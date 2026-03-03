@@ -349,7 +349,8 @@ body {
       <span>Console</span>
       <span style="flex:1"></span>
       <span id="console-status" style="margin-right:12px">Ready</span>
-      <span style="cursor:pointer;font-size:13px;color:#8b949e" onclick="maximizeConsole()" title="Maximize / Restore console">&#9633;</span>
+      <span style="cursor:pointer;font-size:13px;color:#8b949e;padding:0 4px" onclick="toggleConsole()" title="Minimize console">&#9660;</span>
+      <span style="cursor:pointer;font-size:13px;color:#8b949e;padding:0 4px" onclick="maximizeConsole()" title="Maximize / Restore console">&#9633;</span>
     </div>
     <div class="console-body" id="console-body">
       <div class="cl-info">[Ready] Waiting for scan...</div>
@@ -708,12 +709,35 @@ function updateMap() {
   }
   svg.setAttribute('viewBox', `${viewBox.x} ${viewBox.y} ${viewBox.w} ${viewBox.h}`);
 
+  // Count connections per source→target pair for curve offsets
+  const pairCount = {};
+  const pairIdx = {};
+  conns.forEach((conn, ci) => {
+    // Use sorted pair key so A→B and B→A share offset space
+    const a = conn.source_sid || '', b = conn.target_sid || conn.target_host || '';
+    const pairKey = a < b ? a + '|' + b : b + '|' + a;
+    pairCount[pairKey] = (pairCount[pairKey] || 0) + 1;
+  });
+  conns.forEach((conn, ci) => {
+    const a = conn.source_sid || '', b = conn.target_sid || conn.target_host || '';
+    const pairKey = a < b ? a + '|' + b : b + '|' + a;
+    pairIdx[ci] = (pairIdx[ci - 1] !== undefined ? 0 : 0);  // placeholder
+  });
+  // Assign index within each pair
+  const pairCurrent = {};
+  conns.forEach((conn, ci) => {
+    const a = conn.source_sid || '', b = conn.target_sid || conn.target_host || '';
+    const pairKey = a < b ? a + '|' + b : b + '|' + a;
+    pairCurrent[pairKey] = (pairCurrent[pairKey] || 0);
+    pairIdx[ci] = pairCurrent[pairKey];
+    pairCurrent[pairKey]++;
+  });
+
   // Draw connections first (behind nodes)
   conns.forEach((conn, ci) => {
     const srcNode = nodes[conn.source_sid];
     let tgtNode = nodes[conn.target_sid];
 
-    // If target is unknown, use the virtual node (if checkbox is on)
     if (!tgtNode && showUnknown) {
       const key = conn.target_host || conn.target_sid || '';
       tgtNode = unknownTargets[key];
@@ -737,19 +761,55 @@ function updateMap() {
     }
 
     // Arrow marker
-    html += `<defs><marker id="arrow-${ci}" markerWidth="8" markerHeight="6" ` +
-      `refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="${color}"/></marker></defs>`;
-    html += `<line class="edge-line" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" ` +
-      `stroke="${color}" stroke-width="${width}" ${dashArray ? 'stroke-dasharray="'+dashArray+'"' : ''} ` +
-      `marker-end="url(#arrow-${ci})" data-conn-idx="${ci}" ` +
-      `onclick="showConnInfo(event, ${ci})" />`;
+    html += `<defs><marker id="arrow-${ci}" markerWidth="10" markerHeight="7" ` +
+      `refX="10" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="${color}"/></marker></defs>`;
 
-    // Connection label (midpoint)
-    const mx = (x1 + x2) / 2, my = (y1 + y2) / 2 - 6;
+    // Determine curve offset for parallel connections
+    const a = conn.source_sid || '', b = conn.target_sid || conn.target_host || '';
+    const pairKey = a < b ? a + '|' + b : b + '|' + a;
+    const total = pairCount[pairKey] || 1;
+    const idx = pairIdx[ci] || 0;
+
+    if (total === 1) {
+      // Single connection: straight line
+      html += `<line class="edge-line" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" ` +
+        `stroke="${color}" stroke-width="${width}" fill="none" ${dashArray ? 'stroke-dasharray="'+dashArray+'"' : ''} ` +
+        `marker-end="url(#arrow-${ci})" data-conn-idx="${ci}" ` +
+        `onclick="showConnInfo(event, ${ci})" />`;
+    } else {
+      // Multiple connections: curved paths offset from each other
+      const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+      const dx = x2 - x1, dy = y2 - y1;
+      const len = Math.sqrt(dx*dx + dy*dy) || 1;
+      // Perpendicular unit vector
+      const px = -dy / len, py = dx / len;
+      // Spread curves: center them around 0, spacing 40px
+      const offset = (idx - (total - 1) / 2) * 40;
+      const cx = mx + px * offset, cy = my + py * offset;
+      html += `<path class="edge-line" d="M${x1},${y1} Q${cx},${cy} ${x2},${y2}" ` +
+        `stroke="${color}" stroke-width="${width}" fill="none" ${dashArray ? 'stroke-dasharray="'+dashArray+'"' : ''} ` +
+        `marker-end="url(#arrow-${ci})" data-conn-idx="${ci}" ` +
+        `onclick="showConnInfo(event, ${ci})" />`;
+    }
+
+    // Connection label at midpoint (offset for curves)
+    const a2 = conn.source_sid || '', b2 = conn.target_sid || conn.target_host || '';
+    const pk2 = a2 < b2 ? a2 + '|' + b2 : b2 + '|' + a2;
+    const tot2 = pairCount[pk2] || 1;
+    const idx2 = pairIdx[ci] || 0;
+    let lx = (x1 + x2) / 2, ly = (y1 + y2) / 2 - 6;
+    if (tot2 > 1) {
+      const dx2 = x2 - x1, dy2 = y2 - y1;
+      const len2 = Math.sqrt(dx2*dx2 + dy2*dy2) || 1;
+      const off2 = (idx2 - (tot2 - 1) / 2) * 40;
+      // Label sits at the curve midpoint (quadratic bezier at t=0.5)
+      lx = (x1 + x2) / 2 * 0.5 + (lx + (-dy2/len2)*off2) * 0.5 + (-dy2/len2)*off2*0.25;
+      ly = (y1 + y2) / 2 * 0.5 + (ly + (dx2/len2)*off2) * 0.5 + (dx2/len2)*off2*0.25 - 6;
+    }
     let label = conn.destination_name || '';
     if (conn.rfc_user) label += ' / ' + conn.rfc_user;
     if (conn.has_sap_all) label += ' (SAP_ALL)';
-    html += `<text x="${mx}" y="${my}" text-anchor="middle" font-size="8" ` +
+    html += `<text x="${lx}" y="${ly}" text-anchor="middle" font-size="8" ` +
       `fill="#8b949e" font-family="monospace" pointer-events="none">${escHtml(label)}</text>`;
   });
 
