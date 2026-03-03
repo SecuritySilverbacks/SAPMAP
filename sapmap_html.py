@@ -1094,7 +1094,9 @@ async function showCreatedUsers() {
 
 // --- Save/Load ---
 async function saveState() {
-  const name = prompt('Save state as:', 'sapmap_' + new Date().toISOString().slice(0,10));
+  const d = new Date();
+  const ts = d.getFullYear() + ('0'+(d.getMonth()+1)).slice(-2) + ('0'+d.getDate()).slice(-2) + '_' + ('0'+d.getHours()).slice(-2) + ('0'+d.getMinutes()).slice(-2) + ('0'+d.getSeconds()).slice(-2);
+  const name = prompt('Save state as:', 'sapmap_' + ts);
   if (!name) return;
   await api('POST', 'state/save', { name });
 }
