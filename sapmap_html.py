@@ -340,7 +340,7 @@ body {
     <span class="legend-item"><span class="legend-swatch" style="background:#5dade2"></span> RFC</span>
     <span class="legend-item"><span class="legend-swatch" style="background:#ff6b35"></span> GW Exploit</span>
     <span style="flex:1"></span>
-    <label class="legend-item" style="cursor:pointer"><input type="checkbox" id="show-unknown" style="margin-right:4px" onchange="updateMap()"> Show unknown targets</label>
+    <label style="cursor:pointer;display:flex;align-items:center;gap:6px;padding:2px 10px;border:1px solid #30363d;border-radius:4px;background:#161b22;color:#c9d1d9;font-size:11px"><input type="checkbox" id="show-unknown" style="accent-color:#f0883e;width:14px;height:14px" onchange="updateMap()"> Show unknown targets</label>
   </div>
 
   <!-- Console -->
@@ -461,15 +461,15 @@ body {
     <div id="type-system-info" style="font-size:12px;color:#8b949e;margin-bottom:12px"></div>
     <div class="form-row">
       <label>System Type</label>
-      <select id="type-select" style="width:200px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:4px 8px;border-radius:4px">
-        <option value="ABAP">ABAP</option>
-        <option value="JAVA">Java</option>
-        <option value="ABAP+JAVA">ABAP+Java</option>
-        <option value="BUSINESSOBJECTS">BusinessObjects</option>
-        <option value="CLOUD_CONNECTOR">Cloud Connector</option>
-        <option value="CONTENT_SERVER">Content Server</option>
-        <option value="SAPROUTER">SAPRouter</option>
-        <option value="MDM">MDM</option>
+      <select id="type-select" style="width:200px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:4px 8px;border-radius:4px;-webkit-appearance:menulist">
+        <option value="ABAP" style="background:#0d1117;color:#e6edf3">ABAP</option>
+        <option value="JAVA" style="background:#0d1117;color:#e6edf3">Java</option>
+        <option value="ABAP+JAVA" style="background:#0d1117;color:#e6edf3">ABAP+Java</option>
+        <option value="BUSINESSOBJECTS" style="background:#0d1117;color:#e6edf3">BusinessObjects</option>
+        <option value="CLOUD_CONNECTOR" style="background:#0d1117;color:#e6edf3">Cloud Connector</option>
+        <option value="CONTENT_SERVER" style="background:#0d1117;color:#e6edf3">Content Server</option>
+        <option value="SAPROUTER" style="background:#0d1117;color:#e6edf3">SAPRouter</option>
+        <option value="MDM" style="background:#0d1117;color:#e6edf3">MDM</option>
       </select>
     </div>
     <div class="form-actions">
@@ -839,7 +839,7 @@ function updateMap() {
     // Clients
     const clients = n.clients || [];
     if (clients.length > 0) {
-      const clientStr = clients.slice(0, 6).map(c => c.nr || c).join(', ') +
+      const clientStr = clients.slice(0, 6).map(c => typeof c === 'object' ? (c.nr||'?') : String(c)).join(', ') +
         (clients.length > 6 ? ` (+${clients.length-6})` : '');
       html += `<text x="${x+10}" y="${ty}" fill="#8b949e" font-size="10" font-family="monospace">Clients: ${escHtml(clientStr)}</text>`;
       ty += 14;
@@ -1081,7 +1081,7 @@ function showDetails(sid) {
     </div>
     <div class="detail-section">
       <h4>Clients</h4>
-      ${(n.clients || []).map(c => `<div class="detail-row"><span class="detail-key">${escHtml(c.nr||c)}</span><span class="detail-val">${c.category === 'P' ? '<span style="color:#f85149">Production</span>' : escHtml(c.category||'')}</span></div>`).join('') || '<div style="color:#484f58">None enumerated</div>'}
+      ${(n.clients || []).map(c => { const nr = typeof c === 'object' ? (c.nr||'?') : String(c); const cat = typeof c === 'object' ? (c.category||'') : ''; return `<div class="detail-row"><span class="detail-key">${escHtml(nr)}</span><span class="detail-val">${cat === 'P' ? '<span style="color:#f85149">Production</span>' : escHtml(cat)}</span></div>`; }).join('') || '<div style="color:#484f58">None enumerated</div>'}
     </div>
     <div class="detail-section">
       <h4>Created Users (${(n.created_users||[]).length})</h4>

@@ -407,13 +407,20 @@ class SAPMAPState:
         return self.nodes.get(sid)
 
     def find_node_by_host(self, hostname: str = "", ip: str = "") -> Optional[SAPNode]:
-        """Find a node matching a hostname or IP."""
-        hostname_lower = hostname.lower() if hostname else ""
+        """Find a node matching a hostname or IP.
+
+        Both parameters are checked against both IPs and hostnames,
+        since RFC destinations often store an IP in the host field.
+        """
+        candidates = [s.strip() for s in (hostname, ip) if s and s.strip()]
         for node in self.nodes.values():
-            if ip and ip in node.all_ips():
-                return node
-            if hostname_lower and hostname_lower in node.all_hostnames():
-                return node
+            node_ips = node.all_ips()
+            node_names = node.all_hostnames()
+            for val in candidates:
+                if val in node_ips:
+                    return node
+                if val.lower() in node_names:
+                    return node
         return None
 
     def find_node_by_instance(self, host: str, instance_nr: str) -> Optional[SAPNode]:
