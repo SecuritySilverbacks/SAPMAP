@@ -339,6 +339,8 @@ body {
     <span class="legend-item"><span class="legend-swatch" style="background:#e74c3c"></span> RFC+SAP_ALL</span>
     <span class="legend-item"><span class="legend-swatch" style="background:#5dade2"></span> RFC</span>
     <span class="legend-item"><span class="legend-swatch" style="background:#ff6b35"></span> GW Exploit</span>
+    <span style="flex:1"></span>
+    <label class="legend-item" style="cursor:pointer"><input type="checkbox" id="show-unknown" style="margin-right:4px" onchange="updateMap()"> Show unknown targets</label>
   </div>
 
   <!-- Console -->
@@ -385,6 +387,8 @@ body {
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="cleanup">&#129529; Cleanup Created Users</div>
   <div class="ctx-item" data-action="client_roles">&#128202; View Client Roles</div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item" data-action="set_type">&#9881; Set System Type</div>
 </div>
 
 <!-- Connection Info Panel -->
@@ -446,6 +450,31 @@ body {
     <div class="form-actions">
       <button class="btn btn-primary" onclick="downloadTable()">Download</button>
       <button class="btn" onclick="closeModal('table-modal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Set System Type Modal -->
+<div class="modal-overlay" id="type-modal">
+  <div class="modal">
+    <h3>&#9881; Set System Type</h3>
+    <div id="type-system-info" style="font-size:12px;color:#8b949e;margin-bottom:12px"></div>
+    <div class="form-row">
+      <label>System Type</label>
+      <select id="type-select" style="width:200px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:4px 8px;border-radius:4px">
+        <option value="ABAP">ABAP</option>
+        <option value="JAVA">Java</option>
+        <option value="ABAP+JAVA">ABAP+Java</option>
+        <option value="BUSINESSOBJECTS">BusinessObjects</option>
+        <option value="CLOUD_CONNECTOR">Cloud Connector</option>
+        <option value="CONTENT_SERVER">Content Server</option>
+        <option value="SAPROUTER">SAPRouter</option>
+        <option value="MDM">MDM</option>
+      </select>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-primary" onclick="saveSystemType()">Save</button>
+      <button class="btn" onclick="closeModal('type-modal')">Cancel</button>
     </div>
   </div>
 </div>
@@ -575,6 +604,14 @@ async function pollUpdates() {
     // Poll state
     const state = await api('GET', 'state');
     if (state) {
+      // Preserve dragged node positions across state refreshes
+      const oldNodes = mapState.nodes || {};
+      for (const sid in state.nodes || {}) {
+        if (oldNodes[sid] && oldNodes[sid]._x != null) {
+          state.nodes[sid]._x = oldNodes[sid]._x;
+          state.nodes[sid]._y = oldNodes[sid]._y;
+        }
+      }
       mapState = state;
       updateMap();
       updateStatusBar();
@@ -625,8 +662,45 @@ function updateMap() {
     maxY = Math.max(maxY, (n._y || 0) + BOX_H + MARGIN);
   });
 
-  // Only auto-set viewBox on first render or when nodes change count.
-  // Once the user has zoomed/panned, preserve their viewBox.
+  let html = '';
+
+  // Collect unknown targets when checkbox is on
+  const showUnknown = document.getElementById('show-unknown') && document.getElementById('show-unknown').checked;
+  const unknownTargets = {};  // host -> { _x, _y, label }
+  if (showUnknown) {
+    let unkIdx = 0;
+    conns.forEach(conn => {
+      const srcNode = nodes[conn.source_sid];
+      const tgtNode = nodes[conn.target_sid];
+      if (srcNode && !tgtNode) {
+        const key = conn.target_host || conn.target_sid || ('unk_' + unkIdx++);
+        if (!unknownTargets[key]) {
+          unknownTargets[key] = {
+            label: conn.target_host || conn.target_sid || '?',
+            _x: null, _y: null,
+          };
+        }
+      }
+    });
+    // Position unknown target nodes to the right of the known nodes
+    let unkCol = 0;
+    const unkStartX = maxX + MARGIN;
+    for (const key in unknownTargets) {
+      const ut = unknownTargets[key];
+      if (!ut._x) {
+        ut._x = unkStartX;
+        ut._y = MARGIN + unkCol * (BOX_H + MARGIN);
+        unkCol++;
+      }
+    }
+    // Update bounds for viewBox
+    for (const key in unknownTargets) {
+      maxX = Math.max(maxX, unknownTargets[key]._x + BOX_W + MARGIN);
+      maxY = Math.max(maxY, unknownTargets[key]._y + BOX_H + MARGIN);
+    }
+  }
+
+  // Set viewBox (after unknown targets are positioned so bounds include them)
   if (!viewBoxUserControlled || viewBox._nodeCount !== nodeKeys.length) {
     viewBox.w = Math.max(maxX, 800);
     viewBox.h = Math.max(maxY, 600);
@@ -634,12 +708,16 @@ function updateMap() {
   }
   svg.setAttribute('viewBox', `${viewBox.x} ${viewBox.y} ${viewBox.w} ${viewBox.h}`);
 
-  let html = '';
-
   // Draw connections first (behind nodes)
   conns.forEach((conn, ci) => {
     const srcNode = nodes[conn.source_sid];
-    const tgtNode = nodes[conn.target_sid];
+    let tgtNode = nodes[conn.target_sid];
+
+    // If target is unknown, use the virtual node (if checkbox is on)
+    if (!tgtNode && showUnknown) {
+      const key = conn.target_host || conn.target_sid || '';
+      tgtNode = unknownTargets[key];
+    }
     if (!srcNode || !tgtNode) return;
 
     const x1 = (srcNode._x || 0) + BOX_W / 2;
@@ -787,6 +865,21 @@ function updateMap() {
     html += '</g>';
   });
 
+  // Draw unknown target boxes (dashed border, dimmed)
+  if (showUnknown) {
+    for (const key in unknownTargets) {
+      const ut = unknownTargets[key];
+      const x = ut._x || 0, y = ut._y || 0;
+      html += `<g class="node-box">`;
+      html += `<rect x="${x}" y="${y}" width="${BOX_W}" height="${BOX_H}" rx="6" fill="#1a1a2e" stroke="#484f58" stroke-width="3" stroke-dasharray="8,4" />`;
+      html += `<rect x="${x}" y="${y}" width="${BOX_W}" height="28" rx="6" fill="#484f58" opacity="0.2" />`;
+      html += `<text x="${x+BOX_W/2}" y="${y+18}" fill="#484f58" font-size="11" font-weight="bold" font-family="monospace" text-anchor="middle">UNKNOWN TARGET</text>`;
+      html += `<text x="${x+10}" y="${y+48}" fill="#6e7681" font-size="10" font-family="monospace">Host: ${escHtml(ut.label)}</text>`;
+      html += `<text x="${x+BOX_W/2}" y="${y+BOX_H/2+10}" fill="#484f58" font-size="20" text-anchor="middle">?</text>`;
+      html += '</g>';
+    }
+  }
+
   svg.innerHTML = html;
 }
 
@@ -827,6 +920,7 @@ function showCtxMenu(e, sid) {
     'propagate':        hasCreds,                   // need access to propagate from
     'cleanup':          hasCreatedUsers,             // need created users to clean up
     'client_roles':     hasCreds,                   // need credentials/access
+    'set_type':         true,                       // always available
   };
 
   // Tooltip hints for disabled items
@@ -906,6 +1000,7 @@ async function ctxAction(action) {
       break;
     case 'client_roles':
       await api('POST', `node/${sid}/client_roles`); break;
+    case 'set_type': showTypeModal(sid); break;
   }
   startPolling();
 }
@@ -1066,6 +1161,26 @@ async function downloadTable() {
     max_rows: parseInt(document.getElementById('tbl-maxrows').value) || 500,
   });
   closeModal('table-modal');
+}
+
+function showTypeModal(sid) {
+  const n = (mapState.nodes || {})[sid];
+  document.getElementById('type-system-info').textContent = sid + (n ? ' (' + (n.system_type || 'unknown') + ')' : '');
+  if (n && n.system_type) {
+    const sel = document.getElementById('type-select');
+    for (let i = 0; i < sel.options.length; i++) {
+      if (sel.options[i].value.toUpperCase() === n.system_type.toUpperCase()) {
+        sel.selectedIndex = i; break;
+      }
+    }
+  }
+  document.getElementById('type-modal').classList.add('visible');
+}
+async function saveSystemType() {
+  const newType = document.getElementById('type-select').value;
+  await api('POST', `node/${selectedNodeSid}/set_type`, { system_type: newType });
+  closeModal('type-modal');
+  startPolling();
 }
 
 function closeModal(id) { document.getElementById(id).classList.remove('visible'); }

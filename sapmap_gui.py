@@ -296,6 +296,19 @@ def create_app(api: SAPMAPApi) -> Bottle:
         threading.Thread(target=_run, daemon=True).start()
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/set_type", method="POST")
+    def node_set_type(sid):
+        response.content_type = "application/json"
+        data = request.json or {}
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        new_type = data.get("system_type", "").strip()
+        if new_type:
+            node.system_type = new_type
+            print(f"[*] System type for {sid} set to: {new_type}")
+        return json.dumps({"status": "ok"})
+
     @app.route("/api/node/<sid>/create_user", method="POST")
     def node_create_user(sid):
         response.content_type = "application/json"
