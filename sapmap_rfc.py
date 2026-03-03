@@ -190,6 +190,91 @@ def get_user_details(node: SAPNode, username: str,
     return result_info
 
 
+def get_remote_user_profiles(node: SAPNode, username: str,
+                             destination: str,
+                             creds: Credentials = None) -> dict:
+    """Get user profiles on a REMOTE system via GET_TABLEBLOCK_RFC.
+
+    Reads UST04 on the target system through the RFC destination configured
+    on the source (node).  The FM uses a generic table type that the NW RFC
+    SDK cannot resolve, so we build the function description manually.
+
+    INTTAB returns rows of 200 chars: MANDT(3) + BNAME(12) + PROFILE(12).
+
+    Returns dict with: profiles, has_sap_all, error.
+    """
+    from sap_rfc_ctypes import RFCTYPE_CHAR, RFCTYPE_TABLE, RFCTYPE_INT, \
+        RFCTYPE_STRING, RFCTYPE_BYTE, RFC_IMPORT, RFC_EXPORT, RFC_CHANGING, RFC_TABLES
+
+    result_info = {"profiles": [], "has_sap_all": False, "error": ""}
+
+    try:
+        with _get_connection(node, creds) as conn:
+            # Build function description manually — GET_TABLEBLOCK_RFC has
+            # a generic INTTAB table that the SDK can't resolve via metadata.
+            # Use typeDescHandle=None (untyped) and read raw bytes.
+            func_desc = conn._make_func_desc("GET_TABLEBLOCK_RFC", [
+                ("TABNAME",      RFC_IMPORT,  RFCTYPE_STRING, 0, 0, None),
+                ("GET_SYSTAB",   RFC_IMPORT,  RFCTYPE_STRING, 0, 0, None),
+                ("RFC_DEST",     RFC_IMPORT,  RFCTYPE_STRING, 0, 0, None),
+                ("CHECK_TABLE",  RFC_IMPORT,  RFCTYPE_STRING, 0, 0, None),
+                ("BLOCK_SIZE",   RFC_IMPORT,  RFCTYPE_INT,    4, 4, None),
+                ("FIRST_KEY",    RFC_IMPORT,  RFCTYPE_STRING, 0, 0, None),
+                ("LAST_KEY",     RFC_CHANGING, RFCTYPE_STRING, 0, 0, None),
+                ("CODE_PAGE",    RFC_CHANGING, RFCTYPE_STRING, 0, 0, None),
+                ("INT_FORMAT",   RFC_CHANGING, RFCTYPE_STRING, 0, 0, None),
+                ("TABLEN",       RFC_CHANGING, RFCTYPE_INT,   4, 4, None),
+                ("NR_OF_ROWS",   RFC_EXPORT,  RFCTYPE_INT,    4, 4, None),
+                ("READY_FLAG",   RFC_EXPORT,  RFCTYPE_STRING, 0, 0, None),
+                ("MESSAGE_TEXT", RFC_EXPORT,  RFCTYPE_STRING, 0, 0, None),
+                ("INTTAB",       RFC_TABLES,  RFCTYPE_TABLE,  0, 0, None),
+            ])
+
+            result = conn.call_raw(
+                "GET_TABLEBLOCK_RFC", func_desc,
+                TABNAME="UST04",
+                GET_SYSTAB="X",
+                RFC_DEST=destination,
+                CHECK_TABLE="X",
+                BLOCK_SIZE=9999,
+                FIRST_KEY="X",
+            )
+
+            # INTTAB rows are raw bytes (TBL1024).  On Unicode systems
+            # the UST04 line is: MANDT(3 chars=6 bytes) + BNAME(12 chars=24 bytes)
+            # + PROFILE(12 chars=24 bytes) in UTF-16LE.
+            for row in result.get("INTTAB", []):
+                raw = row if isinstance(row, (bytes, bytearray)) else \
+                      row.get("WA", b"") if isinstance(row, dict) else b""
+                if isinstance(raw, str):
+                    # Already decoded as string — parse as chars
+                    if len(raw) >= 27:
+                        bname = raw[3:15].strip()
+                        profile = raw[15:27].strip()
+                        if bname.upper() == username.upper() and profile:
+                            result_info["profiles"].append(profile)
+                elif isinstance(raw, bytes) and len(raw) >= 54:
+                    # Raw UTF-16LE bytes: MANDT(6) + BNAME(24) + PROFILE(24)
+                    bname = raw[6:30].decode('utf-16-le', errors='ignore').strip()
+                    profile = raw[30:54].decode('utf-16-le', errors='ignore').strip()
+                    if bname.upper() == username.upper() and profile:
+                        result_info["profiles"].append(profile)
+
+            result_info["has_sap_all"] = "SAP_ALL" in result_info["profiles"]
+
+            if result_info["profiles"]:
+                print(f"[+] Remote profiles for {username} via {destination}: "
+                      f"{', '.join(result_info['profiles'])}")
+            else:
+                print(f"[*] No profiles found for {username} via {destination}")
+
+    except Exception as e:
+        result_info["error"] = str(e)
+        logger.debug(f"Remote user detail retrieval failed: {e}")
+
+    return result_info
+
+
 # ---------------------------------------------------------------------------
 # Create user via BAPI
 # ---------------------------------------------------------------------------
@@ -570,7 +655,6 @@ def _try_rfc_read_table_fallback(conn, node: SAPNode) -> list:
 
 def _parse_rfcdes_options(conn: RFCConn, options_str: str):
     """Parse RFCDES RFCOPTIONS field to extract host, instance, user, client."""
-    # RFCOPTIONS is a structured string with H=host, S=sysnr, etc.
     for part in options_str.split(","):
         part = part.strip()
         if part.startswith("H="):

@@ -342,12 +342,16 @@ def create_app(api: SAPMAPApi) -> Bottle:
             creds = node.best_credentials()
             conns = sapmap_rfc.retrieve_rfc_connections(node, creds)
             for conn in conns:
-                # Try to resolve target
-                target = api.state.find_node_by_host(
-                    hostname=conn.target_host, ip=conn.target_ip
-                )
-                if target:
-                    conn.target_sid = target.sid
+                # Empty hostname = local RFC destination (points to itself)
+                if not conn.target_host and not conn.target_ip:
+                    conn.target_host = node.hostname or node.ip
+                    conn.target_sid = node.sid
+                else:
+                    target = api.state.find_node_by_host(
+                        hostname=conn.target_host, ip=conn.target_ip
+                    )
+                    if target:
+                        conn.target_sid = target.sid
                 api.state.add_connection(conn)
             print(f"[+] Added {len(conns)} connections from {sid}")
 
@@ -382,11 +386,12 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         if target:
                             target.has_critical_finding = True
 
-                # Get user details
+                # Get user profiles on the TARGET via GET_TABLEBLOCK_RFC
                 if conn.rfc_user and not conn.profiles:
-                    info = sapmap_rfc.get_user_details(node, conn.rfc_user, creds)
+                    info = sapmap_rfc.get_remote_user_profiles(
+                        node, conn.rfc_user, conn.destination_name, creds
+                    )
                     conn.profiles = info.get("profiles", [])
-                    conn.roles = info.get("roles", [])
                     conn.has_sap_all = info.get("has_sap_all", False)
                     conn.user_detail_error = info.get("error", "")
                     if conn.has_sap_all:

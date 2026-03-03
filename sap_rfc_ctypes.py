@@ -85,6 +85,13 @@ def _str_to_uc(s):
     return buf
 
 
+def _uc_set(field, s):
+    """Write a Python string into an existing SAP_UC array field in a Structure."""
+    encoded = s.encode('utf-16-le')
+    n_bytes = min(len(encoded), ctypes.sizeof(field) - 2)  # leave room for null
+    ctypes.memmove(field, encoded, n_bytes)
+
+
 def _uc_to_str(buf, char_count=None):
     """Convert a SAP_UC buffer (array or pointer) to a Python str.
 
@@ -570,6 +577,19 @@ class _SDKLibrary:
         lib.RfcGetFieldDescByName.argtypes = [VP, VP, POINTER(RFC_FIELD_DESC), EI]
         lib.RfcGetFieldDescByName.restype = c_uint
 
+        # -- Manual type/function description creation --
+        lib.RfcCreateTypeDesc.argtypes = [VP, EI]
+        lib.RfcCreateTypeDesc.restype = VP
+
+        lib.RfcAddTypeField.argtypes = [VP, POINTER(RFC_FIELD_DESC), EI]
+        lib.RfcAddTypeField.restype = c_uint
+
+        lib.RfcCreateFunctionDesc.argtypes = [VP, EI]
+        lib.RfcCreateFunctionDesc.restype = VP
+
+        lib.RfcAddParameter.argtypes = [VP, POINTER(RFC_PARAMETER_DESC), EI]
+        lib.RfcAddParameter.restype = c_uint
+
         # -- Function Handle --
         lib.RfcCreateFunction.argtypes = [VP, EI]
         lib.RfcCreateFunction.restype = VP
@@ -892,6 +912,88 @@ class RFCConnection:
 
         finally:
             # 6. Always destroy the function container
+            self._sdk.RfcDestroyFunction(func_handle, byref(error_info))
+
+    def _make_type_desc(self, name, fields):
+        """Create a type description manually for generic/unresolvable table types.
+
+        Args:
+            name: type name (e.g. "TAB200")
+            fields: list of (field_name, rfctype, nuc_length, uc_length) tuples
+        """
+        error_info = RFC_ERROR_INFO()
+        name_uc = _str_to_uc(name)
+        td = self._sdk.RfcCreateTypeDesc(name_uc, byref(error_info))
+        _raise_on_error(error_info, 'RfcCreateTypeDesc')
+
+        uc_offset = 0
+        nuc_offset = 0
+        for fname, ftype, nuc_len, uc_len in fields:
+            fd = RFC_FIELD_DESC()
+            _uc_set(fd.name, fname)
+            fd.type = ftype
+            fd.nucLength = nuc_len
+            fd.ucLength = uc_len
+            fd.ucOffset = uc_offset
+            fd.nucOffset = nuc_offset
+            fd.decimals = 0
+            fd.typeDescHandle = None
+            fd.extendedDescription = None
+            rc = self._sdk.RfcAddTypeField(td, byref(fd), byref(error_info))
+            _raise_on_error(error_info, f'RfcAddTypeField({fname})')
+            uc_offset += uc_len
+            nuc_offset += nuc_len
+        return td
+
+    def _make_func_desc(self, func_name, params):
+        """Create a function description manually.
+
+        Args:
+            func_name: FM name
+            params: list of (name, direction, rfctype, uc_length, nuc_length, type_desc_handle) tuples
+        """
+        error_info = RFC_ERROR_INFO()
+        name_uc = _str_to_uc(func_name)
+        fd = self._sdk.RfcCreateFunctionDesc(name_uc, byref(error_info))
+        _raise_on_error(error_info, 'RfcCreateFunctionDesc')
+
+        for pname, direction, ptype, uc_len, nuc_len, td_handle in params:
+            pd = RFC_PARAMETER_DESC()
+            _uc_set(pd.name, pname)
+            pd.type = ptype
+            pd.direction = direction
+            pd.ucLength = uc_len
+            pd.nucLength = nuc_len
+            pd.decimals = 0
+            pd.typeDescHandle = td_handle
+            pd.optional = 1
+            pd.extendedDescription = None
+            rc = self._sdk.RfcAddParameter(fd, byref(pd), byref(error_info))
+            _raise_on_error(error_info, f'RfcAddParameter({pname})')
+        return fd
+
+    def call_raw(self, func_name, func_desc, **kwargs):
+        """Call an RFC function using a manually-built function description.
+
+        Same as call() but uses a pre-built func_desc instead of
+        looking it up via RfcGetFunctionDesc (which fails for FMs with
+        generic/unresolvable table types).
+        """
+        self._ensure_open()
+        error_info = RFC_ERROR_INFO()
+
+        func_handle = self._sdk.RfcCreateFunction(func_desc, byref(error_info))
+        _raise_on_error(error_info, f'RfcCreateFunction({func_name})')
+
+        try:
+            for param_name, param_value in kwargs.items():
+                self._set_parameter(func_handle, func_desc, param_name, param_value)
+
+            rc = self._sdk.RfcInvoke(self._handle, func_handle, byref(error_info))
+            _raise_on_error(error_info, f'RfcInvoke({func_name})')
+
+            return self._read_output(func_handle, func_desc)
+        finally:
             self._sdk.RfcDestroyFunction(func_handle, byref(error_info))
 
     # -- Internal: Parameter Setting --
