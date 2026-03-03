@@ -400,7 +400,8 @@ body {
     <div id="cred-system-info" style="font-size:12px;color:#8b949e;margin-bottom:12px"></div>
     <div class="form-row">
       <label>Instance Number</label>
-      <select id="cred-instance"></select>
+      <input type="text" id="cred-instance" placeholder="00" style="width:60px">
+      <span id="cred-instance-hint" style="font-size:10px;color:#484f58;margin-left:8px"></span>
     </div>
     <div class="form-row">
       <label>Client</label>
@@ -1014,12 +1015,19 @@ function showCredModal(sid) {
   if (!n) return;
   document.getElementById('cred-system-info').textContent =
     `${n.sid} (${n.hostname || n.ip})`;
-  const sel = document.getElementById('cred-instance');
-  sel.innerHTML = (n.instances || []).map(i =>
-    `<option value="${i.instance_nr}">${i.instance_nr}</option>`
-  ).join('') || '<option value="00">00</option>';
+  // Find real instance numbers (exclude XX)
+  const instNrs = (n.instances || [])
+    .map(i => i.instance_nr)
+    .filter(nr => nr && nr !== 'XX')
+    .sort();
+  const inp = document.getElementById('cred-instance');
+  inp.value = instNrs[0] || '00';
+  document.getElementById('cred-instance-hint').textContent =
+    instNrs.length > 1 ? 'Available: ' + instNrs.join(', ') : '';
   document.getElementById('cred-client').value = (n.clients && n.clients[0]) ?
     (n.clients[0].nr || '100') : '100';
+  document.getElementById('cred-user').value = '';
+  document.getElementById('cred-pass').value = '';
   document.getElementById('cred-modal').classList.add('visible');
 }
 
