@@ -463,9 +463,20 @@ def retrieve_rfc_connections(node: SAPNode, creds: Credentials = None) -> list:
             except Exception:
                 pass
 
+            # If RSRFCCHK yielded nothing, fall back to RFCDES table
+            if not connections:
+                print(f"[*] No connections from RSRFCCHK, trying RFCDES fallback...")
+                connections = _try_rfc_read_table_fallback(conn, node)
+
     except Exception as e:
         logger.error(f"RFC connection retrieval failed for {node.sid}: {e}")
         print(f"[-] Failed to retrieve RFC connections: {e}")
+        # Last resort: try RFCDES in a fresh connection
+        try:
+            with _get_connection(node, creds) as conn:
+                connections = _try_rfc_read_table_fallback(conn, node)
+        except Exception as e2:
+            logger.debug(f"RFCDES fallback also failed: {e2}")
 
     return connections
 
@@ -509,8 +520,8 @@ def _parse_rsrfcchk_output(spool_lines: list, node: SAPNode) -> list:
 
 
 def _try_rfc_read_table_fallback(conn, node: SAPNode) -> list:
-    """Fallback: read RFCDES table directly for Type-3 connections."""
-    print(f"[*] Trying RFC_READ_TABLE fallback for RFCDES...")
+    """Fallback: read RFCDES table directly for Type-3 connections with stored passwords."""
+    print(f"[*] Trying RFC_READ_TABLE fallback on RFCDES...")
     connections = []
 
     try:
@@ -533,19 +544,22 @@ def _try_rfc_read_table_fallback(conn, node: SAPNode) -> list:
             parts = wa.split("|")
             if len(parts) >= 2:
                 dest_name = parts[0].strip()
-                # RFCOPTIONS contains host, instance, etc.
                 options = parts[2].strip() if len(parts) > 2 else ""
+
+                # Only include connections that have a stored password
+                if "%_PWD" not in options:
+                    continue
 
                 conn_obj = RFCConn(
                     source_sid=node.sid,
                     source_host=node.hostname or node.ip,
                     destination_name=dest_name,
                 )
-                # Parse options for host/instance info
                 _parse_rfcdes_options(conn_obj, options)
                 connections.append(conn_obj)
 
-        print(f"[+] Found {len(connections)} Type-3 connections via RFCDES")
+        print(f"[+] Found {len(connections)} Type-3 connections "
+              f"with stored passwords via RFCDES")
 
     except Exception as e:
         logger.debug(f"RFCDES read failed: {e}")

@@ -567,6 +567,9 @@ class _SDKLibrary:
         lib.RfcGetFieldDescByIndex.argtypes = [VP, c_uint, POINTER(RFC_FIELD_DESC), EI]
         lib.RfcGetFieldDescByIndex.restype = c_uint
 
+        lib.RfcGetFieldDescByName.argtypes = [VP, VP, POINTER(RFC_FIELD_DESC), EI]
+        lib.RfcGetFieldDescByName.restype = c_uint
+
         # -- Function Handle --
         lib.RfcCreateFunction.argtypes = [VP, EI]
         lib.RfcCreateFunction.restype = VP
