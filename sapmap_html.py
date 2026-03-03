@@ -679,12 +679,12 @@ function updateMap() {
     // Determine colors
     let fill = '#16213e';
     let borderColor = '#2ecc71';
-    let borderWidth = 2;
+    let borderWidth = 4;
 
     if (n.is_production) fill = '#4a1a1a';
     else if (Object.keys(n.clients || {}).length > 0) fill = '#4a3a1a';
 
-    if (n.has_critical_finding) { borderColor = '#8b0000'; borderWidth = 3; }
+    if (n.has_critical_finding) { borderColor = '#8b0000'; borderWidth = 6; }
 
     // Node group
     html += `<g class="node-box" data-sid="${sid}" ` +
@@ -1000,7 +1000,7 @@ function showFindings(sid) {
   panel.innerHTML = `
     <span class="close-btn" onclick="this.parentElement.classList.remove('visible')">&times;</span>
     <h3>${escHtml(n.sid)} — Findings (${(n.findings||[]).length})</h3>
-    ${(n.findings || []).map(f => {
+    ${(n.findings || []).slice().sort((a,b) => (b.severity||0) - (a.severity||0)).map(f => {
       const cls = 'finding-' + (sevMap[f.severity] || 'info');
       return `<div class="finding-item ${cls}"><strong>${escHtml(f.severity_label || 'INFO')}</strong> — ${escHtml(f.name)}<br><span style="color:#8b949e;font-size:10px">${escHtml(f.description)}</span></div>`;
     }).join('') || '<div style="color:#484f58">No findings</div>'}

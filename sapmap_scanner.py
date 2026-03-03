@@ -633,21 +633,44 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
         print(f"[-]   RFC_SYSTEM_INFO error on {host}:{gw_port}: {e}")
         logger.debug(f"RFC_SYSTEM_INFO failed for {host}:{gw_port}: {e}")
 
-    # If SID still missing, try a quick SAPControl SOAP query on 5XX13
+    # If SID still missing, try SAPControl SOAP on 5XX13 for all known instances
     if not info["sid"]:
-        inst_nr = gw_port % 100 if 3300 <= gw_port <= 3399 else 0
-        sc_port = 50000 + inst_nr * 100 + 13
-        sid = _query_sapcontrol_sid(host, sc_port, timeout=min(timeout, 3))
-        if sid:
-            info["sid"] = sid
-            print(f"[+]   SID from SAPControl ({host}:{sc_port}): {sid}")
+        # Collect instance numbers to try from gateway port + common ones
+        inst_nrs_to_try = set()
+        if 3300 <= gw_port <= 3399:
+            inst_nrs_to_try.add(gw_port % 100)
+        inst_nrs_to_try.add(0)  # always try instance 00
+        for inst_nr in sorted(inst_nrs_to_try):
+            sc_port = 50000 + inst_nr * 100 + 13
+            sid, is_java, is_abap = _query_sapcontrol_sid(
+                host, sc_port, timeout=min(timeout, 3)
+            )
+            if sid:
+                info["sid"] = sid
+                info["_is_java"] = is_java
+                info["_is_abap"] = is_abap
+                print(f"[+]   SID from SAPControl ({host}:{sc_port}): {sid}"
+                      f"{'  [JAVA]' if is_java else ''}"
+                      f"{'  [ABAP]' if is_abap else ''}")
+                break
 
     return info
 
 
-def _query_sapcontrol_sid(host: str, port: int, timeout: float = 3) -> str:
-    """Quick SAPControl SOAP query to extract SAPSYSTEMNAME (SID)."""
+def _query_sapcontrol_sid(host: str, port: int, timeout: float = 3) -> tuple:
+    """Quick SAPControl SOAP query to extract SID and system type hints.
+
+    Returns (sid, is_java, is_abap) tuple.
+    SID is extracted from (in priority order):
+      1. SAPSYSTEMNAME property
+      2. ABAP/J2EE DB Connection string (DBName=XXX)
+      3. INSTANCE_NAME prefix (e.g. DVEBMGS00 -> SID from hostname)
+    """
     import re as _re
+    sid = ""
+    is_java = False
+    is_abap = False
+
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(timeout)
@@ -667,7 +690,7 @@ def _query_sapcontrol_sid(host: str, port: int, timeout: float = 3) -> str:
         sock.sendall(req.encode())
         resp = b""
         try:
-            while len(resp) < 16384:
+            while len(resp) < 32768:
                 chunk = sock.recv(4096)
                 if not chunk:
                     break
@@ -676,12 +699,38 @@ def _query_sapcontrol_sid(host: str, port: int, timeout: float = 3) -> str:
             pass
         sock.close()
         text = resp.decode("utf-8", errors="replace")
-        m = _re.search(r'SAPSYSTEMNAME.*?<value>([^<]+)</value>', text)
-        if m:
-            return m.group(1).strip()
+
+        # Build property dict
+        props = _re.findall(r'<property>([^<]+)</property>', text)
+        vals = _re.findall(r'<value>([^<]*)</value>', text)
+        prop_dict = dict(zip(props, vals))
+
+        # 1. SAPSYSTEMNAME (best source)
+        if "SAPSYSTEMNAME" in prop_dict:
+            sid = prop_dict["SAPSYSTEMNAME"].strip()
+
+        # 2. DB Connection string fallback: DBName=XXX
+        if not sid:
+            for key in ("ABAP DB Connection", "J2EE DB Connection"):
+                val = prop_dict.get(key, "")
+                m = _re.search(r'DBName=(\w+)', val)
+                if m:
+                    sid = m.group(1).strip()
+                    break
+
+        # Detect ABAP vs JAVA from properties
+        if "ABAP WP Table" in prop_dict:
+            is_abap = True
+        if any("J2EE" in p for p in prop_dict):
+            is_java = True
+        # SCS (SAP Central Services) and message server = Java infrastructure
+        inst_name = prop_dict.get("INSTANCE_NAME", "")
+        if inst_name.startswith("SCS") or inst_name.startswith("J"):
+            is_java = True
+
     except Exception:
         pass
-    return ""
+    return (sid, is_java, is_abap)
 
 
 # ---------------------------------------------------------------------------
@@ -748,7 +797,32 @@ def _build_node_from_fast_scan(scan_result: dict, timeout: float = 10,
                 if sys_info.get("sid"):
                     break
 
-    sid = sys_info.get("sid", "") or f"UNK_{host.replace('.', '_')}"
+    sid = sys_info.get("sid", "")
+    sc_is_java = sys_info.get("_is_java", False)
+    sc_is_abap = sys_info.get("_is_abap", False)
+
+    # If SID still missing, try SAPControl on all discovered instance ports
+    if not sid:
+        tried_ports = set()
+        for inst_nr_str in instance_nrs:
+            if inst_nr_str.isdigit():
+                sc_port = 50000 + int(inst_nr_str) * 100 + 13
+                if sc_port not in tried_ports:
+                    tried_ports.add(sc_port)
+                    sc_sid, sc_j, sc_a = _query_sapcontrol_sid(
+                        host, sc_port, timeout=min(timeout, 3)
+                    )
+                    if sc_sid:
+                        sid = sc_sid
+                        sc_is_java = sc_is_java or sc_j
+                        sc_is_abap = sc_is_abap or sc_a
+                        print(f"[+]   SID from SAPControl ({host}:{sc_port}): {sid}"
+                              f"{'  [JAVA]' if sc_j else ''}"
+                              f"{'  [ABAP]' if sc_a else ''}")
+                        break
+
+    if not sid:
+        sid = f"UNK_{host.replace('.', '_')}"
 
     # Build instance info objects
     instances = []
@@ -771,18 +845,28 @@ def _build_node_from_fast_scan(scan_result: dict, timeout: float = 10,
         db_type = "HDB"
         print(f"[+]   HANA database detected via SQL port")
 
-    # Determine system type based on ports
+    # Determine system type: use SAPControl hints if available, else infer from ports
     has_dispatcher = any(v["service"] == "dispatcher" for v in open_ports.values())
     has_saphost = any(v["service"] in ("saphost_http", "saphost_https")
                       for v in open_ports.values())
-    if has_dispatcher:
-        system_type = "ABAP"
+    type_parts = []
+    if sc_is_abap or has_dispatcher:
+        type_parts.append("ABAP")
+    if sc_is_java:
+        type_parts.append("JAVA")
+    if type_parts:
+        system_type = "+".join(type_parts)
     elif has_hana_port:
         system_type = "HANA"
     elif has_saphost:
         system_type = "SAP"
     else:
         system_type = "SAP"
+    # SAPControl is the authority on ABAP vs JAVA when available.
+    # Override port-based heuristic: a Java SCS instance may listen on
+    # 32XX (DIAG-like) without being an actual ABAP dispatcher.
+    if sc_is_java and not sc_is_abap:
+        system_type = "JAVA"
 
     # Enumerate clients from first dispatcher port
     clients = []
