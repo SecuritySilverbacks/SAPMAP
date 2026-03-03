@@ -576,6 +576,7 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
         result = probe_sap_system(host, gw_port, timeout=timeout, verbose=verbose)
         status = result.get("status", "unknown")
 
+        # Extract from standard RFCSI_EXPORT fields first
         if status in ("rfc_success", "info_extracted", "partial_info",
                        "ok", "partial"):
             info["sid"] = result.get("RFCSYSID", "").strip()
@@ -590,44 +591,97 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
             if rfcip:
                 info["ip"] = rfcip
 
-            print(f"[+]   RFC_SYSTEM_INFO ({status}): SID={info['sid']}, "
-                  f"Host={info['hostname']}, OS={info['os_type']}, "
-                  f"DB={info['db_type']}, Kernel={info['kernel']}, "
-                  f"Release={info['sap_release']}")
-        else:
-            # Even if the full parse failed, try to extract partial info
-            for key in ("RFCSYSID", "RFCHOST2", "RFCHOST", "RFCOPSYS",
-                        "RFCDBSYS", "RFCKERNRL", "RFCSAPRL"):
-                val = result.get(key, "").strip()
-                if val:
-                    if key == "RFCSYSID":
-                        info["sid"] = val
-                    elif key in ("RFCHOST2", "RFCHOST"):
-                        if not info["hostname"]:
-                            info["hostname"] = val
-                    elif key == "RFCOPSYS":
-                        info["os_type"] = val
-                    elif key == "RFCDBSYS":
-                        info["db_type"] = val
-                    elif key == "RFCKERNRL":
-                        info["kernel"] = val
-                    elif key == "RFCSAPRL":
-                        info["sap_release"] = val
+        # Fallback: extract from gateway error parsing fields (chipik method).
+        # These are populated when the v6/v2 full RFCSI parse fails but the
+        # gateway still leaks info in error messages.
+        if not info["sid"]:
+            # Try to derive SID from hostname (format: hostname_SID_NN or just SID in gw name)
+            gw_name = result.get("gateway_name", "")  # e.g. "sapgw00"
+            hostname_full = result.get("hostname", "")  # e.g. "s4hanadev.mooo.com"
+            if hostname_full and not info["hostname"]:
+                info["hostname"] = hostname_full.split(".")[0]  # short hostname
+        if not info["kernel"]:
+            info["kernel"] = result.get("kernel_release", "").strip()
+        if not info["os_type"]:
+            info["os_type"] = result.get("os_hint", "").strip()
+        if not info["sap_release"]:
+            info["sap_release"] = result.get("sap_release_approx", "").strip()
 
-            if info["sid"]:
-                print(f"[*]   RFC_SYSTEM_INFO ({status}): partial data — "
-                      f"SID={info['sid']}, Host={info['hostname']}")
-            else:
-                methods = result.get("methods_tried", [])
-                methods_ok = result.get("methods_success", [])
-                print(f"[!]   RFC_SYSTEM_INFO failed (status={status}, "
-                      f"methods tried={methods}, success={methods_ok})")
+        # Try to extract SID from hostname pattern: <host>_<SID>_<inst>
+        # or from the hostname itself if it follows SAP naming conventions
+        if not info["sid"] and info["hostname"]:
+            hn = info["hostname"].lower()
+            # Common SAP naming: the SID is often embedded, e.g. "s4hanadev" -> S4H
+            # Check instance number from result
+            inst_nr = result.get("instance_number", "")
+            gw_svc = result.get("gw_service", "")  # e.g. "sapgw00"
+            if gw_svc and gw_svc.startswith("sapgw"):
+                inst_nr = inst_nr or gw_svc[5:]
+
+        if info["sid"] or info["hostname"] or info["kernel"]:
+            print(f"[+]   RFC_SYSTEM_INFO ({status}): SID={info['sid'] or '?'}, "
+                  f"Host={info['hostname'] or '?'}, OS={info['os_type'] or '?'}, "
+                  f"DB={info['db_type'] or '?'}, Kernel={info['kernel'] or '?'}, "
+                  f"Release={info['sap_release'] or '?'}")
+        else:
+            methods = result.get("methods_tried", [])
+            methods_ok = result.get("methods_success", [])
+            print(f"[!]   RFC_SYSTEM_INFO: no data extracted (status={status}, "
+                  f"methods tried={methods}, success={methods_ok})")
 
     except Exception as e:
         print(f"[-]   RFC_SYSTEM_INFO error on {host}:{gw_port}: {e}")
         logger.debug(f"RFC_SYSTEM_INFO failed for {host}:{gw_port}: {e}")
 
+    # If SID still missing, try a quick SAPControl SOAP query on 5XX13
+    if not info["sid"]:
+        inst_nr = gw_port % 100 if 3300 <= gw_port <= 3399 else 0
+        sc_port = 50000 + inst_nr * 100 + 13
+        sid = _query_sapcontrol_sid(host, sc_port, timeout=min(timeout, 3))
+        if sid:
+            info["sid"] = sid
+            print(f"[+]   SID from SAPControl ({host}:{sc_port}): {sid}")
+
     return info
+
+
+def _query_sapcontrol_sid(host: str, port: int, timeout: float = 3) -> str:
+    """Quick SAPControl SOAP query to extract SAPSYSTEMNAME (SID)."""
+    import re as _re
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect((host, port))
+        body = (
+            '<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/">'
+            '<SOAP-ENV:Body><ns1:GetInstanceProperties xmlns:ns1="urn:SAPControl">'
+            '</ns1:GetInstanceProperties></SOAP-ENV:Body></SOAP-ENV:Envelope>'
+        )
+        req = (
+            f"POST / HTTP/1.1\r\n"
+            f"Host: {host}:{port}\r\n"
+            f"Content-Type: text/xml\r\n"
+            f"Content-Length: {len(body)}\r\n"
+            f"\r\n{body}"
+        )
+        sock.sendall(req.encode())
+        resp = b""
+        try:
+            while len(resp) < 16384:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                resp += chunk
+        except socket.timeout:
+            pass
+        sock.close()
+        text = resp.decode("utf-8", errors="replace")
+        m = _re.search(r'SAPSYSTEMNAME.*?<value>([^<]+)</value>', text)
+        if m:
+            return m.group(1).strip()
+    except Exception:
+        pass
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -903,7 +957,9 @@ def _sapology_system_to_node(sys_obj, target_ip: str) -> SAPNode:
                 gw_vulnerable = True
 
     # Determine DB type — SAPology sets db_type and has_hana/has_maxdb/etc.
-    db_type = sys_obj.db_type or ""
+    # Normalize variants like "ADABAS D" -> "ADA"
+    from sapmap_config import normalize_db_type as _norm_db
+    db_type = _norm_db(sys_obj.db_type) if sys_obj.db_type else ""
     if not db_type:
         # Infer from has_* flags
         if getattr(sys_obj, 'has_hana', False):
@@ -1039,7 +1095,7 @@ def _deep_scan_with_sapology(targets, instance_range, timeout, threads,
         phase2_start = time.time()
         landscape = SAPology.assess_vulnerabilities(
             landscape, gw_cmd="whoami", timeout=timeout + 2,
-            verbose=True,
+            verbose=True, url_scan=False,
             cancel_check=lambda: cancel_event.is_set() if cancel_event else False,
         )
 
@@ -1162,7 +1218,7 @@ def deep_scan_single(node: SAPNode, timeout: float = DEFAULT_TIMEOUT,
         print(f"")
         landscape = SAPology.assess_vulnerabilities(
             landscape, gw_cmd="whoami", timeout=timeout + 2,
-            verbose=True,
+            verbose=True, url_scan=False,
             cancel_check=lambda: cancel_event.is_set() if cancel_event else False,
         )
 

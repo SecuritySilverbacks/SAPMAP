@@ -131,6 +131,7 @@ body {
   flex: 1; overflow-y: auto; padding: 4px 12px;
   font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
   font-size: 11px; background: #0d1117; line-height: 1.5;
+  user-select: text; -webkit-user-select: text; cursor: text;
 }
 .cl-ok { color: #3fb950; }
 .cl-err { color: #f85149; }
@@ -288,7 +289,7 @@ body {
 <!-- Toolbar (Scan Configuration) -->
 <div class="toolbar" id="toolbar" style="flex-wrap:wrap;gap:4px 8px">
   <label>Targets:</label>
-  <input type="text" id="targets" placeholder="192.168.1.0/24 or @targets.txt" value="">
+  <input type="text" id="targets" placeholder="192.168.1.0/24 or @targets.txt" value="" onkeydown="if(event.key==='Enter')startScan()">
   <label>Inst:</label>
   <input type="number" id="inst-from" value="0" min="0" max="99">
   <span style="color:#484f58">-</span>
@@ -461,6 +462,7 @@ let selectedNodeSid = null;
 let dragNode = null;
 let dragOffset = { x: 0, y: 0 };
 let viewBox = { x: 0, y: 0, w: 1200, h: 800 };
+let viewBoxUserControlled = false;  // true once user zooms/pans
 let isPanning = false;
 let panStart = { x: 0, y: 0 };
 
@@ -611,15 +613,21 @@ function updateMap() {
     }
   });
 
-  // Compute viewBox
+  // Compute content bounds (needed for initial auto-fit and fitMap)
   let maxX = 0, maxY = 0;
   nodeKeys.forEach(sid => {
     const n = nodes[sid];
     maxX = Math.max(maxX, (n._x || 0) + BOX_W + MARGIN);
     maxY = Math.max(maxY, (n._y || 0) + BOX_H + MARGIN);
   });
-  viewBox.w = Math.max(maxX, 800);
-  viewBox.h = Math.max(maxY, 600);
+
+  // Only auto-set viewBox on first render or when nodes change count.
+  // Once the user has zoomed/panned, preserve their viewBox.
+  if (!viewBoxUserControlled || viewBox._nodeCount !== nodeKeys.length) {
+    viewBox.w = Math.max(maxX, 800);
+    viewBox.h = Math.max(maxY, 600);
+    viewBox._nodeCount = nodeKeys.length;
+  }
   svg.setAttribute('viewBox', `${viewBox.x} ${viewBox.y} ${viewBox.w} ${viewBox.h}`);
 
   let html = '';
@@ -1090,10 +1098,12 @@ async function exportJSON() {
 }
 
 // --- View controls ---
-function zoomIn() { viewBox.w *= 0.8; viewBox.h *= 0.8; applyViewBox(); }
-function zoomOut() { viewBox.w *= 1.25; viewBox.h *= 1.25; applyViewBox(); }
-function fitMap() { viewBox.x = 0; viewBox.y = 0; viewBox.w = 1200; viewBox.h = 800; applyViewBox(); updateMap(); }
+function zoomIn() { viewBoxUserControlled = true; viewBox.w *= 0.8; viewBox.h *= 0.8; applyViewBox(); }
+function zoomOut() { viewBoxUserControlled = true; viewBox.w *= 1.25; viewBox.h *= 1.25; applyViewBox(); }
+function fitMap() { viewBoxUserControlled = false; viewBox.x = 0; viewBox.y = 0; viewBox.w = 1200; viewBox.h = 800; viewBox._nodeCount = 0; applyViewBox(); updateMap(); }
 function resetLayout() {
+  viewBoxUserControlled = false;
+  viewBox.x = 0; viewBox.y = 0; viewBox._nodeCount = 0;
   Object.values(mapState.nodes || {}).forEach(n => { n._x = null; n._y = null; });
   updateMap();
 }
@@ -1143,6 +1153,7 @@ document.addEventListener('mousemove', e => {
     mapState.nodes[dragNode]._y = svgPt.y - dragOffset.y;
     updateMap();
   } else if (isPanning) {
+    viewBoxUserControlled = true;
     const svg = document.getElementById('map-svg');
     const scale = viewBox.w / svg.clientWidth;
     viewBox.x -= (e.clientX - panStart.x) * scale;
@@ -1162,6 +1173,7 @@ document.getElementById('map-container').addEventListener('mousedown', e => {
 
 document.getElementById('map-container').addEventListener('wheel', e => {
   e.preventDefault();
+  viewBoxUserControlled = true;
   const factor = e.deltaY > 0 ? 1.1 : 0.9;
   viewBox.w *= factor; viewBox.h *= factor;
   applyViewBox();

