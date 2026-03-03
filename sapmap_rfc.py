@@ -211,7 +211,6 @@ def create_user_via_bapi(node: SAPNode, username: str, password: str,
                 PASSWORD={"BAPIPWD": password},
                 LOGONDATA={
                     "USTYP": "S",      # System/service user
-                    "GLTGV": "",       # Valid from (empty = today)
                     "GLTGB": "99991231",  # Valid to (far future)
                 },
                 ADDRESS={

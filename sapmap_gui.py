@@ -571,6 +571,19 @@ def create_app(api: SAPMAPApi) -> Bottle:
         except Exception as e:
             return json.dumps({"error": str(e)})
 
+    @app.route("/api/state/upload", method="POST")
+    def api_state_upload():
+        """Load state from an uploaded file (browser file picker)."""
+        response.content_type = "application/json"
+        try:
+            data = request.json
+            if not data:
+                return json.dumps({"error": "No data received"})
+            api.state = SAPMAPState.from_dict(data)
+            return json.dumps({"status": "ok"})
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+
     # -- Export --
     @app.route("/api/export/json")
     def export_json():

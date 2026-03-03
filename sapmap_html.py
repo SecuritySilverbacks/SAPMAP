@@ -450,6 +450,9 @@ body {
   </div>
 </div>
 
+<!-- Hidden file picker for Load State -->
+<input type="file" id="file-picker" accept=".sapmap,.json" style="display:none" onchange="handleFileLoad(this)">
+
 <script>
 /* =========================================================================
    SAPMAP Frontend JavaScript
@@ -1095,11 +1098,25 @@ async function saveState() {
   if (!name) return;
   await api('POST', 'state/save', { name });
 }
-async function loadState() {
-  const name = prompt('Load state file (path or name):');
-  if (!name) return;
-  await api('POST', 'state/load', { name });
-  startPolling();
+function loadState() {
+  document.getElementById('file-picker').click();
+}
+function handleFileLoad(input) {
+  const file = input.files[0];
+  if (!file) return;
+  input.value = '';
+  const reader = new FileReader();
+  reader.onload = async function(e) {
+    try {
+      const data = JSON.parse(e.target.result);
+      const res = await api('POST', 'state/upload', data);
+      if (res.error) alert('Load failed: ' + res.error);
+    } catch (err) {
+      alert('Invalid file: ' + err.message);
+    }
+    startPolling();
+  };
+  reader.readAsText(file);
 }
 async function exportJSON() {
   window.open('/api/export/json', '_blank');
