@@ -272,13 +272,16 @@ def create_app(api: SAPMAPApi) -> Bottle:
             ok = sapmap_rfc.test_connection(node, creds)
             return json.dumps({"success": ok, "message": "OK" if ok else "Failed"})
 
-        # Save credentials
+        # Test and save credentials
+        print(f"[*] Testing credentials for {sid}: user={creds.username}, "
+              f"client={creds.client}, instance={creds.instance_nr}")
         creds.verified = sapmap_rfc.test_connection(node, creds)
         node.credentials.append(creds)
         if creds.verified:
-            print(f"[+] Credentials verified for {sid}")
+            print(f"[+] Credentials saved and verified for {sid}")
         else:
-            print(f"[!] Credentials saved but verification failed for {sid}")
+            print(f"[!] Credentials saved for {sid} but could NOT verify — "
+                  f"check the error above. User creation will likely fail.")
         return json.dumps({"success": True, "verified": creds.verified})
 
     @app.route("/api/node/<sid>/deep_scan", method="POST")

@@ -78,9 +78,19 @@ def test_connection(node: SAPNode, creds: Credentials = None) -> bool:
             ok = conn.ping()
             if ok and creds:
                 creds.verified = True
+                print(f"[+] Connection test OK for {node.sid} "
+                      f"(user={creds.username}, client={creds.client}, "
+                      f"inst={creds.instance_nr})")
             return ok
     except Exception as e:
-        logger.debug(f"Connection test failed for {node.sid}: {e}")
+        err = str(e)
+        print(f"[-] Connection test failed for {node.sid}: {err}")
+        if "password" in err.lower() or "logon" in err.lower():
+            print(f"    Check username/password and client number")
+        elif "communication" in err.lower() or "connect" in err.lower():
+            print(f"    Check host/instance number — cannot reach the system")
+        elif "library" in err.lower() or "sdk" in err.lower() or "load" in err.lower():
+            print(f"    SAP NW RFC SDK not found — set the SDK path in settings")
         return False
 
 
