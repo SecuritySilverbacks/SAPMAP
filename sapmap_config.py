@@ -15,8 +15,11 @@ SAPMAP_USER_MAX = 99   # SAPMAP00 .. SAPMAP99
 
 # Pre-generated password hashes for user SAPMAP00 with password "andinyougo"
 # Note: SAP hashes are username-dependent — these are ONLY valid for SAPMAP00.
+# Used by the GW exploit (direct DB insert).
 SAPMAP_PASSWORD_ABAP = "andinyougo"
 SAPMAP_PASSWORD_JAVA = "Andinyoug0"
+# Password for BAPI-based user creation (must meet SAP password policies).
+SAPMAP_PASSWORD_BAPI = "Andinyougo123!"
 BCODE_HEX = "3E6632FB15070BA1"
 PASSCODE_HEX = "1C6BB7A000D12A1F250D58C3B5A1674D0A716D19"
 

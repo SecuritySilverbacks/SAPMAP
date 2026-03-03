@@ -221,6 +221,7 @@ body {
   display: none; position: fixed; right: 0; top: 28px; bottom: 24px;
   width: 360px; background: #1c2128; border-left: 1px solid #30363d;
   z-index: 1000; overflow-y: auto; padding: 16px;
+  user-select: text; -webkit-user-select: text; cursor: auto;
 }
 .detail-panel.visible { display: block; }
 .detail-panel h3 { font-size: 14px; color: #f0883e; margin-bottom: 12px; }
@@ -495,6 +496,8 @@ let pollTimer = null;
 let selectedNodeSid = null;
 let dragNode = null;
 let dragOffset = { x: 0, y: 0 };
+let dragMoved = false;
+let dragStartPos = { x: 0, y: 0 };
 let viewBox = { x: 0, y: 0, w: 1200, h: 800 };
 let viewBoxUserControlled = false;  // true once user zooms/pans
 let isPanning = false;
@@ -1327,6 +1330,9 @@ function startDrag(e, sid) {
   if (e.button === 2) return; // right-click = context menu
   e.stopPropagation();
   dragNode = sid;
+  dragMoved = false;
+  dragStartPos.x = e.clientX;
+  dragStartPos.y = e.clientY;
   const n = mapState.nodes[sid];
   const svg = document.getElementById('map-svg');
   const pt = svg.createSVGPoint();
@@ -1347,6 +1353,8 @@ function updateStatusBar() {
 // --- Global event listeners ---
 document.addEventListener('mousemove', e => {
   if (dragNode) {
+    const dx = e.clientX - dragStartPos.x, dy = e.clientY - dragStartPos.y;
+    if (dx*dx + dy*dy > 9) dragMoved = true;  // 3px threshold
     const svg = document.getElementById('map-svg');
     const pt = svg.createSVGPoint();
     pt.x = e.clientX; pt.y = e.clientY;
@@ -1365,7 +1373,10 @@ document.addEventListener('mousemove', e => {
   }
 });
 
-document.addEventListener('mouseup', () => { dragNode = null; isPanning = false; });
+document.addEventListener('mouseup', () => {
+  if (dragNode && !dragMoved) showDetails(dragNode);
+  dragNode = null; isPanning = false;
+});
 
 document.getElementById('map-container').addEventListener('mousedown', e => {
   if (e.target === document.getElementById('map-svg') || e.target === document.getElementById('map-container')) {

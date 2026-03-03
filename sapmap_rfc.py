@@ -687,7 +687,7 @@ def get_client_roles(node: SAPNode, creds: Credentials = None) -> list:
                 client_list = result.get("ET_CLIENTS", [])
                 for c in client_list:
                     clients.append({
-                        "MANDT": c.get("CLIENT", ""),
+                        "MANDT": c.get("MANDT", "") or c.get("CLIENT", ""),
                         "CCCATEGORY": c.get("CCCATEGORY", ""),
                     })
                 if clients:
