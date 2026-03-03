@@ -104,7 +104,7 @@ body {
 .node-box:active { cursor: grabbing; }
 .node-header { cursor: grab; }
 .edge-line { cursor: pointer; }
-.edge-line:hover { stroke-width: 3 !important; filter: brightness(1.3); }
+.edge-line:hover { stroke-width: 6 !important; filter: brightness(1.3); }
 
 /* === Legend === */
 .legend-bar {
@@ -648,14 +648,14 @@ function updateMap() {
     const y2 = (tgtNode._y || 0) + BOX_H / 2;
 
     let color = '#5dade2';
-    let width = 1.5;
+    let width = 3;
     let dashArray = '';
     if (conn.has_sap_all && conn.logon_successful) {
-      color = '#e74c3c'; width = 2.5;
+      color = '#e74c3c'; width = 4.5;
     } else if (conn.has_sap_all) {
-      color = '#e67e22'; width = 2;
+      color = '#e67e22'; width = 4;
     } else if (conn.sapxpg_remote_works) {
-      color = '#ff6b35'; width = 2; dashArray = '6,3';
+      color = '#ff6b35'; width = 4; dashArray = '6,3';
     }
 
     // Arrow marker

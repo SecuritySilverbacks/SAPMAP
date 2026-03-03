@@ -130,16 +130,18 @@ def sql_maxdb(sid: str, client: str, username: str) -> list:
 
 
 def sql_hana(sid: str, client: str, username: str) -> list:
-    """HANA DB — hdbsql statements (semicolon-terminated)."""
+    """HANA DB — hdbsql statements (no schema prefix, -U DEFAULT sets it)."""
     return [
         f"INSERT INTO USR02 (MANDT,BNAME,USTYP,CODVN) "
-        f"VALUES ('{client}','{username}','{USER_TYPE}','{CODVN}');",
+        f"VALUES ('{client}','{username}','{USER_TYPE}','{CODVN}')",
         f"UPDATE USR02 SET BCODE='{BCODE_HEX}' "
-        f"WHERE MANDT='{client}' AND BNAME='{username}';",
+        f"WHERE MANDT='{client}' AND BNAME='{username}'",
         f"UPDATE USR02 SET PASSCODE='{PASSCODE_HEX}' "
-        f"WHERE MANDT='{client}' AND BNAME='{username}';",
+        f"WHERE MANDT='{client}' AND BNAME='{username}'",
         f"INSERT INTO USREFUS (MANDT,BNAME,REFUSER) "
-        f"VALUES ('{client}','{username}','DDIC');",
+        f"VALUES ('{client}','{username}','DDIC')",
+        f"INSERT INTO UST04 (MANDT,BNAME,PROFILE) "
+        f"VALUES ('{client}','{username}','SAP_ALL')",
     ]
 
 
