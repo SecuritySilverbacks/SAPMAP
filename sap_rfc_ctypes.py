@@ -249,10 +249,13 @@ class RFC_ERROR_INFO(Structure):
     """SAP RFC error information structure.
 
     Filled by every SDK function call. Check 'code' field for RFC_OK (0).
+    SAP SDK: RFC_RC and RFC_ERROR_GROUP are 'unsigned' (uint32, 4 bytes).
+    Using c_uint, NOT c_long (which is 8 bytes on 64-bit Linux and would
+    misalign the structure, causing segfaults).
     """
     _fields_ = [
-        ('code', c_long),          # RFC_RC enum
-        ('group', c_long),         # RFC_ERROR_GROUP enum
+        ('code', c_uint),          # RFC_RC enum (unsigned = 4 bytes)
+        ('group', c_uint),         # RFC_ERROR_GROUP enum (unsigned = 4 bytes)
         ('key', _UC * 128),        # Error key
         ('message', _UC * 512),    # Error message (human-readable)
         ('abapMsgClass', _UC * 21),
@@ -533,136 +536,136 @@ class _SDKLibrary:
         lib.RfcOpenConnection.restype = VP
 
         lib.RfcCloseConnection.argtypes = [VP, EI]
-        lib.RfcCloseConnection.restype = c_ulong
+        lib.RfcCloseConnection.restype = c_uint  # RFC_RC = unsigned
 
         lib.RfcPing.argtypes = [VP, EI]
-        lib.RfcPing.restype = c_ulong
+        lib.RfcPing.restype = c_uint
 
         lib.RfcGetConnectionAttributes.argtypes = [VP, POINTER(RFC_ATTRIBUTES), EI]
-        lib.RfcGetConnectionAttributes.restype = c_ulong
+        lib.RfcGetConnectionAttributes.restype = c_uint
 
         lib.RfcIsConnectionHandleValid.argtypes = [VP, POINTER(c_int), EI]
-        lib.RfcIsConnectionHandleValid.restype = c_ulong
+        lib.RfcIsConnectionHandleValid.restype = c_uint
 
         # -- Function Description --
         lib.RfcGetFunctionDesc.argtypes = [VP, VP, EI]
         lib.RfcGetFunctionDesc.restype = VP
 
         lib.RfcGetParameterCount.argtypes = [VP, POINTER(c_uint), EI]
-        lib.RfcGetParameterCount.restype = c_ulong
+        lib.RfcGetParameterCount.restype = c_uint
 
         lib.RfcGetParameterDescByIndex.argtypes = [VP, c_uint, POINTER(RFC_PARAMETER_DESC), EI]
-        lib.RfcGetParameterDescByIndex.restype = c_ulong
+        lib.RfcGetParameterDescByIndex.restype = c_uint
 
         lib.RfcGetParameterDescByName.argtypes = [VP, VP, POINTER(RFC_PARAMETER_DESC), EI]
-        lib.RfcGetParameterDescByName.restype = c_ulong
+        lib.RfcGetParameterDescByName.restype = c_uint
 
         # -- Type Description (for structure/table introspection) --
         lib.RfcGetFieldCount.argtypes = [VP, POINTER(c_uint), EI]
-        lib.RfcGetFieldCount.restype = c_ulong
+        lib.RfcGetFieldCount.restype = c_uint
 
         lib.RfcGetFieldDescByIndex.argtypes = [VP, c_uint, POINTER(RFC_FIELD_DESC), EI]
-        lib.RfcGetFieldDescByIndex.restype = c_ulong
+        lib.RfcGetFieldDescByIndex.restype = c_uint
 
         # -- Function Handle --
         lib.RfcCreateFunction.argtypes = [VP, EI]
         lib.RfcCreateFunction.restype = VP
 
         lib.RfcDestroyFunction.argtypes = [VP, EI]
-        lib.RfcDestroyFunction.restype = c_ulong
+        lib.RfcDestroyFunction.restype = c_uint
 
         lib.RfcInvoke.argtypes = [VP, VP, EI]
-        lib.RfcInvoke.restype = c_ulong
+        lib.RfcInvoke.restype = c_uint
 
         # -- String getters/setters --
         lib.RfcSetString.argtypes = [VP, VP, VP, c_uint, EI]
-        lib.RfcSetString.restype = c_ulong
+        lib.RfcSetString.restype = c_uint
 
         lib.RfcGetString.argtypes = [VP, VP, VP, c_uint, POINTER(c_uint), EI]
-        lib.RfcGetString.restype = c_ulong
+        lib.RfcGetString.restype = c_uint
 
         lib.RfcGetStringLength.argtypes = [VP, VP, POINTER(c_uint), EI]
-        lib.RfcGetStringLength.restype = c_ulong
+        lib.RfcGetStringLength.restype = c_uint
 
         # -- Char getters/setters --
         lib.RfcSetChars.argtypes = [VP, VP, VP, c_uint, EI]
-        lib.RfcSetChars.restype = c_ulong
+        lib.RfcSetChars.restype = c_uint
 
         lib.RfcGetChars.argtypes = [VP, VP, VP, c_uint, EI]
-        lib.RfcGetChars.restype = c_ulong
+        lib.RfcGetChars.restype = c_uint
 
         # -- Numeric string --
         lib.RfcSetNum.argtypes = [VP, VP, VP, c_uint, EI]
-        lib.RfcSetNum.restype = c_ulong
+        lib.RfcSetNum.restype = c_uint
 
         lib.RfcGetNum.argtypes = [VP, VP, VP, c_uint, EI]
-        lib.RfcGetNum.restype = c_ulong
+        lib.RfcGetNum.restype = c_uint
 
         # -- Integer getters/setters --
         lib.RfcSetInt.argtypes = [VP, VP, c_int, EI]
-        lib.RfcSetInt.restype = c_ulong
+        lib.RfcSetInt.restype = c_uint
 
         lib.RfcGetInt.argtypes = [VP, VP, POINTER(c_int), EI]
-        lib.RfcGetInt.restype = c_ulong
+        lib.RfcGetInt.restype = c_uint
 
         lib.RfcSetInt8.argtypes = [VP, VP, c_int64, EI]
-        lib.RfcSetInt8.restype = c_ulong
+        lib.RfcSetInt8.restype = c_uint
 
         lib.RfcGetInt8.argtypes = [VP, VP, POINTER(c_int64), EI]
-        lib.RfcGetInt8.restype = c_ulong
+        lib.RfcGetInt8.restype = c_uint
 
         # -- Float --
         lib.RfcSetFloat.argtypes = [VP, VP, c_double, EI]
-        lib.RfcSetFloat.restype = c_ulong
+        lib.RfcSetFloat.restype = c_uint
 
         lib.RfcGetFloat.argtypes = [VP, VP, POINTER(c_double), EI]
-        lib.RfcGetFloat.restype = c_ulong
+        lib.RfcGetFloat.restype = c_uint
 
         # -- Date/Time (SAP_UC[8] / SAP_UC[6]) --
         lib.RfcSetDate.argtypes = [VP, VP, VP, EI]
-        lib.RfcSetDate.restype = c_ulong
+        lib.RfcSetDate.restype = c_uint
 
         lib.RfcGetDate.argtypes = [VP, VP, VP, EI]
-        lib.RfcGetDate.restype = c_ulong
+        lib.RfcGetDate.restype = c_uint
 
         lib.RfcSetTime.argtypes = [VP, VP, VP, EI]
-        lib.RfcSetTime.restype = c_ulong
+        lib.RfcSetTime.restype = c_uint
 
         lib.RfcGetTime.argtypes = [VP, VP, VP, EI]
-        lib.RfcGetTime.restype = c_ulong
+        lib.RfcGetTime.restype = c_uint
 
         # -- Bytes/XString --
         lib.RfcSetBytes.argtypes = [VP, VP, POINTER(c_ubyte), c_uint, EI]
-        lib.RfcSetBytes.restype = c_ulong
+        lib.RfcSetBytes.restype = c_uint
 
         lib.RfcGetBytes.argtypes = [VP, VP, POINTER(c_ubyte), c_uint, EI]
-        lib.RfcGetBytes.restype = c_ulong
+        lib.RfcGetBytes.restype = c_uint
 
         lib.RfcSetXString.argtypes = [VP, VP, POINTER(c_ubyte), c_uint, EI]
-        lib.RfcSetXString.restype = c_ulong
+        lib.RfcSetXString.restype = c_uint
 
         lib.RfcGetXString.argtypes = [VP, VP, POINTER(c_ubyte), c_uint, POINTER(c_uint), EI]
-        lib.RfcGetXString.restype = c_ulong
+        lib.RfcGetXString.restype = c_uint
 
         # -- Structure --
         lib.RfcGetStructure.argtypes = [VP, VP, POINTER(VP), EI]
-        lib.RfcGetStructure.restype = c_ulong
+        lib.RfcGetStructure.restype = c_uint
 
         # -- Table --
         lib.RfcGetTable.argtypes = [VP, VP, POINTER(VP), EI]
-        lib.RfcGetTable.restype = c_ulong
+        lib.RfcGetTable.restype = c_uint
 
         lib.RfcGetRowCount.argtypes = [VP, POINTER(c_uint), EI]
-        lib.RfcGetRowCount.restype = c_ulong
+        lib.RfcGetRowCount.restype = c_uint
 
         lib.RfcMoveToFirstRow.argtypes = [VP, EI]
-        lib.RfcMoveToFirstRow.restype = c_ulong
+        lib.RfcMoveToFirstRow.restype = c_uint
 
         lib.RfcMoveToNextRow.argtypes = [VP, EI]
-        lib.RfcMoveToNextRow.restype = c_ulong
+        lib.RfcMoveToNextRow.restype = c_uint
 
         lib.RfcMoveTo.argtypes = [VP, c_uint, EI]
-        lib.RfcMoveTo.restype = c_ulong
+        lib.RfcMoveTo.restype = c_uint
 
         lib.RfcGetCurrentRow.argtypes = [VP, EI]
         lib.RfcGetCurrentRow.restype = VP
@@ -671,7 +674,7 @@ class _SDKLibrary:
         lib.RfcAppendNewRow.restype = VP
 
         lib.RfcDeleteCurrentRow.argtypes = [VP, EI]
-        lib.RfcDeleteCurrentRow.restype = c_ulong
+        lib.RfcDeleteCurrentRow.restype = c_uint
 
     def __getattr__(self, name):
         """Proxy attribute access to the underlying ctypes library."""
