@@ -140,13 +140,15 @@ ALIVE_PROBE_PORTS = [3200, 3300, 3201, 3301, 8000, 50013, 443, 22]
 ALIVE_TIMEOUT = 0.5  # seconds — short TCP timeout for alive probes
 
 
-def _is_host_alive(host: str, timeout: float = ALIVE_TIMEOUT) -> bool:
+def _is_host_alive(host: str, timeout: float = None) -> bool:
     """Quick check if a host is reachable.
 
     Runs ICMP ping and TCP probes in parallel threads so a single dead
     host takes at most ~timeout seconds instead of sequentially
     accumulating timeouts.  Returns True on first success.
     """
+    if timeout is None:
+        timeout = ALIVE_TIMEOUT
     found = threading.Event()
 
     def _ping():
@@ -232,14 +234,13 @@ def alive_sweep(targets: list, threads: int = 100,
                 print(f"[*]   Probed {scanned[0]}/{total} hosts "
                       f"({len(alive)} alive so far)")
 
-    executor = ThreadPoolExecutor(max_workers=threads)
-    futures = [executor.submit(_check, h) for h in targets]
-    for f in as_completed(futures):
-        if cancel_event and cancel_event.is_set():
-            break
-        f.result()  # propagate exceptions
-    # Don't wait for stragglers on cancel — daemon threads will clean up
-    executor.shutdown(wait=not (cancel_event and cancel_event.is_set()))
+    with ThreadPoolExecutor(max_workers=threads) as executor:
+        futures = [executor.submit(_check, h) for h in targets]
+        for f in as_completed(futures):
+            if cancel_event and cancel_event.is_set():
+                break
+            f.result()  # propagate exceptions
+        # executor.__exit__ waits; workers check cancel so they exit fast
 
     elapsed = time.time() - t0
     if cancel_event and cancel_event.is_set():
@@ -421,24 +422,25 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
               f"no response, skipping full scan")
         return result
 
+    _cancelled = lambda: cancel_event and cancel_event.is_set()
+
     def _do_scan(port_list):
         hits = {}
         def _check(args):
             port, svc, inst = args
-            if cancel_event and cancel_event.is_set():
+            if _cancelled():
                 return None
             if _scan_port(host, port, timeout):
                 return (port, svc, inst)
             return None
-        executor = ThreadPoolExecutor(max_workers=threads)
-        futures = [executor.submit(_check, a) for a in port_list]
-        for f in as_completed(futures):
-            if cancel_event and cancel_event.is_set():
-                break
-            r = f.result()
-            if r:
-                hits[r[0]] = {"service": r[1], "instance_nr": r[2]}
-        executor.shutdown(wait=not (cancel_event and cancel_event.is_set()))
+        with ThreadPoolExecutor(max_workers=threads) as executor:
+            futures = [executor.submit(_check, a) for a in port_list]
+            for f in as_completed(futures):
+                if _cancelled():
+                    break
+                r = f.result()
+                if r:
+                    hits[r[0]] = {"service": r[1], "instance_nr": r[2]}
         return hits
 
     # Pass 1: Dispatcher + Gateway + fixed ports (fast — ~200 ports)
@@ -446,10 +448,14 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
     ports_pass1.append((1128, "saphost_http", "XX"))
     ports_pass1.append((1129, "saphost_https", "XX"))
 
+    if _cancelled():
+        return result
     print(f"[*]     Pass 1: scanning {len(ports_pass1)} ports "
           f"(dispatcher 32XX, gateway 33XX, SAPHostControl) ...")
     t0 = time.time()
     hits1 = _do_scan(ports_pass1)
+    if _cancelled():
+        return result
     result["open_ports"].update(hits1)
     print(f"[*]     Pass 1 done in {time.time() - t0:.1f}s — "
           f"{len(hits1)} open port(s)")
@@ -457,17 +463,21 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
     # Verify dispatcher ports with DIAG protocol probe
     disp_ports = [p for p, info in result["open_ports"].items()
                   if info["service"] == "dispatcher"]
-    if disp_ports:
+    if disp_ports and not _cancelled():
         print(f"[*]     Verifying {len(disp_ports)} dispatcher port(s) "
               f"with SAP DIAG protocol probe ...")
-    for port in disp_ports:
+    for port in list(disp_ports):
+        if _cancelled():
+            break
         if not _verify_sap_diag(host, port, timeout=min(timeout, 2.0)):
             del result["open_ports"][port]
 
+    if _cancelled():
+        return result
     result["has_sap"] = len(result["open_ports"]) > 0
 
     # Pass 2: HANA SQL ports — only if SAP was found
-    if result["has_sap"]:
+    if result["has_sap"] and not _cancelled():
         # Scan HANA ports for all instances in range
         hana_ports = []
         for inst_nr in range(instance_range[0], instance_range[1] + 1):
@@ -479,9 +489,10 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
               f"(3XX13/3XX15) ...")
         t0 = time.time()
         hits2 = _do_scan(hana_ports)
-        result["open_ports"].update(hits2)
-        print(f"[*]     Pass 2 done in {time.time() - t0:.1f}s — "
-              f"{len(hits2)} HANA port(s) open")
+        if not _cancelled():
+            result["open_ports"].update(hits2)
+            print(f"[*]     Pass 2 done in {time.time() - t0:.1f}s — "
+                  f"{len(hits2)} HANA port(s) open")
 
     return result
 
@@ -522,7 +533,10 @@ def fast_scan_network(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RA
     scan_start = time.time()
 
     # --- Stage 1: Alive sweep (skip for small target lists or if disabled) ---
-    if not skip_alive and total > 3:
+    # Use threshold of 10+ targets: for small lists the full port scan is
+    # fast enough, and alive sweep can miss hosts whose SAP instance ports
+    # (e.g. 3210/3310 for instance 10) don't overlap the probe port list.
+    if not skip_alive and total > 10:
         print(f"")
         alive_hosts = alive_sweep(targets, threads=min(total, 100),
                                   cancel_event=cancel_event)
@@ -562,6 +576,8 @@ def fast_scan_network(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RA
         print(f"[*]   [{idx+1}/{host_count}] Scanning {host} ...")
         r = fast_scan_host(host, instance_range, port_timeout, port_threads,
                            cancel_event)
+        if cancel_event and cancel_event.is_set():
+            return
         with completed_lock:
             completed[0] += 1
             nr = completed[0]
@@ -589,14 +605,19 @@ def fast_scan_network(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RA
                 fc = len(found)
             progress_callback(nr, host_count, host, fc)
 
-    executor = ThreadPoolExecutor(max_workers=max_parallel)
-    futures = [executor.submit(_scan_one, i, h)
-               for i, h in enumerate(alive_hosts)]
-    for f in as_completed(futures):
-        if cancel_event and cancel_event.is_set():
-            break
-        f.result()
-    executor.shutdown(wait=not (cancel_event and cancel_event.is_set()))
+    with ThreadPoolExecutor(max_workers=max_parallel) as executor:
+        futures = [executor.submit(_scan_one, i, h)
+                   for i, h in enumerate(alive_hosts)]
+        for f in as_completed(futures):
+            if cancel_event and cancel_event.is_set():
+                break
+            f.result()
+        # executor.__exit__ waits for running threads; workers check cancel
+        # so they finish within one socket timeout (~2s)
+
+    if cancel_event and cancel_event.is_set():
+        print(f"[!] Port scan cancelled")
+        return found
 
     # Print found details
     if found:

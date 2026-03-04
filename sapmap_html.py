@@ -104,7 +104,7 @@ body {
 .node-box:active { cursor: grabbing; }
 .node-header { cursor: grab; }
 .edge-line { cursor: pointer; }
-.edge-line:hover { stroke-width: 6 !important; filter: brightness(1.3); }
+.edge-line:hover { stroke-width: 8 !important; filter: brightness(1.3); }
 
 /* === Legend === */
 .legend-bar {
@@ -207,7 +207,10 @@ body {
 .modal .form-row input, .modal .form-row select {
   width: 100%; padding: 6px 10px; background: #0d1117; border: 1px solid #30363d;
   color: #e6edf3; border-radius: 4px; font-size: 12px;
+  -webkit-appearance: none; appearance: none;
 }
+.modal .form-row select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%238b949e' d='M2 4l4 4 4-4'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 8px center; padding-right: 28px; }
+.modal .form-row select option { background: #0d1117; color: #e6edf3; }
 .modal .form-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
 
 /* === Pill Badges (system type) === */
@@ -466,15 +469,17 @@ body {
     <div id="type-system-info" style="font-size:12px;color:#8b949e;margin-bottom:12px"></div>
     <div class="form-row">
       <label>System Type</label>
-      <select id="type-select" style="width:200px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:4px 8px;border-radius:4px;-webkit-appearance:menulist">
-        <option value="ABAP" style="background:#0d1117;color:#e6edf3">ABAP</option>
-        <option value="JAVA" style="background:#0d1117;color:#e6edf3">Java</option>
-        <option value="ABAP+JAVA" style="background:#0d1117;color:#e6edf3">ABAP+Java</option>
-        <option value="BUSINESSOBJECTS" style="background:#0d1117;color:#e6edf3">BusinessObjects</option>
-        <option value="CLOUD_CONNECTOR" style="background:#0d1117;color:#e6edf3">Cloud Connector</option>
-        <option value="CONTENT_SERVER" style="background:#0d1117;color:#e6edf3">Content Server</option>
-        <option value="SAPROUTER" style="background:#0d1117;color:#e6edf3">SAPRouter</option>
-        <option value="MDM" style="background:#0d1117;color:#e6edf3">MDM</option>
+      <select id="type-select">
+        <option value="" disabled selected hidden>Select type...</option>
+        <option value="ABAP">ABAP</option>
+        <option value="JAVA">Java</option>
+        <option value="ABAP+JAVA">ABAP+Java</option>
+        <option value="BUSINESSOBJECTS">BusinessObjects</option>
+        <option value="CLOUD_CONNECTOR">Cloud Connector</option>
+        <option value="CONTENT_SERVER">Content Server</option>
+        <option value="SAPROUTER">SAPRouter</option>
+        <option value="MDM">MDM</option>
+        <option value="HANA">HANA</option>
       </select>
     </div>
     <div class="form-actions">
@@ -501,6 +506,7 @@ let dragNode = null;
 let dragOffset = { x: 0, y: 0 };
 let dragMoved = false;
 let dragStartPos = { x: 0, y: 0 };
+let unkPositions = {};  // persistent positions for unknown target boxes
 let viewBox = { x: 0, y: 0, w: 1200, h: 800 };
 let viewBoxUserControlled = false;  // true once user zooms/pans
 let isPanning = false;
@@ -697,11 +703,15 @@ function updateMap() {
     const unkStartX = maxX + MARGIN;
     for (const key in unknownTargets) {
       const ut = unknownTargets[key];
-      if (!ut._x) {
+      if (unkPositions[key]) {
+        ut._x = unkPositions[key]._x;
+        ut._y = unkPositions[key]._y;
+      } else {
         ut._x = unkStartX;
         ut._y = MARGIN + unkCol * (BOX_H + MARGIN);
-        unkCol++;
+        unkPositions[key] = { _x: ut._x, _y: ut._y };
       }
+      unkCol++;
     }
     // Update bounds for viewBox
     for (const key in unknownTargets) {
@@ -753,72 +763,120 @@ function updateMap() {
     }
     if (!srcNode || !tgtNode) return;
 
-    const x1 = (srcNode._x || 0) + BOX_W / 2;
-    const y1 = (srcNode._y || 0) + BOX_H / 2;
-    const x2 = (tgtNode._x || 0) + BOX_W / 2;
-    const y2 = (tgtNode._y || 0) + BOX_H / 2;
-
     let color = '#5dade2';
-    let width = 3;
+    let width = 4;
     let dashArray = '';
     if (conn.has_sap_all && conn.logon_successful) {
-      color = '#e74c3c'; width = 4.5;
+      color = '#e74c3c'; width = 6;
     } else if (conn.has_sap_all) {
-      color = '#e67e22'; width = 4;
+      color = '#e67e22'; width = 5.5;
     } else if (conn.sapxpg_remote_works) {
-      color = '#ff6b35'; width = 4; dashArray = '6,3';
+      color = '#ff6b35'; width = 5.5; dashArray = '8,4';
     }
 
     // Arrow marker
-    html += `<defs><marker id="arrow-${ci}" markerWidth="10" markerHeight="7" ` +
-      `refX="10" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="${color}"/></marker></defs>`;
+    html += `<defs><marker id="arrow-${ci}" markerWidth="14" markerHeight="10" ` +
+      `refX="13" refY="5" orient="auto" markerUnits="userSpaceOnUse"><polygon points="0 0, 14 5, 0 10" fill="${color}"/></marker></defs>`;
+
+    const dashAttr = dashArray ? ` stroke-dasharray="${dashArray}"` : '';
+
+    // Self-loop: source and target are the same node
+    const isSelf = conn.source_sid && conn.source_sid === conn.target_sid;
+    if (isSelf) {
+      const nx = srcNode._x || 0, ny = srcNode._y || 0;
+      // Count self-loops on this node for stacking
+      const selfKey = conn.source_sid + '|' + conn.source_sid;
+      const selfTotal = pairCount[selfKey] || 1;
+      const selfIdx = pairIdx[ci] || 0;
+      // Loop exits right side, arcs out and comes back
+      const loopR = 30 + selfIdx * 20;
+      const startY = ny + BOX_H * 0.3 + selfIdx * 12;
+      const endY = ny + BOX_H * 0.7 + selfIdx * 12;
+      // Clamp to box height
+      const sy = Math.min(startY, ny + BOX_H - 4);
+      const ey = Math.min(endY, ny + BOX_H - 4);
+      const sx = nx + BOX_W;  // right edge
+      const cpx = sx + loopR;
+      html += `<path class="edge-line" d="M${sx},${sy} C${cpx},${sy} ${cpx},${ey} ${sx},${ey}" ` +
+        `stroke="${color}" stroke-width="${width}" fill="none"${dashAttr} ` +
+        `marker-end="url(#arrow-${ci})" data-conn-idx="${ci}" ` +
+        `onclick="showConnInfo(event, ${ci})" />`;
+      // Label to the right of the loop
+      let label = conn.destination_name || '';
+      if (conn.rfc_user) label += ' / ' + conn.rfc_user;
+      if (conn.has_sap_all) label += ' (SAP_ALL)';
+      const lx = cpx + 4, ly = (sy + ey) / 2 + 3;
+      html += `<text x="${lx}" y="${ly}" text-anchor="start" font-size="10" ` +
+        `fill="#8b949e" font-family="monospace" pointer-events="none">${escHtml(label)}</text>`;
+      return;  // done with this self-loop connection
+    }
+
+    const cx1 = (srcNode._x || 0) + BOX_W / 2;
+    const cy1 = (srcNode._y || 0) + BOX_H / 2;
+    const cx2 = (tgtNode._x || 0) + BOX_W / 2;
+    const cy2 = (tgtNode._y || 0) + BOX_H / 2;
+
+    // Clip line endpoints to box edges so arrows are visible
+    function clipToBox(fromX, fromY, toX, toY, bw, bh) {
+      const dx = fromX - toX, dy = fromY - toY;
+      const len = Math.sqrt(dx*dx + dy*dy) || 1;
+      const ux = dx / len, uy = dy / len;
+      const hw = bw / 2, hh = bh / 2;
+      const sx = ux !== 0 ? hw / Math.abs(ux) : Infinity;
+      const sy = uy !== 0 ? hh / Math.abs(uy) : Infinity;
+      const s = Math.min(sx, sy);
+      return { x: toX + ux * s, y: toY + uy * s };
+    }
+    const src = clipToBox(cx2, cy2, cx1, cy1, BOX_W, BOX_H);
+    const tgt = clipToBox(cx1, cy1, cx2, cy2, BOX_W, BOX_H);
+    const x1 = src.x, y1 = src.y, x2 = tgt.x, y2 = tgt.y;
 
     // Determine curve offset for parallel connections
+    // Use canonical (sorted) direction for the perpendicular so that
+    // A→B and B→A connections curve to opposite sides instead of overlapping.
     const a = conn.source_sid || '', b = conn.target_sid || conn.target_host || '';
     const pairKey = a < b ? a + '|' + b : b + '|' + a;
     const total = pairCount[pairKey] || 1;
     const idx = pairIdx[ci] || 0;
 
     if (total === 1) {
-      // Single connection: straight line
       html += `<line class="edge-line" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" ` +
-        `stroke="${color}" stroke-width="${width}" fill="none" ${dashArray ? 'stroke-dasharray="'+dashArray+'"' : ''} ` +
+        `stroke="${color}" stroke-width="${width}" fill="none"${dashAttr} ` +
         `marker-end="url(#arrow-${ci})" data-conn-idx="${ci}" ` +
         `onclick="showConnInfo(event, ${ci})" />`;
     } else {
-      // Multiple connections: curved paths offset from each other
       const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
-      const dx = x2 - x1, dy = y2 - y1;
-      const len = Math.sqrt(dx*dx + dy*dy) || 1;
-      // Perpendicular unit vector
-      const px = -dy / len, py = dx / len;
-      // Spread curves: center them around 0, spacing 40px
+      // Canonical direction: always from alphabetically smaller to larger SID
+      const cdx = a < b ? (cx2 - cx1) : (cx1 - cx2);
+      const cdy = a < b ? (cy2 - cy1) : (cy1 - cy2);
+      const len = Math.sqrt(cdx*cdx + cdy*cdy) || 1;
+      // Perpendicular based on canonical direction (consistent for both A→B and B→A)
+      const px = -cdy / len, py = cdx / len;
       const offset = (idx - (total - 1) / 2) * 40;
-      const cx = mx + px * offset, cy = my + py * offset;
-      html += `<path class="edge-line" d="M${x1},${y1} Q${cx},${cy} ${x2},${y2}" ` +
-        `stroke="${color}" stroke-width="${width}" fill="none" ${dashArray ? 'stroke-dasharray="'+dashArray+'"' : ''} ` +
+      const qx = mx + px * offset, qy = my + py * offset;
+      html += `<path class="edge-line" d="M${x1},${y1} Q${qx},${qy} ${x2},${y2}" ` +
+        `stroke="${color}" stroke-width="${width}" fill="none"${dashAttr} ` +
         `marker-end="url(#arrow-${ci})" data-conn-idx="${ci}" ` +
         `onclick="showConnInfo(event, ${ci})" />`;
     }
 
-    // Connection label at midpoint (offset for curves)
-    const a2 = conn.source_sid || '', b2 = conn.target_sid || conn.target_host || '';
-    const pk2 = a2 < b2 ? a2 + '|' + b2 : b2 + '|' + a2;
-    const tot2 = pairCount[pk2] || 1;
-    const idx2 = pairIdx[ci] || 0;
-    let lx = (x1 + x2) / 2, ly = (y1 + y2) / 2 - 6;
-    if (tot2 > 1) {
-      const dx2 = x2 - x1, dy2 = y2 - y1;
-      const len2 = Math.sqrt(dx2*dx2 + dy2*dy2) || 1;
-      const off2 = (idx2 - (tot2 - 1) / 2) * 40;
-      // Label sits at the curve midpoint (quadratic bezier at t=0.5)
-      lx = (x1 + x2) / 2 * 0.5 + (lx + (-dy2/len2)*off2) * 0.5 + (-dy2/len2)*off2*0.25;
-      ly = (y1 + y2) / 2 * 0.5 + (ly + (dx2/len2)*off2) * 0.5 + (dx2/len2)*off2*0.25 - 6;
+    // Connection label at midpoint
+    const mx2 = (x1 + x2) / 2, my2 = (y1 + y2) / 2;
+    let lx = mx2, ly = my2 - 6;
+    if (total > 1) {
+      const cdx2 = a < b ? (cx2 - cx1) : (cx1 - cx2);
+      const cdy2 = a < b ? (cy2 - cy1) : (cy1 - cy2);
+      const len2 = Math.sqrt(cdx2*cdx2 + cdy2*cdy2) || 1;
+      const px2 = -cdy2 / len2, py2 = cdx2 / len2;
+      const off2 = (idx - (total - 1) / 2) * 40;
+      // Place label at quadratic bezier midpoint (t=0.5)
+      lx = mx2 + px2 * off2 * 0.5;
+      ly = my2 + py2 * off2 * 0.5 - 6;
     }
     let label = conn.destination_name || '';
     if (conn.rfc_user) label += ' / ' + conn.rfc_user;
     if (conn.has_sap_all) label += ' (SAP_ALL)';
-    html += `<text x="${lx}" y="${ly}" text-anchor="middle" font-size="8" ` +
+    html += `<text x="${lx}" y="${ly}" text-anchor="middle" font-size="10" ` +
       `fill="#8b949e" font-family="monospace" pointer-events="none">${escHtml(label)}</text>`;
   });
 
@@ -939,7 +997,8 @@ function updateMap() {
     for (const key in unknownTargets) {
       const ut = unknownTargets[key];
       const x = ut._x || 0, y = ut._y || 0;
-      html += `<g class="node-box">`;
+      const unkId = 'unk:' + key.replace(/'/g, "\\'");
+      html += `<g class="node-box" onmousedown="startDrag(event,'${unkId}')">`;
       html += `<rect x="${x}" y="${y}" width="${BOX_W}" height="${BOX_H}" rx="6" fill="#1a1a2e" stroke="#484f58" stroke-width="3" stroke-dasharray="8,4" />`;
       html += `<rect x="${x}" y="${y}" width="${BOX_W}" height="28" rx="6" fill="#484f58" opacity="0.2" />`;
       html += `<text x="${x+BOX_W/2}" y="${y+18}" fill="#484f58" font-size="11" font-weight="bold" font-family="monospace" text-anchor="middle">UNKNOWN TARGET</text>`;
@@ -1128,6 +1187,11 @@ function showDetails(sid) {
   const n = (mapState.nodes || {})[sid];
   if (!n) return;
   const panel = document.getElementById('detail-panel');
+  if (panel.classList.contains('visible') && panel.dataset.sid === sid) {
+    panel.classList.remove('visible');
+    return;
+  }
+  panel.dataset.sid = sid;
   panel.innerHTML = `
     <span class="close-btn" onclick="this.parentElement.classList.remove('visible')">&times;</span>
     <h3>${escHtml(n.sid)} System Details</h3>
@@ -1235,8 +1299,9 @@ async function downloadTable() {
 function showTypeModal(sid) {
   const n = (mapState.nodes || {})[sid];
   document.getElementById('type-system-info').textContent = sid + (n ? ' (' + (n.system_type || 'unknown') + ')' : '');
+  const sel = document.getElementById('type-select');
+  sel.selectedIndex = 0; // reset to placeholder
   if (n && n.system_type) {
-    const sel = document.getElementById('type-select');
     for (let i = 0; i < sel.options.length; i++) {
       if (sel.options[i].value.toUpperCase() === n.system_type.toUpperCase()) {
         sel.selectedIndex = i; break;
@@ -1344,6 +1409,10 @@ function toggleToolbar() {
 }
 
 // --- Drag & Pan ---
+function _getDragTarget(sid) {
+  if (sid.startsWith('unk:')) return unkPositions[sid.slice(4)];
+  return mapState.nodes[sid];
+}
 function startDrag(e, sid) {
   if (e.button === 2) return; // right-click = context menu
   e.stopPropagation();
@@ -1351,7 +1420,8 @@ function startDrag(e, sid) {
   dragMoved = false;
   dragStartPos.x = e.clientX;
   dragStartPos.y = e.clientY;
-  const n = mapState.nodes[sid];
+  const n = _getDragTarget(sid);
+  if (!n) return;
   const svg = document.getElementById('map-svg');
   const pt = svg.createSVGPoint();
   pt.x = e.clientX; pt.y = e.clientY;
@@ -1377,8 +1447,8 @@ document.addEventListener('mousemove', e => {
     const pt = svg.createSVGPoint();
     pt.x = e.clientX; pt.y = e.clientY;
     const svgPt = pt.matrixTransform(svg.getScreenCTM().inverse());
-    mapState.nodes[dragNode]._x = svgPt.x - dragOffset.x;
-    mapState.nodes[dragNode]._y = svgPt.y - dragOffset.y;
+    const dt = _getDragTarget(dragNode);
+    if (dt) { dt._x = svgPt.x - dragOffset.x; dt._y = svgPt.y - dragOffset.y; }
     updateMap();
   } else if (isPanning) {
     viewBoxUserControlled = true;
@@ -1392,7 +1462,7 @@ document.addEventListener('mousemove', e => {
 });
 
 document.addEventListener('mouseup', () => {
-  if (dragNode && !dragMoved) showDetails(dragNode);
+  if (dragNode && !dragMoved && !dragNode.startsWith('unk:')) showDetails(dragNode);
   dragNode = null; isPanning = false;
 });
 

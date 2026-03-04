@@ -346,8 +346,17 @@ def create_app(api: SAPMAPApi) -> Bottle:
             creds = node.best_credentials()
             conns = sapmap_rfc.retrieve_rfc_connections(node, creds)
             for conn in conns:
-                # Empty hostname = local RFC destination (points to itself)
-                if not conn.target_host and not conn.target_ip:
+                # Detect self-referencing RFC destinations:
+                # empty host, 'localhost', own hostname, or own IP
+                th = (conn.target_host or '').strip().lower()
+                ti = (conn.target_ip or '').strip()
+                own_names = {s.lower() for s in [
+                    node.hostname, node.ip, 'localhost', '127.0.0.1',
+                ] if s}
+                own_names.update(h.lower() for h in node.all_hostnames())
+                own_names.update(node.all_ips())
+                is_self = (not th and not ti) or th in own_names or ti in own_names
+                if is_self:
                     conn.target_host = node.hostname or node.ip
                     conn.target_sid = node.sid
                 else:
@@ -372,6 +381,10 @@ def create_app(api: SAPMAPApi) -> Bottle:
         def _run():
             creds = node.best_credentials()
             conns = api.state.get_connections_from(sid)
+            tested_count = 0
+            logon_ok_count = 0
+            sap_all_count = 0
+            print(f"[*] RFC Testing: {sid} — {len(conns)} connection(s) to check")
             for conn in conns:
                 if not conn.tested and not api.state.is_rfc_checked(conn.destination_name):
                     print(f"[*] Testing {conn.destination_name}...")
@@ -382,8 +395,10 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     conn.ping_ok = result.get("ping_ok", False)
                     conn.latency_ms = result.get("latency_ms", 0)
                     conn.tested = True
+                    tested_count += 1
 
                     if conn.logon_successful:
+                        logon_ok_count += 1
                         print(f"[+] {conn.destination_name}: Logon successful!")
                         # Mark target
                         target = api.state.get_node(conn.target_sid)
@@ -399,7 +414,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     conn.has_sap_all = info.get("has_sap_all", False)
                     conn.user_detail_error = info.get("error", "")
                     if conn.has_sap_all:
+                        sap_all_count += 1
                         print(f"[!] {conn.rfc_user} in {conn.destination_name} has SAP_ALL!")
+            print(f"[+] RFC Testing done for {sid}: "
+                  f"{tested_count} tested, {logon_ok_count} logon OK, "
+                  f"{sap_all_count} with SAP_ALL")
 
         threading.Thread(target=_run, daemon=True).start()
         return json.dumps({"status": "started"})
