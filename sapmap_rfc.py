@@ -190,81 +190,101 @@ def get_user_details(node: SAPNode, username: str,
     return result_info
 
 
-def get_remote_user_profiles(node: SAPNode, username: str,
-                             destination: str,
-                             creds: Credentials = None) -> dict:
-    """Get user profiles on a REMOTE system via GET_TABLEBLOCK_RFC.
+def _abap_install_and_run(conn, destination: str, username: str) -> dict:
+    """Execute BAPI_USER_GET_DETAIL on a remote system via ABAP_INSTALL_AND_RUN.
 
-    Reads UST04 on the target system through the RFC destination configured
-    on the source (node).  The FM uses a generic table type that the NW RFC
-    SDK cannot resolve, so we build the function description manually.
+    Dynamically generates an ABAP program that calls BAPI_USER_GET_DETAIL
+    with DESTINATION '<dest>' to retrieve user profiles on the TARGET system.
+    The program is compiled and executed on the SOURCE system.
 
-    INTTAB returns rows of 200 chars: MANDT(3) + BNAME(12) + PROFILE(12).
+    Tries ABAP_INSTALL_AND_RUN first, then /SAPDS/RFC_ABAP_INSTALL_RUN
+    (available on newer S/4HANA systems).
 
     Returns dict with: profiles, has_sap_all, error.
     """
-    from sap_rfc_ctypes import RFCTYPE_CHAR, RFCTYPE_TABLE, RFCTYPE_INT, \
-        RFCTYPE_STRING, RFCTYPE_BYTE, RFC_IMPORT, RFC_EXPORT, RFC_CHANGING, RFC_TABLES
+    # Build ABAP source lines
+    abap_lines = [
+        "REPORT zsapmap.",
+        "DATA: t_profiles TYPE TABLE OF bapiprof,",
+        "      l_profiles LIKE LINE OF t_profiles,",
+        "      t_roles    TYPE TABLE OF bapiagr.",
+        f"CALL FUNCTION 'BAPI_USER_GET_DETAIL' DESTINATION '{destination}'",
+        "  EXPORTING",
+        f"    username       = '{username}'",
+        "  TABLES",
+        "    profiles       = t_profiles",
+        "    activitygroups = t_roles.",
+        "LOOP AT t_profiles INTO l_profiles.",
+        "  WRITE: / l_profiles-bapiprof.",
+        "ENDLOOP.",
+    ]
+    program_table = [{"LINE": line} for line in abap_lines]
 
+    last_error = ""
+    for fm_name in ("ABAP_INSTALL_AND_RUN", "/SAPDS/RFC_ABAP_INSTALL_RUN"):
+        try:
+            result = conn.call(
+                fm_name,
+                PROGRAMNAME="ZSAPMAP",
+                MODE="F",
+                PROGRAM=program_table,
+            )
+            # Parse WRITES table — each row contains a profile name
+            writes = result.get("WRITES", [])
+            profiles = []
+            for row in writes:
+                line = ""
+                if isinstance(row, dict):
+                    # WRITES structure field is ZEESSION (CHAR 256)
+                    line = (row.get("ZEESSION", "") or
+                            row.get("LINE", "") or
+                            row.get("WA", "")).strip()
+                elif isinstance(row, str):
+                    line = row.strip()
+                if line:
+                    profiles.append(line)
+            return {
+                "profiles": profiles,
+                "has_sap_all": "SAP_ALL" in profiles,
+                "error": "",
+            }
+        except Exception as e:
+            last_error = str(e)
+            logger.debug(f"{fm_name} failed for {destination}/{username}: {e}")
+            continue
+
+    return {
+        "profiles": [],
+        "has_sap_all": False,
+        "error": f"ABAP_INSTALL_AND_RUN not available: {last_error}",
+    }
+
+
+def get_remote_user_profiles(node: SAPNode, username: str,
+                             destination: str,
+                             creds: Credentials = None) -> dict:
+    """Get user profiles on a REMOTE system via ABAP_INSTALL_AND_RUN.
+
+    Generates an ABAP program that calls BAPI_USER_GET_DETAIL with
+    DESTINATION '<dest>' on the source system, which executes the BAPI
+    on the target system and returns the profiles.
+
+    Tries ABAP_INSTALL_AND_RUN first, then /SAPDS/RFC_ABAP_INSTALL_RUN.
+
+    Returns dict with: profiles, has_sap_all, error.
+    """
     result_info = {"profiles": [], "has_sap_all": False, "error": ""}
 
     try:
         with _get_connection(node, creds) as conn:
-            # Build function description manually — GET_TABLEBLOCK_RFC has
-            # a generic INTTAB table that the SDK can't resolve via metadata.
-            # Use typeDescHandle=None (untyped) and read raw bytes.
-            func_desc = conn._make_func_desc("GET_TABLEBLOCK_RFC", [
-                ("TABNAME",      RFC_IMPORT,  RFCTYPE_STRING, 0, 0, None),
-                ("GET_SYSTAB",   RFC_IMPORT,  RFCTYPE_STRING, 0, 0, None),
-                ("RFC_DEST",     RFC_IMPORT,  RFCTYPE_STRING, 0, 0, None),
-                ("CHECK_TABLE",  RFC_IMPORT,  RFCTYPE_STRING, 0, 0, None),
-                ("BLOCK_SIZE",   RFC_IMPORT,  RFCTYPE_INT,    4, 4, None),
-                ("FIRST_KEY",    RFC_IMPORT,  RFCTYPE_STRING, 0, 0, None),
-                ("LAST_KEY",     RFC_CHANGING, RFCTYPE_STRING, 0, 0, None),
-                ("CODE_PAGE",    RFC_CHANGING, RFCTYPE_STRING, 0, 0, None),
-                ("INT_FORMAT",   RFC_CHANGING, RFCTYPE_STRING, 0, 0, None),
-                ("TABLEN",       RFC_CHANGING, RFCTYPE_INT,   4, 4, None),
-                ("NR_OF_ROWS",   RFC_EXPORT,  RFCTYPE_INT,    4, 4, None),
-                ("READY_FLAG",   RFC_EXPORT,  RFCTYPE_STRING, 0, 0, None),
-                ("MESSAGE_TEXT", RFC_EXPORT,  RFCTYPE_STRING, 0, 0, None),
-                ("INTTAB",       RFC_TABLES,  RFCTYPE_TABLE,  0, 0, None),
-            ])
-
-            result = conn.call_raw(
-                "GET_TABLEBLOCK_RFC", func_desc,
-                TABNAME="UST04",
-                GET_SYSTAB="X",
-                RFC_DEST=destination,
-                CHECK_TABLE="X",
-                BLOCK_SIZE=9999,
-                FIRST_KEY="X",
-            )
-
-            # INTTAB rows are raw bytes (TBL1024).  On Unicode systems
-            # the UST04 line is: MANDT(3 chars=6 bytes) + BNAME(12 chars=24 bytes)
-            # + PROFILE(12 chars=24 bytes) in UTF-16LE.
-            for row in result.get("INTTAB", []):
-                raw = row if isinstance(row, (bytes, bytearray)) else \
-                      row.get("WA", b"") if isinstance(row, dict) else b""
-                if isinstance(raw, str):
-                    # Already decoded as string — parse as chars
-                    if len(raw) >= 27:
-                        bname = raw[3:15].strip()
-                        profile = raw[15:27].strip()
-                        if bname.upper() == username.upper() and profile:
-                            result_info["profiles"].append(profile)
-                elif isinstance(raw, bytes) and len(raw) >= 54:
-                    # Raw UTF-16LE bytes: MANDT(6) + BNAME(24) + PROFILE(24)
-                    bname = raw[6:30].decode('utf-16-le', errors='ignore').strip()
-                    profile = raw[30:54].decode('utf-16-le', errors='ignore').strip()
-                    if bname.upper() == username.upper() and profile:
-                        result_info["profiles"].append(profile)
-
-            result_info["has_sap_all"] = "SAP_ALL" in result_info["profiles"]
+            result_info = _abap_install_and_run(conn, destination, username)
 
             if result_info["profiles"]:
                 print(f"[+] Remote profiles for {username} via {destination}: "
                       f"{', '.join(result_info['profiles'])}")
+            elif result_info["error"]:
+                print(f"[-] Could not get profiles for {username} via "
+                      f"{destination}: {result_info['error']}")
             else:
                 print(f"[*] No profiles found for {username} via {destination}")
 
