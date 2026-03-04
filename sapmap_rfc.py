@@ -197,7 +197,7 @@ def _abap_install_and_run(conn, destination: str, username: str) -> dict:
     with DESTINATION '<dest>' to retrieve user profiles on the TARGET system.
     The program is compiled and executed on the SOURCE system.
 
-    Tries ABAP_INSTALL_AND_RUN first, then /SAPDS/RFC_ABAP_INSTALL_RUN
+    Tries RFC_ABAP_INSTALL_AND_RUN first, then /SAPDS/RFC_ABAP_INSTALL_RUN
     (available on newer S/4HANA systems).
 
     Returns dict with: profiles, has_sap_all, error.
@@ -222,7 +222,7 @@ def _abap_install_and_run(conn, destination: str, username: str) -> dict:
 
     # Determine which FM is available via FUNCTION_EXISTS
     fm_name = None
-    for candidate in ("ABAP_INSTALL_AND_RUN", "/SAPDS/RFC_ABAP_INSTALL_RUN"):
+    for candidate in ("RFC_ABAP_INSTALL_AND_RUN", "/SAPDS/RFC_ABAP_INSTALL_RUN"):
         try:
             fe_result = conn.call("FUNCTION_EXISTS", FUNCNAME=candidate)
             # If no exception, the FM exists
@@ -234,7 +234,7 @@ def _abap_install_and_run(conn, destination: str, username: str) -> dict:
         return {
             "profiles": [],
             "has_sap_all": False,
-            "error": "Neither ABAP_INSTALL_AND_RUN nor /SAPDS/RFC_ABAP_INSTALL_RUN available",
+            "error": "Neither RFC_ABAP_INSTALL_AND_RUN nor /SAPDS/RFC_ABAP_INSTALL_RUN available",
         }
 
     try:
@@ -281,7 +281,7 @@ def get_remote_user_profiles(node: SAPNode, username: str,
     DESTINATION '<dest>' on the source system, which executes the BAPI
     on the target system and returns the profiles.
 
-    Tries ABAP_INSTALL_AND_RUN first, then /SAPDS/RFC_ABAP_INSTALL_RUN.
+    Tries RFC_ABAP_INSTALL_AND_RUN first, then /SAPDS/RFC_ABAP_INSTALL_RUN.
 
     Returns dict with: profiles, has_sap_all, error.
     """
@@ -356,7 +356,7 @@ def create_user_via_bapi(node: SAPNode, username: str, password: str,
                 assign_result = conn.call(
                     BAPI_USER_PROFILES_ASSIGN,
                     USERNAME=username,
-                    PROFILES=[{"BAPIPROF": "SAP_ALL"}],
+                    PROFILES=[{"BAPIPROF": "SAP_ALL"}, {"BAPIPROF": "SAP_NEW"}],
                 )
                 ret = assign_result.get("RETURN", {})
                 if isinstance(ret, list):
