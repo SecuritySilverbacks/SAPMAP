@@ -104,6 +104,8 @@ def sql_mssql_abap(sid: str, client: str, username: str) -> list:
         "GO",
         f"INSERT INTO {SID}.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_USER_PRO','^&_SAP_ALL')",
         "GO",
+        f"INSERT INTO {SID}.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_XMI_PROD','^&_SAP_ALL')",
+        "GO",
     ]
 
 
@@ -152,6 +154,7 @@ def sql_maxdb(sid: str, client: str, username: str) -> list:
         f"INSERT INTO USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_USER_AUT','^&_SAP_ALL')",
         f"INSERT INTO USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_USER_GRP','^&_SAP_ALL')",
         f"INSERT INTO USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_USER_PRO','^&_SAP_ALL')",
+        f"INSERT INTO USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_XMI_PROD','^&_SAP_ALL')",
     ]
 
 
@@ -170,6 +173,18 @@ def sql_hana(sid: str, client: str, username: str) -> list:
         f"VALUES ('{client}','{username}','SAP_ALL')",
         f"INSERT INTO UST04 (MANDT,BNAME,PROFILE) "
         f"VALUES ('{client}','{username}','SAP_NEW')",
+        f"INSERT INTO USR04 (MANDT,BNAME,NRPRO,PROFS) "
+        f"VALUES ('{client}','{username}','14','C SAP_ALL')",
+        f"INSERT INTO USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_ADMI_FCD','^&_SAP_ALL')",
+        f"INSERT INTO USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_DATASET','^&_SAP_ALL')",
+        f"INSERT INTO USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_DEVELOP','^&_SAP_ALL')",
+        f"INSERT INTO USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_RFC','^&_SAP_ALL')",
+        f"INSERT INTO USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_TABU_DIS','^&_SAP_ALL')",
+        f"INSERT INTO USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_TCODE','^&_SAP_ALL')",
+        f"INSERT INTO USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_USER_AUT','^&_SAP_ALL')",
+        f"INSERT INTO USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_USER_GRP','^&_SAP_ALL')",
+        f"INSERT INTO USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_USER_PRO','^&_SAP_ALL')",
+        f"INSERT INTO USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_XMI_PROD','^&_SAP_ALL')",
     ]
 
 
@@ -188,6 +203,18 @@ def sql_oracle(sid: str, client: str, username: str) -> list:
         f"VALUES ('{client}','{username}','SAP_ALL');",
         f"INSERT INTO SAPSR3.UST04 (MANDT,BNAME,PROFILE) "
         f"VALUES ('{client}','{username}','SAP_NEW');",
+        f"INSERT INTO SAPSR3.USR04 (MANDT,BNAME,NRPRO,PROFS) "
+        f"VALUES ('{client}','{username}','14','C SAP_ALL');",
+        f"INSERT INTO SAPSR3.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_ADMI_FCD','^&_SAP_ALL');",
+        f"INSERT INTO SAPSR3.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_DATASET','^&_SAP_ALL');",
+        f"INSERT INTO SAPSR3.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_DEVELOP','^&_SAP_ALL');",
+        f"INSERT INTO SAPSR3.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_RFC','^&_SAP_ALL');",
+        f"INSERT INTO SAPSR3.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_TABU_DIS','^&_SAP_ALL');",
+        f"INSERT INTO SAPSR3.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_TCODE','^&_SAP_ALL');",
+        f"INSERT INTO SAPSR3.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_USER_AUT','^&_SAP_ALL');",
+        f"INSERT INTO SAPSR3.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_USER_GRP','^&_SAP_ALL');",
+        f"INSERT INTO SAPSR3.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_USER_PRO','^&_SAP_ALL');",
+        f"INSERT INTO SAPSR3.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_XMI_PROD','^&_SAP_ALL');",
     ]
 
 
@@ -204,6 +231,18 @@ def sql_db2(sid: str, client: str, username: str) -> list:
         f"VALUES ('{client}','{username}','SAP_ALL')",
         f"INSERT INTO UST04 (MANDT,BNAME,PROFILE) "
         f"VALUES ('{client}','{username}','SAP_NEW')",
+        f"INSERT INTO USR04 (MANDT,BNAME,NRPRO,PROFS) "
+        f"VALUES ('{client}','{username}','14','C SAP_ALL')",
+        f"INSERT INTO USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_ADMI_FCD','^&_SAP_ALL')",
+        f"INSERT INTO USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_DATASET','^&_SAP_ALL')",
+        f"INSERT INTO USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_DEVELOP','^&_SAP_ALL')",
+        f"INSERT INTO USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_RFC','^&_SAP_ALL')",
+        f"INSERT INTO USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_TABU_DIS','^&_SAP_ALL')",
+        f"INSERT INTO USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_TCODE','^&_SAP_ALL')",
+        f"INSERT INTO USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_USER_AUT','^&_SAP_ALL')",
+        f"INSERT INTO USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_USER_GRP','^&_SAP_ALL')",
+        f"INSERT INTO USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_USER_PRO','^&_SAP_ALL')",
+        f"INSERT INTO USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_XMI_PROD','^&_SAP_ALL')",
     ]
 
 
