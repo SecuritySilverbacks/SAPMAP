@@ -231,6 +231,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
         response.content_type = "application/json"
         cursor = int(request.params.get("cursor", 0))
         with _console_lock:
+            # Reset cursor if buffer was cleared (new scan started)
+            if cursor > len(_console_lines):
+                cursor = 0
             lines = _console_lines[cursor:]
             new_cursor = len(_console_lines)
         return json.dumps({"lines": lines, "cursor": new_cursor})

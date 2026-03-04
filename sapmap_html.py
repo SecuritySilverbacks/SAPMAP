@@ -544,6 +544,9 @@ async function startScan() {
     alive_timeout: parseFloat(document.getElementById('adv-alive-timeout').value) || 0.5,
     skip_alive: document.getElementById('adv-skip-alive').checked,
   };
+  // Reset console cursor so new scan output is visible
+  consoleCursor = 0;
+  document.getElementById('console-body').innerHTML = '';
   await api('POST', 'scan/start', config);
   document.getElementById('st-status').textContent = 'Scanning...';
   startPolling();
