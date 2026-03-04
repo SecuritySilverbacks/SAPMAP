@@ -151,7 +151,7 @@ class SAPMAPApi:
             fast_mode = config.get("fast_mode", True)
 
             # Advanced scan parameters
-            concurrent_hosts = config.get("concurrent_hosts", 3)
+            concurrent_hosts = config.get("concurrent_hosts", 5)
             port_timeout = config.get("port_timeout", 2.0)
             alive_timeout = config.get("alive_timeout", 0.5)
             skip_alive = config.get("skip_alive", False)
@@ -200,6 +200,7 @@ class SAPMAPApi:
     def stop_scan(self):
         self.cancel_event.set()
         self.scan_cancelled = True
+        print("[!] Stop requested — cancelling scan ...")
         return {"status": "stopping"}
 
     def get_state_dict(self):

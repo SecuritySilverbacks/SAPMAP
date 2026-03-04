@@ -132,9 +132,17 @@ def main():
 
     print(f"[*] Starting SAPMAP server on {url}")
 
-    # Start Bottle server in background thread
+    # Start Bottle server in background thread (threaded so stop/poll don't block)
+    from socketserver import ThreadingMixIn
+    from wsgiref.simple_server import WSGIServer
+    class ThreadedWSGIServer(ThreadingMixIn, WSGIServer):
+        daemon_threads = True
+
     server_thread = threading.Thread(
-        target=lambda: app.run(host="127.0.0.1", port=port, quiet=True),
+        target=lambda: app.run(
+            host="127.0.0.1", port=port, quiet=True,
+            server_class=ThreadedWSGIServer,
+        ),
         daemon=True,
     )
     server_thread.start()

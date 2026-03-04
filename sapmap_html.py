@@ -314,7 +314,7 @@ body {
 <div class="toolbar" id="toolbar-adv" style="display:none;padding:4px 12px;gap:4px 12px;flex-wrap:wrap;background:#12161d;border-bottom:1px solid #30363d">
   <span style="color:#8b949e;font-size:11px;font-weight:600">Advanced:</span>
   <label>Concurrent Hosts:</label>
-  <input type="number" id="adv-concurrent" value="2" min="1" max="20" style="width:45px" title="Max hosts to port-scan in parallel (higher=faster but may miss ports)">
+  <input type="number" id="adv-concurrent" value="5" min="1" max="20" style="width:45px" title="Max hosts to port-scan in parallel (higher=faster but may miss ports)">
   <label>Port Timeout:</label>
   <input type="number" id="adv-port-timeout" value="2.0" min="0.5" max="10" step="0.5" style="width:50px" title="TCP connect timeout for port probes (seconds). Lower=faster but may miss slow ports">
   <label>Alive Timeout:</label>
@@ -343,6 +343,9 @@ body {
     <span style="flex:1"></span>
     <label style="cursor:pointer;display:flex;align-items:center;gap:6px;padding:2px 10px;border:1px solid #30363d;border-radius:4px;background:#161b22;color:#c9d1d9;font-size:11px"><input type="checkbox" id="show-unknown" style="accent-color:#f0883e;width:14px;height:14px" onchange="updateMap()"> Show unknown targets</label>
   </div>
+
+  <!-- Console restore button (visible when console is minimized) -->
+  <div id="console-restore" style="display:none;height:24px;flex-shrink:0;background:#161b22;border-top:1px solid #30363d;cursor:pointer;text-align:center;line-height:24px;color:#8b949e;font-size:12px;user-select:none" onclick="toggleConsole()" title="Show Console">&#9650; Console</div>
 
   <!-- Console -->
   <div class="console-container" id="console-container">
@@ -536,7 +539,7 @@ async function startScan() {
     threads: parseInt(document.getElementById('threads').value),
     timeout: parseFloat(document.getElementById('timeout').value) || 3,
     fast_mode: document.querySelector('input[name="scanmode"]:checked').value === 'fast',
-    concurrent_hosts: parseInt(document.getElementById('adv-concurrent').value) || 3,
+    concurrent_hosts: parseInt(document.getElementById('adv-concurrent').value) || 5,
     port_timeout: parseFloat(document.getElementById('adv-port-timeout').value) || 2.0,
     alive_timeout: parseFloat(document.getElementById('adv-alive-timeout').value) || 0.5,
     skip_alive: document.getElementById('adv-skip-alive').checked,
@@ -1318,7 +1321,19 @@ function applyViewBox() {
 }
 function toggleConsole() {
   const c = document.getElementById('console-container');
-  c.style.display = c.style.display === 'none' ? 'flex' : 'none';
+  const r = document.getElementById('console-restore');
+  const hidden = c.style.display === 'none';
+  c.style.display = hidden ? 'flex' : 'none';
+  r.style.display = hidden ? 'none' : 'block';
+  // If we were maximized, restore map/legend when minimizing
+  if (!hidden && consoleMaximized) {
+    c.style.height = '180px';
+    c.style.flex = '';
+    document.getElementById('console-body').style.overflow = '';
+    document.getElementById('map-container').style.display = '';
+    document.getElementById('legend-bar').style.display = '';
+    consoleMaximized = false;
+  }
 }
 function toggleToolbar() {
   const t = document.getElementById('toolbar');

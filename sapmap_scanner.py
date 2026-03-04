@@ -144,18 +144,20 @@ def _is_host_alive(host: str, timeout: float = ALIVE_TIMEOUT) -> bool:
     """Quick check if a host is reachable.
 
     Runs ICMP ping and TCP probes in parallel threads so a single dead
-    host takes at most ~0.5-0.8s instead of sequentially accumulating
-    timeouts.  Returns True on first success.
+    host takes at most ~timeout seconds instead of sequentially
+    accumulating timeouts.  Returns True on first success.
     """
     found = threading.Event()
 
     def _ping():
         try:
             import subprocess
+            # Use ceil of timeout for -W (integer seconds, min 1)
+            wait_sec = str(max(1, int(timeout + 0.5)))
             ret = subprocess.call(
-                ["ping", "-c", "1", "-W", "1", host],
+                ["ping", "-c", "1", "-W", wait_sec, host],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                timeout=1.0,
+                timeout=timeout + 0.3,
             )
             if ret == 0:
                 found.set()
@@ -182,9 +184,10 @@ def _is_host_alive(host: str, timeout: float = ALIVE_TIMEOUT) -> bool:
     for w in workers:
         w.start()
 
-    # Wait for first success or all to finish (whichever is sooner)
-    # Max wait = slightly over TCP timeout so dead hosts don't block long
-    deadline = time.time() + timeout + 0.6
+    # Wait for first success or all to finish.
+    # Dead hosts are bounded by the TCP timeout; we add a small margin
+    # so the join loop doesn't exit before TCP probes finish cleanly.
+    deadline = time.time() + timeout + 0.15
     for w in workers:
         remaining = deadline - time.time()
         if remaining <= 0 or found.is_set():
@@ -225,17 +228,26 @@ def alive_sweep(targets: list, threads: int = 100,
                 alive.append(host)
                 print(f"[+]   {host} is alive  "
                       f"({scanned[0]}/{total}, {len(alive)} alive so far)")
+            elif scanned[0] % 25 == 0 or scanned[0] == total:
+                print(f"[*]   Probed {scanned[0]}/{total} hosts "
+                      f"({len(alive)} alive so far)")
 
-    with ThreadPoolExecutor(max_workers=threads) as executor:
-        futures = [executor.submit(_check, h) for h in targets]
-        for f in as_completed(futures):
-            if cancel_event and cancel_event.is_set():
-                break
-            f.result()  # propagate exceptions
+    executor = ThreadPoolExecutor(max_workers=threads)
+    futures = [executor.submit(_check, h) for h in targets]
+    for f in as_completed(futures):
+        if cancel_event and cancel_event.is_set():
+            break
+        f.result()  # propagate exceptions
+    # Don't wait for stragglers on cancel — daemon threads will clean up
+    executor.shutdown(wait=not (cancel_event and cancel_event.is_set()))
 
     elapsed = time.time() - t0
-    print(f"[+] Alive sweep done in {elapsed:.1f}s: "
-          f"{len(alive)}/{total} hosts alive")
+    if cancel_event and cancel_event.is_set():
+        print(f"[!] Alive sweep cancelled after {elapsed:.1f}s "
+              f"({len(alive)} alive found so far)")
+    else:
+        print(f"[+] Alive sweep done in {elapsed:.1f}s: "
+              f"{len(alive)}/{total} hosts alive")
     return alive
 
 
@@ -385,6 +397,30 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
     """
     result = {"host": host, "open_ports": {}, "has_sap": False}
 
+    # Quick pre-check: probe a handful of common SAP ports with a short
+    # timeout.  If none respond, skip the full 200-port scan entirely.
+    # This saves ~8s per non-SAP host that is alive but firewalls ports.
+    if cancel_event and cancel_event.is_set():
+        return result
+    QUICK_PORTS = [3200, 3300, 3201, 3301, 8000, 50013, 1128]
+    quick_timeout = min(timeout, 0.8)
+    quick_hit = False
+    qe = ThreadPoolExecutor(max_workers=len(QUICK_PORTS))
+    qf = [qe.submit(_scan_port, host, p, quick_timeout) for p in QUICK_PORTS]
+    for f in as_completed(qf):
+        if cancel_event and cancel_event.is_set():
+            break
+        if f.result():
+            quick_hit = True
+            break
+    qe.shutdown(wait=False)
+    if cancel_event and cancel_event.is_set():
+        return result
+    if not quick_hit:
+        print(f"[*]     Quick probe ({len(QUICK_PORTS)} common ports) — "
+              f"no response, skipping full scan")
+        return result
+
     def _do_scan(port_list):
         hits = {}
         def _check(args):
@@ -394,14 +430,15 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
             if _scan_port(host, port, timeout):
                 return (port, svc, inst)
             return None
-        with ThreadPoolExecutor(max_workers=threads) as executor:
-            futures = [executor.submit(_check, a) for a in port_list]
-            for f in as_completed(futures):
-                if cancel_event and cancel_event.is_set():
-                    break
-                r = f.result()
-                if r:
-                    hits[r[0]] = {"service": r[1], "instance_nr": r[2]}
+        executor = ThreadPoolExecutor(max_workers=threads)
+        futures = [executor.submit(_check, a) for a in port_list]
+        for f in as_completed(futures):
+            if cancel_event and cancel_event.is_set():
+                break
+            r = f.result()
+            if r:
+                hits[r[0]] = {"service": r[1], "instance_nr": r[2]}
+        executor.shutdown(wait=not (cancel_event and cancel_event.is_set()))
         return hits
 
     # Pass 1: Dispatcher + Gateway + fixed ports (fast — ~200 ports)
@@ -409,12 +446,20 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
     ports_pass1.append((1128, "saphost_http", "XX"))
     ports_pass1.append((1129, "saphost_https", "XX"))
 
+    print(f"[*]     Pass 1: scanning {len(ports_pass1)} ports "
+          f"(dispatcher 32XX, gateway 33XX, SAPHostControl) ...")
+    t0 = time.time()
     hits1 = _do_scan(ports_pass1)
     result["open_ports"].update(hits1)
+    print(f"[*]     Pass 1 done in {time.time() - t0:.1f}s — "
+          f"{len(hits1)} open port(s)")
 
     # Verify dispatcher ports with DIAG protocol probe
     disp_ports = [p for p, info in result["open_ports"].items()
                   if info["service"] == "dispatcher"]
+    if disp_ports:
+        print(f"[*]     Verifying {len(disp_ports)} dispatcher port(s) "
+              f"with SAP DIAG protocol probe ...")
     for port in disp_ports:
         if not _verify_sap_diag(host, port, timeout=min(timeout, 2.0)):
             del result["open_ports"][port]
@@ -430,8 +475,13 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
             hana_ports.append((30000 + inst_nr * 100 + 13, "hana_sql", inst_str))
             hana_ports.append((30000 + inst_nr * 100 + 15, "hana_sql", inst_str))
 
+        print(f"[*]     Pass 2: scanning {len(hana_ports)} HANA SQL ports "
+              f"(3XX13/3XX15) ...")
+        t0 = time.time()
         hits2 = _do_scan(hana_ports)
         result["open_ports"].update(hits2)
+        print(f"[*]     Pass 2 done in {time.time() - t0:.1f}s — "
+              f"{len(hits2)} HANA port(s) open")
 
     return result
 
@@ -440,7 +490,7 @@ def fast_scan_network(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RA
                       timeout: float = DEFAULT_TIMEOUT, threads: int = DEFAULT_THREADS,
                       cancel_event: threading.Event = None,
                       progress_callback=None, skip_alive: bool = False,
-                      concurrent_hosts: int = 2, port_timeout: float = 2.0) -> list:
+                      concurrent_hosts: int = 5, port_timeout: float = 2.0) -> list:
     """Fast scan multiple hosts for SAP systems.
 
     Three-stage approach for speed:
@@ -488,26 +538,33 @@ def fast_scan_network(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RA
     else:
         alive_hosts = list(targets)
 
-    # --- Stage 2: Sequential host scan with high per-host parallelism ---
-    # Scanning one host at a time avoids socket contention between hosts
-    # that causes missed ports. Each host gets 50 threads, so even hosts
-    # with firewalled ports (200 ports * 2s timeout / 50 threads = 8s)
-    # complete quickly.  The alive sweep already reduced 254 hosts to ~14,
-    # so sequential scanning totals ~60-80s for a /24.
+    # --- Stage 2: Parallel host scan ---
+    # Scan multiple hosts concurrently (controlled by concurrent_hosts).
+    # Each host still gets its own thread pool for port scanning so that
+    # per-host parallelism stays high.  With concurrent_hosts=5 a /24
+    # with 15 alive hosts completes in ~24s instead of ~120s.
     found = []
+    found_lock = threading.Lock()
     host_count = len(alive_hosts)
     port_threads = max(threads, 50)
     port_timeout = min(timeout, port_timeout)
+    completed = [0]
+    completed_lock = threading.Lock()
 
+    max_parallel = max(concurrent_hosts, 1)
     print(f"[*] SAP port scanning {host_count} alive hosts "
-          f"({port_threads} threads/host, port timeout={port_timeout}s) ...")
+          f"({max_parallel} concurrent, {port_threads} threads/host, "
+          f"port timeout={port_timeout}s) ...")
 
-    for idx, host in enumerate(alive_hosts):
+    def _scan_one(idx, host):
         if cancel_event and cancel_event.is_set():
-            print("[!] Scan cancelled")
-            break
-
-        r = fast_scan_host(host, instance_range, port_timeout, port_threads, cancel_event)
+            return
+        print(f"[*]   [{idx+1}/{host_count}] Scanning {host} ...")
+        r = fast_scan_host(host, instance_range, port_timeout, port_threads,
+                           cancel_event)
+        with completed_lock:
+            completed[0] += 1
+            nr = completed[0]
         elapsed = time.time() - scan_start
 
         if r["has_sap"]:
@@ -519,15 +576,27 @@ def fast_scan_network(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RA
             svc_str = "; ".join(
                 f"{s}: {', '.join(ps)}" for s, ps in sorted(services.items())
             )
-            print(f"[+] [{idx+1}/{host_count}] {host} — SAP found: "
-                  f"{svc_str}  (total {elapsed:.1f}s)")
-            found.append(r)
+            with found_lock:
+                found.append(r)
+            print(f"[+] [{nr}/{host_count}] {host} — SAP found: "
+                  f"{svc_str}  ({elapsed:.1f}s)")
         else:
-            print(f"[*] [{idx+1}/{host_count}] {host} — no SAP  "
-                  f"(total {elapsed:.1f}s)")
+            print(f"[*] [{nr}/{host_count}] {host} — no SAP  "
+                  f"({elapsed:.1f}s)")
 
         if progress_callback:
-            progress_callback(idx + 1, host_count, host, len(found))
+            with found_lock:
+                fc = len(found)
+            progress_callback(nr, host_count, host, fc)
+
+    executor = ThreadPoolExecutor(max_workers=max_parallel)
+    futures = [executor.submit(_scan_one, i, h)
+               for i, h in enumerate(alive_hosts)]
+    for f in as_completed(futures):
+        if cancel_event and cancel_event.is_set():
+            break
+        f.result()
+    executor.shutdown(wait=not (cancel_event and cancel_event.is_set()))
 
     # Print found details
     if found:
@@ -897,7 +966,7 @@ def discover_systems(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RAN
                      timeout: float = DEFAULT_TIMEOUT, threads: int = DEFAULT_THREADS,
                      fast_mode: bool = True, cancel_event: threading.Event = None,
                      progress_callback=None, verbose: bool = False,
-                     skip_alive: bool = False, concurrent_hosts: int = 2,
+                     skip_alive: bool = False, concurrent_hosts: int = 5,
                      port_timeout: float = 2.0) -> list:
     """Main entry point: discover SAP systems on the network.
 
@@ -1118,12 +1187,27 @@ def _deep_scan_with_sapology(targets, instance_range, timeout, threads,
     try:
         # Phase 1: SAPology discover_systems — full port scan, fingerprinting,
         # SAPControl queries, RFC_SYSTEM_INFO, client enumeration, OS/DB detection
+
+        # Heartbeat thread so the user sees progress during long SAPology calls
+        def _heartbeat(label, stop_evt):
+            n = 0
+            while not stop_evt.wait(10):
+                n += 10
+                if cancel_event and cancel_event.is_set():
+                    break
+                print(f"[*] ... {label} still running ({n}s elapsed)")
+        heartbeat_stop = threading.Event()
+        hb = threading.Thread(target=_heartbeat, args=("Phase 1", heartbeat_stop),
+                              daemon=True)
+        hb.start()
+
         landscape = SAPology.discover_systems(
             targets, instances, timeout=timeout, threads=threads,
             verbose=True,
             cancel_check=lambda: cancel_event.is_set() if cancel_event else False,
             client_enum=True,
         )
+        heartbeat_stop.set()
 
         if cancel_event and cancel_event.is_set():
             return
@@ -1177,11 +1261,16 @@ def _deep_scan_with_sapology(targets, instance_range, timeout, threads,
         print(f"")
 
         phase2_start = time.time()
+        heartbeat_stop = threading.Event()
+        hb = threading.Thread(target=_heartbeat, args=("Phase 2", heartbeat_stop),
+                              daemon=True)
+        hb.start()
         landscape = SAPology.assess_vulnerabilities(
             landscape, gw_cmd="whoami", timeout=timeout + 2,
             verbose=True, url_scan=False,
             cancel_check=lambda: cancel_event.is_set() if cancel_event else False,
         )
+        heartbeat_stop.set()
 
         if cancel_event and cancel_event.is_set():
             return
