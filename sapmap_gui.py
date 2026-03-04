@@ -388,6 +388,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
             mapped_conns = [c for c in conns
                             if c.target_sid and api.state.get_node(c.target_sid)]
             skipped = len(conns) - len(mapped_conns)
+            # Reset tested state so re-clicking "Test RFCs" actually re-tests
+            for conn in mapped_conns:
+                if conn.tested:
+                    conn.tested = False
+                    api.state.rfc_check_cache.pop(conn.destination_name, None)
             print(f"[*] RFC Testing: {sid} — {len(mapped_conns)} mapped connection(s) "
                   f"to check{f' ({skipped} unmapped skipped)' if skipped else ''}")
             for conn in mapped_conns:

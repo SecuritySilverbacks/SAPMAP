@@ -402,6 +402,18 @@ class SAPMAPState:
 
     def add_node(self, node: SAPNode) -> None:
         self.nodes[node.sid] = node
+        # Re-match unresolved RFC connections against the new node
+        node_ips = node.all_ips()
+        node_names = node.all_hostnames()
+        for conn in self.connections:
+            if conn.target_sid:
+                continue
+            candidates = [s.strip() for s in (conn.target_host, conn.target_ip)
+                          if s and s.strip()]
+            for val in candidates:
+                if val in node_ips or val.lower() in node_names:
+                    conn.target_sid = node.sid
+                    break
 
     def get_node(self, sid: str) -> Optional[SAPNode]:
         return self.nodes.get(sid)
