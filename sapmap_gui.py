@@ -429,6 +429,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
             print(f"[+] RFC Testing done for {sid}: "
                   f"{tested_count} tested, {logon_ok_count} logon OK, "
                   f"{sap_all_count} with SAP_ALL")
+            if tested_count == 0 and mapped_conns:
+                print("[*] Possibly no RFC testing done because all RFCs are on the "
+                      "RFC check list. Resetting it via the menu might help.")
 
         threading.Thread(target=_run, daemon=True).start()
         return json.dumps({"status": "started"})
