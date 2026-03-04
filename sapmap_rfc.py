@@ -220,44 +220,55 @@ def _abap_install_and_run(conn, destination: str, username: str) -> dict:
     ]
     program_table = [{"LINE": line} for line in abap_lines]
 
-    last_error = ""
-    for fm_name in ("ABAP_INSTALL_AND_RUN", "/SAPDS/RFC_ABAP_INSTALL_RUN"):
+    # Determine which FM is available via FUNCTION_EXISTS
+    fm_name = None
+    for candidate in ("ABAP_INSTALL_AND_RUN", "/SAPDS/RFC_ABAP_INSTALL_RUN"):
         try:
-            result = conn.call(
-                fm_name,
-                PROGRAMNAME="ZSAPMAP",
-                MODE="F",
-                PROGRAM=program_table,
-            )
-            # Parse WRITES table — each row contains a profile name
-            writes = result.get("WRITES", [])
-            profiles = []
-            for row in writes:
-                line = ""
-                if isinstance(row, dict):
-                    # WRITES structure field is ZEESSION (CHAR 256)
-                    line = (row.get("ZEESSION", "") or
-                            row.get("LINE", "") or
-                            row.get("WA", "")).strip()
-                elif isinstance(row, str):
-                    line = row.strip()
-                if line:
-                    profiles.append(line)
-            return {
-                "profiles": profiles,
-                "has_sap_all": "SAP_ALL" in profiles,
-                "error": "",
-            }
-        except Exception as e:
-            last_error = str(e)
-            logger.debug(f"{fm_name} failed for {destination}/{username}: {e}")
+            fe_result = conn.call("FUNCTION_EXISTS", FUNCNAME=candidate)
+            # If no exception, the FM exists
+            fm_name = candidate
+            break
+        except Exception:
             continue
+    if not fm_name:
+        return {
+            "profiles": [],
+            "has_sap_all": False,
+            "error": "Neither ABAP_INSTALL_AND_RUN nor /SAPDS/RFC_ABAP_INSTALL_RUN available",
+        }
 
-    return {
-        "profiles": [],
-        "has_sap_all": False,
-        "error": f"ABAP_INSTALL_AND_RUN not available: {last_error}",
-    }
+    try:
+        result = conn.call(
+            fm_name,
+            PROGRAMNAME="ZSAPMAP",
+            MODE="F",
+            PROGRAM=program_table,
+        )
+        # Parse WRITES table — each row contains a profile name
+        writes = result.get("WRITES", [])
+        profiles = []
+        for row in writes:
+            line = ""
+            if isinstance(row, dict):
+                # WRITES structure field is ZEESSION (CHAR 256)
+                line = (row.get("ZEESSION", "") or
+                        row.get("LINE", "") or
+                        row.get("WA", "")).strip()
+            elif isinstance(row, str):
+                line = row.strip()
+            if line:
+                profiles.append(line)
+        return {
+            "profiles": profiles,
+            "has_sap_all": "SAP_ALL" in profiles,
+            "error": "",
+        }
+    except Exception as e:
+        return {
+            "profiles": [],
+            "has_sap_all": False,
+            "error": f"{fm_name} failed: {e}",
+        }
 
 
 def get_remote_user_profiles(node: SAPNode, username: str,
