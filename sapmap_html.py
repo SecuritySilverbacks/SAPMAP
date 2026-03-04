@@ -385,7 +385,7 @@ body {
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="deep_scan">&#128260; Deep Scan (full SAPology)</div>
   <div class="ctx-item" data-action="retrieve_rfcs">&#128225; Retrieve RFC Connections</div>
-  <div class="ctx-item" data-action="test_rfcs">&#129514; Test RFC Connections</div>
+  <div class="ctx-item" data-action="test_rfcs">&#129514; Test RFC Connections+Retrieve Profiles</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="download_hashes">&#128229; Download Password Hashes</div>
   <div class="ctx-item" data-action="download_table">&#128229; Download Table Data</div>
@@ -394,7 +394,7 @@ body {
   <div class="ctx-item" data-action="propagate">&#128640; Propagate (exploit next hop)</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="cleanup">&#129529; Cleanup Created Users</div>
-  <div class="ctx-item" data-action="client_roles">&#128202; View Client Roles</div>
+  <div class="ctx-item" data-action="client_roles">&#128202; Retrieve Client Roles</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="set_type">&#9881; Set System Type</div>
 </div>
@@ -770,6 +770,8 @@ function updateMap() {
       color = '#e74c3c'; width = 6;
     } else if (conn.has_sap_all) {
       color = '#e67e22'; width = 5.5;
+    } else if (conn.logon_successful) {
+      color = '#2ecc71'; width = 5;
     } else if (conn.sapxpg_remote_works) {
       color = '#ff6b35'; width = 5.5; dashArray = '8,4';
     }

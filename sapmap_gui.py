@@ -405,8 +405,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         if target:
                             target.has_critical_finding = True
 
-                # Get user profiles on the TARGET via GET_TABLEBLOCK_RFC
-                if conn.rfc_user and not conn.profiles:
+                # Only retrieve profiles if logon was successful
+                if conn.logon_successful and conn.rfc_user and not conn.profiles:
                     info = sapmap_rfc.get_remote_user_profiles(
                         node, conn.rfc_user, conn.destination_name, creds
                     )

@@ -440,7 +440,12 @@ def test_rfc_destination(node: SAPNode, destination_name: str,
 
             result["logon_message"] = check_result.get("EV_LOGON_MESSAGE", "").strip()
             result["ping_ok"] = check_result.get("EV_PING_MESSAGE", "").strip() != ""
-            result["logon_ok"] = RFC_LOGON_SUCCESS_TEXT in result["logon_message"]
+            # EV_LOGON_STATUS=1 means logon succeeded; fall back to text match
+            logon_status = check_result.get("EV_LOGON_STATUS", "")
+            if str(logon_status).strip() == "1":
+                result["logon_ok"] = True
+            else:
+                result["logon_ok"] = RFC_LOGON_SUCCESS_TEXT in result["logon_message"]
 
             latency = check_result.get("EV_LATENC_MESSAGE", "")
             if latency:
