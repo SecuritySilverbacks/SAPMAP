@@ -309,7 +309,7 @@ RFC_CHECK_FM = "/SDF/RFC_CHECK"
 RFC_CHECK_PARAMS = {
     "IV_LOGON": "X",
     "IV_PING": "X",
-    "IV_LATENC": "X",
+    "IV_LATENCY": "X",
 }
 RFC_LOGON_SUCCESS_TEXT = "RFC Logon successful."
 

@@ -384,8 +384,13 @@ def create_app(api: SAPMAPApi) -> Bottle:
             tested_count = 0
             logon_ok_count = 0
             sap_all_count = 0
-            print(f"[*] RFC Testing: {sid} — {len(conns)} connection(s) to check")
-            for conn in conns:
+            # Only test connections whose target is a known node on the map
+            mapped_conns = [c for c in conns
+                            if c.target_sid and api.state.get_node(c.target_sid)]
+            skipped = len(conns) - len(mapped_conns)
+            print(f"[*] RFC Testing: {sid} — {len(mapped_conns)} mapped connection(s) "
+                  f"to check{f' ({skipped} unmapped skipped)' if skipped else ''}")
+            for conn in mapped_conns:
                 if not conn.tested and not api.state.is_rfc_checked(conn.destination_name):
                     print(f"[*] Testing {conn.destination_name}...")
                     result = sapmap_rfc.test_rfc_destination(

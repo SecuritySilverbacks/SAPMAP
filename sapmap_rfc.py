@@ -250,8 +250,9 @@ def _abap_install_and_run(conn, destination: str, username: str) -> dict:
         for row in writes:
             line = ""
             if isinstance(row, dict):
-                # WRITES structure field is ZEESSION (CHAR 256)
-                line = (row.get("ZEESSION", "") or
+                # WRITES structure field is ZEILE
+                line = (row.get("ZEILE", "") or
+                        row.get("ZEESSION", "") or
                         row.get("LINE", "") or
                         row.get("WA", "")).strip()
             elif isinstance(row, str):
@@ -447,16 +448,20 @@ def test_rfc_destination(node: SAPNode, destination_name: str,
             else:
                 result["logon_ok"] = RFC_LOGON_SUCCESS_TEXT in result["logon_message"]
 
-            latency = check_result.get("EV_LATENC_MESSAGE", "")
-            if latency:
-                try:
-                    # Parse latency from message
-                    import re
-                    match = re.search(r'(\d+)', latency)
-                    if match:
-                        result["latency_ms"] = int(match.group(1))
-                except Exception:
-                    pass
+            # Read latency — prefer numeric EV_LATENCY_IN_MS, fall back to message
+            lat_ms = check_result.get("EV_LATENCY_IN_MS", 0)
+            if isinstance(lat_ms, int) and lat_ms > 0:
+                result["latency_ms"] = lat_ms
+            else:
+                latency_msg = check_result.get("EV_LATENCY_MESSAGE", "")
+                if latency_msg:
+                    try:
+                        import re
+                        match = re.search(r'(\d+)', latency_msg)
+                        if match:
+                            result["latency_ms"] = int(match.group(1))
+                    except Exception:
+                        pass
 
     except Exception as e:
         result["error"] = str(e)
