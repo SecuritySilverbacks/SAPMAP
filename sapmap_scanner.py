@@ -380,7 +380,8 @@ def _build_port_list(instance_range, include_hana=False, skip_non_sap=True):
 
 def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
                    timeout: float = DEFAULT_TIMEOUT, threads: int = DEFAULT_THREADS,
-                   cancel_event: threading.Event = None) -> dict:
+                   cancel_event: threading.Event = None,
+                   skip_quick_check: bool = False) -> dict:
     """Fast scan a single host for SAP ports.
 
     Two-pass approach:
@@ -398,29 +399,32 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
     """
     result = {"host": host, "open_ports": {}, "has_sap": False}
 
-    # Quick pre-check: probe a handful of common SAP ports with a short
-    # timeout.  If none respond, skip the full 200-port scan entirely.
-    # This saves ~8s per non-SAP host that is alive but firewalls ports.
+    # Quick pre-check: probe SAP dispatcher ports (3200-3299), gateway,
+    # HTTP, SAPControl and SAPHostControl with a short timeout.
+    # If none respond, skip the full scan.  All ports are probed in
+    # parallel so wall-clock time equals the timeout (~1.5s max).
+    # Skipped for single-target scans where the time saving is negligible.
     if cancel_event and cancel_event.is_set():
         return result
-    QUICK_PORTS = [3200, 3300, 3201, 3301, 8000, 50013, 1128]
-    quick_timeout = min(timeout, 0.8)
-    quick_hit = False
-    qe = ThreadPoolExecutor(max_workers=len(QUICK_PORTS))
-    qf = [qe.submit(_scan_port, host, p, quick_timeout) for p in QUICK_PORTS]
-    for f in as_completed(qf):
+    if not skip_quick_check:
+        QUICK_PORTS = list(range(3200, 3300)) + [3300, 3301, 8000, 50013, 1128]
+        quick_timeout = min(timeout, 1.5)
+        quick_hit = False
+        qe = ThreadPoolExecutor(max_workers=len(QUICK_PORTS))
+        qf = [qe.submit(_scan_port, host, p, quick_timeout) for p in QUICK_PORTS]
+        for f in as_completed(qf):
+            if cancel_event and cancel_event.is_set():
+                break
+            if f.result():
+                quick_hit = True
+                break
+        qe.shutdown(wait=False)
         if cancel_event and cancel_event.is_set():
-            break
-        if f.result():
-            quick_hit = True
-            break
-    qe.shutdown(wait=False)
-    if cancel_event and cancel_event.is_set():
-        return result
-    if not quick_hit:
-        print(f"[*]     Quick probe ({len(QUICK_PORTS)} common ports) — "
-              f"no response, skipping full scan")
-        return result
+            return result
+        if not quick_hit:
+            print(f"[*]     Quick probe ({len(QUICK_PORTS)} ports) — "
+                  f"no response, skipping full scan")
+            return result
 
     _cancelled = lambda: cancel_event and cancel_event.is_set()
 
@@ -501,7 +505,7 @@ def fast_scan_network(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RA
                       timeout: float = DEFAULT_TIMEOUT, threads: int = DEFAULT_THREADS,
                       cancel_event: threading.Event = None,
                       progress_callback=None, skip_alive: bool = False,
-                      concurrent_hosts: int = 5, port_timeout: float = 2.0) -> list:
+                      concurrent_hosts: int = 5, port_timeout: float = 3.0) -> list:
     """Fast scan multiple hosts for SAP systems.
 
     Three-stage approach for speed:
@@ -560,7 +564,7 @@ def fast_scan_network(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RA
     found = []
     found_lock = threading.Lock()
     host_count = len(alive_hosts)
-    port_threads = max(threads, 50)
+    port_threads = min(threads, 20)
     port_timeout = min(timeout, port_timeout)
     completed = [0]
     completed_lock = threading.Lock()
@@ -575,7 +579,7 @@ def fast_scan_network(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RA
             return
         print(f"[*]   [{idx+1}/{host_count}] Scanning {host} ...")
         r = fast_scan_host(host, instance_range, port_timeout, port_threads,
-                           cancel_event)
+                           cancel_event, skip_quick_check=(host_count <= 3))
         if cancel_event and cancel_event.is_set():
             return
         with completed_lock:
@@ -988,7 +992,7 @@ def discover_systems(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RAN
                      fast_mode: bool = True, cancel_event: threading.Event = None,
                      progress_callback=None, verbose: bool = False,
                      skip_alive: bool = False, concurrent_hosts: int = 5,
-                     port_timeout: float = 2.0) -> list:
+                     port_timeout: float = 3.0) -> list:
     """Main entry point: discover SAP systems on the network.
 
     Args:

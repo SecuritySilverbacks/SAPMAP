@@ -152,7 +152,7 @@ class SAPMAPApi:
 
             # Advanced scan parameters
             concurrent_hosts = config.get("concurrent_hosts", 5)
-            port_timeout = config.get("port_timeout", 2.0)
+            port_timeout = config.get("port_timeout", 3.0)
             alive_timeout = config.get("alive_timeout", 0.5)
             skip_alive = config.get("skip_alive", False)
 
@@ -432,6 +432,59 @@ def create_app(api: SAPMAPApi) -> Bottle:
             if tested_count == 0 and mapped_conns:
                 print("[*] Possibly no RFC testing done because all RFCs are on the "
                       "RFC check list. Resetting it via the menu might help.")
+
+        threading.Thread(target=_run, daemon=True).start()
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/test_rfc_single", method="POST")
+    def node_test_rfc_single(sid):
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        data = request.json or {}
+        dest_name = data.get("destination_name", "")
+        if not dest_name:
+            return json.dumps({"error": "destination_name required"})
+
+        def _run():
+            creds = node.best_credentials()
+            conn = None
+            for c in api.state.get_connections_from(sid):
+                if c.destination_name == dest_name:
+                    conn = c
+                    break
+            if not conn:
+                print(f"[-] Connection {dest_name} not found on {sid}")
+                return
+            # Clear cache so it actually re-tests
+            conn.tested = False
+            api.state.rfc_check_cache.pop(dest_name, None)
+            print(f"[*] Testing single RFC destination: {dest_name}...")
+            result = sapmap_rfc.test_rfc_destination(
+                node, dest_name, creds, api.state.rfc_check_cache
+            )
+            conn.logon_successful = result.get("logon_ok", False)
+            conn.ping_ok = result.get("ping_ok", False)
+            conn.latency_ms = result.get("latency_ms", 0)
+            conn.tested = True
+            if conn.logon_successful:
+                print(f"[+] {dest_name}: Logon successful!")
+                target = api.state.get_node(conn.target_sid)
+                if target:
+                    target.has_critical_finding = True
+                if conn.rfc_user:
+                    info = sapmap_rfc.get_remote_user_profiles(
+                        node, conn.rfc_user, dest_name, creds
+                    )
+                    conn.profiles = info.get("profiles", [])
+                    conn.has_sap_all = info.get("has_sap_all", False)
+                    conn.user_detail_error = info.get("error", "")
+                    if conn.has_sap_all:
+                        print(f"[!] {conn.rfc_user} in {dest_name} has SAP_ALL!")
+            else:
+                print(f"[-] {dest_name}: Logon failed")
+            print(f"[+] Single RFC test done for {dest_name}")
 
         threading.Thread(target=_run, daemon=True).start()
         return json.dumps({"status": "started"})

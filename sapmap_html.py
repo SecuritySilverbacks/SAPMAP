@@ -341,6 +341,8 @@ body {
     <span class="legend-item"><span class="legend-swatch" style="background:transparent;border:2px solid #8b0000"></span> Critical</span>
     <span class="legend-item">&#9889; Pwned</span>
     <span class="legend-item"><span class="legend-swatch" style="background:#e74c3c"></span> RFC+SAP_ALL</span>
+    <span class="legend-item"><span class="legend-swatch" style="background:#e67e22"></span> RFC SAP_ALL</span>
+    <span class="legend-item"><span class="legend-swatch" style="background:#2ecc71"></span> RFC Logon OK</span>
     <span class="legend-item"><span class="legend-swatch" style="background:#5dade2"></span> RFC</span>
     <span class="legend-item"><span class="legend-swatch" style="background:#ff6b35"></span> GW Exploit</span>
     <span style="flex:1"></span>
@@ -393,7 +395,7 @@ body {
   <div class="ctx-item" data-action="create_tcpip">&#128279; Create TCP/IP Dest (sapxpg)</div>
   <div class="ctx-item" data-action="propagate">&#128640; Propagate (exploit next hop)</div>
   <div class="ctx-sep"></div>
-  <div class="ctx-item" data-action="cleanup">&#129529; Cleanup Created Users</div>
+  <div class="ctx-item" data-action="cleanup">&#128465; Delete SAPMAP00 User</div>
   <div class="ctx-item" data-action="client_roles">&#128202; Retrieve Client Roles</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="set_type">&#9881; Set System Type</div>
@@ -1125,7 +1127,7 @@ async function ctxAction(action) {
     case 'propagate':
       await api('POST', `node/${sid}/propagate`); break;
     case 'cleanup':
-      if (confirm(`Delete all SAPMAP users from ${sid}?`))
+      if (confirm(`Delete SAPMAP00 user from ${sid}?`))
         await api('POST', `node/${sid}/cleanup`);
       break;
     case 'client_roles':
@@ -1177,11 +1179,28 @@ function showConnInfo(e, connIdx) {
     <div class="info-section">
       <div class="info-row"><span class="info-label">Risk:</span><span class="info-val"><span class="risk-badge ${riskClass}">${risk}</span></span></div>
     </div>
-    <div style="text-align:right;margin-top:8px"><button class="btn" onclick="document.getElementById('info-panel').classList.remove('visible')">Close</button></div>
+    <div style="text-align:right;margin-top:8px;display:flex;gap:6px;justify-content:flex-end">
+      <button class="btn" onclick="testSingleRfc('${escHtml(conn.source_sid)}','${escHtml(conn.destination_name)}',${connIdx})">Test Connection</button>
+      <button class="btn" onclick="document.getElementById('info-panel').classList.remove('visible')">Close</button>
+    </div>
   `;
   panel.style.left = Math.min(e.clientX, window.innerWidth - 440) + 'px';
   panel.style.top = Math.min(e.clientY, window.innerHeight - 520) + 'px';
   panel.classList.add('visible');
+}
+
+async function testSingleRfc(sid, destName, connIdx) {
+  await api('POST', `node/${sid}/test_rfc_single`, { destination_name: destName });
+  startPolling();
+  // Re-open the info panel after a short delay to show updated results
+  setTimeout(() => {
+    const conn = (mapState.connections || [])[connIdx];
+    if (conn) {
+      const panel = document.getElementById('info-panel');
+      const fakeEvent = { stopPropagation: ()=>{}, clientX: parseInt(panel.style.left), clientY: parseInt(panel.style.top) };
+      showConnInfo(fakeEvent, connIdx);
+    }
+  }, 3000);
 }
 
 // --- Detail panel ---
@@ -1216,7 +1235,7 @@ function showDetails(sid) {
     </div>
     <div class="detail-section">
       <h4>Clients</h4>
-      ${(n.clients || []).map(c => { const nr = typeof c === 'object' ? (c.nr||'?') : String(c); const cat = typeof c === 'object' ? (c.category||'') : ''; return `<div class="detail-row"><span class="detail-key">${escHtml(nr)}</span><span class="detail-val">${cat === 'P' ? '<span style="color:#f85149">Production</span>' : escHtml(cat)}</span></div>`; }).join('') || '<div style="color:#484f58">None enumerated</div>'}
+      ${(n.clients || []).map(c => { const nr = typeof c === 'object' ? (c.nr||'?') : String(c); const cat = typeof c === 'object' ? (c.category||'') : ''; const roleMap = {P:'Production',S:'SAP Reference Client',T:'Test',C:'Customising',D:'Demo',E:'Training'}; const label = roleMap[cat]; return `<div class="detail-row"><span class="detail-key">${escHtml(nr)}</span><span class="detail-val">${cat === 'P' ? '<span style="color:#f85149">Production</span>' : label ? escHtml(label) : escHtml(cat)}</span></div>`; }).join('') || '<div style="color:#484f58">None enumerated</div>'}
     </div>
     <div class="detail-section">
       <h4>Created Users (${(n.created_users||[]).length})</h4>
