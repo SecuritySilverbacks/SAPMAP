@@ -274,8 +274,11 @@ body {
       <div class="dd-item" onclick="propagateAll()">&#128640; Auto-Propagate All</div>
       <div class="dd-item" onclick="cleanupAll()">&#129529; Cleanup All Users</div>
       <div class="dd-item" onclick="resetRFCCache()">&#128202; Reset RFC Check List</div>
+      <div class="dd-item" onclick="viewRFCCache()">&#128203; View RFC Check List</div>
       <div class="dd-sep"></div>
       <div class="dd-item" onclick="showCreatedUsers()">&#128203; View Created Users</div>
+      <div class="dd-sep"></div>
+      <div class="dd-item" onclick="showAddSystemModal()">&#10133; Add System Manually</div>
     </div>
   </div>
   <div class="menu-item">View
@@ -401,6 +404,8 @@ body {
   <div class="ctx-item" data-action="client_roles">&#128202; Retrieve Client Roles</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="set_type">&#9881; Set System Type</div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item" data-action="delete_system" style="color:#f85149">&#128465; Delete System from Map</div>
 </div>
 
 <!-- Connection Info Panel -->
@@ -489,6 +494,29 @@ body {
     <div class="form-actions">
       <button class="btn btn-primary" onclick="saveSystemType()">Save</button>
       <button class="btn" onclick="closeModal('type-modal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add System Modal -->
+<div class="modal-overlay" id="add-system-modal">
+  <div class="modal">
+    <h3>&#10133; Add System Manually</h3>
+    <div class="form-row">
+      <label>SID (3 letters)</label>
+      <input type="text" id="add-sid" placeholder="e.g. PRD" maxlength="3" style="width:80px;text-transform:uppercase">
+    </div>
+    <div class="form-row">
+      <label>IP / Hostname</label>
+      <input type="text" id="add-ip" placeholder="e.g. 10.0.1.50 or sapserver">
+    </div>
+    <div class="form-row">
+      <label>Instance Number (2 digits)</label>
+      <input type="text" id="add-instance" placeholder="00" maxlength="2" style="width:60px">
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-primary" onclick="addSystem()">Add System</button>
+      <button class="btn" onclick="closeModal('add-system-modal')">Cancel</button>
     </div>
   </div>
 </div>
@@ -1058,6 +1086,7 @@ function showCtxMenu(e, sid) {
     'cleanup':          hasCreatedUsers,             // need created users to clean up
     'client_roles':     hasCreds,                   // need credentials/access
     'set_type':         true,                       // always available
+    'delete_system':    true,                       // always available
   };
 
   // Tooltip hints for disabled items
@@ -1144,6 +1173,10 @@ async function ctxAction(action) {
     case 'client_roles':
       await api('POST', `node/${sid}/client_roles`); break;
     case 'set_type': showTypeModal(sid); break;
+    case 'delete_system':
+      if (confirm(`Delete ${sid} from the map? This removes the system and all its connections.`))
+        await api('DELETE', `node/${sid}`);
+      break;
   }
   startPolling();
 }
@@ -1351,6 +1384,24 @@ async function saveSystemType() {
 
 function closeModal(id) { document.getElementById(id).classList.remove('visible'); }
 
+function showAddSystemModal() {
+  document.getElementById('add-sid').value = '';
+  document.getElementById('add-ip').value = '';
+  document.getElementById('add-instance').value = '00';
+  document.getElementById('add-system-modal').classList.add('visible');
+  document.getElementById('add-sid').focus();
+}
+async function addSystem() {
+  const sid = document.getElementById('add-sid').value.trim().toUpperCase();
+  const ip = document.getElementById('add-ip').value.trim();
+  const inst = document.getElementById('add-instance').value.trim();
+  if (!sid || !ip || !inst) { alert('All fields are required'); return; }
+  const res = await api('POST', 'node/add', { sid, ip, instance_nr: inst });
+  if (res.error) { alert(res.error); return; }
+  closeModal('add-system-modal');
+  startPolling();
+}
+
 // --- Global actions ---
 async function propagateAll() {
   if (confirm('Auto-propagate from all pwned systems?'))
@@ -1365,6 +1416,17 @@ async function cleanupAll() {
 async function resetRFCCache() {
   if (confirm('Reset the RFC check cache? This allows re-testing all connections.'))
     await api('POST', 'actions/reset_rfc_cache');
+}
+async function viewRFCCache() {
+  const res = await api('GET', 'actions/rfc_check_list');
+  const entries = res.entries || [];
+  if (entries.length === 0) { alert('RFC check list is empty.'); return; }
+  const lines = entries.map(e => {
+    const status = e.logon_ok ? 'LOGON OK' : e.ping_ok ? 'PING OK' : e.error ? 'ERROR' : 'FAILED';
+    const lat = e.latency_ms ? ` ${e.latency_ms}ms` : '';
+    return `${e.destination}: ${status}${lat}`;
+  });
+  alert(`RFC Check List (${entries.length} entries):\n\n` + lines.join('\n'));
 }
 async function showCreatedUsers() {
   const res = await api('GET', 'actions/created_users');

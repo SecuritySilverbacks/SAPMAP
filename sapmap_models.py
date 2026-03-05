@@ -415,6 +415,16 @@ class SAPMAPState:
                     conn.target_sid = node.sid
                     break
 
+    def remove_node(self, sid: str) -> bool:
+        """Remove a node and all associated connections/created users."""
+        if sid not in self.nodes:
+            return False
+        del self.nodes[sid]
+        self.connections = [c for c in self.connections
+                           if c.source_sid != sid and c.target_sid != sid]
+        self.created_users = [u for u in self.created_users if u.sid != sid]
+        return True
+
     def get_node(self, sid: str) -> Optional[SAPNode]:
         return self.nodes.get(sid)
 

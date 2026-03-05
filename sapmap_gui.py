@@ -16,7 +16,7 @@ from datetime import datetime
 
 from bottle import Bottle, request, response, static_file
 
-from sapmap_models import SAPMAPState, SAPNode, Credentials, CreatedUser
+from sapmap_models import SAPMAPState, SAPNode, InstanceInfo, Credentials, CreatedUser
 from sapmap_html import get_html
 import sapmap_scanner
 import sapmap_rfc
@@ -333,8 +333,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
             if not gw_port:
                 print(f"[-] No gateway port found for {node.sid}")
                 return
-            info = sapmap_scanner.enrich_system_info(
-                node.ip or node.hostname, gw_port)
+            host = node.ip or node.hostname
+            info = sapmap_scanner.enrich_system_info(host, gw_port)
             # Update node with retrieved info
             if info.get("sid") and not node.sid.startswith("UNK"):
                 pass  # keep existing SID
@@ -350,6 +350,26 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 node.kernel = info["kernel"]
             if info.get("sap_release"):
                 node.sap_release = info["sap_release"]
+
+            # Database port fingerprinting (if DB not yet known)
+            if not node.db_type:
+                inst_nrs = node.instance_nrs() or ["00"]
+                db_ports = []
+                for nr in inst_nrs:
+                    n = int(nr)
+                    db_ports.append((30000 + n * 100 + 13, "HDB"))   # HANA SystemDB
+                    db_ports.append((30000 + n * 100 + 15, "HDB"))   # HANA tenant
+                db_ports += [(7210, "ADA"), (1433, "MSS"),
+                             (1521, "ORA"), (50000, "DB6")]
+                print(f"[*] Scanning database ports on {host}...")
+                for port, db_name in db_ports:
+                    if sapmap_scanner._scan_port(host, port, timeout=2.0):
+                        node.db_type = db_name
+                        print(f"[+] Database detected: {db_name} "
+                              f"(port {port} open on {host})")
+                        break
+                if not node.db_type:
+                    print(f"[*] No database ports detected on {host}")
 
         threading.Thread(target=_run, daemon=True).start()
         return json.dumps({"status": "started"})
@@ -662,6 +682,44 @@ def create_app(api: SAPMAPApi) -> Bottle:
         threading.Thread(target=_run, daemon=True).start()
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>", method="DELETE")
+    def node_delete(sid):
+        response.content_type = "application/json"
+        if api.state.remove_node(sid):
+            print(f"[*] Removed system {sid} from the map")
+            return json.dumps({"status": "ok"})
+        return json.dumps({"error": f"Node {sid} not found"})
+
+    @app.route("/api/node/add", method="POST")
+    def node_add():
+        response.content_type = "application/json"
+        data = request.json or {}
+        sid = (data.get("sid") or "").strip().upper()
+        ip = (data.get("ip") or "").strip()
+        inst_nr = (data.get("instance_nr") or "").strip()
+
+        if not sid or len(sid) != 3 or not sid.isalnum():
+            return json.dumps({"error": "SID must be exactly 3 alphanumeric characters"})
+        if not ip:
+            return json.dumps({"error": "IP/Hostname is required"})
+        if not inst_nr or len(inst_nr) != 2 or not inst_nr.isdigit():
+            return json.dumps({"error": "Instance number must be 2 digits (00-99)"})
+        if api.state.get_node(sid):
+            return json.dumps({"error": f"System {sid} already exists on the map"})
+
+        nr = inst_nr
+        ports = {
+            int(f"32{nr}"): "dispatcher",
+            int(f"33{nr}"): "gateway",
+            int(f"5{nr}13"): "sapcontrol_http",
+            int(f"80{nr}"): "icm_http",
+        }
+        instance = InstanceInfo(instance_nr=nr, ip=ip, ports=ports)
+        node = SAPNode(sid=sid, ip=ip, hostname=ip, instances=[instance])
+        api.state.add_node(node)
+        print(f"[+] Manually added system {sid} ({ip}, instance {nr})")
+        return json.dumps({"status": "ok"})
+
     # -- Global actions --
     @app.route("/api/actions/propagate_all", method="POST")
     def actions_propagate_all():
@@ -688,6 +746,21 @@ def create_app(api: SAPMAPApi) -> Bottle:
         response.content_type = "application/json"
         state_mgr.reset_rfc_cache(api.state)
         return json.dumps({"status": "ok"})
+
+    @app.route("/api/actions/rfc_check_list")
+    def actions_rfc_check_list():
+        response.content_type = "application/json"
+        cache = api.state.rfc_check_cache
+        entries = []
+        for dest, result in cache.items():
+            entries.append({
+                "destination": dest,
+                "logon_ok": result.get("logon_ok", False),
+                "ping_ok": result.get("ping_ok", False),
+                "latency_ms": result.get("latency_ms", 0),
+                "error": result.get("error", ""),
+            })
+        return json.dumps({"entries": entries})
 
     @app.route("/api/actions/created_users")
     def actions_created_users():

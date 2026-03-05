@@ -704,6 +704,11 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
             info["os_type"] = result.get("os_hint", "").strip()
         if not info["sap_release"]:
             info["sap_release"] = result.get("sap_release_approx", "").strip()
+        if not info["db_type"]:
+            # Infer DB type from SAP product name (e.g. S/4HANA -> HDB)
+            product = result.get("sap_product", "")
+            if "HANA" in product.upper():
+                info["db_type"] = "HDB"
 
         # Try to extract SID from hostname pattern: <host>_<SID>_<inst>
         # or from the hostname itself if it follows SAP naming conventions
