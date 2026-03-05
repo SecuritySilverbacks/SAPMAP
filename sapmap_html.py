@@ -520,6 +520,22 @@ body {
   </div>
 </div>
 
+<!-- TCP/IP Destination Modal -->
+<div class="modal-overlay" id="tcpip-modal">
+  <div class="modal">
+    <h3>&#128279; Create TCP/IP Destination (sapxpg)</h3>
+    <div id="tcpip-source-info" style="font-size:12px;color:#8b949e;margin-bottom:12px"></div>
+    <div class="form-row">
+      <label>Target System</label>
+      <select id="tcpip-target"></select>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-primary" onclick="createTcpipDest()">Create</button>
+      <button class="btn" onclick="closeModal('tcpip-modal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <!-- Hidden file picker for Load State -->
 <input type="file" id="file-picker" accept=".sapmap,.json" style="display:none" onchange="handleFileLoad(this)">
 
@@ -829,10 +845,10 @@ function updateMap() {
     let dashArray = '';
     if (conn.has_sap_all && conn.logon_successful) {
       color = '#e74c3c'; width = 6;
-    } else if (conn.logon_successful) {
-      color = '#2ecc71'; width = 5;
     } else if (conn.sapxpg_remote_works) {
       color = '#ff6b35'; width = 5.5; dashArray = '8,4';
+    } else if (conn.logon_successful) {
+      color = '#2ecc71'; width = 5;
     }
 
     // Arrow marker
@@ -1108,7 +1124,7 @@ function showCtxMenu(e, sid) {
     'test_rfcs':        hasCreds && hasRFCs,        // need access + existing RFCs
     'download_hashes':  hasCreds,                   // need credentials/access
     'download_table':   hasCreds,                   // need credentials/access
-    'create_tcpip':     hasCreds && hasRFCs,        // need access + targets
+    'create_tcpip':     hasCreds,                   // need credentials/access
     'propagate':        hasCreds,                   // need access to propagate from
     'cleanup':          hasCreatedUsers,             // need created users to clean up
     'client_roles':     hasCreds,                   // need credentials/access
@@ -1126,7 +1142,7 @@ function showCtxMenu(e, sid) {
     'test_rfcs':        'Retrieve RFC connections first',
     'download_hashes':  'Provide credentials or create a user first',
     'download_table':   'Provide credentials or create a user first',
-    'create_tcpip':     'Need credentials and RFC connections',
+    'create_tcpip':     'Provide credentials or create a user first',
     'propagate':        'Provide credentials or create a user first',
     'cleanup':          'No created users to clean up',
     'client_roles':     'Provide credentials or create a user first',
@@ -1189,8 +1205,7 @@ async function ctxAction(action) {
       await api('POST', `node/${sid}/download_hashes`); break;
     case 'download_table':
       document.getElementById('table-modal').classList.add('visible'); break;
-    case 'create_tcpip':
-      await api('POST', `node/${sid}/create_tcpip_dest`); break;
+    case 'create_tcpip': showTcpipModal(sid); break;
     case 'propagate':
       await api('POST', `node/${sid}/propagate`); break;
     case 'cleanup':
@@ -1214,28 +1229,61 @@ function showConnInfo(e, connIdx) {
   if (!conn) return;
 
   const panel = document.getElementById('info-panel');
-  const risk = conn.has_sap_all && conn.logon_successful ? 'CRITICAL' :
-    conn.logon_successful ? 'MEDIUM' : conn.tested ? 'LOW' : 'UNKNOWN';
+  const isTypeT = !!conn.sapxpg_remote_works;
+  const connType = isTypeT ? 'T' : '3';
+  let risk;
+  if (isTypeT) {
+    risk = conn.ping_ok ? 'CRITICAL' : conn.tested ? 'LOW' : 'UNKNOWN';
+  } else {
+    risk = conn.has_sap_all && conn.logon_successful ? 'CRITICAL' :
+      conn.logon_successful ? 'MEDIUM' : conn.tested ? 'LOW' : 'UNKNOWN';
+  }
   const riskClass = 'risk-' + risk.toLowerCase();
 
   let profilesHtml = '';
-  (conn.profiles || []).forEach(p => {
-    const cls = p === 'SAP_ALL' ? 'profile-item sap-all' : 'profile-item';
-    profilesHtml += `<div class="${cls}">${p === 'SAP_ALL' ? '&#9888; ' : ''}${escHtml(p)}</div>`;
-  });
+  if (!isTypeT) {
+    (conn.profiles || []).forEach(p => {
+      const cls = p === 'SAP_ALL' ? 'profile-item sap-all' : 'profile-item';
+      profilesHtml += `<div class="${cls}">${p === 'SAP_ALL' ? '&#9888; ' : ''}${escHtml(p)}</div>`;
+    });
+  }
 
   let rolesHtml = '';
-  (conn.roles || []).forEach(r => {
-    rolesHtml += `<div class="profile-item">${escHtml(r)}</div>`;
-  });
+  if (!isTypeT) {
+    (conn.roles || []).forEach(r => {
+      rolesHtml += `<div class="profile-item">${escHtml(r)}</div>`;
+    });
+  }
+
+  // For Type T, derive gateway port from target node
+  let gwPort = '';
+  if (isTypeT) {
+    const tgt = (mapState.nodes || {})[conn.target_sid];
+    if (tgt) {
+      for (const inst of (tgt.instances || [])) {
+        for (const [p, svc] of Object.entries(inst.ports || {})) {
+          if (svc === 'gateway' || (p >= 3300 && p <= 3399)) { gwPort = p; break; }
+        }
+        if (gwPort) break;
+      }
+      if (!gwPort) {
+        const nrs = (tgt.instances || []).map(i => i.instance_nr).filter(n => n !== 'XX').sort();
+        gwPort = nrs.length ? '33' + nrs[0] : '3300';
+      }
+    }
+  }
 
   panel.innerHTML = `
-    <h3>RFC Connection Details</h3>
+    <h3>${isTypeT ? 'TCP/IP' : 'RFC'} Connection Details</h3>
     <div class="info-row"><span class="info-label">Source:</span><span class="info-val">${escHtml(conn.source_sid)} (${escHtml(conn.source_host)})</span></div>
     <div class="info-row"><span class="info-label">Target:</span><span class="info-val">${escHtml(conn.target_sid || '?')} (${escHtml(conn.target_host || '?')})</span></div>
-    <div class="info-row"><span class="info-label">Destination:</span><span class="info-val">${escHtml(conn.destination_name)} (Type 3)</span></div>
-    <div class="info-row"><span class="info-label">Client:</span><span class="info-val">${escHtml(conn.client || '?')}</span></div>
-    <div class="info-row"><span class="info-label">RFC User:</span><span class="info-val">${escHtml(conn.rfc_user || '?')}</span></div>
+    <div class="info-row"><span class="info-label">Destination:</span><span class="info-val">${escHtml(conn.destination_name)} (Type ${connType})</span></div>
+    ${isTypeT ? `
+      <div class="info-row"><span class="info-label">Port:</span><span class="info-val">${escHtml(gwPort)}</span></div>
+    ` : `
+      <div class="info-row"><span class="info-label">Client:</span><span class="info-val">${escHtml(conn.client || '?')}</span></div>
+      <div class="info-row"><span class="info-label">RFC User:</span><span class="info-val">${escHtml(conn.rfc_user || '?')}</span></div>
+    `}
     ${profilesHtml ? `<div class="info-section"><strong style="font-size:11px;color:#8b949e">Profiles</strong><div class="profile-list">${profilesHtml}</div></div>` : ''}
     ${rolesHtml ? `<div class="info-section"><strong style="font-size:11px;color:#8b949e">Roles</strong><div class="profile-list">${rolesHtml}</div></div>` : ''}
     ${conn.user_detail_error ? `<div class="info-section" style="color:#d29922;font-size:11px">${escHtml(conn.user_detail_error)}</div>` : ''}
@@ -1243,7 +1291,7 @@ function showConnInfo(e, connIdx) {
       <strong style="font-size:11px;color:#8b949e">/SDF/RFC_CHECK</strong>
       ${conn.tested ? `
         <div class="info-row"><span class="info-label">Ping:</span><span class="info-val">${conn.ping_ok ? 'OK' : 'Failed'}${conn.latency_ms ? ' ('+conn.latency_ms+'ms)' : ''}</span></div>
-        <div class="info-row"><span class="info-label">Logon:</span><span class="info-val">${conn.logon_successful ? '&#9989; RFC Logon successful.' : '&#10060; Failed'}</span></div>
+        ${isTypeT ? '' : `<div class="info-row"><span class="info-label">Logon:</span><span class="info-val">${conn.logon_successful ? '&#9989; RFC Logon successful.' : '&#10060; Failed'}</span></div>`}
       ` : '<div style="color:#484f58;font-size:11px;margin-top:4px">Not tested yet</div>'}
     </div>
     <div class="info-section">
@@ -1425,6 +1473,31 @@ async function addSystem() {
   const res = await api('POST', 'node/add', { sid, ip, instance_nr: inst });
   if (res.error) { alert(res.error); return; }
   closeModal('add-system-modal');
+  startPolling();
+}
+
+function showTcpipModal(sid) {
+  document.getElementById('tcpip-source-info').textContent = `Source: ${sid}`;
+  const sel = document.getElementById('tcpip-target');
+  sel.innerHTML = '';
+  const nodes = mapState.nodes || {};
+  for (const s in nodes) {
+    if (s === sid) continue;
+    const n = nodes[s];
+    const label = `${s} (${n.ip || n.hostname || '?'})`;
+    sel.innerHTML += `<option value="${s}">${label}</option>`;
+  }
+  if (sel.options.length === 0) {
+    alert('No other systems on the map to create a destination to.');
+    return;
+  }
+  document.getElementById('tcpip-modal').classList.add('visible');
+}
+async function createTcpipDest() {
+  const targetSid = document.getElementById('tcpip-target').value;
+  if (!targetSid) { alert('Select a target system'); return; }
+  closeModal('tcpip-modal');
+  await api('POST', `node/${selectedNodeSid}/create_tcpip_dest`, { target_sid: targetSid });
   startPolling();
 }
 

@@ -16,7 +16,8 @@ from datetime import datetime
 
 from bottle import Bottle, request, response, static_file
 
-from sapmap_models import SAPMAPState, SAPNode, InstanceInfo, Credentials, CreatedUser
+from sapmap_models import (SAPMAPState, SAPNode, InstanceInfo, RFCConnection,
+                           Credentials, CreatedUser)
 from sapmap_html import get_html
 import sapmap_scanner
 import sapmap_rfc
@@ -534,31 +535,50 @@ def create_app(api: SAPMAPApi) -> Bottle:
             # Clear cache so it actually re-tests
             conn.tested = False
             api.state.rfc_check_cache.pop(dest_name, None)
-            print(f"[*] Testing single RFC destination: {dest_name}...")
+            is_type_t = conn.sapxpg_remote_works or dest_name.startswith("SAPMAP_")
+            print(f"[*] Testing {'TCP/IP' if is_type_t else 'RFC'} "
+                  f"destination: {dest_name}...")
             result = sapmap_rfc.test_rfc_destination(
                 node, dest_name, creds, api.state.rfc_check_cache
             )
-            conn.logon_successful = result.get("logon_ok", False)
-            conn.ping_ok = result.get("ping_ok", False)
             conn.latency_ms = result.get("latency_ms", 0)
             conn.tested = True
-            if conn.logon_successful:
-                print(f"[+] {dest_name}: Logon successful!")
-                target = api.state.get_node(conn.target_sid)
-                if target:
-                    target.has_critical_finding = True
-                if conn.rfc_user:
-                    info = sapmap_rfc.get_remote_user_profiles(
-                        node, conn.rfc_user, dest_name, creds
-                    )
-                    conn.profiles = info.get("profiles", [])
-                    conn.has_sap_all = info.get("has_sap_all", False)
-                    conn.user_detail_error = info.get("error", "")
-                    if conn.has_sap_all:
-                        print(f"[!] {conn.rfc_user} in {dest_name} has SAP_ALL!")
+
+            if is_type_t:
+                # Type T: success = EV_PING_STATUS == 1
+                ping_success = result.get("ping_status") == "1"
+                conn.ping_ok = ping_success
+                conn.logon_successful = ping_success
+                conn.sapxpg_remote_works = ping_success
+                if ping_success:
+                    print(f"[+] {dest_name}: Ping successful! "
+                          f"(EV_PING_STATUS=1, latency={conn.latency_ms}ms)")
+                    target = api.state.get_node(conn.target_sid)
+                    if target:
+                        target.has_critical_finding = True
+                else:
+                    print(f"[-] {dest_name}: Ping failed")
             else:
-                print(f"[-] {dest_name}: Logon failed")
-            print(f"[+] Single RFC test done for {dest_name}")
+                # Type 3: success = logon_ok
+                conn.logon_successful = result.get("logon_ok", False)
+                conn.ping_ok = result.get("ping_ok", False)
+                if conn.logon_successful:
+                    print(f"[+] {dest_name}: Logon successful!")
+                    target = api.state.get_node(conn.target_sid)
+                    if target:
+                        target.has_critical_finding = True
+                    if conn.rfc_user:
+                        info = sapmap_rfc.get_remote_user_profiles(
+                            node, conn.rfc_user, dest_name, creds
+                        )
+                        conn.profiles = info.get("profiles", [])
+                        conn.has_sap_all = info.get("has_sap_all", False)
+                        conn.user_detail_error = info.get("error", "")
+                        if conn.has_sap_all:
+                            print(f"[!] {conn.rfc_user} in {dest_name} has SAP_ALL!")
+                else:
+                    print(f"[-] {dest_name}: Logon failed")
+            print(f"[+] Single test done for {dest_name}")
 
         threading.Thread(target=_run, daemon=True).start()
         return json.dumps({"status": "started"})
@@ -620,24 +640,77 @@ def create_app(api: SAPMAPApi) -> Bottle:
     @app.route("/api/node/<sid>/create_tcpip_dest", method="POST")
     def node_create_tcpip(sid):
         response.content_type = "application/json"
+        data = request.json or {}
         node = api.state.get_node(sid)
         if not node:
             return json.dumps({"error": f"Node {sid} not found"})
+        target_sid = data.get("target_sid", "")
+        tgt_node = api.state.get_node(target_sid) if target_sid else None
+        if not tgt_node:
+            return json.dumps({"error": f"Target system {target_sid} not found"})
 
         def _run():
             creds = node.best_credentials()
-            # Create TCP/IP dest to all connected targets
-            conns = api.state.get_connections_from(sid)
-            for conn in conns:
-                if conn.target_host:
-                    result = sapmap_rfc.create_tcpip_destination(
-                        node, conn.target_host, creds=creds
-                    )
-                    if result["success"]:
-                        conn.sapxpg_remote_works = True
-                        target = api.state.get_node(conn.target_sid)
-                        if target:
-                            target.has_critical_finding = True
+            if not creds:
+                print(f"[-] No credentials available for {sid}")
+                return
+            tgt_host = tgt_node.ip or tgt_node.hostname
+            # Find gateway port on target
+            gw_port = ""
+            for inst in tgt_node.instances:
+                for port, svc in inst.ports.items():
+                    if svc == "gateway" or (3300 <= port <= 3399):
+                        gw_port = str(port)
+                        break
+                if gw_port:
+                    break
+            if not gw_port:
+                nrs = tgt_node.instance_nrs()
+                gw_port = f"33{nrs[0]}" if nrs else "3300"
+            print(f"[*] Creating TCP/IP dest from {sid} → "
+                  f"{target_sid} ({tgt_host}, gw={gw_port})...")
+            result = sapmap_rfc.create_tcpip_destination(
+                node, tgt_host, target_sid=target_sid,
+                target_gw_port=gw_port, creds=creds
+            )
+            if not result["success"]:
+                print(f"[-] Failed: {result['message']}")
+                return
+            dest_name = result["dest_name"]
+            print(f"[+] Created: {dest_name} on {sid}")
+
+            # Test the destination with /SDF/RFC_CHECK
+            print(f"[*] Testing {dest_name} with /SDF/RFC_CHECK...")
+            check = sapmap_rfc.test_rfc_destination(
+                node, dest_name, creds, api.state.rfc_check_cache
+            )
+
+            # For TCP/IP destinations, success = EV_PING_STATUS == 1
+            ping_success = check.get("ping_status") == "1"
+
+            # Create connection and add to state
+            conn = RFCConnection(
+                source_sid=sid,
+                source_host=node.ip or node.hostname,
+                target_sid=target_sid,
+                target_host=tgt_host,
+                target_ip=tgt_node.ip,
+                destination_name=dest_name,
+                logon_successful=ping_success,
+                ping_ok=ping_success,
+                latency_ms=check.get("latency_ms", 0),
+                tested=True,
+                sapxpg_remote_works=ping_success,
+            )
+            api.state.add_connection(conn)
+
+            if ping_success:
+                print(f"[+] {dest_name}: Ping successful! "
+                      f"(EV_PING_STATUS=1, latency={conn.latency_ms}ms)")
+                tgt_node.has_critical_finding = True
+            else:
+                print(f"[-] {dest_name}: Ping failed — "
+                      f"{check.get('logon_message', check.get('error', ''))}")
 
         threading.Thread(target=_run, daemon=True).start()
         return json.dumps({"status": "started"})

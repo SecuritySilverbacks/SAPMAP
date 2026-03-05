@@ -14,6 +14,7 @@ Uses sap_rfc_ctypes.RFCConnection for all authenticated operations:
 
 import logging
 import time
+from datetime import datetime
 from typing import Optional
 
 from sapmap_models import (
@@ -441,6 +442,7 @@ def test_rfc_destination(node: SAPNode, destination_name: str,
 
             result["logon_message"] = check_result.get("EV_LOGON_MESSAGE", "").strip()
             result["ping_ok"] = check_result.get("EV_PING_MESSAGE", "").strip() != ""
+            result["ping_status"] = str(check_result.get("EV_PING_STATUS", "")).strip()
             # EV_LOGON_STATUS=1 means logon succeeded; fall back to text match
             logon_status = check_result.get("EV_LOGON_STATUS", "")
             if str(logon_status).strip() == "1":
@@ -870,24 +872,38 @@ def update_node_production_status(node: SAPNode, creds: Credentials = None):
 # ---------------------------------------------------------------------------
 
 def create_tcpip_destination(node: SAPNode, target_host: str,
-                             dest_name: str = "",
+                             target_sid: str = "",
+                             target_gw_port: str = "",
                              creds: Credentials = None) -> dict:
-    """Create a TCP/IP destination to test remote sapxpg execution.
+    """Create a TCP/IP destination for remote sapxpg execution.
 
-    Returns dict with: success, message
+    Args:
+        node: source SAP system to create the destination on
+        target_host: IP/hostname of the target system
+        target_sid: SID of the target (used in dest name)
+        target_gw_port: gateway port of the target (e.g. "3300")
+        creds: credentials to use on the source system
+
+    Returns dict with: success, message, dest_name
     """
-    if not dest_name:
-        dest_name = f"SAPMAP_TEST_{target_host[:20]}"
+    ts = datetime.now().strftime("%Y%m%d%H%M%S")
+    dest_name = f"SAPMAP_{target_sid}_{ts}" if target_sid else f"SAPMAP_{target_host[:14]}_{ts}"
+    gw_service = target_gw_port or "3300"
 
-    result = {"success": False, "message": ""}
+    result = {"success": False, "message": "", "dest_name": dest_name}
 
     try:
         with _get_connection(node, creds) as conn:
             create_result = conn.call(
                 DEST_RFC_TCPIP_CREATE,
-                DESTINATION=dest_name,
-                PROGRAM="sapxpg",
+                NAME=dest_name,
+                DESCRIPTION=f"TCP/IP CONNECTION TO {target_sid or target_host}",
                 SERVER_NAME=target_host,
+                GATEWAY_HOST=target_host,
+                GATEWAY_SERVICE=gw_service,
+                METHOD="E",
+                PROGRAM="sapxpg",
+                CPIC_TIMEOUT="20",
             )
             # Check result
             ret = create_result.get("RETURN", {})
@@ -896,9 +912,11 @@ def create_tcpip_destination(node: SAPNode, target_host: str,
             else:
                 result["success"] = True
                 result["message"] = f"TCP/IP destination {dest_name} created"
-                print(f"[+] Created TCP/IP dest {dest_name} → {target_host}")
+                print(f"[+] Created TCP/IP dest {dest_name} → "
+                      f"{target_host} (gw={gw_service})")
     except Exception as e:
         result["message"] = str(e)
+        print(f"[-] TCP/IP dest creation error: {e}")
         logger.debug(f"TCP/IP dest creation failed: {e}")
 
     return result
