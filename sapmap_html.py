@@ -970,7 +970,7 @@ function updateMap() {
     if (n.is_production) fill = '#4a1a1a';
     else if (Object.keys(n.clients || {}).length > 0) fill = '#4a3a1a';
 
-    if (n.has_critical_finding) { borderColor = '#8b0000'; borderWidth = 6; }
+    if (n.has_critical_finding || n.gw_vulnerable) { borderColor = '#8b0000'; borderWidth = 6; }
 
     // Node group
     html += `<g class="node-box" data-sid="${sid}" ` +
@@ -1161,10 +1161,16 @@ function showCtxMenu(e, sid) {
     }
   });
 
-  // Position menu within viewport
-  menu.style.left = Math.min(e.clientX, window.innerWidth - 280) + 'px';
-  menu.style.top = Math.min(e.clientY, window.innerHeight - 420) + 'px';
+  // Position menu within viewport — measure actual height
   menu.classList.add('visible');
+  const menuRect = menu.getBoundingClientRect();
+  let menuX = e.clientX, menuY = e.clientY;
+  if (menuX + menuRect.width > window.innerWidth) menuX = window.innerWidth - menuRect.width - 4;
+  if (menuY + menuRect.height > window.innerHeight) menuY = window.innerHeight - menuRect.height - 4;
+  if (menuY < 0) { menuY = 0; menu.style.maxHeight = window.innerHeight + 'px'; menu.style.overflowY = 'auto'; }
+  else { menu.style.maxHeight = ''; menu.style.overflowY = ''; }
+  menu.style.left = menuX + 'px';
+  menu.style.top = menuY + 'px';
 }
 
 function hideCtxMenu() {
