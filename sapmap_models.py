@@ -342,8 +342,6 @@ class RFCConnection:
         """Return risk assessment for this connection."""
         if self.has_sap_all and self.logon_successful:
             return "CRITICAL"
-        if self.has_sap_all:
-            return "HIGH"
         if self.logon_successful:
             return "MEDIUM"
         if self.tested and not self.logon_successful:

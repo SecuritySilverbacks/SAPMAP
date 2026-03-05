@@ -310,7 +310,6 @@ DEFAULT_MAX_POLL_ATTEMPTS = 40
 # Fast scan: only these port patterns
 FAST_SCAN_PORT_PATTERNS = {
     "dispatcher": 3200,    # 3200 + instance_nr
-    "gateway":    3300,    # 3300 + instance_nr
 }
 
 # Additional ports for deep scan (beyond SAPology's full set)

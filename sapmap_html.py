@@ -343,10 +343,9 @@ body {
     <span class="legend-item"><span class="legend-swatch" style="background:#4a3a1a;border:1px solid #e67e22"></span> Non-PRD</span>
     <span class="legend-item"><span class="legend-swatch" style="background:transparent;border:2px solid #8b0000"></span> Critical</span>
     <span class="legend-item">&#9889; Pwned</span>
-    <span class="legend-item"><span class="legend-swatch" style="background:#e74c3c"></span> RFC+SAP_ALL</span>
-    <span class="legend-item"><span class="legend-swatch" style="background:#e67e22"></span> RFC SAP_ALL</span>
+    <span class="legend-item"><span class="legend-swatch" style="background:#e74c3c"></span> RFC Logon OK + SAP_ALL</span>
     <span class="legend-item"><span class="legend-swatch" style="background:#2ecc71"></span> RFC Logon OK</span>
-    <span class="legend-item"><span class="legend-swatch" style="background:#5dade2"></span> RFC</span>
+    <span class="legend-item"><span class="legend-swatch" style="background:#5dade2"></span> RFC (untested)</span>
     <span class="legend-item"><span class="legend-swatch" style="background:#ff6b35"></span> GW Exploit</span>
     <span style="flex:1"></span>
     <label style="cursor:pointer;display:flex;align-items:center;gap:6px;padding:2px 10px;border:1px solid #30363d;border-radius:4px;background:#161b22;color:#c9d1d9;font-size:11px"><input type="checkbox" id="show-unknown" style="accent-color:#f0883e;width:14px;height:14px" onchange="updateMap()"> Show unknown targets</label>
@@ -693,12 +692,42 @@ function updateMap() {
   const cols = Math.max(1, Math.min(4, nodeKeys.length));
 
   // Auto-layout (grid) for nodes without positions
+  // Place new nodes in free space, avoiding overlap with existing nodes
+  const placedBoxes = [];
+  nodeKeys.forEach(sid => {
+    const n = nodes[sid];
+    if (n._x != null) placedBoxes.push({ x: n._x, y: n._y });
+  });
+
+  function overlapsAny(x, y) {
+    for (const b of placedBoxes) {
+      if (Math.abs(x - b.x) < BOX_W + MARGIN/2 && Math.abs(y - b.y) < BOX_H + MARGIN/2)
+        return true;
+    }
+    return false;
+  }
+
   nodeKeys.forEach((sid, idx) => {
     const n = nodes[sid];
-    if (!n._x) {
-      const col = idx % cols, row = Math.floor(idx / cols);
-      n._x = MARGIN + col * (BOX_W + MARGIN);
-      n._y = MARGIN + row * (BOX_H + MARGIN);
+    if (n._x == null) {
+      // Try grid position first, then search for free slot
+      let col = idx % cols, row = Math.floor(idx / cols);
+      let px = MARGIN + col * (BOX_W + MARGIN);
+      let py = MARGIN + row * (BOX_H + MARGIN);
+      if (overlapsAny(px, py)) {
+        // Scan grid slots until a free one is found
+        let found = false;
+        for (let r = 0; r < 100 && !found; r++) {
+          for (let c = 0; c < cols && !found; c++) {
+            px = MARGIN + c * (BOX_W + MARGIN);
+            py = MARGIN + r * (BOX_H + MARGIN);
+            if (!overlapsAny(px, py)) found = true;
+          }
+        }
+      }
+      n._x = px;
+      n._y = py;
+      placedBoxes.push({ x: px, y: py });
     }
   });
 
@@ -800,8 +829,6 @@ function updateMap() {
     let dashArray = '';
     if (conn.has_sap_all && conn.logon_successful) {
       color = '#e74c3c'; width = 6;
-    } else if (conn.has_sap_all) {
-      color = '#e67e22'; width = 5.5;
     } else if (conn.logon_successful) {
       color = '#2ecc71'; width = 5;
     } else if (conn.sapxpg_remote_works) {
@@ -1188,8 +1215,7 @@ function showConnInfo(e, connIdx) {
 
   const panel = document.getElementById('info-panel');
   const risk = conn.has_sap_all && conn.logon_successful ? 'CRITICAL' :
-    conn.has_sap_all ? 'HIGH' : conn.logon_successful ? 'MEDIUM' :
-    conn.tested ? 'LOW' : 'UNKNOWN';
+    conn.logon_successful ? 'MEDIUM' : conn.tested ? 'LOW' : 'UNKNOWN';
   const riskClass = 'risk-' + risk.toLowerCase();
 
   let profilesHtml = '';

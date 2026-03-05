@@ -7,7 +7,7 @@ Wraps SAPology scanning functions and the standalone helper modules
 network and populate SAPNode objects for the map.
 
 Supports two modes:
-  - Fast scan: ports 32XX/33XX only (dispatcher + gateway) for quick discovery
+  - Fast scan: dispatcher 32XX, then gateway 33XX + HANA for found instances
   - Deep scan: full SAPology scan with all ports, fingerprinting, and vuln checks
 """
 
@@ -350,15 +350,15 @@ def _verify_sap_diag(host: str, port: int, timeout: float = 2.0) -> bool:
 
 
 # Ports that collide with SAP port formulas but are NOT SAP services
-NON_SAP_PORTS = {3389}  # Windows RDP = gateway base 3300 + instance 89
+NON_SAP_PORTS = set()  # Previously had 3389 (RDP = gateway 3300+89), no longer needed
 
 
 def _build_port_list(instance_range, include_hana=False, skip_non_sap=True):
     """Build list of (port, service, instance_nr) tuples for scanning.
 
-    Always includes dispatcher (32XX) and gateway (33XX).
-    HANA SQL (3XX13/3XX15) only included when include_hana=True to avoid
-    doubling the port count (adds 200 extra ports for 100 instances).
+    Includes dispatcher (32XX) for fast discovery.
+    Gateway (33XX) and HANA SQL (3XX13/3XX15) are scanned in Pass 2
+    only for instances where a dispatcher was found.
     """
     ports = []
     for inst_nr in range(instance_range[0], instance_range[1] + 1):
@@ -385,8 +385,8 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
     """Fast scan a single host for SAP ports.
 
     Two-pass approach:
-      Pass 1: Scan dispatcher (32XX), gateway (33XX), SAPHostControl (1128/1129)
-      Pass 2: If SAP found, scan HANA SQL (3XX13/3XX15) for detected instances
+      Pass 1: Scan dispatcher (32XX), SAPHostControl (1128/1129)
+      Pass 2: If SAP found, scan gateway (33XX) + HANA SQL (3XX13/3XX15) for detected instances
 
     Verifies dispatcher ports with SAP DIAG protocol probe to eliminate
     false positives from non-SAP services on 32XX ports.
@@ -407,7 +407,7 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
     if cancel_event and cancel_event.is_set():
         return result
     if not skip_quick_check:
-        QUICK_PORTS = list(range(3200, 3300)) + [3300, 3301, 8000, 50013, 1128]
+        QUICK_PORTS = list(range(3200, 3300)) + [8000, 50013, 1128]
         quick_timeout = min(timeout, 1.5)
         quick_hit = False
         qe = ThreadPoolExecutor(max_workers=min(len(QUICK_PORTS), 20))
@@ -455,7 +455,7 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
     if _cancelled():
         return result
     print(f"[*]     Pass 1: scanning {len(ports_pass1)} ports "
-          f"(dispatcher 32XX, gateway 33XX, SAPHostControl) ...")
+          f"(dispatcher 32XX, SAPHostControl) ...")
     t0 = time.time()
     hits1 = _do_scan(ports_pass1)
     if _cancelled():
@@ -480,23 +480,27 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
         return result
     result["has_sap"] = len(result["open_ports"]) > 0
 
-    # Pass 2: HANA SQL ports — only if SAP was found
+    # Pass 2: Gateway + HANA SQL ports — only for discovered instances
     if result["has_sap"] and not _cancelled():
-        # Scan HANA ports for all instances in range
-        hana_ports = []
-        for inst_nr in range(instance_range[0], instance_range[1] + 1):
-            inst_str = f"{inst_nr:02d}"
-            hana_ports.append((30000 + inst_nr * 100 + 13, "hana_sql", inst_str))
-            hana_ports.append((30000 + inst_nr * 100 + 15, "hana_sql", inst_str))
+        found_instances = sorted(set(
+            v["instance_nr"] for v in result["open_ports"].values()
+            if v["instance_nr"] != "XX"
+        ))
+        pass2_ports = []
+        for inst_str in found_instances:
+            inst_nr = int(inst_str)
+            pass2_ports.append((3300 + inst_nr, "gateway", inst_str))
+            pass2_ports.append((30000 + inst_nr * 100 + 13, "hana_sql", inst_str))
+            pass2_ports.append((30000 + inst_nr * 100 + 15, "hana_sql", inst_str))
 
-        print(f"[*]     Pass 2: scanning {len(hana_ports)} HANA SQL ports "
-              f"(3XX13/3XX15) ...")
+        print(f"[*]     Pass 2: scanning {len(pass2_ports)} ports "
+              f"(gateway 33XX, HANA 3XX13/3XX15) for {len(found_instances)} instance(s) ...")
         t0 = time.time()
-        hits2 = _do_scan(hana_ports)
+        hits2 = _do_scan(pass2_ports)
         if not _cancelled():
             result["open_ports"].update(hits2)
             print(f"[*]     Pass 2 done in {time.time() - t0:.1f}s — "
-                  f"{len(hits2)} HANA port(s) open")
+                  f"{len(hits2)} port(s) open")
 
     return result
 
@@ -531,7 +535,7 @@ def fast_scan_network(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RA
     print(f"[*] Targets: {total} hosts")
     print(f"[*] Ports per host: {num_ports} "
           f"(instances {instance_range[0]:02d}-{instance_range[1]:02d}, "
-          f"dispatcher 32XX + gateway 33XX)")
+          f"dispatcher 32XX)")
     print(f"[*] Timeout: {timeout}s, Threads: {threads}")
 
     scan_start = time.time()
