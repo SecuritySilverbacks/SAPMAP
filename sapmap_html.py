@@ -382,6 +382,8 @@ body {
   <div class="ctx-item" data-action="findings">&#128203; View SAPology Findings</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="credentials">&#128273; Provide Credentials</div>
+  <div class="ctx-item" data-action="rfc_system_info">&#128225; RFC System Info</div>
+  <div class="ctx-item" data-action="check_gw">&#128270; Check GW Vulnerability</div>
   <div class="ctx-item" data-action="create_user_gw">&#128100; Create User (GW Exploit)</div>
   <div class="ctx-item" data-action="create_user_creds">&#128100; Create User (via Credentials)</div>
   <div class="ctx-sep"></div>
@@ -1031,6 +1033,7 @@ function showCtxMenu(e, sid) {
   // Determine node capabilities
   const hasCreds = n && ((n.credentials || []).length > 0 || (n.created_users || []).length > 0 || n.pwned);
   const hasGwVuln = n && n.gw_vulnerable;
+  const hasGwPort = n && (n.instances || []).some(i => Object.entries(i.ports || {}).some(([p,s]) => s === 'gateway' || (p >= 3300 && p <= 3399)));
   const hasFindings = n && (n.findings || []).length > 0;
   const hasCreatedUsers = n && (n.created_users || []).length > 0;
   const hasRFCs = (mapState.connections || []).some(c => c.source_sid === sid);
@@ -1041,6 +1044,8 @@ function showCtxMenu(e, sid) {
     'details':          true,                       // always available
     'findings':         true,                       // always (shows "no findings" if empty)
     'credentials':      true,                       // always available
+    'rfc_system_info':  hasGwPort,                   // need a gateway port
+    'check_gw':         hasGwPort,                   // need a gateway port
     'create_user_gw':   hasGwVuln,                  // need GW vulnerability
     'create_user_creds': hasCreds,                  // need credentials
     'deep_scan':        true,                       // always available
@@ -1057,6 +1062,8 @@ function showCtxMenu(e, sid) {
 
   // Tooltip hints for disabled items
   const hints = {
+    'rfc_system_info':  'No gateway port detected',
+    'check_gw':         'No gateway port detected',
     'create_user_gw':   'Requires a vulnerable RFC Gateway',
     'create_user_creds': 'Provide credentials first',
     'retrieve_rfcs':    'Provide credentials or create a user first',
@@ -1108,6 +1115,10 @@ async function ctxAction(action) {
     case 'details': showDetails(sid); break;
     case 'findings': showFindings(sid); break;
     case 'credentials': showCredModal(sid); break;
+    case 'rfc_system_info':
+      await api('POST', `node/${sid}/rfc_system_info`); break;
+    case 'check_gw':
+      await api('POST', `node/${sid}/check_gw`); break;
     case 'create_user_gw':
       await api('POST', `node/${sid}/create_user`, { method: 'gw_exploit' }); break;
     case 'create_user_creds':

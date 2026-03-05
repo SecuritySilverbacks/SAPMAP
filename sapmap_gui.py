@@ -313,6 +313,60 @@ def create_app(api: SAPMAPApi) -> Bottle:
             print(f"[*] System type for {sid} set to: {new_type}")
         return json.dumps({"status": "ok"})
 
+    @app.route("/api/node/<sid>/rfc_system_info", method="POST")
+    def node_rfc_system_info(sid):
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        def _run():
+            # Find gateway port
+            gw_port = None
+            for inst in node.instances:
+                for port, svc in inst.ports.items():
+                    if svc == "gateway" or (3300 <= port <= 3399):
+                        gw_port = port
+                        break
+                if gw_port:
+                    break
+            if not gw_port:
+                print(f"[-] No gateway port found for {node.sid}")
+                return
+            info = sapmap_scanner.enrich_system_info(
+                node.ip or node.hostname, gw_port)
+            # Update node with retrieved info
+            if info.get("sid") and not node.sid.startswith("UNK"):
+                pass  # keep existing SID
+            elif info.get("sid"):
+                node.sid = info["sid"]
+            if info.get("hostname"):
+                node.hostname = info["hostname"]
+            if info.get("os_type"):
+                node.os_type = info["os_type"]
+            if info.get("db_type"):
+                node.db_type = info["db_type"]
+            if info.get("kernel"):
+                node.kernel = info["kernel"]
+            if info.get("sap_release"):
+                node.sap_release = info["sap_release"]
+
+        threading.Thread(target=_run, daemon=True).start()
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/check_gw", method="POST")
+    def node_check_gw(sid):
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        def _run():
+            sapmap_exploit.check_gw_vulnerable(node)
+
+        threading.Thread(target=_run, daemon=True).start()
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/create_user", method="POST")
     def node_create_user(sid):
         response.content_type = "application/json"
