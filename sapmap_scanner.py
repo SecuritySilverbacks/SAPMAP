@@ -410,7 +410,7 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
         QUICK_PORTS = list(range(3200, 3300)) + [3300, 3301, 8000, 50013, 1128]
         quick_timeout = min(timeout, 1.5)
         quick_hit = False
-        qe = ThreadPoolExecutor(max_workers=len(QUICK_PORTS))
+        qe = ThreadPoolExecutor(max_workers=min(len(QUICK_PORTS), 20))
         qf = [qe.submit(_scan_port, host, p, quick_timeout) for p in QUICK_PORTS]
         for f in as_completed(qf):
             if cancel_event and cancel_event.is_set():
@@ -569,7 +569,11 @@ def fast_scan_network(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RA
     completed = [0]
     completed_lock = threading.Lock()
 
+    # Auto-scale concurrency: for small target lists, limit parallel hosts
+    # to avoid overwhelming the network with too many simultaneous connections
     max_parallel = max(concurrent_hosts, 1)
+    if host_count <= 10:
+        max_parallel = min(max_parallel, 2)
     print(f"[*] SAP port scanning {host_count} alive hosts "
           f"({max_parallel} concurrent, {port_threads} threads/host, "
           f"port timeout={port_timeout}s) ...")
@@ -579,7 +583,7 @@ def fast_scan_network(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RA
             return
         print(f"[*]   [{idx+1}/{host_count}] Scanning {host} ...")
         r = fast_scan_host(host, instance_range, port_timeout, port_threads,
-                           cancel_event, skip_quick_check=(host_count <= 3))
+                           cancel_event, skip_quick_check=(host_count <= 10))
         if cancel_event and cancel_event.is_set():
             return
         with completed_lock:
