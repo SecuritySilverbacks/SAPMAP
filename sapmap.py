@@ -35,7 +35,8 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from sapmap_gui import SAPMAPApi, OutputCapture, create_app
-from sapmap_state import load_state, save_state, auto_save_path, load_rfc_cache_into
+from sapmap_state import (load_state, save_state, auto_save_path,
+                          load_rfc_cache_into, load_created_destinations_into)
 import sapmap_rfc
 
 
@@ -111,8 +112,9 @@ def main():
             print(f"[-] Could not load state: {e}")
             sys.exit(1)
     else:
-        # Load persistent RFC cache
+        # Load persistent RFC cache and created destinations
         load_rfc_cache_into(api.state)
+        load_created_destinations_into(api.state)
 
     # CLI-only scan mode
     if args.targets:

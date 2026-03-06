@@ -679,6 +679,18 @@ def create_app(api: SAPMAPApi) -> Bottle:
             dest_name = result["dest_name"]
             print(f"[+] Created: {dest_name} on {sid}")
 
+            # Track for cleanup (in-memory + persistent file)
+            entry = {
+                "dest_name": dest_name,
+                "source_sid": sid,
+                "target_sid": target_sid,
+                "target_host": tgt_host,
+                "gw_port": gw_port,
+                "created_at": datetime.now().isoformat(),
+            }
+            api.state.created_destinations.append(entry)
+            state_mgr.save_created_destination(entry)
+
             # Test the destination with /SDF/RFC_CHECK
             print(f"[*] Testing {dest_name} with /SDF/RFC_CHECK...")
             check = sapmap_rfc.test_rfc_destination(
@@ -840,6 +852,17 @@ def create_app(api: SAPMAPApi) -> Bottle:
         response.content_type = "application/json"
         users = sapmap_cleanup.list_created_users(api.state)
         return json.dumps({"users": users})
+
+    @app.route("/api/actions/created_destinations")
+    def actions_created_destinations():
+        response.content_type = "application/json"
+        return json.dumps({"destinations": api.state.created_destinations})
+
+    @app.route("/api/actions/clear_created_destinations", method="POST")
+    def actions_clear_created_destinations():
+        response.content_type = "application/json"
+        state_mgr.clear_created_destinations(api.state)
+        return json.dumps({"status": "ok"})
 
     # -- State save/load --
     @app.route("/api/state/save", method="POST")

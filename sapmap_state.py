@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 # Default state directory
 STATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "states")
 RFC_CACHE_FILE = os.path.join(STATE_DIR, ".sapmap_rfc_cache.json")
+DEST_LOG_FILE = os.path.join(STATE_DIR, ".sapmap_created_destinations.json")
 
 
 def _ensure_state_dir():
@@ -152,6 +153,58 @@ def reset_rfc_cache(state: SAPMAPState) -> None:
         print("[+] RFC check cache has been reset")
     except Exception as e:
         logger.warning(f"Could not remove RFC cache file: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Persistent created TCP/IP destinations log (survives across sessions)
+# ---------------------------------------------------------------------------
+
+def save_created_destination(entry: dict) -> None:
+    """Append a created TCP/IP destination to the persistent log."""
+    _ensure_state_dir()
+    try:
+        dests = _load_dest_log()
+        dests.append(entry)
+        with open(DEST_LOG_FILE, "w", encoding="utf-8") as f:
+            json.dump(dests, f, indent=2, default=str)
+    except Exception as e:
+        logger.warning(f"Could not persist destination log: {e}")
+
+
+def _load_dest_log() -> list:
+    """Load the persistent created destinations log."""
+    try:
+        if os.path.exists(DEST_LOG_FILE):
+            with open(DEST_LOG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                return data
+    except Exception as e:
+        logger.warning(f"Could not load destination log: {e}")
+    return []
+
+
+def load_created_destinations_into(state: SAPMAPState) -> None:
+    """Load the persistent destinations log into a state object."""
+    dests = _load_dest_log()
+    existing = {d["dest_name"] for d in state.created_destinations}
+    for d in dests:
+        if d.get("dest_name") not in existing:
+            state.created_destinations.append(d)
+    if dests:
+        logger.info(f"Loaded {len(dests)} entries from persistent destinations log")
+        print(f"[*] Loaded {len(state.created_destinations)} created TCP/IP destination(s) from previous sessions")
+
+
+def clear_created_destinations(state: SAPMAPState) -> None:
+    """Clear the created destinations list (both in-memory and on disk)."""
+    state.created_destinations.clear()
+    try:
+        if os.path.exists(DEST_LOG_FILE):
+            os.remove(DEST_LOG_FILE)
+        print("[+] Created TCP/IP destinations list has been cleared")
+    except Exception as e:
+        logger.warning(f"Could not remove destinations log file: {e}")
 
 
 def auto_save_path() -> str:

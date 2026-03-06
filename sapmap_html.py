@@ -277,6 +277,8 @@ body {
       <div class="dd-item" onclick="viewRFCCache()">&#128203; View RFC Check List</div>
       <div class="dd-sep"></div>
       <div class="dd-item" onclick="showCreatedUsers()">&#128203; View Created Users</div>
+      <div class="dd-item" onclick="showCreatedDestinations()">&#128203; View Created TCP/IP Destinations</div>
+      <div class="dd-item" onclick="clearCreatedDestinations()">&#128465; Clear TCP/IP Destinations List</div>
       <div class="dd-sep"></div>
       <div class="dd-item" onclick="showAddSystemModal()">&#10133; Add System Manually</div>
     </div>
@@ -1538,6 +1540,22 @@ async function showCreatedUsers() {
   const users = res.users || [];
   alert(users.length === 0 ? 'No users created yet.' :
     users.map(u => `${u.username} @ ${u.sid} (${u.method})`).join('\n'));
+}
+
+async function showCreatedDestinations() {
+  const res = await api('GET', 'actions/created_destinations');
+  const dests = res.destinations || [];
+  if (dests.length === 0) { alert('No TCP/IP destinations created yet.'); return; }
+  const lines = dests.map(d => {
+    const ts = d.created_at ? d.created_at.replace('T', ' ').substring(0, 19) : '?';
+    return `${d.dest_name}  on ${d.source_sid} → ${d.target_sid} (${d.target_host}:${d.gw_port})  [${ts}]`;
+  });
+  alert(`Created TCP/IP Destinations (${dests.length}):\n\n` + lines.join('\n'));
+}
+
+async function clearCreatedDestinations() {
+  if (confirm('Clear the list of created TCP/IP destinations? This only clears the tracking list, not the actual destinations on the SAP systems.'))
+    await api('POST', 'actions/clear_created_destinations');
 }
 
 // --- Save/Load ---

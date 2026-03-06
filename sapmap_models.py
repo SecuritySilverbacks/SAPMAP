@@ -387,6 +387,7 @@ class SAPMAPState:
     nodes: dict = field(default_factory=dict)           # sid -> SAPNode
     connections: list = field(default_factory=list)      # [RFCConnection, ...]
     created_users: list = field(default_factory=list)    # global [CreatedUser, ...]
+    created_destinations: list = field(default_factory=list)  # [{dest_name, source_sid, target_sid, ...}]
     rfc_check_cache: dict = field(default_factory=dict)  # {dest_name: result_dict}
     scan_config: dict = field(default_factory=dict)
     timestamp: str = ""
@@ -512,6 +513,7 @@ class SAPMAPState:
             "nodes": {sid: node.to_dict() for sid, node in self.nodes.items()},
             "connections": [c.to_dict() for c in self.connections],
             "created_users": [u.to_dict() for u in self.created_users],
+            "created_destinations": self.created_destinations,
             "rfc_check_cache": self.rfc_check_cache,
         }
 
@@ -527,6 +529,7 @@ class SAPMAPState:
             state.nodes[sid] = SAPNode.from_dict(node_d)
         state.connections = [RFCConnection.from_dict(c) for c in d.get("connections", [])]
         state.created_users = [CreatedUser.from_dict(u) for u in d.get("created_users", [])]
+        state.created_destinations = d.get("created_destinations", [])
         return state
 
     def to_json(self, indent: int = 2) -> str:
