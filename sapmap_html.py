@@ -538,6 +538,23 @@ body {
   </div>
 </div>
 
+<!-- Propagate Target Picker Modal -->
+<div class="modal-overlay" id="propagate-modal">
+  <div class="modal">
+    <h3>&#128640; Propagate to Next Hop</h3>
+    <div id="propagate-source-info" style="font-size:12px;color:#8b949e;margin-bottom:12px"></div>
+    <div class="form-row">
+      <label>Target System</label>
+      <select id="propagate-target"></select>
+    </div>
+    <div id="propagate-hint" style="font-size:11px;color:#8b949e;margin-top:4px"></div>
+    <div class="form-actions">
+      <button class="btn btn-primary" onclick="doPropagateTarget()">Propagate</button>
+      <button class="btn" onclick="closeModal('propagate-modal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <!-- Hidden file picker for Load State -->
 <input type="file" id="file-picker" accept=".sapmap,.json" style="display:none" onchange="handleFileLoad(this)">
 
@@ -1214,8 +1231,7 @@ async function ctxAction(action) {
     case 'download_table':
       document.getElementById('table-modal').classList.add('visible'); break;
     case 'create_tcpip': showTcpipModal(sid); break;
-    case 'propagate':
-      await api('POST', `node/${sid}/propagate`); break;
+    case 'propagate': showPropagateModal(sid); break;
     case 'cleanup':
       if (confirm(`Delete SAPMAP00 user from ${sid}?`))
         await api('POST', `node/${sid}/cleanup`);
@@ -1506,6 +1522,68 @@ async function createTcpipDest() {
   if (!targetSid) { alert('Select a target system'); return; }
   closeModal('tcpip-modal');
   await api('POST', `node/${selectedNodeSid}/create_tcpip_dest`, { target_sid: targetSid });
+  startPolling();
+}
+
+function showPropagateModal(sid) {
+  document.getElementById('propagate-source-info').textContent = `Source: ${sid}`;
+  const sel = document.getElementById('propagate-target');
+  sel.innerHTML = '';
+  const nodes = mapState.nodes || {};
+  const conns = mapState.connections || [];
+
+  // Build list of reachable targets from this source
+  const targets = {};
+  for (const c of conns) {
+    if (c.source_sid !== sid) continue;
+    if (!c.target_sid || c.target_sid === sid) continue;
+    const tgt = nodes[c.target_sid];
+    if (!tgt) continue;
+    if (tgt.pwned) continue;  // already pwned
+    const key = c.target_sid;
+    if (!targets[key]) targets[key] = { sid: key, methods: [] };
+    if (c.sapxpg_remote_works) {
+      targets[key].methods.push(`TCP/IP: ${c.destination_name}`);
+    } else if (c.logon_successful && c.has_sap_all) {
+      targets[key].methods.push(`RFC+SAP_ALL: ${c.destination_name}`);
+    } else if (c.logon_successful) {
+      targets[key].methods.push(`RFC Logon OK: ${c.destination_name}`);
+    }
+  }
+  // Also add GW-vulnerable targets that are on the map
+  for (const s in nodes) {
+    if (s === sid) continue;
+    const n = nodes[s];
+    if (n.pwned) continue;
+    if (n.gw_vulnerable && !targets[s]) {
+      targets[s] = { sid: s, methods: ['GW Vulnerable'] };
+    } else if (n.gw_vulnerable && targets[s]) {
+      targets[s].methods.push('GW Vulnerable');
+    }
+  }
+
+  if (Object.keys(targets).length === 0) {
+    alert('No exploitable targets found.\\n\\nNeed: RFC Type 3 with SAP_ALL, TCP/IP with ping OK, or vulnerable gateway on a target system.');
+    return;
+  }
+
+  for (const key in targets) {
+    const t = targets[key];
+    const n = nodes[t.sid];
+    const host = n ? (n.ip || n.hostname || '?') : '?';
+    const methods = t.methods.length ? ` [${t.methods.join(', ')}]` : '';
+    sel.innerHTML += `<option value="${t.sid}">${t.sid} (${host})${methods}</option>`;
+  }
+  document.getElementById('propagate-hint').textContent =
+    'Select a target system to create a SAPMAP user on. ' +
+    'Tries BAPI first, then SXPG over TCP/IP, then GW exploit.';
+  document.getElementById('propagate-modal').classList.add('visible');
+}
+async function doPropagateTarget() {
+  const targetSid = document.getElementById('propagate-target').value;
+  if (!targetSid) { alert('Select a target system'); return; }
+  closeModal('propagate-modal');
+  await api('POST', `node/${selectedNodeSid}/propagate`, { target_sid: targetSid });
   startPolling();
 }
 

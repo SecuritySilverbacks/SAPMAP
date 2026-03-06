@@ -730,12 +730,16 @@ def create_app(api: SAPMAPApi) -> Bottle:
     @app.route("/api/node/<sid>/propagate", method="POST")
     def node_propagate(sid):
         response.content_type = "application/json"
+        data = request.json or {}
         node = api.state.get_node(sid)
         if not node:
             return json.dumps({"error": f"Node {sid} not found"})
+        target_sid = data.get("target_sid", None)
 
         def _run():
-            sapmap_exploit.propagate_from_node(node, api.state)
+            sapmap_exploit.propagate_from_node(
+                node, api.state, target_sid=target_sid
+            )
 
         threading.Thread(target=_run, daemon=True).start()
         return json.dumps({"status": "started"})
