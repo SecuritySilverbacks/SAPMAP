@@ -499,7 +499,7 @@ body {
 
 <!-- Add System Modal -->
 <div class="modal-overlay" id="add-system-modal">
-  <div class="modal">
+  <div class="modal" onkeydown="if(event.key==='Enter'){event.preventDefault();addSystem();}">
     <h3>&#10133; Add System Manually</h3>
     <div class="form-row">
       <label>SID (3 letters)</label>
