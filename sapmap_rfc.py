@@ -643,7 +643,7 @@ def ping_rfc_destination(node: SAPNode, destination_name: str,
             msg = check_result.get("EV_PING_MESSAGE", "").strip()
             status = str(check_result.get("EV_PING_STATUS", "")).strip()
             result["ping_message"] = msg
-            result["ping_ok"] = status == "1" or bool(msg)
+            result["ping_ok"] = status == "1"
     except Exception as e:
         result["error"] = str(e)
 
@@ -652,10 +652,11 @@ def ping_rfc_destination(node: SAPNode, destination_name: str,
 
 def get_remote_sysinfo(node: SAPNode, destination_name: str,
                        creds: Credentials = None) -> dict:
-    """Get remote system info via RFC_SYSTEM_INFO with DESTINATION.
+    """Get remote system info via RFC_GET_SYSTEM_INFO with DESTINATION.
 
-    Calls RFC_SYSTEM_INFO on the source system with DESTINATION parameter
-    to retrieve the remote system's SID, hostname, etc.
+    Calls RFC_GET_SYSTEM_INFO on the source system with DESTINATION
+    parameter to retrieve the remote system's SID, hostname, etc.
+    Output is in RFCSI_EXPORT field RFCSYSID.
 
     Returns dict with: sid, hostname, ip, error
     """
@@ -664,7 +665,7 @@ def get_remote_sysinfo(node: SAPNode, destination_name: str,
     try:
         with _get_connection(node, creds) as conn:
             info = conn.call(
-                "RFC_SYSTEM_INFO",
+                "RFC_GET_SYSTEM_INFO",
                 DESTINATION=destination_name,
             )
             export = info.get("RFCSI_EXPORT", {})
