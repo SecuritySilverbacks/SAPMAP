@@ -13,15 +13,17 @@ into pure Python templates usable by the exploitation engine.
 SAPMAP_USER_PREFIX = "SAPMAP"
 SAPMAP_USER_MAX = 99   # SAPMAP00 .. SAPMAP99
 
-# Pre-generated password hashes for user SAPMAP00 with password "andinyougo"
+# Password for SAPMAP00 — used for all creation methods (BAPI, GW exploit, SXPG).
+SAPMAP_PASSWORD = "Andinyougo123!"
+# Legacy aliases — point to the single password for backward compat.
+SAPMAP_PASSWORD_ABAP = SAPMAP_PASSWORD
+SAPMAP_PASSWORD_BAPI = SAPMAP_PASSWORD
+
+# Pre-generated password hashes for user SAPMAP00 with password "Andinyougo123!"
 # Note: SAP hashes are username-dependent — these are ONLY valid for SAPMAP00.
-# Used by the GW exploit (direct DB insert).
-SAPMAP_PASSWORD_ABAP = "andinyougo"
-SAPMAP_PASSWORD_JAVA = "Andinyoug0"
-# Password for BAPI-based user creation (must meet SAP password policies).
-SAPMAP_PASSWORD_BAPI = "Andinyougo123!"
+# Used by the GW exploit and SXPG exploit (direct DB insert).
 BCODE_HEX = "3E6632FB15070BA1"
-PASSCODE_HEX = "1C6BB7A000D12A1F250D58C3B5A1674D0A716D19"
+PASSCODE_HEX = "1C21FA470B3D34F6FC60A4CD27D17473FB6AA9E6"
 
 # User type S = System / Service user (no dialog logon restrictions apply)
 USER_TYPE = "S"
