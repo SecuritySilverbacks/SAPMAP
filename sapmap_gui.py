@@ -64,6 +64,21 @@ def _derive_sid(destination_name: str, host: str) -> str:
     return h[:3] if len(h) >= 3 else "UNK"
 
 
+def _resolve_host(host: str) -> str:
+    """Resolve a hostname to an IP address. Returns '' on failure."""
+    import socket
+    # If it already looks like an IP, return as-is
+    try:
+        socket.inet_aton(host)
+        return host
+    except socket.error:
+        pass
+    try:
+        return socket.gethostbyname(host)
+    except socket.gaierror:
+        return ""
+
+
 # ===========================================================================
 # Console line buffer (same pattern as SAPology GUI)
 # ===========================================================================
@@ -519,41 +534,93 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     api.state.add_connection(conn)
                     discovered[key] = conn.destination_name
 
-                    # Auto-add system to map if not already present
-                    if not api.state.find_node_by_host(
-                            hostname=host, ip=host):
-                        # Derive SID from destination name or use host
-                        dest_sid = _derive_sid(
-                            conn.destination_name, host)
-                        # Ensure SID is unique on the map
-                        base_sid = dest_sid
-                        counter = 1
-                        while api.state.get_node(dest_sid):
-                            dest_sid = f"{base_sid}{counter}"
-                            counter += 1
+                    # Resolve hostname to IP for dedup
+                    resolved_ip = _resolve_host(host)
+
+                    # Check if this resolves to an existing node
+                    existing = (
+                        api.state.find_node_by_host(
+                            hostname=host, ip=host) or
+                        (api.state.find_node_by_host(ip=resolved_ip)
+                         if resolved_ip else None)
+                    )
+
+                    if existing:
+                        # Same system already on map
+                        conn.target_sid = existing.sid
+                        api.state.add_connection(conn)
+                        if existing.sid == node.sid:
+                            print(f"[*] {conn.destination_name}: "
+                                  f"resolves to self ({node.sid})")
+                        else:
+                            print(f"[*] {conn.destination_name}: "
+                                  f"maps to existing {existing.sid}")
+                    else:
+                        # New system — get real SID
+                        print(f"[*] Getting remote SID via "
+                              f"RFC_SYSTEM_INFO DESTINATION "
+                              f"'{conn.destination_name}'...")
+                        sysinfo = sapmap_rfc.get_remote_sysinfo(
+                            node, conn.destination_name, creds)
+                        dest_sid = sysinfo.get("sid", "").strip()
+                        remote_host = (
+                            sysinfo.get("hostname", "").strip()
+                            or host)
+                        if dest_sid:
+                            print(f"[+] Remote SID: {dest_sid}")
+                        else:
+                            dest_sid = _derive_sid(
+                                conn.destination_name, host)
+                            print(f"[*] Could not get remote SID, "
+                                  f"using derived: {dest_sid}")
+
+                        # Check if a node with this SID exists
+                        existing_sid_node = api.state.get_node(
+                            dest_sid)
+                        if existing_sid_node:
+                            # Same SID on map — check if same system
+                            existing_ips = existing_sid_node.all_ips()
+                            check_ip = resolved_ip or host
+                            if check_ip in existing_ips:
+                                # Same system (hostname resolved to
+                                # same IP)
+                                conn.target_sid = dest_sid
+                                api.state.add_connection(conn)
+                                print(f"[*] {conn.destination_name}:"
+                                      f" same system as {dest_sid} "
+                                      f"(IP match: {check_ip})")
+                                continue
+                            else:
+                                # Different system, same SID — append
+                                # number
+                                base_sid = dest_sid
+                                counter = 1
+                                while api.state.get_node(dest_sid):
+                                    dest_sid = (f"{base_sid}"
+                                                f"{counter}")
+                                    counter += 1
+                                print(f"[*] SID {base_sid} already "
+                                      f"on map with different IP, "
+                                      f"using {dest_sid}")
+
+                        use_ip = resolved_ip or host
                         ports = {
                             int(f"32{inst}"): "dispatcher",
                             int(f"33{inst}"): "gateway",
                         }
                         new_inst = InstanceInfo(
-                            instance_nr=inst, ip=host, ports=ports)
+                            instance_nr=inst, ip=use_ip,
+                            ports=ports)
                         new_node = SAPNode(
-                            sid=dest_sid, ip=host,
-                            hostname=host,
+                            sid=dest_sid, ip=use_ip,
+                            hostname=remote_host,
                             instances=[new_inst])
                         api.state.add_node(new_node)
                         conn.target_sid = dest_sid
                         api.state.add_connection(conn)
                         print(f"[+] Discovered system {dest_sid} "
-                              f"({host}, inst {inst}) — "
-                              f"added to map")
-                    else:
-                        # System exists, link the connection
-                        existing = api.state.find_node_by_host(
-                            hostname=host, ip=host)
-                        if existing and not conn.target_sid:
-                            conn.target_sid = existing.sid
-                            api.state.add_connection(conn)
+                              f"({remote_host}/{use_ip}, "
+                              f"inst {inst}) — added to map")
                 else:
                     print(f"[-] {conn.destination_name}: not reachable"
                           f"{' — ' + ping['error'][:60] if ping['error'] else ''}")

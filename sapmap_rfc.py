@@ -650,6 +650,33 @@ def ping_rfc_destination(node: SAPNode, destination_name: str,
     return result
 
 
+def get_remote_sysinfo(node: SAPNode, destination_name: str,
+                       creds: Credentials = None) -> dict:
+    """Get remote system info via RFC_SYSTEM_INFO with DESTINATION.
+
+    Calls RFC_SYSTEM_INFO on the source system with DESTINATION parameter
+    to retrieve the remote system's SID, hostname, etc.
+
+    Returns dict with: sid, hostname, ip, error
+    """
+    result = {"sid": "", "hostname": "", "ip": "", "error": ""}
+
+    try:
+        with _get_connection(node, creds) as conn:
+            info = conn.call(
+                "RFC_SYSTEM_INFO",
+                DESTINATION=destination_name,
+            )
+            export = info.get("RFCSI_EXPORT", {})
+            if isinstance(export, dict):
+                result["sid"] = (export.get("RFCSYSID", "") or "").strip()
+                result["hostname"] = (export.get("RFCHOST", "") or "").strip()
+    except Exception as e:
+        result["error"] = str(e)
+
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Retrieve RFC connections (via RSRFCCHK)
 # ---------------------------------------------------------------------------
