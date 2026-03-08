@@ -744,6 +744,28 @@ def create_app(api: SAPMAPApi) -> Bottle:
         threading.Thread(target=_run, daemon=True).start()
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/create_user_via_rfc", method="POST")
+    def node_create_user_via_rfc(sid):
+        """Create a remote user on a target system via a specific RFC destination."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        dest_name = data.get("destination_name", "")
+        target_sid = data.get("target_sid", "")
+        if not dest_name or not target_sid:
+            return json.dumps({"error": "destination_name and target_sid required"})
+
+        def _run():
+            sapmap_exploit.propagate_from_node(
+                node, api.state, target_sid=target_sid,
+                destination_name=dest_name
+            )
+
+        threading.Thread(target=_run, daemon=True).start()
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/cleanup", method="POST")
     def node_cleanup(sid):
         response.content_type = "application/json"

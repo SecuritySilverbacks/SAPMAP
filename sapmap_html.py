@@ -1321,7 +1321,9 @@ function showConnInfo(e, connIdx) {
     <div class="info-section">
       <div class="info-row"><span class="info-label">Risk:</span><span class="info-val"><span class="risk-badge ${riskClass}">${risk}</span></span></div>
     </div>
-    <div style="text-align:right;margin-top:8px;display:flex;gap:6px;justify-content:flex-end">
+    <div style="text-align:right;margin-top:8px;display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">
+      ${(!isTypeT && conn.logon_successful && conn.has_sap_all && conn.target_sid) ?
+        `<button class="btn" style="background:#b33;color:#fff" onclick="createUserViaRfc('${escHtml(conn.source_sid)}','${escHtml(conn.destination_name)}','${escHtml(conn.target_sid)}')">Create Remote User</button>` : ''}
       <button class="btn" onclick="testSingleRfc('${escHtml(conn.source_sid)}','${escHtml(conn.destination_name)}',${connIdx})">Test Connection</button>
       <button class="btn" onclick="document.getElementById('info-panel').classList.remove('visible')">Close</button>
     </div>
@@ -1343,6 +1345,15 @@ async function testSingleRfc(sid, destName, connIdx) {
       showConnInfo(fakeEvent, connIdx);
     }
   }, 3000);
+}
+
+async function createUserViaRfc(sourceSid, destName, targetSid) {
+  document.getElementById('info-panel').classList.remove('visible');
+  await api('POST', `node/${sourceSid}/create_user_via_rfc`, {
+    destination_name: destName,
+    target_sid: targetSid
+  });
+  startPolling();
 }
 
 // --- Detail panel ---
