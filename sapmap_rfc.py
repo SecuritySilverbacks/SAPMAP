@@ -624,6 +624,32 @@ def test_rfc_destination(node: SAPNode, destination_name: str,
     return result
 
 
+def ping_rfc_destination(node: SAPNode, destination_name: str,
+                         creds: Credentials = None) -> dict:
+    """Ping-only check of an RFC destination via /SDF/RFC_CHECK.
+
+    Only sends IV_PING=X (no logon attempt).
+    Returns dict with: ping_ok, ping_message, error
+    """
+    result = {"ping_ok": False, "ping_message": "", "error": ""}
+
+    try:
+        with _get_connection(node, creds) as conn:
+            check_result = conn.call(
+                RFC_CHECK_FM,
+                IV_DESTINATION=destination_name,
+                IV_PING="X",
+            )
+            msg = check_result.get("EV_PING_MESSAGE", "").strip()
+            status = str(check_result.get("EV_PING_STATUS", "")).strip()
+            result["ping_message"] = msg
+            result["ping_ok"] = status == "1" or bool(msg)
+    except Exception as e:
+        result["error"] = str(e)
+
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Retrieve RFC connections (via RSRFCCHK)
 # ---------------------------------------------------------------------------

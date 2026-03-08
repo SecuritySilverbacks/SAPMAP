@@ -25,6 +25,45 @@ import sapmap_exploit
 import sapmap_cleanup
 import sapmap_state as state_mgr
 
+def _derive_sid(destination_name: str, host: str) -> str:
+    """Derive a SID from an RFC destination name or hostname.
+
+    Common patterns: DEST_SID, SID_DEST, PREFIX_SID_SUFFIX.
+    Falls back to first 3 chars of hostname uppercased.
+    """
+    import re
+    name = destination_name.upper().strip()
+    # Try to extract a 3-char alphanumeric segment that looks like a SID
+    # Skip common prefixes: SAP, RFC, SM_, SAPMAP_, SAPHOUND_
+    cleaned = re.sub(r'^(SAPMAP_|SAPHOUND_|SAP_|RFC_|SM_)', '', name)
+    parts = re.split(r'[_\-]', cleaned)
+    skip = {'TO', 'IN', 'OF', 'ON', 'AT', 'BY', 'CLNT', 'DEST',
+            'CONN', 'TEST', 'PROD', 'DEV', 'QAS'}
+    # Prefer 3-char segments first
+    for p in parts:
+        p = p.strip()
+        if len(p) == 3 and p.isalnum() and not p.isdigit() and p not in skip:
+            return p
+    for p in parts:
+        p = p.strip()
+        if 2 <= len(p) <= 4 and p.isalnum() and not p.isdigit() and p not in skip:
+            return p[:3]
+    # Try to extract a 3-char SID from longer segments (e.g. S4HCLNT001)
+    for p in parts:
+        p = p.strip()
+        if len(p) > 4:
+            candidate = p[:3]
+            if candidate.isalnum() and not candidate.isdigit():
+                return candidate
+    # Fallback: use host
+    h = host.upper().replace('.', '_').replace('-', '_')
+    parts = h.split('_')
+    for p in parts:
+        if 2 <= len(p) <= 4 and p.isalnum() and not p.isdigit():
+            return p[:3]
+    return h[:3] if len(h) >= 3 else "UNK"
+
+
 # ===========================================================================
 # Console line buffer (same pattern as SAPology GUI)
 # ===========================================================================
@@ -420,9 +459,14 @@ def create_app(api: SAPMAPApi) -> Bottle:
         def _run():
             creds = node.best_credentials()
             conns = sapmap_rfc.retrieve_rfc_connections(node, creds)
+            print(f"[+] Retrieved {len(conns)} RFC connections from {sid}")
+
+            # Track discovered systems to avoid duplicate pings
+            # Key: (host, instance_nr) → dest_name for dedup
+            discovered = {}
+
             for conn in conns:
-                # Detect self-referencing RFC destinations:
-                # empty host, 'localhost', own hostname, or own IP
+                # Detect self-referencing RFC destinations
                 th = (conn.target_host or '').strip().lower()
                 ti = (conn.target_ip or '').strip()
                 own_names = {s.lower() for s in [
@@ -441,7 +485,85 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     if target:
                         conn.target_sid = target.sid
                 api.state.add_connection(conn)
-            print(f"[+] Added {len(conns)} connections from {sid}")
+
+            # Ping each non-self connection and auto-discover systems
+            non_self = [c for c in conns
+                        if c.target_sid != sid and c.target_host]
+
+            if non_self:
+                print(f"[*] Pinging {len(non_self)} remote RFC destinations...")
+
+            for conn in non_self:
+                host = conn.target_host or conn.target_ip or ""
+                inst = conn.target_instance_nr or "00"
+                key = (host.lower(), inst)
+
+                if key in discovered:
+                    # Already pinged this host+instance, reuse result
+                    conn.ping_ok = True
+                    conn.tested = True
+                    api.state.add_connection(conn)
+                    continue
+
+                print(f"[*] Ping {conn.destination_name} → "
+                      f"{host}...")
+                ping = sapmap_rfc.ping_rfc_destination(
+                    node, conn.destination_name, creds
+                )
+
+                if ping["ping_ok"]:
+                    print(f"[+] {conn.destination_name}: alive "
+                          f"({ping['ping_message'][:60]})")
+                    conn.ping_ok = True
+                    conn.tested = True
+                    api.state.add_connection(conn)
+                    discovered[key] = conn.destination_name
+
+                    # Auto-add system to map if not already present
+                    if not api.state.find_node_by_host(
+                            hostname=host, ip=host):
+                        # Derive SID from destination name or use host
+                        dest_sid = _derive_sid(
+                            conn.destination_name, host)
+                        # Ensure SID is unique on the map
+                        base_sid = dest_sid
+                        counter = 1
+                        while api.state.get_node(dest_sid):
+                            dest_sid = f"{base_sid}{counter}"
+                            counter += 1
+                        ports = {
+                            int(f"32{inst}"): "dispatcher",
+                            int(f"33{inst}"): "gateway",
+                        }
+                        new_inst = InstanceInfo(
+                            instance_nr=inst, ip=host, ports=ports)
+                        new_node = SAPNode(
+                            sid=dest_sid, ip=host,
+                            hostname=host,
+                            instances=[new_inst])
+                        api.state.add_node(new_node)
+                        conn.target_sid = dest_sid
+                        api.state.add_connection(conn)
+                        print(f"[+] Discovered system {dest_sid} "
+                              f"({host}, inst {inst}) — "
+                              f"added to map")
+                    else:
+                        # System exists, link the connection
+                        existing = api.state.find_node_by_host(
+                            hostname=host, ip=host)
+                        if existing and not conn.target_sid:
+                            conn.target_sid = existing.sid
+                            api.state.add_connection(conn)
+                else:
+                    print(f"[-] {conn.destination_name}: not reachable"
+                          f"{' — ' + ping['error'][:60] if ping['error'] else ''}")
+                    conn.ping_ok = False
+                    conn.tested = True
+                    api.state.add_connection(conn)
+
+            alive = len(discovered)
+            print(f"[+] Ping results: {alive} alive systems, "
+                  f"{len(non_self) - alive} unreachable")
 
         threading.Thread(target=_run, daemon=True).start()
         return json.dumps({"status": "started"})
