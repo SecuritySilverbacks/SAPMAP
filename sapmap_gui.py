@@ -568,18 +568,50 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     # Check if SID already on map
                     existing_sid_node = api.state.get_node(dest_sid)
                     if existing_sid_node:
-                        # SID exists — resolve hostname to IP to
-                        # check if it's the same system
-                        resolved_ip = _resolve_host(host)
+                        # SID exists — check if it's the same system
+                        # Try multiple ways to match:
+                        # 1. Direct IP match
+                        # 2. Resolve RFC host → IP, compare
+                        # 3. Resolve existing hostname → IP, compare
+                        # 4. Resolve remote_host from sysinfo
                         existing_ips = existing_sid_node.all_ips()
-                        check_ip = resolved_ip or host
-                        if check_ip in existing_ips:
-                            # Same system, different hostname
+                        existing_names = existing_sid_node.all_hostnames()
+                        is_same = False
+
+                        # Direct match: host in existing IPs/names
+                        if host in existing_ips or host.lower() in existing_names:
+                            is_same = True
+
+                        # Resolve RFC host to IP and compare
+                        if not is_same:
+                            resolved_ip = _resolve_host(host)
+                            if resolved_ip and resolved_ip in existing_ips:
+                                is_same = True
+
+                        # Resolve existing node's hostname and compare
+                        if not is_same and existing_sid_node.hostname:
+                            existing_resolved = _resolve_host(
+                                existing_sid_node.hostname)
+                            rfc_resolved = _resolve_host(host)
+                            if (existing_resolved and rfc_resolved
+                                    and existing_resolved == rfc_resolved):
+                                is_same = True
+
+                        # Check remote_host from sysinfo
+                        if not is_same and remote_host:
+                            if (remote_host in existing_ips or
+                                    remote_host.lower() in existing_names):
+                                is_same = True
+                            else:
+                                rh_ip = _resolve_host(remote_host)
+                                if rh_ip and rh_ip in existing_ips:
+                                    is_same = True
+
+                        if is_same:
                             conn.target_sid = dest_sid
                             api.state.add_connection(conn)
                             print(f"[*] {conn.destination_name}: "
-                                  f"same system as {dest_sid} "
-                                  f"(IP match: {check_ip})")
+                                  f"same system as {dest_sid}")
                             continue
                         else:
                             # Different system, same SID
