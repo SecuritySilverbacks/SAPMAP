@@ -405,6 +405,7 @@ body {
   <div class="ctx-item" data-action="client_roles">&#128202; Retrieve Client Roles</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="set_type">&#9881; Set System Type</div>
+  <div class="ctx-item" data-action="set_db_type">&#9881; Set DB Type</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="delete_system" style="color:#f85149">&#128465; Delete System from Map</div>
 </div>
@@ -495,6 +496,29 @@ body {
     <div class="form-actions">
       <button class="btn btn-primary" onclick="saveSystemType()">Save</button>
       <button class="btn" onclick="closeModal('type-modal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Set DB Type Modal -->
+<div class="modal-overlay" id="db-type-modal">
+  <div class="modal">
+    <h3>&#9881; Set DB Type</h3>
+    <div id="db-type-system-info" style="font-size:12px;color:#8b949e;margin-bottom:12px"></div>
+    <div class="form-row">
+      <label>Database Type</label>
+      <select id="db-type-select">
+        <option value="" disabled selected hidden>Select DB type...</option>
+        <option value="HDB">HANA (HDB)</option>
+        <option value="ADA">MaxDB / ADABAS D (ADA)</option>
+        <option value="ORA">Oracle (ORA)</option>
+        <option value="MSS">MS SQL Server (MSS)</option>
+        <option value="DB6">DB2 (DB6)</option>
+      </select>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-primary" onclick="saveDbType()">Save</button>
+      <button class="btn" onclick="closeModal('db-type-modal')">Cancel</button>
     </div>
   </div>
 </div>
@@ -1148,6 +1172,7 @@ function showCtxMenu(e, sid) {
     'cleanup':          hasCreatedUsers,             // need created users to clean up
     'client_roles':     hasCreds,                   // need credentials/access
     'set_type':         true,                       // always available
+    'set_db_type':      true,                       // always available
     'delete_system':    true,                       // always available
   };
 
@@ -1239,6 +1264,7 @@ async function ctxAction(action) {
     case 'client_roles':
       await api('POST', `node/${sid}/client_roles`); break;
     case 'set_type': showTypeModal(sid); break;
+    case 'set_db_type': showDbTypeModal(sid); break;
     case 'delete_system':
       if (confirm(`Delete ${sid} from the map? This removes the system and all its connections.`))
         await api('DELETE', `node/${sid}`);
@@ -1488,6 +1514,26 @@ async function saveSystemType() {
   const newType = document.getElementById('type-select').value;
   await api('POST', `node/${selectedNodeSid}/set_type`, { system_type: newType });
   closeModal('type-modal');
+  startPolling();
+}
+function showDbTypeModal(sid) {
+  const n = (mapState.nodes || {})[sid];
+  document.getElementById('db-type-system-info').textContent = sid + (n ? ' (DB: ' + (n.db_type || 'unknown') + ')' : '');
+  const sel = document.getElementById('db-type-select');
+  sel.selectedIndex = 0;
+  if (n && n.db_type) {
+    for (let i = 0; i < sel.options.length; i++) {
+      if (sel.options[i].value.toUpperCase() === n.db_type.toUpperCase()) {
+        sel.selectedIndex = i; break;
+      }
+    }
+  }
+  document.getElementById('db-type-modal').classList.add('visible');
+}
+async function saveDbType() {
+  const newDb = document.getElementById('db-type-select').value;
+  await api('POST', `node/${selectedNodeSid}/set_db_type`, { db_type: newDb });
+  closeModal('db-type-modal');
   startPolling();
 }
 
