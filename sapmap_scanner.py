@@ -740,8 +740,8 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
         print(f"[-]   RFC_SYSTEM_INFO error on {host}:{gw_port}: {e}")
         logger.debug(f"RFC_SYSTEM_INFO failed for {host}:{gw_port}: {e}")
 
-    # If SID still missing, try SAPControl SOAP on 5XX13 for all known instances
-    if not info["sid"]:
+    # If SID or db_type still missing, try SAPControl SOAP on 5XX13
+    if not info["sid"] or not info["db_type"]:
         # Collect instance numbers to try from gateway port + common ones
         inst_nrs_to_try = set()
         if 3300 <= gw_port <= 3399:
@@ -749,34 +749,50 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
         inst_nrs_to_try.add(0)  # always try instance 00
         for inst_nr in sorted(inst_nrs_to_try):
             sc_port = 50000 + inst_nr * 100 + 13
-            sid, is_java, is_abap = _query_sapcontrol_sid(
+            sid, is_java, is_abap, db_type = _query_sapcontrol_sid(
                 host, sc_port, timeout=min(timeout, 3)
             )
-            if sid:
+            if sid and not info["sid"]:
                 info["sid"] = sid
                 info["_is_java"] = is_java
                 info["_is_abap"] = is_abap
                 print(f"[+]   SID from SAPControl ({host}:{sc_port}): {sid}"
                       f"{'  [JAVA]' if is_java else ''}"
                       f"{'  [ABAP]' if is_abap else ''}")
+            if db_type and not info["db_type"]:
+                info["db_type"] = db_type
+                print(f"[+]   DB type from SAPControl ({host}:{sc_port}): "
+                      f"{db_type}")
+            if info["sid"] and info["db_type"]:
                 break
 
     return info
 
 
 def _query_sapcontrol_sid(host: str, port: int, timeout: float = 3) -> tuple:
-    """Quick SAPControl SOAP query to extract SID and system type hints.
+    """Quick SAPControl SOAP query to extract SID, system type, and DB type.
 
-    Returns (sid, is_java, is_abap) tuple.
+    Returns (sid, is_java, is_abap, db_type) tuple.
     SID is extracted from (in priority order):
       1. SAPSYSTEMNAME property
       2. ABAP/J2EE DB Connection string (DBName=XXX)
       3. INSTANCE_NAME prefix (e.g. DVEBMGS00 -> SID from hostname)
+    DB type is extracted from the "Database" property (e.g. "SAPdb" -> "ADA").
     """
     import re as _re
     sid = ""
     is_java = False
     is_abap = False
+    db_type = ""
+
+    # Map SAPControl "Database" values to RFCDBSYS-style codes
+    _DB_MAP = {
+        "sapdb": "ADA", "maxdb": "ADA", "ada": "ADA",
+        "hdb": "HDB", "hana": "HDB",
+        "ora": "ORA", "oracle": "ORA",
+        "mss": "MSS", "mssql": "MSS",
+        "db6": "DB6", "db2": "DB6",
+    }
 
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -825,6 +841,21 @@ def _query_sapcontrol_sid(host: str, port: int, timeout: float = 3) -> tuple:
                     sid = m.group(1).strip()
                     break
 
+        # Extract database type from connection strings or standalone property
+        # Format: "Database=SAPDB,DBHost=...,DBName=..." in ABAP/J2EE DB Connection
+        for key in ("ABAP DB Connection", "J2EE DB Connection"):
+            val = prop_dict.get(key, "")
+            m = _re.search(r'Database=(\w+)', val)
+            if m:
+                raw_db = m.group(1).strip()
+                db_type = _DB_MAP.get(raw_db.lower(), raw_db.upper())
+                break
+        # Fallback: standalone "Database" property
+        if not db_type:
+            raw_db = prop_dict.get("Database", "").strip()
+            if raw_db:
+                db_type = _DB_MAP.get(raw_db.lower(), raw_db.upper())
+
         # Detect ABAP vs JAVA from properties
         if "ABAP WP Table" in prop_dict:
             is_abap = True
@@ -837,7 +868,7 @@ def _query_sapcontrol_sid(host: str, port: int, timeout: float = 3) -> tuple:
 
     except Exception:
         pass
-    return (sid, is_java, is_abap)
+    return (sid, is_java, is_abap, db_type)
 
 
 # ---------------------------------------------------------------------------
@@ -916,7 +947,7 @@ def _build_node_from_fast_scan(scan_result: dict, timeout: float = 10,
                 sc_port = 50000 + int(inst_nr_str) * 100 + 13
                 if sc_port not in tried_ports:
                     tried_ports.add(sc_port)
-                    sc_sid, sc_j, sc_a = _query_sapcontrol_sid(
+                    sc_sid, sc_j, sc_a, _ = _query_sapcontrol_sid(
                         host, sc_port, timeout=min(timeout, 3)
                     )
                     if sc_sid:
