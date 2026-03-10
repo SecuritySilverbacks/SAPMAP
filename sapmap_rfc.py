@@ -31,6 +31,8 @@ from sapmap_config import (
     sapmap_username,
 )
 
+from sap_rfc_ctypes import ABAPApplicationError
+
 logger = logging.getLogger(__name__)
 
 # SDK path (set globally or per-connection)
@@ -558,13 +560,80 @@ def delete_user(node: SAPNode, username: str,
 
 
 # ---------------------------------------------------------------------------
-# RFC connection testing (/SDF/RFC_CHECK)
+# RFC connection testing (/SDF/RFC_CHECK with DEST_CHECK_CONNECTION fallback)
 # ---------------------------------------------------------------------------
+
+def _test_via_sdf_rfc_check(conn, destination_name: str, result: dict) -> bool:
+    """Try /SDF/RFC_CHECK. Returns True if the FM exists, False if not found."""
+    try:
+        check_result = conn.call(
+            RFC_CHECK_FM,
+            IV_DESTINATION=destination_name,
+            **RFC_CHECK_PARAMS,
+        )
+
+        result["logon_message"] = check_result.get("EV_LOGON_MESSAGE", "").strip()
+        result["ping_ok"] = check_result.get("EV_PING_MESSAGE", "").strip() != ""
+        result["ping_status"] = str(check_result.get("EV_PING_STATUS", "")).strip()
+        logon_status = check_result.get("EV_LOGON_STATUS", "")
+        if str(logon_status).strip() == "1":
+            result["logon_ok"] = True
+        else:
+            result["logon_ok"] = RFC_LOGON_SUCCESS_TEXT in result["logon_message"]
+
+        lat_ms = check_result.get("EV_LATENCY_IN_MS", 0)
+        if isinstance(lat_ms, int) and lat_ms > 0:
+            result["latency_ms"] = lat_ms
+        else:
+            latency_msg = check_result.get("EV_LATENCY_MESSAGE", "")
+            if latency_msg:
+                try:
+                    import re
+                    match = re.search(r'(\d+)', latency_msg)
+                    if match:
+                        result["latency_ms"] = int(match.group(1))
+                except Exception:
+                    pass
+        return True
+    except ABAPApplicationError as e:
+        if getattr(e, "key", "") == "FU_NOT_FOUND":
+            return False  # FM doesn't exist — caller should use fallback
+        raise
+
+
+def _test_via_dest_check(conn, destination_name: str, result: dict):
+    """Fallback: use DEST_CHECK_CONNECTION (available on older NW releases).
+
+    AUTHORIZATION_TEST_RESULT='' means logon OK, 'E' means failed.
+    CONNECTION_TEST_RESULT='' means TCP connection OK.
+    CONNECTION_PROPERTIES contains remote SID, client, basis release.
+    """
+    check_result = conn.call("DEST_CHECK_CONNECTION",
+                             NAME=destination_name)
+
+    auth_result = check_result.get("AUTHORIZATION_TEST_RESULT", "X").strip()
+    conn_result = check_result.get("CONNECTION_TEST_RESULT", "X").strip()
+    auth_error = check_result.get("AUTHORIZATION_ERROR_TEXT", "").strip()
+    conn_error = check_result.get("CONNECTION_ERROR_TEXT", "").strip()
+
+    result["logon_ok"] = auth_result == ""
+    result["ping_ok"] = conn_result == ""
+    result["logon_message"] = auth_error or ("RFC Logon successful."
+                                             if result["logon_ok"] else "")
+
+    # Extract remote system info from CONNECTION_PROPERTIES
+    props = check_result.get("CONNECTION_PROPERTIES", {})
+    if isinstance(props, dict):
+        result["remote_sid"] = props.get("SYSID", "").strip()
+        result["remote_client"] = props.get("CLIENT_USED", "").strip()
+        result["remote_release"] = props.get("BASIS_RELEASE", "").strip()
+
 
 def test_rfc_destination(node: SAPNode, destination_name: str,
                          creds: Credentials = None,
                          rfc_check_cache: dict = None) -> dict:
-    """Test an RFC destination via /SDF/RFC_CHECK.
+    """Test an RFC destination via /SDF/RFC_CHECK, falling back to
+    DEST_CHECK_CONNECTION on older systems where the FM doesn't exist.
 
     Returns dict with: logon_ok, ping_ok, latency_ms, logon_message, error
     """
@@ -582,36 +651,11 @@ def test_rfc_destination(node: SAPNode, destination_name: str,
 
     try:
         with _get_connection(node, creds) as conn:
-            check_result = conn.call(
-                RFC_CHECK_FM,
-                IV_DESTINATION=destination_name,
-                **RFC_CHECK_PARAMS,
-            )
-
-            result["logon_message"] = check_result.get("EV_LOGON_MESSAGE", "").strip()
-            result["ping_ok"] = check_result.get("EV_PING_MESSAGE", "").strip() != ""
-            result["ping_status"] = str(check_result.get("EV_PING_STATUS", "")).strip()
-            # EV_LOGON_STATUS=1 means logon succeeded; fall back to text match
-            logon_status = check_result.get("EV_LOGON_STATUS", "")
-            if str(logon_status).strip() == "1":
-                result["logon_ok"] = True
-            else:
-                result["logon_ok"] = RFC_LOGON_SUCCESS_TEXT in result["logon_message"]
-
-            # Read latency — prefer numeric EV_LATENCY_IN_MS, fall back to message
-            lat_ms = check_result.get("EV_LATENCY_IN_MS", 0)
-            if isinstance(lat_ms, int) and lat_ms > 0:
-                result["latency_ms"] = lat_ms
-            else:
-                latency_msg = check_result.get("EV_LATENCY_MESSAGE", "")
-                if latency_msg:
-                    try:
-                        import re
-                        match = re.search(r'(\d+)', latency_msg)
-                        if match:
-                            result["latency_ms"] = int(match.group(1))
-                    except Exception:
-                        pass
+            if not _test_via_sdf_rfc_check(conn, destination_name, result):
+                # /SDF/RFC_CHECK not available — fall back
+                logger.debug(f"/SDF/RFC_CHECK not found on {node.sid}, "
+                             f"using DEST_CHECK_CONNECTION")
+                _test_via_dest_check(conn, destination_name, result)
 
     except Exception as e:
         result["error"] = str(e)
@@ -626,7 +670,8 @@ def test_rfc_destination(node: SAPNode, destination_name: str,
 
 def ping_rfc_destination(node: SAPNode, destination_name: str,
                          creds: Credentials = None) -> dict:
-    """Ping-only check of an RFC destination via /SDF/RFC_CHECK.
+    """Ping-only check of an RFC destination via /SDF/RFC_CHECK,
+    falling back to DEST_CHECK_CONNECTION on older systems.
 
     Only sends IV_PING=X (no logon attempt).
     Returns dict with: ping_ok, ping_message, error
@@ -635,15 +680,27 @@ def ping_rfc_destination(node: SAPNode, destination_name: str,
 
     try:
         with _get_connection(node, creds) as conn:
-            check_result = conn.call(
-                RFC_CHECK_FM,
-                IV_DESTINATION=destination_name,
-                IV_PING="X",
-            )
-            msg = check_result.get("EV_PING_MESSAGE", "").strip()
-            status = str(check_result.get("EV_PING_STATUS", "")).strip()
-            result["ping_message"] = msg
-            result["ping_ok"] = status == "1"
+            try:
+                check_result = conn.call(
+                    RFC_CHECK_FM,
+                    IV_DESTINATION=destination_name,
+                    IV_PING="X",
+                )
+                msg = check_result.get("EV_PING_MESSAGE", "").strip()
+                status = str(check_result.get("EV_PING_STATUS", "")).strip()
+                result["ping_message"] = msg
+                result["ping_ok"] = status == "1"
+            except ABAPApplicationError as e:
+                if getattr(e, "key", "") != "FU_NOT_FOUND":
+                    raise
+                # Fallback: DEST_CHECK_CONNECTION
+                check_result = conn.call("DEST_CHECK_CONNECTION",
+                                         NAME=destination_name)
+                conn_result = check_result.get(
+                    "CONNECTION_TEST_RESULT", "X").strip()
+                result["ping_ok"] = conn_result == ""
+                result["ping_message"] = check_result.get(
+                    "CONNECTION_ERROR_TEXT", "").strip()
     except Exception as e:
         result["error"] = str(e)
 
