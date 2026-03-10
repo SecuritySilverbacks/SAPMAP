@@ -436,6 +436,17 @@ def create_app(api: SAPMAPApi) -> Bottle:
             if info.get("sap_release"):
                 node.sap_release = info["sap_release"]
 
+            # Set system type from SAPControl ABAP/JAVA detection
+            sc_abap = info.get("_is_abap", False)
+            sc_java = info.get("_is_java", False)
+            if sc_abap or sc_java:
+                if sc_abap and sc_java:
+                    node.system_type = "ABAP+JAVA"
+                elif sc_java:
+                    node.system_type = "JAVA"
+                else:
+                    node.system_type = "ABAP"
+
             # Database port fingerprinting (if DB not yet known)
             if not node.db_type:
                 inst_nrs = node.instance_nrs() or ["00"]
