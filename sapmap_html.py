@@ -410,6 +410,17 @@ body {
   <div class="ctx-item" data-action="delete_system" style="color:#f85149">&#128465; Delete System from Map</div>
 </div>
 
+<!-- Map Background Context Menu -->
+<div class="ctx-menu" id="map-ctx-menu">
+  <div class="ctx-item" data-action="map_add_system">&#10133; Add System Manually</div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item" data-action="map_propagate_all">&#128640; Auto-Propagate All</div>
+  <div class="ctx-item" data-action="map_cleanup_all">&#129529; Cleanup All Users</div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item" data-action="map_fit">&#128208; Fit to Window</div>
+  <div class="ctx-item" data-action="map_reset_layout">&#128260; Reset Layout</div>
+</div>
+
 <!-- Connection Info Panel -->
 <div class="info-panel" id="info-panel"></div>
 
@@ -1141,6 +1152,7 @@ function escHtml(s) {
 function showCtxMenu(e, sid) {
   e.preventDefault();
   e.stopPropagation();
+  hideMapCtxMenu();
   selectedNodeSid = sid;
   const n = (mapState.nodes || {})[sid];
   const menu = document.getElementById('ctx-menu');
@@ -1847,8 +1859,43 @@ document.addEventListener('click', e => {
 });
 
 document.addEventListener('contextmenu', e => {
-  if (!e.target.closest('.node-box')) hideCtxMenu();
+  const nodeBox = e.target.closest('.node-box');
+  const mapSvg = document.getElementById('map-svg');
+  const mapContainer = document.getElementById('map-container');
+  hideCtxMenu();
+  hideMapCtxMenu();
+  if (!nodeBox && (e.target === mapSvg || e.target === mapContainer || mapSvg.contains(e.target))) {
+    e.preventDefault();
+    showMapCtxMenu(e);
+  }
 });
+
+function showMapCtxMenu(e) {
+  const menu = document.getElementById('map-ctx-menu');
+  menu.classList.add('visible');
+  let mx = e.clientX, my = e.clientY;
+  const rect = menu.getBoundingClientRect();
+  if (mx + rect.width > window.innerWidth) mx = window.innerWidth - rect.width - 4;
+  if (my + rect.height > window.innerHeight) my = window.innerHeight - rect.height - 4;
+  menu.style.left = mx + 'px';
+  menu.style.top = my + 'px';
+}
+function hideMapCtxMenu() {
+  document.getElementById('map-ctx-menu').classList.remove('visible');
+}
+document.getElementById('map-ctx-menu').addEventListener('click', function(e) {
+  const item = e.target.closest('.ctx-item[data-action]');
+  if (!item) return;
+  hideMapCtxMenu();
+  switch (item.getAttribute('data-action')) {
+    case 'map_add_system': showAddSystemModal(); break;
+    case 'map_propagate_all': propagateAll(); break;
+    case 'map_cleanup_all': cleanupAll(); break;
+    case 'map_fit': fitMap(); break;
+    case 'map_reset_layout': resetLayout(); break;
+  }
+});
+document.addEventListener('click', () => hideMapCtxMenu());
 
 // --- Init ---
 startPolling();
