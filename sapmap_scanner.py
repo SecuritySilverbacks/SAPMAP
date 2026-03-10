@@ -737,23 +737,24 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
         print(f"[-]   RFC_SYSTEM_INFO error on {host}:{gw_port}: {e}")
         logger.debug(f"RFC_SYSTEM_INFO failed for {host}:{gw_port}: {e}")
 
+    # Build ordered instance number list for SAPControl queries
+    _seen = set()
+    ordered_nrs = []
+    for nr in (instance_nrs or []):
+        n = int(nr) if isinstance(nr, str) and nr.isdigit() else nr
+        if isinstance(n, int) and n not in _seen:
+            _seen.add(n)
+            ordered_nrs.append(n)
+    if 3300 <= gw_port <= 3399:
+        gw_nr = gw_port % 100
+        if gw_nr not in _seen:
+            _seen.add(gw_nr)
+            ordered_nrs.append(gw_nr)
+    if 0 not in _seen:
+        ordered_nrs.append(0)
+
     # If SID or db_type still missing, try SAPControl SOAP on 5XX13
     if not info["sid"] or not info["db_type"]:
-        # Build ordered list: explicit instance_nrs first, then gw-derived, then 00
-        seen = set()
-        ordered_nrs = []
-        for nr in (instance_nrs or []):
-            n = int(nr) if isinstance(nr, str) and nr.isdigit() else nr
-            if isinstance(n, int) and n not in seen:
-                seen.add(n)
-                ordered_nrs.append(n)
-        if 3300 <= gw_port <= 3399:
-            gw_nr = gw_port % 100
-            if gw_nr not in seen:
-                seen.add(gw_nr)
-                ordered_nrs.append(gw_nr)
-        if 0 not in seen:
-            ordered_nrs.append(0)
         for inst_nr in ordered_nrs:
             sc_port = 50000 + inst_nr * 100 + 13
             sid, is_java, is_abap, db_type = _query_sapcontrol_sid(
@@ -771,6 +772,17 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
                 print(f"[+]   DB type from SAPControl ({host}:{sc_port}): "
                       f"{db_type}")
             if info["sid"] and info["db_type"]:
+                break
+
+    # If OS still unknown, try SAPControl GetProcessList (.EXE = Windows)
+    if not info["os_type"]:
+        for inst_nr in ordered_nrs:
+            sc_port = 50000 + inst_nr * 100 + 13
+            os_type = _query_sapcontrol_os(host, sc_port, timeout=min(timeout, 3))
+            if os_type:
+                info["os_type"] = os_type
+                print(f"[+]   OS type from SAPControl ({host}:{sc_port}): "
+                      f"{os_type}")
                 break
 
     # Last resort: infer DB from product name (weak - kernel range is not proof)
@@ -887,6 +899,58 @@ def _query_sapcontrol_sid(host: str, port: int, timeout: float = 3) -> tuple:
     except Exception:
         pass
     return (sid, is_java, is_abap, db_type)
+
+
+def _query_sapcontrol_os(host: str, port: int, timeout: float = 3) -> str:
+    """Detect OS type via SAPControl GetProcessList.
+
+    Process names ending with .EXE indicate Windows; otherwise Linux/Unix.
+    GetProcessList is usually available without authentication.
+
+    Returns os_type string ("Linux", "Windows") or "" if detection fails.
+    """
+    import re as _re
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect((host, port))
+        body = (
+            '<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/">'
+            '<SOAP-ENV:Body><ns1:GetProcessList xmlns:ns1="urn:SAPControl">'
+            '</ns1:GetProcessList></SOAP-ENV:Body></SOAP-ENV:Envelope>'
+        )
+        req = (
+            f"POST / HTTP/1.1\r\n"
+            f"Host: {host}:{port}\r\n"
+            f"Content-Type: text/xml\r\n"
+            f"Content-Length: {len(body)}\r\n"
+            f"\r\n{body}"
+        )
+        sock.sendall(req.encode())
+        resp = b""
+        try:
+            while len(resp) < 32768:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                resp += chunk
+        except socket.timeout:
+            pass
+        sock.close()
+        text = resp.decode("utf-8", errors="replace")
+
+        if "401" in text[:80]:
+            return ""
+
+        names = _re.findall(r'<name>([^<]+)</name>', text)
+        if not names:
+            return ""
+
+        if any(n.upper().endswith(".EXE") for n in names):
+            return "Windows"
+        return "Linux"
+    except Exception:
+        return ""
 
 
 # ---------------------------------------------------------------------------
