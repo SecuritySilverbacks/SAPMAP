@@ -658,9 +658,12 @@ def fast_scan_network(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RA
 # ---------------------------------------------------------------------------
 
 def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
-                       verbose: bool = False) -> dict:
+                       verbose: bool = False,
+                       instance_nrs: list = None) -> dict:
     """Call RFC_SYSTEM_INFO (unauthenticated) to get OS, DB, kernel, hostname, SID.
 
+    Args:
+        instance_nrs: Explicit instance numbers to try for SAPControl (prioritized).
     Returns dict with fields: sid, hostname, os, db_type, kernel, sap_release, ip, etc.
     """
     info = {
@@ -736,12 +739,22 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
 
     # If SID or db_type still missing, try SAPControl SOAP on 5XX13
     if not info["sid"] or not info["db_type"]:
-        # Collect instance numbers to try from gateway port + common ones
-        inst_nrs_to_try = set()
+        # Build ordered list: explicit instance_nrs first, then gw-derived, then 00
+        seen = set()
+        ordered_nrs = []
+        for nr in (instance_nrs or []):
+            n = int(nr) if isinstance(nr, str) and nr.isdigit() else nr
+            if isinstance(n, int) and n not in seen:
+                seen.add(n)
+                ordered_nrs.append(n)
         if 3300 <= gw_port <= 3399:
-            inst_nrs_to_try.add(gw_port % 100)
-        inst_nrs_to_try.add(0)  # always try instance 00
-        for inst_nr in sorted(inst_nrs_to_try):
+            gw_nr = gw_port % 100
+            if gw_nr not in seen:
+                seen.add(gw_nr)
+                ordered_nrs.append(gw_nr)
+        if 0 not in seen:
+            ordered_nrs.append(0)
+        for inst_nr in ordered_nrs:
             sc_port = 50000 + inst_nr * 100 + 13
             sid, is_java, is_abap, db_type = _query_sapcontrol_sid(
                 host, sc_port, timeout=min(timeout, 3)

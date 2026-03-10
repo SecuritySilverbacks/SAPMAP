@@ -402,7 +402,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 print(f"[-] No gateway port found for {node.sid}")
                 return
             host = node.ip or node.hostname
-            info = sapmap_scanner.enrich_system_info(host, gw_port)
+            # Pass known instance numbers so SAPControl queries the right one
+            inst_nrs = [inst.instance_nr for inst in node.instances
+                        if inst.instance_nr is not None]
+            info = sapmap_scanner.enrich_system_info(
+                host, gw_port, instance_nrs=inst_nrs)
             # Update node with retrieved info
             if info.get("sid") and not node.sid.startswith("UNK"):
                 pass  # keep existing SID
