@@ -136,8 +136,8 @@ def sql_maxdb(sid: str, client: str, username: str) -> list:
     """MaxDB — sqlcli statements."""
     return _cleanup_sql(client, username) + [
         f"INSERT INTO USR02 (MANDT,BNAME,BCODE,USTYP,CODVN) "
-        f"VALUES ('{client}','{username}','{BCODE_HEX}','{USER_TYPE}','{CODVN}')",
-        f"UPDATE USR02 SET PASSCODE='{PASSCODE_HEX}' "
+        f"VALUES ('{client}','{username}',x'{BCODE_HEX}','{USER_TYPE}','{CODVN}')",
+        f"UPDATE USR02 SET PASSCODE=x'{PASSCODE_HEX}' "
         f"WHERE BNAME='{username}' AND MANDT='{client}'",
         f"INSERT INTO USREFUS (MANDT,BNAME,REFUSER) "
         f"VALUES ('{client}','{username}','DDIC')",
