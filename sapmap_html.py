@@ -406,6 +406,7 @@ body {
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="set_type">&#9881; Set System Type</div>
   <div class="ctx-item" data-action="set_db_type">&#9881; Set DB Type</div>
+  <div class="ctx-item" data-action="set_os_type">&#9881; Set OS Type</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="delete_system" style="color:#f85149">&#128465; Delete System from Map</div>
 </div>
@@ -530,6 +531,29 @@ body {
     <div class="form-actions">
       <button class="btn btn-primary" onclick="saveDbType()">Save</button>
       <button class="btn" onclick="closeModal('db-type-modal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Set OS Type Modal -->
+<div class="modal-overlay" id="os-type-modal">
+  <div class="modal">
+    <h3>&#9881; Set OS Type</h3>
+    <div id="os-type-system-info" style="font-size:12px;color:#8b949e;margin-bottom:12px"></div>
+    <div class="form-row">
+      <label>Operating System</label>
+      <select id="os-type-select">
+        <option value="" disabled selected hidden>Select OS type...</option>
+        <option value="Linux">Linux</option>
+        <option value="Windows">Windows</option>
+        <option value="AIX">AIX</option>
+        <option value="HP-UX">HP-UX</option>
+        <option value="SunOS">SunOS / Solaris</option>
+      </select>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-primary" onclick="saveOsType()">Save</button>
+      <button class="btn" onclick="closeModal('os-type-modal')">Cancel</button>
     </div>
   </div>
 </div>
@@ -1186,6 +1210,7 @@ function showCtxMenu(e, sid) {
     'client_roles':     hasCreds,                   // need credentials/access
     'set_type':         true,                       // always available
     'set_db_type':      true,                       // always available
+    'set_os_type':      true,                       // always available
     'delete_system':    true,                       // always available
   };
 
@@ -1278,6 +1303,7 @@ async function ctxAction(action) {
       await api('POST', `node/${sid}/client_roles`); break;
     case 'set_type': showTypeModal(sid); break;
     case 'set_db_type': showDbTypeModal(sid); break;
+    case 'set_os_type': showOsTypeModal(sid); break;
     case 'delete_system':
       if (confirm(`Delete ${sid} from the map? This removes the system and all its connections.`)) {
         const r = await api('DELETE', `node/${sid}`);
@@ -1554,6 +1580,26 @@ async function saveDbType() {
   const newDb = document.getElementById('db-type-select').value;
   await api('POST', `node/${selectedNodeSid}/set_db_type`, { db_type: newDb });
   closeModal('db-type-modal');
+  startPolling();
+}
+function showOsTypeModal(sid) {
+  const n = (mapState.nodes || {})[sid];
+  document.getElementById('os-type-system-info').textContent = sid + (n ? ' (OS: ' + (n.os_type || 'unknown') + ')' : '');
+  const sel = document.getElementById('os-type-select');
+  sel.selectedIndex = 0;
+  if (n && n.os_type) {
+    for (let i = 0; i < sel.options.length; i++) {
+      if (sel.options[i].value.toLowerCase() === n.os_type.toLowerCase()) {
+        sel.selectedIndex = i; break;
+      }
+    }
+  }
+  document.getElementById('os-type-modal').classList.add('visible');
+}
+async function saveOsType() {
+  const newOs = document.getElementById('os-type-select').value;
+  await api('POST', `node/${selectedNodeSid}/set_os_type`, { os_type: newOs });
+  closeModal('os-type-modal');
   startPolling();
 }
 

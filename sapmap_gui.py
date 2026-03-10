@@ -381,6 +381,19 @@ def create_app(api: SAPMAPApi) -> Bottle:
             print(f"[*] DB type for {sid} set to: {new_db}")
         return json.dumps({"status": "ok"})
 
+    @app.route("/api/node/<sid>/set_os_type", method="POST")
+    def node_set_os_type(sid):
+        response.content_type = "application/json"
+        data = request.json or {}
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        new_os = data.get("os_type", "").strip()
+        if new_os:
+            node.os_type = new_os
+            print(f"[*] OS type for {sid} set to: {new_os}")
+        return json.dumps({"status": "ok"})
+
     @app.route("/api/node/<sid>/rfc_system_info", method="POST")
     def node_rfc_system_info(sid):
         response.content_type = "application/json"
