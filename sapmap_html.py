@@ -1266,8 +1266,11 @@ async function ctxAction(action) {
     case 'set_type': showTypeModal(sid); break;
     case 'set_db_type': showDbTypeModal(sid); break;
     case 'delete_system':
-      if (confirm(`Delete ${sid} from the map? This removes the system and all its connections.`))
-        await api('DELETE', `node/${sid}`);
+      if (confirm(`Delete ${sid} from the map? This removes the system and all its connections.`)) {
+        const r = await api('DELETE', `node/${sid}`);
+        if (r && r.error) alert('Delete failed: ' + r.error);
+        else { const s = await api('GET', 'state'); if (s) { mapState = s; updateMap(); } }
+      }
       break;
   }
   startPolling();
