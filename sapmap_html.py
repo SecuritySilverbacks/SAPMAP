@@ -741,6 +741,7 @@ function updateMap() {
   if (nodeKeys.length === 0) {
     document.getElementById('empty-msg').style.display = 'block';
     document.getElementById('legend-bar').style.display = 'none';
+    document.getElementById('map-svg').innerHTML = '';
     return;
   }
   document.getElementById('empty-msg').style.display = 'none';
@@ -1268,8 +1269,12 @@ async function ctxAction(action) {
     case 'delete_system':
       if (confirm(`Delete ${sid} from the map? This removes the system and all its connections.`)) {
         const r = await api('DELETE', `node/${sid}`);
-        if (r && r.error) alert('Delete failed: ' + r.error);
-        else { const s = await api('GET', 'state'); if (s) { mapState = s; updateMap(); } }
+        if (r && r.error) { alert('Delete failed: ' + r.error); break; }
+        // Immediately remove from local state and re-render
+        delete mapState.nodes[sid];
+        mapState.connections = (mapState.connections || []).filter(
+          c => c.source_sid !== sid && c.target_sid !== sid);
+        updateMap();
       }
       break;
   }
