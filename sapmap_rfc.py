@@ -313,13 +313,14 @@ def get_remote_user_profiles(node: SAPNode, username: str,
         with _get_connection(node, creds) as conn:
             result_info = _abap_install_and_run(conn, destination, username)
 
-            # Fallback: if ABAP_INSTALL_AND_RUN is blocked, use SUSR_SUIM
-            if (result_info["error"] and
-                    "not permitted in this client" in result_info["error"].lower()):
-                print(f"[*] ABAP_INSTALL_AND_RUN blocked on {node.sid}, "
-                      f"trying SUSR_SUIM fallback...")
+        # Fallback: if ABAP_INSTALL_AND_RUN is blocked, open fresh connection
+        if (result_info["error"] and
+                "not permitted in this client" in result_info["error"].lower()):
+            print(f"[*] ABAP_INSTALL_AND_RUN blocked on {node.sid}, "
+                  f"trying SUSR_SUIM fallback...")
+            with _get_connection(node, creds) as conn2:
                 result_info = _susr_suim_sap_all_check(
-                    conn, destination, username)
+                    conn2, destination, username)
 
             if result_info["profiles"]:
                 print(f"[+] Remote profiles for {username} via {destination}: "
