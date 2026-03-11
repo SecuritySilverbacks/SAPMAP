@@ -274,7 +274,7 @@ def _susr_suim_sap_all_check(conn, destination: str, username: str) -> dict:
                      f"{total} entries, {len(matched)}/{len(REQUIRED_OBJECTS)} "
                      f"required objects → SAP_ALL={has_sap_all}")
 
-        profiles = ["SAP_ALL"] if has_sap_all else []
+        profiles = ["very likely SAP_ALL"] if has_sap_all else []
         if has_sap_all:
             print(f"[+] SUSR_SUIM fallback: {username} via {destination} has "
                   f"SAP_ALL ({total} auth entries, "
