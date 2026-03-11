@@ -570,6 +570,12 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 own_names.update(h.lower() for h in node.all_hostnames())
                 own_names.update(node.all_ips())
                 is_self = (not th and not ti) or th in own_names or ti in own_names
+                # Same host but different instance = NOT self
+                if is_self and conn.target_instance_nr:
+                    own_instances = set(node.instance_nrs())
+                    target_inst = conn.target_instance_nr.strip().zfill(2)
+                    if own_instances and target_inst not in own_instances:
+                        is_self = False
                 if is_self:
                     conn.target_host = node.hostname or node.ip
                     conn.target_sid = node.sid
