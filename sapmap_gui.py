@@ -583,11 +583,16 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 api.state.add_connection(conn)
 
             # Ping each non-self connection and auto-discover systems
+            # DEST_CHECK_CONNECTION returns the remote SID so we can
+            # do SID-first mapping instead of host-first.
             non_self = [c for c in conns
                         if c.target_sid != sid and c.target_host]
 
             if non_self:
                 print(f"[*] Pinging {len(non_self)} remote RFC destinations...")
+
+            # discovered: (host, inst) → {dest_name, remote_sid, remote_host}
+            discovered = {}
 
             for conn in non_self:
                 host = conn.target_host or conn.target_ip or ""
@@ -595,9 +600,12 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 key = (host.lower(), inst)
 
                 if key in discovered:
-                    # Already pinged this host+instance, reuse result
+                    # Already pinged this host+instance, reuse SID
+                    prev = discovered[key]
                     conn.ping_ok = True
                     conn.tested = True
+                    if prev.get("remote_sid"):
+                        conn.target_sid = prev["remote_sid"]
                     api.state.add_connection(conn)
                     continue
 
@@ -608,17 +616,43 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 )
 
                 if ping["ping_ok"]:
-                    print(f"[+] {conn.destination_name}: alive "
-                          f"({ping['ping_message'][:60]})")
+                    dest_sid = ping.get("remote_sid", "").strip()
+                    remote_host = (
+                        ping.get("remote_hostname", "").strip()
+                        or host)
+                    print(f"[+] {conn.destination_name}: alive"
+                          f"{f' (SID={dest_sid})' if dest_sid else ''}"
+                          f" ({ping['ping_message'][:60]})")
                     conn.ping_ok = True
                     conn.tested = True
-                    discovered[key] = conn.destination_name
+                    discovered[key] = {
+                        "dest_name": conn.destination_name,
+                        "remote_sid": "",  # set below once resolved
+                        "remote_host": remote_host,
+                    }
 
-                    # Check if host already known on map
+                    # ---- SID-first mapping ----
+                    # 1. If we got a remote SID, look it up directly
+                    if dest_sid:
+                        existing_sid_node = api.state.get_node(dest_sid)
+                        if existing_sid_node:
+                            conn.target_sid = dest_sid
+                            discovered[key]["remote_sid"] = dest_sid
+                            api.state.add_connection(conn)
+                            if dest_sid == node.sid:
+                                print(f"[*] {conn.destination_name}: "
+                                      f"self-reference ({node.sid})")
+                            else:
+                                print(f"[*] {conn.destination_name}: "
+                                      f"maps to existing {dest_sid}")
+                            continue
+
+                    # 2. Fall back to host+instance matching
                     existing = api.state.find_node_by_host(
                         hostname=host, ip=host, instance_nr=inst)
                     if existing:
                         conn.target_sid = existing.sid
+                        discovered[key]["remote_sid"] = existing.sid
                         api.state.add_connection(conn)
                         if existing.sid == node.sid:
                             print(f"[*] {conn.destination_name}: "
@@ -628,48 +662,29 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                   f"maps to existing {existing.sid}")
                         continue
 
-                    # Get real SID via RFC_GET_SYSTEM_INFO
-                    print(f"[*] Getting remote SID via "
-                          f"RFC_GET_SYSTEM_INFO DESTINATION "
-                          f"'{conn.destination_name}'...")
-                    sysinfo = sapmap_rfc.get_remote_sysinfo(
-                        node, conn.destination_name, creds)
-                    dest_sid = sysinfo.get("sid", "").strip()
-                    remote_host = (
-                        sysinfo.get("hostname", "").strip()
-                        or host)
-                    if dest_sid:
-                        print(f"[+] Remote SID: {dest_sid}")
-                    else:
+                    # 3. No existing node — use SID from ping or derive
+                    if not dest_sid:
                         dest_sid = _derive_sid(
                             conn.destination_name, host)
                         print(f"[*] Could not get remote SID, "
                               f"using derived: {dest_sid}")
 
-                    # Check if SID already on map
+                    # Check if SID already on map but different host
                     existing_sid_node = api.state.get_node(dest_sid)
                     if existing_sid_node:
-                        # SID exists — check if it's the same system
-                        # Try multiple ways to match:
-                        # 1. Direct IP match
-                        # 2. Resolve RFC host → IP, compare
-                        # 3. Resolve existing hostname → IP, compare
-                        # 4. Resolve remote_host from sysinfo
+                        # Same SID exists — verify it's the same system
                         existing_ips = existing_sid_node.all_ips()
                         existing_names = existing_sid_node.all_hostnames()
                         is_same = False
 
-                        # Direct match: host in existing IPs/names
                         if host in existing_ips or host.lower() in existing_names:
                             is_same = True
 
-                        # Resolve RFC host to IP and compare
                         if not is_same:
                             resolved_ip = _resolve_host(host)
                             if resolved_ip and resolved_ip in existing_ips:
                                 is_same = True
 
-                        # Resolve existing node's hostname and compare
                         if not is_same and existing_sid_node.hostname:
                             existing_resolved = _resolve_host(
                                 existing_sid_node.hostname)
@@ -678,7 +693,6 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                     and existing_resolved == rfc_resolved):
                                 is_same = True
 
-                        # Check remote_host from sysinfo
                         if not is_same and remote_host:
                             if (remote_host in existing_ips or
                                     remote_host.lower() in existing_names):
@@ -688,8 +702,6 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                 if rh_ip and rh_ip in existing_ips:
                                     is_same = True
 
-                        # Even if host matches, different instance nr
-                        # means a different SAP system on the same host
                         if is_same and inst:
                             existing_insts = existing_sid_node.instance_nrs()
                             if existing_insts and inst.zfill(2) not in existing_insts:
@@ -697,12 +709,12 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
                         if is_same:
                             conn.target_sid = dest_sid
+                            discovered[key]["remote_sid"] = dest_sid
                             api.state.add_connection(conn)
                             print(f"[*] {conn.destination_name}: "
                                   f"same system as {dest_sid}")
                             continue
                         else:
-                            # Different system, same SID
                             base_sid = dest_sid
                             counter = 1
                             while api.state.get_node(dest_sid):
@@ -727,6 +739,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         instances=[new_inst])
                     api.state.add_node(new_node)
                     conn.target_sid = dest_sid
+                    discovered[key]["remote_sid"] = dest_sid
                     api.state.add_connection(conn)
                     print(f"[+] Discovered {dest_sid} "
                           f"({remote_host}/{host}, "

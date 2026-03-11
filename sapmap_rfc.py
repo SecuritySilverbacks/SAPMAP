@@ -735,37 +735,80 @@ def test_rfc_destination(node: SAPNode, destination_name: str,
 
 def ping_rfc_destination(node: SAPNode, destination_name: str,
                          creds: Credentials = None) -> dict:
-    """Ping-only check of an RFC destination via /SDF/RFC_CHECK,
-    falling back to DEST_CHECK_CONNECTION on older systems.
+    """Ping an RFC destination via DEST_CHECK_CONNECTION (primary) which
+    also returns the remote SID, falling back to /SDF/RFC_CHECK + separate
+    RFC_GET_SYSTEM_INFO if DEST_CHECK_CONNECTION is unavailable.
 
-    Only sends IV_PING=X (no logon attempt).
-    Returns dict with: ping_ok, ping_message, error
+    Returns dict with: ping_ok, ping_message, remote_sid, remote_hostname,
+                       logon_ok, error
     """
-    result = {"ping_ok": False, "ping_message": "", "error": ""}
+    result = {
+        "ping_ok": False, "ping_message": "", "logon_ok": False,
+        "remote_sid": "", "remote_hostname": "", "error": "",
+    }
 
     try:
         with _get_connection(node, creds) as conn:
+            # Primary: DEST_CHECK_CONNECTION — returns SID in one call
             try:
-                check_result = conn.call(
-                    RFC_CHECK_FM,
-                    IV_DESTINATION=destination_name,
-                    IV_PING="X",
-                )
-                msg = check_result.get("EV_PING_MESSAGE", "").strip()
-                status = str(check_result.get("EV_PING_STATUS", "")).strip()
-                result["ping_message"] = msg
-                result["ping_ok"] = status == "1"
-            except ABAPApplicationError as e:
-                if getattr(e, "key", "") != "FU_NOT_FOUND":
-                    raise
-                # Fallback: DEST_CHECK_CONNECTION
                 check_result = conn.call("DEST_CHECK_CONNECTION",
                                          NAME=destination_name)
                 conn_result = check_result.get(
                     "CONNECTION_TEST_RESULT", "X").strip()
+                auth_result = check_result.get(
+                    "AUTHORIZATION_TEST_RESULT", "X").strip()
                 result["ping_ok"] = conn_result == ""
-                result["ping_message"] = check_result.get(
-                    "CONNECTION_ERROR_TEXT", "").strip()
+                result["logon_ok"] = auth_result == ""
+                result["ping_message"] = (
+                    check_result.get("CONNECTION_ERROR_TEXT", "").strip()
+                    or ("OK" if result["ping_ok"] else ""))
+
+                props = check_result.get("CONNECTION_PROPERTIES", {})
+                if isinstance(props, dict):
+                    result["remote_sid"] = props.get(
+                        "SYSID", "").strip()
+                    result["remote_hostname"] = props.get(
+                        "RFCHOST", "").strip()
+            except ABAPApplicationError as e:
+                if getattr(e, "key", "") == "FU_NOT_FOUND":
+                    # DEST_CHECK_CONNECTION not available — fall back to
+                    # /SDF/RFC_CHECK for ping + RFC_GET_SYSTEM_INFO for SID
+                    logger.debug("DEST_CHECK_CONNECTION not found, "
+                                 "falling back to /SDF/RFC_CHECK")
+                    try:
+                        check_result = conn.call(
+                            RFC_CHECK_FM,
+                            IV_DESTINATION=destination_name,
+                            IV_PING="X",
+                        )
+                        msg = check_result.get(
+                            "EV_PING_MESSAGE", "").strip()
+                        status = str(check_result.get(
+                            "EV_PING_STATUS", "")).strip()
+                        result["ping_message"] = msg
+                        result["ping_ok"] = status == "1"
+                    except ABAPApplicationError as e2:
+                        if getattr(e2, "key", "") != "FU_NOT_FOUND":
+                            raise
+                    # Get SID separately
+                    if result["ping_ok"]:
+                        try:
+                            info = conn.call(
+                                "RFC_GET_SYSTEM_INFO",
+                                DESTINATION=destination_name,
+                            )
+                            export = info.get("RFCSI_EXPORT", {})
+                            if isinstance(export, dict):
+                                result["remote_sid"] = (
+                                    export.get("RFCSYSID", "")
+                                    or "").strip()
+                                result["remote_hostname"] = (
+                                    export.get("RFCHOST", "")
+                                    or "").strip()
+                        except Exception:
+                            pass
+                else:
+                    raise
     except Exception as e:
         result["error"] = str(e)
 
