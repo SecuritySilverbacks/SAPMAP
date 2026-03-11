@@ -247,6 +247,20 @@ body {
 .finding-medium { border-color: #d29922; background: rgba(210,153,34,.1); }
 .finding-low { border-color: #3498db; background: rgba(52,152,219,.1); }
 .finding-info { border-color: #8b949e; background: rgba(139,148,158,.1); }
+
+/* Activity indicator */
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes pulse { 0%,100% { opacity:.6; } 50% { opacity:1; } }
+.activity-dot {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  background: #f0883e; margin-right: 6px; animation: pulse 1.2s ease-in-out infinite;
+}
+#activity-bar {
+  display: none; align-items: center; gap: 6px;
+  background: #1a1510; border-bottom: 1px solid #f0883e40;
+  padding: 3px 12px; flex-shrink: 0; font-size: 11px; color: #f0883e;
+}
+#activity-bar.active { display: flex; }
 </style>
 </head>
 <body>
@@ -329,6 +343,9 @@ body {
   <input type="number" id="adv-alive-timeout" value="0.5" min="0.2" max="5" step="0.1" style="width:50px" title="Timeout for host alive detection (seconds)">
   <label style="cursor:pointer"><input type="checkbox" id="adv-skip-alive" style="margin-right:3px">Skip Alive Sweep</label>
 </div>
+
+<!-- Activity Bar -->
+<div id="activity-bar"><span class="activity-dot"></span><span id="activity-text">Working...</span></div>
 
 <!-- Main Area -->
 <div class="main">
@@ -632,6 +649,7 @@ let dragOffset = { x: 0, y: 0 };
 let dragMoved = false;
 let dragStartPos = { x: 0, y: 0 };
 let unkPositions = {};  // persistent positions for unknown target boxes
+let activeTasks = {};   // key → label for active background operations
 let viewBox = { x: 0, y: 0, w: 1200, h: 800 };
 let viewBoxUserControlled = false;  // true once user zooms/pans
 let isPanning = false;
@@ -754,8 +772,10 @@ async function pollUpdates() {
         }
       }
       mapState = state;
+      activeTasks = state.active_tasks || {};
       updateMap();
       updateStatusBar();
+      updateActivityBar();
       if (state.scan_state === 'complete' || state.scan_state === 'error' ||
           state.scan_state === 'cancelled') {
         document.getElementById('st-status').textContent =
@@ -1098,6 +1118,13 @@ function updateMap() {
       html += `<text x="${x+BOX_W-22}" y="${y+19}" font-size="16" fill="#f0883e">&#9889;</text>`;
     }
 
+    // Activity spinner for active background tasks
+    if (_nodeHasActiveTask(sid)) {
+      const cx = n.pwned ? x+BOX_W-40 : x+BOX_W-18;
+      html += `<circle cx="${cx}" cy="${y+14}" r="6" fill="none" stroke="#f0883e" stroke-width="2" stroke-dasharray="20 12" stroke-linecap="round">` +
+        `<animateTransform attributeName="transform" type="rotate" from="0 ${cx} ${y+14}" to="360 ${cx} ${y+14}" dur="1s" repeatCount="indefinite" /></circle>`;
+    }
+
     // Instance info
     let ty = y + 38;
     const instances = n.instances || [];
@@ -1116,6 +1143,12 @@ function updateMap() {
     // OS
     if (n.os_type) {
       html += `<text x="${x+10}" y="${ty}" fill="#8b949e" font-size="10" font-family="monospace">OS: ${escHtml(n.os_type)}</text>`;
+      ty += 14;
+    }
+
+    // DB type
+    if (n.db_type) {
+      html += `<text x="${x+10}" y="${ty}" fill="#8b949e" font-size="10" font-family="monospace">DB: ${escHtml(n.db_type)}</text>`;
       ty += 14;
     }
 
@@ -1854,6 +1887,33 @@ function updateStatusBar() {
   document.getElementById('st-connections').textContent = s.connections || (mapState.connections||[]).length;
   document.getElementById('st-pwned').textContent = s.pwned || 0;
   document.getElementById('st-users').textContent = s.users_created || 0;
+}
+
+function updateActivityBar() {
+  const bar = document.getElementById('activity-bar');
+  const keys = Object.keys(activeTasks);
+  if (keys.length === 0) {
+    bar.classList.remove('active');
+    return;
+  }
+  bar.classList.add('active');
+  // Build descriptive text: group by SID
+  const parts = [];
+  for (const key of keys) {
+    const label = activeTasks[key];
+    // Key format: "SID:operation" or "_global_op"
+    const colonIdx = key.indexOf(':');
+    const sid = colonIdx > 0 && !key.startsWith('_') ? key.substring(0, colonIdx) : '';
+    parts.push(sid ? `${sid}: ${label}` : label);
+  }
+  document.getElementById('activity-text').textContent = parts.join(' | ');
+}
+
+function _nodeHasActiveTask(sid) {
+  for (const key in activeTasks) {
+    if (key === sid + ':' || key.startsWith(sid + ':')) return true;
+  }
+  return false;
 }
 
 // --- Global event listeners ---

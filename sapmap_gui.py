@@ -159,6 +159,40 @@ class OutputCapture(io.TextIOBase):
 
 
 # ===========================================================================
+# Active-task tracker (thread-safe)
+# ===========================================================================
+
+_active_tasks = {}          # key → description, e.g. "NPL:rfc_system_info" → "RFC System Info"
+_active_tasks_lock = threading.Lock()
+
+
+def _task_start(key: str, label: str = ""):
+    with _active_tasks_lock:
+        _active_tasks[key] = label or key
+
+
+def _task_end(key: str):
+    with _active_tasks_lock:
+        _active_tasks.pop(key, None)
+
+
+def _get_active_tasks() -> dict:
+    with _active_tasks_lock:
+        return dict(_active_tasks)
+
+
+def _bg(key: str, label: str, fn):
+    """Launch *fn* in a daemon thread with task tracking."""
+    def _wrapper():
+        _task_start(key, label)
+        try:
+            fn()
+        finally:
+            _task_end(key)
+    threading.Thread(target=_wrapper, daemon=True).start()
+
+
+# ===========================================================================
 # SAPMAPApi — Backend controller
 # ===========================================================================
 
@@ -190,9 +224,13 @@ class SAPMAPApi:
         with _console_lock:
             _console_lines = []
 
-        self.scan_thread = threading.Thread(
-            target=self._run_scan, args=(config,), daemon=True
-        )
+        def _scan_fn():
+            _task_start("_scan", "Network Scan")
+            try:
+                self._run_scan(config)
+            finally:
+                _task_end("_scan")
+        self.scan_thread = threading.Thread(target=_scan_fn, daemon=True)
         self.scan_thread.start()
         return {"status": "started"}
 
@@ -264,6 +302,7 @@ class SAPMAPApi:
         d["scan_state"] = self.scan_state
         d["scan_error"] = self.scan_error
         d["stats"] = self.state.stats()
+        d["active_tasks"] = _get_active_tasks()
         return d
 
 
@@ -352,7 +391,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
         def _run():
             sapmap_scanner.deep_scan_single(node)
-        threading.Thread(target=_run, daemon=True).start()
+        _bg(f"{sid}:deep_scan", "Deep Scan", _run)
         return json.dumps({"status": "started"})
 
     @app.route("/api/node/<sid>/set_type", method="POST")
@@ -467,7 +506,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 if not node.db_type:
                     print(f"[*] No database ports detected on {host}")
 
-        threading.Thread(target=_run, daemon=True).start()
+        _bg(f"{sid}:rfc_system_info", "RFC System Info", _run)
         return json.dumps({"status": "started"})
 
     @app.route("/api/node/<sid>/check_gw", method="POST")
@@ -480,7 +519,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
         def _run():
             sapmap_exploit.check_gw_vulnerable(node)
 
-        threading.Thread(target=_run, daemon=True).start()
+        _bg(f"{sid}:check_gw", "Check Gateway", _run)
         return json.dumps({"status": "started"})
 
     @app.route("/api/node/<sid>/create_user", method="POST")
@@ -502,7 +541,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 api.state.track_created_user(created)
                 sapmap_exploit._post_exploit_enrichment(node, api.state)
 
-        threading.Thread(target=_run, daemon=True).start()
+        _bg(f"{sid}:create_user", "Create User", _run)
         return json.dumps({"status": "started"})
 
     @app.route("/api/node/<sid>/retrieve_rfcs", method="POST")
@@ -536,7 +575,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     conn.target_sid = node.sid
                 else:
                     target = api.state.find_node_by_host(
-                        hostname=conn.target_host, ip=conn.target_ip
+                        hostname=conn.target_host, ip=conn.target_ip,
+                        instance_nr=conn.target_instance_nr or "",
                     )
                     if target:
                         conn.target_sid = target.sid
@@ -576,7 +616,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
                     # Check if host already known on map
                     existing = api.state.find_node_by_host(
-                        hostname=host, ip=host)
+                        hostname=host, ip=host, instance_nr=inst)
                     if existing:
                         conn.target_sid = existing.sid
                         api.state.add_connection(conn)
@@ -648,6 +688,13 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                 if rh_ip and rh_ip in existing_ips:
                                     is_same = True
 
+                        # Even if host matches, different instance nr
+                        # means a different SAP system on the same host
+                        if is_same and inst:
+                            existing_insts = existing_sid_node.instance_nrs()
+                            if existing_insts and inst.zfill(2) not in existing_insts:
+                                is_same = False
+
                         if is_same:
                             conn.target_sid = dest_sid
                             api.state.add_connection(conn)
@@ -695,7 +742,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
             print(f"[+] Ping results: {alive} alive systems, "
                   f"{len(non_self) - alive} unreachable")
 
-        threading.Thread(target=_run, daemon=True).start()
+        _bg(f"{sid}:retrieve_rfcs", "Retrieve RFCs", _run)
         return json.dumps({"status": "started"})
 
     @app.route("/api/node/<sid>/test_rfcs", method="POST")
@@ -760,7 +807,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 print("[*] Possibly no RFC testing done because all RFCs are on the "
                       "RFC check list. Resetting it via the menu might help.")
 
-        threading.Thread(target=_run, daemon=True).start()
+        _bg(f"{sid}:test_rfcs", "Test RFCs", _run)
         return json.dumps({"status": "started"})
 
     @app.route("/api/node/<sid>/test_rfc_single", method="POST")
@@ -832,7 +879,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     print(f"[-] {dest_name}: Logon failed")
             print(f"[+] Single test done for {dest_name}")
 
-        threading.Thread(target=_run, daemon=True).start()
+        _bg(f"{sid}:test_rfc:{dest_name}", "Test RFC", _run)
         return json.dumps({"status": "started"})
 
     @app.route("/api/node/<sid>/download_hashes", method="POST")
@@ -857,7 +904,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     json.dump(hashes, f, indent=2)
                 print(f"[+] Hashes saved to {outfile}")
 
-        threading.Thread(target=_run, daemon=True).start()
+        _bg(f"{sid}:download_hashes", "Download Hashes", _run)
         return json.dumps({"status": "started"})
 
     @app.route("/api/node/<sid>/download_table", method="POST")
@@ -886,7 +933,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     json.dump(rows, f, indent=2)
                 print(f"[+] {len(rows)} rows from {table} saved to {outfile}")
 
-        threading.Thread(target=_run, daemon=True).start()
+        _bg(f"{sid}:download_table", "Download Table", _run)
         return json.dumps({"status": "started"})
 
     @app.route("/api/node/<sid>/create_tcpip_dest", method="POST")
@@ -976,7 +1023,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 print(f"[-] {dest_name}: Ping failed — "
                       f"{check.get('logon_message', check.get('error', ''))}")
 
-        threading.Thread(target=_run, daemon=True).start()
+        _bg(f"{sid}:create_tcpip", "Create TCP/IP Dest", _run)
         return json.dumps({"status": "started"})
 
     @app.route("/api/node/<sid>/propagate", method="POST")
@@ -993,7 +1040,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 node, api.state, target_sid=target_sid
             )
 
-        threading.Thread(target=_run, daemon=True).start()
+        _bg(f"{sid}:propagate", "Propagate", _run)
         return json.dumps({"status": "started"})
 
     @app.route("/api/node/<sid>/create_user_via_rfc", method="POST")
@@ -1015,7 +1062,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 destination_name=dest_name
             )
 
-        threading.Thread(target=_run, daemon=True).start()
+        _bg(f"{sid}:create_user_rfc:{dest_name}", "Create User via RFC", _run)
         return json.dumps({"status": "started"})
 
     @app.route("/api/node/<sid>/cleanup", method="POST")
@@ -1028,7 +1075,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
         def _run():
             sapmap_cleanup.cleanup_node_users(node, api.state)
 
-        threading.Thread(target=_run, daemon=True).start()
+        _bg(f"{sid}:cleanup", "Cleanup Users", _run)
         return json.dumps({"status": "started"})
 
     @app.route("/api/node/<sid>/client_roles", method="POST")
@@ -1042,7 +1089,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
             creds = node.best_credentials()
             sapmap_rfc.update_node_production_status(node, creds)
 
-        threading.Thread(target=_run, daemon=True).start()
+        _bg(f"{sid}:client_roles", "Client Roles", _run)
         return json.dumps({"status": "started"})
 
     @app.route("/api/node/<sid>", method="DELETE")
@@ -1091,7 +1138,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
         def _run():
             sapmap_exploit.propagate_all(api.state)
 
-        threading.Thread(target=_run, daemon=True).start()
+        _bg("_propagate_all", "Propagate All", _run)
         return json.dumps({"status": "started"})
 
     @app.route("/api/actions/cleanup_all", method="POST")
@@ -1101,7 +1148,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
         def _run():
             sapmap_cleanup.cleanup_all_users(api.state)
 
-        threading.Thread(target=_run, daemon=True).start()
+        _bg("_cleanup_all", "Cleanup All", _run)
         return json.dumps({"status": "started"})
 
     @app.route("/api/actions/reset_rfc_cache", method="POST")

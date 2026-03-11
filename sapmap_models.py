@@ -404,6 +404,7 @@ class SAPMAPState:
         # Re-match unresolved RFC connections against the new node
         node_ips = node.all_ips()
         node_names = node.all_hostnames()
+        node_instances = set(node.instance_nrs())
         for conn in self.connections:
             if conn.target_sid:
                 continue
@@ -411,6 +412,11 @@ class SAPMAPState:
                           if s and s.strip()]
             for val in candidates:
                 if val in node_ips or val.lower() in node_names:
+                    # If the connection has an instance nr, verify it matches
+                    conn_inst = (conn.target_instance_nr or "").strip()
+                    if conn_inst and node_instances:
+                        if conn_inst.zfill(2) not in node_instances:
+                            break  # host matches but wrong instance
                     conn.target_sid = node.sid
                     break
 
@@ -427,29 +433,46 @@ class SAPMAPState:
     def get_node(self, sid: str) -> Optional[SAPNode]:
         return self.nodes.get(sid)
 
-    def find_node_by_host(self, hostname: str = "", ip: str = "") -> Optional[SAPNode]:
+    def find_node_by_host(self, hostname: str = "", ip: str = "",
+                          instance_nr: str = "") -> Optional[SAPNode]:
         """Find a node matching a hostname or IP.
 
         Both parameters are checked against both IPs and hostnames,
         since RFC destinations often store an IP in the host field.
+
+        When *instance_nr* is provided, prefer the node whose instances
+        contain that number.  If multiple nodes share the same host but
+        only one has the matching instance, that one wins.  Without an
+        instance_nr (or when only one node matches) the first match is
+        returned — preserving backward-compatible behaviour.
         """
         candidates = [s.strip() for s in (hostname, ip) if s and s.strip()]
+        matches = []
         for node in self.nodes.values():
             node_ips = node.all_ips()
             node_names = node.all_hostnames()
             for val in candidates:
-                if val in node_ips:
-                    return node
-                if val.lower() in node_names:
-                    return node
-        return None
+                if val in node_ips or val.lower() in node_names:
+                    matches.append(node)
+                    break
+
+        if not matches:
+            return None
+        if len(matches) == 1 or not instance_nr:
+            return matches[0]
+
+        # Multiple nodes on the same host — disambiguate by instance nr
+        inst = instance_nr.strip().zfill(2)
+        for node in matches:
+            if inst in node.instance_nrs():
+                return node
+        # No exact instance match — return first candidate
+        return matches[0]
 
     def find_node_by_instance(self, host: str, instance_nr: str) -> Optional[SAPNode]:
         """Find a node matching host + instance number."""
-        candidate = self.find_node_by_host(hostname=host, ip=host)
-        if candidate and instance_nr in candidate.instance_nrs():
-            return candidate
-        return candidate  # return even without exact instance match
+        return self.find_node_by_host(hostname=host, ip=host,
+                                      instance_nr=instance_nr)
 
     # -- Connection management --
 
