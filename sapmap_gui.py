@@ -776,6 +776,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         node, conn.destination_name, creds, api.state.rfc_check_cache
                     )
                     conn.logon_successful = result.get("logon_ok", False)
+                    conn.logon_tested = True
                     conn.ping_ok = result.get("ping_ok", False)
                     conn.latency_ms = result.get("latency_ms", 0)
                     conn.tested = True
@@ -848,6 +849,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 ping_success = result.get("ping_status") == "1"
                 conn.ping_ok = ping_success
                 conn.logon_successful = ping_success
+                conn.logon_tested = True
                 conn.sapxpg_remote_works = ping_success
                 if ping_success:
                     print(f"[+] {dest_name}: Ping successful! "
@@ -860,6 +862,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
             else:
                 # Type 3: success = logon_ok
                 conn.logon_successful = result.get("logon_ok", False)
+                conn.logon_tested = True
                 conn.ping_ok = result.get("ping_ok", False)
                 if conn.logon_successful:
                     print(f"[+] {dest_name}: Logon successful!")

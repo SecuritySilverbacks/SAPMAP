@@ -330,6 +330,7 @@ class RFCConnection:
 
     # /SDF/RFC_CHECK results
     logon_successful: bool = False
+    logon_tested: bool = False   # True after explicit logon test (Test RFCs)
     ping_ok: bool = False
     latency_ms: int = 0
     check_error: str = ""
@@ -364,6 +365,7 @@ class RFCConnection:
             "has_sap_all": self.has_sap_all,
             "user_detail_error": self.user_detail_error,
             "logon_successful": self.logon_successful,
+            "logon_tested": self.logon_tested,
             "ping_ok": self.ping_ok,
             "latency_ms": self.latency_ms,
             "check_error": self.check_error,

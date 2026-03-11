@@ -1420,7 +1420,7 @@ function showConnInfo(e, connIdx) {
       <strong style="font-size:11px;color:#8b949e">/SDF/RFC_CHECK</strong>
       ${conn.tested ? `
         <div class="info-row"><span class="info-label">Ping:</span><span class="info-val">${conn.ping_ok ? 'OK' : 'Failed'}${conn.latency_ms ? ' ('+conn.latency_ms+'ms)' : ''}</span></div>
-        ${isTypeT ? '' : `<div class="info-row"><span class="info-label">Logon:</span><span class="info-val">${conn.logon_successful ? '&#9989; RFC Logon successful.' : '&#10060; Failed'}</span></div>`}
+        ${isTypeT ? '' : `<div class="info-row"><span class="info-label">Logon:</span><span class="info-val">${conn.logon_successful ? '&#9989; RFC Logon successful.' : (conn.logon_tested ? '&#10060; Failed' : '&#9898; Not tested')}</span></div>`}
       ` : '<div style="color:#484f58;font-size:11px;margin-top:4px">Not tested yet</div>'}
     </div>
     <div class="info-section">
