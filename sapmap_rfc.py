@@ -238,6 +238,60 @@ def _abap_install_and_run(conn, destination: str, username: str) -> dict:
     }
 
 
+def _susr_suim_sap_all_check(conn, destination: str, username: str) -> dict:
+    """Check if a remote user has SAP_ALL via SUSR_SUIM_API_RSUSR050_USER.
+
+    Fallback when RFC_ABAP_INSTALL_AND_RUN is blocked ("not permitted in
+    this client").  Compares authorization objects of the user on the remote
+    system.  If at least 10 key auth objects are present AND the total number
+    of entries exceeds 500, we consider SAP_ALL granted.
+
+    Returns dict with: profiles, has_sap_all, error.
+    """
+    REQUIRED_OBJECTS = {
+        "S_DX_MAIN", "S_ECATTADM", "S_PATH", "S_ICF_ADM", "S_BTCH_ADM",
+        "S_DEVELOP", "S_DBCON", "S_TABU_DIS", "S_TABU_NAM", "S_USER_ADM",
+    }
+
+    try:
+        result = conn.call(
+            "SUSR_SUIM_API_RSUSR050_USER",
+            IV_SYSTEM_A=destination,
+            IV_SYSTEM_B=destination,
+            IV_USER_A=username,
+            IV_USER_B=username,
+            IV_TAB_VIEW=1,
+        )
+
+        et_tab = result.get("ET_TAB_VIEW1", [])
+        total = len(et_tab)
+        found_objects = {row.get("OBJCT", "").strip() for row in et_tab
+                         if isinstance(row, dict)}
+        matched = REQUIRED_OBJECTS & found_objects
+        has_sap_all = len(matched) >= len(REQUIRED_OBJECTS) and total > 500
+
+        logger.debug(f"SUSR_SUIM check for {username}@{destination}: "
+                     f"{total} entries, {len(matched)}/{len(REQUIRED_OBJECTS)} "
+                     f"required objects → SAP_ALL={has_sap_all}")
+
+        profiles = ["SAP_ALL"] if has_sap_all else []
+        if has_sap_all:
+            print(f"[+] SUSR_SUIM fallback: {username} via {destination} has "
+                  f"SAP_ALL ({total} auth entries, "
+                  f"{len(matched)}/{len(REQUIRED_OBJECTS)} key objects)")
+        else:
+            print(f"[-] SUSR_SUIM fallback: {username} via {destination} does "
+                  f"NOT have SAP_ALL ({total} entries, "
+                  f"{len(matched)}/{len(REQUIRED_OBJECTS)} key objects)")
+
+        return {"profiles": profiles, "has_sap_all": has_sap_all, "error": ""}
+
+    except Exception as e:
+        logger.debug(f"SUSR_SUIM fallback failed: {e}")
+        return {"profiles": [], "has_sap_all": False,
+                "error": f"SUSR_SUIM fallback failed: {e}"}
+
+
 def get_remote_user_profiles(node: SAPNode, username: str,
                              destination: str,
                              creds: Credentials = None) -> dict:
@@ -248,6 +302,8 @@ def get_remote_user_profiles(node: SAPNode, username: str,
     on the target system and returns the profiles.
 
     Tries RFC_ABAP_INSTALL_AND_RUN first, then /SAPDS/RFC_ABAP_INSTALL_RUN.
+    If both fail with "not permitted in this client", falls back to
+    SUSR_SUIM_API_RSUSR050_USER for SAP_ALL heuristic detection.
 
     Returns dict with: profiles, has_sap_all, error.
     """
@@ -256,6 +312,14 @@ def get_remote_user_profiles(node: SAPNode, username: str,
     try:
         with _get_connection(node, creds) as conn:
             result_info = _abap_install_and_run(conn, destination, username)
+
+            # Fallback: if ABAP_INSTALL_AND_RUN is blocked, use SUSR_SUIM
+            if (result_info["error"] and
+                    "not permitted in this client" in result_info["error"].lower()):
+                print(f"[*] ABAP_INSTALL_AND_RUN blocked on {node.sid}, "
+                      f"trying SUSR_SUIM fallback...")
+                result_info = _susr_suim_sap_all_check(
+                    conn, destination, username)
 
             if result_info["profiles"]:
                 print(f"[+] Remote profiles for {username} via {destination}: "
