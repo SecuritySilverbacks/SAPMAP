@@ -458,16 +458,24 @@ class SAPMAPState:
 
         if not matches:
             return None
-        if len(matches) == 1 or not instance_nr:
+        if not instance_nr:
             return matches[0]
 
-        # Multiple nodes on the same host — disambiguate by instance nr
+        # Validate instance number against candidates
         inst = instance_nr.strip().zfill(2)
         for node in matches:
             if inst in node.instance_nrs():
                 return node
-        # No exact instance match — return first candidate
-        return matches[0]
+
+        # Single match but wrong instance — not the same system
+        if len(matches) == 1:
+            node_insts = matches[0].instance_nrs()
+            if node_insts and inst not in node_insts:
+                return None
+            return matches[0]  # no instances known yet, accept it
+
+        # Multiple matches, none with matching instance — no match
+        return None
 
     def find_node_by_instance(self, host: str, instance_nr: str) -> Optional[SAPNode]:
         """Find a node matching host + instance number."""
