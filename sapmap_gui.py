@@ -317,6 +317,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
     @app.route("/")
     def index():
         response.content_type = "text/html; charset=utf-8"
+        response.set_header("Cache-Control", "no-cache, no-store, must-revalidate")
         return get_html()
 
     # -- Console polling --

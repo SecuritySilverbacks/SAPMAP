@@ -1276,6 +1276,31 @@ function showCtxMenu(e, sid) {
     }
   });
 
+  // Show existing credentials / created users in the menu
+  let oldInfo = menu.querySelector('.ctx-cred-info');
+  if (oldInfo) oldInfo.remove();
+  if (n && hasCreds) {
+    const info = document.createElement('div');
+    info.className = 'ctx-cred-info';
+    info.style.cssText = 'padding:4px 12px;font-size:10px;color:#8b949e;border-top:1px solid #30363d;pointer-events:none';
+    let lines = [];
+    for (const c of (n.credentials || [])) {
+      const mark = c.verified ? '\u2705' : '\u274C';
+      lines.push(`${mark} ${c.username} / client ${c.client} / inst ${c.instance_nr}`);
+    }
+    for (const u of (n.created_users || [])) {
+      lines.push(`\u26A1 ${u.username} / client ${u.client} (created)`);
+    }
+    if (lines.length) info.innerHTML = lines.join('<br>');
+    // Insert after the "Provide Credentials" item
+    const credItem = menu.querySelector('[data-action="credentials"]');
+    if (credItem && credItem.nextSibling) {
+      credItem.parentNode.insertBefore(info, credItem.nextSibling);
+    } else {
+      menu.appendChild(info);
+    }
+  }
+
   // Position menu within viewport — measure actual height
   menu.classList.add('visible');
   const menuRect = menu.getBoundingClientRect();
@@ -1523,8 +1548,30 @@ function showFindings(sid) {
 function showCredModal(sid) {
   const n = (mapState.nodes || {})[sid];
   if (!n) return;
-  document.getElementById('cred-system-info').textContent =
-    `${n.sid} (${n.hostname || n.ip})`;
+
+  // Build info text with existing credentials and created users
+  let infoHtml = `<strong>${escHtml(n.sid)}</strong> (${escHtml(n.hostname || n.ip)})`;
+  const creds = n.credentials || [];
+  const users = n.created_users || [];
+  if (creds.length > 0 || users.length > 0) {
+    infoHtml += '<div style="margin-top:6px;font-size:11px;color:#8b949e">';
+    if (creds.length > 0) {
+      infoHtml += '<div style="margin-bottom:2px">Saved credentials:</div>';
+      for (const c of creds) {
+        const verified = c.verified ? ' &#9989;' : ' &#10060;';
+        infoHtml += `<div style="margin-left:8px;color:#c9d1d9">${escHtml(c.username)} / client ${escHtml(c.client)} / inst ${escHtml(c.instance_nr)}${verified}</div>`;
+      }
+    }
+    if (users.length > 0) {
+      infoHtml += '<div style="margin-top:4px;margin-bottom:2px">Created users:</div>';
+      for (const u of users) {
+        infoHtml += `<div style="margin-left:8px;color:#3fb950">${escHtml(u.username)} / client ${escHtml(u.client)} &#9889;</div>`;
+      }
+    }
+    infoHtml += '</div>';
+  }
+  document.getElementById('cred-system-info').innerHTML = infoHtml;
+
   // Find real instance numbers (exclude XX)
   const instNrs = (n.instances || [])
     .map(i => i.instance_nr)
@@ -1562,6 +1609,7 @@ async function saveCredentials() {
   await api('POST', `node/${selectedNodeSid}/credentials`, creds);
   closeModal('cred-modal');
   startPolling();
+  await pollUpdates();  // refresh state immediately
 }
 
 async function downloadTable() {
