@@ -689,6 +689,9 @@ let dragMoved = false;
 let dragStartPos = { x: 0, y: 0 };
 let unkPositions = {};  // persistent positions for unknown target boxes
 let activeTasks = {};   // key → label for active background operations
+let knownNodeSids = new Set();   // SIDs seen in previous renders
+let knownConnKeys = new Set();   // connection keys seen in previous renders
+let firstRender = true;          // skip animations on initial load
 let viewBox = { x: 0, y: 0, w: 1200, h: 800 };
 let viewBoxUserControlled = false;  // true once user zooms/pans
 let isPanning = false;
@@ -967,7 +970,12 @@ function updateMap() {
     pairCurrent[pairKey]++;
   });
 
+  // Snapshot previous state for animation detection
+  const prevNodes = new Set(knownNodeSids);
+  const prevConns = new Set(knownConnKeys);
+
   // Draw connections first (behind nodes)
+  const newConnKeys = new Set();
   conns.forEach((conn, ci) => {
     const srcNode = nodes[conn.source_sid];
     let tgtNode = nodes[conn.target_sid];
@@ -977,6 +985,11 @@ function updateMap() {
       tgtNode = unknownTargets[key];
     }
     if (!srcNode || !tgtNode) return;
+
+    const connKey = conn.source_sid + '|' + conn.destination_name;
+    newConnKeys.add(connKey);
+    const isNewConn = !firstRender && !prevConns.has(connKey);
+    const newAttr = isNewConn ? ' data-new="1"' : '';
 
     let color = '#5dade2';
     let width = 4;
@@ -1013,7 +1026,7 @@ function updateMap() {
       const sx = nx + BOX_W;  // right edge
       const cpx = sx + loopR;
       html += `<path class="edge-line" d="M${sx},${sy} C${cpx},${sy} ${cpx},${ey} ${sx},${ey}" ` +
-        `stroke="${color}" stroke-width="${width}" fill="none"${dashAttr} ` +
+        `stroke="${color}" stroke-width="${width}" fill="none"${dashAttr}${newAttr} data-orig-dash="${dashArray}" ` +
         `marker-end="url(#arrow-${ci})" data-conn-idx="${ci}" ` +
         `onclick="showConnInfo(event, ${ci})" />`;
       // Label to the right of the loop
@@ -1056,7 +1069,7 @@ function updateMap() {
 
     if (total === 1) {
       html += `<line class="edge-line" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" ` +
-        `stroke="${color}" stroke-width="${width}" fill="none"${dashAttr} ` +
+        `stroke="${color}" stroke-width="${width}" fill="none"${dashAttr}${newAttr} data-orig-dash="${dashArray}" ` +
         `marker-end="url(#arrow-${ci})" data-conn-idx="${ci}" ` +
         `onclick="showConnInfo(event, ${ci})" />`;
     } else {
@@ -1070,7 +1083,7 @@ function updateMap() {
       const offset = (idx - (total - 1) / 2) * 40;
       const qx = mx + px * offset, qy = my + py * offset;
       html += `<path class="edge-line" d="M${x1},${y1} Q${qx},${qy} ${x2},${y2}" ` +
-        `stroke="${color}" stroke-width="${width}" fill="none"${dashAttr} ` +
+        `stroke="${color}" stroke-width="${width}" fill="none"${dashAttr}${newAttr} data-orig-dash="${dashArray}" ` +
         `marker-end="url(#arrow-${ci})" data-conn-idx="${ci}" ` +
         `onclick="showConnInfo(event, ${ci})" />`;
     }
@@ -1099,6 +1112,8 @@ function updateMap() {
   nodeKeys.forEach(sid => {
     const n = nodes[sid];
     const x = n._x || 0, y = n._y || 0;
+    const isNewNode = !firstRender && !prevNodes.has(sid);
+    const isScanning = !!(activeTasks[sid + ':retrieve_rfcs']);
 
     // Determine colors
     let fill = '#16213e';
@@ -1110,10 +1125,24 @@ function updateMap() {
 
     if (n.has_critical_finding || n.gw_vulnerable) { borderColor = '#8b0000'; borderWidth = 6; }
 
+    // Scanning radar pulse (behind node)
+    if (isScanning) {
+      const pcx = x + BOX_W/2, pcy = y + BOX_H/2;
+      html += `<circle cx="${pcx}" cy="${pcy}" fill="none" stroke="#f0883e" stroke-width="2">` +
+        `<animate attributeName="r" from="20" to="140" dur="1s" fill="freeze" />` +
+        `<animate attributeName="opacity" from="0.5" to="0" dur="1s" fill="freeze" />` +
+        `</circle>`;
+    }
+
     // Node group
-    html += `<g class="node-box" data-sid="${sid}" ` +
+    html += `<g class="node-box" data-sid="${sid}" ${isNewNode ? 'opacity="0"' : ''} ` +
       `onmousedown="startDrag(event,'${sid}')" ` +
       `oncontextmenu="showCtxMenu(event,'${sid}')" >`;
+
+    // Fade-in animation for newly discovered nodes
+    if (isNewNode) {
+      html += `<animate attributeName="opacity" from="0" to="1" dur="0.6s" fill="freeze" />`;
+    }
 
     // Box
     html += `<rect x="${x}" y="${y}" width="${BOX_W}" height="${BOX_H}" ` +
@@ -1237,6 +1266,27 @@ function updateMap() {
   }
 
   svg.innerHTML = html;
+
+  // Post-render: animate new connection lines (draw effect)
+  svg.querySelectorAll('.edge-line[data-new="1"]').forEach(el => {
+    const len = el.getTotalLength ? el.getTotalLength() : 500;
+    el.style.strokeDasharray = len;
+    el.style.strokeDashoffset = len;
+    el.style.transition = 'stroke-dashoffset 0.5s ease-out';
+    el.getBoundingClientRect(); // force reflow
+    el.style.strokeDashoffset = '0';
+    el.addEventListener('transitionend', () => {
+      const origDash = el.getAttribute('data-orig-dash') || '';
+      el.style.strokeDasharray = origDash || '';
+      el.style.strokeDashoffset = '';
+      el.style.transition = '';
+    }, { once: true });
+  });
+
+  // Update tracking sets
+  knownNodeSids = new Set(nodeKeys);
+  knownConnKeys = newConnKeys;
+  if (firstRender) firstRender = false;
 }
 
 // --- Event handlers ---
