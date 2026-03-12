@@ -1116,7 +1116,7 @@ function updateMap() {
     const isScanning = !!(activeTasks[sid + ':retrieve_rfcs']);
     // Track new nodes for fade-in (persists across re-renders)
     if (!firstRender && !prevNodes.has(sid) && !fadingNodes[sid]) {
-      fadingNodes[sid] = { start: Date.now(), duration: 2500 };
+      fadingNodes[sid] = { start: Date.now(), duration: 5000 };
     }
     const fadeInfo = fadingNodes[sid];
     const isFading = !!fadeInfo;
