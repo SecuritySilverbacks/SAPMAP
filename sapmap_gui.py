@@ -905,6 +905,36 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:test_rfc:{dest_name}", "Test RFC", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/exec_command", method="POST")
+    def node_exec_command(sid):
+        """Execute an OS command on a node (synchronous)."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        method = data.get("method", "gateway")  # "gateway" or "sxpg"
+        command = data.get("command", "").strip()
+        params = data.get("params", "").strip()
+
+        if not command:
+            return json.dumps({"error": "No command specified"})
+
+        if method == "gateway":
+            if not node.gw_vulnerable:
+                return json.dumps({"error": "Gateway not vulnerable on this system"})
+            result = sapmap_exploit.execute_gw_command(node, command, params)
+        elif method == "sxpg":
+            creds = node.best_credentials()
+            if not creds:
+                return json.dumps({"error": "No credentials available"})
+            result = sapmap_rfc.execute_local_command(node, command, params, creds)
+        else:
+            return json.dumps({"error": f"Unknown method: {method}"})
+
+        return json.dumps(result)
+
     @app.route("/api/node/<sid>/download_hashes", method="POST")
     def node_download_hashes(sid):
         response.content_type = "application/json"

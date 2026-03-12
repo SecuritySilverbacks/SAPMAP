@@ -414,6 +414,7 @@ body {
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="download_hashes">&#128229; Download Password Hashes</div>
   <div class="ctx-item" data-action="download_table">&#128229; Download Table Data</div>
+  <div class="ctx-item" data-action="os_terminal">&#128187; OS Command Terminal</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="create_tcpip">&#128279; Create TCP/IP Dest (sapxpg)</div>
   <div class="ctx-item" data-action="propagate">&#128640; Propagate (exploit next hop)</div>
@@ -627,6 +628,44 @@ body {
     <div class="form-actions">
       <button class="btn btn-primary" onclick="doPropagateTarget()">Propagate</button>
       <button class="btn" onclick="closeModal('propagate-modal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- OS Command Terminal Modal -->
+<div class="modal-overlay" id="terminal-modal">
+  <div class="modal" style="width:620px;max-width:90vw">
+    <h3>&#128187; OS Command Terminal — <span id="term-sid"></span></h3>
+    <div style="font-size:11px;color:#8b949e;margin-bottom:8px" id="term-info"></div>
+    <div class="form-row" style="display:flex;gap:8px;align-items:flex-end">
+      <div style="flex:1">
+        <label>Method</label>
+        <select id="term-method" style="width:100%">
+          <option value="gateway">Gateway (unauthenticated)</option>
+          <option value="sxpg">SXPG (via SAP_ALL user)</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-row" style="display:flex;gap:8px;align-items:flex-end">
+      <div style="flex:1">
+        <label>Command</label>
+        <input type="text" id="term-cmd" placeholder="e.g. /bin/sh or cmd.exe" style="width:100%">
+      </div>
+      <div style="flex:2">
+        <label>Parameters</label>
+        <input type="text" id="term-params" placeholder="e.g. -c whoami  or  /C dir" style="width:100%"
+               onkeydown="if(event.key==='Enter'){event.preventDefault();termExec();}">
+      </div>
+      <button class="btn btn-primary" onclick="termExec()" style="white-space:nowrap">Run</button>
+    </div>
+    <div id="term-output" style="background:#010409;border:1px solid #30363d;border-radius:4px;
+      padding:8px;margin-top:8px;font-family:monospace;font-size:12px;color:#7ee787;
+      min-height:120px;max-height:400px;overflow-y:auto;white-space:pre-wrap;word-break:break-all">
+      Ready. Enter a command above and click Run.
+    </div>
+    <div class="form-actions" style="margin-top:8px">
+      <button class="btn" onclick="document.getElementById('term-output').textContent=''">Clear</button>
+      <button class="btn" onclick="closeModal('terminal-modal')">Close</button>
     </div>
   </div>
 </div>
@@ -1237,6 +1276,7 @@ function showCtxMenu(e, sid) {
     'test_rfcs':        hasCreds && hasRFCs,        // need access + existing RFCs
     'download_hashes':  hasCreds,                   // need credentials/access
     'download_table':   hasCreds,                   // need credentials/access
+    'os_terminal':      hasGwVuln || hasCreatedUsers, // need GW vuln or created user
     'create_tcpip':     hasCreds,                   // need credentials/access
     'propagate':        hasCreds,                   // need access to propagate from
     'cleanup':          hasCreatedUsers,             // need created users to clean up
@@ -1257,6 +1297,7 @@ function showCtxMenu(e, sid) {
     'test_rfcs':        'Retrieve RFC connections first',
     'download_hashes':  'Provide credentials or create a user first',
     'download_table':   'Provide credentials or create a user first',
+    'os_terminal':      'Requires vulnerable gateway or created user with SAP_ALL',
     'create_tcpip':     'Provide credentials or create a user first',
     'propagate':        'Provide credentials or create a user first',
     'cleanup':          'No created users to clean up',
@@ -1351,6 +1392,7 @@ async function ctxAction(action) {
       await api('POST', `node/${sid}/download_hashes`); break;
     case 'download_table':
       document.getElementById('table-modal').classList.add('visible'); break;
+    case 'os_terminal': showTerminalModal(sid); break;
     case 'create_tcpip': showTcpipModal(sid); break;
     case 'propagate': showPropagateModal(sid); break;
     case 'cleanup':
@@ -1789,6 +1831,65 @@ async function doPropagateTarget() {
   closeModal('propagate-modal');
   await api('POST', `node/${selectedNodeSid}/propagate`, { target_sid: targetSid });
   startPolling();
+}
+
+// --- OS Terminal ---
+function showTerminalModal(sid) {
+  const n = (mapState.nodes || {})[sid];
+  document.getElementById('term-sid').textContent = sid;
+  const hasGw = n && n.gw_vulnerable;
+  const hasCreated = n && (n.created_users || []).length > 0;
+  const methodSel = document.getElementById('term-method');
+  // Enable/disable method options based on what's available
+  methodSel.options[0].disabled = !hasGw;   // gateway
+  methodSel.options[1].disabled = !hasCreated; // sxpg
+  methodSel.value = hasGw ? 'gateway' : 'sxpg';
+  // Info text
+  let info = [];
+  if (hasGw) info.push('Gateway: vulnerable');
+  if (hasCreated) info.push('SXPG: user available');
+  document.getElementById('term-info').textContent = info.join(' | ') || 'No execution method available';
+  // Pre-fill command based on OS
+  const os = (n && n.os_type || '').toLowerCase();
+  const cmdInput = document.getElementById('term-cmd');
+  const paramInput = document.getElementById('term-params');
+  if (os.includes('windows') || os.includes('nt')) {
+    cmdInput.value = 'cmd.exe';
+    paramInput.value = '/C whoami';
+  } else {
+    cmdInput.value = '/bin/sh';
+    paramInput.value = '-c whoami';
+  }
+  document.getElementById('term-output').textContent = 'Ready. Enter a command above and click Run.';
+  document.getElementById('terminal-modal').classList.add('visible');
+  paramInput.focus();
+}
+
+async function termExec() {
+  const sid = document.getElementById('term-sid').textContent;
+  const method = document.getElementById('term-method').value;
+  const command = document.getElementById('term-cmd').value.trim();
+  const params = document.getElementById('term-params').value.trim();
+  const out = document.getElementById('term-output');
+  if (!command) { alert('Enter a command'); return; }
+
+  out.textContent += `\n$ ${command} ${params}\n`;
+  out.textContent += '(executing...)\n';
+  out.scrollTop = out.scrollHeight;
+
+  try {
+    const res = await api('POST', `node/${sid}/exec_command`, { method, command, params });
+    if (res.error) {
+      out.textContent += `ERROR: ${res.error}\n`;
+    } else if (res.output && res.output.length) {
+      out.textContent += res.output.join('\n') + '\n';
+    } else {
+      out.textContent += '(no output)\n';
+    }
+  } catch (e) {
+    out.textContent += `ERROR: ${e}\n`;
+  }
+  out.scrollTop = out.scrollHeight;
 }
 
 // --- Global actions ---

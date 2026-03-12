@@ -1359,3 +1359,84 @@ def execute_remote_command(node: SAPNode, destination: str,
         logger.debug(f"SXPG remote command failed via {destination}: {e}")
 
     return result
+
+
+def execute_local_command(node: SAPNode, command: str, params: str,
+                          creds: Credentials = None) -> dict:
+    """Execute an OS command on the node itself via SXPG_STEP_XPG_START.
+
+    Creates a self-referencing TCP/IP destination (pointing to localhost)
+    if one doesn't already exist, then calls execute_remote_command().
+
+    Args:
+        node: target SAP system (must have credentials with SAP_ALL)
+        command: executable to run (e.g. cmd.exe or /bin/sh)
+        params: command parameters
+        creds: credentials on the system
+
+    Returns dict with: success, output (list of lines), error
+    """
+    result = {"success": False, "output": [], "error": ""}
+
+    # Look for an existing self-referencing TCP/IP destination
+    dest_name = None
+    try:
+        with _get_connection(node, creds) as conn:
+            try:
+                table_result = conn.call(
+                    "RFC_READ_TABLE",
+                    QUERY_TABLE="RFCDES",
+                    DELIMITER="|",
+                    FIELDS=[{"FIELDNAME": "RFCDEST"}, {"FIELDNAME": "RFCTYPE"},
+                            {"FIELDNAME": "RFCOPTIONS"}],
+                    OPTIONS=[{"TEXT": "RFCTYPE = 'T'"}],
+                    ROWCOUNT=500,
+                )
+                for row in table_result.get("DATA", []):
+                    line = row.get("WA", "") if isinstance(row, dict) else str(row)
+                    parts = line.split("|")
+                    if len(parts) >= 3:
+                        name = parts[0].strip()
+                        opts = parts[2].strip().upper()
+                        # Self-referencing: points to localhost or own host
+                        if ("SAPXPG" in opts or "PROGRAM=SAPXPG" in opts):
+                            host_lower = (node.ip or node.hostname or "").lower()
+                            if ("LOCALHOST" in opts or "127.0.0.1" in opts
+                                    or (host_lower and host_lower.upper() in opts)):
+                                dest_name = name
+                                break
+            except Exception:
+                pass  # RFC_READ_TABLE might not be available
+    except Exception:
+        pass
+
+    # Create one if not found
+    if not dest_name:
+        host = node.ip or node.hostname
+        if not host:
+            result["error"] = "No IP/hostname for node"
+            return result
+
+        # Find own gateway port
+        gw_port = None
+        for inst in node.instances:
+            for port, svc in inst.ports.items():
+                if svc == "gateway" or (3300 <= port <= 3399):
+                    gw_port = str(port)
+                    break
+            if gw_port:
+                break
+        if not gw_port:
+            gw_port = "3300"
+
+        create_result = create_tcpip_destination(
+            node, target_host=host, target_sid=node.sid,
+            target_gw_port=gw_port, creds=creds,
+        )
+        if not create_result["success"]:
+            result["error"] = f"Could not create TCP/IP dest: {create_result['message']}"
+            return result
+        dest_name = create_result["dest_name"]
+
+    # Execute command via the destination
+    return execute_remote_command(node, dest_name, command, params, creds)
