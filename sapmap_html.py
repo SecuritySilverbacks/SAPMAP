@@ -692,6 +692,7 @@ let activeTasks = {};   // key → label for active background operations
 let knownNodeSids = new Set();   // SIDs seen in previous renders
 let knownConnKeys = new Set();   // connection keys seen in previous renders
 let firstRender = true;          // skip animations on initial load
+let fadingNodes = {};            // sid → { start, duration } for nodes currently fading in
 let viewBox = { x: 0, y: 0, w: 1200, h: 800 };
 let viewBoxUserControlled = false;  // true once user zooms/pans
 let isPanning = false;
@@ -1112,8 +1113,19 @@ function updateMap() {
   nodeKeys.forEach(sid => {
     const n = nodes[sid];
     const x = n._x || 0, y = n._y || 0;
-    const isNewNode = !firstRender && !prevNodes.has(sid);
     const isScanning = !!(activeTasks[sid + ':retrieve_rfcs']);
+    // Track new nodes for fade-in (persists across re-renders)
+    if (!firstRender && !prevNodes.has(sid) && !fadingNodes[sid]) {
+      fadingNodes[sid] = { start: Date.now(), duration: 2500 };
+    }
+    const fadeInfo = fadingNodes[sid];
+    const isFading = !!fadeInfo;
+    let nodeOpacity = 1;
+    if (isFading) {
+      const elapsed = Date.now() - fadeInfo.start;
+      nodeOpacity = Math.min(1, elapsed / fadeInfo.duration);
+      if (nodeOpacity >= 1) delete fadingNodes[sid]; // done fading
+    }
 
     // Determine colors
     let fill = '#16213e';
@@ -1134,30 +1146,24 @@ function updateMap() {
         `<animate attributeName="opacity" from="0.5" to="0" dur="1.2s" fill="freeze" />` +
         `</circle>`;
       // Fake probe lines shooting out in random directions
-      const probeCount = 4 + Math.floor(Math.random() * 3);
+      const probeCount = 5 + Math.floor(Math.random() * 3);
       for (let p = 0; p < probeCount; p++) {
         const angle = Math.random() * Math.PI * 2;
         const dist = 150 + Math.random() * 250;
         const ex = pcx + Math.cos(angle) * dist;
         const ey = pcy + Math.sin(angle) * dist;
-        const delay = (p * 0.12).toFixed(2);
-        const dur = (0.4 + Math.random() * 0.3).toFixed(2);
+        const dur = (0.5 + Math.random() * 0.4).toFixed(2);
         html += `<line x1="${pcx}" y1="${pcy}" x2="${ex}" y2="${ey}" ` +
-          `stroke="#f0883e" stroke-width="1.5" stroke-dasharray="6,8" opacity="0">` +
-          `<animate attributeName="opacity" values="0;0.4;0" dur="${dur}s" begin="${delay}s" fill="freeze" />` +
+          `stroke="#f0883e" stroke-width="1.5" stroke-dasharray="6,8">` +
+          `<animate attributeName="opacity" values="0;0.5;0" dur="${dur}s" repeatCount="indefinite" />` +
           `</line>`;
       }
     }
 
     // Node group
-    html += `<g class="node-box" data-sid="${sid}" ${isNewNode ? 'opacity="0"' : ''} ` +
+    html += `<g class="node-box" data-sid="${sid}" ${isFading ? `opacity="${nodeOpacity.toFixed(2)}"` : ''} ` +
       `onmousedown="startDrag(event,'${sid}')" ` +
       `oncontextmenu="showCtxMenu(event,'${sid}')" >`;
-
-    // Fade-in animation for newly discovered nodes
-    if (isNewNode) {
-      html += `<animate attributeName="opacity" from="0" to="1" dur="1.2s" fill="freeze" />`;
-    }
 
     // Box
     html += `<rect x="${x}" y="${y}" width="${BOX_W}" height="${BOX_H}" ` +
@@ -1302,6 +1308,11 @@ function updateMap() {
   knownNodeSids = new Set(nodeKeys);
   knownConnKeys = newConnKeys;
   if (firstRender) firstRender = false;
+
+  // Schedule fast re-renders while nodes are still fading in
+  if (Object.keys(fadingNodes).length > 0) {
+    setTimeout(updateMap, 80);
+  }
 }
 
 // --- Event handlers ---
