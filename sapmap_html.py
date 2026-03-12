@@ -1125,13 +1125,28 @@ function updateMap() {
 
     if (n.has_critical_finding || n.gw_vulnerable) { borderColor = '#8b0000'; borderWidth = 6; }
 
-    // Scanning radar pulse (behind node)
+    // Scanning radar pulse + probe lines (behind node)
     if (isScanning) {
       const pcx = x + BOX_W/2, pcy = y + BOX_H/2;
+      // Radar pulse ring
       html += `<circle cx="${pcx}" cy="${pcy}" fill="none" stroke="#f0883e" stroke-width="2">` +
-        `<animate attributeName="r" from="20" to="140" dur="1s" fill="freeze" />` +
-        `<animate attributeName="opacity" from="0.5" to="0" dur="1s" fill="freeze" />` +
+        `<animate attributeName="r" from="20" to="160" dur="1.2s" fill="freeze" />` +
+        `<animate attributeName="opacity" from="0.5" to="0" dur="1.2s" fill="freeze" />` +
         `</circle>`;
+      // Fake probe lines shooting out in random directions
+      const probeCount = 4 + Math.floor(Math.random() * 3);
+      for (let p = 0; p < probeCount; p++) {
+        const angle = Math.random() * Math.PI * 2;
+        const dist = 150 + Math.random() * 250;
+        const ex = pcx + Math.cos(angle) * dist;
+        const ey = pcy + Math.sin(angle) * dist;
+        const delay = (p * 0.12).toFixed(2);
+        const dur = (0.4 + Math.random() * 0.3).toFixed(2);
+        html += `<line x1="${pcx}" y1="${pcy}" x2="${ex}" y2="${ey}" ` +
+          `stroke="#f0883e" stroke-width="1.5" stroke-dasharray="6,8" opacity="0">` +
+          `<animate attributeName="opacity" values="0;0.4;0" dur="${dur}s" begin="${delay}s" fill="freeze" />` +
+          `</line>`;
+      }
     }
 
     // Node group
@@ -1141,7 +1156,7 @@ function updateMap() {
 
     // Fade-in animation for newly discovered nodes
     if (isNewNode) {
-      html += `<animate attributeName="opacity" from="0" to="1" dur="0.6s" fill="freeze" />`;
+      html += `<animate attributeName="opacity" from="0" to="1" dur="1.2s" fill="freeze" />`;
     }
 
     // Box
@@ -1272,7 +1287,7 @@ function updateMap() {
     const len = el.getTotalLength ? el.getTotalLength() : 500;
     el.style.strokeDasharray = len;
     el.style.strokeDashoffset = len;
-    el.style.transition = 'stroke-dashoffset 0.5s ease-out';
+    el.style.transition = 'stroke-dashoffset 0.8s ease-out';
     el.getBoundingClientRect(); // force reflow
     el.style.strokeDashoffset = '0';
     el.addEventListener('transitionend', () => {

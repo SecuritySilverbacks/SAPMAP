@@ -614,7 +614,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     if prev.get("remote_sid"):
                         conn.target_sid = prev["remote_sid"]
                     api.state.add_connection(conn)
-                    time.sleep(0.15)
+                    time.sleep(0.4)
                     continue
 
                 print(f"[*] Ping {conn.destination_name} → "
@@ -647,7 +647,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             conn.target_sid = dest_sid
                             discovered[key]["remote_sid"] = dest_sid
                             api.state.add_connection(conn)
-                            time.sleep(0.3)
+                            time.sleep(0.6)
                             if dest_sid == node.sid:
                                 print(f"[*] {conn.destination_name}: "
                                       f"self-reference ({node.sid})")
@@ -663,7 +663,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         conn.target_sid = existing.sid
                         discovered[key]["remote_sid"] = existing.sid
                         api.state.add_connection(conn)
-                        time.sleep(0.3)
+                        time.sleep(0.6)
                         if existing.sid == node.sid:
                             print(f"[*] {conn.destination_name}: "
                                   f"self-reference ({node.sid})")
@@ -721,7 +721,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             conn.target_sid = dest_sid
                             discovered[key]["remote_sid"] = dest_sid
                             api.state.add_connection(conn)
-                            time.sleep(0.3)
+                            time.sleep(0.6)
                             print(f"[*] {conn.destination_name}: "
                                   f"same system as {dest_sid}")
                             continue
@@ -752,7 +752,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     conn.target_sid = dest_sid
                     discovered[key]["remote_sid"] = dest_sid
                     api.state.add_connection(conn)
-                    time.sleep(0.5)  # longer pause for new system discovery
+                    time.sleep(1.2)  # longer pause for new system discovery
                     print(f"[+] Discovered {dest_sid} "
                           f"({remote_host}/{host}, "
                           f"inst {inst}) — added to map")
@@ -762,7 +762,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     conn.ping_ok = False
                     conn.tested = True
                     api.state.add_connection(conn)
-                    time.sleep(0.15)
+                    time.sleep(0.4)
 
             alive = len(discovered)
             print(f"[+] Ping results: {alive} alive systems, "
