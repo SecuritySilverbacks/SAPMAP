@@ -756,26 +756,33 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
     if 0 not in _seen:
         ordered_nrs.append(0)
 
-    # If SID or db_type still missing, try SAPControl SOAP on 5XX13
-    if not info["sid"] or not info["db_type"]:
-        for inst_nr in ordered_nrs:
-            sc_port = 50000 + inst_nr * 100 + 13
-            sid, is_java, is_abap, db_type = _query_sapcontrol_sid(
-                host, sc_port, timeout=min(timeout, 3)
-            )
-            if sid and not info["sid"]:
-                info["sid"] = sid
-                info["_is_java"] = is_java
-                info["_is_abap"] = is_abap
-                print(f"[+]   SID from SAPControl ({host}:{sc_port}): {sid}"
-                      f"{'  [JAVA]' if is_java else ''}"
-                      f"{'  [ABAP]' if is_abap else ''}")
-            if db_type and not info["db_type"]:
-                info["db_type"] = db_type
-                print(f"[+]   DB type from SAPControl ({host}:{sc_port}): "
-                      f"{db_type}")
-            if info["sid"] and info["db_type"]:
-                break
+    # Query SAPControl SOAP on 5XX13 for SID, DB type, and ABAP/JAVA detection.
+    # Always run this even if SID/db_type are known, because the ABAP/JAVA
+    # stack detection (is_abap, is_java) only comes from SAPControl properties.
+    for inst_nr in ordered_nrs:
+        sc_port = 50000 + inst_nr * 100 + 13
+        sid, is_java, is_abap, db_type = _query_sapcontrol_sid(
+            host, sc_port, timeout=min(timeout, 3)
+        )
+        if sid and not info["sid"]:
+            info["sid"] = sid
+            print(f"[+]   SID from SAPControl ({host}:{sc_port}): {sid}")
+        if is_java or is_abap:
+            info["_is_java"] = info.get("_is_java", False) or is_java
+            info["_is_abap"] = info.get("_is_abap", False) or is_abap
+            print(f"[+]   Stack from SAPControl ({host}:{sc_port}):"
+                  f"{'  [ABAP]' if is_abap else ''}"
+                  f"{'  [JAVA]' if is_java else ''}")
+        if db_type and not info["db_type"]:
+            info["db_type"] = db_type
+            print(f"[+]   DB type from SAPControl ({host}:{sc_port}): "
+                  f"{db_type}")
+        # For double-stack, ABAP and JAVA run on different instances.
+        # Keep querying until we have SID + db_type + both stack flags checked,
+        # or all instances are exhausted.
+        if (info["sid"] and info["db_type"]
+                and info.get("_is_java") and info.get("_is_abap")):
+            break  # Found both stacks, no need to continue
 
     # If OS still unknown, try SAPControl GetProcessList (.EXE = Windows)
     if not info["os_type"]:
