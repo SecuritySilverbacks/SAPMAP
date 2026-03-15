@@ -201,6 +201,7 @@ class SAPNode:
     created_users: list = field(default_factory=list)  # [CreatedUser, ...]
     sapology_data: dict = field(default_factory=dict)
     gw_vulnerable: bool = False         # True if SAPXPG gateway exploit works
+    gw_vulnerable_port: int = 0         # The specific gateway port that is vulnerable
     position: Optional[tuple] = None    # (x, y) on map — None = auto-layout
 
     # Computed helpers
@@ -275,6 +276,7 @@ class SAPNode:
             "created_users": [u.to_dict() for u in self.created_users],
             "sapology_data": self.sapology_data,
             "gw_vulnerable": self.gw_vulnerable,
+            "gw_vulnerable_port": self.gw_vulnerable_port,
             "position": list(self.position) if self.position else None,
         }
 
@@ -299,6 +301,7 @@ class SAPNode:
             created_users=[CreatedUser.from_dict(u) for u in d.get("created_users", [])],
             sapology_data=d.get("sapology_data", {}),
             gw_vulnerable=d.get("gw_vulnerable", False),
+            gw_vulnerable_port=d.get("gw_vulnerable_port", 0),
             position=tuple(d["position"]) if d.get("position") else None,
         )
         return node

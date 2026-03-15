@@ -407,7 +407,7 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
     if cancel_event and cancel_event.is_set():
         return result
     if not skip_quick_check:
-        QUICK_PORTS = list(range(3200, 3300)) + [8000, 50013, 1128]
+        QUICK_PORTS = list(range(3200, 3300)) + [8000, 50013, 50113, 50213, 50313, 54213, 1128]
         quick_timeout = min(timeout, 1.5)
         quick_hit = False
         qe = ThreadPoolExecutor(max_workers=min(len(QUICK_PORTS), 20))
@@ -447,8 +447,11 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
                     hits[r[0]] = {"service": r[1], "instance_nr": r[2]}
         return hits
 
-    # Pass 1: Dispatcher + Gateway + fixed ports (fast — ~200 ports)
+    # Pass 1: Dispatcher + SAPControl + fixed ports (fast — ~300 ports)
     ports_pass1 = _build_port_list(instance_range, include_hana=False)
+    # SAPControl HTTP ports (5XX13) — detects ABAP, JAVA, and double-stack
+    for inst_nr in range(instance_range[0], instance_range[1] + 1):
+        ports_pass1.append((50013 + inst_nr * 100, "sapcontrol", f"{inst_nr:02d}"))
     ports_pass1.append((1128, "saphost_http", "XX"))
     ports_pass1.append((1129, "saphost_https", "XX"))
 
