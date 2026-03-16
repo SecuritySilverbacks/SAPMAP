@@ -1098,14 +1098,15 @@ def _build_node_from_fast_scan(scan_result: dict, timeout: float = 10,
     if sc_is_java and not sc_is_abap:
         system_type = "JAVA"
 
-    # Enumerate clients from first dispatcher port
+    # Enumerate clients from dispatcher ports (try all until one succeeds)
     clients = []
     for port, info in sorted(open_ports.items()):
         if info["service"] == "dispatcher":
             client_list = enumerate_system_clients(host, port, timeout=timeout,
                                                    verbose=verbose)
-            clients = [{"nr": c, "category": ""} for c in client_list]
-            break
+            if client_list:
+                clients = [{"nr": c, "category": ""} for c in client_list]
+                break
 
     node = SAPNode(
         sid=sid,
