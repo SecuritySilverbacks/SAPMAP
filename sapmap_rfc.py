@@ -770,10 +770,31 @@ def ping_rfc_destination(node: SAPNode, destination_name: str,
                         "SYSID", "").strip()
                     result["remote_hostname"] = props.get(
                         "RFCHOST", "").strip()
-                    result["remote_ip"] = (
-                        props.get("RFCIPV6ADDR", "")
-                        or props.get("RFCIPADDR", "")
-                        or "").strip()
+
+                # Get IP via RFC_GET_SYSTEM_INFO with DESTINATION
+                # (RFCSI_EXPORT contains RFCIPADDR; CONNECTION_PROPERTIES does not)
+                if result["ping_ok"]:
+                    try:
+                        info = conn.call(
+                            "RFC_GET_SYSTEM_INFO",
+                            DESTINATION=destination_name,
+                        )
+                        export = info.get("RFCSI_EXPORT", {})
+                        if isinstance(export, dict):
+                            result["remote_ip"] = (
+                                export.get("RFCIPV6ADDR", "")
+                                or export.get("RFCIPADDR", "")
+                                or "").strip()
+                            if not result["remote_sid"]:
+                                result["remote_sid"] = (
+                                    export.get("RFCSYSID", "")
+                                    or "").strip()
+                            if not result["remote_hostname"]:
+                                result["remote_hostname"] = (
+                                    export.get("RFCHOST", "")
+                                    or "").strip()
+                    except Exception:
+                        pass
             except ABAPApplicationError as e:
                 if getattr(e, "key", "") == "FU_NOT_FOUND":
                     # DEST_CHECK_CONNECTION not available — fall back to
