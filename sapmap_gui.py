@@ -557,27 +557,6 @@ def create_app(api: SAPMAPApi) -> Bottle:
             conns = sapmap_rfc.retrieve_rfc_connections(node, creds)
             print(f"[+] Retrieved {len(conns)} RFC connections from {sid}")
 
-            # Resolve hostnames stored in target_host to IP addresses.
-            # RFCDES sometimes stores a hostname where an IP is expected.
-            import socket as _socket
-            for conn in conns:
-                host_val = (conn.target_host or "").strip()
-                if not host_val:
-                    continue
-                is_ip = True
-                try:
-                    _socket.inet_aton(host_val)
-                except _socket.error:
-                    is_ip = False
-                if not is_ip:
-                    resolved = _resolve_host(host_val)
-                    if resolved:
-                        print(f"[*] Resolved hostname {host_val} → {resolved}")
-                        conn.target_ip = resolved
-                        # target_host keeps the hostname for display/matching
-                    else:
-                        print(f"[*] Could not resolve hostname {host_val}")
-
             # Track discovered systems to avoid duplicate pings
             # Key: (host, instance_nr) → dest_name for dedup
             discovered = {}
@@ -646,9 +625,18 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
                 if ping["ping_ok"]:
                     dest_sid = ping.get("remote_sid", "").strip()
+                    remote_ip = ping.get("remote_ip", "").strip()
                     remote_host = (
                         ping.get("remote_hostname", "").strip()
                         or conn.target_host or host)
+                    # If target_host was a hostname (not IP), use the
+                    # IP returned by RFC_SYSTEM_INFO on the SAP system
+                    if remote_ip and remote_ip != host:
+                        print(f"[*] Resolved {host} → {remote_ip} "
+                              f"(via RFC_SYSTEM_INFO)")
+                        conn.target_ip = remote_ip
+                        host = remote_ip
+                        key = (host.lower(), inst)  # update dedup key
                     print(f"[+] {conn.destination_name}: alive"
                           f"{f' (SID={dest_sid})' if dest_sid else ''}"
                           f" ({ping['ping_message'][:60]})")

@@ -744,7 +744,8 @@ def ping_rfc_destination(node: SAPNode, destination_name: str,
     """
     result = {
         "ping_ok": False, "ping_message": "", "logon_ok": False,
-        "remote_sid": "", "remote_hostname": "", "error": "",
+        "remote_sid": "", "remote_hostname": "", "remote_ip": "",
+        "error": "",
     }
 
     try:
@@ -769,6 +770,10 @@ def ping_rfc_destination(node: SAPNode, destination_name: str,
                         "SYSID", "").strip()
                     result["remote_hostname"] = props.get(
                         "RFCHOST", "").strip()
+                    result["remote_ip"] = (
+                        props.get("RFCIPV6ADDR", "")
+                        or props.get("RFCIPADDR", "")
+                        or "").strip()
             except ABAPApplicationError as e:
                 if getattr(e, "key", "") == "FU_NOT_FOUND":
                     # DEST_CHECK_CONNECTION not available — fall back to
@@ -804,6 +809,10 @@ def ping_rfc_destination(node: SAPNode, destination_name: str,
                                     or "").strip()
                                 result["remote_hostname"] = (
                                     export.get("RFCHOST", "")
+                                    or "").strip()
+                                result["remote_ip"] = (
+                                    export.get("RFCIPV6ADDR", "")
+                                    or export.get("RFCIPADDR", "")
                                     or "").strip()
                         except Exception:
                             pass
