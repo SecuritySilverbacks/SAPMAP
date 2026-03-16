@@ -557,6 +557,23 @@ def create_app(api: SAPMAPApi) -> Bottle:
             conns = sapmap_rfc.retrieve_rfc_connections(node, creds)
             print(f"[+] Retrieved {len(conns)} RFC connections from {sid}")
 
+            # Resolve hostnames in target_host to IP addresses.
+            # RFCDES sometimes stores a hostname in what should be an IP field.
+            import socket as _socket
+            for conn in conns:
+                host_val = (conn.target_host or "").strip()
+                if host_val and not conn.target_ip:
+                    # Check if it looks like an IP already
+                    try:
+                        _socket.inet_aton(host_val)
+                    except _socket.error:
+                        # Not an IP — it's a hostname, try to resolve
+                        resolved = _resolve_host(host_val)
+                        if resolved and resolved != host_val:
+                            print(f"[*] Resolved hostname {host_val} → {resolved}")
+                            conn.target_ip = resolved
+                            # Keep the hostname in target_host for display
+
             # Track discovered systems to avoid duplicate pings
             # Key: (host, instance_nr) → dest_name for dedup
             discovered = {}
