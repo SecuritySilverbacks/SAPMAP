@@ -557,22 +557,26 @@ def create_app(api: SAPMAPApi) -> Bottle:
             conns = sapmap_rfc.retrieve_rfc_connections(node, creds)
             print(f"[+] Retrieved {len(conns)} RFC connections from {sid}")
 
-            # Resolve hostnames in target_host to IP addresses.
-            # RFCDES sometimes stores a hostname in what should be an IP field.
+            # Resolve hostnames stored in target_host to IP addresses.
+            # RFCDES sometimes stores a hostname where an IP is expected.
             import socket as _socket
             for conn in conns:
                 host_val = (conn.target_host or "").strip()
-                if host_val and not conn.target_ip:
-                    # Check if it looks like an IP already
-                    try:
-                        _socket.inet_aton(host_val)
-                    except _socket.error:
-                        # Not an IP — it's a hostname, try to resolve
-                        resolved = _resolve_host(host_val)
-                        if resolved and resolved != host_val:
-                            print(f"[*] Resolved hostname {host_val} → {resolved}")
-                            conn.target_ip = resolved
-                            # Keep the hostname in target_host for display
+                if not host_val:
+                    continue
+                is_ip = True
+                try:
+                    _socket.inet_aton(host_val)
+                except _socket.error:
+                    is_ip = False
+                if not is_ip:
+                    resolved = _resolve_host(host_val)
+                    if resolved:
+                        print(f"[*] Resolved hostname {host_val} → {resolved}")
+                        conn.target_ip = resolved
+                        # target_host keeps the hostname for display/matching
+                    else:
+                        print(f"[*] Could not resolve hostname {host_val}")
 
             # Track discovered systems to avoid duplicate pings
             # Key: (host, instance_nr) → dest_name for dedup
@@ -619,7 +623,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
             discovered = {}
 
             for conn in non_self:
-                host = conn.target_host or conn.target_ip or ""
+                host = conn.target_ip or conn.target_host or ""
                 inst = conn.target_instance_nr or "00"
                 key = (host.lower(), inst)
 
@@ -644,7 +648,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     dest_sid = ping.get("remote_sid", "").strip()
                     remote_host = (
                         ping.get("remote_hostname", "").strip()
-                        or host)
+                        or conn.target_host or host)
                     print(f"[+] {conn.destination_name}: alive"
                           f"{f' (SID={dest_sid})' if dest_sid else ''}"
                           f" ({ping['ping_message'][:60]})")
