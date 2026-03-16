@@ -1145,7 +1145,7 @@ function updateMap() {
         `<animate attributeName="r" from="20" to="160" dur="1.2s" fill="freeze" />` +
         `<animate attributeName="opacity" from="0.5" to="0" dur="1.2s" fill="freeze" />` +
         `</circle>`;
-      // Fake probe lines shooting out in random directions
+      // Fake probe lines shooting out in random directions (styled like RFC connections)
       const probeCount = 5 + Math.floor(Math.random() * 3);
       for (let p = 0; p < probeCount; p++) {
         const angle = Math.random() * Math.PI * 2;
@@ -1154,8 +1154,8 @@ function updateMap() {
         const ey = pcy + Math.sin(angle) * dist;
         const dur = (0.5 + Math.random() * 0.4).toFixed(2);
         html += `<line x1="${pcx}" y1="${pcy}" x2="${ex}" y2="${ey}" ` +
-          `stroke="#f0883e" stroke-width="1.5" stroke-dasharray="6,8">` +
-          `<animate attributeName="opacity" values="0;0.5;0" dur="${dur}s" repeatCount="indefinite" />` +
+          `stroke="#5dade2" stroke-width="4">` +
+          `<animate attributeName="opacity" values="0;0.6;0" dur="${dur}s" repeatCount="indefinite" />` +
           `</line>`;
       }
     }
