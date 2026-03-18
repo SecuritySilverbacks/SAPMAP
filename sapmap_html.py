@@ -435,6 +435,7 @@ body {
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="map_propagate_all">&#128640; Auto-Propagate All</div>
   <div class="ctx-item" data-action="map_cleanup_all">&#129529; Cleanup All Users</div>
+  <div class="ctx-item" id="map-ctx-check-all-gw" data-action="map_check_all_gw">&#128272; Check All GW Vulnerabilities</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="map_fit">&#128208; Fit to Window</div>
   <div class="ctx-item" data-action="map_reset_layout">&#128260; Reset Layout</div>
@@ -1979,6 +1980,13 @@ async function cleanupAll() {
     await api('POST', 'actions/cleanup_all');
   startPolling();
 }
+async function checkAllGateways() {
+  const nodeCount = Object.keys(mapState.nodes || {}).length;
+  if (nodeCount < 2) { alert('Need at least 2 systems on the map.'); return; }
+  if (confirm(`Check RFC gateway vulnerability on all ${nodeCount} systems on the map?`))
+    await api('POST', 'actions/check_all_gw');
+  startPolling();
+}
 async function resetRFCCache() {
   if (confirm('Reset the RFC check cache? This allows re-testing all connections.'))
     await api('POST', 'actions/reset_rfc_cache');
@@ -2203,6 +2211,9 @@ document.addEventListener('contextmenu', e => {
 
 function showMapCtxMenu(e) {
   const menu = document.getElementById('map-ctx-menu');
+  const nodeCount = Object.keys(mapState.nodes || {}).length;
+  document.getElementById('map-ctx-check-all-gw').style.display =
+    nodeCount >= 2 ? '' : 'none';
   menu.classList.add('visible');
   let mx = e.clientX, my = e.clientY;
   const rect = menu.getBoundingClientRect();
@@ -2222,6 +2233,7 @@ document.getElementById('map-ctx-menu').addEventListener('click', function(e) {
     case 'map_add_system': showAddSystemModal(); break;
     case 'map_propagate_all': propagateAll(); break;
     case 'map_cleanup_all': cleanupAll(); break;
+    case 'map_check_all_gw': checkAllGateways(); break;
     case 'map_fit': fitMap(); break;
     case 'map_reset_layout': resetLayout(); break;
   }

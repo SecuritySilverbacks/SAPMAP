@@ -1219,6 +1219,21 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg("_cleanup_all", "Cleanup All", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/actions/check_all_gw", method="POST")
+    def actions_check_all_gw():
+        response.content_type = "application/json"
+        nodes = list(api.state.nodes.values())
+        if len(nodes) < 2:
+            return json.dumps({"error": "Need at least 2 systems on the map"})
+
+        def _run():
+            for node in nodes:
+                print(f"[*] Checking GW vulnerability: {node.sid} ({node.ip})")
+                sapmap_exploit.check_gw_vulnerable(node)
+
+        _bg("_check_all_gw", "Check All GW Vulnerabilities", _run)
+        return json.dumps({"status": "started", "systems": len(nodes)})
+
     @app.route("/api/actions/reset_rfc_cache", method="POST")
     def actions_reset_rfc_cache():
         response.content_type = "application/json"
