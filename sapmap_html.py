@@ -1230,6 +1230,12 @@ function updateMap() {
       ty += 14;
     }
 
+    // IP address
+    if (n.ip) {
+      html += `<text x="${x+10}" y="${ty}" fill="#8b949e" font-size="10" font-family="monospace">IP: ${escHtml(n.ip)}</text>`;
+      ty += 14;
+    }
+
     // OS
     if (n.os_type) {
       html += `<text x="${x+10}" y="${ty}" fill="#8b949e" font-size="10" font-family="monospace">OS: ${escHtml(n.os_type)}</text>`;
