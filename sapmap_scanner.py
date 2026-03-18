@@ -999,9 +999,16 @@ def enumerate_system_clients(host: str, disp_port: int, timeout: float = 5,
 # Build SAPNode from scan results
 # ---------------------------------------------------------------------------
 
-def _build_node_from_fast_scan(scan_result: dict, timeout: float = 10,
-                               verbose: bool = False) -> SAPNode:
-    """Build a SAPNode from fast scan results + system info enrichment."""
+def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
+                                verbose: bool = False) -> list:
+    """Build one or more SAPNodes from fast scan results + system info enrichment.
+
+    Queries each discovered instance's gateway individually so that multiple SAP
+    systems sharing the same IP address (different SIDs on different instance
+    numbers) are detected as separate nodes rather than being collapsed into one.
+    """
+    from collections import defaultdict
+
     host = scan_result["host"]
     open_ports = scan_result["open_ports"]
 
@@ -1010,118 +1017,151 @@ def _build_node_from_fast_scan(scan_result: dict, timeout: float = 10,
         v["instance_nr"] for v in open_ports.values()
     ))
 
-    # Try to get system info from the first gateway port found
-    sys_info = {}
-    for port, info in sorted(open_ports.items()):
-        if info["service"] == "gateway":
-            sys_info = enrich_system_info(host, port, timeout=timeout, verbose=verbose)
-            break
+    # Phase A: Query SID for EACH instance individually
+    instance_sid_map = {}   # {instance_nr: sid}
+    instance_sysinfo = {}   # {instance_nr: sys_info dict}
 
-    # If no gateway, try dispatcher port + 100 (gateway is typically disp + 100)
-    if not sys_info.get("sid"):
-        for port, info in sorted(open_ports.items()):
-            if info["service"] == "dispatcher":
-                gw_port = port + 100  # 32XX -> 33XX
-                print(f"[*]   No gateway found, trying dispatcher+100 = {gw_port}")
-                sys_info = enrich_system_info(host, gw_port, timeout=timeout, verbose=verbose)
-                if sys_info.get("sid"):
-                    break
-
-    sid = sys_info.get("sid", "")
-    sc_is_java = sys_info.get("_is_java", False)
-    sc_is_abap = sys_info.get("_is_abap", False)
-
-    # If SID still missing, try SAPControl on all discovered instance ports
-    if not sid:
-        tried_ports = set()
-        for inst_nr_str in instance_nrs:
-            if inst_nr_str.isdigit():
-                sc_port = 50000 + int(inst_nr_str) * 100 + 13
-                if sc_port not in tried_ports:
-                    tried_ports.add(sc_port)
-                    sc_sid, sc_j, sc_a, _ = _query_sapcontrol_sid(
-                        host, sc_port, timeout=min(timeout, 3)
-                    )
-                    if sc_sid:
-                        sid = sc_sid
-                        sc_is_java = sc_is_java or sc_j
-                        sc_is_abap = sc_is_abap or sc_a
-                        print(f"[+]   SID from SAPControl ({host}:{sc_port}): {sid}"
-                              f"{'  [JAVA]' if sc_j else ''}"
-                              f"{'  [ABAP]' if sc_a else ''}")
-                        break
-
-    if not sid:
-        sid = f"UNK_{host.replace('.', '_')}"
-
-    # Build instance info objects
-    instances = []
     for inst_nr in instance_nrs:
-        inst_ports = {
-            port: info["service"]
-            for port, info in open_ports.items()
-            if info["instance_nr"] == inst_nr
-        }
-        instances.append(InstanceInfo(
-            instance_nr=inst_nr,
-            ip=host,
-            ports=inst_ports,
-        ))
-
-    # Detect HANA from open ports (3XX13/3XX15) or RFC_SYSTEM_INFO (RFCDBSYS=HDB)
-    has_hana_port = any(v["service"] == "hana_sql" for v in open_ports.values())
-    db_type = sys_info.get("db_type", "")
-    if has_hana_port and not db_type:
-        db_type = "HDB"
-        print(f"[+]   HANA database detected via SQL port")
-
-    # Determine system type: use SAPControl hints if available, else infer from ports
-    has_dispatcher = any(v["service"] == "dispatcher" for v in open_ports.values())
-    has_saphost = any(v["service"] in ("saphost_http", "saphost_https")
-                      for v in open_ports.values())
-    type_parts = []
-    if sc_is_abap or has_dispatcher:
-        type_parts.append("ABAP")
-    if sc_is_java:
-        type_parts.append("JAVA")
-    if type_parts:
-        system_type = "+".join(type_parts)
-    elif has_hana_port:
-        system_type = "HANA"
-    elif has_saphost:
-        system_type = "SAP"
-    else:
-        system_type = "SAP"
-    # SAPControl is the authority on ABAP vs JAVA when available.
-    # Override port-based heuristic: a Java SCS instance may listen on
-    # 32XX (DIAG-like) without being an actual ABAP dispatcher.
-    if sc_is_java and not sc_is_abap:
-        system_type = "JAVA"
-
-    # Enumerate clients from dispatcher ports (try all until one succeeds)
-    clients = []
-    for port, info in sorted(open_ports.items()):
-        if info["service"] == "dispatcher":
-            client_list = enumerate_system_clients(host, port, timeout=timeout,
-                                                   verbose=verbose)
-            if client_list:
-                clients = [{"nr": c, "category": ""} for c in client_list]
+        # Find gateway port belonging to this instance
+        gw_port = None
+        for port, info in sorted(open_ports.items()):
+            if info["service"] == "gateway" and info["instance_nr"] == inst_nr:
+                gw_port = port
                 break
 
-    node = SAPNode(
-        sid=sid,
-        system_type=system_type,
-        hostname=sys_info.get("hostname", ""),
-        ip=host,
-        instances=instances,
-        os_type=sys_info.get("os_type", ""),
-        db_type=db_type or sys_info.get("db_type", ""),
-        kernel=sys_info.get("kernel", ""),
-        sap_release=sys_info.get("sap_release", ""),
-        clients=clients,
-    )
+        # Try gateway port for this instance
+        if gw_port:
+            sys_info = enrich_system_info(host, gw_port, timeout=timeout, verbose=verbose)
+            if sys_info.get("sid"):
+                instance_sid_map[inst_nr] = sys_info["sid"]
+                instance_sysinfo[inst_nr] = sys_info
+                continue
 
-    return node
+        # No gateway open for this instance — try dispatcher+100
+        for port, info in sorted(open_ports.items()):
+            if info["service"] == "dispatcher" and info["instance_nr"] == inst_nr:
+                derived_gw = port + 100  # 32XX -> 33XX
+                print(f"[*]   No gateway for instance {inst_nr}, trying dispatcher+100 = {derived_gw}")
+                sys_info = enrich_system_info(host, derived_gw, timeout=timeout, verbose=verbose)
+                if sys_info.get("sid"):
+                    instance_sid_map[inst_nr] = sys_info["sid"]
+                    instance_sysinfo[inst_nr] = sys_info
+                break
+
+        if inst_nr in instance_sid_map:
+            continue
+
+        # Try SAPControl as last resort for this instance
+        if inst_nr.isdigit():
+            sc_port = 50000 + int(inst_nr) * 100 + 13
+            sc_sid, sc_j, sc_a, _ = _query_sapcontrol_sid(
+                host, sc_port, timeout=min(timeout, 3)
+            )
+            if sc_sid:
+                instance_sid_map[inst_nr] = sc_sid
+                instance_sysinfo[inst_nr] = {
+                    "sid": sc_sid, "_is_java": sc_j, "_is_abap": sc_a
+                }
+                print(f"[+]   SID from SAPControl ({host}:{sc_port}): {sc_sid}"
+                      f"{'  [JAVA]' if sc_j else ''}"
+                      f"{'  [ABAP]' if sc_a else ''}")
+
+    # Phase B: Assign unresolved instances to the first known SID (or UNK)
+    default_sid = next(iter(instance_sid_map.values()), f"UNK_{host.replace('.', '_')}")
+    for inst_nr in instance_nrs:
+        if inst_nr not in instance_sid_map:
+            instance_sid_map[inst_nr] = default_sid
+
+    # Phase C: Group instances by their SID
+    sid_instances = defaultdict(list)
+    for inst_nr in instance_nrs:
+        sid_instances[instance_sid_map[inst_nr]].append(inst_nr)
+
+    # Phase D: Build one SAPNode per discovered SID
+    nodes = []
+    for sid, inst_nrs_for_sid in sid_instances.items():
+        # Pick enrichment data from the first instance in this group that has it
+        sys_info = {}
+        for inr in inst_nrs_for_sid:
+            if inr in instance_sysinfo and instance_sysinfo[inr].get("sid"):
+                sys_info = instance_sysinfo[inr]
+                break
+
+        sc_is_java = sys_info.get("_is_java", False)
+        sc_is_abap = sys_info.get("_is_abap", False)
+
+        # Build InstanceInfo objects for only this SID's instances
+        instances = []
+        for inst_nr in inst_nrs_for_sid:
+            inst_ports = {
+                port: info["service"]
+                for port, info in open_ports.items()
+                if info["instance_nr"] == inst_nr
+            }
+            instances.append(InstanceInfo(
+                instance_nr=inst_nr,
+                ip=host,
+                ports=inst_ports,
+            ))
+
+        # Detect HANA from this SID's instance ports
+        sid_port_services = [
+            open_ports[p]["service"]
+            for p in open_ports
+            if open_ports[p]["instance_nr"] in inst_nrs_for_sid
+        ]
+        has_hana_port = "hana_sql" in sid_port_services
+        db_type = sys_info.get("db_type", "")
+        if has_hana_port and not db_type:
+            db_type = "HDB"
+            print(f"[+]   HANA database detected via SQL port (SID: {sid})")
+
+        # Determine system type from this SID's ports + SAPControl hints
+        has_dispatcher = "dispatcher" in sid_port_services
+        has_saphost = any(s in ("saphost_http", "saphost_https") for s in sid_port_services)
+        type_parts = []
+        if sc_is_abap or has_dispatcher:
+            type_parts.append("ABAP")
+        if sc_is_java:
+            type_parts.append("JAVA")
+        if type_parts:
+            system_type = "+".join(type_parts)
+        elif has_hana_port:
+            system_type = "HANA"
+        elif has_saphost:
+            system_type = "SAP"
+        else:
+            system_type = "SAP"
+        # SAPControl is the authority on ABAP vs JAVA when available.
+        if sc_is_java and not sc_is_abap:
+            system_type = "JAVA"
+
+        # Enumerate clients from this SID's dispatcher ports
+        clients = []
+        for port, info in sorted(open_ports.items()):
+            if (info["service"] == "dispatcher"
+                    and info["instance_nr"] in inst_nrs_for_sid):
+                client_list = enumerate_system_clients(host, port, timeout=timeout,
+                                                       verbose=verbose)
+                if client_list:
+                    clients = [{"nr": c, "category": ""} for c in client_list]
+                    break
+
+        node = SAPNode(
+            sid=sid,
+            system_type=system_type,
+            hostname=sys_info.get("hostname", ""),
+            ip=host,
+            instances=instances,
+            os_type=sys_info.get("os_type", ""),
+            db_type=db_type or sys_info.get("db_type", ""),
+            kernel=sys_info.get("kernel", ""),
+            sap_release=sys_info.get("sap_release", ""),
+            clients=clients,
+        )
+        nodes.append(node)
+
+    return nodes
 
 
 def discover_systems(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
@@ -1187,19 +1227,20 @@ def discover_systems(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RAN
             print(f"[*] --- Host {idx + 1}/{len(scan_results)}: "
                   f"{host} ({port_count} open ports) ---")
 
-            node = _build_node_from_fast_scan(result, timeout=timeout, verbose=verbose)
-            nodes.append(node)
+            host_nodes = _build_nodes_from_fast_scan(result, timeout=timeout, verbose=verbose)
+            nodes.extend(host_nodes)
 
-            # Summary line for this node
-            client_count = len(node.clients)
-            inst_list = ", ".join(node.instance_nrs()) or "?"
-            print(f"[+] => {node.sid} | {node.system_type} | "
-                  f"Host: {node.hostname or '?'} | "
-                  f"OS: {node.os_type or '?'} | "
-                  f"DB: {node.db_type or '?'} | "
-                  f"Kernel: {node.kernel or '?'} | "
-                  f"Instances: [{inst_list}] | "
-                  f"Clients: {client_count}")
+            # Summary line per discovered system on this host
+            for node in host_nodes:
+                client_count = len(node.clients)
+                inst_list = ", ".join(node.instance_nrs()) or "?"
+                print(f"[+] => {node.sid} | {node.system_type} | "
+                      f"Host: {node.hostname or '?'} | "
+                      f"OS: {node.os_type or '?'} | "
+                      f"DB: {node.db_type or '?'} | "
+                      f"Kernel: {node.kernel or '?'} | "
+                      f"Instances: [{inst_list}] | "
+                      f"Clients: {client_count}")
             print(f"")
     else:
         # Deep scan: use SAPology if available
