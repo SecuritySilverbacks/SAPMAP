@@ -29,6 +29,24 @@ def ni_send(sock, payload):
     sock.sendall(header + payload)
 
 
+def ni_drain(sock, drain_timeout=2):
+    """Read and return all NI frames currently available on the socket.
+
+    Uses a short timeout so we collect any burst of frames (common on SAP Java
+    gateways) without blocking indefinitely.  Returns a list of raw payloads.
+    """
+    frames = []
+    while True:
+        try:
+            frame = ni_recv(sock, drain_timeout)
+            frames.append(frame)
+        except socket.timeout:
+            break
+        except ConnectionError:
+            break
+    return frames
+
+
 def ni_recv(sock, timeout=10):
     """Receive one SAP NI frame: 4-byte length prefix + payload.
 
@@ -962,38 +980,68 @@ def main():
     print("[+] Connected")
 
     # Step 1: GW_NORMAL_CLIENT
+    # SAP Java gateways may send multiple frames in response (e.g. an ack frame
+    # followed by a capabilities/info frame).  Drain all of them so the receive
+    # buffer is empty before sending P2.
     print("\n[*] Step 1: GW_NORMAL_CLIENT")
     ni_send(sock, p1_data)
-    resp = ni_recv(sock, args.timeout)
-    if args.verbose:
-        print(hexdump(resp[:200]))
-    info = parse_response(resp, "GW_NORMAL_CLIENT")
-    if info["error"]:
-        print("[-] Rejected: %s" % info["error_msg"])
+    p1_frames = ni_drain(sock, args.timeout)
+    if not p1_frames:
+        print("[-] No response to GW_NORMAL_CLIENT (timeout)")
         sock.close()
         sys.exit(1)
-    print("[+] Accepted by gateway")
+    if args.verbose:
+        for i, f in enumerate(p1_frames):
+            print("[*] P1 frame %d (%d bytes):" % (i + 1, len(f)))
+            print(hexdump(f[:200]))
+    # Check any frame for an error — first frame is the primary response
+    rejected = False
+    for f in p1_frames:
+        info = parse_response(f, "GW_NORMAL_CLIENT")
+        if info["error"]:
+            print("[-] Rejected: %s" % info["error_msg"])
+            rejected = True
+            break
+    if rejected:
+        sock.close()
+        sys.exit(1)
+    print("[+] Accepted by gateway (%d frame(s))" % len(p1_frames))
 
     # Step 2: F_SAP_INIT
+    # Same multi-frame pattern: loop until we find a conv_id or an error.
     print("\n[*] Step 2: F_SAP_INIT (STARTED_PRG -> sapxpg)")
     ni_send(sock, p2_data)
-    resp = ni_recv(sock, args.timeout)
-    if args.verbose:
-        print(hexdump(resp[:200]))
-    info = parse_response(resp, "F_SAP_INIT")
-    if info["error"]:
-        print("[-] F_SAP_INIT error: %s" % info["error_msg"])
-        sock.close()
-        sys.exit(1)
-
-    conv_id = info["conv_id"]
-    if not conv_id:
-        print("[-] Could not extract conversation ID from response")
+    conv_id = None
+    p2_frame_count = 0
+    while True:
+        try:
+            resp = ni_recv(sock, args.timeout)
+        except socket.timeout:
+            if p2_frame_count == 0:
+                print("[-] Timeout waiting for F_SAP_INIT response")
+                sock.close()
+                sys.exit(1)
+            break
+        p2_frame_count += 1
         if args.verbose:
-            print(hexdump(resp))
+            print("[*] P2 frame %d (%d bytes):" % (p2_frame_count, len(resp)))
+            print(hexdump(resp[:200]))
+        info = parse_response(resp, "F_SAP_INIT")
+        if info["error"]:
+            print("[-] F_SAP_INIT error: %s" % info["error_msg"])
+            sock.close()
+            sys.exit(1)
+        if info["conv_id"] and not conv_id:
+            conv_id = info["conv_id"]
+            break  # Got what we need — stop reading
+        # No conv_id yet — might be an intermediate frame; try next with short timeout
+        sock.settimeout(2)
+
+    if not conv_id:
+        print("[-] Could not extract conversation ID from F_SAP_INIT response")
         sock.close()
         sys.exit(1)
-    print("[+] Conversation ID: %s" % conv_id)
+    print("[+] Conversation ID: %s (from %d frame(s))" % (conv_id, p2_frame_count))
 
     # Step 3: F_SAP_SEND (SAPXPG_START_XPG_LONG)
     # SAP Java gateways send multiple NI frames in response to this step:
