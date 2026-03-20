@@ -264,35 +264,15 @@ def build_p2(target_ip, dest_name="T_75"):
     """Build F_SAP_INIT packet (452 bytes).
 
     info2=0x01 (WITH_LONG_LU_NAME)
-    info3=0xC0 (GW_EXTENDED_INIT_OPTIONS | GW_DIST_TRACE)
-    info=0x00C9 (SYNC_CPIC_FUNCTION | WITH_HOSTADDR | WITH_GW_SAP_PARAMS_HDR | R3_CPIC_LOGIN_WITH_TERM) = bits 0,3... wait
+    info3=0x00 — intentionally no GW_EXTENDED_INIT_OPTIONS (0x40) or
+                  GW_DIST_TRACE (0x80).  Kernel 754 (and other older kernels)
+                  silently discard F_SAP_INIT when GW_EXTENDED_INIT_OPTIONS is
+                  set, because they expect a different extended-options block
+                  that we do not include.  Omitting the flag makes P2 accepted
+                  by both kernel 754 and 793.
+    info=0x0087 (SYNC_CPIC_FUNCTION + WITH_HOSTADDR + WITH_GW_SAP_PARAMS_HDR
+                 + R3_CPIC_LOGIN_WITH_TERM)
     """
-    # pysap flag encoding:
-    # info = SYNC_CPIC_FUNCTION(bit0) + WITH_HOSTADDR(bit1) + WITH_GW_SAP_PARAMS_HDR(bit2) + R3_CPIC_LOGIN_WITH_TERM(bit7)
-    # = 0x0001 | 0x0002 | 0x0004 | 0x0080 = 0x0087
-    # But the Python 2 script uses these specific symbolic names.
-    # Let me trace through pysap's FlagsField to get the right value.
-    #
-    # pysap FlagsField for info (16 bits):
-    #   bit0 = SYNC_CPIC_FUNCTION    -> 0x0001
-    #   bit1 = WITH_HOSTADDR         -> 0x0002
-    #   bit2 = WITH_GW_SAP_PARAMS_HDR -> 0x0004
-    #   bit3 = CPIC_SYNC_REQ         -> 0x0008
-    #   bit4 = WITH_ERR_INFO         -> 0x0010
-    #   bit5 = DATA_WITH_TERM_OUTPUT -> 0x0020
-    #   bit6 = DATA_WITH_TERM_INPUT  -> 0x0040
-    #   bit7 = R3_CPIC_LOGIN_WITH_TERM -> 0x0080
-    #
-    # SYNC_CPIC_FUNCTION + WITH_HOSTADDR + WITH_GW_SAP_PARAMS_HDR + R3_CPIC_LOGIN_WITH_TERM
-    # = 0x0001 + 0x0002 + 0x0004 + 0x0080 = 0x0087
-    #
-    # info2 = WITH_LONG_LU_NAME (bit0) = 0x01
-    #
-    # info3 = GW_EXTENDED_INIT_OPTIONS(bit6) + GW_DIST_TRACE(bit7)
-    # = 0x40 + 0x80 = 0xC0
-    #
-    # vector=0 (no vector flags for INIT)
-
     dt = build_saprf_dt_struct(target_ip)
 
     header = build_saprfc_header_v6(
@@ -300,7 +280,7 @@ def build_p2(target_ip, dest_name="T_75"):
         gw_id=0xFFFF,
         uid=19,
         info2=0x01,             # WITH_LONG_LU_NAME
-        info3=0xC0,             # GW_EXTENDED_INIT_OPTIONS | GW_DIST_TRACE
+        info3=0x00,             # no extended init options (compatible with kernel 754+)
         timeout=-1,
         sap_param_len=len(dt),  # 340
         info=0x0087,            # SYNC_CPIC_FUNCTION + WITH_HOSTADDR + WITH_GW_SAP_PARAMS_HDR + R3_CPIC_LOGIN_WITH_TERM
@@ -1045,7 +1025,7 @@ def main():
     ni_send(sock, p2_data)
     conv_id = None
     try:
-        first_p2 = ni_recv(sock, min(args.timeout, 3))
+        first_p2 = ni_recv(sock, args.timeout)
         p2_frames = [first_p2] + ni_drain(sock, 1)
         if args.verbose:
             for i, f in enumerate(p2_frames):
