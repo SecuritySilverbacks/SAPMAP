@@ -1169,7 +1169,8 @@ def discover_systems(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RAN
                      fast_mode: bool = True, cancel_event: threading.Event = None,
                      progress_callback=None, verbose: bool = False,
                      skip_alive: bool = False, concurrent_hosts: int = 5,
-                     port_timeout: float = 3.0) -> list:
+                     port_timeout: float = 3.0,
+                     node_callback=None) -> list:
     """Main entry point: discover SAP systems on the network.
 
     Args:
@@ -1184,6 +1185,7 @@ def discover_systems(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RAN
         skip_alive: skip the alive sweep (scan all targets)
         concurrent_hosts: max hosts to port-scan in parallel
         port_timeout: TCP timeout for port probes
+        node_callback: callable(SAPNode) invoked as each system is discovered
 
     Returns:
         list of SAPNode objects
@@ -1230,6 +1232,11 @@ def discover_systems(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RAN
             host_nodes = _build_nodes_from_fast_scan(result, timeout=timeout, verbose=verbose)
             nodes.extend(host_nodes)
 
+            # Notify caller immediately so nodes appear on the map progressively
+            if node_callback:
+                for node in host_nodes:
+                    node_callback(node)
+
             # Summary line per discovered system on this host
             for node in host_nodes:
                 client_count = len(node.clients)
@@ -1253,7 +1260,8 @@ def discover_systems(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RAN
             print("[!] SAPology not importable, falling back to fast scan with enrichment")
             return discover_systems(targets, instance_range, timeout, threads,
                                     fast_mode=True, cancel_event=cancel_event,
-                                    progress_callback=progress_callback, verbose=verbose)
+                                    progress_callback=progress_callback, verbose=verbose,
+                                    node_callback=node_callback)
 
     # Mark systems with critical findings
     for node in nodes:

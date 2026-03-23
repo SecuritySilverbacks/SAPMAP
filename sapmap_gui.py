@@ -273,10 +273,13 @@ class SAPMAPApi:
                 skip_alive=skip_alive,
                 concurrent_hosts=concurrent_hosts,
                 port_timeout=port_timeout,
+                node_callback=lambda node: self.state.add_node(node),
             )
 
+            # Add any nodes that weren't already added via callback (e.g. deep mode)
             for node in nodes:
-                self.state.add_node(node)
+                if node.sid not in self.state.nodes:
+                    self.state.add_node(node)
 
             if self.cancel_event.is_set():
                 self.scan_state = "cancelled"
