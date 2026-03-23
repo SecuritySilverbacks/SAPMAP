@@ -584,6 +584,9 @@ class _SDKLibrary:
         lib.RfcAddTypeField.argtypes = [VP, POINTER(RFC_FIELD_DESC), EI]
         lib.RfcAddTypeField.restype = c_uint
 
+        lib.RfcSetTypeLength.argtypes = [VP, c_uint, c_uint, EI]
+        lib.RfcSetTypeLength.restype = c_uint
+
         lib.RfcCreateFunctionDesc.argtypes = [VP, EI]
         lib.RfcCreateFunctionDesc.restype = VP
 
@@ -943,6 +946,10 @@ class RFCConnection:
             _raise_on_error(error_info, f'RfcAddTypeField({fname})')
             uc_offset += uc_len
             nuc_offset += nuc_len
+
+        # Finalize the type descriptor with total row lengths
+        rc = self._sdk.RfcSetTypeLength(td, nuc_offset, uc_offset, byref(error_info))
+        _raise_on_error(error_info, 'RfcSetTypeLength')
         return td
 
     def _make_func_desc(self, func_name, params):
