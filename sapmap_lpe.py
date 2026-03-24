@@ -234,12 +234,14 @@ def _sql_assign_sap_all(sid: str, client: str, username: str,
     Unlike the full SQL generators in sapmap_config.py which also
     create the USR02 user record, this returns only the profile and
     authorization object INSERTs (UST04, USR04, USRBF2).
+
+    The username is uppercased because SAP stores BNAME in uppercase.
     """
     db_key = normalize_db_type(db_type)
     sql_gen = SQL_GENERATORS.get(db_key)
     if not sql_gen:
         return []
-    all_sql = sql_gen(sid, client, username)
+    all_sql = sql_gen(sid, client, username.upper())
     return [
         s for s in all_sql
         if s.strip().upper().startswith("INSERT")
