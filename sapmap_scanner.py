@@ -1577,9 +1577,11 @@ def deep_scan_single(node: SAPNode, timeout: float = DEFAULT_TIMEOUT,
         print(f"")
 
         # Phase 1: Discovery
+        # skip_alive=True because the system is already on the map —
+        # cloud hosts may block ICMP and the alive sweep's TCP probes
         landscape = SAPology.discover_systems(
             [host], instances, timeout=timeout, threads=threads,
-            verbose=True,
+            verbose=True, skip_alive=True,
             cancel_check=lambda: cancel_event.is_set() if cancel_event else False,
             client_enum=True,
         )
