@@ -229,24 +229,32 @@ def _webgui_vkey(session, post_url, moin, vkey=0):
 
 def _sql_assign_sap_all(sid: str, client: str, username: str,
                         db_type: str) -> list:
-    """Generate SQL INSERTs for SAP_ALL profile assignment only.
+    """Generate short-form SQL INSERTs for SAP_ALL profile assignment.
 
-    Unlike the full SQL generators in sapmap_config.py which also
-    create the USR02 user record, this returns only the profile and
-    authorization object INSERTs (UST04, USR04, USRBF2).
+    Uses ``INSERT INTO table VALUES(...)`` without column names to keep
+    commands under the 94-character RSBDCOS0 command-line limit.
 
     The username is uppercased because SAP stores BNAME in uppercase.
     """
-    db_key = normalize_db_type(db_type)
-    sql_gen = SQL_GENERATORS.get(db_key)
-    if not sql_gen:
-        return []
-    all_sql = sql_gen(sid, client, username.upper())
-    return [
-        s for s in all_sql
-        if s.strip().upper().startswith("INSERT")
-        and any(t in s for t in ("UST04", "USR04", "USRBF2"))
+    u = username.upper()
+    c = client
+
+    # Auth objects to insert into USRBF2
+    auth_objects = [
+        "S_ADMI_FCD", "S_DATASET", "S_DEVELOP", "S_RFC", "S_TABU_DIS",
+        "S_TCODE", "S_USER_AUT", "S_USER_GRP", "S_USER_PRO", "S_XMI_PROD",
     ]
+
+    stmts = [
+        f"INSERT INTO UST04 VALUES('{c}','{u}','SAP_ALL')",
+        f"INSERT INTO UST04 VALUES('{c}','{u}','SAP_NEW')",
+        f"INSERT INTO USR04 VALUES('{c}','{u}','14','C SAP_ALL')",
+    ]
+    for obj in auth_objects:
+        stmts.append(
+            f"INSERT INTO USRBF2 VALUES('{c}','{u}','{obj}','&_SAP_ALL')"
+        )
+    return stmts
 
 
 def _build_os_command_for_sql(sql: str, db_type: str, sid: str,
