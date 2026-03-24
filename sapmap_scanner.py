@@ -795,7 +795,7 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
                       f"{os_type}")
                 break
 
-    # Last resort: infer DB from product name or hostname
+    # Last resort: infer DB from product name
     if not info["db_type"]:
         try:
             product = result.get("sap_product", "")
@@ -806,13 +806,30 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
         except Exception:
             pass
 
-    # S/4HANA always runs on HANA — detect from hostname pattern
+    # Probe HANA SQL ports on the same host (3XX13/3XX15 where XX = instance).
+    # Only check a few likely instance numbers to keep it fast.
     if not info["db_type"]:
-        hn = (info["hostname"] or "").lower()
-        if "s4h" in hn or "s4hana" in hn:
-            info["db_type"] = "HDB"
-            print(f"[+]   DB type inferred from hostname '{info['hostname']}'"
-                  f" (S/4HANA always uses HANA)")
+        import socket
+        # Derive instance numbers to try from the gateway port and common defaults
+        inst_candidates = {0, 1, 2, 3}
+        if gw_port and 3300 <= gw_port <= 3399:
+            inst_candidates.add(gw_port - 3300)
+        for inst in sorted(inst_candidates):
+            for port_offset in (13, 15):
+                hana_port = 30000 + inst * 100 + port_offset
+                try:
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.settimeout(1)
+                    s.connect((host, hana_port))
+                    s.close()
+                    info["db_type"] = "HDB"
+                    print(f"[+]   HANA detected: port {hana_port} is open "
+                          f"(instance {inst:02d})")
+                    break
+                except Exception:
+                    pass
+            if info["db_type"]:
+                break
 
     return info
 
