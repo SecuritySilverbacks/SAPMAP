@@ -548,6 +548,29 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:create_user", "Create User", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/lpe", method="POST")
+    def node_lpe(sid):
+        response.content_type = "application/json"
+        data = request.json or {}
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        method = data.get("method")  # None = try all
+
+        def _run():
+            creds = node.best_credentials()
+            if not creds:
+                print(f"[-] No credentials available for {sid}")
+                return
+            import sapmap_lpe
+            success = sapmap_lpe.try_lpe(node, creds, method_name=method)
+            if success:
+                print(f"[+] LPE succeeded on {sid} — "
+                      f"{creds.username} now has SAP_ALL")
+
+        _bg(f"{sid}:lpe", "Local Privilege Escalation", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/retrieve_rfcs", method="POST")
     def node_retrieve_rfcs(sid):
         response.content_type = "application/json"

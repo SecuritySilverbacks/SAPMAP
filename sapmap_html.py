@@ -407,6 +407,7 @@ body {
   <div class="ctx-item" data-action="check_gw">&#128270; Check GW Vulnerability</div>
   <div class="ctx-item" data-action="create_user_gw">&#128100; Create User (GW Exploit)</div>
   <div class="ctx-item" data-action="create_user_creds">&#128100; Create User (via Credentials)</div>
+  <div class="ctx-item" data-action="lpe">&#128274; Try Local Privilege Escalation</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="deep_scan">&#128260; Deep Scan (full SAPology)</div>
   <div class="ctx-item" data-action="retrieve_rfcs">&#128225; Retrieve RFC Connections</div>
@@ -1354,6 +1355,7 @@ function showCtxMenu(e, sid) {
     'check_gw':         hasGwPort,                   // need a gateway port
     'create_user_gw':   hasGwVuln,                  // need GW vulnerability
     'create_user_creds': hasCreds,                  // need credentials
+    'lpe':              hasCreds,                   // need credentials to escalate
     'deep_scan':        true,                       // always available
     'retrieve_rfcs':    hasCreds,                   // need credentials/access
     'test_rfcs':        hasCreds && hasRFCs,        // need access + existing RFCs
@@ -1376,6 +1378,7 @@ function showCtxMenu(e, sid) {
     'check_gw':         'No gateway port detected',
     'create_user_gw':   'Requires a vulnerable RFC Gateway',
     'create_user_creds': 'Provide credentials first',
+    'lpe':              'Provide credentials first',
     'retrieve_rfcs':    'Provide credentials or create a user first',
     'test_rfcs':        'Retrieve RFC connections first',
     'download_hashes':  'Provide credentials or create a user first',
@@ -1465,6 +1468,8 @@ async function ctxAction(action) {
       await api('POST', `node/${sid}/create_user`, { method: 'gw_exploit' }); break;
     case 'create_user_creds':
       await api('POST', `node/${sid}/create_user`, { method: 'credentials' }); break;
+    case 'lpe':
+      await api('POST', `node/${sid}/lpe`); break;
     case 'deep_scan':
       await api('POST', `node/${sid}/deep_scan`); break;
     case 'retrieve_rfcs':
