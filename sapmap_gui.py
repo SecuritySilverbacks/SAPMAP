@@ -940,7 +940,12 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         if conn.has_sap_all:
                             print(f"[!] {conn.rfc_user} in {dest_name} has SAP_ALL!")
                 else:
-                    print(f"[-] {dest_name}: Logon failed")
+                    err = result.get("error", "")
+                    if err:
+                        err_short = err.split("\n")[0][:120]
+                        print(f"[-] {dest_name}: Logon failed ({err_short})")
+                    else:
+                        print(f"[-] {dest_name}: Logon failed")
             print(f"[+] Single test done for {dest_name}")
 
         _bg(f"{sid}:test_rfc:{dest_name}", "Test RFC", _run)

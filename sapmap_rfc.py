@@ -34,6 +34,7 @@ from sapmap_config import (
 from sap_rfc_ctypes import (
     ABAPApplicationError,
     RFCTYPE_CHAR, RFCTYPE_TABLE, RFCTYPE_INT, RFCTYPE_BYTE, RFCTYPE_NUM,
+    RFCTYPE_STRUCTURE,
     RFC_IMPORT, RFC_EXPORT, RFC_TABLES,
 )
 
@@ -698,6 +699,52 @@ def _test_via_dest_check(conn, destination_name: str, result: dict):
         result["remote_release"] = props.get("BASIS_RELEASE", "").strip()
 
 
+def _test_via_dest_check_raw(conn, destination_name: str, result: dict):
+    """Fallback: call DEST_CHECK_CONNECTION via call_raw (bypasses
+    RFC_GET_FUNCTION_INTERFACE).  Used when the user has SAP_ALL in
+    the database but the authorization buffer hasn't been refreshed yet.
+    """
+    from sap_rfc_ctypes import RFCTYPE_STRUCTURE, RFC_CHANGING
+
+    # Build DEST_CHECK_CONNECTION function description manually
+    # Parameters: NAME (import CHAR 32), AUTHORIZATION_TEST_RESULT (export CHAR 1),
+    #             CONNECTION_TEST_RESULT (export CHAR 1), etc.
+    props_td = conn._make_type_desc('DEST_CHECK_PROPS', [
+        ('SYSID',         RFCTYPE_CHAR, 8,  16),
+        ('CLIENT_USED',   RFCTYPE_CHAR, 3,  6),
+        ('BASIS_RELEASE', RFCTYPE_CHAR, 4,  8),
+        ('HOSTNAME',      RFCTYPE_CHAR, 32, 64),
+        ('IPADDR',        RFCTYPE_CHAR, 15, 30),
+    ])
+
+    func_desc = conn._make_func_desc('DEST_CHECK_CONNECTION', [
+        ('NAME',                       RFC_IMPORT, RFCTYPE_CHAR,      64,  32, None),
+        ('AUTHORIZATION_TEST_RESULT',  RFC_EXPORT, RFCTYPE_CHAR,      2,   1,  None),
+        ('AUTHORIZATION_ERROR_TEXT',   RFC_EXPORT, RFCTYPE_CHAR,      150, 75, None),
+        ('CONNECTION_TEST_RESULT',     RFC_EXPORT, RFCTYPE_CHAR,      2,   1,  None),
+        ('CONNECTION_ERROR_TEXT',      RFC_EXPORT, RFCTYPE_CHAR,      150, 75, None),
+        ('CONNECTION_PROPERTIES',      RFC_EXPORT, RFCTYPE_STRUCTURE, 0,   0,  props_td),
+    ])
+
+    check_result = conn.call_raw('DEST_CHECK_CONNECTION', func_desc,
+                                  NAME=destination_name)
+
+    auth_result = check_result.get("AUTHORIZATION_TEST_RESULT", "X").strip()
+    conn_result = check_result.get("CONNECTION_TEST_RESULT", "X").strip()
+    auth_error = check_result.get("AUTHORIZATION_ERROR_TEXT", "").strip()
+
+    result["logon_ok"] = auth_result == ""
+    result["ping_ok"] = conn_result == ""
+    result["logon_message"] = auth_error or ("RFC Logon successful."
+                                             if result["logon_ok"] else "")
+
+    props = check_result.get("CONNECTION_PROPERTIES", {})
+    if isinstance(props, dict):
+        result["remote_sid"] = props.get("SYSID", "").strip()
+        result["remote_client"] = props.get("CLIENT_USED", "").strip()
+        result["remote_release"] = props.get("BASIS_RELEASE", "").strip()
+
+
 def test_rfc_destination(node: SAPNode, destination_name: str,
                          creds: Credentials = None,
                          rfc_check_cache: dict = None) -> dict:
@@ -727,8 +774,20 @@ def test_rfc_destination(node: SAPNode, destination_name: str,
                 _test_via_dest_check(conn, destination_name, result)
 
     except Exception as e:
-        result["error"] = str(e)
+        err_msg = str(e).split("\n")[0]
+        result["error"] = err_msg
         logger.debug(f"RFC check failed for {destination_name}@{node.sid}: {e}")
+
+        # If the error is due to RFC_GET_FUNCTION_INTERFACE not authorized,
+        # try again with call_raw (bypasses the SDK metadata lookup)
+        if "RFC_GET_FUNCTION_INTERFACE" in str(e) or "No RFC authorization" in str(e):
+            try:
+                with _get_connection(node, creds) as conn:
+                    _test_via_dest_check_raw(conn, destination_name, result)
+                    result["error"] = ""  # clear the error on success
+            except Exception as e2:
+                result["error"] = str(e2).split("\n")[0]
+                logger.debug(f"call_raw DEST_CHECK also failed: {e2}")
 
     # Cache the result
     if rfc_check_cache is not None:

