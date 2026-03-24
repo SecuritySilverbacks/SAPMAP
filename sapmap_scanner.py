@@ -795,7 +795,7 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
                       f"{os_type}")
                 break
 
-    # Last resort: infer DB from product name (weak - kernel range is not proof)
+    # Last resort: infer DB from product name or hostname
     if not info["db_type"]:
         try:
             product = result.get("sap_product", "")
@@ -805,6 +805,14 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
                       f" (weak heuristic, may be wrong)")
         except Exception:
             pass
+
+    # S/4HANA always runs on HANA — detect from hostname pattern
+    if not info["db_type"]:
+        hn = (info["hostname"] or "").lower()
+        if "s4h" in hn or "s4hana" in hn:
+            info["db_type"] = "HDB"
+            print(f"[+]   DB type inferred from hostname '{info['hostname']}'"
+                  f" (S/4HANA always uses HANA)")
 
     return info
 
@@ -1577,14 +1585,23 @@ def deep_scan_single(node: SAPNode, timeout: float = DEFAULT_TIMEOUT,
         print(f"")
 
         # Phase 1: Discovery
-        # skip_alive=True because the system is already on the map —
-        # cloud hosts may block ICMP and the alive sweep's TCP probes
-        landscape = SAPology.discover_systems(
-            [host], instances, timeout=timeout, threads=threads,
-            verbose=True, skip_alive=True,
+        # The system is already on the map, so skip the alive check.
+        # SAPology may or may not support skip_alive — try with it first,
+        # fall back to without it.
+        disco_kwargs = dict(
+            timeout=timeout, threads=threads, verbose=True,
             cancel_check=lambda: cancel_event.is_set() if cancel_event else False,
             client_enum=True,
         )
+        try:
+            landscape = SAPology.discover_systems(
+                [host], instances, skip_alive=True, **disco_kwargs,
+            )
+        except TypeError:
+            # Older SAPology without skip_alive support
+            landscape = SAPology.discover_systems(
+                [host], instances, **disco_kwargs,
+            )
 
         if not landscape:
             print(f"[*] SAPology found no SAP system on {host}")
