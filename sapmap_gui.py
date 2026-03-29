@@ -1217,7 +1217,13 @@ def create_app(api: SAPMAPApi) -> Bottle:
             return json.dumps({"error": f"System {sid} already exists on the map"})
 
         nr = inst_nr
-        instance = InstanceInfo(instance_nr=nr, ip=ip)
+        # Only set dispatcher/gateway ports (derived from instance nr)
+        # — other ports are discovered by scanning
+        ports = {
+            int(f"32{nr}"): "dispatcher",
+            int(f"33{nr}"): "gateway",
+        }
+        instance = InstanceInfo(instance_nr=nr, ip=ip, ports=ports)
         node = SAPNode(sid=sid, ip=ip, hostname=ip, instances=[instance])
         api.state.add_node(node)
         print(f"[+] Manually added system {sid} ({ip}, instance {nr})")
