@@ -158,12 +158,27 @@ body {
 .ctx-menu.visible { display: block; }
 .ctx-item {
   padding: 7px 16px; cursor: pointer; display: flex; align-items: center; gap: 8px;
-  font-size: 12px; color: #c9d1d9;
+  font-size: 12px; color: #c9d1d9; position: relative; white-space: nowrap;
 }
 .ctx-item:hover { background: #30363d; }
 .ctx-item.disabled { color: #484f58; cursor: default; }
 .ctx-item.disabled:hover { background: transparent; }
 .ctx-sep { border-top: 1px solid #30363d; margin: 4px 0; }
+
+/* Flyout submenu groups */
+.ctx-group { position: relative; }
+.ctx-group > .ctx-item::after {
+  content: '\25B8'; margin-left: auto; font-size: 10px; color: #8b949e;
+}
+.ctx-sub {
+  display: none; position: absolute; left: 100%; top: -4px;
+  background: #1c2128; border: 1px solid #30363d; border-radius: 8px;
+  min-width: 260px; padding: 4px 0; box-shadow: 0 8px 24px rgba(0,0,0,.5);
+  z-index: 2100;
+}
+.ctx-group:hover > .ctx-sub { display: block; }
+/* Flip submenu left if it would overflow viewport (set by JS) */
+.ctx-sub.flip-left { left: auto; right: 100%; }
 
 /* === Info Panel (connection details) === */
 .info-panel {
@@ -275,7 +290,7 @@ body {
       <div class="dd-sep"></div>
       <div class="dd-item" onclick="exportJSON()">&#128196; Export JSON</div>
       <div class="dd-sep"></div>
-      <div class="dd-item" onclick="if(confirm('Exit SAPMAP?'))window.close()">&#10060; Exit</div>
+      <div class="dd-item" onclick="if(confirm('Exit SAPMAP?'))api('POST','exit').then(()=>window.close())">&#10060; Exit</div>
     </div>
   </div>
   <div class="menu-item">Scan
@@ -399,33 +414,61 @@ body {
 
 <!-- Context Menu (items enabled/disabled dynamically by showCtxMenu) -->
 <div class="ctx-menu" id="ctx-menu">
+  <!-- Top-level quick actions -->
   <div class="ctx-item" data-action="details">&#128269; View System Details</div>
   <div class="ctx-item" data-action="findings">&#128203; View SAPology Findings</div>
-  <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="credentials">&#128273; Provide Credentials</div>
-  <div class="ctx-item" data-action="rfc_system_info">&#128225; RFC System Info</div>
-  <div class="ctx-item" data-action="check_gw">&#128270; Check GW Vulnerability</div>
-  <div class="ctx-item" data-action="create_user_gw">&#128100; Create User (GW Exploit)</div>
-  <div class="ctx-item" data-action="create_user_creds">&#128100; Create User (via Credentials)</div>
-  <div class="ctx-item" data-action="lpe">&#128274; Try Local Privilege Escalation</div>
   <div class="ctx-sep"></div>
-  <div class="ctx-item" data-action="deep_scan">&#128260; Deep Scan (full SAPology)</div>
-  <div class="ctx-item" data-action="retrieve_rfcs">&#128225; Retrieve RFC Connections</div>
-  <div class="ctx-item" data-action="test_rfcs">&#129514; Test RFC Connections+Retrieve Profiles</div>
+  <!-- Scanning submenu -->
+  <div class="ctx-group">
+    <div class="ctx-item">&#128225; Scanning</div>
+    <div class="ctx-sub">
+      <div class="ctx-item" data-action="rfc_system_info">&#128225; RFC System Info</div>
+      <div class="ctx-item" data-action="check_gw">&#128270; Check GW Vulnerability</div>
+      <div class="ctx-item" data-action="deep_scan">&#128260; Deep Scan (full SAPology)</div>
+      <div class="ctx-item" data-action="retrieve_rfcs">&#128225; Retrieve RFC Connections</div>
+      <div class="ctx-item" data-action="test_rfcs">&#129514; Test RFC Connections</div>
+      <div class="ctx-item" data-action="client_roles">&#128202; Retrieve Client Roles</div>
+    </div>
+  </div>
+  <!-- Exploitation submenu -->
+  <div class="ctx-group">
+    <div class="ctx-item">&#9876; Exploitation</div>
+    <div class="ctx-sub">
+      <div class="ctx-item" data-action="lpe">&#128274; Local Privilege Escalation</div>
+      <div class="ctx-item" data-action="create_user_gw">&#128100; Create User (GW Exploit)</div>
+      <div class="ctx-item" data-action="create_user_creds">&#128100; Create User (Credentials)</div>
+      <div class="ctx-item" data-action="create_tcpip">&#128279; Create TCP/IP Dest (sapxpg)</div>
+      <div class="ctx-item" data-action="os_terminal">&#128187; OS Command Terminal</div>
+      <div class="ctx-sep"></div>
+      <div class="ctx-item" data-action="propagate">&#128640; Propagate (exploit next hop)</div>
+    </div>
+  </div>
+  <!-- Data Extraction submenu -->
+  <div class="ctx-group">
+    <div class="ctx-item">&#128230; Data Extraction</div>
+    <div class="ctx-sub">
+      <div class="ctx-item" data-action="download_hashes">&#128229; Download Password Hashes</div>
+      <div class="ctx-item" data-action="download_table">&#128229; Download Table Data</div>
+    </div>
+  </div>
+  <!-- Cleanup submenu -->
+  <div class="ctx-group">
+    <div class="ctx-item">&#128465; Cleanup</div>
+    <div class="ctx-sub">
+      <div class="ctx-item" data-action="cleanup">&#128465; Delete SAPMAP00 User</div>
+    </div>
+  </div>
   <div class="ctx-sep"></div>
-  <div class="ctx-item" data-action="download_hashes">&#128229; Download Password Hashes</div>
-  <div class="ctx-item" data-action="download_table">&#128229; Download Table Data</div>
-  <div class="ctx-item" data-action="os_terminal">&#128187; OS Command Terminal</div>
-  <div class="ctx-sep"></div>
-  <div class="ctx-item" data-action="create_tcpip">&#128279; Create TCP/IP Dest (sapxpg)</div>
-  <div class="ctx-item" data-action="propagate">&#128640; Propagate (exploit next hop)</div>
-  <div class="ctx-sep"></div>
-  <div class="ctx-item" data-action="cleanup">&#128465; Delete SAPMAP00 User</div>
-  <div class="ctx-item" data-action="client_roles">&#128202; Retrieve Client Roles</div>
-  <div class="ctx-sep"></div>
-  <div class="ctx-item" data-action="set_type">&#9881; Set System Type</div>
-  <div class="ctx-item" data-action="set_db_type">&#9881; Set DB Type</div>
-  <div class="ctx-item" data-action="set_os_type">&#9881; Set OS Type</div>
+  <!-- Settings submenu -->
+  <div class="ctx-group">
+    <div class="ctx-item">&#9881; Settings</div>
+    <div class="ctx-sub">
+      <div class="ctx-item" data-action="set_type">&#9881; Set System Type</div>
+      <div class="ctx-item" data-action="set_db_type">&#9881; Set DB Type</div>
+      <div class="ctx-item" data-action="set_os_type">&#9881; Set OS Type</div>
+    </div>
+  </div>
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="delete_system" style="color:#f85149">&#128465; Delete System from Map</div>
 </div>
@@ -1451,6 +1494,14 @@ function showCtxMenu(e, sid) {
   else { menu.style.maxHeight = ''; menu.style.overflowY = ''; }
   menu.style.left = menuX + 'px';
   menu.style.top = menuY + 'px';
+
+  // Flip flyout submenus left if they would overflow the viewport
+  menu.querySelectorAll('.ctx-sub').forEach(sub => {
+    sub.classList.remove('flip-left');
+    if (menuX + menuRect.width + 260 > window.innerWidth) {
+      sub.classList.add('flip-left');
+    }
+  });
 }
 
 function hideCtxMenu() {
@@ -1657,7 +1708,19 @@ function showDetails(sid) {
     </div>
     <div class="detail-section">
       <h4>Instances</h4>
-      ${(n.instances || []).map(i => `<div class="detail-row"><span class="detail-key">${escHtml(i.instance_nr)}</span><span class="detail-val">${escHtml(i.ip)} — Ports: ${Object.keys(i.ports||{}).sort().join(', ')}</span></div>`).join('')}
+      ${(n.instances || []).map(i => {
+        const ports = Object.keys(i.ports||{}).sort((a,b)=>a-b).join(', ');
+        return `<div class="detail-row"><span class="detail-key">Inst ${escHtml(i.instance_nr)}</span><span class="detail-val">${escHtml(i.ip)}${ports ? ' — Ports: '+ports : ''}</span></div>`;
+      }).join('')}
+    </div>
+    <div class="detail-section">
+      <h4>Open Ports</h4>
+      ${(() => {
+        const allPorts = new Set();
+        for (const inst of (n.instances || [])) for (const p of Object.keys(inst.ports || {})) allPorts.add(parseInt(p));
+        if (allPorts.size === 0) return '<div style="color:#484f58">None detected</div>';
+        return [...allPorts].sort((a,b)=>a-b).map(p => `<span style="display:inline-block;background:#21262d;border:1px solid #30363d;border-radius:4px;padding:1px 6px;margin:2px;font-size:11px;font-family:monospace">${p}</span>`).join('');
+      })()}
     </div>
     <div class="detail-section">
       <h4>Clients</h4>
