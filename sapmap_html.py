@@ -848,7 +848,7 @@ function updateMap() {
   document.getElementById('legend-bar').style.display = 'flex';
 
   const svg = document.getElementById('map-svg');
-  const BOX_W = 240, BOX_H = 160, MARGIN = 60;
+  const BOX_W = 240, BOX_H = 174, MARGIN = 60;
   const cols = Math.max(1, Math.min(4, nodeKeys.length));
 
   // Auto-layout (grid) for nodes without positions
@@ -1255,6 +1255,19 @@ function updateMap() {
       const clientStr = clients.slice(0, 6).map(c => typeof c === 'object' ? (c.nr||'?') : String(c)).join(', ') +
         (clients.length > 6 ? ` (+${clients.length-6})` : '');
       html += `<text x="${x+10}" y="${ty}" fill="#8b949e" font-size="10" font-family="monospace">Clients: ${escHtml(clientStr)}</text>`;
+      ty += 14;
+    }
+
+    // Open ports (collected from all instances)
+    const allPorts = new Set();
+    for (const inst of (n.instances || [])) {
+      for (const p of Object.keys(inst.ports || {})) allPorts.add(parseInt(p));
+    }
+    if (allPorts.size > 0) {
+      const sorted = [...allPorts].sort((a,b) => a-b);
+      const portStr = sorted.slice(0, 10).join(', ') +
+        (sorted.length > 10 ? ` (+${sorted.length-10})` : '');
+      html += `<text x="${x+10}" y="${ty}" fill="#8b949e" font-size="10" font-family="monospace">Ports: ${escHtml(portStr)}</text>`;
       ty += 14;
     }
 
