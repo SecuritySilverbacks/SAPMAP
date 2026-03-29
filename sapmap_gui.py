@@ -1217,16 +1217,19 @@ def create_app(api: SAPMAPApi) -> Bottle:
             return json.dumps({"error": f"System {sid} already exists on the map"})
 
         nr = inst_nr
-        ports = {
-            int(f"32{nr}"): "dispatcher",
-            int(f"33{nr}"): "gateway",
-            int(f"5{nr}13"): "sapcontrol_http",
-            int(f"80{nr}"): "icm_http",
-        }
-        instance = InstanceInfo(instance_nr=nr, ip=ip, ports=ports)
+        instance = InstanceInfo(instance_nr=nr, ip=ip)
         node = SAPNode(sid=sid, ip=ip, hostname=ip, instances=[instance])
         api.state.add_node(node)
         print(f"[+] Manually added system {sid} ({ip}, instance {nr})")
+        return json.dumps({"status": "ok"})
+
+    # -- Exit --
+    @app.route("/api/exit", method="POST")
+    def do_exit():
+        response.content_type = "application/json"
+        print("[*] Exit requested — shutting down ...")
+        import threading
+        threading.Timer(0.5, lambda: os._exit(0)).start()
         return json.dumps({"status": "ok"})
 
     # -- Global actions --
