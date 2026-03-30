@@ -2329,7 +2329,8 @@ document.addEventListener('contextmenu', e => {
   const mapContainer = document.getElementById('map-container');
   hideCtxMenu();
   hideMapCtxMenu();
-  if (!nodeBox && (e.target === mapSvg || e.target === mapContainer || mapSvg.contains(e.target))) {
+  if (!nodeBox && (e.target === mapSvg || e.target === mapContainer ||
+      mapSvg.contains(e.target) || mapContainer.contains(e.target))) {
     e.preventDefault();
     showMapCtxMenu(e);
   }
