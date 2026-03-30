@@ -26,6 +26,7 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import traceback
 
 try:
@@ -35,6 +36,7 @@ except ImportError:
     _HAVE_CRYPTO = False
 
 import sapmap_rfc
+from sapmap_models import Credentials, RFCConnection
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -337,6 +339,178 @@ def _read_rsectab_via_rfc(node, creds) -> list | None:
     except Exception as e:
         print(f"[-] SecStore RFC_READ_TABLE failed: {e}")
         return None
+
+
+# ---------------------------------------------------------------------------
+# Categorisation and map integration
+# ---------------------------------------------------------------------------
+
+# Regex patterns for parsing IDENT strings
+_RE_RFC_WITH_USER = re.compile(
+    r"^/RFC/([A-Za-z0-9_]+)@([A-Z0-9]{3})(?:CLNT(\d{3}))?(?:\.|$)"
+)
+_RE_RFC_SIMPLE = re.compile(r"^/RFC/(.+)$")
+_RE_DBCON = re.compile(r"^/DBCON/(.+)$")
+_RE_CTS = re.compile(r"^/CTS/")
+_RE_STRUST = re.compile(r"^/STRUST_PSE_PIN/")
+_RE_HMAC = re.compile(r"^/HMAC_INDEP/")
+
+
+def categorise_entry(entry: dict) -> dict:
+    """Add category and parsed fields to a decrypted SecStore entry.
+
+    Modifies and returns the entry dict with added keys:
+      category    – rfc | db | cts | smtp | hmac | pse | other
+      dest_name   – RFC destination name (rfc only)
+      target_sid  – target SID parsed from ident (rfc only)
+      rfc_user    – RFC logon user parsed from ident (rfc only)
+      rfc_client  – client parsed from CLNTnnn (rfc only)
+      mandt       – SAP client extracted from the MANDT prefix
+    """
+    raw_ident = entry.get("ident", "")
+
+    # Strip the MANDT prefix that the ABAP program prepends.
+    # Format: "NNN /path/..." or "    /path/..." (spaces/underscores for cross-client)
+    mandt = ""
+    ident = raw_ident
+    m_prefix = re.match(r"^(\d{3}|[_ ]{3})\s+(.*)$", raw_ident)
+    if m_prefix:
+        mandt = m_prefix.group(1).strip().replace("_", "")
+        ident = m_prefix.group(2)
+    entry["mandt"] = mandt
+    entry["ident_clean"] = ident
+
+    # --- RFC destinations ---
+    m = _RE_RFC_WITH_USER.match(ident)
+    if m:
+        entry["category"]   = "rfc"
+        entry["rfc_user"]   = m.group(1)
+        entry["target_sid"] = m.group(2)
+        entry["rfc_client"] = m.group(3) or ""
+        entry["dest_name"]  = ident[5:]  # everything after /RFC/
+        return entry
+
+    m = _RE_RFC_SIMPLE.match(ident)
+    if m:
+        dest = m.group(1)
+        entry["category"]   = "rfc"
+        entry["dest_name"]  = dest
+        # If dest_name looks like a 3-char SID, use it as target_sid
+        entry["target_sid"] = dest if re.match(r"^[A-Z][A-Z0-9]{2}$", dest) else ""
+        entry["rfc_user"]   = ""
+        entry["rfc_client"] = ""
+        return entry
+
+    # --- DB connections ---
+    if _RE_DBCON.match(ident):
+        entry["category"] = "db"
+        return entry
+
+    # --- CTS transport ---
+    if _RE_CTS.match(ident):
+        entry["category"] = "cts"
+        return entry
+
+    # --- SMTP ---
+    if "SMTP" in ident.upper():
+        entry["category"] = "smtp"
+        return entry
+
+    # --- HMAC ---
+    if _RE_HMAC.match(ident):
+        entry["category"] = "hmac"
+        return entry
+
+    # --- PSE / certificate PIN ---
+    if _RE_STRUST.match(ident):
+        entry["category"] = "pse"
+        return entry
+
+    entry["category"] = "other"
+    return entry
+
+
+def integrate_results(node, state, results: list):
+    """Integrate decrypted SecStore results into the SAPMAP state.
+
+    1. Store categorised entries on the node.
+    2. Enrich existing RFC connections with decrypted passwords.
+    3. Add credentials to target nodes on the map.
+    """
+    # Categorise every entry
+    for entry in results:
+        categorise_entry(entry)
+
+    # Store on node
+    node.secstore_entries = results
+
+    rfc_entries = [e for e in results
+                   if e.get("category") == "rfc" and e.get("password")]
+
+    # --- Enrich existing connections ---
+    for entry in rfc_entries:
+        dest = entry.get("dest_name", "")
+        if not dest:
+            continue
+        for conn in state.get_connections_from(node.sid):
+            if conn.destination_name == dest:
+                conn.secstore_password = entry["password"]
+                print(f"[+] SecStore: enriched RFC dest {dest} with password")
+                break
+
+    # --- Add credentials to target nodes ---
+    for entry in rfc_entries:
+        target_sid = entry.get("target_sid", "")
+        target_node = state.get_node(target_sid) if target_sid else None
+        if not target_node:
+            continue
+
+        rfc_user  = entry.get("rfc_user", "")
+        password  = entry["password"]
+        client    = entry.get("rfc_client", "") or "000"
+
+        if not rfc_user:
+            # Try to derive user from dest_name for simple /RFC/<dest> patterns
+            # e.g., /RFC/TMSADM@... → user TMSADM
+            continue
+
+        # Avoid duplicates
+        already = any(
+            c.username.upper() == rfc_user.upper() and c.client == client
+            for c in target_node.credentials
+        )
+        if not already:
+            cred = Credentials(
+                username=rfc_user,
+                password=password,
+                client=client,
+                instance_nr=target_node.instance_nrs()[0] if target_node.instance_nrs() else "00",
+                verified=False,
+            )
+            target_node.credentials.append(cred)
+            print(f"[+] SecStore: added credentials {rfc_user}@{target_sid} "
+                  f"client {client} (from RSECTAB)")
+
+        # Create RFC connection if none exists yet
+        existing = any(
+            c.destination_name == entry.get("dest_name", "")
+            for c in state.get_connections_from(node.sid)
+        )
+        if not existing:
+            conn = RFCConnection(
+                source_sid=node.sid,
+                source_host=node.hostname or node.ip,
+                target_sid=target_sid,
+                target_host=target_node.hostname or target_node.ip,
+                target_ip=target_node.ip,
+                destination_name=entry.get("dest_name", ""),
+                rfc_user=rfc_user,
+                client=client,
+                secstore_password=password,
+            )
+            state.add_connection(conn)
+            print(f"[+] SecStore: created RFC connection {node.sid} → "
+                  f"{target_sid} via {entry.get('dest_name', '')}")
 
 
 # ---------------------------------------------------------------------------

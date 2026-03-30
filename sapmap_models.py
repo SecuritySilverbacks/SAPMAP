@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import copy
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import datetime
 from enum import IntEnum
 from typing import Any, Optional
@@ -202,6 +202,7 @@ class SAPNode:
     sapology_data: dict = field(default_factory=dict)
     gw_vulnerable: bool = False         # True if SAPXPG gateway exploit works
     gw_vulnerable_port: int = 0         # The specific gateway port that is vulnerable
+    secstore_entries: list = field(default_factory=list)  # [{ident, password, category, ...}]
     position: Optional[tuple] = None    # (x, y) on map — None = auto-layout
 
     # Computed helpers
@@ -277,6 +278,7 @@ class SAPNode:
             "sapology_data": self.sapology_data,
             "gw_vulnerable": self.gw_vulnerable,
             "gw_vulnerable_port": self.gw_vulnerable_port,
+            "secstore_entries": self.secstore_entries,
             "position": list(self.position) if self.position else None,
         }
 
@@ -302,6 +304,7 @@ class SAPNode:
             sapology_data=d.get("sapology_data", {}),
             gw_vulnerable=d.get("gw_vulnerable", False),
             gw_vulnerable_port=d.get("gw_vulnerable_port", 0),
+            secstore_entries=d.get("secstore_entries", []),
             position=tuple(d["position"]) if d.get("position") else None,
         )
         return node
@@ -342,6 +345,9 @@ class RFCConnection:
     # sapxpg remote test
     sapxpg_remote_works: bool = False
 
+    # SecStore
+    secstore_password: str = ""  # Decrypted password from RSECTAB (if matched)
+
     def risk_level(self) -> str:
         """Return risk assessment for this connection."""
         if self.has_sap_all and self.logon_successful:
@@ -374,11 +380,14 @@ class RFCConnection:
             "check_error": self.check_error,
             "tested": self.tested,
             "sapxpg_remote_works": self.sapxpg_remote_works,
+            "secstore_password": self.secstore_password,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> RFCConnection:
-        return cls(**d)
+        # Filter out unknown keys for forward compatibility
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in d.items() if k in known})
 
 
 # ---------------------------------------------------------------------------
