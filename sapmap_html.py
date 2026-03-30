@@ -449,6 +449,7 @@ body {
     <div class="ctx-item">&#128230; Data Extraction</div>
     <div class="ctx-sub">
       <div class="ctx-item" data-action="download_hashes">&#128229; Download Password Hashes</div>
+      <div class="ctx-item" data-action="download_secstore">&#128273; Download SecStore (RSECTAB)</div>
       <div class="ctx-item" data-action="download_table">&#128229; Download Table Data</div>
     </div>
   </div>
@@ -1415,8 +1416,9 @@ function showCtxMenu(e, sid) {
     'deep_scan':        true,                       // always available
     'retrieve_rfcs':    hasCreds,                   // need credentials/access
     'test_rfcs':        hasCreds && hasRFCs,        // need access + existing RFCs
-    'download_hashes':  hasCreds,                   // need credentials/access
-    'download_table':   hasCreds,                   // need credentials/access
+    'download_hashes':    hasCreds,                   // need credentials/access
+    'download_secstore':  hasCreds,                   // need credentials/access
+    'download_table':     hasCreds,                   // need credentials/access
     'os_terminal':      hasGwVuln || hasCreatedUsers, // need GW vuln or created user
     'create_tcpip':     hasCreds,                   // need credentials/access
     'propagate':        hasCreds,                   // need access to propagate from
@@ -1437,8 +1439,9 @@ function showCtxMenu(e, sid) {
     'lpe':              'Provide credentials first',
     'retrieve_rfcs':    'Provide credentials or create a user first',
     'test_rfcs':        'Retrieve RFC connections first',
-    'download_hashes':  'Provide credentials or create a user first',
-    'download_table':   'Provide credentials or create a user first',
+    'download_hashes':    'Provide credentials or create a user first',
+    'download_secstore':  'Provide credentials or create a user first',
+    'download_table':     'Provide credentials or create a user first',
     'os_terminal':      'Requires vulnerable gateway or created user with SAP_ALL',
     'create_tcpip':     'Provide credentials or create a user first',
     'propagate':        'Provide credentials or create a user first',
@@ -1542,6 +1545,8 @@ async function ctxAction(action) {
       await api('POST', `node/${sid}/test_rfcs`); break;
     case 'download_hashes':
       await api('POST', `node/${sid}/download_hashes`); break;
+    case 'download_secstore':
+      await api('POST', `node/${sid}/download_secstore`); break;
     case 'download_table':
       document.getElementById('table-modal').classList.add('visible'); break;
     case 'os_terminal': showTerminalModal(sid); break;
