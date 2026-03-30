@@ -1050,6 +1050,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
             creds = node.best_credentials()
             try:
                 results = sapmap_secstore.download_and_decrypt(node, creds, key_hex)
+                sapmap_secstore.integrate_results(node, api.state, results)
                 ok  = [r for r in results if not r.get("error") and r.get("password")]
                 err = [r for r in results if r.get("error")]
                 states_dir = os.path.join(os.path.dirname(__file__), "states")

@@ -1636,6 +1636,7 @@ function showConnInfo(e, connIdx) {
     ` : `
       <div class="info-row"><span class="info-label">Client:</span><span class="info-val">${escHtml(conn.client || '?')}</span></div>
       <div class="info-row"><span class="info-label">RFC User:</span><span class="info-val">${escHtml(conn.rfc_user || '?')}</span></div>
+      ${conn.secstore_password ? `<div class="info-row"><span class="info-label">SecStore Pwd:</span><span class="info-val" style="color:#3fb950">&#9679;&#9679;&#9679;&#9679; (${conn.secstore_password.length} chars) — from RSECTAB</span></div>` : ''}
     `}
     ${profilesHtml ? `<div class="info-section"><strong style="font-size:11px;color:#8b949e">Profiles</strong><div class="profile-list">${profilesHtml}</div></div>` : ''}
     ${rolesHtml ? `<div class="info-section"><strong style="font-size:11px;color:#8b949e">Roles</strong><div class="profile-list">${rolesHtml}</div></div>` : ''}
@@ -1735,7 +1736,40 @@ function showDetails(sid) {
       <h4>Created Users (${(n.created_users||[]).length})</h4>
       ${(n.created_users || []).map(u => `<div class="detail-row"><span class="detail-key">${escHtml(u.username)}</span><span class="detail-val">Client ${escHtml(u.client)} via ${escHtml(u.method)}</span></div>`).join('') || '<div style="color:#484f58">None</div>'}
     </div>
+    ${(() => {
+      const ss = n.secstore_entries || [];
+      if (ss.length === 0) return '';
+      const catColors = {rfc:'#f0883e',db:'#58a6ff',cts:'#3fb950',smtp:'#bc8cff',hmac:'#484f58',pse:'#484f58',other:'#484f58'};
+      const catLabels = {rfc:'RFC',db:'DB',cts:'CTS',smtp:'SMTP',hmac:'HMAC',pse:'PSE',other:'?'};
+      return '<div class="detail-section"><h4>&#128273; SecStore (' + ss.length + ' entries)</h4>' +
+        ss.filter(e => !e.error).map(e => {
+          const cat = e.category || 'other';
+          const col = catColors[cat] || '#484f58';
+          const lbl = catLabels[cat] || '?';
+          const pwd = e.password || '';
+          const plen = e.password_len || pwd.length || 0;
+          const masked = plen > 0 ? '&#9679;'.repeat(Math.min(plen, 8)) + ' (' + plen + ' chars)' : '(empty)';
+          const ident = e.ident || '?';
+          return '<div class="detail-row" style="cursor:pointer" onclick="this.querySelector(\\'[data-ss]\\').toggleAttribute(\\'data-revealed\\')">' +
+            '<span class="detail-key" style="color:' + col + ';min-width:36px">' + lbl + '</span>' +
+            '<span class="detail-val" style="font-size:11px">' + escHtml(ident) +
+            '<br><span data-ss style="color:#8b949e">' + masked + '</span>' +
+            '<span style="display:none;color:#3fb950">' + escHtml(pwd) + '</span>' +
+            '</span></div>';
+        }).join('') +
+        '</div>';
+    })()}
   `;
+
+  // Wire up click-to-reveal on SecStore entries
+  panel.querySelectorAll('[data-ss]').forEach(el => {
+    const revealed = el.nextElementSibling;
+    el.parentElement.parentElement.addEventListener('click', () => {
+      if (el.style.display === 'none') { el.style.display = ''; revealed.style.display = 'none'; }
+      else { el.style.display = 'none'; revealed.style.display = ''; }
+    });
+  });
+
   panel.classList.add('visible');
 }
 
