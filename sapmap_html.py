@@ -1749,12 +1749,12 @@ function showDetails(sid) {
           const pwd = e.password || '';
           const plen = e.password_len || pwd.length || 0;
           const masked = plen > 0 ? '&#9679;'.repeat(Math.min(plen, 8)) + ' (' + plen + ' chars)' : '(empty)';
-          const ident = e.ident || '?';
-          return '<div class="detail-row" style="cursor:pointer" onclick="this.querySelector(\\'[data-ss]\\').toggleAttribute(\\'data-revealed\\')">' +
+          const ident = e.ident_clean || e.ident || '?';
+          return '<div class="detail-row ss-reveal" style="cursor:pointer">' +
             '<span class="detail-key" style="color:' + col + ';min-width:36px">' + lbl + '</span>' +
             '<span class="detail-val" style="font-size:11px">' + escHtml(ident) +
-            '<br><span data-ss style="color:#8b949e">' + masked + '</span>' +
-            '<span style="display:none;color:#3fb950">' + escHtml(pwd) + '</span>' +
+            '<br><span class="ss-masked" style="color:#8b949e">' + masked + '</span>' +
+            '<span class="ss-plain" style="display:none;color:#3fb950">' + escHtml(pwd) + '</span>' +
             '</span></div>';
         }).join('') +
         '</div>';
@@ -1762,11 +1762,12 @@ function showDetails(sid) {
   `;
 
   // Wire up click-to-reveal on SecStore entries
-  panel.querySelectorAll('[data-ss]').forEach(el => {
-    const revealed = el.nextElementSibling;
-    el.parentElement.parentElement.addEventListener('click', () => {
-      if (el.style.display === 'none') { el.style.display = ''; revealed.style.display = 'none'; }
-      else { el.style.display = 'none'; revealed.style.display = ''; }
+  panel.querySelectorAll('.ss-reveal').forEach(row => {
+    row.addEventListener('click', () => {
+      const m = row.querySelector('.ss-masked');
+      const p = row.querySelector('.ss-plain');
+      if (m.style.display === 'none') { m.style.display = ''; p.style.display = 'none'; }
+      else { m.style.display = 'none'; p.style.display = ''; }
     });
   });
 
