@@ -174,6 +174,9 @@ def main():
 def _patch_pywebview_gtk():
     """Monkey-patch pywebview's GTK backend for WebKit2GTK 4.0 compatibility.
 
+    Only relevant on Linux where pywebview uses GTK/WebKit2GTK.
+    On macOS (WKWebView) and Windows (EdgeChromium) this is a no-op.
+
     pywebview >= 4.4 uses WebKit2GTK 4.1 APIs that don't exist in 4.0:
       - WebView.evaluate_javascript()  -> patched to use run_javascript()
       - WebView.evaluate_javascript_finish() -> patched to use run_javascript_finish()
@@ -182,6 +185,9 @@ def _patch_pywebview_gtk():
     This avoids the need to downgrade pywebview or upgrade the system's
     WebKit2GTK package.
     """
+    import sys
+    if sys.platform != 'linux':
+        return False  # Only needed on Linux (GTK/WebKit2GTK)
     try:
         import gi
         gi.require_version('Gtk', '3.0')
