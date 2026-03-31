@@ -662,13 +662,17 @@ def fast_scan_network(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RA
 
 def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
                        verbose: bool = False,
-                       instance_nrs: list = None) -> dict:
+                       instance_nrs: list = None,
+                       sid_hint: str = "") -> dict:
     """Call RFC_SYSTEM_INFO (unauthenticated) to get OS, DB, kernel, hostname, SID.
 
     Args:
         instance_nrs: Explicit instance numbers to try for SAPControl (prioritized).
+        sid_hint: Optional SID to use as log prefix (for already-known systems).
     Returns dict with fields: sid, hostname, os, db_type, kernel, sap_release, ip, etc.
     """
+    tag = sid_hint or host  # log prefix: SID if known, else IP
+
     info = {
         "sid": "",
         "hostname": "",
@@ -679,7 +683,7 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
         "ip": host,
     }
 
-    print(f"[*] {host}: Probing RFC_SYSTEM_INFO on {host}:{gw_port} ...")
+    print(f"[*] {tag}: Probing RFC_SYSTEM_INFO on {host}:{gw_port} ...")
     try:
         result = probe_sap_system(host, gw_port, timeout=timeout, verbose=verbose)
         status = result.get("status", "unknown")
@@ -726,18 +730,21 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
                 inst_nr = inst_nr or gw_svc[5:]
 
         if info["sid"] or info["hostname"] or info["kernel"]:
-            print(f"[+] {host}: RFC_SYSTEM_INFO ({status}): SID={info['sid'] or '?'}, "
+            # Update tag with discovered SID for subsequent messages
+            if info["sid"]:
+                tag = info["sid"]
+            print(f"[+] {tag}: RFC_SYSTEM_INFO ({status}): SID={info['sid'] or '?'}, "
                   f"Host={info['hostname'] or '?'}, OS={info['os_type'] or '?'}, "
                   f"DB={info['db_type'] or '?'}, Kernel={info['kernel'] or '?'}, "
                   f"Release={info['sap_release'] or '?'}")
         else:
             methods = result.get("methods_tried", [])
             methods_ok = result.get("methods_success", [])
-            print(f"[!] {host}: RFC_SYSTEM_INFO: no data extracted (status={status}, "
+            print(f"[!] {tag}: RFC_SYSTEM_INFO: no data extracted (status={status}, "
                   f"methods tried={methods}, success={methods_ok})")
 
     except Exception as e:
-        print(f"[-] {host}: RFC_SYSTEM_INFO error on {host}:{gw_port}: {e}")
+        print(f"[-] {tag}: RFC_SYSTEM_INFO error on {host}:{gw_port}: {e}")
         logger.debug(f"RFC_SYSTEM_INFO failed for {host}:{gw_port}: {e}")
 
     # Build ordered instance number list for SAPControl queries
@@ -766,16 +773,17 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
         )
         if sid and not info["sid"]:
             info["sid"] = sid
-            print(f"[+] {host}: SID from SAPControl ({host}:{sc_port}): {sid}")
+            tag = sid  # update tag with discovered SID
+            print(f"[+] {tag}: SID from SAPControl ({host}:{sc_port}): {sid}")
         if is_java or is_abap:
             info["_is_java"] = info.get("_is_java", False) or is_java
             info["_is_abap"] = info.get("_is_abap", False) or is_abap
-            print(f"[+] {host}: Stack from SAPControl ({host}:{sc_port}):"
+            print(f"[+] {tag}: Stack from SAPControl ({host}:{sc_port}):"
                   f"{'  [ABAP]' if is_abap else ''}"
                   f"{'  [JAVA]' if is_java else ''}")
         if db_type and not info["db_type"]:
             info["db_type"] = db_type
-            print(f"[+] {host}: DB type from SAPControl ({host}:{sc_port}): "
+            print(f"[+] {tag}: DB type from SAPControl ({host}:{sc_port}): "
                   f"{db_type}")
         # For double-stack, ABAP and JAVA run on different instances.
         # Keep querying until we have SID + db_type + both stack flags checked,
@@ -791,7 +799,7 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
             os_type = _query_sapcontrol_os(host, sc_port, timeout=min(timeout, 3))
             if os_type:
                 info["os_type"] = os_type
-                print(f"[+] {host}: OS type from SAPControl ({host}:{sc_port}): "
+                print(f"[+] {tag}: OS type from SAPControl ({host}:{sc_port}): "
                       f"{os_type}")
                 break
 
@@ -801,7 +809,7 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
             product = result.get("sap_product", "")
             if "HANA" in product.upper():
                 info["db_type"] = "HDB"
-                print(f"[!] {host}: DB type inferred from product name '{product}'"
+                print(f"[!] {tag}: DB type inferred from product name '{product}'"
                       f" (weak heuristic, may be wrong)")
         except Exception:
             pass
@@ -823,7 +831,7 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
                     s.connect((host, hana_port))
                     s.close()
                     info["db_type"] = "HDB"
-                    print(f"[+] {host}: HANA detected: port {hana_port} is open "
+                    print(f"[+] {tag}: HANA detected: port {hana_port} is open "
                           f"(instance {inst:02d})")
                     break
                 except Exception:
@@ -993,12 +1001,16 @@ def _query_sapcontrol_os(host: str, port: int, timeout: float = 3) -> str:
 # ---------------------------------------------------------------------------
 
 def enumerate_system_clients(host: str, disp_port: int, timeout: float = 5,
-                             max_workers: int = 20, verbose: bool = False) -> list:
+                             max_workers: int = 20, verbose: bool = False,
+                             sid_hint: str = "") -> list:
     """Enumerate SAP clients via DIAG protocol.
 
+    Args:
+        sid_hint: Optional SID to use as log prefix (for already-known systems).
     Returns list of client number strings, e.g. ["000", "001", "100"].
     """
-    print(f"[*] {host}: Enumerating clients on {host}:{disp_port} via DIAG ...")
+    tag = sid_hint or host
+    print(f"[*] {tag}: Enumerating clients on {host}:{disp_port} via DIAG ...")
     try:
         result = enumerate_clients(host, disp_port, timeout=timeout,
                                    max_workers=max_workers, verbose=verbose)
@@ -1007,15 +1019,15 @@ def enumerate_system_clients(host: str, disp_port: int, timeout: float = 5,
         probed = result.get("probed", 0)
         errors = result.get("errors", 0)
         if clients:
-            print(f"[+] {host}: Found {len(clients)} clients: {', '.join(clients[:15])}"
+            print(f"[+] {tag}: Found {len(clients)} clients: {', '.join(clients[:15])}"
                   f"{'...' if len(clients) > 15 else ''}"
                   f" (probed={probed}, errors={errors})")
         else:
-            print(f"[*] {host}: No clients found (status={status}, "
+            print(f"[*] {tag}: No clients found (status={status}, "
                   f"probed={probed}, errors={errors})")
         return clients
     except Exception as e:
-        print(f"[-] {host}: Client enumeration error on {host}:{disp_port}: {e}")
+        print(f"[-] {tag}: Client enumeration error on {host}:{disp_port}: {e}")
         logger.debug(f"Client enum failed for {host}:{disp_port}: {e}")
         return []
 
