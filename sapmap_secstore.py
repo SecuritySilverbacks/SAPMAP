@@ -79,10 +79,9 @@ def _des_ecb_encrypt(key8: bytes, block8: bytes) -> bytes:
 
 def _des3_manual(key24: bytes, data: bytes) -> bytes:
     """
-    SAP SecStore manual 3-pass DES (CBC, IV=0x00*8):
-      pass 1: decrypt  key[16:24]
-      pass 2: encrypt  key[8:16]
-      pass 3: decrypt  key[0:8]
+    RSECTAB decryption uses standard DES-CBC (NOT SAP's RSECCipher).
+    Manual 3-pass: decrypt key[16:24], encrypt key[8:16], decrypt key[0:8].
+    IV = 8 null bytes for each pass.
     """
     iv = b"\x00" * 8
 
@@ -169,47 +168,17 @@ def extract_ssfs_key(key_file_bytes: bytes) -> bytes:
 def _decrypt_ssfs_key_enc(key_file_bytes: bytes) -> bytes:
     """Decrypt the encrypted SSFS key using the hardcoded KEK.
 
-    Algorithm (from pysap rsec_decrypt_key):
-      1. Take 56 bytes of encrypted key (offset 130-185)
-      2. DES-CBC decrypt with KEK[16:24]  (last 8 bytes)
-      3. DES-CBC encrypt with KEK[8:16]   (middle 8 bytes)
-      4. DES-CBC decrypt with KEK[0:8]    (first 8 bytes)
-      5. Byte 57 (offset 186) = special XOR with intermediate ciphertexts
-      6. Final key = result[33:56] + [last_byte] = 24 bytes
+    Uses SAP's RSECCipher (NOT standard DES) — the same proprietary cipher
+    used for all SSFS operations.  The pysap rsec_decrypt_key function
+    handles the 57-byte encrypted key blob including the partial-block
+    CBC carry for the last byte.
     """
-    kek = bytes.fromhex(_SSFS_KEK_HEX)
+    from sap_rsec_cipher import rsec_decrypt_key
     key_enc = key_file_bytes[130:]
     if len(key_enc) < 57:
         raise ValueError(f"Encrypted key too short: {len(key_enc)} bytes (need 57)")
 
-    enc_block = key_enc[:56]   # first 56 bytes
-    last_byte = key_enc[56]    # byte 57
-
-    iv = b"\x00" * 8
-
-    # Round 1: DES-CBC decrypt with KEK[16:24]
-    c1 = _CryptoDES.new(kek[16:24], _CryptoDES.MODE_CBC, iv)
-    r1 = c1.decrypt(enc_block)
-
-    # Round 2: DES-CBC encrypt with KEK[8:16]
-    c2 = _CryptoDES.new(kek[8:16], _CryptoDES.MODE_CBC, iv)
-    r2 = c2.encrypt(r1)
-
-    # Round 3: DES-CBC decrypt with KEK[0:8]
-    c3 = _CryptoDES.new(kek[0:8], _CryptoDES.MODE_CBC, iv)
-    r3 = c3.decrypt(r2)
-
-    # Last byte: XOR with DES-ECB encryptions of CBC carry blocks.
-    # Round 1 carry = last input ciphertext block (enc_block[48:56])
-    # Round 2 carry = last OUTPUT ciphertext block (r2[48:56])
-    # Round 3 carry = last input ciphertext block to round 3 = r2[48:56]
-    xb = last_byte
-    xb ^= _des_ecb_encrypt(kek[16:24], enc_block[48:56])[0]   # round 1
-    xb ^= _des_ecb_encrypt(kek[8:16],  r2[48:56])[0]          # round 2
-    xb ^= _des_ecb_encrypt(kek[0:8],   r2[48:56])[0]          # round 3
-
-    # Final key: bytes 33-56 of r3 + the XOR'd last byte = 24 bytes
-    key = r3[33:56] + bytes([xb])
+    key = rsec_decrypt_key(key_enc)
     if len(key) != 24:
         raise ValueError(f"Decrypted key wrong size: {len(key)} bytes (expected 24)")
 
@@ -295,10 +264,12 @@ def parse_ssfs_dat(dat_file_bytes: bytes, ssfs_key: bytes = None) -> list:
         data_bytes = dat_file_bytes[data_start:data_start + data_len]
 
         if ident and not is_deleted and data_len > 0:
-            # Decrypt with SSFS key if provided and data is encrypted
+            # Decrypt with SSFS key if provided and data is encrypted.
+            # SSFS uses RSECCipher (NOT standard DES) for record encryption.
             if ssfs_key and not is_plaintext and data_len >= 8 and data_len % 8 == 0:
                 try:
-                    data_bytes = _des3_manual(ssfs_key, data_bytes)
+                    from sap_rsec_cipher import rsec_decrypt
+                    data_bytes = rsec_decrypt(data_bytes, ssfs_key)
                 except Exception:
                     pass  # leave as encrypted
             records.append((ident, data_bytes.hex().upper()))
