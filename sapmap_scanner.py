@@ -422,7 +422,7 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
         if cancel_event and cancel_event.is_set():
             return result
         if not quick_hit:
-            print(f"[*]     Quick probe ({len(QUICK_PORTS)} ports) — "
+            print(f"[*] {host}: Quick probe ({len(QUICK_PORTS)} ports) — "
                   f"no response, skipping full scan")
             return result
 
@@ -457,21 +457,21 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
 
     if _cancelled():
         return result
-    print(f"[*]     Pass 1: scanning {len(ports_pass1)} ports "
+    print(f"[*] {host}: Pass 1: scanning {len(ports_pass1)} ports "
           f"(dispatcher 32XX, SAPHostControl) ...")
     t0 = time.time()
     hits1 = _do_scan(ports_pass1)
     if _cancelled():
         return result
     result["open_ports"].update(hits1)
-    print(f"[*]     Pass 1 done in {time.time() - t0:.1f}s — "
+    print(f"[*] {host}: Pass 1 done in {time.time() - t0:.1f}s — "
           f"{len(hits1)} open port(s)")
 
     # Verify dispatcher ports with DIAG protocol probe
     disp_ports = [p for p, info in result["open_ports"].items()
                   if info["service"] == "dispatcher"]
     if disp_ports and not _cancelled():
-        print(f"[*]     Verifying {len(disp_ports)} dispatcher port(s) "
+        print(f"[*] {host}: Verifying {len(disp_ports)} dispatcher port(s) "
               f"with SAP DIAG protocol probe ...")
     for port in list(disp_ports):
         if _cancelled():
@@ -496,13 +496,13 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
             pass2_ports.append((30000 + inst_nr * 100 + 13, "hana_sql", inst_str))
             pass2_ports.append((30000 + inst_nr * 100 + 15, "hana_sql", inst_str))
 
-        print(f"[*]     Pass 2: scanning {len(pass2_ports)} ports "
+        print(f"[*] {host}: Pass 2: scanning {len(pass2_ports)} ports "
               f"(gateway 33XX, HANA 3XX13/3XX15) for {len(found_instances)} instance(s) ...")
         t0 = time.time()
         hits2 = _do_scan(pass2_ports)
         if not _cancelled():
             result["open_ports"].update(hits2)
-            print(f"[*]     Pass 2 done in {time.time() - t0:.1f}s — "
+            print(f"[*] {host}: Pass 2 done in {time.time() - t0:.1f}s — "
                   f"{len(hits2)} port(s) open")
 
     return result
@@ -679,7 +679,7 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
         "ip": host,
     }
 
-    print(f"[*]   Probing RFC_SYSTEM_INFO on {host}:{gw_port} ...")
+    print(f"[*] {host}: Probing RFC_SYSTEM_INFO on {host}:{gw_port} ...")
     try:
         result = probe_sap_system(host, gw_port, timeout=timeout, verbose=verbose)
         status = result.get("status", "unknown")
@@ -726,18 +726,18 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
                 inst_nr = inst_nr or gw_svc[5:]
 
         if info["sid"] or info["hostname"] or info["kernel"]:
-            print(f"[+]   RFC_SYSTEM_INFO ({status}): SID={info['sid'] or '?'}, "
+            print(f"[+] {host}: RFC_SYSTEM_INFO ({status}): SID={info['sid'] or '?'}, "
                   f"Host={info['hostname'] or '?'}, OS={info['os_type'] or '?'}, "
                   f"DB={info['db_type'] or '?'}, Kernel={info['kernel'] or '?'}, "
                   f"Release={info['sap_release'] or '?'}")
         else:
             methods = result.get("methods_tried", [])
             methods_ok = result.get("methods_success", [])
-            print(f"[!]   RFC_SYSTEM_INFO: no data extracted (status={status}, "
+            print(f"[!] {host}: RFC_SYSTEM_INFO: no data extracted (status={status}, "
                   f"methods tried={methods}, success={methods_ok})")
 
     except Exception as e:
-        print(f"[-]   RFC_SYSTEM_INFO error on {host}:{gw_port}: {e}")
+        print(f"[-] {host}: RFC_SYSTEM_INFO error on {host}:{gw_port}: {e}")
         logger.debug(f"RFC_SYSTEM_INFO failed for {host}:{gw_port}: {e}")
 
     # Build ordered instance number list for SAPControl queries
@@ -766,16 +766,16 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
         )
         if sid and not info["sid"]:
             info["sid"] = sid
-            print(f"[+]   SID from SAPControl ({host}:{sc_port}): {sid}")
+            print(f"[+] {host}: SID from SAPControl ({host}:{sc_port}): {sid}")
         if is_java or is_abap:
             info["_is_java"] = info.get("_is_java", False) or is_java
             info["_is_abap"] = info.get("_is_abap", False) or is_abap
-            print(f"[+]   Stack from SAPControl ({host}:{sc_port}):"
+            print(f"[+] {host}: Stack from SAPControl ({host}:{sc_port}):"
                   f"{'  [ABAP]' if is_abap else ''}"
                   f"{'  [JAVA]' if is_java else ''}")
         if db_type and not info["db_type"]:
             info["db_type"] = db_type
-            print(f"[+]   DB type from SAPControl ({host}:{sc_port}): "
+            print(f"[+] {host}: DB type from SAPControl ({host}:{sc_port}): "
                   f"{db_type}")
         # For double-stack, ABAP and JAVA run on different instances.
         # Keep querying until we have SID + db_type + both stack flags checked,
@@ -791,7 +791,7 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
             os_type = _query_sapcontrol_os(host, sc_port, timeout=min(timeout, 3))
             if os_type:
                 info["os_type"] = os_type
-                print(f"[+]   OS type from SAPControl ({host}:{sc_port}): "
+                print(f"[+] {host}: OS type from SAPControl ({host}:{sc_port}): "
                       f"{os_type}")
                 break
 
@@ -801,7 +801,7 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
             product = result.get("sap_product", "")
             if "HANA" in product.upper():
                 info["db_type"] = "HDB"
-                print(f"[!]   DB type inferred from product name '{product}'"
+                print(f"[!] {host}: DB type inferred from product name '{product}'"
                       f" (weak heuristic, may be wrong)")
         except Exception:
             pass
@@ -823,7 +823,7 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
                     s.connect((host, hana_port))
                     s.close()
                     info["db_type"] = "HDB"
-                    print(f"[+]   HANA detected: port {hana_port} is open "
+                    print(f"[+] {host}: HANA detected: port {hana_port} is open "
                           f"(instance {inst:02d})")
                     break
                 except Exception:
@@ -998,7 +998,7 @@ def enumerate_system_clients(host: str, disp_port: int, timeout: float = 5,
 
     Returns list of client number strings, e.g. ["000", "001", "100"].
     """
-    print(f"[*]   Enumerating clients on {host}:{disp_port} via DIAG ...")
+    print(f"[*] {host}: Enumerating clients on {host}:{disp_port} via DIAG ...")
     try:
         result = enumerate_clients(host, disp_port, timeout=timeout,
                                    max_workers=max_workers, verbose=verbose)
@@ -1007,15 +1007,15 @@ def enumerate_system_clients(host: str, disp_port: int, timeout: float = 5,
         probed = result.get("probed", 0)
         errors = result.get("errors", 0)
         if clients:
-            print(f"[+]   Found {len(clients)} clients: {', '.join(clients[:15])}"
+            print(f"[+] {host}: Found {len(clients)} clients: {', '.join(clients[:15])}"
                   f"{'...' if len(clients) > 15 else ''}"
                   f" (probed={probed}, errors={errors})")
         else:
-            print(f"[*]   No clients found (status={status}, "
+            print(f"[*] {host}: No clients found (status={status}, "
                   f"probed={probed}, errors={errors})")
         return clients
     except Exception as e:
-        print(f"[-]   Client enumeration error on {host}:{disp_port}: {e}")
+        print(f"[-] {host}: Client enumeration error on {host}:{disp_port}: {e}")
         logger.debug(f"Client enum failed for {host}:{disp_port}: {e}")
         return []
 
@@ -1066,7 +1066,7 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
         for port, info in sorted(open_ports.items()):
             if info["service"] == "dispatcher" and info["instance_nr"] == inst_nr:
                 derived_gw = port + 100  # 32XX -> 33XX
-                print(f"[*]   No gateway for instance {inst_nr}, trying dispatcher+100 = {derived_gw}")
+                print(f"[*] {host}: No gateway for instance {inst_nr}, trying dispatcher+100 = {derived_gw}")
                 sys_info = enrich_system_info(host, derived_gw, timeout=timeout, verbose=verbose)
                 if sys_info.get("sid"):
                     instance_sid_map[inst_nr] = sys_info["sid"]
@@ -1087,7 +1087,7 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
                 instance_sysinfo[inst_nr] = {
                     "sid": sc_sid, "_is_java": sc_j, "_is_abap": sc_a
                 }
-                print(f"[+]   SID from SAPControl ({host}:{sc_port}): {sc_sid}"
+                print(f"[+] {host}: SID from SAPControl ({host}:{sc_port}): {sc_sid}"
                       f"{'  [JAVA]' if sc_j else ''}"
                       f"{'  [ABAP]' if sc_a else ''}")
 
@@ -1139,7 +1139,7 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
         db_type = sys_info.get("db_type", "")
         if has_hana_port and not db_type:
             db_type = "HDB"
-            print(f"[+]   HANA database detected via SQL port (SID: {sid})")
+            print(f"[+] {sid}: HANA database detected via SQL port")
 
         # Determine system type from this SID's ports + SAPControl hints
         has_dispatcher = "dispatcher" in sid_port_services
@@ -1251,7 +1251,7 @@ def discover_systems(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RAN
                 break
             host = result["host"]
             port_count = len(result["open_ports"])
-            print(f"[*] --- Host {idx + 1}/{len(scan_results)}: "
+            print(f"[*] {host}: --- Host {idx + 1}/{len(scan_results)}: "
                   f"{host} ({port_count} open ports) ---")
 
             host_nodes = _build_nodes_from_fast_scan(result, timeout=timeout, verbose=verbose)
@@ -1266,7 +1266,7 @@ def discover_systems(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RAN
             for node in host_nodes:
                 client_count = len(node.clients)
                 inst_list = ", ".join(node.instance_nrs()) or "?"
-                print(f"[+] => {node.sid} | {node.system_type} | "
+                print(f"[+] {node.sid}: => {node.system_type} | "
                       f"Host: {node.hostname or '?'} | "
                       f"OS: {node.os_type or '?'} | "
                       f"DB: {node.db_type or '?'} | "
@@ -1562,7 +1562,7 @@ def _deep_scan_with_sapology(targets, instance_range, timeout, threads,
 
     except Exception as e:
         logger.error(f"SAPology deep scan failed: {e}")
-        print(f"[-] SAPology deep scan failed: {e}")
+        print(f"[-] SAPology deep scan failed for {targets}: {e}")
         import traceback
         traceback.print_exc()
 
@@ -1579,7 +1579,7 @@ def deep_scan_single(node: SAPNode, timeout: float = DEFAULT_TIMEOUT,
     """
     host = node.ip or node.hostname
     if not host:
-        print(f"[-] No IP/hostname for {node.sid}, cannot deep scan")
+        print(f"[-] {node.sid}: No IP/hostname, cannot deep scan")
         return node
 
     print(f"")
@@ -1595,10 +1595,10 @@ def deep_scan_single(node: SAPNode, timeout: float = DEFAULT_TIMEOUT,
         if not instances:
             instances = list(range(0, 100))
 
-        print(f"[*] Phase 1: SAPology Discovery & Fingerprinting")
-        print(f"[*]   Target: {host}, Instances: {min(instances):02d}-{max(instances):02d}")
-        print(f"[*]   Port scanning, SAPControl queries, RFC_SYSTEM_INFO,")
-        print(f"[*]   OS/DB detection, client enumeration ...")
+        print(f"[*] {node.sid}: Phase 1: SAPology Discovery & Fingerprinting")
+        print(f"[*] {node.sid}: Target: {host}, Instances: {min(instances):02d}-{max(instances):02d}")
+        print(f"[*] {node.sid}: Port scanning, SAPControl queries, RFC_SYSTEM_INFO,")
+        print(f"[*] {node.sid}: OS/DB detection, client enumeration ...")
         print(f"")
 
         # Phase 1: Discovery
@@ -1612,20 +1612,20 @@ def deep_scan_single(node: SAPNode, timeout: float = DEFAULT_TIMEOUT,
         )
 
         if not landscape:
-            print(f"[*] SAPology found no SAP system on {host}")
+            print(f"[*] {node.sid}: SAPology found no SAP system on {host}")
             return node
 
         sys_obj = landscape[0]
         print(f"")
-        print(f"[+] Phase 1 complete: {sys_obj.sid} found")
-        print(f"[+]   Type: {sys_obj.system_type}, OS: {sys_obj.os_type}, "
+        print(f"[+] {node.sid}: Phase 1 complete: {sys_obj.sid} found")
+        print(f"[+] {node.sid}: Type: {sys_obj.system_type}, OS: {sys_obj.os_type}, "
               f"DB: {sys_obj.db_type}, Kernel: {sys_obj.kernel}")
-        print(f"[+]   Host: {sys_obj.hostname}, Clients: {len(sys_obj.clients)}")
+        print(f"[+] {node.sid}: Host: {sys_obj.hostname}, Clients: {len(sys_obj.clients)}")
         print(f"")
 
         # Phase 2: Vulnerability assessment
-        print(f"[*] Phase 2: Vulnerability Assessment")
-        print(f"[*]   Gateway SAPXPG, MS ACL, SAPControl, CVEs, SSL/TLS ...")
+        print(f"[*] {node.sid}: Phase 2: Vulnerability Assessment")
+        print(f"[*] {node.sid}: Gateway SAPXPG, MS ACL, SAPControl, CVEs, SSL/TLS ...")
         print(f"")
         landscape = SAPology.assess_vulnerabilities(
             landscape, gw_cmd="whoami", timeout=timeout + 2,
@@ -1665,23 +1665,23 @@ def deep_scan_single(node: SAPNode, timeout: float = DEFAULT_TIMEOUT,
             if getattr(sys_obj, attr, False):
                 db_labels.append(label)
 
-        print(f"[+] Deep scan complete for {node.sid}:")
-        print(f"    System type: {node.system_type}")
-        print(f"    OS:          {node.os_type}")
-        print(f"    DB:          {node.db_type}"
+        print(f"[+] {node.sid}: Deep scan complete:")
+        print(f"[+] {node.sid}: System type: {node.system_type}")
+        print(f"[+] {node.sid}: OS:          {node.os_type}")
+        print(f"[+] {node.sid}: DB:          {node.db_type}"
               f"{' (' + '/'.join(db_labels) + ')' if db_labels else ''}")
-        print(f"    Kernel:      {node.kernel}")
-        print(f"    Hostname:    {node.hostname}")
-        print(f"    Clients:     {len(node.clients)}")
-        print(f"    Findings:    {len(node.findings)}")
+        print(f"[+] {node.sid}: Kernel:      {node.kernel}")
+        print(f"[+] {node.sid}: Hostname:    {node.hostname}")
+        print(f"[+] {node.sid}: Clients:     {len(node.clients)}")
+        print(f"[+] {node.sid}: Findings:    {len(node.findings)}")
         if node.gw_vulnerable:
-            print(f"    [!] Gateway SAPXPG VULNERABLE")
+            print(f"[!] {node.sid}: Gateway SAPXPG VULNERABLE")
 
     except ImportError:
         print("[!] SAPology not available for deep scanning")
     except Exception as e:
         logger.error(f"Deep scan error for {node.sid}: {e}")
-        print(f"[-] Deep scan error: {e}")
+        print(f"[-] {node.sid}: Deep scan error: {e}")
         import traceback
         traceback.print_exc()
 
