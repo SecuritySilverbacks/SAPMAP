@@ -6,3 +6,7 @@ states/
 dev_rfc.log
 *.sapmap
 *.log
+# MCP server / VSP (contains credentials)
+.mcp.json
+.vsp.json
+vsp
