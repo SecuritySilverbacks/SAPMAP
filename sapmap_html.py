@@ -1643,7 +1643,7 @@ function showConnInfo(e, connIdx) {
     ` : `
       <div class="info-row"><span class="info-label">Client:</span><span class="info-val">${escHtml(conn.client || '?')}</span></div>
       <div class="info-row"><span class="info-label">RFC User:</span><span class="info-val">${escHtml(conn.rfc_user || '?')}</span></div>
-      ${conn.secstore_password ? `<div class="info-row"><span class="info-label">SecStore Pwd:</span><span class="info-val" style="color:#3fb950">&#9679;&#9679;&#9679;&#9679; (${conn.secstore_password.length} chars) — from RSECTAB</span></div>` : ''}
+      ${conn.secstore_password ? `<div class="info-row"><span class="info-label">SecStore Pwd:</span><span class="info-val ss-reveal" style="color:#3fb950;cursor:pointer"><span class="ss-masked">&#9679;&#9679;&#9679;&#9679; (${conn.secstore_password.length} chars) — click to reveal</span><span class="ss-plain" style="display:none">${escHtml(conn.secstore_password)}</span></span></div>` : ''}
     `}
     ${profilesHtml ? `<div class="info-section"><strong style="font-size:11px;color:#8b949e">Profiles</strong><div class="profile-list">${profilesHtml}</div></div>` : ''}
     ${rolesHtml ? `<div class="info-section"><strong style="font-size:11px;color:#8b949e">Roles</strong><div class="profile-list">${rolesHtml}</div></div>` : ''}
@@ -1665,6 +1665,16 @@ function showConnInfo(e, connIdx) {
       <button class="btn" onclick="document.getElementById('info-panel').classList.remove('visible')">Close</button>
     </div>
   `;
+  // Wire up click-to-reveal for SecStore password
+  panel.querySelectorAll('.ss-reveal').forEach(row => {
+    row.addEventListener('click', () => {
+      const m = row.querySelector('.ss-masked');
+      const p = row.querySelector('.ss-plain');
+      if (m.style.display === 'none') { m.style.display = ''; p.style.display = 'none'; }
+      else { m.style.display = 'none'; p.style.display = ''; }
+    });
+  });
+
   panel.style.left = Math.min(e.clientX, window.innerWidth - 440) + 'px';
   panel.style.top = Math.min(e.clientY, window.innerHeight - 520) + 'px';
   panel.classList.add('visible');
