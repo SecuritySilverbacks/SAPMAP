@@ -910,7 +910,12 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX,
             print(f"[-] {node.sid}: No open clients found in T000")
 
     if not rows:
-        print(f"[-] {node.sid} client {creds.client}: SecStore no entries found")
+        if actual_key_hex != key_hex:
+            print(f"[-] {node.sid} client {creds.client}: "
+                  f"SSFS key extracted but RSECTAB could not be read "
+                  f"(ABAP exec blocked, no open client found)")
+        else:
+            print(f"[-] {node.sid} client {creds.client}: SecStore no entries found")
         return []
 
     # --- Step 3: Decrypt all entries ---
