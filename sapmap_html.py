@@ -1302,35 +1302,21 @@ function updateMap() {
       ty += 14;
     }
 
-    // Open ports (collected from all instances) — fit within BOX_W
+    // Open ports (collected from all instances) — truncate to fit box
     const allPorts = new Set();
     for (const inst of (n.instances || [])) {
       for (const p of Object.keys(inst.ports || {})) allPorts.add(parseInt(p));
     }
     if (allPorts.size > 0) {
       const sorted = [...allPorts].sort((a,b) => a-b);
-      // Build port string that fits within box (~36 chars max after "Ports: ")
-      const maxChars = 30;
       let portStr = '';
-      let shown = 0;
       for (const p of sorted) {
-        const next = shown === 0 ? String(p) : ', ' + p;
-        if (portStr.length + next.length > maxChars) {
-          portStr += ` (+${sorted.length - shown})`;
-          break;
-        }
+        const next = portStr ? ', ' + p : String(p);
+        if (portStr.length + next.length > 30) { portStr += '...'; break; }
         portStr += next;
-        shown++;
       }
-      if (shown === sorted.length && portStr.length <= maxChars) {
-        // All ports fit on one line
-        html += `<text x="${x+10}" y="${ty}" fill="#8b949e" font-size="10" font-family="monospace">Ports: ${escHtml(portStr)}</text>`;
-        ty += 14;
-      } else {
-        // Show first line + second line for overflow
-        html += `<text x="${x+10}" y="${ty}" fill="#8b949e" font-size="10" font-family="monospace">Ports: ${escHtml(portStr)}</text>`;
-        ty += 14;
-      }
+      html += `<text x="${x+10}" y="${ty}" fill="#8b949e" font-size="10" font-family="monospace">Ports: ${escHtml(portStr)}</text>`;
+      ty += 14;
     }
 
     // PRD indicator bar
