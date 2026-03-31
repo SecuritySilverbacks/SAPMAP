@@ -389,7 +389,8 @@ def _read_ssfs_files_via_abap(node, creds) -> tuple:
             res = sapmap_rfc._run_abap_program(conn, _ABAP_READ_SSFS_FILES,
                                                 "ZSECSSFS")
             if not res.get("success"):
-                print(f"[-] SSFS file read failed: {res.get('error')}")
+                print(f"[-] {node.sid} client {creds.client}: "
+                      f"SSFS file read failed: {res.get('error')}")
                 return None, None
 
             output = res.get("output", [])
@@ -631,11 +632,12 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX) -> list:
     rows = _read_rsectab_via_abap(node, creds)
 
     if rows is None:
-        print("[*] SecStore: ABAP exec unavailable, falling back to RFC_READ_TABLE")
+        print(f"[*] {node.sid} client {creds.client}: "
+              f"ABAP exec unavailable, falling back to RFC_READ_TABLE")
         rows = _read_rsectab_via_rfc(node, creds)
 
     if not rows:
-        print(f"[-] SecStore {node.sid}: no entries found")
+        print(f"[-] {node.sid} client {creds.client}: SecStore no entries found")
         return []
 
     # --- Step 3: Decrypt all entries ---
@@ -673,7 +675,8 @@ def _read_rsectab_via_abap(node, creds) -> list | None:
                 return None  # FM not available — caller will fall back
 
             if not res.get("success"):
-                print(f"[-] SecStore ABAP exec error: {res.get('error')}")
+                print(f"[-] {node.sid} client {creds.client}: "
+                      f"SecStore ABAP exec error: {res.get('error')}")
                 return None
 
             output = res.get("output", [])
