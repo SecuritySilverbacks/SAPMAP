@@ -10,3 +10,7 @@ dev_rfc.log
 .mcp.json
 .vsp.json
 vsp
+# Binary files / SDKs
+nwrfcsdk/
+.DS_Store
+*.webarchive

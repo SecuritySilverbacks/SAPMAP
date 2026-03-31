@@ -1549,6 +1549,7 @@ def get_client_roles(node: SAPNode, creds: Credentials = None) -> list:
                 FIELDS=[
                     {"FIELDNAME": "MANDT"},
                     {"FIELDNAME": "CCCATEGORY"},
+                    {"FIELDNAME": "CCCORACTIV"},
                     {"FIELDNAME": "MTEXT"},
                 ],
             )
@@ -1559,7 +1560,8 @@ def get_client_roles(node: SAPNode, creds: Credentials = None) -> list:
                     clients.append({
                         "MANDT": parts[0].strip(),
                         "CCCATEGORY": parts[1].strip(),
-                        "MTEXT": parts[2].strip() if len(parts) > 2 else "",
+                        "CCCORACTIV": parts[2].strip() if len(parts) > 2 else "",
+                        "MTEXT": parts[3].strip() if len(parts) > 3 else "",
                     })
 
     except Exception as e:

