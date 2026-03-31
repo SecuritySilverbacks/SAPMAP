@@ -1324,8 +1324,10 @@ function updateMap() {
       html += `<rect x="${x+10}" y="${y+BOX_H-28}" width="${BOX_W-20}" height="8" rx="4" fill="#8b0000" opacity="0.7" />`;
       html += `<text x="${x+BOX_W/2}" y="${y+BOX_H-32}" text-anchor="middle" font-size="9" fill="#f85149" font-weight="bold">PRD</text>`;
     } else if (clients.length > 0) {
+      const rolesKnown = clients.some(c => typeof c === 'object' && c.category);
+      const barLabel = rolesKnown ? 'Non-PRD' : 'Clients found — roles unknown';
       html += `<rect x="${x+10}" y="${y+BOX_H-28}" width="${BOX_W-20}" height="8" rx="4" fill="#e67e22" opacity="0.4" />`;
-      html += `<text x="${x+BOX_W/2}" y="${y+BOX_H-32}" text-anchor="middle" font-size="8" fill="#e67e22" opacity="0.7">Non-PRD</text>`;
+      html += `<text x="${x+BOX_W/2}" y="${y+BOX_H-32}" text-anchor="middle" font-size="8" fill="#e67e22" opacity="0.7">${barLabel}</text>`;
     }
 
     // Finding count badge
