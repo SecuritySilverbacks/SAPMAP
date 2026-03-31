@@ -899,6 +899,50 @@ def create_app(api: SAPMAPApi) -> Bottle:
             conn.tested = False
             api.state.rfc_check_cache.pop(dest_name, None)
             is_type_t = conn.sapxpg_remote_works or dest_name.startswith("SAPMAP_")
+
+            # If we have a SecStore password, try direct connection to the
+            # target first — this bypasses the source system entirely and
+            # works even when the source client is locked (SCC4).
+            if conn.secstore_password and conn.rfc_user and conn.target_sid:
+                target_node = api.state.get_node(conn.target_sid)
+                if target_node:
+                    target_client = conn.client or "000"
+                    target_inst = (target_node.instance_nrs()[0]
+                                   if target_node.instance_nrs() else "00")
+                    print(f"[*] Testing {dest_name} via direct RFC to "
+                          f"{conn.target_sid} (SecStore password)...")
+                    direct_creds = Credentials(
+                        username=conn.rfc_user,
+                        password=conn.secstore_password,
+                        client=target_client,
+                        instance_nr=target_inst,
+                    )
+                    try:
+                        if sapmap_rfc.test_connection(target_node, direct_creds):
+                            conn.logon_successful = True
+                            conn.logon_tested = True
+                            conn.ping_ok = True
+                            conn.tested = True
+                            print(f"[+] {dest_name}: Direct logon OK "
+                                  f"({conn.rfc_user}@{conn.target_sid})")
+                            # Check SAP_ALL via BAPI_USER_GET_DETAIL
+                            try:
+                                with sapmap_rfc._get_connection(
+                                        target_node, direct_creds) as tc:
+                                    det = tc.call("BAPI_USER_GET_DETAIL",
+                                                  USERNAME=conn.rfc_user)
+                                    for p in det.get("PROFILES", []):
+                                        if p.get("BAPIPROF") == "SAP_ALL":
+                                            conn.has_sap_all = True
+                                            print(f"[!] {conn.rfc_user} on "
+                                                  f"{conn.target_sid} has SAP_ALL!")
+                                            break
+                            except Exception:
+                                pass
+                            return
+                    except Exception as e:
+                        print(f"[-] Direct test failed: {e}")
+
             print(f"[*] Testing {'TCP/IP' if is_type_t else 'RFC'} "
                   f"destination: {dest_name}...")
             result = sapmap_rfc.test_rfc_destination(
