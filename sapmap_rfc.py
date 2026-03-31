@@ -328,13 +328,13 @@ def get_remote_user_profiles(node: SAPNode, username: str,
                     conn2, destination, username)
 
             if result_info["profiles"]:
-                print(f"[+] Remote profiles for {username} via {destination}: "
+                print(f"[+] {node.sid}: Remote profiles for {username} via {destination}: "
                       f"{', '.join(result_info['profiles'])}")
             elif result_info["error"]:
-                print(f"[-] Could not get profiles for {username} via "
+                print(f"[-] {node.sid}: Could not get profiles for {username} via "
                       f"{destination}: {result_info['error']}")
             else:
-                print(f"[*] No profiles found for {username} via {destination}")
+                print(f"[*] {node.sid}: No profiles found for {username} via {destination}")
 
     except Exception as e:
         result_info["error"] = str(e)
@@ -378,11 +378,11 @@ def create_user_via_bapi(node: SAPNode, username: str, password: str,
                 for entry in ret:
                     if entry.get("TYPE", "") in ("E", "A"):
                         result["message"] = entry.get("MESSAGE", "Unknown error")
-                        print(f"[-] User creation failed: {result['message']}")
+                        print(f"[-] {node.sid}: User creation failed: {result['message']}")
                         return result
             elif ret.get("TYPE", "") in ("E", "A"):
                 result["message"] = ret.get("MESSAGE", "Unknown error")
-                print(f"[-] User creation failed: {result['message']}")
+                print(f"[-] {node.sid}: User creation failed: {result['message']}")
                 return result
 
             print(f"[+] User {username} created in {node.sid} client {client}")
@@ -398,13 +398,13 @@ def create_user_via_bapi(node: SAPNode, username: str, password: str,
                 if isinstance(ret, list):
                     for entry in ret:
                         if entry.get("TYPE", "") in ("E", "A"):
-                            print(f"[!] SAP_ALL assignment warning: {entry.get('MESSAGE', '')}")
+                            print(f"[!] {node.sid}: SAP_ALL assignment warning: {entry.get('MESSAGE', '')}")
                 elif ret.get("TYPE", "") in ("E", "A"):
-                    print(f"[!] SAP_ALL assignment warning: {ret.get('MESSAGE', '')}")
+                    print(f"[!] {node.sid}: SAP_ALL assignment warning: {ret.get('MESSAGE', '')}")
                 else:
-                    print(f"[+] SAP_ALL profile assigned to {username}")
+                    print(f"[+] {node.sid}: SAP_ALL profile assigned to {username}")
             except Exception as e:
-                print(f"[!] Could not assign SAP_ALL: {e}")
+                print(f"[!] {node.sid}: Could not assign SAP_ALL: {e}")
 
             result["success"] = True
             result["message"] = f"User {username} created with SAP_ALL"
@@ -412,7 +412,7 @@ def create_user_via_bapi(node: SAPNode, username: str, password: str,
     except Exception as e:
         result["message"] = str(e)
         logger.error(f"BAPI user creation failed: {e}")
-        print(f"[-] User creation error: {e}")
+        print(f"[-] {node.sid}: User creation error: {e}")
 
     return result
 
@@ -558,16 +558,16 @@ def create_user_via_destination(node: SAPNode, destination: str,
 
     try:
         with _get_connection(node, creds) as conn:
-            print(f"[*] Running BAPI_USER_CREATE1 via "
+            print(f"[*] {node.sid}: Running BAPI_USER_CREATE1 via "
                   f"ABAP_INSTALL_AND_RUN DESTINATION '{d}'...")
             run = _run_abap_program(conn, abap_lines, "ZSAPM")
 
             if not run["success"]:
                 result["message"] = run["error"]
-                print(f"[-] {run['error']}")
+                print(f"[-] {node.sid}: {run['error']}")
                 return result
 
-            print(f"[*] Used FM: {run['fm_name']}")
+            print(f"[*] {node.sid}: Used FM: {run['fm_name']}")
             output = run["output"]
             for line in output:
                 print(f"    ABAP output: {line}")
@@ -577,27 +577,27 @@ def create_user_via_destination(node: SAPNode, destination: str,
                 if any("SAP_ALL_OK" in l for l in output):
                     result["message"] = (f"User {u} created with "
                                          f"SAP_ALL via DESTINATION")
-                    print(f"[+] User {u} created and SAP_ALL "
+                    print(f"[+] {node.sid}: User {u} created and SAP_ALL "
                           f"assigned on remote system via {d}")
                 else:
                     result["message"] = (f"User {u} created via "
                                          f"DESTINATION (SAP_ALL uncertain)")
-                    print(f"[+] User {u} created on remote system "
+                    print(f"[+] {node.sid}: User {u} created on remote system "
                           f"via {d} (SAP_ALL uncertain)")
             else:
                 err = [l for l in output if "ERR:" in l]
                 if err:
                     result["message"] = err[0]
-                    print(f"[-] Remote user creation: {err[0]}")
+                    print(f"[-] {node.sid}: Remote user creation: {err[0]}")
                 else:
                     result["message"] = (f"Unexpected output: "
                                          f"{output}")
-                    print(f"[-] Unexpected output: {output}")
+                    print(f"[-] {node.sid}: Unexpected output: {output}")
 
     except Exception as e:
         result["message"] = str(e)
         logger.error(f"Remote user creation via DESTINATION: {e}")
-        print(f"[-] Remote user creation error: {e}")
+        print(f"[-] {node.sid}: Remote user creation error: {e}")
 
     return result
 
@@ -616,16 +616,16 @@ def delete_user(node: SAPNode, username: str,
             if isinstance(ret, list):
                 for entry in ret:
                     if entry.get("TYPE", "") in ("E", "A"):
-                        print(f"[-] Delete failed: {entry.get('MESSAGE', '')}")
+                        print(f"[-] {node.sid}: Delete failed: {entry.get('MESSAGE', '')}")
                         return False
             elif ret.get("TYPE", "") in ("E", "A"):
-                print(f"[-] Delete failed: {ret.get('MESSAGE', '')}")
+                print(f"[-] {node.sid}: Delete failed: {ret.get('MESSAGE', '')}")
                 return False
             print(f"[+] User {username} deleted from {node.sid}")
             return True
     except Exception as e:
         logger.error(f"User deletion failed for {username}@{node.sid}: {e}")
-        print(f"[-] Delete error: {e}")
+        print(f"[-] {node.sid}: Delete error: {e}")
         return False
 
 
@@ -961,7 +961,7 @@ def retrieve_rfc_connections(node: SAPNode, creds: Credentials = None) -> list:
             )
             ret = xmi_result.get("RETURN", {})
             if isinstance(ret, dict) and ret.get("TYPE", "") in ("E", "A"):
-                print(f"[-] XBP logon failed: {ret.get('MESSAGE', '')}")
+                print(f"[-] {node.sid}: XBP logon failed: {ret.get('MESSAGE', '')}")
                 return _try_rfc_read_table_fallback(conn, node)
 
             # Step 2: Open job
@@ -973,7 +973,7 @@ def retrieve_rfc_connections(node: SAPNode, creds: Credentials = None) -> list:
             )
             jobcount = job_result.get("JOBCOUNT", "")
             if not jobcount:
-                print(f"[-] Failed to open job: {job_result}")
+                print(f"[-] {node.sid}: Failed to open job: {job_result}")
                 return _try_rfc_read_table_fallback(conn, node)
 
             # Step 3: Add ABAP step
@@ -1000,7 +1000,7 @@ def retrieve_rfc_connections(node: SAPNode, creds: Credentials = None) -> list:
                 JOBCOUNT=jobcount,
                 EXTERNAL_USER_NAME=RSRFCCHK_EXTERNAL_USER,
             )
-            print(f"[*] Job started, polling for completion...")
+            print(f"[*] {node.sid}: Job started, polling for completion...")
 
             # Step 6: Wait for completion
             finished = False
@@ -1016,16 +1016,16 @@ def retrieve_rfc_connections(node: SAPNode, creds: Credentials = None) -> list:
                     finished = True
                     break
                 if status == "X":
-                    print(f"[-] Job aborted")
+                    print(f"[-] {node.sid}: Job aborted")
                     break
                 time.sleep(DEFAULT_POLL_INTERVAL)
 
             if not finished:
-                print(f"[-] Job did not finish, trying table fallback...")
+                print(f"[-] {node.sid}: Job did not finish, trying table fallback...")
                 return _try_rfc_read_table_fallback(conn, node)
 
             # Step 7: Read spool output
-            print(f"[+] Job finished, reading spool output...")
+            print(f"[+] {node.sid}: Job finished, reading spool output...")
             try:
                 spool_result = conn.call(
                     "BAPI_XBP_JOB_SPOOLLIST_READ",
@@ -1037,9 +1037,9 @@ def retrieve_rfc_connections(node: SAPNode, creds: Credentials = None) -> list:
                 spool_lines = spool_result.get("SPOOL_LIST", [])
                 if spool_lines:
                     connections = _parse_rsrfcchk_output(spool_lines, node)
-                    print(f"[+] Parsed {len(connections)} RFC connections from spool")
+                    print(f"[+] {node.sid}: Parsed {len(connections)} RFC connections from spool")
                 else:
-                    print(f"[*] No spool output, trying table fallback...")
+                    print(f"[*] {node.sid}: No spool output, trying table fallback...")
                     connections = _try_rfc_read_table_fallback(conn, node)
             except Exception as e:
                 logger.debug(f"Spool read error: {e}")
@@ -1053,12 +1053,12 @@ def retrieve_rfc_connections(node: SAPNode, creds: Credentials = None) -> list:
 
             # If RSRFCCHK yielded nothing, fall back to RFCDES table
             if not connections:
-                print(f"[*] No connections from RSRFCCHK, trying RFCDES fallback...")
+                print(f"[*] {node.sid}: No connections from RSRFCCHK, trying RFCDES fallback...")
                 connections = _try_rfc_read_table_fallback(conn, node)
 
     except Exception as e:
         logger.error(f"RFC connection retrieval failed for {node.sid}: {e}")
-        print(f"[-] Failed to retrieve RFC connections: {e}")
+        print(f"[-] {node.sid}: Failed to retrieve RFC connections: {e}")
         # Last resort: try RFCDES in a fresh connection
         try:
             with _get_connection(node, creds) as conn:
@@ -1126,7 +1126,7 @@ def _parse_rsrfcchk_output(spool_lines: list, node: SAPNode) -> list:
 
 def _try_rfc_read_table_fallback(conn, node: SAPNode) -> list:
     """Fallback: read RFCDES table directly for Type-3 connections with stored passwords."""
-    print(f"[*] Trying RFC_READ_TABLE fallback on RFCDES...")
+    print(f"[*] {node.sid}: Trying RFC_READ_TABLE fallback on RFCDES...")
     connections = []
 
     try:
@@ -1163,12 +1163,12 @@ def _try_rfc_read_table_fallback(conn, node: SAPNode) -> list:
                 _parse_rfcdes_options(conn_obj, options)
                 connections.append(conn_obj)
 
-        print(f"[+] Found {len(connections)} Type-3 connections "
+        print(f"[+] {node.sid}: Found {len(connections)} Type-3 connections "
               f"with stored passwords via RFCDES")
 
     except Exception as e:
         logger.debug(f"RFCDES read failed: {e}")
-        print(f"[-] Could not read RFCDES table: {e}")
+        print(f"[-] {node.sid}: Could not read RFCDES table: {e}")
 
     return connections
 
@@ -1182,7 +1182,7 @@ def _try_rfcdes_raw_fallback(conn, node: SAPNode) -> list:
     RFC_GET_FUNCTION_INTERFACE first to fetch parameter metadata; call_raw
     skips that by supplying a hand-built function description.
     """
-    print(f"[*] Trying RFC_READ_TABLE via call_raw (bypass RFC_GET_FUNCTION_INTERFACE)...")
+    print(f"[*] {node.sid}: Trying RFC_READ_TABLE via call_raw (bypass RFC_GET_FUNCTION_INTERFACE)...")
     connections = []
 
     try:
@@ -1240,12 +1240,12 @@ def _try_rfcdes_raw_fallback(conn, node: SAPNode) -> list:
                 _parse_rfcdes_options(conn_obj, options)
                 connections.append(conn_obj)
 
-        print(f"[+] Found {len(connections)} Type-3 connections "
+        print(f"[+] {node.sid}: Found {len(connections)} Type-3 connections "
               f"with stored passwords via call_raw RFCDES")
 
     except Exception as e:
         logger.debug(f"call_raw RFCDES failed: {e}")
-        print(f"[-] call_raw RFCDES fallback failed: {e}")
+        print(f"[-] {node.sid}: call_raw RFCDES fallback failed: {e}")
 
     return connections
 
@@ -1264,12 +1264,12 @@ def _try_tableblock_compressed_fallback(conn, node: SAPNode) -> list:
     """
     import os, subprocess, struct
 
-    print("[*] Trying GET_TABLEBLOCK_COMPRESSED_RFC on RFCDES ...")
+    print(f"[*] {node.sid}: Trying GET_TABLEBLOCK_COMPRESSED_RFC on RFCDES ...")
     connections = []
 
     decompress_bin = os.path.join(os.path.dirname(__file__), "sap_decompress")
     if not os.path.isfile(decompress_bin):
-        print("[-] sap_decompress binary not found, skipping")
+        print(f"[-] {node.sid}: sap_decompress binary not found, skipping")
         return connections
 
     try:
@@ -1346,7 +1346,7 @@ def _try_tableblock_compressed_fallback(conn, node: SAPNode) -> list:
 
         nr_rows = result.get('NR_OF_ROWS', 0)
         if nr_rows == 0:
-            print("[*] RFCDES returned 0 rows")
+            print(f"[*] {node.sid}: RFCDES returned 0 rows")
             return connections
 
         # -- reassemble & decompress -----------------------------------
@@ -1365,7 +1365,7 @@ def _try_tableblock_compressed_fallback(conn, node: SAPNode) -> list:
         )
         if proc.returncode != 0 or not proc.stdout:
             err = proc.stderr.decode(errors='replace').strip()
-            print(f"[-] SAP decompression failed: {err}")
+            print(f"[-] {node.sid}: SAP decompression failed: {err}")
             return connections
 
         decompressed = proc.stdout
@@ -1400,12 +1400,12 @@ def _try_tableblock_compressed_fallback(conn, node: SAPNode) -> list:
             _parse_rfcdes_options(conn_obj, rfcoptions)
             connections.append(conn_obj)
 
-        print(f"[+] Found {len(connections)} Type-3 connections "
+        print(f"[+] {node.sid}: Found {len(connections)} Type-3 connections "
               f"with stored passwords via GET_TABLEBLOCK_COMPRESSED_RFC")
 
     except Exception as e:
         logger.debug(f"GET_TABLEBLOCK_COMPRESSED_RFC failed: {e}")
-        print(f"[-] GET_TABLEBLOCK_COMPRESSED_RFC fallback failed: {e}")
+        print(f"[-] {node.sid}: GET_TABLEBLOCK_COMPRESSED_RFC fallback failed: {e}")
 
     return connections
 
@@ -1485,7 +1485,7 @@ def read_table(node: SAPNode, table_name: str, fields: list = None,
 
     except Exception as e:
         logger.error(f"Table read failed for {table_name}@{node.sid}: {e}")
-        print(f"[-] Could not read {table_name}: {e}")
+        print(f"[-] {node.sid}: Could not read {table_name}: {e}")
 
     return rows
 
@@ -1564,7 +1564,7 @@ def get_client_roles(node: SAPNode, creds: Credentials = None) -> list:
 
     except Exception as e:
         logger.debug(f"Client role read failed for {node.sid}: {e}")
-        print(f"[-] Could not read client roles: {e}")
+        print(f"[-] {node.sid}: Could not read client roles: {e}")
 
     return clients
 
@@ -1631,11 +1631,11 @@ def create_tcpip_destination(node: SAPNode, target_host: str,
             else:
                 result["success"] = True
                 result["message"] = f"TCP/IP destination {dest_name} created"
-                print(f"[+] Created TCP/IP dest {dest_name} → "
+                print(f"[+] {node.sid}: Created TCP/IP dest {dest_name} → "
                       f"{target_host} (gw={gw_service})")
     except Exception as e:
         result["message"] = str(e)
-        print(f"[-] TCP/IP dest creation error: {e}")
+        print(f"[-] {node.sid}: TCP/IP dest creation error: {e}")
         logger.debug(f"TCP/IP dest creation failed: {e}")
 
     return result

