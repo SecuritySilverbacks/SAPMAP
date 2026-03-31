@@ -1060,7 +1060,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 print(f"[+] SecStore {sid}: {len(results)} entries, "
                       f"{len(ok)} decrypted, {len(err)} errors → {outfile}")
             except Exception as e:
+                import traceback
                 print(f"[-] SecStore {sid}: {e}")
+                traceback.print_exc()
 
         _bg(f"{sid}:download_secstore", "Download SecStore", _run)
         return json.dumps({"status": "started"})
