@@ -8,10 +8,11 @@ implementing the SAP RFC/Gateway protocol at the raw packet level.
 This replicates how SAP systems call each other's RFC_SYSTEM_INFO during
 server-to-server communication, which does not require authentication.
 
-The tool implements three probe methods:
+The tool implements four probe methods:
   1. V6 single-packet RFC call (template replay from pcap capture)
   2. V2 GW_NORMAL_CLIENT + F_SAP_INIT error leak (gateway error parsing)
   3. Chipik-style F_SAP_INIT with external program type (sapxpg/T_75)
+  4. DIAG login screen extraction (port 32XX, SAP GUI protocol)
 
 All methods attempt to extract system information including hostname,
 kernel release, OS, SID, database type, and IP addresses.
@@ -19,12 +20,13 @@ kernel release, OS, SID, database type, and IP addresses.
 For authorized security testing only.
 
 Usage:
-  python3 sap_rfc_system_info.py -t <target_ip> [-p <port>] [-v] [--json]
+  python3 sap_rfc_system_info.py -t <target_ip> [-p <port>] [-R <router>] [-v] [--json]
   python3 sap_rfc_system_info.py -t 192.168.2.29 -p 3340 -t 192.168.2.209 -p 3300
 
 Examples:
   python3 sap_rfc_system_info.py -t 192.168.2.209 -p 3300 -v
   python3 sap_rfc_system_info.py -t 192.168.2.29 -p 3340 --json
+  python3 sap_rfc_system_info.py -t 192.168.2.209:3200 -R 10.0.0.1:3299 -v
 """
 
 import socket
@@ -150,6 +152,122 @@ _P_UUID_BIN_2 = 830     # 16-byte binary UUID (item 05:14)
 def ni_frame(payload: bytes) -> bytes:
     """Wrap payload in SAP NI frame (4-byte big-endian length prefix)."""
     return struct.pack('>I', len(payload)) + payload
+
+
+def connect_via_saprouter(router_host, router_port, target, target_port,
+                          timeout=10, verbose=False):
+    """
+    Establish a TCP tunnel through a SAProuter to the target host.
+
+    Connects to the SAProuter, sends a binary NI_ROUTE request, and waits
+    for the route to be accepted (NI_PONG or empty ACK). Returns the
+    connected socket which can then be used to speak DIAG/RFC to the target.
+
+    Args:
+        router_host: SAProuter IP or hostname
+        router_port: SAProuter port (typically 3299)
+        target: Target SAP system IP or hostname
+        target_port: Target port (e.g. 3200 for DIAG, 3300 for GW)
+        timeout: Connection timeout in seconds
+        verbose: Print debug output
+
+    Returns:
+        Connected socket with tunnel established
+
+    Raises:
+        ConnectionError: If the route is rejected or connection fails
+    """
+    if verbose:
+        print(f'    SAProuter: connecting to {router_host}:{router_port}')
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    sock.connect((router_host, router_port))
+
+    # Build route entries as null-terminated triplets: host\x00port\x00password\x00
+    entry1 = (router_host.encode('ascii') + b'\x00'
+              + str(router_port).encode('ascii') + b'\x00' + b'\x00')
+    entry2 = (target.encode('ascii') + b'\x00'
+              + str(target_port).encode('ascii') + b'\x00' + b'\x00')
+    route_data = entry1 + entry2
+
+    # Build NI_ROUTE packet
+    route_pkt = bytearray()
+    route_pkt += b'NI_ROUTE\x00'                          # type
+    route_pkt += b'\x02'                                   # version = 2
+    route_pkt += b'\x27'                                   # ni_version = 39
+    route_pkt += b'\x02'                                   # entries = 2
+    route_pkt += b'\x00'                                   # talk_mode = 0 (NI)
+    route_pkt += b'\x00\x00'                               # padding
+    route_pkt += b'\x01'                                   # rest_nodes = 1
+    route_pkt += struct.pack('>I', len(route_data))        # route_length
+    route_pkt += struct.pack('>I', len(entry1))            # route_offset (skip entry1)
+    route_pkt += route_data
+
+    if verbose:
+        print(f'    SAProuter: sending NI_ROUTE '
+              f'({len(route_pkt)} bytes, route to {target}:{target_port})')
+
+    sock.sendall(ni_frame(bytes(route_pkt)))
+
+    # Read route response
+    resp = b''
+    try:
+        while len(resp) < 4:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            resp += chunk
+        if len(resp) >= 4:
+            ni_len = struct.unpack('>I', resp[:4])[0]
+            if ni_len > 0:
+                while len(resp) < 4 + ni_len:
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        break
+                    resp += chunk
+    except socket.timeout:
+        sock.close()
+        raise ConnectionError('SAProuter route response timed out')
+
+    if len(resp) < 4:
+        sock.close()
+        raise ConnectionError('SAProuter: no response')
+
+    ni_len = struct.unpack('>I', resp[:4])[0]
+    payload = resp[4:4 + ni_len] if ni_len > 0 else b''
+
+    # NI_PONG or empty frame = route accepted
+    if ni_len == 0 or payload.startswith(b'NI_PONG'):
+        if verbose:
+            print(f'    SAProuter: route ACCEPTED')
+        return sock
+
+    # NI_RTERR = route rejected
+    if b'NI_RTERR' in payload:
+        sock.close()
+        # Extract error message
+        err_msg = 'route rejected'
+        strings = []
+        current = b''
+        for byte in payload:
+            if 0x20 <= byte < 0x7f:
+                current += bytes([byte])
+            else:
+                if len(current) >= 3:
+                    strings.append(current.decode('ascii'))
+                current = b''
+        for s in strings:
+            if 'NiR' in s or ('route' in s.lower() and 'invalid' in s.lower()):
+                err_msg = s
+                break
+            if 'permission' in s.lower() or 'denied' in s.lower():
+                err_msg = s
+                break
+        raise ConnectionError(f'SAProuter: {err_msg}')
+
+    sock.close()
+    raise ConnectionError(f'SAProuter: unexpected response ({ni_len} bytes)')
 
 
 def pad_bytes(b: bytes, length: int, char: int = 0x20) -> bytes:
@@ -579,6 +697,548 @@ def build_f_sap_init_reinit(local_ip, target, instance):
 
 
 # ============================================================================
+# Method 4: DIAG Login Screen Extraction (port 32XX)
+#
+# The SAP DIAG protocol (used by SAP GUI) returns system information on the
+# login screen without authentication. By sending a TERM_INI initialization
+# packet, the server responds with the full login screen containing the SID,
+# hostname, client number, kernel version, and more.
+#
+# Protocol based on pysap (OWASP/SecureAuth) DIAG implementation.
+# ============================================================================
+
+# ST_R3INFO sub-IDs (item_sid values) for system information extraction
+_DIAG_R3INFO_SIDS = {
+    0x02: 'DBNAME',           # System ID (SID)
+    0x03: 'CPUNAME',          # Server hostname
+    0x07: 'TCODE',            # Transaction code
+    0x0b: 'MESSAGE',          # System messages
+    0x0c: 'CLIENT',           # SAP client number
+    0x0d: 'DYNPRONAME',       # Dynpro program name
+    0x0e: 'DYNPRONUMBER',     # Dynpro screen number
+    0x20: 'CODEPAGE',         # System code page
+    0x29: 'KERNEL_VERSION',   # Kernel version (null-separated)
+}
+
+# ST_USER sub-IDs
+_DIAG_USER_SIDS = {
+    0x01: 'CONNECT',
+    0x02: 'DIALOG_STEP',
+    0x11: 'SUPPORTDATA',
+}
+
+# VARINFO sub-IDs
+_DIAG_VARINFO_SIDS = {
+    0x01: 'AREA_PASSWORD',
+    0x02: 'AREA_MACHINE',
+    0x03: 'AREA_BROWSER',
+    0x04: 'AREA_DATA',
+}
+
+# DIAG application IDs
+_DIAG_APPL_IDS = {
+    0x04: 'ST_USER',
+    0x06: 'ST_R3INFO',
+    0x09: 'DYNT',
+    0x0c: 'VARINFO',
+}
+
+# Support data bitfield emulating SAP GUI 7.40 Java rev 8
+# This enables the server to send us maximum information
+_DIAG_SUPPORT_DATA = bytes.fromhex(
+    'ff7ffe2ddab737f674087e9305971597'
+    'eff2bf8f4f71ff9f8606000000000000'
+)
+
+
+def build_diag_term_ini():
+    """
+    Build a SAP DIAG TERM_INI initialization packet (raw bytes).
+
+    This packet emulates a SAP GUI client connecting to the server.
+    The server responds with either the login screen (full success)
+    or a DIAG error that leaks hostname, SID, and instance number.
+
+    The DP header uses LITTLE-ENDIAN for integer fields (matching the
+    SAP dispatcher's internal format on x86/x64 Linux), while the NI
+    layer and DIAG items use big-endian (network byte order).
+
+    Wire format:
+      [4B NI length (BE)] [200B SAPDiagDP (LE ints)] [8B SAPDiag header]
+      [17B UserConnect item] [37B SupportData item]
+
+    Total payload: 262 bytes.
+    """
+    # Generate random terminal name (IP-like string, max 15 chars)
+    terminal = '.'.join(str(random.randint(1, 254)) for _ in range(4))
+
+    # ---- SAPDiag items: built first so we know the length ----
+
+    # SAPDiag header: 8 bytes
+    diag = bytearray()
+    diag += b'\x00'                       # mode
+    diag += b'\x10'                       # com_flags: TERM_INI=1 (bit 4)
+    diag += b'\x00'                       # mode_stat
+    diag += b'\x00'                       # err_no
+    diag += b'\x00'                       # msg_type
+    diag += b'\x00'                       # msg_info
+    diag += b'\x00'                       # msg_rc
+    diag += b'\x00'                       # compress = 0 (uncompressed)
+
+    # Item 1: UserConnect (APPL / ST_USER / DIALOG_STEP)
+    diag += b'\x10'                       # item_type = APPL
+    diag += b'\x04'                       # item_id = ST_USER
+    diag += b'\x02'                       # item_sid = DIALOG_STEP (0x02)
+    diag += struct.pack('>H', 12)         # item_length = 12 (BE)
+    diag += struct.pack('>I', 200)        # protocol_version (uncompressed)
+    diag += struct.pack('>I', 1100)       # code_page
+    diag += struct.pack('>I', 5001)       # ws_type (Java GUI)
+
+    # Item 2: SupportData (APPL / ST_USER / SUPPORTDATA)
+    diag += b'\x10'                       # item_type = APPL
+    diag += b'\x04'                       # item_id = ST_USER
+    diag += b'\x11'                       # item_sid = SUPPORTDATA
+    diag += struct.pack('>H', 32)         # item_length = 32 (BE)
+    diag += _DIAG_SUPPORT_DATA            # 32-byte support bitfield
+
+    diag_data = bytes(diag)
+
+    # ---- SAPDiagDP header: 200 bytes (LE integers) ----
+    dp = bytearray()
+    dp += struct.pack('<i', -1)           # request_id
+    dp += b'\x0a'                         # retcode
+    dp += b'\x00'                         # sender_id
+    dp += b'\x00'                         # action_type
+    dp += struct.pack('<I', 0)            # req_info
+    dp += struct.pack('<i', -1)           # tid
+    dp += struct.pack('<h', -1)           # uid
+    dp += b'\xff'                         # mode
+    dp += struct.pack('<i', -1)           # wp_id
+    dp += struct.pack('<i', -1)           # wp_ca_blk
+    dp += struct.pack('<i', -1)           # appc_ca_blk
+    dp += struct.pack('<I', len(diag_data))  # length (payload size)
+    dp += b'\x00'                         # new_stat
+    dp += struct.pack('<i', -1)           # unused1
+    dp += struct.pack('<h', -1)           # rq_id
+    dp += b'\x20' * 40                    # unused2 (spaces)
+    dp += terminal.encode('ascii').ljust(15, b'\x00')  # terminal (15B)
+    dp += b'\x00' * 10                    # unused3
+    dp += b'\x20' * 20                    # unused4 (spaces)
+    dp += struct.pack('<I', 0)            # unused5
+    dp += struct.pack('<I', 0)            # unused6
+    dp += struct.pack('<i', -1)           # unused7
+    dp += struct.pack('<I', 0)            # unused8
+    dp += b'\x01'                         # unused9
+    dp += b'\x00' * 57                    # unused10
+
+    assert len(dp) == 200, f'DP header is {len(dp)} bytes, expected 200'
+
+    # Assemble: NI frame wrapping DP header + DIAG data
+    payload = bytes(dp) + diag_data
+    return ni_frame(payload)
+
+
+def parse_diag_response(data):
+    """
+    Parse a SAP DIAG response to extract system information.
+
+    Handles two response types:
+    1. Full login screen (large response with DP header + DIAG items)
+       -> Extracts ST_R3INFO items: SID, hostname, client, kernel
+    2. DIAG error response (small response, no DP header)
+       -> Parses error text for "location <host>_<SID>_<inst>" pattern
+
+    Args:
+        data: Raw bytes of the DIAG response (with NI header)
+
+    Returns:
+        dict with extracted system information, or empty dict on failure
+    """
+    info = {}
+
+    if len(data) < 12:
+        return info
+
+    # Skip NI header
+    ni_len = struct.unpack('>I', data[:4])[0]
+    if ni_len == 0 or 4 + ni_len > len(data):
+        return info
+
+    payload = data[4:4 + ni_len]
+
+    # ---- Check for DIAG error response (no DP header) ----
+    # Error responses are short (< 200 bytes) and contain a SAPDiag
+    # header (8 bytes) followed directly by error text + EOM (0x0c).
+    # Format: [8B SAPDiag header] [error text bytes] [0x0c EOM]
+    # The SAPDiag com_flags byte (offset 1) will have TERM_EOC (bit 1)
+    # set, and err_no (offset 3) will be non-zero.
+    if len(payload) < 200 and len(payload) >= 8:
+        diag_header = payload[:8]
+        com_flags = diag_header[1]
+        err_no = diag_header[3]
+
+        if err_no != 0 or (com_flags & 0x02):  # TERM_EOC or error
+            error_data = payload[8:]
+            _parse_diag_error_text(error_data, info)
+            return info
+
+    # ---- Full login screen response (with DP header) ----
+    if len(payload) < 208:  # DP(200) + DiagHeader(8) minimum
+        return info
+
+    diag_data = payload[200:]
+
+    if len(diag_data) < 8:
+        return info
+
+    compress = diag_data[7]
+
+    if compress != 0:
+        info['_compressed'] = True
+
+    items_data = diag_data[8:]
+
+    if compress == 0:
+        _parse_diag_items(items_data, info)
+    else:
+        _scan_diag_raw(data, info)
+
+    return info
+
+
+def _parse_diag_error_text(error_data, info):
+    """
+    Parse DIAG error text for system information.
+
+    SAP Dispatcher error responses contain text like:
+      "invalid gui connect data (location srv03s4d1_S4D_01-W9)"
+
+    This reveals:
+      - hostname: srv03s4d1
+      - SID: S4D
+      - instance: 01
+      - work process: W9
+
+    The text may be ASCII or UTF-16LE (depending on codepage negotiation).
+    """
+    if not error_data or len(error_data) < 4:
+        return
+
+    # Detect UTF-16LE: if data has alternating byte-null pattern
+    # (e.g., 'i\x00n\x00v\x00...'), decode as UTF-16LE
+    # Check first 6 bytes for the pattern (3 chars)
+    raw = error_data.rstrip(b'\x0c')
+    is_utf16 = (len(raw) >= 6
+                and raw[1] == 0 and raw[3] == 0 and raw[5] == 0
+                and raw[0] != 0 and raw[2] != 0 and raw[4] != 0)
+
+    if is_utf16:
+        # Ensure even length
+        if len(raw) % 2 != 0:
+            raw += b'\x00'
+        text = raw.decode('utf-16-le', errors='replace').rstrip('\x00')
+    else:
+        text = raw.rstrip(b'\x00').decode('ascii', errors='replace')
+
+    text = text.strip()
+    if not text:
+        return
+
+    info['diag_error_text'] = text
+
+    # Parse "location <hostname>_<SID>_<instance>-<wpid>" pattern
+    m = re.search(
+        r'location\s+(\S+?)_([A-Z][A-Z0-9]{2})_(\d{2})(?:-(\w+))?',
+        text, re.IGNORECASE)
+    if m:
+        info['hostname'] = m.group(1)
+        info['RFCSYSID'] = m.group(2).upper()
+        info['sap_sid'] = m.group(2).upper()
+        info['instance_number'] = m.group(3)
+        if m.group(4):
+            info['diag_work_process'] = m.group(4)
+
+
+def _parse_diag_items(items_data, info):
+    """
+    Parse SAPDiagItem list from uncompressed DIAG message data.
+
+    Item format for APPL (0x10):
+      [1B type] [1B id] [1B sid] [2B length] [NB value]
+
+    Item format for APPL4 (0x12):
+      [1B type] [1B id] [1B sid] [4B length] [NB value]
+
+    Other item types (SES=0x01, EOM=0x0c, etc.) have only type + value.
+    """
+    pos = 0
+    while pos < len(items_data):
+        if pos + 1 > len(items_data):
+            break
+
+        item_type = items_data[pos]
+
+        if item_type == 0x0c:  # EOM (End of Message)
+            break
+
+        if item_type in (0x10, 0x12):  # APPL or APPL4
+            if item_type == 0x10:
+                # APPL: type(1) + id(1) + sid(1) + length(2)
+                if pos + 5 > len(items_data):
+                    break
+                item_id = items_data[pos + 1]
+                item_sid = items_data[pos + 2]
+                item_len = struct.unpack('>H', items_data[pos + 3:pos + 5])[0]
+                header_size = 5
+            else:
+                # APPL4: type(1) + id(1) + sid(1) + length(4)
+                if pos + 7 > len(items_data):
+                    break
+                item_id = items_data[pos + 1]
+                item_sid = items_data[pos + 2]
+                item_len = struct.unpack('>I', items_data[pos + 3:pos + 7])[0]
+                header_size = 7
+
+            value_start = pos + header_size
+            value_end = value_start + item_len
+
+            if value_end > len(items_data):
+                # Truncated item - try to use what we have
+                item_value = items_data[value_start:]
+                pos = len(items_data)
+            else:
+                item_value = items_data[value_start:value_end]
+                pos = value_end
+
+            # Extract ST_R3INFO fields
+            if item_id == 0x06:  # ST_R3INFO
+                field_name = _DIAG_R3INFO_SIDS.get(item_sid)
+                if field_name:
+                    try:
+                        text = item_value.rstrip(b'\x00').decode(
+                            'utf-8', errors='replace')
+                        if field_name == 'KERNEL_VERSION':
+                            # Null-separated components: "793\x00200\x00..."
+                            parts = text.split('\x00')
+                            parts = [p.strip() for p in parts if p.strip()]
+                            info['diag_kernel_version'] = '.'.join(parts)
+                            if parts:
+                                info['kernel_release'] = parts[0]
+                        elif field_name == 'DBNAME':
+                            info['RFCSYSID'] = text.strip()
+                            info['sap_sid'] = text.strip()
+                        elif field_name == 'CPUNAME':
+                            info['hostname'] = text.strip()
+                        elif field_name == 'CLIENT':
+                            info['diag_client'] = text.strip()
+                        elif field_name == 'CODEPAGE':
+                            codepage_val = text.strip()
+                            if codepage_val:
+                                info['diag_codepage'] = codepage_val
+                        elif field_name == 'DYNPRONAME':
+                            info['diag_dynpro_name'] = text.strip()
+                        elif field_name == 'DYNPRONUMBER':
+                            info['diag_dynpro_number'] = text.strip()
+                        elif field_name == 'MESSAGE':
+                            msg = text.strip()
+                            if msg:
+                                info.setdefault('diag_messages', []).append(msg)
+                    except Exception:
+                        pass
+
+            # Extract DYNT items for screen field text
+            elif item_id == 0x09:  # DYNT
+                _parse_dynt_atoms(item_value, info)
+
+        elif item_type in (0x01, 0x02, 0x03, 0x07, 0x08, 0x09,
+                           0x0a, 0x0b, 0x11, 0x13, 0x15):
+            # Non-APPL items: variable-length, hard to parse without
+            # knowing the exact format. Skip by scanning for next valid
+            # item_type byte. This is a best-effort approach.
+            pos += 1
+            # Skip until we find another known item type or EOM
+            while pos < len(items_data):
+                b = items_data[pos]
+                if b in (0x10, 0x12, 0x0c):  # APPL, APPL4, or EOM
+                    break
+                pos += 1
+        else:
+            pos += 1
+
+
+def _parse_dynt_atoms(data, info):
+    """
+    Parse DYNT_ATOM structures for login screen text content.
+
+    DYNT atoms contain the actual text displayed on the login screen,
+    including the session title which typically contains the SID.
+    This is a best-effort text extraction.
+    """
+    # DYNT atoms contain screen field data. Extract printable strings
+    # that might contain useful system information.
+    try:
+        # Look for printable text runs in the DYNT data
+        text_runs = []
+        current = b''
+        for byte in data:
+            if 0x20 <= byte < 0x7f:
+                current += bytes([byte])
+            else:
+                if len(current) >= 4:
+                    text_runs.append(current.decode('ascii', errors='replace'))
+                current = b''
+        if len(current) >= 4:
+            text_runs.append(current.decode('ascii', errors='replace'))
+
+        for text in text_runs:
+            # Session title often contains SID
+            if 'SAP' in text and not info.get('diag_session_title'):
+                info['diag_session_title'] = text.strip()
+    except Exception:
+        pass
+
+
+def _scan_diag_raw(data, info):
+    """
+    Fallback: scan raw (possibly compressed) DIAG response for known patterns.
+
+    When the response is compressed and we can't decompress LZC/LZH,
+    scan for readable ASCII strings that match known SAP patterns.
+    """
+    # Many SAP systems embed the SID and hostname in readable form
+    # even in compressed responses, because short strings often
+    # survive compression intact or appear in uncompressed metadata.
+
+    # Look for APPL items that might be partially visible
+    for i in range(len(data) - 5):
+        if data[i] == 0x10 and data[i + 1] == 0x06:  # APPL + ST_R3INFO
+            item_sid = data[i + 2]
+            if i + 5 <= len(data):
+                item_len = struct.unpack('>H', data[i + 3:i + 5])[0]
+                if 0 < item_len < 256 and i + 5 + item_len <= len(data):
+                    value = data[i + 5:i + 5 + item_len]
+                    field_name = _DIAG_R3INFO_SIDS.get(item_sid)
+                    if field_name:
+                        try:
+                            text = value.rstrip(b'\x00').decode(
+                                'utf-8', errors='replace').strip()
+                            if text and all(c.isprintable() or c == '\x00'
+                                            for c in text):
+                                if field_name == 'DBNAME':
+                                    info['RFCSYSID'] = text
+                                    info['sap_sid'] = text
+                                elif field_name == 'CPUNAME':
+                                    info['hostname'] = text
+                                elif field_name == 'CLIENT':
+                                    info['diag_client'] = text
+                                elif field_name == 'KERNEL_VERSION':
+                                    parts = text.split('\x00')
+                                    parts = [p.strip() for p in parts
+                                             if p.strip()]
+                                    if parts:
+                                        info['kernel_release'] = parts[0]
+                        except Exception:
+                            pass
+
+
+def probe_diag_login(target, port, timeout=10, verbose=False, router=None):
+    """
+    Probe a SAP system via the DIAG protocol (port 32XX) to extract
+    system information from the login screen.
+
+    Sends a TERM_INI initialization packet and parses the login screen
+    response for SID, hostname, client number, and kernel version.
+
+    Args:
+        target: Target IP address
+        port: DIAG port (typically 32XX where XX = instance number)
+        timeout: Connection timeout in seconds
+        verbose: Print protocol-level debug output
+        router: Optional (host, port) tuple for SAProuter
+
+    Returns:
+        dict with extracted information, or empty dict on failure
+    """
+    result = {}
+
+    if verbose:
+        print('[4] DIAG login screen extraction...')
+
+    try:
+        if router:
+            sock = connect_via_saprouter(
+                router[0], router[1], target, port, timeout, verbose)
+        else:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            sock.connect((target, port))
+
+        # Send TERM_INI
+        pkt = build_diag_term_ini()
+        if verbose:
+            print(f'    Sending TERM_INI ({len(pkt)} bytes)...')
+        sock.sendall(pkt)
+
+        # Receive response - login screen can be large
+        response = b''
+        recv_start = time.time()
+        try:
+            while time.time() - recv_start < timeout:
+                remaining = max(1, timeout - (time.time() - recv_start))
+                sock.settimeout(remaining)
+                chunk = sock.recv(16384)
+                if not chunk:
+                    break
+                response += chunk
+
+                # Check if we have a complete NI frame
+                if len(response) >= 4:
+                    ni_len = struct.unpack('>I', response[:4])[0]
+                    if ni_len > 0 and len(response) >= 4 + ni_len:
+                        break
+        except socket.timeout:
+            pass
+
+        if verbose:
+            print(f'    Received {len(response)} bytes')
+
+        if len(response) > 12:
+            result = parse_diag_response(response)
+            if verbose:
+                if result:
+                    resp_type = ('login screen' if len(response) > 212
+                                 else 'error response')
+                    print(f'    Parsed {resp_type}:')
+                    for k, v in result.items():
+                        if not k.startswith('_'):
+                            print(f'      {k}: {v}')
+                else:
+                    print('    Could not parse response')
+        elif verbose:
+            print(f'    Response too short ({len(response)} bytes)')
+
+    except socket.timeout:
+        if verbose:
+            print('    Connection timed out')
+    except ConnectionRefusedError:
+        if verbose:
+            print('    Connection refused')
+    except ConnectionResetError:
+        if verbose:
+            print('    Connection reset')
+    except OSError as e:
+        if verbose:
+            print(f'    Error: {e}')
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+    return result
+
+
+# ============================================================================
 # Response Parsers
 # ============================================================================
 
@@ -836,14 +1496,84 @@ def parse_gateway_error(data):
 # Main Probe Function
 # ============================================================================
 
-def probe_sap_system(target, port, timeout=10, verbose=False):
+def _enrich_kernel_release(result, kr):
     """
-    Probe a SAP system for RFC_SYSTEM_INFO without authentication.
+    Enrich result dict with SAP release info inferred from kernel release.
 
-    Strategy (tries all methods, merges results):
+    The SAP kernel release is tightly coupled to the SAP Basis release,
+    but a system can run a NEWER kernel than its Basis release (forward
+    compatibility). For example, kernel 742 can run Basis 7.40-7.42.
+    """
+    KERNEL_RELEASE_MAP = {
+        '700': ('700',     '7.00-7.02', 'NW 7.0x'),
+        '701': ('700-701', '7.00-7.01', 'NW 7.0x'),
+        '710': ('710',     '7.10',      'NW 7.10'),
+        '720': ('720',     '7.20',      'NW 7.20'),
+        '721': ('720-721', '7.20-7.21', 'NW 7.2x'),
+        '740': ('740',     '7.40',      'NW 7.40'),
+        '741': ('740-741', '7.40-7.41', 'NW 7.4x'),
+        '742': ('740-742', '7.40-7.42', 'NW 7.4x'),
+        '745': ('740-745', '7.40-7.45', 'NW 7.4x'),
+        '749': ('749-750', '7.49-7.50', 'NW 7.50 / S/4HANA 1511'),
+        '753': ('750-753', '7.50-7.53', 'S/4HANA 1709/1809'),
+        '754': ('750-754', '7.50-7.54', 'S/4HANA 1909'),
+        '755': ('750-755', '7.50-7.55', 'S/4HANA 2020'),
+        '756': ('750-756', '7.50-7.56', 'S/4HANA 2021'),
+        '757': ('750-757', '7.50-7.57', 'S/4HANA 2022'),
+        '777': ('750-757', '7.50-7.57', 'S/4HANA 2020-2022'),
+        '785': ('750-758', '7.50-7.58', 'S/4HANA Cloud/2023'),
+        '789': ('750-758', '7.50-7.58', 'S/4HANA 2022/2023'),
+        '791': ('750-758', '7.50-7.58', 'S/4HANA Cloud/2023'),
+        '793': ('750-758', '7.50-7.58', 'S/4HANA 2022/2023'),
+    }
+    entry = KERNEL_RELEASE_MAP.get(kr)
+    if entry:
+        rel_code, rel_display, product = entry
+        result['sap_release_range'] = rel_code
+        result['sap_release_approx'] = rel_display
+        result['sap_product'] = product
+
+
+def _detect_port_type(port):
+    """
+    Detect SAP service type from port number.
+
+    Returns:
+        'diag' for DIAG ports (32XX)
+        'gateway' for RFC Gateway ports (33XX)
+        'unknown' for other ports
+    """
+    if 3200 <= port <= 3299:
+        return 'diag'
+    elif 3300 <= port <= 3399:
+        return 'gateway'
+    else:
+        return 'unknown'
+
+
+def probe_sap_system(target, port, timeout=10, verbose=False, router=None):
+    """
+    Probe a SAP system for system information without authentication.
+
+    Automatically detects the port type and uses appropriate methods:
+      - DIAG ports (32XX): Login screen extraction via DIAG protocol
+      - Gateway ports (33XX): RFC_SYSTEM_INFO via RFC/Gateway protocol
+      - Other ports: Tries all methods
+
+    RFC/Gateway methods (port 33XX):
       1. V6 single-packet RFC call (pcap template replay)
       2. V2 GW_NORMAL_CLIENT + F_SAP_INIT error leak
       3. Chipik-style F_SAP_INIT (ctype=E, sapxpg, T_75)
+
+    DIAG method (port 32XX):
+      4. DIAG TERM_INI login screen extraction
+
+    Args:
+        target: Target IP address or hostname
+        port: Target port number
+        timeout: Connection timeout in seconds
+        verbose: Print protocol-level debug output
+        router: Optional (host, port) tuple for SAProuter
 
     Returns dict with all extracted information merged.
     """
@@ -854,25 +1584,58 @@ def probe_sap_system(target, port, timeout=10, verbose=False):
         'methods_tried': [],
         'methods_success': [],
     }
-    local_ip = get_local_ip(target)
+    local_ip = get_local_ip(router[0] if router else target)
     instance = port % 100
+    port_type = _detect_port_type(port)
 
     if verbose:
         print(f'[*] Local IP: {local_ip}')
         print(f'[*] Target: {target}:{port} (instance {instance:02d})')
+        if router:
+            print(f'[*] Via SAProuter: {router[0]}:{router[1]}')
+        print(f'[*] Port type: {port_type}')
         print(f'[*] Hostname: {socket.gethostname()}')
         print()
+
+    # ---- Method 4: DIAG login screen (for 32XX ports) ----
+    if port_type in ('diag', 'unknown'):
+        result['methods_tried'].append('diag_login')
+
+        diag_info = probe_diag_login(target, port, timeout, verbose, router)
+        if diag_info and (diag_info.get('RFCSYSID') or diag_info.get('hostname')
+                          or diag_info.get('kernel_release')):
+            result['status'] = 'diag_success'
+            result['methods_success'].append('diag_login')
+            result.update(diag_info)
+
+            if verbose:
+                print('    SUCCESS - extracted login screen info!')
+
+        if port_type == 'diag':
+            # For DIAG ports, skip RFC methods (they won't work)
+            # Go straight to enrichment
+            kr = result.get('RFCKERNRL') or result.get('kernel_release')
+            if kr:
+                _enrich_kernel_release(result, kr)
+            return result
+
+        if verbose:
+            print()
 
     # ---- Method 1: V6 single-packet RFC call ----
     if verbose:
         print('[1] V6 GW_NORMAL_CLIENT single-packet RFC call...')
 
     result['methods_tried'].append('v6_single_packet')
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(timeout)
 
     try:
-        sock.connect((target, port))
+        if router:
+            sock = connect_via_saprouter(
+                router[0], router[1], target, port, timeout, verbose)
+        else:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            sock.connect((target, port))
         result['status'] = 'tcp_open'
 
         request = build_rfc_system_info_request(local_ip, target, instance)
@@ -965,11 +1728,15 @@ def probe_sap_system(target, port, timeout=10, verbose=False):
             print('\n[2] V2 GW_NORMAL_CLIENT + F_SAP_INIT error leak...')
 
         result['methods_tried'].append('v2_error_leak')
-        sock2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock2.settimeout(timeout)
 
         try:
-            sock2.connect((target, port))
+            if router:
+                sock2 = connect_via_saprouter(
+                    router[0], router[1], target, port, timeout, verbose)
+            else:
+                sock2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock2.settimeout(timeout)
+                sock2.connect((target, port))
 
             # P1: Gateway handshake
             pkt1 = build_gw_normal_client_v2(local_ip, instance)
@@ -1042,11 +1809,15 @@ def probe_sap_system(target, port, timeout=10, verbose=False):
             print('\n[3] Chipik-style F_SAP_INIT (ctype=E, sapxpg, T_75)...')
 
         result['methods_tried'].append('chipik_p2')
-        sock3 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock3.settimeout(timeout)
 
         try:
-            sock3.connect((target, port))
+            if router:
+                sock3 = connect_via_saprouter(
+                    router[0], router[1], target, port, timeout, verbose)
+            else:
+                sock3 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock3.settimeout(timeout)
+                sock3.connect((target, port))
 
             # P1: Gateway handshake (same as method 2)
             pkt1 = build_gw_normal_client_v2(local_ip, instance)
@@ -1209,51 +1980,10 @@ def probe_sap_system(target, port, timeout=10, verbose=False):
             except Exception:
                 pass
 
-    # ---- Enrichment: kernel release -> SAP release inference ----
-    #
-    # The SAP kernel release is tightly coupled to the SAP Basis release,
-    # but a system can run a NEWER kernel than its Basis release (forward
-    # compatibility). For example, kernel 742 can run Basis 7.40-7.42.
-    #
-    # When we cannot extract RFCSAPRL directly (e.g. gateway blocks RFC
-    # to ABAP), we infer the range of possible SAP Basis releases from
-    # the kernel version.
-    #
+    # ---- Enrichment ----
     kr = result.get('RFCKERNRL') or result.get('kernel_release')
     if kr:
-        # Kernel -> (SAP release range, SAP product name, display version)
-        # The release range reflects all SAP_BASIS versions a given kernel
-        # is known to support (kernel is always >= basis release).
-        KERNEL_RELEASE_MAP = {
-            # Classic NetWeaver kernels (support basis <= kernel version)
-            '700': ('700',     '7.00-7.02', 'NW 7.0x'),
-            '701': ('700-701', '7.00-7.01', 'NW 7.0x'),
-            '710': ('710',     '7.10',      'NW 7.10'),
-            '720': ('720',     '7.20',      'NW 7.20'),
-            '721': ('720-721', '7.20-7.21', 'NW 7.2x'),
-            '740': ('740',     '7.40',      'NW 7.40'),
-            '741': ('740-741', '7.40-7.41', 'NW 7.4x'),
-            '742': ('740-742', '7.40-7.42', 'NW 7.4x'),
-            '745': ('740-745', '7.40-7.45', 'NW 7.4x'),
-            '749': ('749-750', '7.49-7.50', 'NW 7.50 / S/4HANA 1511'),
-            '753': ('750-753', '7.50-7.53', 'S/4HANA 1709/1809'),
-            '754': ('750-754', '7.50-7.54', 'S/4HANA 1909'),
-            '755': ('750-755', '7.50-7.55', 'S/4HANA 2020'),
-            '756': ('750-756', '7.50-7.56', 'S/4HANA 2021'),
-            '757': ('750-757', '7.50-7.57', 'S/4HANA 2022'),
-            # Long-term kernels (support multiple basis releases)
-            '777': ('750-757', '7.50-7.57', 'S/4HANA 2020-2022'),
-            '785': ('750-758', '7.50-7.58', 'S/4HANA Cloud/2023'),
-            '789': ('750-758', '7.50-7.58', 'S/4HANA 2022/2023'),
-            '791': ('750-758', '7.50-7.58', 'S/4HANA Cloud/2023'),
-            '793': ('750-758', '7.50-7.58', 'S/4HANA 2022/2023'),
-        }
-        entry = KERNEL_RELEASE_MAP.get(kr)
-        if entry:
-            rel_code, rel_display, product = entry
-            result['sap_release_range'] = rel_code
-            result['sap_release_approx'] = rel_display
-            result['sap_product'] = product
+        _enrich_kernel_release(result, kr)
 
     return result
 
@@ -1274,7 +2004,7 @@ def print_results(info):
         return
 
     print('=' * 65)
-    print('  SAP RFC_SYSTEM_INFO - Unauthenticated Results')
+    print('  SAP System Info - Unauthenticated Results')
     print('=' * 65)
     print(f'  Target:  {info.get("target")}:{info.get("port")}')
     print(f'  Status:  {status}')
@@ -1322,6 +2052,47 @@ def print_results(info):
                     if v is not None and v != '':
                         print(f'    {label:22s} = {v}')
                 print()
+
+    elif status == 'diag_success':
+        print('  --- DIAG Login Screen Information ---')
+        print()
+        for gname, fields in [
+            ('System Identity', [
+                ('System ID (SID)',  'RFCSYSID'),
+                ('Hostname',         'hostname'),
+                ('Client',           'diag_client'),
+            ]),
+            ('Software', [
+                ('Kernel Version',   'diag_kernel_version'),
+                ('Kernel Release',   'kernel_release'),
+                ('SAP Release',      'sap_release_approx'),
+                ('SAP Product',      'sap_product'),
+            ]),
+            ('DIAG Details', [
+                ('Instance',         'instance_number'),
+                ('Work Process',     'diag_work_process'),
+                ('Codepage',         'diag_codepage'),
+                ('Dynpro Name',      'diag_dynpro_name'),
+                ('Dynpro Number',    'diag_dynpro_number'),
+                ('Session Title',    'diag_session_title'),
+                ('Error Text',       'diag_error_text'),
+            ]),
+        ]:
+            section_fields = [(l, k) for l, k in fields
+                              if info.get(k) is not None and info.get(k) != '']
+            if section_fields:
+                print(f'  {gname}:')
+                for label, key in section_fields:
+                    print(f'    {label:22s} = {info[key]}')
+                print()
+
+        # Print DIAG messages if any
+        msgs = info.get('diag_messages', [])
+        if msgs:
+            print('  Messages:')
+            for msg in msgs:
+                print(f'    {msg}')
+            print()
 
     elif status in ('info_extracted', 'partial_info', 'gateway_alive'):
         print('  --- Extracted Information ---')
@@ -1408,6 +2179,8 @@ def main():
                         help='Default SAP Gateway port (default: 3300)')
     parser.add_argument('-T', '--timeout', type=int, default=10,
                         help='Timeout in seconds (default: 10)')
+    parser.add_argument('-R', '--router',
+                        help='SAProuter host[:port] (default port 3299)')
     parser.add_argument('-v', '--verbose', action='store_true',
                         help='Verbose protocol-level output')
     parser.add_argument('--json', action='store_true', help='JSON output')
@@ -1422,13 +2195,25 @@ def main():
         else:
             targets.append((t, args.port))
 
+    # Parse SAProuter
+    router = None
+    if args.router:
+        if ':' in args.router:
+            rhost, rport = args.router.rsplit(':', 1)
+            router = (rhost, int(rport))
+        else:
+            router = (args.router, 3299)
+
     all_results = []
     for host, port in targets:
         if not args.json:
-            print(f'[*] SAP RFC_SYSTEM_INFO - Unauthenticated Probe')
+            print(f'[*] SAP System Info - Unauthenticated Probe')
             print(f'[*] Target: {host}:{port}')
+            if router:
+                print(f'[*] Via SAProuter: {router[0]}:{router[1]}')
 
-        result = probe_sap_system(host, port, args.timeout, args.verbose)
+        result = probe_sap_system(host, port, args.timeout, args.verbose,
+                                  router)
         all_results.append(result)
 
         if args.json:
