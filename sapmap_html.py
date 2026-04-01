@@ -638,6 +638,11 @@ body {
       <label>Instance Number (2 digits)</label>
       <input type="text" id="add-instance" placeholder="00" maxlength="2" style="width:60px">
     </div>
+    <div class="form-row">
+      <label>SAProuter String (optional)</label>
+      <input type="text" id="add-saprouter" placeholder="/H/router_ip/S/3299/W/password" style="width:100%">
+      <span style="font-size:10px;color:#484f58;margin-top:2px;display:block">Route prefix to reach this system via SAProuter. Target host/port are appended automatically.</span>
+    </div>
     <div class="form-actions">
       <button class="btn btn-primary" onclick="addSystem()">Add System</button>
       <button class="btn" onclick="closeModal('add-system-modal')">Cancel</button>
@@ -1278,6 +1283,12 @@ function updateMap() {
     // IP address
     if (n.ip) {
       html += `<text x="${x+10}" y="${ty}" fill="#8b949e" font-size="10" font-family="monospace">IP: ${escHtml(n.ip)}</text>`;
+      ty += 14;
+    }
+
+    // SAProuter indicator
+    if (n.saprouter) {
+      html += `<text x="${x+10}" y="${ty}" fill="#d29922" font-size="9" font-family="monospace">&#128268; via SAProuter</text>`;
       ty += 14;
     }
 
@@ -1953,6 +1964,7 @@ function showAddSystemModal() {
   document.getElementById('add-sid').value = '';
   document.getElementById('add-ip').value = '';
   document.getElementById('add-instance').value = '00';
+  document.getElementById('add-saprouter').value = '';
   document.getElementById('add-system-modal').classList.add('visible');
   document.getElementById('add-sid').focus();
 }
@@ -1960,8 +1972,9 @@ async function addSystem() {
   const sid = document.getElementById('add-sid').value.trim().toUpperCase();
   const ip = document.getElementById('add-ip').value.trim();
   const inst = document.getElementById('add-instance').value.trim();
-  if (!sid || !ip || !inst) { alert('All fields are required'); return; }
-  const res = await api('POST', 'node/add', { sid, ip, instance_nr: inst });
+  const saprouter = document.getElementById('add-saprouter').value.trim();
+  if (!sid || !ip || !inst) { alert('SID, IP, and Instance are required'); return; }
+  const res = await api('POST', 'node/add', { sid, ip, instance_nr: inst, saprouter });
   if (res.error) { alert(res.error); return; }
   closeModal('add-system-modal');
   startPolling();
