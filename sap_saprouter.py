@@ -92,9 +92,21 @@ def build_ni_route_packet(hops: list, talk_mode: int = 1) -> bytes:
     first_hop_len = len(hop_entries[0])
 
     # NI_ROUTE payload
+    # Format matches the working implementation in sap_rfc_system_info.py:
+    #   byte  0-8: "NI_ROUTE\0"
+    #   byte  9:   route protocol version (2)
+    #   byte 10:   NI version (0x27 = 39)
+    #   byte 11:   entries count
+    #   byte 12:   talk mode (0=NI_MSG_IO, 1=NI_RAW_IO)
+    #   byte 13-14: padding
+    #   byte 15:   rest_nodes (entries - 1)
+    #   byte 16-19: route_length (uint32 BE)
+    #   byte 20-23: route_offset (uint32 BE)
+    #   byte 24+:  route data
     payload = b""
     payload += b"NI_ROUTE\x00"          # type (9 bytes, null-terminated)
-    payload += struct.pack("B", 0x28)    # route_ni_version = 40
+    payload += struct.pack("B", 0x02)    # route protocol version = 2
+    payload += struct.pack("B", 0x27)    # NI version = 39
     payload += struct.pack("B", len(hops))  # route_entries
     payload += struct.pack("B", talk_mode)  # route_talk_mode
     payload += b"\x00\x00"              # padding
@@ -146,8 +158,8 @@ def connect_through_saprouter(route_str: str, timeout: float = 10) -> socket.soc
             f"Cannot connect to SAProuter {router_host}:{router_port}: {e}"
         ) from e
 
-    # Send NI_ROUTE packet (talk_mode=1 for RAW_IO = transparent tunnel)
-    ni_route = build_ni_route_packet(hops, talk_mode=1)
+    # Send NI_ROUTE packet (talk_mode=0 for NI_MSG_IO)
+    ni_route = build_ni_route_packet(hops, talk_mode=0)
     try:
         sock.sendall(ni_route)
     except Exception as e:
@@ -183,8 +195,8 @@ def connect_through_saprouter(route_str: str, timeout: float = 10) -> socket.soc
         sock.close()
         raise
 
-    # Check for NI_PONG (success)
-    if resp.startswith(b"NI_PONG"):
+    # Check for NI_PONG or empty frame (both = success)
+    if resp_len == 0 or resp.startswith(b"NI_PONG"):
         # Tunnel established — socket is now a transparent TCP pipe
         return sock
 

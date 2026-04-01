@@ -459,6 +459,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 print(f"[-] No gateway port found for {node.sid}")
                 return
             host = node.ip or node.hostname
+            if node.saprouter:
+                print(f"[*] {node.sid}: Using SAProuter: {node.saprouter}")
             # Pass known instance numbers so SAPControl queries the right one
             inst_nrs = [inst.instance_nr for inst in node.instances
                         if inst.instance_nr is not None]
