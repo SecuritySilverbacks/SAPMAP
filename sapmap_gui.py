@@ -1309,6 +1309,27 @@ def create_app(api: SAPMAPApi) -> Bottle:
         print(f"[+] Manually added system {sid} ({ip}, instance {nr}{router_msg})")
         return json.dumps({"status": "ok"})
 
+    # -- Default password --
+    @app.route("/api/settings/password", method="GET")
+    def get_password():
+        response.content_type = "application/json"
+        import sapmap_config
+        return json.dumps({"password": sapmap_config.SAPMAP_PASSWORD})
+
+    @app.route("/api/settings/password", method="POST")
+    def set_password():
+        response.content_type = "application/json"
+        data = request.json or {}
+        new_pwd = (data.get("password") or "").strip()
+        if not new_pwd:
+            return json.dumps({"error": "Password cannot be empty"})
+        import sapmap_config
+        sapmap_config.SAPMAP_PASSWORD = new_pwd
+        sapmap_config.SAPMAP_PASSWORD_ABAP = new_pwd
+        sapmap_config.SAPMAP_PASSWORD_BAPI = new_pwd
+        print(f"[*] Default password changed to: {new_pwd[:3]}{'*' * (len(new_pwd)-3)}")
+        return json.dumps({"status": "ok"})
+
     # -- Exit --
     @app.route("/api/exit", method="POST")
     def do_exit():

@@ -310,6 +310,7 @@ body {
       <div class="dd-item" onclick="clearCreatedDestinations()">&#128465; Clear TCP/IP Destinations List</div>
       <div class="dd-sep"></div>
       <div class="dd-item" onclick="showAddSystemModal()">&#10133; Add System Manually</div>
+      <div class="dd-item" onclick="showSetPasswordModal()">&#128273; Set Default Password</div>
     </div>
   </div>
   <div class="menu-item">View
@@ -646,6 +647,29 @@ body {
     <div class="form-actions">
       <button class="btn btn-primary" onclick="addSystem()">Add System</button>
       <button class="btn" onclick="closeModal('add-system-modal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Set Default Password Modal -->
+<div class="modal-overlay" id="password-modal">
+  <div class="modal" onkeydown="if(event.key==='Enter'){event.preventDefault();setDefaultPassword();}">
+    <h3>&#128273; Set Default Password</h3>
+    <p style="font-size:12px;color:#8b949e;margin-bottom:12px">
+      This password is used when creating SAPMAP00 users on target systems (via BAPI, GW exploit, or SXPG).
+      Change takes effect immediately for this session.
+    </p>
+    <div class="form-row">
+      <label>Current Password</label>
+      <input type="text" id="pwd-current" readonly style="color:#484f58;background:#161b22">
+    </div>
+    <div class="form-row">
+      <label>New Password</label>
+      <input type="text" id="pwd-new" placeholder="Enter new password">
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-primary" onclick="setDefaultPassword()">Set Password</button>
+      <button class="btn" onclick="closeModal('password-modal')">Cancel</button>
     </div>
   </div>
 </div>
@@ -1959,6 +1983,21 @@ async function saveOsType() {
 }
 
 function closeModal(id) { document.getElementById(id).classList.remove('visible'); }
+
+async function showSetPasswordModal() {
+  const res = await api('GET', 'settings/password');
+  document.getElementById('pwd-current').value = res.password || '?';
+  document.getElementById('pwd-new').value = '';
+  document.getElementById('password-modal').classList.add('visible');
+  document.getElementById('pwd-new').focus();
+}
+async function setDefaultPassword() {
+  const newPwd = document.getElementById('pwd-new').value;
+  if (!newPwd) { alert('Password cannot be empty'); return; }
+  const res = await api('POST', 'settings/password', { password: newPwd });
+  if (res.error) { alert(res.error); return; }
+  closeModal('password-modal');
+}
 
 function showAddSystemModal() {
   document.getElementById('add-sid').value = '';
