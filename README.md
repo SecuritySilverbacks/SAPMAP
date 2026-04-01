@@ -24,6 +24,7 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 - [Usage](#usage)
 - [Web GUI](#web-gui)
 - [Scanning](#scanning)
+- [Default Account Detection](#default-account-detection)
 - [Exploitation](#exploitation)
 - [Local Privilege Escalation](#local-privilege-escalation)
 - [Propagation](#propagation)
@@ -45,6 +46,12 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 - **System identification** — Unauthenticated RFC_SYSTEM_INFO probing (3 methods: V6 single-packet, V2 error leak, Chipik-style)
 - **SAPControl queries** — Extract SID, database type, system type, and OS via SOAP API (GetInstanceProperties, GetProcessList)
 - **Database detection** — Port fingerprinting for HANA, MaxDB, MSSQL, Oracle, DB2
+
+### Default Account Detection
+- **SAP default credential scanning** — Tests 16 well-known SAP default username/password combinations via DIAG protocol
+- **Sequential testing** — No threading to minimize account lockout risk
+- **Smart skip** — Stops testing locked users and non-dialog users automatically
+- **Automatic credential import** — Confirmed credentials are added to the system for further exploitation
 
 ### Exploitation
 - **Gateway SAPXPG exploit** — Unauthenticated OS command execution via the 10KBLAZE technique (P1→P2→P3→P4 protocol chain)
@@ -127,6 +134,7 @@ sap_gw_xpg_standalone.py    Gateway SAPXPG exploit — raw SAP NI protocol (stdl
 sap_rfc_system_info.py       Unauthenticated RFC_SYSTEM_INFO retrieval with SAProuter support
 sap_client_enum.py           DIAG protocol client enumeration (stdlib only)
 sap_rfc_ctypes.py            RFC connection library — ctypes wrapper for SAP NW RFC SDK
+sap_default_creds.py         Default SAP credential scanner via DIAG protocol
 sap_rsec_cipher.py           SAP RSECCipher — proprietary DES variant for SSFS encryption
 sap_saprouter.py             SAProuter NI protocol tunnel for routing through SAP Router
 ```
@@ -231,6 +239,7 @@ The web interface is a single-page application with an interactive SVG map.
 | Retrieve RFC Connections | Map all RFC destinations (via RSRFCCHK) |
 | Test RFC Destinations | Validate all discovered connections |
 | Check Gateway | Test SAPXPG vulnerability |
+| Check Default Accounts | ⚠️ Test 16 default SAP credentials via DIAG (may lock accounts!) |
 | Create User (GW Exploit) | Unauthenticated user creation via gateway |
 | Create User (BAPI) | Authenticated user creation |
 | Try Local Privilege Escalation | Assign SAP_ALL to current user (tries BAPI, then WebGUI SQL) |
@@ -296,6 +305,40 @@ For each discovered system, SAPMAP automatically:
 ### Deep Scan
 
 Uses SAPology for comprehensive port scanning, service fingerprinting, and vulnerability assessment including SSL/TLS checks, MS ACL testing, and CVE detection.
+
+---
+
+## Default Account Detection
+
+Right-click a system → Scanning → **⚠️ Check Default Accounts**
+
+> **WARNING**: Failed login attempts may lock SAP accounts. A confirmation dialog is shown before testing.
+
+Tests 16 well-known default SAP credentials via DIAG protocol (dispatcher port 32XX):
+
+| Severity | Username | Default Password | Clients |
+|----------|----------|-----------------|---------|
+| CRITICAL | SAP* | 06071992 | All |
+| CRITICAL | SAP* | PASS | All |
+| CRITICAL | DDIC | 19920706 | All |
+| CRITICAL | IDEADM | admin | All |
+| HIGH | EARLYWATCH | SUPPORT | 066 |
+| MEDIUM | TMSADM | PASSWORD | All |
+| HIGH | SMD_ADMIN | init1234 | All |
+| HIGH | SOLMAN_ADMIN | init1234 | All |
+| ... | *(16 combinations total)* | | |
+
+**Safety features:**
+- Sequential testing (no parallel requests) to minimize lockout risk
+- Automatically stops testing a user after it's detected as locked
+- Skips non-dialog users (SAP doesn't verify password for these)
+- Confirmed credentials are automatically added to the system's credential list
+
+**Result classification:**
+- `SUCCESS` — Full login worked
+- `PASSWORD_CHANGE` — Password correct but expired
+- `NO_AUTH_LOGON` — Password correct but no dialog authorization
+- `USER_LOCKED` — User is locked (skips further attempts)
 
 ---
 
