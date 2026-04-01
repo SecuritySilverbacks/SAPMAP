@@ -27,8 +27,11 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 - [Exploitation](#exploitation)
 - [Local Privilege Escalation](#local-privilege-escalation)
 - [Propagation](#propagation)
+- [SAProuter Support](#saprouter-support)
+- [SAP Secure Store Decryption](#sap-secure-store-rsectab-decryption)
 - [Standalone Tools](#standalone-tools)
 - [State Management](#state-management)
+- [Testing](#testing)
 - [Configuration](#configuration)
 
 ---
@@ -68,10 +71,28 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 - **Connection details** — Hover over RFC links to see destination info, profiles, roles, risk assessment
 - **State persistence** — Save/load `.sapmap` session files, auto-save on exit
 
+### SAP Secure Store Decryption (RSECTAB)
+- **Full RSECTAB decryption** — Extract RFC destination passwords, DB connection credentials, CTS transport passwords, SMTP credentials, and HMAC keys
+- **Individual key support** — Reads SSFS KEY + DAT files from the OS filesystem, decrypts with SAP's RSECCipher (custom DES with proprietary S-boxes), extracts the RSECTAB individual encryption key
+- **Default key support** — Systems using the well-known default key are decrypted automatically
+- **VERSION 2 + VERSION 3** — Handles both legacy (two-stage 3DES with keyprime) and modern (single-stage, `RSEC` magic) formats
+- **Multiple fallback paths** — ABAP exec → SXPG file read (base64/certutil) → SXPG database query (hdbsql/sqlcli/sqlcmd/sqlplus) → RFC_READ_TABLE → client fallback
+- **Client fallback** — When ABAP exec is blocked by SCC4, auto-discovers open clients via T000 CCCORACTIV, creates SAPMAP00 there, and retries
+- **Map integration** — Decrypted passwords enriched onto RFC connections (click to reveal), categorised entries shown in node detail panel, credentials added to target nodes for lateral movement
+- **SecStore-based lateral movement** — When BAPI via DESTINATION fails (locked source), extracts RFC destination password from SecStore and connects directly to target
+
+### SAProuter Support
+- **Transparent routing** — All operations (RFC, port scanning, GW exploit, system probing) work through SAP Router proxy
+- **NI_ROUTE protocol** — Pure Python implementation of SAProuter tunnel establishment (NI_ROUTE → NI_PONG)
+- **Per-system configuration** — Set SAProuter string per system via right-click menu or manual add dialog
+- **Automatic inheritance** — Target systems discovered via RFC connections inherit the source's SAProuter
+- **RFC SDK integration** — NW RFC SDK's native `saprouter` parameter used for authenticated connections
+
 ### Data Extraction
-- **Password hash download** — Extract BCODE/PASSCODE from USR02
+- **Password hash download** — Extract BCODE/PASSCODE/PWDSALTEDHASH from USR02 (includes iSSHA-1 salted hashes)
 - **Arbitrary table reads** — Download any SAP table via RFC_READ_TABLE
-- **Client role detection** — Identify production (P), QA (Q), test (T) systems from T000
+- **Client role detection** — Identify production (P), QA (Q), test (T) systems from T000 with CCCORACTIV
+- **SecStore download** — Decrypt and export all RSECTAB entries as categorised JSON loot
 
 ### Cleanup
 - **User deletion** — Remove all created SAPMAP users via BAPI_USER_DELETE
@@ -92,6 +113,7 @@ sapmap.py                    Entry point — CLI args, server launch, state mana
 ├── sapmap_lpe.py            Local privilege escalation — extensible method registry (WebGUI, BAPI)
 ├── sapmap_rfc.py            Authenticated RFC operations — BAPI calls, table reads, destination testing
 │
+├── sapmap_secstore.py       SecStore (RSECTAB) decryption — SSFS key extraction, 3DES decrypt, map integration
 ├── sapmap_models.py         Data models — SAPNode, RFCConnection, CreatedUser, SAPMAPState
 ├── sapmap_config.py         Configuration — SQL templates, password hashes, defaults, colors
 ├── sapmap_state.py          State persistence — save/load JSON, RFC cache, destinations
@@ -102,9 +124,11 @@ sapmap.py                    Entry point — CLI args, server launch, state mana
 
 ```
 sap_gw_xpg_standalone.py    Gateway SAPXPG exploit — raw SAP NI protocol (stdlib only)
-sap_rfc_system_info.py       Unauthenticated RFC_SYSTEM_INFO retrieval (stdlib only)
+sap_rfc_system_info.py       Unauthenticated RFC_SYSTEM_INFO retrieval with SAProuter support
 sap_client_enum.py           DIAG protocol client enumeration (stdlib only)
 sap_rfc_ctypes.py            RFC connection library — ctypes wrapper for SAP NW RFC SDK
+sap_rsec_cipher.py           SAP RSECCipher — proprietary DES variant for SSFS encryption
+sap_saprouter.py             SAProuter NI protocol tunnel for routing through SAP Router
 ```
 
 ### Key Data Models
@@ -131,8 +155,10 @@ sap_rfc_ctypes.py            RFC connection library — ctypes wrapper for SAP N
 ```bash
 git clone https://github.com/kloris/SAPMAP.git
 cd SAPMAP
-pip install bottle pywebview
+pip install bottle pywebview pycryptodome
 ```
+
+> `pycryptodome` is required for SecStore (RSECTAB) decryption. Without it, all other features work normally.
 
 ### SAP NW RFC SDK (optional, for authenticated operations)
 
@@ -209,9 +235,11 @@ The web interface is a single-page application with an interactive SVG map.
 | Create User (BAPI) | Authenticated user creation |
 | Try Local Privilege Escalation | Assign SAP_ALL to current user (tries BAPI, then WebGUI SQL) |
 | Propagate | Exploit RFC links to reach other systems |
-| Download Hashes | Extract USR02 password hashes |
+| Download Hashes | Extract USR02 password hashes (BCODE/PASSCODE/PWDSALTEDHASH) |
+| Download SecStore | Decrypt RSECTAB — extract RFC/DB/CTS/SMTP passwords |
 | Download Table | Read arbitrary SAP table data |
 | Set OS/DB/System Type | Manual override for detection gaps |
+| Set SAProuter | Configure SAProuter route string for this system |
 | Cleanup Users | Delete all SAPMAP-created users |
 | Delete System | Remove from the map |
 
@@ -219,8 +247,10 @@ The web interface is a single-page application with an interactive SVG map.
 
 | Action | Description |
 |--------|-------------|
-| Add System Manually | Add a system by IP/hostname |
+| Add System Manually | Add a system by IP/hostname (with optional SAProuter) |
+| Set Default Password | Change SAPMAP00 password for this session |
 | Auto-Propagate All | Propagate from all compromised systems |
+| Check All GW Vulnerabilities | Test gateway exploit on all systems with 2+ nodes |
 | Cleanup All Users | Delete all created users across all systems |
 | Fit to Window | Auto-zoom to fit all systems |
 | Reset Layout | Rearrange all systems |
@@ -237,6 +267,11 @@ The web interface is a single-page application with an interactive SVG map.
 | Blue connection line | Regular RFC connection |
 | Orange connection line | Gateway exploit path |
 | Lightning bolt icon | System is compromised (pwned) |
+| 🔗 via SAProuter | System is accessed through SAP Router proxy |
+| PRD bar (red) | Production system detected |
+| Non-PRD bar (orange) | Clients found, no production client |
+| "Clients found" bar | Clients enumerated, roles not yet retrieved |
+| SecStore Pwd indicator | Decrypted password available on RFC connection (click to reveal) |
 
 ---
 
@@ -384,6 +419,77 @@ The map updates in real-time as new systems are reached, showing attack paths as
 
 ---
 
+## SAProuter Support
+
+SAPMAP can reach SAP systems behind a SAP Router proxy. The SAProuter uses the NI (Network Interface) protocol to create TCP tunnels.
+
+### Configuration
+
+Set a SAProuter route string when adding a system manually, or right-click an existing system → Settings → Set SAProuter:
+
+```
+/H/<router_ip>/S/<router_port>/W/<password>
+```
+
+Example: `/H/3.221.134.53/S/3299/W/my_password`
+
+### What Routes Through SAProuter
+
+When a system has a SAProuter string configured, **all operations** route through it:
+
+| Operation | Mechanism |
+|-----------|-----------|
+| RFC connections | NW RFC SDK native `saprouter` parameter |
+| RFC System Info | `probe_sap_system()` via `connect_via_saprouter()` TCP tunnel |
+| GW vulnerability check | `_gw_connect()` via SAProuter NI_ROUTE tunnel |
+| GW exploit (user creation) | All P1→P2→P3→P4 packets via tunnel |
+| Port scanning | `_scan_port()` via SAProuter tunnel |
+| SecStore download | Both ABAP exec and SXPG fallbacks use RFC/SXPG which route through SAProuter |
+
+### SAProuter Inheritance
+
+When propagating from system A (with SAProuter) to system B (discovered via RFC connections), system B automatically inherits A's SAProuter string. This ensures newly discovered systems behind the router are also reachable.
+
+---
+
+## SAP Secure Store (RSECTAB) Decryption
+
+SAPMAP can decrypt the SAP Secure Store to extract stored passwords for RFC destinations, database connections, CTS transport, and SMTP — enabling lateral movement via the extracted credentials.
+
+### Decryption Chain
+
+```
+SSFS_SID.KEY ──[KEK + RSECCipher]──► SSFS master key (24 bytes)
+SSFS_SID.DAT ──[RSECCipher + SSFS key]──► SECSTORE_DB/KEY record
+Record[33:57] ──► RSECTAB individual key (24 bytes)
+RSECTAB.DATA ──[standard 3DES + individual key]──► plaintext passwords
+```
+
+### Fallback Strategy
+
+The SecStore download tries multiple methods in order:
+
+1. **ABAP exec** (`RFC_ABAP_INSTALL_AND_RUN`) — reads SSFS files + RSECTAB with proper hex encoding
+2. **SXPG file read** — reads SSFS KEY/DAT via `base64` (Linux) or `certutil` (Windows) OS commands
+3. **SXPG database query** — reads RSECTAB via `hdbsql`/`sqlcli`/`sqlcmd`/`sqlplus`/`db2` CLI
+4. **RFC_READ_TABLE** — last resort (unreliable for RAW fields)
+5. **Client fallback** — discovers open clients via T000 CCCORACTIV, creates SAPMAP00 there, retries
+
+### Entry Categories
+
+Decrypted entries are categorised and colour-coded in the UI:
+
+| Category | Pattern | Color |
+|----------|---------|-------|
+| RFC | `/RFC/S4D`, `/RFC/TMSADM@H2T.DOMAIN` | Orange |
+| DB | `/DBCON/SYSTEMDB@H2T` | Blue |
+| CTS | `/CTS/PWD/$T$/DOMAIN/DOMCTL` | Green |
+| SMTP | `BC_SX_SMTP` | Purple |
+| HMAC | `/HMAC_INDEP/...` | Grey |
+| PSE | `/STRUST_PSE_PIN/...` | Grey |
+
+---
+
 ## Standalone Tools
 
 Each standalone tool works independently with no external dependencies (Python 3 stdlib only).
@@ -402,13 +508,14 @@ python3 sap_gw_xpg_standalone.py \
 
 ### sap_rfc_system_info.py
 
-Unauthenticated system info retrieval:
+Unauthenticated system info retrieval (supports SAProuter):
 
 ```bash
 python3 sap_rfc_system_info.py -t 192.168.1.100 -p 3300 -v
+python3 sap_rfc_system_info.py -t 172.31.14.107 -p 3200 -R 3.221.134.53:3299 -v
 ```
 
-Extracts SID, hostname, OS, kernel version, database type, and IP addresses using three probe methods (V6 single-packet, V2 error leak, Chipik-style).
+Extracts SID, hostname, OS, kernel version, database type, and IP addresses using four probe methods (V6 single-packet, V2 error leak, Chipik-style, DIAG login screen).
 
 ### sap_client_enum.py
 
@@ -439,6 +546,24 @@ python3 sapmap.py --load states/landscape_2026-03-11.sapmap
 Separate from session state, these persist across sessions:
 - **RFC check cache** (`.sapmap_rfc_cache.json`) — Cached destination test results
 - **Created destinations** (`.sapmap_created_destinations.json`) — Log of TCP/IP destinations created
+
+---
+
+## Testing
+
+SAPMAP includes a unit test suite (62 tests) that validates core logic without network access:
+
+```bash
+python3 -m pytest tests/ -v
+```
+
+| Test File | Tests | Coverage |
+|-----------|-------|----------|
+| `test_secstore_decrypt.py` | 25 | RSECTAB decryption, keyprime derivation, IDENT categorisation, SSFS key extraction |
+| `test_rsec_cipher.py` | 11 | RSECCipher encode/decode roundtrip, rsec_decrypt, rsec_decrypt_key |
+| `test_models.py` | 9 | Data model serialization, risk_level, best_credentials, state management |
+| `test_gw_protocol.py` | 9 | P1/P2 packet building, parse_response, hexdump, TLV encoding |
+| `test_config.py` | 8 | Username generation, DB type normalization, SQL generators |
 
 ---
 
