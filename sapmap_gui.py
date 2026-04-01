@@ -1325,6 +1325,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
             return json.dumps({"error": "Password cannot be empty"})
         import sapmap_config
         sapmap_config.SAPMAP_PASSWORD = new_pwd
+        # Also update legacy aliases for any code that still imports them
         sapmap_config.SAPMAP_PASSWORD_ABAP = new_pwd
         sapmap_config.SAPMAP_PASSWORD_BAPI = new_pwd
         print(f"[*] Default password changed to: {new_pwd[:3]}{'*' * (len(new_pwd)-3)}")
