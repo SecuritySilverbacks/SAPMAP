@@ -469,6 +469,7 @@ body {
       <div class="ctx-item" data-action="set_type">&#9881; Set System Type</div>
       <div class="ctx-item" data-action="set_db_type">&#9881; Set DB Type</div>
       <div class="ctx-item" data-action="set_os_type">&#9881; Set OS Type</div>
+      <div class="ctx-item" data-action="set_saprouter">&#128268; Set SAProuter</div>
     </div>
   </div>
   <div class="ctx-sep"></div>
@@ -619,6 +620,23 @@ body {
     <div class="form-actions">
       <button class="btn btn-primary" onclick="saveOsType()">Save</button>
       <button class="btn" onclick="closeModal('os-type-modal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Set SAProuter Modal -->
+<div class="modal-overlay" id="saprouter-modal">
+  <div class="modal" onkeydown="if(event.key==='Enter'){event.preventDefault();saveSaprouter();}">
+    <h3>&#128268; Set SAProuter</h3>
+    <div id="saprouter-system-info" style="font-size:12px;color:#8b949e;margin-bottom:12px"></div>
+    <div class="form-row">
+      <label>SAProuter String</label>
+      <input type="text" id="saprouter-input" placeholder="/H/router_ip/S/3299/W/password" style="width:100%">
+      <span style="font-size:10px;color:#484f58;margin-top:2px;display:block">Route prefix to reach this system. Leave empty to remove SAProuter. All RFC and GW connections will route through this.</span>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-primary" onclick="saveSaprouter()">Save</button>
+      <button class="btn" onclick="closeModal('saprouter-modal')">Cancel</button>
     </div>
   </div>
 </div>
@@ -1469,6 +1487,7 @@ function showCtxMenu(e, sid) {
     'set_type':         true,                       // always available
     'set_db_type':      true,                       // always available
     'set_os_type':      true,                       // always available
+    'set_saprouter':    true,                       // always available
     'delete_system':    true,                       // always available
   };
 
@@ -1603,6 +1622,7 @@ async function ctxAction(action) {
     case 'set_type': showTypeModal(sid); break;
     case 'set_db_type': showDbTypeModal(sid); break;
     case 'set_os_type': showOsTypeModal(sid); break;
+    case 'set_saprouter': showSaprouterModal(sid); break;
     case 'delete_system':
       if (confirm(`Delete ${sid} from the map? This removes the system and all its connections.`)) {
         const r = await api('DELETE', `node/${sid}`);
@@ -1980,6 +2000,21 @@ async function saveOsType() {
   const newOs = document.getElementById('os-type-select').value;
   await api('POST', `node/${selectedNodeSid}/set_os_type`, { os_type: newOs });
   closeModal('os-type-modal');
+  startPolling();
+}
+
+function showSaprouterModal(sid) {
+  const n = (mapState.nodes || {})[sid];
+  document.getElementById('saprouter-system-info').textContent =
+    sid + (n && n.saprouter ? ' (current: ' + n.saprouter + ')' : ' (no SAProuter set)');
+  document.getElementById('saprouter-input').value = (n && n.saprouter) || '';
+  document.getElementById('saprouter-modal').classList.add('visible');
+  document.getElementById('saprouter-input').focus();
+}
+async function saveSaprouter() {
+  const val = document.getElementById('saprouter-input').value.trim();
+  await api('POST', `node/${selectedNodeSid}/set_saprouter`, { saprouter: val });
+  closeModal('saprouter-modal');
   startPolling();
 }
 
