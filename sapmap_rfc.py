@@ -72,6 +72,10 @@ def _get_connection(node: SAPNode, creds: Credentials = None):
         "lang": "EN",
     }
 
+    # SAProuter support: the NW RFC SDK natively handles routing
+    if node.saprouter:
+        params["saprouter"] = node.saprouter
+
     return RFCConnection(sdk_path=_sdk_path, **params)
 
 

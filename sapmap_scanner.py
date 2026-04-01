@@ -256,14 +256,22 @@ def alive_sweep(targets: list, threads: int = 100,
 # Port scanning & DIAG protocol verification
 # ---------------------------------------------------------------------------
 
-def _scan_port(host: str, port: int, timeout: float = 3.0) -> bool:
-    """Check if a TCP port is open."""
+def _scan_port(host: str, port: int, timeout: float = 3.0,
+               saprouter: str = "") -> bool:
+    """Check if a TCP port is open (optionally via SAProuter tunnel)."""
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        result = sock.connect_ex((host, port))
-        sock.close()
-        return result == 0
+        if saprouter:
+            from sap_saprouter import connect_through_saprouter, build_route_for_port
+            route = build_route_for_port(saprouter, host, port)
+            sock = connect_through_saprouter(route, timeout)
+            sock.close()
+            return True
+        else:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            result = sock.connect_ex((host, port))
+            sock.close()
+            return result == 0
     except Exception:
         return False
 
