@@ -855,7 +855,7 @@ def _ensure_user_in_client(node, current_creds, target_client, state=None):
       3. Create via BAPI_USER_CREATE1 (if current user exists in target client)
       4. Create via GW exploit (if gateway is vulnerable — SQL specifies MANDT)
     """
-    from sapmap_config import SAPMAP_PASSWORD_ABAP
+    import sapmap_config
     from sapmap_config import sapmap_username
 
     username = sapmap_username(0)  # SAPMAP00
@@ -863,7 +863,7 @@ def _ensure_user_in_client(node, current_creds, target_client, state=None):
 
     # 1. Check if SAPMAP00 already works in target client
     test_creds = Credentials(
-        username=username, password=SAPMAP_PASSWORD_ABAP,
+        username=username, password=sapmap_config.SAPMAP_PASSWORD,
         client=target_client, instance_nr=inst_nr,
     )
     try:
@@ -896,7 +896,7 @@ def _ensure_user_in_client(node, current_creds, target_client, state=None):
             client=target_client, instance_nr=inst_nr,
         )
         result = sapmap_rfc.create_user_via_bapi(
-            node, username, SAPMAP_PASSWORD_ABAP, target_client, bapi_creds)
+            node, username, sapmap_config.SAPMAP_PASSWORD, target_client, bapi_creds)
         if result and result.get("success"):
             print(f"[+] {node.sid}: Created SAPMAP00 in client {target_client} via BAPI")
             if state:
@@ -905,7 +905,7 @@ def _ensure_user_in_client(node, current_creds, target_client, state=None):
                     username=username, sid=node.sid, client=target_client,
                     hostname=node.hostname or "", ip=node.ip or "",
                     instance_nr=inst_nr, method="bapi_create",
-                    password=SAPMAP_PASSWORD_ABAP,
+                    password=sapmap_config.SAPMAP_PASSWORD,
                 )
                 node.created_users.append(cu)
                 if hasattr(state, 'created_users'):

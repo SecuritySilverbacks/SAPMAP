@@ -20,8 +20,9 @@ from typing import Optional
 from sapmap_models import (
     SAPNode, RFCConnection as RFCConn, Credentials, CreatedUser, Severity, Finding,
 )
+import sapmap_config
 from sapmap_config import (
-    SAPMAP_USER_PREFIX, SAPMAP_USER_MAX, SAPMAP_PASSWORD_ABAP,
+    SAPMAP_USER_PREFIX, SAPMAP_USER_MAX,
     RFC_CHECK_FM, RFC_CHECK_PARAMS, RFC_LOGON_SUCCESS_TEXT,
     BAPI_USER_CREATE, BAPI_USER_DELETE, BAPI_USER_GET_DETAIL,
     BAPI_USER_PROFILES_ASSIGN, DEST_RFC_TCPIP_CREATE,
