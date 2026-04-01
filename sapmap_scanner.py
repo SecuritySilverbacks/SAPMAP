@@ -671,12 +671,14 @@ def fast_scan_network(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RA
 def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
                        verbose: bool = False,
                        instance_nrs: list = None,
-                       sid_hint: str = "") -> dict:
+                       sid_hint: str = "",
+                       saprouter: str = "") -> dict:
     """Call RFC_SYSTEM_INFO (unauthenticated) to get OS, DB, kernel, hostname, SID.
 
     Args:
         instance_nrs: Explicit instance numbers to try for SAPControl (prioritized).
         sid_hint: Optional SID to use as log prefix (for already-known systems).
+        saprouter: Optional SAProuter route string prefix for reaching the system.
     Returns dict with fields: sid, hostname, os, db_type, kernel, sap_release, ip, etc.
     """
     tag = sid_hint or host  # log prefix: SID if known, else IP
@@ -691,9 +693,23 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
         "ip": host,
     }
 
-    print(f"[*] {tag}: Probing RFC_SYSTEM_INFO on {host}:{gw_port} ...")
+    # Parse SAProuter string into (host, port) tuple for probe_sap_system
+    router_tuple = None
+    if saprouter:
+        try:
+            from sap_saprouter import parse_route_string
+            hops = parse_route_string(saprouter + f"/H/{host}/S/{gw_port}")
+            router_tuple = (hops[0]["host"], int(hops[0]["port"]))
+            print(f"[*] {tag}: Probing RFC_SYSTEM_INFO on {host}:{gw_port} "
+                  f"via SAProuter {router_tuple[0]}:{router_tuple[1]} ...")
+        except Exception as e:
+            print(f"[-] {tag}: Invalid SAProuter string: {e}")
+    else:
+        print(f"[*] {tag}: Probing RFC_SYSTEM_INFO on {host}:{gw_port} ...")
+
     try:
-        result = probe_sap_system(host, gw_port, timeout=timeout, verbose=verbose)
+        result = probe_sap_system(host, gw_port, timeout=timeout, verbose=verbose,
+                                  router=router_tuple)
         status = result.get("status", "unknown")
 
         # Extract from standard RFCSI_EXPORT fields first

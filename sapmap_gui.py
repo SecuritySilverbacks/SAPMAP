@@ -464,7 +464,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         if inst.instance_nr is not None]
             info = sapmap_scanner.enrich_system_info(
                 host, gw_port, instance_nrs=inst_nrs,
-                sid_hint=node.sid)
+                sid_hint=node.sid, saprouter=node.saprouter)
             # Update node with retrieved info
             if info.get("sid") and not node.sid.startswith("UNK"):
                 pass  # keep existing SID
