@@ -1270,6 +1270,79 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:cleanup", "Cleanup Users", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/check_default_creds", method="POST")
+    def node_check_default_creds(sid):
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        def _run():
+            try:
+                from sap_default_creds import check_default_credentials
+            except ImportError:
+                print(f"[-] {sid}: sap_default_creds module not available")
+                return
+
+            host = node.ip or node.hostname
+            if not host:
+                print(f"[-] {sid}: No IP/hostname available")
+                return
+
+            # Find dispatcher port (32XX)
+            disp_port = None
+            for inst in node.instances:
+                for port, svc in inst.ports.items():
+                    if svc == "dispatcher" or (3200 <= port <= 3299):
+                        disp_port = port
+                        break
+                if disp_port:
+                    break
+            if not disp_port:
+                print(f"[-] {sid}: No dispatcher port found (need 32XX for DIAG)")
+                return
+
+            # Get client list
+            clients = []
+            for c in node.clients:
+                nr = c.get("nr") if isinstance(c, dict) else str(c)
+                if nr:
+                    clients.append(nr)
+            if not clients:
+                clients = ["000"]
+                print(f"[*] {sid}: No clients enumerated, testing client 000 only")
+
+            print(f"[*] {sid}: Checking default accounts on {host}:{disp_port} "
+                  f"(clients: {', '.join(clients)})...")
+            print(f"[!] {sid}: WARNING — failed login attempts may lock accounts!")
+
+            findings = check_default_credentials(
+                host, disp_port, clients, timeout=5, verbose=True)
+
+            if findings:
+                print(f"[+] {sid}: Found {len(findings)} default credential(s)!")
+                for f in findings:
+                    # Add as credentials on the node
+                    cred = Credentials(
+                        username=f["username"], password=f["password"],
+                        client=f["client"],
+                        instance_nr=node.instance_nrs()[0] if node.instance_nrs() else "00",
+                        verified=(f["result"] == "SUCCESS"),
+                    )
+                    already = any(
+                        c.username == cred.username and c.client == cred.client
+                        for c in node.credentials
+                    )
+                    if not already:
+                        node.credentials.append(cred)
+                        print(f"    [{f['severity']}] {f['username']}:{f['password']} "
+                              f"client {f['client']} — {f['detail']}")
+            else:
+                print(f"[*] {sid}: No default credentials found")
+
+        _bg(f"{sid}:default_creds", "Check Default Accounts", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/client_roles", method="POST")
     def node_client_roles(sid):
         response.content_type = "application/json"
