@@ -438,6 +438,21 @@ def create_app(api: SAPMAPApi) -> Bottle:
             print(f"[*] OS type for {sid} set to: {new_os}")
         return json.dumps({"status": "ok"})
 
+    @app.route("/api/node/<sid>/set_saprouter", method="POST")
+    def node_set_saprouter(sid):
+        response.content_type = "application/json"
+        data = request.json or {}
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        new_router = data.get("saprouter", "").strip()
+        node.saprouter = new_router
+        if new_router:
+            print(f"[*] SAProuter for {sid} set to: {new_router}")
+        else:
+            print(f"[*] SAProuter for {sid} removed")
+        return json.dumps({"status": "ok"})
+
     @app.route("/api/node/<sid>/rfc_system_info", method="POST")
     def node_rfc_system_info(sid):
         response.content_type = "application/json"
