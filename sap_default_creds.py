@@ -146,16 +146,24 @@ def classify_login_response(resp_bytes):
 # Single Login Attempt
 # ============================================================================
 
-def try_login(host, port, client, user, password, timeout=5):
+def try_login(host, port, client, user, password, timeout=5, saprouter=""):
     """Attempt a single DIAG login. One TCP connection per attempt.
+
+    Args:
+        saprouter: Optional SAProuter route string prefix for tunneled access.
 
     Returns (result_code, detail_string).
     """
     sock = None
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        sock.connect((host, port))
+        if saprouter:
+            from sap_saprouter import connect_through_saprouter, build_route_for_port
+            route = build_route_for_port(saprouter, host, port)
+            sock = connect_through_saprouter(route, timeout=timeout)
+        else:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            sock.connect((host, port))
 
         # DIAG init handshake
         ni_send(sock, build_diag_init())
@@ -191,7 +199,7 @@ def try_login(host, port, client, user, password, timeout=5):
 # ============================================================================
 
 def check_default_credentials(host, port, clients, timeout=5, verbose=False,
-                               cancel_check=None):
+                               cancel_check=None, saprouter=""):
     """Check all default credentials against the given host/port/clients.
 
     Iterates credentials sequentially (no threading — avoids flooding/lockout).
@@ -240,7 +248,8 @@ def check_default_credentials(host, port, clients, timeout=5, verbose=False,
             if user in skip_users:
                 break
 
-            result, detail = try_login(host, port, client, user, password, timeout)
+            result, detail = try_login(host, port, client, user, password, timeout,
+                                      saprouter=saprouter)
 
             if result == USER_LOCKED:
                 skip_users.add(user)

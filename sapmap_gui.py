@@ -1316,8 +1316,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
                   f"(clients: {', '.join(clients)})...")
             print(f"[!] {sid}: WARNING — failed login attempts may lock accounts!")
 
+            if node.saprouter:
+                print(f"[*] {sid}: Routing DIAG via SAProuter: {node.saprouter}")
             findings = check_default_credentials(
-                host, disp_port, clients, timeout=5, verbose=True)
+                host, disp_port, clients, timeout=10, verbose=True,
+                saprouter=node.saprouter)
 
             if findings:
                 print(f"[+] {sid}: Found {len(findings)} default credential(s)!")
