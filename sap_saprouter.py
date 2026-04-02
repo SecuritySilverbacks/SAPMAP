@@ -81,6 +81,13 @@ def build_ni_route_packet(hops: list, talk_mode: int = 1) -> bytes:
     Returns the complete NI packet (including 4-byte length prefix).
     """
     # Build hop data: each hop = "host\0" + "port\0" + "password\0"
+    # SAProuter protocol: the password goes on the TARGET hop (the one
+    # being routed TO), NOT on the router's own entry.  If the parser
+    # placed /W/ on hop 0 (the router), move it to hop 1 (the target).
+    if len(hops) >= 2 and hops[0].get("password") and not hops[1].get("password"):
+        hops[1]["password"] = hops[0]["password"]
+        hops[0]["password"] = ""
+
     hop_entries = []
     for hop in hops:
         entry = (hop["host"].encode("ascii") + b"\x00"
