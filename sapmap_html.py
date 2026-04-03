@@ -1806,7 +1806,7 @@ function showDetails(sid) {
         '<div class="detail-row"><span class="detail-key">Working Dir</span><span class="detail-val">' + escHtml(ri.working_dir || '?') + '</span></div>' +
         '<div class="detail-row"><span class="detail-key">Routtab</span><span class="detail-val">' + escHtml(ri.routtab || '?') + '</span></div>' +
         '<div class="detail-row"><span class="detail-key">Clients</span><span class="detail-val">' + (ri.total_clients || 0) + '</span></div>' +
-        (ri.clients || []).map(c => '<div class="detail-row" style="font-size:11px"><span class="detail-key" style="color:#8b949e">→</span><span class="detail-val">' + escHtml(c.source || '?') + ' → ' + escHtml(c.destination || '?') + ' (' + escHtml(c.service || '?') + ')</span></div>').join('') +
+        (ri.clients || []).map(c => '<div class="detail-row" style="font-size:11px"><span class="detail-key" style="color:#8b949e">→</span><span class="detail-val">' + escHtml(c.source || '?') + (c.ip ? ' (' + escHtml(c.ip) + ')' : '') + '</span></div>').join('') +
         (ri.raw_info || []).map(l => '<div style="font-size:10px;color:#484f58;margin-left:12px">' + escHtml(l) + '</div>').join('') +
         '</div>';
     })()}
