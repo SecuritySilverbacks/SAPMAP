@@ -451,7 +451,7 @@ body {
   <div class="ctx-group">
     <div class="ctx-item">&#128230; Data Extraction</div>
     <div class="ctx-sub">
-      <div class="ctx-item" data-action="download_hashes">&#128229; Download Password Hashes</div>
+      <div class="ctx-item" data-action="download_hashes">&#128273; Extract Hashes for Cracking</div>
       <div class="ctx-item" data-action="download_secstore">&#128273; Download SecStore (RSECTAB)</div>
       <div class="ctx-item" data-action="download_table">&#128229; Download Table Data</div>
     </div>

