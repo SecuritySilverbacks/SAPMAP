@@ -432,6 +432,7 @@ body {
       <div class="ctx-item" data-action="enum_clients">&#128202; Enumerate Clients</div>
       <div class="ctx-item" data-action="client_roles">&#128202; Retrieve Client Roles</div>
       <div class="ctx-item" data-action="default_creds">&#9888; Check Default Accounts</div>
+      <div class="ctx-item" data-action="check_router_info">&#128268; Check SAProuter Info Leak</div>
     </div>
   </div>
   <!-- Exploitation submenu -->
@@ -1491,6 +1492,7 @@ function showCtxMenu(e, sid) {
     'set_os_type':      true,                       // always available
     'enum_clients':     true,                       // always (uses DIAG, no creds needed)
     'default_creds':    true,                       // always (uses DIAG, no creds needed)
+    'check_router_info': true,                     // always (direct TCP, no creds)
     'set_saprouter':    true,                       // always available
     'delete_system':    true,                       // always available
   };
@@ -1626,6 +1628,8 @@ async function ctxAction(action) {
     case 'set_type': showTypeModal(sid); break;
     case 'set_db_type': showDbTypeModal(sid); break;
     case 'set_os_type': showOsTypeModal(sid); break;
+    case 'check_router_info':
+      await api('POST', `node/${sid}/check_router_info`); break;
     case 'enum_clients':
       await api('POST', `node/${sid}/enum_clients`); break;
     case 'default_creds':
@@ -1795,6 +1799,17 @@ function showDetails(sid) {
       <div class="detail-row"><span class="detail-key">GW Vulnerable</span><span class="detail-val">${n.gw_vulnerable ? '<span style="color:#f85149">YES</span>' : 'No'}</span></div>
       ${n.saprouter ? `<div class="detail-row"><span class="detail-key">SAProuter</span><span class="detail-val" style="color:#d29922">${escHtml(n.saprouter)}</span></div>` : ''}
     </div>
+    ${(() => {
+      const ri = n.saprouter_info || {};
+      if (!ri.vulnerable) return '';
+      return '<div class="detail-section"><h4 style="color:#f85149">&#128268; SAProuter Info Leak (Vulnerable!)</h4>' +
+        '<div class="detail-row"><span class="detail-key">Working Dir</span><span class="detail-val">' + escHtml(ri.working_dir || '?') + '</span></div>' +
+        '<div class="detail-row"><span class="detail-key">Routtab</span><span class="detail-val">' + escHtml(ri.routtab || '?') + '</span></div>' +
+        '<div class="detail-row"><span class="detail-key">Clients</span><span class="detail-val">' + (ri.total_clients || 0) + '</span></div>' +
+        (ri.clients || []).map(c => '<div class="detail-row" style="font-size:11px"><span class="detail-key" style="color:#8b949e">→</span><span class="detail-val">' + escHtml(c.source || '?') + ' → ' + escHtml(c.destination || '?') + ' (' + escHtml(c.service || '?') + ')</span></div>').join('') +
+        (ri.raw_info || []).map(l => '<div style="font-size:10px;color:#484f58;margin-left:12px">' + escHtml(l) + '</div>').join('') +
+        '</div>';
+    })()}
     <div class="detail-section">
       <h4>Instances</h4>
       ${(n.instances || []).map(i => {
