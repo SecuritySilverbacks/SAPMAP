@@ -429,6 +429,7 @@ body {
       <div class="ctx-item" data-action="deep_scan">&#128260; Deep Scan (full SAPology)</div>
       <div class="ctx-item" data-action="retrieve_rfcs">&#128225; Retrieve RFC Connections</div>
       <div class="ctx-item" data-action="test_rfcs">&#129514; Test RFC Connections</div>
+      <div class="ctx-item" data-action="enum_clients">&#128202; Enumerate Clients</div>
       <div class="ctx-item" data-action="client_roles">&#128202; Retrieve Client Roles</div>
       <div class="ctx-item" data-action="default_creds">&#9888; Check Default Accounts</div>
     </div>
@@ -1488,6 +1489,7 @@ function showCtxMenu(e, sid) {
     'set_type':         true,                       // always available
     'set_db_type':      true,                       // always available
     'set_os_type':      true,                       // always available
+    'enum_clients':     true,                       // always (uses DIAG, no creds needed)
     'default_creds':    true,                       // always (uses DIAG, no creds needed)
     'set_saprouter':    true,                       // always available
     'delete_system':    true,                       // always available
@@ -1624,6 +1626,8 @@ async function ctxAction(action) {
     case 'set_type': showTypeModal(sid); break;
     case 'set_db_type': showDbTypeModal(sid); break;
     case 'set_os_type': showOsTypeModal(sid); break;
+    case 'enum_clients':
+      await api('POST', `node/${sid}/enum_clients`); break;
     case 'default_creds':
       if (confirm('⚠️ WARNING: Checking default accounts may LOCK user accounts after failed login attempts.\\n\\nThis tests well-known SAP default credentials (SAP*, DDIC, TMSADM, etc.) via DIAG protocol.\\n\\nProceed?'))
         api('POST', `node/${sid}/check_default_creds`);
