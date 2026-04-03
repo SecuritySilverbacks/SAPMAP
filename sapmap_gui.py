@@ -1270,6 +1270,47 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:cleanup", "Cleanup Users", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/enum_clients", method="POST")
+    def node_enum_clients(sid):
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        def _run():
+            host = node.ip or node.hostname
+            if not host:
+                print(f"[-] {sid}: No IP/hostname available")
+                return
+
+            # Find dispatcher port (32XX)
+            disp_port = None
+            for inst in node.instances:
+                for port, svc in inst.ports.items():
+                    if svc == "dispatcher" or (3200 <= port <= 3299):
+                        disp_port = port
+                        break
+                if disp_port:
+                    break
+            if not disp_port:
+                print(f"[-] {sid}: No dispatcher port found (need 32XX for DIAG)")
+                return
+
+            clients = sapmap_scanner.enumerate_system_clients(
+                host, disp_port, sid_hint=node.sid)
+            if clients:
+                # Merge with existing clients (avoid duplicates)
+                existing_nrs = set()
+                for c in node.clients:
+                    nr = c.get("nr") if isinstance(c, dict) else str(c)
+                    existing_nrs.add(nr)
+                for nr in clients:
+                    if nr not in existing_nrs:
+                        node.clients.append({"nr": nr, "category": ""})
+
+        _bg(f"{sid}:enum_clients", "Enumerate Clients", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/check_default_creds", method="POST")
     def node_check_default_creds(sid):
         response.content_type = "application/json"
