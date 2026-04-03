@@ -2309,7 +2309,7 @@ async function showShellModal(sid) {
   const isWin = os.includes('windows') || os.includes('nt');
   document.getElementById('shell-payload-preview').textContent =
     isWin ? 'Payload: PowerShell TCPClient reverse shell (Windows detected)'
-          : 'Payload: bash /dev/tcp reverse shell (Linux detected)';
+          : 'Payload: Python3 socket reverse shell (Linux detected)';
 
   // Reset UI state
   document.getElementById('shell-config').style.display = '';
