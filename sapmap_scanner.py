@@ -334,10 +334,12 @@ def _verify_sap_diag(host: str, port: int, timeout: float = 2.0) -> bool:
     if connection_reset:
         return False
 
-    # Timeout with no data = inconclusive (dispatcher might be busy).
-    # Treat as "probably SAP" to avoid false negatives.
+    # Timeout with no data = not SAP DIAG.
+    # SAP dispatchers always respond to the DIAG init probe.
+    # Services like SAProuter accept the connection but don't respond
+    # (they expect NI_ROUTE, not DIAG), causing an empty response.
     if len(resp) == 0:
-        return True
+        return False
 
     if len(resp) < 4:
         return False
@@ -357,8 +359,10 @@ def _verify_sap_diag(host: str, port: int, timeout: float = 2.0) -> bool:
     return False
 
 
-# Ports that collide with SAP port formulas but are NOT SAP services
-NON_SAP_PORTS = set()  # Previously had 3389 (RDP = gateway 3300+89), no longer needed
+# Ports that collide with SAP port formulas but are NOT SAP services.
+# 3299 = SAProuter (instance 99 dispatcher would be 3200+99=3299)
+# 3389 = RDP (instance 89 gateway would be 3300+89=3389) — currently not scanned
+NON_SAP_PORTS = {3299}
 
 
 def _build_port_list(instance_range, include_hana=False, skip_non_sap=True):
