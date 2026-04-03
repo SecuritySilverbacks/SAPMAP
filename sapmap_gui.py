@@ -1353,6 +1353,48 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:cleanup", "Cleanup Users", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/check_router_info", method="POST")
+    def node_check_router_info(sid):
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        def _run():
+            from sap_router_info import saprouter_info_request
+            host = node.ip or node.hostname
+            if not host:
+                print(f"[-] {sid}: No IP/hostname available")
+                return
+
+            # Find SAProuter port (default 3299)
+            router_port = 3299
+            for inst in node.instances:
+                for port, svc in inst.ports.items():
+                    if svc == "saprouter":
+                        router_port = port
+                        break
+
+            print(f"[*] {sid}: Checking SAProuter info leak on "
+                  f"{host}:{router_port}...")
+            result = saprouter_info_request(host, router_port, timeout=10)
+            node.saprouter_info = result
+
+            if result["vulnerable"]:
+                print(f"[+] {sid}: SAProuter is VULNERABLE to info leak!")
+                print(f"    Working dir: {result['working_dir']}")
+                print(f"    Routtab: {result['routtab']}")
+                print(f"    Connected clients: {result['total_clients']}")
+                for c in result['clients']:
+                    print(f"      {c['source']} → {c['destination']}")
+                node.has_critical_finding = True
+            else:
+                print(f"[*] {sid}: SAProuter info leak not available "
+                      f"({result['error']})")
+
+        _bg(f"{sid}:check_router_info", "Check SAProuter Info", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/enum_clients", method="POST")
     def node_enum_clients(sid):
         response.content_type = "application/json"

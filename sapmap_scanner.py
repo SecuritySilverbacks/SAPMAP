@@ -359,10 +359,12 @@ def _verify_sap_diag(host: str, port: int, timeout: float = 2.0) -> bool:
     return False
 
 
-# Ports that collide with SAP port formulas but are NOT SAP services.
-# 3299 = SAProuter (instance 99 dispatcher would be 3200+99=3299)
+# Ports that collide with SAP port formulas but are NOT standard SAP services.
 # 3389 = RDP (instance 89 gateway would be 3300+89=3389) — currently not scanned
-NON_SAP_PORTS = {3299}
+NON_SAP_PORTS = set()
+
+# SAProuter port — scanned separately, not as a dispatcher
+SAPROUTER_PORT = 3299
 
 
 def _build_port_list(instance_range, include_hana=False, skip_non_sap=True):
@@ -379,6 +381,10 @@ def _build_port_list(instance_range, include_hana=False, skip_non_sap=True):
         for svc_name, base_port in FAST_SCAN_PORT_PATTERNS.items():
             port = base_port + inst_nr
             if skip_non_sap and port in NON_SAP_PORTS:
+                continue
+            # Port 3299 = SAProuter — label as "saprouter" not "dispatcher"
+            if port == SAPROUTER_PORT and svc_name == "dispatcher":
+                ports.append((port, "saprouter", "99"))
                 continue
             ports.append((port, svc_name, inst_str))
         # HANA SQL ports: 3XX13 (SystemDB) and 3XX15 (first tenant)
@@ -1186,6 +1192,7 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
 
         # Determine system type from this SID's ports + SAPControl hints
         has_dispatcher = "dispatcher" in sid_port_services
+        has_saprouter = "saprouter" in sid_port_services
         has_saphost = any(s in ("saphost_http", "saphost_https") for s in sid_port_services)
         type_parts = []
         if sc_is_abap or has_dispatcher:
@@ -1194,6 +1201,8 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
             type_parts.append("JAVA")
         if type_parts:
             system_type = "+".join(type_parts)
+        elif has_saprouter:
+            system_type = "SAPROUTER"
         elif has_hana_port:
             system_type = "HANA"
         elif has_saphost:
