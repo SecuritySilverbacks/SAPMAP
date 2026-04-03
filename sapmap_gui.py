@@ -1297,7 +1297,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 return
 
             clients = sapmap_scanner.enumerate_system_clients(
-                host, disp_port, sid_hint=node.sid)
+                host, disp_port, sid_hint=node.sid,
+                saprouter=node.saprouter)
             if clients:
                 # Merge with existing clients (avoid duplicates)
                 existing_nrs = set()

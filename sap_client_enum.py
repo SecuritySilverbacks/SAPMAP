@@ -40,6 +40,18 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
+def _diag_connect(host, port, timeout, saprouter=""):
+    """Create a TCP connection, optionally through SAProuter."""
+    if saprouter:
+        from sap_saprouter import connect_through_saprouter, build_route_for_port
+        route = build_route_for_port(saprouter, host, port)
+        return connect_through_saprouter(route, timeout=timeout)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    sock.connect((host, port))
+    return sock
+
+
 # ============================================================================
 # DIAG Protocol Constants (from pySAP by Martin Gallo / SAPology)
 # ============================================================================
@@ -390,7 +402,7 @@ def _extract_default_client(init_resp):
         return None
 
 
-def _check_client_redirection(host, port, timeout=5):
+def _check_client_redirection(host, port, timeout=5, saprouter=""):
     """Detect if the SAP system redirects all logins to a default client.
 
     Some SAP systems (especially S/4HANA) have login/system_client configured,
@@ -414,9 +426,7 @@ def _check_client_redirection(host, port, timeout=5):
         test_client = "%03d" % test_nr
         sock = None
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(timeout)
-            sock.connect((host, port))
+            sock = _diag_connect(host, port, timeout, saprouter)
 
             ni_send(sock, build_diag_init())
             resp = ni_recv(sock, timeout)
@@ -469,7 +479,7 @@ def _check_client_redirection(host, port, timeout=5):
 # Client Probing
 # ============================================================================
 
-def probe_client(host, port, client_nr, timeout=5):
+def probe_client(host, port, client_nr, timeout=5, saprouter=""):
     """Probe a single SAP client via DIAG login attempt.
 
     For each client:
@@ -485,9 +495,7 @@ def probe_client(host, port, client_nr, timeout=5):
     client_str = "%03d" % client_nr
     sock = None
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        sock.connect((host, port))
+        sock = _diag_connect(host, port, timeout, saprouter)
 
         # Step 1: DIAG init (TERM_INI) — includes DP header
         ni_send(sock, build_diag_init())
@@ -550,7 +558,8 @@ def probe_client(host, port, client_nr, timeout=5):
 
 
 def enumerate_clients(host, port, timeout=5, max_workers=20,
-                      start_client=0, end_client=999, verbose=False):
+                      start_client=0, end_client=999, verbose=False,
+                      saprouter=""):
     """Enumerate available SAP clients via DIAG protocol.
 
     Connects to SAP Dispatcher port (32XX) and probes each client number
@@ -577,9 +586,7 @@ def enumerate_clients(host, port, timeout=5, max_workers=20,
 
     # Quick init to verify the port is a DIAG dispatcher
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        sock.connect((host, port))
+        sock = _diag_connect(host, port, timeout, saprouter)
         ni_send(sock, build_diag_init())
         resp = ni_recv(sock, timeout)
         sock.close()
@@ -597,7 +604,7 @@ def enumerate_clients(host, port, timeout=5, max_workers=20,
     # Detect client redirection (S/4HANA systems with login/system_client)
     # Some systems redirect all logins to a default client, making per-client
     # enumeration impossible. Detect this before wasting 1000 probes.
-    is_redirecting, default_client, _ = _check_client_redirection(host, port, timeout)
+    is_redirecting, default_client, _ = _check_client_redirection(host, port, timeout, saprouter=saprouter)
     if is_redirecting:
         print("  [!] Client redirection/hardening detected — server never returns")
         print("      'Client not available', making per-client enumeration impossible.")
@@ -619,7 +626,7 @@ def enumerate_clients(host, port, timeout=5, max_workers=20,
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {}
         for c in clients_range:
-            f = executor.submit(probe_client, host, port, c, timeout)
+            f = executor.submit(probe_client, host, port, c, timeout, saprouter)
             futures[f] = c
 
         for f in as_completed(futures):
