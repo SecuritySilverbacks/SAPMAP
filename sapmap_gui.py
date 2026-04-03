@@ -1394,7 +1394,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 "active": True,
                 "status": _shell_session.status,
                 "target_sid": _shell_session.target_sid,
-                "listen_port": _shell_session.listen_port,
+                "listen_port": _shell_session.port,
                 "client_addr": (f"{_shell_session.client_addr[0]}:"
                                 f"{_shell_session.client_addr[1]}"
                                 if _shell_session.client_addr else ""),
