@@ -105,55 +105,47 @@ def saprouter_info_request(host: str, port: int = 3299,
     result["vulnerable"] = True
 
     # Frame 0: Connection table (binary, fixed-width fields)
-    # Structure per Metasploit: each entry is 46+46+30+2 = 124 bytes
-    # First 8 bytes are header, then entries
+    # Header: 4 bytes (length/flags) + 4 bytes (padding) + 1 byte (num clients)
+    # Then per entry: 4-byte IP + hostname (null-terminated, padded to ~46 bytes)
+    #                 + destination + service fields
     conn_frame = frames[0]
-    if len(conn_frame) > 8:
-        # Parse header
-        header = conn_frame[:8]
-        num_entries = struct.unpack("!I", header[:4])[0]
-        conn_data = conn_frame[8:]
+    if len(conn_frame) > 9:
+        num_clients = conn_frame[8]
+        conn_data = conn_frame[9:]
 
-        # Each connection entry: 46 (source) + 46 (dest) + 30 (service) + 2 (pad) + 1 (flag)
-        entry_size = 125  # approximate — depends on router version
-        # Try to extract source hostnames from the connection data
-        # The entries are null-terminated strings padded to fixed widths
+        # Extract client entries — each starts with 4-byte binary IP then hostname
         i = 0
-        while i + 92 <= len(conn_data):
-            # Source: first null-terminated string (up to 46 bytes)
-            src_end = conn_data.find(b"\x00", i)
-            if src_end < 0 or src_end > i + 46:
-                src_end = i + 46
-            src_raw = conn_data[i:src_end]
-            # First 4 bytes may be binary IP — skip non-printable prefix
-            src = src_raw.decode("ascii", errors="replace").strip()
-            while src and ord(src[0]) < 32:
-                src = src[1:]
+        while i < len(conn_data) and len(result["clients"]) < max(num_clients, 10):
+            # Skip 4-byte binary IP address
+            if i + 4 > len(conn_data):
+                break
+            ip_bytes = conn_data[i:i + 4]
+            ip_str = ".".join(str(b) for b in ip_bytes)
+            i += 4
 
-            # Destination: next null-terminated string (up to 46 bytes from offset i+46)
-            dst_start = i + 46
-            dst_end = conn_data.find(b"\x00", dst_start)
-            if dst_end < 0 or dst_end > dst_start + 46:
-                dst_end = dst_start + 46
-            dst = conn_data[dst_start:dst_end].decode("ascii", errors="replace").strip()
+            # Hostname: null-terminated string
+            hostname_end = conn_data.find(b"\x00", i)
+            if hostname_end < 0:
+                break
+            hostname = conn_data[i:hostname_end].decode("ascii", errors="replace").strip()
+            # Skip past the hostname + remaining padding (to ~46 byte boundary)
+            i = hostname_end + 1
+            # Skip null padding until next non-null or end
+            while i < len(conn_data) and conn_data[i] == 0:
+                i += 1
 
-            # Service: next null-terminated string (up to 30 bytes from offset i+92)
-            svc_start = i + 92
-            svc_end = conn_data.find(b"\x00", svc_start)
-            if svc_end < 0 or svc_end > svc_start + 30:
-                svc_end = svc_start + 30
-            svc = conn_data[svc_start:svc_end].decode("ascii", errors="replace").strip()
+            # Use hostname if available, otherwise IP
+            src = hostname if hostname else ip_str
 
             if src:
                 result["clients"].append({
                     "source": src,
-                    "destination": dst,
-                    "service": svc,
+                    "ip": ip_str,
                 })
 
-            i += 125  # move to next entry (approximate)
-            if i + 46 > len(conn_data):
-                break
+            # After the source block, remaining bytes are destination/service
+            # which may be empty for simple connections — skip to end
+            break  # Connection table format varies by router version
 
     # Remaining frames: text info lines (null-terminated strings)
     for frame in frames[1:]:
