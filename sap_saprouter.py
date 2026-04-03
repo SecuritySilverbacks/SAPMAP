@@ -35,8 +35,8 @@ def parse_route_string(route_str: str) -> list:
     if not route_str or not route_str.startswith("/"):
         raise ValueError(f"Invalid route string: {route_str!r}")
 
-    # Tokenise: split on /X/ markers
-    tokens = re.split(r"/([HSW])/", route_str)
+    # Tokenise: split on /X/ markers (case-insensitive)
+    tokens = re.split(r"/([HSWhsw])/", route_str)
     # tokens[0] is empty (before first /), then alternating key, value
     tokens = tokens[1:]  # drop leading empty
 
