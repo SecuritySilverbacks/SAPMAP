@@ -298,10 +298,9 @@ def test_reverse_payload_linux_no_spaces():
 
 def test_reverse_payload_windows():
     p = _generate_payload("Windows NT", "10.0.0.1", 5555)
-    assert p["command"] == "cmd.exe"
-    assert "powershell" in p["params"].lower()
-    assert "10.0.0.1" in p["params"]
-    assert "5555" in p["params"]
+    assert p["command"] == "powershell.exe"
+    assert "EncodedCommand" in p["params"]
+    assert "-nop" in p["params"]
 
 
 def test_reverse_payload_various_os_strings():
@@ -312,7 +311,7 @@ def test_reverse_payload_various_os_strings():
 
     for os_type in ("Windows NT", "windows", "Windows Server 2019", "NT"):
         p = _generate_payload(os_type, "1.2.3.4", 4444)
-        assert p["command"] == "cmd.exe"
+        assert p["command"] == "powershell.exe"
 
 
 # ===========================================================================
@@ -363,10 +362,9 @@ def test_bind_payload_has_setsockopt_reuseaddr():
 
 def test_bind_payload_windows():
     p = _generate_bind_payload("Windows NT", 5555)
-    assert p["command"] == "cmd.exe"
-    assert "powershell" in p["params"].lower()
-    assert "5555" in p["params"]
-    assert "TcpListener" in p["params"]
+    assert p["command"] == "powershell.exe"
+    assert "EncodedCommand" in p["params"]
+    assert "-nop" in p["params"]
 
 
 def test_bind_payload_various_os_strings():
@@ -376,7 +374,7 @@ def test_bind_payload_various_os_strings():
 
     for os_type in ("Windows NT", "windows", "win"):
         p = _generate_bind_payload(os_type, 4444)
-        assert p["command"] == "cmd.exe"
+        assert p["command"] == "powershell.exe"
 
 
 # ===========================================================================
