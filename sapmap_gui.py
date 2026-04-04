@@ -1302,22 +1302,40 @@ def create_app(api: SAPMAPApi) -> Bottle:
         # If cmdline provided, auto-detect OS and wrap in shell
         if cmdline:
             os_type = node.os_type or ""
-            # Auto-detect OS if unknown via RFC_SYSTEM_INFO
-            if not os_type and method == "sxpg":
-                creds = node.best_credentials()
-                if creds:
+            # Auto-detect OS if unknown
+            if not os_type:
+                if method == "sxpg":
+                    # Use RFC_SYSTEM_INFO
+                    creds = node.best_credentials()
+                    if creds:
+                        try:
+                            with sapmap_rfc._get_connection(
+                                    node, creds) as conn:
+                                info = conn.call("RFC_SYSTEM_INFO")
+                                export = info.get("RFCSI_EXPORT", {})
+                                if isinstance(export, dict):
+                                    os_type = export.get(
+                                        "RFCOPSYS", "").strip()
+                        except Exception:
+                            pass
+                elif method == "gateway" and node.gw_vulnerable:
+                    # Probe via GW: run "ver" (Windows returns version,
+                    # Linux returns error) to detect OS
                     try:
-                        with sapmap_rfc._get_connection(node, creds) as conn:
-                            info = conn.call("RFC_SYSTEM_INFO")
-                            export = info.get("RFCSI_EXPORT", {})
-                            if isinstance(export, dict):
-                                os_type = export.get("RFCOPSYS", "").strip()
-                                if os_type:
-                                    node.os_type = os_type
-                                    print(f"[*] {sid}: Auto-detected OS: "
-                                          f"{os_type}")
+                        probe = sapmap_exploit.execute_gw_command(
+                            node, "ver", "")
+                        if probe.get("success") and probe.get("output"):
+                            out_text = " ".join(probe["output"]).lower()
+                            if "windows" in out_text:
+                                os_type = "Windows NT"
+                        if not os_type:
+                            # ver failed → likely Linux
+                            os_type = "Linux"
                     except Exception:
-                        pass
+                        os_type = "Linux"
+                if os_type:
+                    node.os_type = os_type
+                    print(f"[*] {sid}: Auto-detected OS: {os_type}")
             is_win = any(w in os_type.lower()
                          for w in ("windows", "nt", "win"))
             if is_win:
