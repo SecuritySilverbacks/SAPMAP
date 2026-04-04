@@ -298,10 +298,15 @@ def test_reverse_payload_linux_no_spaces():
 
 def test_reverse_payload_windows():
     p = _generate_payload("Windows NT", "10.0.0.1", 5555)
-    assert p["command"].startswith("powershell.exe")
-    assert "EncodedCommand" in p["command"]
-    assert "-nop" in p["command"]
+    # Windows uses multi-step: write B64 chunks + execute
+    assert "steps" in p
+    assert len(p["steps"]) > 0
+    assert p["command"].startswith("powershell")
+    assert len(p["command"]) <= 128  # must fit in EXTPROG
     assert p["params"] == ""
+    # Each step must fit in 128 bytes
+    for step in p["steps"]:
+        assert len(step["command"]) <= 128
 
 
 def test_reverse_payload_various_os_strings():
@@ -312,7 +317,7 @@ def test_reverse_payload_various_os_strings():
 
     for os_type in ("Windows NT", "windows", "Windows Server 2019", "NT"):
         p = _generate_payload(os_type, "1.2.3.4", 4444)
-        assert p["command"].startswith("powershell.exe")
+        assert "steps" in p
 
 
 # ===========================================================================
@@ -363,10 +368,13 @@ def test_bind_payload_has_setsockopt_reuseaddr():
 
 def test_bind_payload_windows():
     p = _generate_bind_payload("Windows NT", 5555)
-    assert p["command"].startswith("powershell.exe")
-    assert "EncodedCommand" in p["command"]
-    assert "-nop" in p["command"]
+    assert "steps" in p
+    assert len(p["steps"]) > 0
+    assert p["command"].startswith("powershell")
+    assert len(p["command"]) <= 128
     assert p["params"] == ""
+    for step in p["steps"]:
+        assert len(step["command"]) <= 128
 
 
 def test_bind_payload_various_os_strings():
@@ -376,7 +384,7 @@ def test_bind_payload_various_os_strings():
 
     for os_type in ("Windows NT", "windows", "win"):
         p = _generate_bind_payload(os_type, 4444)
-        assert p["command"].startswith("powershell.exe")
+        assert "steps" in p
 
 
 # ===========================================================================

