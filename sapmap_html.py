@@ -276,6 +276,24 @@ body {
   padding: 3px 12px; flex-shrink: 0; font-size: 11px; color: #f0883e;
 }
 #activity-bar.active { display: flex; }
+.shell-window {
+  position: fixed; width: 820px; height: 520px;
+  min-width: 400px; min-height: 300px; padding: 0;
+  display: flex; flex-direction: column; overflow: hidden;
+  top: 50%; left: 50%; transform: translate(-50%, -50%);
+}
+.shell-titlebar {
+  cursor: move; padding: 8px 12px; background: #161b22;
+  border-bottom: 1px solid #30363d; flex-shrink: 0;
+  user-select: none; -webkit-user-select: none;
+}
+.shell-titlebar h3 { font-size: 14px; color: #f0883e; }
+.shell-resize-handle {
+  position: absolute; bottom: 0; right: 0; width: 16px; height: 16px;
+  cursor: nwse-resize; z-index: 10;
+  background: linear-gradient(135deg, transparent 50%, #484f58 50%, transparent 60%,
+    #484f58 70%, transparent 80%, #484f58 90%);
+}
 </style>
 </head>
 <body>
@@ -769,8 +787,11 @@ body {
 
 <!-- Reverse Shell Modal -->
 <div class="modal-overlay" id="shell-modal">
-  <div class="modal" style="width:820px;max-width:92vw;max-height:90vh;resize:both;overflow:auto;display:flex;flex-direction:column">
-    <h3>&#128279; Shell — <span id="shell-sid"></span></h3>
+  <div class="modal shell-window" id="shell-window">
+    <div class="shell-titlebar" id="shell-titlebar">
+      <h3 style="margin:0">&#128279; Shell — <span id="shell-sid"></span></h3>
+    </div>
+    <div style="flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column">
     <div id="shell-config">
       <div style="font-size:11px;color:#8b949e;margin-bottom:8px" id="shell-info"></div>
       <div style="display:flex;gap:8px;margin-bottom:8px">
@@ -816,10 +837,12 @@ body {
              onkeydown="if(event.key==='Enter'){event.preventDefault();shellSendInput();}">
       <button class="btn" onclick="shellSendInput()" id="shell-send-btn" disabled>Send</button>
     </div>
-    <div class="form-actions" style="margin-top:8px">
+    <div class="form-actions" style="margin-top:8px;flex-shrink:0">
       <button class="btn btn-danger" onclick="shellStop()" id="shell-stop-btn" style="display:none">&#9724; Stop</button>
       <button class="btn" onclick="shellClose()">Close</button>
     </div>
+    </div>
+    <div class="shell-resize-handle" id="shell-resize-handle"></div>
   </div>
 </div>
 
@@ -2295,6 +2318,12 @@ async function showShellModal(sid) {
   const n = (mapState.nodes || {})[sid];
   document.getElementById('shell-sid').textContent = sid;
 
+  // Reset window position to centered
+  const win = document.getElementById('shell-window');
+  win.style.top = '50%'; win.style.left = '50%';
+  win.style.transform = 'translate(-50%, -50%)';
+  win.style.width = '820px'; win.style.height = '520px';
+
   // Method availability
   const hasGw = n && n.gw_vulnerable;
   const hasCreated = n && (n.created_users || []).length > 0;
@@ -2460,6 +2489,54 @@ function shellClose() {
   shellStop();
   closeModal('shell-modal');
 }
+
+// --- Shell window drag & resize ---
+(function() {
+  const win = document.getElementById('shell-window');
+  const bar = document.getElementById('shell-titlebar');
+  const handle = document.getElementById('shell-resize-handle');
+  let dragging = false, resizing = false, dx, dy, startW, startH, startX, startY;
+
+  bar.addEventListener('mousedown', e => {
+    if (e.target.closest('button,input,select')) return;
+    dragging = true;
+    const r = win.getBoundingClientRect();
+    // Remove transform centering on first drag — switch to top/left positioning
+    if (win.style.transform && win.style.transform !== 'none') {
+      win.style.top = r.top + 'px';
+      win.style.left = r.left + 'px';
+      win.style.transform = 'none';
+    }
+    dx = e.clientX - r.left;
+    dy = e.clientY - r.top;
+    e.preventDefault();
+  });
+
+  handle.addEventListener('mousedown', e => {
+    resizing = true;
+    const r = win.getBoundingClientRect();
+    if (win.style.transform && win.style.transform !== 'none') {
+      win.style.top = r.top + 'px';
+      win.style.left = r.left + 'px';
+      win.style.transform = 'none';
+    }
+    startW = r.width; startH = r.height;
+    startX = e.clientX; startY = e.clientY;
+    e.preventDefault();
+  });
+
+  document.addEventListener('mousemove', e => {
+    if (dragging) {
+      win.style.left = Math.max(0, e.clientX - dx) + 'px';
+      win.style.top = Math.max(0, e.clientY - dy) + 'px';
+    } else if (resizing) {
+      win.style.width = Math.max(400, startW + e.clientX - startX) + 'px';
+      win.style.height = Math.max(300, startH + e.clientY - startY) + 'px';
+    }
+  });
+
+  document.addEventListener('mouseup', () => { dragging = false; resizing = false; });
+})();
 
 // --- Global actions ---
 async function propagateAll() {
