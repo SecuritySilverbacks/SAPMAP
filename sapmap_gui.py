@@ -1466,8 +1466,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
             def _exec_step(cmd, params):
                 """Execute a single step via GW or SXPG.
-                For SXPG, split 'cmd.exe /C ...' into binary + args.
-                For GW, full command line goes in EXTPROG.
+                Both pass full command in EXTPROG — Windows SAPXPG
+                treats EXTPROG as full command line regardless of
+                whether it arrives via GW or SXPG.
                 """
                 if method == "gateway":
                     return sapmap_exploit.execute_gw_command(
@@ -1477,12 +1478,6 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     if not creds:
                         return {"success": False,
                                 "error": "No credentials"}
-                    # SXPG needs binary in EXTPROG, args in PARAMS.
-                    # GW payloads put full command in cmd with empty
-                    # params. Split at first space for SXPG.
-                    if params == "" and " " in cmd:
-                        parts = cmd.split(" ", 1)
-                        cmd, params = parts[0], parts[1]
                     return sapmap_rfc.execute_local_command(
                         node, cmd, params, creds)
 
