@@ -2285,23 +2285,13 @@ async function termExec() {
   const out = document.getElementById('term-output');
   if (!cmdline) { alert('Enter a command'); return; }
 
-  // Detect OS to wrap in appropriate shell
-  const n = (mapState.nodes || {})[sid];
-  const os = (n && n.os_type || '').toLowerCase();
-  const isWin = os.includes('windows') || os.includes('nt');
-  // SAPXPG splits PARAMS at spaces (execvp argv). For sh -c, the entire
-  // command must be ONE argument. Replace spaces with ${IFS} which sh
-  // expands back to space at runtime, but SAPXPG sees no spaces to split.
-  const command = isWin ? 'cmd.exe' : '/bin/sh';
-  const safeCmd = cmdline.replace(/ /g, '${IFS}');
-  const params = isWin ? '/C ' + cmdline : '-c ' + safeCmd;
-
   out.textContent += `\n$ ${cmdline}\n`;
   out.textContent += '(executing...)\n';
   out.scrollTop = out.scrollHeight;
 
   try {
-    const res = await api('POST', `node/${sid}/exec_command`, { method, command, params });
+    // Send raw cmdline — backend auto-detects OS and wraps in shell
+    const res = await api('POST', `node/${sid}/exec_command`, { method, cmdline });
     if (res.error) {
       out.textContent += `ERROR: ${res.error}\n`;
     } else if (res.output && res.output.length) {

