@@ -278,11 +278,12 @@ def _susr_suim_sap_all_check(conn, destination: str, username: str) -> dict:
         found_objects = {row.get("OBJCT", "").strip() for row in et_tab
                          if isinstance(row, dict)}
         matched = REQUIRED_OBJECTS & found_objects
-        has_sap_all = len(matched) >= len(REQUIRED_OBJECTS) and total > 500
+        has_sap_all = len(matched) >= (len(REQUIRED_OBJECTS) - 1) and total > 400
 
+        missing = REQUIRED_OBJECTS - matched
         logger.debug(f"SUSR_SUIM check for {username}@{destination}: "
                      f"{total} entries, {len(matched)}/{len(REQUIRED_OBJECTS)} "
-                     f"required objects → SAP_ALL={has_sap_all}")
+                     f"required objects, missing={missing} → SAP_ALL={has_sap_all}")
 
         profiles = ["very likely SAP_ALL"] if has_sap_all else []
         if has_sap_all:
@@ -292,7 +293,8 @@ def _susr_suim_sap_all_check(conn, destination: str, username: str) -> dict:
         else:
             print(f"[-] SUSR_SUIM fallback: {username} via {destination} does "
                   f"NOT have SAP_ALL ({total} entries, "
-                  f"{len(matched)}/{len(REQUIRED_OBJECTS)} key objects)")
+                  f"{len(matched)}/{len(REQUIRED_OBJECTS)} key objects, "
+                  f"missing: {missing})")
 
         return {"profiles": profiles, "has_sap_all": has_sap_all, "error": ""}
 
