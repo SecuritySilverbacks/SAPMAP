@@ -2289,8 +2289,12 @@ async function termExec() {
   const n = (mapState.nodes || {})[sid];
   const os = (n && n.os_type || '').toLowerCase();
   const isWin = os.includes('windows') || os.includes('nt');
+  // SAPXPG splits PARAMS at spaces (execvp argv). For sh -c, the entire
+  // command must be ONE argument. Replace spaces with ${IFS} which sh
+  // expands back to space at runtime, but SAPXPG sees no spaces to split.
   const command = isWin ? 'cmd.exe' : '/bin/sh';
-  const params = isWin ? `/C ${cmdline}` : `-c ${cmdline}`;
+  const safeCmd = cmdline.replace(/ /g, '${IFS}');
+  const params = isWin ? '/C ' + cmdline : '-c ' + safeCmd;
 
   out.textContent += `\n$ ${cmdline}\n`;
   out.textContent += '(executing...)\n';
