@@ -763,16 +763,9 @@ body {
           <option value="sxpg">SXPG (via SAP_ALL user)</option>
         </select>
       </div>
-    </div>
-    <div class="form-row" style="display:flex;gap:8px;align-items:flex-end;flex-shrink:0">
-      <div style="flex:1">
+      <div style="flex:3">
         <label>Command</label>
-        <input type="text" id="term-cmd" placeholder="e.g. /bin/sh or cmd.exe" style="width:100%"
-               autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false">
-      </div>
-      <div style="flex:2">
-        <label>Parameters</label>
-        <input type="text" id="term-params" placeholder="e.g. -c whoami  or  /C dir" style="width:100%"
+        <input type="text" id="term-cmdline" placeholder="e.g. whoami, ls -la /tmp, cat /etc/passwd" style="width:100%;font-family:monospace"
                autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false"
                onkeydown="if(event.key==='Enter'){event.preventDefault();termExec();}">
       </div>
@@ -2279,31 +2272,27 @@ function showTerminalModal(sid) {
   if (hasGw) info.push('Gateway: vulnerable');
   if (hasCreated) info.push('SXPG: user available');
   document.getElementById('term-info').textContent = info.join(' | ') || 'No execution method available';
-  // Pre-fill command based on OS
-  const os = (n && n.os_type || '').toLowerCase();
-  const cmdInput = document.getElementById('term-cmd');
-  const paramInput = document.getElementById('term-params');
-  if (os.includes('windows') || os.includes('nt')) {
-    cmdInput.value = 'cmd.exe';
-    paramInput.value = '/C whoami';
-  } else {
-    cmdInput.value = '/bin/sh';
-    paramInput.value = '-c whoami';
-  }
-  document.getElementById('term-output').textContent = 'Ready. Enter a command above and click Run.';
+  document.getElementById('term-cmdline').value = 'whoami';
+  document.getElementById('term-output').textContent = 'Ready. Type a command and press Enter or click Run.\n';
   document.getElementById('terminal-modal').classList.add('visible');
-  paramInput.focus();
+  document.getElementById('term-cmdline').focus();
 }
 
 async function termExec() {
   const sid = document.getElementById('term-sid').textContent;
   const method = document.getElementById('term-method').value;
-  const command = document.getElementById('term-cmd').value.trim();
-  const params = document.getElementById('term-params').value.trim();
+  const cmdline = document.getElementById('term-cmdline').value.trim();
   const out = document.getElementById('term-output');
-  if (!command) { alert('Enter a command'); return; }
+  if (!cmdline) { alert('Enter a command'); return; }
 
-  out.textContent += `\n$ ${command} ${params}\n`;
+  // Detect OS to wrap in appropriate shell
+  const n = (mapState.nodes || {})[sid];
+  const os = (n && n.os_type || '').toLowerCase();
+  const isWin = os.includes('windows') || os.includes('nt');
+  const command = isWin ? 'cmd.exe' : '/bin/sh';
+  const params = isWin ? `/C ${cmdline}` : `-c ${cmdline}`;
+
+  out.textContent += `\n$ ${cmdline}\n`;
   out.textContent += '(executing...)\n';
   out.scrollTop = out.scrollHeight;
 
@@ -2320,6 +2309,8 @@ async function termExec() {
     out.textContent += `ERROR: ${e}\n`;
   }
   out.scrollTop = out.scrollHeight;
+  document.getElementById('term-cmdline').value = '';
+  document.getElementById('term-cmdline').focus();
 }
 
 // --- Reverse Shell ---
