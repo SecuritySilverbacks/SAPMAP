@@ -14,6 +14,7 @@ from sap_gw_xpg_standalone import (
     build_tlv,
     parse_response,
     hexdump,
+    extract_p4_output,
 )
 
 
@@ -110,3 +111,78 @@ def test_build_tlv():
     assert result[5:] == b"test"
     # Check the tag
     assert result[:3] == tag
+
+
+# ---------------------------------------------------------------------------
+# extract_p4_output — new kernel format (03 XX 03 03, 128-byte padded blocks)
+# ---------------------------------------------------------------------------
+
+def _build_p4_response_new_kernel(lines, block_size=128):
+    """Build a fake P4 response with new-kernel padded TLV blocks."""
+    # 80 bytes header (48 RFC + 32 cm_ok)
+    header = b"\x00" * 80
+    # Some filler before TLVs (offset 80..100)
+    filler = b"\x00" * 21
+    body = b""
+    for idx, line in enumerate(lines):
+        # First line: 03 02 03 03, subsequent: 03 04 03 03
+        tag = b"\x03\x02\x03\x03" if idx == 0 else b"\x03\x04\x03\x03"
+        padded = line.encode("ascii").ljust(block_size, b" ")
+        length = struct.pack("!H", block_size)
+        body += tag + length + padded
+    return header + filler + body
+
+
+def test_extract_p4_output_new_kernel_single_line():
+    data = _build_p4_response_new_kernel(["s4hadm"])
+    lines = extract_p4_output(data)
+    assert lines == ["s4hadm"]
+
+
+def test_extract_p4_output_new_kernel_multi_line():
+    """Multiple output lines must all be extracted (regression: 03 04 03 03)."""
+    input_lines = [
+        "total 772",
+        "drwxr-xr-x 2 root root 4096 Jan  1 00:00 bin",
+        "drwxr-xr-x 3 root root 4096 Jan  1 00:00 etc",
+        "-rw-r--r-- 1 root root  220 Jan  1 00:00 .bashrc",
+    ]
+    data = _build_p4_response_new_kernel(input_lines)
+    lines = extract_p4_output(data)
+    assert len(lines) == 4
+    assert lines[0] == "total 772"
+    assert "bin" in lines[1]
+    assert "etc" in lines[2]
+    assert ".bashrc" in lines[3]
+
+
+def test_extract_p4_output_new_kernel_empty_lines_skipped():
+    """Lines that are all spaces (empty after stripping) should be skipped."""
+    data = _build_p4_response_new_kernel(["line1", "", "line3"])
+    lines = extract_p4_output(data)
+    assert lines == ["line1", "line3"]
+
+
+# ---------------------------------------------------------------------------
+# extract_p4_output — old kernel format (03 XX 03 04, exact-length TLVs)
+# ---------------------------------------------------------------------------
+
+def _build_p4_response_old_kernel(lines):
+    """Build a fake P4 response with old-kernel TLV format."""
+    header = b"\x00" * 80
+    filler = b"\x00" * 21
+    body = b""
+    for idx, line in enumerate(lines):
+        tag = b"\x03\x02\x03\x04" if idx == 0 else b"\x03\x04\x03\x04"
+        encoded = line.encode("ascii")
+        length = struct.pack("!H", len(encoded))
+        body += tag + length + encoded
+    return header + filler + body
+
+
+def test_extract_p4_output_old_kernel_multi_line():
+    input_lines = ["uid=1000(test)", "gid=1000(test)", "groups=1000(test)"]
+    data = _build_p4_response_old_kernel(input_lines)
+    lines = extract_p4_output(data)
+    assert len(lines) == 3
+    assert lines[0] == "uid=1000(test)"
