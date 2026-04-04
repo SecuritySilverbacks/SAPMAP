@@ -1327,17 +1327,24 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         except Exception:
                             pass
                 elif method == "gateway" and node.gw_vulnerable:
-                    # Probe via GW: run "ver" (Windows returns version,
-                    # Linux returns error) to detect OS
+                    # Probe via GW to detect OS. "ver" is a cmd.exe
+                    # built-in (not a standalone exe), so we must use
+                    # "cmd.exe /C ver" as full EXTPROG. If it succeeds
+                    # with "windows" in output → Windows. If it fails,
+                    # try "uname" which works on Linux/Unix.
                     try:
                         probe = sapmap_exploit.execute_gw_command(
-                            node, "ver", "")
+                            node, "cmd.exe /C ver", "")
                         if probe.get("success") and probe.get("output"):
                             out_text = " ".join(probe["output"]).lower()
                             if "windows" in out_text:
                                 os_type = "Windows NT"
                         if not os_type:
-                            # ver failed → likely Linux
+                            probe2 = sapmap_exploit.execute_gw_command(
+                                node, "uname", "")
+                            if probe2.get("success") and probe2.get("output"):
+                                os_type = "Linux"
+                        if not os_type:
                             os_type = "Linux"
                     except Exception:
                         os_type = "Linux"
