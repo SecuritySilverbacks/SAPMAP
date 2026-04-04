@@ -769,7 +769,7 @@ body {
 
 <!-- Reverse Shell Modal -->
 <div class="modal-overlay" id="shell-modal">
-  <div class="modal" style="width:660px;max-width:92vw">
+  <div class="modal" style="width:820px;max-width:92vw;max-height:90vh;resize:both;overflow:auto;display:flex;flex-direction:column">
     <h3>&#128279; Shell — <span id="shell-sid"></span></h3>
     <div id="shell-config">
       <div style="font-size:11px;color:#8b949e;margin-bottom:8px" id="shell-info"></div>
@@ -808,10 +808,12 @@ body {
     </div>
     <div id="shell-terminal" style="display:none;background:#010409;border:1px solid #30363d;border-radius:4px;
       padding:8px;margin-top:4px;font-family:monospace;font-size:12px;color:#7ee787;
-      min-height:200px;max-height:450px;overflow-y:auto;white-space:pre-wrap;word-break:break-all"></div>
-    <div id="shell-input-bar" style="display:none;margin-top:4px;display:flex;gap:4px">
+      min-height:200px;flex:1;overflow-y:auto;white-space:pre-wrap;word-break:break-all;
+      user-select:text;-webkit-user-select:text;cursor:text"></div>
+    <div id="shell-input-bar" style="display:none;margin-top:4px;gap:4px">
       <input type="text" id="shell-input" placeholder="Type command..." style="flex:1;font-family:monospace"
-             disabled onkeydown="if(event.key==='Enter'){event.preventDefault();shellSendInput();}">
+             disabled autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false"
+             onkeydown="if(event.key==='Enter'){event.preventDefault();shellSendInput();}">
       <button class="btn" onclick="shellSendInput()" id="shell-send-btn" disabled>Send</button>
     </div>
     <div class="form-actions" style="margin-top:8px">
@@ -2401,10 +2403,15 @@ function shellStartPolling() {
       return;
     }
     if (st.status === 'connected') {
-      shellSetStatus('connected', `Connected from ${st.client_addr}`);
-      document.getElementById('shell-input').disabled = false;
-      document.getElementById('shell-send-btn').disabled = false;
-      document.getElementById('shell-input').focus();
+      if (document.getElementById('shell-input').disabled) {
+        shellSetStatus('connected', `Connected from ${st.client_addr}`);
+        const term = document.getElementById('shell-terminal');
+        term.textContent += `[+] Connected to ${st.client_addr}\n`;
+        term.scrollTop = term.scrollHeight;
+        document.getElementById('shell-input').disabled = false;
+        document.getElementById('shell-send-btn').disabled = false;
+        document.getElementById('shell-input').focus();
+      }
     } else if (st.status === 'error') {
       shellSetStatus('error', st.error || 'Error');
       shellStopPolling();
