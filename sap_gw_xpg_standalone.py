@@ -766,9 +766,9 @@ def extract_p4_output(data):
                 continue
         # Check for padded block: 03 XX 03 03 00 <len> <padded_data>
         # (new kernels: each output line is a 128-byte space-padded TLV)
-        # First line uses 03 02 03 03, subsequent lines use 03 04 03 03
+        # First line uses 03 02 03 03, subsequent lines use 03 03 03 03
         elif (data[i:i+4] == b"\x03\x02\x03\x03"
-                or data[i:i+4] == b"\x03\x04\x03\x03"):
+                or data[i:i+4] == b"\x03\x03\x03\x03"):
             block_len = struct.unpack("!H", data[i+4:i+6])[0]
             if block_len > 0 and i + 6 + block_len <= len(data):
                 raw = data[i+6:i+6+block_len]

@@ -125,8 +125,8 @@ def _build_p4_response_new_kernel(lines, block_size=128):
     filler = b"\x00" * 21
     body = b""
     for idx, line in enumerate(lines):
-        # First line: 03 02 03 03, subsequent: 03 04 03 03
-        tag = b"\x03\x02\x03\x03" if idx == 0 else b"\x03\x04\x03\x03"
+        # First line: 03 02 03 03, subsequent: 03 03 03 03
+        tag = b"\x03\x02\x03\x03" if idx == 0 else b"\x03\x03\x03\x03"
         padded = line.encode("ascii").ljust(block_size, b" ")
         length = struct.pack("!H", block_size)
         body += tag + length + padded
