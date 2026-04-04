@@ -749,10 +749,13 @@ body {
 
 <!-- OS Command Terminal Modal -->
 <div class="modal-overlay" id="terminal-modal">
-  <div class="modal" style="width:620px;max-width:90vw">
-    <h3>&#128187; OS Command Terminal — <span id="term-sid"></span></h3>
+  <div class="modal shell-window" id="term-window">
+    <div class="shell-titlebar" id="term-titlebar">
+      <h3 style="margin:0">&#128187; OS Command Terminal — <span id="term-sid"></span></h3>
+    </div>
+    <div style="flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column">
     <div style="font-size:11px;color:#8b949e;margin-bottom:8px" id="term-info"></div>
-    <div class="form-row" style="display:flex;gap:8px;align-items:flex-end">
+    <div class="form-row" style="display:flex;gap:8px;align-items:flex-end;flex-shrink:0">
       <div style="flex:1">
         <label>Method</label>
         <select id="term-method" style="width:100%">
@@ -761,27 +764,32 @@ body {
         </select>
       </div>
     </div>
-    <div class="form-row" style="display:flex;gap:8px;align-items:flex-end">
+    <div class="form-row" style="display:flex;gap:8px;align-items:flex-end;flex-shrink:0">
       <div style="flex:1">
         <label>Command</label>
-        <input type="text" id="term-cmd" placeholder="e.g. /bin/sh or cmd.exe" style="width:100%">
+        <input type="text" id="term-cmd" placeholder="e.g. /bin/sh or cmd.exe" style="width:100%"
+               autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false">
       </div>
       <div style="flex:2">
         <label>Parameters</label>
         <input type="text" id="term-params" placeholder="e.g. -c whoami  or  /C dir" style="width:100%"
+               autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false"
                onkeydown="if(event.key==='Enter'){event.preventDefault();termExec();}">
       </div>
       <button class="btn btn-primary" onclick="termExec()" style="white-space:nowrap">Run</button>
     </div>
     <div id="term-output" style="background:#010409;border:1px solid #30363d;border-radius:4px;
       padding:8px;margin-top:8px;font-family:monospace;font-size:12px;color:#7ee787;
-      min-height:120px;max-height:400px;overflow-y:auto;white-space:pre-wrap;word-break:break-all">
+      min-height:120px;flex:1;overflow-y:auto;white-space:pre-wrap;word-break:break-all;
+      user-select:text;-webkit-user-select:text;cursor:text">
       Ready. Enter a command above and click Run.
     </div>
-    <div class="form-actions" style="margin-top:8px">
+    <div class="form-actions" style="margin-top:8px;flex-shrink:0">
       <button class="btn" onclick="document.getElementById('term-output').textContent=''">Clear</button>
       <button class="btn" onclick="closeModal('terminal-modal')">Close</button>
     </div>
+    </div>
+    <div class="shell-resize-handle" id="term-resize-handle"></div>
   </div>
 </div>
 
@@ -2254,6 +2262,11 @@ async function doPropagateTarget() {
 function showTerminalModal(sid) {
   const n = (mapState.nodes || {})[sid];
   document.getElementById('term-sid').textContent = sid;
+  // Reset window position to centered
+  const twin = document.getElementById('term-window');
+  twin.style.top = '50%'; twin.style.left = '50%';
+  twin.style.transform = 'translate(-50%, -50%)';
+  twin.style.width = '820px'; twin.style.height = '520px';
   const hasGw = n && n.gw_vulnerable;
   const hasCreated = n && (n.created_users || []).length > 0;
   const methodSel = document.getElementById('term-method');
@@ -2490,23 +2503,27 @@ function shellClose() {
   closeModal('shell-modal');
 }
 
-// --- Shell window drag & resize ---
-(function() {
-  const win = document.getElementById('shell-window');
-  const bar = document.getElementById('shell-titlebar');
-  const handle = document.getElementById('shell-resize-handle');
+// --- Draggable/resizable window helper ---
+function makeDraggableResizable(winId, barId, handleId) {
+  const win = document.getElementById(winId);
+  const bar = document.getElementById(barId);
+  const handle = document.getElementById(handleId);
   let dragging = false, resizing = false, dx, dy, startW, startH, startX, startY;
 
-  bar.addEventListener('mousedown', e => {
-    if (e.target.closest('button,input,select')) return;
-    dragging = true;
+  function snapToAbsolute() {
     const r = win.getBoundingClientRect();
-    // Remove transform centering on first drag — switch to top/left positioning
     if (win.style.transform && win.style.transform !== 'none') {
       win.style.top = r.top + 'px';
       win.style.left = r.left + 'px';
       win.style.transform = 'none';
     }
+    return r;
+  }
+
+  bar.addEventListener('mousedown', e => {
+    if (e.target.closest('button,input,select')) return;
+    dragging = true;
+    const r = snapToAbsolute();
     dx = e.clientX - r.left;
     dy = e.clientY - r.top;
     e.preventDefault();
@@ -2514,12 +2531,7 @@ function shellClose() {
 
   handle.addEventListener('mousedown', e => {
     resizing = true;
-    const r = win.getBoundingClientRect();
-    if (win.style.transform && win.style.transform !== 'none') {
-      win.style.top = r.top + 'px';
-      win.style.left = r.left + 'px';
-      win.style.transform = 'none';
-    }
+    const r = snapToAbsolute();
     startW = r.width; startH = r.height;
     startX = e.clientX; startY = e.clientY;
     e.preventDefault();
@@ -2536,7 +2548,9 @@ function shellClose() {
   });
 
   document.addEventListener('mouseup', () => { dragging = false; resizing = false; });
-})();
+}
+makeDraggableResizable('shell-window', 'shell-titlebar', 'shell-resize-handle');
+makeDraggableResizable('term-window', 'term-titlebar', 'term-resize-handle');
 
 // --- Global actions ---
 async function propagateAll() {
