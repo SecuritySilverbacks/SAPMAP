@@ -213,6 +213,7 @@ class ShellSession:
         self.status = "idle"       # idle/waiting/connected/disconnected/error
         self.error_msg = ""
         self.progress_msg = ""     # transient progress info for UI
+        self.cancelled = False     # set True to abort _send thread
         self.server_sock = None
         self.client_sock = None
         self.client_addr = None
@@ -326,6 +327,7 @@ class ShellSession:
 
     def stop(self):
         self.status = "disconnected"
+        self.cancelled = True
         self._close_client()
         self._close_server()
 
@@ -1487,6 +1489,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
             _shell_session = session
 
         # Generate and send payload in background
+        # Capture session ref so we can check cancelled flag
+        _session_ref = session
+
         def _send():
             target_host = node.ip or node.hostname
             if shell_mode == "bind":
@@ -1512,6 +1517,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 if pre_steps:
                     total = len(pre_steps)
                     for idx, step in enumerate(pre_steps):
+                        if _session_ref.cancelled:
+                            print(f"[*] {sid}: Payload delivery cancelled")
+                            return
                         _set_progress(
                             f"Writing payload chunk {idx+1}/{total}...")
                         sapmap_exploit.execute_gw_command(
@@ -1533,6 +1541,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 if sxpg_steps:
                     total = len(sxpg_steps)
                     for idx, step in enumerate(sxpg_steps):
+                        if _session_ref.cancelled:
+                            print(f"[*] {sid}: Payload delivery cancelled")
+                            return
                         _set_progress(
                             f"Writing payload step {idx+1}/{total}...")
                         sapmap_rfc.execute_local_command(
