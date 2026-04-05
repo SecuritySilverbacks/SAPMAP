@@ -2143,6 +2143,51 @@ def create_app(api: SAPMAPApi) -> Bottle:
         api.state.add_node(node)
         router_msg = f", via SAProuter" if saprouter else ""
         print(f"[+] Manually added system {sid} ({ip}, instance {nr}{router_msg})")
+
+        # Auto-enrich via RFC_SYSTEM_INFO in background
+        def _enrich():
+            host = node.ip or node.hostname
+            gw_port = int(f"33{nr}")
+            inst_nrs = [nr]
+            print(f"[*] {sid}: Auto-enriching via RFC_SYSTEM_INFO...")
+            try:
+                info = sapmap_scanner.enrich_system_info(
+                    host, gw_port, instance_nrs=inst_nrs,
+                    sid_hint=sid, saprouter=saprouter)
+                if info.get("hostname"):
+                    node.hostname = info["hostname"]
+                if info.get("os_type"):
+                    node.os_type = info["os_type"]
+                if info.get("db_type"):
+                    node.db_type = info["db_type"]
+                if info.get("kernel"):
+                    node.kernel = info["kernel"]
+                if info.get("sap_release"):
+                    node.sap_release = info["sap_release"]
+                sc_abap = info.get("_is_abap", False)
+                sc_java = info.get("_is_java", False)
+                if sc_abap or sc_java:
+                    if sc_abap and sc_java:
+                        node.system_type = "ABAP+JAVA"
+                    elif sc_java:
+                        node.system_type = "JAVA"
+                    else:
+                        node.system_type = "ABAP"
+                parts = []
+                if node.os_type:
+                    parts.append(f"OS: {node.os_type}")
+                if node.db_type:
+                    parts.append(f"DB: {node.db_type}")
+                if node.kernel:
+                    parts.append(f"Kernel: {node.kernel}")
+                if parts:
+                    print(f"[+] {sid}: {', '.join(parts)}")
+                else:
+                    print(f"[*] {sid}: RFC_SYSTEM_INFO returned no data")
+            except Exception as e:
+                print(f"[*] {sid}: RFC_SYSTEM_INFO failed: {e}")
+        threading.Thread(target=_enrich, daemon=True).start()
+
         return json.dumps({"status": "ok"})
 
     # -- Default password --
