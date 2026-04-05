@@ -212,6 +212,7 @@ class ShellSession:
         self.mode = mode           # "reverse" or "bind"
         self.status = "idle"       # idle/waiting/connected/disconnected/error
         self.error_msg = ""
+        self.progress_msg = ""     # transient progress info for UI
         self.server_sock = None
         self.client_sock = None
         self.client_addr = None
@@ -1484,15 +1485,22 @@ def create_app(api: SAPMAPApi) -> Bottle:
                       f"{payload['display']}")
                 print(f"    Listening on 0.0.0.0:{shell_port}")
 
+            def _set_progress(msg):
+                with _shell_lock:
+                    if _shell_session:
+                        _shell_session.progress_msg = msg
+
             if method == "gateway":
                 # GW: full command line in EXTPROG
                 pre_steps = payload.get("steps", [])
                 if pre_steps:
-                    print(f"[*] {sid}: Writing payload to temp file "
-                          f"({len(pre_steps)} chunks)...")
-                    for step in pre_steps:
+                    total = len(pre_steps)
+                    for idx, step in enumerate(pre_steps):
+                        _set_progress(
+                            f"Writing payload chunk {idx+1}/{total}...")
                         sapmap_exploit.execute_gw_command(
                             node, step["command"], step["params"])
+                _set_progress("Executing payload...")
                 result = sapmap_exploit.execute_gw_command(
                     node, payload["command"], payload["params"])
             else:
@@ -1507,12 +1515,14 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     return
                 sxpg_steps = payload.get("sxpg_steps", [])
                 if sxpg_steps:
-                    print(f"[*] {sid}: Writing payload via SXPG "
-                          f"({len(sxpg_steps)} steps)...")
-                    for step in sxpg_steps:
+                    total = len(sxpg_steps)
+                    for idx, step in enumerate(sxpg_steps):
+                        _set_progress(
+                            f"Writing payload step {idx+1}/{total}...")
                         sapmap_rfc.execute_local_command(
                             node, step["command"], step["params"],
                             creds)
+                _set_progress("Executing payload...")
                 sxpg_cmd = payload.get("sxpg_command",
                                        payload["command"])
                 sxpg_params = payload.get("sxpg_params",
@@ -1562,6 +1572,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                 f"{_shell_session.client_addr[1]}"
                                 if _shell_session.client_addr else ""),
                 "error": _shell_session.error_msg,
+                "progress": _shell_session.progress_msg,
             })
 
     @app.route("/api/shell/output", method="GET")

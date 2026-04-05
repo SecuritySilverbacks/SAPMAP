@@ -2449,6 +2449,8 @@ function shellStartPolling() {
       document.getElementById('shell-send-btn').disabled = true;
       shellStopPolling();
       return;
+    } else if (st.status === 'waiting' && st.progress) {
+      shellSetStatus('waiting', st.progress);
     }
 
     // Poll output
