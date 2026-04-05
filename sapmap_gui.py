@@ -471,6 +471,13 @@ def _detect_python_cmd(node) -> str:
                 else:
                     continue
             if result.get("success"):
+                # Check output for errors — SAPXPG returns success
+                # even when the program doesn't exist
+                out = " ".join(result.get("output", [])).lower()
+                if ("no such file" in out or "not found" in out
+                        or "not recognized" in out
+                        or "exit code 1" in out):
+                    continue
                 node._python_cmd = cmd
                 print(f"[*] {node.sid}: Detected {cmd}")
                 return cmd
