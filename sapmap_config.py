@@ -190,33 +190,38 @@ def sql_hana(sid: str, client: str, username: str) -> list:
     ]
 
 
-def sql_oracle(sid: str, client: str, username: str) -> list:
-    """Oracle — sqlplus statements (SAPSR3 schema, sysdba auth)."""
-    cleanup = [f"DELETE FROM SAPSR3.{t} WHERE MANDT='{client}' AND BNAME='{username}';"
+def sql_oracle(sid: str, client: str, username: str, schema: str = "SAPSR3") -> list:
+    """Oracle — sqlplus statements (sysdba auth).
+
+    schema: SAP DB owner schema — 'SAPSR3' (ECC 6.x+) or 'SAPR3' (R/3 4.x).
+    Each statement ends with ;COMMIT;EXIT; so sqlplus commits even in batch mode.
+    """
+    s = schema
+    cleanup = [f"DELETE FROM {s}.{t} WHERE MANDT='{client}' AND BNAME='{username}';COMMIT;EXIT;"
                for t in ("USRBF2", "USR04", "UST04", "USREFUS", "USR02")]
-    return ["CONNECT / AS SYSDBA;"] + cleanup + [
-        f"INSERT INTO SAPSR3.USR02 (MANDT,BNAME,BCODE,USTYP,CODVN) "
-        f"VALUES ('{client}','{username}','{BCODE_HEX}','{USER_TYPE}','{CODVN}');",
-        f"UPDATE SAPSR3.USR02 SET PASSCODE='{PASSCODE_HEX}' "
-        f"WHERE BNAME='{username}' AND MANDT='{client}';",
-        f"INSERT INTO SAPSR3.USREFUS (MANDT,BNAME,REFUSER) "
-        f"VALUES ('{client}','{username}','DDIC');",
-        f"INSERT INTO SAPSR3.UST04 (MANDT,BNAME,PROFILE) "
-        f"VALUES ('{client}','{username}','SAP_ALL');",
-        f"INSERT INTO SAPSR3.UST04 (MANDT,BNAME,PROFILE) "
-        f"VALUES ('{client}','{username}','SAP_NEW');",
-        f"INSERT INTO SAPSR3.USR04 (MANDT,BNAME,NRPRO,PROFS) "
-        f"VALUES ('{client}','{username}','14','C SAP_ALL');",
-        f"INSERT INTO SAPSR3.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_ADMI_FCD','&_SAP_ALL');",
-        f"INSERT INTO SAPSR3.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_DATASET','&_SAP_ALL');",
-        f"INSERT INTO SAPSR3.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_DEVELOP','&_SAP_ALL');",
-        f"INSERT INTO SAPSR3.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_RFC','&_SAP_ALL');",
-        f"INSERT INTO SAPSR3.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_TABU_DIS','&_SAP_ALL');",
-        f"INSERT INTO SAPSR3.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_TCODE','&_SAP_ALL');",
-        f"INSERT INTO SAPSR3.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_USER_AUT','&_SAP_ALL');",
-        f"INSERT INTO SAPSR3.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_USER_GRP','&_SAP_ALL');",
-        f"INSERT INTO SAPSR3.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_USER_PRO','&_SAP_ALL');",
-        f"INSERT INTO SAPSR3.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_XMI_PROD','&_SAP_ALL');",
+    return ["CONNECT / AS SYSDBA"] + cleanup + [
+        f"INSERT INTO {s}.USR02 (MANDT,BNAME,BCODE,USTYP,CODVN) "
+        f"VALUES ('{client}','{username}','{BCODE_HEX}','{USER_TYPE}','{CODVN}');COMMIT;EXIT;",
+        f"UPDATE {s}.USR02 SET PASSCODE='{PASSCODE_HEX}' "
+        f"WHERE BNAME='{username}' AND MANDT='{client}';COMMIT;EXIT;",
+        f"INSERT INTO {s}.USREFUS (MANDT,BNAME,REFUSER) "
+        f"VALUES ('{client}','{username}','DDIC');COMMIT;EXIT;",
+        f"INSERT INTO {s}.UST04 (MANDT,BNAME,PROFILE) "
+        f"VALUES ('{client}','{username}','SAP_ALL');COMMIT;EXIT;",
+        f"INSERT INTO {s}.UST04 (MANDT,BNAME,PROFILE) "
+        f"VALUES ('{client}','{username}','SAP_NEW');COMMIT;EXIT;",
+        f"INSERT INTO {s}.USR04 (MANDT,BNAME,NRPRO,PROFS) "
+        f"VALUES ('{client}','{username}','14','C SAP_ALL');COMMIT;EXIT;",
+        f"INSERT INTO {s}.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_ADMI_FCD','&_SAP_ALL');COMMIT;EXIT;",
+        f"INSERT INTO {s}.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_DATASET','&_SAP_ALL');COMMIT;EXIT;",
+        f"INSERT INTO {s}.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_DEVELOP','&_SAP_ALL');COMMIT;EXIT;",
+        f"INSERT INTO {s}.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_RFC','&_SAP_ALL');COMMIT;EXIT;",
+        f"INSERT INTO {s}.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_TABU_DIS','&_SAP_ALL');COMMIT;EXIT;",
+        f"INSERT INTO {s}.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_TCODE','&_SAP_ALL');COMMIT;EXIT;",
+        f"INSERT INTO {s}.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_USER_AUT','&_SAP_ALL');COMMIT;EXIT;",
+        f"INSERT INTO {s}.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_USER_GRP','&_SAP_ALL');COMMIT;EXIT;",
+        f"INSERT INTO {s}.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_USER_PRO','&_SAP_ALL');COMMIT;EXIT;",
+        f"INSERT INTO {s}.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_XMI_PROD','&_SAP_ALL');COMMIT;EXIT;",
     ]
 
 

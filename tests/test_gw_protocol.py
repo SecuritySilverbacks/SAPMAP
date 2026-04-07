@@ -12,6 +12,7 @@ from sap_gw_xpg_standalone import (
     build_p1,
     build_p2,
     build_tlv,
+    build_saprfxpg,
     parse_response,
     hexdump,
     extract_p4_output,
@@ -186,3 +187,79 @@ def test_extract_p4_output_old_kernel_multi_line():
     lines = extract_p4_output(data)
     assert len(lines) == 3
     assert lines[0] == "uid=1000(test)"
+
+
+# ---------------------------------------------------------------------------
+# build_saprfxpg — long_params parameter
+# ---------------------------------------------------------------------------
+
+def _extract_longparam_from_xpg(xpg_blob):
+    """Extract the 1024-byte LONG_PARAMS value from a SAPRFXPG blob.
+
+    The structure is:
+      ... (labels TLVs) ...
+      LONG_PARAMS label TLV (b"LONG_PARAMS")
+      LONG_PARAMS value TLV: 4-byte tag + 2-byte big-endian length (1024) + 1024 bytes
+    Find the value TLV that immediately follows the LONG_PARAMS label.
+    """
+    import struct
+    marker = b"LONG_PARAMS"
+    idx = xpg_blob.find(marker)
+    assert idx != -1, "LONG_PARAMS label not found"
+    # After the marker, skip the TLV frame: 4-byte tag before the marker we found
+    # The label TLV is: 4-byte-tag + 2-byte-len + b"LONG_PARAMS"
+    # The value TLV follows immediately: 4-byte-tag + 2-byte-len + 1024-bytes
+    after_label = idx + len(marker)
+    # 4-byte tag + 2-byte length = 6 bytes of TLV header for the value block
+    val_len = struct.unpack("!H", xpg_blob[after_label + 4: after_label + 6])[0]
+    val_start = after_label + 6
+    return xpg_blob[val_start: val_start + val_len]
+
+
+def test_saprfxpg_long_params_default_copies_params():
+    """Default: LONG_PARAMS mirrors PARAMS (space-padded to 1024)."""
+    xpg = build_saprfxpg("cmd.exe", "/C echo hello")
+    longparam = _extract_longparam_from_xpg(xpg)
+    assert len(longparam) == 1024
+    # Should start with the params value
+    assert longparam[:13] == b"/C echo hello"
+    # Remainder is space-padding
+    assert longparam[13:] == b" " * (1024 - 13)
+
+
+def test_saprfxpg_long_params_empty_is_all_spaces():
+    """long_params="" → LONG_PARAMS field is all spaces (no command repeated).
+
+    This prevents old Windows kernels (700) from appending the 255-byte
+    PARAMS + 1024-byte LONG_PARAMS together into one cmd.exe command line,
+    which would corrupt echo output written to the SQL file.
+    """
+    xpg = build_saprfxpg("cmd.exe", "/C echo hello >> C:\\work\\a.sql", long_params="")
+    longparam = _extract_longparam_from_xpg(xpg)
+    assert len(longparam) == 1024
+    assert longparam == b" " * 1024
+
+
+def test_saprfxpg_long_params_explicit_overrides():
+    """Explicit long_params value is used verbatim (space-padded to 1024)."""
+    xpg = build_saprfxpg("python3", "-c pass", long_params="-c override")
+    longparam = _extract_longparam_from_xpg(xpg)
+    assert longparam[:11] == b"-c override"
+    assert longparam[11:] == b" " * (1024 - 11)
+
+
+def test_saprfxpg_extprog_and_params_unaffected_by_long_params():
+    """Setting long_params="" must not change EXTPROG or PARAMS fields."""
+    xpg_default = build_saprfxpg("cmd.exe", "/C echo test")
+    xpg_empty   = build_saprfxpg("cmd.exe", "/C echo test", long_params="")
+    # EXTPROG: 4-byte tag + 2-byte len + 128 bytes
+    # Find EXTPROG label and then its value TLV
+    import struct
+    marker = b"EXTPROG"
+    idx = xpg_default.find(marker)
+    after = idx + len(marker)
+    # value TLV: 4-byte tag + 2-byte len
+    val_len = struct.unpack("!H", xpg_default[after + 4: after + 6])[0]
+    extprog_default = xpg_default[after + 6: after + 6 + val_len]
+    extprog_empty   = xpg_empty[after + 6: after + 6 + val_len]
+    assert extprog_default == extprog_empty, "EXTPROG must be identical"
