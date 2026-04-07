@@ -404,6 +404,38 @@ def test_bind_payload_various_os_strings():
         assert "steps" in p
 
 
+def test_win_payload_uses_percent_temp():
+    """GW echo steps must write to %TEMP% (cmd.exe env-var) not a hardcoded
+    path.  On SAP systems like TWT the SAP service user may not have write
+    access to C:\\Windows\\Temp, but always owns %TEMP%."""
+    p = _generate_payload("Windows NT", "10.0.0.1", 4444)
+    # Every echo step must redirect to %TEMP% (expands at cmd.exe runtime)
+    echo_steps = [s for s in p["steps"] if "echo" in s["params"]]
+    assert echo_steps, "Expected at least one echo step"
+    for step in echo_steps:
+        assert "%TEMP%" in step["params"], (
+            f"Echo step must use %TEMP%, got: {step['params'][:80]}")
+    # The execute PARAMS must reference $env:TEMP (PowerShell runtime expansion)
+    assert "$env:TEMP" in p["params"], (
+        "Execute params must use $env:TEMP, not a hardcoded path")
+    # No hardcoded C:\\Windows\\Temp or C:\\temp
+    all_params = " ".join(s["params"] for s in p["steps"]) + " " + p["params"]
+    assert r"C:\Windows\Temp" not in all_params, "Hardcoded C:\\Windows\\Temp found"
+    assert r"C:\temp" not in all_params, "Hardcoded C:\\temp found"
+
+
+def test_win_payload_execute_params_fit_in_255():
+    """Execute PARAMS (the -nop -c ... string) must fit in 255 bytes."""
+    for ip, port in [("10.0.0.1", 4444), ("192.168.100.200", 9999)]:
+        p = _generate_payload("Windows NT", ip, port)
+        assert len(p["params"]) <= 255, (
+            f"Execute PARAMS too long ({len(p['params'])} bytes) for {ip}:{port}")
+    for port in (4444, 9999):
+        p = _generate_bind_payload("Windows NT", port)
+        assert len(p["params"]) <= 255, (
+            f"Bind execute PARAMS too long ({len(p['params'])} bytes)")
+
+
 # ===========================================================================
 # _detect_local_ip
 # ===========================================================================
