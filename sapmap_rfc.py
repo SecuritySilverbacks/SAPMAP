@@ -1595,8 +1595,11 @@ def _download_hashes_via_sxpg(node: SAPNode,
         _mss_server = f".\\{sid.upper()}_DB"
         cat = "+"   # MSSQL uses + for string concatenation, not ||
         def run_q(sql):
+            # Double-quote the SQL so sqlcmd -Q receives it as a single argument.
+            # Without quotes, sqlcmd -Q only gets the first whitespace-delimited
+            # token (e.g. "SELECT") and the rest of the query is silently discarded.
             return execute_local_command(node, "sqlcmd",
-                                         f"-S {_mss_server} -h -1 -W -Q {sql}", creds)
+                                         f'-S {_mss_server} -h -1 -W -Q "{sql}"', creds)
     elif db_type in ("ORA", "ORACLE"):
         tbl = "SAPSR3.USR02"
         hex_fn_bcode = "RAWTOHEX(BCODE)"
@@ -1845,6 +1848,7 @@ def execute_remote_command(node: SAPNode, destination: str,
                 TRACELEVEL="0",
                 LONG_PARAMS=params if len(params) > 255 else "",
                 CONNCNTL="H",
+                MXROW=9999,   # default is 2 — must set high to capture full output
             )
 
             # Parse LOG table for output lines
