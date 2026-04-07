@@ -190,20 +190,37 @@ def sql_hana(sid: str, client: str, username: str) -> list:
     ]
 
 
-def sql_oracle(sid: str, client: str, username: str, schema: str = "SAPSR3") -> list:
+def sql_oracle(sid: str, client: str, username: str, schema: str = "SAPSR3",
+               codvn: str = None) -> list:
     """Oracle — sqlplus statements (sysdba auth).
 
     schema: SAP DB owner schema — 'SAPSR3' (ECC 6.x+) or 'SAPR3' (R/3 4.x).
+    codvn:  password hash version.  Defaults to global CODVN ('G').
+            Use 'B' for old kernels (700-era) that don't support CODVN=G.
+            CODVN=B uses only BCODE (DES, first 8 uppercase chars of password).
+            CODVN=G additionally writes PASSCODE (SHA-1 extended hash).
+
+    GLTGB='99991231': set explicitly so old kernels don't treat a missing
+    valid-to date as an expired account.
+
     Each statement ends with ;COMMIT;EXIT; so sqlplus commits even in batch mode.
     """
     s = schema
+    _codvn = codvn if codvn is not None else CODVN
     cleanup = [f"DELETE FROM {s}.{t} WHERE MANDT='{client}' AND BNAME='{username}';COMMIT;EXIT;"
                for t in ("USRBF2", "USR04", "UST04", "USREFUS", "USR02")]
-    return ["CONNECT / AS SYSDBA"] + cleanup + [
-        f"INSERT INTO {s}.USR02 (MANDT,BNAME,BCODE,USTYP,CODVN) "
-        f"VALUES ('{client}','{username}','{BCODE_HEX}','{USER_TYPE}','{CODVN}');COMMIT;EXIT;",
-        f"UPDATE {s}.USR02 SET PASSCODE='{PASSCODE_HEX}' "
-        f"WHERE BNAME='{username}' AND MANDT='{client}';COMMIT;EXIT;",
+    stmts = ["CONNECT / AS SYSDBA"] + cleanup + [
+        f"INSERT INTO {s}.USR02 (MANDT,BNAME,BCODE,USTYP,CODVN,GLTGB) "
+        f"VALUES ('{client}','{username}','{BCODE_HEX}','{USER_TYPE}','{_codvn}','99991231');COMMIT;EXIT;",
+    ]
+    if _codvn != 'B':
+        # CODVN=B uses only BCODE — no PASSCODE field needed.
+        # CODVN=G (and later) require PASSCODE for case-sensitive password verification.
+        stmts.append(
+            f"UPDATE {s}.USR02 SET PASSCODE='{PASSCODE_HEX}' "
+            f"WHERE BNAME='{username}' AND MANDT='{client}';COMMIT;EXIT;"
+        )
+    stmts += [
         f"INSERT INTO {s}.USREFUS (MANDT,BNAME,REFUSER) "
         f"VALUES ('{client}','{username}','DDIC');COMMIT;EXIT;",
         f"INSERT INTO {s}.UST04 (MANDT,BNAME,PROFILE) "
@@ -223,6 +240,7 @@ def sql_oracle(sid: str, client: str, username: str, schema: str = "SAPSR3") -> 
         f"INSERT INTO {s}.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_USER_PRO','&_SAP_ALL');COMMIT;EXIT;",
         f"INSERT INTO {s}.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_XMI_PROD','&_SAP_ALL');COMMIT;EXIT;",
     ]
+    return stmts
 
 
 def sql_db2(sid: str, client: str, username: str) -> list:
