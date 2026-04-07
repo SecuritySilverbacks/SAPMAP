@@ -253,8 +253,13 @@ def _susr_suim_sap_all_check(conn, destination: str, username: str) -> dict:
 
     Fallback when RFC_ABAP_INSTALL_AND_RUN is blocked ("not permitted in
     this client").  Compares authorization objects of the user on the remote
-    system.  If at least 10 key auth objects are present AND the total number
-    of entries exceeds 500, we consider SAP_ALL granted.
+    system.  If at least 8 of the 10 key auth objects are present AND the
+    total number of entries exceeds 400, we consider SAP_ALL granted.
+
+    Threshold is 8/10 (not 10/10) because some objects are system-optional:
+    - S_TABU_NAM: only active when table-name authorization is configured
+    - S_ECATTADM: only present when the eCATT test tool component is installed
+    A genuine SAP_ALL user on systems without these objects will score 8/10.
 
     Returns dict with: profiles, has_sap_all, error.
     """
@@ -278,7 +283,7 @@ def _susr_suim_sap_all_check(conn, destination: str, username: str) -> dict:
         found_objects = {row.get("OBJCT", "").strip() for row in et_tab
                          if isinstance(row, dict)}
         matched = REQUIRED_OBJECTS & found_objects
-        has_sap_all = len(matched) >= (len(REQUIRED_OBJECTS) - 1) and total > 400
+        has_sap_all = len(matched) >= (len(REQUIRED_OBJECTS) - 2) and total > 400
 
         missing = REQUIRED_OBJECTS - matched
         logger.debug(f"SUSR_SUIM check for {username}@{destination}: "
