@@ -53,60 +53,68 @@ def _cleanup_sql(client: str, username: str) -> list:
     ]
 
 def sql_mssql_abap(sid: str, client: str, username: str) -> list:
-    """MSSQL ABAP stack — T-SQL statements."""
-    SID = sid.upper()
+    """MSSQL ABAP stack — T-SQL statements.
+
+    SAP MSSQL installations use a case-sensitive collation.  The database
+    name (USE / -d flag) is uppercase (e.g. TWT), but the schema that owns
+    the SAP tables is lowercase (e.g. twt) — matching the dbs/mss/schema
+    profile parameter.  Using uppercase schema names causes 'Invalid object
+    name' errors on case-sensitive installations.
+    """
+    DB  = sid.upper()   # Database name: USE TWT / sqlcmd -d TWT
+    SCH = sid.lower()   # Schema owner:  twt.USR02 (case-sensitive!)
     # Cleanup first, then create
     cleanup = []
     for tbl in ["USRBF2", "USR04", "UST04", "USREFUS", "USR02"]:
         cleanup += [
-            f"DELETE FROM {SID}.{tbl} WHERE MANDT='{client}' AND BNAME='{username}'",
+            f"DELETE FROM {SCH}.{tbl} WHERE MANDT='{client}' AND BNAME='{username}'",
             "GO",
         ]
     return [
-        f"USE {SID}",
+        f"USE {DB}",
         "GO",
     ] + cleanup + [
-        f"INSERT INTO {SID}.USR02 (MANDT,BNAME,USTYP,CODVN) "
+        f"INSERT INTO {SCH}.USR02 (MANDT,BNAME,USTYP,CODVN) "
         f"VALUES ('{client}','{username}','{USER_TYPE}','{CODVN}')",
         "GO",
-        f"UPDATE {SID}.USR02 SET BCODE=0x{BCODE_HEX} "
+        f"UPDATE {SCH}.USR02 SET BCODE=0x{BCODE_HEX} "
         f"WHERE MANDT='{client}' AND BNAME='{username}'",
         "GO",
-        f"UPDATE {SID}.USR02 SET PASSCODE=0x{PASSCODE_HEX} "
+        f"UPDATE {SCH}.USR02 SET PASSCODE=0x{PASSCODE_HEX} "
         f"WHERE MANDT='{client}' AND BNAME='{username}'",
         "GO",
-        f"INSERT INTO {SID}.USREFUS (MANDT,BNAME,REFUSER) "
+        f"INSERT INTO {SCH}.USREFUS (MANDT,BNAME,REFUSER) "
         f"VALUES ('{client}','{username}','DDIC')",
         "GO",
-        f"INSERT INTO {SID}.UST04 (MANDT,BNAME,PROFILE) "
+        f"INSERT INTO {SCH}.UST04 (MANDT,BNAME,PROFILE) "
         f"VALUES ('{client}','{username}','SAP_ALL')",
         "GO",
-        f"INSERT INTO {SID}.UST04 (MANDT,BNAME,PROFILE) "
+        f"INSERT INTO {SCH}.UST04 (MANDT,BNAME,PROFILE) "
         f"VALUES ('{client}','{username}','SAP_NEW')",
         "GO",
-        f"INSERT INTO {SID}.USR04 (MANDT,BNAME,NRPRO,PROFS) "
+        f"INSERT INTO {SCH}.USR04 (MANDT,BNAME,NRPRO,PROFS) "
         f"VALUES ('{client}','{username}','14','C SAP_ALL')",
         "GO",
         # Authorization object entries (USRBF2)
-        f"INSERT INTO {SID}.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_ADMI_FCD','&_SAP_ALL')",
+        f"INSERT INTO {SCH}.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_ADMI_FCD','&_SAP_ALL')",
         "GO",
-        f"INSERT INTO {SID}.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_DATASET','&_SAP_ALL')",
+        f"INSERT INTO {SCH}.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_DATASET','&_SAP_ALL')",
         "GO",
-        f"INSERT INTO {SID}.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_DEVELOP','&_SAP_ALL')",
+        f"INSERT INTO {SCH}.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_DEVELOP','&_SAP_ALL')",
         "GO",
-        f"INSERT INTO {SID}.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_RFC','&_SAP_ALL')",
+        f"INSERT INTO {SCH}.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_RFC','&_SAP_ALL')",
         "GO",
-        f"INSERT INTO {SID}.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_TABU_DIS','&_SAP_ALL')",
+        f"INSERT INTO {SCH}.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_TABU_DIS','&_SAP_ALL')",
         "GO",
-        f"INSERT INTO {SID}.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_TCODE','&_SAP_ALL')",
+        f"INSERT INTO {SCH}.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_TCODE','&_SAP_ALL')",
         "GO",
-        f"INSERT INTO {SID}.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_USER_AUT','&_SAP_ALL')",
+        f"INSERT INTO {SCH}.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_USER_AUT','&_SAP_ALL')",
         "GO",
-        f"INSERT INTO {SID}.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_USER_GRP','&_SAP_ALL')",
+        f"INSERT INTO {SCH}.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_USER_GRP','&_SAP_ALL')",
         "GO",
-        f"INSERT INTO {SID}.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_USER_PRO','&_SAP_ALL')",
+        f"INSERT INTO {SCH}.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_USER_PRO','&_SAP_ALL')",
         "GO",
-        f"INSERT INTO {SID}.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_XMI_PROD','&_SAP_ALL')",
+        f"INSERT INTO {SCH}.USRBF2 (MANDT,BNAME,OBJCT,AUTH) VALUES ('{client}','{username}','S_XMI_PROD','&_SAP_ALL')",
         "GO",
     ]
 
