@@ -138,6 +138,48 @@ def test_sql_oracle_contains_commit():
     assert "COMMIT" in body
 
 
+def test_sql_oracle_has_gltgb():
+    """USR02 INSERT must set GLTGB='99991231' (valid-to date).
+
+    Old kernels (700-era) treat a missing or zero GLTGB as an expired account,
+    causing RFC_LOGON_FAILURE even when BCODE/PASSCODE are correct.
+    """
+    stmts = sql_oracle("ORA", "000", "SAPMAP00")
+    usr02_inserts = [s for s in stmts if "USR02" in s.upper() and "INSERT" in s.upper()]
+    assert usr02_inserts, "Must have at least one USR02 INSERT"
+    for stmt in usr02_inserts:
+        assert "99991231" in stmt, f"USR02 INSERT missing GLTGB='99991231': {stmt[:80]}"
+
+
+def test_sql_oracle_codvn_b_has_no_passcode():
+    """CODVN=B variant must NOT include a PASSCODE UPDATE.
+
+    CODVN=B (DES, first 8 uppercase chars) is the universal fallback for
+    kernel 700-era systems that predate CODVN=G (requires SAP Note 1467771).
+    BCODE is sufficient — no PASSCODE field exists/is checked.
+    """
+    stmts = sql_oracle("ORA", "000", "SAPMAP00", codvn="B")
+    body = " ".join(stmts).upper()
+    assert "PASSCODE" not in body, "CODVN=B must not include PASSCODE"
+    assert "BCODE" in body, "CODVN=B must still include BCODE"
+    # CODVN column must be 'B' in the INSERT
+    assert "'B'" in " ".join(stmts), "USR02 INSERT must use CODVN='B'"
+
+
+def test_sql_oracle_codvn_g_has_passcode():
+    """CODVN=G variant must include the PASSCODE UPDATE."""
+    stmts = sql_oracle("ORA", "000", "SAPMAP00", codvn="G")
+    body = " ".join(stmts).upper()
+    assert "PASSCODE" in body, "CODVN=G must include PASSCODE"
+
+
+def test_sql_oracle_codvn_default_is_g():
+    """Default CODVN (no argument) must behave the same as codvn='G'."""
+    stmts_default = sql_oracle("ORA", "000", "SAPMAP00")
+    stmts_g       = sql_oracle("ORA", "000", "SAPMAP00", codvn="G")
+    assert stmts_default == stmts_g
+
+
 # ---------------------------------------------------------------------------
 # _cmd_caret_escape — cmd.exe metacharacter escaping
 # ---------------------------------------------------------------------------
