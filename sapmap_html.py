@@ -451,6 +451,7 @@ body {
       <div class="ctx-item" data-action="client_roles">&#128202; Retrieve Client Roles</div>
       <div class="ctx-item" data-action="default_creds">&#9888; Check Default Accounts</div>
       <div class="ctx-item" data-action="check_router_info">&#128268; Check SAProuter Info Leak</div>
+      <div class="ctx-item" data-action="router_scan">&#128270; Scan Internally via SAProuter</div>
     </div>
   </div>
   <!-- Exploitation submenu -->
@@ -659,6 +660,62 @@ body {
     <div class="form-actions">
       <button class="btn btn-primary" onclick="saveSaprouter()">Save</button>
       <button class="btn" onclick="closeModal('saprouter-modal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- SAProuter Internal Scan Modal -->
+<div class="modal-overlay" id="router-scan-modal">
+  <div class="modal">
+    <h3>&#128270; Scan Internally via SAProuter</h3>
+    <div id="router-scan-info" style="font-size:12px;color:#8b949e;margin-bottom:12px"></div>
+    <div class="form-row">
+      <label>Target IP Range</label>
+      <input type="text" id="router-scan-targets" placeholder="e.g. 192.168.2.0/24 or 192.168.2.1,192.168.2.2" style="width:100%">
+      <span style="font-size:10px;color:#484f58;margin-top:2px;display:block">
+        CIDR, single IP, or comma-separated list.
+        Leave empty to use IPs from the Router Info Leak.
+      </span>
+    </div>
+    <div id="router-scan-autotargets-row" style="display:none" class="form-row">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+        <input type="checkbox" id="router-scan-auto" checked style="width:auto">
+        Also include IPs from Router Info Leak
+        <span id="router-scan-auto-count" style="color:#3fb950;font-size:11px"></span>
+      </label>
+    </div>
+    <div style="display:flex;gap:12px">
+      <div class="form-row" style="flex:1">
+        <label>Instance range</label>
+        <div style="display:flex;align-items:center;gap:6px">
+          <input type="number" id="router-scan-inst-from" value="0" min="0" max="99" style="width:52px">
+          <span style="color:#484f58">–</span>
+          <input type="number" id="router-scan-inst-to" value="10" min="0" max="99" style="width:52px">
+        </div>
+        <span style="font-size:10px;color:#484f58;margin-top:2px;display:block">SAP instances NN to scan (e.g. 0–10 probes ports 3200–3210, 3300–3310)</span>
+      </div>
+      <div class="form-row" style="flex:1">
+        <label>Mode</label>
+        <select id="router-scan-mode" style="width:100%">
+          <option value="sap" selected>SAP (dispatcher + gateway + sapcontrol)</option>
+          <option value="full">Full (+ HANA SQL + Java)</option>
+        </select>
+      </div>
+    </div>
+    <div style="display:flex;gap:12px">
+      <div class="form-row" style="flex:1">
+        <label>Concurrency</label>
+        <input type="number" id="router-scan-concurrency" value="10" min="1" max="50" style="width:60px">
+        <span style="font-size:10px;color:#484f58;margin-top:2px;display:block">Simultaneous probes per host. Keep ≤10 to avoid flooding the SAProuter.</span>
+      </div>
+      <div class="form-row" style="flex:1">
+        <label>Probe timeout (s)</label>
+        <input type="number" id="router-scan-timeout" value="5" min="1" max="30" style="width:60px">
+      </div>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-primary" onclick="startRouterScan()">&#128270; Start Scan</button>
+      <button class="btn" onclick="closeModal('router-scan-modal')">Cancel</button>
     </div>
   </div>
 </div>
@@ -1575,6 +1632,7 @@ function showCtxMenu(e, sid) {
     'enum_clients':     true,                       // always (uses DIAG, no creds needed)
     'default_creds':    true,                       // always (uses DIAG, no creds needed)
     'check_router_info': true,                     // always (direct TCP, no creds)
+    'router_scan':      true,                       // always (probes via SAProuter, no creds)
     'set_saprouter':    true,                       // always available
     'delete_system':    true,                       // always available
   };
@@ -1714,6 +1772,7 @@ async function ctxAction(action) {
     case 'set_os_type': showOsTypeModal(sid); break;
     case 'check_router_info':
       await api('POST', `node/${sid}/check_router_info`); break;
+    case 'router_scan': showRouterScanModal(sid); break;
     case 'enum_clients':
       await api('POST', `node/${sid}/enum_clients`); break;
     case 'default_creds':
@@ -1886,12 +1945,14 @@ function showDetails(sid) {
     ${(() => {
       const ri = n.saprouter_info || {};
       if (!ri.vulnerable) return '';
+      const sid = n.sid;
       return '<div class="detail-section"><h4 style="color:#f85149">&#128268; SAProuter Info Leak (Vulnerable!)</h4>' +
         '<div class="detail-row"><span class="detail-key">Working Dir</span><span class="detail-val">' + escHtml(ri.working_dir || '?') + '</span></div>' +
         '<div class="detail-row"><span class="detail-key">Routtab</span><span class="detail-val">' + escHtml(ri.routtab || '?') + '</span></div>' +
         '<div class="detail-row"><span class="detail-key">Clients</span><span class="detail-val">' + (ri.total_clients || 0) + '</span></div>' +
         (ri.clients || []).map(c => '<div class="detail-row" style="font-size:11px"><span class="detail-key" style="color:#8b949e">→</span><span class="detail-val">' + escHtml(c.source || '?') + (c.ip ? ' (' + escHtml(c.ip) + ')' : '') + '</span></div>').join('') +
         (ri.raw_info || []).map(l => '<div style="font-size:10px;color:#484f58;margin-left:12px">' + escHtml(l) + '</div>').join('') +
+        '<div style="margin-top:8px"><button class="btn btn-primary" style="font-size:11px;padding:3px 10px" onclick="selectedNodeSid=\'' + escHtml(sid) + '\';showRouterScanModal(\'' + escHtml(sid) + '\')">&#128270; Scan Internally via this SAProuter</button></div>' +
         '</div>';
     })()}
     <div class="detail-section">
@@ -2119,6 +2180,67 @@ function showSaprouterModal(sid) {
   document.getElementById('saprouter-input').value = (n && n.saprouter) || '';
   document.getElementById('saprouter-modal').classList.add('visible');
   document.getElementById('saprouter-input').focus();
+}
+
+function showRouterScanModal(sid) {
+  const n = (mapState.nodes || {})[sid];
+  const ri = (n && n.saprouter_info) || {};
+  const routerIp = (n && n.ip) || sid;
+
+  // Info line
+  let infoText = sid + ' (' + routerIp + ')';
+  if (n && n.saprouter) infoText += '  •  routing via: ' + n.saprouter;
+  document.getElementById('router-scan-info').textContent = infoText;
+
+  // Auto-targets from router info
+  const autoRow = document.getElementById('router-scan-autotargets-row');
+  const autoCount = document.getElementById('router-scan-auto-count');
+  if (ri.vulnerable && ((ri.clients && ri.clients.length) || (ri.raw_info && ri.raw_info.length))) {
+    autoRow.style.display = '';
+    const cnt = (ri.clients || []).length;
+    autoCount.textContent = cnt ? '(' + cnt + ' client IP(s) available)' : '';
+  } else {
+    autoRow.style.display = 'none';
+  }
+
+  // Clear manual target field
+  document.getElementById('router-scan-targets').value = '';
+
+  document.getElementById('router-scan-modal').classList.add('visible');
+  document.getElementById('router-scan-targets').focus();
+}
+
+async function startRouterScan() {
+  const sid = selectedNodeSid;
+  const targets  = document.getElementById('router-scan-targets').value.trim();
+  const auto     = document.getElementById('router-scan-auto').checked;
+  const instFrom = parseInt(document.getElementById('router-scan-inst-from').value) || 0;
+  const instTo   = parseInt(document.getElementById('router-scan-inst-to').value) || 10;
+  const mode     = document.getElementById('router-scan-mode').value;
+  const conc     = parseInt(document.getElementById('router-scan-concurrency').value) || 10;
+  const tout     = parseFloat(document.getElementById('router-scan-timeout').value) || 5;
+
+  if (!targets && !auto) {
+    alert('Please enter a target range or enable auto-fill from router info.');
+    return;
+  }
+
+  closeModal('router-scan-modal');
+  const r = await api('POST', `node/${sid}/router_scan`, {
+    targets:      targets,
+    auto_targets: auto,
+    inst_from:    instFrom,
+    inst_to:      instTo,
+    mode:         mode,
+    concurrency:  conc,
+    timeout:      tout,
+  });
+  if (r && r.error) {
+    alert('Router scan failed to start: ' + r.error);
+  } else if (r && r.status === 'started') {
+    console.log('Router scan started:', r);
+  }
+  startPolling();
 }
 async function saveSaprouter() {
   const val = document.getElementById('saprouter-input').value.trim();

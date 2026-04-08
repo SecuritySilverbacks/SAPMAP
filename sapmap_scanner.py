@@ -1074,12 +1074,17 @@ def enumerate_system_clients(host: str, disp_port: int, timeout: float = 5,
 # ---------------------------------------------------------------------------
 
 def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
-                                verbose: bool = False) -> list:
+                                verbose: bool = False,
+                                saprouter: str = "") -> list:
     """Build one or more SAPNodes from fast scan results + system info enrichment.
 
     Queries each discovered instance's gateway individually so that multiple SAP
     systems sharing the same IP address (different SIDs on different instance
     numbers) are detected as separate nodes rather than being collapsed into one.
+
+    Args:
+        saprouter: Optional SAProuter route prefix.  When set, all enrichment
+                   (RFC_SYSTEM_INFO, client enum) is performed through the tunnel.
     """
     from collections import defaultdict
 
@@ -1105,7 +1110,8 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
 
         # Try gateway port for this instance
         if gw_port:
-            sys_info = enrich_system_info(host, gw_port, timeout=timeout, verbose=verbose)
+            sys_info = enrich_system_info(host, gw_port, timeout=timeout,
+                                          verbose=verbose, saprouter=saprouter)
             if sys_info.get("sid"):
                 instance_sid_map[inst_nr] = sys_info["sid"]
                 instance_sysinfo[inst_nr] = sys_info
@@ -1116,7 +1122,8 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
             if info["service"] == "dispatcher" and info["instance_nr"] == inst_nr:
                 derived_gw = port + 100  # 32XX -> 33XX
                 print(f"[*] {host}: No gateway for instance {inst_nr}, trying dispatcher+100 = {derived_gw}")
-                sys_info = enrich_system_info(host, derived_gw, timeout=timeout, verbose=verbose)
+                sys_info = enrich_system_info(host, derived_gw, timeout=timeout,
+                                              verbose=verbose, saprouter=saprouter)
                 if sys_info.get("sid"):
                     instance_sid_map[inst_nr] = sys_info["sid"]
                     instance_sysinfo[inst_nr] = sys_info
@@ -1219,7 +1226,8 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
             if (info["service"] == "dispatcher"
                     and info["instance_nr"] in inst_nrs_for_sid):
                 client_list = enumerate_system_clients(host, port, timeout=timeout,
-                                                       verbose=verbose)
+                                                       verbose=verbose,
+                                                       saprouter=saprouter)
                 if client_list:
                     clients = [{"nr": c, "category": ""} for c in client_list]
                     break
@@ -1236,6 +1244,10 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
             sap_release=sys_info.get("sap_release", ""),
             clients=clients,
         )
+        # Attach saprouter prefix so all subsequent operations (exploit, RFC,
+        # secstore, SXPG) automatically route through the tunnel.
+        if saprouter:
+            node.saprouter = saprouter
         nodes.append(node)
 
     return nodes
@@ -1738,3 +1750,362 @@ def deep_scan_single(node: SAPNode, timeout: float = DEFAULT_TIMEOUT,
         traceback.print_exc()
 
     return node
+
+
+# ---------------------------------------------------------------------------
+# SAProuter internal network scanning
+# ---------------------------------------------------------------------------
+
+def extract_targets_from_router_info(router_info: dict) -> list:
+    """Extract internal IP addresses from a saprouter_info_request() result.
+
+    The SAProuter info leak (ROUTER_ADM) exposes connected clients and the
+    routing table, both of which contain internal host addresses.  This
+    function parses both to produce a deduplicated list of candidate scan
+    targets for scan_network_via_saprouter().
+
+    Args:
+        router_info: dict returned by sap_router_info.saprouter_info_request()
+
+    Returns:
+        Sorted list of unique IP address strings.
+    """
+    import ipaddress as _ipa
+    import re as _re
+
+    ips = set()
+
+    # 1. Connected clients list — each entry has a "host" field
+    for client in router_info.get("clients", []):
+        addr = (client.get("host") or client.get("ip") or "").strip()
+        if addr:
+            try:
+                _ipa.ip_address(addr)
+                ips.add(addr)
+            except ValueError:
+                pass  # hostname, not IP — skip (use remote resolution instead)
+
+    # 2. Raw info lines — look for /H/<ip>/ patterns from the routing table
+    _h_re = _re.compile(r"/[Hh]/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/")
+    for line in router_info.get("raw_info", []):
+        for match in _h_re.finditer(line):
+            addr = match.group(1)
+            try:
+                _ipa.ip_address(addr)
+                ips.add(addr)
+            except ValueError:
+                pass
+
+    return sorted(ips, key=lambda ip: tuple(int(x) for x in ip.split(".")))
+
+
+def _sap_ports_for_instance_range(
+        instance_range: tuple = (0, 10),
+        include_hana: bool = False,
+        include_java: bool = False,
+        include_msgserver: bool = True,
+) -> list:
+    """Build the list of SAP ports to probe per host when scanning via SAProuter.
+
+    Returns list of (port, service_name, instance_str) tuples.
+    The instance range is intentionally smaller than the direct scan default
+    (0-99) because each probe requires a round-trip to the SAProuter.
+
+    Args:
+        instance_range:   (start, end) instance numbers inclusive
+        include_hana:     Also probe HANA SQL ports (3NN13 / 3NN15)
+        include_java:     Also probe JAVA dispatcher (5NN00) and P4 (5NN04)
+        include_msgserver: Also probe Message Server port (36NN)
+    """
+    inst_start, inst_end = instance_range
+    ports = []
+    for inst_nr in range(inst_start, inst_end + 1):
+        inst_str = f"{inst_nr:02d}"
+        ports.append((3200 + inst_nr, "dispatcher", inst_str))
+        ports.append((3300 + inst_nr, "gateway",    inst_str))
+        if include_msgserver:
+            ports.append((3600 + inst_nr, "msgserver", inst_str))
+        ports.append((50013 + inst_nr * 100, "sapcontrol", inst_str))
+        if include_hana:
+            ports.append((30000 + inst_nr * 100 + 13, "hana_sql", inst_str))
+            ports.append((30000 + inst_nr * 100 + 15, "hana_sql", inst_str))
+        if include_java:
+            ports.append((50000 + inst_nr * 100,      "java_http", inst_str))
+            ports.append((50000 + inst_nr * 100 + 4,  "java_p4",   inst_str))
+
+    # Fixed ports (not instance-specific)
+    ports.append((1128,  "saphost_http",  "XX"))
+    ports.append((1129,  "saphost_https", "XX"))
+    ports.append((3299,  "saprouter",     "99"))  # detect chained routers
+
+    return ports
+
+
+def scan_host_via_saprouter(
+        saprouter_prefix: str,
+        target_host: str,
+        ports: list,
+        timeout: float = 5.0,
+        concurrency: int = 10,
+        cancel_event: threading.Event = None,
+) -> dict:
+    """Scan one internal host through a SAProuter.
+
+    For each (port, service, instance_str) in *ports*, sends a single
+    NI_ROUTE probe and classifies the response as open / closed /
+    acl_denied / filtered / unknown_host.
+
+    Only open ports are used for node construction.  acl_denied ports are
+    retained separately so the GUI can display the SAProuter ACL map —
+    a denied response proves the host exists even when nothing is open.
+
+    Args:
+        saprouter_prefix: Route prefix, e.g. "/H/1.2.3.4/S/3299/W/pass"
+        target_host:      Internal IP or hostname to scan
+        ports:            List of (port, service_name, instance_str) tuples
+        timeout:          Per-probe socket timeout
+        concurrency:      Max simultaneous probes (keep ≤10 to avoid flooding
+                          the shared SAProuter)
+        cancel_event:     Optional cancellation signal
+
+    Returns dict matching fast_scan_host() output, plus:
+        acl_denied_ports: list of ints — ports blocked by SAProuter ACL
+        probe_counts:     dict with open/closed/acl_denied/filtered counts
+    """
+    from sap_saprouter import probe_port_via_saprouter
+    from sap_saprouter import (PROBE_OPEN, PROBE_CLOSED,
+                               PROBE_ACL_DENIED, PROBE_FILTERED,
+                               PROBE_UNKNOWN_HOST)
+
+    result = {
+        "host": target_host,
+        "open_ports": {},
+        "acl_denied_ports": [],
+        "has_sap": False,
+        "probe_counts": {PROBE_OPEN: 0, PROBE_CLOSED: 0,
+                         PROBE_ACL_DENIED: 0, PROBE_FILTERED: 0,
+                         PROBE_UNKNOWN_HOST: 0, "error": 0},
+    }
+
+    _cancelled = lambda: cancel_event and cancel_event.is_set()
+
+    def _probe(args):
+        port, service, inst_str = args
+        if _cancelled():
+            return None
+        r = probe_port_via_saprouter(saprouter_prefix, target_host, port, timeout)
+        return (port, service, inst_str, r["status"], r.get("message", ""))
+
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        futures = [executor.submit(_probe, p) for p in ports]
+        for f in as_completed(futures):
+            if _cancelled():
+                break
+            res = f.result()
+            if res is None:
+                continue
+            port, service, inst_str, status, msg = res
+            result["probe_counts"][status] = result["probe_counts"].get(status, 0) + 1
+
+            if status == PROBE_OPEN:
+                result["open_ports"][port] = {"service": service,
+                                              "instance_nr": inst_str}
+            elif status == PROBE_ACL_DENIED:
+                result["acl_denied_ports"].append(port)
+
+    result["has_sap"] = bool(result["open_ports"])
+    return result
+
+
+def scan_network_via_saprouter(
+        saprouter_prefix: str,
+        targets: list,
+        instance_range: tuple = (0, 10),
+        timeout: float = 5.0,
+        concurrency: int = 10,
+        mode: str = "sap",
+        cancel_event: threading.Event = None,
+        progress_callback=None,
+        node_callback=None,
+        verbose: bool = False,
+) -> list:
+    """Scan an internal network through a SAProuter and build SAPNode objects.
+
+    This is the SAProuter equivalent of discover_systems().  It probes
+    internal hosts via probe_port_via_saprouter() — without a live-host
+    sweep (impossible through a router) — then enriches discovered SAP
+    systems with RFC_SYSTEM_INFO and client enumeration, all routed
+    through the same SAProuter tunnel.
+
+    Args:
+        saprouter_prefix: Route prefix up to (not including) the target,
+                          e.g. "/H/10.0.0.1/S/3299/W/secret"
+        targets:          List of internal IP strings (use parse_targets() or
+                          extract_targets_from_router_info() to build this)
+        instance_range:   (start, end) SAP instance numbers to probe
+        timeout:          Per-probe socket timeout in seconds
+        concurrency:      Simultaneous probes per host (≤10 recommended)
+        mode:             "sap"  — dispatcher + gateway + msgserver + sapcontrol
+                          "full" — also HANA SQL and JAVA ports
+        cancel_event:     Cancellation signal
+        progress_callback: callable(done, total) for progress updates
+        node_callback:    callable(SAPNode) invoked as each node is discovered
+        verbose:          Extra logging
+
+    Returns:
+        List of SAPNode objects with node.saprouter set so all subsequent
+        operations (RFC, exploitation, SecStore) route through the tunnel.
+    """
+    include_hana = (mode == "full")
+    include_java = (mode == "full")
+    ports = _sap_ports_for_instance_range(
+        instance_range, include_hana=include_hana, include_java=include_java
+    )
+
+    total = len(targets)
+    print(f"[*] ========================================")
+    print(f"[*]  SAProuter Internal Scan")
+    print(f"[*]  Router: {saprouter_prefix}")
+    print(f"[*]  {total} target(s), {len(ports)} ports/host, "
+          f"instances {instance_range[0]:02d}-{instance_range[1]:02d}, "
+          f"mode={mode}")
+    print(f"[*] ========================================")
+
+    nodes = []
+    scan_results_with_sap = []
+    total_start = time.time()
+
+    for idx, host in enumerate(targets):
+        if cancel_event and cancel_event.is_set():
+            print("[!] Router scan cancelled")
+            break
+
+        if progress_callback:
+            progress_callback(idx, total)
+
+        print(f"[*] {host}: Probing {len(ports)} ports via SAProuter "
+              f"({idx + 1}/{total}) ...")
+        t0 = time.time()
+        host_result = scan_host_via_saprouter(
+            saprouter_prefix, host, ports, timeout,
+            concurrency, cancel_event,
+        )
+        elapsed = time.time() - t0
+        counts = host_result["probe_counts"]
+
+        if host_result["has_sap"]:
+            n_open = len(host_result["open_ports"])
+            n_acl  = len(host_result["acl_denied_ports"])
+            print(f"[+] {host}: {n_open} open SAP port(s), "
+                  f"{n_acl} ACL-denied"
+                  f"{', ' + str(counts.get('filtered', 0)) + ' filtered' if counts.get('filtered') else ''}"
+                  f"  [{elapsed:.1f}s]")
+            scan_results_with_sap.append(host_result)
+
+        elif host_result["acl_denied_ports"]:
+            # ACL denied responses prove the SAProuter knows this host —
+            # report it even though no ports are open.
+            n_acl = len(host_result["acl_denied_ports"])
+            print(f"[~] {host}: No open ports but {n_acl} port(s) ACL-denied "
+                  f"(host known to SAProuter)  [{elapsed:.1f}s]")
+            scan_results_with_sap.append(host_result)
+
+        else:
+            open_c    = counts.get(PROBE_OPEN if False else "open", 0)
+            filtered_c = counts.get("filtered", 0)
+            if verbose:
+                print(f"[*] {host}: No SAP found — "
+                      f"filtered={filtered_c}  [{elapsed:.1f}s]")
+
+    if progress_callback:
+        progress_callback(total, total)
+
+    if not scan_results_with_sap:
+        print(f"[*] No SAP systems found via SAProuter scan")
+        return nodes
+
+    # Enrich each discovered host with RFC_SYSTEM_INFO + client enumeration,
+    # all routed through the same SAProuter prefix.
+    print(f"")
+    print(f"[*] === PHASE 2: Enrichment (via SAProuter) ===")
+    print(f"[*] Enriching {len(scan_results_with_sap)} host(s) with "
+          f"RFC_SYSTEM_INFO + client enum ...")
+
+    for idx, host_result in enumerate(scan_results_with_sap):
+        if cancel_event and cancel_event.is_set():
+            break
+
+        host = host_result["host"]
+        print(f"[*] {host}: --- Host {idx + 1}/{len(scan_results_with_sap)} ---")
+
+        if not host_result["open_ports"]:
+            # ACL-denied only — build minimal node so map shows the host
+            acl_ports = host_result["acl_denied_ports"]
+            node = SAPNode(
+                sid=f"ACL_{host.replace('.', '_')}",
+                system_type="SAP?",
+                ip=host,
+                hostname="",
+            )
+            node.saprouter = saprouter_prefix
+            # Store ACL info as a finding
+            from sapmap_models import Finding, Severity
+            node.findings.append(Finding(
+                title="SAP ports ACL-denied by SAProuter",
+                description=(
+                    f"SAProuter blocks access to {len(acl_ports)} SAP port(s) "
+                    f"on this host: {', '.join(str(p) for p in sorted(acl_ports)[:20])}. "
+                    f"The host is known to the SAProuter routing table."
+                ),
+                severity=Severity.INFO,
+                category="Network",
+            ))
+            nodes.append(node)
+            if node_callback:
+                node_callback(node)
+            continue
+
+        host_nodes = _build_nodes_from_fast_scan(
+            host_result, timeout=timeout, verbose=verbose,
+            saprouter=saprouter_prefix,
+        )
+
+        # Attach ACL-denied port info as findings on each node
+        acl_ports = host_result.get("acl_denied_ports", [])
+        for node in host_nodes:
+            if acl_ports:
+                from sapmap_models import Finding, Severity
+                node.findings.append(Finding(
+                    title="SAProuter ACL partially blocks this host",
+                    description=(
+                        f"SAProuter ACL denies access to {len(acl_ports)} "
+                        f"port(s): {', '.join(str(p) for p in sorted(acl_ports)[:20])}. "
+                        f"Other ports are accessible."
+                    ),
+                    severity=Severity.INFO,
+                    category="Network",
+                ))
+
+        nodes.extend(host_nodes)
+        for node in host_nodes:
+            if node_callback:
+                node_callback(node)
+
+        for node in host_nodes:
+            inst_list = ", ".join(node.instance_nrs()) or "?"
+            print(f"[+] {node.sid}: => {node.system_type} | "
+                  f"Host: {node.hostname or '?'} | "
+                  f"OS: {node.os_type or '?'} | "
+                  f"Kernel: {node.kernel or '?'} | "
+                  f"Instances: [{inst_list}] | "
+                  f"Clients: {len(node.clients)} | "
+                  f"SAProuter: ✓")
+        print()
+
+    elapsed = time.time() - total_start
+    print(f"[*] ========================================")
+    print(f"[+]  SAProuter scan complete in {elapsed:.1f}s")
+    print(f"[+]  SAP systems found: {len(nodes)}")
+    print(f"[*] ========================================")
+
+    return nodes

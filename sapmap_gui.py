@@ -884,6 +884,118 @@ def create_app(api: SAPMAPApi) -> Bottle:
             print(f"[*] SAProuter for {sid} removed")
         return json.dumps({"status": "ok"})
 
+    @app.route("/api/node/<sid>/router_scan", method="POST")
+    def node_router_scan(sid):
+        """Scan internal hosts through a SAProuter node.
+
+        POST body (JSON):
+            targets      str   IP range/list to scan, e.g. "192.168.2.0/24"
+                               Omit or set to "" to auto-fill from router info.
+            auto_targets bool  If true, extract targets from node.saprouter_info
+                               (the ROUTER_ADM info leak result) and merge with
+                               any manually supplied targets.
+            inst_from    int   Start of instance number range (default 0)
+            inst_to      int   End of instance number range (default 10)
+            mode         str   "sap" (default) or "full" (adds HANA + JAVA ports)
+            concurrency  int   Simultaneous probes per host (default 10)
+            timeout      float Per-probe socket timeout in seconds (default 5)
+        """
+        response.content_type = "application/json"
+        data = request.json or {}
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        # Build the SAProuter prefix from the node's IP (if it IS the router)
+        # or from node.saprouter (if it routes THROUGH a router to this node).
+        # A SAProuter node has system_type="SAPROUTER" or port 3299 open.
+        router_port = 3299
+        for inst in node.instances:
+            for port, svc in inst.ports.items():
+                if svc == "saprouter" or port == 3299:
+                    router_port = port
+                    break
+
+        router_ip = node.ip or node.hostname
+        if node.saprouter:
+            # This node is itself reached via a SAProuter — chain through it
+            saprouter_prefix = node.saprouter
+        else:
+            # This node IS the SAProuter
+            saprouter_prefix = f"/H/{router_ip}/S/{router_port}"
+
+        # Collect targets
+        target_ips = []
+        targets_str = (data.get("targets") or "").strip()
+        if targets_str:
+            target_ips = sapmap_scanner.parse_targets(targets_str)
+
+        auto_targets = data.get("auto_targets", not bool(targets_str))
+        if auto_targets and node.saprouter_info:
+            from sapmap_scanner import extract_targets_from_router_info
+            router_targets = extract_targets_from_router_info(node.saprouter_info)
+            if router_targets:
+                print(f"[*] {sid}: Auto-extracted {len(router_targets)} target(s) "
+                      f"from router info: {router_targets[:5]}"
+                      f"{'...' if len(router_targets) > 5 else ''}")
+                # Merge, deduplicate, preserve order
+                existing = set(target_ips)
+                for t in router_targets:
+                    if t not in existing:
+                        target_ips.append(t)
+                        existing.add(t)
+
+        if not target_ips:
+            return json.dumps({"error": "No targets specified and no router info available. "
+                                        "Supply a target range or run Router Info first."})
+
+        inst_from   = int(data.get("inst_from", 0))
+        inst_to     = int(data.get("inst_to", 10))
+        mode        = data.get("mode", "sap")
+        concurrency = int(data.get("concurrency", 10))
+        timeout     = float(data.get("timeout", 5.0))
+
+        print(f"[*] {sid}: Starting SAProuter internal scan")
+        print(f"[*]   Router prefix: {saprouter_prefix}")
+        print(f"[*]   Targets: {len(target_ips)}, instances {inst_from:02d}-{inst_to:02d}, "
+              f"mode={mode}")
+
+        def _run():
+            _task_start(f"{sid}:router_scan", f"Router Scan via {sid}")
+            try:
+                nodes = sapmap_scanner.scan_network_via_saprouter(
+                    saprouter_prefix=saprouter_prefix,
+                    targets=target_ips,
+                    instance_range=(inst_from, inst_to),
+                    timeout=timeout,
+                    concurrency=concurrency,
+                    mode=mode,
+                    cancel_event=api.cancel_event,
+                    node_callback=lambda n: api.state.add_node(n),
+                    verbose=True,
+                )
+                # Add any nodes not yet added via callback
+                for n in nodes:
+                    if n.sid not in api.state.nodes:
+                        api.state.add_node(n)
+                print(f"[+] {sid}: Router scan complete — "
+                      f"{len(nodes)} system(s) discovered")
+            except Exception as e:
+                print(f"[-] {sid}: Router scan error: {e}")
+                import traceback
+                traceback.print_exc()
+            finally:
+                _task_end(f"{sid}:router_scan")
+
+        _bg(f"{sid}:router_scan", f"Router Scan via {sid}", _run)
+        return json.dumps({
+            "status": "started",
+            "saprouter_prefix": saprouter_prefix,
+            "targets": len(target_ips),
+            "instances": f"{inst_from:02d}-{inst_to:02d}",
+            "mode": mode,
+        })
+
     @app.route("/api/node/<sid>/rfc_system_info", method="POST")
     def node_rfc_system_info(sid):
         response.content_type = "application/json"

@@ -240,3 +240,165 @@ def build_route_for_port(saprouter_prefix: str, target_host: str,
     """
     prefix = saprouter_prefix.rstrip("/")
     return f"{prefix}/H/{target_host}/S/{target_port}"
+
+
+# ---------------------------------------------------------------------------
+# Port probing via SAProuter (lightweight — no full tunnel needed)
+# ---------------------------------------------------------------------------
+
+# Status codes returned by probe_port_via_saprouter()
+PROBE_OPEN         = "open"          # NI_PONG — SAProuter reached target + port open
+PROBE_CLOSED       = "closed"        # NI_RTERR: connection refused — port closed (host reachable)
+PROBE_ACL_DENIED   = "acl_denied"    # NI_RTERR: connection denied — SAProuter ACL blocks this dest
+PROBE_FILTERED     = "filtered"      # NI_RTERR: timed out / not reached — firewall or dead host
+PROBE_UNKNOWN_HOST = "unknown_host"  # NI_RTERR: unknown host / GetHostByName failed
+PROBE_ERROR        = "error"         # connection to SAProuter itself failed
+
+# NI_RTERR keyword → status mapping (checked in order; first match wins)
+_RTERR_STATUS_MAP = [
+    ("refused",     PROBE_CLOSED),
+    ("denied",      PROBE_ACL_DENIED),
+    ("timed out",   PROBE_FILTERED),
+    ("not reached", PROBE_FILTERED),
+    # SAP spells "reachable" as "reacheable" in some kernel versions
+    ("reacheable",  PROBE_FILTERED),
+    ("reachable",   PROBE_FILTERED),
+    ("unknown",     PROBE_UNKNOWN_HOST),
+    ("not found",   PROBE_UNKNOWN_HOST),
+    ("gethostbyname", PROBE_UNKNOWN_HOST),
+    ("invalid",     PROBE_FILTERED),
+]
+
+
+def probe_port_via_saprouter(saprouter_prefix: str, target_host: str,
+                             target_port: int,
+                             timeout: float = 5.0) -> dict:
+    """Probe whether a port is accessible through a SAProuter.
+
+    Sends one NI_ROUTE packet and reads the response — cheaper than
+    connect_through_saprouter() because no full tunnel is established.
+    The SAProuter's NI_RTERR error text reveals whether the port is
+    open, closed, blocked by ACL, or the host is unreachable.
+
+    This is the core primitive for internal network scanning through a
+    SAProuter: the ACL distinction (acl_denied vs closed vs filtered)
+    reveals the SAProuter routing policy even for unreachable targets.
+
+    Args:
+        saprouter_prefix: Route prefix up to (but not including) the target,
+                          e.g. "/H/10.0.0.1/S/3299/W/secret"
+        target_host:      Internal IP or hostname to probe
+        target_port:      TCP port to probe
+        timeout:          Socket timeout in seconds
+
+    Returns dict:
+        status:   one of PROBE_OPEN / PROBE_CLOSED / PROBE_ACL_DENIED /
+                  PROBE_FILTERED / PROBE_UNKNOWN_HOST / PROBE_ERROR
+        message:  human-readable SAProuter error text (empty for OPEN)
+    """
+    result = {"status": PROBE_ERROR, "message": ""}
+
+    try:
+        route_str = build_route_for_port(saprouter_prefix, target_host, target_port)
+        hops = parse_route_string(route_str)
+    except ValueError as e:
+        result["message"] = str(e)
+        return result
+
+    router_host = hops[0]["host"]
+    router_port_str = hops[0]["port"]
+    try:
+        router_port = int(router_port_str)
+    except ValueError:
+        result["message"] = f"Invalid router port: {router_port_str!r}"
+        return result
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        sock.connect((router_host, router_port))
+    except Exception as e:
+        sock.close()
+        result["message"] = f"Cannot connect to SAProuter {router_host}:{router_port}: {e}"
+        return result
+
+    # Send NI_ROUTE packet (talk_mode=0 = NI_MSG_IO; same as connect_through_saprouter)
+    ni_pkt = build_ni_route_packet(hops, talk_mode=0)
+    try:
+        sock.sendall(ni_pkt)
+    except Exception as e:
+        sock.close()
+        result["message"] = f"Send failed: {e}"
+        return result
+
+    # Read NI response: 4-byte length header + payload
+    try:
+        hdr = b""
+        while len(hdr) < 4:
+            chunk = sock.recv(4 - len(hdr))
+            if not chunk:
+                # Connection closed without response — treat as filtered
+                sock.close()
+                result["status"] = PROBE_FILTERED
+                result["message"] = "SAProuter closed connection without response"
+                return result
+            hdr += chunk
+
+        resp_len = struct.unpack("!I", hdr)[0]
+
+        if resp_len == 0:
+            # Empty NI frame = NI_PONG equivalent → port open
+            sock.close()
+            result["status"] = PROBE_OPEN
+            return result
+
+        # Read payload (cap at 4 KB — error messages are always short)
+        resp = b""
+        max_read = min(resp_len, 4096)
+        while len(resp) < max_read:
+            chunk = sock.recv(max_read - len(resp))
+            if not chunk:
+                break
+            resp += chunk
+
+    except socket.timeout:
+        sock.close()
+        result["status"] = PROBE_FILTERED
+        result["message"] = "Timeout waiting for SAProuter response"
+        return result
+    except Exception as e:
+        sock.close()
+        result["message"] = str(e)
+        return result
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+    # NI_PONG → open
+    if resp.startswith(b"NI_PONG"):
+        result["status"] = PROBE_OPEN
+        return result
+
+    # NI_RTERR → classify by error text
+    if b"NI_RTERR" in resp or b"*ERR*" in resp:
+        try:
+            err_text = resp.decode("ascii", errors="replace").lower()
+        except Exception:
+            err_text = ""
+        result["message"] = resp.decode("ascii", errors="replace").strip()
+
+        for keyword, status in _RTERR_STATUS_MAP:
+            if keyword in err_text:
+                result["status"] = status
+                return result
+
+        # Unknown NI_RTERR — treat as filtered
+        result["status"] = PROBE_FILTERED
+        return result
+
+    # Unexpected response
+    result["status"] = PROBE_FILTERED
+    result["message"] = f"Unexpected response ({resp_len} bytes): {resp[:40].hex()}"
+    return result
