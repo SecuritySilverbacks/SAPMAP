@@ -11,11 +11,38 @@ SAProuter should reject admin requests from external hosts.
 
 Reference: https://github.com/rapid7/metasploit-framework/blob/master/
            modules/auxiliary/scanner/sap/sap_router_info_request.rb
+Reference: pysap SAPRouter.py — SAPRouterInfoClient (137 bytes, fixed-width)
 """
 
 import re
 import socket
 import struct
+
+
+# ---------------------------------------------------------------------------
+# Binary entry layout (pysap SAPRouterInfoClient, exactly 137 bytes each)
+# ---------------------------------------------------------------------------
+#   Offset  Size  Field
+#   0       4     id             — big-endian int (IntField in pysap)
+#   4       1     flags          — 8 bit-flags (flag_routed, flag_connected, …)
+#   5       8     connected_on   — LongField timestamp (unused here)
+#   13      45    address        — StrNullFixedLenField: source IP/hostname, null-padded
+#   58      45    partner        — StrNullFixedLenField: destination IP/hostname, null-padded
+#   103     27    service        — StrNullFixedLenField: destination port/service, null-padded
+#   130     7     XXX3           — padding
+# ---------------------------------------------------------------------------
+_ENTRY_SIZE    = 137
+_OFF_ID        = 0
+_OFF_FLAGS     = 4
+_OFF_CONN_ON   = 5   # 8 bytes, skipped
+_OFF_ADDRESS   = 13  # 45 bytes
+_OFF_PARTNER   = 58  # 45 bytes
+_OFF_SERVICE   = 103 # 27 bytes
+_OFF_PAD       = 130 # 7 bytes (end of entry)
+
+# Flag bits in byte 4 (MSB to LSB per pysap BitField order)
+_FLAG_ROUTED    = 0x01
+_FLAG_CONNECTED = 0x02
 
 
 def saprouter_info_request(host: str, port: int = 3299,
@@ -30,16 +57,16 @@ def saprouter_info_request(host: str, port: int = 3299,
     Returns dict with:
         vulnerable:    bool — True if info was returned
         clients:       list of dicts — connected client entries, each with:
-                         id:           int    connection ID (as shown by saprouter -l)
-                         source:       str    source hostname or IP
-                         ip:           str    source IP (dotted-decimal)
-                         partner:      str    destination IP/hostname, or "(no partner)"
-                         partner_ip:   str    destination IP if available, else ""
-                         service:      str    destination port, or ""
+                         id:          int    connection ID (as shown by saprouter -l)
+                         source:      str    source hostname or IP
+                         partner:     str    destination hostname/IP, or "(no partner)"
+                         partner_ip:  str    destination IP if it is an IP, else ""
+                         service:     str    destination port/service, or ""
+                         flag_routed: bool   connection is routed (not local)
         total_clients: int — total number of connected clients
         working_dir:   str — SAProuter working directory
         routtab:       str — path to routing table file
-        raw_info:      list of str — all text info lines from the response
+        raw_info:      list of str — text info lines from the response
         error:         str — error message if request failed
     """
     result = {
@@ -71,7 +98,7 @@ def saprouter_info_request(host: str, port: int = 3299,
                 if not chunk:
                     break
                 resp += chunk
-                if len(resp) > 100000:
+                if len(resp) > 200000:
                     break
         except socket.timeout:
             pass
@@ -113,43 +140,25 @@ def saprouter_info_request(host: str, port: int = 3299,
 
     # ---------------------------------------------------------------------------
     # Frame 0: binary connection table
-    #
-    # Header layout (9 bytes):
-    #   bytes 0-7: flags/padding
-    #   byte  8:   number of client entries
-    #
-    # Per-entry layout (pysap SAPRouterInfoClient / saprouter -l equivalent):
-    #   [4 bytes LE uint32] connection ID  (shown as "ID" in saprouter -l)
-    #   [4 bytes binary]    source IP      (the "CLIENT" IP address)
-    #   [null-term string]  partner        (destination address, "" if no partner)
-    #   [null-term string]  service        (destination port, "" if no partner)
-    #   [null-term string]  host           (source hostname, "" if not resolved)
-    #
-    # Note: "partner" and "host" are text strings (IP or hostname), NOT binary.
-    # "partner" is empty when there is no destination yet (connection in progress).
+    # Each entry is exactly 137 bytes (pysap SAPRouterInfoClient).
+    # The frame may have a short header before the entries; we detect the
+    # first valid entry by scanning for a 137-byte-aligned block.
     # ---------------------------------------------------------------------------
     conn_frame = frames[0]
-    if len(conn_frame) > 9:
-        num_clients_bin = conn_frame[8]
-        conn_data = conn_frame[9:]
-        result["clients"] = _parse_conn_table(conn_data, num_clients_bin)
+    result["clients"] = _parse_conn_table(conn_frame)
 
     # ---------------------------------------------------------------------------
     # Frames 1+: null-terminated text info lines
-    # Each frame carries one text string (working dir, routtab, client count, etc.)
     # ---------------------------------------------------------------------------
     for frame in frames[1:]:
         text = frame.decode("ascii", errors="replace").rstrip("\x00").strip()
         if not text:
             continue
-
-        # Strip leading non-printable bytes (some kernels prepend a byte)
+        # Strip leading non-printable bytes
         while text and (ord(text[0]) < 32 or ord(text[0]) > 126):
             text = text[1:]
-
         if not text:
             continue
-
         result["raw_info"].append(text)
 
         if text.startswith("Total no. of clients:"):
@@ -162,18 +171,7 @@ def saprouter_info_request(host: str, port: int = 3299,
         elif "Routtab" in text and ":" in text:
             result["routtab"] = text.split(":", 1)[1].strip()
 
-    # ---------------------------------------------------------------------------
-    # Text-pattern fallback: some router versions embed the connection table
-    # as formatted text (the "saprouter -l" output) inside the text frames.
-    # If the binary parser produced fewer entries than total_clients, supplement
-    # from the text frames.
-    # ---------------------------------------------------------------------------
-    if result["total_clients"] > len(result["clients"]):
-        text_clients = _parse_conn_table_text(result["raw_info"])
-        if len(text_clients) > len(result["clients"]):
-            result["clients"] = text_clients
-
-    # Use total_clients from binary if text frame didn't give us one
+    # Use client count from binary if text frames didn't supply one
     if result["total_clients"] == 0 and result["clients"]:
         result["total_clients"] = len(result["clients"])
 
@@ -184,86 +182,85 @@ def saprouter_info_request(host: str, port: int = 3299,
 # Binary connection table parser
 # ---------------------------------------------------------------------------
 
-def _parse_conn_table(conn_data: bytes, num_clients: int) -> list:
+def _fixed_str(data: bytes, offset: int, length: int) -> str:
+    """Extract a null-padded fixed-length ASCII string from *data*."""
+    raw = data[offset:offset + length]
+    # Split at first null byte and decode
+    null_pos = raw.find(b"\x00")
+    if null_pos >= 0:
+        raw = raw[:null_pos]
+    return raw.decode("ascii", errors="replace").strip()
+
+
+def _parse_conn_table(frame: bytes) -> list:
     """Parse the binary connection table from Frame 0 of the info response.
 
-    Each entry (pysap SAPRouterInfoClient format):
-        [4 LE uint32]  connection ID
-        [4 bytes]      source IP (binary IPv4)
-        [null-term]    partner (destination address string, "" = no partner)
-        [null-term]    service (destination port string, "" = no partner)
-        [null-term]    host    (source hostname string, "" = unresolved)
+    Each entry is exactly 137 bytes (pysap SAPRouterInfoClient):
+        [4]  id             big-endian int
+        [1]  flags          bit-flags
+        [8]  connected_on   LongField timestamp (skipped)
+        [45] address        source IP/hostname (null-padded fixed string)
+        [45] partner        destination IP/hostname (null-padded fixed string)
+        [27] service        destination port/service (null-padded fixed string)
+        [7]  padding
+
+    The frame may contain a short header before the first entry.  We scan
+    forward to find the first 137-byte aligned block where byte 4 looks like
+    a valid flags byte and address looks like a printable string.
 
     Returns list of client dicts.
     """
     clients = []
-    i = 0
-    max_entries = max(num_clients, 64)  # safety cap — don't loop forever
+    frame_len = len(frame)
 
-    while i < len(conn_data) and len(clients) < max_entries:
-        # Need at least 8 bytes for ID + source IP
-        if i + 8 > len(conn_data):
+    if frame_len < _ENTRY_SIZE:
+        return clients
+
+    # Find where entries start: scan the first 32 bytes for the best offset.
+    # A valid entry has a printable non-empty address string starting at +13.
+    best_offset = None
+    for start in range(min(32, frame_len - _ENTRY_SIZE + 1)):
+        addr = _fixed_str(frame, start + _OFF_ADDRESS, 45)
+        if addr and _looks_printable(addr):
+            best_offset = start
             break
 
-        # Read connection ID (4-byte little-endian unsigned int)
-        conn_id = struct.unpack_from("<I", conn_data, i)[0]
-        i += 4
+    if best_offset is None:
+        return clients
 
-        # Sanity check: ID should be a small-ish positive integer (< 65536)
-        # If it's huge, the format might be different — stop trying
-        if conn_id > 0xFFFF:
-            break
+    # Parse all 137-byte entries starting from best_offset
+    pos = best_offset
+    while pos + _ENTRY_SIZE <= frame_len:
+        entry = frame[pos:pos + _ENTRY_SIZE]
 
-        # Read source IP (4-byte binary)
-        src_ip = ".".join(str(b) for b in conn_data[i:i + 4])
-        i += 4
+        conn_id   = struct.unpack_from(">I", entry, _OFF_ID)[0]
+        flags     = entry[_OFF_FLAGS]
+        address   = _fixed_str(entry, _OFF_ADDRESS, 45)
+        partner   = _fixed_str(entry, _OFF_PARTNER, 45)
+        service   = _fixed_str(entry, _OFF_SERVICE, 27)
 
-        # Read null-terminated partner string (destination address)
-        partner, i = _read_null_str(conn_data, i)
-        if i < 0:
-            break
+        flag_routed    = bool(flags & _FLAG_ROUTED)
+        flag_connected = bool(flags & _FLAG_CONNECTED)
 
-        # Read null-terminated service string (destination port)
-        service, i = _read_null_str(conn_data, i)
-        if i < 0:
-            break
+        # Skip obviously invalid entries (e.g. all-zero padding blocks)
+        if not address and not partner:
+            pos += _ENTRY_SIZE
+            continue
 
-        # Read null-terminated source hostname string
-        host, i = _read_null_str(conn_data, i)
-        if i < 0:
-            # Last entry — no trailing null; use what we have
-            i = len(conn_data)
-
-        # Resolve display names
-        client_display = host if host else src_ip
         partner_display = partner if partner else "(no partner)"
-
-        # Extract partner IP (the partner field IS the IP as a string in this format)
-        partner_ip = partner if _looks_like_ip(partner) else ""
+        partner_ip      = partner if _looks_like_ip(partner) else ""
 
         clients.append({
-            "id":         conn_id,
-            "source":     client_display,
-            "ip":         src_ip,
-            "partner":    partner_display,
-            "partner_ip": partner_ip,
-            "service":    service,
+            "id":          conn_id,
+            "source":      address if address else "(unknown)",
+            "partner":     partner_display,
+            "partner_ip":  partner_ip,
+            "service":     service,
+            "flag_routed": flag_routed,
         })
+        pos += _ENTRY_SIZE
 
     return clients
-
-
-def _read_null_str(data: bytes, offset: int) -> tuple:
-    """Read a null-terminated ASCII string from *data* starting at *offset*.
-
-    Returns (string, new_offset) where new_offset points past the null.
-    Returns ("", -1) if no null terminator is found within the data.
-    """
-    end = data.find(b"\x00", offset)
-    if end < 0:
-        return "", -1
-    text = data[offset:end].decode("ascii", errors="replace").strip()
-    return text, end + 1
 
 
 def _looks_like_ip(s: str) -> bool:
@@ -277,49 +274,6 @@ def _looks_like_ip(s: str) -> bool:
         return False
 
 
-# ---------------------------------------------------------------------------
-# Text-pattern fallback parser
-# ---------------------------------------------------------------------------
-
-# Matches lines from "saprouter -l" output embedded in text frames:
-#   188 localhost                     | (no partner)
-#   208 178.230.159.115         | 192.168.2.209                  3200
-_CONN_TABLE_RE = re.compile(
-    r"^\s*(\d+)\s+(\S+)\s*\|\s*(.*?)\s*(\d{2,5})?\s*$"
-)
-
-
-def _parse_conn_table_text(raw_info: list) -> list:
-    """Parse connection table entries from text-format info lines.
-
-    Some SAProuter versions (or certain kernel releases) include the
-    connection table as formatted text (identical to saprouter -l output)
-    inside the text frames.  This is a fallback to the binary parser.
-    """
-    clients = []
-    for line in raw_info:
-        m = _CONN_TABLE_RE.match(line)
-        if not m:
-            continue
-        conn_id_str, client, partner_raw, service = m.groups()
-        partner_raw = (partner_raw or "").strip()
-        service = (service or "").strip()
-
-        # Separate partner IP from trailing noise; "(no partner)" is the SAP text
-        partner_display = partner_raw if partner_raw else "(no partner)"
-        partner_ip = partner_raw if _looks_like_ip(partner_raw) else ""
-
-        try:
-            conn_id = int(conn_id_str)
-        except ValueError:
-            conn_id = 0
-
-        clients.append({
-            "id":         conn_id,
-            "source":     client,
-            "ip":         client if _looks_like_ip(client) else "",
-            "partner":    partner_display,
-            "partner_ip": partner_ip,
-            "service":    service,
-        })
-    return clients
+def _looks_printable(s: str) -> bool:
+    """Return True if *s* contains only printable ASCII characters."""
+    return bool(s) and all(32 <= ord(c) <= 126 for c in s)
