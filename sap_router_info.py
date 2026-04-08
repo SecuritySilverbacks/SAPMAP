@@ -20,25 +20,29 @@ import struct
 
 
 # ---------------------------------------------------------------------------
-# Binary entry layout (pysap SAPRouterInfoClient, exactly 137 bytes each)
+# Binary entry layout (SAProuter wire format, exactly 137 bytes each)
+# Confirmed via live capture against a real SAProuter instance.
+# Note: pysap StrNullFixedLenField(length=45) stores 46 bytes on the wire
+# (45 usable chars + mandatory null terminator byte), so partner/service
+# offsets are 1-2 bytes higher than pysap's stated field length suggests.
 # ---------------------------------------------------------------------------
 #   Offset  Size  Field
-#   0       4     id             — big-endian int (IntField in pysap)
-#   4       1     flags          — 8 bit-flags (flag_routed, flag_connected, …)
-#   5       8     connected_on   — LongField timestamp (unused here)
-#   13      45    address        — StrNullFixedLenField: source IP/hostname, null-padded
-#   58      45    partner        — StrNullFixedLenField: destination IP/hostname, null-padded
-#   103     27    service        — StrNullFixedLenField: destination port/service, null-padded
-#   130     7     XXX3           — padding
+#   0       4     id             — big-endian int
+#   4       1     flags          — bit-flags (flag_routed, flag_connected, …)
+#   5       8     connected_on   — timestamp (unused here)
+#   13      46    address        — source IP/hostname + optional DNS suffix, null-padded
+#   59      46    partner        — destination IP/hostname + optional DNS suffix, null-padded
+#   105     30    service        — destination port/service, null-padded
+#   135     2     XXX3           — padding
 # ---------------------------------------------------------------------------
 _ENTRY_SIZE    = 137
 _OFF_ID        = 0
 _OFF_FLAGS     = 4
 _OFF_CONN_ON   = 5   # 8 bytes, skipped
-_OFF_ADDRESS   = 13  # 45 bytes
-_OFF_PARTNER   = 58  # 45 bytes
-_OFF_SERVICE   = 103 # 27 bytes
-_OFF_PAD       = 130 # 7 bytes (end of entry)
+_OFF_ADDRESS   = 13  # 46 bytes
+_OFF_PARTNER   = 59  # 46 bytes  (was 58 — address occupies 46 bytes, not 45)
+_OFF_SERVICE   = 105 # 30 bytes  (was 103)
+_OFF_PAD       = 135 # 2 bytes (end of entry)
 
 # Flag bits in byte 4 (MSB to LSB per pysap BitField order)
 _FLAG_ROUTED    = 0x01
@@ -159,6 +163,9 @@ def saprouter_info_request(host: str, port: int = 3299,
             text = text[1:]
         if not text:
             continue
+        # Skip frames that are mostly binary (e.g. the stats block in Frame 1)
+        if not _looks_printable(text[:20]):
+            continue
         result["raw_info"].append(text)
 
         if text.startswith("Total no. of clients:"):
@@ -235,9 +242,9 @@ def _parse_conn_table(frame: bytes) -> list:
 
         conn_id   = struct.unpack_from(">I", entry, _OFF_ID)[0]
         flags     = entry[_OFF_FLAGS]
-        address   = _fixed_str(entry, _OFF_ADDRESS, 45)
-        partner   = _fixed_str(entry, _OFF_PARTNER, 45)
-        service   = _fixed_str(entry, _OFF_SERVICE, 27)
+        address   = _fixed_str(entry, _OFF_ADDRESS, 46)
+        partner   = _fixed_str(entry, _OFF_PARTNER, 46)
+        service   = _fixed_str(entry, _OFF_SERVICE, 30)
 
         flag_routed    = bool(flags & _FLAG_ROUTED)
         flag_connected = bool(flags & _FLAG_CONNECTED)

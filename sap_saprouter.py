@@ -126,7 +126,8 @@ def build_ni_route_packet(hops: list, talk_mode: int = 1) -> bytes:
     return struct.pack("!I", len(payload)) + payload
 
 
-def connect_through_saprouter(route_str: str, timeout: float = 10) -> socket.socket:
+def connect_through_saprouter(route_str: str, timeout: float = 10,
+                              talk_mode: int = 0) -> socket.socket:
     """Establish a TCP tunnel through SAProuter.
 
     1. Parse route string into hops
@@ -139,6 +140,8 @@ def connect_through_saprouter(route_str: str, timeout: float = 10) -> socket.soc
         route_str: Full SAProuter route string
                    (e.g., "/H/router/S/3299/W/pass/H/target/S/3200")
         timeout: Connection and response timeout in seconds
+        talk_mode: 0=NI_MSG_IO (SAP protocol with NI framing, default),
+                   1=NI_RAW_IO (pure transparent TCP — use for raw shells)
 
     Returns:
         Connected socket (transparent tunnel to target)
@@ -165,8 +168,8 @@ def connect_through_saprouter(route_str: str, timeout: float = 10) -> socket.soc
             f"Cannot connect to SAProuter {router_host}:{router_port}: {e}"
         ) from e
 
-    # Send NI_ROUTE packet (talk_mode=0 for NI_MSG_IO)
-    ni_route = build_ni_route_packet(hops, talk_mode=0)
+    # Send NI_ROUTE packet
+    ni_route = build_ni_route_packet(hops, talk_mode=talk_mode)
     try:
         sock.sendall(ni_route)
     except Exception as e:
