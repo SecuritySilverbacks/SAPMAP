@@ -2183,7 +2183,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 print(f"    Routtab: {result['routtab']}")
                 print(f"    Connected clients: {result['total_clients']}")
                 for c in result['clients']:
-                    print(f"      {c['source']} → {c['destination']}")
+                    svc = f":{c['service']}" if c.get('service') else ""
+                    print(f"      [{c.get('id','')}] {c['source']} → "
+                          f"{c.get('partner', '(no partner)')}{svc}")
                 node.has_critical_finding = True
             else:
                 print(f"[*] {sid}: SAProuter info leak not available "

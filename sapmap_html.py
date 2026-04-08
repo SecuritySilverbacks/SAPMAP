@@ -1946,12 +1946,42 @@ function showDetails(sid) {
       const ri = n.saprouter_info || {};
       if (!ri.vulnerable) return '';
       const sid = n.sid;
-      return '<div class="detail-section"><h4 style="color:#f85149">&#128268; SAProuter Info Leak (Vulnerable!)</h4>' +
+      const clients = ri.clients || [];
+      // Build connection table (mirrors "saprouter -l" output)
+      const connTable = clients.length === 0
+        ? '<div style="color:#484f58;font-size:11px;margin:4px 0">No active connections</div>'
+        : '<table style="width:100%;border-collapse:collapse;font-family:monospace;font-size:11px;margin:6px 0">' +
+          '<thead><tr style="color:#8b949e;border-bottom:1px solid #30363d">' +
+          '<th style="text-align:right;padding:2px 8px 2px 0;white-space:nowrap">ID</th>' +
+          '<th style="text-align:left;padding:2px 8px">CLIENT</th>' +
+          '<th style="text-align:left;padding:2px 8px">PARTNER</th>' +
+          '<th style="text-align:right;padding:2px 0">service</th>' +
+          '</tr></thead><tbody>' +
+          clients.map(c => {
+            const hasPartner = c.partner && c.partner !== '(no partner)';
+            const partnerCol = hasPartner
+              ? '<span style="color:#58a6ff">' + escHtml(c.partner) + '</span>'
+              : '<span style="color:#484f58">(no partner)</span>';
+            const svcCol = c.service
+              ? '<span style="color:#3fb950">' + escHtml(c.service) + '</span>'
+              : '<span style="color:#484f58">—</span>';
+            const srcCol = c.ip && c.ip !== c.source
+              ? escHtml(c.source) + ' <span style="color:#484f58">(' + escHtml(c.ip) + ')</span>'
+              : '<span style="color:#d29922">' + escHtml(c.source || '?') + '</span>';
+            return '<tr style="border-bottom:1px solid #21262d">' +
+              '<td style="text-align:right;padding:3px 8px 3px 0;color:#484f58">' + escHtml(String(c.id ?? '')) + '</td>' +
+              '<td style="padding:3px 8px">' + srcCol + '</td>' +
+              '<td style="padding:3px 8px">' + partnerCol + '</td>' +
+              '<td style="text-align:right;padding:3px 0">' + svcCol + '</td>' +
+              '</tr>';
+          }).join('') +
+          '</tbody></table>';
+      return '<div class="detail-section">' +
+        '<h4 style="color:#f85149">&#128268; SAProuter Info Leak (Vulnerable!)</h4>' +
         '<div class="detail-row"><span class="detail-key">Working Dir</span><span class="detail-val">' + escHtml(ri.working_dir || '?') + '</span></div>' +
         '<div class="detail-row"><span class="detail-key">Routtab</span><span class="detail-val">' + escHtml(ri.routtab || '?') + '</span></div>' +
-        '<div class="detail-row"><span class="detail-key">Clients</span><span class="detail-val">' + (ri.total_clients || 0) + '</span></div>' +
-        (ri.clients || []).map(c => '<div class="detail-row" style="font-size:11px"><span class="detail-key" style="color:#8b949e">→</span><span class="detail-val">' + escHtml(c.source || '?') + (c.ip ? ' (' + escHtml(c.ip) + ')' : '') + '</span></div>').join('') +
-        (ri.raw_info || []).map(l => '<div style="font-size:10px;color:#484f58;margin-left:12px">' + escHtml(l) + '</div>').join('') +
+        '<div class="detail-row"><span class="detail-key">Connections</span><span class="detail-val">' + (ri.total_clients || clients.length || 0) + '</span></div>' +
+        connTable +
         '<div style="margin-top:8px"><button class="btn btn-primary" style="font-size:11px;padding:3px 10px" onclick="selectedNodeSid=\'' + escHtml(sid) + '\';showRouterScanModal(\'' + escHtml(sid) + '\')">&#128270; Scan Internally via this SAProuter</button></div>' +
         '</div>';
     })()}
