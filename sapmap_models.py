@@ -202,6 +202,9 @@ class SAPNode:
     sapology_data: dict = field(default_factory=dict)
     gw_vulnerable: bool = False         # True if SAPXPG gateway exploit works
     gw_vulnerable_port: int = 0         # The specific gateway port that is vulnerable
+    ms_port: int = 0                    # MS internal port found (39NN), 0 = not found
+    ms_vulnerable: bool = False         # True if MS lacks ACL protection (CVE-2020-6207)
+    ms_acl_protected: bool = False      # True if MS port reachable but ACL blocks our IP
     secstore_entries: list = field(default_factory=list)  # [{ident, password, category, ...}]
     saprouter: str = ""                 # SAProuter route string prefix (e.g., "/H/router/S/3299/W/pass")
     saprouter_info: dict = field(default_factory=dict)  # SAProuter info leak results
@@ -280,6 +283,9 @@ class SAPNode:
             "sapology_data": self.sapology_data,
             "gw_vulnerable": self.gw_vulnerable,
             "gw_vulnerable_port": self.gw_vulnerable_port,
+            "ms_port": self.ms_port,
+            "ms_vulnerable": self.ms_vulnerable,
+            "ms_acl_protected": self.ms_acl_protected,
             "secstore_entries": self.secstore_entries,
             "saprouter": self.saprouter,
             "saprouter_info": self.saprouter_info,
@@ -308,6 +314,9 @@ class SAPNode:
             sapology_data=d.get("sapology_data", {}),
             gw_vulnerable=d.get("gw_vulnerable", False),
             gw_vulnerable_port=d.get("gw_vulnerable_port", 0),
+            ms_port=d.get("ms_port", 0),
+            ms_vulnerable=d.get("ms_vulnerable", False),
+            ms_acl_protected=d.get("ms_acl_protected", False),
             secstore_entries=d.get("secstore_entries", []),
             saprouter=d.get("saprouter", ""),
             saprouter_info=d.get("saprouter_info", {}),
