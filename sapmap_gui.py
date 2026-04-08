@@ -276,7 +276,7 @@ class ShellSession:
                     route = build_route_for_port(
                         saprouter, target_host, self.port)
                     self.client_sock = connect_through_saprouter(
-                        route, timeout=5)
+                        route, timeout=5, talk_mode=1)  # raw TCP for shell
                 else:
                     self.client_sock = _socket_mod.socket(
                         _socket_mod.AF_INET, _socket_mod.SOCK_STREAM)

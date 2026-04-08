@@ -1,13 +1,17 @@
 """Tests for sap_router_info.py — connection table parsing.
 
-The binary format is pysap SAPRouterInfoClient: exactly 137 bytes per entry:
+The binary format is the SAProuter wire format: exactly 137 bytes per entry:
     [4]  id             big-endian int
     [1]  flags
     [8]  connected_on   (skipped)
-    [45] address        null-padded source hostname/IP
-    [45] partner        null-padded destination hostname/IP
-    [27] service        null-padded destination port/service
-    [7]  padding
+    [46] address        null-padded source hostname/IP (+ optional DNS suffix)
+    [46] partner        null-padded destination hostname/IP (+ optional DNS suffix)
+    [30] service        null-padded destination port/service
+    [2]  padding
+
+Note: pysap StrNullFixedLenField(length=45) occupies 46 bytes on the wire
+(45 usable chars + 1 mandatory null).  Partner therefore starts at offset 59,
+not 58 as pysap's stated field length would suggest.
 """
 import sys
 import os
@@ -34,15 +38,25 @@ from sap_router_info import (
 def _make_entry(conn_id: int, address: str, partner: str = "",
                 service: str = "", flags: int = 0,
                 connected_on: int = 0) -> bytes:
-    """Build one SAPRouterInfoClient entry (137 bytes)."""
+    """Build one SAProuter wire-format entry (137 bytes).
+
+    Wire layout (confirmed against a live SAProuter):
+        [0:4]    id             big-endian uint32
+        [4]      flags          uint8
+        [5:13]   connected_on   big-endian uint64 (skipped by parser)
+        [13:59]  address        46-byte null-padded field  (45 usable + 1 null)
+        [59:105] partner        46-byte null-padded field
+        [105:135] service       30-byte null-padded field
+        [135:137] padding       2 bytes
+    """
     assert _ENTRY_SIZE == 137
-    data  = struct.pack(">I", conn_id)          # [0:4]  id (big-endian)
-    data += bytes([flags])                       # [4]    flags
-    data += struct.pack(">Q", connected_on)      # [5:13] connected_on (8 bytes)
-    data += address.encode("ascii").ljust(45, b"\x00")[:45]   # [13:58] address
-    data += partner.encode("ascii").ljust(45, b"\x00")[:45]   # [58:103] partner
-    data += service.encode("ascii").ljust(27, b"\x00")[:27]   # [103:130] service
-    data += b"\x00" * 7                          # [130:137] padding
+    data  = struct.pack(">I", conn_id)           # [0:4]   id (big-endian)
+    data += bytes([flags])                        # [4]     flags
+    data += struct.pack(">Q", connected_on)       # [5:13]  connected_on (8 bytes)
+    data += address.encode("ascii").ljust(46, b"\x00")[:46]   # [13:59]   address (46 bytes)
+    data += partner.encode("ascii").ljust(46, b"\x00")[:46]   # [59:105]  partner (46 bytes)
+    data += service.encode("ascii").ljust(30, b"\x00")[:30]   # [105:135] service (30 bytes)
+    data += b"\x00" * 2                           # [135:137] padding
     assert len(data) == 137, f"Entry size is {len(data)}, expected 137"
     return data
 
@@ -241,9 +255,9 @@ class TestParseConnTable:
         entry = _make_entry(1, "x")
         assert len(entry) == _ENTRY_SIZE == 137
 
-    def test_source_address_truncated_at_45_bytes(self):
-        """A 45-char address fills the field exactly; parser returns it intact."""
-        addr = "A" * 44   # 44 chars + implicit null within the 45-byte field
+    def test_source_address_fills_field(self):
+        """A 44-char address fits in the 46-byte field; parser returns it intact."""
+        addr = "A" * 44   # 44 chars + null terminator within the 46-byte field
         frame = _make_entry(1, addr)
         clients = _parse_conn_table(frame)
         assert clients[0]["source"] == addr
