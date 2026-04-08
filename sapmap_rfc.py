@@ -1832,24 +1832,39 @@ def execute_remote_command(node: SAPNode, destination: str,
     """
     result = {"success": False, "output": [], "error": ""}
 
+    # Base kwargs shared by both call attempts
+    _sxpg_kwargs = dict(
+        TARGET="",
+        DESTINATION=destination,
+        EXTPROG=command,
+        PARAMS=params if len(params) <= 255 else "",
+        STDINCNTL="R",
+        STDOUTCNTL="M",
+        STDERRCNTL="M",
+        TRACECNTL="0",
+        TERMCNTL="C",
+        TRACELEVEL="0",
+        LONG_PARAMS=params if len(params) > 255 else "",
+        CONNCNTL="H",
+    )
+
     try:
         with _get_connection(node, creds) as conn:
-            call_result = conn.call(
-                "SXPG_STEP_XPG_START",
-                TARGET="",
-                DESTINATION=destination,
-                EXTPROG=command,
-                PARAMS=params if len(params) <= 255 else "",
-                STDINCNTL="R",
-                STDOUTCNTL="M",
-                STDERRCNTL="M",
-                TRACECNTL="0",
-                TERMCNTL="C",
-                TRACELEVEL="0",
-                LONG_PARAMS=params if len(params) > 255 else "",
-                CONNCNTL="H",
-                MXROW=9999,   # default is 2 — must set high to capture full output
-            )
+            try:
+                # MXROW raises RFC_INVALID_PARAMETER on older SAP kernels
+                # (e.g. Basis 7.0x / Windows 2008 R2); default is 2 rows so
+                # we ask for 9999 but fall back gracefully if unsupported.
+                call_result = conn.call(
+                    "SXPG_STEP_XPG_START", MXROW=9999, **_sxpg_kwargs
+                )
+            except Exception as mxrow_err:
+                if "MXROW" in str(mxrow_err) or "RFC_INVALID_PARAMETER" in str(mxrow_err):
+                    logger.debug(
+                        f"SXPG MXROW not supported on this kernel, retrying without it: {mxrow_err}"
+                    )
+                    call_result = conn.call("SXPG_STEP_XPG_START", **_sxpg_kwargs)
+                else:
+                    raise
 
             # Parse LOG table for output lines
             log_table = call_result.get("LOG", [])
