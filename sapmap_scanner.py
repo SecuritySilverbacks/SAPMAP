@@ -511,6 +511,7 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
         for inst_str in found_instances:
             inst_nr = int(inst_str)
             pass2_ports.append((3300 + inst_nr, "gateway", inst_str))
+            pass2_ports.append((3900 + inst_nr, "ms_internal", inst_str))  # betrusted
             pass2_ports.append((30000 + inst_nr * 100 + 13, "hana_sql", inst_str))
             pass2_ports.append((30000 + inst_nr * 100 + 15, "hana_sql", inst_str))
 
@@ -672,6 +673,108 @@ def fast_scan_network(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RA
           f"{len(found)} SAP hosts found out of {total} targets "
           f"({host_count} alive)")
     return found
+
+
+# ---------------------------------------------------------------------------
+# MS betrusted ACL check (CVE-2020-6207)
+# ---------------------------------------------------------------------------
+
+def check_ms_betrusted(node: SAPNode, timeout: float = 8.0) -> bool:
+    """Check all MS internal ports on a node for CVE-2020-6207 (betrusted).
+
+    Probes each known instance's MS internal port (39NN).  Updates:
+      node.ms_port          — first open MS port found
+      node.ms_vulnerable    — True if MS accepts unauthenticated login
+      node.ms_acl_protected — True if port reachable but ACL blocks our IP
+
+    Returns True if any MS port was found (open OR ACL-protected).
+    """
+    try:
+        from sap_ms_betrusted import sapmap_check_ms
+    except ImportError:
+        logger.warning("sap_ms_betrusted not available — skipping MS check")
+        return False
+
+    host = node.ip or node.hostname
+    if not host:
+        return False
+
+    # Collect all candidate instance numbers from known ports
+    candidate_instances = set()
+    for inst in node.instances:
+        try:
+            candidate_instances.add(int(inst.instance_nr))
+        except (ValueError, TypeError):
+            pass
+        for port in inst.ports:
+            try:
+                p = int(port)
+                # Gateway 33XX → instance XX; dispatcher 32XX → instance XX
+                if 3300 <= p <= 3399:
+                    candidate_instances.add(p - 3300)
+                elif 3200 <= p <= 3299:
+                    candidate_instances.add(p - 3200)
+                elif 3900 <= p <= 3999:
+                    candidate_instances.add(p - 3900)
+            except (ValueError, TypeError):
+                pass
+
+    # If nothing known yet, probe common instances
+    if not candidate_instances:
+        candidate_instances = {0, 1, 2}
+
+    found_any = False
+    for inst_nr in sorted(candidate_instances):
+        result = sapmap_check_ms(host, inst_nr, timeout)
+        ms_p = result["port"]
+
+        if result["accessible"]:
+            found_any = True
+            node.ms_port = ms_p
+            node.ms_vulnerable    = result["vulnerable"]
+            node.ms_acl_protected = result.get("acl_protected", False)
+
+            if result["vulnerable"]:
+                logger.info(f"{node.sid}: MS port {ms_p} VULNERABLE (CVE-2020-6207) "
+                            f"— no ACL, betrusted attack possible")
+                node.findings.append(Finding(
+                    name="MS Internal Port Without ACL (CVE-2020-6207)",
+                    severity=Severity.CRITICAL,
+                    description=(
+                        "SAP Message Server internal port is accessible without "
+                        "authentication (no access control list configured). "
+                        "An attacker can register a fake dispatcher and inject their "
+                        "IP into the SAP Gateway's trusted host list (10KBLAZE betrusted), "
+                        "enabling unauthenticated OS command execution via SAPXPG."
+                    ),
+                    remediation=(
+                        "1. Firewall port 39NN to allow only SAP hosts. "
+                        "2. Configure ms/acl_info and ms/server_ip_check in DEFAULT.PFL. "
+                        "3. Apply SAP Security Note 2821575."
+                    ),
+                    detail=f"Port {ms_p} open; MS name: {result.get('ms_name', '')}",
+                ))
+                node.has_critical_finding = True
+                break  # found a vulnerable MS — no need to probe more
+            elif result["acl_protected"]:
+                logger.info(f"{node.sid}: MS port {ms_p} accessible but ACL-protected "
+                            f"(errorno={result.get('errorno', '?')})")
+                # Only add finding if not already present
+                if not any(f.name == "MS Internal Port Exposed" for f in node.findings):
+                    node.findings.append(Finding(
+                        name="MS Internal Port Exposed (ACL Active)",
+                        severity=Severity.MEDIUM,
+                        description=(
+                            "SAP Message Server internal port is reachable from the network "
+                            "but has an ACL configured that blocks unauthenticated login. "
+                            "The port itself should not be accessible from outside the SAP landscape."
+                        ),
+                        remediation="Firewall port 39NN to SAP hosts only.",
+                        detail=f"Port {ms_p} reachable; ACL blocks login from this IP",
+                    ))
+                break
+
+    return found_any
 
 
 # ---------------------------------------------------------------------------

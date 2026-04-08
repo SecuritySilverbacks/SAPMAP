@@ -444,6 +444,7 @@ body {
     <div class="ctx-sub">
       <div class="ctx-item" data-action="rfc_system_info">&#128225; RFC System Info</div>
       <div class="ctx-item" data-action="check_gw">&#128270; Check GW Vulnerability</div>
+      <div class="ctx-item" data-action="check_ms">&#128270; Check MS Betrusted (CVE-2020-6207)</div>
       <div class="ctx-item" data-action="deep_scan">&#128260; Deep Scan (full SAPology)</div>
       <div class="ctx-item" data-action="retrieve_rfcs">&#128225; Retrieve RFC Connections</div>
       <div class="ctx-item" data-action="test_rfcs">&#129514; Test RFC Connections</div>
@@ -459,6 +460,7 @@ body {
     <div class="ctx-item">&#9876; Exploitation</div>
     <div class="ctx-sub">
       <div class="ctx-item" data-action="lpe">&#128274; Local Privilege Escalation</div>
+      <div class="ctx-item" data-action="betrusted">&#128272; Betrusted — Inject Trusted IP (10KBLAZE)</div>
       <div class="ctx-item" data-action="create_user_gw">&#128100; Create User (GW Exploit)</div>
       <div class="ctx-item" data-action="create_user_creds">&#128100; Create User (Credentials)</div>
       <div class="ctx-item" data-action="create_tcpip">&#128279; Create TCP/IP Dest (sapxpg)</div>
@@ -1369,7 +1371,7 @@ function updateMap() {
     if (n.is_production) fill = '#4a1a1a';
     else if (Object.keys(n.clients || {}).length > 0) fill = '#4a3a1a';
 
-    if (n.has_critical_finding || n.gw_vulnerable) { borderColor = '#8b0000'; borderWidth = 6; }
+    if (n.has_critical_finding || n.gw_vulnerable || n.ms_vulnerable) { borderColor = '#8b0000'; borderWidth = 6; }
 
     // Scanning radar pulse + probe lines (behind node)
     if (isScanning) {
@@ -1598,6 +1600,8 @@ function showCtxMenu(e, sid) {
   // Determine node capabilities
   const hasCreds = n && ((n.credentials || []).length > 0 || (n.created_users || []).length > 0 || n.pwned);
   const hasGwVuln = n && n.gw_vulnerable;
+  const hasMsVuln = n && n.ms_vulnerable;
+  const hasMsPort = n && n.ms_port > 0;
   const hasGwPort = n && (n.instances || []).some(i => Object.entries(i.ports || {}).some(([p,s]) => s === 'gateway' || (p >= 3300 && p <= 3399)));
   const hasFindings = n && (n.findings || []).length > 0;
   const hasCreatedUsers = n && (n.created_users || []).length > 0;
@@ -1611,6 +1615,8 @@ function showCtxMenu(e, sid) {
     'credentials':      true,                       // always available
     'rfc_system_info':  hasGwPort,                   // need a gateway port
     'check_gw':         hasGwPort,                   // need a gateway port
+    'check_ms':         true,                        // always (probes 39NN directly)
+    'betrusted':        hasMsPort,                   // need a known MS port
     'create_user_gw':   hasGwVuln,                  // need GW vulnerability
     'create_user_creds': hasCreds,                  // need credentials
     'lpe':              hasCreds,                   // need credentials to escalate
@@ -1641,6 +1647,7 @@ function showCtxMenu(e, sid) {
   const hints = {
     'rfc_system_info':  'No gateway port detected',
     'check_gw':         'No gateway port detected',
+    'betrusted':        'Run Check MS Betrusted first to find the MS port',
     'create_user_gw':   'Requires a vulnerable RFC Gateway',
     'create_user_creds': 'Provide credentials first',
     'lpe':              'Provide credentials first',
@@ -1739,6 +1746,17 @@ async function ctxAction(action) {
       await api('POST', `node/${sid}/rfc_system_info`); break;
     case 'check_gw':
       await api('POST', `node/${sid}/check_gw`); break;
+    case 'check_ms':
+      await api('POST', `node/${sid}/check_ms`); break;
+    case 'betrusted': {
+      const n = (mapState.nodes || {})[sid];
+      const msPort = n && n.ms_port ? n.ms_port : '39NN';
+      const ip = prompt(`Betrusted — Inject Trusted IP (10KBLAZE)\nMS port: ${msPort}\n\nEnter the attacker IP to inject into the gateway's trusted host list:`, '');
+      if (ip && ip.trim()) {
+        await api('POST', `node/${sid}/betrusted`, { attacker_ip: ip.trim(), nilist_wait: 30 });
+      }
+      break;
+    }
     case 'create_user_gw':
       await api('POST', `node/${sid}/create_user`, { method: 'gw_exploit' }); break;
     case 'create_user_creds':
@@ -1939,7 +1957,13 @@ function showDetails(sid) {
       <div class="detail-row"><span class="detail-key">SAP Release</span><span class="detail-val">${escHtml(n.sap_release)}</span></div>
       <div class="detail-row"><span class="detail-key">Production</span><span class="detail-val">${n.is_production ? '<span style="color:#f85149">YES</span>' : 'No'}</span></div>
       <div class="detail-row"><span class="detail-key">Pwned</span><span class="detail-val">${n.pwned ? '<span style="color:#f0883e">&#9889; YES</span>' : 'No'}</span></div>
-      <div class="detail-row"><span class="detail-key">GW Vulnerable</span><span class="detail-val">${n.gw_vulnerable ? '<span style="color:#f85149">YES</span>' : 'No'}</span></div>
+      <div class="detail-row"><span class="detail-key">GW Vulnerable</span><span class="detail-val">${n.gw_vulnerable ? '<span style="color:#f85149">YES — SAPXPG</span>' : 'No'}</span></div>
+      <div class="detail-row"><span class="detail-key">MS Vulnerable</span><span class="detail-val">${
+        n.ms_vulnerable ? `<span style="color:#f85149">YES — betrusted (port ${n.ms_port})</span>`
+        : n.ms_acl_protected ? `<span style="color:#d29922">ACL protected (port ${n.ms_port})</span>`
+        : n.ms_port ? `<span style="color:#3fb950">Port ${n.ms_port} open</span>`
+        : 'Not checked'
+      }</span></div>
       ${n.saprouter ? `<div class="detail-row"><span class="detail-key">SAProuter</span><span class="detail-val" style="color:#d29922">${escHtml(n.saprouter)}</span></div>` : ''}
     </div>
     ${(() => {

