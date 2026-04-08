@@ -461,6 +461,7 @@ body {
     <div class="ctx-sub">
       <div class="ctx-item" data-action="lpe">&#128274; Local Privilege Escalation</div>
       <div class="ctx-item" data-action="betrusted">&#128272; Betrusted — Inject Trusted IP (10KBLAZE)</div>
+      <div class="ctx-item" data-action="create_user_betrusted">&#128272; Create User (10KBLAZE Full Chain)</div>
       <div class="ctx-item" data-action="create_user_gw">&#128100; Create User (GW Exploit)</div>
       <div class="ctx-item" data-action="create_user_creds">&#128100; Create User (Credentials)</div>
       <div class="ctx-item" data-action="create_tcpip">&#128279; Create TCP/IP Dest (sapxpg)</div>
@@ -1615,8 +1616,9 @@ function showCtxMenu(e, sid) {
     'credentials':      true,                       // always available
     'rfc_system_info':  hasGwPort,                   // need a gateway port
     'check_gw':         hasGwPort,                   // need a gateway port
-    'check_ms':         true,                        // always (probes 39NN directly)
-    'betrusted':        hasMsPort,                   // need a known MS port
+    'check_ms':              true,                    // always (probes 39NN directly)
+    'betrusted':             hasMsPort,              // need a known MS port
+    'create_user_betrusted': hasMsVuln || hasGwVuln, // need vulnerable MS or GW
     'create_user_gw':   hasGwVuln,                  // need GW vulnerability
     'create_user_creds': hasCreds,                  // need credentials
     'lpe':              hasCreds,                   // need credentials to escalate
@@ -1647,7 +1649,8 @@ function showCtxMenu(e, sid) {
   const hints = {
     'rfc_system_info':  'No gateway port detected',
     'check_gw':         'No gateway port detected',
-    'betrusted':        'Run Check MS Betrusted first to find the MS port',
+    'betrusted':             'Run Check MS Betrusted first to find the MS port',
+    'create_user_betrusted': 'Requires a vulnerable MS (betrusted) or gateway',
     'create_user_gw':   'Requires a vulnerable RFC Gateway',
     'create_user_creds': 'Provide credentials first',
     'lpe':              'Provide credentials first',
@@ -1754,6 +1757,19 @@ async function ctxAction(action) {
       const ip = prompt(`Betrusted — Inject Trusted IP (10KBLAZE)\nMS port: ${msPort}\n\nEnter the attacker IP to inject into the gateway's trusted host list:`, '');
       if (ip && ip.trim()) {
         await api('POST', `node/${sid}/betrusted`, { attacker_ip: ip.trim(), nilist_wait: 30 });
+      }
+      break;
+    }
+    case 'create_user_betrusted': {
+      const n = (mapState.nodes || {})[sid];
+      const msPort = n && n.ms_port ? n.ms_port : '39NN';
+      const ip = prompt(
+        `10KBLAZE Full Chain: betrusted → GW trust → create user\nMS port: ${msPort}\n\n` +
+        `Enter attacker IP to inject (leave blank to auto-detect):`, ''
+      );
+      if (ip !== null) {
+        await api('POST', `node/${sid}/betrusted_chain`,
+                  { attacker_ip: ip.trim(), nilist_wait: 30 });
       }
       break;
     }
