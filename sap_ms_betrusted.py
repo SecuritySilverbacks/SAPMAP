@@ -91,9 +91,11 @@ ADM_SERVER_LONG_LIST = 0x05
 ADM_DUMP             = 0x06
 ADM_NILIST           = 0x07   # inject IP into gateway trust list
 ADM_CHANGE_IP        = 0x09   # update registered IP in MS routing table
-ADM_GET_NILIST_PORT  = 0x28   # MS asks: "what port is your NILIST listener?"
+ADM_GET_NILIST_PORT  = 0x20   # MS asks: "what port is your NILIST listener?"
                                # (pull model NILIST: MS connects to our port
                                # to fetch our IP list; reply with 0 = no listener)
+                               # Wire opcode confirmed 0x20 on kernel 745 (S4H);
+                               # SM66 labels this "ADM opcode AD_GET_NILIST_PORT"
 ADM_FILE_RELOAD      = 0x1E   # reload config files (incl. ACL)
 
 # Opcode in 4-byte opcode section (for non-admin REQUEST/REPLY packets)
