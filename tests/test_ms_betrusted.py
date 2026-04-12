@@ -549,8 +549,8 @@ class TestConstants:
         assert len(rec) == _ADM_REC_SIZE
 
     def test_adm_hdr_len_constant(self):
-        # ADM header: 12 (eye) + 11 (recno) + 11 (recsize) = 34
-        assert _ADM_HDR_LEN == 34
+        # Kernel 745+ extended ADM header: 12 (eye) + 2 (version/flags) + 11 (recsize) + 11 (recno) = 36
+        assert _ADM_HDR_LEN == 36
 
     def test_msg_all_is_0xBB(self):
         assert MSG_ALL == 0xBB
