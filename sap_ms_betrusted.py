@@ -655,49 +655,14 @@ def build_gwmon_nilist_reply(request_pkt: bytes, our_name: str,
         key=key,
     )
 
-    # Extract the opcode+DP info blob from the request (between MS header and ADM
-    # eyecatcher).  Layout: [0:5] opcode fields, [5:512] SAPDPInfo1 (507 bytes).
-    # SAPDPInfo1 field offsets:
-    #   [0:4]   dp_req_len     [4] dp_req_prio    [5] dp_type_from
-    #   [6:46]  dp_fromname    [46] dp_agent_type_from
-    #   [47]    dp_worker_type_from  [48:50] dp_worker_from_num
-    #   [50]    dp_addr_from_t [51:53] dp_addr_from_u [53] dp_addr_from_m
-    #   [54:58] dp_respid_from [58] dp_type_to
-    #   [59:99] dp_toname      [99] dp_agent_type_to
-    #   [100]   dp_worker_type_to [101:103] dp_worker_to_num
-    #   [103]   dp_addr_to_t [104:106] dp_addr_to_u [106] dp_addr_to_m
-    #   [107:111] dp_respid_to
-    DP_PREFIX = 5   # opcode(1) + opcode_version(1) + opcode_charset(1) + opcode_error(1) + dp_version(1)
+    # Extract the DP info blob verbatim from the request.  The DP info format
+    # varies by kernel and dp_version (SAPDPInfo1=507B, DPInfo2=203B, DPInfo3
+    # varies).  Rather than parsing individual fields (which breaks when the
+    # format doesn't match our assumptions — e.g. the 180B format on kernel
+    # 753 dp_version=14), copy the blob unchanged and let the MS handle
+    # routing via the MS header's toname/fromname fields.
     adm_pos = request_pkt.find(_ADM_EYE, _HEADER_LEN)
-    if adm_pos > _HEADER_LEN:
-        dp_blob = bytearray(request_pkt[_HEADER_LEN:adm_pos])
-        name_pad = our_name.encode("ascii").ljust(40, b" ")[:40]
-        req_pad = requestor.encode("ascii").ljust(40, b" ")[:40]
-        if len(dp_blob) >= DP_PREFIX + 111:
-            dp = dp_blob[DP_PREFIX:]  # the 507-byte SAPDPInfo1
-            # Save request's from-side addressing
-            req_worker_from = dp[48:50]
-            req_addr_from_t = dp[50:51]
-            req_addr_from_u = dp[51:53]
-            req_addr_from_m = dp[53:54]
-            req_respid_from = dp[54:58]
-            req_worker_to = dp[101:103]
-            # Swap from/to names
-            dp[6:46] = name_pad           # dp_fromname = us
-            dp[46:47] = b"\x03"           # dp_agent_type_from = DISP (3)
-            dp[48:50] = req_worker_to     # dp_worker_from_num = request's worker_to
-            dp[59:99] = req_pad           # dp_toname = requestor
-            dp[99:100] = b"\x01"          # dp_agent_type_to = WORKER (1)
-            dp[100:101] = b"\x01"         # dp_worker_type_to = DIA (1)
-            dp[101:103] = req_worker_from # dp_worker_to_num = request's worker_from
-            dp[103:104] = req_addr_from_t # dp_addr_to_t
-            dp[104:106] = req_addr_from_u # dp_addr_to_u
-            dp[106:107] = req_addr_from_m # dp_addr_to_m
-            dp[107:111] = req_respid_from # dp_respid_to
-            dp_blob[DP_PREFIX:] = dp
-        dp_info = bytes(dp_blob)
-    else:
-        dp_info = b""
+    dp_info = request_pkt[_HEADER_LEN:adm_pos] if adm_pos > _HEADER_LEN else b""
 
     fmt = "old RSMONGWY" if use_old_format else "new RGWMON"
     print(f"[*] build_gwmon_nilist_reply: {fmt} reply → toname={requestor!r} "

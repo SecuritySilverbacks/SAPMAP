@@ -308,13 +308,14 @@ class TestBuildGwmonNilistReply:
         adm_pos = reply.find(_ADM_EYE)
         assert adm_pos > _HEADER_LEN + 100  # DP info is > 100 bytes
 
-    def test_dp_fromname_swapped_to_ours(self):
+    def test_dp_info_copied_verbatim(self):
         req = self._build_fake_request(our_name="fake_srv", requestor="REAL_SRV")
         reply = build_gwmon_nilist_reply(req, "my_new_name", "10.0.0.1")
-        # DP fromname at offset HEADER + 5 (opcode prefix) + 6 in DP info
-        dp_start = _HEADER_LEN + 5 + 6
-        dp_fromname = reply[dp_start:dp_start + 40].rstrip(b" ").decode("ascii")
-        assert dp_fromname == "my_new_name"
+        # DP info is copied verbatim (no field swap) to avoid corrupting
+        # variable-length DP structures across kernel versions
+        req_dp = req[_HEADER_LEN:req.find(_ADM_EYE, _HEADER_LEN)]
+        reply_dp = reply[_HEADER_LEN:reply.find(_ADM_EYE, _HEADER_LEN)]
+        assert req_dp == reply_dp
 
     def test_rsmongwy_detection_uses_old_format(self):
         req = self._build_fake_request()
