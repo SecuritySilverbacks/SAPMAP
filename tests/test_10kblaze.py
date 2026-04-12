@@ -92,14 +92,14 @@ class TestDeriveAppserverName:
         name = _derive_appserver_name("MSG_SERVER", 0,
                                        attacker_ip="192.168.2.210",
                                        target_sid="S4H")
-        assert name.startswith("192_168_2_210_S4H_00_")
-        assert len(name.split("_")) >= 6  # ip(4) + sid + inst + hash
+        assert name.startswith("192.168.2.210_S4H_00_")
+        assert "_S4H_00_" in name
 
-    def test_ip_dots_become_underscores(self):
+    def test_ip_dots_preserved(self):
         name = _derive_appserver_name("MSG_SERVER", 0,
                                        attacker_ip="10.0.1.2",
                                        target_sid="S4H")
-        assert name.startswith("10_0_1_2_")
+        assert name.startswith("10.0.1.2_")
 
     def test_instance_zero_padded(self):
         name = _derive_appserver_name("MSG_SERVER", 3,
@@ -129,7 +129,7 @@ class TestDeriveAppserverName:
         name = _derive_appserver_name("MSG_SERVER", 5,
                                        attacker_ip="10.0.0.1")
         # MSG_SERVER has no SID segment → fallback to hostname_NN_hash
-        assert "10_0_0_1_05_" in name
+        assert "10.0.0.1_05_" in name
 
 
 # ---------------------------------------------------------------------------
@@ -330,14 +330,11 @@ class TestServerNameHostnameExtraction:
     def test_ubuntu_w74_40_extracts_ubuntu(self):
         assert self._extract_hostname("ubuntu_W74_40_ff00") == "ubuntu"
 
-    def test_ip_underscore_name_extracts_ip(self):
-        assert self._extract_hostname("192_168_2_210_S4H_00_eb33") == "192_168_2_210"
+    def test_ip_dots_name_extracts_ip(self):
+        assert self._extract_hostname("192.168.2.210_S4H_00_eb33") == "192.168.2.210"
 
-    def test_resolvable_hostname_is_key(self):
-        """The extracted hostname must be DNS-resolvable on the target.
-        192_168_2_210 is NOT a valid hostname → exploit fails.
-        'ubuntu' IS in /etc/hosts → exploit succeeds."""
-        ip_name = self._extract_hostname("192_168_2_210_S4H_00")
-        dns_name = self._extract_hostname("ubuntu_S4H_00")
-        assert ip_name == "192_168_2_210"  # not resolvable
-        assert dns_name == "ubuntu"  # resolvable via /etc/hosts
+    def test_raw_ip_resolves_via_gethostbyname(self):
+        """gethostbyname('192.168.2.210') returns the IP directly —
+        no /etc/hosts entry needed. This is why dots must be preserved."""
+        ip_name = self._extract_hostname("192.168.2.210_S4H_00")
+        assert ip_name == "192.168.2.210"  # resolves via gethostbyname

