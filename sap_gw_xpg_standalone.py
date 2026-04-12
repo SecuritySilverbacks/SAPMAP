@@ -114,12 +114,17 @@ def ip_to_bytes(ip_str):
 # P1 - GW_NORMAL_CLIENT (version=2, 64 bytes)
 # ---------------------------------------------------------------------------
 
-def build_p1(target_ip, instance, accept_info=0x00):
+def build_p1(target_ip, instance, accept_info=0x00, lu_name=None):
     """Build GW_NORMAL_CLIENT registration packet (64 bytes).
 
     accept_info controls which protocol extensions we advertise:
       0x00 - no extensions (safe default; Java gateways skip EINFO handshake)
       0x0B - EINFO+PING (original value; triggers mandatory EINFO exchange on Java)
+
+    lu_name: client LU name (≤7 ASCII chars, no dots/underscores).
+      Must be ≤7 so pad_right_null guarantees a NUL within the 8-byte field;
+      older kernels use strlen() which overflows into tp without it (SAP Note
+      975044: "multibyte characters used in hostname").  Default: "sapserv".
 
     SAP Java gateways enforce the EINFO handshake when the client advertises
     EINFO support (bit 0 of accept_info).  ABAP gateways tolerate both values.
@@ -127,6 +132,9 @@ def build_p1(target_ip, instance, accept_info=0x00):
     """
     service = "sapgw%s" % instance
     tp = "sapgw%s" % instance
+    if lu_name is None:
+        lu_name = "sapserv"
+    lu_name = lu_name.replace(".", "-").replace("_", "-")[:7]
 
     p = b""
     p += struct.pack("B", 0x02)             # version = 2
@@ -136,7 +144,7 @@ def build_p1(target_ip, instance, accept_info=0x00):
     p += pad_right(service, 10, b" ")        # service (10 bytes, space-padded)
     p += b"4103"                            # codepage (4 bytes ASCII, pysap uses int 4103 -> "4103")
     p += b"\x00" * 6                        # padd2
-    p += pad_right_null("sapserve", 8)      # lu (8 bytes)
+    p += pad_right_null(lu_name, 8)         # lu (8 bytes, ≤7 chars + NUL)
     p += pad_right(tp, 8, b" ")              # tp (8 bytes, space-padded)
     p += b" " * 8                           # conversation_id (8 spaces)
     p += struct.pack("B", 0x06)             # appc_header_version
