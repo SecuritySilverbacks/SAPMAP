@@ -573,7 +573,7 @@ def _rfc_landscape_exposure(conn, node):
         dest_name = d.get("RFCDEST", "").strip()
         opts = d.get("RFCOPTIONS", "").strip()
 
-        if rfctype not in ("3", "T", "I"):
+        if rfctype not in ("3", "H", "G"):
             continue
 
         # Parse options: H=host, S=instance, M=client, U=user, v=%_PWD
@@ -590,7 +590,7 @@ def _rfc_landscape_exposure(conn, node):
         client = opt_map.get("M", "")
         has_pwd = "%_PWD" in opts or "v=" in opts
 
-        type_label = {"3": "Type 3 (ABAP)", "T": "TCP/IP", "I": "Internal"}.get(
+        type_label = {"3": "Type 3 (ABAP)", "H": "HTTP", "G": "HTTP (external)"}.get(
             rfctype, rfctype)
 
         if host:
