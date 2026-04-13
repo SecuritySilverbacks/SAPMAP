@@ -3035,9 +3035,9 @@ function showChainResults(chains) {
 let _highlightedChain = null;
 function highlightChain(pathSids) {
   _highlightedChain = pathSids;
-  refreshMap();
+  updateMap();
   // Auto-clear after 15 seconds
-  setTimeout(() => { _highlightedChain = null; refreshMap(); }, 15000);
+  setTimeout(() => { _highlightedChain = null; updateMap(); }, 15000);
 }
 
 async function resetRFCCache() {
