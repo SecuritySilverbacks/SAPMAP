@@ -917,15 +917,52 @@ def ping_rfc_destination(node: SAPNode, destination_name: str,
     except Exception as e:
         result["error"] = str(e)
 
-    # Last-resort fallback: if both DEST_CHECK and /SDF/RFC_CHECK failed,
-    # parse the destination options from RFCDES and try a direct connection.
-    # This works on old kernels (700) where the test FMs don't exist.
+    # Fallback: IWB_SHE_RFCDESTINATION_CHECK (available on older kernels
+    # where DEST_CHECK_CONNECTION and /SDF/RFC_CHECK don't work)
+    if not result["ping_ok"] and result["error"]:
+        try:
+            result.update(_ping_via_iwb_check(node, destination_name, creds))
+        except Exception as e2:
+            logger.debug(f"IWB_SHE check also failed: {e2}")
+
+    # Last-resort fallback: parse RFCDES options and try direct TCP connect
     if not result["ping_ok"] and result["error"]:
         try:
             result.update(_ping_via_direct_connect(node, destination_name, creds))
         except Exception as e2:
             logger.debug(f"Direct connect fallback also failed: {e2}")
 
+    return result
+
+
+def _ping_via_iwb_check(node, destination_name, creds=None):
+    """Fallback ping via IWB_SHE_RFCDESTINATION_CHECK (available on older kernels)."""
+    result = {"ping_ok": False, "remote_sid": "", "remote_hostname": "",
+              "remote_ip": "", "error": "", "ping_message": "", "logon_ok": False}
+    with _get_connection(node, creds) as conn:
+        try:
+            r = conn.call("IWB_SHE_RFCDESTINATION_CHECK",
+                          RFCDESTINATION=destination_name)
+            subrc = r.get("RFC_SUBRC", 99)
+            try:
+                subrc = int(subrc)
+            except (ValueError, TypeError):
+                subrc = 99
+            sysid = r.get("RFC_SYSID", "").strip()
+            user = r.get("RFC_USER", "").strip()
+            msg = (r.get("MSGV1", "") + r.get("MSGV2", "")).strip()
+            if subrc == 0:
+                result["ping_ok"] = True
+                result["logon_ok"] = True
+                result["remote_sid"] = sysid
+                result["ping_message"] = "IWB check OK"
+                result["error"] = ""
+                logger.info(f"IWB_SHE_RFCDESTINATION_CHECK {destination_name}: "
+                            f"OK (SID={sysid}, user={user})")
+            else:
+                result["error"] = msg or f"IWB check subrc={subrc}"
+        except Exception as e:
+            result["error"] = str(e).split("\n")[0]
     return result
 
 
@@ -1128,7 +1165,17 @@ def retrieve_rfc_connections(node: SAPNode, creds: Credentials = None) -> list:
                 spool_lines = spool_result.get("SPOOL_LIST", [])
                 if spool_lines:
                     connections = _parse_rsrfcchk_output(spool_lines, node)
-                    print(f"[+] {node.sid}: Parsed {len(connections)} RFC connections from spool")
+                    # Validate: if destination names look like instance numbers
+                    # (pure digits ≤2 chars), the spool format wasn't parsed correctly
+                    if connections and all(
+                        c.destination_name.isdigit() and len(c.destination_name) <= 2
+                        for c in connections
+                    ):
+                        print(f"[*] {node.sid}: Spool format mismatch (kernel {node.kernel or '?'}), "
+                              f"using RFCDES table instead...")
+                        connections = _try_rfc_read_table_fallback(conn, node)
+                    else:
+                        print(f"[+] {node.sid}: Parsed {len(connections)} RFC connections from spool")
                 else:
                     print(f"[*] {node.sid}: No spool output, trying table fallback...")
                     connections = _try_rfc_read_table_fallback(conn, node)
