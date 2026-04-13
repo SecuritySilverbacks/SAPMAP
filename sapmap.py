@@ -253,7 +253,10 @@ def _try_pywebview(url: str, debug: bool = False) -> bool:
 
     try:
         print("[*] Launching pywebview window...")
-        icon_path = os.path.join(os.path.dirname(__file__), "icons", "sapmap_256x256.png")
+        icon_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "icons", "sapmap_256x256.png"))
+        if not os.path.exists(icon_path):
+            print(f"[!] Icon not found: {icon_path}")
+            icon_path = None
         window = webview.create_window(
             "SAPMAP — SAP Landscape Attack Path Mapper",
             url,
