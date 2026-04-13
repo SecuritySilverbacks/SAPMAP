@@ -1649,22 +1649,15 @@ function updateMap() {
 // --- Event handlers ---
 function downloadCsv(sid, scenario) {
   const url = '/api/node/' + encodeURIComponent(sid) + '/impact/export/' + encodeURIComponent(scenario);
-  const xhr = new XMLHttpRequest();
-  xhr.open('GET', url, true);
-  xhr.responseType = 'blob';
-  xhr.onload = function() {
-    if (xhr.status === 200) {
-      const blob = xhr.response;
-      const link = document.createElement('a');
-      link.href = URL.createObjectURL(blob);
-      link.download = sid + '_' + scenario + '.csv';
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(link.href);
-    }
-  };
-  xhr.send();
+  // Use hidden iframe — works in pywebview where XHR blob downloads are blocked
+  let iframe = document.getElementById('_download_frame');
+  if (!iframe) {
+    iframe = document.createElement('iframe');
+    iframe.id = '_download_frame';
+    iframe.style.display = 'none';
+    document.body.appendChild(iframe);
+  }
+  iframe.src = url;
 }
 
 function escHtml(s) {
