@@ -2304,12 +2304,17 @@ function showImpactDetail(sid) {
   `;
 
   // Wire up CSV export links
-  panel.querySelectorAll('.csv-export-link').forEach(link => {
+  const csvLinks = panel.querySelectorAll('.csv-export-link');
+  console.log('CSV export links found:', csvLinks.length);
+  csvLinks.forEach(link => {
+    link.style.cursor = 'pointer';
+    link.style.textDecoration = 'underline';
     link.addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();
       const s = link.getAttribute('data-sid');
       const sc = link.getAttribute('data-scenario');
+      alert('Exporting CSV for ' + s + ' / ' + sc);
       downloadCsv(s, sc);
     });
   });
