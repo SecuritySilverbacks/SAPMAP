@@ -2878,30 +2878,27 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
     @app.route("/api/node/<sid>/impact/export/<scenario_name>")
     def node_impact_export(sid, scenario_name):
+        response.content_type = "application/json"
         node = api.state.get_node(sid)
         if not node:
-            response.content_type = "application/json"
             return json.dumps({"error": f"Node {sid} not found"})
 
-        # Find the scenario result
-        result = None
-        for ir in node.impact_results:
-            if ir.get("scenario") == scenario_name:
-                result = ir
-                break
-        if not result or not result.get("sample_records"):
-            response.content_type = "application/json"
+        # Re-run the scenario to get FULL data (not the truncated cache)
+        import sapmap_impact
+        creds = node.best_credentials()
+        if not creds:
+            return json.dumps({"error": "No credentials available"})
+
+        try:
+            result = sapmap_impact.assess_one(node, creds, scenario_name)
+        except Exception as e:
+            return json.dumps({"error": f"Query failed: {e}"})
+
+        if not result or not result.sample_records:
             return json.dumps({"error": "No data for this scenario"})
 
-        # Build CSV
-        records = result["sample_records"]
-        if not records:
-            response.content_type = "application/json"
-            return json.dumps({"error": "Empty dataset"})
-
-        # Get all column names from the first record
+        records = result.sample_records
         columns = list(records[0].keys())
-        # Filter out nested objects (like 'items' list in POs)
         columns = [c for c in columns
                     if not isinstance(records[0].get(c), (list, dict))]
 
@@ -2912,11 +2909,21 @@ def create_app(api: SAPMAPApi) -> Bottle:
         for row in records:
             writer.writerow({k: row.get(k, "") for k in columns})
 
-        response.content_type = "text/csv"
-        response.headers["Content-Disposition"] = (
-            f'attachment; filename="{sid}_{scenario_name}.csv"'
-        )
-        return buf.getvalue()
+        # Save to states/ folder
+        import sapmap_state
+        os.makedirs(sapmap_state.STATE_DIR, exist_ok=True)
+        filename = f"{sid}_{scenario_name}.csv"
+        filepath = os.path.join(sapmap_state.STATE_DIR, filename)
+        with open(filepath, "w", newline="") as f:
+            f.write(buf.getvalue())
+
+        print(f"[+] Exported {len(records)} records to {filepath}")
+        return json.dumps({
+            "status": "ok",
+            "file": filepath,
+            "records": len(records),
+            "filename": filename,
+        })
 
     @app.route("/api/local_ip")
     def local_ip():
