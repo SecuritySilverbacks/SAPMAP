@@ -2192,7 +2192,7 @@ function showImpactDetail(sid) {
         '</div>' +
         '<div style="font-size:11px;color:#8b949e;margin:4px 0">' + escHtml(r.category) + ' &mdash; ' + r.record_count + ' records</div>' +
         '<div style="font-size:12px;color:#c9d1d9;margin:6px 0;font-style:italic">&ldquo;' + escHtml(r.business_message) + '&rdquo;</div>' +
-        (previewRows.length > 0 ? '<details style="margin-top:6px"><summary style="cursor:pointer;font-size:11px;color:#58a6ff">Preview data (' + samples.length + ' records)</summary>' +
+        (previewRows.length > 0 ? '<details style="margin-top:6px"><summary style="cursor:pointer;font-size:11px;color:#58a6ff">Preview data (' + previewRows.length + ' of ' + samples.length + ' records)</summary>' +
           '<div style="overflow-x:auto;margin-top:4px"><table style="width:100%;font-size:10px;border-collapse:collapse">' +
           '<tr>' + cols.map(c => '<th style="text-align:left;padding:2px 6px;border-bottom:1px solid #30363d;color:#8b949e">' + escHtml(c) + '</th>').join('') + '</tr>' +
           previewRows.map(row => '<tr>' + cols.map(c => '<td style="padding:2px 6px;border-bottom:1px solid #21262d;font-family:monospace;color:#c9d1d9">' + escHtml(String(row[c]||'')) + '</td>').join('') + '</tr>').join('') +
