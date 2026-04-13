@@ -546,6 +546,96 @@ def _production_sabotage(conn, node):
     )
 
 
+@impact_scenario("rfc_landscape_exposure", "Lateral Movement / NetWeaver", Severity.CRITICAL,
+                 icon="\U0001F310")
+def _rfc_landscape_exposure(conn, node):
+    """Map all RFC destinations — reveals landscape topology and stored credentials."""
+    dests = _read_table(conn, "RFCDES",
+                        ["RFCDEST", "RFCTYPE", "RFCOPTIONS"],
+                        max_rows=500)
+
+    if not dests:
+        return ImpactResult(
+            scenario="rfc_landscape_exposure",
+            category="Lateral Movement / NetWeaver",
+            severity=Severity.INFO, headline="No RFC destinations found",
+            icon="\U0001F310",
+        )
+
+    records = []
+    unique_hosts = set()
+    with_password = 0
+    external = 0
+    type3_count = 0
+
+    for d in dests:
+        rfctype = d.get("RFCTYPE", "").strip()
+        dest_name = d.get("RFCDEST", "").strip()
+        opts = d.get("RFCOPTIONS", "").strip()
+
+        if rfctype not in ("3", "T", "I"):
+            continue
+
+        # Parse options: H=host, S=instance, M=client, U=user, v=%_PWD
+        opt_map = {}
+        for token in opts.split(","):
+            token = token.strip()
+            if "=" in token:
+                k, v = token.split("=", 1)
+                opt_map[k.strip()] = v.strip()
+
+        host = opt_map.get("H", "")
+        instance = opt_map.get("S", "")
+        user = opt_map.get("U", "")
+        client = opt_map.get("M", "")
+        has_pwd = "%_PWD" in opts or "v=" in opts
+
+        type_label = {"3": "Type 3 (ABAP)", "T": "TCP/IP", "I": "Internal"}.get(
+            rfctype, rfctype)
+
+        if host:
+            unique_hosts.add(host.lower())
+        if has_pwd:
+            with_password += 1
+        if host and not any(h in host.lower() for h in [
+            "localhost", "127.0.0.1", node.hostname.lower() if node.hostname else "",
+            node.ip or "",
+        ]):
+            external += 1
+        if rfctype == "3":
+            type3_count += 1
+
+        rec = {
+            "destination": dest_name,
+            "type": type_label,
+            "host": host,
+            "instance": instance,
+            "user": user,
+            "client": client,
+            "stored_password": "Yes" if has_pwd else "No",
+        }
+        records.append(rec)
+
+    headline = f"{len(records)} RFC destinations to {len(unique_hosts)} systems"
+    parts = []
+    if with_password:
+        parts.append(f"{with_password} with stored passwords")
+    if external:
+        parts.append(f"{external} external/remote")
+    if parts:
+        headline += f" \u2014 {', '.join(parts)}"
+
+    return ImpactResult(
+        scenario="rfc_landscape_exposure",
+        category="Lateral Movement / NetWeaver",
+        severity=Severity.CRITICAL if with_password >= 3 else Severity.HIGH,
+        headline=headline,
+        record_count=len(records), sample_records=records,
+        business_message="Complete SAP landscape topology with stored credentials \u2014 an attacker uses these connections to move laterally across every connected system.",
+        icon="\U0001F310",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
