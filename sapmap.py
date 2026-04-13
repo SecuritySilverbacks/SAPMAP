@@ -253,6 +253,7 @@ def _try_pywebview(url: str, debug: bool = False) -> bool:
 
     try:
         print("[*] Launching pywebview window...")
+        icon_path = os.path.join(os.path.dirname(__file__), "icons", "sapmap_256x256.png")
         window = webview.create_window(
             "SAPMAP — SAP Landscape Attack Path Mapper",
             url,
@@ -260,7 +261,7 @@ def _try_pywebview(url: str, debug: bool = False) -> bool:
             height=900,
             min_size=(1000, 700),
         )
-        webview.start(debug=debug)
+        webview.start(debug=debug, icon=icon_path)
         return True
     except Exception as e:
         print(f"[!] pywebview error: {e}")
