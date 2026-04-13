@@ -258,19 +258,29 @@ def _try_pywebview(url: str, debug: bool = False) -> bool:
             print(f"[!] Icon not found: {icon_path}")
             icon_path = None
 
-        # Set GTK default icon and program name BEFORE window creation —
-        # on Linux the taskbar icon is determined by WM_CLASS / prgname,
-        # not the per-window icon that pywebview sets later.
+        # Set platform-specific application icon BEFORE window creation.
+        # pywebview's icon= param only works on GTK/QT, not macOS Cocoa.
         if icon_path:
-            try:
-                import gi
-                gi.require_version("Gtk", "3.0")
-                from gi.repository import Gtk, GLib
-                GLib.set_prgname("sapmap")
-                GLib.set_application_name("SAPMAP")
-                Gtk.Window.set_default_icon_from_file(icon_path)
-            except Exception:
-                pass
+            if sys.platform == "darwin":
+                # macOS: set dock icon via AppKit NSApplication
+                try:
+                    import AppKit
+                    ns_image = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
+                    if ns_image:
+                        AppKit.NSApplication.sharedApplication().setApplicationIconImage_(ns_image)
+                except Exception:
+                    pass
+            else:
+                # Linux: set GTK default icon + WM_CLASS for taskbar
+                try:
+                    import gi
+                    gi.require_version("Gtk", "3.0")
+                    from gi.repository import Gtk, GLib
+                    GLib.set_prgname("sapmap")
+                    GLib.set_application_name("SAPMAP")
+                    Gtk.Window.set_default_icon_from_file(icon_path)
+                except Exception:
+                    pass
 
         window = webview.create_window(
             "SAPMAP — SAP Landscape Attack Path Mapper",
