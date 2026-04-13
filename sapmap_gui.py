@@ -1162,12 +1162,14 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
         attacker_ip  = data.get("attacker_ip", "").strip()
         nilist_wait  = float(data.get("nilist_wait", 30.0))
+        client       = data.get("client")
 
         def _run():
             created = sapmap_exploit.create_user_betrusted_chain(
                 node, api.state,
                 attacker_ip=attacker_ip,
                 nilist_wait=nilist_wait,
+                client=client,
             )
             if created:
                 api.state.track_created_user(created)
@@ -1227,9 +1229,12 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
         method = data.get("method", "credentials")
 
+        client = data.get("client")
+
         def _run():
             if method == "gw_exploit":
-                created = sapmap_exploit.create_user_gw_exploit(node, api.state)
+                created = sapmap_exploit.create_user_gw_exploit(node, api.state,
+                                                                 client=client)
             else:
                 created = sapmap_exploit.create_user_via_credentials(node, api.state)
             if created:
