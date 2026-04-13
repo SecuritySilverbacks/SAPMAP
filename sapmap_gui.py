@@ -2825,6 +2825,19 @@ def create_app(api: SAPMAPApi) -> Bottle:
         )
         return buf.getvalue()
 
+    @app.route("/api/local_ip")
+    def local_ip():
+        response.content_type = "application/json"
+        import socket as _sock
+        try:
+            s = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 53))
+            ip = s.getsockname()[0]
+            s.close()
+        except Exception:
+            ip = ""
+        return json.dumps({"ip": ip})
+
     @app.route("/api/impact/scenarios")
     def impact_scenarios():
         response.content_type = "application/json"
