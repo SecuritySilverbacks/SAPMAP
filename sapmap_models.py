@@ -206,6 +206,7 @@ class SAPNode:
     ms_vulnerable: bool = False         # True if MS lacks ACL protection (CVE-2020-6207)
     ms_acl_protected: bool = False      # True if MS port reachable but ACL blocks our IP
     secstore_entries: list = field(default_factory=list)  # [{ident, password, category, ...}]
+    impact_results: list = field(default_factory=list)   # [ImpactResult.to_dict(), ...]
     saprouter: str = ""                 # SAProuter route string prefix (e.g., "/H/router/S/3299/W/pass")
     saprouter_info: dict = field(default_factory=dict)  # SAProuter info leak results
     position: Optional[tuple] = None    # (x, y) on map — None = auto-layout
@@ -287,6 +288,7 @@ class SAPNode:
             "ms_vulnerable": self.ms_vulnerable,
             "ms_acl_protected": self.ms_acl_protected,
             "secstore_entries": self.secstore_entries,
+            "impact_results": self.impact_results,
             "saprouter": self.saprouter,
             "saprouter_info": self.saprouter_info,
             "position": list(self.position) if self.position else None,
@@ -318,6 +320,7 @@ class SAPNode:
             ms_vulnerable=d.get("ms_vulnerable", False),
             ms_acl_protected=d.get("ms_acl_protected", False),
             secstore_entries=d.get("secstore_entries", []),
+            impact_results=d.get("impact_results", []),
             saprouter=d.get("saprouter", ""),
             saprouter_info=d.get("saprouter_info", {}),
             position=tuple(d["position"]) if d.get("position") else None,

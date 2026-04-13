@@ -2727,6 +2727,105 @@ def create_app(api: SAPMAPApi) -> Bottle:
         except Exception as e:
             return json.dumps({"error": str(e)})
 
+    # -- Business Impact Assessment --
+    @app.route("/api/node/<sid>/impact/assess", method="POST")
+    def node_impact_assess(sid):
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        data = request.json or {}
+        scenario = data.get("scenario")  # None = run all
+
+        def _run():
+            creds = node.best_credentials()
+            if not creds:
+                print(f"[-] No credentials available for {sid}")
+                return
+            import sapmap_impact
+            if scenario:
+                print(f"[*] {sid}: Running impact scenario '{scenario}'...")
+                r = sapmap_impact.assess_one(node, creds, scenario)
+                if r:
+                    # Replace or append
+                    node.impact_results = [
+                        ir for ir in node.impact_results
+                        if ir.get("scenario") != scenario
+                    ]
+                    node.impact_results.append(r.to_dict())
+                    print(f"  [{r.severity_label}] {r.headline}")
+            else:
+                print(f"[*] {sid}: Running all business impact scenarios...")
+                results = sapmap_impact.assess_all(node, creds)
+                node.impact_results = [r.to_dict() for r in results]
+                crit = sum(1 for r in results if r.severity.value >= 5)
+                high = sum(1 for r in results if r.severity.value == 4)
+                total = len([r for r in results if r.record_count > 0])
+                print(f"[+] {sid}: {total} impact scenarios with data "
+                      f"({crit} critical, {high} high)")
+
+        _bg(f"{sid}:impact", "Business Impact Assessment", _run)
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/impact")
+    def node_impact_get(sid):
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        return json.dumps({
+            "sid": sid,
+            "results": node.impact_results,
+        })
+
+    @app.route("/api/node/<sid>/impact/export/<scenario_name>")
+    def node_impact_export(sid, scenario_name):
+        node = api.state.get_node(sid)
+        if not node:
+            response.content_type = "application/json"
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        # Find the scenario result
+        result = None
+        for ir in node.impact_results:
+            if ir.get("scenario") == scenario_name:
+                result = ir
+                break
+        if not result or not result.get("sample_records"):
+            response.content_type = "application/json"
+            return json.dumps({"error": "No data for this scenario"})
+
+        # Build CSV
+        records = result["sample_records"]
+        if not records:
+            response.content_type = "application/json"
+            return json.dumps({"error": "Empty dataset"})
+
+        # Get all column names from the first record
+        columns = list(records[0].keys())
+        # Filter out nested objects (like 'items' list in POs)
+        columns = [c for c in columns
+                    if not isinstance(records[0].get(c), (list, dict))]
+
+        import io, csv
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=columns, extrasaction="ignore")
+        writer.writeheader()
+        for row in records:
+            writer.writerow({k: row.get(k, "") for k in columns})
+
+        response.content_type = "text/csv"
+        response.headers["Content-Disposition"] = (
+            f'attachment; filename="{sid}_{scenario_name}.csv"'
+        )
+        return buf.getvalue()
+
+    @app.route("/api/impact/scenarios")
+    def impact_scenarios():
+        response.content_type = "application/json"
+        import sapmap_impact
+        return json.dumps(sapmap_impact.list_scenarios())
+
     # -- Export --
     @app.route("/api/export/json")
     def export_json():
