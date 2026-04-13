@@ -2644,6 +2644,26 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg("_check_all_ms", "Check All MS Betrusted", _run)
         return json.dumps({"status": "started", "systems": len(nodes)})
 
+    @app.route("/api/actions/analyze_chains", method="POST")
+    def actions_analyze_chains():
+        """Discover RFC trust chain escalation paths across the landscape."""
+        response.content_type = "application/json"
+
+        def _run():
+            import sapmap_chain
+            chains = sapmap_chain.analyze_chains(api.state)
+            # Store on state for retrieval
+            api.state._trust_chains = [c.to_dict() for c in chains]
+
+        _bg("_analyze_chains", "Trust Chain Analysis", _run)
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/chains")
+    def get_chains():
+        response.content_type = "application/json"
+        chains = getattr(api.state, '_trust_chains', [])
+        return json.dumps({"chains": chains})
+
     @app.route("/api/actions/check_all_betrusted", method="POST")
     def actions_check_all_betrusted():
         """Check MS betrusted + inject trusted IP on all nodes."""
