@@ -2262,8 +2262,8 @@ function showImpactDetail(sid) {
           '<tr>' + cols.map(c => '<th style="text-align:left;padding:2px 6px;border-bottom:1px solid #30363d;color:#8b949e">' + escHtml(c) + '</th>').join('') + '</tr>' +
           previewRows.map(row => '<tr>' + cols.map(c => '<td style="padding:2px 6px;border-bottom:1px solid #21262d;font-family:monospace;color:#c9d1d9">' + escHtml(String(row[c]||'')) + '</td>').join('') + '</tr>').join('') +
           '</table></div>' +
-          '<a href="/api/node/' + encodeURIComponent(n.sid) + '/impact/export/' + encodeURIComponent(r.scenario) + '" ' +
-            'download style="font-size:11px;color:#58a6ff;text-decoration:none;display:inline-block;margin-top:4px">&#128229; Export CSV</a>' +
+          '<a href="#" onclick="event.preventDefault();fetch(\'/api/node/' + encodeURIComponent(n.sid) + '/impact/export/' + encodeURIComponent(r.scenario) + '\').then(r=>r.blob()).then(b=>{const u=URL.createObjectURL(b);const a=document.createElement(\'a\');a.href=u;a.download=\'' + escHtml(n.sid) + '_' + escHtml(r.scenario) + '.csv\';a.click();URL.revokeObjectURL(u)})" ' +
+            'style="font-size:11px;color:#58a6ff;text-decoration:none;display:inline-block;margin-top:4px">&#128229; Export CSV</a>' +
           '</details>' : '') +
         '</div>';
     }).join('')}
