@@ -2741,9 +2741,34 @@ def create_app(api: SAPMAPApi) -> Bottle:
             return json.dumps({"error": f"Node {sid} not found"})
         data = request.json or {}
         scenario = data.get("scenario")  # None = run all
+        client = data.get("client")      # None = best_credentials
 
         def _run():
-            creds = node.best_credentials()
+            if client:
+                # Find credentials matching the requested client
+                creds = None
+                for cu in node.created_users:
+                    if cu.client == client:
+                        creds = Credentials(username=cu.username, password=cu.password,
+                                            client=cu.client, instance_nr=cu.instance_nr,
+                                            verified=True)
+                        break
+                if not creds:
+                    for c in node.credentials:
+                        if c.client == client:
+                            creds = c
+                            break
+                if not creds:
+                    # Fallback: use best_credentials and override client
+                    creds = node.best_credentials()
+                    if creds:
+                        creds = Credentials(username=creds.username,
+                                            password=creds.password,
+                                            client=client,
+                                            instance_nr=creds.instance_nr,
+                                            verified=creds.verified)
+            else:
+                creds = node.best_credentials()
             if not creds:
                 print(f"[-] No credentials available for {sid}")
                 return

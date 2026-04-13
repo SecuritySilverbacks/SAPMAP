@@ -1851,8 +1851,33 @@ async function ctxAction(action) {
       await api('POST', `node/${sid}/download_secstore`); break;
     case 'download_table':
       document.getElementById('table-modal').classList.add('visible'); break;
-    case 'impact_assess':
-      await api('POST', `node/${sid}/impact/assess`); break;
+    case 'impact_assess': {
+      const n_ia = (mapState.nodes || {})[sid];
+      // Collect all unique clients from credentials + created users
+      const credClients = new Set();
+      for (const c of (n_ia && n_ia.credentials || [])) {
+        if (c.client) credClients.add(c.client);
+      }
+      for (const u of (n_ia && n_ia.created_users || [])) {
+        if (u.client) credClients.add(u.client);
+      }
+      const clientList = [...credClients].sort();
+      let chosenClient = null;
+      if (clientList.length > 1) {
+        const defClient = clientList.find(c => c !== '000') || clientList[0];
+        const chosen = prompt(
+          `Run business impact scenarios in which client?\n\n` +
+          `Available clients with credentials: ${clientList.join(', ')}\n\n` +
+          `(Business data like sales orders, HR data, etc. is typically in client 001+)`,
+          defClient
+        );
+        if (chosen === null) break;
+        chosenClient = chosen.trim();
+      }
+      const payload = chosenClient ? { client: chosenClient } : {};
+      await api('POST', `node/${sid}/impact/assess`, payload);
+      break;
+    }
     case 'impact_view':
       showImpactDetail(sid); break;
     case 'os_terminal': showTerminalModal(sid); break;
