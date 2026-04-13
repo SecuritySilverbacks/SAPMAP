@@ -1536,6 +1536,19 @@ function updateMap() {
       html += `<text x="${x+BOX_W/2}" y="${y+BOX_H-32}" text-anchor="middle" font-size="8" fill="#e67e22" opacity="0.7">${barLabel}</text>`;
     }
 
+    // Business impact badge row (small icons for each finding)
+    const impactResults = (n.impact_results || []).filter(r => r.record_count > 0);
+    if (impactResults.length > 0) {
+      const maxImpSev = Math.max(...impactResults.map(r => r.severity || 1));
+      const impColor = maxImpSev >= 5 ? '#e74c3c' : maxImpSev >= 4 ? '#e67e22' : '#d29922';
+      // Impact bar at the bottom of the box
+      html += `<rect x="${x+10}" y="${y+BOX_H-14}" width="${BOX_W-20}" height="10" rx="3" fill="${impColor}" opacity="0.2" />`;
+      // Show scenario icons (up to 6)
+      const icons = impactResults.slice(0, 6).map(r => r.icon || '?');
+      const iconStr = icons.join(' ');
+      html += `<text x="${x+BOX_W/2}" y="${y+BOX_H-6}" text-anchor="middle" font-size="9" fill="${impColor}" opacity="0.9">${iconStr} ${impactResults.length} impacts</text>`;
+    }
+
     // Finding count badge
     const findings = n.findings || [];
     if (findings.length > 0) {
