@@ -125,8 +125,10 @@ def _read_table(conn, table: str, fields: list, where: str = "",
 
 def _format_eur(value_str: str) -> str:
     """Format a numeric string as EUR amount."""
+    if value_str is None:
+        return ""
     try:
-        v = float(value_str.replace(",", "."))
+        v = float(str(value_str).replace(",", "."))
         if v >= 1_000_000:
             return f"\u20ac{v/1_000_000:.1f}M"
         if v >= 1_000:
