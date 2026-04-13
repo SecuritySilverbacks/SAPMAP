@@ -518,6 +518,7 @@ body {
   <div class="ctx-item" data-action="map_propagate_all">&#128640; Auto-Propagate All</div>
   <div class="ctx-item" data-action="map_cleanup_all">&#129529; Cleanup All Users</div>
   <div class="ctx-item" id="map-ctx-check-all-gw" data-action="map_check_all_gw">&#128272; Check All GW Vulnerabilities</div>
+  <div class="ctx-item" data-action="map_check_all_betrusted">&#128272; Check All 10KBlaze (MS Betrusted)</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="map_fit">&#128208; Fit to Window</div>
   <div class="ctx-item" data-action="map_reset_layout">&#128260; Reset Layout</div>
@@ -2899,6 +2900,17 @@ async function checkAllGateways() {
     await api('POST', 'actions/check_all_gw');
   startPolling();
 }
+async function checkAllBetrusted() {
+  const nodeCount = Object.keys(mapState.nodes || {}).length;
+  if (nodeCount < 1) { alert('No systems on the map.'); return; }
+  if (confirm(`Check 10KBlaze (MS betrusted) vulnerability on all ${nodeCount} systems?\n\n` +
+              `This will:\n` +
+              `1. Scan for unprotected MS internal ports (39XX)\n` +
+              `2. On vulnerable systems, inject our IP as trusted\n\n` +
+              `Systems with gw/reg_no_conn_info=0 will become exploitable.`))
+    await api('POST', 'actions/check_all_betrusted', { attacker_ip: localIp });
+  startPolling();
+}
 async function resetRFCCache() {
   if (confirm('Reset the RFC check cache? This allows re-testing all connections.'))
     await api('POST', 'actions/reset_rfc_cache');
@@ -3147,6 +3159,7 @@ document.getElementById('map-ctx-menu').addEventListener('click', function(e) {
     case 'map_propagate_all': propagateAll(); break;
     case 'map_cleanup_all': cleanupAll(); break;
     case 'map_check_all_gw': checkAllGateways(); break;
+    case 'map_check_all_betrusted': checkAllBetrusted(); break;
     case 'map_fit': fitMap(); break;
     case 'map_reset_layout': resetLayout(); break;
   }

