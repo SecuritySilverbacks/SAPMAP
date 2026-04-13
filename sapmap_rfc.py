@@ -917,6 +917,85 @@ def ping_rfc_destination(node: SAPNode, destination_name: str,
     except Exception as e:
         result["error"] = str(e)
 
+    # Last-resort fallback: if both DEST_CHECK and /SDF/RFC_CHECK failed,
+    # parse the destination options from RFCDES and try a direct connection.
+    # This works on old kernels (700) where the test FMs don't exist.
+    if not result["ping_ok"] and result["error"]:
+        try:
+            result.update(_ping_via_direct_connect(node, destination_name, creds))
+        except Exception as e2:
+            logger.debug(f"Direct connect fallback also failed: {e2}")
+
+    return result
+
+
+def _ping_via_direct_connect(node, destination_name, creds=None):
+    """Fallback ping: read RFCDES options, parse H=host/S=instance, try TCP connect."""
+    import socket as _sock
+    result = {"ping_ok": False, "remote_sid": "", "remote_hostname": "",
+              "remote_ip": "", "error": "", "ping_message": ""}
+
+    with _get_connection(node, creds) as conn:
+        rows = conn.call("RFC_READ_TABLE", QUERY_TABLE="RFCDES", DELIMITER="|",
+                         FIELDS=[{"FIELDNAME": "RFCDEST"}, {"FIELDNAME": "RFCOPTIONS"}],
+                         OPTIONS=[{"TEXT": f"RFCDEST = '{destination_name}'"}])
+        for row in rows.get("DATA", []):
+            wa = row.get("WA", "")
+            parts = wa.split("|")
+            if len(parts) < 2:
+                continue
+            opts = parts[1].strip()
+            # Parse H=host, S=instance, M=client, U=user from comma-separated options
+            opt_map = {}
+            for token in opts.split(","):
+                token = token.strip()
+                if "=" in token:
+                    k, v = token.split("=", 1)
+                    opt_map[k.strip()] = v.strip()
+
+            host = opt_map.get("H", "")
+            inst = opt_map.get("S", "00")
+            client = opt_map.get("M", "")
+            user = opt_map.get("U", "")
+
+            if not host:
+                continue
+
+            # Try TCP connect to gateway port (33XX)
+            gw_port = 3300 + int(inst)
+            try:
+                s = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+                s.settimeout(5)
+                s.connect((host, gw_port))
+                s.close()
+                result["ping_ok"] = True
+                result["remote_ip"] = host
+                result["remote_hostname"] = host
+                result["ping_message"] = f"TCP connect to {host}:{gw_port} OK"
+                result["error"] = ""
+                logger.info(f"Direct connect to {destination_name} "
+                            f"({host}:{gw_port}) succeeded")
+            except Exception as e:
+                result["error"] = f"TCP connect to {host}:{gw_port} failed: {e}"
+
+            # Try RFC_SYSTEM_INFO via direct connection to get SID
+            if result["ping_ok"]:
+                try:
+                    with RFCConnection(
+                        sdk_path=conn._sdk_path,
+                        ashost=host, sysnr=inst,
+                        client=client or "000",
+                        user=user or "SAPINFO",
+                        passwd="",
+                    ) as direct:
+                        info = direct.call("RFC_SYSTEM_INFO")
+                        export = info.get("RFCSI_EXPORT", {})
+                        result["remote_sid"] = export.get("RFCSYSID", "").strip()
+                        result["remote_hostname"] = export.get("RFCHOST", "").strip()
+                        result["logon_ok"] = True
+                except Exception:
+                    pass  # TCP worked but RFC logon failed — still report ping_ok
+            break
     return result
 
 
