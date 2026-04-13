@@ -3002,7 +3002,7 @@ function showChainResults(chains) {
       const arrow = ' &#8594; ';
 
       return '<div class="detail-section" style="border-left:3px solid ' + col + ';padding-left:10px;margin-bottom:14px;cursor:pointer" ' +
-        'onclick="highlightChain(' + JSON.stringify(pathSids) + ')">' +
+        "onclick='highlightChain(" + JSON.stringify(pathSids) + ")'>" +
         '<div style="display:flex;justify-content:space-between;align-items:center">' +
           '<h4 style="margin:0;font-size:13px">&#128279; ' + escHtml(c.headline) + '</h4>' +
           '<span style="font-size:10px;padding:2px 6px;border-radius:3px;background:' + col + ';color:#fff;font-weight:bold">' + escHtml(c.risk_label) + '</span>' +
