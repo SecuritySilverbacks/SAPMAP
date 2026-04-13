@@ -258,29 +258,34 @@ def _try_pywebview(url: str, debug: bool = False) -> bool:
             print(f"[!] Icon not found: {icon_path}")
             icon_path = None
 
-        # Set platform-specific application icon BEFORE window creation.
+        # Set platform-specific application icon.
         # pywebview's icon= param only works on GTK/QT, not macOS Cocoa.
-        if icon_path:
-            if sys.platform == "darwin":
-                # macOS: set dock icon via AppKit NSApplication
-                try:
-                    import AppKit
-                    ns_image = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
-                    if ns_image:
-                        AppKit.NSApplication.sharedApplication().setApplicationIconImage_(ns_image)
-                except Exception:
-                    pass
-            else:
-                # Linux: set GTK default icon + WM_CLASS for taskbar
-                try:
-                    import gi
-                    gi.require_version("Gtk", "3.0")
-                    from gi.repository import Gtk, GLib
-                    GLib.set_prgname("sapmap")
-                    GLib.set_application_name("SAPMAP")
-                    Gtk.Window.set_default_icon_from_file(icon_path)
-                except Exception:
-                    pass
+        if icon_path and sys.platform != "darwin":
+            # Linux: set GTK default icon + WM_CLASS for taskbar
+            try:
+                import gi
+                gi.require_version("Gtk", "3.0")
+                from gi.repository import Gtk, GLib
+                GLib.set_prgname("sapmap")
+                GLib.set_application_name("SAPMAP")
+                Gtk.Window.set_default_icon_from_file(icon_path)
+            except Exception:
+                pass
+
+        # macOS: set dock icon AFTER pywebview initializes NSApplication.
+        # Use webview.start(func=) to run code after the Cocoa event loop starts.
+        def _set_macos_icon():
+            if sys.platform != "darwin" or not icon_path:
+                return
+            import time
+            time.sleep(0.5)  # let Cocoa fully initialize
+            try:
+                import AppKit
+                ns_image = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
+                if ns_image:
+                    AppKit.NSApplication.sharedApplication().setApplicationIconImage_(ns_image)
+            except Exception:
+                pass
 
         window = webview.create_window(
             "SAPMAP — SAP Landscape Attack Path Mapper",
@@ -289,7 +294,8 @@ def _try_pywebview(url: str, debug: bool = False) -> bool:
             height=900,
             min_size=(1000, 700),
         )
-        webview.start(debug=debug, icon=icon_path)
+        start_func = _set_macos_icon if sys.platform == "darwin" else None
+        webview.start(func=start_func, debug=debug, icon=icon_path)
         return True
     except Exception as e:
         print(f"[!] pywebview error: {e}")
