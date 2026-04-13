@@ -256,7 +256,7 @@ def _vendor_bank_fraud(conn, node):
 def _purchase_order_exposure(conn, node):
     """Expose purchase orders with values and vendor details."""
     po_headers = _read_table(conn, "EKKO",
-                             ["EBELN", "LIFNR", "BEDAT", "WAESSION"],
+                             ["EBELN", "LIFNR", "BEDAT", "WAERS"],
                              max_rows=500)
     po_items = _read_table(conn, "EKPO",
                            ["EBELN", "EBELP", "TXZ01", "MENGE", "NETPR"],
@@ -299,7 +299,7 @@ def _purchase_order_exposure(conn, node):
             "po_number": ebeln,
             "vendor": h.get("LIFNR", ""),
             "date": h.get("BEDAT", ""),
-            "currency": h.get("WAESSION", "EUR"),
+            "currency": h.get("WAERS", "EUR"),
             "items": item_map.get(ebeln, []),
             "item_count": len(item_map.get(ebeln, [])),
         })
