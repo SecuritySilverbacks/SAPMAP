@@ -147,7 +147,7 @@ def _format_eur(value_str: str) -> str:
 def _salary_exfiltration(conn, node):
     """Export all employee names and annual salaries."""
     people = _read_table(conn, "PA0002", ["PERNR", "VORNA", "NACHN"], max_rows=9999)
-    salaries = _read_table(conn, "PA0008", ["PERNR", "ANSAL", "DIVGV", "WAESSION"],
+    salaries = _read_table(conn, "PA0008", ["PERNR", "ANSAL", "DIVGV", "WAERS"],
                            max_rows=9999)
     if not people and not salaries:
         return ImpactResult(
@@ -163,7 +163,7 @@ def _salary_exfiltration(conn, node):
             annual = float(s.get("ANSAL", "0").replace(",", "."))
         except ValueError:
             annual = 0
-        currency = s.get("WAESSION", "EUR").strip() or "EUR"
+        currency = s.get("WAERS", "EUR").strip() or "EUR"
         if pernr and annual > 0:
             sal_map[pernr] = (annual, currency)
 
