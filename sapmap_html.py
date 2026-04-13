@@ -481,6 +481,14 @@ body {
       <div class="ctx-item" data-action="download_table">&#128229; Download Table Data</div>
     </div>
   </div>
+  <!-- Business Impact submenu -->
+  <div class="ctx-group">
+    <div class="ctx-item">&#128200; Business Impact</div>
+    <div class="ctx-sub">
+      <div class="ctx-item" data-action="impact_assess">&#128200; Run All Impact Scenarios</div>
+      <div class="ctx-item" data-action="impact_view">&#128202; View Impact Results</div>
+    </div>
+  </div>
   <!-- Cleanup submenu -->
   <div class="ctx-group">
     <div class="ctx-item">&#128465; Cleanup</div>
@@ -1629,6 +1637,8 @@ function showCtxMenu(e, sid) {
     'download_hashes':    hasCreds,                   // need credentials/access
     'download_secstore':  hasCreds,                   // need credentials/access
     'download_table':     hasCreds,                   // need credentials/access
+    'impact_assess':      hasCreds,                   // need credentials/access
+    'impact_view':        (n.impact_results||[]).length > 0,
     'os_terminal':      hasGwVuln || hasCreatedUsers, // need GW vuln or created user
     'reverse_shell':    hasGwVuln || hasCreatedUsers, // need GW vuln or created user
     'create_tcpip':     hasCreds,                   // need credentials/access
@@ -1660,6 +1670,8 @@ function showCtxMenu(e, sid) {
     'download_hashes':    'Provide credentials or create a user first',
     'download_secstore':  'Provide credentials or create a user first',
     'download_table':     'Provide credentials or create a user first',
+    'impact_assess':      'Provide credentials or create a user first',
+    'impact_view':        'Run impact assessment first',
     'os_terminal':      'Requires vulnerable gateway or created user with SAP_ALL',
     'reverse_shell':    'Requires vulnerable gateway or created user with SAP_ALL',
     'create_tcpip':     'Provide credentials or create a user first',
@@ -1792,6 +1804,10 @@ async function ctxAction(action) {
       await api('POST', `node/${sid}/download_secstore`); break;
     case 'download_table':
       document.getElementById('table-modal').classList.add('visible'); break;
+    case 'impact_assess':
+      await api('POST', `node/${sid}/impact/assess`); break;
+    case 'impact_view':
+      showImpactDetail(sid); break;
     case 'os_terminal': showTerminalModal(sid); break;
     case 'reverse_shell': showShellModal(sid); break;
     case 'create_tcpip': showTcpipModal(sid); break;
@@ -2073,6 +2089,19 @@ function showDetails(sid) {
         }).join('') +
         '</div>';
     })()}
+    ${(() => {
+      const ir = n.impact_results || [];
+      const withData = ir.filter(r => r.record_count > 0);
+      if (withData.length === 0) return '';
+      const sevColors = { 5:'#e74c3c', 4:'#e67e22', 3:'#f1c40f', 2:'#3498db', 1:'#95a5a6' };
+      return '<div class="detail-section"><h4 style="cursor:pointer" onclick="showImpactDetail(\'' + escHtml(n.sid) + '\')">&#128200; Business Impact (' + withData.length + ' findings) &#8594;</h4>' +
+        withData.slice(0, 3).map(r => {
+          const col = sevColors[r.severity] || '#95a5a6';
+          return '<div class="detail-row"><span class="detail-key" style="color:' + col + '">' + (r.icon||'') + '</span><span class="detail-val" style="font-size:11px">' + escHtml(r.headline) + '</span></div>';
+        }).join('') +
+        (withData.length > 3 ? '<div style="font-size:11px;color:#58a6ff;cursor:pointer;margin-top:4px" onclick="showImpactDetail(\'' + escHtml(n.sid) + '\')">+ ' + (withData.length - 3) + ' more &rarr;</div>' : '') +
+        '</div>';
+    })()}
   `;
 
   // Wire up click-to-reveal on SecStore entries
@@ -2084,6 +2113,54 @@ function showDetails(sid) {
       else { m.style.display = 'none'; p.style.display = ''; }
     });
   });
+
+  panel.classList.add('visible');
+}
+
+function showImpactDetail(sid) {
+  const n = (mapState.nodes || {})[sid];
+  if (!n) return;
+  const panel = document.getElementById('detail-panel');
+  const results = (n.impact_results || []).slice().sort((a,b) => (b.severity||0) - (a.severity||0));
+  const sevColors = { 5:'#e74c3c', 4:'#e67e22', 3:'#f1c40f', 2:'#3498db', 1:'#95a5a6' };
+  const sevLabels = { 5:'CRITICAL', 4:'HIGH', 3:'MEDIUM', 2:'LOW', 1:'INFO' };
+
+  const withData = results.filter(r => r.record_count > 0);
+  const empty = results.filter(r => r.record_count === 0 && !r.error);
+
+  panel.innerHTML = `
+    <span class="close-btn" onclick="this.parentElement.classList.remove('visible')">&times;</span>
+    <h3>&#128200; ${escHtml(n.sid)} — Business Impact (${withData.length} findings)</h3>
+    ${withData.length === 0 ? '<div style="color:#8b949e;padding:8px">No impact data yet. Right-click → Business Impact → Run All Impact Scenarios.</div>' : ''}
+    ${withData.map(r => {
+      const col = sevColors[r.severity] || '#95a5a6';
+      const lbl = sevLabels[r.severity] || 'INFO';
+      const icon = r.icon || '';
+      const samples = r.sample_records || [];
+      const previewRows = samples.slice(0, 5);
+      const cols = previewRows.length > 0 ? Object.keys(previewRows[0]).filter(k => !Array.isArray(previewRows[0][k]) && typeof previewRows[0][k] !== 'object') : [];
+
+      return '<div class="detail-section" style="border-left:3px solid ' + col + ';padding-left:10px;margin-bottom:12px">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center">' +
+          '<h4 style="margin:0;font-size:13px">' + icon + ' ' + escHtml(r.headline) + '</h4>' +
+          '<span style="font-size:10px;padding:2px 6px;border-radius:3px;background:' + col + ';color:#fff;font-weight:bold">' + lbl + '</span>' +
+        '</div>' +
+        '<div style="font-size:11px;color:#8b949e;margin:4px 0">' + escHtml(r.category) + ' &mdash; ' + r.record_count + ' records</div>' +
+        '<div style="font-size:12px;color:#c9d1d9;margin:6px 0;font-style:italic">&ldquo;' + escHtml(r.business_message) + '&rdquo;</div>' +
+        (previewRows.length > 0 ? '<details style="margin-top:6px"><summary style="cursor:pointer;font-size:11px;color:#58a6ff">Preview data (' + samples.length + ' records)</summary>' +
+          '<div style="overflow-x:auto;margin-top:4px"><table style="width:100%;font-size:10px;border-collapse:collapse">' +
+          '<tr>' + cols.map(c => '<th style="text-align:left;padding:2px 6px;border-bottom:1px solid #30363d;color:#8b949e">' + escHtml(c) + '</th>').join('') + '</tr>' +
+          previewRows.map(row => '<tr>' + cols.map(c => '<td style="padding:2px 6px;border-bottom:1px solid #21262d;font-family:monospace;color:#c9d1d9">' + escHtml(String(row[c]||'')) + '</td>').join('') + '</tr>').join('') +
+          '</table></div>' +
+          '<a href="/api/node/' + encodeURIComponent(n.sid) + '/impact/export/' + encodeURIComponent(r.scenario) + '" ' +
+            'download style="font-size:11px;color:#58a6ff;text-decoration:none;display:inline-block;margin-top:4px">&#128229; Export CSV</a>' +
+          '</details>' : '') +
+        '</div>';
+    }).join('')}
+    ${empty.length > 0 ? '<div class="detail-section" style="margin-top:8px"><h4 style="color:#484f58;font-size:12px">Not found (' + empty.length + ')</h4>' +
+      empty.map(r => '<div style="font-size:11px;color:#484f58;margin:2px 0">' + (r.icon||'') + ' ' + escHtml(r.scenario.replace(/_/g,' ')) + '</div>').join('') +
+      '</div>' : ''}
+  `;
 
   panel.classList.add('visible');
 }
