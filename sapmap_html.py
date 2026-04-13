@@ -519,6 +519,7 @@ body {
   <div class="ctx-item" data-action="map_cleanup_all">&#129529; Cleanup All Users</div>
   <div class="ctx-item" id="map-ctx-check-all-gw" data-action="map_check_all_gw">&#128272; Check All GW Vulnerabilities</div>
   <div class="ctx-item" data-action="map_check_all_betrusted">&#128272; Check All 10KBlaze (MS Betrusted)</div>
+  <div class="ctx-item" data-action="map_analyze_chains">&#128279; Analyze Trust Chains</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="map_fit">&#128208; Fit to Window</div>
   <div class="ctx-item" data-action="map_reset_layout">&#128260; Reset Layout</div>
@@ -1577,6 +1578,42 @@ function updateMap() {
       html += `<text x="${x+10}" y="${y+48}" fill="#6e7681" font-size="10" font-family="monospace">Host: ${escHtml(ut.label)}</text>`;
       html += `<text x="${x+BOX_W/2}" y="${y+BOX_H/2+10}" fill="#484f58" font-size="20" text-anchor="middle">?</text>`;
       html += '</g>';
+    }
+  }
+
+  // Chain highlight overlay: draw glowing path + hop badges
+  if (_highlightedChain && _highlightedChain.length >= 2) {
+    const BOX_W_h = 240, BOX_H_h = 174;
+    // Draw glowing edges between consecutive nodes in the chain
+    for (let i = 0; i < _highlightedChain.length - 1; i++) {
+      const srcSid = _highlightedChain[i];
+      const tgtSid = _highlightedChain[i + 1];
+      const srcN = nodes[srcSid]; const tgtN = nodes[tgtSid];
+      if (!srcN || !tgtN) continue;
+      const sx = (srcN._x||0) + BOX_W_h/2, sy = (srcN._y||0) + BOX_H_h/2;
+      const tx = (tgtN._x||0) + BOX_W_h/2, ty = (tgtN._y||0) + BOX_H_h/2;
+      // Glow underlay
+      html += `<line x1="${sx}" y1="${sy}" x2="${tx}" y2="${ty}" stroke="#e74c3c" stroke-width="12" opacity="0.25" stroke-linecap="round">` +
+        `<animate attributeName="opacity" values="0.15;0.35;0.15" dur="2s" repeatCount="indefinite" /></line>`;
+      // Main line
+      html += `<line x1="${sx}" y1="${sy}" x2="${tx}" y2="${ty}" stroke="#e74c3c" stroke-width="4" stroke-linecap="round">` +
+        `<animate attributeName="stroke" values="#e74c3c;#ff6b6b;#e74c3c" dur="1.5s" repeatCount="indefinite" /></line>`;
+      // Arrow head at midpoint
+      const mx = (sx+tx)/2, my = (sy+ty)/2;
+      html += `<text x="${mx}" y="${my-8}" text-anchor="middle" font-size="16" fill="#e74c3c" opacity="0.8">&#9654;</text>`;
+    }
+    // Hop number badges on each node in the chain
+    for (let i = 0; i < _highlightedChain.length; i++) {
+      const nSid = _highlightedChain[i];
+      const nNode = nodes[nSid];
+      if (!nNode) continue;
+      const bx = (nNode._x||0) + BOX_W_h - 8, by = (nNode._y||0) - 8;
+      const isStart = (i === 0), isEnd = (i === _highlightedChain.length - 1);
+      const badgeCol = isStart ? '#f0883e' : isEnd ? '#e74c3c' : '#d29922';
+      const label = isStart ? '&#9733;' : isEnd ? '&#127919;' : String(i);
+      html += `<circle cx="${bx}" cy="${by}" r="14" fill="${badgeCol}" stroke="#0d1117" stroke-width="2">` +
+        `<animate attributeName="r" values="14;16;14" dur="1.5s" repeatCount="indefinite" /></circle>`;
+      html += `<text x="${bx}" y="${by+5}" text-anchor="middle" font-size="12" fill="#fff" font-weight="bold">${label}</text>`;
     }
   }
 
@@ -2911,6 +2948,98 @@ async function checkAllBetrusted() {
     await api('POST', 'actions/check_all_betrusted', { attacker_ip: localIp });
   startPolling();
 }
+async function analyzeChains() {
+  const nodeCount = Object.keys(mapState.nodes || {}).length;
+  if (nodeCount < 2) { alert('Need at least 2 systems on the map with RFC connections.'); return; }
+  await api('POST', 'actions/analyze_chains');
+  // Poll for results then show them
+  setTimeout(async () => {
+    const r = await fetch('/api/chains');
+    const data = await r.json();
+    const chains = data.chains || [];
+    if (chains.length === 0) {
+      // Keep polling a bit
+      setTimeout(async () => {
+        const r2 = await fetch('/api/chains');
+        const d2 = await r2.json();
+        showChainResults(d2.chains || []);
+      }, 3000);
+    } else {
+      showChainResults(chains);
+    }
+  }, 2000);
+  startPolling();
+}
+
+function showChainResults(chains) {
+  const panel = document.getElementById('detail-panel');
+  const sevColors = { 5:'#e74c3c', 4:'#e67e22', 3:'#f1c40f', 2:'#3498db', 1:'#95a5a6' };
+
+  if (chains.length === 0) {
+    panel.innerHTML = `
+      <span class="close-btn" onclick="this.parentElement.classList.remove('visible')">&times;</span>
+      <h3>&#128279; Trust Chain Analysis</h3>
+      <div style="color:#8b949e;padding:12px">
+        No exploitable attack chains found.<br><br>
+        This means either:<br>
+        &bull; No systems are compromised/exploitable yet<br>
+        &bull; RFC connections haven't been retrieved<br>
+        &bull; No RFC links have successful logon with SAP_ALL<br><br>
+        Try: Retrieve RFC connections first, then run the analysis.
+      </div>`;
+    panel.classList.add('visible');
+    return;
+  }
+
+  const prodChains = chains.filter(c => c.end_is_production);
+
+  panel.innerHTML = `
+    <span class="close-btn" onclick="this.parentElement.classList.remove('visible')">&times;</span>
+    <h3>&#128279; Trust Chain Analysis (${chains.length} paths${prodChains.length ? ', ' + prodChains.length + ' reach production' : ''})</h3>
+    ${chains.map((c, idx) => {
+      const col = sevColors[c.severity] || '#95a5a6';
+      const pathSids = c.path_sids || [];
+      const arrow = ' &#8594; ';
+
+      return '<div class="detail-section" style="border-left:3px solid ' + col + ';padding-left:10px;margin-bottom:14px;cursor:pointer" ' +
+        'onclick="highlightChain(' + JSON.stringify(pathSids) + ')">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center">' +
+          '<h4 style="margin:0;font-size:13px">&#128279; ' + escHtml(c.headline) + '</h4>' +
+          '<span style="font-size:10px;padding:2px 6px;border-radius:3px;background:' + col + ';color:#fff;font-weight:bold">' + escHtml(c.risk_label) + '</span>' +
+        '</div>' +
+        '<div style="margin:6px 0;font-size:12px">' +
+          '<span style="font-family:monospace;background:#21262d;padding:3px 8px;border-radius:4px;display:inline-block">' +
+            pathSids.map((s,i) => '<span style="color:' + (i === 0 ? '#f0883e' : i === pathSids.length-1 ? (c.end_is_production ? '#e74c3c' : '#58a6ff') : '#c9d1d9') + '">' + escHtml(s) + '</span>').join(arrow) +
+          '</span>' +
+        '</div>' +
+        (c.hops || []).map((h, hi) =>
+          '<div style="font-size:11px;color:#8b949e;margin:2px 0;padding-left:' + (hi * 8 + 4) + 'px">' +
+            '&#9654; ' + escHtml(h.source_sid) + ' &#8594; ' + escHtml(h.target_sid) +
+            (h.destination_name ? ' via <span style="color:#58a6ff">' + escHtml(h.destination_name) + '</span>' : '') +
+            (h.rfc_user ? ' (user: ' + escHtml(h.rfc_user) + ')' : '') +
+            (h.has_sap_all ? ' <span style="color:#e74c3c;font-weight:bold">SAP_ALL</span>' : '') +
+          '</div>'
+        ).join('') +
+        '<div style="font-size:11px;color:#8b949e;margin-top:4px">' +
+          'Entry: ' + escHtml(c.entry_method || 'unknown') +
+          (c.end_is_production ? ' &mdash; <span style="color:#e74c3c;font-weight:bold">PRODUCTION reached</span>' : '') +
+        '</div>' +
+        (c.business_impact ? '<div style="font-size:12px;color:#c9d1d9;margin-top:4px;font-style:italic">&ldquo;' + escHtml(c.business_impact) + '&rdquo;</div>' : '') +
+        '<div style="font-size:10px;color:#58a6ff;margin-top:4px">Click to highlight on map</div>' +
+      '</div>';
+    }).join('')}
+  `;
+  panel.classList.add('visible');
+}
+
+let _highlightedChain = null;
+function highlightChain(pathSids) {
+  _highlightedChain = pathSids;
+  refreshMap();
+  // Auto-clear after 15 seconds
+  setTimeout(() => { _highlightedChain = null; refreshMap(); }, 15000);
+}
+
 async function resetRFCCache() {
   if (confirm('Reset the RFC check cache? This allows re-testing all connections.'))
     await api('POST', 'actions/reset_rfc_cache');
@@ -3160,6 +3289,7 @@ document.getElementById('map-ctx-menu').addEventListener('click', function(e) {
     case 'map_cleanup_all': cleanupAll(); break;
     case 'map_check_all_gw': checkAllGateways(); break;
     case 'map_check_all_betrusted': checkAllBetrusted(); break;
+    case 'map_analyze_chains': analyzeChains(); break;
     case 'map_fit': fitMap(); break;
     case 'map_reset_layout': resetLayout(); break;
   }
