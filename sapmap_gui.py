@@ -791,6 +791,12 @@ def create_app(api: SAPMAPApi) -> Bottle:
         response.set_header("Cache-Control", "no-cache, no-store, must-revalidate")
         return get_html()
 
+    # -- Favicon --
+    @app.route("/favicon.ico")
+    def favicon():
+        icons_dir = os.path.join(os.path.dirname(__file__), "icons")
+        return static_file("sapmap.ico", root=icons_dir)
+
     # -- Console polling --
     @app.route("/api/console")
     def get_console():

@@ -1,0 +1,147 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <clipPath id="roundClip">
+      <rect x="0" y="0" width="512" height="512" rx="102" ry="102"/>
+    </clipPath>
+    <radialGradient id="bgGrad" cx="50%" cy="50%" r="70%">
+      <stop offset="0%" stop-color="#1a2744"/>
+      <stop offset="100%" stop-color="#0a0f1a"/>
+    </radialGradient>
+    <radialGradient id="centerGlow" cx="50%" cy="50%" r="35%">
+      <stop offset="0%" stop-color="#00e5ff" stop-opacity="0.12"/>
+      <stop offset="100%" stop-color="#00e5ff" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="nodeGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="bigGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="sapGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <!-- SAP blue gradient -->
+    <linearGradient id="sapBlue" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0070F2"/>
+      <stop offset="100%" stop-color="#0053B8"/>
+    </linearGradient>
+    <linearGradient id="sapBlueLight" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3399FF"/>
+      <stop offset="100%" stop-color="#0070F2"/>
+    </linearGradient>
+  </defs>
+
+  <g clip-path="url(#roundClip)">
+    <!-- Background -->
+    <rect width="512" height="512" fill="url(#bgGrad)"/>
+    
+    <!-- Subtle grid -->
+    <g stroke="#1e3a5f" stroke-width="0.5" opacity="0.25">
+      <line x1="0" y1="128" x2="512" y2="128"/>
+      <line x1="0" y1="256" x2="512" y2="256"/>
+      <line x1="0" y1="384" x2="512" y2="384"/>
+      <line x1="128" y1="0" x2="128" y2="512"/>
+      <line x1="256" y1="0" x2="256" y2="512"/>
+      <line x1="384" y1="0" x2="384" y2="512"/>
+    </g>
+
+    <!-- Center glow -->
+    <circle cx="256" cy="270" r="200" fill="url(#centerGlow)"/>
+
+    <!-- Radar rings -->
+    <circle cx="256" cy="270" r="55" fill="none" stroke="#00e5ff" stroke-width="1" opacity="0.2"/>
+    <circle cx="256" cy="270" r="110" fill="none" stroke="#00e5ff" stroke-width="1" opacity="0.15"/>
+    <circle cx="256" cy="270" r="170" fill="none" stroke="#00e5ff" stroke-width="1" opacity="0.1"/>
+
+    <!-- Crosshair lines -->
+    <g stroke="#00e5ff" stroke-width="1.5" opacity="0.3">
+      <line x1="256" y1="76" x2="256" y2="210"/>
+      <line x1="256" y1="330" x2="256" y2="460"/>
+      <line x1="62" y1="270" x2="196" y2="270"/>
+      <line x1="316" y1="270" x2="450" y2="270"/>
+    </g>
+
+    <!-- Crosshair ticks -->
+    <g stroke="#00e5ff" stroke-width="2" opacity="0.45">
+      <line x1="246" y1="100" x2="266" y2="100"/>
+      <line x1="246" y1="440" x2="266" y2="440"/>
+      <line x1="86" y1="260" x2="86" y2="280"/>
+      <line x1="426" y1="260" x2="426" y2="280"/>
+    </g>
+
+    <!-- Connection lines -->
+    <g stroke="#00e5ff" stroke-width="1.5" opacity="0.2">
+      <line x1="256" y1="270" x2="155" y2="175"/>
+      <line x1="256" y1="270" x2="375" y2="190"/>
+      <line x1="256" y1="270" x2="130" y2="350"/>
+      <line x1="256" y1="270" x2="390" y2="360"/>
+      <line x1="256" y1="270" x2="300" y2="420"/>
+      <line x1="155" y1="175" x2="375" y2="190"/>
+      <line x1="130" y1="350" x2="300" y2="420"/>
+    </g>
+
+    <!-- Network nodes -->
+    <g filter="url(#nodeGlow)">
+      <circle cx="155" cy="175" r="7" fill="#ff3d5a" opacity="0.9"/>
+      <circle cx="375" cy="190" r="6" fill="#00e5ff" opacity="0.8"/>
+      <circle cx="130" cy="350" r="6" fill="#00e5ff" opacity="0.7"/>
+      <circle cx="390" cy="360" r="7" fill="#ff3d5a" opacity="0.85"/>
+      <circle cx="300" cy="420" r="5" fill="#00e5ff" opacity="0.6"/>
+    </g>
+
+    <!-- Center target -->
+    <g filter="url(#bigGlow)">
+      <circle cx="256" cy="270" r="15" fill="none" stroke="#00e5ff" stroke-width="2" opacity="0.7"/>
+      <circle cx="256" cy="270" r="5" fill="#00e5ff" opacity="0.9"/>
+    </g>
+
+    <!-- ========== SAP LOGO BLOCK (top area) ========== -->
+    <!-- SAP-style rounded rectangle badge -->
+    <g filter="url(#sapGlow)">
+      <rect x="178" y="28" width="156" height="62" rx="8" ry="8" fill="url(#sapBlue)" opacity="0.92"/>
+      <!-- SAP text in bold, referencing SAP's corporate style -->
+      <text x="256" y="68" text-anchor="middle" dominant-baseline="central"
+            font-family="'Arial Black', 'Helvetica Neue', Arial, sans-serif"
+            font-size="42" font-weight="900" letter-spacing="4"
+            fill="#ffffff">
+        SAP
+      </text>
+    </g>
+
+    <!-- Corner brackets (HUD) -->
+    <g stroke="#00e5ff" stroke-width="2.5" fill="none" opacity="0.35">
+      <polyline points="40,80 40,40 80,40"/>
+      <polyline points="432,40 472,40 472,80"/>
+      <polyline points="40,432 40,472 80,472"/>
+      <polyline points="432,472 472,472 472,432"/>
+    </g>
+
+    <!-- Bottom SAPMAP label -->
+    <rect x="148" y="460" width="216" height="26" rx="4" fill="#00e5ff" opacity="0.08"/>
+    <text x="256" y="476" text-anchor="middle" dominant-baseline="central"
+          font-family="'SF Mono', 'Fira Code', 'Consolas', monospace"
+          font-size="16" font-weight="600" letter-spacing="7"
+          fill="#00e5ff" opacity="0.65">
+      SAPMAP
+    </text>
+
+    <!-- Top-left status -->
+    <circle cx="52" cy="100" r="3.5" fill="#00e5ff" opacity="0.5"/>
+    <text x="62" y="104" font-family="'SF Mono', 'Fira Code', monospace"
+          font-size="10" fill="#00e5ff" opacity="0.3">
+      RCE SCAN
+    </text>
+  </g>
+</svg>
