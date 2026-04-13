@@ -2267,7 +2267,7 @@ function showImpactDetail(sid) {
           '<tr>' + cols.map(c => '<th style="text-align:left;padding:2px 6px;border-bottom:1px solid #30363d;color:#8b949e">' + escHtml(c) + '</th>').join('') + '</tr>' +
           previewRows.map(row => '<tr>' + cols.map(c => '<td style="padding:2px 6px;border-bottom:1px solid #21262d;font-family:monospace;color:#c9d1d9">' + escHtml(String(row[c]||'')) + '</td>').join('') + '</tr>').join('') +
           '</table></div>' +
-          '<a href="#" onclick="event.preventDefault();event.stopPropagation();downloadCsv(\'' + escHtml(n.sid) + '\',\'' + escHtml(r.scenario) + '\')" ' +
+          '<a href="#" class="csv-export-link" data-sid="' + escHtml(n.sid) + '" data-scenario="' + escHtml(r.scenario) + '" ' +
             'style="font-size:11px;color:#58a6ff;text-decoration:none;display:inline-block;margin-top:4px">&#128229; Export CSV</a>' +
           '</details>' : '') +
         '</div>';
@@ -2276,6 +2276,17 @@ function showImpactDetail(sid) {
       empty.map(r => '<div style="font-size:11px;color:#484f58;margin:2px 0">' + (r.icon||'') + ' ' + escHtml(r.scenario.replace(/_/g,' ')) + '</div>').join('') +
       '</div>' : ''}
   `;
+
+  // Wire up CSV export links
+  panel.querySelectorAll('.csv-export-link').forEach(link => {
+    link.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const s = link.getAttribute('data-sid');
+      const sc = link.getAttribute('data-scenario');
+      downloadCsv(s, sc);
+    });
+  });
 
   panel.classList.add('visible');
 }
