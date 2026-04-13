@@ -926,6 +926,8 @@ body {
 
 // --- State ---
 let mapState = { nodes: {}, connections: [], stats: {} };
+let localIp = '';
+fetch('/api/local_ip').then(r => r.json()).then(d => { localIp = d.ip || ''; }).catch(() => {});
 let consoleCursor = 0;
 let pollTimer = null;
 let selectedNodeSid = null;
@@ -1780,7 +1782,7 @@ async function ctxAction(action) {
     case 'betrusted': {
       const n = (mapState.nodes || {})[sid];
       const msPort = n && n.ms_port ? n.ms_port : '39NN';
-      const ip = prompt(`Betrusted — Inject Trusted IP (10KBLAZE)\nMS port: ${msPort}\n\nEnter the attacker IP to inject into the gateway's trusted host list:`, '');
+      const ip = prompt(`Betrusted — Inject Trusted IP (10KBLAZE)\nMS port: ${msPort}\n\nEnter the attacker IP to inject into the gateway's trusted host list:`, localIp);
       if (ip && ip.trim()) {
         await api('POST', `node/${sid}/betrusted`, { attacker_ip: ip.trim(), nilist_wait: 30 });
       }
@@ -1793,7 +1795,7 @@ async function ctxAction(action) {
       let defBt = clients_bt.find(c => c !== '000') || clients_bt[0] || '001';
       const ip = prompt(
         `10KBLAZE Full Chain: betrusted → GW trust → create user\nMS port: ${msPort}\n\n` +
-        `Enter attacker IP to inject (leave blank to auto-detect):`, ''
+        `Enter attacker IP to inject:`, localIp
       );
       if (ip === null) break;
       const clientBt = prompt(
