@@ -1649,7 +1649,33 @@ function updateMap() {
 // --- Event handlers ---
 function downloadCsv(sid, scenario) {
   const url = '/api/node/' + encodeURIComponent(sid) + '/impact/export/' + encodeURIComponent(scenario);
-  window.open(url, '_blank');
+  console.log('downloadCsv called:', sid, scenario, url);
+  // Fetch the CSV content and offer as a text file save
+  const xhr = new XMLHttpRequest();
+  xhr.open('GET', url, true);
+  xhr.onreadystatechange = function() {
+    if (xhr.readyState === 4) {
+      console.log('XHR status:', xhr.status, 'length:', xhr.responseText.length);
+      if (xhr.status === 200 && xhr.responseText) {
+        // Create a data URI and open it — most reliable cross-platform
+        const csv = xhr.responseText;
+        const dataUri = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+        const a = document.createElement('a');
+        a.href = dataUri;
+        a.download = sid + '_' + scenario + '.csv';
+        a.style.display = 'none';
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => document.body.removeChild(a), 100);
+      } else {
+        alert('CSV export failed: HTTP ' + xhr.status);
+      }
+    }
+  };
+  xhr.onerror = function() {
+    alert('CSV export error: network request failed');
+  };
+  xhr.send();
 }
 
 function escHtml(s) {
