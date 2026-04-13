@@ -60,7 +60,7 @@ class TestScenarioRegistry:
 
     def test_scenarios_registered(self):
         scenarios = list_scenarios()
-        assert len(scenarios) >= 8
+        assert len(scenarios) >= 9
 
     def test_scenario_fields(self):
         scenarios = list_scenarios()
@@ -81,6 +81,7 @@ class TestScenarioRegistry:
         assert "supply_chain_intel" in names
         assert "sales_revenue" in names
         assert "production_sabotage" in names
+        assert "rfc_landscape_exposure" in names
 
     def test_unique_names(self):
         names = [s["name"] for s in list_scenarios()]
