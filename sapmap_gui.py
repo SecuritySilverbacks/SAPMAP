@@ -1276,7 +1276,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     stop_event=stop_event,
                 )
                 if stop_event.is_set():
-                    print(f"[!] {sid}: betrusted cancelled by user")
+                    pass   # exploit already logged cancellation
                 elif ok:
                     print(f"[+] {sid}: Gateway now TRUSTED from {attacker_ip} "
                           f"— GW exploit is available")
