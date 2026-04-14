@@ -79,6 +79,8 @@ def main():
                         help="Fast scan mode (default)")
     parser.add_argument("--deep", action="store_true",
                         help="Deep scan mode (full SAPology)")
+    parser.add_argument("--script", metavar="FILE",
+                        help="Run a scripted scenario (YAML/JSON) with GUI visualization")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Verbose output")
     parser.add_argument("--debug", action="store_true",
@@ -152,6 +154,27 @@ def main():
     # Give server a moment to start
     import time
     time.sleep(0.5)
+
+    # Launch script runner in background (if --script provided)
+    if args.script:
+        from sapmap_script import ScriptRunner
+        runner = ScriptRunner(url, args.script)
+        try:
+            runner.load()
+        except Exception as e:
+            print(f"[!] Failed to load script: {e}")
+            return
+        # Run script in a background thread so the GUI launches immediately
+        script_thread = threading.Thread(
+            target=lambda: runner.run(print_fn=print),
+            daemon=True,
+        )
+        # Delay script start so the GUI has time to open and render
+        def _delayed_script():
+            time.sleep(3)
+            runner.run(print_fn=print)
+        script_thread = threading.Thread(target=_delayed_script, daemon=True)
+        script_thread.start()
 
     # Launch GUI
     use_browser = args.browser or args.no_gui
