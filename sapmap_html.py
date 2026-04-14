@@ -1084,6 +1084,7 @@ async function pollUpdates() {
           if (c.cmd === 'show_impact') showImpactDetail(c.sid);
           else if (c.cmd === 'show_chains') { const r = await fetch('/api/chains'); const d = await r.json(); showChainResults(d.chains || []); }
           else if (c.cmd === 'show_detail') showSystemDetail(c.sid);
+          else if (c.cmd === 'highlight_chain') highlightChain(c.path_sids);
         }
       }
     } catch(e2) {}

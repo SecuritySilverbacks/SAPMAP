@@ -27,7 +27,8 @@ Supported actions:
     betrusted_chain, create_user, create_user_via_rfc, retrieve_rfcs,
     test_rfcs, test_rfc_single, download_hashes, download_secstore,
     impact_assess, impact_show, impact_export, analyze_chains,
-    check_all_gw, check_all_betrusted, propagate, deep_scan, lpe, sleep
+    check_all_gw, check_all_betrusted, propagate, deep_scan, lpe,
+    highlight_chain, sleep
 """
 
 import json
@@ -132,6 +133,13 @@ def _map_step(step: dict) -> tuple:
 
     if action == "analyze_chains":
         return ("POST", "/api/actions/analyze_chains", {}, True)
+
+    if action == "highlight_chain":
+        return ("HIGHLIGHT_CHAIN", "", {
+            "start": step.get("start", ""),
+            "end": step.get("end", ""),
+            "index": step.get("index", 0),
+        }, False)
 
     if action == "check_all_gw":
         return ("POST", "/api/actions/check_all_gw", {}, True)
@@ -333,6 +341,36 @@ class ScriptRunner:
                         pf(f"[SCRIPT]   Exported {r['records']} records → {r['file']}")
                     else:
                         pf(f"[SCRIPT]   Export {sc}: {r.get('error', 'failed')}")
+                continue
+
+            # Special case: highlight a chain on the map
+            if method == "HIGHLIGHT_CHAIN":
+                chains = self._api_call("GET", "/api/chains")
+                chain_list = chains.get("chains", [])
+                start = payload.get("start", "")
+                end = payload.get("end", "")
+                idx = payload.get("index", 0)
+
+                # Find matching chain by start/end SIDs or by index
+                target_chain = None
+                if start and end:
+                    for c in chain_list:
+                        if c.get("start_sid") == start and c.get("end_sid") == end:
+                            target_chain = c
+                            break
+                if not target_chain and idx < len(chain_list):
+                    target_chain = chain_list[idx]
+
+                if target_chain:
+                    path_sids = target_chain.get("path_sids", [])
+                    pf(f"[SCRIPT]   Highlighting chain: {' → '.join(path_sids)}")
+                    try:
+                        from sapmap_gui import ui_command
+                        ui_command("highlight_chain", path_sids=path_sids)
+                    except ImportError:
+                        pass
+                else:
+                    pf(f"[SCRIPT]   No matching chain found (run analyze_chains first)")
                 continue
 
             # Execute the API call
