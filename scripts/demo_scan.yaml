@@ -1,0 +1,24 @@
+# SAPMAP Script: Network Scan + Auto-Exploit
+# Usage: python3 sapmap.py --script scripts/demo_scan.yaml
+#
+# Scans a subnet for SAP systems, then checks all for vulnerabilities
+
+name: "Network Discovery & Vulnerability Scan"
+description: "Scan 192.168.2.0/24 for SAP systems, check GW and 10KBlaze vulnerabilities"
+
+steps:
+  # Discover SAP systems on the network
+  - action: scan
+    targets: "192.168.2.0/24"
+    mode: fast
+    timeout: 600
+
+  # Check all discovered systems for gateway vulnerability
+  - action: check_all_gw
+
+  # Check all for 10KBlaze (MS betrusted)
+  - action: check_all_betrusted
+    attacker_ip: auto
+
+  # Analyze trust chains across discovered landscape
+  - action: analyze_chains
