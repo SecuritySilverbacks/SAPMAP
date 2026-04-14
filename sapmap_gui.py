@@ -701,8 +701,11 @@ class SAPMAPApi:
         with _console_lock:
             _console_lines = []
 
+        targets_str = config.get("targets", "").strip()
+        scan_label = f"Scan on target {targets_str}" if targets_str else "Network Scan"
+
         def _scan_fn():
-            _task_start("_scan", "Network Scan")
+            _task_start("_scan", scan_label)
             try:
                 self._run_scan(config)
             finally:
