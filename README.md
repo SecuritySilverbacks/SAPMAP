@@ -679,6 +679,7 @@ steps:
 
 | Action | Parameters | Description |
 |--------|-----------|-------------|
+| `scan` | `targets` (CIDR/range/IP), `mode` (`fast` or `deep`), `concurrent_hosts` (default: 5) | Scan a network for SAP systems (e.g. `192.168.2.0/24`) |
 | `check_gw` | `target` | Check if SAP Gateway is vulnerable to SAPXPG exploit |
 | `check_ms` | `target` | Check if MS internal port is unprotected (CVE-2020-6207) |
 | `deep_scan` | `target` | Run full SAPology vulnerability scan |
@@ -704,6 +705,8 @@ steps:
 | `download_hashes` | `target` | Extract USR02 password hashes (BCODE/PASSCODE) |
 | `download_secstore` | `target` | Decrypt SecStore (RSECTAB) — RFC/DB/CTS/SMTP passwords |
 | `impact_assess` | `target`, `client` (optional), `scenario` (optional) | Run business impact assessment (all or one scenario) |
+| `impact_show` | `target` | Print all impact results to the console |
+| `impact_export` | `target`, `scenario` (optional — omit to export all) | Export impact data to CSV in the states/ folder |
 
 #### Landscape Analysis
 

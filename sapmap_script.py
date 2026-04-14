@@ -23,11 +23,11 @@ Script format (YAML):
       ...
 
 Supported actions:
-    add_system, set_credentials, check_gw, check_ms, betrusted,
+    add_system, set_credentials, scan, check_gw, check_ms, betrusted,
     betrusted_chain, create_user, retrieve_rfcs, test_rfcs,
-    download_hashes, download_secstore, impact_assess, analyze_chains,
-    check_all_gw, check_all_betrusted, propagate, deep_scan, lpe,
-    sleep
+    download_hashes, download_secstore, impact_assess, impact_show,
+    impact_export, analyze_chains, check_all_gw, check_all_betrusted,
+    propagate, deep_scan, lpe, sleep
 """
 
 import json
@@ -155,6 +155,20 @@ def _map_step(step: dict) -> tuple:
             "method": step.get("method"),
         }, True)
 
+    if action == "scan":
+        return ("POST", "/api/scan/start", {
+            "targets": step.get("targets", ""),
+            "scan_mode": step.get("mode", "fast"),
+            "concurrent_hosts": step.get("concurrent_hosts", 5),
+        }, True)
+
+    if action == "impact_show":
+        return ("IMPACT_SHOW", "", target, False)
+
+    if action == "impact_export":
+        scenario = step.get("scenario", "")
+        return ("IMPACT_EXPORT", "", {"target": target, "scenario": scenario}, False)
+
     if action == "sleep":
         return ("SLEEP", "", step.get("seconds", 5), False)
 
@@ -266,6 +280,42 @@ class ScriptRunner:
                 seconds = payload
                 pf(f"[SCRIPT] Waiting {seconds}s...")
                 time.sleep(seconds)
+                continue
+
+            # Special case: show impact results
+            if method == "IMPACT_SHOW":
+                sid = payload
+                results = self._api_call("GET", f"/api/node/{sid}/impact")
+                items = results.get("results", [])
+                with_data = [r for r in items if r.get("record_count", 0) > 0]
+                if not with_data:
+                    pf(f"[SCRIPT] No impact results for {sid} (run impact_assess first)")
+                else:
+                    pf(f"[SCRIPT] === Business Impact: {sid} ({len(with_data)} findings) ===")
+                    for r in with_data:
+                        icon = r.get("icon", "")
+                        sev = r.get("severity_label", "?")
+                        pf(f"[SCRIPT]   {icon} [{sev:8s}] {r.get('headline', '')}")
+                        pf(f"[SCRIPT]              {r.get('business_message', '')[:80]}")
+                continue
+
+            # Special case: export impact scenario to CSV
+            if method == "IMPACT_EXPORT":
+                sid = payload.get("target", "")
+                scenario = payload.get("scenario", "")
+                if scenario:
+                    scenarios = [scenario]
+                else:
+                    # Export all scenarios that have data
+                    results = self._api_call("GET", f"/api/node/{sid}/impact")
+                    scenarios = [r["scenario"] for r in results.get("results", [])
+                                 if r.get("record_count", 0) > 0]
+                for sc in scenarios:
+                    r = self._api_call("GET", f"/api/node/{sid}/impact/export/{sc}")
+                    if r.get("status") == "ok":
+                        pf(f"[SCRIPT]   Exported {r['records']} records → {r['file']}")
+                    else:
+                        pf(f"[SCRIPT]   Export {sc}: {r.get('error', 'failed')}")
                 continue
 
             # Execute the API call

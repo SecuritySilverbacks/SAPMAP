@@ -44,3 +44,9 @@ steps:
   - action: impact_assess
     target: S4H
     client: "001"
+
+  - action: impact_show
+    target: S4H
+
+  - action: impact_export
+    target: S4H
