@@ -695,6 +695,7 @@ steps:
 | `betrusted` | `target`, `attacker_ip` (`auto` = detect), `nilist_wait` (default: 30) | Inject attacker IP into GW trust list via MS betrusted |
 | `betrusted_chain` | `target`, `attacker_ip`, `nilist_wait`, `client` | Full 10KBlaze chain: betrusted → GW exploit → create user |
 | `create_user` | `target`, `method` (`gw_exploit` or `credentials`), `client` | Create a SAPMAP user with SAP_ALL |
+| `create_user_via_rfc` | `target` (source SID), `destination` (RFC dest name), `target_sid` (remote SID) | Create a user on a remote system via an RFC destination |
 | `lpe` | `target`, `method` (optional — tries all if omitted) | Local privilege escalation (assign SAP_ALL to current user) |
 | `propagate` | `target` | Exploit RFC connections to reach other systems |
 
@@ -704,6 +705,7 @@ steps:
 |--------|-----------|-------------|
 | `retrieve_rfcs` | `target` | Retrieve all RFC destinations from the system |
 | `test_rfcs` | `target` | Test/ping all discovered RFC destinations |
+| `test_rfc_single` | `target`, `destination` (RFC destination name) | Test a single specific RFC destination |
 | `download_hashes` | `target` | Extract USR02 password hashes (BCODE/PASSCODE) |
 | `download_secstore` | `target` | Decrypt SecStore (RSECTAB) — RFC/DB/CTS/SMTP passwords |
 | `impact_assess` | `target`, `client` (optional), `scenario` (optional) | Run business impact assessment (all or one scenario) |

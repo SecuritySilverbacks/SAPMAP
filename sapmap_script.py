@@ -24,10 +24,10 @@ Script format (YAML):
 
 Supported actions:
     add_system, set_credentials, scan, check_gw, check_ms, betrusted,
-    betrusted_chain, create_user, retrieve_rfcs, test_rfcs,
-    download_hashes, download_secstore, impact_assess, impact_show,
-    impact_export, analyze_chains, check_all_gw, check_all_betrusted,
-    propagate, deep_scan, lpe, sleep
+    betrusted_chain, create_user, create_user_via_rfc, retrieve_rfcs,
+    test_rfcs, test_rfc_single, download_hashes, download_secstore,
+    impact_assess, impact_show, impact_export, analyze_chains,
+    check_all_gw, check_all_betrusted, propagate, deep_scan, lpe, sleep
 """
 
 import json
@@ -153,6 +153,17 @@ def _map_step(step: dict) -> tuple:
     if action == "lpe":
         return ("POST", f"/api/node/{target}/lpe", {
             "method": step.get("method"),
+        }, True)
+
+    if action == "test_rfc_single":
+        return ("POST", f"/api/node/{target}/test_rfc_single", {
+            "destination_name": step.get("destination", ""),
+        }, True)
+
+    if action == "create_user_via_rfc":
+        return ("POST", f"/api/node/{target}/create_user_via_rfc", {
+            "destination_name": step.get("destination", ""),
+            "target_sid": step.get("target_sid", ""),
         }, True)
 
     if action == "scan":
