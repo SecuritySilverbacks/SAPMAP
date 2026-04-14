@@ -1,0 +1,22 @@
+{
+  "name": "Simple GW Exploit Demo",
+  "description": "Add a system, check GW, create user",
+  "steps": [
+    {
+      "action": "add_system",
+      "sid": "S4H",
+      "ip": "192.168.2.209",
+      "instance": "00"
+    },
+    {
+      "action": "check_gw",
+      "target": "S4H"
+    },
+    {
+      "action": "create_user",
+      "target": "S4H",
+      "method": "gw_exploit",
+      "client": "001"
+    }
+  ]
+}
