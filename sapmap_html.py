@@ -1023,8 +1023,10 @@ function maximizeConsole() {
 }
 
 async function stopScan() {
-  await api('POST', 'scan/stop');
-  document.getElementById('st-status').textContent = 'Cancelled';
+  const r = await api('POST', 'scan/stop');
+  const bt = (r && r.betrusted_cancelled) || 0;
+  document.getElementById('st-status').textContent =
+    bt ? `Cancelled (+${bt} 10KBlaze)` : 'Cancelled';
 }
 
 // --- Polling ---

