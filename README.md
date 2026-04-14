@@ -195,6 +195,7 @@ python3 sapmap.py --browser                          # Force browser mode
 python3 sapmap.py --port 8080                        # Custom port
 python3 sapmap.py --load states/my_landscape.sapmap  # Resume a saved session
 python3 sapmap.py --sdk /opt/nwrfcsdk/lib            # Set NW RFC SDK path
+python3 sapmap.py --script scripts/demo_10kblaze.yaml  # Run scripted scenario with GUI
 ```
 
 ### CLI Options
@@ -204,6 +205,7 @@ python3 sapmap.py --sdk /opt/nwrfcsdk/lib            # Set NW RFC SDK path
 | `--load FILE` | Load a saved `.sapmap` state file |
 | `--sdk PATH` | Path to SAP NW RFC SDK lib directory |
 | `--port PORT` | HTTP server port (0 = auto-select) |
+| `--script FILE` | Run a scripted scenario (YAML/JSON) with GUI visualization ([details](#scripted-scenarios)) |
 | `--browser` | Force browser mode (skip pywebview) |
 | `--no-gui` | Server only — open browser manually |
 | `--targets TARGETS` | Scan targets (CLI mode, implies --no-gui) |
