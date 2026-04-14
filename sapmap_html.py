@@ -1075,6 +1075,18 @@ async function pollUpdates() {
           state.scan_state.charAt(0).toUpperCase() + state.scan_state.slice(1);
       }
     }
+
+    // Poll UI commands (from script runner)
+    try {
+      const cmds = await api('GET', 'ui/commands');
+      if (cmds && cmds.length) {
+        for (const c of cmds) {
+          if (c.cmd === 'show_impact') showImpactDetail(c.sid);
+          else if (c.cmd === 'show_chains') { const r = await fetch('/api/chains'); const d = await r.json(); showChainResults(d.chains || []); }
+          else if (c.cmd === 'show_detail') showSystemDetail(c.sid);
+        }
+      }
+    } catch(e2) {}
   } catch (e) {
     // Server not responding
   }
