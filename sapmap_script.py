@@ -282,7 +282,7 @@ class ScriptRunner:
                 time.sleep(seconds)
                 continue
 
-            # Special case: show impact results
+            # Special case: show impact results in GUI + console
             if method == "IMPACT_SHOW":
                 sid = payload
                 results = self._api_call("GET", f"/api/node/{sid}/impact")
@@ -297,6 +297,12 @@ class ScriptRunner:
                         sev = r.get("severity_label", "?")
                         pf(f"[SCRIPT]   {icon} [{sev:8s}] {r.get('headline', '')}")
                         pf(f"[SCRIPT]              {r.get('business_message', '')[:80]}")
+                # Tell the GUI to open the impact detail panel
+                try:
+                    from sapmap_gui import ui_command
+                    ui_command("show_impact", sid=sid)
+                except ImportError:
+                    pass
                 continue
 
             # Special case: export impact scenario to CSV
@@ -338,6 +344,13 @@ class ScriptRunner:
                     pf(f"[SCRIPT] {step_label}: timed out")
                 else:
                     pf(f"[SCRIPT] {step_label}: completed")
+                    # Auto-show results in GUI for certain actions
+                    if action == "analyze_chains":
+                        try:
+                            from sapmap_gui import ui_command
+                            ui_command("show_chains")
+                        except ImportError:
+                            pass
 
             # Optional delay between steps
             delay = step.get("delay", 1)

@@ -87,6 +87,15 @@ def _resolve_host(host: str) -> str:
 _console_lines = []
 _console_lock = threading.Lock()
 
+_ui_commands = []
+_ui_cmd_lock = threading.Lock()
+
+
+def ui_command(cmd: str, **kwargs):
+    """Queue a command for the frontend to execute on its next poll."""
+    with _ui_cmd_lock:
+        _ui_commands.append({"cmd": cmd, **kwargs})
+
 
 def _add_console_line(ts, text, css_class="cl-info"):
     with _console_lock:
@@ -809,6 +818,15 @@ def create_app(api: SAPMAPApi) -> Bottle:
             lines = _console_lines[cursor:]
             new_cursor = len(_console_lines)
         return json.dumps({"lines": lines, "cursor": new_cursor})
+
+    # -- UI commands (script → frontend) --
+    @app.route("/api/ui/commands")
+    def get_ui_commands():
+        response.content_type = "application/json"
+        with _ui_cmd_lock:
+            cmds = list(_ui_commands)
+            _ui_commands.clear()
+        return json.dumps(cmds)
 
     # -- State --
     @app.route("/api/state")
