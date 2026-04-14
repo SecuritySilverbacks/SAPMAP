@@ -717,6 +717,7 @@ steps:
 | Action | Parameters | Description |
 |--------|-----------|-------------|
 | `analyze_chains` | *(none)* | Discover RFC trust chain escalation paths across the landscape |
+| `highlight_chain` | `start` + `end` (SIDs), or `index` (0-based) | Highlight an attack chain on the map with pulsing red path |
 
 ### Per-Step Options
 
