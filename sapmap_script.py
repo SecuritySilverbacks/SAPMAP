@@ -181,12 +181,19 @@ class ScriptRunner:
             raw = f.read()
 
         # Try YAML first, fall back to JSON
-        try:
-            import yaml
-            data = yaml.safe_load(raw)
-        except ImportError:
-            data = json.loads(raw)
-        except Exception:
+        is_yaml = self.script_path.lower().endswith((".yaml", ".yml"))
+        data = None
+        if is_yaml:
+            try:
+                import yaml
+                data = yaml.safe_load(raw)
+            except ImportError:
+                raise ValueError(
+                    f"PyYAML is required for .yaml scripts. "
+                    f"Install it with: pip3 install pyyaml\n"
+                    f"Or use a .json script file instead."
+                )
+        if data is None:
             data = json.loads(raw)
 
         if not isinstance(data, dict) or "steps" not in data:
