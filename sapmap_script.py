@@ -239,11 +239,14 @@ class ScriptRunner:
     def _api_call(self, method: str, path: str, payload: dict = None) -> dict:
         """Make an HTTP request to the SAPMAP API."""
         url = self.base_url + path
-        body = json.dumps(payload or {}).encode("utf-8")
-        req = urllib.request.Request(
-            url, data=body, method=method,
-            headers={"Content-Type": "application/json"},
-        )
+        if method.upper() == "GET":
+            req = urllib.request.Request(url, method="GET")
+        else:
+            body = json.dumps(payload or {}).encode("utf-8")
+            req = urllib.request.Request(
+                url, data=body, method=method,
+                headers={"Content-Type": "application/json"},
+            )
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 return json.loads(resp.read().decode())
