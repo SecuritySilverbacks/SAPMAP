@@ -1789,6 +1789,7 @@ function showCtxMenu(e, sid) {
     'create_tcpip':          !isAbapStack,
     'create_user_creds':     !isAbapStack,
     'create_user_betrusted': !isAbapStack,
+    'create_user_gw':        !isAbapStack,  // inserts into ABAP USR02 — no-op on Java
     // SAProuter-only: reads the ROUTER_ADM info page
     'check_router_info': !isSaprouter,
   };
