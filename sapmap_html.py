@@ -1781,6 +1781,8 @@ function showCtxMenu(e, sid) {
     'enum_clients':     !isAbapStack,
     'client_roles':     !isAbapStack,
     'default_creds':    !isAbapStack,
+    'retrieve_rfcs':    !isAbapStack,
+    'test_rfcs':        !isAbapStack,
     // SAProuter-only: reads the ROUTER_ADM info page
     'check_router_info': !isSaprouter,
   };
