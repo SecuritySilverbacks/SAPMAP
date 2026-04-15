@@ -2785,29 +2785,74 @@ def create_app(api: SAPMAPApi) -> Bottle:
             gw_port = int(f"33{nr}")
             inst_nrs = [nr]
             print(f"[*] {sid}: Auto-enriching via RFC_SYSTEM_INFO...")
+
+            def _apply(info, fill_only=False):
+                # fill_only: only populate fields that are currently empty —
+                # used for the sweep step so a later, lower-confidence probe
+                # (e.g. product-name-based DB inference) doesn't clobber a
+                # correctly-detected value from the primary probe.
+                def _set(field, val):
+                    if not val:
+                        return
+                    cur = getattr(node, field, "")
+                    if fill_only and cur:
+                        return
+                    setattr(node, field, val)
+                _set("hostname", info.get("hostname"))
+                _set("os_type", info.get("os_type"))
+                _set("db_type", info.get("db_type"))
+                _set("kernel", info.get("kernel"))
+                _set("sap_release", info.get("sap_release"))
+                sc_abap = info.get("_is_abap", False)
+                sc_java = info.get("_is_java", False)
+                if sc_abap or sc_java:
+                    new_type = ("ABAP+JAVA" if sc_abap and sc_java
+                                else "JAVA" if sc_java else "ABAP")
+                    if not fill_only or not node.system_type:
+                        node.system_type = new_type
+
             try:
                 info = sapmap_scanner.enrich_system_info(
                     host, gw_port, instance_nrs=inst_nrs,
                     sid_hint=sid, saprouter=saprouter)
-                if info.get("hostname"):
-                    node.hostname = info["hostname"]
-                if info.get("os_type"):
-                    node.os_type = info["os_type"]
-                if info.get("db_type"):
-                    node.db_type = info["db_type"]
-                if info.get("kernel"):
-                    node.kernel = info["kernel"]
-                if info.get("sap_release"):
-                    node.sap_release = info["sap_release"]
-                sc_abap = info.get("_is_abap", False)
-                sc_java = info.get("_is_java", False)
-                if sc_abap or sc_java:
-                    if sc_abap and sc_java:
-                        node.system_type = "ABAP+JAVA"
-                    elif sc_java:
-                        node.system_type = "JAVA"
-                    else:
-                        node.system_type = "ABAP"
+                _apply(info)
+
+                # For Java-only systems the user often provides the Java
+                # dispatcher instance (e.g. SJJ inst 02) rather than the SCS
+                # gateway instance (SJJ inst 03).  If the primary RFC_SYSTEM_INFO
+                # probe didn't yield kernel/release but we did detect a stack
+                # via SAPControl, sweep 33NN on the host to find an actually-
+                # open gateway and re-probe RFC_SYSTEM_INFO there.
+                needs_sweep = (not node.kernel or not node.sap_release)
+                if needs_sweep and (info.get("_is_java") or info.get("_is_abap")):
+                    import socket as _sock
+                    for try_inst in range(0, 10):
+                        if try_inst == int(nr):
+                            continue  # already tried
+                        try_port = 3300 + try_inst
+                        try:
+                            s = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+                            s.settimeout(0.5)
+                            s.connect((host, try_port))
+                            s.close()
+                        except Exception:
+                            continue
+                        print(f"[*] {sid}: Sweeping additional gateway at "
+                              f"{host}:{try_port} for RFC_SYSTEM_INFO...")
+                        sweep_info = sapmap_scanner.enrich_system_info(
+                            host, try_port,
+                            instance_nrs=[f"{try_inst:02d}"],
+                            sid_hint=sid, saprouter=saprouter)
+                        _apply(sweep_info, fill_only=True)
+                        # Track the discovered gateway instance on the node
+                        have_inst = any(i.instance_nr == f"{try_inst:02d}"
+                                         for i in node.instances)
+                        if not have_inst:
+                            node.instances.append(InstanceInfo(
+                                instance_nr=f"{try_inst:02d}", ip=host,
+                                ports={try_port: "gateway"}))
+                        if node.kernel and node.sap_release:
+                            break
                 parts = []
                 if node.os_type:
                     parts.append(f"OS: {node.os_type}")
