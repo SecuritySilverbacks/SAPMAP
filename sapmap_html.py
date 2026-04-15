@@ -1695,7 +1695,10 @@ function showCtxMenu(e, sid) {
   const hasGwVuln = n && n.gw_vulnerable;
   const hasMsVuln = n && n.ms_vulnerable;
   const hasMsPort = n && n.ms_port > 0;
-  const isJavaStack = n && typeof n.system_type === 'string' && n.system_type.toUpperCase().indexOf('JAVA') !== -1;
+  const sysType = (n && typeof n.system_type === 'string') ? n.system_type.toUpperCase() : '';
+  const isJavaStack = sysType.indexOf('JAVA') !== -1;
+  const isAbapStack = sysType.indexOf('ABAP') !== -1;
+  const isSaprouter = sysType.indexOf('SAPROUTER') !== -1;
   const hasCve31324 = n && n.cve_2025_31324_vulnerable;
   const hasGwPort = n && (n.instances || []).some(i => Object.entries(i.ports || {}).some(([p,s]) => s === 'gateway' || (p >= 3300 && p <= 3399)));
   const hasFindings = n && (n.findings || []).length > 0;
@@ -1769,9 +1772,27 @@ function showCtxMenu(e, sid) {
     'client_roles':     'Provide credentials or create a user first',
   };
 
-  // Apply enable/disable state to each menu item
+  // Items hidden entirely (not just disabled) when the node type doesn't
+  // match.  A workflow that's inapplicable on this stack type shouldn't
+  // clutter the menu with grayed-out entries.
+  const hidden = {
+    // ABAP-only: these use BAPIs / DIAG / RFC-specific to the ABAP stack
+    'credentials':      !isAbapStack,
+    'enum_clients':     !isAbapStack,
+    'client_roles':     !isAbapStack,
+    'default_creds':    !isAbapStack,
+    // SAProuter-only: reads the ROUTER_ADM info page
+    'check_router_info': !isSaprouter,
+  };
+
+  // Apply visibility + enable/disable state to each menu item
   menu.querySelectorAll('.ctx-item[data-action]').forEach(item => {
     const action = item.getAttribute('data-action');
+    if (hidden[action]) {
+      item.style.display = 'none';
+      return;
+    }
+    item.style.display = '';
     const enabled = rules[action] !== false;
     if (enabled) {
       item.classList.remove('disabled');
