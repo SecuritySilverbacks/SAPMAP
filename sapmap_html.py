@@ -1783,6 +1783,9 @@ function showCtxMenu(e, sid) {
     'default_creds':    !isAbapStack,
     'retrieve_rfcs':    !isAbapStack,
     'test_rfcs':        !isAbapStack,
+    'create_tcpip':          !isAbapStack,
+    'create_user_creds':     !isAbapStack,
+    'create_user_betrusted': !isAbapStack,
     // SAProuter-only: reads the ROUTER_ADM info page
     'check_router_info': !isSaprouter,
   };
