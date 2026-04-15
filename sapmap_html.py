@@ -446,6 +446,7 @@ body {
       <div class="ctx-item" data-action="rfc_system_info">&#128225; RFC System Info</div>
       <div class="ctx-item" data-action="check_gw">&#128270; Check GW Vulnerability</div>
       <div class="ctx-item" data-action="check_ms">&#128270; Check MS Betrusted (CVE-2020-6207)</div>
+      <div class="ctx-item" data-action="check_cve_31324">&#128270; Check CVE-2025-31324 (Java VisualComposer)</div>
       <div class="ctx-item" data-action="deep_scan">&#128260; Deep Scan (full SAPology)</div>
       <div class="ctx-item" data-action="retrieve_rfcs">&#128225; Retrieve RFC Connections</div>
       <div class="ctx-item" data-action="test_rfcs">&#129514; Test RFC Connections</div>
@@ -463,6 +464,7 @@ body {
       <div class="ctx-item" data-action="lpe">&#128274; Local Privilege Escalation</div>
       <div class="ctx-item" data-action="betrusted">&#128272; Betrusted — Inject Trusted IP (10KBLAZE)</div>
       <div class="ctx-item" data-action="create_user_betrusted">&#128272; Create User (10KBLAZE Full Chain)</div>
+      <div class="ctx-item" data-action="exploit_cve_31324_drop">&#128272; Drop JSP Webshell (CVE-2025-31324)</div>
       <div class="ctx-item" data-action="create_user_gw">&#128100; Create User (GW Exploit)</div>
       <div class="ctx-item" data-action="create_user_creds">&#128100; Create User (Credentials)</div>
       <div class="ctx-item" data-action="create_tcpip">&#128279; Create TCP/IP Dest (sapxpg)</div>
@@ -832,6 +834,7 @@ body {
         <select id="term-method" style="width:100%">
           <option value="gateway">Gateway (unauthenticated)</option>
           <option value="sxpg">SXPG (via SAP_ALL user)</option>
+          <option value="cve_31324">CVE-2025-31324 (Java unauth)</option>
         </select>
       </div>
       <div style="flex:3">
@@ -872,6 +875,7 @@ body {
           <select id="shell-method" style="width:100%">
             <option value="gateway">Gateway (unauthenticated)</option>
             <option value="sxpg">SXPG (via SAP_ALL user)</option>
+            <option value="cve_31324">CVE-2025-31324 (Java unauth)</option>
           </select>
         </div>
         <div style="flex:1">
@@ -1400,7 +1404,7 @@ function updateMap() {
     if (n.is_production) fill = '#4a1a1a';
     else if (Object.keys(n.clients || {}).length > 0) fill = '#4a3a1a';
 
-    if (n.has_critical_finding || n.gw_vulnerable || n.ms_vulnerable) { borderColor = '#8b0000'; borderWidth = 6; }
+    if (n.has_critical_finding || n.gw_vulnerable || n.ms_vulnerable || n.cve_2025_31324_vulnerable) { borderColor = '#8b0000'; borderWidth = 6; }
 
     // Scanning radar pulse + probe lines (behind node)
     if (isScanning) {
@@ -1691,6 +1695,8 @@ function showCtxMenu(e, sid) {
   const hasGwVuln = n && n.gw_vulnerable;
   const hasMsVuln = n && n.ms_vulnerable;
   const hasMsPort = n && n.ms_port > 0;
+  const isJavaStack = n && typeof n.system_type === 'string' && n.system_type.toUpperCase().indexOf('JAVA') !== -1;
+  const hasCve31324 = n && n.cve_2025_31324_vulnerable;
   const hasGwPort = n && (n.instances || []).some(i => Object.entries(i.ports || {}).some(([p,s]) => s === 'gateway' || (p >= 3300 && p <= 3399)));
   const hasFindings = n && (n.findings || []).length > 0;
   const hasCreatedUsers = n && (n.created_users || []).length > 0;
@@ -1705,6 +1711,8 @@ function showCtxMenu(e, sid) {
     'rfc_system_info':  hasGwPort,                   // need a gateway port
     'check_gw':         hasGwPort,                   // need a gateway port
     'check_ms':              true,                    // always (probes 39NN directly)
+    'check_cve_31324':       isJavaStack,             // Java-only vulnerability
+    'exploit_cve_31324_drop': hasCve31324,            // need confirmed CVE-2025-31324
     'betrusted':             hasMsPort,              // need a known MS port
     'create_user_betrusted': hasMsVuln || hasGwVuln, // need vulnerable MS or GW
     'create_user_gw':   hasGwVuln,                  // need GW vulnerability
@@ -1718,8 +1726,8 @@ function showCtxMenu(e, sid) {
     'download_table':     hasCreds,                   // need credentials/access
     'impact_assess':      hasCreds,                   // need credentials/access
     'impact_view':        (n.impact_results||[]).length > 0,
-    'os_terminal':      hasGwVuln || hasCreatedUsers, // need GW vuln or created user
-    'reverse_shell':    hasGwVuln || hasCreatedUsers, // need GW vuln or created user
+    'os_terminal':      hasGwVuln || hasCreatedUsers || hasCve31324, // GW, user, or CVE-31324
+    'reverse_shell':    hasGwVuln || hasCreatedUsers || hasCve31324, // GW, user, or CVE-31324
     'create_tcpip':     hasCreds,                   // need credentials/access
     'propagate':        hasCreds,                   // need access to propagate from
     'cleanup':          hasCreatedUsers,             // need created users to clean up
@@ -1741,6 +1749,8 @@ function showCtxMenu(e, sid) {
     'check_gw':         'No gateway port detected',
     'betrusted':             'Run Check MS Betrusted first to find the MS port',
     'create_user_betrusted': 'Requires a vulnerable MS (betrusted) or gateway',
+    'check_cve_31324':       'Only applicable to Java / double-stack systems',
+    'exploit_cve_31324_drop': 'Run Check CVE-2025-31324 first; vulnerability required',
     'create_user_gw':   'Requires a vulnerable RFC Gateway',
     'create_user_creds': 'Provide credentials first',
     'lpe':              'Provide credentials first',
@@ -1751,8 +1761,8 @@ function showCtxMenu(e, sid) {
     'download_table':     'Provide credentials or create a user first',
     'impact_assess':      'Provide credentials or create a user first',
     'impact_view':        'Run impact assessment first',
-    'os_terminal':      'Requires vulnerable gateway or created user with SAP_ALL',
-    'reverse_shell':    'Requires vulnerable gateway or created user with SAP_ALL',
+    'os_terminal':      'Requires vulnerable gateway, created user with SAP_ALL, or CVE-2025-31324',
+    'reverse_shell':    'Requires vulnerable gateway, created user with SAP_ALL, or CVE-2025-31324',
     'create_tcpip':     'Provide credentials or create a user first',
     'propagate':        'Provide credentials or create a user first',
     'cleanup':          'No created users to clean up',
@@ -1843,6 +1853,23 @@ async function ctxAction(action) {
       await api('POST', `node/${sid}/check_gw`); break;
     case 'check_ms':
       await api('POST', `node/${sid}/check_ms`); break;
+    case 'check_cve_31324':
+      await api('POST', `node/${sid}/check_cve_2025_31324`); break;
+    case 'exploit_cve_31324_drop': {
+      if (!confirm('Drop a JSP webshell via CVE-2025-31324?\n\n' +
+                    'A randomly-named JSP will be written under /irj/<name>.jsp ' +
+                    'on the target and then usable to run OS commands with output ' +
+                    'capture.  Remember to remove the file when you are done.')) break;
+      const r = await api('POST', `node/${sid}/exploit_cve_2025_31324`,
+                          { mode: 'dropshell' });
+      if (r && r.success) {
+        alert('Shell dropped:\n' + r.shell_url + '\n\nUse OS Terminal with ' +
+              'method "CVE-2025-31324" to run commands with captured output.');
+      } else {
+        alert('Drop failed: ' + ((r && r.error) || 'unknown error'));
+      }
+      break;
+    }
     case 'betrusted': {
       const n = (mapState.nodes || {})[sid];
       const msPort = n && n.ms_port ? n.ms_port : '39NN';
@@ -2133,6 +2160,16 @@ function showDetails(sid) {
         : n.ms_port ? `<span style="color:#3fb950">Port ${n.ms_port} open</span>`
         : 'Not checked'
       }</span></div>
+      ${(n.system_type || '').toUpperCase().indexOf('JAVA') !== -1 ? `
+      <div class="detail-row"><span class="detail-key">CVE-2025-31324</span><span class="detail-val">${
+        n.cve_2025_31324_vulnerable
+          ? `<span style="color:#f85149">YES — metadatauploader RCE (port ${n.cve_2025_31324_port}${n.cve_2025_31324_https ? ' HTTPS' : ''})</span>`
+          : n.cve_2025_31324_checked
+            ? `<span style="color:#3fb950">Not vulnerable</span><span style="color:#8b949e"> · ${escHtml(n.cve_2025_31324_evidence || '')}</span>`
+            : 'Not checked'
+      }${(n.cve_2025_31324_shells || []).length
+          ? ` · <span style="color:#f0883e">${(n.cve_2025_31324_shells || []).length} JSP shell(s) dropped</span>`
+          : ''}</span></div>` : ''}
       ${n.saprouter ? `<div class="detail-row"><span class="detail-key">SAProuter</span><span class="detail-val" style="color:#d29922">${escHtml(n.saprouter)}</span></div>` : ''}
     </div>
     ${(() => {
@@ -2677,15 +2714,25 @@ function showTerminalModal(sid) {
   twin.style.width = '820px'; twin.style.height = '520px';
   const hasGw = n && n.gw_vulnerable;
   const hasCreated = n && (n.created_users || []).length > 0;
+  const hasCve = n && n.cve_2025_31324_vulnerable;
+  const hasCveShell = n && (n.cve_2025_31324_shells || []).length > 0;
   const methodSel = document.getElementById('term-method');
   // Enable/disable method options based on what's available
-  methodSel.options[0].disabled = !hasGw;   // gateway
+  methodSel.options[0].disabled = !hasGw;    // gateway
   methodSel.options[1].disabled = !hasCreated; // sxpg
-  methodSel.value = hasGw ? 'gateway' : 'sxpg';
+  methodSel.options[2].disabled = !hasCve;   // cve_31324
+  // Default: prefer CVE-31324 on Java nodes (unauth path, output via shell),
+  // otherwise GW exploit, otherwise SXPG.
+  methodSel.value = hasCve ? 'cve_31324' : (hasGw ? 'gateway' : 'sxpg');
   // Info text
   let info = [];
   if (hasGw) info.push('Gateway: vulnerable');
   if (hasCreated) info.push('SXPG: user available');
+  if (hasCve) {
+    info.push(hasCveShell
+      ? 'CVE-2025-31324: vulnerable (shell dropped — output captured)'
+      : 'CVE-2025-31324: vulnerable (no shell — run "Drop JSP Webshell" for output)');
+  }
   document.getElementById('term-info').textContent = info.join(' | ') || 'No execution method available';
   document.getElementById('term-cmdline').value = 'whoami';
   document.getElementById('term-output').textContent = 'Ready. Type a command and press Enter or click Run.\n';
@@ -2740,14 +2787,17 @@ async function showShellModal(sid) {
   // Method availability
   const hasGw = n && n.gw_vulnerable;
   const hasCreated = n && (n.created_users || []).length > 0;
+  const hasCve = n && n.cve_2025_31324_vulnerable;
   const methodSel = document.getElementById('shell-method');
   methodSel.options[0].disabled = !hasGw;
   methodSel.options[1].disabled = !hasCreated;
-  methodSel.value = hasGw ? 'gateway' : 'sxpg';
+  methodSel.options[2].disabled = !hasCve;
+  methodSel.value = hasCve ? 'cve_31324' : (hasGw ? 'gateway' : 'sxpg');
 
   let info = [];
   if (hasGw) info.push('Gateway: vulnerable');
   if (hasCreated) info.push('SXPG: user available');
+  if (hasCve) info.push('CVE-2025-31324: vulnerable');
   document.getElementById('shell-info').textContent = info.join(' | ');
 
   // Auto-detect callback IP
