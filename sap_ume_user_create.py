@@ -329,11 +329,20 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
                     "error": f"chunk {idx+1}/{len(chunks)} write failed: "
                              f"{r.get('error', '?')}"}
 
-    # 2) Decode to target JSP
-    r = exec_fn("certutil.exe", f"-decode {tmp_b64} \"{target_path}\"")
+    # 2) Decode to target JSP.  Wrap in cmd.exe /C so %TEMP% in the source
+    #    path expands — certutil invoked directly by SAPXPG doesn't resolve
+    #    environment variables and would ERROR_PATH_NOT_FOUND on %TEMP%\....
+    r = exec_fn("cmd.exe",
+                f'/C certutil.exe -decode {tmp_b64} "{target_path}"')
     if not r.get("success"):
         return {"success": False,
                 "error": f"certutil -decode failed: {r.get('error', '?')}"}
+    # Verify certutil actually decoded (it returns success exit code even
+    # on file errors; stdout lines tell us what really happened)
+    out_text = " ".join(r.get("output") or [])
+    if "FAILED" in out_text or "ERROR" in out_text.upper():
+        return {"success": False,
+                "error": f"certutil reported error: {out_text[:200]}"}
 
     # 3) Clean up the tmp base64 file
     try:
