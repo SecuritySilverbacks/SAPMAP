@@ -1864,8 +1864,15 @@ def create_app(api: SAPMAPApi) -> Bottle:
         command = data.get("command", "").strip()
         params = data.get("params", "").strip()
 
-        # If cmdline provided, auto-detect OS and wrap in shell
-        if cmdline:
+        # If cmdline provided, auto-detect OS and wrap in shell.
+        # CVE-2025-31324 is special: the JSP webshell already detects
+        # Windows vs Linux and wraps in cmd.exe /c or /bin/sh -c internally.
+        # Server-side wrapping would double-wrap (e.g. "/bin/sh -c whoami"
+        # passed to cmd.exe /c on Windows → path not found).  Skip it.
+        if cmdline and method == "cve_31324":
+            command = cmdline
+            params = ""
+        elif cmdline:
             os_type = node.os_type or ""
             # Auto-detect OS if unknown
             if not os_type:
