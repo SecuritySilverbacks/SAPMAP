@@ -778,6 +778,110 @@ def check_ms_betrusted(node: SAPNode, timeout: float = 8.0) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# CVE-2025-31324 — Java VisualComposer metadatauploader unauth RCE
+# ---------------------------------------------------------------------------
+
+def check_cve_2025_31324(node: SAPNode, timeout: float = 10.0) -> bool:
+    """Probe Java ports for CVE-2025-31324 (Visual Composer metadatauploader).
+
+    Only runs against Java / double-stack nodes — returns False immediately for
+    pure-ABAP systems where the endpoint is not hosted.
+
+    Updates:
+      node.cve_2025_31324_checked    — set True after any probe attempt
+      node.cve_2025_31324_vulnerable — True on positive detection
+      node.cve_2025_31324_port       — HTTP port that detected the vuln
+      node.cve_2025_31324_https      — True if probed via HTTPS
+      node.cve_2025_31324_evidence   — short reason string
+
+    Returns True if a vulnerable port was found.
+    """
+    try:
+        from sap_cve_2025_31324 import check_cve_2025_31324 as _probe
+    except ImportError:
+        logger.warning("sap_cve_2025_31324 not available — skipping")
+        return False
+
+    sys_type = (node.system_type or "").upper()
+    if not sys_type:
+        logger.debug(f"{node.sid}: system_type unknown, skipping CVE-2025-31324 probe")
+        return False
+    if "JAVA" not in sys_type:
+        logger.debug(f"{node.sid}: not a Java stack ({sys_type}) — "
+                     "skipping CVE-2025-31324")
+        return False
+
+    host = node.ip or node.hostname
+    if not host:
+        return False
+
+    node.cve_2025_31324_checked = True
+
+    # Candidate HTTP ports: 50000 + nn*100 (plain), 50000 + nn*100 + 1 (HTTPS).
+    # Prefer ports already known to be open.
+    candidates = []
+    for inst in node.instances:
+        try:
+            nr = int(inst.instance_nr)
+        except (ValueError, TypeError):
+            continue
+        base = 50000 + nr * 100
+        for p, use_https in [(base, False), (base + 1, True)]:
+            if p in inst.ports or (p, use_https) not in candidates:
+                candidates.append((p, use_https))
+    if not candidates:
+        # No instances known — probe common Java ports as a last resort.
+        for nr in (0, 1, 2, 3):
+            base = 50000 + nr * 100
+            candidates.append((base, False))
+            candidates.append((base + 1, True))
+
+    for port, use_https in candidates:
+        if not _scan_port(host, port, timeout=2.0):
+            continue
+        logger.info(f"{node.sid}: probing {host}:{port} "
+                    f"{'(HTTPS)' if use_https else ''} for CVE-2025-31324")
+        r = _probe(host, port, use_https=use_https, timeout=timeout)
+        if not r.get("reachable"):
+            continue
+        if r.get("vulnerable"):
+            node.cve_2025_31324_vulnerable = True
+            node.cve_2025_31324_port = port
+            node.cve_2025_31324_https = use_https
+            node.cve_2025_31324_evidence = r.get("evidence", "")
+            logger.info(f"{node.sid}: VULNERABLE to CVE-2025-31324 on port {port}")
+            if not any(f.name.startswith("CVE-2025-31324") for f in node.findings):
+                node.findings.append(Finding(
+                    name="CVE-2025-31324 — VisualComposer Metadatauploader RCE",
+                    severity=Severity.CRITICAL,
+                    description=(
+                        "SAP NetWeaver Visual Composer exposes "
+                        "/developmentserver/metadatauploader without "
+                        "authentication.  An attacker can upload a zipped "
+                        ".properties payload containing a Java deserialisation "
+                        "gadget (TemplatesImpl) and obtain arbitrary OS "
+                        "command execution as the SAP Java process user."
+                    ),
+                    remediation=(
+                        "Apply SAP Security Note 3594142 (April 2025). "
+                        "Disable Visual Composer if not in use. "
+                        "Restrict network access to the Java HTTP port."
+                    ),
+                    detail=f"Port {port} · {r.get('evidence', '')}",
+                ))
+                node.has_critical_finding = True
+            return True
+        else:
+            # Record the first reachable-but-not-vulnerable result so the GUI
+            # can show the reason (useful after patching).
+            node.cve_2025_31324_port = port
+            node.cve_2025_31324_https = use_https
+            node.cve_2025_31324_evidence = r.get("evidence", "")
+
+    return False
+
+
+# ---------------------------------------------------------------------------
 # System info enrichment (unauthenticated)
 # ---------------------------------------------------------------------------
 

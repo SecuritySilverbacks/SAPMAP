@@ -205,6 +205,13 @@ class SAPNode:
     ms_port: int = 0                    # MS internal port found (39NN), 0 = not found
     ms_vulnerable: bool = False         # True if MS lacks ACL protection (CVE-2020-6207)
     ms_acl_protected: bool = False      # True if MS port reachable but ACL blocks our IP
+    # CVE-2025-31324 — Java VisualComposer metadatauploader unauth RCE
+    cve_2025_31324_checked: bool = False
+    cve_2025_31324_vulnerable: bool = False
+    cve_2025_31324_port: int = 0        # HTTP port that answered (50000 + nn*100)
+    cve_2025_31324_https: bool = False  # True if probed via HTTPS
+    cve_2025_31324_evidence: str = ""   # short reason string
+    cve_2025_31324_shells: list = field(default_factory=list)  # [{url, name, dropped_at}]
     secstore_entries: list = field(default_factory=list)  # [{ident, password, category, ...}]
     impact_results: list = field(default_factory=list)   # [ImpactResult.to_dict(), ...]
     saprouter: str = ""                 # SAProuter route string prefix (e.g., "/H/router/S/3299/W/pass")
@@ -287,6 +294,12 @@ class SAPNode:
             "ms_port": self.ms_port,
             "ms_vulnerable": self.ms_vulnerable,
             "ms_acl_protected": self.ms_acl_protected,
+            "cve_2025_31324_checked": self.cve_2025_31324_checked,
+            "cve_2025_31324_vulnerable": self.cve_2025_31324_vulnerable,
+            "cve_2025_31324_port": self.cve_2025_31324_port,
+            "cve_2025_31324_https": self.cve_2025_31324_https,
+            "cve_2025_31324_evidence": self.cve_2025_31324_evidence,
+            "cve_2025_31324_shells": self.cve_2025_31324_shells,
             "secstore_entries": self.secstore_entries,
             "impact_results": self.impact_results,
             "saprouter": self.saprouter,
@@ -319,6 +332,12 @@ class SAPNode:
             ms_port=d.get("ms_port", 0),
             ms_vulnerable=d.get("ms_vulnerable", False),
             ms_acl_protected=d.get("ms_acl_protected", False),
+            cve_2025_31324_checked=d.get("cve_2025_31324_checked", False),
+            cve_2025_31324_vulnerable=d.get("cve_2025_31324_vulnerable", False),
+            cve_2025_31324_port=d.get("cve_2025_31324_port", 0),
+            cve_2025_31324_https=d.get("cve_2025_31324_https", False),
+            cve_2025_31324_evidence=d.get("cve_2025_31324_evidence", ""),
+            cve_2025_31324_shells=d.get("cve_2025_31324_shells", []),
             secstore_entries=d.get("secstore_entries", []),
             impact_results=d.get("impact_results", []),
             saprouter=d.get("saprouter", ""),
