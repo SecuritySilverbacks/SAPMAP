@@ -1789,7 +1789,10 @@ function showCtxMenu(e, sid) {
     'create_tcpip':          !isAbapStack,
     'create_user_creds':     !isAbapStack,
     'create_user_betrusted': !isAbapStack,
-    'create_user_gw':        !isAbapStack,  // inserts into ABAP USR02 — no-op on Java
+    // create_user_gw stays visible on both ABAP and Java — click handler
+    // dispatches to the right backend (ABAP USR02 SQL insert vs. Java UME
+    // via JSP), and is hidden only on non-ABAP/non-Java stacks.
+    'create_user_gw':        !(isAbapStack || isJavaStack),
     // SAProuter-only: reads the ROUTER_ADM info page
     'check_router_info': !isSaprouter,
   };
@@ -1960,6 +1963,25 @@ async function ctxAction(action) {
     }
     case 'create_user_gw': {
       const n_gw = (mapState.nodes || {})[sid];
+      const sysTypeGw = (n_gw && n_gw.system_type || '').toUpperCase();
+      const isJavaOnly = sysTypeGw.indexOf('JAVA') !== -1 && sysTypeGw.indexOf('ABAP') === -1;
+      if (isJavaOnly) {
+        // Java stack has no client concept and no USR02 — route to the
+        // Java UME backend using the GW SAPXPG delivery path.
+        const uj = prompt('Create Java user (via GW SAPXPG → UME)\n\nUsername:', 'SAPMAP00');
+        if (!uj || !uj.trim()) break;
+        const pj = prompt('Password (leave empty for random):', 'Andinyougo123!');
+        if (pj === null) break;
+        const gj = prompt('Add to group (blank = Administrators):', 'Administrators');
+        await api('POST', `node/${sid}/create_user_java`, {
+          username: uj.trim(),
+          password: (pj || '').trim(),
+          group:    (gj || 'Administrators').trim(),
+          method:   'gw',
+        });
+        break;
+      }
+      // ABAP / dual-stack: original USR02 SQL-INSERT path (needs client)
       const clients_gw = (n_gw && n_gw.clients || []).map(c => typeof c === 'object' ? c.nr || '?' : String(c));
       let defaultClient = clients_gw.find(c => c !== '000') || clients_gw[0] || '001';
       const clientGw = prompt(
