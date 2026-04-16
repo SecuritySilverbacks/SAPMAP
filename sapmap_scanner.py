@@ -514,9 +514,15 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
             pass2_ports.append((3900 + inst_nr, "ms_internal", inst_str))  # betrusted
             pass2_ports.append((30000 + inst_nr * 100 + 13, "hana_sql", inst_str))
             pass2_ports.append((30000 + inst_nr * 100 + 15, "hana_sql", inst_str))
+            # Java HTTP / HTTPS dispatcher ports (icm) — by SAP convention
+            # 50000+nn*100 (HTTP) and +1 (HTTPS).  Cheap fallback for when
+            # SAPControl is firewalled or refuses GetInstanceProperties.
+            pass2_ports.append((50000 + inst_nr * 100,     "java_http",  inst_str))
+            pass2_ports.append((50000 + inst_nr * 100 + 1, "java_https", inst_str))
 
         print(f"[*] {host}: Pass 2: scanning {len(pass2_ports)} ports "
-              f"(gateway 33XX, HANA 3XX13/3XX15) for {len(found_instances)} instance(s) ...")
+              f"(gateway 33XX, HANA 3XX13/3XX15, Java 5NN00/01) for "
+              f"{len(found_instances)} instance(s) ...")
         t0 = time.time()
         hits2 = _do_scan(pass2_ports)
         if not _cancelled():
