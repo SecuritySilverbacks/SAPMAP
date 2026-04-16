@@ -1714,14 +1714,26 @@ function updateMap() {
 
 // --- Event handlers ---
 function downloadCsv(sid, scenario) {
-  const url = '/api/node/' + encodeURIComponent(sid) + '/impact/export/' + encodeURIComponent(scenario);
-  fetch(url).then(r => r.json()).then(data => {
-    if (data.status === 'ok') {
-      alert('Exported ' + data.records + ' records to:\n' + data.file);
-    } else {
-      alert('Export failed: ' + (data.error || 'unknown error'));
-    }
-  }).catch(err => alert('Export error: ' + err));
+  // Use the query-string route so scenario names containing "/"
+  // (e.g. "PI/PO Message Tampering") survive HTTP routing — Bottle's
+  // <name> placeholder doesn't match a literal slash, even when the
+  // browser %2F-encodes it.
+  const url = '/api/node/' + encodeURIComponent(sid) +
+              '/impact/export?scenario=' + encodeURIComponent(scenario);
+  fetch(url)
+    .then(r => r.text().then(text => ({ ok: r.ok, status: r.status, text })))
+    .then(({ ok, status, text }) => {
+      let data = null;
+      try { data = JSON.parse(text); } catch (e) { /* non-JSON body */ }
+      if (data && data.status === 'ok') {
+        alert('Exported ' + data.records + ' records to:\n' + data.file);
+      } else if (data && data.error) {
+        alert('Export failed: ' + data.error);
+      } else {
+        alert('Export failed: HTTP ' + status + (text ? '\n' + text.slice(0, 200) : ''));
+      }
+    })
+    .catch(err => alert('Export error: ' + err));
 }
 
 function escHtml(s) {
@@ -2568,7 +2580,15 @@ function showImpactDetail(sid) {
       const icon = r.icon || '';
       const samples = r.sample_records || [];
       const previewRows = samples.slice(0, 5);
-      const cols = previewRows.length > 0 ? Object.keys(previewRows[0]).filter(k => !Array.isArray(previewRows[0][k]) && typeof previewRows[0][k] !== 'object') : [];
+      // Two row shapes:
+      //   - dicts (ABAP impact scenarios)            -> column per dict key
+      //   - plain strings (Java impact scenarios)    -> single "Evidence" col
+      const isStringRows = previewRows.length > 0 && typeof previewRows[0] === 'string';
+      const cols = isStringRows
+          ? ['Evidence']
+          : (previewRows.length > 0
+              ? Object.keys(previewRows[0]).filter(k => !Array.isArray(previewRows[0][k]) && typeof previewRows[0][k] !== 'object')
+              : []);
 
       return '<div class="detail-section" style="border-left:3px solid ' + col + ';padding-left:10px;margin-bottom:12px">' +
         '<div style="display:flex;justify-content:space-between;align-items:center">' +
@@ -2576,11 +2596,16 @@ function showImpactDetail(sid) {
           '<span style="font-size:10px;padding:2px 6px;border-radius:3px;background:' + col + ';color:#fff;font-weight:bold">' + lbl + '</span>' +
         '</div>' +
         '<div style="font-size:11px;color:#8b949e;margin:4px 0">' + escHtml(r.category) + ' &mdash; ' + r.record_count + ' records</div>' +
-        '<div style="font-size:12px;color:#c9d1d9;margin:6px 0;font-style:italic">&ldquo;' + escHtml(r.business_message) + '&rdquo;</div>' +
+        '<div style="font-size:12px;color:#c9d1d9;margin:6px 0;white-space:pre-wrap">' + escHtml(r.business_message) + '</div>' +
         (previewRows.length > 0 ? '<details style="margin-top:6px"><summary style="cursor:pointer;font-size:11px;color:#58a6ff">Preview data (' + previewRows.length + ' of ' + samples.length + ' records)</summary>' +
           '<div style="overflow-x:auto;margin-top:4px"><table style="width:100%;font-size:10px;border-collapse:collapse">' +
           '<tr>' + cols.map(c => '<th style="text-align:left;padding:2px 6px;border-bottom:1px solid #30363d;color:#8b949e">' + escHtml(c) + '</th>').join('') + '</tr>' +
-          previewRows.map(row => '<tr>' + cols.map(c => '<td style="padding:2px 6px;border-bottom:1px solid #21262d;font-family:monospace;color:#c9d1d9">' + escHtml(String(row[c]||'')) + '</td>').join('') + '</tr>').join('') +
+          previewRows.map(row => {
+            if (isStringRows) {
+              return '<tr><td style="padding:2px 6px;border-bottom:1px solid #21262d;font-family:monospace;color:#c9d1d9;word-break:break-all">' + escHtml(String(row)) + '</td></tr>';
+            }
+            return '<tr>' + cols.map(c => '<td style="padding:2px 6px;border-bottom:1px solid #21262d;font-family:monospace;color:#c9d1d9">' + escHtml(String(row[c]||'')) + '</td></tr>').join('') + '</tr>';
+          }).join('') +
           '</table></div>' +
           '<a href="#" class="csv-export-link" data-sid="' + escHtml(n.sid) + '" data-scenario="' + escHtml(r.scenario) + '" ' +
             'style="font-size:11px;color:#58a6ff;text-decoration:none;display:inline-block;margin-top:4px">&#128229; Export CSV</a>' +
