@@ -3361,43 +3361,85 @@ def create_app(api: SAPMAPApi) -> Bottle:
             "results": node.impact_results,
         })
 
+    # Two routes for the same handler — the path-style accepts the
+    # scenario name as a positional segment (legacy ABAP scenarios with
+    # short alphanumeric names), the query-style accepts it as ?scenario=
+    # so names containing characters Bottle's <name> placeholder rejects
+    # (slashes and spaces in Java scenario names like "PI/PO Message
+    # Tampering") still work.
+    @app.route("/api/node/<sid>/impact/export")
+    def node_impact_export_query(sid):
+        return _node_impact_export(sid, request.params.get("scenario", ""))
+
     @app.route("/api/node/<sid>/impact/export/<scenario_name>")
-    def node_impact_export(sid, scenario_name):
+    def node_impact_export_path(sid, scenario_name):
+        return _node_impact_export(sid, scenario_name)
+
+    def _node_impact_export(sid, scenario_name):
         response.content_type = "application/json"
+        if not scenario_name:
+            return json.dumps({"error": "scenario name is required"})
         node = api.state.get_node(sid)
         if not node:
             return json.dumps({"error": f"Node {sid} not found"})
 
-        # Re-run the scenario to get FULL data (not the truncated cache)
-        import sapmap_impact
-        creds = node.best_credentials()
-        if not creds:
-            return json.dumps({"error": "No credentials available"})
+        # 1. Try the cached results on the node first.  Java impact
+        #    scenarios are probe-only (no creds + no re-run path), and
+        #    even for ABAP this avoids a duplicate RFC round trip when
+        #    we already have the data.
+        cached = next(
+            (r for r in (node.impact_results or [])
+             if r.get("scenario") == scenario_name),
+            None,
+        )
 
-        try:
-            result = sapmap_impact.assess_one(node, creds, scenario_name)
-        except Exception as e:
-            return json.dumps({"error": f"Query failed: {e}"})
+        records = []
+        if cached and cached.get("sample_records"):
+            records = cached["sample_records"]
+        else:
+            # 2. Fallback: re-run the ABAP scenario via RFC.  Only
+            #    available when ABAP credentials exist on the node.
+            import sapmap_impact
+            creds = node.best_credentials()
+            if not creds:
+                return json.dumps({
+                    "error": "No cached records for this scenario "
+                             "and no credentials available to re-run"
+                })
+            try:
+                result = sapmap_impact.assess_one(node, creds, scenario_name)
+            except Exception as e:
+                return json.dumps({"error": f"Query failed: {e}"})
+            if not result or not result.sample_records:
+                return json.dumps({"error": "No data for this scenario"})
+            records = result.sample_records
 
-        if not result or not result.sample_records:
-            return json.dumps({"error": "No data for this scenario"})
-
-        records = result.sample_records
-        columns = list(records[0].keys())
-        columns = [c for c in columns
-                    if not isinstance(records[0].get(c), (list, dict))]
-
+        # Normalise the row shape: dict (ABAP) → multi-column CSV,
+        # plain string (Java) → single-column CSV with header "evidence".
         import io, csv
         buf = io.StringIO()
-        writer = csv.DictWriter(buf, fieldnames=columns, extrasaction="ignore")
-        writer.writeheader()
-        for row in records:
-            writer.writerow({k: row.get(k, "") for k in columns})
+        if records and isinstance(records[0], dict):
+            columns = [c for c in records[0].keys()
+                        if not isinstance(records[0].get(c), (list, dict))]
+            writer = csv.DictWriter(buf, fieldnames=columns,
+                                      extrasaction="ignore")
+            writer.writeheader()
+            for row in records:
+                writer.writerow({k: row.get(k, "") for k in columns})
+        else:
+            writer = csv.writer(buf)
+            writer.writerow(["evidence"])
+            for row in records:
+                writer.writerow([str(row)])
 
         # Save to states/ folder
         import sapmap_state
         os.makedirs(sapmap_state.STATE_DIR, exist_ok=True)
-        filename = f"{sid}_{scenario_name}.csv"
+        # Sanitise the scenario name for the filename — slashes and
+        # spaces would otherwise produce invalid paths.
+        import re as _re
+        safe_scn = _re.sub(r"[^A-Za-z0-9._-]+", "_", scenario_name)
+        filename = f"{sid}_{safe_scn}.csv"
         filepath = os.path.join(sapmap_state.STATE_DIR, filename)
         with open(filepath, "w", newline="") as f:
             f.write(buf.getvalue())
