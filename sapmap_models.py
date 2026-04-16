@@ -218,6 +218,7 @@ class SAPNode:
     java_secstore_algorithm: str = ""
     java_secstore_entries: list = field(default_factory=list)  # [{name,kind,target_sid,client,value,is_downstream}]
     java_ume_jsps: list = field(default_factory=list)  # [{url, deployed_at}] — cached UME create-user JSPs
+    java_destinations: list = field(default_factory=list)  # [{name,target_sid,ashost,sysnr,client,user,password,...}]
     secstore_entries: list = field(default_factory=list)  # [{ident, password, category, ...}]
     impact_results: list = field(default_factory=list)   # [ImpactResult.to_dict(), ...]
     saprouter: str = ""                 # SAProuter route string prefix (e.g., "/H/router/S/3299/W/pass")
@@ -311,6 +312,7 @@ class SAPNode:
             "java_secstore_algorithm": self.java_secstore_algorithm,
             "java_secstore_entries": self.java_secstore_entries,
             "java_ume_jsps": self.java_ume_jsps,
+            "java_destinations": self.java_destinations,
             "secstore_entries": self.secstore_entries,
             "impact_results": self.impact_results,
             "saprouter": self.saprouter,
@@ -354,6 +356,7 @@ class SAPNode:
             java_secstore_algorithm=d.get("java_secstore_algorithm", ""),
             java_secstore_entries=d.get("java_secstore_entries", []),
             java_ume_jsps=d.get("java_ume_jsps", []),
+            java_destinations=d.get("java_destinations", []),
             secstore_entries=d.get("secstore_entries", []),
             impact_results=d.get("impact_results", []),
             saprouter=d.get("saprouter", ""),
