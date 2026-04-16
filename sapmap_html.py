@@ -482,6 +482,7 @@ body {
       <div class="ctx-item" data-action="download_hashes">&#128273; Extract Hashes for Cracking</div>
       <div class="ctx-item" data-action="download_secstore">&#128273; Download SecStore (RSECTAB)</div>
       <div class="ctx-item" data-action="download_java_secstore">&#128273; Download Java Secure Store</div>
+      <div class="ctx-item" data-action="view_java_secstore">&#128203; View Java Secure Store Results</div>
       <div class="ctx-item" data-action="download_table">&#128229; Download Table Data</div>
     </div>
   </div>
@@ -859,6 +860,39 @@ body {
     </div>
     </div>
     <div class="shell-resize-handle" id="term-resize-handle"></div>
+  </div>
+</div>
+
+<!-- Java Secure Store Results Modal -->
+<div class="modal-overlay" id="jss-modal">
+  <div class="modal" style="width:90vw;max-width:1200px;max-height:85vh;display:flex;flex-direction:column">
+    <h3 style="margin:0 0 8px">&#128273; Java Secure Store — <span id="jss-sid"></span></h3>
+    <div id="jss-meta" style="font-size:11px;color:#8b949e;margin-bottom:8px"></div>
+    <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center">
+      <input type="text" id="jss-filter" placeholder="filter by name or value..." style="flex:1" oninput="renderJssTable()">
+      <label style="font-size:11px;color:#8b949e">
+        <input type="checkbox" id="jss-showpw" onchange="renderJssTable()" checked> Show passwords
+      </label>
+      <button class="btn" onclick="copyJssJson()" style="white-space:nowrap">Copy JSON</button>
+    </div>
+    <div style="overflow:auto;flex:1;border:1px solid #30363d;border-radius:4px">
+      <table id="jss-table" style="width:100%;border-collapse:collapse;font-size:12px;font-family:monospace">
+        <thead style="position:sticky;top:0;background:#161b22;z-index:1">
+          <tr style="color:#8b949e;border-bottom:1px solid #30363d">
+            <th style="text-align:left;padding:6px 8px">Source</th>
+            <th style="text-align:left;padding:6px 8px">Kind</th>
+            <th style="text-align:left;padding:6px 8px">Target</th>
+            <th style="text-align:left;padding:6px 8px">Name</th>
+            <th style="text-align:left;padding:6px 8px">Value</th>
+            <th style="width:80px;padding:6px 8px"></th>
+          </tr>
+        </thead>
+        <tbody id="jss-tbody"></tbody>
+      </table>
+    </div>
+    <div class="form-actions" style="margin-top:8px">
+      <button class="btn" onclick="closeModal('jss-modal')">Close</button>
+    </div>
   </div>
 </div>
 
@@ -1730,6 +1764,7 @@ function showCtxMenu(e, sid) {
     'download_hashes':    hasCreds,                   // need credentials/access
     'download_secstore':  hasCreds,                   // need credentials/access
     'download_java_secstore': isJavaStack && (hasCve31324 || hasGwVuln), // Java + exploit
+    'view_java_secstore':     n && n.java_secstore_checked,
     'download_table':     hasCreds,                   // need credentials/access
     'impact_assess':      hasCreds,                   // need credentials/access
     'impact_view':        (n.impact_results||[]).length > 0,
@@ -1767,6 +1802,7 @@ function showCtxMenu(e, sid) {
     'download_hashes':    'Provide credentials or create a user first',
     'download_secstore':  'Provide credentials or create a user first',
     'download_java_secstore': 'Requires Java/dual-stack + CVE-2025-31324 or GW SAPXPG vuln',
+    'view_java_secstore':     'Run Download Java Secure Store first',
     'download_table':     'Provide credentials or create a user first',
     'impact_assess':      'Provide credentials or create a user first',
     'impact_view':        'Run impact assessment first',
@@ -1798,6 +1834,9 @@ function showCtxMenu(e, sid) {
     'create_user_gw':        !(isAbapStack || isJavaStack),
     // SAProuter-only: reads the ROUTER_ADM info page
     'check_router_info': !isSaprouter,
+    // Java-only (dual-stack also counts as Java here)
+    'download_java_secstore': !isJavaStack,
+    'view_java_secstore':     !isJavaStack,
   };
 
   // Apply visibility + enable/disable state to each menu item
@@ -1894,12 +1933,27 @@ async function ctxAction(action) {
     case 'download_java_secstore': {
       if (!confirm('Extract + decrypt the Java Secure Store?\n\n' +
                     'Reads /usr/sap/<SID>/SYS/global/security/data/SecStore.{properties,key}\n' +
-                    'and decrypts entries using the target\'s own SecStoreFS class.\n\n' +
+                    'and decrypts entries using the target\'s own SecStoreFS class.\n' +
+                    'Also queries J2EE_CONFIGENTRY for encrypted config rows.\n\n' +
                     'Any downstream ABAP systems referenced by SAPJSF/JCo entries will be ' +
                     'auto-added to the map, with the extracted credentials imported and ' +
                     'an RFC edge drawn from this node to them.')) break;
-      await api('POST', `node/${sid}/java_secstore`); break;
+      await api('POST', `node/${sid}/java_secstore`);
+      // Poll briefly for the results modal to auto-open once the bg job lands.
+      const pollStart = Date.now();
+      const pollTimer = setInterval(() => {
+        const nn = (mapState.nodes || {})[sid];
+        if (nn && nn.java_secstore_checked && (nn.java_secstore_entries||[]).length) {
+          clearInterval(pollTimer);
+          showJavaSecStoreModal(sid);
+        } else if (Date.now() - pollStart > 180000) {
+          clearInterval(pollTimer);
+        }
+      }, 1500);
+      break;
     }
+    case 'view_java_secstore':
+      showJavaSecStoreModal(sid); break;
     case 'create_user_java': {
       const u = prompt('Create Java user\n\nUsername:', 'SAPMAP00');
       if (!u || !u.trim()) break;
@@ -2796,6 +2850,97 @@ async function doPropagateTarget() {
 }
 
 // --- OS Terminal ---
+// --- Java Secure Store results modal ---
+let _jssCurrentSid = '';
+
+function showJavaSecStoreModal(sid) {
+  _jssCurrentSid = sid;
+  const n = (mapState.nodes || {})[sid];
+  if (!n) return;
+  document.getElementById('jss-sid').textContent = sid;
+  const entries = n.java_secstore_entries || [];
+  const fe = entries.filter(e => (e.source || '') === 'SecStore.properties').length;
+  const ce = entries.filter(e => (e.source || '') === 'J2EE_CONFIGENTRY').length;
+  const ds = entries.filter(e => e.is_downstream).map(e => e.target_sid);
+  const dsText = ds.length
+      ? ' | <span style="color:#f85149">downstream: ' + Array.from(new Set(ds)).join(', ') + '</span>'
+      : '';
+  document.getElementById('jss-meta').innerHTML =
+      'version=' + escHtml(n.java_secstore_version || '?') +
+      ' | algorithm=' + escHtml((n.java_secstore_algorithm || '?').slice(0, 80)) +
+      ' | file=' + fe + ' · configentry=' + ce + dsText;
+  renderJssTable();
+  document.getElementById('jss-modal').classList.add('visible');
+}
+
+function renderJssTable() {
+  const sid = _jssCurrentSid;
+  if (!sid) return;
+  const n = (mapState.nodes || {})[sid];
+  if (!n) return;
+  const entries = n.java_secstore_entries || [];
+  const showPw = document.getElementById('jss-showpw').checked;
+  const filter = (document.getElementById('jss-filter').value || '').toLowerCase();
+  const tbody = document.getElementById('jss-tbody');
+  const rows = [];
+  const isPwField = (name) => /pass|pwd|secret|credential/i.test(name);
+  for (const e of entries) {
+    const name = e.name || '';
+    const value = e.value || '';
+    if (filter && name.toLowerCase().indexOf(filter) === -1
+               && value.toLowerCase().indexOf(filter) === -1) continue;
+    let display = value;
+    if (!showPw && isPwField(name)) {
+      display = (value.length > 0) ? '•'.repeat(Math.min(value.length, 8)) + ' (' + value.length + 'B)' : '(empty)';
+    }
+    // Heuristic redact for JDBC / connection-string values that embed
+    // passwords inline even when the entry name doesn't advertise it.
+    if (!showPw) {
+      display = display.replace(/(password\s*=)[^&;\s]+/gi, '$1***');
+    }
+    if (display.length > 160) display = display.slice(0, 160) + '…';
+    const kind = e.kind || '';
+    const target = e.target_sid || '';
+    const source = e.source || '';
+    const ds = e.is_downstream ? ' style="color:#f85149"' : '';
+    rows.push(
+      '<tr' + ds + '>' +
+        '<td style="padding:4px 8px;white-space:nowrap">' + escHtml(source) + '</td>' +
+        '<td style="padding:4px 8px;white-space:nowrap">' + escHtml(kind) + '</td>' +
+        '<td style="padding:4px 8px;white-space:nowrap">' +
+          (target ? escHtml(target) + (e.client ? '/' + escHtml(e.client) : '') : '') +
+        '</td>' +
+        '<td style="padding:4px 8px">' + escHtml(name) + '</td>' +
+        '<td style="padding:4px 8px;word-break:break-all">' + escHtml(display) + '</td>' +
+        '<td style="padding:4px 8px;text-align:right">' +
+          '<button class="btn" style="padding:2px 8px;font-size:10px"' +
+          ' onclick=\'copyJssValue(' + JSON.stringify(name) + ')\'>Copy</button>' +
+        '</td>' +
+      '</tr>'
+    );
+  }
+  if (!rows.length) {
+    rows.push('<tr><td colspan="6" style="padding:12px;color:#8b949e;text-align:center">No matching entries.</td></tr>');
+  }
+  tbody.innerHTML = rows.join('');
+}
+
+function copyJssValue(name) {
+  const n = (mapState.nodes || {})[_jssCurrentSid];
+  if (!n) return;
+  const entry = (n.java_secstore_entries || []).find(e => e.name === name);
+  if (!entry) return;
+  navigator.clipboard.writeText(entry.value || '').then(() => {
+    console.log('copied', name);
+  });
+}
+
+function copyJssJson() {
+  const n = (mapState.nodes || {})[_jssCurrentSid];
+  if (!n) return;
+  navigator.clipboard.writeText(JSON.stringify(n.java_secstore_entries, null, 2));
+}
+
 function showTerminalModal(sid) {
   const n = (mapState.nodes || {})[sid];
   document.getElementById('term-sid').textContent = sid;

