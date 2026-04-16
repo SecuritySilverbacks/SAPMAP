@@ -215,6 +215,69 @@ UME_HASH_QUERY = (
     "SELECT PID, VAL FROM UME_STRINGS WHERE ATTR LIKE '%j_password%'"
 )
 
+# Find every JCo destination by collecting cleartext property rows under
+# any CID that has a `#~destination.name` entry.  All `#~*` keys come back
+# as cleartext in VSTR; the password is in VBYTES (encrypted) and is
+# decrypted via the SecStoreFS path elsewhere.
+JCO_DESTINATIONS_QUERY = (
+    "SELECT CID, NAME, VSTR FROM J2EE_CONFIGENTRY "
+    "WHERE NAME LIKE '#~%' AND CID IN ("
+    "  SELECT CID FROM J2EE_CONFIGENTRY WHERE NAME = '#~destination.name' "
+    "  AND VSTR IS NOT NULL AND VSTR <> ''"
+    ")"
+)
+
+
+def group_destinations(query_result: dict) -> list:
+    """Convert the flat (CID, NAME, VSTR) result of JCO_DESTINATIONS_QUERY
+    into a list of destination dicts, one per CID.
+
+    Each dict has keys: cid, name, target_sid, ashost, sysnr, client, user,
+    lang, gwhost, gwserv, type, auth_mode, conn_mode, plus any other
+    `jco.client.*` properties keyed without the `#~` prefix.
+    """
+    cols = [c.upper() for c in query_result.get("columns", [])]
+    try:
+        ci, ni, vi = cols.index("CID"), cols.index("NAME"), cols.index("VSTR")
+    except ValueError:
+        return []
+    by_cid = {}
+    for row in query_result.get("rows", []):
+        if len(row) <= max(ci, ni, vi):
+            continue
+        cid, name, vstr = row[ci], row[ni], row[vi]
+        if not name.startswith("#~"):
+            continue
+        prop = name[2:]                          # strip the `#~` prefix
+        bucket = by_cid.setdefault(cid, {"cid": cid, "_props": {}})
+        bucket["_props"][prop] = vstr
+    out = []
+    for cid, bucket in by_cid.items():
+        p = bucket["_props"]
+        d = {
+            "cid":         cid,
+            "name":        p.get("destination.name", ""),
+            "target_sid":  (p.get("jco.client.r3name", "") or "").upper(),
+            "ashost":      p.get("jco.client.ashost", ""),
+            "sysnr":       p.get("jco.client.sysnr", ""),
+            "client":      p.get("jco.client.client", ""),
+            "user":        p.get("jco.client.user", ""),
+            "lang":        p.get("jco.client.lang", ""),
+            "gwhost":      p.get("jco.client.gwhost", ""),
+            "gwserv":      p.get("jco.client.gwserv", ""),
+            "type":        p.get("jco.client.type", ""),
+            "auth_mode":   p.get("AUTHENTICATION_MODE", ""),
+            "conn_mode":   p.get("CONNECTION_MODE", ""),
+            "pool_mode":   p.get("POOL_MODE", ""),
+            "snc_mode":    p.get("jco.client.snc_mode", ""),
+            "all_props":   p,
+            "password":    "",   # filled in by caller from SecStore extract
+        }
+        if d["name"]:                 # ignore CIDs without a real destination
+            out.append(d)
+    return out
+
+
 # J2EE_CONFIGENTRY rows whose NAME suggests a credential.  These are already
 # decrypted by extract_java_secstore, but the password-extraction workflow
 # needs them surfaced alongside the UME hashes so a single output file

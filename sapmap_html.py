@@ -449,6 +449,7 @@ body {
       <div class="ctx-item" data-action="check_cve_31324">&#128270; Check CVE-2025-31324 (Java VisualComposer)</div>
       <div class="ctx-item" data-action="deep_scan">&#128260; Deep Scan (full SAPology)</div>
       <div class="ctx-item" data-action="retrieve_rfcs">&#128225; Retrieve RFC Connections</div>
+      <div class="ctx-item" data-action="read_java_destinations">&#128225; Read Java JCo Destinations</div>
       <div class="ctx-item" data-action="test_rfcs">&#129514; Test RFC Connections</div>
       <div class="ctx-item" data-action="enum_clients">&#128202; Enumerate Clients</div>
       <div class="ctx-item" data-action="client_roles">&#128202; Retrieve Client Roles</div>
@@ -1763,6 +1764,7 @@ function showCtxMenu(e, sid) {
     'deep_scan':        true,                       // always available
     'retrieve_rfcs':    hasCreds,                   // need credentials/access
     'test_rfcs':        hasCreds && hasRFCs,        // need access + existing RFCs
+    'read_java_destinations': isJavaStack && (hasCve31324 || hasGwVuln),
     'download_hashes':    hasCreds || (isJavaStack && (hasCve31324 || hasGwVuln)),
     'download_secstore':  hasCreds,                   // need credentials/access
     'download_java_secstore': isJavaStack && (hasCve31324 || hasGwVuln), // Java + exploit
@@ -1801,6 +1803,7 @@ function showCtxMenu(e, sid) {
     'lpe':              'Provide credentials first',
     'retrieve_rfcs':    'Provide credentials or create a user first',
     'test_rfcs':        'Retrieve RFC connections first',
+    'read_java_destinations': 'Requires Java/dual-stack + CVE-2025-31324 or GW SAPXPG',
     'download_hashes':    'Provide credentials or create a user first',
     'download_secstore':  'Provide credentials or create a user first',
     'download_java_secstore': 'Requires Java/dual-stack + CVE-2025-31324 or GW SAPXPG vuln',
@@ -1838,8 +1841,9 @@ function showCtxMenu(e, sid) {
     // SAProuter-only: reads the ROUTER_ADM info page
     'check_router_info': !isSaprouter,
     // Java-only (dual-stack also counts as Java here)
-    'download_java_secstore': !isJavaStack,
-    'view_java_secstore':     !isJavaStack,
+    'download_java_secstore':     !isJavaStack,
+    'view_java_secstore':         !isJavaStack,
+    'read_java_destinations':     !isJavaStack,
   };
 
   // Apply visibility + enable/disable state to each menu item
@@ -1933,6 +1937,15 @@ async function ctxAction(action) {
       await api('POST', `node/${sid}/check_ms`); break;
     case 'check_cve_31324':
       await api('POST', `node/${sid}/check_cve_2025_31324`); break;
+    case 'read_java_destinations': {
+      if (!confirm('Enumerate JCo destinations from J2EE_CONFIGENTRY?\n\n' +
+                    'Decrypts each destination\'s password via SecStoreFS, ' +
+                    'auto-plots downstream ABAP targets that aren\'t on the ' +
+                    'map yet, imports the credentials, and draws RFC edges ' +
+                    'from this node to each target.')) break;
+      await api('POST', `node/${sid}/read_java_destinations`);
+      break;
+    }
     case 'download_java_secstore': {
       if (!confirm('Extract + decrypt the Java Secure Store?\n\n' +
                     'Reads /usr/sap/<SID>/SYS/global/security/data/SecStore.{properties,key}\n' +

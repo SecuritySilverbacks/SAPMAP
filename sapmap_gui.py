@@ -1322,6 +1322,32 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:extract_java_hashes", "Extract Java Hashes", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/read_java_destinations", method="POST")
+    def node_read_java_destinations(sid):
+        """Read all JCo destinations from J2EE_CONFIGENTRY, plot the
+        downstream targets on the map, and import their credentials."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        if "JAVA" not in (node.system_type or "").upper():
+            return json.dumps({"error": "Not a Java/dual-stack system"})
+
+        def _run():
+            r = sapmap_exploit.read_java_destinations(node, api.state)
+            if r.get("success"):
+                print(f"[+] {sid}: read_java_destinations summary: "
+                      f"{len(r.get('destinations', []))} destinations, "
+                      f"{r['added_nodes']} new nodes plotted, "
+                      f"{r['credentials_added']} creds imported, "
+                      f"{r['added_edges']} RFC edges drawn")
+            else:
+                print(f"[-] {sid}: read_java_destinations failed: "
+                      f"{r.get('error', '?')}")
+
+        _bg(f"{sid}:read_java_destinations", "Read Java JCo Destinations", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/java_secstore", method="POST")
     def node_java_secstore(sid):
         """Extract + decrypt the Java Secure Store; import credentials and
