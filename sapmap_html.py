@@ -1828,6 +1828,7 @@ function showCtxMenu(e, sid) {
     'create_tcpip':          !isAbapStack,
     'create_user_creds':     !isAbapStack,
     'create_user_betrusted': !isAbapStack,
+    'download_secstore':     !isAbapStack,  // RSECTAB is an ABAP table
     // create_user_gw stays visible on both ABAP and Java — click handler
     // dispatches to the right backend (ABAP USR02 SQL insert vs. Java UME
     // via JSP), and is hidden only on non-ABAP/non-Java stacks.
