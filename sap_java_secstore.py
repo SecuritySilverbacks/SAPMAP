@@ -167,9 +167,13 @@ try {
                 out.println("# configentry_error=JDBC URL or user missing");
             } else {
                 conn = java.sql.DriverManager.getConnection(url, dbUser, dbPwd);
+                // NAME LIKE '##%' rows are framework metadata (version,
+                // descriptions, content-class markers) — they're stored
+                // raw, not SecStoreFS-encrypted, so we filter them out.
                 java.sql.PreparedStatement ps = conn.prepareStatement(
                     "SELECT CID, NAME, VBYTES FROM J2EE_CONFIGENTRY "
-                    + "WHERE VBYTES IS NOT NULL");
+                    + "WHERE VBYTES IS NOT NULL "
+                    + "AND NAME NOT LIKE '##%'");
                 java.sql.ResultSet rs = ps.executeQuery();
                 java.lang.reflect.Method decryptM =
                     SSF.getMethod("decrypt", byte[].class);
@@ -182,18 +186,17 @@ try {
                     if (blob == null || blob.length == 0) continue;
                     try {
                         byte[] pt = (byte[]) decryptM.invoke(inst, (Object) blob);
-                        // Plaintext may have a 4-byte length prefix (common
-                        // in SAP's config-entry format).  Trim heuristically:
-                        // if the first 4 bytes form an int that matches the
-                        // remaining length, strip them.
-                        if (pt != null && pt.length >= 4) {
-                            int declared = ((pt[0] & 0xff) << 24)
-                                          | ((pt[1] & 0xff) << 16)
-                                          | ((pt[2] & 0xff) << 8)
-                                          |  (pt[3] & 0xff);
-                            if (declared > 0 && declared <= pt.length - 4) {
+                        // Plaintext layout: 2-byte big-endian length prefix
+                        // followed by `length` bytes of UTF-8 content.
+                        // (Earlier code used a 4-byte prefix — wrong; that
+                        // surfaced "<Password>" prefixed by 00 0a control
+                        // bytes which rendered as boxes in the GUI.)
+                        if (pt != null && pt.length >= 2) {
+                            int declared = ((pt[0] & 0xff) << 8)
+                                          |  (pt[1] & 0xff);
+                            if (declared >= 0 && declared <= pt.length - 2) {
                                 byte[] trimmed = new byte[declared];
-                                System.arraycopy(pt, 4, trimmed, 0, declared);
+                                System.arraycopy(pt, 2, trimmed, 0, declared);
                                 pt = trimmed;
                             }
                         }
@@ -204,9 +207,17 @@ try {
                         out.println(cid + "::" + name + "=" + b64);
                         okCount++;
                     } catch (Throwable dt) {
-                        out.println("# decrypt_failed cid=" + cid
-                            + " name=" + name + " err="
-                            + dt.getClass().getSimpleName());
+                        // Many rows in J2EE_CONFIGENTRY aren't SecStoreFS-
+                        // encrypted (different services use the column for
+                        // their own opaque blobs, e.g. WS-RM sequence state,
+                        // PSE storage).  These throw InvalidStateException
+                        // — surface as comments so users see what's being
+                        // skipped without polluting the entries list.
+                        Throwable rc = dt;
+                        while (rc.getCause() != null) rc = rc.getCause();
+                        out.println("# skipped cid=" + cid
+                            + " name=" + name + " reason="
+                            + rc.getClass().getSimpleName());
                     }
                 }
                 rs.close(); ps.close();
