@@ -875,8 +875,10 @@ body {
       </label>
       <button class="btn" onclick="copyJssJson()" style="white-space:nowrap">Copy JSON</button>
     </div>
-    <div style="overflow:auto;flex:1;border:1px solid #30363d;border-radius:4px">
-      <table id="jss-table" style="width:100%;border-collapse:collapse;font-size:12px;font-family:monospace">
+    <div style="overflow:auto;flex:1;border:1px solid #30363d;border-radius:4px;
+                user-select:text;-webkit-user-select:text;cursor:text">
+      <table id="jss-table" style="width:100%;border-collapse:collapse;font-size:12px;font-family:monospace;
+                                     user-select:text;-webkit-user-select:text">
         <thead style="position:sticky;top:0;background:#161b22;z-index:1">
           <tr style="color:#8b949e;border-bottom:1px solid #30363d">
             <th style="text-align:left;padding:6px 8px">Source</th>
@@ -2318,7 +2320,51 @@ function showDetails(sid) {
           ? ` · <span style="color:#f0883e">${(n.cve_2025_31324_shells || []).length} JSP shell(s) dropped</span>`
           : ''}</span></div>` : ''}
       ${n.saprouter ? `<div class="detail-row"><span class="detail-key">SAProuter</span><span class="detail-val" style="color:#d29922">${escHtml(n.saprouter)}</span></div>` : ''}
+      ${n.java_secstore_checked ? `
+      <div class="detail-row"><span class="detail-key">Java Secure Store</span><span class="detail-val">${
+        (() => {
+          const entries = n.java_secstore_entries || [];
+          const fe = entries.filter(e => (e.source || '') === 'SecStore.properties').length;
+          const ce = entries.filter(e => (e.source || '') === 'J2EE_CONFIGENTRY').length;
+          const ds = Array.from(new Set(entries.filter(e => e.is_downstream).map(e => e.target_sid))).filter(Boolean);
+          return `<span style="color:#f85149">${entries.length} entries decrypted</span>` +
+                 ` <span style="color:#8b949e">(${fe} file · ${ce} configentry` +
+                 (ds.length ? ` · downstream: ${escHtml(ds.join(', '))}` : '') +
+                 `)</span> · alg=${escHtml((n.java_secstore_algorithm || '').slice(0, 60))}` +
+                 ` <a href="javascript:void(0)" onclick="showJavaSecStoreModal('${escHtml(n.sid)}')" style="color:#58a6ff">view all →</a>`;
+        })()
+      }</span></div>` : ''}
     </div>
+    ${n.java_secstore_checked && (n.java_secstore_entries || []).length ? `
+    <div class="detail-section" style="user-select:text;-webkit-user-select:text">
+      <h4 style="margin:0 0 8px;color:#f0883e">&#128273; Java Secure Store entries</h4>
+      <div style="font-size:10px;color:#8b949e;margin-bottom:6px">Click a row to copy the value · <a href="javascript:void(0)" onclick="showJavaSecStoreModal('${escHtml(n.sid)}')" style="color:#58a6ff">open full modal</a></div>
+      <table style="width:100%;border-collapse:collapse;font-family:monospace;font-size:11px;user-select:text">
+        <thead><tr style="color:#8b949e;border-bottom:1px solid #30363d">
+          <th style="text-align:left;padding:3px 6px">Source</th>
+          <th style="text-align:left;padding:3px 6px">Name</th>
+          <th style="text-align:left;padding:3px 6px">Value</th>
+        </tr></thead>
+        <tbody>
+        ${(n.java_secstore_entries || []).slice(0, 25).map(e => {
+          const isPw = /pass|pwd|secret|credential/i.test(e.name || '');
+          let v = e.value || '';
+          if (isPw && v.length > 0) v = '•'.repeat(Math.min(v.length, 8)) + ' (' + v.length + 'B)';
+          v = String(v).replace(/(password\s*=)[^&;\s]+/gi, '$1***');
+          if (v.length > 80) v = v.slice(0, 80) + '…';
+          const ds = e.is_downstream ? ' style="color:#f85149"' : '';
+          return `<tr${ds}>` +
+            `<td style="padding:3px 6px;color:#8b949e">${escHtml((e.source || '').replace('SecStore.properties', 'file').replace('J2EE_CONFIGENTRY', 'cfg'))}</td>` +
+            `<td style="padding:3px 6px">${escHtml(e.name)}</td>` +
+            `<td style="padding:3px 6px;word-break:break-all">${escHtml(v)}</td>` +
+          `</tr>`;
+        }).join('')}
+        ${(n.java_secstore_entries || []).length > 25 ?
+          `<tr><td colspan="3" style="padding:6px;color:#8b949e;text-align:center">… ${(n.java_secstore_entries || []).length - 25} more — open full modal</td></tr>`
+          : ''}
+        </tbody>
+      </table>
+    </div>` : ''}
     ${(() => {
       const ri = n.saprouter_info || {};
       if (!ri.vulnerable) return '';
