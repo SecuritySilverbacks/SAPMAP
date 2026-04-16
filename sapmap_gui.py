@@ -1322,6 +1322,31 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:extract_java_hashes", "Extract Java Hashes", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/impact_assess_java", method="POST")
+    def node_impact_assess_java(sid):
+        """Run Java business-impact scenarios (PI/PO, NWDI/CTS+, HR/ESS,
+        KMC, audit tamper) against a Java/dual-stack node."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        if "JAVA" not in (node.system_type or "").upper():
+            return json.dumps({"error": "Not a Java/dual-stack system"})
+
+        def _run():
+            r = sapmap_exploit.assess_java_impact(node, api.state)
+            if r.get("success"):
+                hits = len(r.get("results", []))
+                print(f"[+] {sid}: Java impact assessment complete — "
+                      f"{hits} scenario(s) applicable on this stack "
+                      f"({r.get('components', 0)} components inventoried)")
+            else:
+                print(f"[-] {sid}: Java impact assessment failed: "
+                      f"{r.get('error', '?')}")
+
+        _bg(f"{sid}:impact_assess_java", "Assess Java Business Impact", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/read_java_destinations", method="POST")
     def node_read_java_destinations(sid):
         """Read all JCo destinations from J2EE_CONFIGENTRY, plot the

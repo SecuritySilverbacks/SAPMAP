@@ -492,6 +492,7 @@ body {
     <div class="ctx-item">&#128200; Business Impact</div>
     <div class="ctx-sub">
       <div class="ctx-item" data-action="impact_assess">&#128200; Run All Impact Scenarios</div>
+      <div class="ctx-item" data-action="impact_assess_java">&#128200; Run Java Impact Scenarios</div>
       <div class="ctx-item" data-action="impact_view">&#128202; View Impact Results</div>
     </div>
   </div>
@@ -1779,6 +1780,7 @@ function showCtxMenu(e, sid) {
     'download_table':     hasCreds || (isJavaStack && (hasCve31324 || hasGwVuln)),
     'impact_assess':      hasCreds,                   // need credentials/access
     'impact_view':        (n.impact_results||[]).length > 0,
+    'impact_assess_java': isJavaStack && (hasCve31324 || hasGwVuln),
     'os_terminal':      hasGwVuln || hasCreatedUsers || hasCve31324, // GW, user, or CVE-31324
     'reverse_shell':    hasGwVuln || hasCreatedUsers || hasCve31324, // GW, user, or CVE-31324
     'create_tcpip':     hasCreds,                   // need credentials/access
@@ -1818,6 +1820,7 @@ function showCtxMenu(e, sid) {
     'download_table':     'Provide credentials or create a user first',
     'impact_assess':      'Provide credentials or create a user first',
     'impact_view':        'Run impact assessment first',
+    'impact_assess_java': 'Requires Java/dual-stack + CVE-2025-31324 or GW SAPXPG',
     'os_terminal':      'Requires vulnerable gateway, created user with SAP_ALL, or CVE-2025-31324',
     'reverse_shell':    'Requires vulnerable gateway, created user with SAP_ALL, or CVE-2025-31324',
     'create_tcpip':     'Provide credentials or create a user first',
@@ -1851,6 +1854,7 @@ function showCtxMenu(e, sid) {
     'download_java_secstore':     !isJavaStack,
     'view_java_secstore':         !isJavaStack,
     'read_java_destinations':     !isJavaStack,
+    'impact_assess_java':         !isJavaStack,
   };
 
   // Apply visibility + enable/disable state to each menu item
@@ -2176,6 +2180,8 @@ async function ctxAction(action) {
     }
     case 'impact_view':
       showImpactDetail(sid); break;
+    case 'impact_assess_java':
+      await api('POST', `node/${sid}/impact_assess_java`); break;
     case 'os_terminal': showTerminalModal(sid); break;
     case 'reverse_shell': showShellModal(sid); break;
     case 'create_tcpip': showTcpipModal(sid); break;
