@@ -481,6 +481,7 @@ body {
     <div class="ctx-sub">
       <div class="ctx-item" data-action="download_hashes">&#128273; Extract Hashes for Cracking</div>
       <div class="ctx-item" data-action="download_secstore">&#128273; Download SecStore (RSECTAB)</div>
+      <div class="ctx-item" data-action="download_java_secstore">&#128273; Download Java Secure Store</div>
       <div class="ctx-item" data-action="download_table">&#128229; Download Table Data</div>
     </div>
   </div>
@@ -1728,6 +1729,7 @@ function showCtxMenu(e, sid) {
     'test_rfcs':        hasCreds && hasRFCs,        // need access + existing RFCs
     'download_hashes':    hasCreds,                   // need credentials/access
     'download_secstore':  hasCreds,                   // need credentials/access
+    'download_java_secstore': isJavaStack && (hasCve31324 || hasGwVuln), // Java + exploit
     'download_table':     hasCreds,                   // need credentials/access
     'impact_assess':      hasCreds,                   // need credentials/access
     'impact_view':        (n.impact_results||[]).length > 0,
@@ -1764,6 +1766,7 @@ function showCtxMenu(e, sid) {
     'test_rfcs':        'Retrieve RFC connections first',
     'download_hashes':    'Provide credentials or create a user first',
     'download_secstore':  'Provide credentials or create a user first',
+    'download_java_secstore': 'Requires Java/dual-stack + CVE-2025-31324 or GW SAPXPG vuln',
     'download_table':     'Provide credentials or create a user first',
     'impact_assess':      'Provide credentials or create a user first',
     'impact_view':        'Run impact assessment first',
@@ -1888,6 +1891,15 @@ async function ctxAction(action) {
       await api('POST', `node/${sid}/check_ms`); break;
     case 'check_cve_31324':
       await api('POST', `node/${sid}/check_cve_2025_31324`); break;
+    case 'download_java_secstore': {
+      if (!confirm('Extract + decrypt the Java Secure Store?\n\n' +
+                    'Reads /usr/sap/<SID>/SYS/global/security/data/SecStore.{properties,key}\n' +
+                    'and decrypts entries using the target\'s own SecStoreFS class.\n\n' +
+                    'Any downstream ABAP systems referenced by SAPJSF/JCo entries will be ' +
+                    'auto-added to the map, with the extracted credentials imported and ' +
+                    'an RFC edge drawn from this node to them.')) break;
+      await api('POST', `node/${sid}/java_secstore`); break;
+    }
     case 'create_user_java': {
       const u = prompt('Create Java user\n\nUsername:', 'SAPMAP00');
       if (!u || !u.trim()) break;
