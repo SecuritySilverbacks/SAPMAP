@@ -1007,11 +1007,12 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
     # Query SAPControl SOAP on 5XX13 for SID, DB type, and ABAP/JAVA detection.
     # Always run this even if SID/db_type are known, because the ABAP/JAVA
     # stack detection (is_abap, is_java) only comes from SAPControl properties.
+    # Accumulate HTTP/HTTPS ports discovered across instances.
+    info.setdefault("http_ports", {})   # {inst_nr: (http_port, https_port)}
     for inst_nr in ordered_nrs:
         sc_port = 50000 + inst_nr * 100 + 13
-        sid, is_java, is_abap, db_type = _query_sapcontrol_sid(
-            host, sc_port, timeout=min(timeout, 3)
-        )
+        sid, is_java, is_abap, db_type, icm_http, icm_https = \
+            _query_sapcontrol_sid(host, sc_port, timeout=min(timeout, 3))
         if sid and not info["sid"]:
             info["sid"] = sid
             tag = sid  # update tag with discovered SID
@@ -1026,6 +1027,13 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
             info["db_type"] = db_type
             print(f"[+] {tag}: DB type from SAPControl ({host}:{sc_port}): "
                   f"{db_type}")
+        if icm_http or icm_https:
+            info["http_ports"][inst_nr] = (icm_http, icm_https)
+            bits = []
+            if icm_http:  bits.append(f"HTTP:{icm_http}")
+            if icm_https: bits.append(f"HTTPS:{icm_https}")
+            print(f"[+] {tag}: ICM ports for instance {inst_nr:02d} "
+                  f"from SAPControl ({host}:{sc_port}): {', '.join(bits)}")
         # For double-stack, ABAP and JAVA run on different instances.
         # Keep querying until we have SID + db_type + both stack flags checked,
         # or all instances are exhausted.
@@ -1086,18 +1094,19 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
 def _query_sapcontrol_sid(host: str, port: int, timeout: float = 3) -> tuple:
     """Quick SAPControl SOAP query to extract SID, system type, and DB type.
 
-    Returns (sid, is_java, is_abap, db_type) tuple.
-    SID is extracted from (in priority order):
-      1. SAPSYSTEMNAME property
-      2. ABAP/J2EE DB Connection string (DBName=XXX)
-      3. INSTANCE_NAME prefix (e.g. DVEBMGS00 -> SID from hostname)
-    DB type is extracted from the "Database" property (e.g. "SAPdb" -> "ADA").
+    Returns (sid, is_java, is_abap, db_type, http_port, https_port) tuple.
+    http_port / https_port come from the 'ICM' / 'ICMS' properties which are
+    URLs like 'HTTP://host:50200/...' — parsed and returned as ints, 0 when
+    not present.  Java stacks always publish these; ABAP stacks publish them
+    too when ICM is configured.
     """
     import re as _re
     sid = ""
     is_java = False
     is_abap = False
     db_type = ""
+    http_port = 0
+    https_port = 0
 
     # Map SAPControl "Database" values to RFCDBSYS-style codes
     _DB_MAP = {
@@ -1180,9 +1189,21 @@ def _query_sapcontrol_sid(host: str, port: int, timeout: float = 3) -> tuple:
         if inst_name.startswith("SCS") or inst_name.startswith("J"):
             is_java = True
 
+        # Extract HTTP / HTTPS ports from the ICM and ICMS URL properties
+        # (e.g. "HTTP://sapsjj:50200/sap/admin/public/index.html").
+        for key, attr in (("ICM", "http_port"), ("ICMS", "https_port")):
+            url = prop_dict.get(key, "")
+            m = _re.search(r'://[^/:]+:(\d+)', url)
+            if m:
+                val = int(m.group(1))
+                if attr == "http_port":
+                    http_port = val
+                else:
+                    https_port = val
+
     except Exception:
         pass
-    return (sid, is_java, is_abap, db_type)
+    return (sid, is_java, is_abap, db_type, http_port, https_port)
 
 
 def _query_sapcontrol_os(host: str, port: int, timeout: float = 3) -> str:
@@ -1346,9 +1367,8 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
         # so the downstream node-build reads them.
         if inst_nr.isdigit():
             sc_port = 50000 + int(inst_nr) * 100 + 13
-            sc_sid, sc_j, sc_a, sc_db = _query_sapcontrol_sid(
-                host, sc_port, timeout=min(timeout, 3)
-            )
+            sc_sid, sc_j, sc_a, sc_db, sc_http, sc_https = \
+                _query_sapcontrol_sid(host, sc_port, timeout=min(timeout, 3))
             if sc_sid:
                 instance_sid_map[inst_nr] = sc_sid
                 sc_os = _query_sapcontrol_os(
@@ -1358,6 +1378,8 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
                     "_is_java": sc_j, "_is_abap": sc_a,
                     "db_type": sc_db or "",
                     "os_type": sc_os,
+                    "icm_http": sc_http,
+                    "icm_https": sc_https,
                 }
                 bits = []
                 if sc_j: bits.append("JAVA")
@@ -1406,6 +1428,18 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
                 for port, info in open_ports.items()
                 if info["instance_nr"] == inst_nr
             }
+            # Record HTTP/HTTPS ports we learned from the SAPControl
+            # GetInstanceProperties -> ICM / ICMS URLs for this instance,
+            # so downstream code (e.g. create_user_java via GW SAPXPG) can
+            # find the Java dispatcher URL without relying on the
+            # 50000+nn*100 convention.
+            isi = instance_sysinfo.get(inst_nr) or {}
+            icm_http = isi.get("icm_http", 0)
+            icm_https = isi.get("icm_https", 0)
+            if icm_http and icm_http not in inst_ports:
+                inst_ports[icm_http] = "java_http"
+            if icm_https and icm_https not in inst_ports:
+                inst_ports[icm_https] = "java_https"
             instances.append(InstanceInfo(
                 instance_nr=inst_nr,
                 ip=host,
