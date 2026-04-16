@@ -2400,7 +2400,9 @@ function showDetails(sid) {
           let v = e.value || '';
           if (isPw && v.length > 0) v = '•'.repeat(Math.min(v.length, 8)) + ' (' + v.length + 'B)';
           v = String(v).replace(/(password\s*=)[^&;\s]+/gi, '$1***');
-          if (v.length > 80) v = v.slice(0, 80) + '…';
+          // Inline details panel keeps a tight 200-char preview;
+          // full value lives in the modal (link below the table).
+          if (v.length > 200) v = v.slice(0, 200) + '… [open full modal]';
           const ds = e.is_downstream ? ' style="color:#f85149"' : '';
           return `<tr${ds}>` +
             `<td style="padding:3px 6px;color:#8b949e">${escHtml((e.source || '').replace('SecStore.properties', 'file').replace('J2EE_CONFIGENTRY', 'cfg'))}</td>` +
@@ -2994,7 +2996,10 @@ function renderJssTable() {
     if (!showPw) {
       display = display.replace(/(password\s*=)[^&;\s]+/gi, '$1***');
     }
-    if (display.length > 160) display = display.slice(0, 160) + '…';
+    // Modal: cap large values at 2000 chars to keep the table scrollable.
+    // The full value is always retained on node.java_secstore_entries
+    // (unsliced) and reachable via the per-row "Copy" button.
+    if (display.length > 2000) display = display.slice(0, 2000) + '… [+'+(value.length-2000)+' more — use Copy button]';
     const kind = e.kind || '';
     const target = e.target_sid || '';
     const source = e.source || '';
