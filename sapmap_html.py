@@ -864,40 +864,45 @@ body {
   </div>
 </div>
 
-<!-- Java Secure Store Results Modal -->
+<!-- Java Secure Store Results Modal — draggable + resizable -->
 <div class="modal-overlay" id="jss-modal">
-  <div class="modal" style="width:90vw;max-width:1200px;max-height:85vh;display:flex;flex-direction:column">
-    <h3 style="margin:0 0 8px">&#128273; Java Secure Store — <span id="jss-sid"></span></h3>
-    <div id="jss-meta" style="font-size:11px;color:#8b949e;margin-bottom:8px"></div>
-    <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center">
-      <input type="text" id="jss-filter" placeholder="filter by name or value..." style="flex:1" oninput="renderJssTable()">
-      <label style="font-size:11px;color:#8b949e">
-        <input type="checkbox" id="jss-showpw" onchange="renderJssTable()" checked> Show passwords
-      </label>
-      <button class="btn" onclick="copyJssJson()" style="white-space:nowrap">Copy JSON</button>
+  <div class="modal shell-window" id="jss-window" style="width:1100px;height:640px">
+    <div class="shell-titlebar" id="jss-titlebar">
+      <h3 style="margin:0">&#128273; Java Secure Store &mdash; <span id="jss-sid"></span></h3>
     </div>
-    <div style="overflow-y:scroll;overflow-x:auto;flex:1 1 0;min-height:200px;
-                border:1px solid #30363d;border-radius:4px;
-                user-select:text;-webkit-user-select:text;cursor:text;
-                scrollbar-width:auto;scrollbar-color:#484f58 #161b22">
-      <table id="jss-table" style="width:100%;border-collapse:collapse;font-size:12px;font-family:monospace;
-                                     user-select:text;-webkit-user-select:text">
-        <thead style="position:sticky;top:0;background:#161b22;z-index:1">
-          <tr style="color:#8b949e;border-bottom:1px solid #30363d">
-            <th style="text-align:left;padding:6px 8px">Source</th>
-            <th style="text-align:left;padding:6px 8px">Kind</th>
-            <th style="text-align:left;padding:6px 8px">Belongs to</th>
-            <th style="text-align:left;padding:6px 8px">Name</th>
-            <th style="text-align:left;padding:6px 8px">Value</th>
-            <th style="width:80px;padding:6px 8px"></th>
-          </tr>
-        </thead>
-        <tbody id="jss-tbody"></tbody>
-      </table>
+    <div style="flex:1;overflow:hidden;padding:12px;display:flex;flex-direction:column">
+      <div id="jss-meta" style="font-size:11px;color:#8b949e;margin-bottom:8px"></div>
+      <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center;flex-shrink:0">
+        <input type="text" id="jss-filter" placeholder="filter by name or value..." style="flex:1" oninput="renderJssTable()">
+        <label style="font-size:11px;color:#8b949e">
+          <input type="checkbox" id="jss-showpw" onchange="renderJssTable()" checked> Show passwords
+        </label>
+        <button class="btn" onclick="copyJssJson()" style="white-space:nowrap">Copy JSON</button>
+      </div>
+      <div style="overflow-y:scroll;overflow-x:auto;flex:1 1 0;min-height:200px;
+                  border:1px solid #30363d;border-radius:4px;
+                  user-select:text;-webkit-user-select:text;cursor:text;
+                  scrollbar-width:auto;scrollbar-color:#484f58 #161b22">
+        <table id="jss-table" style="width:100%;border-collapse:collapse;font-size:12px;font-family:monospace;
+                                       user-select:text;-webkit-user-select:text">
+          <thead style="position:sticky;top:0;background:#161b22;z-index:1">
+            <tr style="color:#8b949e;border-bottom:1px solid #30363d">
+              <th style="text-align:left;padding:6px 8px">Source</th>
+              <th style="text-align:left;padding:6px 8px">Kind</th>
+              <th style="text-align:left;padding:6px 8px">Belongs to</th>
+              <th style="text-align:left;padding:6px 8px">Name</th>
+              <th style="text-align:left;padding:6px 8px">Value</th>
+              <th style="width:80px;padding:6px 8px"></th>
+            </tr>
+          </thead>
+          <tbody id="jss-tbody"></tbody>
+        </table>
+      </div>
+      <div class="form-actions" style="margin-top:8px;flex-shrink:0">
+        <button class="btn" onclick="closeModal('jss-modal')">Close</button>
+      </div>
     </div>
-    <div class="form-actions" style="margin-top:8px">
-      <button class="btn" onclick="closeModal('jss-modal')">Close</button>
-    </div>
+    <div class="shell-resize-handle" id="jss-resize-handle"></div>
   </div>
 </div>
 
@@ -3358,6 +3363,7 @@ function makeDraggableResizable(winId, barId, handleId) {
   document.addEventListener('mouseup', () => { dragging = false; resizing = false; });
 }
 makeDraggableResizable('shell-window', 'shell-titlebar', 'shell-resize-handle');
+makeDraggableResizable('jss-window', 'jss-titlebar', 'jss-resize-handle');
 makeDraggableResizable('term-window', 'term-titlebar', 'term-resize-handle');
 
 // --- Global actions ---
