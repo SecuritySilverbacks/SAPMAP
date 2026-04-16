@@ -184,6 +184,19 @@ try {
                     String name = rs.getString("NAME");
                     byte[] blob = rs.getBytes("VBYTES");
                     if (blob == null || blob.length == 0) continue;
+                    // The MaxDB JDBC driver returns the full BLOB allocation
+                    // (often 2000 bytes) with trailing NUL padding.  SecStoreFS
+                    // chokes on the padded length with IllegalBlockSizeException
+                    // — trim to the last non-zero byte before decrypting.
+                    int last = blob.length - 1;
+                    while (last >= 0 && blob[last] == 0) last--;
+                    if (last < 0) continue;
+                    int realLen = last + 1;
+                    if (realLen != blob.length) {
+                        byte[] tr = new byte[realLen];
+                        System.arraycopy(blob, 0, tr, 0, realLen);
+                        blob = tr;
+                    }
                     try {
                         byte[] pt = (byte[]) decryptM.invoke(inst, (Object) blob);
                         // Plaintext layout: 2-byte big-endian length prefix
