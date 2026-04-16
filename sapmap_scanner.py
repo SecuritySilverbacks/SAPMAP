@@ -1339,20 +1339,33 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
         if inst_nr in instance_sid_map:
             continue
 
-        # Try SAPControl as last resort for this instance
+        # Try SAPControl as last resort for this instance — pure Java stacks
+        # without an open ABAP gateway end up here, and the node would otherwise
+        # land on the map with empty OS/DB/kernel fields.  Capture db_type
+        # (returned by _query_sapcontrol_sid) and os_type (via _query_sapcontrol_os)
+        # so the downstream node-build reads them.
         if inst_nr.isdigit():
             sc_port = 50000 + int(inst_nr) * 100 + 13
-            sc_sid, sc_j, sc_a, _ = _query_sapcontrol_sid(
+            sc_sid, sc_j, sc_a, sc_db = _query_sapcontrol_sid(
                 host, sc_port, timeout=min(timeout, 3)
             )
             if sc_sid:
                 instance_sid_map[inst_nr] = sc_sid
+                sc_os = _query_sapcontrol_os(
+                    host, sc_port, timeout=min(timeout, 3)) or ""
                 instance_sysinfo[inst_nr] = {
-                    "sid": sc_sid, "_is_java": sc_j, "_is_abap": sc_a
+                    "sid": sc_sid,
+                    "_is_java": sc_j, "_is_abap": sc_a,
+                    "db_type": sc_db or "",
+                    "os_type": sc_os,
                 }
-                print(f"[+] {host}: SID from SAPControl ({host}:{sc_port}): {sc_sid}"
-                      f"{'  [JAVA]' if sc_j else ''}"
-                      f"{'  [ABAP]' if sc_a else ''}")
+                bits = []
+                if sc_j: bits.append("JAVA")
+                if sc_a: bits.append("ABAP")
+                if sc_db: bits.append(f"DB={sc_db}")
+                if sc_os: bits.append(f"OS={sc_os}")
+                print(f"[+] {host}: SID from SAPControl ({host}:{sc_port}): "
+                      f"{sc_sid}  [{', '.join(bits) if bits else '?'}]")
 
     # Phase B: Assign unresolved instances to the first known SID (or UNK)
     default_sid = next(iter(instance_sid_map.values()), f"UNK_{host.replace('.', '_')}")
@@ -1368,12 +1381,19 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
     # Phase D: Build one SAPNode per discovered SID
     nodes = []
     for sid, inst_nrs_for_sid in sid_instances.items():
-        # Pick enrichment data from the first instance in this group that has it
+        # Merge enrichment data across all instances of this SID.  On dual-
+        # stack or pure-Java systems the ABAP gateway (kernel/release) and
+        # the Java dispatcher (SAPControl OS/DB) sit on different instances,
+        # so a simple "take the first" picks one and leaves the other's
+        # fields empty.  Prefer non-empty values.
         sys_info = {}
         for inr in inst_nrs_for_sid:
-            if inr in instance_sysinfo and instance_sysinfo[inr].get("sid"):
-                sys_info = instance_sysinfo[inr]
-                break
+            s = instance_sysinfo.get(inr) or {}
+            if not s.get("sid"):
+                continue
+            for k, v in s.items():
+                if v and not sys_info.get(k):
+                    sys_info[k] = v
 
         sc_is_java = sys_info.get("_is_java", False)
         sc_is_abap = sys_info.get("_is_abap", False)
