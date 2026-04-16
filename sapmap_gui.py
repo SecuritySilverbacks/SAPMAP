@@ -1250,6 +1250,32 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:check_cve_31324", "Check CVE-2025-31324", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/java_secstore", method="POST")
+    def node_java_secstore(sid):
+        """Extract + decrypt the Java Secure Store; import credentials and
+        auto-plot downstream ABAP systems + RFC edges."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        if "JAVA" not in (node.system_type or "").upper():
+            return json.dumps({"error": "Not a Java / dual-stack system"})
+
+        def _run():
+            r = sapmap_exploit.extract_java_secstore(node, api.state)
+            if r.get("success"):
+                print(f"[+] {sid}: Java Secure Store extraction summary: "
+                      f"{r['entries_count']} entries, "
+                      f"{r['credentials_added']} credentials imported, "
+                      f"{r['downstream_added']} downstream node(s) added, "
+                      f"{r['edges_added']} RFC edge(s) drawn")
+            else:
+                print(f"[-] {sid}: Java Secure Store extraction failed: "
+                      f"{r.get('error', '?')}")
+
+        _bg(f"{sid}:java_secstore", "Extract Java Secure Store", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/create_user_java", method="POST")
     def node_create_user_java(sid):
         """Create a Java stack user via the UME API exposed by a deployed JSP.
