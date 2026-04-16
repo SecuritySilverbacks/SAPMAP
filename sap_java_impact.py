@@ -249,6 +249,100 @@ def _kmc_documents(components: list, extra: dict) -> Optional[ImpactResult]:
     )
 
 
+@_register("Landscape-Wide SSO / Availability Outage",
+           "Java", Severity.CRITICAL, icon="\U0001F480")
+def _availability_outage(components: list, extra: dict) -> Optional[ImpactResult]:
+    """Probe-only check for landscape-wide SSO + Portal outage capability.
+
+    Reports — but does NOT execute — the destructive blast radius if
+    an attacker were to wipe Portal content, corrupt UME_STRINGS, or
+    detach the IdP keystore.  Pure detection; no writes.
+    """
+    portal = _matches(components,
+                       "com.sap.portal.", "sap.portal.runtime",
+                       "tc~ep~", "ep.coll")
+    sso   = _matches(components,
+                       "tc~sec~saml", "com.sap.security.saml",
+                       "tc~sec~ssoticket", "tc~je~security",
+                       "com.sap.security.core.sda",
+                       "tc~sec~app~jaas")
+    keys  = _matches(components,
+                       "tc~sec~ssf~ks", "com.sap.security.ssf",
+                       "tc~sec~keystorage")
+    ume_user_count = extra.get("ume_user_count", 0)
+    if not (portal or sso or keys or ume_user_count):
+        return None
+
+    # Compose evidence list (samples from each category)
+    evidence = []
+    if portal: evidence += ["[portal] " + p for p in _short(portal, 3)]
+    if sso:    evidence += ["[sso]    " + s for s in _short(sso, 3)]
+    if keys:   evidence += ["[ks]     " + k for k in _short(keys, 3)]
+    if ume_user_count:
+        evidence.append(f"[ume]    {ume_user_count} active UME users")
+
+    # Severity scales with breadth: portal + SSO + many users == CRITICAL
+    sev = Severity.CRITICAL if (portal and sso and ume_user_count >= 5) \
+            else Severity.HIGH
+
+    parts = []
+    if portal: parts.append("Portal")
+    if sso:    parts.append("SSO/SAML services")
+    if keys:   parts.append("keystore service")
+    headline_what = " + ".join(parts) or "UME"
+    headline = (f"{headline_what} present — destructive admin action would "
+                f"cause landscape-wide SSO + Portal outage")
+
+    msg_lines = [
+        "An attacker with Java admin can deliberately render the Portal "
+        "and downstream SSO unusable in seconds — no exploit, just "
+        "destructive use of legitimate admin functions.  Detected:",
+        "",
+    ]
+    if portal:
+        msg_lines.append(
+            f"  - Portal deployed ({len(portal)} components).  "
+            f"Wipe Portal Catalog Definitions / iView XML and every user "
+            f"who accesses business apps via the Portal sees a 500 error.")
+    if sso:
+        msg_lines.append(
+            f"  - SSO / SAML / logon-ticket components ({len(sso)} hits).  "
+            f"Detach the IdP signing keystore (or re-issue with a new key) "
+            f"and every ABAP/HANA system trusting the Portal as IdP "
+            f"rejects every login until certificates are re-imported.")
+    if keys:
+        msg_lines.append(
+            f"  - Keystore-management service deployed ({len(keys)} hits) — "
+            f"keys can be deleted from the GUI.")
+    if ume_user_count:
+        msg_lines.append(
+            f"  - UME_STRINGS holds {ume_user_count} user account(s).  "
+            f"A targeted UPDATE that flips ispassworddisabled=true on "
+            f"every uniquename locks out the entire user base.")
+    msg_lines += [
+        "",
+        "Recovery requires backup restoration + IdP-trust re-establishment "
+        "across every trusting downstream — typically multiple business "
+        "days of outage and an SLA / regulatory-reporting event.  This "
+        "scenario is the classic 'extortion lever' alongside ransomware "
+        "encryption: the attacker doesn't need exfil to demand payment.",
+        "",
+        "NOTE: SAPMAP only DETECTS this risk — no destructive writes are "
+        "performed.  The blast radius is shown so risk can be quantified "
+        "in business terms.",
+    ]
+    return ImpactResult(
+        scenario="Landscape-Wide SSO / Availability Outage",
+        category="Java",
+        severity=sev,
+        icon="\U0001F480",
+        headline=headline,
+        record_count=len(portal) + len(sso) + len(keys),
+        sample_records=evidence[:10],
+        business_message="\n".join(msg_lines),
+    )
+
+
 @_register("Audit-Log Tampering",
            "Java", Severity.HIGH, icon="\U0001F4DD")
 def _audit_tampering(components: list, extra: dict) -> Optional[ImpactResult]:
@@ -295,12 +389,14 @@ def _audit_tampering(components: list, extra: dict) -> Optional[ImpactResult]:
 # Top-level driver
 # ---------------------------------------------------------------------------
 
-def assess(components: list, audit_properties: list = None) -> list:
+def assess(components: list, audit_properties: list = None,
+            ume_user_count: int = 0) -> list:
     """Run every registered scenario against the deployed-components list.
 
     Returns a list of ImpactResult, sorted by severity.
     """
-    extra = {"audit_properties": audit_properties or []}
+    extra = {"audit_properties": audit_properties or [],
+              "ume_user_count": int(ume_user_count or 0)}
     results = []
     for name, cat, desc, sev, icon, func in _SCENARIOS:
         try:
