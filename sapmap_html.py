@@ -876,15 +876,17 @@ body {
       </label>
       <button class="btn" onclick="copyJssJson()" style="white-space:nowrap">Copy JSON</button>
     </div>
-    <div style="overflow:auto;flex:1;border:1px solid #30363d;border-radius:4px;
-                user-select:text;-webkit-user-select:text;cursor:text">
+    <div style="overflow-y:scroll;overflow-x:auto;flex:1 1 0;min-height:200px;
+                border:1px solid #30363d;border-radius:4px;
+                user-select:text;-webkit-user-select:text;cursor:text;
+                scrollbar-width:auto;scrollbar-color:#484f58 #161b22">
       <table id="jss-table" style="width:100%;border-collapse:collapse;font-size:12px;font-family:monospace;
                                      user-select:text;-webkit-user-select:text">
         <thead style="position:sticky;top:0;background:#161b22;z-index:1">
           <tr style="color:#8b949e;border-bottom:1px solid #30363d">
             <th style="text-align:left;padding:6px 8px">Source</th>
             <th style="text-align:left;padding:6px 8px">Kind</th>
-            <th style="text-align:left;padding:6px 8px">Target</th>
+            <th style="text-align:left;padding:6px 8px">Belongs to</th>
             <th style="text-align:left;padding:6px 8px">Name</th>
             <th style="text-align:left;padding:6px 8px">Value</th>
             <th style="width:80px;padding:6px 8px"></th>
@@ -3004,12 +3006,28 @@ function renderJssTable() {
     const target = e.target_sid || '';
     const source = e.source || '';
     const ds = e.is_downstream ? ' style="color:#f85149"' : '';
+    // "Belongs to" column: for J2EE_CONFIGENTRY rows tied to a JCo
+    // destination CID, surface dest_name + user@target_sid/client so the
+    // user can tell two identically-named #~jco.client.passwd rows apart.
+    let belongs = '';
+    if (e.dest_name) {
+      belongs = '<span style="color:#f85149">' + escHtml(e.dest_name) + '</span>';
+      if (e.dest_user || target) {
+        belongs += ' <span style="color:#8b949e">(';
+        if (e.dest_user) belongs += escHtml(e.dest_user);
+        if (target) belongs += (e.dest_user ? '@' : '') + escHtml(target);
+        if (e.client) belongs += '/' + escHtml(e.client);
+        belongs += ')</span>';
+      }
+    } else if (target) {
+      belongs = escHtml(target) + (e.client ? '/' + escHtml(e.client) : '');
+    }
     rows.push(
-      '<tr' + ds + '>' +
+      '<tr' + ds + ' title="cid=' + escHtml(e.cid || '-') + '">' +
         '<td style="padding:4px 8px;white-space:nowrap">' + escHtml(source) + '</td>' +
         '<td style="padding:4px 8px;white-space:nowrap">' + escHtml(kind) + '</td>' +
         '<td style="padding:4px 8px;white-space:nowrap">' +
-          (target ? escHtml(target) + (e.client ? '/' + escHtml(e.client) : '') : '') +
+          belongs +
         '</td>' +
         '<td style="padding:4px 8px">' + escHtml(name) + '</td>' +
         '<td style="padding:4px 8px;word-break:break-all">' + escHtml(display) + '</td>' +

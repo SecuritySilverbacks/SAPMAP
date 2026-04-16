@@ -236,6 +236,33 @@ try {
                 rs.close(); ps.close();
                 out.println("# configentry_total=" + count
                     + " decrypted=" + okCount);
+
+                // Pull the cleartext metadata that lives in VSTR (not VBYTES)
+                // for every JCo destination CID — needed so the GUI can show
+                // "this #~jco.client.passwd belongs to destination to_S4H,
+                // user joris, target S4H" instead of identical anonymous rows.
+                java.sql.PreparedStatement ps2 = conn.prepareStatement(
+                    "SELECT CID, NAME, VSTR FROM J2EE_CONFIGENTRY "
+                    + "WHERE NAME LIKE '#~%' AND VSTR IS NOT NULL "
+                    + "AND VSTR <> '' AND CID IN ("
+                    + "  SELECT CID FROM J2EE_CONFIGENTRY "
+                    + "  WHERE NAME = '#~destination.name' "
+                    + "  AND VSTR IS NOT NULL AND VSTR <> ''"
+                    + ")");
+                java.sql.ResultSet rs2 = ps2.executeQuery();
+                int ctxCount = 0;
+                while (rs2.next()) {
+                    String c2  = rs2.getString("CID");
+                    String n2  = rs2.getString("NAME");
+                    String v2  = rs2.getString("VSTR");
+                    if (v2 == null) continue;
+                    out.println("CTX " + c2 + "::" + n2 + "="
+                        + java.util.Base64.getEncoder()
+                            .encodeToString(v2.getBytes("UTF-8")));
+                    ctxCount++;
+                }
+                rs2.close(); ps2.close();
+                out.println("# context_rows=" + ctxCount);
             }
         } catch (Throwable cet) {
             Throwable cec = cet;
@@ -289,6 +316,11 @@ def invoke_secstore_jsp(jsp_url: str, sid: str,
 
     result = {"success": False, "version": "", "algorithm": "",
               "entries": [], "config_entries": [],
+              # configentry_context[cid] = {prop_name: value} for every
+              # cleartext (#~%) row under JCo destination CIDs.  Lets the
+              # caller annotate each row with its destination/user/target
+              # context.
+              "configentry_context": {},
               "jdbc_meta": {}, "error": "", "raw": ""}
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
@@ -326,6 +358,20 @@ def invoke_secstore_jsp(jsp_url: str, sid: str,
             elif line.startswith("error="):
                 result["error"] = (result.get("error") + " / " if result["error"]
                                     else "") + line[len("error="):]
+            continue
+        # CTX lines (cleartext metadata for JCo destination CIDs) come
+        # interleaved at the end of the CONFIG_ENTRIES block.
+        if line.startswith("CTX "):
+            rest = line[4:]
+            if "::" not in rest or "=" not in rest:
+                continue
+            cid_part, _, kv = rest.partition("::")
+            name_part, _, b64val = kv.partition("=")
+            try:
+                pv = base64.b64decode(b64val).decode("utf-8", errors="replace")
+            except Exception:
+                pv = ""
+            result["configentry_context"].setdefault(cid_part, {})[name_part] = pv
             continue
         # Inside a section.  Lines starting with "#" are metadata/diagnostics,
         # not entries.
