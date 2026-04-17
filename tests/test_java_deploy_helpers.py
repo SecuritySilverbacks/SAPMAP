@@ -44,6 +44,95 @@ def _user(method, username="SAPMAP00", password="Pw!"):
 
 
 # ---------------------------------------------------------------------------
+# _java_os_type / _java_jsp_target_path
+# ---------------------------------------------------------------------------
+
+class TestOSDetection:
+
+    def test_windows_default(self):
+        node = _make_java_node(os_type="")
+        assert ex._java_os_type(node) == "windows"
+
+    def test_explicit_windows(self):
+        node = _make_java_node(os_type="Windows NT 6.3")
+        assert ex._java_os_type(node) == "windows"
+
+    def test_linux_variants(self):
+        for v in ("Linux", "linux x86_64", "UNIX", "AIX 7.2",
+                    "HP-UX", "SunOS", "Solaris"):
+            node = _make_java_node(os_type=v)
+            assert ex._java_os_type(node) == "linux", v
+
+    def test_target_path_windows_uses_backslash(self):
+        node = _make_java_node(os_type="Windows")
+        p = ex._java_jsp_target_path(node, 2, "foo.jsp")
+        assert p.startswith("C:\\usr\\sap\\")
+        assert "\\J02\\" in p
+        assert p.endswith("\\foo.jsp")
+
+    def test_target_path_linux_uses_forward_slash(self):
+        node = _make_java_node(os_type="Linux")
+        p = ex._java_jsp_target_path(node, 2, "foo.jsp")
+        assert p.startswith("/usr/sap/")
+        assert "/J02/" in p
+        assert p.endswith("/foo.jsp")
+        assert "\\" not in p
+
+
+# ---------------------------------------------------------------------------
+# _deploy_jsp_via_gw — OS-aware shell selection
+# ---------------------------------------------------------------------------
+
+class TestDeployGW:
+
+    def _capture(self, monkeypatch):
+        calls = []
+        def _fake_exec(node, cmd, params="", long_params=None):
+            calls.append((cmd, params))
+            return {"success": True, "output": ["ok"], "error": ""}
+        monkeypatch.setattr(ex, "execute_gw_command", _fake_exec)
+        return calls
+
+    def test_windows_uses_cmd_exe_and_certutil(self, monkeypatch):
+        calls = self._capture(monkeypatch)
+        node = _make_java_node(os_type="Windows")
+        r = ex._deploy_jsp_via_gw(node, b"<%=1%>" * 40,
+                                     r"C:\path\to\x.jsp")
+        assert r["success"]
+        assert r["method"].endswith("windows")
+        assert any(c == "cmd.exe" for c, _ in calls)
+        assert any("certutil" in p for _, p in calls)
+
+    def test_linux_uses_sh_and_base64(self, monkeypatch):
+        calls = self._capture(monkeypatch)
+        node = _make_java_node(os_type="Linux")
+        r = ex._deploy_jsp_via_gw(node, b"<%=1%>" * 40, "/path/x.jsp")
+        assert r["success"]
+        assert r["method"].endswith("linux")
+        assert all(c == "/bin/sh" for c, _ in calls)
+        assert any("base64 -d" in p for _, p in calls)
+        assert not any("certutil" in p for _, p in calls)
+
+    def test_certutil_failure_is_reported(self, monkeypatch):
+        def _fake_exec(node, cmd, params="", long_params=None):
+            # Mimic the J75-style error: command succeeds but stdout shows
+            # 'Can't exec external program'
+            if "certutil" in params:
+                return {"success": True,
+                        "output": ["Can't exec external program (13) "
+                                     "External program terminated with "
+                                     "exit code 1"],
+                        "error": ""}
+            return {"success": True, "output": ["ok"], "error": ""}
+        monkeypatch.setattr(ex, "execute_gw_command", _fake_exec)
+        node = _make_java_node(os_type="Windows")
+        r = ex._deploy_jsp_via_gw(node, b"x" * 200, r"C:\x.jsp")
+        assert r["success"] is False
+        assert "decode step failed" in r["error"].lower() \
+            or "can't exec" in r["error"].lower()
+
+
+# ---------------------------------------------------------------------------
 # _parse_telnet_override
 # ---------------------------------------------------------------------------
 
