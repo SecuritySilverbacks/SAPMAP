@@ -113,6 +113,23 @@ class TestDeployGW:
         assert any("base64 -d" in p for _, p in calls)
         assert not any("certutil" in p for _, p in calls)
 
+    def test_linux_params_have_no_escaped_quotes(self, monkeypatch):
+        """Regression: SAPXPG PARAMS tokenizer does not decode \\\".
+        The decode/echo/cleanup commands must use outer double-quotes
+        only and no inner \\\" escapes (paths have no spaces anyway).
+        """
+        calls = self._capture(monkeypatch)
+        node = _make_java_node(os_type="Linux")
+        ex._deploy_jsp_via_gw(node, b"x" * 100,
+                                 "/usr/sap/SJ1/J02/foo.jsp")
+        for cmd, params in calls:
+            assert cmd == "/bin/sh"
+            # every params value: starts with -c, exactly two " (outer)
+            assert params.count('"') == 2, \
+                f"unexpected quote count in: {params!r}"
+            assert '\\"' not in params, \
+                f"leaked \\\" escape in: {params!r}"
+
     def test_certutil_failure_is_reported(self, monkeypatch):
         def _fake_exec(node, cmd, params="", long_params=None):
             # Mimic the J75-style error: command succeeds but stdout shows
