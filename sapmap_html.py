@@ -1800,11 +1800,17 @@ function showCtxMenu(e, sid) {
     'retrieve_rfcs':    hasCreds,                   // need credentials/access
     'test_rfcs':        hasCreds && hasRFCs,        // need access + existing RFCs
     'read_java_destinations': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy),
-    'download_hashes':    hasCreds || (isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy)),
+    // ABAP path uses RFC BAPIs (SAP_ALL user or gateway); Java path
+    // needs a JSP-deploy primitive. A RECON UME user alone with no
+    // reachable CTC/telnet cannot extract hashes/tables, so gate the
+    // Java branch on hasJavaDeploy rather than hasJavaAdmin.
+    'download_hashes':    (isAbapStack && hasCreds) ||
+                          (isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy)),
     'download_secstore':  hasCreds,                   // need credentials/access
     'download_java_secstore': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy),
     'view_java_secstore':     n && n.java_secstore_checked,
-    'download_table':     hasCreds || (isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy)),
+    'download_table':     (isAbapStack && hasCreds) ||
+                          (isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy)),
     'impact_assess':      hasCreds,                   // need credentials/access
     'impact_view':        (n.impact_results||[]).length > 0,
     'impact_assess_java': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy),
@@ -1848,13 +1854,17 @@ function showCtxMenu(e, sid) {
     'read_java_destinations': (javaDeployBlocked
         ? 'RECON admin user exists but no JSP-deploy primitive is reachable (CTC ConfigServlet removed, admin telnet firewalled). System is hardened — data extraction not available from here.'
         : 'Requires Java/dual-stack + CVE-2025-31324, GW SAPXPG, or a Java admin user with a reachable CTC / telnet endpoint'),
-    'download_hashes':    'Provide credentials or create a user first',
+    'download_hashes':    (isJavaStack && !isAbapStack && javaDeployBlocked
+        ? 'RECON admin user exists but no JSP-deploy primitive is reachable (CTC ConfigServlet removed, admin telnet firewalled). Hashes cannot be extracted from a Java-only hardened target.'
+        : 'Provide credentials or create a user first'),
     'download_secstore':  'Provide credentials or create a user first',
     'download_java_secstore': (javaDeployBlocked
         ? 'RECON admin user exists but no JSP-deploy primitive is reachable (CTC ConfigServlet removed, admin telnet firewalled). System is hardened — data extraction not available from here.'
         : 'Requires Java/dual-stack + CVE-2025-31324, GW SAPXPG, or a Java admin user with a reachable CTC / telnet endpoint'),
     'view_java_secstore':     'Run Download Java Secure Store first',
-    'download_table':     'Provide credentials or create a user first',
+    'download_table':     (isJavaStack && !isAbapStack && javaDeployBlocked
+        ? 'RECON admin user exists but no JSP-deploy primitive is reachable (CTC ConfigServlet removed, admin telnet firewalled). Tables cannot be dumped from a Java-only hardened target.'
+        : 'Provide credentials or create a user first'),
     'impact_assess':      'Provide credentials or create a user first',
     'impact_view':        'Run impact assessment first',
     'impact_assess_java': (javaDeployBlocked
