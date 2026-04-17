@@ -433,11 +433,18 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
         decode_shell = "/usr/bin/openssl"
         cleanup_shell = "/bin/rm"
         tmp_b64 = f"/tmp/sapmap_ume_{suffix}.b64"
-        chunk_size = 800
 
         def echo_args(chunk, op):
             mode = "wb" if op == ">" else "ab"
             return f"-c open('{tmp_b64}','{mode}').write(b'{chunk}')"
+
+        # SAPXPG's PARAMS field is 255 bytes; larger payloads get
+        # silently truncated, chopping the chunk mid b'...' literal
+        # and producing a Python SyntaxError.  Pick a chunk_size so
+        # the full wrapped command stays under 255 bytes with a
+        # 10-byte safety margin.
+        _wrapper = echo_args("", ">>")
+        chunk_size = max(40, 255 - len(_wrapper) - 10)
 
         decode_args = f"enc -d -base64 -in {tmp_b64} -out {target_path}"
         cleanup_args = f"-f {tmp_b64}"

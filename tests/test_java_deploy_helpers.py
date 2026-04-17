@@ -146,6 +146,24 @@ class TestDeployGW:
             assert ch not in decode, \
                 f"unexpected shell char {ch!r} in openssl args: {decode!r}"
 
+    def test_linux_chunk_params_fit_in_sapxpg_255_byte_field(self,
+                                                              monkeypatch):
+        """Regression: SAPXPG's PARAMS field is 255 bytes and truncates
+        silently.  Every chunk's full command (`-c open(...).write(b'...')`)
+        must stay at or below 255 bytes or we chop the bytes literal
+        mid-string and Python errors with 'EOL while scanning string'.
+        """
+        calls = self._capture(monkeypatch)
+        node = _make_java_node(os_type="Linux")
+        ex._deploy_jsp_via_gw(node, b"x" * 500,
+                                 "/usr/sap/SJ1/J02/foo.jsp")
+        py_calls = [p for c, p in calls
+                     if c == "python3" and p.startswith("-c ")]
+        for p in py_calls:
+            assert len(p) <= 255, (
+                f"chunk command exceeds SAPXPG PARAMS limit: "
+                f"{len(p)} bytes (limit 255): {p!r}")
+
     def test_linux_cleanup_uses_bin_rm(self, monkeypatch):
         calls = self._capture(monkeypatch)
         node = _make_java_node(os_type="Linux")
