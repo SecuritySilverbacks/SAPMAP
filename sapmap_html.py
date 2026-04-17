@@ -447,6 +447,7 @@ body {
       <div class="ctx-item" data-action="check_gw">&#128270; Check GW Vulnerability</div>
       <div class="ctx-item" data-action="check_ms">&#128270; Check MS Betrusted (CVE-2020-6207)</div>
       <div class="ctx-item" data-action="check_cve_31324">&#128270; Check CVE-2025-31324 (Java VisualComposer)</div>
+      <div class="ctx-item" data-action="check_cve_6287">&#128270; Check CVE-2020-6287 (RECON)</div>
       <div class="ctx-item" data-action="deep_scan">&#128260; Deep Scan (full SAPology)</div>
       <div class="ctx-item" data-action="retrieve_rfcs">&#128225; Retrieve RFC Connections</div>
       <div class="ctx-item" data-action="read_java_destinations">&#128225; Read Java JCo Destinations</div>
@@ -1451,7 +1452,7 @@ function updateMap() {
     if (n.is_production) fill = '#4a1a1a';
     else if (Object.keys(n.clients || {}).length > 0) fill = '#4a3a1a';
 
-    if (n.has_critical_finding || n.gw_vulnerable || n.ms_vulnerable || n.cve_2025_31324_vulnerable) { borderColor = '#8b0000'; borderWidth = 6; }
+    if (n.has_critical_finding || n.gw_vulnerable || n.ms_vulnerable || n.cve_2025_31324_vulnerable || n.cve_2020_6287_vulnerable) { borderColor = '#8b0000'; borderWidth = 6; }
 
     // Scanning radar pulse + probe lines (behind node)
     if (isScanning) {
@@ -1759,6 +1760,7 @@ function showCtxMenu(e, sid) {
   const isAbapStack = sysType.indexOf('ABAP') !== -1;
   const isSaprouter = sysType.indexOf('SAPROUTER') !== -1;
   const hasCve31324 = n && n.cve_2025_31324_vulnerable;
+  const hasCve6287  = n && n.cve_2020_6287_vulnerable;
   const hasGwPort = n && (n.instances || []).some(i => Object.entries(i.ports || {}).some(([p,s]) => s === 'gateway' || (p >= 3300 && p <= 3399)));
   const hasFindings = n && (n.findings || []).length > 0;
   const hasCreatedUsers = n && (n.created_users || []).length > 0;
@@ -1774,8 +1776,9 @@ function showCtxMenu(e, sid) {
     'check_gw':         hasGwPort,                   // need a gateway port
     'check_ms':              true,                    // always (probes 39NN directly)
     'check_cve_31324':       isJavaStack,             // Java-only vulnerability
+    'check_cve_6287':        isJavaStack,             // Java-only RECON check
     'exploit_cve_31324_drop': hasCve31324,            // need confirmed CVE-2025-31324
-    'create_user_java':      isJavaStack && (hasCve31324 || hasGwVuln), // Java + CVE or GW
+    'create_user_java':      isJavaStack && (hasCve31324 || hasCve6287 || hasGwVuln),
     'betrusted':             hasMsPort,              // need a known MS port
     'create_user_betrusted': hasMsVuln || hasGwVuln, // need vulnerable MS or GW
     'create_user_gw':   hasGwVuln,                  // need GW vulnerability
@@ -1817,8 +1820,9 @@ function showCtxMenu(e, sid) {
     'betrusted':             'Run Check MS Betrusted first to find the MS port',
     'create_user_betrusted': 'Requires a vulnerable MS (betrusted) or gateway',
     'check_cve_31324':       'Only applicable to Java / double-stack systems',
+    'check_cve_6287':        'Only applicable to Java / double-stack systems',
     'exploit_cve_31324_drop': 'Run Check CVE-2025-31324 first; vulnerability required',
-    'create_user_java':      'Requires Java / dual-stack system AND a usable CVE-2025-31324 or GW SAPXPG vuln',
+    'create_user_java':      'Requires Java / dual-stack system AND a usable CVE-2025-31324, RECON, or GW SAPXPG vuln',
     'create_user_gw':   'Requires a vulnerable RFC Gateway',
     'create_user_creds': 'Provide credentials first',
     'lpe':              'Provide credentials first',
@@ -1866,6 +1870,7 @@ function showCtxMenu(e, sid) {
     'download_java_secstore':     !isJavaStack,
     'view_java_secstore':         !isJavaStack,
     'read_java_destinations':     !isJavaStack,
+    'check_cve_6287':             !isJavaStack,
     'impact_assess_java':         !isJavaStack,
   };
 
@@ -1960,6 +1965,8 @@ async function ctxAction(action) {
       await api('POST', `node/${sid}/check_ms`); break;
     case 'check_cve_31324':
       await api('POST', `node/${sid}/check_cve_2025_31324`); break;
+    case 'check_cve_6287':
+      await api('POST', `node/${sid}/check_cve_2020_6287`); break;
     case 'read_java_destinations': {
       if (!confirm('Enumerate JCo destinations from J2EE_CONFIGENTRY?\n\n' +
                     'Decrypts each destination\'s password via SecStoreFS, ' +
@@ -2001,12 +2008,19 @@ async function ctxAction(action) {
       const g = prompt('Add to group (blank = Administrators):', 'Administrators');
       const n = (mapState.nodes || {})[sid];
       const hasCve = n && n.cve_2025_31324_vulnerable;
+      const hasRecon = n && n.cve_2020_6287_vulnerable;
       const hasGw  = n && n.gw_vulnerable;
       let method = 'auto';
-      if (hasCve && hasGw) {
-        const m = prompt('Method — "cve" (CVE-2025-31324, fast) or "gw" (RFC Gateway SAPXPG, slow chunked write). Leave "auto" to prefer CVE:', 'auto');
+      const paths = [];
+      if (hasCve)   paths.push('"cve" (CVE-2025-31324)');
+      if (hasRecon) paths.push('"recon" (CVE-2020-6287 RECON)');
+      if (hasGw)    paths.push('"gw" (RFC Gateway SAPXPG)');
+      if (paths.length > 1) {
+        const m = prompt('Method — ' + paths.join(', ') +
+                          '.\nLeave "auto" to let SAPMAP pick the best:', 'auto');
         if (m === null) break;
-        if (/^cve/i.test(m)) method = 'cve_31324';
+        if (/^cve/i.test(m) && !/recon/i.test(m)) method = 'cve_31324';
+        else if (/^recon/i.test(m)) method = 'recon';
         else if (/^gw/i.test(m)) method = 'gw';
       }
       await api('POST', `node/${sid}/create_user_java`, {
@@ -2393,6 +2407,14 @@ function showDetails(sid) {
       }${(n.cve_2025_31324_shells || []).length
           ? ` · <span style="color:#f0883e">${(n.cve_2025_31324_shells || []).length} JSP shell(s) dropped</span>`
           : ''}</span></div>` : ''}
+      ${(n.system_type || '').toUpperCase().indexOf('JAVA') !== -1 ? `
+      <div class="detail-row"><span class="detail-key">CVE-2020-6287</span><span class="detail-val">${
+        n.cve_2020_6287_vulnerable
+          ? `<span style="color:#f85149">YES — RECON unauth admin (port ${n.cve_2020_6287_port}${n.cve_2020_6287_https ? ' HTTPS' : ''})</span>`
+          : n.cve_2020_6287_checked
+            ? `<span style="color:#3fb950">Not vulnerable</span><span style="color:#8b949e"> · ${escHtml(n.cve_2020_6287_evidence || '')}</span>`
+            : 'Not checked'
+      }</span></div>` : ''}
       ${n.saprouter ? `<div class="detail-row"><span class="detail-key">SAProuter</span><span class="detail-val" style="color:#d29922">${escHtml(n.saprouter)}</span></div>` : ''}
       ${n.java_secstore_checked ? `
       <div class="detail-row"><span class="detail-key">Java Secure Store</span><span class="detail-val">${

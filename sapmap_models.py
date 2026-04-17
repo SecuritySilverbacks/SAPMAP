@@ -212,6 +212,12 @@ class SAPNode:
     cve_2025_31324_https: bool = False  # True if probed via HTTPS
     cve_2025_31324_evidence: str = ""   # short reason string
     cve_2025_31324_shells: list = field(default_factory=list)  # [{url, name, dropped_at}]
+    # CVE-2020-6287 (RECON) — LM Configuration Wizard unauth user creation
+    cve_2020_6287_checked: bool = False
+    cve_2020_6287_vulnerable: bool = False
+    cve_2020_6287_port: int = 0
+    cve_2020_6287_https: bool = False
+    cve_2020_6287_evidence: str = ""
     # Java Secure Store extraction state (SecStoreFS + J2EE_CONFIGENTRY)
     java_secstore_checked: bool = False
     java_secstore_version: str = ""
@@ -307,6 +313,11 @@ class SAPNode:
             "cve_2025_31324_https": self.cve_2025_31324_https,
             "cve_2025_31324_evidence": self.cve_2025_31324_evidence,
             "cve_2025_31324_shells": self.cve_2025_31324_shells,
+            "cve_2020_6287_checked": self.cve_2020_6287_checked,
+            "cve_2020_6287_vulnerable": self.cve_2020_6287_vulnerable,
+            "cve_2020_6287_port": self.cve_2020_6287_port,
+            "cve_2020_6287_https": self.cve_2020_6287_https,
+            "cve_2020_6287_evidence": self.cve_2020_6287_evidence,
             "java_secstore_checked": self.java_secstore_checked,
             "java_secstore_version": self.java_secstore_version,
             "java_secstore_algorithm": self.java_secstore_algorithm,
@@ -351,6 +362,11 @@ class SAPNode:
             cve_2025_31324_https=d.get("cve_2025_31324_https", False),
             cve_2025_31324_evidence=d.get("cve_2025_31324_evidence", ""),
             cve_2025_31324_shells=d.get("cve_2025_31324_shells", []),
+            cve_2020_6287_checked=d.get("cve_2020_6287_checked", False),
+            cve_2020_6287_vulnerable=d.get("cve_2020_6287_vulnerable", False),
+            cve_2020_6287_port=d.get("cve_2020_6287_port", 0),
+            cve_2020_6287_https=d.get("cve_2020_6287_https", False),
+            cve_2020_6287_evidence=d.get("cve_2020_6287_evidence", ""),
             java_secstore_checked=d.get("java_secstore_checked", False),
             java_secstore_version=d.get("java_secstore_version", ""),
             java_secstore_algorithm=d.get("java_secstore_algorithm", ""),
