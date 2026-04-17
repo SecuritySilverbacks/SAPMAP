@@ -12,7 +12,23 @@
 
 SAPMAP discovers SAP systems on a network, maps RFC connections between them, exploits gateway vulnerabilities and weak configurations, and charts lateral movement paths across the entire SAP landscape — all from an interactive web-based map.
 
-> **For authorized security testing only.**
+> ## ⚠️ Disclaimer — Use at your own risk
+>
+> SAPMAP implements **real, working exploits** against SAP systems.
+> Running it against a system you do not own or do not have explicit
+> written permission to test is **illegal** in most jurisdictions and
+> may cause data loss, account lockouts, outages, and audit findings.
+>
+> **Intended solely for:** authorized penetration tests, defensive
+> research on systems you own, educational study of SAP attack
+> surfaces, and SOC / blue-team detection-engineering exercises.
+>
+> **No warranty** — the authors accept no liability for damage caused
+> by use or misuse of this tool. You are responsible for obtaining
+> written authorization before every run and for cleaning up artifacts
+> (SAPMAP00 users, dropped JSPs, TCP/IP destinations) when done.
+>
+> See [`DISCLAIMER.md`](DISCLAIMER.md) for the full text.
 
 ---
 
