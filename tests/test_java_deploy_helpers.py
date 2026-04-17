@@ -103,32 +103,51 @@ class TestDeployGW:
         assert any(c == "cmd.exe" for c, _ in calls)
         assert any("certutil" in p for _, p in calls)
 
-    def test_linux_uses_sh_and_base64(self, monkeypatch):
+    def test_linux_chunks_use_sh_single_quoted(self, monkeypatch):
         calls = self._capture(monkeypatch)
         node = _make_java_node(os_type="Linux")
         r = ex._deploy_jsp_via_gw(node, b"<%=1%>" * 40, "/path/x.jsp")
         assert r["success"]
         assert r["method"].endswith("linux")
-        assert all(c == "/bin/sh" for c, _ in calls)
-        assert any("base64 -d" in p for _, p in calls)
-        assert not any("certutil" in p for _, p in calls)
+        # Echo/cleanup chunks go through /bin/sh
+        sh_calls = [p for c, p in calls if c == "/bin/sh"]
+        # Every sh-call uses single-quoted script (no double quotes)
+        for p in sh_calls:
+            assert p.startswith("-c '"), p
+            assert p.endswith("'"), p
+            assert '"' not in p, \
+                f"double quote leaked into sh params: {p!r}"
+            assert '\\"' not in p, \
+                f"escaped quote leaked into sh params: {p!r}"
 
-    def test_linux_params_have_no_escaped_quotes(self, monkeypatch):
-        """Regression: SAPXPG PARAMS tokenizer does not decode \\\".
-        The decode/echo/cleanup commands must use outer double-quotes
-        only and no inner \\\" escapes (paths have no spaces anyway).
-        """
+    def test_linux_decode_uses_openssl_shell_free(self, monkeypatch):
         calls = self._capture(monkeypatch)
         node = _make_java_node(os_type="Linux")
-        ex._deploy_jsp_via_gw(node, b"x" * 100,
+        ex._deploy_jsp_via_gw(node, b"x" * 200,
                                  "/usr/sap/SJ1/J02/foo.jsp")
-        for cmd, params in calls:
-            assert cmd == "/bin/sh"
-            # every params value: starts with -c, exactly two " (outer)
-            assert params.count('"') == 2, \
-                f"unexpected quote count in: {params!r}"
-            assert '\\"' not in params, \
-                f"leaked \\\" escape in: {params!r}"
+        # The decode step should not go through /bin/sh — it should
+        # invoke /usr/bin/openssl directly with argv-only I/O.
+        openssl_calls = [p for c, p in calls if c == "/usr/bin/openssl"]
+        assert len(openssl_calls) >= 1
+        decode = openssl_calls[0]
+        assert "enc" in decode
+        assert "-d" in decode
+        assert "-base64" in decode
+        assert "-in" in decode
+        assert "-out" in decode
+        # No shell metacharacters
+        for ch in ('"', "'", ">", "|"):
+            assert ch not in decode, \
+                f"unexpected shell char {ch!r} in openssl args: {decode!r}"
+
+    def test_windows_path_unchanged(self, monkeypatch):
+        """Sanity: Windows still uses cmd.exe + certutil + double quotes
+        around the target (which cmd.exe handles natively)."""
+        calls = self._capture(monkeypatch)
+        node = _make_java_node(os_type="Windows")
+        ex._deploy_jsp_via_gw(node, b"x" * 200, r"C:\foo.jsp")
+        assert all(c == "cmd.exe" for c, _ in calls)
+        assert any("certutil" in p for _, p in calls)
 
     def test_certutil_failure_is_reported(self, monkeypatch):
         def _fake_exec(node, cmd, params="", long_params=None):
