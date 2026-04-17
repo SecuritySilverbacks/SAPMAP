@@ -222,6 +222,12 @@ class SAPNode:
     # target's admin telnet is localhost-bound and the operator has an
     # SSH tunnel).  Empty => derive from node.ip + default 5NN08.
     telnet_override: str = ""
+    # Set to True after a post-RECON deploy attempt (CTC ConfigServlet
+    # and Telnet console) is confirmed unavailable.  Used by the GUI
+    # to grey out data-extraction actions that require JSP deployment
+    # — RECON alone (user-creation only) is not enough for SecStore /
+    # table dumps / impact probes.
+    java_deploy_blocked: bool = False
     # Java Secure Store extraction state (SecStoreFS + J2EE_CONFIGENTRY)
     java_secstore_checked: bool = False
     java_secstore_version: str = ""
@@ -323,6 +329,7 @@ class SAPNode:
             "cve_2020_6287_https": self.cve_2020_6287_https,
             "cve_2020_6287_evidence": self.cve_2020_6287_evidence,
             "telnet_override": self.telnet_override,
+            "java_deploy_blocked": self.java_deploy_blocked,
             "java_secstore_checked": self.java_secstore_checked,
             "java_secstore_version": self.java_secstore_version,
             "java_secstore_algorithm": self.java_secstore_algorithm,
@@ -373,6 +380,7 @@ class SAPNode:
             cve_2020_6287_https=d.get("cve_2020_6287_https", False),
             cve_2020_6287_evidence=d.get("cve_2020_6287_evidence", ""),
             telnet_override=d.get("telnet_override", ""),
+            java_deploy_blocked=d.get("java_deploy_blocked", False),
             java_secstore_checked=d.get("java_secstore_checked", False),
             java_secstore_version=d.get("java_secstore_version", ""),
             java_secstore_algorithm=d.get("java_secstore_algorithm", ""),
