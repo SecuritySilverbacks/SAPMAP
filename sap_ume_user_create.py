@@ -421,10 +421,14 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
         tmp_b64 = f"/tmp/sapmap_ume_{suffix}.b64"
         chunk_size = 800  # POSIX shells have much more cmdline room
 
+        # SAPXPG PARAMS tokenizer doesn't decode \" escapes — inner quotes
+        # leak through raw and bash errors with an unclosed quote.  The
+        # /usr/sap/<SID>/J<nn>/... target path never contains whitespace,
+        # so we can drop the inner quoting entirely.
         def echo_args(chunk, op):
             return f'-c "echo {chunk} {op} {tmp_b64}"'
 
-        decode_args = f'-c "base64 -d {tmp_b64} > \\"{target_path}\\""'
+        decode_args = f'-c "base64 -d {tmp_b64} > {target_path}"'
         cleanup_args = f'-c "rm -f {tmp_b64}"'
     else:
         shell = "cmd.exe"
