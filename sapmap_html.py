@@ -463,7 +463,7 @@ body {
   <div class="ctx-group">
     <div class="ctx-item">&#9876; Exploitation</div>
     <div class="ctx-sub">
-      <div class="ctx-item" data-action="lpe">&#128274; Local Privilege Escalation</div>
+      <div class="ctx-item" data-action="lpe">&#128274; ABAP Local Privilege Escalation</div>
       <div class="ctx-item" data-action="betrusted">&#128272; Betrusted — Inject Trusted IP (10KBLAZE)</div>
       <div class="ctx-item" data-action="create_user_betrusted">&#128272; Create User (10KBLAZE Full Chain)</div>
       <div class="ctx-item" data-action="create_user_java">&#128100; Create User (Java UME)</div>
@@ -1795,7 +1795,7 @@ function showCtxMenu(e, sid) {
     'create_user_betrusted': hasMsVuln || hasGwVuln, // need vulnerable MS or GW
     'create_user_gw':   hasGwVuln,                  // need GW vulnerability
     'create_user_creds': hasCreds,                  // need credentials
-    'lpe':              hasCreds,                   // need credentials to escalate
+    'lpe':              isAbapStack && hasCreds,    // ABAP-only (BAPI-driven)
     'deep_scan':        true,                       // always available
     'retrieve_rfcs':    hasCreds,                   // need credentials/access
     'test_rfcs':        hasCreds && hasRFCs,        // need access + existing RFCs
@@ -1896,6 +1896,7 @@ function showCtxMenu(e, sid) {
     'check_cve_6287':             !isJavaStack,
     'set_telnet_override':        !isJavaStack,
     'impact_assess':              !isAbapStack,
+    'lpe':                        !isAbapStack,
     'impact_assess_java':         !isJavaStack,
   };
 
