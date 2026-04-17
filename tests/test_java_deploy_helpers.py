@@ -112,14 +112,18 @@ class TestDeployGW:
         r = ex._deploy_jsp_via_gw(node, b"<%=1%>" * 40, "/path/x.jsp")
         assert r["success"]
         assert r["method"].endswith("linux")
-        # Every chunk call is python3 -c open(...).write(b'...')
+        # python3 gets called: first with --version (preflight), then
+        # with -c scripts for each chunk.
         py_calls = [p for c, p in calls if c == "python3"]
-        assert len(py_calls) >= 1
-        for p in py_calls:
-            assert p.startswith("-c "), p
+        assert "--version" in py_calls, \
+            "expected a python3 --version preflight call"
+        chunk_scripts = [p for p in py_calls if p.startswith("-c ")]
+        assert len(chunk_scripts) >= 1
+        for p in chunk_scripts:
             assert "open(" in p
             assert ".write(" in p
-            # No whitespace inside the script (single argv token)
+            # Script portion (after "-c ") must have no whitespace —
+            # it is a single argv token.
             script = p[len("-c "):]
             assert " " not in script, \
                 f"python3 script must be whitespace-free: {script!r}"
