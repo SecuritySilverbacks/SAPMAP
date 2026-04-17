@@ -511,6 +511,13 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
     # 1) Stream base64 chunks.  Surface the first chunk's stdout/stderr
     # so silent failures (e.g. `python3 not in PATH`) show up before we
     # spend minutes writing 40 useless chunks.
+    if linux:
+        # Print the exact first-chunk command so we can eyeball truncation
+        _first = echo_args(chunks[0], ">")
+        _first_display = (_first if len(_first) <= 160
+                           else _first[:160] + "…")
+        print(f"[*] {node.sid}: first-chunk command "
+              f"({len(_first)}B, limit 255): {_first_display}")
     for idx, chunk in enumerate(chunks):
         op = ">" if idx == 0 else ">>"
         r = exec_fn(chunk_shell, echo_args(chunk, op))
@@ -521,11 +528,32 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
         if idx == 0:
             out = " ".join(str(l) for l in (r.get("output") or [])).strip()
             if out:
-                print(f"[*] {node.sid}: first-chunk output: "
+                print(f"[*] {node.sid}: first-chunk stdout/stderr: "
                       f"{out[:300]}")
             else:
-                print(f"[*] {node.sid}: first-chunk output: "
+                print(f"[*] {node.sid}: first-chunk stdout/stderr: "
                       f"<empty — {chunk_shell} ran silently>")
+            # Did the first chunk actually land on disk?
+            if linux:
+                st = exec_fn("/usr/bin/stat",
+                               f"-c %s {tmp_b64}")
+                st_out = " ".join(str(l) for l in
+                                    (st.get("output") or [])).strip()
+                print(f"[*] {node.sid}: first-chunk tmp size: "
+                      f"{tmp_b64} -> {st_out or '<no output>'}")
+                try:
+                    if int(st_out or "0") == 0:
+                        return {"success": False,
+                                "error": (f"first chunk wrote 0 bytes to "
+                                           f"{tmp_b64} — python3 open()/"
+                                           f"write() is silently failing "
+                                           f"(possibly permission denied, "
+                                           f"or SAPXPG is tokenising the "
+                                           f"script differently than we "
+                                           f"expect).  The chunk command "
+                                           f"was: {_first!r}")}
+                except ValueError:
+                    pass
 
     # 2) Decode to target JSP.  On Windows the /C wrapper is important
     #    so %TEMP% in the source path expands (SAPXPG does not resolve
