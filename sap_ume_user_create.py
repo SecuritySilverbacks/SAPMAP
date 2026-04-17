@@ -207,7 +207,9 @@ try {
         out.println("userid=" + userId);
     }
 
-    // Add to group (idempotent — addUserToGroup on an existing member is a no-op)
+    // Add to the primary group (idempotent — addUserToGroup on an
+    // existing member is a no-op).  This is the `group` request param
+    // (default "Administrators") — kept for backward compat.
     try {
         Object grp = gf.getClass()
             .getMethod("getGroupByUniqueName", String.class).invoke(gf, group);
@@ -221,6 +223,58 @@ try {
         Throwable gc = gt;
         while (gc.getCause() != null) gc = gc.getCause();
         out.println("group_error=" + gc.getClass().getSimpleName() + ": " + gc.getMessage());
+    }
+
+    // Also add the user to a list of known J2EE admin groups.  On
+    // ABAP+Java dual-stack systems where UME lives in ABAP, the
+    // "Administrators" UME group alone isn't enough — the J2EE
+    // admin-group mapping is done via SAP_J2EE_ADMIN (replicated from
+    // ABAP PFCG roles).  We try a broad list and record which ones
+    // actually exist on this target.
+    try {
+        java.lang.reflect.Method getGroupByUniqueName =
+            gf.getClass().getMethod("getGroupByUniqueName", String.class);
+        java.lang.reflect.Method addUserToGroup =
+            gf.getClass().getMethod("addUserToGroup",
+                                      String.class, String.class);
+        String[] adminGroups = {
+            "SAP_J2EE_ADMIN",
+            "SAP_BC_JSF_COMMUNICATION",
+            "SAP_BC_JSF_COMMUNICATION_RO",
+            "Administrator",
+        };
+        StringBuilder gAdded = new StringBuilder();
+        StringBuilder gSkipped = new StringBuilder();
+        for (String gn : adminGroups) {
+            // Skip the primary group we already added above
+            if (gn.equals(group)) continue;
+            try {
+                Object gObj = getGroupByUniqueName.invoke(gf, gn);
+                if (gObj == null) {
+                    if (gSkipped.length() > 0) gSkipped.append(",");
+                    gSkipped.append(gn).append(":missing");
+                    continue;
+                }
+                String gId = (String) gObj.getClass()
+                    .getMethod("getUniqueID").invoke(gObj);
+                addUserToGroup.invoke(gf, userId, gId);
+                if (gAdded.length() > 0) gAdded.append(",");
+                gAdded.append(gn);
+            } catch (Throwable gErr) {
+                Throwable gc2 = gErr;
+                while (gc2.getCause() != null) gc2 = gc2.getCause();
+                if (gSkipped.length() > 0) gSkipped.append(",");
+                gSkipped.append(gn).append(":")
+                    .append(gc2.getClass().getSimpleName());
+            }
+        }
+        if (gAdded.length() > 0)   out.println("groups_added=" + gAdded);
+        if (gSkipped.length() > 0) out.println("groups_skipped=" + gSkipped);
+    } catch (Throwable rootGt) {
+        Throwable gc3 = rootGt;
+        while (gc3.getCause() != null) gc3 = gc3.getCause();
+        out.println("groups_error=" + gc3.getClass().getSimpleName()
+                     + ": " + gc3.getMessage());
     }
 
     // Also assign the J2EE admin UME ROLES directly.  On many NW
@@ -375,7 +429,8 @@ def invoke_create_user_jsp(jsp_url: str, username: str, password: str,
     result = {"success": False, "status": "", "userid": "",
               "group": "", "groupid": "", "error": "", "raw": "",
               "http_status": 0, "body_len": 0,
-              "roles_added": "", "roles_skipped": "", "roles_error": ""}
+              "roles_added": "", "roles_skipped": "", "roles_error": "",
+              "groups_added": "", "groups_skipped": "", "groups_error": ""}
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
             text = r.read().decode("latin1", errors="replace")
