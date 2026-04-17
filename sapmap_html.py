@@ -1764,6 +1764,10 @@ function showCtxMenu(e, sid) {
   const hasGwPort = n && (n.instances || []).some(i => Object.entries(i.ports || {}).some(([p,s]) => s === 'gateway' || (p >= 3300 && p <= 3399)));
   const hasFindings = n && (n.findings || []).length > 0;
   const hasCreatedUsers = n && (n.created_users || []).length > 0;
+  // A Java admin user (from RECON or CVE-31324) unlocks the telnet-console
+  // deploy path for Java data extraction.
+  const hasJavaAdmin = isJavaStack && (n.created_users || []).some(u =>
+    (u.method || '').toLowerCase().indexOf('java') === 0 && u.password);
   const hasRFCs = (mapState.connections || []).some(c => c.source_sid === sid);
   const hasUntested = (mapState.connections || []).some(c => c.source_sid === sid && !c.tested);
 
@@ -1787,15 +1791,15 @@ function showCtxMenu(e, sid) {
     'deep_scan':        true,                       // always available
     'retrieve_rfcs':    hasCreds,                   // need credentials/access
     'test_rfcs':        hasCreds && hasRFCs,        // need access + existing RFCs
-    'read_java_destinations': isJavaStack && (hasCve31324 || hasGwVuln),
-    'download_hashes':    hasCreds || (isJavaStack && (hasCve31324 || hasGwVuln)),
+    'read_java_destinations': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaAdmin),
+    'download_hashes':    hasCreds || (isJavaStack && (hasCve31324 || hasGwVuln || hasJavaAdmin)),
     'download_secstore':  hasCreds,                   // need credentials/access
-    'download_java_secstore': isJavaStack && (hasCve31324 || hasGwVuln), // Java + exploit
+    'download_java_secstore': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaAdmin),
     'view_java_secstore':     n && n.java_secstore_checked,
-    'download_table':     hasCreds || (isJavaStack && (hasCve31324 || hasGwVuln)),
+    'download_table':     hasCreds || (isJavaStack && (hasCve31324 || hasGwVuln || hasJavaAdmin)),
     'impact_assess':      hasCreds,                   // need credentials/access
     'impact_view':        (n.impact_results||[]).length > 0,
-    'impact_assess_java': isJavaStack && (hasCve31324 || hasGwVuln),
+    'impact_assess_java': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaAdmin),
     'os_terminal':      hasGwVuln || hasCreatedUsers || hasCve31324, // GW, user, or CVE-31324
     'reverse_shell':    hasGwVuln || hasCreatedUsers || hasCve31324, // GW, user, or CVE-31324
     'create_tcpip':     hasCreds,                   // need credentials/access
@@ -1828,15 +1832,15 @@ function showCtxMenu(e, sid) {
     'lpe':              'Provide credentials first',
     'retrieve_rfcs':    'Provide credentials or create a user first',
     'test_rfcs':        'Retrieve RFC connections first',
-    'read_java_destinations': 'Requires Java/dual-stack + CVE-2025-31324 or GW SAPXPG',
+    'read_java_destinations': 'Requires Java/dual-stack + CVE-2025-31324, GW SAPXPG, or a Java admin user (RECON)',
     'download_hashes':    'Provide credentials or create a user first',
     'download_secstore':  'Provide credentials or create a user first',
-    'download_java_secstore': 'Requires Java/dual-stack + CVE-2025-31324 or GW SAPXPG vuln',
+    'download_java_secstore': 'Requires Java/dual-stack + CVE-2025-31324, GW SAPXPG, or a Java admin user (RECON)',
     'view_java_secstore':     'Run Download Java Secure Store first',
     'download_table':     'Provide credentials or create a user first',
     'impact_assess':      'Provide credentials or create a user first',
     'impact_view':        'Run impact assessment first',
-    'impact_assess_java': 'Requires Java/dual-stack + CVE-2025-31324 or GW SAPXPG',
+    'impact_assess_java': 'Requires Java/dual-stack + CVE-2025-31324, GW SAPXPG, or a Java admin user (RECON)',
     'os_terminal':      'Requires vulnerable gateway, created user with SAP_ALL, or CVE-2025-31324',
     'reverse_shell':    'Requires vulnerable gateway, created user with SAP_ALL, or CVE-2025-31324',
     'create_tcpip':     'Provide credentials or create a user first',

