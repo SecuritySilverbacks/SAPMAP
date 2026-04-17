@@ -1219,6 +1219,33 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:check_ms", "Check MS Betrusted", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/check_cve_2020_6287", method="POST")
+    def node_check_cve_2020_6287(sid):
+        """Probe Java ports for CVE-2020-6287 (RECON)."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        if "JAVA" not in (node.system_type or "").upper():
+            return json.dumps({"error": "Not a Java / double-stack system"})
+
+        def _run():
+            print(f"[*] {sid}: Checking CVE-2020-6287 (RECON / "
+                  f"LM Configuration Wizard)...")
+            found = sapmap_scanner.check_cve_2020_6287(node)
+            if found:
+                print(f"[+] {sid}: VULNERABLE — port "
+                      f"{node.cve_2020_6287_port} · "
+                      f"{node.cve_2020_6287_evidence}")
+            elif node.cve_2020_6287_evidence:
+                print(f"[*] {sid}: not vulnerable "
+                      f"({node.cve_2020_6287_evidence})")
+            else:
+                print(f"[*] {sid}: no Java HTTP port responded")
+
+        _bg(f"{sid}:check_cve_6287", "Check CVE-2020-6287", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/check_cve_2025_31324", method="POST")
     def node_check_cve_2025_31324(sid):
         """Probe Java ports for CVE-2025-31324 (metadatauploader unauth RCE).

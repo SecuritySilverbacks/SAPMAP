@@ -888,6 +888,90 @@ def check_cve_2025_31324(node: SAPNode, timeout: float = 10.0) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# CVE-2020-6287 (RECON) — LM Configuration Wizard unauth user creation
+# ---------------------------------------------------------------------------
+
+def check_cve_2020_6287(node: SAPNode, timeout: float = 10.0) -> bool:
+    """Probe Java ports for CVE-2020-6287 (RECON).
+
+    HEAD /CTCWebService/CTCWebServiceBean → 200 = vulnerable.
+
+    Only runs against Java / double-stack systems.  Port selection reuses
+    the same instance-based HTTP-port candidates as check_cve_2025_31324.
+    """
+    try:
+        from sap_cve_2020_6287 import check_cve_2020_6287 as _probe
+    except ImportError:
+        logger.warning("sap_cve_2020_6287 not available — skipping")
+        return False
+
+    sys_type = (node.system_type or "").upper()
+    if "JAVA" not in sys_type:
+        return False
+
+    host = node.ip or node.hostname
+    if not host:
+        return False
+
+    node.cve_2020_6287_checked = True
+
+    candidates = []
+    for inst in node.instances:
+        try:
+            nr = int(inst.instance_nr)
+        except (ValueError, TypeError):
+            continue
+        base = 50000 + nr * 100
+        for p, use_https in [(base, False), (base + 1, True)]:
+            candidates.append((p, use_https))
+    if not candidates:
+        for nr in (0, 1, 2, 3):
+            base = 50000 + nr * 100
+            candidates.append((base, False))
+            candidates.append((base + 1, True))
+
+    for port, use_https in candidates:
+        if not _scan_port(host, port, timeout=2.0):
+            continue
+        r = _probe(host, port, use_https=use_https, timeout=timeout)
+        if not r.get("reachable"):
+            continue
+        if r.get("vulnerable"):
+            node.cve_2020_6287_vulnerable = True
+            node.cve_2020_6287_port = port
+            node.cve_2020_6287_https = use_https
+            node.cve_2020_6287_evidence = r.get("evidence", "")
+            if not any(f.name.startswith("CVE-2020-6287")
+                        for f in node.findings):
+                node.findings.append(Finding(
+                    name="CVE-2020-6287 — RECON (LM Config Wizard unauth)",
+                    severity=Severity.CRITICAL,
+                    description=(
+                        "SAP NetWeaver AS Java LM Configuration Wizard "
+                        "exposes /CTCWebService/CTCWebServiceBean without "
+                        "authentication.  An attacker can create an "
+                        "Administrator-role UME user and gain full admin "
+                        "access to the Java engine — no credentials, no "
+                        "exploit chain, just a single SOAP POST."
+                    ),
+                    remediation=(
+                        "Apply SAP Security Note 2934135 (July 2020). "
+                        "Remove or restrict access to the CTCWebService "
+                        "and LMConfigurationWizard endpoints."
+                    ),
+                    detail=f"Port {port} · {r.get('evidence', '')}",
+                ))
+                node.has_critical_finding = True
+            return True
+        else:
+            node.cve_2020_6287_port = port
+            node.cve_2020_6287_https = use_https
+            node.cve_2020_6287_evidence = r.get("evidence", "")
+
+    return False
+
+
+# ---------------------------------------------------------------------------
 # System info enrichment (unauthenticated)
 # ---------------------------------------------------------------------------
 
