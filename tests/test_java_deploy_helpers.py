@@ -86,9 +86,21 @@ class TestOSDetection:
 class TestDeployGW:
 
     def _capture(self, monkeypatch):
+        """Capture (command, effective_args).  On Linux the real args
+        flow through long_params with params="" so the effective args
+        are whichever field is non-empty.
+        """
         calls = []
         def _fake_exec(node, cmd, params="", long_params=None):
-            calls.append((cmd, params))
+            # Prefer long_params when params is empty — matches what
+            # the target kernel actually sees after concatenation.
+            if (params or "").strip() == "" and long_params:
+                effective = long_params
+            elif long_params == "" or long_params is None:
+                effective = params
+            else:
+                effective = params + " " + long_params
+            calls.append((cmd, effective))
             return {"success": True, "output": ["ok"], "error": ""}
         monkeypatch.setattr(ex, "execute_gw_command", _fake_exec)
         return calls
