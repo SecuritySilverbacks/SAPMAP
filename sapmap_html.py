@@ -1808,8 +1808,12 @@ function showCtxMenu(e, sid) {
     'impact_assess':      hasCreds,                   // need credentials/access
     'impact_view':        (n.impact_results||[]).length > 0,
     'impact_assess_java': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy),
-    'os_terminal':      hasGwVuln || hasCreatedUsers || hasCve31324, // GW, user, or CVE-31324
-    'reverse_shell':    hasGwVuln || hasCreatedUsers || hasCve31324, // GW, user, or CVE-31324
+    // Gateway + SXPG are ABAP-only primitives; a Java UME user from RECON
+    // cannot call SXPG (no ABAP RFC). CVE-2025-31324 webshell works on
+    // Java. So: enable when (a) ABAP path exists, or (b) CVE-31324 gives
+    // us a webshell on this Java node.
+    'os_terminal':      (isAbapStack && (hasGwVuln || hasCreatedUsers)) || hasCve31324,
+    'reverse_shell':    (isAbapStack && (hasGwVuln || hasCreatedUsers)) || hasCve31324,
     'create_tcpip':     hasCreds,                   // need credentials/access
     'propagate':        hasCreds,                   // need access to propagate from
     'cleanup':          hasCreatedUsers,             // need created users to clean up
@@ -1856,8 +1860,8 @@ function showCtxMenu(e, sid) {
     'impact_assess_java': (javaDeployBlocked
         ? 'RECON admin user exists but no JSP-deploy primitive is reachable (CTC ConfigServlet removed, admin telnet firewalled). System is hardened — data extraction not available from here.'
         : 'Requires Java/dual-stack + CVE-2025-31324, GW SAPXPG, or a Java admin user with a reachable CTC / telnet endpoint'),
-    'os_terminal':      'Requires vulnerable gateway, created user with SAP_ALL, or CVE-2025-31324',
-    'reverse_shell':    'Requires vulnerable gateway, created user with SAP_ALL, or CVE-2025-31324',
+    'os_terminal':      'Requires ABAP gateway/user (SXPG) or CVE-2025-31324 webshell — a Java-only RECON user cannot call SXPG',
+    'reverse_shell':    'Requires ABAP gateway/user (SXPG) or CVE-2025-31324 webshell — a Java-only RECON user cannot call SXPG',
     'create_tcpip':     'Provide credentials or create a user first',
     'propagate':        'Provide credentials or create a user first',
     'cleanup':          'No created users to clean up',
