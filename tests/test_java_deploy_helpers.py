@@ -151,6 +151,10 @@ class TestDeployGW:
         assert "enc" in decode
         assert "-d" in decode
         assert "-base64" in decode
+        # -A is mandatory — without it openssl expects PEM-style line
+        # breaks and silently outputs 0 bytes for single-line input.
+        assert "-A" in decode, \
+            "openssl decode must pass -A to accept single-line base64"
         assert "-in" in decode
         assert "-out" in decode
         # No shell metacharacters

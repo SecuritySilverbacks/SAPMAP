@@ -450,7 +450,11 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
         #     Python script is a single token (no spaces).  Base64
         #     chunks are [A-Za-z0-9+/=] so they never break the
         #     b'...' literal.
-        #   decode  -> /usr/bin/openssl enc -d -base64 -in I -out O
+        #   decode  -> /usr/bin/openssl enc -d -base64 -A -in I -out O
+        #     -A is critical: without it openssl expects PEM-style line
+        #     breaks every 64 chars and silently outputs 0 bytes for a
+        #     single-line base64 blob (which is what our chunk loop
+        #     produces).  With -A single-line input is accepted.
         #   cleanup -> /bin/rm -f FILE
         chunk_shell = "python3"
         decode_shell = "/usr/bin/openssl"
@@ -469,7 +473,8 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
         _wrapper = echo_args("", ">>")
         chunk_size = max(40, 255 - len(_wrapper) - 10)
 
-        decode_args = f"enc -d -base64 -in {tmp_b64} -out {target_path}"
+        decode_args = (f"enc -d -base64 -A -in {tmp_b64} "
+                        f"-out {target_path}")
         cleanup_args = f"-f {tmp_b64}"
     else:
         chunk_shell = "cmd.exe"
