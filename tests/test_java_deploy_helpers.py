@@ -103,30 +103,32 @@ class TestDeployGW:
         assert any(c == "cmd.exe" for c, _ in calls)
         assert any("certutil" in p for _, p in calls)
 
-    def test_linux_chunks_use_sh_single_quoted(self, monkeypatch):
+    def test_linux_chunks_use_python_no_shell(self, monkeypatch):
+        """Linux chunked write must go through python3, not /bin/sh —
+        SAPXPG's whitespace tokenizer breaks any `sh -c` form.
+        """
         calls = self._capture(monkeypatch)
         node = _make_java_node(os_type="Linux")
         r = ex._deploy_jsp_via_gw(node, b"<%=1%>" * 40, "/path/x.jsp")
         assert r["success"]
         assert r["method"].endswith("linux")
-        # Echo/cleanup chunks go through /bin/sh
-        sh_calls = [p for c, p in calls if c == "/bin/sh"]
-        # Every sh-call uses single-quoted script (no double quotes)
-        for p in sh_calls:
-            assert p.startswith("-c '"), p
-            assert p.endswith("'"), p
-            assert '"' not in p, \
-                f"double quote leaked into sh params: {p!r}"
-            assert '\\"' not in p, \
-                f"escaped quote leaked into sh params: {p!r}"
+        # Every chunk call is python3 -c open(...).write(b'...')
+        py_calls = [p for c, p in calls if c == "python3"]
+        assert len(py_calls) >= 1
+        for p in py_calls:
+            assert p.startswith("-c "), p
+            assert "open(" in p
+            assert ".write(" in p
+            # No whitespace inside the script (single argv token)
+            script = p[len("-c "):]
+            assert " " not in script, \
+                f"python3 script must be whitespace-free: {script!r}"
 
     def test_linux_decode_uses_openssl_shell_free(self, monkeypatch):
         calls = self._capture(monkeypatch)
         node = _make_java_node(os_type="Linux")
         ex._deploy_jsp_via_gw(node, b"x" * 200,
                                  "/usr/sap/SJ1/J02/foo.jsp")
-        # The decode step should not go through /bin/sh — it should
-        # invoke /usr/bin/openssl directly with argv-only I/O.
         openssl_calls = [p for c, p in calls if c == "/usr/bin/openssl"]
         assert len(openssl_calls) >= 1
         decode = openssl_calls[0]
@@ -139,6 +141,19 @@ class TestDeployGW:
         for ch in ('"', "'", ">", "|"):
             assert ch not in decode, \
                 f"unexpected shell char {ch!r} in openssl args: {decode!r}"
+
+    def test_linux_cleanup_uses_bin_rm(self, monkeypatch):
+        calls = self._capture(monkeypatch)
+        node = _make_java_node(os_type="Linux")
+        ex._deploy_jsp_via_gw(node, b"x" * 100, "/target.jsp")
+        rm_calls = [p for c, p in calls if c == "/bin/rm"]
+        assert len(rm_calls) >= 1
+        for p in rm_calls:
+            # No shell metacharacters or quotes — just '-f /tmp/…'
+            assert p.startswith("-f "), p
+            for ch in ('"', "'", ">", "|", ";", "&"):
+                assert ch not in p, \
+                    f"unexpected shell char {ch!r} in rm args: {p!r}"
 
     def test_windows_path_unchanged(self, monkeypatch):
         """Sanity: Windows still uses cmd.exe + certutil + double quotes

