@@ -994,6 +994,28 @@ def create_app(api: SAPMAPApi) -> Bottle:
             print(f"[*] SAProuter for {sid} removed")
         return json.dumps({"status": "ok"})
 
+    @app.route("/api/node/<sid>/set_telnet_override", method="POST")
+    def node_set_telnet_override(sid):
+        """Set (or clear) a custom host:port for the admin telnet console.
+
+        Use case: the target binds 5NN08 to 127.0.0.1 and the operator
+        has an SSH tunnel — setting override to e.g. '127.0.0.1:50008'
+        makes the telnet deploy path connect through the tunnel.
+        """
+        response.content_type = "application/json"
+        data = request.json or {}
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        spec = (data.get("telnet_override") or "").strip()
+        node.telnet_override = spec
+        if spec:
+            print(f"[*] {sid}: telnet override set to {spec!r}")
+        else:
+            print(f"[*] {sid}: telnet override cleared")
+        return json.dumps({"status": "ok",
+                            "telnet_override": node.telnet_override})
+
     @app.route("/api/node/<sid>/router_scan", method="POST")
     def node_router_scan(sid):
         """Scan internal hosts through a SAProuter node.
