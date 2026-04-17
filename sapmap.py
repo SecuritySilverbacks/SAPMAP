@@ -134,6 +134,31 @@ def main():
     port = args.port or find_free_port()
     url = f"http://127.0.0.1:{port}"
 
+    # Disclaimer banner — printed once at startup.  SAPMAP ships real
+    # working SAP exploits; make it impossible to miss the intended-use
+    # boundaries on the way in.
+    banner = (
+        "\n"
+        "================================================================\n"
+        "                ⚡  SAPMAP — DISCLAIMER ⚡\n"
+        "================================================================\n"
+        "  Use at your own risk.  SAPMAP implements real, working\n"
+        "  exploits against SAP NetWeaver systems.  Running it against\n"
+        "  a system you do not own or do not have explicit written\n"
+        "  permission to test is ILLEGAL in most jurisdictions.\n"
+        "\n"
+        "  Intended uses:\n"
+        "    • authorized penetration tests / red-team engagements\n"
+        "    • defensive research on systems you own or administer\n"
+        "    • educational study of SAP attack surfaces\n"
+        "    • SOC / blue-team detection-engineering exercises\n"
+        "\n"
+        "  The authors accept no liability for any damage caused by\n"
+        "  the use or misuse of this tool.  Clean up artifacts\n"
+        "  (Actions → Cleanup All Users) when you're done.\n"
+        "================================================================\n"
+    )
+    print(banner)
     print(f"[*] Starting SAPMAP server on {url}")
 
     # Start Bottle server in background thread (threaded so stop/poll don't block)

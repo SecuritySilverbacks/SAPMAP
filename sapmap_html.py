@@ -342,6 +342,11 @@ body {
       <div class="dd-item" onclick="toggleConsole()">&#128203; Toggle Console</div>
     </div>
   </div>
+  <div class="menu-item">Help
+    <div class="menu-dropdown">
+      <div class="dd-item" onclick="showAbout()">&#8505;&#65039; About &amp; Disclaimer</div>
+    </div>
+  </div>
 </div>
 
 <!-- Toolbar (Scan Configuration) -->
@@ -3675,6 +3680,80 @@ function applyViewBox() {
   document.getElementById('map-svg').setAttribute('viewBox',
     `${viewBox.x} ${viewBox.y} ${viewBox.w} ${viewBox.h}`);
 }
+function showAbout() {
+  const body = `
+<div style="padding:18px 22px;max-width:720px;line-height:1.55;color:#c9d1d9">
+  <h2 style="margin:0 0 8px 0;color:#e6edf3">&#9889; SAPMAP</h2>
+  <div style="color:#8b949e;font-size:12px;margin-bottom:18px">
+    SAP Landscape Attack-Path Mapper — offensive/defensive recon,
+    credential propagation, and data-extraction toolkit for SAP
+    NetWeaver ABAP &amp; Java stacks.
+  </div>
+
+  <h3 style="color:#f85149;margin:0 0 6px 0">&#9888;&#65039; Disclaimer</h3>
+  <div style="background:#161b22;border:1px solid #30363d;
+               border-radius:6px;padding:12px 14px;font-size:13px">
+    <p style="margin:0 0 10px 0"><b>Use at your own risk.</b>
+      SAPMAP implements real, working exploits against SAP systems.
+      Running it against a system you do not own or do not have
+      explicit written permission to test is <b>illegal</b> in most
+      jurisdictions and can result in data loss, system outages,
+      locked accounts, or audit findings.</p>
+
+    <p style="margin:0 0 10px 0">This tool is intended <b>solely</b>
+      for:</p>
+    <ul style="margin:0 0 10px 18px;padding:0">
+      <li>authorized penetration tests and red-team engagements,</li>
+      <li>defensive security research on systems you own or
+          administer,</li>
+      <li>educational study of SAP attack surfaces, and</li>
+      <li>SOC / blue-team detection-engineering exercises.</li>
+    </ul>
+
+    <p style="margin:0 0 10px 0">You are responsible for:</p>
+    <ul style="margin:0 0 10px 18px;padding:0">
+      <li>having written authorization before running any scan,
+          check, or exploit against a system,</li>
+      <li>the consequences of any action you take with this tool,</li>
+      <li>cleaning up artifacts (SAPMAP00 users, dropped JSPs, TCP/IP
+          destinations) when you are done — see Actions &rarr;
+          Cleanup All Users.</li>
+    </ul>
+
+    <p style="margin:0"><b>No warranty.</b> SAPMAP is provided
+      "as is", without warranty of any kind, express or implied.
+      The authors accept no liability for any damage caused by
+      its use or misuse.</p>
+  </div>
+
+  <div style="margin-top:16px;font-size:12px;color:#8b949e">
+    Source: <a href="https://github.com/kloris/SAPMAP"
+                target="_blank"
+                style="color:#58a6ff">github.com/kloris/SAPMAP</a>
+    &nbsp;·&nbsp; Report issues, PRs welcome.
+  </div>
+
+  <div style="text-align:right;margin-top:18px">
+    <button class="btn btn-primary"
+            onclick="document.getElementById('about-modal').remove()">
+      I understand
+    </button>
+  </div>
+</div>`;
+  // Remove any existing modal first (in case user clicks twice)
+  const existing = document.getElementById('about-modal');
+  if (existing) existing.remove();
+  const m = document.createElement('div');
+  m.id = 'about-modal';
+  m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.65);'
+    + 'z-index:10000;display:flex;align-items:center;justify-content:center;';
+  m.innerHTML = '<div style="background:#0d1117;border:1px solid #30363d;'
+    + 'border-radius:10px;box-shadow:0 8px 40px rgba(0,0,0,.6);max-width:760px">'
+    + body + '</div>';
+  m.addEventListener('click', (e) => { if (e.target === m) m.remove(); });
+  document.body.appendChild(m);
+}
+
 function toggleConsole() {
   const c = document.getElementById('console-container');
   const r = document.getElementById('console-restore');
