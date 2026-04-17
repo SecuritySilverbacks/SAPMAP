@@ -54,6 +54,20 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT = 20.0
 _READ_CHUNK = 4096
+_PORT_PROBE_TIMEOUT = 2.5   # quick TCP-connect probe before full session
+
+
+def probe_port(host: str, port: int,
+                 timeout: float = _PORT_PROBE_TIMEOUT) -> bool:
+    """Fast check — is TCP port open?  Returns True on a successful
+    connect (even if the peer immediately closes), False on timeout
+    or refused.
+    """
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
