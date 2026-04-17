@@ -513,6 +513,7 @@ body {
       <div class="ctx-item" data-action="set_db_type">&#9881; Set DB Type</div>
       <div class="ctx-item" data-action="set_os_type">&#9881; Set OS Type</div>
       <div class="ctx-item" data-action="set_saprouter">&#128268; Set SAProuter</div>
+      <div class="ctx-item" data-action="set_telnet_override">&#128279; Set Telnet Endpoint (SSH tunnel)</div>
     </div>
   </div>
   <div class="ctx-sep"></div>
@@ -1814,6 +1815,7 @@ function showCtxMenu(e, sid) {
     'check_router_info': true,                     // always (direct TCP, no creds)
     'router_scan':      true,                       // always (probes via SAProuter, no creds)
     'set_saprouter':    true,                       // always available
+    'set_telnet_override': isJavaStack,              // only meaningful for Java stacks
     'delete_system':    true,                       // always available
   };
 
@@ -1875,6 +1877,7 @@ function showCtxMenu(e, sid) {
     'view_java_secstore':         !isJavaStack,
     'read_java_destinations':     !isJavaStack,
     'check_cve_6287':             !isJavaStack,
+    'set_telnet_override':        !isJavaStack,
     'impact_assess':              !isAbapStack,
     'impact_assess_java':         !isJavaStack,
   };
@@ -2236,6 +2239,21 @@ async function ctxAction(action) {
         api('POST', `node/${sid}/check_default_creds`);
       break;
     case 'set_saprouter': showSaprouterModal(sid); break;
+    case 'set_telnet_override': {
+      const cur = n.telnet_override || '';
+      const val = prompt(
+        'Telnet-console endpoint for this node.\n\n' +
+        'Use when the target binds admin telnet to 127.0.0.1 and you\n' +
+        'have an SSH tunnel:\n' +
+        '    ssh -L 50008:127.0.0.1:50008 user@target\n' +
+        'Then set this to "127.0.0.1:50008".\n\n' +
+        'Leave empty to clear and use the default 5NN08 on the node.',
+        cur);
+      if (val === null) break;
+      await api('POST', `node/${sid}/set_telnet_override`,
+                 { telnet_override: val.trim() });
+      break;
+    }
     case 'delete_system':
       if (confirm(`Delete ${sid} from the map? This removes the system and all its connections.`)) {
         const r = await api('DELETE', `node/${sid}`);

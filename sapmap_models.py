@@ -218,6 +218,10 @@ class SAPNode:
     cve_2020_6287_port: int = 0
     cve_2020_6287_https: bool = False
     cve_2020_6287_evidence: str = ""
+    # Telnet console endpoint override (e.g. "127.0.0.1:50008" when the
+    # target's admin telnet is localhost-bound and the operator has an
+    # SSH tunnel).  Empty => derive from node.ip + default 5NN08.
+    telnet_override: str = ""
     # Java Secure Store extraction state (SecStoreFS + J2EE_CONFIGENTRY)
     java_secstore_checked: bool = False
     java_secstore_version: str = ""
@@ -318,6 +322,7 @@ class SAPNode:
             "cve_2020_6287_port": self.cve_2020_6287_port,
             "cve_2020_6287_https": self.cve_2020_6287_https,
             "cve_2020_6287_evidence": self.cve_2020_6287_evidence,
+            "telnet_override": self.telnet_override,
             "java_secstore_checked": self.java_secstore_checked,
             "java_secstore_version": self.java_secstore_version,
             "java_secstore_algorithm": self.java_secstore_algorithm,
@@ -367,6 +372,7 @@ class SAPNode:
             cve_2020_6287_port=d.get("cve_2020_6287_port", 0),
             cve_2020_6287_https=d.get("cve_2020_6287_https", False),
             cve_2020_6287_evidence=d.get("cve_2020_6287_evidence", ""),
+            telnet_override=d.get("telnet_override", ""),
             java_secstore_checked=d.get("java_secstore_checked", False),
             java_secstore_version=d.get("java_secstore_version", ""),
             java_secstore_algorithm=d.get("java_secstore_algorithm", ""),
