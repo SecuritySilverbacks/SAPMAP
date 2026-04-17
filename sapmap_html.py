@@ -1765,10 +1765,17 @@ function showCtxMenu(e, sid) {
   const hasGwPort = n && (n.instances || []).some(i => Object.entries(i.ports || {}).some(([p,s]) => s === 'gateway' || (p >= 3300 && p <= 3399)));
   const hasFindings = n && (n.findings || []).length > 0;
   const hasCreatedUsers = n && (n.created_users || []).length > 0;
-  // A Java admin user (from RECON or CVE-31324) unlocks the telnet-console
-  // deploy path for Java data extraction.
+  // A Java admin user (from RECON or CVE-31324) unlocks the CTC / telnet
+  // deploy paths for Java data extraction — but ONLY if at least one of
+  // those primitives is reachable on the target.  java_deploy_blocked
+  // is set by the backend after we have confirmed both are unavailable
+  // (CTC ConfigServlet 404 + no telnet console reachable).  On a
+  // hardened AS Java, RECON stays useful for user creation but data
+  // extraction is greyed out with a tooltip explaining why.
   const hasJavaAdmin = isJavaStack && (n.created_users || []).some(u =>
     (u.method || '').toLowerCase().indexOf('java') === 0 && u.password);
+  const javaDeployBlocked = !!(n && n.java_deploy_blocked);
+  const hasJavaDeploy = hasJavaAdmin && !javaDeployBlocked;
   const hasRFCs = (mapState.connections || []).some(c => c.source_sid === sid);
   const hasUntested = (mapState.connections || []).some(c => c.source_sid === sid && !c.tested);
 
@@ -1792,15 +1799,15 @@ function showCtxMenu(e, sid) {
     'deep_scan':        true,                       // always available
     'retrieve_rfcs':    hasCreds,                   // need credentials/access
     'test_rfcs':        hasCreds && hasRFCs,        // need access + existing RFCs
-    'read_java_destinations': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaAdmin),
-    'download_hashes':    hasCreds || (isJavaStack && (hasCve31324 || hasGwVuln || hasJavaAdmin)),
+    'read_java_destinations': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy),
+    'download_hashes':    hasCreds || (isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy)),
     'download_secstore':  hasCreds,                   // need credentials/access
-    'download_java_secstore': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaAdmin),
+    'download_java_secstore': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy),
     'view_java_secstore':     n && n.java_secstore_checked,
-    'download_table':     hasCreds || (isJavaStack && (hasCve31324 || hasGwVuln || hasJavaAdmin)),
+    'download_table':     hasCreds || (isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy)),
     'impact_assess':      hasCreds,                   // need credentials/access
     'impact_view':        (n.impact_results||[]).length > 0,
-    'impact_assess_java': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaAdmin),
+    'impact_assess_java': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy),
     'os_terminal':      hasGwVuln || hasCreatedUsers || hasCve31324, // GW, user, or CVE-31324
     'reverse_shell':    hasGwVuln || hasCreatedUsers || hasCve31324, // GW, user, or CVE-31324
     'create_tcpip':     hasCreds,                   // need credentials/access
@@ -1834,15 +1841,21 @@ function showCtxMenu(e, sid) {
     'lpe':              'Provide credentials first',
     'retrieve_rfcs':    'Provide credentials or create a user first',
     'test_rfcs':        'Retrieve RFC connections first',
-    'read_java_destinations': 'Requires Java/dual-stack + CVE-2025-31324, GW SAPXPG, or a Java admin user (RECON)',
+    'read_java_destinations': (javaDeployBlocked
+        ? 'RECON admin user exists but no JSP-deploy primitive is reachable (CTC ConfigServlet removed, admin telnet firewalled). System is hardened — data extraction not available from here.'
+        : 'Requires Java/dual-stack + CVE-2025-31324, GW SAPXPG, or a Java admin user with a reachable CTC / telnet endpoint'),
     'download_hashes':    'Provide credentials or create a user first',
     'download_secstore':  'Provide credentials or create a user first',
-    'download_java_secstore': 'Requires Java/dual-stack + CVE-2025-31324, GW SAPXPG, or a Java admin user (RECON)',
+    'download_java_secstore': (javaDeployBlocked
+        ? 'RECON admin user exists but no JSP-deploy primitive is reachable (CTC ConfigServlet removed, admin telnet firewalled). System is hardened — data extraction not available from here.'
+        : 'Requires Java/dual-stack + CVE-2025-31324, GW SAPXPG, or a Java admin user with a reachable CTC / telnet endpoint'),
     'view_java_secstore':     'Run Download Java Secure Store first',
     'download_table':     'Provide credentials or create a user first',
     'impact_assess':      'Provide credentials or create a user first',
     'impact_view':        'Run impact assessment first',
-    'impact_assess_java': 'Requires Java/dual-stack + CVE-2025-31324, GW SAPXPG, or a Java admin user (RECON)',
+    'impact_assess_java': (javaDeployBlocked
+        ? 'RECON admin user exists but no JSP-deploy primitive is reachable (CTC ConfigServlet removed, admin telnet firewalled). System is hardened — data extraction not available from here.'
+        : 'Requires Java/dual-stack + CVE-2025-31324, GW SAPXPG, or a Java admin user with a reachable CTC / telnet endpoint'),
     'os_terminal':      'Requires vulnerable gateway, created user with SAP_ALL, or CVE-2025-31324',
     'reverse_shell':    'Requires vulnerable gateway, created user with SAP_ALL, or CVE-2025-31324',
     'create_tcpip':     'Provide credentials or create a user first',
