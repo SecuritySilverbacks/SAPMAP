@@ -493,7 +493,7 @@ body {
   <div class="ctx-group">
     <div class="ctx-item">&#128200; Business Impact</div>
     <div class="ctx-sub">
-      <div class="ctx-item" data-action="impact_assess">&#128200; Run All Impact Scenarios</div>
+      <div class="ctx-item" data-action="impact_assess">&#128200; Run ABAP Impact Scenarios</div>
       <div class="ctx-item" data-action="impact_assess_java">&#128200; Run Java Impact Scenarios</div>
       <div class="ctx-item" data-action="impact_view">&#128202; View Impact Results</div>
     </div>
@@ -1875,6 +1875,7 @@ function showCtxMenu(e, sid) {
     'read_java_destinations':     !isJavaStack,
     'check_cve_6287':             !isJavaStack,
     'recon_traversal':            !isJavaStack,
+    'impact_assess':              !isAbapStack,
     'impact_assess_java':         !isJavaStack,
   };
 
@@ -2611,7 +2612,7 @@ function showImpactDetail(sid) {
   panel.innerHTML = `
     <span class="close-btn" onclick="this.parentElement.classList.remove('visible')">&times;</span>
     <h3>&#128200; ${escHtml(n.sid)} — Business Impact (${withData.length} findings)</h3>
-    ${withData.length === 0 ? '<div style="color:#8b949e;padding:8px">No impact data yet. Right-click → Business Impact → Run All Impact Scenarios.</div>' : ''}
+    ${withData.length === 0 ? '<div style="color:#8b949e;padding:8px">No impact data yet. Right-click → Business Impact → Run ABAP/Java Impact Scenarios.</div>' : ''}
     ${withData.map(r => {
       const col = sevColors[r.severity] || '#95a5a6';
       const lbl = sevLabels[r.severity] || 'INFO';
