@@ -490,6 +490,7 @@ body {
       <div class="ctx-item" data-action="download_secstore">&#128273; Download SecStore (RSECTAB)</div>
       <div class="ctx-item" data-action="download_java_secstore">&#128273; Download Java Secure Store</div>
       <div class="ctx-item" data-action="view_java_secstore">&#128203; View Java Secure Store Results</div>
+      <div class="ctx-item" data-action="dump_java_configtool">&#128736;&#65039; Dump SAP ConfigTool (Vault secrets)</div>
       <div class="ctx-item" data-action="download_table">&#128229; Download Table Data</div>
     </div>
   </div>
@@ -1817,6 +1818,11 @@ function showCtxMenu(e, sid) {
     'download_secstore':  hasCreds,                   // need credentials/access
     'download_java_secstore': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy),
     'view_java_secstore':     n && n.java_secstore_checked,
+    // ConfigTool dump needs an OS-exec primitive — GW, CVE-31324
+    // webshell, or a UME admin (for CTC ConfigServlet).  Identical
+    // gate to download_java_secstore; different mechanism (runs
+    // SAP's own secstorefs.sh / secstore.sh / configtool.sh).
+    'dump_java_configtool':   isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy),
     'download_table':     (isAbapStack && hasCreds) ||
                           (isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy)),
     'impact_assess':      hasCreds,                   // need credentials/access
@@ -1912,6 +1918,7 @@ function showCtxMenu(e, sid) {
     // Java-only (dual-stack also counts as Java here)
     'download_java_secstore':     !isJavaStack,
     'view_java_secstore':         !isJavaStack,
+    'dump_java_configtool':       !isJavaStack,
     'read_java_destinations':     !isJavaStack,
     'check_cve_6287':             !isJavaStack,
     'set_telnet_override':        !isJavaStack,
@@ -2046,6 +2053,18 @@ async function ctxAction(action) {
     }
     case 'view_java_secstore':
       showJavaSecStoreModal(sid); break;
+    case 'dump_java_configtool': {
+      if (!confirm('Run SAP ConfigTool / SecStoreFS dump?\n\n' +
+            'Executes SAP\'s own configtool.sh / secstorefs.sh / ' +
+            'secstore.sh on the target via an available OS-exec primitive ' +
+            '(GW SAPXPG, CVE-2025-31324 webshell, or UME-admin-auth CTC).\n\n' +
+            'Recovers Vault-backed entries that SAPMAP\'s SecStoreFS ' +
+            'decrypt path cannot reach — including UMEBackendConnection\'s ' +
+            'SAPJSF password.\n\n' +
+            'Output is streamed to the Console and stored on the node.')) break;
+      await api('POST', `node/${sid}/dump_java_configtool`);
+      break;
+    }
     case 'create_user_java': {
       const u = prompt('Create Java user\n\nUsername:', 'SAPMAP00');
       if (!u || !u.trim()) break;
