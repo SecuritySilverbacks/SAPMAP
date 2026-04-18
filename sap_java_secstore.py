@@ -238,15 +238,24 @@ try {
                     + " decrypted=" + okCount);
 
                 // Pull the cleartext metadata that lives in VSTR (not VBYTES)
-                // for every JCo destination CID — needed so the GUI can show
+                // for every destination CID — needed so the GUI can show
                 // "this #~jco.client.passwd belongs to destination to_S4H,
                 // user joris, target S4H" instead of identical anonymous rows.
+                //
+                // Broad CID set: any CID that has *any* #~jco.client.* VSTR
+                // row (user, ashost, client, r3name, sysnr, ...).  The old
+                // query restricted to CIDs with #~destination.name which
+                // excluded system destinations like UMEBackendConnection
+                // where the name is stored under a different key — those
+                // appeared as anonymous #~jco.client.passwd rows.
                 java.sql.PreparedStatement ps2 = conn.prepareStatement(
                     "SELECT CID, NAME, VSTR FROM J2EE_CONFIGENTRY "
                     + "WHERE NAME LIKE '#~%' AND VSTR IS NOT NULL "
                     + "AND VSTR <> '' AND CID IN ("
-                    + "  SELECT CID FROM J2EE_CONFIGENTRY "
-                    + "  WHERE NAME = '#~destination.name' "
+                    + "  SELECT DISTINCT CID FROM J2EE_CONFIGENTRY "
+                    + "  WHERE (NAME = '#~destination.name' "
+                    + "         OR NAME LIKE '#~jco.client.%' "
+                    + "         OR NAME LIKE '#~destination.%') "
                     + "  AND VSTR IS NOT NULL AND VSTR <> ''"
                     + ")");
                 java.sql.ResultSet rs2 = ps2.executeQuery();

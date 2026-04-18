@@ -3119,6 +3119,7 @@ function renderJssTable() {
     // target_sid / client so the filter can match destination names
     // (e.g. 'UMEBackendConnection') that only live in those fields.
     const belongsStr = [e.dest_name || '', e.dest_user || '',
+                         e.dest_host || '',
                          e.target_sid || '', e.client || '',
                          e.cid || '']
                          .filter(Boolean).join(' ').toLowerCase();
@@ -3155,6 +3156,22 @@ function renderJssTable() {
         if (e.client) belongs += '/' + escHtml(e.client);
         belongs += ')</span>';
       }
+    } else if (e.dest_user || e.dest_host || target) {
+      // Orphan destination (no #~destination.name row found) — build a
+      // user@host or user@SID/client label so the row is identifiable
+      // instead of showing blank.  Typical case: UMEBackendConnection
+      // and other SAP system destinations.
+      const user = e.dest_user ? escHtml(e.dest_user) : '';
+      const host = e.dest_host ? escHtml(e.dest_host) : '';
+      const sid = target ? escHtml(target) : '';
+      const client = e.client ? '/' + escHtml(e.client) : '';
+      const parts = [];
+      if (user) parts.push(user);
+      if (host) parts.push('@' + host);
+      else if (sid) parts.push('@' + sid);
+      if (client) parts.push(client);
+      belongs = '<span style="color:#f0883e" title="orphan destination — no #~destination.name row; labelled from jco.client.* metadata">'
+              + parts.join('') + '</span>';
     } else if (target) {
       belongs = escHtml(target) + (e.client ? '/' + escHtml(e.client) : '');
     }
