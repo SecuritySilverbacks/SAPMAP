@@ -881,7 +881,7 @@ body {
     <div style="flex:1;overflow:hidden;padding:12px;display:flex;flex-direction:column">
       <div id="jss-meta" style="font-size:11px;color:#8b949e;margin-bottom:8px"></div>
       <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center;flex-shrink:0">
-        <input type="text" id="jss-filter" placeholder="filter by name or value..." style="flex:1" oninput="renderJssTable()">
+        <input type="text" id="jss-filter" placeholder="filter by name, value, destination name, user, target SID/client..." style="flex:1" oninput="renderJssTable()">
         <label style="font-size:11px;color:#8b949e">
           <input type="checkbox" id="jss-showpw" onchange="renderJssTable()" checked> Show passwords
         </label>
@@ -3101,8 +3101,16 @@ function renderJssTable() {
   for (const e of entries) {
     const name = e.name || '';
     const value = e.value || '';
+    // Build a flat "belongs to" string from dest_name / dest_user /
+    // target_sid / client so the filter can match destination names
+    // (e.g. 'UMEBackendConnection') that only live in those fields.
+    const belongsStr = [e.dest_name || '', e.dest_user || '',
+                         e.target_sid || '', e.client || '',
+                         e.cid || '']
+                         .filter(Boolean).join(' ').toLowerCase();
     if (filter && name.toLowerCase().indexOf(filter) === -1
-               && value.toLowerCase().indexOf(filter) === -1) continue;
+               && value.toLowerCase().indexOf(filter) === -1
+               && belongsStr.indexOf(filter) === -1) continue;
     let display = value;
     if (!showPw && isPwField(name)) {
       display = (value.length > 0) ? '•'.repeat(Math.min(value.length, 8)) + ' (' + value.length + 'B)' : '(empty)';
