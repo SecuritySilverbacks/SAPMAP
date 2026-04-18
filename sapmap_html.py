@@ -187,12 +187,15 @@ body {
   background: #1c2128; border: 1px solid #30363d; border-radius: 8px;
   width: 420px; max-height: 500px; overflow-y: auto; padding: 16px;
   box-shadow: 0 8px 24px rgba(0,0,0,.5);
+  /* Everything inside the panel is selectable so the operator can
+     copy IPs, usernames, passwords, etc. */
+  user-select: text; -webkit-user-select: text; cursor: text;
 }
 .info-panel.visible { display: block; }
 .info-panel h3 { font-size: 13px; color: #f0883e; margin-bottom: 10px; }
 .info-panel .info-row { display: flex; margin: 3px 0; font-size: 12px; }
 .info-panel .info-label { color: #8b949e; width: 110px; flex-shrink: 0; }
-.info-panel .info-val { color: #e6edf3; }
+.info-panel .info-val { color: #e6edf3; word-break: break-all; }
 .info-panel .info-section { margin-top: 8px; padding-top: 8px; border-top: 1px solid #30363d; }
 .info-panel .profile-list { margin: 4px 0 0 8px; }
 .info-panel .profile-item { font-size: 11px; color: #c9d1d9; padding: 1px 0; }
