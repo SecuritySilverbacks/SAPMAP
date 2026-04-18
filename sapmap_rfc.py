@@ -309,6 +309,54 @@ def _susr_suim_sap_all_check(conn, destination: str, username: str) -> dict:
                 "error": f"SUSR_SUIM fallback failed: {e}"}
 
 
+def get_direct_user_profiles(target_node: SAPNode, username: str,
+                             creds: Credentials) -> dict:
+    """Fetch a user's profiles + roles by logging on DIRECTLY to the
+    target and calling BAPI_USER_GET_DETAIL — no source ABAP needed.
+
+    Used when a Java source has recovered an RFC destination's creds
+    (SAPJSF/UMEBackendConnection) and wants to know whether the remote
+    service user is powerful (SAP_ALL etc.) without routing the call
+    through an ABAP system we don't own.
+
+    Returns dict with: profiles (list), roles (list), has_sap_all (bool),
+    error (str).  A non-empty error means the BAPI call was blocked
+    (e.g. S_RFC on BAPI_USER_GET_DETAIL, or /SAPDS/ missing) — caller
+    can decide whether to still trust the logon OK.
+    """
+    out = {"profiles": [], "roles": [], "has_sap_all": False, "error": ""}
+    try:
+        with _get_connection(target_node, creds) as conn:
+            det = conn.call("BAPI_USER_GET_DETAIL", USERNAME=username)
+            ret = det.get("RETURN", [])
+            # RETURN is a table; look for error-typed rows
+            if isinstance(ret, dict):
+                ret = [ret]
+            for r in ret or []:
+                if r.get("TYPE", "").upper() in ("E", "A"):
+                    out["error"] = r.get("MESSAGE", "BAPI returned error")
+                    return out
+            for p in det.get("PROFILES", []) or []:
+                name = (p.get("BAPIPROF") or "").strip()
+                if name:
+                    out["profiles"].append(name)
+            for a in det.get("ACTIVITYGROUPS", []) or []:
+                name = (a.get("AGR_NAME") or "").strip()
+                if name:
+                    out["roles"].append(name)
+            # SAP_ALL grant: via the profile itself, via SAP_NEW + full
+            # comp, or via a role named SAP_ALL (rare but seen).
+            if ("SAP_ALL" in out["profiles"]
+                    or "SAP_ALL" in out["roles"]):
+                out["has_sap_all"] = True
+    except Exception as e:
+        msg = str(e).split("\n")[0][:200]
+        out["error"] = msg
+        logger.debug(f"direct BAPI_USER_GET_DETAIL on {target_node.sid} "
+                      f"for {username} failed: {e}")
+    return out
+
+
 def get_remote_user_profiles(node: SAPNode, username: str,
                              destination: str,
                              creds: Credentials = None) -> dict:
