@@ -2036,20 +2036,35 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             conn.tested = True
                             print(f"[+] {dest_name}: Direct logon OK "
                                   f"({conn.rfc_user}@{conn.target_sid})")
-                            # Check SAP_ALL via BAPI_USER_GET_DETAIL
-                            try:
-                                with sapmap_rfc._get_connection(
-                                        target_node, direct_creds) as tc:
-                                    det = tc.call("BAPI_USER_GET_DETAIL",
-                                                  USERNAME=conn.rfc_user)
-                                    for p in det.get("PROFILES", []):
-                                        if p.get("BAPIPROF") == "SAP_ALL":
-                                            conn.has_sap_all = True
-                                            print(f"[!] {conn.rfc_user} on "
-                                                  f"{conn.target_sid} has SAP_ALL!")
-                                            break
-                            except Exception:
-                                pass
+                            # Fetch profiles + roles DIRECTLY on the target
+                            # (no source ABAP needed — Java source can't
+                            # run RFC_ABAP_INSTALL_AND_RUN with DESTINATION).
+                            info = sapmap_rfc.get_direct_user_profiles(
+                                target_node, conn.rfc_user, direct_creds)
+                            conn.profiles = info.get("profiles", [])
+                            conn.roles = info.get("roles", [])
+                            conn.has_sap_all = info.get("has_sap_all", False)
+                            conn.user_detail_error = info.get("error", "")
+                            if conn.has_sap_all:
+                                print(f"[!] {conn.rfc_user}@{conn.target_sid} "
+                                      f"has SAP_ALL — edge flipping to red, "
+                                      f"'Create Remote User' now available")
+                                target_node.has_critical_finding = True
+                            elif conn.profiles or conn.roles:
+                                p_str = (", ".join(conn.profiles[:5])
+                                         + ("…" if len(conn.profiles) > 5
+                                            else "")) or "<none>"
+                                r_str = (", ".join(conn.roles[:5])
+                                         + ("…" if len(conn.roles) > 5
+                                            else "")) or "<none>"
+                                print(f"[*] {conn.rfc_user}@{conn.target_sid}: "
+                                      f"profiles=[{p_str}] roles=[{r_str}] "
+                                      f"— no SAP_ALL")
+                            elif conn.user_detail_error:
+                                print(f"[*] {conn.rfc_user}@{conn.target_sid}: "
+                                      f"could not read profiles "
+                                      f"({conn.user_detail_error[:120]}) "
+                                      f"— SAP_ALL status unknown")
                             return
                     except Exception as e:
                         print(f"[-] Direct test failed: {e}")
