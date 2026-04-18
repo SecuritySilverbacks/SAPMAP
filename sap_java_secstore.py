@@ -330,6 +330,12 @@ def invoke_secstore_jsp(jsp_url: str, sid: str,
               # caller annotate each row with its destination/user/target
               # context.
               "configentry_context": {},
+              # failed_decrypts = [{cid, name, reason}, ...] — rows whose
+              # VBYTES couldn't be decrypted with SecStoreFS.  Typically
+              # means the row is encrypted with a different key (VSI /
+              # Vault / per-instance PSE) rather than the SecStoreFS
+              # master.  Exposed so the operator can see what's hiding.
+              "failed_decrypts": [],
               "jdbc_meta": {}, "error": "", "raw": ""}
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
@@ -386,8 +392,20 @@ def invoke_secstore_jsp(jsp_url: str, sid: str,
         # not entries.
         if line.startswith("#"):
             if section == "config":
-                # parse "# jdbc_driver=..." etc. for the jdbc_meta dict
                 stripped = line.lstrip("# ").strip()
+                # "# skipped cid=X name=Y reason=Z" — decrypt failed
+                if stripped.startswith("skipped cid="):
+                    import re as _re
+                    m = _re.match(r"skipped cid=(\S+) name=(.+?) reason=(\S+)",
+                                    stripped)
+                    if m:
+                        result["failed_decrypts"].append({
+                            "cid": m.group(1),
+                            "name": m.group(2).strip(),
+                            "reason": m.group(3),
+                        })
+                    continue
+                # parse "# jdbc_driver=..." etc. for the jdbc_meta dict
                 if "=" in stripped:
                     k, v = stripped.split("=", 1)
                     result["jdbc_meta"][k] = v
