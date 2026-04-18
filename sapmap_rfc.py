@@ -13,9 +13,41 @@ Uses sap_rfc_ctypes.RFCConnection for all authenticated operations:
 """
 
 import logging
+import threading
 import time
 from datetime import datetime
 from typing import Optional
+
+
+def _run_with_timeout(func, timeout: float, *args, **kwargs):
+    """Run `func(*args, **kwargs)` in a background thread; return its
+    result or ``(None, True)`` on timeout.  Used to bound pyrfc calls
+    that block at the TCP layer when an RFC destination points at a
+    dead gateway — without this, a single broken SM59 entry hangs the
+    whole bulk retrieve for 60-120 s per destination.
+
+    Returns ``(result, timed_out)``.  ``timed_out`` is True when the
+    worker is still running after ``timeout``; the background thread
+    is left to finish in the background (pyrfc's C-level SAPNW calls
+    aren't Python-interruptible).
+    """
+    box = {"result": None, "exc": None}
+
+    def _worker():
+        try:
+            box["result"] = func(*args, **kwargs)
+        except BaseException as e:  # noqa: BLE001
+            box["exc"] = e
+
+    t = threading.Thread(target=_worker, name=f"rfc_timeout_{func.__name__}",
+                         daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        return None, True
+    if box["exc"] is not None:
+        raise box["exc"]
+    return box["result"], False
 
 from sapmap_models import (
     SAPNode, RFCConnection as RFCConn, Credentials, CreatedUser, Severity, Finding,
@@ -696,11 +728,24 @@ def delete_user(node: SAPNode, username: str,
 def _test_via_sdf_rfc_check(conn, destination_name: str, result: dict) -> bool:
     """Try /SDF/RFC_CHECK. Returns True if the FM exists, False if not found."""
     try:
-        check_result = conn.call(
+        # Bound at 25 s so a broken destination (pointing at a dead
+        # gateway or a firewalled host) doesn't hang Test RFCs for
+        # 60-120 s per entry.  25 s > typical 20 s ping threshold
+        # /SDF/RFC_CHECK applies internally, so real slow-but-working
+        # destinations still complete.
+        check_result, timed_out = _run_with_timeout(
+            conn.call, 25.0,
             RFC_CHECK_FM,
             IV_DESTINATION=destination_name,
             **RFC_CHECK_PARAMS,
         )
+        if timed_out:
+            result["logon_ok"] = False
+            result["ping_ok"] = False
+            result["error"] = (f"timeout after 25s on /SDF/RFC_CHECK — "
+                                f"destination probably broken")
+            logger.debug(f"/SDF/RFC_CHECK on {destination_name} timed out")
+            return True  # handled; don't fall back — fallback would also hang
 
         result["logon_message"] = check_result.get("EV_LOGON_MESSAGE", "").strip()
         result["ping_ok"] = check_result.get("EV_PING_MESSAGE", "").strip() != ""
@@ -873,10 +918,21 @@ def ping_rfc_destination(node: SAPNode, destination_name: str,
 
     try:
         with _get_connection(node, creds) as conn:
-            # Primary: DEST_CHECK_CONNECTION — returns SID in one call
+            # Primary: DEST_CHECK_CONNECTION — returns SID in one call.
+            # Bounded at 20 s; a broken SM59 destination otherwise blocks
+            # at the TCP layer for 60-120 s and stalls bulk retrieve.
             try:
-                check_result = conn.call("DEST_CHECK_CONNECTION",
-                                         NAME=destination_name)
+                check_result, timed_out = _run_with_timeout(
+                    conn.call, 20.0,
+                    "DEST_CHECK_CONNECTION", NAME=destination_name)
+                if timed_out:
+                    result["ping_ok"] = False
+                    result["error"] = (
+                        f"timeout after 20s — destination probably points "
+                        f"at a dead gateway")
+                    logger.debug(f"DEST_CHECK_CONNECTION on "
+                                  f"{destination_name}@{node.sid} timed out")
+                    return result
                 conn_result = check_result.get(
                     "CONNECTION_TEST_RESULT", "X").strip()
                 auth_result = check_result.get(
