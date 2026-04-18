@@ -1098,6 +1098,12 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
     # Always run this even if SID/db_type are known, because the ABAP/JAVA
     # stack detection (is_abap, is_java) only comes from SAPControl properties.
     # Accumulate HTTP/HTTPS ports discovered across instances.
+    #
+    # CRITICAL: only honor the ABAP/JAVA flags when the SID returned by THIS
+    # SAPControl matches the SID we already established for the current
+    # enrichment context.  On hosts that run multiple SIDs (e.g. SM1 at inst
+    # 00-01 and SJ1 at inst 02-03 on the same box) we'd otherwise OR SM1's
+    # ABAP flag into SJ1's info dict, mis-labelling SJ1 as ABAP+JAVA.
     info.setdefault("http_ports", {})   # {inst_nr: (http_port, https_port)}
     for inst_nr in ordered_nrs:
         sc_port = 50000 + inst_nr * 100 + 13
@@ -1107,17 +1113,35 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
             info["sid"] = sid
             tag = sid  # update tag with discovered SID
             print(f"[+] {tag}: SID from SAPControl ({host}:{sc_port}): {sid}")
-        if is_java or is_abap:
+        # Only accumulate stack flags from a SAPControl whose SID matches the
+        # one this enrichment is about.  Skip silently when SIDs differ.
+        sid_matches = (
+            (sid and info["sid"] and sid.upper() == info["sid"].upper())
+            or (sid and not info["sid"])
+        )
+        if (is_java or is_abap) and not sid_matches:
+            print(f"[*] {info['sid'] or tag}: ignoring stack reading from "
+                  f"{host}:{sc_port} — that SAPControl reports SID={sid} "
+                  f"(different system on the same host)")
+            # Still pick up SID-agnostic data we might use later
+            if db_type and not info.get("db_type"):
+                pass  # do NOT take db_type from a different SID either
+        elif is_java or is_abap:
             info["_is_java"] = info.get("_is_java", False) or is_java
             info["_is_abap"] = info.get("_is_abap", False) or is_abap
+            decided_by = getattr(_query_sapcontrol_sid,
+                                   "_last_decided_by", "")
             print(f"[+] {tag}: Stack from SAPControl ({host}:{sc_port}):"
                   f"{'  [ABAP]' if is_abap else ''}"
-                  f"{'  [JAVA]' if is_java else ''}")
-        if db_type and not info["db_type"]:
+                  f"{'  [JAVA]' if is_java else ''}"
+                  f"  (SID match{', ' + decided_by if decided_by else ''})")
+        # Same SID-scoping rule for db_type and ICM ports — these belong
+        # to the SID running on this instance, not the one we're enriching.
+        if db_type and not info["db_type"] and sid_matches:
             info["db_type"] = db_type
             print(f"[+] {tag}: DB type from SAPControl ({host}:{sc_port}): "
                   f"{db_type}")
-        if icm_http or icm_https:
+        if (icm_http or icm_https) and sid_matches:
             info["http_ports"][inst_nr] = (icm_http, icm_https)
             bits = []
             if icm_http:  bits.append(f"HTTP:{icm_http}")
@@ -1280,24 +1304,40 @@ def _query_sapcontrol_sid(host: str, port: int, timeout: float = 3) -> tuple:
         # Java-side instance prefixes:
         #   J / SCS / ERS = Java application server / Central Services /
         #                   Enqueue Replication Server (Java-side)
-        ABAP_PREFIXES = ("D", "DVEBMGS", "ASCS")
-        JAVA_PREFIXES = ("J", "SCS", "ERS")
+        ABAP_PREFIXES = ("DVEBMGS", "ASCS", "D")
+        JAVA_PREFIXES = ("SCS", "ERS", "J")
+        decided_by = ""
         if inst_name:
-            # ASCS starts with 'A' but matches ABAP; SCS starts with 'S'
-            # — order checks correctly so we don't accidentally flag
-            # SCS as ABAP via the 'D' / 'DVEBMGS' prefix.
+            # Order matters: check longer prefixes first so DVEBMGS isn't
+            # caught by D, and SCS isn't caught by S-anything.
             if any(inst_name.startswith(p) for p in JAVA_PREFIXES):
                 is_java = True
+                decided_by = f"INSTANCE_NAME={inst_name!r} (Java prefix)"
             elif any(inst_name.startswith(p) for p in ABAP_PREFIXES):
                 is_abap = True
+                decided_by = f"INSTANCE_NAME={inst_name!r} (ABAP prefix)"
+            else:
+                # INSTANCE_NAME present but unknown prefix — fall back
+                if "ABAP WP Table" in prop_dict:
+                    is_abap = True
+                    decided_by = (f"INSTANCE_NAME={inst_name!r} (unknown "
+                                   f"prefix); 'ABAP WP Table' present")
+                if any("J2EE" in p for p in prop_dict):
+                    is_java = True
+                    decided_by = (f"INSTANCE_NAME={inst_name!r} (unknown "
+                                   f"prefix); J2EE keys present")
         else:
             # Fallback when INSTANCE_NAME is missing — older kernels and
-            # half-initialised instances occasionally hide it.  Use the
-            # property-key heuristics as before.
+            # half-initialised instances occasionally hide it.
             if "ABAP WP Table" in prop_dict:
                 is_abap = True
+                decided_by = "no INSTANCE_NAME; 'ABAP WP Table' key present"
             if any("J2EE" in p for p in prop_dict):
                 is_java = True
+                decided_by = "no INSTANCE_NAME; J2EE keys present"
+        # Stash for callers that want to log the reasoning.  Not part of
+        # the public tuple return because legacy callers don't unpack it.
+        _query_sapcontrol_sid._last_decided_by = decided_by
 
         # Extract HTTP / HTTPS ports from the ICM and ICMS URL properties
         # (e.g. "HTTP://sapsjj:50200/sap/admin/public/index.html").
@@ -1590,6 +1630,32 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
         # SAPControl is the authority on ABAP vs JAVA when available.
         if sc_is_java and not sc_is_abap:
             system_type = "JAVA"
+
+        # Verbose explanation of the stack decision — useful for spotting
+        # cross-SID contamination on multi-SID hosts and for understanding
+        # why the badge ended up the way it did.
+        reasons = []
+        if sc_is_abap:
+            reasons.append("sc_is_abap=True (SAPControl reported ABAP for "
+                            "an instance owned by this SID)")
+        if sc_is_java:
+            reasons.append("sc_is_java=True (SAPControl reported JAVA for "
+                            "an instance owned by this SID)")
+        if has_dispatcher:
+            reasons.append(f"has_dispatcher=True (port 32xx open: "
+                            f"{[p for p,s in open_ports.items() if s['service']=='dispatcher' and s['instance_nr'] in inst_nrs_for_sid]})")
+        if has_saprouter:
+            reasons.append("has_saprouter=True (port 3299 open)")
+        if has_hana_port:
+            reasons.append("has_hana_port=True (HANA SQL port detected)")
+        if has_saphost:
+            reasons.append("has_saphost=True (SAP Host Agent port 1128/1129)")
+        if not reasons:
+            reasons.append("no positive signal — defaulted to 'SAP'")
+        print(f"[*] {sid}: stack decision -> '{system_type}' "
+              f"(instances {','.join(inst_nrs_for_sid)})")
+        for r in reasons:
+            print(f"[*] {sid}:   reason: {r}")
 
         # Enumerate clients from this SID's dispatcher ports
         clients = []
