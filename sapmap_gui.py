@@ -2037,10 +2037,37 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             print(f"[+] {dest_name}: Direct logon OK "
                                   f"({conn.rfc_user}@{conn.target_sid})")
                             # Fetch profiles + roles DIRECTLY on the target
-                            # (no source ABAP needed — Java source can't
-                            # run RFC_ABAP_INSTALL_AND_RUN with DESTINATION).
+                            # (works for Java sources that have no ABAP
+                            # to host RFC_ABAP_INSTALL_AND_RUN).
                             info = sapmap_rfc.get_direct_user_profiles(
                                 target_node, conn.rfc_user, direct_creds)
+                            # If the RFC-dest user itself can't call
+                            # BAPI_USER_GET_DETAIL on the target (common
+                            # for service users like TRACE, CPIC_*), the
+                            # direct call returns empty/errored.  When
+                            # the SOURCE node IS ABAP we can still get
+                            # real profile data by running the BAPI
+                            # through RFC_ABAP_INSTALL_AND_RUN on the
+                            # source with our SAP_ALL creds — same path
+                            # ABAP→ABAP edges already use.  Upgrade
+                            # whatever the direct call couldn't answer.
+                            is_abap_source = "ABAP" in (
+                                node.system_type or "").upper()
+                            direct_gave_nothing = (
+                                not info.get("profiles")
+                                and not info.get("roles"))
+                            if is_abap_source and direct_gave_nothing:
+                                print(f"[*] {dest_name}: direct BAPI on "
+                                      f"target returned nothing"
+                                      f"{' ('+info.get('error','')[:80]+')' if info.get('error') else ''}"
+                                      f" — falling back to "
+                                      f"RFC_ABAP_INSTALL_AND_RUN via "
+                                      f"source {node.sid}")
+                                src_info = sapmap_rfc.get_remote_user_profiles(
+                                    node, conn.rfc_user, dest_name, creds)
+                                if (src_info.get("profiles")
+                                        or src_info.get("has_sap_all")):
+                                    info = src_info
                             conn.profiles = info.get("profiles", [])
                             conn.roles = info.get("roles", [])
                             conn.has_sap_all = info.get("has_sap_all", False)
