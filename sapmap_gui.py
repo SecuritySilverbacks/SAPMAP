@@ -2054,6 +2054,32 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     except Exception as e:
                         print(f"[-] Direct test failed: {e}")
 
+            # Skip the ABAP /SDF/RFC_CHECK fallback if the source node
+            # is Java-only (no ABAP to run the FM on), or if the only
+            # credential we have is a Java UME user with empty client
+            # (the NW RFC SDK would reject it with 'Invalid CLIENT
+            # format' before even reaching the network).
+            is_java_only = ("JAVA" in (node.system_type or "").upper()
+                            and "ABAP" not in (node.system_type or "").upper())
+            client_numeric = ((creds.client if creds else "") or "").strip()
+            has_valid_client = client_numeric.isdigit()
+            if is_java_only or not has_valid_client:
+                reason = ("source is Java-only, no ABAP /SDF/RFC_CHECK FM"
+                          if is_java_only else
+                          f"best credential has no numeric client "
+                          f"(got {client_numeric!r} — likely a Java UME "
+                          f"user from RECON)")
+                print(f"[*] {dest_name}: skipping ABAP RFC-destination "
+                      f"test — {reason}")
+                conn.logon_successful = False
+                conn.logon_tested = True
+                conn.tested = True
+                if not conn.logon_successful:
+                    print(f"[-] {dest_name}: Logon not tested "
+                          f"(need direct test with SecStore password above)")
+                print(f"[+] Single test done for {dest_name}")
+                return
+
             print(f"[*] Testing {'TCP/IP' if is_type_t else 'RFC'} "
                   f"destination: {dest_name}...")
             result = sapmap_rfc.test_rfc_destination(
