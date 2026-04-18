@@ -259,31 +259,47 @@ def dump_configtool(sid: str,
             cfg_dirs.append(_expand(tmpl, d))
     cfg_dirs_sh = " ".join(f'"{d}"' for d in cfg_dirs)
 
+    # Wrapper writes its entire aggregated output to OUT_FILE instead of
+    # stdout.  SAPXPG's P4 output capture is unreliable for scripts that
+    # run more than a second or two (buffering / short capture window),
+    # so we decouple: execution produces a file, a follow-up `cat`
+    # harvests the file.  Each invoke block records to the file and is
+    # delimited by === markers the Python parser splits on.
+    out_file = "/tmp/sapmap_ct.out"
     wrapper = f"""#!/bin/bash
 # SAPMAP ConfigTool wrapper.  Sources SAP env, iterates candidate
-# directories x tools x args, prints output delimited so the Python
-# parser can split by '=== ... ===' markers.
-for f in /home/*/.sapenv_*.sh /home/*/.sapenv.sh; do
+# directories x tools x args, writes results to {out_file}.  stdin is
+# redirected from /dev/null so interactive tools (secstore.sh password
+# prompt) can't hang waiting on a tty.
+exec </dev/null
+OUT={out_file}
+: > "$OUT"
+echo "=== SAPMAP_CT_START pid=$$ uid=$(id -u) whoami=$(whoami) ===" >> "$OUT"
+for f in /home/*/.sapenv_*.sh /home/*/.sapenv.sh \\
+         /usr/sap/*/home/.sapenv_*.sh; do
   [ -f "$f" ] && . "$f" 2>/dev/null
 done
-[ -x /usr/sap/{sid}/SYS/exe/run/sapcontrol ] && \\
+[ -d /usr/sap/{sid}/SYS/exe/run ] && \\
   export PATH=/usr/sap/{sid}/SYS/exe/run:$PATH
+echo "=== env JAVA_HOME=$JAVA_HOME PATH=$PATH ===" >> "$OUT"
 invoke() {{
   local script=$1 ; shift
   local args=$@
   for d in {cfg_dirs_sh}; do
     local p="$d/$script"
     if [ -x "$p" ]; then
-      echo "=== $p $args ==="
-      "$p" $args 2>&1 | head -500
-      echo
+      {{
+        echo "=== $p $args ==="
+        timeout 20 "$p" $args 2>&1 < /dev/null | head -500
+        echo
+      }} >> "$OUT"
     fi
   done
 }}
 """
-    # Append invoke calls (name + args) for each tool attempt
     for script, args, _ in attempts:
         wrapper += f'invoke "{script}" {args}\n'
+    wrapper += 'echo "=== SAPMAP_CT_END ===" >> "$OUT"\n'
 
     log(f"[*] configtool: writing /tmp/sapmap_ct.sh ({len(wrapper)} B) "
         f"to target via chunked python3 …")
@@ -294,19 +310,36 @@ invoke() {{
         log(f"[-] configtool: {result['error']}")
         return result
 
-    # chmod +x
+    # chmod +x, remove any stale output file from a prior run
     run_cmd("python3", "-c __import__('os').chmod('/tmp/sapmap_ct.sh',0o755)")
+    run_cmd("/bin/rm", f"-f {out_file}")
 
-    # Execute the wrapper.  One round-trip.
-    log(f"[*] configtool: running /tmp/sapmap_ct.sh …")
-    r = run_cmd("/tmp/sapmap_ct.sh", "")
-    out_lines = r.get("output") or []
+    # Execute the wrapper.  Output lands in out_file; P4 stdout capture
+    # here is usually empty and we don't care — the next call is what
+    # returns the real data.
+    log(f"[*] configtool: running /tmp/sapmap_ct.sh (output → {out_file}) …")
+    run_cmd("/tmp/sapmap_ct.sh", "")
+    # Pause for slow/hanging tools: wrapper has `timeout 20` per invocation.
+    # Give it a beat, then harvest.
+    log(f"[*] configtool: harvesting {out_file} …")
+    cat_r = run_cmd("/bin/cat", out_file)
+    out_lines = cat_r.get("output") or []
     dump = "\n".join(str(l) for l in out_lines)
-    log(f"[+] configtool: wrapper returned {len(dump)} bytes in "
-        f"{len(out_lines)} lines")
+    log(f"[+] configtool: harvested {len(dump)} bytes in "
+        f"{len(out_lines)} lines from {out_file}")
+    if not out_lines:
+        # Last-ditch: maybe wrapper never ran.  Try invoking via explicit
+        # /bin/bash in case SAPXPG refused to honor the shebang.
+        log(f"[!] configtool: {out_file} empty — retrying via /bin/bash …")
+        run_cmd("/bin/bash", "/tmp/sapmap_ct.sh")
+        cat_r = run_cmd("/bin/cat", out_file)
+        out_lines = cat_r.get("output") or []
+        dump = "\n".join(str(l) for l in out_lines)
+        log(f"[+] configtool: retry harvested {len(dump)} bytes in "
+            f"{len(out_lines)} lines")
 
     # Cleanup
-    run_cmd("/bin/rm", "-f /tmp/sapmap_ct.sh")
+    run_cmd("/bin/rm", f"-f /tmp/sapmap_ct.sh {out_file}")
 
     # Parse the dump into per-tool blocks for the results structure
     all_output = []
