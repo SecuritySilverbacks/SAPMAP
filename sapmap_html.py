@@ -885,6 +885,9 @@ body {
         <label style="font-size:11px;color:#8b949e">
           <input type="checkbox" id="jss-showpw" onchange="renderJssTable()" checked> Show passwords
         </label>
+        <label style="font-size:11px;color:#8b949e" title="Framework-internal '#~childInstance.N' rows — hidden by default because they clutter the view and never contain user-facing secrets">
+          <input type="checkbox" id="jss-showchild" onchange="renderJssTable()"> Show childInstance entries
+        </label>
         <button class="btn" onclick="copyJssJson()" style="white-space:nowrap">Copy JSON</button>
       </div>
       <div style="overflow-y:scroll;overflow-x:auto;flex:1 1 0;min-height:200px;
@@ -3094,13 +3097,22 @@ function renderJssTable() {
   if (!n) return;
   const entries = n.java_secstore_entries || [];
   const showPw = document.getElementById('jss-showpw').checked;
+  const showChild = document.getElementById('jss-showchild').checked;
   const filter = (document.getElementById('jss-filter').value || '').toLowerCase();
   const tbody = document.getElementById('jss-tbody');
   const rows = [];
   const isPwField = (name) => /pass|pwd|secret|credential/i.test(name);
+  let hiddenChild = 0;
   for (const e of entries) {
     const name = e.name || '';
     const value = e.value || '';
+    // Framework-internal '#~childInstance.N' rows are extremely noisy
+    // and never contain user-facing secrets.  Hide by default; user
+    // can toggle the 'Show childInstance entries' checkbox to reveal.
+    if (!showChild && /childinstance/i.test(name)) {
+      hiddenChild++;
+      continue;
+    }
     // Build a flat "belongs to" string from dest_name / dest_user /
     // target_sid / client so the filter can match destination names
     // (e.g. 'UMEBackendConnection') that only live in those fields.
@@ -3162,6 +3174,12 @@ function renderJssTable() {
   }
   if (!rows.length) {
     rows.push('<tr><td colspan="6" style="padding:12px;color:#8b949e;text-align:center">No matching entries.</td></tr>');
+  }
+  if (hiddenChild > 0) {
+    rows.push('<tr><td colspan="6" style="padding:6px 12px;color:#8b949e;'
+              + 'text-align:center;font-style:italic;border-top:1px dashed #30363d">'
+              + hiddenChild + " '#~childInstance' entries hidden — "
+              + "tick 'Show childInstance entries' above to include them</td></tr>");
   }
   tbody.innerHTML = rows.join('');
 }
