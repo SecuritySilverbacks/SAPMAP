@@ -1269,15 +1269,35 @@ def _query_sapcontrol_sid(host: str, port: int, timeout: float = 3) -> tuple:
             if raw_db:
                 db_type = _DB_MAP.get(raw_db.lower(), raw_db.upper())
 
-        # Detect ABAP vs JAVA from properties
-        if "ABAP WP Table" in prop_dict:
-            is_abap = True
-        if any("J2EE" in p for p in prop_dict):
-            is_java = True
-        # SCS (SAP Central Services) and message server = Java infrastructure
+        # Detect ABAP vs JAVA — INSTANCE_NAME prefix is authoritative
+        # because some kernels expose an empty "ABAP WP Table" key on
+        # Java-only instances, which used to mis-classify clean Java
+        # systems as "ABAP+JAVA" (seen on SJ1: J02 + SCS03 cluster).
         inst_name = prop_dict.get("INSTANCE_NAME", "")
-        if inst_name.startswith("SCS") or inst_name.startswith("J"):
-            is_java = True
+        # ABAP-side instance prefixes:
+        #   D / DVEBMGS = ABAP application server
+        #   ASCS         = ABAP Central Services
+        # Java-side instance prefixes:
+        #   J / SCS / ERS = Java application server / Central Services /
+        #                   Enqueue Replication Server (Java-side)
+        ABAP_PREFIXES = ("D", "DVEBMGS", "ASCS")
+        JAVA_PREFIXES = ("J", "SCS", "ERS")
+        if inst_name:
+            # ASCS starts with 'A' but matches ABAP; SCS starts with 'S'
+            # — order checks correctly so we don't accidentally flag
+            # SCS as ABAP via the 'D' / 'DVEBMGS' prefix.
+            if any(inst_name.startswith(p) for p in JAVA_PREFIXES):
+                is_java = True
+            elif any(inst_name.startswith(p) for p in ABAP_PREFIXES):
+                is_abap = True
+        else:
+            # Fallback when INSTANCE_NAME is missing — older kernels and
+            # half-initialised instances occasionally hide it.  Use the
+            # property-key heuristics as before.
+            if "ABAP WP Table" in prop_dict:
+                is_abap = True
+            if any("J2EE" in p for p in prop_dict):
+                is_java = True
 
         # Extract HTTP / HTTPS ports from the ICM and ICMS URL properties
         # (e.g. "HTTP://sapsjj:50200/sap/admin/public/index.html").
