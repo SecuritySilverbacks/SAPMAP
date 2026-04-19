@@ -684,6 +684,147 @@ def test_probe_and_add_host_returns_existing_node_sid():
 # 11. HTTP destination property extraction — older "#~URL" layout
 # ===========================================================================
 
+# ===========================================================================
+# 10b. Banner-scrape fallbacks (nmap-style SID discovery)
+# ===========================================================================
+
+# We don't open real sockets — patch the actual socket.socket in the
+# scanner module to return a fake that replays whatever banner bytes we
+# want.  Exercises the regex patterns at full fidelity.
+
+class _FakeSock:
+    def __init__(self, payload: bytes):
+        self._payload = payload
+        self._sent = b""
+        self._read_offset = 0
+    def settimeout(self, t): pass
+    def connect(self, addr): pass
+    def sendall(self, data): self._sent += data
+    def recv(self, n):
+        if self._read_offset >= len(self._payload):
+            return b""
+        chunk = self._payload[self._read_offset:self._read_offset + n]
+        self._read_offset += len(chunk)
+        return chunk
+    def close(self): pass
+
+
+def _patch_socket_with(payload: bytes):
+    """Return a contextmanager that patches sapmap_scanner.socket.socket
+    to return _FakeSock replaying `payload`."""
+    from unittest.mock import patch
+    import sapmap_scanner
+    def factory(*args, **kwargs):
+        return _FakeSock(payload)
+    return patch.object(sapmap_scanner.socket, "socket", factory)
+
+
+def test_banner_scrape_sapcontrol_sid_nr():
+    """sapstartsrv GET / response with 'SID=J45, Nr=00' form."""
+    import sapmap_scanner
+    body = b"HTTP/1.0 200 OK\r\n\r\nSAPControl (SID=J45, Nr=00)"
+    with _patch_socket_with(body):
+        hit = sapmap_scanner._query_sapstart_banner("h", 50013)
+    assert hit is not None
+    assert hit["sid"] == "J45"
+    assert hit["instance_nr"] == "00"
+    assert hit["banner_source"] == "sapstart_http"
+
+
+def test_banner_scrape_title_form():
+    """<title>SAP Management Console J45/00</title> form."""
+    import sapmap_scanner
+    body = (b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"
+             b"<html><title>SAP Management Console J45/00 - "
+             b"Process List</title></html>")
+    with _patch_socket_with(body):
+        hit = sapmap_scanner._query_sapstart_banner("h", 50013)
+    assert hit is not None
+    assert hit["sid"] == "J45"
+    assert hit["instance_nr"] == "00"
+
+
+def test_banner_scrape_nmap_style_paren_form():
+    """nmap's service line 'SAP Management Console (SID J45, NR 00)'."""
+    import sapmap_scanner
+    body = (b"HTTP/1.0 200 OK\r\n\r\n"
+             b"SAP Management Console (SID J45, NR 00)")
+    with _patch_socket_with(body):
+        hit = sapmap_scanner._query_sapstart_banner("h", 50013)
+    assert hit is not None
+    assert hit["sid"] == "J45"
+    assert hit["instance_nr"] == "00"
+
+
+def test_banner_scrape_sapsystemname_header_form():
+    body = (b"HTTP/1.0 200 OK\r\n"
+             b"SAPSystemName: J45\r\n"
+             b"SAPSystemInstance: 02\r\n\r\nbody")
+    import sapmap_scanner
+    with _patch_socket_with(body):
+        hit = sapmap_scanner._query_sapstart_banner("h", 50013)
+    assert hit is not None
+    assert hit["sid"] == "J45"
+    assert hit["instance_nr"] == "02"
+
+
+def test_banner_scrape_sid_only_fallback():
+    """When NR isn't captured, fall back to SID-only match."""
+    body = b"HTTP/1.0 200 OK\r\n\r\nSome page with SID=ABC but no NR"
+    import sapmap_scanner
+    with _patch_socket_with(body):
+        hit = sapmap_scanner._query_sapstart_banner("h", 50013)
+    assert hit is not None
+    assert hit["sid"] == "ABC"
+    assert hit["instance_nr"] == "00"
+    assert hit["banner_source"] == "sapstart_http_sid_only"
+
+
+def test_banner_scrape_returns_none_when_no_sid_pattern():
+    body = b"HTTP/1.1 404 Not Found\r\n\r\nsome random page"
+    import sapmap_scanner
+    with _patch_socket_with(body):
+        hit = sapmap_scanner._query_sapstart_banner("h", 50013)
+    assert hit is None
+
+
+def test_msghttp_banner_logon_list():
+    """Message server returns a DIAG-server list: extract SID + NR."""
+    body = (b"HTTP/1.0 200 OK\r\n"
+             b"Content-Type: text/plain\r\n\r\n"
+             b"LB=10\r\n"
+             b"J45_00_srv01j45 srv01j45 3201 DIAG\r\n"
+             b"J45_01_srv01j45 srv01j45 3211 DIAG\r\n")
+    import sapmap_scanner
+    with _patch_socket_with(body):
+        hit = sapmap_scanner._query_msghttp_banner("h", 8101)
+    assert hit is not None
+    assert hit["sid"] == "J45"
+    assert hit["instance_nr"] == "00"
+    assert hit["banner_source"] == "msghttp_logon"
+
+
+def test_msghttp_banner_header_only_with_sid():
+    body = (b"HTTP/1.0 200 OK\r\n"
+             b"Server: SAP Message Server httpd release 745\r\n\r\n"
+             b"SID=J45\r\n")
+    import sapmap_scanner
+    with _patch_socket_with(body):
+        hit = sapmap_scanner._query_msghttp_banner("h", 8101)
+    assert hit is not None
+    assert hit["sid"] == "J45"
+    assert hit["banner_source"] == "msghttp_header"
+
+
+def test_msghttp_banner_no_sid_returns_none():
+    body = b"HTTP/1.0 404 Not Found\r\n\r\n"
+    import sapmap_scanner
+    # All three path attempts return the same 404
+    with _patch_socket_with(body):
+        hit = sapmap_scanner._query_msghttp_banner("h", 8101)
+    assert hit is None
+
+
 def test_http_extraction_handles_7_0_legacy_keys():
     """Older SAP 7.0 HTTP destinations sometimes omit the 'destination.'
     prefix, storing just #~URL, #~Type, #~User.  The extraction

@@ -1356,6 +1356,151 @@ def _query_sapcontrol_sid(host: str, port: int, timeout: float = 3) -> tuple:
     return (sid, is_java, is_abap, db_type, http_port, https_port)
 
 
+def _query_sapstart_banner(host: str, port: int,
+                              timeout: float = 3,
+                              use_ssl: bool = False) -> dict:
+    """Fallback SID grab via plain HTTP GET on a sapstartsrv port.
+
+    `sapstartsrv` responds to GET / with an HTML process-list page that
+    typically contains strings like:
+
+        <title>SAP Management Console J45/00 - ...</title>
+        SAPControl (SID=J45, Nr=00)
+
+    Nmap's service-probe matcher parses exactly this to produce the
+    "SAP Management Console (SID J45, NR 00)" service line.  We
+    reimplement the match so we can fall back to banner-scraping when
+    SOAP GetInstanceProperties is refused or returns nothing.
+    """
+    import re as _re
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect((host, port))
+        if use_ssl:
+            try:
+                import ssl as _ssl
+                ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
+                ctx.check_hostname = False
+                ctx.verify_mode = _ssl.CERT_NONE
+                sock = ctx.wrap_socket(sock, server_hostname=host)
+            except Exception:
+                sock.close()
+                return None
+        sock.sendall(
+            f"GET / HTTP/1.0\r\nHost: {host}:{port}\r\n"
+            f"User-Agent: sapmap\r\n\r\n".encode())
+        resp = b""
+        try:
+            while len(resp) < 32768:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                resp += chunk
+        except socket.timeout:
+            pass
+        sock.close()
+        text = resp.decode("utf-8", errors="replace")
+
+        # Patterns observed in sapstartsrv responses (across 7.0x–7.5x
+        # kernels).  Try each until one hits.
+        patterns = [
+            # "SAPControl (SID=J45, Nr=00)"  — preferred, most specific
+            r"SID\s*=\s*([A-Z][A-Z0-9]{2})[^A-Za-z0-9]+(?:Nr|NR)\s*=\s*(\d{1,2})",
+            # "<title>SAP Management Console J45/00"
+            r"Management Console\s+([A-Z][A-Z0-9]{2})/(\d{1,2})",
+            # "SAP Management Console (SID J45, NR 00)"  (nmap-style)
+            r"SID\s+([A-Z][A-Z0-9]{2})\s*,\s*NR\s+(\d{1,2})",
+            # "SAPSystemName: J45\r\nSAPSystemInstance: 00"  (header)
+            r"SAPSystemName:\s*([A-Z][A-Z0-9]{2}).*?SAPSystemInstance:\s*(\d{1,2})",
+        ]
+        for pat in patterns:
+            m = _re.search(pat, text, _re.IGNORECASE | _re.DOTALL)
+            if m:
+                sid = m.group(1).upper()
+                inst = f"{int(m.group(2)):02d}"
+                return {"sid": sid, "instance_nr": inst,
+                         "is_abap": False, "is_java": False,
+                         "db_type": "", "os_type": "",
+                         "http_port": 0, "https_port": 0,
+                         "banner_source": "sapstart_http"}
+        # SID-only match (NR not captured) — still better than nothing.
+        m = _re.search(r"SID[=\s]+([A-Z][A-Z0-9]{2})",
+                        text, _re.IGNORECASE)
+        if m:
+            return {"sid": m.group(1).upper(), "instance_nr": "00",
+                     "is_abap": False, "is_java": False,
+                     "db_type": "", "os_type": "",
+                     "http_port": 0, "https_port": 0,
+                     "banner_source": "sapstart_http_sid_only"}
+    except Exception:
+        pass
+    return None
+
+
+def _query_msghttp_banner(host: str, port: int,
+                             timeout: float = 3) -> dict:
+    """Fallback SID grab via SAP message server HTTP (81NN).
+
+    `msghttp` answers GET /msgserver/text/logon with a plain-text list
+    of logon servers, one per line in the form:
+
+        J45_00_srv01j45 srv01j45 3201 DIAG
+
+    First token is <SID>_<INST>_<HOST>.  Also the HTTP Server: header
+    on 81NN / 8080 reads "SAP Message Server httpd release 745" —
+    useful but doesn't include the SID, so we primarily rely on the
+    logon list.  GET / also works on many builds and returns similar.
+    """
+    import re as _re
+    # Try the msgserver-specific endpoint first, fall back to root.
+    for path in ("/msgserver/text/logon", "/", "/msgserver/text/lgon"):
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            sock.connect((host, port))
+            sock.sendall(
+                f"GET {path} HTTP/1.0\r\nHost: {host}:{port}\r\n"
+                f"User-Agent: sapmap\r\n\r\n".encode())
+            resp = b""
+            try:
+                while len(resp) < 32768:
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        break
+                    resp += chunk
+            except socket.timeout:
+                pass
+            sock.close()
+            text = resp.decode("utf-8", errors="replace")
+            # Msgserver logon-list line: "<SID>_<NR>_<host>  <host>  <port>  DIAG"
+            m = _re.search(
+                r"^([A-Z][A-Z0-9]{2})_(\d{2})_\S+\s+\S+\s+\d+\s+\S+",
+                text, _re.MULTILINE)
+            if m:
+                return {"sid": m.group(1).upper(),
+                         "instance_nr": m.group(2),
+                         "is_abap": False, "is_java": False,
+                         "db_type": "", "os_type": "",
+                         "http_port": 0, "https_port": 0,
+                         "banner_source": "msghttp_logon"}
+            # Header-style "SAP Message Server httpd release XXX" —
+            # carries release but not SID; combine with SID fallback.
+            if "SAP Message Server" in text:
+                m = _re.search(r"SID[=\s]+([A-Z][A-Z0-9]{2})",
+                                text, _re.IGNORECASE)
+                if m:
+                    return {"sid": m.group(1).upper(),
+                             "instance_nr": "00",
+                             "is_abap": False, "is_java": False,
+                             "db_type": "", "os_type": "",
+                             "http_port": 0, "https_port": 0,
+                             "banner_source": "msghttp_header"}
+        except Exception:
+            continue
+    return None
+
+
 def quick_probe_sid(host: str, saprouter: str = None,
                       timeout: float = 3,
                       instance_hint: int = None) -> dict:
@@ -1396,11 +1541,16 @@ def quick_probe_sid(host: str, saprouter: str = None,
     probe_ports = []
     # SAP Host Agent — special handling below (different SOAP method)
     probe_ports.append((1128, "host_agent_http", "XX"))
-    # Per-instance sapcontrol
+    # Per-instance sapcontrol + message-server HTTP.  For each instance
+    # we try four ports in priority order:
+    #   sapcontrol HTTP  (500NN3)  — SOAP + banner, richest info
+    #   sapcontrol HTTPS (500NN4)  — same, over TLS
+    #   msghttp           (81NN)    — msgserver logon list, has SID+NR
     for inst in tried_insts:
         n = int(inst)
         probe_ports.append((50013 + n * 100, "sapcontrol", inst))
         probe_ports.append((50014 + n * 100, "sapcontrol_https", inst))
+        probe_ports.append((8100 + n,         "msghttp", inst))
 
     for port, kind, inst in probe_ports:
         if kind == "host_agent_http":
@@ -1409,13 +1559,38 @@ def quick_probe_sid(host: str, saprouter: str = None,
                 got["source_port"] = port
                 got.setdefault("instance_nr", inst)
                 return got
+            # Fallback to banner-scrape — host agent root page also has
+            # "SID SAP, Nr 99" for the host agent itself, but if the
+            # real agent for another instance is on 1128 the banner
+            # will carry that SID instead.
+            got = _query_sapstart_banner(host, port, timeout=timeout)
+            if got and got.get("sid") and got["sid"] != "SAP":
+                got["source_port"] = port
+                return got
             continue
-        # Per-instance sapcontrol — existing helper returns a tuple
+
+        if kind == "msghttp":
+            got = _query_msghttp_banner(host, port, timeout=timeout)
+            if got and got.get("sid"):
+                got["source_port"] = port
+                return got
+            continue
+
+        # sapcontrol / sapcontrol_https — try SOAP first, then HTTP
+        # banner-scrape as a fallback when SOAP returned nothing.
+        use_ssl = (kind == "sapcontrol_https")
         try:
-            sid, is_java, is_abap, db_type, http_port, https_port = (
-                _query_sapcontrol_sid(host, port, timeout=timeout))
+            if not use_ssl:
+                sid, is_java, is_abap, db_type, http_port, https_port = (
+                    _query_sapcontrol_sid(host, port, timeout=timeout))
+            else:
+                sid, is_java, is_abap, db_type, http_port, https_port = (
+                    "", False, False, "", 0, 0)
         except Exception:
-            continue
+            sid = ""
+            is_java = is_abap = False
+            db_type = ""
+            http_port = https_port = 0
         if sid:
             os_type = _query_sapcontrol_os(host, port, timeout=timeout) or ""
             return {
@@ -1429,6 +1604,12 @@ def quick_probe_sid(host: str, saprouter: str = None,
                 "os_type": os_type,
                 "source_port": port,
             }
+        # Banner fallback — GET / parses "SID=J45, Nr=00" from the body.
+        got = _query_sapstart_banner(host, port, timeout=timeout,
+                                         use_ssl=use_ssl)
+        if got and got.get("sid"):
+            got["source_port"] = port
+            return got
     return None
 
 
