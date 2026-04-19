@@ -440,3 +440,98 @@ def test_http_destination_host_match_missing_returns_none():
     assert state.find_node_by_host(
         hostname="nonexistent.example.com",
         ip="nonexistent.example.com") is None
+
+
+# ===========================================================================
+# 8. Final #@/#~ dedup pass — structural simulation
+# ===========================================================================
+
+def test_final_pass_drops_factory_when_active_sibling_present():
+    """Simulate the dedup algorithm used at the end of
+    extract_java_secstore.  A #@-prefixed row for the same (cid, base)
+    as a #~-prefixed one must be dropped."""
+    persisted = [
+        {"cid": "C1", "name": "#~jco.client.passwd", "value": "Down1oad"},
+        {"cid": "C1", "name": "#@jco.client.passwd", "value": "Down1oad"},
+        # Different CID — both sides stay
+        {"cid": "C2", "name": "#@jco.client.user",    "value": "ORPHAN"},
+        # #~ only — stays
+        {"cid": "C3", "name": "#~jco.client.passwd", "value": "Secret"},
+    ]
+    active_seen = {}
+    for row in persisted:
+        nm = row.get("name", "") or ""
+        if nm.startswith("#~"):
+            active_seen[(row.get("cid", ""), nm[2:])] = True
+    deduped = [
+        row for row in persisted
+        if not ((row.get("name", "") or "").startswith("#@")
+                  and (row.get("cid", ""),
+                        (row.get("name", "") or "")[2:]) in active_seen)
+    ]
+    names = [(r["cid"], r["name"]) for r in deduped]
+    assert ("C1", "#~jco.client.passwd") in names
+    assert ("C1", "#@jco.client.passwd") not in names
+    assert ("C2", "#@jco.client.user") in names     # orphan kept
+    assert ("C3", "#~jco.client.passwd") in names
+
+
+def test_final_pass_preserves_orphan_factory_entries():
+    """#@<name> rows without a #~ sibling must NOT be dropped."""
+    persisted = [
+        {"cid": "C9", "name": "#@Secured Property xyz", "value": "v"},
+        {"cid": "C9", "name": "#@jco.client.passwd",    "value": "still useful"},
+    ]
+    active_seen = {}
+    for row in persisted:
+        nm = row.get("name", "") or ""
+        if nm.startswith("#~"):
+            active_seen[(row.get("cid", ""), nm[2:])] = True
+    deduped = [
+        row for row in persisted
+        if not ((row.get("name", "") or "").startswith("#@")
+                  and (row.get("cid", ""),
+                        (row.get("name", "") or "")[2:]) in active_seen)
+    ]
+    assert len(deduped) == len(persisted)
+
+
+# ===========================================================================
+# 9. dest_host fallback ordering (ashost → mshost → saphost)
+# ===========================================================================
+
+def test_dest_host_prefers_ashost():
+    """Simulate the extraction logic used in extract_java_secstore's
+    cid_context builder.  ashost wins when present."""
+    props = {
+        "#~jco.client.ashost": "app.example",
+        "#~jco.client.mshost": "ms.example",
+        "#~jco.client.saphost": "sap.example",
+    }
+    dest_host = (props.get("#~jco.client.ashost", "")
+                  or props.get("#~jco.client.mshost", "")
+                  or props.get("#~jco.client.saphost", "")
+                  or "")
+    assert dest_host == "app.example"
+
+
+def test_dest_host_falls_back_to_mshost_for_load_balanced():
+    """UMEBackendConnection and similar system destinations often set
+    mshost only — we must surface that as the host for auto-plot."""
+    props = {
+        "#~jco.client.mshost": "msgsrv.example",
+        "#~jco.client.group":  "PUBLIC",
+    }
+    dest_host = (props.get("#~jco.client.ashost", "")
+                  or props.get("#~jco.client.mshost", "")
+                  or "")
+    assert dest_host == "msgsrv.example"
+
+
+def test_dest_target_sid_falls_back_to_sysid():
+    """Some 7.x variants use #~jco.client.sysid instead of r3name."""
+    props = {"#~jco.client.sysid": "sb7"}  # intentionally lowercase
+    dest_target_sid = ((props.get("#~jco.client.r3name", "")
+                         or props.get("#~jco.client.sysid", ""))
+                         or "").upper()
+    assert dest_target_sid == "SB7"
