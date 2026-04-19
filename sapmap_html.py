@@ -1117,6 +1117,36 @@ async function pollUpdates() {
         div.className = line.cls || 'cl-info';
         div.innerHTML = '<span style="color:#484f58">' + line.ts + '</span> ' + line.text;
         body.appendChild(div);
+        // Detect [ACTION_NEEDED] tags — the backend uses these when
+        // it hits a state the operator must resolve manually (e.g.
+        // pre-existing user whose password can't be reset to
+        // productive via RFC).  Surface as a sticky toast so it
+        // doesn't get buried in console scroll.
+        const t = (line.text || '');
+        const mAct = t.match(/\[ACTION_NEEDED\]\s*(.*)$/);
+        if (mAct) {
+          showToast(
+            '<div style="display:flex;justify-content:space-between;'
+              + 'align-items:center;margin-bottom:6px">'
+              + '<strong style="color:#d29922">&#9888; Operator '
+                + 'action needed</strong>'
+              + '<span data-close style="cursor:pointer;color:#8b949e;'
+                + 'font-size:14px;margin-left:12px" title="dismiss">&times;</span>'
+            + '</div>'
+            + '<div style="color:#c9d1d9;line-height:1.45">'
+              + mAct[1]
+            + '</div>'
+            + '<div style="margin-top:8px;text-align:right">'
+              + '<button class="btn" style="padding:3px 10px;'
+                + 'font-size:11px" data-close>Dismiss</button>'
+            + '</div>',
+            {stickUntilClose: true}
+          );
+          // Also recolour the console line so the context around
+          // the toast stays easy to find on scroll-back.
+          div.style.borderLeft = '3px solid #d29922';
+          div.style.paddingLeft = '6px';
+        }
       }
       body.scrollTop = body.scrollHeight;
       consoleCursor = consoleData.cursor;
