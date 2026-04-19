@@ -431,6 +431,15 @@ class RFCConnection:
     # sapxpg remote test
     sapxpg_remote_works: bool = False
 
+    # Connection type.  Default "rfc" covers classic Type-3 RFC plus
+    # Type-T (where sapxpg_remote_works is the active marker).  "http"
+    # is set for AS Java HTTP destinations pulled from J2EE_CONFIGENTRY
+    # — Java→Java admin / service calls using BASICAUTH etc.
+    conn_type: str = "rfc"          # "rfc" | "http"
+    http_url: str = ""              # full target URL for HTTP destinations
+    http_auth_type: str = ""        # BASICAUTHENTICATION | SSO2 | X509 | NONE
+    http_proxy: str = ""            # "host:port" if the destination uses one
+
     # SecStore
     secstore_password: str = ""  # Decrypted password from RSECTAB (if matched)
 
@@ -466,6 +475,10 @@ class RFCConnection:
             "check_error": self.check_error,
             "tested": self.tested,
             "sapxpg_remote_works": self.sapxpg_remote_works,
+            "conn_type": self.conn_type,
+            "http_url": self.http_url,
+            "http_auth_type": self.http_auth_type,
+            "http_proxy": self.http_proxy,
             "secstore_password": self.secstore_password,
         }
 

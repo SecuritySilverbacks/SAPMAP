@@ -408,6 +408,7 @@ body {
     <span class="legend-item"><span class="legend-swatch" style="background:#e74c3c"></span> RFC Logon OK + SAP_ALL</span>
     <span class="legend-item"><span class="legend-swatch" style="background:#2ecc71"></span> RFC Logon OK</span>
     <span class="legend-item"><span class="legend-swatch" style="background:#5dade2"></span> RFC (untested)</span>
+    <span class="legend-item"><span class="legend-swatch" style="background:#a371f7;border:2px dotted #a371f7;background:transparent"></span> HTTP destination</span>
     <span class="legend-item"><span class="legend-swatch" style="background:#ff6b35;border:2px dashed #ff6b35;background:transparent"></span> TCP/IP (sapxpg)</span>
     <span style="flex:1"></span>
     <label style="cursor:pointer;display:flex;align-items:center;gap:6px;padding:2px 10px;border:1px solid #30363d;border-radius:4px;background:#161b22;color:#c9d1d9;font-size:11px"><input type="checkbox" id="show-unknown" style="accent-color:#f0883e;width:14px;height:14px" onchange="updateMap()"> Show unknown targets</label>
@@ -1326,12 +1327,17 @@ function updateMap() {
     let color = '#5dade2';
     let width = 4;
     let dashArray = '';
+    const isHttp = (conn.conn_type || '') === 'http';
     if (conn.has_sap_all && conn.logon_successful) {
       color = '#e74c3c'; width = 6;
     } else if (conn.sapxpg_remote_works) {
       color = '#ff6b35'; width = 5.5; dashArray = '8,4';
     } else if (conn.logon_successful) {
       color = '#2ecc71'; width = 5;
+    } else if (isHttp) {
+      // HTTP destination — default style before any connectivity test.
+      // Purple-ish; dotted to distinguish from untested RFC edges.
+      color = '#a371f7'; width = 4; dashArray = '3,4';
     }
 
     // Arrow marker
@@ -2321,10 +2327,17 @@ function showConnInfo(e, connIdx) {
   if (!conn) return;
 
   const panel = document.getElementById('info-panel');
-  const isTypeT = !!conn.sapxpg_remote_works;
-  const connType = isTypeT ? 'T' : '3';
+  const isHttp = (conn.conn_type || '') === 'http';
+  const isTypeT = !isHttp && !!conn.sapxpg_remote_works;
+  const connType = isHttp ? 'HTTP' : (isTypeT ? 'T' : '3');
   let risk;
-  if (isTypeT) {
+  if (isHttp) {
+    // HTTP: password+user is high-value if it logs into a Java admin
+    // interface; medium otherwise.  We don't test HTTP automatically
+    // yet — rank by creds availability.
+    risk = (conn.rfc_user && conn.secstore_password)
+           ? 'MEDIUM' : 'UNKNOWN';
+  } else if (isTypeT) {
     risk = conn.ping_ok ? 'CRITICAL' : conn.tested ? 'LOW' : 'UNKNOWN';
   } else {
     risk = conn.has_sap_all && conn.logon_successful ? 'CRITICAL' :
@@ -2332,8 +2345,10 @@ function showConnInfo(e, connIdx) {
   }
   const riskClass = 'risk-' + risk.toLowerCase();
 
+  // Profiles / Roles are ABAP-RFC concepts; never apply to Type T
+  // (TCP/IP sapxpg) or HTTP destinations.
   let profilesHtml = '';
-  if (!isTypeT) {
+  if (!isTypeT && !isHttp) {
     (conn.profiles || []).forEach(p => {
       const cls = p === 'SAP_ALL' ? 'profile-item sap-all' : 'profile-item';
       profilesHtml += `<div class="${cls}">${p === 'SAP_ALL' ? '&#9888; ' : ''}${escHtml(p)}</div>`;
@@ -2341,7 +2356,7 @@ function showConnInfo(e, connIdx) {
   }
 
   let rolesHtml = '';
-  if (!isTypeT) {
+  if (!isTypeT && !isHttp) {
     (conn.roles || []).forEach(r => {
       rolesHtml += `<div class="profile-item">${escHtml(r)}</div>`;
     });
@@ -2365,12 +2380,22 @@ function showConnInfo(e, connIdx) {
     }
   }
 
+  const connLabel = isHttp ? 'HTTP' : (isTypeT ? 'TCP/IP' : 'RFC');
   panel.innerHTML = `
-    <h3>${isTypeT ? 'TCP/IP' : 'RFC'} Connection Details</h3>
+    <h3>${connLabel} Connection Details</h3>
     <div class="info-row"><span class="info-label">Source:</span><span class="info-val">${escHtml(conn.source_sid)} (${escHtml(conn.source_host)})</span></div>
     <div class="info-row"><span class="info-label">Target:</span><span class="info-val">${escHtml(conn.target_sid || '?')} (${escHtml(conn.target_host || '?')})</span></div>
     <div class="info-row"><span class="info-label">Destination:</span><span class="info-val">${escHtml(conn.destination_name)} (Type ${connType})</span></div>
-    ${isTypeT ? `
+    ${isHttp ? `
+      <div class="info-row"><span class="info-label">URL:</span><span class="info-val" style="word-break:break-all">${escHtml(conn.http_url || '?')}</span></div>
+      <div class="info-row"><span class="info-label">Auth type:</span><span class="info-val">${escHtml(conn.http_auth_type || '?')}</span></div>
+      ${conn.http_proxy ? `<div class="info-row"><span class="info-label">Proxy:</span><span class="info-val">${escHtml(conn.http_proxy)}</span></div>` : ''}
+      <div class="info-row"><span class="info-label">User:</span><span class="info-val">${escHtml(conn.rfc_user || '?')}</span></div>
+      ${conn.secstore_password ? `<div class="info-row"><span class="info-label">SecStore Pwd:</span><span class="info-val ss-reveal" style="color:#3fb950;cursor:pointer"><span class="ss-masked">&#9679;&#9679;&#9679;&#9679; (${conn.secstore_password.length} chars) — click to reveal</span><span class="ss-plain" style="display:none">${escHtml(conn.secstore_password)}</span></span></div>` : ''}
+      <div class="info-section" style="color:#8b949e;font-size:11px">
+        Java HTTP destination — if ${escHtml(conn.rfc_user || 'the user')} has UME admin, you can log into the target Java stack's NWA / CTC ConfigServlet / Telnet console with these creds and drop a JSP for full OS access.
+      </div>
+    ` : isTypeT ? `
       <div class="info-row"><span class="info-label">Port:</span><span class="info-val">${escHtml(gwPort)}</span></div>
     ` : `
       <div class="info-row"><span class="info-label">Client:</span><span class="info-val">${escHtml(conn.client || '?')}</span></div>
@@ -2379,21 +2404,22 @@ function showConnInfo(e, connIdx) {
     `}
     ${profilesHtml ? `<div class="info-section"><strong style="font-size:11px;color:#8b949e">Profiles</strong><div class="profile-list">${profilesHtml}</div></div>` : ''}
     ${rolesHtml ? `<div class="info-section"><strong style="font-size:11px;color:#8b949e">Roles</strong><div class="profile-list">${rolesHtml}</div></div>` : ''}
-    ${conn.user_detail_error ? `<div class="info-section" style="color:#d29922;font-size:11px">${escHtml(conn.user_detail_error)}</div>` : ''}
-    <div class="info-section">
+    ${(!isHttp && conn.user_detail_error) ? `<div class="info-section" style="color:#d29922;font-size:11px">${escHtml(conn.user_detail_error)}</div>` : ''}
+    ${isHttp ? '' : `<div class="info-section">
       <strong style="font-size:11px;color:#8b949e">/SDF/RFC_CHECK</strong>
       ${conn.tested ? `
         <div class="info-row"><span class="info-label">Ping:</span><span class="info-val">${conn.ping_ok ? 'OK' : 'Failed'}${conn.latency_ms ? ' ('+conn.latency_ms+'ms)' : ''}</span></div>
         ${isTypeT ? '' : `<div class="info-row"><span class="info-label">Logon:</span><span class="info-val">${conn.logon_successful ? '&#9989; RFC Logon successful.' : (conn.logon_tested ? '&#10060; Failed' : '&#9898; Not tested')}</span></div>`}
       ` : '<div style="color:#484f58;font-size:11px;margin-top:4px">Not tested yet</div>'}
-    </div>
+    </div>`}
     <div class="info-section">
       <div class="info-row"><span class="info-label">Risk:</span><span class="info-val"><span class="risk-badge ${riskClass}">${risk}</span></span></div>
     </div>
     <div style="text-align:right;margin-top:8px;display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">
-      ${(!isTypeT && conn.logon_successful && conn.has_sap_all && conn.target_sid) ?
+      ${(!isTypeT && !isHttp && conn.logon_successful && conn.has_sap_all && conn.target_sid) ?
         `<button class="btn" style="background:#b33;color:#fff" onclick="createUserViaRfc('${escHtml(conn.source_sid)}','${escHtml(conn.destination_name)}','${escHtml(conn.target_sid)}')">Create Remote User</button>` : ''}
-      <button class="btn" onclick="testSingleRfc('${escHtml(conn.source_sid)}','${escHtml(conn.destination_name)}',${connIdx})">Test Connection</button>
+      ${isHttp ? '' :
+        `<button class="btn" onclick="testSingleRfc('${escHtml(conn.source_sid)}','${escHtml(conn.destination_name)}',${connIdx})">Test Connection</button>`}
       <button class="btn" onclick="document.getElementById('info-panel').classList.remove('visible')">Close</button>
     </div>
   `;
