@@ -1502,8 +1502,9 @@ def _query_msghttp_banner(host: str, port: int,
 
 
 def quick_probe_sid(host: str, saprouter: str = None,
-                      timeout: float = 3,
-                      instance_hint: int = None) -> dict:
+                      timeout: float = 2,
+                      instance_hint: int = None,
+                      total_budget: float = 10.0) -> dict:
     """Fast SAPControl probe to discover the SID of a host not yet on
     the map.  Used by the secstore/JCo extraction path when a recovered
     destination points at a host whose SID we can't derive from
@@ -1552,9 +1553,23 @@ def quick_probe_sid(host: str, saprouter: str = None,
         probe_ports.append((50014 + n * 100, "sapcontrol_https", inst))
         probe_ports.append((8100 + n,         "msghttp", inst))
 
+    import time as _time
+    deadline = _time.monotonic() + float(total_budget)
+
+    def _remaining_timeout():
+        left = deadline - _time.monotonic()
+        if left <= 0:
+            return 0
+        return max(0.4, min(timeout, left))
+
     for port, kind, inst in probe_ports:
+        if _time.monotonic() >= deadline:
+            break
+        per_port = _remaining_timeout()
+        if per_port <= 0:
+            break
         if kind == "host_agent_http":
-            got = _query_host_agent_systems(host, port, timeout=timeout)
+            got = _query_host_agent_systems(host, port, timeout=per_port)
             if got and got.get("sid"):
                 got["source_port"] = port
                 got.setdefault("instance_nr", inst)
@@ -1563,53 +1578,66 @@ def quick_probe_sid(host: str, saprouter: str = None,
             # "SID SAP, Nr 99" for the host agent itself, but if the
             # real agent for another instance is on 1128 the banner
             # will carry that SID instead.
-            got = _query_sapstart_banner(host, port, timeout=timeout)
+            got = _query_sapstart_banner(host, port, timeout=per_port)
             if got and got.get("sid") and got["sid"] != "SAP":
                 got["source_port"] = port
                 return got
             continue
 
         if kind == "msghttp":
-            got = _query_msghttp_banner(host, port, timeout=timeout)
+            got = _query_msghttp_banner(host, port, timeout=per_port)
             if got and got.get("sid"):
                 got["source_port"] = port
                 return got
             continue
 
-        # sapcontrol / sapcontrol_https — try SOAP first, then HTTP
-        # banner-scrape as a fallback when SOAP returned nothing.
+        # sapcontrol / sapcontrol_https — banner-scrape FIRST (one plain
+        # HTTP GET, nmap-style SID regex); SOAP GetInstanceProperties
+        # as enrichment fallback when the banner doesn't carry enough
+        # info.  Banner is almost always faster AND works even on
+        # instances that refuse unauthenticated SOAP.  When both
+        # return a SID we prefer SOAP (stack type / DB / ICM URLs).
         use_ssl = (kind == "sapcontrol_https")
-        try:
-            if not use_ssl:
-                sid, is_java, is_abap, db_type, http_port, https_port = (
-                    _query_sapcontrol_sid(host, port, timeout=timeout))
-            else:
-                sid, is_java, is_abap, db_type, http_port, https_port = (
-                    "", False, False, "", 0, 0)
-        except Exception:
-            sid = ""
-            is_java = is_abap = False
-            db_type = ""
-            http_port = https_port = 0
-        if sid:
-            os_type = _query_sapcontrol_os(host, port, timeout=timeout) or ""
-            return {
-                "sid": sid,
-                "instance_nr": inst,
-                "is_abap": bool(is_abap),
-                "is_java": bool(is_java),
-                "db_type": db_type,
-                "http_port": http_port,
-                "https_port": https_port,
-                "os_type": os_type,
-                "source_port": port,
-            }
-        # Banner fallback — GET / parses "SID=J45, Nr=00" from the body.
-        got = _query_sapstart_banner(host, port, timeout=timeout,
-                                         use_ssl=use_ssl)
-        if got and got.get("sid"):
-            got["source_port"] = port
-            return got
+        banner_hit = _query_sapstart_banner(host, port, timeout=per_port,
+                                                 use_ssl=use_ssl)
+
+        # Only attempt SOAP on plain-HTTP variant — SOAP-over-HTTPS
+        # is rarely exposed and doubles the connect time.
+        soap_sid = ""
+        soap_info = None
+        if not use_ssl:
+            try:
+                sid_val, is_java, is_abap, db_type, http_port, https_port = (
+                    _query_sapcontrol_sid(host, port, timeout=per_port))
+                if sid_val:
+                    soap_sid = sid_val
+                    soap_info = {
+                        "sid": sid_val,
+                        "instance_nr": inst,
+                        "is_abap": bool(is_abap),
+                        "is_java": bool(is_java),
+                        "db_type": db_type,
+                        "http_port": http_port,
+                        "https_port": https_port,
+                    }
+            except Exception:
+                pass
+
+        # SOAP (richer) wins when both succeed; banner wins when only
+        # it succeeded; OS-type enrichment is always attempted once.
+        if soap_info:
+            os_type = _query_sapcontrol_os(host, port, timeout=per_port) or ""
+            soap_info["os_type"] = os_type
+            soap_info["source_port"] = port
+            # Prefer banner's instance_nr when it's more specific (banner
+            # reads from the page title, SOAP returns generic "00").
+            if banner_hit and banner_hit.get("instance_nr") not in ("", "00"):
+                soap_info["instance_nr"] = banner_hit["instance_nr"]
+            return soap_info
+
+        if banner_hit and banner_hit.get("sid"):
+            banner_hit["source_port"] = port
+            return banner_hit
     return None
 
 
