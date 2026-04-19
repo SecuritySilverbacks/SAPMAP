@@ -1012,6 +1012,104 @@ def test_find_node_by_host_flex_no_match_returns_none():
                                         exclude_sid="X") is None
 
 
+def test_reset_user_password_via_bapi_success_path():
+    """BAPI_USER_CHANGE with PASSWORD+PASSWORDX succeeds, then
+    BAPI_USER_PROFILES_ASSIGN re-adds SAP_ALL."""
+    import sapmap_rfc
+
+    calls = []
+    class FakeConn:
+        def call(self, fm, **kwargs):
+            calls.append((fm, kwargs))
+            # Every BAPI call returns a clean RETURN structure
+            return {"RETURN": {"TYPE": "S", "MESSAGE": "ok"}}
+    class FakeCtx:
+        def __enter__(self_): return FakeConn()
+        def __exit__(self_, *a): return False
+
+    node = _node(sid="SB6", system_type="ABAP")
+    creds = Credentials(username="SAPJSF", password="Down1oad",
+                           client="001", instance_nr="00")
+
+    with patch.object(sapmap_rfc, "_get_connection",
+                       return_value=FakeCtx()):
+        out = sapmap_rfc.reset_user_password_via_bapi(
+            node, "SAPMAP00", "Andinyougo123!", "100", creds)
+
+    assert out["success"] is True
+    # Three calls in order: UNLOCK → CHANGE → PROFILES_ASSIGN
+    fms = [c[0] for c in calls]
+    assert fms == ["BAPI_USER_UNLOCK", "BAPI_USER_CHANGE",
+                     "BAPI_USER_PROFILES_ASSIGN"]
+    # CHANGE call has the right PASSWORD + PASSWORDX shape
+    change_kwargs = calls[1][1]
+    assert change_kwargs["USERNAME"] == "SAPMAP00"
+    assert change_kwargs["PASSWORD"] == {"BAPIPWD": "Andinyougo123!"}
+    assert change_kwargs["PASSWORDX"] == {"BAPIPWD": "X"}
+    # PROFILES_ASSIGN requests SAP_ALL and SAP_NEW
+    assign_kwargs = calls[2][1]
+    assigned_names = {p["BAPIPROF"] for p in assign_kwargs["PROFILES"]}
+    assert assigned_names == {"SAP_ALL", "SAP_NEW"}
+
+
+def test_reset_user_password_via_bapi_bails_on_user_not_exist():
+    """If BAPI_USER_UNLOCK returns 'user does not exist', we bail
+    before touching BAPI_USER_CHANGE."""
+    import sapmap_rfc
+    calls = []
+    class FakeConn:
+        def call(self, fm, **kwargs):
+            calls.append(fm)
+            if fm == "BAPI_USER_UNLOCK":
+                return {"RETURN": [{"TYPE": "E",
+                                      "MESSAGE": "User GHOST does not exist"}]}
+            return {"RETURN": {"TYPE": "S", "MESSAGE": "ok"}}
+    class FakeCtx:
+        def __enter__(self_): return FakeConn()
+        def __exit__(self_, *a): return False
+
+    node = _node(sid="SB6", system_type="ABAP")
+    creds = Credentials(username="SAPJSF", password="x",
+                           client="001", instance_nr="00")
+    with patch.object(sapmap_rfc, "_get_connection",
+                       return_value=FakeCtx()):
+        out = sapmap_rfc.reset_user_password_via_bapi(
+            node, "GHOST", "x", "100", creds)
+    assert out["success"] is False
+    assert "does not exist" in out["message"].lower()
+    # UNLOCK was called; CHANGE was NOT
+    assert "BAPI_USER_CHANGE" not in calls
+
+
+def test_reset_user_password_via_bapi_surfaces_change_error():
+    """BAPI_USER_CHANGE error is captured in result['message'] and
+    no PROFILES_ASSIGN happens."""
+    import sapmap_rfc
+    calls = []
+    class FakeConn:
+        def call(self, fm, **kwargs):
+            calls.append(fm)
+            if fm == "BAPI_USER_CHANGE":
+                return {"RETURN": {"TYPE": "E",
+                                    "MESSAGE": "Password too short"}}
+            return {"RETURN": {"TYPE": "S", "MESSAGE": "ok"}}
+    class FakeCtx:
+        def __enter__(self_): return FakeConn()
+        def __exit__(self_, *a): return False
+
+    node = _node(sid="SB6", system_type="ABAP")
+    creds = Credentials(username="SAPJSF", password="x",
+                           client="001", instance_nr="00")
+    with patch.object(sapmap_rfc, "_get_connection",
+                       return_value=FakeCtx()):
+        out = sapmap_rfc.reset_user_password_via_bapi(
+            node, "SAPMAP00", "a", "100", creds)
+    assert out["success"] is False
+    assert "Password too short" in out["message"]
+    # PROFILES_ASSIGN must not be called when CHANGE errored
+    assert "BAPI_USER_PROFILES_ASSIGN" not in calls
+
+
 def test_probe_and_add_host_skips_source_sid_probe_result():
     """If SAPControl returns the source SID (e.g. we hit our own port
     before the companion's), don't plot a self-loop."""
