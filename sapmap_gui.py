@@ -1448,36 +1448,6 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:java_secstore", "Extract Java Secure Store", _run)
         return json.dumps({"status": "started"})
 
-    @app.route("/api/node/<sid>/dump_java_configtool", method="POST")
-    def node_dump_java_configtool(sid):
-        """Run SAP's own ConfigTool / SecStoreFS CLI on the target via
-        an available OS-exec primitive, to recover Vault-backed entries
-        SAPMAP's SecStoreFS.decrypt() path cannot reach (e.g.
-        UMEBackendConnection's SAPJSF password)."""
-        response.content_type = "application/json"
-        node = api.state.get_node(sid)
-        if not node:
-            return json.dumps({"error": f"Node {sid} not found"})
-        if "JAVA" not in (node.system_type or "").upper():
-            return json.dumps({"error": "Not a Java / dual-stack system"})
-
-        def _run():
-            r = sapmap_exploit.dump_java_configtool(node, api.state)
-            if r.get("success"):
-                print(f"[+] {sid}: ConfigTool dump: "
-                      f"{len(r.get('successful_commands', []))} commands "
-                      f"ran, {len(r.get('hits', []))} credential-looking "
-                      f"lines, total {len(r.get('dump_text',''))}B raw "
-                      f"(view full output with Actions → Show ConfigTool "
-                      f"Dump).")
-            else:
-                print(f"[-] {sid}: ConfigTool dump failed: "
-                      f"{r.get('error', '?')}")
-
-        _bg(f"{sid}:dump_java_configtool",
-            "Dump SAP ConfigTool", _run)
-        return json.dumps({"status": "started"})
-
     @app.route("/api/node/<sid>/create_user_java", method="POST")
     def node_create_user_java(sid):
         """Create a Java stack user via the UME API exposed by a deployed JSP.
