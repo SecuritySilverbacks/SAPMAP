@@ -1547,7 +1547,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 )
                 if created:
                     api.state.track_created_user(created)
-                    sapmap_exploit._post_exploit_enrichment(node, api.state)
+                    sapmap_exploit._post_exploit_enrichment(node, api.state, proven_type="ABAP")
             finally:
                 _unregister_betrusted_stop(key)
 
@@ -1626,7 +1626,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 created = sapmap_exploit.create_user_via_credentials(node, api.state)
             if created:
                 api.state.track_created_user(created)
-                sapmap_exploit._post_exploit_enrichment(node, api.state)
+                sapmap_exploit._post_exploit_enrichment(node, api.state, proven_type="ABAP")
 
         _bg(f"{sid}:create_user", "Create User", _run)
         return json.dumps({"status": "started"})
