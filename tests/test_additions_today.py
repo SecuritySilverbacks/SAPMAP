@@ -620,7 +620,8 @@ def test_probe_and_add_host_caches_and_reuses():
     import sapmap_scanner
     call_count = {"n": 0}
 
-    def fake_probe(host, saprouter=None, timeout=3, instance_hint=None):
+    def fake_probe(host, saprouter=None, timeout=3, instance_hint=None,
+                      total_budget=10.0, **kw):
         call_count["n"] += 1
         return {"sid": "SB7", "instance_nr": "00",
                 "is_abap": True, "is_java": False,
@@ -823,6 +824,79 @@ def test_msghttp_banner_no_sid_returns_none():
     with _patch_socket_with(body):
         hit = sapmap_scanner._query_msghttp_banner("h", 8101)
     assert hit is None
+
+
+# ===========================================================================
+# 10c. Probe budget enforcement — never exceed the total_budget
+# ===========================================================================
+
+def test_quick_probe_sid_stops_before_exceeding_total_budget():
+    """With every per-port call sleeping 1 s and 16 candidate ports,
+    a 3 s total_budget must stop the probe inside 3 s — not go all
+    the way to 16 s."""
+    import sapmap_scanner
+    import time as _t
+
+    def slow_host_agent(host, port, timeout=3):
+        _t.sleep(timeout)
+        return None
+    def slow_banner(host, port, timeout=3, use_ssl=False):
+        _t.sleep(timeout)
+        return None
+    def slow_msghttp(host, port, timeout=3):
+        _t.sleep(timeout)
+        return None
+    def empty_sid(host, port, timeout=3):
+        _t.sleep(timeout)
+        return ("", False, False, "", 0, 0)
+
+    start = _t.monotonic()
+    with patch.object(sapmap_scanner, "_query_host_agent_systems",
+                       slow_host_agent), \
+         patch.object(sapmap_scanner, "_query_sapstart_banner",
+                       slow_banner), \
+         patch.object(sapmap_scanner, "_query_msghttp_banner",
+                       slow_msghttp), \
+         patch.object(sapmap_scanner, "_query_sapcontrol_sid",
+                       empty_sid), \
+         patch.object(sapmap_scanner, "_query_sapcontrol_os",
+                       lambda *a, **k: ""):
+        hit = sapmap_scanner.quick_probe_sid(
+            "blackhole.example", timeout=1, total_budget=3)
+    elapsed = _t.monotonic() - start
+    assert hit is None
+    # 3 s budget + whatever is in-flight when the deadline passes —
+    # clamp to "well below the 16 × 1 s worst case"
+    assert elapsed < 6.0, f"probe overran budget: {elapsed:.2f}s"
+
+
+def test_probe_and_add_host_bounded_by_run_with_timeout():
+    """Verify _probe_and_add_host wraps quick_probe_sid in the 10s
+    _run_with_timeout guard, so even a buggy probe that ignores its
+    own total_budget can't hang the extraction."""
+    from sapmap_exploit import _probe_and_add_host, _sid_probe_cache
+    _sid_probe_cache.clear()
+    state = SAPMAPState()
+
+    import sapmap_scanner
+    import time as _t
+
+    def forever(*args, **kwargs):
+        _t.sleep(15)     # Longer than the 10 s outer cap
+        return {"sid": "LATE", "instance_nr": "00",
+                "is_abap": True, "is_java": False,
+                "db_type": "", "os_type": "",
+                "http_port": 0, "https_port": 0,
+                "source_port": 50013}
+
+    start = _t.monotonic()
+    with patch.object(sapmap_scanner, "quick_probe_sid", forever):
+        sid = _probe_and_add_host(state, "unreachable.example")
+    elapsed = _t.monotonic() - start
+    # Returns "" via timeout path
+    assert sid == ""
+    # And returns inside ~10 s plus small epsilon — not 15 s
+    assert elapsed < 12.0, f"probe overran wrapper: {elapsed:.2f}s"
 
 
 def test_http_extraction_handles_7_0_legacy_keys():
