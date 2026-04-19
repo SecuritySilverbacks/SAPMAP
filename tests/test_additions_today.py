@@ -940,6 +940,104 @@ def test_http_bucket_password_detection_accepts_legacy_prefixless_name():
         assert matched, f"legacy HTTP password key {nm!r} not detected"
 
 
+def test_hostname_matches_exact():
+    from sapmap_exploit import _hostname_matches
+    assert _hostname_matches("srv01sm1", "srv01sm1") is True
+    assert _hostname_matches("SRV01SM1", "srv01sm1") is True   # case-insensitive
+
+
+def test_hostname_matches_fqdn_short_bridge():
+    from sapmap_exploit import _hostname_matches
+    # The whole point — short ↔ FQDN
+    assert _hostname_matches("srv01sm1", "srv01sm1.ncmi.co") is True
+    assert _hostname_matches("srv01sm1.ncmi.co", "srv01sm1") is True
+    # Different short form → no match
+    assert _hostname_matches("srv01sb6", "srv01sm1.ncmi.co") is False
+
+
+def test_hostname_matches_empty_returns_false():
+    from sapmap_exploit import _hostname_matches
+    assert _hostname_matches("", "srv01sm1") is False
+    assert _hostname_matches("srv01sm1", "") is False
+
+
+def test_find_node_by_host_flex_short_to_fqdn():
+    """SM1 node stored with FQDN; destination host is the short form."""
+    from sapmap_exploit import _find_node_by_host_flex
+    state = SAPMAPState()
+    state.add_node(SAPNode(sid="SM1", system_type="ABAP",
+                              hostname="srv01sm1.ncmi.co",
+                              ip="10.10.1.12",
+                              instances=[InstanceInfo(
+                                  instance_nr="00", ip="10.10.1.12",
+                                  ports={50013: "sapcontrol"})]))
+    m = _find_node_by_host_flex(state, "srv01sm1")
+    assert m is not None and m.sid == "SM1"
+
+
+def test_find_node_by_host_flex_excludes_source():
+    """UMEBackendConnection use-case: source and target share hostname.
+    The flex matcher must skip the source when exclude_sid is given."""
+    from sapmap_exploit import _find_node_by_host_flex
+    state = SAPMAPState()
+    # SJ1 (source) on same host as SM1 (target we want to find)
+    state.add_node(SAPNode(sid="SJ1", system_type="JAVA",
+                              hostname="srv01sm1",
+                              ip="10.10.1.12",
+                              instances=[InstanceInfo(
+                                  instance_nr="02", ip="10.10.1.12",
+                                  ports={})]))
+    state.add_node(SAPNode(sid="SM1", system_type="ABAP",
+                              hostname="srv01sm1.ncmi.co",
+                              ip="10.10.1.12",
+                              instances=[InstanceInfo(
+                                  instance_nr="00", ip="10.10.1.12",
+                                  ports={50013: "sapcontrol"})]))
+    # Without exclude_sid: returns SJ1 (exact match on short hostname)
+    got = _find_node_by_host_flex(state, "srv01sm1")
+    assert got.sid == "SJ1"
+    # With exclude_sid=SJ1: SJ1 skipped, SM1 found via flex bridge
+    got = _find_node_by_host_flex(state, "srv01sm1", exclude_sid="SJ1")
+    assert got.sid == "SM1"
+
+
+def test_find_node_by_host_flex_no_match_returns_none():
+    from sapmap_exploit import _find_node_by_host_flex
+    state = SAPMAPState()
+    state.add_node(SAPNode(sid="X", system_type="ABAP",
+                              hostname="otherhost",
+                              ip="1.2.3.4",
+                              instances=[]))
+    assert _find_node_by_host_flex(state, "foo.example",
+                                        exclude_sid="X") is None
+
+
+def test_probe_and_add_host_skips_source_sid_probe_result():
+    """If SAPControl returns the source SID (e.g. we hit our own port
+    before the companion's), don't plot a self-loop."""
+    from sapmap_exploit import _probe_and_add_host, _sid_probe_cache
+    _sid_probe_cache.clear()
+    state = SAPMAPState()
+    state.add_node(SAPNode(sid="SJ1", system_type="JAVA",
+                              hostname="srv01sm1", ip="10.0.0.1",
+                              instances=[]))
+    import sapmap_scanner
+    # Probe returns the SAME SID as source
+    def fake_probe(host, **kw):
+        return {"sid": "SJ1", "instance_nr": "02",
+                 "is_abap": False, "is_java": True,
+                 "db_type": "", "os_type": "",
+                 "http_port": 0, "https_port": 0,
+                 "source_port": 50213}
+    with patch.object(sapmap_scanner, "quick_probe_sid", fake_probe):
+        sid = _probe_and_add_host(state, "srv01sm1",
+                                      exclude_sid="SJ1")
+    # Don't re-add SJ1, don't return it
+    assert sid == ""
+    # No new node added
+    assert list(state.nodes.keys()) == ["SJ1"]
+
+
 def test_http_extraction_handles_7_0_legacy_keys():
     """Older SAP 7.0 HTTP destinations sometimes omit the 'destination.'
     prefix, storing just #~URL, #~Type, #~User.  The extraction
