@@ -49,6 +49,24 @@ def _run_with_timeout(func, timeout: float, *args, **kwargs):
         raise box["exc"]
     return box["result"], False
 
+
+def _detach_if_timed_out(conn, timed_out: bool) -> None:
+    """If an RFC call timed out, detach the pyrfc handle so Python's
+    subsequent ``__exit__`` / ``close()`` becomes a no-op.
+
+    Without this, the ``with _get_connection(...)`` wrapper calls
+    ``RfcCloseConnection`` on a handle the daemon worker thread is
+    still inside — the SDK then blocks waiting for the in-flight
+    ``RfcInvoke`` to drain, which is exactly the hang we're trying to
+    avoid.  Leaking the handle (the daemon thread eventually returns
+    and the GC reclaims it) is the right trade-off.
+    """
+    if timed_out and conn is not None:
+        try:
+            conn._handle = None
+        except Exception:
+            pass
+
 from sapmap_models import (
     SAPNode, RFCConnection as RFCConn, Credentials, CreatedUser, Severity, Finding,
 )
@@ -740,6 +758,7 @@ def _test_via_sdf_rfc_check(conn, destination_name: str, result: dict) -> bool:
             **RFC_CHECK_PARAMS,
         )
         if timed_out:
+            _detach_if_timed_out(conn, True)
             result["logon_ok"] = False
             result["ping_ok"] = False
             result["error"] = (f"timeout after 25s on /SDF/RFC_CHECK — "
@@ -926,6 +945,11 @@ def ping_rfc_destination(node: SAPNode, destination_name: str,
                     conn.call, 20.0,
                     "DEST_CHECK_CONNECTION", NAME=destination_name)
                 if timed_out:
+                    # Daemon worker is still inside RfcInvoke.  Detach the
+                    # handle so the enclosing `with` block's close()
+                    # becomes a no-op — otherwise RfcCloseConnection
+                    # would itself block waiting for the Invoke to drain.
+                    _detach_if_timed_out(conn, True)
                     result["ping_ok"] = False
                     result["error"] = (
                         f"timeout after 20s — destination probably points "
@@ -962,6 +986,7 @@ def ping_rfc_destination(node: SAPNode, destination_name: str,
                             "RFC_GET_SYSTEM_INFO",
                             DESTINATION=destination_name)
                         if sys_timed_out:
+                            _detach_if_timed_out(conn, True)
                             logger.debug(f"RFC_GET_SYSTEM_INFO on "
                                           f"{destination_name} timed out "
                                           f"— ping_ok kept, IP skipped")
@@ -998,6 +1023,7 @@ def ping_rfc_destination(node: SAPNode, destination_name: str,
                             IV_DESTINATION=destination_name,
                             IV_PING="X")
                         if fb_timeout:
+                            _detach_if_timed_out(conn, True)
                             logger.debug(f"/SDF/RFC_CHECK fallback on "
                                           f"{destination_name} timed out")
                             result["error"] = (
@@ -1021,6 +1047,7 @@ def ping_rfc_destination(node: SAPNode, destination_name: str,
                                 "RFC_GET_SYSTEM_INFO",
                                 DESTINATION=destination_name)
                             if sys_timeout:
+                                _detach_if_timed_out(conn, True)
                                 raise RuntimeError("sys_info timeout")
                             export = info.get("RFCSI_EXPORT", {})
                             if isinstance(export, dict):
@@ -1076,6 +1103,7 @@ def _ping_via_iwb_check(node, destination_name, creds=None):
                 "IWB_SHE_RFCDESTINATION_CHECK",
                 RFCDESTINATION=destination_name)
             if iwb_timeout:
+                _detach_if_timed_out(conn, True)
                 result["error"] = (f"IWB_SHE_RFCDESTINATION_CHECK "
                                     f"timeout after 20s")
                 return result
