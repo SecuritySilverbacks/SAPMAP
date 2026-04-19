@@ -951,13 +951,23 @@ def ping_rfc_destination(node: SAPNode, destination_name: str,
                         "RFCHOST", "").strip()
 
                 # Get IP via RFC_GET_SYSTEM_INFO with DESTINATION
-                # (RFCSI_EXPORT contains RFCIPADDR; CONNECTION_PROPERTIES does not)
+                # (RFCSI_EXPORT contains RFCIPADDR; CONNECTION_PROPERTIES does not).
+                # Bound this call too — a destination that passed
+                # DEST_CHECK_CONNECTION can still hang on an unrelated
+                # second RFC call if the remote side is slow.  15s cap.
                 if result["ping_ok"]:
                     try:
-                        info = conn.call(
+                        info, sys_timed_out = _run_with_timeout(
+                            conn.call, 15.0,
                             "RFC_GET_SYSTEM_INFO",
-                            DESTINATION=destination_name,
-                        )
+                            DESTINATION=destination_name)
+                        if sys_timed_out:
+                            logger.debug(f"RFC_GET_SYSTEM_INFO on "
+                                          f"{destination_name} timed out "
+                                          f"— ping_ok kept, IP skipped")
+                            # Don't fall through to the assertions below
+                            # that would dereference None
+                            raise RuntimeError("sys_info timeout")
                         export = info.get("RFCSI_EXPORT", {})
                         if isinstance(export, dict):
                             result["remote_ip"] = (
@@ -981,27 +991,37 @@ def ping_rfc_destination(node: SAPNode, destination_name: str,
                     logger.debug("DEST_CHECK_CONNECTION not found, "
                                  "falling back to /SDF/RFC_CHECK")
                     try:
-                        check_result = conn.call(
+                        # 20s cap — same logic as DEST_CHECK_CONNECTION.
+                        check_result, fb_timeout = _run_with_timeout(
+                            conn.call, 20.0,
                             RFC_CHECK_FM,
                             IV_DESTINATION=destination_name,
-                            IV_PING="X",
-                        )
-                        msg = check_result.get(
-                            "EV_PING_MESSAGE", "").strip()
-                        status = str(check_result.get(
-                            "EV_PING_STATUS", "")).strip()
-                        result["ping_message"] = msg
-                        result["ping_ok"] = status == "1"
+                            IV_PING="X")
+                        if fb_timeout:
+                            logger.debug(f"/SDF/RFC_CHECK fallback on "
+                                          f"{destination_name} timed out")
+                            result["error"] = (
+                                f"timeout after 20s on /SDF/RFC_CHECK "
+                                f"fallback — destination probably broken")
+                        else:
+                            msg = check_result.get(
+                                "EV_PING_MESSAGE", "").strip()
+                            status = str(check_result.get(
+                                "EV_PING_STATUS", "")).strip()
+                            result["ping_message"] = msg
+                            result["ping_ok"] = status == "1"
                     except ABAPApplicationError as e2:
                         if getattr(e2, "key", "") != "FU_NOT_FOUND":
                             raise
-                    # Get SID separately
+                    # Get SID separately — also bounded.
                     if result["ping_ok"]:
                         try:
-                            info = conn.call(
+                            info, sys_timeout = _run_with_timeout(
+                                conn.call, 15.0,
                                 "RFC_GET_SYSTEM_INFO",
-                                DESTINATION=destination_name,
-                            )
+                                DESTINATION=destination_name)
+                            if sys_timeout:
+                                raise RuntimeError("sys_info timeout")
                             export = info.get("RFCSI_EXPORT", {})
                             if isinstance(export, dict):
                                 result["remote_sid"] = (
@@ -1021,16 +1041,22 @@ def ping_rfc_destination(node: SAPNode, destination_name: str,
     except Exception as e:
         result["error"] = str(e)
 
+    # Skip cascading fallbacks when our primary timed out — that
+    # means the destination's gateway/host IS unreachable (not just
+    # the FM is missing).  Running IWB and direct-connect fallbacks
+    # just stacks another 60-120 s of TCP retries per destination.
+    primary_timed_out = "timeout" in (result.get("error") or "").lower()
+
     # Fallback: IWB_SHE_RFCDESTINATION_CHECK (available on older kernels
     # where DEST_CHECK_CONNECTION and /SDF/RFC_CHECK don't work)
-    if not result["ping_ok"] and result["error"]:
+    if not result["ping_ok"] and result["error"] and not primary_timed_out:
         try:
             result.update(_ping_via_iwb_check(node, destination_name, creds))
         except Exception as e2:
             logger.debug(f"IWB_SHE check also failed: {e2}")
 
     # Last-resort fallback: parse RFCDES options and try direct TCP connect
-    if not result["ping_ok"] and result["error"]:
+    if not result["ping_ok"] and result["error"] and not primary_timed_out:
         try:
             result.update(_ping_via_direct_connect(node, destination_name, creds))
         except Exception as e2:
@@ -1045,8 +1071,14 @@ def _ping_via_iwb_check(node, destination_name, creds=None):
               "remote_ip": "", "error": "", "ping_message": "", "logon_ok": False}
     with _get_connection(node, creds) as conn:
         try:
-            r = conn.call("IWB_SHE_RFCDESTINATION_CHECK",
-                          RFCDESTINATION=destination_name)
+            r, iwb_timeout = _run_with_timeout(
+                conn.call, 20.0,
+                "IWB_SHE_RFCDESTINATION_CHECK",
+                RFCDESTINATION=destination_name)
+            if iwb_timeout:
+                result["error"] = (f"IWB_SHE_RFCDESTINATION_CHECK "
+                                    f"timeout after 20s")
+                return result
             subrc = r.get("RFC_SUBRC", 99)
             try:
                 subrc = int(subrc)
