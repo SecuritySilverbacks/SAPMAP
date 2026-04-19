@@ -3279,10 +3279,17 @@ function renderJssTable() {
     let belongs = '';
     if (e.dest_name) {
       belongs = '<span style="color:#f85149">' + escHtml(e.dest_name) + '</span>';
-      if (e.dest_user || target) {
+      if (e.dest_user || target || e.dest_host) {
         belongs += ' <span style="color:#8b949e">(';
         if (e.dest_user) belongs += escHtml(e.dest_user);
-        if (target) belongs += (e.dest_user ? '@' : '') + escHtml(target);
+        // Prefer the resolved target SID; fall back to the raw host when
+        // the destination has no r3name (typical for UMEBackendConnection
+        // and other SAP system destinations).
+        if (target) {
+          belongs += (e.dest_user ? '@' : '') + escHtml(target);
+        } else if (e.dest_host) {
+          belongs += (e.dest_user ? '@' : '') + escHtml(e.dest_host);
+        }
         if (e.client) belongs += '/' + escHtml(e.client);
         belongs += ')</span>';
       }
