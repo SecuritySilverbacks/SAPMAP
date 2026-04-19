@@ -290,6 +290,13 @@ try {
                     + "    OR NAME = '#~User' "
                     + "    OR NAME = '#~AuthenticationType' "
                     + "    OR NAME = '#~authenticationType' "
+                    // Last-resort: any CID that stores an http://
+                    // or https:// URL anywhere in VSTR.  SolMan 7.0
+                    // HTTP destinations sometimes use key names we
+                    // haven't catalogued, but the URL value gives
+                    // them away regardless of key name.
+                    + "    OR VSTR LIKE 'http://%' "
+                    + "    OR VSTR LIKE 'https://%' "
                     + "  ) AND VSTR IS NOT NULL AND VSTR <> ''"
                     + ")");
                 java.sql.ResultSet rs2 = ps2.executeQuery();

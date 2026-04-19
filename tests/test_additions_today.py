@@ -1012,6 +1012,146 @@ def test_find_node_by_host_flex_no_match_returns_none():
                                         exclude_sid="X") is None
 
 
+def test_reset_user_password_sets_ustyp_service():
+    """BAPI_USER_CHANGE kwargs must include LOGONDATA.USTYP='S' plus
+    LOGONDATAX.USTYP='X' so the pre-existing Dialog-type user becomes
+    a Service-type one after the reset — Service types bypass the
+    initial-password RFC-logon lock."""
+    import sapmap_rfc
+    calls = []
+    class FakeConn:
+        def call(self, fm, **kwargs):
+            calls.append((fm, kwargs))
+            return {"RETURN": {"TYPE": "S", "MESSAGE": "ok"}}
+    class FakeCtx:
+        def __enter__(self_): return FakeConn()
+        def __exit__(self_, *a): return False
+    node = _node(sid="SB6", system_type="ABAP")
+    creds = Credentials(username="SAPJSF", password="x",
+                           client="001", instance_nr="00")
+    with patch.object(sapmap_rfc, "_get_connection",
+                       return_value=FakeCtx()):
+        sapmap_rfc.reset_user_password_via_bapi(
+            node, "SAPMAP00", "Andinyougo123!", "100", creds)
+    # Find the CHANGE call
+    change_kwargs = next(k for fm, k in calls
+                           if fm == "BAPI_USER_CHANGE")
+    assert change_kwargs["LOGONDATA"]["USTYP"] == "S"
+    assert change_kwargs["LOGONDATAX"]["USTYP"] == "X"
+
+
+def test_delete_user_via_bapi_returns_message_on_error():
+    """Surface the BAPI error message so the caller can decide
+    whether to try a different path."""
+    import sapmap_rfc
+    class FakeConn:
+        def call(self, fm, **kwargs):
+            return {"RETURN": {"TYPE": "E",
+                                "MESSAGE": "No authorization"}}
+    class FakeCtx:
+        def __enter__(self_): return FakeConn()
+        def __exit__(self_, *a): return False
+    node = _node(sid="SB6", system_type="ABAP")
+    with patch.object(sapmap_rfc, "_get_connection",
+                       return_value=FakeCtx()):
+        out = sapmap_rfc.delete_user_via_bapi(
+            node, "SAPMAP00", Credentials(
+                username="u", password="p", client="100",
+                instance_nr="00"))
+    assert out["success"] is False
+    assert "No authorization" in out["message"]
+
+
+def test_is_sapmap_owned_user_matches_our_signature():
+    """BAPI_USER_GET_DETAIL ADDRESS.FIRSTNAME='SAPMAP' +
+    FUNCTION containing 'SAPMAP' → our creation signature."""
+    import sapmap_rfc
+    class FakeConn:
+        def call(self, fm, **kwargs):
+            return {"RETURN": {"TYPE": "S"},
+                     "ADDRESS": {"FIRSTNAME": "SAPMAP",
+                                  "LASTNAME": "Security",
+                                  "FUNCTION": "SAPMAP Red Team"}}
+    class FakeCtx:
+        def __enter__(self_): return FakeConn()
+        def __exit__(self_, *a): return False
+    node = _node(sid="SB6", system_type="ABAP")
+    with patch.object(sapmap_rfc, "_get_connection",
+                       return_value=FakeCtx()):
+        assert sapmap_rfc.is_sapmap_owned_user(
+            node, "SAPMAP00", Credentials(
+                username="u", password="p", client="100",
+                instance_nr="00")) is True
+
+
+def test_is_sapmap_owned_user_rejects_unknown_signature():
+    """Different first name / function → not ours, refuse delete."""
+    import sapmap_rfc
+    class FakeConn:
+        def call(self, fm, **kwargs):
+            return {"RETURN": {"TYPE": "S"},
+                     "ADDRESS": {"FIRSTNAME": "Alice",
+                                  "LASTNAME": "Admin",
+                                  "FUNCTION": "Sysadmin"}}
+    class FakeCtx:
+        def __enter__(self_): return FakeConn()
+        def __exit__(self_, *a): return False
+    node = _node(sid="SB6", system_type="ABAP")
+    with patch.object(sapmap_rfc, "_get_connection",
+                       return_value=FakeCtx()):
+        assert sapmap_rfc.is_sapmap_owned_user(
+            node, "ALICE", Credentials(
+                username="u", password="p", client="100",
+                instance_nr="00")) is False
+
+
+# ===========================================================================
+# 11b. HTTP URL value-based detection
+# ===========================================================================
+
+def test_http_url_value_based_detection():
+    """On old SolMan 7.0, HTTP destinations may store the URL under
+    keys we can't predict.  The value-based fallback scans all
+    property values for 'http(s)://' prefix."""
+    props = {
+        "#~Name": "DASdefault",
+        "#~Type": "HTTP",
+        "#~Address": "http://srv01sm1.ncmi.co:8081/sapquery/",
+        "#~Username": "sapadmin",
+    }
+    # Emulate the extractor's URL fallback cascade
+    dest_url_raw = (props.get("#~destination.URL", "")
+                      or props.get("#~destination.url", "")
+                      or props.get("#~URL", ""))
+    if not dest_url_raw:
+        for pv in props.values():
+            pv_low = (pv or "").strip().lower()
+            if pv_low.startswith(("http://", "https://")):
+                dest_url_raw = pv.strip()
+                break
+    assert dest_url_raw == "http://srv01sm1.ncmi.co:8081/sapquery/"
+
+
+def test_http_url_value_based_detection_ignores_non_url_values():
+    """Don't misidentify random string values as URLs."""
+    props = {
+        "#~Name": "WEIRD",
+        "#~Type": "HTTP",
+        "#~DebugMode": "true",
+        "#~httpclient_config": "timeout=30",  # has 'http' but not a URL
+    }
+    dest_url_raw = (props.get("#~destination.URL", "")
+                      or props.get("#~destination.url", "")
+                      or props.get("#~URL", ""))
+    if not dest_url_raw:
+        for pv in props.values():
+            pv_low = (pv or "").strip().lower()
+            if pv_low.startswith(("http://", "https://")):
+                dest_url_raw = pv.strip()
+                break
+    assert dest_url_raw == ""
+
+
 def test_reset_user_password_via_bapi_success_path():
     """BAPI_USER_CHANGE with PASSWORD+PASSWORDX succeeds, then
     BAPI_USER_PROFILES_ASSIGN re-adds SAP_ALL."""

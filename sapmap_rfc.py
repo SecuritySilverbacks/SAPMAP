@@ -502,11 +502,21 @@ def reset_user_password_via_bapi(node: SAPNode, username: str,
             # 2. BAPI_USER_CHANGE — reset password.  PASSWORDX flags
             #    which PASSWORD substructure fields we actually want
             #    to change (X=change, blank=leave alone).
+            #
+            #    Also flip USTYP→'S' (Service) and GLTGB→'99991231'
+            #    (valid-to far future).  Service users bypass the
+            #    initial-password / productive-password requirement
+            #    for RFC logons that blocks Dialog users (USTYP='A')
+            #    from reusing a freshly-set password via RFC.  If
+            #    the pre-existing user was dialog, flipping it to
+            #    service keeps SAPMAP's RFC-only flow working.
             change = conn.call(
                 "BAPI_USER_CHANGE",
                 USERNAME=username,
                 PASSWORD={"BAPIPWD": password},
                 PASSWORDX={"BAPIPWD": "X"},
+                LOGONDATA={"USTYP": "S", "GLTGB": "99991231"},
+                LOGONDATAX={"USTYP": "X", "GLTGB": "X"},
             )
             ret = change.get("RETURN", {})
             rows = ret if isinstance(ret, list) else [ret]
@@ -548,6 +558,50 @@ def reset_user_password_via_bapi(node: SAPNode, username: str,
         print(f"[-] {node.sid}: password reset error: {e}")
 
     return result
+
+
+def delete_user_via_bapi(node: SAPNode, username: str,
+                            creds: Credentials = None) -> dict:
+    """Delete a user via BAPI_USER_DELETE.  Returns {success, message}.
+
+    Safety check: the caller should verify the user belongs to SAPMAP
+    (first name / function marker from BAPI_USER_GET_DETAIL) before
+    invoking this — we don't want to blindly delete arbitrary users.
+    """
+    result = {"success": False, "message": ""}
+    try:
+        with _get_connection(node, creds) as conn:
+            r = conn.call("BAPI_USER_DELETE", USERNAME=username)
+            ret = r.get("RETURN", {})
+            rows = ret if isinstance(ret, list) else [ret]
+            for row in rows or []:
+                if row.get("TYPE", "") in ("E", "A"):
+                    result["message"] = row.get("MESSAGE", "")
+                    return result
+            result["success"] = True
+            result["message"] = f"User {username} deleted"
+    except Exception as e:
+        result["message"] = str(e)
+    return result
+
+
+def is_sapmap_owned_user(node: SAPNode, username: str,
+                             creds: Credentials = None) -> bool:
+    """Check whether `username` was created by SAPMAP (first name
+    'SAPMAP' + function 'SAPMAP Red Team') — safe to delete if
+    recreation is needed.  Returns False on any doubt (BAPI error,
+    different address, user not found)."""
+    try:
+        with _get_connection(node, creds) as conn:
+            det = conn.call("BAPI_USER_GET_DETAIL", USERNAME=username)
+            addr = det.get("ADDRESS") or {}
+            if not isinstance(addr, dict):
+                return False
+            first = (addr.get("FIRSTNAME") or "").strip().upper()
+            fn = (addr.get("FUNCTION") or "").strip()
+            return first == "SAPMAP" and "SAPMAP" in fn.upper()
+    except Exception:
+        return False
 
 
 def create_user_via_bapi(node: SAPNode, username: str, password: str,
