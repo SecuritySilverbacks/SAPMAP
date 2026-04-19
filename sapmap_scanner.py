@@ -1356,6 +1356,150 @@ def _query_sapcontrol_sid(host: str, port: int, timeout: float = 3) -> tuple:
     return (sid, is_java, is_abap, db_type, http_port, https_port)
 
 
+def quick_probe_sid(host: str, saprouter: str = None,
+                      timeout: float = 3,
+                      instance_hint: int = None) -> dict:
+    """Fast SAPControl probe to discover the SID of a host not yet on
+    the map.  Used by the secstore/JCo extraction path when a recovered
+    destination points at a host whose SID we can't derive from
+    J2EE_CONFIGENTRY metadata (typical for WEBADMIN, DEST3BSNJ, and
+    any destination that stores only ashost).
+
+    Strategy (cheapest → most expensive):
+
+    * Port 1128 — SAP Host Agent (if reachable).  GetSystemInstanceList
+      returns every live SAPSYSTEMNAME on that host in one call.  But
+      1128 is often firewalled from non-SAP networks, so we fall back
+      to per-instance ports.
+
+    * Ports 500NN3 (NN=00..04) — per-instance sapcontrol HTTP.  First
+      one that answers with a non-empty SAPSYSTEMNAME wins.
+
+    * Ports 500NN4 (HTTPS variants) — same via HTTPS if plain HTTP
+      refused.
+
+    Returns a dict or None.  On success:
+      { sid, instance_nr, is_abap, is_java, http_port, https_port,
+        db_type, os_type, source_port }
+    """
+    if not host:
+        return None
+
+    # Order of probe ports — host agent first (one call returns every
+    # instance's SID), then per-instance pairs HTTP/HTTPS 00-04.
+    tried_insts = [f"{instance_hint:02d}"] if instance_hint is not None else []
+    for n in (0, 1, 2, 3, 4):
+        k = f"{n:02d}"
+        if k not in tried_insts:
+            tried_insts.append(k)
+
+    probe_ports = []
+    # SAP Host Agent — special handling below (different SOAP method)
+    probe_ports.append((1128, "host_agent_http", "XX"))
+    # Per-instance sapcontrol
+    for inst in tried_insts:
+        n = int(inst)
+        probe_ports.append((50013 + n * 100, "sapcontrol", inst))
+        probe_ports.append((50014 + n * 100, "sapcontrol_https", inst))
+
+    for port, kind, inst in probe_ports:
+        if kind == "host_agent_http":
+            got = _query_host_agent_systems(host, port, timeout=timeout)
+            if got and got.get("sid"):
+                got["source_port"] = port
+                got.setdefault("instance_nr", inst)
+                return got
+            continue
+        # Per-instance sapcontrol — existing helper returns a tuple
+        try:
+            sid, is_java, is_abap, db_type, http_port, https_port = (
+                _query_sapcontrol_sid(host, port, timeout=timeout))
+        except Exception:
+            continue
+        if sid:
+            os_type = _query_sapcontrol_os(host, port, timeout=timeout) or ""
+            return {
+                "sid": sid,
+                "instance_nr": inst,
+                "is_abap": bool(is_abap),
+                "is_java": bool(is_java),
+                "db_type": db_type,
+                "http_port": http_port,
+                "https_port": https_port,
+                "os_type": os_type,
+                "source_port": port,
+            }
+    return None
+
+
+def _query_host_agent_systems(host: str, port: int,
+                                 timeout: float = 3) -> dict:
+    """Query SAP Host Agent (1128) for the SID list via
+    GetSystemInstanceList.  Returns a dict with the first system's
+    SID + lowest instance number, or None.  The host agent runs as
+    'saphostctrl' and returns info for every SAP system on the box
+    without authentication on an unhardened install.
+    """
+    import re as _re
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect((host, port))
+        body = (
+            '<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/">'
+            '<SOAP-ENV:Body><ns1:GetSystemInstanceList xmlns:ns1="urn:SAPControl">'
+            '</ns1:GetSystemInstanceList></SOAP-ENV:Body></SOAP-ENV:Envelope>'
+        )
+        req = (f"POST / HTTP/1.1\r\nHost: {host}:{port}\r\n"
+                f"Content-Type: text/xml\r\nContent-Length: {len(body)}\r\n"
+                f"\r\n{body}")
+        sock.sendall(req.encode())
+        resp = b""
+        try:
+            while len(resp) < 32768:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                resp += chunk
+        except socket.timeout:
+            pass
+        sock.close()
+        text = resp.decode("utf-8", errors="replace")
+        # Each instance returns an <item> block with SAPSYSTEMNAME and
+        # instanceNr; pull the first populated pair we see.
+        hits = _re.findall(
+            r"<item>(.*?)</item>", text, flags=_re.DOTALL)
+        for item in hits:
+            m_sid = _re.search(r"<hostname>[^<]*</hostname>.*?"
+                                r"<instanceNr>(\d+)</instanceNr>.*?"
+                                r"<httpPort>(\d*)</httpPort>.*?"
+                                r"<httpsPort>(\d*)</httpsPort>",
+                                item, flags=_re.DOTALL)
+            # Find SAPSYSTEMNAME separately — layout varies per kernel
+            sid_m = _re.search(r"<SAPSYSTEMNAME>([^<]+)</SAPSYSTEMNAME>",
+                                item) or _re.search(
+                r"<sapSystem[Nn]ame>([^<]+)</", item)
+            if sid_m and sid_m.group(1).strip():
+                sid = sid_m.group(1).strip()
+                if m_sid:
+                    inst = f"{int(m_sid.group(1)):02d}"
+                    http_port = int(m_sid.group(2) or 0)
+                    https_port = int(m_sid.group(3) or 0)
+                else:
+                    inst = "00"
+                    http_port = 0
+                    https_port = 0
+                return {
+                    "sid": sid, "instance_nr": inst,
+                    "is_abap": False, "is_java": False,
+                    "db_type": "", "os_type": "",
+                    "http_port": http_port, "https_port": https_port,
+                }
+    except Exception:
+        pass
+    return None
+
+
 def _query_sapcontrol_os(host: str, port: int, timeout: float = 3) -> str:
     """Detect OS type via SAPControl GetProcessList.
 
