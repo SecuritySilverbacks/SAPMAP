@@ -493,8 +493,6 @@ body {
       <div class="ctx-item" data-action="download_secstore">&#128273; Download SecStore (RSECTAB)</div>
       <div class="ctx-item" data-action="download_java_secstore">&#128273; Download Java Secure Store</div>
       <div class="ctx-item" data-action="view_java_secstore">&#128203; View Java Secure Store Results</div>
-      <div class="ctx-item" data-action="dump_java_configtool">&#128736;&#65039; Dump SAP ConfigTool (Vault secrets)</div>
-      <div class="ctx-item" data-action="view_configtool_dump">&#128203; View ConfigTool Dump</div>
       <div class="ctx-item" data-action="download_table">&#128229; Download Table Data</div>
     </div>
   </div>
@@ -919,35 +917,6 @@ body {
       </div>
     </div>
     <div class="shell-resize-handle" id="jss-resize-handle"></div>
-  </div>
-</div>
-
-<!-- ConfigTool Dump Modal — raw output from SAP configtool/secstore runs -->
-<div class="modal-overlay" id="ctd-modal">
-  <div class="modal shell-window" id="ctd-window" style="width:1100px;height:640px">
-    <div class="shell-titlebar" id="ctd-titlebar">
-      <h3 style="margin:0">&#128736;&#65039; ConfigTool Dump &mdash; <span id="ctd-sid"></span></h3>
-    </div>
-    <div style="flex:1;overflow:hidden;padding:12px;display:flex;flex-direction:column">
-      <div id="ctd-meta" style="font-size:11px;color:#8b949e;margin-bottom:8px"></div>
-      <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center;flex-shrink:0">
-        <input type="text" id="ctd-filter" placeholder="filter lines (case-insensitive)..." style="flex:1" oninput="renderConfigToolDump()">
-        <label style="font-size:11px;color:#8b949e">
-          <input type="checkbox" id="ctd-hits-only" onchange="renderConfigToolDump()"> Credential-hits only
-        </label>
-        <button class="btn" onclick="copyConfigToolDump()" style="white-space:nowrap">Copy All</button>
-      </div>
-      <div id="ctd-hits-summary" style="font-size:11px;color:#f85149;margin-bottom:6px"></div>
-      <pre id="ctd-body" style="flex:1 1 0;min-height:200px;overflow:auto;
-           border:1px solid #30363d;border-radius:4px;padding:8px;
-           font-family:'Cascadia Code','Fira Code','Consolas',monospace;font-size:11px;
-           background:#0d1117;color:#e6edf3;margin:0;
-           user-select:text;-webkit-user-select:text;white-space:pre-wrap;word-break:break-all"></pre>
-      <div class="form-actions" style="margin-top:8px;flex-shrink:0">
-        <button class="btn" onclick="closeModal('ctd-modal')">Close</button>
-      </div>
-    </div>
-    <div class="shell-resize-handle" id="ctd-resize-handle"></div>
   </div>
 </div>
 
@@ -1851,12 +1820,6 @@ function showCtxMenu(e, sid) {
     'download_secstore':  hasCreds,                   // need credentials/access
     'download_java_secstore': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy),
     'view_java_secstore':     n && n.java_secstore_checked,
-    // ConfigTool dump needs an OS-exec primitive — GW, CVE-31324
-    // webshell, or a UME admin (for CTC ConfigServlet).  Identical
-    // gate to download_java_secstore; different mechanism (runs
-    // SAP's own secstorefs.sh / secstore.sh / configtool.sh).
-    'dump_java_configtool':   isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy),
-    'view_configtool_dump':   !!(n && (n.java_configtool_dump || '').length),
     'download_table':     (isAbapStack && hasCreds) ||
                           (isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy)),
     'impact_assess':      hasCreds,                   // need credentials/access
@@ -1912,7 +1875,6 @@ function showCtxMenu(e, sid) {
         ? 'RECON admin user exists but no JSP-deploy primitive is reachable (CTC ConfigServlet removed, admin telnet firewalled). System is hardened — data extraction not available from here.'
         : 'Requires Java/dual-stack + CVE-2025-31324, GW SAPXPG, or a Java admin user with a reachable CTC / telnet endpoint'),
     'view_java_secstore':     'Run Download Java Secure Store first',
-    'view_configtool_dump':   'Run Dump SAP ConfigTool first (no dump stored yet)',
     'download_table':     (isJavaStack && !isAbapStack && javaDeployBlocked
         ? 'RECON admin user exists but no JSP-deploy primitive is reachable (CTC ConfigServlet removed, admin telnet firewalled). Tables cannot be dumped from a Java-only hardened target.'
         : 'Provide credentials or create a user first'),
@@ -1953,8 +1915,6 @@ function showCtxMenu(e, sid) {
     // Java-only (dual-stack also counts as Java here)
     'download_java_secstore':     !isJavaStack,
     'view_java_secstore':         !isJavaStack,
-    'dump_java_configtool':       !isJavaStack,
-    'view_configtool_dump':       !isJavaStack,
     'read_java_destinations':     !isJavaStack,
     'check_cve_6287':             !isJavaStack,
     'set_telnet_override':        !isJavaStack,
@@ -2089,20 +2049,6 @@ async function ctxAction(action) {
     }
     case 'view_java_secstore':
       showJavaSecStoreModal(sid); break;
-    case 'dump_java_configtool': {
-      if (!confirm('Run SAP ConfigTool / SecStoreFS dump?\n\n' +
-            'Executes SAP\'s own configtool.sh / secstorefs.sh / ' +
-            'secstore.sh on the target via an available OS-exec primitive ' +
-            '(GW SAPXPG, CVE-2025-31324 webshell, or UME-admin-auth CTC).\n\n' +
-            'Recovers Vault-backed entries that SAPMAP\'s SecStoreFS ' +
-            'decrypt path cannot reach — including UMEBackendConnection\'s ' +
-            'SAPJSF password.\n\n' +
-            'Output is streamed to the Console and stored on the node.')) break;
-      await api('POST', `node/${sid}/dump_java_configtool`);
-      break;
-    }
-    case 'view_configtool_dump':
-      showConfigToolDumpModal(sid); break;
     case 'create_user_java': {
       const u = prompt('Create Java user\n\nUsername:', 'SAPMAP00');
       if (!u || !u.trim()) break;
@@ -3276,103 +3222,6 @@ function copyJssJson() {
   navigator.clipboard.writeText(JSON.stringify(n.java_secstore_entries, null, 2));
 }
 
-// --- ConfigTool Dump modal ---
-let _ctdCurrentSid = null;
-
-function showConfigToolDumpModal(sid) {
-  const n = (mapState.nodes || {})[sid];
-  if (!n) return;
-  const dump = n.java_configtool_dump || '';
-  const hits = n.java_configtool_hits || [];
-  if (!dump.length) {
-    alert('No ConfigTool dump stored for ' + sid + '.\n\n' +
-          'Run Data Extraction → Dump SAP ConfigTool (Vault secrets) first.');
-    return;
-  }
-  _ctdCurrentSid = sid;
-  document.getElementById('ctd-sid').textContent = sid;
-  // Reset window position + size
-  const w = document.getElementById('ctd-window');
-  w.style.top = '50%'; w.style.left = '50%';
-  w.style.transform = 'translate(-50%, -50%)';
-  w.style.width = '1100px'; w.style.height = '640px';
-  const lineCount = dump.split('\n').length;
-  const tools = (dump.match(/^=== /gm) || []).length;
-  document.getElementById('ctd-meta').innerHTML =
-      'size=' + escHtml(String(dump.length)) + ' B · ' +
-      'lines=' + escHtml(String(lineCount)) + ' · ' +
-      'tools invoked=' + escHtml(String(tools)) + ' · ' +
-      'credential hits=' + escHtml(String(hits.length));
-  // Hit summary — show first few credential hits in red so the
-  // operator doesn't have to scroll looking for them.
-  const summary = document.getElementById('ctd-hits-summary');
-  if (hits.length) {
-    summary.innerHTML = '&#x1F511; ' + hits.length + ' credential-looking '
-      + 'hit(s): ' + hits.slice(0, 5).map(h =>
-          escHtml(h.name || '?') + '=' + escHtml(h.value || '?').slice(0, 40)
-        ).join(' · ') + (hits.length > 5 ? ' …' : '');
-  } else {
-    summary.innerHTML = '';
-  }
-  document.getElementById('ctd-filter').value = '';
-  document.getElementById('ctd-hits-only').checked = false;
-  renderConfigToolDump();
-  document.getElementById('ctd-modal').classList.add('visible');
-}
-
-function renderConfigToolDump() {
-  const sid = _ctdCurrentSid;
-  if (!sid) return;
-  const n = (mapState.nodes || {})[sid];
-  if (!n) return;
-  const dump = n.java_configtool_dump || '';
-  const hits = n.java_configtool_hits || [];
-  const filter = (document.getElementById('ctd-filter').value || '').toLowerCase();
-  const hitsOnly = document.getElementById('ctd-hits-only').checked;
-  const hitLines = new Set();
-  if (hitsOnly || hits.length) {
-    for (const h of hits) {
-      if (h.name) hitLines.add(h.name);
-    }
-  }
-  const body = document.getElementById('ctd-body');
-  const out = [];
-  const lines = dump.split('\n');
-  for (const line of lines) {
-    const low = line.toLowerCase();
-    if (filter && low.indexOf(filter) === -1) continue;
-    if (hitsOnly) {
-      // Keep the line only if it looks like a credential hit (contains
-      // any hit name we recorded, or matches the pass/pwd/secret regex).
-      let keep = false;
-      for (const hn of hitLines) {
-        if (hn && line.indexOf(hn) !== -1) { keep = true; break; }
-      }
-      if (!keep && !/pass(wd|word)?\s*=|pwd\s*=|secret\s*=|credential\s*=/i.test(line)) {
-        continue;
-      }
-    }
-    // Highlight === delimiter lines (per-tool section headers) and
-    // credential-shaped lines (key contains pass/pwd/secret/credential).
-    let colored;
-    if (/^=== .* ===$/.test(line)) {
-      colored = '<span style="color:#f0883e;font-weight:bold">' + escHtml(line) + '</span>';
-    } else if (/(pass(wd|word)?|pwd|secret|credential)\s*=/i.test(line)) {
-      colored = '<span style="color:#f85149">' + escHtml(line) + '</span>';
-    } else {
-      colored = escHtml(line);
-    }
-    out.push(colored);
-  }
-  body.innerHTML = out.join('\n') || '<span style="color:#8b949e">(no lines match the current filter)</span>';
-}
-
-function copyConfigToolDump() {
-  const n = (mapState.nodes || {})[_ctdCurrentSid];
-  if (!n) return;
-  navigator.clipboard.writeText(n.java_configtool_dump || '');
-}
-
 function showTerminalModal(sid) {
   const n = (mapState.nodes || {})[sid];
   document.getElementById('term-sid').textContent = sid;
@@ -3672,7 +3521,6 @@ function makeDraggableResizable(winId, barId, handleId) {
 }
 makeDraggableResizable('shell-window', 'shell-titlebar', 'shell-resize-handle');
 makeDraggableResizable('jss-window', 'jss-titlebar', 'jss-resize-handle');
-makeDraggableResizable('ctd-window', 'ctd-titlebar', 'ctd-resize-handle');
 makeDraggableResizable('term-window', 'term-titlebar', 'term-resize-handle');
 
 // --- Global actions ---

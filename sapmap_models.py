@@ -228,12 +228,6 @@ class SAPNode:
     # — RECON alone (user-creation only) is not enough for SecStore /
     # table dumps / impact probes.
     java_deploy_blocked: bool = False
-    # Raw output + scraped credential hits from "Dump SAP ConfigTool"
-    # action — SAP's own CLI (secstorefs.sh / secstore.sh / configtool.sh)
-    # dumps Vault-backed entries that SAPMAP's SecStoreFS.decrypt() path
-    # cannot reach.  Truncated to 500 KB / 500 hits to keep state small.
-    java_configtool_dump: str = ""
-    java_configtool_hits: list = field(default_factory=list)
     # Java Secure Store extraction state (SecStoreFS + J2EE_CONFIGENTRY)
     java_secstore_checked: bool = False
     java_secstore_version: str = ""
@@ -336,8 +330,6 @@ class SAPNode:
             "cve_2020_6287_evidence": self.cve_2020_6287_evidence,
             "telnet_override": self.telnet_override,
             "java_deploy_blocked": self.java_deploy_blocked,
-            "java_configtool_dump": self.java_configtool_dump,
-            "java_configtool_hits": self.java_configtool_hits,
             "java_secstore_checked": self.java_secstore_checked,
             "java_secstore_version": self.java_secstore_version,
             "java_secstore_algorithm": self.java_secstore_algorithm,
@@ -389,8 +381,6 @@ class SAPNode:
             cve_2020_6287_evidence=d.get("cve_2020_6287_evidence", ""),
             telnet_override=d.get("telnet_override", ""),
             java_deploy_blocked=d.get("java_deploy_blocked", False),
-            java_configtool_dump=d.get("java_configtool_dump", ""),
-            java_configtool_hits=d.get("java_configtool_hits", []) or [],
             java_secstore_checked=d.get("java_secstore_checked", False),
             java_secstore_version=d.get("java_secstore_version", ""),
             java_secstore_algorithm=d.get("java_secstore_algorithm", ""),

