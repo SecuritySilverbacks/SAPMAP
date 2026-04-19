@@ -544,6 +544,8 @@ body {
 
 <!-- Connection Info Panel -->
 <div class="info-panel" id="info-panel"></div>
+<div id="toast-stack" style="position:fixed;right:16px;bottom:16px;z-index:2000;
+     display:flex;flex-direction:column-reverse;gap:8px;pointer-events:none"></div>
 
 <!-- System Detail Panel -->
 <div class="detail-panel" id="detail-panel"></div>
@@ -2034,13 +2036,16 @@ async function ctxAction(action) {
                     'auto-added to the map, with the extracted credentials imported and ' +
                     'an RFC edge drawn from this node to them.')) break;
       await api('POST', `node/${sid}/java_secstore`);
-      // Poll briefly for the results modal to auto-open once the bg job lands.
+      // Poll briefly for the results; when they land, show a small
+      // bottom-right toast with a "View details" button instead of
+      // auto-opening the modal — the modal would hide any new downstream
+      // nodes auto-plotted on the map during extraction.
       const pollStart = Date.now();
       const pollTimer = setInterval(() => {
         const nn = (mapState.nodes || {})[sid];
         if (nn && nn.java_secstore_checked && (nn.java_secstore_entries||[]).length) {
           clearInterval(pollTimer);
-          showJavaSecStoreModal(sid);
+          showJavaSecStoreToast(sid);
         } else if (Date.now() - pollStart > 180000) {
           clearInterval(pollTimer);
         }
@@ -3072,6 +3077,90 @@ async function doPropagateTarget() {
 }
 
 // --- OS Terminal ---
+
+// --- Non-blocking toast (bottom-right) ---
+// Used by the Java Secure Store extraction path so results appear
+// without hiding auto-plotted downstream nodes behind a full modal.
+function showToast(html, {stickUntilClose=false, autoCloseMs=15000} = {}) {
+  const stack = document.getElementById('toast-stack');
+  if (!stack) return;
+  const toast = document.createElement('div');
+  toast.style.cssText = [
+    'background:#1c2128',
+    'border:1px solid #30363d',
+    'border-left:4px solid #3fb950',
+    'border-radius:6px',
+    'padding:10px 12px',
+    'box-shadow:0 6px 20px rgba(0,0,0,.5)',
+    'min-width:320px',
+    'max-width:440px',
+    'font-size:12px',
+    'color:#e6edf3',
+    'pointer-events:auto',
+    'opacity:0',
+    'transform:translateY(8px)',
+    'transition:opacity .18s ease, transform .18s ease',
+  ].join(';');
+  toast.innerHTML = html;
+  stack.appendChild(toast);
+  // Animate in
+  requestAnimationFrame(() => {
+    toast.style.opacity = '1';
+    toast.style.transform = 'translateY(0)';
+  });
+  const close = () => {
+    toast.style.opacity = '0';
+    toast.style.transform = 'translateY(8px)';
+    setTimeout(() => toast.remove(), 200);
+  };
+  toast.querySelectorAll('[data-close]').forEach(el => {
+    el.addEventListener('click', close);
+  });
+  if (!stickUntilClose && autoCloseMs > 0) {
+    setTimeout(close, autoCloseMs);
+  }
+  return close;
+}
+
+function showJavaSecStoreToast(sid) {
+  const n = (mapState.nodes || {})[sid];
+  if (!n) return;
+  const entries = n.java_secstore_entries || [];
+  const offlineCount = entries.filter(e =>
+      (e.source || '').indexOf('offline') !== -1).length;
+  const configCount = entries.filter(e =>
+      (e.source || '').startsWith('J2EE_CONFIGENTRY')).length;
+  const fileCount = entries.filter(e =>
+      e.source === 'SecStore.properties').length;
+  const failed = (n.java_secstore_failed_decrypts || []).length;
+  showToast(
+    '<div style="display:flex;justify-content:space-between;'
+      + 'align-items:center;margin-bottom:6px">'
+      + '<strong style="color:#3fb950">&#128273; '
+        + escHtml(sid) + ' secure store extracted</strong>'
+      + '<span data-close style="cursor:pointer;color:#8b949e;'
+        + 'font-size:14px;margin-left:12px" title="dismiss">&times;</span>'
+    + '</div>'
+    + '<div style="color:#c9d1d9;line-height:1.5">'
+      + fileCount + ' file entries · '
+      + configCount + ' config rows'
+      + (offlineCount ? ' <span style="color:#58a6ff">('
+          + offlineCount + ' via offline decrypt)</span>' : '')
+      + (failed ? ' · <span style="color:#d29922">'
+          + failed + ' still undecryptable</span>' : '')
+    + '</div>'
+    + '<div style="margin-top:8px;display:flex;gap:6px">'
+      + '<button class="btn btn-primary" style="padding:3px 10px;'
+        + 'font-size:11px" onclick="showJavaSecStoreModal(\''
+        + escHtml(sid) + '\');this.closest(\'div\').parentElement.'
+        + 'querySelector(\'[data-close]\').click()">View details</button>'
+      + '<button class="btn" style="padding:3px 10px;font-size:11px"'
+        + ' data-close>Dismiss</button>'
+    + '</div>',
+    {stickUntilClose: true}
+  );
+}
+
 // --- Java Secure Store results modal ---
 let _jssCurrentSid = '';
 
