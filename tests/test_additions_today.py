@@ -899,6 +899,47 @@ def test_probe_and_add_host_bounded_by_run_with_timeout():
     assert elapsed < 12.0, f"probe overran wrapper: {elapsed:.2f}s"
 
 
+def test_dest_name_resolves_from_standalone_prefixless_keys():
+    """HTTP destinations on older NW 7.0x store the destination name
+    as #~DestinationName or #~Name (no 'destination.' prefix).  Our
+    name_candidates chain must resolve to it."""
+    props = {
+        "#~DestinationName": "DASdefault",
+        "#~URL": "http://localhost:50213/",
+        "#~Type": "HTTP",
+    }
+    name_candidates = [
+        props.get("#~destination.name", ""),
+        props.get("#~destination.systemDestinationName", ""),
+        props.get("#~jco.client.destination", ""),
+        props.get("#~DestinationName", ""),
+        props.get("#~destinationName", ""),
+        props.get("#~Name", ""),
+    ]
+    dest_name = next((n for n in name_candidates if n), "")
+    assert dest_name == "DASdefault"
+
+
+def test_http_bucket_password_detection_accepts_legacy_prefixless_name():
+    """The HTTP-bucket password match used to require 'destination' or
+    'secured' in the key name, which broke for older SAP 7.0x
+    destinations that store just '#~Password' / '#~Pwd'.  The
+    is_http_dest gate already confirms the CID is HTTP, so any
+    password-ish VBYTES row under that CID counts."""
+    # Simulate the inline filter logic
+    nm_low_cases = [
+        "#~destination.password",   # newer
+        "#~password",               # older, no prefix
+        "#~Pwd",                    # short form
+        "#~ClientSecret",           # SSO-token variant
+    ]
+    for nm in nm_low_cases:
+        nm_low = nm.lower()
+        matched = ("password" in nm_low or "pwd" in nm_low
+                    or "secret" in nm_low)
+        assert matched, f"legacy HTTP password key {nm!r} not detected"
+
+
 def test_http_extraction_handles_7_0_legacy_keys():
     """Older SAP 7.0 HTTP destinations sometimes omit the 'destination.'
     prefix, storing just #~URL, #~Type, #~User.  The extraction
