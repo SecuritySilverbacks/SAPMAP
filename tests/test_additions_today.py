@@ -535,3 +535,182 @@ def test_dest_target_sid_falls_back_to_sysid():
                          or props.get("#~jco.client.sysid", ""))
                          or "").upper()
     assert dest_target_sid == "SB7"
+
+
+# ===========================================================================
+# 10. SID auto-discovery via SAPControl probe (new today)
+# ===========================================================================
+
+def test_quick_probe_sid_empty_host_returns_none():
+    import sapmap_scanner
+    assert sapmap_scanner.quick_probe_sid("") is None
+    assert sapmap_scanner.quick_probe_sid(None) is None
+
+
+def test_quick_probe_sid_hits_first_responsive_port():
+    """If per-instance sapcontrol (50013) returns a SID, we accept it
+    immediately — no need to keep probing other ports."""
+    import sapmap_scanner
+
+    calls = []
+    def fake_sid(host, port, timeout=3):
+        calls.append(port)
+        if port == 50013:
+            return ("SB7", False, True, "HDB", 50000, 50001)
+        return ("", False, False, "", 0, 0)
+
+    def fake_os(host, port, timeout=3):
+        return "Linux"
+
+    def fake_host_agent(host, port, timeout=3):
+        # 1128 is tried first; simulate it being firewalled / silent
+        return None
+
+    with patch.object(sapmap_scanner, "_query_sapcontrol_sid", fake_sid), \
+         patch.object(sapmap_scanner, "_query_sapcontrol_os", fake_os), \
+         patch.object(sapmap_scanner, "_query_host_agent_systems",
+                       fake_host_agent):
+        hit = sapmap_scanner.quick_probe_sid("srv01sb7.example")
+    assert hit is not None
+    assert hit["sid"] == "SB7"
+    assert hit["instance_nr"] == "00"
+    assert hit["is_abap"] is True
+    assert hit["db_type"] == "HDB"
+    assert hit["http_port"] == 50000
+    assert hit["os_type"] == "Linux"
+    assert hit["source_port"] == 50013
+
+
+def test_quick_probe_sid_uses_host_agent_when_available():
+    import sapmap_scanner
+
+    def fake_host_agent(host, port, timeout=3):
+        return {"sid": "AED", "instance_nr": "00",
+                "is_abap": False, "is_java": False,
+                "db_type": "", "os_type": "",
+                "http_port": 8000, "https_port": 8443}
+
+    with patch.object(sapmap_scanner, "_query_host_agent_systems",
+                       fake_host_agent), \
+         patch.object(sapmap_scanner, "_query_sapcontrol_sid",
+                       lambda *a, **k: ("", False, False, "", 0, 0)):
+        hit = sapmap_scanner.quick_probe_sid("abex1.example")
+    assert hit is not None
+    assert hit["sid"] == "AED"
+    assert hit["source_port"] == 1128
+
+
+def test_quick_probe_sid_returns_none_when_nothing_answers():
+    import sapmap_scanner
+    with patch.object(sapmap_scanner, "_query_host_agent_systems",
+                       lambda *a, **k: None), \
+         patch.object(sapmap_scanner, "_query_sapcontrol_sid",
+                       lambda *a, **k: ("", False, False, "", 0, 0)):
+        hit = sapmap_scanner.quick_probe_sid("firewalled.example")
+    assert hit is None
+
+
+def test_probe_and_add_host_caches_and_reuses():
+    """Second call for the same host must hit the cache, not probe again."""
+    from sapmap_exploit import _probe_and_add_host, _sid_probe_cache
+    state = SAPMAPState()
+    # Clear cache to isolate this test from other runs
+    _sid_probe_cache.clear()
+
+    import sapmap_scanner
+    call_count = {"n": 0}
+
+    def fake_probe(host, saprouter=None, timeout=3, instance_hint=None):
+        call_count["n"] += 1
+        return {"sid": "SB7", "instance_nr": "00",
+                "is_abap": True, "is_java": False,
+                "db_type": "HDB", "os_type": "Linux",
+                "http_port": 0, "https_port": 0,
+                "source_port": 50013}
+
+    with patch.object(sapmap_scanner, "quick_probe_sid", fake_probe):
+        sid1 = _probe_and_add_host(state, "srv01sb7.example")
+        sid2 = _probe_and_add_host(state, "srv01sb7.example")
+    assert sid1 == "SB7"
+    assert sid2 == "SB7"
+    # Probe fires exactly once; second call is cache-served
+    assert call_count["n"] == 1
+    # Node was added to state
+    assert state.get_node("SB7") is not None
+    assert state.get_node("SB7").system_type == "ABAP"
+    assert state.get_node("SB7").db_type == "HDB"
+
+
+def test_probe_and_add_host_returns_empty_on_failure():
+    from sapmap_exploit import _probe_and_add_host, _sid_probe_cache
+    state = SAPMAPState()
+    _sid_probe_cache.clear()
+
+    import sapmap_scanner
+    with patch.object(sapmap_scanner, "quick_probe_sid",
+                       lambda *a, **k: None):
+        sid = _probe_and_add_host(state, "unreachable.example")
+    assert sid == ""
+    # Negative result is also cached — no new node added
+    assert len(state.nodes) == 0
+
+
+def test_probe_and_add_host_empty_host_short_circuits():
+    from sapmap_exploit import _probe_and_add_host
+    state = SAPMAPState()
+    assert _probe_and_add_host(state, "") == ""
+    assert _probe_and_add_host(state, None) == ""
+
+
+def test_probe_and_add_host_returns_existing_node_sid():
+    """If a node with the host is already on the map (different code
+    path added it), return that SID without probing."""
+    from sapmap_exploit import _probe_and_add_host, _sid_probe_cache
+    _sid_probe_cache.clear()
+    state = SAPMAPState()
+    state.add_node(SAPNode(sid="AED", system_type="ABAP",
+                               hostname="abex1", ip="10.10.1.5",
+                               instances=[InstanceInfo(
+                                   instance_nr="00", ip="10.10.1.5",
+                                   ports={})]))
+    import sapmap_scanner
+    with patch.object(sapmap_scanner, "quick_probe_sid") as p:
+        sid = _probe_and_add_host(state, "10.10.1.5")
+    assert sid == "AED"
+    p.assert_not_called()
+
+
+# ===========================================================================
+# 11. HTTP destination property extraction — older "#~URL" layout
+# ===========================================================================
+
+def test_http_extraction_handles_7_0_legacy_keys():
+    """Older SAP 7.0 HTTP destinations sometimes omit the 'destination.'
+    prefix, storing just #~URL, #~Type, #~User.  The extraction
+    fallback chain must pick those up."""
+    props = {
+        "#~Type":      "HTTP",
+        "#~URL":       "http://legacy:8000/",
+        "#~User":      "legacyuser",
+        "#~AuthenticationType": "BASICAUTHENTICATION",
+    }
+    # Emulate what cid_context builder does
+    dest_type_raw = (props.get("#~destination.type", "")
+                       or props.get("#~destination.Type", "")
+                       or props.get("#~Type", ""))
+    dest_url_raw = (props.get("#~destination.URL", "")
+                      or props.get("#~destination.url", "")
+                      or props.get("#~URL", ""))
+    dest_http_user = (props.get("#~destination.User", "")
+                        or props.get("#~destination.Username", "")
+                        or props.get("#~destination.user", "")
+                        or props.get("#~User", "")
+                        or props.get("#~Username", ""))
+    dest_http_auth = (props.get("#~destination.authenticationType", "")
+                        or props.get("#~destination.AuthenticationType", "")
+                        or props.get("#~AuthenticationType", "")
+                        or props.get("#~authenticationType", ""))
+    assert dest_type_raw == "HTTP"
+    assert dest_url_raw == "http://legacy:8000/"
+    assert dest_http_user == "legacyuser"
+    assert dest_http_auth == "BASICAUTHENTICATION"
