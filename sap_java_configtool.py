@@ -62,9 +62,20 @@ _AUX_TOOL_DIRS = [
     "/usr/sap/{sid}/{inst_dir}/exe",
     "/usr/sap/{sid}/SYS/exe/run",
     "/usr/sap/{sid}/SYS/exe/uc/linuxx86_64",
+    # /sapmnt is the canonical NFS-shared kernel location — on many
+    # installs /usr/sap/<SID>/SYS/exe/* are just symlinks pointing here,
+    # so listing /sapmnt directly can avoid failed directory reads when
+    # the symlink target is unreachable/stale.
+    "/sapmnt/{sid}/exe",
+    "/sapmnt/{sid}/exe/uc/linuxx86_64",
+    "/sapmnt/{sid}/exe/run",
     # SAP security tools dir — has secstorefs.sh and friends on 7.5+.
     "/usr/sap/{sid}/SYS/global/security/lib/tools",
     "/usr/sap/{sid}/{inst_dir}/j2ee/os_libs",
+    # AS Java offline ConfigTool jars live here on NW 7.5 — sometimes
+    # contains an auxiliary cfgdump.sh or sapsecstorefs.sh.
+    "/usr/sap/{sid}/{inst_dir}/j2ee/cluster/bin/tools",
+    "/usr/sap/{sid}/{inst_dir}/j2ee/cluster/tools",
 ]
 
 # Scripts / binaries we try.  Each tuple is (name, args, needs_login_shell).
@@ -280,7 +291,13 @@ def dump_configtool(sid: str,
                 or "cannot access" in joined
                 or "does not exist" in joined
                 or "not a directory" in joined):
-            log(f"[*] configtool:     (missing)")
+            # Surface the actual first line so a permission-denied or
+            # NFS-stale response doesn't silently look the same as
+            # not-present.  Earlier run found rsecssfx in a dir that
+            # this run's `(missing)` hid — seeing the reason matters.
+            reason = (str(lines[0]).strip()[:160]
+                      if lines else "no response from /bin/ls")
+            log(f"[*] configtool:     (not usable: {reason})")
             dir_file_cache[d] = set()
             continue
         # Split on whitespace — each token is one filename.  ls without
@@ -329,18 +346,81 @@ def dump_configtool(sid: str,
     #     so all output goes straight to SAPXPG's P4 window (which we
     #     know captures reliably for single short-lived commands)
     env_shim = "/tmp/sapmap_ct_env.sh"
+    # The shim does three jobs:
+    #  1. Source every .sapenv*.sh it can find (checking both /home/*
+    #     and common alternate SAP home layouts).
+    #  2. Fall back — if JAVA_HOME still isn't set, probe the standard
+    #     SAP JVM paths and set it.  Same for configtool classpath
+    #     (J2EE_CONFIGTOOL_JARS / CLASSPATH build based on the
+    #     configtool dir's *.jar contents).
+    #  3. If SAPMAP_DEBUG_ENV=1, print the resolved env to stdout as
+    #     a === diagnostic === block.  Otherwise `exec "$@"` silently.
     shim = (
         "#!/bin/bash\n"
+        f"# SAPMAP ConfigTool env shim for {sid}\n"
         f"for f in /home/*/.sapenv_*.sh /home/*/.sapenv.sh "
+        f"/home/{sid.lower()}adm/.sapenv*.sh "
         f"/usr/sap/{sid}/home/.sapenv_*.sh "
-        f"/usr/sap/{sid}/home/.sapenv.sh; do\n"
+        f"/usr/sap/{sid}/home/.sapenv.sh "
+        f"/sapmnt/{sid}/profile/.sapenv*.sh; do\n"
         f"  [ -f \"$f\" ] && . \"$f\" 2>/dev/null\n"
         f"done\n"
         f"export SAPSYSTEMNAME={sid}\n"
+        # Fallback JAVA_HOME discovery — sapenv isn't always found via
+        # the globs above.  Probe the usual SAP JVM install paths.
+        f"if [ -z \"$JAVA_HOME\" ]; then\n"
+        f"  for jh in /usr/sap/{sid}/*/exe/sapjvm_* "
+        f"/sapmnt/{sid}/exe/sapjvm_* "
+        f"/usr/sap/{sid}/SYS/exe/uc/linuxx86_64/sapjvm_* "
+        f"/usr/sap/{sid}/SYS/exe/run/sapjvm_* "
+        f"/opt/sapjvm_*; do\n"
+        f"    [ -d \"$jh\" ] && export JAVA_HOME=\"$jh\" && break\n"
+        f"  done\n"
+        f"fi\n"
+        f"[ -n \"$JAVA_HOME\" ] && export PATH=\"$JAVA_HOME/bin:$PATH\"\n"
         f"[ -d /usr/sap/{sid}/SYS/exe/run ] && "
         f"export PATH=/usr/sap/{sid}/SYS/exe/run:$PATH\n"
         f"[ -d /usr/sap/{sid}/SYS/exe/uc/linuxx86_64 ] && "
         f"export PATH=/usr/sap/{sid}/SYS/exe/uc/linuxx86_64:$PATH\n"
+        # If the caller is one of the configtool .sh scripts, build a
+        # classpath from every *.jar in its own directory (the jars
+        # ARE there — they're just not discoverable by the wrapper
+        # without a sapenv that defines $J2EE_CONFIG_JARS).
+        f"if [ -n \"$1\" ] && [ -f \"$1\" ]; then\n"
+        f"  TOOL_DIR=$(dirname \"$1\")\n"
+        f"  if ls \"$TOOL_DIR\"/*.jar >/dev/null 2>&1; then\n"
+        f"    CP=\"\"\n"
+        f"    for j in \"$TOOL_DIR\"/*.jar; do\n"
+        f"      CP=\"$CP:$j\"\n"
+        f"    done\n"
+        # Also include lib/ jars if present — NW 7.5 configtool typically
+        # has sharelib/offline_launcher jars one dir below.
+        f"    for lib in \"$TOOL_DIR/lib\" \"$TOOL_DIR/../lib\" "
+        f"\"$TOOL_DIR/../sharelib\"; do\n"
+        f"      if [ -d \"$lib\" ]; then\n"
+        f"        for j in \"$lib\"/*.jar; do\n"
+        f"          [ -f \"$j\" ] && CP=\"$CP:$j\"\n"
+        f"        done\n"
+        f"      fi\n"
+        f"    done\n"
+        f"    export CLASSPATH=\"${{CLASSPATH:+$CLASSPATH:}}${{CP#:}}\"\n"
+        f"  fi\n"
+        f"fi\n"
+        # Always emit diagnostics — small (a few hundred bytes) and
+        # helps us see what the shim actually resolved without extra
+        # round-trips.  Prefixed with === so the dump parser still sees
+        # the tool's own output as the main section.
+        f"echo \"=== SAPMAP_SHIM_ENV ===\"\n"
+        f"echo \"HOME=$HOME USER=$(whoami)\"\n"
+        f"echo \"JAVA_HOME=$JAVA_HOME\"\n"
+        f"echo \"SAPSYSTEMNAME=$SAPSYSTEMNAME\"\n"
+        f"echo \"PATH=$PATH\" | cut -c1-300\n"
+        f"echo \"CLASSPATH len=${{#CLASSPATH}}\"\n"
+        f"echo \"sapenv files found:\"\n"
+        f"ls -1 /home/*/.sapenv*.sh /home/{sid.lower()}adm/.sapenv*.sh "
+        f"/usr/sap/{sid}/home/.sapenv*.sh "
+        f"/sapmnt/{sid}/profile/.sapenv*.sh 2>/dev/null | head -10\n"
+        f"echo \"=== TOOL OUTPUT ===\"\n"
         f"exec \"$@\"\n"
     )
     env_shim_written = False
