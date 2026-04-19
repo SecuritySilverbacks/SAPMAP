@@ -297,9 +297,9 @@ def dump_configtool(sid: str,
             f"{len(matches)} tool hit(s)"
             f"{': ' + ', '.join(matches) if matches else ''}")
         # Add every (tool, args) combo we'll invoke for present tools
-        for (tool, args, _needs_env) in attempts:
+        for (tool, args, needs_env) in attempts:
             if tool in files:
-                present.append((f"{d}/{tool}", args, tool))
+                present.append((f"{d}/{tool}", args, tool, needs_env))
     if not present:
         result["error"] = (
             "none of the candidate ConfigTool / SecStoreFS scripts / "
@@ -317,14 +317,70 @@ def dump_configtool(sid: str,
         f"queued across {len(tools_found)} distinct tool(s) "
         f"({', '.join(tools_found)})")
 
+    # Generate a tiny env-sourcing shim once.  Each env-dependent tool
+    # reuses it so we don't need to push sapenv resolution inline on
+    # every SAPXPG call.  The shim:
+    #   - sources every .sapenv*.sh it can find (<sid>adm home, global)
+    #   - exports SAPSYSTEMNAME so sapstartsrv/sapcontrol-style tools
+    #     resolve the correct profile
+    #   - prepends the kernel exe dir to PATH so rsecssfx + friends
+    #     remain findable for tools that chain-invoke them
+    #   - then `exec "$@"` — takes the tool + args as positional args,
+    #     so all output goes straight to SAPXPG's P4 window (which we
+    #     know captures reliably for single short-lived commands)
+    env_shim = "/tmp/sapmap_ct_env.sh"
+    shim = (
+        "#!/bin/bash\n"
+        f"for f in /home/*/.sapenv_*.sh /home/*/.sapenv.sh "
+        f"/usr/sap/{sid}/home/.sapenv_*.sh "
+        f"/usr/sap/{sid}/home/.sapenv.sh; do\n"
+        f"  [ -f \"$f\" ] && . \"$f\" 2>/dev/null\n"
+        f"done\n"
+        f"export SAPSYSTEMNAME={sid}\n"
+        f"[ -d /usr/sap/{sid}/SYS/exe/run ] && "
+        f"export PATH=/usr/sap/{sid}/SYS/exe/run:$PATH\n"
+        f"[ -d /usr/sap/{sid}/SYS/exe/uc/linuxx86_64 ] && "
+        f"export PATH=/usr/sap/{sid}/SYS/exe/uc/linuxx86_64:$PATH\n"
+        f"exec \"$@\"\n"
+    )
+    env_shim_written = False
+    needs_env_count = sum(1 for _, _, _, ne in present if ne)
+    if needs_env_count:
+        log(f"[*] configtool: {needs_env_count} tool(s) need the SAP "
+            f"env — writing {env_shim} ({len(shim)} B) …")
+        if _write_remote_file(run_cmd, env_shim, shim, log=log,
+                                 chunk_size=180):
+            run_cmd("python3",
+                    f"-c __import__('os').chmod('{env_shim}',0o755)")
+            env_shim_written = True
+        else:
+            log(f"[!] configtool: env shim upload failed — "
+                f"env-dependent tools will be skipped")
+
     # Step 4.  Invoke each tool directly via SAPXPG.  Aggregate output.
     # Each call is its own round-trip (~1-3 s) so progress is logged per
-    # invocation to make the long-running step feel responsive.
+    # invocation to make the long-running step feel responsive.  Tools
+    # that need the SAP env are dispatched through the one-shot shim
+    # which sources sapenv then execs them — the tool's own stdout
+    # still lands in P4 exactly as if it had run directly.
     all_output = []
-    for idx, (full_path, args, tool_name) in enumerate(present, 1):
-        log(f"[*] configtool: [{idx}/{len(present)}] exec "
-            f"{full_path} {args} …")
-        r = run_cmd(full_path, args)
+    for idx, (full_path, args, tool_name, needs_env) in enumerate(present, 1):
+        if needs_env:
+            if not env_shim_written:
+                log(f"[*] configtool: [{idx}/{len(present)}] skip "
+                    f"{full_path} — env shim not available")
+                continue
+            log(f"[*] configtool: [{idx}/{len(present)}] exec (via env) "
+                f"{full_path} {args} …")
+            # Shim reads its invocation as `<shim> <tool> <args>` via
+            # `exec "$@"`.  We send the shim path as the command and a
+            # single PARAMS string containing the tool + its args.
+            shim_params = f"{full_path} {args}".strip()
+            r = run_cmd(env_shim, shim_params)
+        else:
+            log(f"[*] configtool: [{idx}/{len(present)}] exec "
+                f"{full_path} {args} …")
+            r = run_cmd(full_path, args)
         lines = r.get("output") or []
         snippet = "\n".join(str(l) for l in lines).strip()
         err = (r.get("error") or "").strip()
@@ -348,6 +404,11 @@ def dump_configtool(sid: str,
             "bytes": len(snippet),
             "snippet": snippet[:500],
         })
+
+    # Cleanup shim on successful completion; leave behind on error so
+    # the operator can reuse it manually via the OS Terminal.
+    if env_shim_written and all_output:
+        run_cmd("/bin/rm", f"-f {env_shim}")
 
     result["dump_text"] = "\n".join(all_output)
     if all_output:
