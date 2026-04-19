@@ -890,8 +890,8 @@ body {
         <label style="font-size:11px;color:#8b949e">
           <input type="checkbox" id="jss-showpw" onchange="renderJssTable()" checked> Show passwords
         </label>
-        <label style="font-size:11px;color:#8b949e" title="Framework-internal '#~childInstance.N' rows — hidden by default because they clutter the view and never contain user-facing secrets">
-          <input type="checkbox" id="jss-showchild" onchange="renderJssTable()"> Show childInstance entries
+        <label style="font-size:11px;color:#8b949e" title="Framework-internal noise: #~childInstance.N, #~data-source-aliases.xml, #~Secured Property*, and rows whose decrypt was refused (kind=undecryptable).  Hidden by default because they never contain user-facing secrets.">
+          <input type="checkbox" id="jss-shownoise" onchange="renderJssTable()"> Show noise (childInstance, aliases.xml, Secured Property*, undecryptable)
         </label>
         <button class="btn" onclick="copyJssJson()" style="white-space:nowrap">Copy JSON</button>
       </div>
@@ -2488,13 +2488,24 @@ function showDetails(sid) {
       ${n.java_secstore_checked ? `
       <div class="detail-row"><span class="detail-key">Java Secure Store</span><span class="detail-val">${
         (() => {
-          const entries = n.java_secstore_entries || [];
-          const fe = entries.filter(e => (e.source || '') === 'SecStore.properties').length;
-          const ce = entries.filter(e => (e.source || '') === 'J2EE_CONFIGENTRY').length;
-          const ds = Array.from(new Set(entries.filter(e => e.is_downstream).map(e => e.target_sid))).filter(Boolean);
-          return `<span style="color:#f85149">${entries.length} entries decrypted</span>` +
+          // Apply the same noise filter the modal uses by default, so
+          // the summary counts match what the operator actually sees.
+          const isNoise = (e) => {
+            const nm = e.name || '';
+            return /childinstance/i.test(nm)
+                || /^#~data-source-aliases\.xml$/i.test(nm)
+                || /^#~secured property/i.test(nm)
+                || (e.kind || '').toLowerCase() === 'undecryptable';
+          };
+          const visible = (n.java_secstore_entries || []).filter(e => !isNoise(e));
+          const hidden  = (n.java_secstore_entries || []).length - visible.length;
+          const fe = visible.filter(e => (e.source || '') === 'SecStore.properties').length;
+          const ce = visible.filter(e => (e.source || '').startsWith('J2EE_CONFIGENTRY')).length;
+          const ds = Array.from(new Set(visible.filter(e => e.is_downstream).map(e => e.target_sid))).filter(Boolean);
+          return `<span style="color:#f85149">${visible.length} entries decrypted</span>` +
                  ` <span style="color:#8b949e">(${fe} file · ${ce} configentry` +
                  (ds.length ? ` · downstream: ${escHtml(ds.join(', '))}` : '') +
+                 (hidden ? ` · ${hidden} noise hidden` : '') +
                  `)</span> · alg=${escHtml((n.java_secstore_algorithm || '').slice(0, 60))}` +
                  ` <a href="javascript:void(0)" onclick="showJavaSecStoreModal('${escHtml(n.sid)}')" style="color:#58a6ff">view all →</a>`;
         })()
@@ -2511,24 +2522,41 @@ function showDetails(sid) {
           <th style="text-align:left;padding:3px 6px">Value</th>
         </tr></thead>
         <tbody>
-        ${(n.java_secstore_entries || []).slice(0, 25).map(e => {
-          const isPw = /pass|pwd|secret|credential/i.test(e.name || '');
-          let v = e.value || '';
-          if (isPw && v.length > 0) v = '•'.repeat(Math.min(v.length, 8)) + ' (' + v.length + 'B)';
-          v = String(v).replace(/(password\s*=)[^&;\s]+/gi, '$1***');
-          // Inline details panel keeps a tight 200-char preview;
-          // full value lives in the modal (link below the table).
-          if (v.length > 200) v = v.slice(0, 200) + '… [open full modal]';
-          const ds = e.is_downstream ? ' style="color:#f85149"' : '';
-          return `<tr${ds}>` +
-            `<td style="padding:3px 6px;color:#8b949e">${escHtml((e.source || '').replace('SecStore.properties', 'file').replace('J2EE_CONFIGENTRY', 'cfg'))}</td>` +
-            `<td style="padding:3px 6px">${escHtml(e.name)}</td>` +
-            `<td style="padding:3px 6px;word-break:break-all">${escHtml(v)}</td>` +
-          `</tr>`;
-        }).join('')}
-        ${(n.java_secstore_entries || []).length > 25 ?
-          `<tr><td colspan="3" style="padding:6px;color:#8b949e;text-align:center">… ${(n.java_secstore_entries || []).length - 25} more — open full modal</td></tr>`
-          : ''}
+        ${(() => {
+          // Same noise filter as the modal + summary.  We render up
+          // to 25 non-noise rows inline so the operator sees real
+          // credentials without opening the modal.
+          const isNoise = (e) => {
+            const nm = e.name || '';
+            return /childinstance/i.test(nm)
+                || /^#~data-source-aliases\.xml$/i.test(nm)
+                || /^#~secured property/i.test(nm)
+                || (e.kind || '').toLowerCase() === 'undecryptable';
+          };
+          const visible = (n.java_secstore_entries || []).filter(e => !isNoise(e));
+          const head = visible.slice(0, 25);
+          const overflow = visible.length - head.length;
+          const body = head.map(e => {
+            const isPw = /pass|pwd|secret|credential/i.test(e.name || '');
+            let v = e.value || '';
+            if (isPw && v.length > 0) v = '•'.repeat(Math.min(v.length, 8)) + ' (' + v.length + 'B)';
+            v = String(v).replace(/(password\s*=)[^&;\s]+/gi, '$1***');
+            if (v.length > 200) v = v.slice(0, 200) + '… [open full modal]';
+            const ds = e.is_downstream ? ' style="color:#f85149"' : '';
+            return `<tr${ds}>` +
+              `<td style="padding:3px 6px;color:#8b949e">${escHtml((e.source || '').replace('SecStore.properties', 'file').replace('J2EE_CONFIGENTRY', 'cfg'))}</td>` +
+              `<td style="padding:3px 6px">${escHtml(e.name)}</td>` +
+              `<td style="padding:3px 6px;word-break:break-all">${escHtml(v)}</td>` +
+            `</tr>`;
+          }).join('');
+          const more = overflow > 0
+            ? `<tr><td colspan="3" style="padding:6px;color:#8b949e;text-align:center">… ${overflow} more — open full modal</td></tr>`
+            : '';
+          const emptyNote = visible.length === 0
+            ? `<tr><td colspan="3" style="padding:6px;color:#8b949e;text-align:center;font-style:italic">All ${(n.java_secstore_entries || []).length} entries filtered as noise — open the modal and tick "Show noise" to inspect</td></tr>`
+            : '';
+          return body + more + emptyNote;
+        })()}
         </tbody>
       </table>
     </div>` : ''}
@@ -3191,20 +3219,30 @@ function renderJssTable() {
   if (!n) return;
   const entries = n.java_secstore_entries || [];
   const showPw = document.getElementById('jss-showpw').checked;
-  const showChild = document.getElementById('jss-showchild').checked;
+  const showNoise = document.getElementById('jss-shownoise').checked;
   const filter = (document.getElementById('jss-filter').value || '').toLowerCase();
   const tbody = document.getElementById('jss-tbody');
   const rows = [];
   const isPwField = (name) => /pass|pwd|secret|credential/i.test(name);
-  let hiddenChild = 0;
+  let hiddenNoise = 0;
   for (const e of entries) {
     const name = e.name || '';
     const value = e.value || '';
-    // Framework-internal '#~childInstance.N' rows are extremely noisy
-    // and never contain user-facing secrets.  Hide by default; user
-    // can toggle the 'Show childInstance entries' checkbox to reveal.
-    if (!showChild && /childinstance/i.test(name)) {
-      hiddenChild++;
+    // Noise filter: framework-internal rows that never contain
+    // user-facing secrets.  Hidden by default; user can toggle the
+    // 'Show noise' checkbox to reveal.  Matches:
+    //   * #~childInstance.N  — cluster framework state
+    //   * #~data-source-aliases.xml  — JNDI alias descriptor
+    //   * #~Secured Property*  — generic property bag entries
+    //   * kind === 'undecryptable'  — rows whose VBYTES couldn't be
+    //     recovered by either engine or offline path
+    if (!showNoise && (
+          /childinstance/i.test(name)
+          || /^#~data-source-aliases\.xml$/i.test(name)
+          || /^#~secured property/i.test(name)
+          || (e.kind || '').toLowerCase() === 'undecryptable'
+        )) {
+      hiddenNoise++;
       continue;
     }
     // Build a flat "belongs to" string from dest_name / dest_user /
@@ -3286,11 +3324,13 @@ function renderJssTable() {
   if (!rows.length) {
     rows.push('<tr><td colspan="6" style="padding:12px;color:#8b949e;text-align:center">No matching entries.</td></tr>');
   }
-  if (hiddenChild > 0) {
+  if (hiddenNoise > 0) {
     rows.push('<tr><td colspan="6" style="padding:6px 12px;color:#8b949e;'
               + 'text-align:center;font-style:italic;border-top:1px dashed #30363d">'
-              + hiddenChild + " '#~childInstance' entries hidden — "
-              + "tick 'Show childInstance entries' above to include them</td></tr>");
+              + hiddenNoise + ' noise entries hidden '
+              + '(childInstance / data-source-aliases.xml / '
+              + 'Secured Property* / undecryptable) — '
+              + "tick 'Show noise' above to include them</td></tr>");
   }
   tbody.innerHTML = rows.join('');
 }
