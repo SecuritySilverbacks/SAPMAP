@@ -269,10 +269,28 @@ try {
                     + "WHERE NAME LIKE '#~%' AND VSTR IS NOT NULL "
                     + "AND VSTR <> '' AND CID IN ("
                     + "  SELECT DISTINCT CID FROM J2EE_CONFIGENTRY "
-                    + "  WHERE (NAME = '#~destination.name' "
-                    + "         OR NAME LIKE '#~jco.client.%' "
-                    + "         OR NAME LIKE '#~destination.%') "
-                    + "  AND VSTR IS NOT NULL AND VSTR <> ''"
+                    + "  WHERE ("
+                    // RFC / JCo destinations — any CID with classic
+                    // jco.client.* or destination.name / destination.*
+                    + "    NAME = '#~destination.name' "
+                    + "    OR NAME LIKE '#~jco.client.%' "
+                    + "    OR NAME LIKE '#~destination.%' "
+                    // HTTP destinations on older NW 7.0x often skip
+                    // the "destination." prefix — admit CIDs that
+                    // carry just #~URL, #~DestinationName, #~Type
+                    // (case-sensitive — SAP uses both camelCase and
+                    // lowercase across kernel releases).
+                    + "    OR NAME = '#~URL' "
+                    + "    OR NAME = '#~url' "
+                    + "    OR NAME = '#~Type' "
+                    + "    OR NAME = '#~type' "
+                    + "    OR NAME = '#~DestinationName' "
+                    + "    OR NAME = '#~destinationName' "
+                    + "    OR NAME = '#~Username' "
+                    + "    OR NAME = '#~User' "
+                    + "    OR NAME = '#~AuthenticationType' "
+                    + "    OR NAME = '#~authenticationType' "
+                    + "  ) AND VSTR IS NOT NULL AND VSTR <> ''"
                     + ")");
                 java.sql.ResultSet rs2 = ps2.executeQuery();
                 int ctxCount = 0;
