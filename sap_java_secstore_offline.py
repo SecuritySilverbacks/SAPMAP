@@ -67,9 +67,26 @@ _SECKEY_RE = re.compile(rb"(\d\.\d{2}\.\d{3})\.\d{3}\|(.*)", re.DOTALL)
 _PBE_SALT = b"\x00" * 16
 _PBE_ITERATIONS = 0        # 0 is treated as 1 effective round by the KDF
 
-# Each decrypted plaintext starts with an 18-byte "alphabet" header that
-# SAP prefixes for algorithm / version bookkeeping.  We skip it.
-_ALPHABET_SKIP = 18
+# Each decrypted plaintext starts with a fixed 16-byte "alphabet"
+# header ("ABCDEFGHIJKLMNOP") followed by a 2-byte big-endian length
+# prefix, then the actual value, then PKCS#7 padding.
+#   plaintext = <16B alphabet> <2B BE length> <value[length]> <padding>
+# We skip the alphabet and honour the length prefix so truncation is
+# exact — matches what the engine-side SecStoreFS.decrypt() returns
+# (alphabet stripped, length honoured internally).
+_ALPHABET_LEN = 16
+_ALPHABET_SKIP = _ALPHABET_LEN + 2   # 18
+
+
+def _strip_alphabet_and_length(plain: bytes) -> bytes:
+    """Strip the 16-byte alphabet header + honour the 2-byte BE length
+    prefix, returning just the value bytes."""
+    if len(plain) < _ALPHABET_SKIP:
+        return plain[_ALPHABET_SKIP:] if len(plain) > _ALPHABET_SKIP else b""
+    declared = (plain[_ALPHABET_LEN] << 8) | plain[_ALPHABET_LEN + 1]
+    if 0 <= declared <= len(plain) - _ALPHABET_SKIP:
+        return plain[_ALPHABET_SKIP:_ALPHABET_SKIP + declared]
+    return plain[_ALPHABET_SKIP:]
 
 # VBYTES format byte constants
 _VBFMT_CLEARTEXT = 0x00
@@ -250,12 +267,12 @@ def decrypt_vbytes(vbytes_hex: str, keyphrase: bytes,
     body = data[2:]    # skip format byte + (unused) flag/len byte
 
     if fmt == _VBFMT_CLEARTEXT:
-        # Cleartext — stored base64-encoded with the 18-byte alphabet header.
+        # Cleartext — stored base64-encoded with the 18-byte header.
         try:
             plain = base64.b64decode(body, validate=False)
         except Exception:
             return None
-        return plain[_ALPHABET_SKIP:] if len(plain) > _ALPHABET_SKIP else b""
+        return _strip_alphabet_and_length(plain)
 
     if fmt == _VBFMT_PBE:
         # Encrypted — PBEWithSHAAnd3KeyTripleDESCBC.
@@ -264,7 +281,7 @@ def decrypt_vbytes(vbytes_hex: str, keyphrase: bytes,
         except Exception as e:
             logger.debug(f"PBE decrypt failed on VBYTES: {e}")
             return None
-        return dec[_ALPHABET_SKIP:] if len(dec) > _ALPHABET_SKIP else b""
+        return _strip_alphabet_and_length(dec)
 
     # Unknown format byte — row isn't SecStoreFS data.
     return None

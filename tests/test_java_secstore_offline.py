@@ -18,11 +18,19 @@ from sap_java_secstore_offline import (
     _pbe_decrypt_3des_cbc,
     _pwd_to_bmp,
     _SECRET_XOR,
+    _ALPHABET_LEN,
     _ALPHABET_SKIP,
+    _strip_alphabet_and_length,
     deobfuscate_seckey,
     decrypt_vbytes,
     decrypt_secstore_properties,
 )
+
+
+def _build_plain(payload: bytes) -> bytes:
+    """Build a plaintext matching SAP's actual layout:
+       <16B alphabet> <2B BE length> <payload bytes>"""
+    return b"ABCDEFGHIJKLMNOP" + len(payload).to_bytes(2, "big") + payload
 
 
 # ---------------------------------------------------------------------------
@@ -151,19 +159,17 @@ def test_deobfuscate_seckey_marks_pre_v7_false():
 
 def _make_vbytes_cleartext(payload: bytes) -> str:
     """Build a fake VBYTES hex for format 0x00 (cleartext base64 with
-    18-byte prefix)."""
-    prefix_header = b"\x00" * _ALPHABET_SKIP
-    b64_content = base64.b64encode(prefix_header + payload)
+    16-byte alphabet + 2-byte BE length prefix)."""
+    b64_content = base64.b64encode(_build_plain(payload))
     # Format byte 0x00, flag byte 0x00, then the base64 bytes.
     vb = b"\x00\x00" + b64_content
     return vb.hex()
 
 
 def _make_vbytes_encrypted(payload: bytes, password) -> str:
-    """Build a fake VBYTES hex for format 0x01 (PBE-encrypted)."""
-    prefix_header = b"\x00" * _ALPHABET_SKIP
-    pt = prefix_header + payload
-    ct = _pbe_encrypt_3des_cbc(pt, password)
+    """Build a fake VBYTES hex for format 0x01 (PBE-encrypted), with
+    the SAP plaintext layout: 16B alphabet + 2B BE length + payload."""
+    ct = _pbe_encrypt_3des_cbc(_build_plain(payload), password)
     vb = b"\x01\x00" + ct
     return vb.hex()
 
@@ -204,6 +210,26 @@ def test_decrypt_vbytes_rejects_invalid_hex():
 
 def test_decrypt_vbytes_empty_input():
     assert decrypt_vbytes("", keyphrase=b"x") is None
+
+
+def test_strip_alphabet_honours_length_prefix():
+    # Plaintext has real payload followed by junk; length prefix says
+    # take only the first 4 bytes of payload.  The rest (even if not
+    # zero) must not be returned.
+    plain = b"ABCDEFGHIJKLMNOP" + (4).to_bytes(2, "big") + b"PASS" + b"GARBAGE"
+    assert _strip_alphabet_and_length(plain) == b"PASS"
+
+
+def test_decrypt_vbytes_truncates_to_declared_length():
+    # Emulates SAP's real payload layout when the PBE plaintext has
+    # trailing padding left behind after PKCS#7 strip.  decrypt_vbytes
+    # must return ONLY the declared-length bytes, not the full tail.
+    payload = b"Down1oad"   # 8 bytes, real SAP default keyphrase length
+    hex_vb = _make_vbytes_encrypted(payload, b"masterkey")
+    # Decrypt → plaintext has extra bytes past the 8-byte payload
+    # (the next 3DES-CBC block); length prefix says 8.
+    result = decrypt_vbytes(hex_vb, keyphrase=b"masterkey")
+    assert result == payload  # exactly 8 bytes, not 8+padding
 
 
 # ---------------------------------------------------------------------------
