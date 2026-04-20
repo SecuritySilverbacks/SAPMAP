@@ -3359,6 +3359,129 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(key, "Check All 10KBlaze", _run)
         return json.dumps({"status": "started", "systems": len(nodes)})
 
+    @app.route("/api/actions/check_all_vulns", method="POST")
+    def actions_check_all_vulns():
+        """Run every passive 'Check ...' probe across every node on the map.
+
+        Mirrors the per-node right-click Scanning → Check * items, gated
+        by the node's system_type:
+          - check_gw          — every node
+          - check_ms          — every node (39NN probe)
+          - check_cve_31324   — Java / double-stack only
+          - check_cve_6287    — Java / double-stack only
+          - check_router_info — SAProuter nodes only
+        Deep scan / default-creds / RFC retrieval are excluded by design
+        (deep scan is SAPology; default-creds may lock accounts; RFC
+        retrieval needs authenticated logon — none are "vulnerability
+        checks" in the drive-by sense this action covers).
+        """
+        response.content_type = "application/json"
+        nodes = list(api.state.nodes.values())
+        if not nodes:
+            return json.dumps({"error": "No systems on the map"})
+
+        def _run():
+            import sapmap_stop
+            sapmap_stop.reset_stop()
+            total = len(nodes)
+            print(f"[*] Scan for All Vulnerabilities — {total} system(s)")
+            for idx, node in enumerate(nodes, 1):
+                if sapmap_stop.is_stop_requested():
+                    print(f"[!] STOP — vuln sweep aborted "
+                          f"({idx-1}/{total} processed)")
+                    return
+                sys_type = (node.system_type or "").upper()
+                is_java = "JAVA" in sys_type
+                is_router = "ROUTER" in sys_type
+                print(f"[*] [{idx}/{total}] {node.sid} "
+                      f"({node.system_type or '?'}) — running vuln checks")
+
+                # 1. Gateway (every SAP system — skip pure routers)
+                if not is_router:
+                    try:
+                        print(f"[*] {node.sid}: check_gw")
+                        sapmap_exploit.check_gw_vulnerable(node)
+                    except Exception as e:
+                        print(f"[-] {node.sid}: check_gw failed: {e}")
+                    if sapmap_stop.is_stop_requested():
+                        print(f"[!] STOP — vuln sweep aborted")
+                        return
+
+                # 2. MS betrusted / CVE-2020-6207 (every SAP system)
+                if not is_router:
+                    try:
+                        print(f"[*] {node.sid}: check_ms_betrusted")
+                        sapmap_scanner.check_ms_betrusted(node)
+                    except Exception as e:
+                        print(f"[-] {node.sid}: check_ms failed: {e}")
+                    if sapmap_stop.is_stop_requested():
+                        print(f"[!] STOP — vuln sweep aborted")
+                        return
+
+                # 3. CVE-2025-31324 — Java / double-stack only
+                if is_java:
+                    try:
+                        print(f"[*] {node.sid}: check_cve_2025_31324")
+                        sapmap_scanner.check_cve_2025_31324(node)
+                    except Exception as e:
+                        print(f"[-] {node.sid}: check_cve_31324 failed: {e}")
+                    if sapmap_stop.is_stop_requested():
+                        print(f"[!] STOP — vuln sweep aborted")
+                        return
+
+                # 4. CVE-2020-6287 (RECON) — Java / double-stack only
+                if is_java:
+                    try:
+                        print(f"[*] {node.sid}: check_cve_2020_6287 (RECON)")
+                        sapmap_scanner.check_cve_2020_6287(node)
+                    except Exception as e:
+                        print(f"[-] {node.sid}: check_cve_6287 failed: {e}")
+                    if sapmap_stop.is_stop_requested():
+                        print(f"[!] STOP — vuln sweep aborted")
+                        return
+
+                # 5. SAProuter info leak — SAProuter nodes only
+                if is_router:
+                    try:
+                        from sap_router_info import saprouter_info_request
+                        host = node.ip or node.hostname
+                        if host:
+                            router_port = 3299
+                            for inst in node.instances:
+                                for port, svc in inst.ports.items():
+                                    if svc == "saprouter":
+                                        router_port = port
+                                        break
+                            print(f"[*] {node.sid}: check_router_info "
+                                  f"({host}:{router_port})")
+                            node.saprouter_info = saprouter_info_request(
+                                host, router_port, timeout=10)
+                            if node.saprouter_info.get("vulnerable"):
+                                node.has_critical_finding = True
+                    except Exception as e:
+                        print(f"[-] {node.sid}: check_router_info failed: {e}")
+
+            vulns = []
+            for n in nodes:
+                hits = []
+                if n.gw_vulnerable: hits.append("GW")
+                if n.ms_vulnerable: hits.append("10KBlaze")
+                if getattr(n, "cve_2025_31324_vulnerable", False):
+                    hits.append("CVE-2025-31324")
+                if getattr(n, "cve_2020_6287_vulnerable", False):
+                    hits.append("RECON")
+                if (getattr(n, "saprouter_info", None)
+                        and n.saprouter_info.get("vulnerable")):
+                    hits.append("Router-InfoLeak")
+                if hits:
+                    vulns.append(f"{n.sid}: {', '.join(hits)}")
+            print(f"[+] Vuln sweep complete — {len(vulns)} system(s) with findings")
+            for v in vulns:
+                print(f"    {v}")
+
+        _bg("_check_all_vulns", "Scan for All Vulnerabilities", _run)
+        return json.dumps({"status": "started", "systems": len(nodes)})
+
     @app.route("/api/actions/reset_rfc_cache", method="POST")
     def actions_reset_rfc_cache():
         response.content_type = "application/json"
