@@ -3382,6 +3382,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
         def _run():
             import sapmap_stop
+            import time as _time
             sapmap_stop.reset_stop()
             total = len(nodes)
             print(f"[*] Scan for All Vulnerabilities — {total} system(s)")
@@ -3390,6 +3391,15 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     print(f"[!] STOP — vuln sweep aborted "
                           f"({idx-1}/{total} processed)")
                     return
+                # Small gap between nodes so each target's gateway / MS has
+                # a moment to reset NI buffer state before we hit it again.
+                # Without this, P2 (F_SAP_INIT) occasionally goes silent
+                # on the second-or-later probe in a rapid sweep even though
+                # the target is vulnerable — the P1+P2 retry inside
+                # check_gw_vulnerable catches most of these, but a 1 s
+                # breather up front reduces the rate of the retry path.
+                if idx > 1:
+                    _time.sleep(1.0)
                 sys_type = (node.system_type or "").upper()
                 is_java = "JAVA" in sys_type
                 is_router = "ROUTER" in sys_type
