@@ -28,7 +28,10 @@ Supported actions:
     test_rfcs, test_rfc_single, download_hashes, download_secstore,
     impact_assess, impact_show, impact_export, analyze_chains,
     check_all_gw, check_all_betrusted, propagate, deep_scan, lpe,
-    highlight_chain, sleep
+    highlight_chain, sleep,
+    # Java data extraction / business impact
+    java_secstore, extract_java_hashes, read_java_destinations,
+    download_java_table, impact_assess_java
 """
 
 import json
@@ -190,6 +193,34 @@ def _map_step(step: dict) -> tuple:
 
     if action == "sleep":
         return ("SLEEP", "", step.get("seconds", 5), False)
+
+    if action == "java_secstore":
+        return ("POST", f"/api/node/{target}/java_secstore", {}, True)
+
+    if action == "extract_java_hashes":
+        return ("POST", f"/api/node/{target}/extract_java_hashes", {}, True)
+
+    if action == "read_java_destinations":
+        return ("POST", f"/api/node/{target}/read_java_destinations",
+                {}, True)
+
+    if action == "download_java_table":
+        table = (step.get("table") or "").strip()
+        if not table:
+            raise ValueError("download_java_table requires `table`")
+        payload = {
+            "table":  table,
+            "fields": step.get("fields", "*"),
+            "where":  step.get("where", ""),
+        }
+        if step.get("max_rows"):
+            payload["max_rows"] = int(step["max_rows"])
+        return ("POST", f"/api/node/{target}/download_java_table",
+                payload, True)
+
+    if action == "impact_assess_java":
+        return ("POST", f"/api/node/{target}/impact_assess_java",
+                {}, True)
 
     raise ValueError(f"Unknown action: {action}")
 
