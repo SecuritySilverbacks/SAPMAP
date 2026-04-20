@@ -35,7 +35,9 @@ Supported actions:
     # Java vulnerability checks
     check_cve_31324, check_cve_6287, check_all_cve_31324,
     # Java exploitation (requires --confirm on the CLI)
-    exploit_cve_31324, create_user_java
+    exploit_cve_31324, create_user_java,
+    # Macros (expanded at load time into multiple sub-steps)
+    java_pipeline
 """
 
 import json
@@ -276,6 +278,46 @@ DESTRUCTIVE_ACTIONS = {
 }
 
 
+# Macro actions — expanded into multiple sub-steps at load time so the
+# scripting engine stays composable (each macro is just a canonical
+# chain of existing actions).  All fields on the macro step (`target`,
+# `delay`, `timeout`, etc.) propagate to every sub-step.
+MACRO_ACTIONS = {
+    # Full Java post-compromise pipeline: verify CVE-2025-31324, drop
+    # SecStore + harvest UME hashes + enumerate JCo destinations, then
+    # run business-impact assessment.  All steps are read-only / passive
+    # (no user creation, no RCE) — for exploitation prepend an explicit
+    # `exploit_cve_31324` step (requires --confirm).
+    "java_pipeline": [
+        {"action": "check_cve_31324"},
+        {"action": "java_secstore"},
+        {"action": "extract_java_hashes"},
+        {"action": "read_java_destinations"},
+        {"action": "impact_assess_java"},
+    ],
+}
+
+
+def _expand_macros(steps: list) -> list:
+    """Replace macro steps with their component sub-steps.
+
+    Propagates `target` and any extra keys (delay/timeout/required) from
+    the macro onto each expanded sub-step, unless the sub-step already
+    defines that key.
+    """
+    out = []
+    for step in steps:
+        action = (step.get("action") or "").strip().lower()
+        if action not in MACRO_ACTIONS:
+            out.append(step)
+            continue
+        for sub in MACRO_ACTIONS[action]:
+            merged = dict(step)
+            merged.update(sub)
+            out.append(merged)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Script execution
 # ---------------------------------------------------------------------------
@@ -318,7 +360,7 @@ class ScriptRunner:
 
         self.name = data.get("name", os.path.basename(self.script_path))
         self.description = data.get("description", "")
-        self.steps = data["steps"]
+        self.steps = _expand_macros(data["steps"])
 
     def _api_call(self, method: str, path: str, payload: dict = None) -> dict:
         """Make an HTTP request to the SAPMAP API."""
