@@ -33,7 +33,9 @@ Supported actions:
     java_secstore, extract_java_hashes, read_java_destinations,
     download_java_table, impact_assess_java,
     # Java vulnerability checks
-    check_cve_31324, check_cve_6287, check_all_cve_31324
+    check_cve_31324, check_cve_6287, check_all_cve_31324,
+    # Java exploitation (requires --confirm on the CLI)
+    exploit_cve_31324, create_user_java
 """
 
 import json
@@ -235,7 +237,43 @@ def _map_step(step: dict) -> tuple:
         return ("POST", f"/api/node/{target}/impact_assess_java",
                 {}, True)
 
+    if action == "exploit_cve_31324":
+        mode = (step.get("mode") or "command").strip().lower()
+        payload = {"mode": mode}
+        if mode == "command":
+            cmd = (step.get("command") or "").strip()
+            if not cmd:
+                raise ValueError("exploit_cve_31324 mode=command requires "
+                                 "`command`")
+            payload["command"] = cmd
+        return ("POST", f"/api/node/{target}/exploit_cve_2025_31324",
+                payload, True)
+
+    if action == "create_user_java":
+        password = (step.get("password") or "").strip()
+        if not password:
+            raise ValueError("create_user_java requires `password`")
+        payload = {
+            "username": (step.get("username") or "SAPMAP00").strip(),
+            "password": password,
+            "group":    (step.get("group") or "Administrators").strip(),
+            "method":   (step.get("method") or "auto").strip(),
+        }
+        return ("POST", f"/api/node/{target}/create_user_java",
+                payload, True)
+
     raise ValueError(f"Unknown action: {action}")
+
+
+# Exploitation actions — these require an explicit --confirm on the CLI
+# to execute.  Running them without confirmation is a no-op with a
+# clearly-logged skip, so a playbook can safely be dry-run end-to-end
+# (discovery + data-read) and then re-run with --confirm to land the
+# exploitation stage.
+DESTRUCTIVE_ACTIONS = {
+    "exploit_cve_31324",
+    "create_user_java",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -245,9 +283,11 @@ def _map_step(step: dict) -> tuple:
 class ScriptRunner:
     """Execute a SAPMAP script against the local API server."""
 
-    def __init__(self, base_url: str, script_path: str):
+    def __init__(self, base_url: str, script_path: str,
+                 confirm: bool = False):
         self.base_url = base_url.rstrip("/")
         self.script_path = script_path
+        self.confirm = bool(confirm)
         self.steps = []
         self.name = ""
         self.description = ""
@@ -334,6 +374,11 @@ class ScriptRunner:
                 desc += f" on {target}"
 
             pf(f"[SCRIPT] {step_label}: {desc}")
+
+            if action in DESTRUCTIVE_ACTIONS and not self.confirm:
+                pf(f"[SCRIPT] {step_label}: SKIPPED — '{action}' is "
+                   f"exploitation; re-run with --confirm to execute")
+                continue
 
             try:
                 method, path, payload, wait = _map_step(step)
