@@ -81,6 +81,11 @@ def main():
                         help="Deep scan mode (full SAPology)")
     parser.add_argument("--script", metavar="FILE",
                         help="Run a scripted scenario (YAML/JSON) with GUI visualization")
+    parser.add_argument("--confirm", action="store_true",
+                        help="Allow a --script run to execute destructive "
+                             "actions (exploit_cve_31324, create_user_java). "
+                             "Without this flag, those steps are skipped so "
+                             "the playbook can be dry-run safely.")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Verbose output")
     parser.add_argument("--debug", action="store_true",
@@ -183,7 +188,7 @@ def main():
     # Launch script runner in background (if --script provided)
     if args.script:
         from sapmap_script import ScriptRunner
-        runner = ScriptRunner(url, args.script)
+        runner = ScriptRunner(url, args.script, confirm=args.confirm)
         try:
             runner.load()
         except Exception as e:
