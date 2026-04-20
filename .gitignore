@@ -14,5 +14,5 @@ vsp
 nwrfcsdk/
 .DS_Store
 *.webarchive
-# Lab/user-specific target lists
+# Lab/user-specific target lists — may contain internal IPs/hostnames
 targets.txt
