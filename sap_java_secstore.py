@@ -565,6 +565,30 @@ _DOWNSTREAM_PATTERNS = [
 ]
 
 
+# LMDB / SolMan Diagnostics-Agent "managed ABAP system" credentials.
+# Pattern: "#~<SID>/abap/<role>/pwd" where role ∈ {admin, com}.  These
+# aren't JCo/HTTP destinations, so classify_entry() won't see them —
+# caller code handles auth + auto-plot separately.
+_LMDB_PWD_RE = re.compile(
+    r"^#~(?P<sid>[A-Z0-9]{3})/abap/(?P<role>admin|com)/pwd$",
+    re.IGNORECASE)
+
+
+def parse_lmdb_managed_entry(name: str) -> dict:
+    """Parse a "#~<SID>/abap/(admin|com)/pwd" entry name.
+
+    Returns {is_lmdb, sid, role} on match, {is_lmdb: False} otherwise.
+    """
+    m = _LMDB_PWD_RE.match(name or "")
+    if not m:
+        return {"is_lmdb": False}
+    return {
+        "is_lmdb": True,
+        "sid":  m.group("sid").upper(),
+        "role": m.group("role").lower(),
+    }
+
+
 def classify_entry(name: str, source_sid: str) -> dict:
     """Classify a SecStore entry name.  Returns dict:
         kind       : "sapjsf"|"jdbc_local"|"jco_dest"|... or "unknown"
