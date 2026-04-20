@@ -119,9 +119,23 @@ body {
 }
 
 /* === Console === */
+.console-resizer {
+  height: 8px; flex-shrink: 0; cursor: ns-resize;
+  background: #21262d; border-top: 1px solid #30363d; border-bottom: 1px solid #30363d;
+  transition: background 0.15s;
+  position: relative; z-index: 10;
+  display: flex; align-items: center; justify-content: center;
+}
+.console-resizer::before {
+  content: ''; display: block;
+  width: 40px; height: 2px; border-radius: 2px;
+  background: #484f58;
+}
+.console-resizer:hover, .console-resizer.dragging { background: #1f6feb; }
+.console-resizer:hover::before, .console-resizer.dragging::before { background: #c9d1d9; }
 .console-container {
   height: 180px; flex-shrink: 0; display: flex; flex-direction: column;
-  border-top: 1px solid #30363d; min-height: 0;
+  min-height: 0;
 }
 .console-header {
   display: flex; justify-content: space-between; align-items: center;
@@ -421,6 +435,9 @@ body {
 
   <!-- Console restore button (visible when console is minimized) -->
   <div id="console-restore" style="display:none;height:24px;flex-shrink:0;background:#161b22;border-top:1px solid #30363d;cursor:pointer;text-align:right;padding-right:12px;line-height:24px;color:#8b949e;font-size:12px;user-select:none" onclick="toggleConsole()" title="Show Console">&#9650; Console</div>
+
+  <!-- Drag handle to resize console -->
+  <div class="console-resizer" id="console-resizer" title="Drag to resize console"></div>
 
   <!-- Console -->
   <div class="console-container" id="console-container">
@@ -4237,9 +4254,11 @@ function showAbout() {
 function toggleConsole() {
   const c = document.getElementById('console-container');
   const r = document.getElementById('console-restore');
+  const rz = document.getElementById('console-resizer');
   const hidden = c.style.display === 'none';
   c.style.display = hidden ? 'flex' : 'none';
   r.style.display = hidden ? 'none' : 'block';
+  if (rz) rz.style.display = hidden ? 'block' : 'none';
   // If we were maximized, restore map/legend when minimizing
   if (!hidden && consoleMaximized) {
     c.style.height = '180px';
@@ -4405,6 +4424,70 @@ document.getElementById('map-ctx-menu').addEventListener('click', function(e) {
   }
 });
 document.addEventListener('click', () => hideMapCtxMenu());
+
+// --- Console resize (drag handle) ---
+(function initConsoleResizer() {
+  const resizer = document.getElementById('console-resizer');
+  const container = document.getElementById('console-container');
+  if (!resizer || !container) {
+    console.warn('[resizer] elements missing', {resizer, container});
+    return;
+  }
+  const LS_KEY = 'sapmap.consoleHeight';
+  const MIN_H = 60;
+  const maxH = () => Math.max(MIN_H + 20, Math.floor(window.innerHeight * 0.8));
+  const setH = (h) => {
+    // !important defeats any late-arriving class-based CSS that might
+    // try to re-pin the height (e.g. a rerender helper that re-adds
+    // the .console-container class with its 180px default).
+    container.style.setProperty('height', h + 'px', 'important');
+  };
+  // Restore saved height
+  const saved = parseInt(localStorage.getItem(LS_KEY) || '', 10);
+  if (!isNaN(saved) && saved >= MIN_H) {
+    setH(Math.min(saved, maxH()));
+  }
+  let dragging = false, startY = 0, startH = 0, pointerId = null;
+  resizer.addEventListener('pointerdown', (e) => {
+    if (consoleMaximized) return;
+    if (container.style.display === 'none') return;
+    dragging = true;
+    pointerId = e.pointerId;
+    startY = e.clientY;
+    startH = container.getBoundingClientRect().height;
+    resizer.classList.add('dragging');
+    try { resizer.setPointerCapture(e.pointerId); } catch (err) {}
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'ns-resize';
+    e.preventDefault();
+  });
+  resizer.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    const delta = startY - e.clientY; // drag up => increase
+    let h = startH + delta;
+    h = Math.max(MIN_H, Math.min(h, maxH()));
+    setH(h);
+  });
+  const stopDrag = (e) => {
+    if (!dragging) return;
+    dragging = false;
+    resizer.classList.remove('dragging');
+    try { if (pointerId != null) resizer.releasePointerCapture(pointerId); } catch (err) {}
+    pointerId = null;
+    document.body.style.userSelect = '';
+    document.body.style.cursor = '';
+    const h = Math.round(container.getBoundingClientRect().height);
+    try { localStorage.setItem(LS_KEY, String(h)); } catch (err) {}
+  };
+  resizer.addEventListener('pointerup', stopDrag);
+  resizer.addEventListener('pointercancel', stopDrag);
+  resizer.addEventListener('lostpointercapture', stopDrag);
+  // Double-click resets to default
+  resizer.addEventListener('dblclick', () => {
+    setH(180);
+    try { localStorage.removeItem(LS_KEY); } catch (err) {}
+  });
+})();
 
 // --- Init ---
 startPolling();

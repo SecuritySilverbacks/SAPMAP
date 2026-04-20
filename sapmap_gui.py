@@ -2026,8 +2026,15 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 target_node = api.state.get_node(conn.target_sid)
                 if target_node:
                     target_client = conn.client or "000"
-                    target_inst = (target_node.instance_nrs()[0]
-                                   if target_node.instance_nrs() else "00")
+                    # Prefer the JCo-destination sysnr captured from the
+                    # Java SecStore.  Without it, a destination targeting
+                    # sysnr 40 falls back to the first registered instance
+                    # (often 00) and hits the wrong gateway port (3300
+                    # instead of 3340) — RFC_COMMUNICATION_FAILURE.
+                    target_inst = (
+                        (conn.target_instance_nr or "").strip()
+                        or (target_node.instance_nrs()[0]
+                            if target_node.instance_nrs() else "00"))
                     print(f"[*] Testing {dest_name} via direct RFC to "
                           f"{conn.target_sid} (SecStore password)...")
                     direct_creds = Credentials(
