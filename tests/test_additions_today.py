@@ -955,6 +955,40 @@ def test_hostname_matches_fqdn_short_bridge():
     assert _hostname_matches("srv01sb6", "srv01sm1.ncmi.co") is False
 
 
+def test_hostname_matches_ipv4_does_not_short_form_bridge():
+    """REGRESSION: 172.31.8.220 must not match 172.31.31.246.
+
+    The short-form bridge meant for hostnames (srv01sm1 ↔
+    srv01sm1.ncmi.co) was incorrectly splitting IPv4 addresses on
+    the first dot too — both 172.x.x.x addresses got short-form
+    "172", so DEST3BSNJ@172.31.8.220 was plotting onto THJ at
+    172.31.31.246.  IPv4 must compare exact-string only.
+    """
+    from sapmap_exploit import _hostname_matches
+    # Original false-positive case — different /16 ranges, same /8
+    assert _hostname_matches("172.31.8.220", "172.31.31.246") is False
+    # Even differing only in the last octet must not match unless
+    # exact (we don't do same-subnet matching either)
+    assert _hostname_matches("10.0.0.1", "10.0.0.2") is False
+    # IP vs hostname: never equal
+    assert _hostname_matches("172.31.8.220", "srv01") is False
+    # Same exact IP DOES match (sanity)
+    assert _hostname_matches("172.31.8.220", "172.31.8.220") is True
+
+
+def test_is_ipv4_basic():
+    from sapmap_exploit import _is_ipv4
+    assert _is_ipv4("172.31.8.220") is True
+    assert _is_ipv4("0.0.0.0") is True
+    assert _is_ipv4("255.255.255.255") is True
+    assert _is_ipv4("256.1.1.1") is False    # out of range
+    assert _is_ipv4("1.2.3") is False         # too few parts
+    assert _is_ipv4("1.2.3.4.5") is False     # too many parts
+    assert _is_ipv4("srv01sm1") is False
+    assert _is_ipv4("") is False
+    assert _is_ipv4("a.b.c.d") is False
+
+
 def test_hostname_matches_empty_returns_false():
     from sapmap_exploit import _hostname_matches
     assert _hostname_matches("", "srv01sm1") is False
