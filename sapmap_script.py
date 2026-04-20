@@ -31,7 +31,9 @@ Supported actions:
     highlight_chain, sleep,
     # Java data extraction / business impact
     java_secstore, extract_java_hashes, read_java_destinations,
-    download_java_table, impact_assess_java
+    download_java_table, impact_assess_java,
+    # Java vulnerability checks
+    check_cve_31324, check_cve_6287, check_all_cve_31324
 """
 
 import json
@@ -193,6 +195,17 @@ def _map_step(step: dict) -> tuple:
 
     if action == "sleep":
         return ("SLEEP", "", step.get("seconds", 5), False)
+
+    if action == "check_cve_31324":
+        return ("POST", f"/api/node/{target}/check_cve_2025_31324",
+                {}, True)
+
+    if action == "check_cve_6287":
+        return ("POST", f"/api/node/{target}/check_cve_2020_6287",
+                {}, True)
+
+    if action == "check_all_cve_31324":
+        return ("POST", "/api/actions/check_all_cve_31324", {}, True)
 
     if action == "java_secstore":
         return ("POST", f"/api/node/{target}/java_secstore", {}, True)

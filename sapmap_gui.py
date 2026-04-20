@@ -3276,6 +3276,33 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg("_check_all_ms", "Check All MS Betrusted", _run)
         return json.dumps({"status": "started", "systems": len(nodes)})
 
+    @app.route("/api/actions/check_all_cve_31324", method="POST")
+    def actions_check_all_cve_31324():
+        """Probe every Java / double-stack node for CVE-2025-31324.
+
+        Pure-ABAP nodes are skipped (the vuln lives in VisualComposer on
+        the Java stack), so the loop only hits candidates where the
+        check is meaningful.
+        """
+        response.content_type = "application/json"
+        nodes = [n for n in api.state.nodes.values()
+                 if "JAVA" in (n.system_type or "").upper()]
+        if not nodes:
+            return json.dumps({"error": "No Java / double-stack systems on "
+                                         "the map"})
+
+        def _run():
+            for node in nodes:
+                print(f"[*] {node.sid}: check_cve_2025_31324 "
+                      f"({node.ip})")
+                try:
+                    sapmap_scanner.check_cve_2025_31324(node)
+                except Exception as e:
+                    print(f"[-] {node.sid}: check_cve_31324 failed: {e}")
+
+        _bg("_check_all_cve_31324", "Check All CVE-2025-31324", _run)
+        return json.dumps({"status": "started", "systems": len(nodes)})
+
     @app.route("/api/actions/analyze_chains", method="POST")
     def actions_analyze_chains():
         """Discover RFC trust chain escalation paths across the landscape."""
