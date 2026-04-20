@@ -220,7 +220,14 @@ def _signal_all_betrusted_stops() -> int:
 
 
 def _bg(key: str, label: str, fn):
-    """Launch *fn* in a daemon thread with task tracking."""
+    """Launch *fn* in a daemon thread with task tracking.
+
+    Each freshly-launched task implicitly clears the global stop
+    flag so a prior STOP press doesn't silently cancel new work.
+    Cancellation only affects work already in flight.
+    """
+    import sapmap_stop
+    sapmap_stop.reset_stop()
     def _wrapper():
         _task_start(key, label)
         try:
@@ -737,6 +744,10 @@ class SAPMAPApi:
         self.scan_running = True
         self.scan_cancelled = False
         self.cancel_event.clear()
+        # Clear the global stop flag too so a previous STOP doesn't
+        # immediately cancel the new scan.
+        import sapmap_stop
+        sapmap_stop.reset_stop()
         self.scan_state = "running"
         self.scan_error = ""
 
@@ -818,13 +829,30 @@ class SAPMAPApi:
             self.scan_running = False
 
     def stop_scan(self):
+        # Three layers — older callers + new global poll:
+        #  1. scanner.cancel_event (existing) — affects the scan loop
+        #  2. registered betrusted stop_events (existing) — 10KBlaze
+        #  3. process-wide sapmap_stop.request_stop() (new) — every
+        #     long-running background op (RFC bulk tests, secstore
+        #     extract, JSP deploy chunked upload, propagation chains)
+        #     can poll is_stop_requested() and bail at a safe point
         self.cancel_event.set()
         self.scan_cancelled = True
-        print("[!] Stop requested — cancelling scan ...")
-        n = _signal_all_betrusted_stops()
-        if n:
-            print(f"[!] Stop requested — cancelling {n} 10KBlaze betrusted run(s) ...")
-        return {"status": "stopping", "betrusted_cancelled": n}
+        import sapmap_stop
+        sapmap_stop.request_stop()
+        n_bet = _signal_all_betrusted_stops()
+        n_active = len(_get_active_tasks())
+        msg_parts = ["[!] STOP requested"]
+        msg_parts.append(f"scan cancel-event set")
+        if n_bet:
+            msg_parts.append(f"{n_bet} 10KBlaze betrusted run(s) signalled")
+        if n_active:
+            msg_parts.append(f"{n_active} active background task(s) "
+                              f"flagged via sapmap_stop")
+        print(" — ".join(msg_parts))
+        return {"status": "stopping",
+                "betrusted_cancelled": n_bet,
+                "active_tasks_flagged": n_active}
 
     def get_state_dict(self):
         """Get current state as a dict for the frontend."""
@@ -1709,8 +1737,13 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
             # discovered: (host, inst) → {dest_name, remote_sid, remote_host}
             discovered = {}
+            import sapmap_stop
 
             for conn in non_self:
+                if sapmap_stop.is_stop_requested():
+                    print(f"[!] STOP — retrieve-RFCs ping loop "
+                          f"aborted ({len(discovered)} probed)")
+                    return
                 host = conn.target_ip or conn.target_host or ""
                 inst = conn.target_instance_nr or "00"
                 key = (host.lower(), inst)
@@ -1913,7 +1946,12 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     api.state.rfc_check_cache.pop(conn.destination_name, None)
             print(f"[*] RFC Testing: {sid} — {len(mapped_conns)} mapped connection(s) "
                   f"to check{f' ({skipped} unmapped skipped)' if skipped else ''}")
+            import sapmap_stop
             for conn in mapped_conns:
+                if sapmap_stop.is_stop_requested():
+                    print(f"[!] STOP — bulk RFC test aborted "
+                          f"({tested_count}/{len(mapped_conns)} done)")
+                    return
                 if not conn.tested and not api.state.is_rfc_checked(conn.destination_name):
                     print(f"[*] Testing {conn.destination_name}...")
                     result = sapmap_rfc.test_rfc_destination(
