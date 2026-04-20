@@ -14,3 +14,5 @@ vsp
 nwrfcsdk/
 .DS_Store
 *.webarchive
+# Lab/user-specific target lists
+targets.txt
