@@ -340,7 +340,12 @@ body {
       <div class="dd-item" onclick="zoomIn()">&#128269; Zoom In</div>
       <div class="dd-item" onclick="zoomOut()">&#128269; Zoom Out</div>
       <div class="dd-item" onclick="fitMap()">&#128208; Fit to Window</div>
-      <div class="dd-item" onclick="resetLayout()">&#128260; Reset Layout</div>
+      <div class="dd-item" onclick="resetLayout()">&#128260; Reset Layout (Grid)</div>
+      <div class="dd-sep"></div>
+      <div class="dd-item" onclick="layoutCircle()">&#9711; Layout: Circle</div>
+      <div class="dd-item" onclick="layoutStar()">&#10024; Layout: Star (hub &amp; spoke)</div>
+      <div class="dd-item" onclick="layoutHierarchy()">&#128719; Layout: Hierarchy (top &rarr; bottom by RFC)</div>
+      <div class="dd-item" onclick="layoutByStack()">&#128218; Layout: Group by Stack (ABAP / Java / Dual)</div>
       <div class="dd-sep"></div>
       <div class="dd-item" onclick="toggleConsole()">&#128203; Toggle Console</div>
     </div>
@@ -3914,6 +3919,182 @@ function resetLayout() {
   viewBoxUserControlled = false;
   viewBox.x = 0; viewBox.y = 0; viewBox._nodeCount = 0;
   Object.values(mapState.nodes || {}).forEach(n => { n._x = null; n._y = null; });
+  updateMap();
+}
+
+// ---------------------------------------------------------------------------
+// Alternative layouts.  All operate on mapState.nodes by setting
+// n._x / n._y (top-left corner of each node box) and then trigger
+// fitMap() so the new layout fills the viewport.  Box dimensions
+// duplicated from updateMap()'s constants — keep in sync.
+// ---------------------------------------------------------------------------
+const _LO_BOX_W = 240, _LO_BOX_H = 174, _LO_MARGIN = 60;
+
+function _loCenter(n, cx, cy) {
+  // Place node so its CENTER lands at (cx, cy).
+  n._x = cx - _LO_BOX_W / 2;
+  n._y = cy - _LO_BOX_H / 2;
+}
+
+function _loSortedNodeKeys() {
+  const nodes = mapState.nodes || {};
+  return Object.keys(nodes).sort();
+}
+
+function layoutCircle() {
+  const sids = _loSortedNodeKeys();
+  if (sids.length === 0) return;
+  const nodes = mapState.nodes;
+  // Radius scales with node count so boxes don't overlap on the ring.
+  const minR = 360;
+  const circ = sids.length * (_LO_BOX_W + _LO_MARGIN);
+  const r = Math.max(minR, circ / (2 * Math.PI));
+  // Centre of the ring; +radius padding on each side leaves room
+  // for boxes to extend past the ring centre coordinate.
+  const cx = r + _LO_BOX_W;
+  const cy = r + _LO_BOX_H;
+  sids.forEach((sid, i) => {
+    const angle = (2 * Math.PI * i) / sids.length - Math.PI / 2;  // start at top
+    _loCenter(nodes[sid], cx + r * Math.cos(angle),
+                              cy + r * Math.sin(angle));
+  });
+  fitMap();
+  updateMap();
+}
+
+function layoutStar() {
+  // Hub-and-spoke: pick the most-connected node as hub, ring the rest.
+  const sids = _loSortedNodeKeys();
+  if (sids.length === 0) return;
+  const nodes = mapState.nodes;
+  const conns = mapState.connections || [];
+  // Tally edge counts per SID — both source and target sides count.
+  const deg = {};
+  sids.forEach(s => { deg[s] = 0; });
+  conns.forEach(c => {
+    if (deg[c.source_sid] != null) deg[c.source_sid]++;
+    if (deg[c.target_sid] != null) deg[c.target_sid]++;
+  });
+  // Pick highest-degree node; tie-break by SID for stability.
+  let hub = sids[0];
+  sids.forEach(s => {
+    if (deg[s] > deg[hub] ||
+        (deg[s] === deg[hub] && s < hub)) hub = s;
+  });
+  const spokes = sids.filter(s => s !== hub);
+  const r = Math.max(360,
+      spokes.length * (_LO_BOX_W + _LO_MARGIN) / (2 * Math.PI));
+  const cx = r + _LO_BOX_W;
+  const cy = r + _LO_BOX_H;
+  // Hub at centre.
+  _loCenter(nodes[hub], cx, cy);
+  // Spokes around the ring (sorted, start at top).
+  spokes.forEach((sid, i) => {
+    const angle = (2 * Math.PI * i) / spokes.length - Math.PI / 2;
+    _loCenter(nodes[sid], cx + r * Math.cos(angle),
+                              cy + r * Math.sin(angle));
+  });
+  fitMap();
+  updateMap();
+}
+
+function layoutHierarchy() {
+  // Layered top-down by RFC edge direction.  Sources of edges go on
+  // upper layers, targets below.  Uses a BFS pass: nodes with no
+  // incoming edges land on layer 0; everyone else gets max(layer of
+  // any source) + 1.  Cycles are broken by the BFS order so the
+  // result is always a valid layered DAG even on cyclic landscapes.
+  const sids = _loSortedNodeKeys();
+  if (sids.length === 0) return;
+  const nodes = mapState.nodes;
+  const conns = mapState.connections || [];
+  // Build incoming edge map (target -> [source])
+  const incoming = {};
+  sids.forEach(s => { incoming[s] = new Set(); });
+  conns.forEach(c => {
+    if (c.source_sid && c.target_sid && c.source_sid !== c.target_sid
+        && incoming[c.target_sid] != null) {
+      incoming[c.target_sid].add(c.source_sid);
+    }
+  });
+  // Iteratively assign layer = max(layer(src)+1).  Cap at 12 passes
+  // so cycles don't loop forever.
+  const layer = {};
+  sids.forEach(s => { layer[s] = 0; });
+  for (let pass = 0; pass < 12; pass++) {
+    let changed = false;
+    sids.forEach(s => {
+      let max_src = -1;
+      incoming[s].forEach(src => {
+        if (layer[src] > max_src) max_src = layer[src];
+      });
+      if (max_src + 1 > layer[s] && max_src >= 0) {
+        layer[s] = max_src + 1;
+        changed = true;
+      }
+    });
+    if (!changed) break;
+  }
+  // Bucket sids by layer
+  const buckets = {};
+  sids.forEach(s => {
+    (buckets[layer[s]] = buckets[layer[s]] || []).push(s);
+  });
+  const layerKeys = Object.keys(buckets).map(Number).sort((a,b)=>a-b);
+  // Place each layer as a horizontal row, centred on x.
+  const ySpacing = _LO_BOX_H + _LO_MARGIN * 1.5;
+  const xSpacing = _LO_BOX_W + _LO_MARGIN;
+  const maxRow = Math.max(...layerKeys.map(k => buckets[k].length));
+  const rowWidth = maxRow * xSpacing;
+  layerKeys.forEach((lk, layerIdx) => {
+    const row = buckets[lk].sort();
+    const yC = _LO_MARGIN + layerIdx * ySpacing + _LO_BOX_H / 2;
+    const xPad = (rowWidth - row.length * xSpacing) / 2;
+    row.forEach((sid, i) => {
+      const xC = _LO_MARGIN + xPad + i * xSpacing + _LO_BOX_W / 2;
+      _loCenter(nodes[sid], xC, yC);
+    });
+  });
+  fitMap();
+  updateMap();
+}
+
+function layoutByStack() {
+  // Group nodes into clusters by system_type.  Each cluster gets its
+  // own column; nodes within a cluster stack vertically.  Saproute
+  // and unknown-stack nodes get their own columns at the right edge.
+  const sids = _loSortedNodeKeys();
+  if (sids.length === 0) return;
+  const nodes = mapState.nodes;
+
+  function bucketOf(n) {
+    const t = (n.system_type || '').toUpperCase();
+    if (t === 'SAPROUTER') return 'SAProuter';
+    if (t.includes('ABAP') && t.includes('JAVA')) return 'ABAP+JAVA';
+    if (t.includes('ABAP')) return 'ABAP';
+    if (t.includes('JAVA')) return 'JAVA';
+    return 'Other';
+  }
+  const order = ['ABAP', 'ABAP+JAVA', 'JAVA', 'SAProuter', 'Other'];
+  const clusters = {};
+  order.forEach(b => { clusters[b] = []; });
+  sids.forEach(sid => {
+    const b = bucketOf(nodes[sid]);
+    if (!clusters[b]) clusters[b] = [];
+    clusters[b].push(sid);
+  });
+  // Drop empty clusters; keep order
+  const populated = order.filter(b => clusters[b].length > 0);
+  const xSpacing = _LO_BOX_W + _LO_MARGIN * 2;
+  const ySpacing = _LO_BOX_H + _LO_MARGIN;
+  populated.forEach((b, colIdx) => {
+    clusters[b].sort().forEach((sid, rowIdx) => {
+      const xC = _LO_MARGIN + colIdx * xSpacing + _LO_BOX_W / 2;
+      const yC = _LO_MARGIN + 30 + rowIdx * ySpacing + _LO_BOX_H / 2;
+      _loCenter(nodes[sid], xC, yC);
+    });
+  });
+  fitMap();
   updateMap();
 }
 function applyViewBox() {
