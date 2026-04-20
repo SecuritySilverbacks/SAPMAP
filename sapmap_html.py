@@ -336,6 +336,7 @@ body {
   </div>
   <div class="menu-item">Actions
     <div class="menu-dropdown">
+      <div class="dd-item" onclick="scanAllVulns()" style="color:#f0883e">&#128270; Scan for All Vulnerabilities</div>
       <div class="dd-item" onclick="propagateAll()">&#128640; Auto-Propagate All</div>
       <div class="dd-item" onclick="cleanupAll()">&#129529; Cleanup All Users</div>
       <div class="dd-item" onclick="resetRFCCache()">&#128202; Reset RFC Check List</div>
@@ -557,6 +558,7 @@ body {
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="map_propagate_all">&#128640; Auto-Propagate All</div>
   <div class="ctx-item" data-action="map_cleanup_all">&#129529; Cleanup All Users</div>
+  <div class="ctx-item" data-action="map_scan_all_vulns" style="color:#f0883e">&#128270; Scan for All Vulnerabilities</div>
   <div class="ctx-item" id="map-ctx-check-all-gw" data-action="map_check_all_gw">&#128272; Check All GW Vulnerabilities</div>
   <div class="ctx-item" data-action="map_check_all_betrusted">&#128272; Check All 10KBlaze (MS Betrusted)</div>
   <div class="ctx-item" data-action="map_analyze_chains">&#128279; Analyze Trust Chains</div>
@@ -3814,6 +3816,21 @@ async function checkAllGateways() {
     await api('POST', 'actions/check_all_gw');
   startPolling();
 }
+async function scanAllVulns() {
+  const nodeCount = Object.keys(mapState.nodes || {}).length;
+  if (nodeCount < 1) { alert('No systems on the map.'); return; }
+  if (confirm(`Scan for ALL vulnerabilities on ${nodeCount} system(s)?\n\n` +
+              `Runs every passive 'Check ...' probe per node:\n` +
+              ` • GW Vulnerability (every SAP)\n` +
+              ` • MS Betrusted / CVE-2020-6207 (every SAP)\n` +
+              ` • CVE-2025-31324 VisualComposer (Java only)\n` +
+              ` • CVE-2020-6287 RECON (Java only)\n` +
+              ` • SAProuter Info Leak (SAProuter nodes)\n\n` +
+              `Excluded: Deep/SAPology scan, Default Accounts (may lock), RFC retrieval.\n\n` +
+              `Press STOP to cancel mid-sweep.`))
+    await api('POST', 'actions/check_all_vulns');
+  startPolling();
+}
 async function checkAllBetrusted() {
   const nodeCount = Object.keys(mapState.nodes || {}).length;
   if (nodeCount < 1) { alert('No systems on the map.'); return; }
@@ -4416,6 +4433,7 @@ document.getElementById('map-ctx-menu').addEventListener('click', function(e) {
     case 'map_add_system': showAddSystemModal(); break;
     case 'map_propagate_all': propagateAll(); break;
     case 'map_cleanup_all': cleanupAll(); break;
+    case 'map_scan_all_vulns': scanAllVulns(); break;
     case 'map_check_all_gw': checkAllGateways(); break;
     case 'map_check_all_betrusted': checkAllBetrusted(); break;
     case 'map_analyze_chains': analyzeChains(); break;
