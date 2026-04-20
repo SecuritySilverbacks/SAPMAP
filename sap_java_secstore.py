@@ -275,6 +275,11 @@ try {
                     + "    NAME = '#~destination.name' "
                     + "    OR NAME LIKE '#~jco.client.%' "
                     + "    OR NAME LIKE '#~destination.%' "
+                    // HTTP / logon destinations whose password lives at
+                    // #~logon.password — pull their siblings so the
+                    // extractor can label each password with its user
+                    // and destination context.
+                    + "    OR NAME LIKE '#~logon.%' "
                     // HTTP destinations on older NW 7.0x often skip
                     // the "destination." prefix — admit CIDs that
                     // carry just #~URL, #~DestinationName, #~Type
