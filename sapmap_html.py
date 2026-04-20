@@ -2356,6 +2356,63 @@ async function ctxAction(action) {
   startPolling();
 }
 
+// Tracks the per-modal live-poller so we never run more than one at
+// a time and we cancel the old one when the operator clicks a
+// different connection.
+let _connInfoPollTimer = null;
+let _connInfoLastKey = '';
+let _connInfoCurrentIdx = -1;
+
+function _connInfoStateKey(c) {
+  if (!c) return '<missing>';
+  return JSON.stringify({
+    tested:           !!c.tested,
+    logon_successful: !!c.logon_successful,
+    has_sap_all:      !!c.has_sap_all,
+    profiles_len:     (c.profiles || []).length,
+    roles_len:        (c.roles || []).length,
+    user_detail_err:  (c.user_detail_error || '').length,
+    sapxpg_remote_works: !!c.sapxpg_remote_works,
+    ping_ok:          !!c.ping_ok,
+  });
+}
+
+function _connInfoStartLivePoll(connIdx) {
+  // One active poller at a time; clear any stale one.
+  if (_connInfoPollTimer != null) {
+    clearInterval(_connInfoPollTimer);
+    _connInfoPollTimer = null;
+  }
+  _connInfoCurrentIdx = connIdx;
+  _connInfoLastKey = _connInfoStateKey(
+    (mapState.connections || [])[connIdx]);
+  const panel = document.getElementById('info-panel');
+  const POLL_MS = 750;
+  _connInfoPollTimer = setInterval(() => {
+    // Operator closed the modal OR opened another connection — stop.
+    if (!panel.classList.contains('visible')
+        || _connInfoCurrentIdx !== connIdx) {
+      clearInterval(_connInfoPollTimer);
+      _connInfoPollTimer = null;
+      return;
+    }
+    const c = (mapState.connections || [])[connIdx];
+    const key = _connInfoStateKey(c);
+    if (key === _connInfoLastKey) return;
+    _connInfoLastKey = key;
+    // Re-render in place — preserve current screen coordinates so
+    // the panel doesn't jump.
+    const initialLeft = panel.style.left;
+    const initialTop  = panel.style.top;
+    const fakeEvent = {
+      stopPropagation: () => {},
+      clientX: parseInt(initialLeft) || 0,
+      clientY: parseInt(initialTop)  || 0,
+    };
+    showConnInfo(fakeEvent, connIdx);
+  }, POLL_MS);
+}
+
 function showConnInfo(e, connIdx) {
   e.stopPropagation();
   const conn = (mapState.connections || [])[connIdx];
@@ -2471,92 +2528,22 @@ function showConnInfo(e, connIdx) {
   panel.style.left = Math.min(e.clientX, window.innerWidth - 440) + 'px';
   panel.style.top = Math.min(e.clientY, window.innerHeight - 520) + 'px';
   panel.classList.add('visible');
+
+  // Start a per-modal live poller so any subsequent backend update
+  // (Test Connection finishing, bulk Test RFCs filling profiles,
+  // RECON-driven probe etc.) re-renders this open modal without the
+  // operator having to close and re-open it.  Cheap: only re-renders
+  // when the connection's state key actually changes.
+  _connInfoStartLivePoll(connIdx);
 }
 
 async function testSingleRfc(sid, destName, connIdx) {
-  // Snapshot current state so we can tell when the backend test
-  // actually changed something (vs. just elapsed time).
-  const before = (mapState.connections || [])[connIdx] || {};
-  const beforeKey = JSON.stringify({
-    tested:           !!before.tested,
-    logon_successful: !!before.logon_successful,
-    has_sap_all:      !!before.has_sap_all,
-    profiles_len:     (before.profiles || []).length,
-    roles_len:        (before.roles || []).length,
-  });
-
+  // Just kick the backend test off.  The per-modal live-poller
+  // (started in showConnInfo) catches phase-1 (tested+logon_tested)
+  // and phase-2 (profiles+roles+has_sap_all) updates and re-renders
+  // the modal in place when either lands.  No separate poller here.
   await api('POST', `node/${sid}/test_rfc_single`, { destination_name: destName });
   startPolling();
-
-  // Poll the connection state every 750 ms.  Re-render the modal as
-  // soon as ANY meaningful field changed — typically tested→true
-  // and (possibly) has_sap_all→true.  Bail after ~60 s or if the
-  // operator closed the panel.  This replaces the old fixed 3 s
-  // timeout that missed has_sap_all when BAPI_USER_GET_DETAIL took
-  // longer than 3 s, leaving "Create Remote User" hidden until the
-  // user manually re-opened the modal.
-  // The backend test_rfc_single sets fields in two phases:
-  //   1. tested + logon_tested + logon_successful  (RFC ping)
-  //   2. profiles + roles + has_sap_all + user_detail_error
-  //      (BAPI_USER_GET_DETAIL — typically 1-10 s LATER)
-  //
-  // We must keep polling well beyond phase 1 so the second phase's
-  // has_sap_all gets reflected.  Strategy: poll continuously; exit
-  // only when the modal closes, the global timeout fires, OR we've
-  // observed N consecutive identical samples after phase 1 (state
-  // has stabilised).
-  const POLL_MS = 750;
-  const MAX_WAIT_MS = 60000;
-  const STABLE_AFTER = 8;      // 8 × 750 ms ≈ 6 s of no change post-phase-1
-  const start = Date.now();
-  let lastRenderKey = beforeKey;
-  let stableTicks = 0;
-  const panel = document.getElementById('info-panel');
-  const initialLeft = panel.style.left;
-  const initialTop = panel.style.top;
-  const poller = setInterval(() => {
-    if (!panel.classList.contains('visible')) {
-      // Operator closed the modal — stop polling silently.
-      clearInterval(poller);
-      return;
-    }
-    if (Date.now() - start > MAX_WAIT_MS) {
-      clearInterval(poller);
-      return;
-    }
-    const c = (mapState.connections || [])[connIdx];
-    if (!c) return;
-    const key = JSON.stringify({
-      tested:           !!c.tested,
-      logon_successful: !!c.logon_successful,
-      has_sap_all:      !!c.has_sap_all,
-      profiles_len:     (c.profiles || []).length,
-      roles_len:        (c.roles || []).length,
-    });
-    if (key !== lastRenderKey) {
-      lastRenderKey = key;
-      stableTicks = 0;
-      // Re-render the modal in place — preserve current pop-up coords
-      // so it doesn't jump to wherever the user's mouse is now.
-      const fakeEvent = {
-        stopPropagation: () => {},
-        clientX: parseInt(initialLeft) || 0,
-        clientY: parseInt(initialTop)  || 0,
-      };
-      showConnInfo(fakeEvent, connIdx);
-      return;
-    }
-    // Same state as last tick — count toward stability, but only
-    // start counting AFTER the first phase has completed
-    // (c.logon_tested is set there).  This way we can't bail in the
-    // brief gap between RFC ping done and BAPI_USER_GET_DETAIL fired.
-    if (c.logon_tested) {
-      stableTicks++;
-      if (stableTicks >= STABLE_AFTER) {
-        clearInterval(poller);
-      }
-    }
-  }, POLL_MS);
 }
 
 async function createUserViaRfc(sourceSid, destName, targetSid) {
