@@ -2495,10 +2495,22 @@ async function testSingleRfc(sid, destName, connIdx) {
   // timeout that missed has_sap_all when BAPI_USER_GET_DETAIL took
   // longer than 3 s, leaving "Create Remote User" hidden until the
   // user manually re-opened the modal.
+  // The backend test_rfc_single sets fields in two phases:
+  //   1. tested + logon_tested + logon_successful  (RFC ping)
+  //   2. profiles + roles + has_sap_all + user_detail_error
+  //      (BAPI_USER_GET_DETAIL — typically 1-10 s LATER)
+  //
+  // We must keep polling well beyond phase 1 so the second phase's
+  // has_sap_all gets reflected.  Strategy: poll continuously; exit
+  // only when the modal closes, the global timeout fires, OR we've
+  // observed N consecutive identical samples after phase 1 (state
+  // has stabilised).
   const POLL_MS = 750;
   const MAX_WAIT_MS = 60000;
+  const STABLE_AFTER = 8;      // 8 × 750 ms ≈ 6 s of no change post-phase-1
   const start = Date.now();
   let lastRenderKey = beforeKey;
+  let stableTicks = 0;
   const panel = document.getElementById('info-panel');
   const initialLeft = panel.style.left;
   const initialTop = panel.style.top;
@@ -2521,21 +2533,28 @@ async function testSingleRfc(sid, destName, connIdx) {
       profiles_len:     (c.profiles || []).length,
       roles_len:        (c.roles || []).length,
     });
-    if (key === lastRenderKey) return;     // nothing changed
-    lastRenderKey = key;
-    // Re-render the modal in place — preserve current pop-up coords
-    // so it doesn't jump to wherever the user's mouse is now.
-    const fakeEvent = {
-      stopPropagation: () => {},
-      clientX: parseInt(initialLeft) || 0,
-      clientY: parseInt(initialTop)  || 0,
-    };
-    showConnInfo(fakeEvent, connIdx);
-    // If the test finished AND we're done with auth-detail (sap_all
-    // either confirmed or explicitly missing), stop polling — no
-    // further changes expected.
-    if (c.tested && c.logon_tested) {
-      clearInterval(poller);
+    if (key !== lastRenderKey) {
+      lastRenderKey = key;
+      stableTicks = 0;
+      // Re-render the modal in place — preserve current pop-up coords
+      // so it doesn't jump to wherever the user's mouse is now.
+      const fakeEvent = {
+        stopPropagation: () => {},
+        clientX: parseInt(initialLeft) || 0,
+        clientY: parseInt(initialTop)  || 0,
+      };
+      showConnInfo(fakeEvent, connIdx);
+      return;
+    }
+    // Same state as last tick — count toward stability, but only
+    // start counting AFTER the first phase has completed
+    // (c.logon_tested is set there).  This way we can't bail in the
+    // brief gap between RFC ping done and BAPI_USER_GET_DETAIL fired.
+    if (c.logon_tested) {
+      stableTicks++;
+      if (stableTicks >= STABLE_AFTER) {
+        clearInterval(poller);
+      }
     }
   }, POLL_MS);
 }
