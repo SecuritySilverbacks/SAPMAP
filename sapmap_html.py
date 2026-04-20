@@ -3517,15 +3517,17 @@ function showTerminalModal(sid) {
   const sysTypeT = (n && n.system_type || '').toUpperCase();
   const isAbapT = sysTypeT.indexOf('ABAP') !== -1;
   const methodSel = document.getElementById('term-method');
-  // Enable/disable method options based on what's available
-  methodSel.options[0].disabled = !hasGw;    // gateway
-  methodSel.options[1].disabled = !hasCreated; // sxpg
-  methodSel.options[2].disabled = !hasCve;   // cve_31324
-  // SXPG requires an ABAP dialog user — hide the option entirely on
-  // pure-Java stacks so it doesn't clutter the dropdown.
-  methodSel.options[1].hidden = !isAbapT;
-  // Default: prefer CVE-31324 on Java nodes (unauth path, output via shell),
-  // otherwise GW exploit, otherwise SXPG (ABAP-only fallback).
+  // Rebuild options from scratch — SXPG is ABAP-only (requires SAP_ALL
+  // dialog user), so it is physically absent on pure-Java stacks.
+  methodSel.innerHTML = '';
+  const addT = (v, label, disabled) => {
+    const o = document.createElement('option');
+    o.value = v; o.textContent = label; o.disabled = !!disabled;
+    methodSel.appendChild(o);
+  };
+  addT('gateway', 'Gateway (unauthenticated)', !hasGw);
+  if (isAbapT) addT('sxpg', 'SXPG (via SAP_ALL user)', !hasCreated);
+  addT('cve_31324', 'CVE-2025-31324 (Java unauth)', !hasCve);
   methodSel.value = hasCve ? 'cve_31324'
                            : (hasGw ? 'gateway'
                                     : (isAbapT ? 'sxpg' : 'gateway'));
@@ -3596,11 +3598,17 @@ async function showShellModal(sid) {
   const sysTypeS = (n && n.system_type || '').toUpperCase();
   const isAbapS = sysTypeS.indexOf('ABAP') !== -1;
   const methodSel = document.getElementById('shell-method');
-  methodSel.options[0].disabled = !hasGw;
-  methodSel.options[1].disabled = !hasCreated;
-  methodSel.options[2].disabled = !hasCve;
-  // SXPG is ABAP-only — hide on pure-Java stacks.
-  methodSel.options[1].hidden = !isAbapS;
+  // Rebuild options from scratch — SXPG is ABAP-only (requires SAP_ALL
+  // dialog user), so it is physically absent on pure-Java stacks.
+  methodSel.innerHTML = '';
+  const addS = (v, label, disabled) => {
+    const o = document.createElement('option');
+    o.value = v; o.textContent = label; o.disabled = !!disabled;
+    methodSel.appendChild(o);
+  };
+  addS('gateway', 'Gateway (unauthenticated)', !hasGw);
+  if (isAbapS) addS('sxpg', 'SXPG (via SAP_ALL user)', !hasCreated);
+  addS('cve_31324', 'CVE-2025-31324 (Java unauth)', !hasCve);
   methodSel.value = hasCve ? 'cve_31324'
                            : (hasGw ? 'gateway'
                                     : (isAbapS ? 'sxpg' : 'gateway'));
