@@ -313,6 +313,36 @@ try {
                 }
                 rs2.close(); ps2.close();
                 out.println("# context_rows=" + ctxCount);
+
+                // Diagnostic — scan the WHOLE J2EE_CONFIGENTRY table
+                // for ANY row whose name contains 'URL' / 'http' /
+                // 'Address' (case-insensitive).  Tells us whether
+                // HTTP destinations are stored in this table at all
+                // on the target.  On older SolMan 7.00 they often
+                // live in entirely separate tables; this surfaces
+                // that fact definitively.
+                try {
+                    java.sql.PreparedStatement ps3 = conn.prepareStatement(
+                        "SELECT NAME, COUNT(*) AS C "
+                        + "FROM J2EE_CONFIGENTRY "
+                        + "WHERE UPPER(NAME) LIKE '%URL%' "
+                        + "   OR UPPER(NAME) LIKE '%HTTP%' "
+                        + "   OR UPPER(NAME) LIKE '%ADDRESS%' "
+                        + "GROUP BY NAME "
+                        + "ORDER BY C DESC");
+                    java.sql.ResultSet rs3 = ps3.executeQuery();
+                    int rows3 = 0;
+                    while (rs3.next() && rows3 < 25) {
+                        out.println("HTTPDIAG " + rs3.getString("NAME")
+                            + "=" + rs3.getInt("C"));
+                        rows3++;
+                    }
+                    out.println("# httpdiag_rows=" + rows3);
+                    rs3.close(); ps3.close();
+                } catch (Throwable hd) {
+                    out.println("# httpdiag_error="
+                        + hd.getClass().getSimpleName());
+                }
             }
         } catch (Throwable cet) {
             Throwable cec = cet;
@@ -428,6 +458,22 @@ def invoke_secstore_jsp(jsp_url: str, sid: str,
             except Exception:
                 pv = ""
             result["configentry_context"].setdefault(cid_part, {})[name_part] = pv
+            continue
+        # HTTPDIAG lines — table-wide name-pattern diagnostic
+        # ("HTTPDIAG #~URL=12") so the operator can see whether
+        # HTTP-related rows exist in J2EE_CONFIGENTRY at all on this
+        # target.  Stashed under result["httpdiag"] for the caller to
+        # surface in the console.
+        if line.startswith("HTTPDIAG "):
+            rest = line[len("HTTPDIAG "):]
+            if "=" in rest:
+                nm, _, ct = rest.partition("=")
+                try:
+                    cnt = int(ct.strip())
+                except ValueError:
+                    cnt = 0
+                result.setdefault("httpdiag", []).append(
+                    {"name": nm.strip(), "count": cnt})
             continue
         # Inside a section.  Lines starting with "#" are metadata/diagnostics,
         # not entries.
