@@ -2474,17 +2474,70 @@ function showConnInfo(e, connIdx) {
 }
 
 async function testSingleRfc(sid, destName, connIdx) {
+  // Snapshot current state so we can tell when the backend test
+  // actually changed something (vs. just elapsed time).
+  const before = (mapState.connections || [])[connIdx] || {};
+  const beforeKey = JSON.stringify({
+    tested:           !!before.tested,
+    logon_successful: !!before.logon_successful,
+    has_sap_all:      !!before.has_sap_all,
+    profiles_len:     (before.profiles || []).length,
+    roles_len:        (before.roles || []).length,
+  });
+
   await api('POST', `node/${sid}/test_rfc_single`, { destination_name: destName });
   startPolling();
-  // Re-open the info panel after a short delay to show updated results
-  setTimeout(() => {
-    const conn = (mapState.connections || [])[connIdx];
-    if (conn) {
-      const panel = document.getElementById('info-panel');
-      const fakeEvent = { stopPropagation: ()=>{}, clientX: parseInt(panel.style.left), clientY: parseInt(panel.style.top) };
-      showConnInfo(fakeEvent, connIdx);
+
+  // Poll the connection state every 750 ms.  Re-render the modal as
+  // soon as ANY meaningful field changed — typically tested→true
+  // and (possibly) has_sap_all→true.  Bail after ~60 s or if the
+  // operator closed the panel.  This replaces the old fixed 3 s
+  // timeout that missed has_sap_all when BAPI_USER_GET_DETAIL took
+  // longer than 3 s, leaving "Create Remote User" hidden until the
+  // user manually re-opened the modal.
+  const POLL_MS = 750;
+  const MAX_WAIT_MS = 60000;
+  const start = Date.now();
+  let lastRenderKey = beforeKey;
+  const panel = document.getElementById('info-panel');
+  const initialLeft = panel.style.left;
+  const initialTop = panel.style.top;
+  const poller = setInterval(() => {
+    if (!panel.classList.contains('visible')) {
+      // Operator closed the modal — stop polling silently.
+      clearInterval(poller);
+      return;
     }
-  }, 3000);
+    if (Date.now() - start > MAX_WAIT_MS) {
+      clearInterval(poller);
+      return;
+    }
+    const c = (mapState.connections || [])[connIdx];
+    if (!c) return;
+    const key = JSON.stringify({
+      tested:           !!c.tested,
+      logon_successful: !!c.logon_successful,
+      has_sap_all:      !!c.has_sap_all,
+      profiles_len:     (c.profiles || []).length,
+      roles_len:        (c.roles || []).length,
+    });
+    if (key === lastRenderKey) return;     // nothing changed
+    lastRenderKey = key;
+    // Re-render the modal in place — preserve current pop-up coords
+    // so it doesn't jump to wherever the user's mouse is now.
+    const fakeEvent = {
+      stopPropagation: () => {},
+      clientX: parseInt(initialLeft) || 0,
+      clientY: parseInt(initialTop)  || 0,
+    };
+    showConnInfo(fakeEvent, connIdx);
+    // If the test finished AND we're done with auth-detail (sap_all
+    // either confirmed or explicitly missing), stop polling — no
+    // further changes expected.
+    if (c.tested && c.logon_tested) {
+      clearInterval(poller);
+    }
+  }, POLL_MS);
 }
 
 async function createUserViaRfc(sourceSid, destName, targetSid) {
