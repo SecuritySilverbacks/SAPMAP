@@ -453,10 +453,25 @@ def hashes_to_text(hashes: list, configentry_secrets: list = None) -> str:
         lines.append("# Section 2: cleartext password-like entries from "
                       "J2EE_CONFIGENTRY")
         lines.append("# Format: cid::name=value   (already decrypted via SecStoreFS)")
+        lines.append("# When destination context was resolved, an extra")
+        lines.append("#   # -> dest=NAME user=USER host=HOST")
+        lines.append("# comment precedes the entry so identical keys")
+        lines.append("# (e.g. multiple #~logon.password / #~jco.client.passwd)")
+        lines.append("# can be told apart.")
         lines.append("")
         for s in configentry_secrets:
             v = s.get("value", "")
             # Single-line presentation; keep newlines visible as \n
             v = v.replace("\\", "\\\\").replace("\n", "\\n")
+            # Annotate with destination context when available
+            ctx_parts = []
+            if s.get("dest_name"):
+                ctx_parts.append(f"dest={s['dest_name']}")
+            if s.get("dest_user"):
+                ctx_parts.append(f"user={s['dest_user']}")
+            if s.get("dest_host"):
+                ctx_parts.append(f"host={s['dest_host']}")
+            if ctx_parts:
+                lines.append(f"# -> {' '.join(ctx_parts)}")
             lines.append(f"{s.get('cid', '')}::{s.get('name', '')}={v}")
     return "\n".join(lines) + "\n"
