@@ -1109,6 +1109,48 @@ def test_is_sapmap_owned_user_rejects_unknown_signature():
 # 11b. HTTP URL value-based detection
 # ===========================================================================
 
+# ===========================================================================
+# 12. Global STOP — process-wide cancellation flag
+# ===========================================================================
+
+def test_global_stop_initial_state_is_clear():
+    import sapmap_stop
+    sapmap_stop.reset_stop()    # ensure clean state for the test
+    assert sapmap_stop.is_stop_requested() is False
+
+
+def test_global_stop_set_and_reset_round_trip():
+    import sapmap_stop
+    sapmap_stop.reset_stop()
+    sapmap_stop.request_stop()
+    assert sapmap_stop.is_stop_requested() is True
+    sapmap_stop.reset_stop()
+    assert sapmap_stop.is_stop_requested() is False
+
+
+def test_global_stop_request_is_idempotent():
+    import sapmap_stop
+    sapmap_stop.reset_stop()
+    sapmap_stop.request_stop()
+    sapmap_stop.request_stop()
+    sapmap_stop.request_stop()
+    assert sapmap_stop.is_stop_requested() is True
+    sapmap_stop.reset_stop()
+
+
+def test_global_stop_event_handle_returned_for_wait():
+    """stop_event() lets long sleeps abort early via Event.wait()."""
+    import sapmap_stop
+    sapmap_stop.reset_stop()
+    ev = sapmap_stop.stop_event()
+    # Without STOP: wait(0.05) returns False (timed out)
+    assert ev.wait(0.05) is False
+    # With STOP: wait(5) returns True immediately
+    sapmap_stop.request_stop()
+    assert ev.wait(5.0) is True
+    sapmap_stop.reset_stop()
+
+
 def test_http_url_value_based_detection():
     """On old SolMan 7.0, HTTP destinations may store the URL under
     keys we can't predict.  The value-based fallback scans all

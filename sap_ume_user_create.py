@@ -638,7 +638,15 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
           f"{chunk_size}B base64 = {len(jsp_b64)} bytes total "
           f"(JSP source: {len(UME_CREATE_JSP)} bytes)")
     loop_start = _time.monotonic()
+    try:
+        import sapmap_stop as _stop
+    except Exception:
+        _stop = None
     for idx, chunk in enumerate(chunks):
+        if _stop is not None and _stop.is_stop_requested():
+            return {"success": False,
+                    "error": (f"user-requested stop after "
+                                f"{idx}/{len(chunks)} chunks")}
         op = ">" if idx == 0 else ">>"
         t_start = _time.monotonic()
         r = exec_fn(chunk_shell, echo_args(chunk, op))
