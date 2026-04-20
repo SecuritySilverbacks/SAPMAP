@@ -1694,13 +1694,18 @@ function updateMap() {
       html += `<text x="${x+BOX_W/2}" y="${y+BOX_H-6}" text-anchor="middle" font-size="9" fill="${impColor}" opacity="0.9">${iconStr} ${impactResults.length} impacts</text>`;
     }
 
-    // Finding count badge
-    const findings = n.findings || [];
-    if (findings.length > 0) {
-      const maxSev = Math.max(...findings.map(f => f.severity || 1));
-      const badgeColor = maxSev >= 5 ? '#da3633' : maxSev >= 4 ? '#e67e22' : '#d29922';
+    // Finding count badge — matches the vulnerability rows shown in the System Details panel
+    const isJava = (n.system_type || '').toUpperCase().indexOf('JAVA') !== -1;
+    let vulnCount = 0;
+    if (n.gw_vulnerable) vulnCount++;
+    if (n.ms_vulnerable) vulnCount++;
+    if (isJava && n.cve_2025_31324_vulnerable) vulnCount++;
+    if (isJava && n.cve_2020_6287_vulnerable) vulnCount++;
+    if (vulnCount > 0) {
+      // All of these map to critical severity (5)
+      const badgeColor = '#da3633';
       html += `<circle cx="${x+BOX_W-14}" cy="${y+BOX_H-14}" r="11" fill="${badgeColor}" />`;
-      html += `<text x="${x+BOX_W-14}" y="${y+BOX_H-10}" text-anchor="middle" font-size="10" fill="#fff">${findings.length}</text>`;
+      html += `<text x="${x+BOX_W-14}" y="${y+BOX_H-10}" text-anchor="middle" font-size="10" fill="#fff">${vulnCount}</text>`;
     }
 
     html += '</g>';
@@ -3811,8 +3816,8 @@ async function cleanupAll() {
 }
 async function checkAllGateways() {
   const nodeCount = Object.keys(mapState.nodes || {}).length;
-  if (nodeCount < 2) { alert('Need at least 2 systems on the map.'); return; }
-  if (confirm(`Check RFC gateway vulnerability on all ${nodeCount} systems on the map?`))
+  if (nodeCount < 1) { alert('No systems on the map.'); return; }
+  if (confirm(`Check RFC gateway vulnerability on all ${nodeCount} system(s) on the map?`))
     await api('POST', 'actions/check_all_gw');
   startPolling();
 }
