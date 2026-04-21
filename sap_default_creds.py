@@ -42,6 +42,7 @@ DEFAULT_CREDENTIALS = [
     ("CRITICAL", "SAP*",         "PASS",      "ALL"),
     ("CRITICAL", "DDIC",         "19920706",  "ALL"),
     ("CRITICAL", "IDEADM",       "admin",     "ALL"),
+    ("CRITICAL", "idadmin",      "ides123",   "ALL"),
     ("HIGH",     "EARLYWATCH",   "SUPPORT",   "066"),
     ("MEDIUM",   "TMSADM",       "PASSWORD",  "ALL"),
     ("MEDIUM",   "TMSADM",       "$1Pawd2&",  "ALL"),
