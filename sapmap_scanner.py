@@ -2051,8 +2051,38 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
                 print(f"[+] {host}: SID from SAPControl ({host}:{sc_port}): "
                       f"{sc_sid}  [{', '.join(bits) if bits else '?'}]")
 
-    # Phase B: Assign unresolved instances to the first known SID (or UNK)
-    default_sid = next(iter(instance_sid_map.values()), f"UNK_{host.replace('.', '_')}")
+    # Phase A2: Split off SAProuter-only instances into their own synthetic
+    # SID *before* the default-SID fallback, so port 3299 on a host that
+    # also has real SAP instances doesn't get folded into the SAP SID's
+    # node.  A SAProuter belongs on the map as its own box.
+    #
+    # SID scheme: "R" + hex of IPv4 last octet (e.g. 192.168.2.210 → "RD2").
+    # Unique per-host within a /24; across /24s a very rare collision is
+    # acceptable (3299 is scanned on one host at a time).
+    def _router_sid_for(ip_str: str) -> str:
+        try:
+            last = int(ip_str.split(".")[-1]) & 0xFF
+        except Exception:
+            last = abs(hash(ip_str)) & 0xFF
+        return f"R{last:02X}"
+
+    router_sid = None
+    for inst_nr in list(instance_nrs):
+        inst_services = {
+            info["service"] for port, info in open_ports.items()
+            if info["instance_nr"] == inst_nr
+        }
+        if inst_services == {"saprouter"} and inst_nr not in instance_sid_map:
+            router_sid = router_sid or _router_sid_for(host)
+            instance_sid_map[inst_nr] = router_sid
+
+    # Phase B: Assign unresolved instances to the first known SID (or UNK).
+    # Skip router_sid when picking the default — the router should never
+    # become the host for orphan instances on the same IP.
+    default_sid = next(
+        (s for s in instance_sid_map.values() if s != router_sid),
+        f"UNK_{host.replace('.', '_')}",
+    )
     for inst_nr in instance_nrs:
         if inst_nr not in instance_sid_map:
             instance_sid_map[inst_nr] = default_sid
