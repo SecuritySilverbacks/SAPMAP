@@ -359,6 +359,56 @@ def _verify_sap_diag(host: str, port: int, timeout: float = 2.0) -> bool:
     return False
 
 
+# Canonical DIAG routing string — dispatchers embed "<SID>/<host>_<SID>_<NN>"
+# in the DIAG init response.  Used as a SID fallback when only 32XX is open
+# (no SAPControl on 5XX13, no gateway on 33XX for RFC_SYSTEM_INFO).
+_DIAG_ROUTE_RE = _re.compile(
+    rb'([A-Z][A-Z0-9]{2})/([A-Za-z0-9][A-Za-z0-9._-]{0,63})_\1_(\d{2})'
+)
+
+
+def _query_diag_dispatcher_info(host: str, port: int,
+                                 timeout: float = 3.0) -> tuple:
+    """Send the full DIAG init probe and parse (sid, hostname, inst) out.
+
+    Modelled on the nmap SAPDISP probe (which only identifies the service
+    via the '**DPTMMSG**' marker on an empty NI packet), but uses the
+    richer DIAG init probe from SAPology — that response embeds the SID +
+    hostname + instance number as an uppercase routing string
+    '<SID>/<hostname>_<SID>_<NN>'.
+
+    Returns (sid, hostname, inst_nr) on success, or ("", "", "") if the
+    probe failed or the marker wasn't found.  Safe to call against any
+    port; non-dispatcher services won't match the regex.
+    """
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect((host, port))
+        s.sendall(_SAP_DIAG_PROBE)
+        resp = b""
+        try:
+            # DIAG init response is typically 5-8 KB; cap at 16 KB so a
+            # chatty / malformed response doesn't stall us indefinitely.
+            while len(resp) < 16384:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                resp += chunk
+        except socket.timeout:
+            pass
+        s.close()
+    except Exception:
+        return ("", "", "")
+
+    m = _DIAG_ROUTE_RE.search(resp)
+    if not m:
+        return ("", "", "")
+    return (m.group(1).decode("ascii", "ignore"),
+            m.group(2).decode("ascii", "ignore"),
+            m.group(3).decode("ascii", "ignore"))
+
+
 # Ports that collide with SAP port formulas but are NOT standard SAP services.
 # 3389 = RDP (instance 89 gateway would be 3300+89=3389) — currently not scanned
 NON_SAP_PORTS = set()
@@ -1154,6 +1204,25 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
         if (info["sid"] and info["db_type"]
                 and info.get("_is_java") and info.get("_is_abap")):
             break  # Found both stacks, no need to continue
+
+    # SID still unknown?  Fall back to the DIAG dispatcher probe on 32XX.
+    # This is the only metadata channel left when the gateway (33XX) and
+    # SAPControl (5XX13) are both firewalled but the dispatcher port is
+    # reachable — the DIAG init response embeds "<SID>/<host>_<SID>_<NN>".
+    if not info["sid"]:
+        for inst_nr in ordered_nrs:
+            disp_port = 3200 + inst_nr
+            sid, disp_host, disp_inst = _query_diag_dispatcher_info(
+                host, disp_port, timeout=min(timeout, 3))
+            if sid:
+                info["sid"] = sid
+                tag = sid
+                if disp_host and not info["hostname"]:
+                    info["hostname"] = disp_host
+                print(f"[+] {tag}: SID from DIAG dispatcher "
+                      f"({host}:{disp_port}): SID={sid}, "
+                      f"Host={disp_host or '?'}, Inst={disp_inst or '?'}")
+                break
 
     # If OS still unknown, try SAPControl GetProcessList (.EXE = Windows)
     if not info["os_type"]:
