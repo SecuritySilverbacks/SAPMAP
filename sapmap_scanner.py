@@ -567,8 +567,14 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
 
     _cancelled = lambda: cancel_event and cancel_event.is_set()
 
-    def _do_scan(port_list):
+    def _do_scan(port_list, label="scan"):
         hits = {}
+        total = len(port_list)
+        # Aim for ~4 progress ticks per pass, clamped between 25 and 200 ports.
+        tick_every = max(25, min(200, total // 4 or 1))
+        done = 0
+        t_pass = time.time()
+
         def _check(args):
             port, svc, inst = args
             if _cancelled():
@@ -582,8 +588,17 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
                 if _cancelled():
                     break
                 r = f.result()
+                done += 1
                 if r:
                     hits[r[0]] = {"service": r[1], "instance_nr": r[2]}
+                    # Live discovery — print immediately so the user sees
+                    # something happen during a long pass.
+                    print(f"[+]   {host}:{r[0]:<6} OPEN  "
+                          f"({r[1]}, inst {r[2]})")
+                if done % tick_every == 0 and done < total:
+                    elapsed = time.time() - t_pass
+                    print(f"[*]   {host}: {label} {done}/{total} probed, "
+                          f"{len(hits)} open  [{elapsed:.1f}s]")
         return hits
 
     # Pass 1: Dispatcher + SAPControl + fixed ports (fast — ~300 ports)
@@ -599,7 +614,7 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
     print(f"[*] {host}: Pass 1: scanning {len(ports_pass1)} ports "
           f"(dispatcher 32XX, SAPHostControl) ...")
     t0 = time.time()
-    hits1 = _do_scan(ports_pass1)
+    hits1 = _do_scan(ports_pass1, label="Pass 1")
     if _cancelled():
         return result
     result["open_ports"].update(hits1)
@@ -645,7 +660,7 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
               f"(gateway 33XX, HANA 3XX13/3XX15, Java 5NN00/01) for "
               f"{len(found_instances)} instance(s) ...")
         t0 = time.time()
-        hits2 = _do_scan(pass2_ports)
+        hits2 = _do_scan(pass2_ports, label="Pass 2")
         if not _cancelled():
             result["open_ports"].update(hits2)
             print(f"[*] {host}: Pass 2 done in {time.time() - t0:.1f}s — "
