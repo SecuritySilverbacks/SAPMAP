@@ -284,16 +284,32 @@ body {
 /* Activity indicator */
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes pulse { 0%,100% { opacity:.6; } 50% { opacity:1; } }
+@keyframes activity-glow {
+  0%,100% { box-shadow: inset 0 0 0 1px #f0883e70, 0 0 14px #f0883e40; }
+  50%     { box-shadow: inset 0 0 0 1px #f0883e, 0 0 22px #f0883e90; }
+}
 .activity-dot {
-  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
-  background: #f0883e; margin-right: 6px; animation: pulse 1.2s ease-in-out infinite;
+  display: inline-block; width: 12px; height: 12px; border-radius: 50%;
+  background: #f0883e; margin-right: 10px;
+  animation: pulse 1.2s ease-in-out infinite;
+  box-shadow: 0 0 8px #f0883ecc;
 }
 #activity-bar {
   display: none; align-items: center; gap: 6px;
-  background: #1a1510; border-bottom: 1px solid #f0883e40;
-  padding: 3px 12px; flex-shrink: 0; font-size: 11px; color: #f0883e;
+  background: linear-gradient(90deg, #2a1a08 0%, #1a1510 100%);
+  border-bottom: 2px solid #f0883e;
+  padding: 8px 16px; flex-shrink: 0;
+  font-size: 15px; font-weight: 600; letter-spacing: 0.3px;
+  color: #ffb27a; text-shadow: 0 0 6px #f0883e80;
+  animation: activity-glow 2s ease-in-out infinite;
 }
 #activity-bar.active { display: flex; }
+#activity-prefix {
+  font-weight: 700; color: #f0883e; margin-right: 8px;
+  text-transform: uppercase; font-size: 12px; letter-spacing: 1px;
+  padding: 2px 8px; border: 1px solid #f0883e80; border-radius: 3px;
+  background: #f0883e15;
+}
 .shell-window {
   position: fixed; width: 820px; height: 520px;
   min-width: 400px; min-height: 300px; padding: 0;
@@ -408,7 +424,7 @@ body {
 </div>
 
 <!-- Activity Bar -->
-<div id="activity-bar"><span class="activity-dot"></span><span id="activity-text">Working...</span></div>
+<div id="activity-bar"><span class="activity-dot"></span><span id="activity-prefix">Working</span><span id="activity-text">...</span></div>
 
 <!-- Main Area -->
 <div class="main">
