@@ -28,7 +28,7 @@ Supported actions:
     test_rfcs, test_rfc_single, download_hashes, download_secstore,
     impact_assess, impact_show, impact_export, analyze_chains,
     check_all_gw, check_all_betrusted, propagate, deep_scan, lpe,
-    highlight_chain, sleep,
+    highlight_chain, layout, sleep,
     # Java data extraction / business impact
     java_secstore, extract_java_hashes, read_java_destinations,
     download_java_table, impact_assess_java,
@@ -149,6 +149,15 @@ def _map_step(step: dict) -> tuple:
             "end": step.get("end", ""),
             "index": step.get("index", 0),
         }, False)
+
+    if action == "layout":
+        mode = (step.get("mode") or "").strip().lower()
+        valid = {"circle", "star", "hierarchy", "stack", "by_stack", "reset"}
+        if mode not in valid:
+            raise ValueError(
+                f"layout requires mode in {sorted(valid)} (got {mode!r})"
+            )
+        return ("LAYOUT", "", {"mode": mode}, False)
 
     if action == "check_all_gw":
         return ("POST", "/api/actions/check_all_gw", {}, True)
@@ -475,6 +484,17 @@ class ScriptRunner:
                         pf(f"[SCRIPT]   Exported {r['records']} records → {r['file']}")
                     else:
                         pf(f"[SCRIPT]   Export {sc}: {r.get('error', 'failed')}")
+                continue
+
+            # Special case: rearrange the map layout (client-side only)
+            if method == "LAYOUT":
+                mode = payload.get("mode", "")
+                pf(f"[SCRIPT]   Rearranging map → {mode}")
+                try:
+                    from sapmap_gui import ui_command
+                    ui_command("relayout", mode=mode)
+                except ImportError:
+                    pass
                 continue
 
             # Special case: highlight a chain on the map

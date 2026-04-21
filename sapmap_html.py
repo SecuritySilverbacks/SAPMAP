@@ -1208,6 +1208,16 @@ async function pollUpdates() {
           else if (c.cmd === 'show_chains') { const r = await fetch('/api/chains'); const d = await r.json(); showChainResults(d.chains || []); }
           else if (c.cmd === 'show_detail') showSystemDetail(c.sid);
           else if (c.cmd === 'highlight_chain') highlightChain(c.path_sids);
+          else if (c.cmd === 'relayout') {
+            const m = (c.mode || '').toLowerCase();
+            if      (m === 'circle')     layoutCircle();
+            else if (m === 'star')       layoutStar();
+            else if (m === 'hierarchy')  layoutHierarchy();
+            else if (m === 'stack'
+                  || m === 'by_stack')   layoutByStack();
+            else if (m === 'reset')      resetLayout();
+            else console.warn('relayout: unknown mode', c.mode);
+          }
         }
       }
     } catch(e2) {}
