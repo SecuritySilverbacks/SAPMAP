@@ -38,7 +38,7 @@ steps:
     inst_to: 45
     mode: sap              # "full" adds HANA (3NN15) + JAVA (5NN00/04)
     concurrency: 10
-    timeout: 120
+    timeout: 500
 
   # --- 4. Tidy the map so the new internal node is easy to spot -----------
   - action: layout
