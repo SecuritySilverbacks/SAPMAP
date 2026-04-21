@@ -29,6 +29,8 @@ Supported actions:
     impact_assess, impact_show, impact_export, analyze_chains,
     check_all_gw, check_all_betrusted, propagate, deep_scan, lpe,
     highlight_chain, layout, sleep,
+    # SAProuter
+    set_saprouter, check_router_info, router_scan,
     # Java data extraction / business impact
     java_secstore, extract_java_hashes, read_java_destinations,
     download_java_table, impact_assess_java,
@@ -273,6 +275,44 @@ def _map_step(step: dict) -> tuple:
         return ("POST", f"/api/node/{target}/create_user_java",
                 payload, True)
 
+    # -----------------------------------------------------------------
+    # SAProuter actions
+    # -----------------------------------------------------------------
+    if action == "set_saprouter":
+        # Attach a router prefix to a node so subsequent ops tunnel through it.
+        # Usage:  - action: set_saprouter
+        #           target: S4H
+        #           saprouter: "/H/192.168.2.209/S/3299"
+        return ("POST", f"/api/node/{target}/set_saprouter", {
+            "saprouter": (step.get("saprouter") or "").strip(),
+        }, False)
+
+    if action == "check_router_info":
+        # CVE-2017-12636 / ROUTER_ADM info leak probe on a SAProuter node.
+        return ("POST", f"/api/node/{target}/check_router_info", {}, True)
+
+    if action == "router_scan":
+        # Scan internal hosts through a SAProuter node.
+        #   target:       SID of the SAProuter node
+        #   targets:      "192.168.2.0/24" or "192.168.2.10-20" or ""
+        #                 (empty ⇒ auto-extract from prior router_info probe)
+        #   auto_targets: bool (defaults True when targets is empty)
+        #   inst_from/to: SAP instance-number range (default 0..10)
+        #   mode:         "sap" (default) or "full" (adds HANA + JAVA)
+        #   concurrency:  parallel probes (default 10)
+        #   timeout:      per-probe socket timeout (default 5s)
+        payload = {
+            "targets":     (step.get("targets") or "").strip(),
+            "inst_from":   int(step.get("inst_from", 0)),
+            "inst_to":     int(step.get("inst_to", 10)),
+            "mode":        (step.get("mode") or "sap").strip(),
+            "concurrency": int(step.get("concurrency", 10)),
+            "timeout":     float(step.get("timeout", 5.0)),
+        }
+        if "auto_targets" in step:
+            payload["auto_targets"] = bool(step["auto_targets"])
+        return ("POST", f"/api/node/{target}/router_scan", payload, True)
+
     raise ValueError(f"Unknown action: {action}")
 
 
@@ -365,6 +405,9 @@ _ACTION_LABELS = {
     "deep_scan":              "Deep scanning",
     "lpe":                    "Local privilege escalation",
     "exploit_cve_31324":      "Exploiting CVE-2025-31324",
+    "set_saprouter":          "Attaching SAProuter prefix",
+    "check_router_info":      "Probing SAProuter info leak",
+    "router_scan":            "Scanning internal net via SAProuter",
     "layout":                 "Rearranging map",
     "sleep":                  "Pausing",
 }
