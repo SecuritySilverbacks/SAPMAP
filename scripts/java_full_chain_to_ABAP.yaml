@@ -42,6 +42,9 @@ steps:
   - action: java_pipeline
     target: SJJ
 
+- action: layout
+  mode: hierarchy     # or: star | circle | hierarchy | stack | reset
+
   # --- Stage 4: exploitation (requires --confirm) -----------------------
   # Without --confirm these two steps are skipped with a clear log line,
   # so the playbook can be dry-run end-to-end for reporting purposes and
