@@ -3191,7 +3191,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
             except Exception as e:
                 logger.debug(f"{sid}: MS check failed: {e}")
 
-        threading.Thread(target=_enrich, daemon=True).start()
+        _bg(f"{sid}:enrich", "Enriching via RFC_SYSTEM_INFO", _enrich)
 
         return json.dumps({"status": "ok"})
 

@@ -1234,6 +1234,9 @@ async function pollUpdates() {
             else if (m === 'reset')      resetLayout();
             else console.warn('relayout: unknown mode', c.mode);
           }
+          else if (c.cmd === 'flash_activity') {
+            flashActivity(c.label || 'Working', c.hold_ms);
+          }
         }
       }
     } catch(e2) {}
@@ -4061,6 +4064,7 @@ function zoomIn() { viewBoxUserControlled = true; viewBox.w *= 0.8; viewBox.h *=
 function zoomOut() { viewBoxUserControlled = true; viewBox.w *= 1.25; viewBox.h *= 1.25; applyViewBox(); }
 function fitMap() { viewBoxUserControlled = false; viewBox.x = 0; viewBox.y = 0; viewBox.w = 1200; viewBox.h = 800; viewBox._nodeCount = 0; applyViewBox(); updateMap(); }
 function resetLayout() {
+  flashActivity('Rearranging: Reset');
   viewBoxUserControlled = false;
   viewBox.x = 0; viewBox.y = 0; viewBox._nodeCount = 0;
   Object.values(mapState.nodes || {}).forEach(n => { n._x = null; n._y = null; });
@@ -4089,6 +4093,7 @@ function _loSortedNodeKeys() {
 function layoutCircle() {
   const sids = _loSortedNodeKeys();
   if (sids.length === 0) return;
+  flashActivity('Rearranging: Circle');
   const nodes = mapState.nodes;
   // Radius scales with node count so boxes don't overlap on the ring.
   const minR = 360;
@@ -4111,6 +4116,7 @@ function layoutStar() {
   // Hub-and-spoke: pick the most-connected node as hub, ring the rest.
   const sids = _loSortedNodeKeys();
   if (sids.length === 0) return;
+  flashActivity('Rearranging: Star');
   const nodes = mapState.nodes;
   const conns = mapState.connections || [];
   // Tally edge counts per SID — both source and target sides count.
@@ -4151,6 +4157,7 @@ function layoutHierarchy() {
   // result is always a valid layered DAG even on cyclic landscapes.
   const sids = _loSortedNodeKeys();
   if (sids.length === 0) return;
+  flashActivity('Rearranging: Hierarchy');
   const nodes = mapState.nodes;
   const conns = mapState.connections || [];
   // Build incoming edge map (target -> [source])
@@ -4210,6 +4217,7 @@ function layoutByStack() {
   // and unknown-stack nodes get their own columns at the right edge.
   const sids = _loSortedNodeKeys();
   if (sids.length === 0) return;
+  flashActivity('Rearranging: Group by Stack');
   const nodes = mapState.nodes;
 
   function bucketOf(n) {
@@ -4377,15 +4385,46 @@ function updateStatusBar() {
 // the task completes, so fast steps don't flash by too quickly to read.
 // A brand-new activity overrides the grace window immediately.
 const _ACTIVITY_HOLD_MS = 3000;
-let _activityLastText = "";
+const _FLASH_HOLD_MS    = 3000;
 let _activityHideTimer = null;
+
+// Client-side "flash" activities — synchronous or purely-UI actions
+// that aren't tracked by the server's active_tasks map (e.g. layout
+// changes, set_credentials, add_system).  Each entry auto-expires.
+// Shape: {id → {label, expiresAt}}
+const _flashActivities = {};
+let _flashCounter = 0;
+
+function flashActivity(label, holdMs) {
+  const id = 'f' + (++_flashCounter);
+  _flashActivities[id] = {
+    label: label || 'Working',
+    expiresAt: Date.now() + (holdMs || _FLASH_HOLD_MS),
+  };
+  updateActivityBar();
+  // Schedule re-render right when this flash expires
+  setTimeout(updateActivityBar, (holdMs || _FLASH_HOLD_MS) + 50);
+}
+
+function _collectFlashLabels() {
+  const now = Date.now();
+  const out = [];
+  for (const id in _flashActivities) {
+    if (_flashActivities[id].expiresAt <= now) {
+      delete _flashActivities[id];
+    } else {
+      out.push(_flashActivities[id].label);
+    }
+  }
+  return out;
+}
 
 function updateActivityBar() {
   const bar = document.getElementById('activity-bar');
   const keys = Object.keys(activeTasks);
+  const flashes = _collectFlashLabels();
 
-  if (keys.length > 0) {
-    // Build descriptive text: group by SID
+  if (keys.length > 0 || flashes.length > 0) {
     const parts = [];
     for (const key of keys) {
       const label = activeTasks[key];
@@ -4393,24 +4432,20 @@ function updateActivityBar() {
       const sid = colonIdx > 0 && !key.startsWith('_') ? key.substring(0, colonIdx) : '';
       parts.push(sid ? `${sid}: ${label}` : label);
     }
+    parts.push(...flashes);
     const text = parts.join(' | ');
-    // New activity → cancel any pending hide + show immediately
     if (_activityHideTimer) { clearTimeout(_activityHideTimer); _activityHideTimer = null; }
     document.getElementById('activity-text').textContent = text;
-    _activityLastText = text;
     bar.classList.add('active');
     return;
   }
 
-  // No active tasks — hold the previous label on-screen for a grace
-  // period so users can actually read it, unless the timer is already
-  // counting down from a prior completion.
   if (!bar.classList.contains('active')) return;
   if (_activityHideTimer) return;
   _activityHideTimer = setTimeout(() => {
     _activityHideTimer = null;
-    // Only hide if no new activity landed in the meantime.
-    if (Object.keys(activeTasks).length === 0) {
+    if (Object.keys(activeTasks).length === 0 &&
+        _collectFlashLabels().length === 0) {
       bar.classList.remove('active');
     }
   }, _ACTIVITY_HOLD_MS);
