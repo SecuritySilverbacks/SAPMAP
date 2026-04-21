@@ -42,6 +42,9 @@ steps:
   - action: download_secstore
     target: W74
 
+  - action: layout
+    mode: stack     # or: star | circle | hierarchy | hierarchy | reset
+
   # Test connection 
   - action: test_rfc_single 
     target: W74
