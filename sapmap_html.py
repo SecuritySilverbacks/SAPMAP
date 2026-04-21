@@ -4373,24 +4373,47 @@ function updateStatusBar() {
   document.getElementById('st-users').textContent = s.users_created || 0;
 }
 
+// Keep the last-shown activity visible for a short grace period after
+// the task completes, so fast steps don't flash by too quickly to read.
+// A brand-new activity overrides the grace window immediately.
+const _ACTIVITY_HOLD_MS = 3000;
+let _activityLastText = "";
+let _activityHideTimer = null;
+
 function updateActivityBar() {
   const bar = document.getElementById('activity-bar');
   const keys = Object.keys(activeTasks);
-  if (keys.length === 0) {
-    bar.classList.remove('active');
+
+  if (keys.length > 0) {
+    // Build descriptive text: group by SID
+    const parts = [];
+    for (const key of keys) {
+      const label = activeTasks[key];
+      const colonIdx = key.indexOf(':');
+      const sid = colonIdx > 0 && !key.startsWith('_') ? key.substring(0, colonIdx) : '';
+      parts.push(sid ? `${sid}: ${label}` : label);
+    }
+    const text = parts.join(' | ');
+    // New activity → cancel any pending hide + show immediately
+    if (_activityHideTimer) { clearTimeout(_activityHideTimer); _activityHideTimer = null; }
+    document.getElementById('activity-text').textContent = text;
+    _activityLastText = text;
+    bar.classList.add('active');
     return;
   }
-  bar.classList.add('active');
-  // Build descriptive text: group by SID
-  const parts = [];
-  for (const key of keys) {
-    const label = activeTasks[key];
-    // Key format: "SID:operation" or "_global_op"
-    const colonIdx = key.indexOf(':');
-    const sid = colonIdx > 0 && !key.startsWith('_') ? key.substring(0, colonIdx) : '';
-    parts.push(sid ? `${sid}: ${label}` : label);
-  }
-  document.getElementById('activity-text').textContent = parts.join(' | ');
+
+  // No active tasks — hold the previous label on-screen for a grace
+  // period so users can actually read it, unless the timer is already
+  // counting down from a prior completion.
+  if (!bar.classList.contains('active')) return;
+  if (_activityHideTimer) return;
+  _activityHideTimer = setTimeout(() => {
+    _activityHideTimer = null;
+    // Only hide if no new activity landed in the meantime.
+    if (Object.keys(activeTasks).length === 0) {
+      bar.classList.remove('active');
+    }
+  }, _ACTIVITY_HOLD_MS);
 }
 
 function _nodeHasActiveTask(sid) {

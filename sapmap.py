@@ -86,6 +86,10 @@ def main():
                              "actions (exploit_cve_31324, create_user_java). "
                              "Without this flag, those steps are skipped so "
                              "the playbook can be dry-run safely.")
+    parser.add_argument("--step-delay", type=float, metavar="SECONDS",
+                        help="Override the inter-step delay for --script runs "
+                             "(default: 2s, or whatever the script's "
+                             "top-level `step_delay` sets). Use 0 to disable.")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Verbose output")
     parser.add_argument("--debug", action="store_true",
@@ -188,7 +192,8 @@ def main():
     # Launch script runner in background (if --script provided)
     if args.script:
         from sapmap_script import ScriptRunner
-        runner = ScriptRunner(url, args.script, confirm=args.confirm)
+        runner = ScriptRunner(url, args.script, confirm=args.confirm,
+                              step_delay=args.step_delay)
         try:
             runner.load()
         except Exception as e:

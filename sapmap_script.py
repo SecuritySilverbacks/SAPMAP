@@ -335,10 +335,14 @@ class ScriptRunner:
     """Execute a SAPMAP script against the local API server."""
 
     def __init__(self, base_url: str, script_path: str,
-                 confirm: bool = False):
+                 confirm: bool = False, step_delay: float = None):
         self.base_url = base_url.rstrip("/")
         self.script_path = script_path
         self.confirm = bool(confirm)
+        # None = use script's top-level `step_delay` or the built-in
+        # 2-second default.  CLI --step-delay overrides both.
+        self.step_delay_override = step_delay
+        self.step_delay = 2.0
         self.steps = []
         self.name = ""
         self.description = ""
@@ -369,6 +373,12 @@ class ScriptRunner:
 
         self.name = data.get("name", os.path.basename(self.script_path))
         self.description = data.get("description", "")
+        # Resolve step delay: CLI override > script top-level `step_delay` > 2s default
+        if self.step_delay_override is not None:
+            self.step_delay = float(self.step_delay_override)
+        elif "step_delay" in data:
+            self.step_delay = float(data["step_delay"])
+        # else keep built-in default (2.0s)
         self.steps = _expand_macros(data["steps"])
 
     def _api_call(self, method: str, path: str, payload: dict = None) -> dict:
@@ -555,8 +565,9 @@ class ScriptRunner:
                         except ImportError:
                             pass
 
-            # Optional delay between steps
-            delay = step.get("delay", 1)
+            # Optional delay between steps.  Per-step `delay:` wins; else
+            # the script-wide delay (CLI / top-level YAML / 2s default).
+            delay = step.get("delay", self.step_delay)
             if delay > 0:
                 time.sleep(delay)
 
