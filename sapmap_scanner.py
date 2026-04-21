@@ -2827,6 +2827,7 @@ def scan_host_via_saprouter(
         timeout: float = 5.0,
         concurrency: int = 10,
         cancel_event: threading.Event = None,
+        verbose: bool = True,
 ) -> dict:
     """Scan one internal host through a SAProuter.
 
@@ -2875,12 +2876,18 @@ def scan_host_via_saprouter(
         r = probe_port_via_saprouter(saprouter_prefix, target_host, port, timeout)
         return (port, service, inst_str, r["status"], r.get("message", ""))
 
+    total_count = len(ports)
+    done_count = 0
+    tick_every = max(10, total_count // 8)  # ~8 status lines per host
+    t_start = time.time()
+
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         futures = [executor.submit(_probe, p) for p in ports]
         for f in as_completed(futures):
             if _cancelled():
                 break
             res = f.result()
+            done_count += 1
             if res is None:
                 continue
             port, service, inst_str, status, msg = res
@@ -2889,8 +2896,24 @@ def scan_host_via_saprouter(
             if status == PROBE_OPEN:
                 result["open_ports"][port] = {"service": service,
                                               "instance_nr": inst_str}
+                if verbose:
+                    print(f"[+]   {target_host}:{port:<6} OPEN       "
+                          f"({service}, inst {inst_str})")
             elif status == PROBE_ACL_DENIED:
                 result["acl_denied_ports"].append(port)
+                if verbose:
+                    print(f"[~]   {target_host}:{port:<6} ACL-denied "
+                          f"({service}, inst {inst_str})")
+
+            if verbose and (done_count % tick_every == 0
+                            or done_count == total_count):
+                pc = result["probe_counts"]
+                el = time.time() - t_start
+                print(f"[*]   {target_host}: {done_count}/{total_count} probed "
+                      f"— open={pc.get(PROBE_OPEN,0)} "
+                      f"acl={pc.get(PROBE_ACL_DENIED,0)} "
+                      f"filtered={pc.get(PROBE_FILTERED,0)} "
+                      f"closed={pc.get(PROBE_CLOSED,0)}  [{el:.1f}s]")
 
     result["has_sap"] = bool(result["open_ports"])
     return result
@@ -2906,7 +2929,7 @@ def scan_network_via_saprouter(
         cancel_event: threading.Event = None,
         progress_callback=None,
         node_callback=None,
-        verbose: bool = False,
+        verbose: bool = True,
 ) -> list:
     """Scan an internal network through a SAProuter and build SAPNode objects.
 
@@ -2942,12 +2965,17 @@ def scan_network_via_saprouter(
     )
 
     total = len(targets)
+    svc_set = sorted({svc for _, svc, _ in ports})
+    svc_summary = ", ".join(svc_set) if len(svc_set) <= 8 else f"{len(svc_set)} service types"
     print(f"[*] ========================================")
     print(f"[*]  SAProuter Internal Scan")
     print(f"[*]  Router: {saprouter_prefix}")
     print(f"[*]  {total} target(s), {len(ports)} ports/host, "
           f"instances {instance_range[0]:02d}-{instance_range[1]:02d}, "
           f"mode={mode}")
+    print(f"[*]  Services: {svc_summary}")
+    print(f"[*]  Timeout={timeout}s, concurrency={concurrency}, "
+          f"verbose={verbose}")
     print(f"[*] ========================================")
 
     nodes = []
@@ -2968,6 +2996,7 @@ def scan_network_via_saprouter(
         host_result = scan_host_via_saprouter(
             saprouter_prefix, host, ports, timeout,
             concurrency, cancel_event,
+            verbose=verbose,
         )
         elapsed = time.time() - t0
         counts = host_result["probe_counts"]
