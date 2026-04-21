@@ -327,6 +327,65 @@ def _expand_macros(steps: list) -> list:
     return out
 
 
+# Human-readable labels shown in the GUI activity bar for each action.
+# Only actions that aren't already long-running server-tracked tasks need
+# friendly names — but including every action keeps the bar consistent.
+_ACTION_LABELS = {
+    "add_system":             "Adding system",
+    "set_credentials":        "Saving credentials",
+    "scan":                   "Scanning network",
+    "check_gw":               "Checking Gateway (10KBlaze)",
+    "check_ms":               "Checking MS Betrusted",
+    "check_cve_31324":        "Checking CVE-2025-31324",
+    "check_cve_6287":         "Checking CVE-2020-6287",
+    "check_all_cve_31324":    "Sweeping CVE-2025-31324",
+    "check_all_gw":           "Sweeping Gateway (10KBlaze)",
+    "check_all_betrusted":    "Sweeping MS Betrusted",
+    "betrusted":              "10KBlaze betrusted",
+    "betrusted_chain":        "10KBlaze full chain",
+    "create_user":            "Creating ABAP user",
+    "create_user_java":       "Creating Java user",
+    "create_user_via_rfc":    "Creating user via RFC",
+    "retrieve_rfcs":          "Retrieving RFC destinations",
+    "test_rfcs":              "Testing RFC destinations",
+    "test_rfc_single":        "Testing RFC destination",
+    "download_hashes":        "Extracting ABAP hashes",
+    "download_secstore":      "Downloading ABAP SecStore",
+    "extract_java_hashes":    "Extracting Java hashes",
+    "java_secstore":          "Extracting Java SecStore",
+    "read_java_destinations": "Reading Java JCo destinations",
+    "download_java_table":    "Downloading Java table",
+    "impact_assess":          "Assessing business impact",
+    "impact_assess_java":     "Assessing Java business impact",
+    "impact_show":            "Showing business impact",
+    "impact_export":          "Exporting impact results",
+    "analyze_chains":         "Analysing trust chains",
+    "highlight_chain":        "Highlighting chain",
+    "propagate":              "Propagating credentials",
+    "deep_scan":              "Deep scanning",
+    "lpe":                    "Local privilege escalation",
+    "exploit_cve_31324":      "Exploiting CVE-2025-31324",
+    "layout":                 "Rearranging map",
+    "sleep":                  "Pausing",
+}
+
+
+def _script_flash_label(action: str, target: str, step: dict) -> str:
+    """Build the human label that gets flashed in the GUI activity bar."""
+    base = _ACTION_LABELS.get(action, action)
+    # Layout mode, highlight chain start/end — add the relevant detail
+    if action == "layout":
+        mode = (step.get("mode") or "").strip()
+        if mode: base = f"{base}: {mode}"
+    elif action == "sleep":
+        secs = step.get("seconds", 5)
+        base = f"{base} {secs}s"
+    elif action == "highlight_chain":
+        start = step.get("start", ""); end = step.get("end", "")
+        if start and end: base = f"{base} {start} → {end}"
+    return f"{base} on {target}" if target else base
+
+
 # ---------------------------------------------------------------------------
 # Script execution
 # ---------------------------------------------------------------------------
@@ -435,6 +494,20 @@ class ScriptRunner:
                 desc += f" on {target}"
 
             pf(f"[SCRIPT] {step_label}: {desc}")
+
+            # Always flash a status label in the GUI activity bar so every
+            # step — including synchronous ones and client-side ones (layout,
+            # highlight_chain, sleep) that don't hit _bg() on the server —
+            # shows up prominently.  Server-tracked long-running steps will
+            # *additionally* render their own server label, which replaces
+            # this flash immediately via the `new activity overrides hold`
+            # rule.
+            try:
+                from sapmap_gui import ui_command as _ui
+                pretty = _script_flash_label(action, target, step)
+                _ui("flash_activity", label=f"{step_label}: {pretty}")
+            except ImportError:
+                pass
 
             if action in DESTRUCTIVE_ACTIONS and not self.confirm:
                 pf(f"[SCRIPT] {step_label}: SKIPPED — '{action}' is "
