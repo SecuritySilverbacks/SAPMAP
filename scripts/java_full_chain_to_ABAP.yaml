@@ -42,8 +42,8 @@ steps:
   - action: java_pipeline
     target: SJJ
 
-- action: layout
-  mode: hierarchy     # or: star | circle | hierarchy | stack | reset
+  - action: layout
+    mode: hierarchy     # or: star | circle | hierarchy | stack | reset
 
   # --- Stage 4: exploitation (requires --confirm) -----------------------
   # Without --confirm these two steps are skipped with a clear log line,
