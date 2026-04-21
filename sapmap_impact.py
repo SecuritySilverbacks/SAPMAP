@@ -142,6 +142,103 @@ def _format_eur(value_str: str) -> str:
 # Scenarios
 # ---------------------------------------------------------------------------
 
+# Client numbers that ship empty / technical by convention and almost never
+# hold business data.  Used to hint at the "wrong client" problem — an IDES
+# ECC box typically has 000/001/066 empty and business data in 800.
+_TECHNICAL_CLIENTS = {"000", "001", "066"}
+
+
+@impact_scenario("client_landscape", "System Landscape", Severity.INFO,
+                 icon="\U0001F5C4\uFE0F")
+def _client_landscape(conn, node):
+    """Enumerate clients (T000) and flag where business data likely lives.
+
+    Runs first so a session bound to a technical client (000/001/066) can
+    be diagnosed immediately when the business scenarios come up empty —
+    the follow-up scenarios read only the connected client's rows via
+    RFC_READ_TABLE, so they will be blank until credentials are obtained
+    for the business client.
+    """
+    clients = _read_table(conn, "T000",
+                          ["MANDT", "MTEXT", "ORT01", "MWAER", "CCCATEGORY"],
+                          max_rows=100)
+    if not clients:
+        return ImpactResult(
+            scenario="client_landscape", category="System Landscape",
+            severity=Severity.INFO, headline="Could not read T000",
+            icon="\U0001F5C4\uFE0F",
+        )
+
+    # Pull the current session's client off the RFC connection attributes.
+    # get_attributes() is the method name on sap_rfc_ctypes.RFCConnection.
+    current = ""
+    try:
+        attrs = conn.get_attributes()
+        current = (attrs.get("client") or "").strip().zfill(3)
+    except Exception:
+        pass
+
+    records = []
+    business_candidates = []
+    for cl in clients:
+        mandt = (cl.get("MANDT") or "").strip().zfill(3)
+        mtext = (cl.get("MTEXT") or "").strip()
+        cat   = (cl.get("CCCATEGORY") or "").strip()  # P=prod, T=test, C=cust, D=demo, S=SAP
+        is_technical = mandt in _TECHNICAL_CLIENTS
+        is_current   = mandt == current
+        cat_label = {"P": "Production", "T": "Test", "C": "Customizing",
+                     "D": "Demo", "S": "SAP reference", "E": "Training"
+                     }.get(cat, cat or "?")
+        if not is_technical:
+            business_candidates.append(mandt)
+        records.append({
+            "client":   mandt,
+            "name":     mtext,
+            "city":     cl.get("ORT01", ""),
+            "currency": cl.get("MWAER", ""),
+            "category": cat_label,
+            "role":     ("← current session" if is_current
+                          else ("technical" if is_technical else "business")),
+        })
+
+    # Build a headline that makes the "wrong client" case immediately obvious
+    headline = f"{len(records)} client(s) on this system"
+    if current and current in _TECHNICAL_CLIENTS and business_candidates:
+        headline += (f" — connected to technical client {current}; "
+                     f"business data likely in "
+                     f"{', '.join(business_candidates)}")
+        severity = Severity.HIGH
+        business_message = (
+            f"The current RFC session is bound to client {current}, which is "
+            f"a technical / delivery client and rarely holds business data. "
+            f"Scenarios that query HR, vendors, customers, materials, sales or "
+            f"POs will return zero rows until credentials are obtained for "
+            f"one of: {', '.join(business_candidates)}. "
+            f"RFC_READ_TABLE enforces the session's client — a WHERE "
+            f"MANDT='<other>' filter will NOT work as a bypass."
+        )
+    elif current:
+        headline += f" — connected to client {current}"
+        severity = Severity.INFO
+        business_message = (
+            f"Each client is an isolated dataset.  All subsequent scenarios "
+            f"read rows from client {current} only — credentials in other "
+            f"clients would uncover different data."
+        )
+    else:
+        severity = Severity.INFO
+        business_message = ("Each client is an isolated dataset.  "
+                             "Subsequent scenarios read only the session's client.")
+
+    return ImpactResult(
+        scenario="client_landscape", category="System Landscape",
+        severity=severity, headline=headline,
+        record_count=len(records), sample_records=records,
+        business_message=business_message,
+        icon="\U0001F5C4\uFE0F",
+    )
+
+
 @impact_scenario("salary_exfiltration", "HR / Employee Data", Severity.CRITICAL,
                  icon="\U0001F4B0")
 def _salary_exfiltration(conn, node):
