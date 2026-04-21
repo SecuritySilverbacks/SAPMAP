@@ -1,0 +1,49 @@
+# SAPMAP Script: SAProuter Discovery + Internal Scan
+# Usage: python3 sapmap.py --script scripts/demo_saprouter.yaml
+#
+# Flow:
+#   1. Add the SAProuter as a node (port 3299 on 192.168.2.209)
+#   2. Scan it so SAPMAP classifies the node as SAPROUTER
+#   3. Probe CVE-2017-12636 ROUTER_ADM info leak (may reveal routtab + peers)
+#   4. Scan the internal host 192.168.2.29, instances 40-45, via the router
+#
+# Any SAP systems discovered in step 4 will automatically carry the
+# SAProuter prefix, so follow-up actions (check_gw, betrusted, etc.)
+# against those SIDs will tunnel through the router without extra setup.
+
+name: "SAProuter Discovery + Internal Scan"
+description: "Discover SAProuter RD1, test info leak, then scan internal host 192.168.2.29 (inst 40-45) through the tunnel"
+
+# Slow the script down a little so the activity bar is readable.
+step_delay: 2
+
+steps:
+  # --- 1. Register the SAProuter as a node --------------------------------
+  - action: add_system
+    sid: RD1
+    ip: 192.168.2.209
+    instance: "99"         # 99 = SAProuter convention (port 3299)
+
+  # --- 2. Fingerprint it (confirms system_type=SAPROUTER) -----------------
+  - action: scan
+    target: RD1
+
+  # --- 3. ROUTER_ADM info-leak probe (CVE-2017-12636) ---------------------
+  - action: check_router_info
+    target: RD1
+
+  # --- 4. Scan internal host via the SAProuter ----------------------------
+  #   targets left empty would auto-extract from the info-leak result;
+  #   here we target 192.168.2.29 explicitly, instances 40..45 only.
+  - action: router_scan
+    target: RD1
+    targets: "192.168.2.29"
+    inst_from: 40
+    inst_to: 45
+    mode: sap              # "full" adds HANA (3NN15) + JAVA (5NN00/04)
+    concurrency: 10
+    timeout: 5.0
+
+  # --- 5. Tidy the map so the new internal node is easy to spot -----------
+  - action: layout
+    mode: hierarchy
