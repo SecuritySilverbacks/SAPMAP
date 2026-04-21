@@ -409,6 +409,77 @@ def _query_diag_dispatcher_info(host: str, port: int,
             m.group(3).decode("ascii", "ignore"))
 
 
+# MS HTTP "release" banner — "SAP Message Server, release 793 (S4H)" —
+# embeds the SID in parentheses.  Used as a second extraction path when
+# the text/logon body doesn't contain the routing string.
+_MS_RELEASE_SID_RE = _re.compile(
+    rb'SAP Message Server, release \d+\s*\(([A-Z][A-Z0-9]{2})\)', _re.IGNORECASE
+)
+
+# MS HTTP logon body — server identifier "<host>_<SID>_<NN>" without
+# the leading "SID/" prefix that the DIAG response carries.  Matches
+# "s4hanadev_S4H_00" in the plain-text /msgserver/text/logon body.
+_MS_ROUTE_RE = _re.compile(
+    rb'(?:^|[\s\n])([A-Za-z0-9][A-Za-z0-9._-]{0,63})_([A-Z][A-Z0-9]{2})_(\d{2})\b'
+)
+
+
+def _query_ms_http_info(host: str, inst_nr: int,
+                        timeout: float = 3.0) -> tuple:
+    """Query the MS HTTP port (81XX) for unauthenticated server info.
+
+    The MS-internal (36XX) and MS-external (39XX) binary ports reject
+    anonymous admin queries on locked-down kernels, but the MS HTTP
+    port at 8100+NN exposes /msgserver/text/logon to everyone.  The
+    plain-text body contains the routing string '<host>_<SID>_<NN>'
+    and the HTTP 'server:' header contains 'release X (SID)'.
+
+    Returns (sid, hostname, inst_nr_str) on success, or ("", "", "").
+    Called as a fallback when MS ports are open but the gateway and
+    SAPControl metadata channels are firewalled.
+    """
+    port = 8100 + inst_nr
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect((host, port))
+        s.sendall(
+            b"GET /msgserver/text/logon HTTP/1.0\r\n"
+            b"Host: x\r\n\r\n"
+        )
+        resp = b""
+        while len(resp) < 16384:
+            try:
+                chunk = s.recv(4096)
+            except socket.timeout:
+                break
+            if not chunk:
+                break
+            resp += chunk
+        s.close()
+    except Exception:
+        return ("", "", "")
+
+    if not resp:
+        return ("", "", "")
+
+    # Preferred: MS body contains "<host>_<SID>_<NN>" on its own line
+    m = _MS_ROUTE_RE.search(resp)
+    if m:
+        return (m.group(2).decode("ascii", "ignore"),   # SID
+                m.group(1).decode("ascii", "ignore"),   # hostname
+                m.group(3).decode("ascii", "ignore"))   # inst
+
+    # Fallback: SID from "server: SAP Message Server, release N (SID)" header
+    m = _MS_RELEASE_SID_RE.search(resp)
+    if m:
+        return (m.group(1).decode("ascii", "ignore"),
+                "",
+                f"{inst_nr:02d}")
+
+    return ("", "", "")
+
+
 # Ports that collide with SAP port formulas but are NOT standard SAP services.
 # 3389 = RDP (instance 89 gateway would be 3300+89=3389) — currently not scanned
 NON_SAP_PORTS = set()
@@ -1222,6 +1293,25 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
                 print(f"[+] {tag}: SID from DIAG dispatcher "
                       f"({host}:{disp_port}): SID={sid}, "
                       f"Host={disp_host or '?'}, Inst={disp_inst or '?'}")
+                break
+
+    # Still no SID?  Try the MS HTTP port (81XX) as a second fallback.
+    # This is the path for systems where 32XX is firewalled but 36XX /
+    # 39XX (message server) is open — the MS HTTP port on the same
+    # instance serves /msgserver/text/logon anonymously and its body
+    # contains "<host>_<SID>_<NN>" plus a "release N (SID)" banner.
+    if not info["sid"]:
+        for inst_nr in ordered_nrs:
+            sid, ms_host, ms_inst = _query_ms_http_info(
+                host, inst_nr, timeout=min(timeout, 3))
+            if sid:
+                info["sid"] = sid
+                tag = sid
+                if ms_host and not info["hostname"]:
+                    info["hostname"] = ms_host
+                print(f"[+] {tag}: SID from MS HTTP "
+                      f"({host}:{8100 + inst_nr}): SID={sid}, "
+                      f"Host={ms_host or '?'}, Inst={ms_inst or '?'}")
                 break
 
     # If OS still unknown, try SAPControl GetProcessList (.EXE = Windows)
