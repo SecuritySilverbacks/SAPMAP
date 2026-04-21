@@ -2056,14 +2056,19 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
     # also has real SAP instances doesn't get folded into the SAP SID's
     # node.  A SAProuter belongs on the map as its own box.
     #
-    # SID scheme: "R" + hex of IPv4 last octet (e.g. 192.168.2.210 → "RD2").
-    # Unique per-host within a /24; across /24s a very rare collision is
-    # acceptable (3299 is scanned on one host at a time).
+    # SID scheme: "R" + hex of IPv4 last octet (e.g. 192.168.2.209 → "RD1",
+    # 192.168.2.210 → "RD2").  Unique per-host within a /24 and stable
+    # across runs (crc32 fallback for non-IPv4 inputs so hostnames also
+    # map to a reproducible SID).  To pin a custom SID for scripting,
+    # register the router up-front with `add_system sid: <SID> ip: <IP>
+    # instance: "99"` — the scanner reuses an existing node at that IP
+    # rather than synthesising a new one.
     def _router_sid_for(ip_str: str) -> str:
         try:
             last = int(ip_str.split(".")[-1]) & 0xFF
         except Exception:
-            last = abs(hash(ip_str)) & 0xFF
+            import zlib
+            last = zlib.crc32(ip_str.encode("utf-8", "replace")) & 0xFF
         return f"R{last:02X}"
 
     router_sid = None
