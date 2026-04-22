@@ -625,6 +625,12 @@ body {
   <div class="map-container" id="map-container">
     <div class="empty-msg" id="empty-msg">Start a scan or load a saved state to discover SAP systems</div>
     <svg id="map-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+    <!-- Pulse overlay: short-lived SVG rects/lines flashed when a finding
+         fires.  Lives outside #map-svg so innerHTML rebuilds don't wipe
+         in-flight animations.  viewBox is kept in sync by applyViewBox(). -->
+    <svg id="pulse-svg" xmlns="http://www.w3.org/2000/svg"
+         style="position:absolute;inset:0;width:100%;height:100%;
+                pointer-events:none;z-index:5"></svg>
   </div>
 
   <!-- Legend -->
@@ -1426,6 +1432,11 @@ async function pollUpdates() {
           // focused — operators who left the tab open during a long
           // exploit chain get a native OS pop when something pwns.
           if (rec.severity === 'CRITICAL') _maybeNotifyDesktop(rec);
+          // Map pulse — light up the affected node (and, for findings
+          // that carry a source/target pair in meta, the connection too).
+          // Deferred one tick so the node's _x/_y is guaranteed to be set
+          // by an in-flight updateMap() for a just-plotted system.
+          setTimeout(() => { try { _maybePulseFromFinding(rec); } catch (_) {} }, 50);
         }
         findingsCursor = fd.cursor || findingsCursor;
         renderFindings();
@@ -2055,6 +2066,14 @@ function updateMap() {
   }
 
   svg.innerHTML = html;
+
+  // Keep the pulse overlay's viewBox matched so pulse rects/lines land
+  // on the same world coordinates as the main map.
+  const pulseSvg = document.getElementById('pulse-svg');
+  if (pulseSvg) {
+    pulseSvg.setAttribute('viewBox',
+      svg.getAttribute('viewBox') || `0 0 ${viewBox.w} ${viewBox.h}`);
+  }
 
   // Post-render: animate new connection lines (draw effect)
   svg.querySelectorAll('.edge-line[data-new="1"]').forEach(el => {
@@ -4520,8 +4539,10 @@ function layoutByStack() {
   updateMap();
 }
 function applyViewBox() {
-  document.getElementById('map-svg').setAttribute('viewBox',
-    `${viewBox.x} ${viewBox.y} ${viewBox.w} ${viewBox.h}`);
+  const vb = `${viewBox.x} ${viewBox.y} ${viewBox.w} ${viewBox.h}`;
+  document.getElementById('map-svg').setAttribute('viewBox', vb);
+  const pulseSvg = document.getElementById('pulse-svg');
+  if (pulseSvg) pulseSvg.setAttribute('viewBox', vb);
 }
 function showAbout() {
   const body = `
@@ -4892,6 +4913,100 @@ function toggleFindingsDrawer() {
   _findingsDrawerOpen = !_findingsDrawerOpen;
   const d = document.getElementById('findings-drawer');
   if (d) d.classList.toggle('open', _findingsDrawerOpen);
+}
+
+// ---------------------------------------------------------------------------
+// Pulse overlay — when a finding fires, briefly light up the relevant node
+// box (and, for SAP_ALL / credentialed connections, the edge between two
+// nodes).  Uses short-lived SVG elements with native <animate> children so
+// they self-destroy when the animation ends and survive map innerHTML
+// rebuilds (the pulse layer is a sibling <svg>).
+// ---------------------------------------------------------------------------
+const _PULSE_COLORS = {
+  CRITICAL: '#ff4d4d',
+  HIGH:     '#f0883e',
+  MEDIUM:   '#d29922',
+  INFO:     '#388bfd',
+};
+
+function _getNodeCenter(sid) {
+  const n = (mapState.nodes || {})[sid];
+  if (!n || n._x == null) return null;
+  const BOX_W = 240, BOX_H = 174;
+  return { x: n._x, y: n._y, w: BOX_W, h: BOX_H,
+           cx: n._x + BOX_W / 2, cy: n._y + BOX_H / 2 };
+}
+
+function _pulseNode(sid, severity) {
+  const pulse = document.getElementById('pulse-svg');
+  if (!pulse) return;
+  const pos = _getNodeCenter(sid);
+  if (!pos) return;
+  const color = _PULSE_COLORS[severity] || _PULSE_COLORS.INFO;
+  const svgNS = 'http://www.w3.org/2000/svg';
+  // Border rect: starts flush with the node, expands outward while fading.
+  const pad = 4;
+  const rect = document.createElementNS(svgNS, 'rect');
+  rect.setAttribute('x', pos.x - pad);
+  rect.setAttribute('y', pos.y - pad);
+  rect.setAttribute('width', pos.w + pad * 2);
+  rect.setAttribute('height', pos.h + pad * 2);
+  rect.setAttribute('rx', 8);
+  rect.setAttribute('fill', 'none');
+  rect.setAttribute('stroke', color);
+  rect.setAttribute('stroke-width', 4);
+  rect.setAttribute('opacity', 0.9);
+  // Expanding stroke + fading opacity, 3 cycles over ~2.4s.
+  rect.innerHTML =
+    `<animate attributeName="stroke-width" values="3;10;3" ` +
+        `dur="0.8s" repeatCount="3" />` +
+    `<animate attributeName="opacity" values="0.9;0.2;0.9" ` +
+        `dur="0.8s" repeatCount="3" />`;
+  pulse.appendChild(rect);
+  setTimeout(() => rect.remove(), 2500);
+}
+
+function _pulseConnection(srcSid, tgtSid, severity) {
+  const pulse = document.getElementById('pulse-svg');
+  if (!pulse) return;
+  const a = _getNodeCenter(srcSid);
+  const b = _getNodeCenter(tgtSid);
+  if (!a || !b) return;
+  const color = _PULSE_COLORS[severity] || _PULSE_COLORS.CRITICAL;
+  const svgNS = 'http://www.w3.org/2000/svg';
+  // Straight line between box centers — the real edge may be curved, but
+  // a thick pulsing overlay at center-to-center reads clearly as "this
+  // connection just lit up" without duplicating clip/curve math.
+  const line = document.createElementNS(svgNS, 'line');
+  line.setAttribute('x1', a.cx);
+  line.setAttribute('y1', a.cy);
+  line.setAttribute('x2', b.cx);
+  line.setAttribute('y2', b.cy);
+  line.setAttribute('stroke', color);
+  line.setAttribute('stroke-width', 4);
+  line.setAttribute('stroke-linecap', 'round');
+  line.setAttribute('opacity', 0.85);
+  line.innerHTML =
+    `<animate attributeName="stroke-width" values="3;12;3" ` +
+        `dur="0.7s" repeatCount="3" />` +
+    `<animate attributeName="opacity" values="0.85;0.15;0.85" ` +
+        `dur="0.7s" repeatCount="3" />`;
+  pulse.appendChild(line);
+  // Also light up both endpoints so the eye is drawn to them too.
+  _pulseNode(srcSid, severity);
+  _pulseNode(tgtSid, severity);
+  setTimeout(() => line.remove(), 2200);
+}
+
+function _maybePulseFromFinding(rec) {
+  if (!rec || !rec.node) return;
+  const sev = rec.severity || 'INFO';
+  const meta = rec.meta || {};
+  if (meta.source_sid && meta.target_sid) {
+    _pulseConnection(meta.source_sid, meta.target_sid, sev);
+  } else {
+    _pulseNode(rec.node, sev);
+  }
 }
 
 // Request Notification permission lazily on first scan start so the
