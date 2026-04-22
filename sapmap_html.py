@@ -314,10 +314,12 @@ body {
  * pile up with the activity-bar at the top.  Newest slides in from the
  * right and sits at the bottom; older toasts stack upward. */
 #findings-bar {
-  position: fixed; bottom: 32px; right: 16px; z-index: 900;
+  position: fixed; right: 16px; z-index: 900;
+  bottom: 200px; /* JS updates this to sit just above the console pane */
   width: 420px; max-width: calc(100vw - 32px);
   display: flex; flex-direction: column; gap: 8px;
   pointer-events: none;
+  transition: bottom 0.12s ease-out;
 }
 .finding-row {
   display: flex; align-items: center; gap: 10px;
@@ -5087,6 +5089,36 @@ document.addEventListener('click', () => hideMapCtxMenu());
     setH(180);
     try { localStorage.removeItem(LS_KEY); } catch (err) {}
   });
+})();
+
+// --- Keep the findings toast stack pinned just above the console pane ---
+(function initFindingsAnchor() {
+  const bar = document.getElementById('findings-bar');
+  const container = document.getElementById('console-container');
+  const restore = document.getElementById('console-restore');
+  if (!bar || !container) return;
+  const GAP = 12;
+  const update = () => {
+    let base = 0;
+    if (container.style.display !== 'none') {
+      base = container.getBoundingClientRect().height;
+    } else if (restore && restore.style.display !== 'none') {
+      base = restore.getBoundingClientRect().height;
+    }
+    bar.style.bottom = (base + GAP) + 'px';
+  };
+  update();
+  if ('ResizeObserver' in window) {
+    const ro = new ResizeObserver(update);
+    ro.observe(container);
+    if (restore) ro.observe(restore);
+  }
+  window.addEventListener('resize', update);
+  // Also re-check when the console is toggled (CSS display changes don't
+  // fire ResizeObserver reliably on some browsers).
+  const mo = new MutationObserver(update);
+  mo.observe(container, { attributes: true, attributeFilter: ['style', 'class'] });
+  if (restore) mo.observe(restore, { attributes: true, attributeFilter: ['style'] });
 })();
 
 // --- Init ---
