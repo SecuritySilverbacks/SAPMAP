@@ -1516,6 +1516,13 @@ def create_app(api: SAPMAPApi) -> Bottle:
                       f"{r['credentials_added']} credentials imported, "
                       f"{r['downstream_added']} downstream node(s) added, "
                       f"{r['edges_added']} RFC edge(s) drawn")
+                if r.get("credentials_added"):
+                    sapmap_findings.emit_finding(
+                        "CRITICAL", sid,
+                        f"Java Secure Store decrypted — "
+                        f"{r['credentials_added']} credential(s) imported, "
+                        f"{r['downstream_added']} downstream system(s) added",
+                    )
             else:
                 print(f"[-] {sid}: Java Secure Store extraction failed: "
                       f"{r.get('error', '?')}")
@@ -3662,6 +3669,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
             if not data:
                 return json.dumps({"error": "No data received"})
             api.state = SAPMAPState.from_dict(data)
+            if isinstance(data, dict) and data.get("_findings"):
+                try:
+                    sapmap_findings.load_snapshot(data["_findings"])
+                except Exception:
+                    pass
             return json.dumps({"status": "ok"})
         except Exception as e:
             return json.dumps({"error": str(e)})

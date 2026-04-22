@@ -115,3 +115,34 @@ def clear() -> None:
     """Wipe the findings buffer (called when a new scan begins)."""
     with _lock:
         _findings.clear()
+
+
+def snapshot() -> List[Dict]:
+    """Return a JSON-safe copy of the full findings buffer.
+
+    Used by state save/load so a reopened .sapmap session still has the
+    banner/drawer/bell history from the run that produced it.
+    """
+    with _lock:
+        return [dict(r) for r in _findings]
+
+
+def load_snapshot(records: List[Dict]) -> None:
+    """Replace the buffer from a previous snapshot().
+
+    Re-anchors the id counter past the loaded max so new findings from
+    subsequent actions stay strictly increasing (cursor-based polling
+    depends on monotonic ids).  Does NOT re-fire listeners — the caller
+    is loading historical data, not reporting new events.
+    """
+    global _next_id
+    with _lock:
+        _findings.clear()
+        if not records:
+            return
+        for r in records:
+            _findings.append(dict(r))
+        try:
+            _next_id = max(int(r.get("id", 0)) for r in records) + 1
+        except (ValueError, TypeError):
+            _next_id = len(records) + 1
