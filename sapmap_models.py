@@ -631,11 +631,15 @@ class SAPMAPState:
                 and conn.source_sid and conn.target_sid):
             try:
                 from sapmap_findings import emit_finding
+                # source_sid/target_sid travel in meta so the UI pulse
+                # overlay can light up the specific edge between them.
                 emit_finding(
                     "CRITICAL", conn.source_sid,
                     f"RFC destination {conn.destination_name!r} "
                     f"logs on to {conn.target_sid} as SAP_ALL "
                     f"— lateral-movement hop confirmed",
+                    meta={"source_sid": conn.source_sid,
+                          "target_sid": conn.target_sid},
                 )
             except Exception:
                 pass
