@@ -1307,10 +1307,12 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
     # 00-01 and SJ1 at inst 02-03 on the same box) we'd otherwise OR SM1's
     # ABAP flag into SJ1's info dict, mis-labelling SJ1 as ABAP+JAVA.
     info.setdefault("http_ports", {})   # {inst_nr: (http_port, https_port)}
+    sc_to = min(timeout, 5 if saprouter else 3)
     for inst_nr in ordered_nrs:
         sc_port = 50000 + inst_nr * 100 + 13
         sid, is_java, is_abap, db_type, icm_http, icm_https = \
-            _query_sapcontrol_sid(host, sc_port, timeout=min(timeout, 3))
+            _query_sapcontrol_sid(host, sc_port, timeout=sc_to,
+                                   saprouter=saprouter)
         if sid and not info["sid"]:
             info["sid"] = sid
             tag = sid  # update tag with discovered SID
@@ -1367,6 +1369,9 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
         diag_to = min(timeout, 6 if saprouter else 3)
         for inst_nr in ordered_nrs:
             disp_port = 3200 + inst_nr
+            print(f"[*] {tag}: Probing DIAG dispatcher {host}:{disp_port}"
+                  f"{' via SAProuter' if saprouter else ''} "
+                  f"for SID (timeout={diag_to}s) ...")
             sid, disp_host, disp_inst = _query_diag_dispatcher_info(
                 host, disp_port, timeout=diag_to, saprouter=saprouter)
             if sid:
@@ -1378,6 +1383,8 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
                       f"({host}:{disp_port}): SID={sid}, "
                       f"Host={disp_host or '?'}, Inst={disp_inst or '?'}")
                 break
+            else:
+                print(f"[-] {tag}: DIAG {host}:{disp_port} yielded no SID")
 
     # Still no SID?  Try the MS HTTP port (81XX) as a second fallback.
     # This is the path for systems where 32XX is firewalled but 36XX /
@@ -1387,6 +1394,10 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
     if not info["sid"]:
         ms_to = min(timeout, 6 if saprouter else 3)
         for inst_nr in ordered_nrs:
+            ms_port = 8100 + inst_nr
+            print(f"[*] {tag}: Probing MS HTTP {host}:{ms_port}"
+                  f"{' via SAProuter' if saprouter else ''} "
+                  f"for SID (timeout={ms_to}s) ...")
             sid, ms_host, ms_inst = _query_ms_http_info(
                 host, inst_nr, timeout=ms_to, saprouter=saprouter)
             if sid:
@@ -1395,15 +1406,18 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
                 if ms_host and not info["hostname"]:
                     info["hostname"] = ms_host
                 print(f"[+] {tag}: SID from MS HTTP "
-                      f"({host}:{8100 + inst_nr}): SID={sid}, "
+                      f"({host}:{ms_port}): SID={sid}, "
                       f"Host={ms_host or '?'}, Inst={ms_inst or '?'}")
                 break
+            else:
+                print(f"[-] {tag}: MS HTTP {host}:{ms_port} yielded no SID")
 
     # If OS still unknown, try SAPControl GetProcessList (.EXE = Windows)
     if not info["os_type"]:
         for inst_nr in ordered_nrs:
             sc_port = 50000 + inst_nr * 100 + 13
-            os_type = _query_sapcontrol_os(host, sc_port, timeout=min(timeout, 3))
+            os_type = _query_sapcontrol_os(host, sc_port, timeout=sc_to,
+                                           saprouter=saprouter)
             if os_type:
                 info["os_type"] = os_type
                 print(f"[+] {tag}: OS type from SAPControl ({host}:{sc_port}): "
@@ -1449,7 +1463,8 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
     return info
 
 
-def _query_sapcontrol_sid(host: str, port: int, timeout: float = 3) -> tuple:
+def _query_sapcontrol_sid(host: str, port: int, timeout: float = 3,
+                          saprouter: str = "") -> tuple:
     """Quick SAPControl SOAP query to extract SID, system type, and DB type.
 
     Returns (sid, is_java, is_abap, db_type, http_port, https_port) tuple.
@@ -1476,9 +1491,16 @@ def _query_sapcontrol_sid(host: str, port: int, timeout: float = 3) -> tuple:
     }
 
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        sock.connect((host, port))
+        if saprouter:
+            from sap_saprouter import connect_through_saprouter
+            sock = connect_through_saprouter(
+                saprouter + f"/H/{host}/S/{port}",
+                timeout=timeout, talk_mode=1,
+            )
+        else:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            sock.connect((host, port))
         body = (
             '<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/">'
             '<SOAP-ENV:Body><ns1:GetInstanceProperties xmlns:ns1="urn:SAPControl">'
@@ -1953,7 +1975,8 @@ def _query_host_agent_systems(host: str, port: int,
     return None
 
 
-def _query_sapcontrol_os(host: str, port: int, timeout: float = 3) -> str:
+def _query_sapcontrol_os(host: str, port: int, timeout: float = 3,
+                         saprouter: str = "") -> str:
     """Detect OS type via SAPControl GetProcessList.
 
     Process names ending with .EXE indicate Windows; otherwise Linux/Unix.
@@ -1963,9 +1986,16 @@ def _query_sapcontrol_os(host: str, port: int, timeout: float = 3) -> str:
     """
     import re as _re
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        sock.connect((host, port))
+        if saprouter:
+            from sap_saprouter import connect_through_saprouter
+            sock = connect_through_saprouter(
+                saprouter + f"/H/{host}/S/{port}",
+                timeout=timeout, talk_mode=1,
+            )
+        else:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            sock.connect((host, port))
         body = (
             '<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/">'
             '<SOAP-ENV:Body><ns1:GetProcessList xmlns:ns1="urn:SAPControl">'
@@ -2092,10 +2122,19 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
                 instance_sysinfo[inst_nr] = sys_info
                 continue
 
-        # No gateway open for this instance — try dispatcher+100
+        # No gateway open (or gateway enrichment yielded no SID) — try the
+        # dispatcher+100 formula, but skip when it would land on the same
+        # port we already probed (wasted ~25s of fallback timeouts over a
+        # SAProuter).  Also keep the partial sys_info from the first call
+        # so hostname / kernel / OS aren't lost when only the SID is missing.
+        first_sys_info = sys_info if gw_port else None
         for port, info in sorted(open_ports.items()):
             if info["service"] == "dispatcher" and info["instance_nr"] == inst_nr:
                 derived_gw = port + 100  # 32XX -> 33XX
+                if derived_gw == gw_port:
+                    print(f"[*] {host}: dispatcher+100 ({derived_gw}) == "
+                          f"gateway already tried — skipping redundant retry")
+                    break
                 print(f"[*] {host}: No gateway for instance {inst_nr}, trying dispatcher+100 = {derived_gw}")
                 sys_info = enrich_system_info(host, derived_gw, timeout=timeout,
                                               verbose=verbose, saprouter=saprouter)
@@ -2103,6 +2142,12 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
                     instance_sid_map[inst_nr] = sys_info["sid"]
                     instance_sysinfo[inst_nr] = sys_info
                 break
+        # Preserve what we learned from the first enrichment so downstream
+        # node-build can still show hostname/kernel/OS even without a SID.
+        if (inst_nr not in instance_sysinfo) and first_sys_info and any(
+                first_sys_info.get(k) for k in
+                ("hostname", "kernel", "os_type", "sap_release")):
+            instance_sysinfo[inst_nr] = first_sys_info
 
         if inst_nr in instance_sid_map:
             continue
