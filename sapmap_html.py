@@ -1337,7 +1337,17 @@ async function pollUpdates() {
     try {
       const fd = await api('GET', 'findings?cursor=' + findingsCursor);
       if (fd && Array.isArray(fd.findings) && fd.findings.length > 0) {
-        for (const rec of fd.findings) _activeFindings.push(rec);
+        for (const rec of fd.findings) {
+          _activeFindings.push(rec);
+          // Auto-dismiss banner rows after 5 s — the drawer + console
+          // keep the full history, so no information is lost.
+          if (rec.severity === 'CRITICAL' || rec.severity === 'HIGH') {
+            setTimeout((id) => {
+              _dismissedFindingIds.add(id);
+              renderFindings();
+            }, 5000, rec.id);
+          }
+        }
         findingsCursor = fd.cursor || findingsCursor;
         renderFindings();
       }
