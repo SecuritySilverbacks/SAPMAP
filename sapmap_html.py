@@ -426,19 +426,41 @@ body {
 }
 .findings-tool:hover { color: #c9d1d9; }
 .finding-log-row {
-  display: flex; gap: 8px; padding: 6px 8px; margin-bottom: 4px;
+  display: block; padding: 6px 10px; margin-bottom: 4px;
   border-left: 3px solid currentColor; border-radius: 2px;
   background: #161b22;
-  font-size: 12px; line-height: 1.45;
+  font-size: 12px; line-height: 1.4;
 }
 .finding-log-row.sev-CRITICAL { color: #ff8a80; }
 .finding-log-row.sev-HIGH     { color: #ffb27a; }
 .finding-log-row.sev-MEDIUM   { color: #e6d884; }
 .finding-log-row.sev-INFO     { color: #8bd2ff; }
-.finding-log-ts { color: #6e7681; font-size: 11px; flex-shrink: 0; }
-.finding-log-msg { color: #c9d1d9; font-weight: 400; }
-.finding-log-node { font-weight: 700; cursor: pointer;
-                     text-decoration: underline; text-underline-offset: 2px; }
+/* Drawer-specific overrides: the banner styles use big outlined
+   badges that wrap awkwardly inside the narrow (420px) drawer.  In
+   the drawer we want a compact header line and a free-flowing
+   message paragraph. */
+.finding-log-row .finding-sev {
+  font-weight: 700; font-size: 9px; letter-spacing: 0.6px;
+  padding: 1px 5px; border-radius: 2px; border: none;
+  background: currentColor; color: #0d1117;
+  margin-right: 6px; display: inline-block; vertical-align: 1px;
+}
+.finding-log-row .finding-node {
+  font-weight: 700; cursor: pointer;
+  text-decoration: underline; text-underline-offset: 2px;
+  margin-right: 6px;
+}
+.finding-log-row .finding-msg {
+  display: block; margin-top: 3px;
+  color: #c9d1d9; font-weight: 400;
+  word-break: break-word;
+}
+.finding-log-row .finding-cve {
+  display: inline-block; margin-left: 4px;
+  font-size: 10px; padding: 0 4px; border-radius: 2px;
+  border: 1px solid currentColor; opacity: 0.75;
+  vertical-align: 1px;
+}
 .shell-window {
   position: fixed; width: 820px; height: 520px;
   min-width: 400px; min-height: 300px; padding: 0;
