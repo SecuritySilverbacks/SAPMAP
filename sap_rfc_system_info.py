@@ -795,9 +795,13 @@ def build_diag_term_ini():
     diag += struct.pack('>I', 5001)       # ws_type (Java GUI)
 
     # Item 2: SupportData (APPL / ST_USER / SUPPORTDATA)
+    # item_sid = 0x0B (ST_USER_SUPPORTDATA) — using 0x11 here causes the
+    # dispatcher to reject the packet as "invalid gui connect data" on
+    # at least kernel 742/754, which would otherwise swallow the login
+    # screen and hide the SID.  Matches sap_client_enum.build_diag_init().
     diag += b'\x10'                       # item_type = APPL
     diag += b'\x04'                       # item_id = ST_USER
-    diag += b'\x11'                       # item_sid = SUPPORTDATA
+    diag += b'\x0b'                       # item_sid = SUPPORTDATA (0x0B)
     diag += struct.pack('>H', 32)         # item_length = 32 (BE)
     diag += _DIAG_SUPPORT_DATA            # 32-byte support bitfield
 
