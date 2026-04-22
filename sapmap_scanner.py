@@ -368,7 +368,8 @@ _DIAG_ROUTE_RE = _re.compile(
 
 
 def _query_diag_dispatcher_info(host: str, port: int,
-                                 timeout: float = 3.0) -> tuple:
+                                 timeout: float = 3.0,
+                                 saprouter: str = "") -> tuple:
     """Send the full DIAG init probe and parse (sid, hostname, inst) out.
 
     Modelled on the nmap SAPDISP probe (which only identifies the service
@@ -377,10 +378,37 @@ def _query_diag_dispatcher_info(host: str, port: int,
     hostname + instance number as an uppercase routing string
     '<SID>/<hostname>_<SID>_<NN>'.
 
+    When *saprouter* is set, delegates to sap_rfc_system_info.probe_diag_login
+    (pysap-style TERM_INI + ST_R3INFO[DBNAME] login-screen scrape) because
+    that path already supports SAProuter tunnelling and extracts the SID
+    from the DBNAME item even on systems where the short routing regex
+    doesn't match.
+
     Returns (sid, hostname, inst_nr) on success, or ("", "", "") if the
-    probe failed or the marker wasn't found.  Safe to call against any
-    port; non-dispatcher services won't match the regex.
+    probe failed or no SID could be extracted.
     """
+    # SAProuter path — use the pysap-style login-screen scraper, which
+    # knows how to tunnel and has the richer DBNAME-based SID extraction.
+    if saprouter:
+        try:
+            from sap_saprouter import parse_route_string
+            from sap_rfc_system_info import probe_diag_login
+            hops = parse_route_string(saprouter + f"/H/{host}/S/{port}")
+            router_tuple = (hops[0]["host"], int(hops[0]["port"]))
+            info = probe_diag_login(host, port, timeout=timeout,
+                                    verbose=False, router=router_tuple) or {}
+        except Exception:
+            return ("", "", "")
+        sid = (info.get("RFCSYSID") or "").strip().upper()
+        if not sid:
+            return ("", "", "")
+        hn  = (info.get("hostname") or info.get("CPUNAME") or "").strip()
+        if hn:
+            hn = hn.split(".")[0]
+        inst = str(info.get("instance_number") or f"{port % 100:02d}")
+        return (sid, hn, inst)
+
+    # Direct path — lightweight DIAG init probe with routing-string regex.
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(timeout)
@@ -402,11 +430,28 @@ def _query_diag_dispatcher_info(host: str, port: int,
         return ("", "", "")
 
     m = _DIAG_ROUTE_RE.search(resp)
-    if not m:
+    if m:
+        return (m.group(1).decode("ascii", "ignore"),
+                m.group(2).decode("ascii", "ignore"),
+                m.group(3).decode("ascii", "ignore"))
+
+    # Direct-path fallback: the routing-string regex didn't hit — try the
+    # pysap DBNAME scrape locally too so locked-down systems still leak
+    # their SID via the login screen.
+    try:
+        from sap_rfc_system_info import probe_diag_login
+        info = probe_diag_login(host, port, timeout=timeout,
+                                verbose=False, router=None) or {}
+    except Exception:
         return ("", "", "")
-    return (m.group(1).decode("ascii", "ignore"),
-            m.group(2).decode("ascii", "ignore"),
-            m.group(3).decode("ascii", "ignore"))
+    sid = (info.get("RFCSYSID") or "").strip().upper()
+    if not sid:
+        return ("", "", "")
+    hn  = (info.get("hostname") or info.get("CPUNAME") or "").strip()
+    if hn:
+        hn = hn.split(".")[0]
+    inst = str(info.get("instance_number") or f"{port % 100:02d}")
+    return (sid, hn, inst)
 
 
 # MS HTTP "release" banner — "SAP Message Server, release 793 (S4H)" —
@@ -425,7 +470,8 @@ _MS_ROUTE_RE = _re.compile(
 
 
 def _query_ms_http_info(host: str, inst_nr: int,
-                        timeout: float = 3.0) -> tuple:
+                        timeout: float = 3.0,
+                        saprouter: str = "") -> tuple:
     """Query the MS HTTP port (81XX) for unauthenticated server info.
 
     The MS-internal (36XX) and MS-external (39XX) binary ports reject
@@ -434,15 +480,26 @@ def _query_ms_http_info(host: str, inst_nr: int,
     plain-text body contains the routing string '<host>_<SID>_<NN>'
     and the HTTP 'server:' header contains 'release X (SID)'.
 
+    When *saprouter* is set, the HTTP GET is tunnelled through the
+    SAProuter using a raw (NI_RAW_IO) NI_ROUTE channel so the probe
+    works against internal hosts.
+
     Returns (sid, hostname, inst_nr_str) on success, or ("", "", "").
     Called as a fallback when MS ports are open but the gateway and
     SAPControl metadata channels are firewalled.
     """
     port = 8100 + inst_nr
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(timeout)
-        s.connect((host, port))
+        if saprouter:
+            from sap_saprouter import connect_through_saprouter
+            s = connect_through_saprouter(
+                saprouter + f"/H/{host}/S/{port}",
+                timeout=timeout, talk_mode=1,
+            )
+        else:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(timeout)
+            s.connect((host, port))
         s.sendall(
             b"GET /msgserver/text/logon HTTP/1.0\r\n"
             b"Host: x\r\n\r\n"
@@ -456,7 +513,10 @@ def _query_ms_http_info(host: str, inst_nr: int,
             if not chunk:
                 break
             resp += chunk
-        s.close()
+        try:
+            s.close()
+        except Exception:
+            pass
     except Exception:
         return ("", "", "")
 
@@ -1150,9 +1210,15 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
     else:
         print(f"[*] {tag}: Probing RFC_SYSTEM_INFO on {host}:{gw_port} ...")
 
+    # Through a SAProuter every failed RFC method establishes a fresh
+    # NI_ROUTE tunnel, so the default 10s × 3-methods chain can easily
+    # reach 30s on a locked-down system.  Cap the per-method timeout at
+    # 5s over the tunnel — local RFC paths keep the full timeout.
+    rfc_timeout = min(timeout, 5) if saprouter else timeout
+
     try:
-        result = probe_sap_system(host, gw_port, timeout=timeout, verbose=verbose,
-                                  router=router_tuple)
+        result = probe_sap_system(host, gw_port, timeout=rfc_timeout,
+                                  verbose=verbose, router=router_tuple)
         status = result.get("status", "unknown")
 
         # Extract from standard RFCSI_EXPORT fields first
@@ -1294,12 +1360,15 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
     # SID still unknown?  Fall back to the DIAG dispatcher probe on 32XX.
     # This is the only metadata channel left when the gateway (33XX) and
     # SAPControl (5XX13) are both firewalled but the dispatcher port is
-    # reachable — the DIAG init response embeds "<SID>/<host>_<SID>_<NN>".
+    # reachable — the DIAG init response embeds "<SID>/<host>_<SID>_<NN>",
+    # and the pysap-style login-screen scrape additionally extracts the
+    # DBNAME item as a SID.  Both paths are router-aware.
     if not info["sid"]:
+        diag_to = min(timeout, 6 if saprouter else 3)
         for inst_nr in ordered_nrs:
             disp_port = 3200 + inst_nr
             sid, disp_host, disp_inst = _query_diag_dispatcher_info(
-                host, disp_port, timeout=min(timeout, 3))
+                host, disp_port, timeout=diag_to, saprouter=saprouter)
             if sid:
                 info["sid"] = sid
                 tag = sid
@@ -1316,9 +1385,10 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
     # instance serves /msgserver/text/logon anonymously and its body
     # contains "<host>_<SID>_<NN>" plus a "release N (SID)" banner.
     if not info["sid"]:
+        ms_to = min(timeout, 6 if saprouter else 3)
         for inst_nr in ordered_nrs:
             sid, ms_host, ms_inst = _query_ms_http_info(
-                host, inst_nr, timeout=min(timeout, 3))
+                host, inst_nr, timeout=ms_to, saprouter=saprouter)
             if sid:
                 info["sid"] = sid
                 tag = sid
