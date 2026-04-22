@@ -2104,7 +2104,6 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             conn.logon_tested = True
                             conn.ping_ok = True
                             conn.tested = True
-                            api.state.notify_sap_all_if_elevated(conn)
                             print(f"[+] {dest_name}: Direct logon OK "
                                   f"({conn.rfc_user}@{conn.target_sid})")
                             # Fetch profiles + roles DIRECTLY on the target
@@ -2148,6 +2147,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                       f"has SAP_ALL — edge flipping to red, "
                                       f"'Create Remote User' now available")
                                 target_node.has_critical_finding = True
+                                api.state.notify_sap_all_if_elevated(conn)
                             elif conn.profiles or conn.roles:
                                 p_str = (", ".join(conn.profiles[:5])
                                          + ("…" if len(conn.profiles) > 5
