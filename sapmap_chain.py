@@ -334,4 +334,16 @@ def analyze_chains(state: SAPMAPState, max_depth: int = 6,
         if c.business_impact:
             pf(f"             {c.business_impact[:80]}")
 
+    try:
+        from sapmap_findings import emit_finding
+        for c in result[:5]:
+            sev = "CRITICAL" if c.end_is_production else "HIGH"
+            emit_finding(
+                sev, c.end_sid or c.start_sid or "?",
+                f"Attack chain: {c.headline} "
+                f"({c.total_hops} hops, {c.risk_label})",
+            )
+    except Exception:
+        pass
+
     return result

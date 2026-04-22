@@ -310,6 +310,121 @@ body {
   padding: 2px 8px; border: 1px solid #f0883e80; border-radius: 3px;
   background: #f0883e15;
 }
+/* Critical-finding banner (stacks under activity-bar; one row per finding,
+ * max 3 visible, older collapse into "+N more").  Click the node name to
+ * focus, click ✕ to dismiss a single row.  Severity colors follow the
+ * same palette as node pwned states. */
+#findings-bar { display: flex; flex-direction: column; flex-shrink: 0; }
+.finding-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 14px; font-size: 13px; font-weight: 600;
+  border-bottom: 1px solid #0008;
+  animation: finding-slide 0.25s ease-out;
+}
+@keyframes finding-slide {
+  from { transform: translateY(-6px); opacity: 0; }
+  to   { transform: translateY(0);    opacity: 1; }
+}
+.finding-row.sev-CRITICAL {
+  background: linear-gradient(90deg, #4a1a1a 0%, #2a1010 100%);
+  color: #ff8a80;
+  border-bottom-color: #8b0000;
+  box-shadow: inset 0 0 0 1px #8b000080, 0 0 16px #8b000050;
+}
+.finding-row.sev-HIGH {
+  background: linear-gradient(90deg, #3a2410 0%, #1f1810 100%);
+  color: #ffb27a;
+  border-bottom-color: #f0883e;
+  box-shadow: inset 0 0 0 1px #f0883e60;
+}
+.finding-row.sev-MEDIUM {
+  background: linear-gradient(90deg, #3a3410 0%, #1f1c10 100%);
+  color: #e6d884;
+  border-bottom-color: #d29922;
+}
+.finding-row.sev-INFO {
+  background: linear-gradient(90deg, #10283a 0%, #101820 100%);
+  color: #8bd2ff;
+  border-bottom-color: #388bfd;
+}
+.finding-sev {
+  font-weight: 800; font-size: 10px; letter-spacing: 1px;
+  padding: 2px 7px; border: 1px solid currentColor; border-radius: 3px;
+  flex-shrink: 0; text-transform: uppercase;
+}
+.finding-node {
+  font-weight: 700; cursor: pointer; text-decoration: underline;
+  text-decoration-color: currentColor; text-underline-offset: 3px;
+  flex-shrink: 0;
+}
+.finding-node:hover { filter: brightness(1.3); }
+.finding-msg { flex: 1; font-weight: 500; }
+.finding-cve {
+  flex-shrink: 0; font-size: 11px; opacity: 0.8;
+  padding: 1px 6px; border: 1px solid currentColor; border-radius: 2px;
+}
+.finding-dismiss {
+  cursor: pointer; opacity: 0.6; padding: 2px 6px;
+  font-size: 14px; user-select: none;
+}
+.finding-dismiss:hover { opacity: 1; }
+.finding-more {
+  text-align: center; padding: 3px; font-size: 11px; cursor: pointer;
+  background: #161b22; color: #8b949e; border-bottom: 1px solid #30363d;
+}
+.finding-more:hover { color: #c9d1d9; }
+/* Bell icon in toolbar with new-finding badge */
+#findings-bell {
+  position: relative; cursor: pointer; user-select: none;
+  padding: 4px 8px; font-size: 15px; color: #c9d1d9;
+  border: 1px solid #30363d; border-radius: 4px; background: #161b22;
+}
+#findings-bell:hover { background: #21262d; }
+#findings-bell.has-critical { color: #ff8a80; border-color: #8b0000;
+                               box-shadow: 0 0 10px #8b000080; }
+#findings-bell.has-high     { color: #ffb27a; border-color: #f0883e; }
+#findings-badge {
+  position: absolute; top: -6px; right: -6px;
+  min-width: 16px; height: 16px; line-height: 16px; padding: 0 4px;
+  font-size: 10px; font-weight: 700; text-align: center;
+  background: #8b0000; color: #fff; border-radius: 8px;
+  display: none;
+}
+#findings-badge.show { display: inline-block; }
+/* Session drawer: full chronological log opened from the bell */
+#findings-drawer {
+  position: fixed; top: 0; right: 0; width: 420px; height: 100%;
+  background: #0d1117; border-left: 1px solid #30363d; z-index: 9999;
+  display: none; flex-direction: column;
+  box-shadow: -6px 0 24px #0008;
+}
+#findings-drawer.open { display: flex; }
+#findings-drawer-head {
+  padding: 10px 14px; border-bottom: 1px solid #30363d;
+  display: flex; align-items: center; justify-content: space-between;
+  background: #161b22;
+}
+#findings-drawer-head h3 {
+  font-size: 13px; color: #c9d1d9; margin: 0; font-weight: 600;
+  letter-spacing: 0.5px;
+}
+#findings-drawer-body {
+  flex: 1; overflow: auto; padding: 8px;
+}
+.finding-log-row {
+  display: flex; gap: 8px; padding: 6px 8px; margin-bottom: 4px;
+  border-left: 3px solid currentColor; border-radius: 2px;
+  background: #161b22;
+  font-size: 12px; line-height: 1.45;
+}
+.finding-log-row.sev-CRITICAL { color: #ff8a80; }
+.finding-log-row.sev-HIGH     { color: #ffb27a; }
+.finding-log-row.sev-MEDIUM   { color: #e6d884; }
+.finding-log-row.sev-INFO     { color: #8bd2ff; }
+.finding-log-ts { color: #6e7681; font-size: 11px; flex-shrink: 0; }
+.finding-log-msg { color: #c9d1d9; font-weight: 400; }
+.finding-log-node { font-weight: 700; cursor: pointer;
+                     text-decoration: underline; text-underline-offset: 2px; }
 .shell-window {
   position: fixed; width: 820px; height: 520px;
   min-width: 400px; min-height: 300px; padding: 0;
@@ -426,6 +541,19 @@ body {
 <!-- Activity Bar -->
 <div id="activity-bar"><span class="activity-dot"></span><span id="activity-prefix">Working</span><span id="activity-text">...</span></div>
 
+<!-- Critical-finding banner (rendered by renderFindings()) -->
+<div id="findings-bar"></div>
+
+<!-- Session drawer for the full findings log (opens from the bell) -->
+<div id="findings-drawer">
+  <div id="findings-drawer-head">
+    <h3>&#128276; Session Findings</h3>
+    <span style="cursor:pointer;color:#8b949e;font-size:16px"
+          onclick="toggleFindingsDrawer()" title="Close">&times;</span>
+  </div>
+  <div id="findings-drawer-body"><div style="color:#6e7681;padding:20px;text-align:center">No findings yet</div></div>
+</div>
+
 <!-- Main Area -->
 <div class="main">
   <!-- Map -->
@@ -478,6 +606,9 @@ body {
   <span class="stat">Connections: <span class="stat-val" id="st-connections">0</span></span>
   <span class="stat">Pwned: <span class="stat-val" id="st-pwned">0</span></span>
   <span class="stat">Users Created: <span class="stat-val" id="st-users">0</span></span>
+  <span style="flex:1"></span>
+  <span id="findings-bell" onclick="toggleFindingsDrawer()"
+        title="Session findings (click to open)">&#128276;<span id="findings-badge">0</span></span>
 </div>
 
 <!-- Context Menu (items enabled/disabled dynamically by showCtxMenu) -->
@@ -1038,6 +1169,10 @@ let mapState = { nodes: {}, connections: [], stats: {} };
 let localIp = '';
 fetch('/api/local_ip').then(r => r.json()).then(d => { localIp = d.ip || ''; }).catch(() => {});
 let consoleCursor = 0;
+let findingsCursor = 0;
+let _activeFindings = [];          // id → {record, dismissed}
+let _dismissedFindingIds = new Set();
+let _findingsDrawerOpen = false;
 let pollTimer = null;
 let selectedNodeSid = null;
 let dragNode = null;
@@ -1096,6 +1231,12 @@ async function startScan() {
   // Reset console cursor so new scan output is visible
   consoleCursor = 0;
   document.getElementById('console-body').innerHTML = '';
+  // Reset the findings bus (banner + drawer) for the new scan
+  findingsCursor = 0;
+  _activeFindings = [];
+  _dismissedFindingIds = new Set();
+  renderFindings();
+  try { await api('POST', 'findings/clear'); } catch (_) {}
   await api('POST', 'scan/start', config);
   document.getElementById('st-status').textContent = 'Scanning...';
   startPolling();
@@ -1191,6 +1332,16 @@ async function pollUpdates() {
       body.scrollTop = body.scrollHeight;
       consoleCursor = consoleData.cursor;
     }
+
+    // Poll findings (critical-finding banner + drawer)
+    try {
+      const fd = await api('GET', 'findings?cursor=' + findingsCursor);
+      if (fd && Array.isArray(fd.findings) && fd.findings.length > 0) {
+        for (const rec of fd.findings) _activeFindings.push(rec);
+        findingsCursor = fd.cursor || findingsCursor;
+        renderFindings();
+      }
+    } catch (_) { /* findings polling never blocks state refresh */ }
 
     // Poll state
     const state = await api('GET', 'state');
@@ -4456,6 +4607,126 @@ function _nodeHasActiveTask(sid) {
     if (key === sid + ':' || key.startsWith(sid + ':')) return true;
   }
   return false;
+}
+
+// ---------------------------------------------------------------
+// Findings banner + drawer + bell
+// ---------------------------------------------------------------
+// Only CRITICAL/HIGH surface as live banner rows above the map.
+// MEDIUM/INFO still go to the drawer + console but don't grab the
+// full-width attention grabber.
+const _BANNER_SEVERITIES = { CRITICAL: true, HIGH: true };
+const _SEV_LABEL = {
+  CRITICAL: 'CRITICAL', HIGH: 'HIGH', MEDIUM: 'MEDIUM', INFO: 'INFO',
+};
+
+function _escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function renderFindings() {
+  const bar = document.getElementById('findings-bar');
+  const bell = document.getElementById('findings-bell');
+  const badge = document.getElementById('findings-badge');
+  const drawerBody = document.getElementById('findings-drawer-body');
+  if (!bar || !bell || !badge || !drawerBody) return;
+
+  // --- Banner: only undismissed CRITICAL/HIGH, newest first, cap at 5 ---
+  const bannerRows = [];
+  for (let i = _activeFindings.length - 1; i >= 0 && bannerRows.length < 5; i--) {
+    const f = _activeFindings[i];
+    if (_dismissedFindingIds.has(f.id)) continue;
+    if (!_BANNER_SEVERITIES[f.severity]) continue;
+    bannerRows.push(f);
+  }
+  bar.innerHTML = bannerRows.map(f => {
+    const sev = _SEV_LABEL[f.severity] || 'INFO';
+    const node = _escapeHtml(f.node || '?');
+    const nodeClick = f.node
+      ? ` onclick="focusFindingNode('${_escapeHtml(f.node)}')"`
+      : '';
+    const cve = f.cve
+      ? ` <span class="finding-cve">${_escapeHtml(f.cve)}</span>` : '';
+    return `<div class="finding-row sev-${sev}">`
+      + `<span class="finding-sev">${sev}</span>`
+      + `<span class="finding-node"${nodeClick}>${node}</span>`
+      + `<span class="finding-msg">${_escapeHtml(f.msg)}</span>${cve}`
+      + `<span class="finding-dismiss" title="Dismiss"`
+      + ` onclick="dismissFinding(${f.id})">&times;</span>`
+      + `</div>`;
+  }).join('');
+
+  // --- Bell badge + glow state ---
+  let undismissedCrit = 0, undismissedHigh = 0, totalUndismissed = 0;
+  for (const f of _activeFindings) {
+    if (_dismissedFindingIds.has(f.id)) continue;
+    totalUndismissed++;
+    if (f.severity === 'CRITICAL') undismissedCrit++;
+    else if (f.severity === 'HIGH') undismissedHigh++;
+  }
+  badge.textContent = String(totalUndismissed);
+  badge.classList.toggle('show', totalUndismissed > 0);
+  bell.classList.toggle('has-critical', undismissedCrit > 0);
+  bell.classList.toggle('has-high', undismissedCrit === 0 && undismissedHigh > 0);
+
+  // --- Drawer body: full history, newest first ---
+  if (_activeFindings.length === 0) {
+    drawerBody.innerHTML = '<div style="color:#6e7681;padding:20px;'
+      + 'text-align:center">No findings yet</div>';
+  } else {
+    const rows = [];
+    for (let i = _activeFindings.length - 1; i >= 0; i--) {
+      const f = _activeFindings[i];
+      const sev = _SEV_LABEL[f.severity] || 'INFO';
+      const ts = new Date((f.ts || 0) * 1000);
+      const hh = String(ts.getHours()).padStart(2, '0');
+      const mm = String(ts.getMinutes()).padStart(2, '0');
+      const ss = String(ts.getSeconds()).padStart(2, '0');
+      const dismissed = _dismissedFindingIds.has(f.id);
+      const nodeClick = f.node
+        ? ` onclick="focusFindingNode('${_escapeHtml(f.node)}')"`
+        : '';
+      rows.push(
+        `<div class="finding-log-row sev-${sev}"`
+          + (dismissed ? ' style="opacity:0.55"' : '')
+          + `>`
+        + `<span style="color:#6e7681;font-size:10px;margin-right:6px">`
+          + `${hh}:${mm}:${ss}</span>`
+        + `<span class="finding-sev">${sev}</span>`
+        + `<span class="finding-node"${nodeClick}>`
+          + `${_escapeHtml(f.node || '?')}</span>`
+        + `<span class="finding-msg">${_escapeHtml(f.msg)}</span>`
+        + (f.cve
+            ? `<span class="finding-cve">${_escapeHtml(f.cve)}</span>` : '')
+        + `</div>`
+      );
+    }
+    drawerBody.innerHTML = rows.join('');
+  }
+}
+
+function dismissFinding(id) {
+  _dismissedFindingIds.add(id);
+  renderFindings();
+}
+
+function toggleFindingsDrawer() {
+  _findingsDrawerOpen = !_findingsDrawerOpen;
+  const d = document.getElementById('findings-drawer');
+  if (d) d.classList.toggle('open', _findingsDrawerOpen);
+}
+
+function focusFindingNode(sid) {
+  if (!sid || sid === '?') return;
+  // If the SID is mapped, open its details panel.  If it's just a
+  // host/IP (no node yet), fall back to flashing the activity bar.
+  if (mapState.nodes && mapState.nodes[sid]) {
+    try { showDetails(sid); } catch (_) {}
+    return;
+  }
+  try { flashActivity('Focus: ' + sid); } catch (_) {}
 }
 
 // --- Global event listeners ---
