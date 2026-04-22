@@ -2564,7 +2564,7 @@ def _sapology_system_to_node(sys_obj, target_ip: str) -> SAPNode:
                     "HIGH", sys_obj.sid or "?",
                     "Gateway accepts SAPXPG register_ep — "
                     "unauthenticated OS command execution possible",
-                    cve="CVE-2019-0344 / 10KBLAZE",
+                    cve="SAP Note 1408081 (Gateway ACL)",
                 )
 
     # Determine DB type — SAPology sets db_type and has_hana/has_maxdb/etc.
