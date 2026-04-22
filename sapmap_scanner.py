@@ -1196,6 +1196,15 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
         "ip": host,
     }
 
+    # If the caller already discovered this host's SID on a previous
+    # instance, pre-seed it here so the DIAG / MS-HTTP SID-fallback
+    # cascade short-circuits (they're all gated on `not info["sid"]`).
+    # sid_hint is a real SID string (e.g. "W74") — anything that looks
+    # like the synthetic "UNK_..." / IP-derived name is not a real SID
+    # and should NOT short-circuit the fallbacks.
+    if sid_hint and _re.match(r"^[A-Z][A-Z0-9]{2}$", sid_hint):
+        info["sid"] = sid_hint
+
     # Parse SAProuter string into (host, port) tuple for probe_sap_system
     router_tuple = None
     if saprouter:
@@ -2105,6 +2114,10 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
     instance_sid_map = {}   # {instance_nr: sid}
     instance_sysinfo = {}   # {instance_nr: sys_info dict}
 
+    # Track first SID discovered on this host so later per-instance
+    # enrichments can short-circuit the DIAG/MS-HTTP SID fallbacks.
+    known_host_sid = ""
+
     for inst_nr in instance_nrs:
         # Find gateway port belonging to this instance
         gw_port = None
@@ -2116,10 +2129,14 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
         # Try gateway port for this instance
         if gw_port:
             sys_info = enrich_system_info(host, gw_port, timeout=timeout,
-                                          verbose=verbose, saprouter=saprouter)
+                                          verbose=verbose,
+                                          sid_hint=known_host_sid,
+                                          saprouter=saprouter)
             if sys_info.get("sid"):
                 instance_sid_map[inst_nr] = sys_info["sid"]
                 instance_sysinfo[inst_nr] = sys_info
+                if not known_host_sid:
+                    known_host_sid = sys_info["sid"]
                 continue
 
         # No gateway open (or gateway enrichment yielded no SID) — try the
@@ -2137,10 +2154,14 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
                     break
                 print(f"[*] {host}: No gateway for instance {inst_nr}, trying dispatcher+100 = {derived_gw}")
                 sys_info = enrich_system_info(host, derived_gw, timeout=timeout,
-                                              verbose=verbose, saprouter=saprouter)
+                                              verbose=verbose,
+                                              sid_hint=known_host_sid,
+                                              saprouter=saprouter)
                 if sys_info.get("sid"):
                     instance_sid_map[inst_nr] = sys_info["sid"]
                     instance_sysinfo[inst_nr] = sys_info
+                    if not known_host_sid:
+                        known_host_sid = sys_info["sid"]
                 break
         # Preserve what we learned from the first enrichment so downstream
         # node-build can still show hostname/kernel/OS even without a SID.
