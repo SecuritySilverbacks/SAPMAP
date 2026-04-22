@@ -513,7 +513,20 @@ class SAPMAPState:
     # -- Node management --
 
     def add_node(self, node: SAPNode) -> None:
+        is_new = node.sid not in self.nodes
         self.nodes[node.sid] = node
+        if is_new:
+            try:
+                from sapmap_findings import emit_finding
+                host = node.ip or node.hostname or "?"
+                sys_type = node.system_type or "SAP"
+                kernel = f" K:{node.kernel}" if node.kernel else ""
+                emit_finding(
+                    "INFO", node.sid,
+                    f"New {sys_type} system plotted — {host}{kernel}",
+                )
+            except Exception:
+                pass
         # Re-match unresolved RFC connections against the new node
         node_ips = node.all_ips()
         node_names = node.all_hostnames()
