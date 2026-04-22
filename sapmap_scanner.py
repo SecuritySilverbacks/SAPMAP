@@ -36,6 +36,7 @@ if os.path.isdir(_sapology_dir) and _sapology_dir not in sys.path:
 # Import from existing modules in SAPMAP directory
 from sap_rfc_system_info import probe_sap_system
 from sap_client_enum import enumerate_clients
+from sapmap_findings import emit_finding
 
 
 # ---------------------------------------------------------------------------
@@ -939,6 +940,12 @@ def check_ms_betrusted(node: SAPNode, timeout: float = 8.0) -> bool:
             if result["vulnerable"]:
                 logger.info(f"{node.sid}: MS port {ms_p} VULNERABLE (CVE-2020-6207) "
                             f"— no ACL, betrusted attack possible")
+                emit_finding(
+                    "HIGH", node.sid,
+                    f"MS port {ms_p} accepts unauthenticated login — "
+                    f"10KBLAZE betrusted attack path open",
+                    cve="CVE-2020-6207",
+                )
                 node.findings.append(Finding(
                     name="MS Internal Port Without ACL (CVE-2020-6207)",
                     severity=Severity.CRITICAL,
@@ -2543,6 +2550,12 @@ def _sapology_system_to_node(sys_obj, target_ip: str) -> SAPNode:
             ))
             if "SAPXPG" in f.name:
                 gw_vulnerable = True
+                emit_finding(
+                    "HIGH", sys_obj.sid or "?",
+                    "Gateway accepts SAPXPG register_ep — "
+                    "unauthenticated OS command execution possible",
+                    cve="CVE-2019-0344 / 10KBLAZE",
+                )
 
     # Determine DB type — SAPology sets db_type and has_hana/has_maxdb/etc.
     # Normalize variants like "ADABAS D" -> "ADA"

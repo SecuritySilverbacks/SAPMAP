@@ -622,6 +622,15 @@ class SAPMAPState:
         if node:
             node.created_users.append(user)
             node.pwned = True
+        try:
+            from sapmap_findings import emit_finding
+            emit_finding(
+                "CRITICAL", user.sid,
+                f"User {user.username!r} created on client {user.client} "
+                f"via {user.method} — system pwned",
+            )
+        except Exception:
+            pass
 
     # -- RFC check cache --
 

@@ -25,6 +25,7 @@ import sapmap_exploit
 import sapmap_cleanup
 import sapmap_secstore
 import sapmap_state as state_mgr
+import sapmap_findings
 
 def _derive_sid(destination_name: str, host: str) -> str:
     """Derive a SID from an RFC destination name or hostname.
@@ -100,6 +101,35 @@ def ui_command(cmd: str, **kwargs):
 def _add_console_line(ts, text, css_class="cl-info"):
     with _console_lock:
         _console_lines.append({"ts": ts, "text": text, "cls": css_class})
+
+
+# ---- Wire findings → console: every emit_finding() also shows up in the
+# console pane with severity-specific styling, so nothing is ever hidden.
+_SEV_TO_CSS = {
+    "CRITICAL": "cl-crit",
+    "HIGH":     "cl-warn",
+    "MEDIUM":   "cl-warn",
+    "INFO":     "cl-ok",
+}
+
+
+def _console_push_finding(record: dict) -> None:
+    sev   = record.get("severity", "INFO")
+    node  = record.get("node", "?")
+    msg   = record.get("msg", "")
+    cve   = record.get("cve", "")
+    text  = f"[{sev}] {node} — {msg}"
+    if cve:
+        text += f"  ({cve})"
+    escaped = (text
+               .replace("&", "&amp;")
+               .replace("<", "&lt;")
+               .replace(">", "&gt;"))
+    ts = datetime.now().strftime("%H:%M:%S")
+    _add_console_line(ts, escaped, _SEV_TO_CSS.get(sev, "cl-info"))
+
+
+sapmap_findings.register_listener(_console_push_finding)
 
 
 class OutputCapture(io.TextIOBase):
@@ -751,10 +781,11 @@ class SAPMAPApi:
         self.scan_state = "running"
         self.scan_error = ""
 
-        # Clear console
+        # Clear console and findings buffer
         global _console_lines
         with _console_lock:
             _console_lines = []
+        sapmap_findings.clear()
 
         targets_str = config.get("targets", "").strip()
         scan_label = f"Scan on target {targets_str}" if targets_str else "Network Scan"
@@ -896,6 +927,22 @@ def create_app(api: SAPMAPApi) -> Bottle:
             lines = _console_lines[cursor:]
             new_cursor = len(_console_lines)
         return json.dumps({"lines": lines, "cursor": new_cursor})
+
+    # -- Findings polling (critical-finding banner + drawer) --
+    @app.route("/api/findings")
+    def get_findings():
+        response.content_type = "application/json"
+        try:
+            cursor = int(request.params.get("cursor", 0))
+        except (TypeError, ValueError):
+            cursor = 0
+        return json.dumps(sapmap_findings.get_since(cursor))
+
+    @app.route("/api/findings/clear", method="POST")
+    def clear_findings():
+        response.content_type = "application/json"
+        sapmap_findings.clear()
+        return json.dumps({"status": "ok"})
 
     # -- UI commands (script → frontend) --
     @app.route("/api/ui/commands")
@@ -2723,6 +2770,12 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 outfile = sapmap_secstore.save_loot(node.sid, results, states_dir)
                 print(f"[+] SecStore {sid}: {len(results)} entries, "
                       f"{len(ok)} decrypted, {len(err)} errors → {outfile}")
+                if ok:
+                    sapmap_findings.emit_finding(
+                        "CRITICAL", sid,
+                        f"ABAP SecStore decrypted — {len(ok)} RFC "
+                        f"destination password(s) recovered",
+                    )
             except Exception as e:
                 import traceback
                 print(f"[-] SecStore {sid}: {e}")
@@ -2910,6 +2963,12 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     print(f"      [{c.get('id','')}] {c['source']} → "
                           f"{c.get('partner', '(no partner)')}{svc}")
                 node.has_critical_finding = True
+                sapmap_findings.emit_finding(
+                    "HIGH", sid,
+                    f"SAProuter info-leak succeeded on {host}:{router_port} "
+                    f"— {result['total_clients']} clients, routtab exposed",
+                    cve="CVE-2022-27668 (similar) / NIINFO leak",
+                )
             else:
                 print(f"[*] {sid}: SAProuter info leak not available "
                       f"({result['error']})")
