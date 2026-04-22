@@ -5091,8 +5091,11 @@ document.addEventListener('click', () => hideMapCtxMenu());
   });
 })();
 
-// --- Keep the findings toast stack pinned just above the legend bar
-//     (which itself sits above the console-resizer + console pane) ---
+// --- Keep the findings toast stack pinned just above the legend bar ---
+// Anchor directly off the legend's top edge when visible (falls back to
+// summing console+resizer heights when the legend is hidden).  Using the
+// legend's bounding rect avoids arithmetic drift from gaps, margins, and
+// flex padding between the stacked bottom elements.
 (function initFindingsAnchor() {
   const bar = document.getElementById('findings-bar');
   const container = document.getElementById('console-container');
@@ -5100,20 +5103,25 @@ document.addEventListener('click', () => hideMapCtxMenu());
   const resizer = document.getElementById('console-resizer');
   const legend = document.getElementById('legend-bar');
   if (!bar || !container) return;
-  const GAP = 10;
-  const visibleH = (el) => {
-    if (!el) return 0;
-    const style = window.getComputedStyle(el);
-    if (style.display === 'none' || style.visibility === 'hidden') return 0;
-    return el.getBoundingClientRect().height;
+  const GAP = 8;
+  const isVisible = (el) => {
+    if (!el) return false;
+    const s = window.getComputedStyle(el);
+    return s.display !== 'none' && s.visibility !== 'hidden';
   };
+  const hOf = (el) => isVisible(el) ? el.getBoundingClientRect().height : 0;
   const update = () => {
-    let base = 0;
-    base += visibleH(container.style.display !== 'none' ? container : null);
-    if (container.style.display === 'none') base += visibleH(restore);
-    base += visibleH(resizer);
-    base += visibleH(legend);
-    bar.style.bottom = (base + GAP) + 'px';
+    let bottom;
+    if (isVisible(legend)) {
+      // Sit the toast bottom one gap above the legend's top edge.
+      bottom = window.innerHeight - legend.getBoundingClientRect().top + GAP;
+    } else {
+      let base = 0;
+      base += hOf(isVisible(container) ? container : restore);
+      base += hOf(resizer);
+      bottom = base + GAP;
+    }
+    bar.style.bottom = Math.max(0, bottom) + 'px';
   };
   update();
   const observed = [container, restore, resizer, legend].filter(Boolean);
@@ -5122,8 +5130,7 @@ document.addEventListener('click', () => hideMapCtxMenu());
     observed.forEach(el => ro.observe(el));
   }
   window.addEventListener('resize', update);
-  // Also re-check when display/class toggles (ResizeObserver doesn't fire
-  // reliably on display:none transitions in all browsers).
+  window.addEventListener('scroll', update, true);
   const mo = new MutationObserver(update);
   observed.forEach(el => mo.observe(el,
     { attributes: true, attributeFilter: ['style', 'class'] }));
