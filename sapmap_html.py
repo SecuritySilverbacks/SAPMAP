@@ -310,20 +310,27 @@ body {
   padding: 2px 8px; border: 1px solid #f0883e80; border-radius: 3px;
   background: #f0883e15;
 }
-/* Critical-finding banner (stacks under activity-bar; one row per finding,
- * max 3 visible, older collapse into "+N more").  Click the node name to
- * focus, click ✕ to dismiss a single row.  Severity colors follow the
- * same palette as node pwned states. */
-#findings-bar { display: flex; flex-direction: column; flex-shrink: 0; }
+/* Critical-finding banner: fixed bottom-right toast stack so it doesn't
+ * pile up with the activity-bar at the top.  Newest slides in from the
+ * right and sits at the bottom; older toasts stack upward. */
+#findings-bar {
+  position: fixed; bottom: 32px; right: 16px; z-index: 900;
+  width: 420px; max-width: calc(100vw - 32px);
+  display: flex; flex-direction: column; gap: 8px;
+  pointer-events: none;
+}
 .finding-row {
   display: flex; align-items: center; gap: 10px;
-  padding: 6px 14px; font-size: 13px; font-weight: 600;
-  border-bottom: 1px solid #0008;
-  animation: finding-slide 0.25s ease-out;
+  padding: 8px 12px; font-size: 13px; font-weight: 600;
+  border-radius: 6px; border-left: 4px solid currentColor;
+  box-shadow: 0 4px 18px #000a, 0 0 0 1px #30363d80;
+  backdrop-filter: blur(2px);
+  pointer-events: auto;
+  animation: finding-slide 0.28s ease-out;
 }
 @keyframes finding-slide {
-  from { transform: translateY(-6px); opacity: 0; }
-  to   { transform: translateY(0);    opacity: 1; }
+  from { transform: translateX(24px); opacity: 0; }
+  to   { transform: translateX(0);    opacity: 1; }
 }
 .finding-row.sev-CRITICAL {
   background: linear-gradient(90deg, #4a1a1a 0%, #2a1010 100%);
@@ -369,10 +376,12 @@ body {
 }
 .finding-dismiss:hover { opacity: 1; }
 .finding-more {
-  text-align: center; padding: 3px; font-size: 11px; cursor: pointer;
-  background: #161b22; color: #8b949e; border-bottom: 1px solid #30363d;
+  text-align: center; padding: 4px 10px; font-size: 11px; cursor: pointer;
+  background: #161b22d0; color: #8b949e;
+  border-radius: 4px; border: 1px solid #30363d;
+  pointer-events: auto;
 }
-.finding-more:hover { color: #c9d1d9; }
+.finding-more:hover { color: #c9d1d9; border-color: #484f58; }
 /* Bell icon in toolbar with new-finding badge */
 #findings-bell {
   position: relative; cursor: pointer; user-select: none;
@@ -4766,7 +4775,9 @@ function renderFindings() {
     if (!_BANNER_SEVERITIES[f.severity]) continue;
     bannerRows.push(f);
   }
-  bar.innerHTML = bannerRows.map(f => {
+  // Reverse so the newest toast sits at the bottom of the stack (nearest
+  // the bottom-right corner), matching standard toast-notification UX.
+  bar.innerHTML = bannerRows.slice().reverse().map(f => {
     const sev = _SEV_LABEL[f.severity] || 'INFO';
     const node = _escapeHtml(f.node || '?');
     const nodeClick = f.node
