@@ -14,7 +14,9 @@ import threading
 import time
 from datetime import datetime
 
-from bottle import Bottle, request, response, static_file
+from bottle import Bottle, BaseRequest, request, response, static_file
+
+BaseRequest.MEMFILE_MAX = 512 * 1024 * 1024
 
 from sapmap_models import (SAPMAPState, SAPNode, InstanceInfo, RFCConnection,
                            Credentials, CreatedUser)
