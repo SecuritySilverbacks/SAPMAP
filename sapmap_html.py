@@ -1844,7 +1844,9 @@ function updateMap() {
                  : fCount.worst === 'HIGH'     ? '#f0883e'
                  : fCount.worst === 'MEDIUM'   ? '#d29922'
                  :                                '#388bfd';
-      const bx = x + 8, by = y + 14;
+      // Nudge the badge outside the top-left corner (half above / half
+      // left) so it doesn't cover the SID text inside the box.
+      const bx = x - 4, by = y - 4;
       html += `<circle cx="${bx}" cy="${by}" r="8" fill="${fill}"`
         + ` stroke="#0d1117" stroke-width="1.5">`
         + `<title>${fCount.count} unresolved finding(s) · worst: `
