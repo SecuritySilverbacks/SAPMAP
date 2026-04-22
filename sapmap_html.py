@@ -1378,11 +1378,16 @@ async function pollUpdates() {
           _activeFindings.push(rec);
           // Auto-dismiss banner rows after 5 s — the drawer + console
           // keep the full history, so no information is lost.
-          if (rec.severity === 'CRITICAL' || rec.severity === 'HIGH') {
-            setTimeout((id) => {
+          if (rec.severity === 'CRITICAL' || rec.severity === 'HIGH'
+              || rec.severity === 'INFO') {
+            // INFO auto-dismisses in both banner AND badge (noisy scan
+            // events shouldn't leave a long-lived badge trail).
+            setTimeout((id, sev) => {
               _bannerHiddenIds.add(id);
+              if (sev === 'INFO') _dismissedFindingIds.add(id);
               renderFindings();
-            }, 5000, rec.id);
+              try { updateMap(); } catch (_) {}
+            }, 5000, rec.id, rec.severity);
           }
           // Desktop notification for CRITICAL when the window isn't
           // focused — operators who left the tab open during a long
@@ -4710,7 +4715,7 @@ function _nodeFindingCount(sid) {
 // Only CRITICAL/HIGH surface as live banner rows above the map.
 // MEDIUM/INFO still go to the drawer + console but don't grab the
 // full-width attention grabber.
-const _BANNER_SEVERITIES = { CRITICAL: true, HIGH: true };
+const _BANNER_SEVERITIES = { CRITICAL: true, HIGH: true, INFO: true };
 const _SEV_LABEL = {
   CRITICAL: 'CRITICAL', HIGH: 'HIGH', MEDIUM: 'MEDIUM', INFO: 'INFO',
 };
