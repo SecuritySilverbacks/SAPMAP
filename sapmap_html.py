@@ -5091,34 +5091,42 @@ document.addEventListener('click', () => hideMapCtxMenu());
   });
 })();
 
-// --- Keep the findings toast stack pinned just above the console pane ---
+// --- Keep the findings toast stack pinned just above the legend bar
+//     (which itself sits above the console-resizer + console pane) ---
 (function initFindingsAnchor() {
   const bar = document.getElementById('findings-bar');
   const container = document.getElementById('console-container');
   const restore = document.getElementById('console-restore');
+  const resizer = document.getElementById('console-resizer');
+  const legend = document.getElementById('legend-bar');
   if (!bar || !container) return;
-  const GAP = 12;
+  const GAP = 10;
+  const visibleH = (el) => {
+    if (!el) return 0;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') return 0;
+    return el.getBoundingClientRect().height;
+  };
   const update = () => {
     let base = 0;
-    if (container.style.display !== 'none') {
-      base = container.getBoundingClientRect().height;
-    } else if (restore && restore.style.display !== 'none') {
-      base = restore.getBoundingClientRect().height;
-    }
+    base += visibleH(container.style.display !== 'none' ? container : null);
+    if (container.style.display === 'none') base += visibleH(restore);
+    base += visibleH(resizer);
+    base += visibleH(legend);
     bar.style.bottom = (base + GAP) + 'px';
   };
   update();
+  const observed = [container, restore, resizer, legend].filter(Boolean);
   if ('ResizeObserver' in window) {
     const ro = new ResizeObserver(update);
-    ro.observe(container);
-    if (restore) ro.observe(restore);
+    observed.forEach(el => ro.observe(el));
   }
   window.addEventListener('resize', update);
-  // Also re-check when the console is toggled (CSS display changes don't
-  // fire ResizeObserver reliably on some browsers).
+  // Also re-check when display/class toggles (ResizeObserver doesn't fire
+  // reliably on display:none transitions in all browsers).
   const mo = new MutationObserver(update);
-  mo.observe(container, { attributes: true, attributeFilter: ['style', 'class'] });
-  if (restore) mo.observe(restore, { attributes: true, attributeFilter: ['style'] });
+  observed.forEach(el => mo.observe(el,
+    { attributes: true, attributeFilter: ['style', 'class'] }));
 })();
 
 // --- Init ---
