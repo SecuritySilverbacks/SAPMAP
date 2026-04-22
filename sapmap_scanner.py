@@ -1059,6 +1059,11 @@ def check_cve_2025_31324(node: SAPNode, timeout: float = 10.0) -> bool:
             node.cve_2025_31324_https = use_https
             node.cve_2025_31324_evidence = r.get("evidence", "")
             logger.info(f"{node.sid}: VULNERABLE to CVE-2025-31324 on port {port}")
+            emit_finding(
+                "CRITICAL", node.sid,
+                f"CVE-2025-31324 metadatauploader unauth RCE on port {port}",
+                cve="CVE-2025-31324",
+            )
             if not any(f.name.startswith("CVE-2025-31324") for f in node.findings):
                 node.findings.append(Finding(
                     name="CVE-2025-31324 — VisualComposer Metadatauploader RCE",
@@ -1144,6 +1149,11 @@ def check_cve_2020_6287(node: SAPNode, timeout: float = 10.0) -> bool:
             node.cve_2020_6287_port = port
             node.cve_2020_6287_https = use_https
             node.cve_2020_6287_evidence = r.get("evidence", "")
+            emit_finding(
+                "CRITICAL", node.sid,
+                f"CVE-2020-6287 RECON unauth admin-user creation on port {port}",
+                cve="CVE-2020-6287",
+            )
             if not any(f.name.startswith("CVE-2020-6287")
                         for f in node.findings):
                 node.findings.append(Finding(

@@ -598,15 +598,34 @@ class SAPMAPState:
     # -- Connection management --
 
     def add_connection(self, conn: RFCConnection) -> None:
+        was_new_or_elevated = True
         # Avoid duplicates
         for existing in self.connections:
             if (existing.source_sid == conn.source_sid and
                     existing.destination_name == conn.destination_name):
-                # Update in place
+                # Only emit a finding if the SAP_ALL / logon state just
+                # improved — otherwise updates on every poll would spam.
+                if (existing.has_sap_all and existing.logon_successful
+                        and conn.has_sap_all and conn.logon_successful):
+                    was_new_or_elevated = False
                 idx = self.connections.index(existing)
                 self.connections[idx] = conn
-                return
-        self.connections.append(conn)
+                break
+        else:
+            self.connections.append(conn)
+        if (was_new_or_elevated and getattr(conn, 'logon_successful', False)
+                and getattr(conn, 'has_sap_all', False)
+                and conn.source_sid and conn.target_sid):
+            try:
+                from sapmap_findings import emit_finding
+                emit_finding(
+                    "CRITICAL", conn.source_sid,
+                    f"RFC destination {conn.destination_name!r} "
+                    f"logs on to {conn.target_sid} as SAP_ALL "
+                    f"— lateral-movement hop confirmed",
+                )
+            except Exception:
+                pass
 
     def get_connections_from(self, sid: str) -> list:
         return [c for c in self.connections if c.source_sid == sid]

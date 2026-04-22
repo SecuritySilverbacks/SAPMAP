@@ -48,8 +48,18 @@ def save_state(state: SAPMAPState, filepath: str) -> str:
         if parent:
             os.makedirs(parent, exist_ok=True)
 
+        # Snapshot live findings alongside state so the banner/drawer/bell
+        # history survives a reopen.  Stored as a top-level field rather
+        # than inside SAPMAPState to keep the existing dataclass clean.
+        import json as _json
+        payload = _json.loads(state.to_json())
+        try:
+            import sapmap_findings as _sf
+            payload["_findings"] = _sf.snapshot()
+        except Exception:
+            pass
         with open(filepath, "w", encoding="utf-8") as f:
-            f.write(state.to_json(indent=2))
+            _json.dump(payload, f, indent=2)
 
         logger.info(f"State saved to {filepath}")
         print(f"[+] State saved to {filepath}")
@@ -78,6 +88,14 @@ def load_state(filepath: str) -> SAPMAPState:
             data = json.load(f)
 
         state = SAPMAPState.from_dict(data)
+
+        # Restore findings bus so the drawer repopulates after reload.
+        if isinstance(data, dict) and data.get("_findings"):
+            try:
+                import sapmap_findings as _sf
+                _sf.load_snapshot(data["_findings"])
+            except Exception as _e:
+                logger.warning(f"Could not restore findings snapshot: {_e}")
 
         # Merge persistent RFC cache (the saved one might be newer)
         persistent_cache = _load_rfc_cache()

@@ -411,6 +411,20 @@ body {
 #findings-drawer-body {
   flex: 1; overflow: auto; padding: 8px;
 }
+#findings-drawer-filters {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 12px; background: #0b0f14;
+  border-bottom: 1px solid #30363d;
+  font-size: 11px; color: #8b949e;
+}
+#findings-drawer-filters label {
+  display: flex; align-items: center; gap: 4px; cursor: pointer;
+}
+.findings-tool {
+  cursor: pointer; color: #8b949e; padding: 2px 6px;
+  font-size: 14px; margin-right: 6px;
+}
+.findings-tool:hover { color: #c9d1d9; }
 .finding-log-row {
   display: flex; gap: 8px; padding: 6px 8px; margin-bottom: 4px;
   border-left: 3px solid currentColor; border-radius: 2px;
@@ -548,8 +562,26 @@ body {
 <div id="findings-drawer">
   <div id="findings-drawer-head">
     <h3>&#128276; Session Findings</h3>
+    <span style="flex:1"></span>
+    <span class="findings-tool" onclick="copyFindingsMarkdown()"
+          title="Copy all findings as markdown">&#128203;</span>
     <span style="cursor:pointer;color:#8b949e;font-size:16px"
           onclick="toggleFindingsDrawer()" title="Close">&times;</span>
+  </div>
+  <div id="findings-drawer-filters">
+    <label><input type="checkbox" id="fflt-crit" checked
+             onchange="renderFindings()"> CRITICAL</label>
+    <label><input type="checkbox" id="fflt-high" checked
+             onchange="renderFindings()"> HIGH</label>
+    <label><input type="checkbox" id="fflt-med"  checked
+             onchange="renderFindings()"> MEDIUM</label>
+    <label><input type="checkbox" id="fflt-info" checked
+             onchange="renderFindings()"> INFO</label>
+    <span style="flex:1"></span>
+    <input type="text" id="fflt-node" placeholder="Filter by SID/host"
+           oninput="renderFindings()"
+           style="background:#0d1117;border:1px solid #30363d;color:#c9d1d9;
+                  padding:2px 6px;font-size:11px;border-radius:3px;width:100px">
   </div>
   <div id="findings-drawer-body"><div style="color:#6e7681;padding:20px;text-align:center">No findings yet</div></div>
 </div>
@@ -1170,8 +1202,11 @@ let localIp = '';
 fetch('/api/local_ip').then(r => r.json()).then(d => { localIp = d.ip || ''; }).catch(() => {});
 let consoleCursor = 0;
 let findingsCursor = 0;
-let _activeFindings = [];          // id → {record, dismissed}
+let _activeFindings = [];
+// Manual dismissal → hide from banner, drawer AND node badge.
 let _dismissedFindingIds = new Set();
+// Auto-expire (5 s) → hide from banner only; badge + drawer keep it.
+let _bannerHiddenIds = new Set();
 let _findingsDrawerOpen = false;
 let pollTimer = null;
 let selectedNodeSid = null;
@@ -1235,7 +1270,9 @@ async function startScan() {
   findingsCursor = 0;
   _activeFindings = [];
   _dismissedFindingIds = new Set();
+  _bannerHiddenIds = new Set();
   renderFindings();
+  _maybeAskNotifPermission();
   try { await api('POST', 'findings/clear'); } catch (_) {}
   await api('POST', 'scan/start', config);
   document.getElementById('st-status').textContent = 'Scanning...';
@@ -1343,13 +1380,18 @@ async function pollUpdates() {
           // keep the full history, so no information is lost.
           if (rec.severity === 'CRITICAL' || rec.severity === 'HIGH') {
             setTimeout((id) => {
-              _dismissedFindingIds.add(id);
+              _bannerHiddenIds.add(id);
               renderFindings();
             }, 5000, rec.id);
           }
+          // Desktop notification for CRITICAL when the window isn't
+          // focused — operators who left the tab open during a long
+          // exploit chain get a native OS pop when something pwns.
+          if (rec.severity === 'CRITICAL') _maybeNotifyDesktop(rec);
         }
         findingsCursor = fd.cursor || findingsCursor;
         renderFindings();
+        try { updateMap(); } catch (_) {}
       }
     } catch (_) { /* findings polling never blocks state refresh */ }
 
@@ -1786,6 +1828,25 @@ function updateMap() {
     // Lightning bolt for pwned
     if (n.pwned) {
       html += `<text x="${x+BOX_W-22}" y="${y+19}" font-size="16" fill="#f0883e">&#9889;</text>`;
+    }
+
+    // Finding badge — count of unresolved (undismissed) CRITICAL/HIGH
+    // for this SID.  Renders as a small numbered dot in the top-left
+    // corner so it doesn't fight the pwned bolt in the top-right.
+    const fCount = _nodeFindingCount(sid);
+    if (fCount.count > 0) {
+      const fill = fCount.worst === 'CRITICAL' ? '#e74c3c'
+                 : fCount.worst === 'HIGH'     ? '#f0883e'
+                 : fCount.worst === 'MEDIUM'   ? '#d29922'
+                 :                                '#388bfd';
+      const bx = x + 8, by = y + 14;
+      html += `<circle cx="${bx}" cy="${by}" r="8" fill="${fill}"`
+        + ` stroke="#0d1117" stroke-width="1.5">`
+        + `<title>${fCount.count} unresolved finding(s) · worst: `
+        + `${fCount.worst}</title></circle>`
+        + `<text x="${bx}" y="${by+3}" font-size="10" fill="#fff"`
+        + ` text-anchor="middle" font-weight="700" font-family="monospace"`
+        + ` pointer-events="none">${fCount.count}</text>`;
     }
 
     // Activity spinner for active background tasks
@@ -4209,6 +4270,13 @@ function handleFileLoad(input) {
       const data = JSON.parse(e.target.result);
       const res = await api('POST', 'state/upload', data);
       if (res.error) alert('Load failed: ' + res.error);
+      // Reset cursors + dismissal state so the restored findings snapshot
+      // reappears in the banner/drawer/bell on the next poll.
+      findingsCursor = 0;
+      _activeFindings = [];
+      _dismissedFindingIds = new Set();
+      _bannerHiddenIds = new Set();
+      renderFindings();
     } catch (err) {
       alert('Invalid file: ' + err.message);
     }
@@ -4619,6 +4687,23 @@ function _nodeHasActiveTask(sid) {
   return false;
 }
 
+// Count undismissed findings scoped to a given node SID, and record the
+// worst severity so the map badge can pick a colour without scanning
+// twice.  Banner auto-dismiss (after 5 s) DOES decay these — the badge
+// is "unresolved attention", not "lifetime count".
+const _SEV_RANK = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, INFO: 1 };
+function _nodeFindingCount(sid) {
+  let count = 0, worstRank = 0, worst = '';
+  for (const f of _activeFindings) {
+    if (f.node !== sid) continue;
+    if (_dismissedFindingIds.has(f.id)) continue;
+    count++;
+    const r = _SEV_RANK[f.severity] || 0;
+    if (r > worstRank) { worstRank = r; worst = f.severity; }
+  }
+  return { count, worst };
+}
+
 // ---------------------------------------------------------------
 // Findings banner + drawer + bell
 // ---------------------------------------------------------------
@@ -4648,6 +4733,7 @@ function renderFindings() {
   for (let i = _activeFindings.length - 1; i >= 0 && bannerRows.length < 5; i--) {
     const f = _activeFindings[i];
     if (_dismissedFindingIds.has(f.id)) continue;
+    if (_bannerHiddenIds.has(f.id)) continue;
     if (!_BANNER_SEVERITIES[f.severity]) continue;
     bannerRows.push(f);
   }
@@ -4681,14 +4767,28 @@ function renderFindings() {
   bell.classList.toggle('has-critical', undismissedCrit > 0);
   bell.classList.toggle('has-high', undismissedCrit === 0 && undismissedHigh > 0);
 
-  // --- Drawer body: full history, newest first ---
-  if (_activeFindings.length === 0) {
+  // --- Drawer body: full history, newest first, honouring filters ---
+  const fltEnabled = {
+    CRITICAL: document.getElementById('fflt-crit')?.checked !== false,
+    HIGH:     document.getElementById('fflt-high')?.checked !== false,
+    MEDIUM:   document.getElementById('fflt-med')?.checked  !== false,
+    INFO:     document.getElementById('fflt-info')?.checked !== false,
+  };
+  const nodeFilter = (document.getElementById('fflt-node')?.value || '')
+    .trim().toLowerCase();
+  const visible = _activeFindings.filter(f => {
+    if (!fltEnabled[f.severity]) return false;
+    if (nodeFilter && !(f.node || '').toLowerCase().includes(nodeFilter))
+      return false;
+    return true;
+  });
+  if (visible.length === 0) {
     drawerBody.innerHTML = '<div style="color:#6e7681;padding:20px;'
-      + 'text-align:center">No findings yet</div>';
+      + 'text-align:center">No findings match the current filter</div>';
   } else {
     const rows = [];
-    for (let i = _activeFindings.length - 1; i >= 0; i--) {
-      const f = _activeFindings[i];
+    for (let i = visible.length - 1; i >= 0; i--) {
+      const f = visible[i];
       const sev = _SEV_LABEL[f.severity] || 'INFO';
       const ts = new Date((f.ts || 0) * 1000);
       const hh = String(ts.getHours()).padStart(2, '0');
@@ -4720,12 +4820,63 @@ function renderFindings() {
 function dismissFinding(id) {
   _dismissedFindingIds.add(id);
   renderFindings();
+  try { updateMap(); } catch (_) {}
+}
+
+function copyFindingsMarkdown() {
+  if (_activeFindings.length === 0) {
+    try { showToast('No findings to copy'); } catch (_) {}
+    return;
+  }
+  const lines = ['# SAPMAP session findings', ''];
+  lines.push(`_${_activeFindings.length} event(s), newest first_`, '');
+  for (let i = _activeFindings.length - 1; i >= 0; i--) {
+    const f = _activeFindings[i];
+    const ts = new Date((f.ts || 0) * 1000).toISOString();
+    const cve = f.cve ? ` [${f.cve}]` : '';
+    lines.push(`- **${f.severity}** ${ts} · \`${f.node || '?'}\` — `
+               + `${f.msg}${cve}`);
+  }
+  const md = lines.join('\n');
+  try {
+    navigator.clipboard.writeText(md);
+    showToast(`Copied ${_activeFindings.length} finding(s) as markdown`);
+  } catch (e) {
+    try { showToast('Clipboard blocked: ' + e); } catch (_) {}
+  }
 }
 
 function toggleFindingsDrawer() {
   _findingsDrawerOpen = !_findingsDrawerOpen;
   const d = document.getElementById('findings-drawer');
   if (d) d.classList.toggle('open', _findingsDrawerOpen);
+}
+
+// Request Notification permission lazily on first scan start so the
+// browser only prompts when the feature is actually about to be used.
+let _notifPermissionAsked = false;
+function _maybeAskNotifPermission() {
+  if (_notifPermissionAsked) return;
+  _notifPermissionAsked = true;
+  if (typeof Notification === 'undefined') return;
+  if (Notification.permission === 'default') {
+    try { Notification.requestPermission(); } catch (_) {}
+  }
+}
+function _maybeNotifyDesktop(rec) {
+  if (typeof Notification === 'undefined') return;
+  if (Notification.permission !== 'granted') return;
+  // Only pop when the window isn't the active tab — otherwise the
+  // banner + drawer + console are already visible.
+  if (!document.hidden && document.hasFocus && document.hasFocus()) return;
+  try {
+    const n = new Notification('SAPMAP: CRITICAL — ' + (rec.node || '?'), {
+      body: rec.msg || '',
+      tag: 'sapmap-' + rec.id,
+      silent: false,
+    });
+    n.onclick = () => { try { window.focus(); } catch (_) {} n.close(); };
+  } catch (_) { /* some browsers throw on rapid creation */ }
 }
 
 function focusFindingNode(sid) {
