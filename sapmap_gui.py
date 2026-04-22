@@ -3719,6 +3719,15 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 print(f"[-] No credentials available for {sid}")
                 return
             import sapmap_impact
+            # Map impact Severity.value (1..5) → findings bus severity.
+            # Only scenarios that actually returned data (record_count>0)
+            # are worth surfacing — empty reads are just noise.
+            def _sev_for(sev_value: int) -> str:
+                if sev_value >= 5: return "CRITICAL"
+                if sev_value == 4: return "HIGH"
+                if sev_value == 3: return "MEDIUM"
+                return "INFO"
+
             if scenario:
                 print(f"[*] {sid}: Running impact scenario '{scenario}'...")
                 r = sapmap_impact.assess_one(node, creds, scenario)
@@ -3730,6 +3739,12 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     ]
                     node.impact_results.append(r.to_dict())
                     print(f"  [{r.severity_label}] {r.headline}")
+                    if r.record_count > 0 and not r.error:
+                        sapmap_findings.emit_finding(
+                            _sev_for(r.severity.value), sid,
+                            f"Business impact [{r.scenario}]: {r.headline} "
+                            f"({r.record_count} record(s))",
+                        )
             else:
                 print(f"[*] {sid}: Running all business impact scenarios...")
                 results = sapmap_impact.assess_all(node, creds)
@@ -3739,6 +3754,24 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 total = len([r for r in results if r.record_count > 0])
                 print(f"[+] {sid}: {total} impact scenarios with data "
                       f"({crit} critical, {high} high)")
+                # Per-scenario finding for each hit so the drawer gets
+                # full detail; plus a single roll-up row so the banner
+                # shows the headline count without 20 slide-ins.
+                for r in results:
+                    if r.record_count > 0 and not r.error:
+                        sapmap_findings.emit_finding(
+                            _sev_for(r.severity.value), sid,
+                            f"Business impact [{r.scenario}]: {r.headline} "
+                            f"({r.record_count} record(s))",
+                        )
+                if total > 0:
+                    roll_sev = "CRITICAL" if crit else ("HIGH" if high
+                                                         else "MEDIUM")
+                    sapmap_findings.emit_finding(
+                        roll_sev, sid,
+                        f"Business-impact assessment: {total} scenario(s) "
+                        f"returned data ({crit} critical, {high} high)",
+                    )
 
         _bg(f"{sid}:impact", "Business Impact Assessment", _run)
         return json.dumps({"status": "started"})
