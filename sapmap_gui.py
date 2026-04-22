@@ -2037,6 +2037,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     if conn.has_sap_all:
                         sap_all_count += 1
                         print(f"[!] {conn.rfc_user} in {conn.destination_name} has SAP_ALL!")
+                    api.state.notify_sap_all_if_elevated(conn)
             print(f"[+] RFC Testing done for {sid}: "
                   f"{tested_count} tested, {logon_ok_count} logon OK, "
                   f"{sap_all_count} with SAP_ALL")
@@ -2103,6 +2104,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             conn.logon_tested = True
                             conn.ping_ok = True
                             conn.tested = True
+                            api.state.notify_sap_all_if_elevated(conn)
                             print(f"[+] {dest_name}: Direct logon OK "
                                   f"({conn.rfc_user}@{conn.target_sid})")
                             # Fetch profiles + roles DIRECTLY on the target
@@ -2233,6 +2235,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         conn.user_detail_error = info.get("error", "")
                         if conn.has_sap_all:
                             print(f"[!] {conn.rfc_user} in {dest_name} has SAP_ALL!")
+                        api.state.notify_sap_all_if_elevated(conn)
                 else:
                     err = result.get("error", "")
                     if err:

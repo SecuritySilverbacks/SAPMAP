@@ -644,6 +644,35 @@ class SAPMAPState:
             except Exception:
                 pass
 
+    def notify_sap_all_if_elevated(self, conn) -> None:
+        """Emit a CRITICAL finding (with source/target meta for the pulse
+        overlay) when a connection's has_sap_all + logon_successful flags
+        are both True.
+
+        The findings bus already dedupes identical (severity, node, msg)
+        tuples within a 60s window, so this can safely be called multiple
+        times from each RFC-check site without spamming the banner.  The
+        payload mirrors the one produced by ``add_connection`` — the goal
+        here is to cover the GUI flow where flags are mutated directly on
+        an existing connection object rather than re-added.
+        """
+        if not (getattr(conn, 'logon_successful', False)
+                and getattr(conn, 'has_sap_all', False)
+                and conn.source_sid and conn.target_sid):
+            return
+        try:
+            from sapmap_findings import emit_finding
+            emit_finding(
+                "CRITICAL", conn.source_sid,
+                f"RFC destination {conn.destination_name!r} "
+                f"logs on to {conn.target_sid} as SAP_ALL "
+                f"— lateral-movement hop confirmed",
+                meta={"source_sid": conn.source_sid,
+                      "target_sid": conn.target_sid},
+            )
+        except Exception:
+            pass
+
     def get_connections_from(self, sid: str) -> list:
         return [c for c in self.connections if c.source_sid == sid]
 
