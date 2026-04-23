@@ -640,7 +640,7 @@ def enumerate_clients(host, port, timeout=5, max_workers=20,
                               (client_str, detail))
                 elif available is False:
                     if verbose:
-                        print("  [-] Client %s: not available" % client_str)
+                        print("  [*] Client %s: not available" % client_str)
                 elif available is None:
                     result["errors"] += 1
                     if verbose:
