@@ -1275,7 +1275,7 @@ const PILL_COLORS = {
 const PILL_LABELS = {
   'ABAP': 'ABAP', 'JAVA': 'Java', 'ABAP+JAVA': 'AB+Java',
   'BUSINESSOBJECTS': 'BO', 'CLOUD_CONNECTOR': 'SCC',
-  'CONTENT_SERVER': 'Content', 'SAPROUTER': 'Router', 'MDM': 'MDM',
+  'CONTENT_SERVER': 'Content', 'SAPROUTER': 'SAProuter', 'MDM': 'MDM',
   'HANA': 'HANA', 'MAXDB': 'MaxDB', 'MSSQL': 'MSSQL',
   'ORACLE': 'Oracle', 'DB2': 'DB2'
 };
