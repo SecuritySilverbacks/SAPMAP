@@ -25,7 +25,7 @@ description: "Discover -> check CVE-2025-31324 -> SecStore/UME/destinations/impa
 steps:
   # --- Stage 1: discovery -----------------------------------------------
   - action: scan
-    targets: "192.168.2.192"
+    targets: "192.168.2.0/24"
     mode: fast
     timeout: 600
 
@@ -64,12 +64,32 @@ steps:
   # Test connection 
   - action: test_rfc_single 
     target: SJJ
-    destination: to_S4H
+    destination: SJJ_to_W74
 
   - action: create_user_via_rfc 
     target: SJJ
-    destination: to_S4H
+    destination: SJJ_to_W74
+    target_sid: W74
+
+  - action: layout
+    mode: hierarchy     # or: star | circle | hierarchy | stack | reset
+
+  # Get RFC connections from W74
+  - action: retrieve_rfcs
+    target: W74
+
+  # Test connection 
+  - action: test_rfc_single 
+    target: W74
+    destination: S4H
+
+  - action: create_user_via_rfc 
+    target: W74
+    destination: S4H
     target_sid: S4H
+
+  - action: layout
+    mode: hierarchy     # or: star | circle | hierarchy | stack | reset
 
   - action: impact_assess
     target: S4H
