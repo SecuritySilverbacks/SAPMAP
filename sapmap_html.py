@@ -516,9 +516,8 @@ body {
     <div class="menu-dropdown">
       <div class="dd-item" onclick="scanAllVulns()" style="color:#f0883e">&#128270; Scan for All Vulnerabilities</div>
       <div class="dd-item" onclick="propagateAll()">&#128640; Auto-Propagate All</div>
+      <div class="dd-item" onclick="testAllRFCs()">&#129514; Test All RFC Destinations</div>
       <div class="dd-item" onclick="cleanupAll()">&#129529; Cleanup All Users</div>
-      <div class="dd-item" onclick="resetRFCCache()">&#128202; Reset RFC Check List</div>
-      <div class="dd-item" onclick="viewRFCCache()">&#128203; View RFC Check List</div>
       <div class="dd-sep"></div>
       <div class="dd-item" onclick="showCreatedUsers()">&#128203; View Created Users</div>
       <div class="dd-item" onclick="showCreatedDestinations()">&#128203; View Created TCP/IP Destinations</div>
@@ -2563,6 +2562,9 @@ async function ctxAction(action) {
     case 'retrieve_rfcs':
       await api('POST', `node/${sid}/retrieve_rfcs`); break;
     case 'test_rfcs':
+      if (!confirm('Test RFC destinations on ' + sid + '?\n\n' +
+                   '⚠ Warning: if a destination holds a wrong password for a ' +
+                   'real user, this may lock that user on the target system.')) break;
       await api('POST', `node/${sid}/test_rfcs`); break;
     case 'download_hashes': {
       const nh = (mapState.nodes || {})[sid];
@@ -4270,20 +4272,28 @@ function highlightChain(pathSids) {
   setTimeout(() => { _highlightedChain = null; updateMap(); }, 15000);
 }
 
-async function resetRFCCache() {
-  if (confirm('Reset the RFC check cache? This allows re-testing all connections.'))
-    await api('POST', 'actions/reset_rfc_cache');
-}
-async function viewRFCCache() {
-  const res = await api('GET', 'actions/rfc_check_list');
-  const entries = res.entries || [];
-  if (entries.length === 0) { alert('RFC check list is empty.'); return; }
-  const lines = entries.map(e => {
-    const status = e.logon_ok ? 'LOGON OK' : e.ping_ok ? 'PING OK' : e.error ? 'ERROR' : 'FAILED';
-    const lat = e.latency_ms ? ` ${e.latency_ms}ms` : '';
-    return `${e.destination}: ${status}${lat}`;
+async function testAllRFCs() {
+  const nodes = mapState.nodes || {};
+  const conns = mapState.connections || [];
+  const sources = Object.keys(nodes).filter(sid => {
+    const n = nodes[sid];
+    const hasCreds = ((n.credentials || []).length > 0)
+                     || ((n.created_users || []).length > 0)
+                     || n.pwned;
+    const hasRFCs = conns.some(c => c.source_sid === sid);
+    return hasCreds && hasRFCs;
   });
-  alert(`RFC Check List (${entries.length} entries):\n\n` + lines.join('\n'));
+  if (sources.length === 0) {
+    alert('No systems on the map have both credentials and RFC destinations to test.');
+    return;
+  }
+  if (!confirm('Test RFC destinations on ' + sources.length + ' system(s): '
+               + sources.join(', ') + '?\n\n'
+               + '⚠ Warning: if a destination holds a wrong password for a '
+               + 'real user, this may lock that user on the target system.')) return;
+  for (const sid of sources) {
+    await api('POST', `node/${sid}/test_rfcs`);
+  }
 }
 async function showCreatedUsers() {
   const res = await api('GET', 'actions/created_users');

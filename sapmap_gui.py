@@ -1995,11 +1995,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
             mapped_conns = [c for c in conns
                             if c.target_sid and api.state.get_node(c.target_sid)]
             skipped = len(conns) - len(mapped_conns)
-            # Reset tested state so re-clicking "Test RFCs" actually re-tests
             for conn in mapped_conns:
-                if conn.tested:
-                    conn.tested = False
-                    api.state.rfc_check_cache.pop(conn.destination_name, None)
+                conn.tested = False
+                api.state.rfc_check_cache.pop(conn.destination_name, None)
             print(f"[*] RFC Testing: {sid} — {len(mapped_conns)} mapped connection(s) "
                   f"to check{f' ({skipped} unmapped skipped)' if skipped else ''}")
             import sapmap_stop
@@ -2008,27 +2006,24 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     print(f"[!] STOP — bulk RFC test aborted "
                           f"({tested_count}/{len(mapped_conns)} done)")
                     return
-                if not conn.tested and not api.state.is_rfc_checked(conn.destination_name):
-                    print(f"[*] Testing {conn.destination_name}...")
-                    result = sapmap_rfc.test_rfc_destination(
-                        node, conn.destination_name, creds, api.state.rfc_check_cache
-                    )
-                    conn.logon_successful = result.get("logon_ok", False)
-                    conn.logon_tested = True
-                    conn.ping_ok = result.get("ping_ok", False)
-                    conn.latency_ms = result.get("latency_ms", 0)
-                    conn.tested = True
-                    tested_count += 1
+                print(f"[*] Testing {conn.destination_name}...")
+                result = sapmap_rfc.test_rfc_destination(
+                    node, conn.destination_name, creds, api.state.rfc_check_cache
+                )
+                conn.logon_successful = result.get("logon_ok", False)
+                conn.logon_tested = True
+                conn.ping_ok = result.get("ping_ok", False)
+                conn.latency_ms = result.get("latency_ms", 0)
+                conn.tested = True
+                tested_count += 1
 
-                    if conn.logon_successful:
-                        logon_ok_count += 1
-                        print(f"[+] {conn.destination_name}: Logon successful!")
-                        # Mark target
-                        target = api.state.get_node(conn.target_sid)
-                        if target:
-                            target.has_critical_finding = True
+                if conn.logon_successful:
+                    logon_ok_count += 1
+                    print(f"[+] {conn.destination_name}: Logon successful!")
+                    target = api.state.get_node(conn.target_sid)
+                    if target:
+                        target.has_critical_finding = True
 
-                # Only retrieve profiles if logon was successful
                 if conn.logon_successful and conn.rfc_user and not conn.profiles:
                     info = sapmap_rfc.get_remote_user_profiles(
                         node, conn.rfc_user, conn.destination_name, creds
@@ -2043,9 +2038,6 @@ def create_app(api: SAPMAPApi) -> Bottle:
             print(f"[+] RFC Testing done for {sid}: "
                   f"{tested_count} tested, {logon_ok_count} logon OK, "
                   f"{sap_all_count} with SAP_ALL")
-            if tested_count == 0 and mapped_conns:
-                print("[*] Possibly no RFC testing done because all RFCs are on the "
-                      "RFC check list. Resetting it via the menu might help.")
 
         _bg(f"{sid}:test_rfcs", "Test RFCs", _run)
         return json.dumps({"status": "started"})
@@ -3589,27 +3581,6 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
         _bg("_check_all_vulns", "Scan for All Vulnerabilities", _run)
         return json.dumps({"status": "started", "systems": len(nodes)})
-
-    @app.route("/api/actions/reset_rfc_cache", method="POST")
-    def actions_reset_rfc_cache():
-        response.content_type = "application/json"
-        state_mgr.reset_rfc_cache(api.state)
-        return json.dumps({"status": "ok"})
-
-    @app.route("/api/actions/rfc_check_list")
-    def actions_rfc_check_list():
-        response.content_type = "application/json"
-        cache = api.state.rfc_check_cache
-        entries = []
-        for dest, result in cache.items():
-            entries.append({
-                "destination": dest,
-                "logon_ok": result.get("logon_ok", False),
-                "ping_ok": result.get("ping_ok", False),
-                "latency_ms": result.get("latency_ms", 0),
-                "error": result.get("error", ""),
-            })
-        return json.dumps({"entries": entries})
 
     @app.route("/api/actions/created_users")
     def actions_created_users():
