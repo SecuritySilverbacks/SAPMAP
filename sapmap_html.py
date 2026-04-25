@@ -1873,9 +1873,14 @@ function updateMap() {
       }
     }
 
-    // Lightning bolt for pwned
+    // Lightning bolt for pwned — sits in the top-right corner, partly
+    // outside the box (mirror of the finding badge in the top-left).
     if (n.pwned) {
-      html += `<text x="${x+BOX_W-22}" y="${y+19}" font-size="16" fill="#f0883e">&#9889;</text>`;
+      const lx = x + BOX_W + 2, ly = y - 2;
+      html += `<text x="${lx}" y="${ly}" font-size="28" fill="#f0883e"`
+        + ` stroke="#0d1117" stroke-width="2.5" paint-order="stroke"`
+        + ` text-anchor="middle" dominant-baseline="middle"`
+        + ` font-weight="bold" pointer-events="none">&#9889;</text>`;
     }
 
     // Finding badge — count of unresolved (undismissed) CRITICAL/HIGH
@@ -1901,7 +1906,7 @@ function updateMap() {
 
     // Activity spinner for active background tasks
     if (_nodeHasActiveTask(sid)) {
-      const cx = n.pwned ? x+BOX_W-40 : x+BOX_W-18;
+      const cx = x + BOX_W - 18;
       html += `<circle cx="${cx}" cy="${y+14}" r="6" fill="none" stroke="#f0883e" stroke-width="2" stroke-dasharray="20 12" stroke-linecap="round">` +
         `<animateTransform attributeName="transform" type="rotate" from="0 ${cx} ${y+14}" to="360 ${cx} ${y+14}" dur="1s" repeatCount="indefinite" /></circle>`;
     }
