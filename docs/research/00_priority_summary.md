@@ -40,7 +40,7 @@ even for authenticated admins. NWA always shows `********`.
 | # | Addition | Effort | Why |
 |---|---|---|---|
 | 8 | **CVE-2025-42944 P4 deserialization** (`sap_cve_2025_42944.py`) | ~500 LOC | Second unauth Java RCE path (port 5NN04), for installs without Visual Composer. Base: codewhitesec scaffold. |
-| 9 | **SAP Cloud Connector module** (`sapmap_scc.py`) | ~800 LOC | Fingerprint → default creds (`Administrator:manage`) → CVE-2024-25645 auth-bypass → post-RCE JCEKS extraction. New `SCCNode` + `BTPSubaccountNode`. First public tool to chain on-prem → BTP. |
+| 9 | **SAP Cloud Connector + BTP module** — see elaborate plan in [`08_cloud_connector_implementation_plan.md`](08_cloud_connector_implementation_plan.md) | ~6 wk | Fingerprint → default creds (`Administrator:manage`) → version-bucket CVEs → post-RCE JCEKS extraction → BTP destination cleartext capture → CISO-grade risk dashboard. New `SCCNode` / `BTPSubaccountNode` / `IASTenantNode` / `BTPDestination` / `SCCMapping` types. First public tool to chain on-prem → BTP. |
 | 10 | **Authenticated `/logviewer/` credential scraper** (`sap_java_logviewer_grep.py`) | ~300 LOC | No JSP needed. UME admin + log read + regex = creds from defaultTrace. |
 | 11 | **Trusted RFC hop** (new edge type) | ~250 LOC | Call BAPI on destination B from compromised A with `jco.client.trusted=1`. No password. Walks SolMan/CUA/TMS topology automatically. |
 | 12 | **SAPControl/sapstartsrv `OSExecute`** | ~200 LOC | After SecStore yields `sidadm`, authenticated OS-cmd via sapstartsrv SOAP on every SAP host. Universal. |
@@ -78,7 +78,7 @@ Adds the highest-impact CVEs SAPMAP is currently missing.
 
 ### Phase 3 — "differentiator" (2-3 weeks)
 
-- **#9** Cloud Connector module with post-RCE harvest and graph semantics
+- **#9** Cloud Connector + BTP module — see elaborate plan in [`08_cloud_connector_implementation_plan.md`](08_cloud_connector_implementation_plan.md)
 - **#8** P4 deserialization
 - **#11** Trusted RFC hop
 
@@ -134,6 +134,17 @@ New `Finding` categories:
   `hana.repo.leak`, `persistence.installed`,
   `role.capability.inventory`, `ztable.credential`,
   `saprouter.permissive.route`, `scc.default.creds.live`.
+
+---
+
+## Cloud Connector elaborate plan
+
+The Cloud Connector + BTP feature has its own deep implementation plan
+(detection ladder, dataclasses, SVG node shapes, edge kinds, risk-score
+matrix, compliance-tag map, 6-week roadmap, scope fence, CVE-verification
+table) at [`08_cloud_connector_implementation_plan.md`](08_cloud_connector_implementation_plan.md).
+It supersedes the §8.* sketch in `03_cloud_connector_btp.md` and replaces
+the placeholder line about item #9 above.
 
 ---
 

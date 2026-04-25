@@ -14,6 +14,8 @@ list lives in `00_priority_summary.md`.
 | 4 | SSO ticket forging & trust-relationship abuse (lateral movement) | [`04_sso_trust_lateral_movement.md`](04_sso_trust_lateral_movement.md) |
 | 5 | Post-exploitation / data-extraction techniques (ABAP + Java + HANA) | [`05_post_exploitation.md`](05_post_exploitation.md) |
 | 6 | Initial-access: default creds, pre-auth info disclosure, weak-config probes | [`06_initial_access.md`](06_initial_access.md) |
+| 7 | Java SecStore recovery (DSO/SECSTORE/key extraction on AS Java) | [`07_java_secstore_recovery.md`](07_java_secstore_recovery.md) |
+| 8 | **Cloud Connector + BTP — elaborate implementation plan** (detection, data model, visualization, risk scoring, 6-week roadmap) | [`08_cloud_connector_implementation_plan.md`](08_cloud_connector_implementation_plan.md) |
 
 ## Research method
 
