@@ -34,6 +34,7 @@ checkbox.
 """
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import re
@@ -63,6 +64,7 @@ class SCCAdminSession:
     opener: object = None           # urllib.request.OpenerDirector
     csrf_token: str = ""
     user: str = ""
+    basic_auth: str = ""            # "Basic <b64(user:pwd)>" for /api/v1 calls
     authenticated: bool = False
     version: str = ""
     build: str = ""
@@ -119,6 +121,8 @@ def login(host: str, user: str, password: str,
     """
     sess = _build_session(host, port)
     sess.user = user
+    sess.basic_auth = "Basic " + base64.b64encode(
+        f"{user}:{password}".encode("utf-8")).decode("ascii")
 
     # Seed JSESSIONID
     r = _request(sess, "/api/login", timeout=timeout)
@@ -156,10 +160,24 @@ def login(host: str, user: str, password: str,
 
     # Tomcat success → 302/303 with Location to /api/login (or original URL).
     # Tomcat failure → 200 with the login HTML re-served, no Location.
-    if status in (301, 302, 303, 307, 308) and location:
-        # Verify by fetching the backends monitoring endpoint — JSON when
-        # authenticated, login-HTML otherwise.  Cache the payload so
-        # pull_subaccounts() doesn't have to re-fetch.
+    form_ok = status in (301, 302, 303, 307, 308) and bool(location)
+
+    # Independently verify by fetching /api/v1/configuration/subaccounts
+    # with HTTP Basic — that endpoint is the authoritative configuration
+    # source on 2.16+ builds and only honours Basic auth, so it's the
+    # most reliable cred-validity check we have.
+    cfg = _get_v1_subaccounts_raw(sess, timeout=timeout)
+    if cfg is not None:
+        sess.authenticated = True
+        sess.csrf_token = csrf
+        sess.raw_versions = {"subaccounts": cfg}
+        v = _get_versions_raw(sess, timeout=timeout) or {}
+        sess.version = v.get("connector") or v.get("version") or ""
+        sess.build = v.get("build") or v.get("revision") or ""
+        return sess
+    if form_ok:
+        # Fall back to monitoring/connections/backends for older builds
+        # without the v1 config API.
         b = _get_backends_raw(sess, timeout=timeout)
         if b is not None:
             sess.authenticated = True
@@ -170,6 +188,37 @@ def login(host: str, user: str, password: str,
             sess.build = v.get("build") or v.get("revision") or ""
             return sess
     return None
+
+
+def _basic_headers(sess: SCCAdminSession) -> dict:
+    return {"Authorization": sess.basic_auth} if sess.basic_auth else {}
+
+
+def _get_v1_subaccounts_raw(sess: SCCAdminSession, timeout: float = 8.0) -> Optional[list]:
+    """GET /api/v1/configuration/subaccounts with HTTP Basic.
+
+    Returns the parsed JSON list (each entry has _links.systemMappings
+    among others) when authenticated and the v1 configuration API is
+    present; ``None`` otherwise (404 on older builds, 401 on bad creds,
+    SAPUI5 HTML when filter rules block the request entirely).
+    """
+    r = _request(sess, "/api/v1/configuration/subaccounts",
+                 headers=_basic_headers(sess), timeout=timeout)
+    status = getattr(r, "status", 0) or getattr(r, "code", 0)
+    ct = ""
+    try:
+        ct = (r.headers.get("Content-Type", "") or "").lower()
+    except Exception:
+        pass
+    if status != 200 or "json" not in ct:
+        return None
+    try:
+        body = r.read(2 * 1024 * 1024)
+        data = json.loads(body.decode("utf-8", "replace"))
+    except Exception as e:
+        logger.debug("v1 subaccounts parse failed: %s", e)
+        return None
+    return data if isinstance(data, list) else None
 
 
 def _get_backends_raw(sess: SCCAdminSession, timeout: float = 8.0) -> Optional[dict]:
@@ -225,96 +274,190 @@ def pull_versions(sess: SCCAdminSession, timeout: float = 8.0) -> dict:
 
 
 def pull_subaccounts(sess: SCCAdminSession, timeout: float = 8.0) -> list:
-    """Return [{subaccount, regionHost, locationID, backendConnections, ...}, ...].
+    """Return [{subaccount, regionHost, locationID, _links?, ...}, ...].
 
-    Reads /api/monitoring/connections/backends — the same endpoint used
-    for auth verification, so the result may already be cached on the
-    session from login().
+    Prefers the v1 configuration API (Basic auth) since that endpoint is
+    the authoritative source for subaccounts *and* their mapping links;
+    falls back to the form-auth /api/monitoring/connections/backends
+    payload (cached on the session at login time) for older builds.
     """
     if not sess.authenticated:
         return []
-    data = sess.raw_versions if isinstance(sess.raw_versions, dict) and sess.raw_versions.get("subaccounts") else None
-    if data is None:
-        data = _get_backends_raw(sess, timeout=timeout)
-    if not isinstance(data, dict):
-        return []
-    subs = data.get("subaccounts")
-    return subs if isinstance(subs, list) else []
+    cached = sess.raw_versions if isinstance(sess.raw_versions, dict) else None
+    if cached and isinstance(cached.get("subaccounts"), list):
+        # raw_versions["subaccounts"] is the v1 list (preferred) or the
+        # monitoring backends list (fallback) depending on what login()
+        # cached.  Both expose .subaccount + .regionHost on each entry.
+        return cached["subaccounts"]
+    fresh = _get_v1_subaccounts_raw(sess, timeout=timeout)
+    if isinstance(fresh, list):
+        sess.raw_versions = {"subaccounts": fresh}
+        return fresh
+    legacy = _get_backends_raw(sess, timeout=timeout)
+    if isinstance(legacy, dict) and isinstance(legacy.get("subaccounts"), list):
+        return legacy["subaccounts"]
+    return []
+
+
+def _safe_int(v, default: int = 0) -> int:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
 
 
 def _normalize_mapping(m: dict) -> dict:
-    """Shape one raw backendConnection / systemMapping entry to match
-    SCCMapping.from_dict().  Tolerant of field-name drift between SCC
-    builds.
+    """Shape one raw systemMapping entry to match SCCMapping.from_dict().
+
+    Field-name drift between SCC builds:
+      v1 config API   : virtualHost, virtualPort (str), localHost, localPort
+                        (str), protocol, backendType, authenticationMode,
+                        sid, hostInHeader, totalResourcesCount,
+                        enabledResourcesCount, allowedClients, blacklistedUsers
+      legacy monitor  : virtualUrl, internalHost, internalPort, type
     """
+    auth_mode = m.get("authenticationMode") or ""
     return {
         "virtual_host": m.get("virtualHost") or m.get("virtualUrl") or "",
-        "virtual_port": int(m.get("virtualPort") or 0),
-        "internal_host": m.get("internalHost") or m.get("localHost") or "",
-        "internal_port": int(m.get("internalPort") or m.get("localPort") or 0),
+        "virtual_port": _safe_int(m.get("virtualPort")),
+        "internal_host": m.get("localHost") or m.get("internalHost") or "",
+        "internal_port": _safe_int(m.get("localPort") or m.get("internalPort")),
         "protocol": m.get("protocol") or m.get("type") or "",
         "path_allowlist": m.get("resources") or m.get("pathAllowlist") or [],
         "path_wildcards": bool(m.get("pathWildcards", False)),
         "backend_type": m.get("backendType") or "",
-        "principal_propagation": bool(m.get("authenticationMode") == "X509_GENERAL"
-                                      or m.get("principalPropagation", False)),
+        "principal_propagation": (auth_mode in ("X509_GENERAL", "KERBEROS")
+                                  or bool(m.get("principalPropagation", False))),
+        "authentication_mode": auth_mode,
+        "sid": m.get("sid") or "",
+        "host_in_header": m.get("hostInHeader") or "",
+        "description": m.get("description") or "",
+        "total_resources": _safe_int(m.get("totalResourcesCount")),
+        "enabled_resources": _safe_int(m.get("enabledResourcesCount")),
     }
+
+
+def _path_for_link(href: str, base_url: str) -> str:
+    """Strip scheme://host:port from a HATEOAS href, return the path."""
+    if not href:
+        return ""
+    if href.startswith(base_url):
+        return href[len(base_url):] or "/"
+    if href.startswith("http://") or href.startswith("https://"):
+        return "/" + href.split("/", 3)[3] if "/" in href[8:] else ""
+    return href if href.startswith("/") else "/" + href
+
+
+def _fetch_resources(sess: SCCAdminSession, href: str, timeout: float) -> list:
+    """GET a systemMappings/<vhost:vport>/resources link → list[str]."""
+    path = _path_for_link(href, sess.base_url)
+    if not path:
+        return []
+    r = _request(sess, path, headers=_basic_headers(sess), timeout=timeout)
+    status = getattr(r, "status", 0) or getattr(r, "code", 0)
+    ct = ""
+    try:
+        ct = (r.headers.get("Content-Type", "") or "").lower()
+    except Exception:
+        pass
+    if status != 200 or "json" not in ct:
+        return []
+    try:
+        data = json.loads(r.read(256 * 1024).decode("utf-8", "replace"))
+    except Exception:
+        return []
+    out = []
+    for entry in (data if isinstance(data, list) else []):
+        if isinstance(entry, dict):
+            exact = bool(entry.get("exactMatchOnly", False))
+            policy_raw = entry.get("accessPolicy") or entry.get("policy") or ""
+            # SCC v1 uses exactMatchOnly bool; older builds use accessPolicy str.
+            policy = policy_raw or ("PATH" if exact else "PATH_AND_ALL_SUB_PATHS")
+            out.append({
+                "path": entry.get("id") or entry.get("path") or "",
+                "policy": policy,
+                "exact_match_only": exact,
+                "enabled": bool(entry.get("enabled", True)),
+                "description": entry.get("description") or "",
+                "websocket_upgrade_allowed": bool(entry.get("websocketUpgradeAllowed", False)),
+            })
+        elif isinstance(entry, str):
+            out.append({"path": entry, "policy": "PATH_AND_ALL_SUB_PATHS",
+                        "exact_match_only": False, "enabled": True,
+                        "description": "", "websocket_upgrade_allowed": False})
+    return out
 
 
 def pull_mappings(sess: SCCAdminSession, subaccount_uuid: str,
                   timeout: float = 8.0) -> list:
     """Return the cloud-to-on-premise mapping table for one subaccount.
 
-    Mappings are inlined under each subaccount's ``backendConnections``
-    in the /api/monitoring/connections/backends payload.  Falls back to
-    the per-subaccount /cloudToOnPremise path on older SCC builds where
-    the monitoring endpoint omits them.
+    Strategy:
+      1. /api/v1/configuration/subaccounts (Basic auth) → find the matching
+         subaccount entry, follow its `_links.systemMappings.href`.
+      2. For each mapping, follow `_links.resources.href` (if present and
+         totalResourcesCount > 0) to expand the path allowlist.
+      3. Fallback to /api/monitoring/connections/backends (form-auth) for
+         older SCC builds that don't expose the v1 config API.
     """
     if not sess.authenticated or not subaccount_uuid:
         return []
-    out = []
-    subs = pull_subaccounts(sess, timeout=timeout)
-    for s in subs:
-        if not isinstance(s, dict):
-            continue
-        if s.get("subaccount") != subaccount_uuid:
-            continue
-        for m in (s.get("backendConnections") or []):
-            if isinstance(m, dict):
-                out.append(_normalize_mapping(m))
-        if out:
-            return out
-        break
+    out: list = []
 
-    quoted = urllib.parse.quote(subaccount_uuid, safe="")
-    for path in (f"/api/configuration/subaccounts/{quoted}/cloudToOnPremise",
-                 f"/api/configuration/subaccounts/{quoted}/systemMappings"):
-        r = _request(sess, path, timeout=timeout)
+    subs = pull_subaccounts(sess, timeout=timeout)
+    target = None
+    for s in subs:
+        if isinstance(s, dict) and s.get("subaccount") == subaccount_uuid:
+            target = s
+            break
+    if target is None:
+        return []
+
+    links = target.get("_links") or {}
+    sm_href = ""
+    if isinstance(links.get("systemMappings"), dict):
+        sm_href = links["systemMappings"].get("href") or ""
+
+    if sm_href:
+        path = _path_for_link(sm_href, sess.base_url)
+        r = _request(sess, path, headers=_basic_headers(sess), timeout=timeout)
         status = getattr(r, "status", 0) or getattr(r, "code", 0)
         ct = ""
         try:
             ct = (r.headers.get("Content-Type", "") or "").lower()
         except Exception:
             pass
-        if status != 200 or "json" not in ct:
-            continue
-        try:
-            data = json.loads(r.read(1024 * 1024).decode("utf-8", "replace"))
-        except Exception:
-            continue
-        raw = []
-        if isinstance(data, list):
-            raw = data
-        elif isinstance(data, dict):
-            for k in ("systemMappings", "mappings", "items", "backendConnections"):
-                if isinstance(data.get(k), list):
-                    raw = data[k]
-                    break
-        for m in raw:
-            if isinstance(m, dict):
-                out.append(_normalize_mapping(m))
-        if out:
-            break
+        if status == 200 and "json" in ct:
+            try:
+                raw = json.loads(r.read(2 * 1024 * 1024).decode("utf-8", "replace"))
+            except Exception:
+                raw = []
+            entries = raw if isinstance(raw, list) else (
+                raw.get("systemMappings") if isinstance(raw, dict) else None) or []
+            for m in entries:
+                if not isinstance(m, dict):
+                    continue
+                norm = _normalize_mapping(m)
+                # Expand resources via the per-mapping link if present.
+                m_links = m.get("_links") or {}
+                res_href = ""
+                if isinstance(m_links.get("resources"), dict):
+                    res_href = m_links["resources"].get("href") or ""
+                if res_href and norm.get("total_resources", 0) > 0:
+                    norm["path_allowlist"] = _fetch_resources(sess, res_href, timeout)
+                out.append(norm)
+            if out:
+                return out
+
+    # Fallback: monitoring backends payload (older SCC builds).
+    legacy = _get_backends_raw(sess, timeout=timeout)
+    if isinstance(legacy, dict):
+        for s in (legacy.get("subaccounts") or []):
+            if isinstance(s, dict) and s.get("subaccount") == subaccount_uuid:
+                for m in (s.get("backendConnections") or []):
+                    if isinstance(m, dict):
+                        out.append(_normalize_mapping(m))
+                break
     return out
 
 
