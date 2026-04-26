@@ -20,7 +20,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from sapmap_models import SAPNode, InstanceInfo, Finding, Severity
+from sapmap_models import SAPNode, InstanceInfo, Finding, Severity, SCCNode
 from sapmap_config import (
     DEFAULT_INSTANCE_RANGE, DEFAULT_THREADS, DEFAULT_TIMEOUT,
     FAST_SCAN_PORT_PATTERNS,
@@ -548,6 +548,9 @@ NON_SAP_PORTS = set()
 # SAProuter port — scanned separately, not as a dispatcher
 SAPROUTER_PORT = 3299
 
+# SAP Cloud Connector admin UI default port — fingerprinted (not enumerated as SAP)
+SCC_DEFAULT_PORT = 8443
+
 
 def _build_port_list(instance_range, include_hana=False, skip_non_sap=True):
     """Build list of (port, service, instance_nr) tuples for scanning.
@@ -607,7 +610,7 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
     if cancel_event and cancel_event.is_set():
         return result
     if not skip_quick_check:
-        QUICK_PORTS = list(range(3200, 3300)) + [8000, 50013, 50113, 50213, 50313, 54213, 1128]
+        QUICK_PORTS = list(range(3200, 3300)) + [8000, 8443, 50013, 50113, 50213, 50313, 54213, 1128]
         quick_timeout = min(timeout, 1.5)
         quick_hit = False
         qe = ThreadPoolExecutor(max_workers=min(len(QUICK_PORTS), 20))
@@ -669,6 +672,11 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
         ports_pass1.append((50013 + inst_nr * 100, "sapcontrol", f"{inst_nr:02d}"))
     ports_pass1.append((1128, "saphost_http", "XX"))
     ports_pass1.append((1129, "saphost_https", "XX"))
+    # SAP Cloud Connector admin UI (8443/tcp) — fingerprinted in a follow-up
+    # phase, not promoted to a SAPNode here.  Including it in Pass 1 ensures
+    # a host that ONLY runs SCC (no dispatcher 32XX) is still recognised by
+    # the scanner; the quick-probe above already lists 8443 to keep alive.
+    ports_pass1.append((SCC_DEFAULT_PORT, "scc_admin", "XX"))
 
     if _cancelled():
         return result
@@ -2101,6 +2109,49 @@ def enumerate_system_clients(host: str, disp_port: int, timeout: float = 5,
 
 
 # ---------------------------------------------------------------------------
+# Build SCCNode from scan result (Cloud Connector fingerprint)
+# ---------------------------------------------------------------------------
+
+def _maybe_build_scc_node(scan_result: dict, timeout: float = 5.0) -> SCCNode:
+    """If 8443/tcp is open and looks like SCC, run the read-only fingerprint
+    module and return a populated SCCNode.  Returns ``None`` when the host
+    isn't an SCC (or 8443 is closed / fingerprint inconclusive).
+    """
+    host = scan_result.get("host", "")
+    open_ports = scan_result.get("open_ports", {})
+    if SCC_DEFAULT_PORT not in open_ports:
+        return None
+
+    try:
+        from sapmap_scc_fingerprint import scc_fingerprint
+    except ImportError as e:
+        logger.debug("SCC fingerprint module unavailable: %s", e)
+        return None
+
+    fp = scc_fingerprint(host, port=SCC_DEFAULT_PORT, timeout=timeout)
+    if not fp or not fp.get("is_scc"):
+        return None
+
+    node = SCCNode(
+        host=host,
+        ip=host,
+        admin_ui_port=SCC_DEFAULT_PORT,
+        version=fp.get("version", ""),
+        version_source=fp.get("version_source", ""),
+        bundle_hash=fp.get("bundle_hash", ""),
+        favicon_sha256=fp.get("favicon_sha256", ""),
+        favicon_mmh3=fp.get("favicon_mmh3", 0),
+        tls_fingerprint=fp.get("tls", {}) or {},
+        server_header=fp.get("server_header", ""),
+        admin_ui_reachable=True,
+    )
+    print(f"[+] {host}: SAP Cloud Connector detected on :{SCC_DEFAULT_PORT}"
+          f"{' v' + node.version if node.version else ''} "
+          f"[server={node.server_header or '?'}]")
+    return node
+
+
+# ---------------------------------------------------------------------------
 # Build SAPNode from scan results
 # ---------------------------------------------------------------------------
 
@@ -2411,7 +2462,8 @@ def discover_systems(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RAN
                      progress_callback=None, verbose: bool = False,
                      skip_alive: bool = False, concurrent_hosts: int = 5,
                      port_timeout: float = 3.0,
-                     node_callback=None) -> list:
+                     node_callback=None,
+                     scc_callback=None) -> list:
     """Main entry point: discover SAP systems on the network.
 
     Args:
@@ -2427,6 +2479,7 @@ def discover_systems(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RAN
         concurrent_hosts: max hosts to port-scan in parallel
         port_timeout: TCP timeout for port probes
         node_callback: callable(SAPNode) invoked as each system is discovered
+        scc_callback:  callable(SCCNode) invoked as each Cloud Connector is fingerprinted
 
     Returns:
         list of SAPNode objects
@@ -2477,6 +2530,15 @@ def discover_systems(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RAN
             if node_callback:
                 for node in host_nodes:
                     node_callback(node)
+
+            # SCC fingerprint — independent of SAP node enrichment so a host
+            # that is *only* a Cloud Connector still surfaces on the map.
+            scc_node = _maybe_build_scc_node(result, timeout=min(timeout, 5.0))
+            if scc_node and scc_callback:
+                try:
+                    scc_callback(scc_node)
+                except Exception as e:
+                    logger.debug("scc_callback failed for %s: %s", host, e)
 
             # Summary line per discovered system on this host
             for node in host_nodes:

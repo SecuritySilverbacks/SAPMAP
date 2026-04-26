@@ -490,6 +490,137 @@ class RFCConnection:
 
 
 # ---------------------------------------------------------------------------
+# SAP Cloud Connector (SCC) — sibling node type
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SCCMapping:
+    """One row of the SCC 'Cloud To On-Premise' table.
+
+    Stored on SCCNode.mappings as plain dicts (so state.to_dict() stays JSON-safe).
+    Use to_dict() / from_dict() to round-trip.
+    """
+    virtual_host: str = ""
+    virtual_port: int = 0
+    internal_host: str = ""
+    internal_port: int = 0
+    protocol: str = ""           # HTTP | HTTPS | RFC | TCP | LDAP | MAIL
+    path_allowlist: list = field(default_factory=list)
+    path_wildcards: bool = False
+    backend_type: str = ""       # ABAP | JAVA | HANA | GENERIC
+    principal_propagation: bool = False
+
+    def to_dict(self) -> dict:
+        return {
+            "virtual_host": self.virtual_host,
+            "virtual_port": self.virtual_port,
+            "internal_host": self.internal_host,
+            "internal_port": self.internal_port,
+            "protocol": self.protocol,
+            "path_allowlist": list(self.path_allowlist),
+            "path_wildcards": self.path_wildcards,
+            "backend_type": self.backend_type,
+            "principal_propagation": self.principal_propagation,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> SCCMapping:
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in d.items() if k in known})
+
+
+@dataclass
+class SCCNode:
+    """A SAP Cloud Connector instance — sibling to SAPNode on the map.
+
+    Identifier: ``host`` (string).  Lives in SAPMAPState.scc_nodes keyed by host.
+    """
+    host: str = ""                              # acts as identifier
+    ip: str = ""
+    admin_ui_port: int = 8443
+    version: str = ""                           # "2.17.1"
+    version_source: str = ""                    # "favicon" | "bundle" | "api" | "header"
+    bundle_hash: str = ""
+    favicon_sha256: str = ""
+    favicon_mmh3: int = 0
+    tls_fingerprint: dict = field(default_factory=dict)  # {alpn, cipher, version, cert_subject, ...}
+    server_header: str = ""
+    admin_ui_reachable: bool = False
+    admin_session_obtained: bool = False
+    default_creds_live: bool = False
+    cves_confirmed: list = field(default_factory=list)
+    cves_suspected: list = field(default_factory=list)
+    subaccount_uuids: list = field(default_factory=list)
+    location_ids: list = field(default_factory=list)
+    tunnel_region: str = ""
+    principal_propagation_enabled: bool = False
+    mappings: list = field(default_factory=list)         # [SCCMapping.to_dict(), ...]
+    keystore_extracted: bool = False
+    keystore_loot_path: str = ""
+    tunnel_privkey_fp: str = ""
+    pp_ca_privkey_fp: str = ""
+    tunnel_replayed: bool = False
+    pwned: bool = False
+    findings: list = field(default_factory=list)
+    credentials: list = field(default_factory=list)      # SCC local users (Credentials objects)
+    position: Optional[tuple] = None
+    ha_shadow_host: str = ""
+    notes: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "host": self.host,
+            "ip": self.ip,
+            "admin_ui_port": self.admin_ui_port,
+            "version": self.version,
+            "version_source": self.version_source,
+            "bundle_hash": self.bundle_hash,
+            "favicon_sha256": self.favicon_sha256,
+            "favicon_mmh3": self.favicon_mmh3,
+            "tls_fingerprint": dict(self.tls_fingerprint),
+            "server_header": self.server_header,
+            "admin_ui_reachable": self.admin_ui_reachable,
+            "admin_session_obtained": self.admin_session_obtained,
+            "default_creds_live": self.default_creds_live,
+            "cves_confirmed": list(self.cves_confirmed),
+            "cves_suspected": list(self.cves_suspected),
+            "subaccount_uuids": list(self.subaccount_uuids),
+            "location_ids": list(self.location_ids),
+            "tunnel_region": self.tunnel_region,
+            "principal_propagation_enabled": self.principal_propagation_enabled,
+            "mappings": list(self.mappings),
+            "keystore_extracted": self.keystore_extracted,
+            "keystore_loot_path": self.keystore_loot_path,
+            "tunnel_privkey_fp": self.tunnel_privkey_fp,
+            "pp_ca_privkey_fp": self.pp_ca_privkey_fp,
+            "tunnel_replayed": self.tunnel_replayed,
+            "pwned": self.pwned,
+            "findings": [f.to_dict() if hasattr(f, "to_dict") else f
+                         for f in self.findings],
+            "credentials": [c.to_dict() if hasattr(c, "to_dict") else c
+                            for c in self.credentials],
+            "position": list(self.position) if self.position else None,
+            "ha_shadow_host": self.ha_shadow_host,
+            "notes": self.notes,
+            "kind": "scc",
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> SCCNode:
+        known = {f.name for f in fields(cls)}
+        clean = {k: v for k, v in d.items() if k in known}
+        if isinstance(clean.get("position"), list):
+            clean["position"] = tuple(clean["position"])
+        findings_d = clean.get("findings", [])
+        clean["findings"] = [Finding.from_dict(f) if isinstance(f, dict) and "severity" in f else f
+                             for f in findings_d]
+        creds_d = clean.get("credentials", [])
+        clean["credentials"] = [Credentials.from_dict(c) if isinstance(c, dict) else c
+                                for c in creds_d]
+        return cls(**clean)
+
+
+# ---------------------------------------------------------------------------
 # SAPMAPState — full session state (serializable)
 # ---------------------------------------------------------------------------
 
@@ -502,6 +633,7 @@ class SAPMAPState:
     created_users: list = field(default_factory=list)    # global [CreatedUser, ...]
     created_destinations: list = field(default_factory=list)  # [{dest_name, source_sid, target_sid, ...}]
     rfc_check_cache: dict = field(default_factory=dict)  # {dest_name: result_dict}
+    scc_nodes: dict = field(default_factory=dict)        # host -> SCCNode (Cloud Connectors)
     scan_config: dict = field(default_factory=dict)
     timestamp: str = ""
     version: str = "1.0"
@@ -733,6 +865,7 @@ class SAPMAPState:
             "created_users": [u.to_dict() for u in self.created_users],
             "created_destinations": self.created_destinations,
             "rfc_check_cache": self.rfc_check_cache,
+            "scc_nodes": {h: n.to_dict() for h, n in self.scc_nodes.items()},
         }
 
     @classmethod
@@ -748,6 +881,8 @@ class SAPMAPState:
         state.connections = [RFCConnection.from_dict(c) for c in d.get("connections", [])]
         state.created_users = [CreatedUser.from_dict(u) for u in d.get("created_users", [])]
         state.created_destinations = d.get("created_destinations", [])
+        for host, scc_d in d.get("scc_nodes", {}).items():
+            state.scc_nodes[host] = SCCNode.from_dict(scc_d)
         return state
 
     def to_json(self, indent: int = 2) -> str:

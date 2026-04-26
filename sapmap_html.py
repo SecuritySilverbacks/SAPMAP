@@ -644,6 +644,7 @@ body {
     <span class="legend-item"><span class="legend-swatch" style="background:#5dade2"></span> RFC (untested)</span>
     <span class="legend-item"><span class="legend-swatch" style="background:#a371f7;border:2px dotted #a371f7;background:transparent"></span> HTTP destination</span>
     <span class="legend-item"><span class="legend-swatch" style="background:#ff6b35;border:2px dashed #ff6b35;background:transparent"></span> TCP/IP (sapxpg)</span>
+    <span class="legend-item"><span class="legend-swatch" style="background:#046c7a"></span> SAP Cloud Connector</span>
     <span style="flex:1"></span>
     <label style="cursor:pointer;display:flex;align-items:center;gap:6px;padding:2px 10px;border:1px solid #30363d;border-radius:4px;background:#161b22;color:#c9d1d9;font-size:11px"><input type="checkbox" id="show-unknown" style="accent-color:#f0883e;width:14px;height:14px" onchange="updateMap()"> Show unknown targets</label>
   </div>
@@ -1454,6 +1455,13 @@ async function pollUpdates() {
           state.nodes[sid]._y = oldNodes[sid]._y;
         }
       }
+      const oldScc = mapState.scc_nodes || {};
+      for (const h in state.scc_nodes || {}) {
+        if (oldScc[h] && oldScc[h]._x != null) {
+          state.scc_nodes[h]._x = oldScc[h]._x;
+          state.scc_nodes[h]._y = oldScc[h]._y;
+        }
+      }
       mapState = state;
       activeTasks = state.active_tasks || {};
       updateMap();
@@ -1501,8 +1509,9 @@ function updateMap() {
   const nodes = mapState.nodes || {};
   const conns = mapState.connections || [];
   const nodeKeys = Object.keys(nodes);
+  const _sccCount = Object.keys(mapState.scc_nodes || {}).length;
 
-  if (nodeKeys.length === 0) {
+  if (nodeKeys.length === 0 && _sccCount === 0) {
     document.getElementById('empty-msg').style.display = 'block';
     document.getElementById('legend-bar').style.display = 'none';
     document.getElementById('map-svg').innerHTML = '';
@@ -1555,12 +1564,33 @@ function updateMap() {
     }
   });
 
+  // --- SAP Cloud Connector nodes — placed alongside SAP nodes ---
+  const sccNodes = mapState.scc_nodes || {};
+  const sccKeys = Object.keys(sccNodes);
+  sccKeys.forEach((host, idx) => {
+    const sn = sccNodes[host];
+    if (sn._x == null) {
+      // Park new SCC nodes off to the right of the SAP-node grid so they
+      // never share a slot with a SAP node and a fresh discovery doesn't
+      // trip the overlap detector.
+      const baseX = MARGIN + cols * (BOX_W + MARGIN);
+      sn._x = baseX;
+      sn._y = MARGIN + idx * (BOX_H + MARGIN);
+      placedBoxes.push({ x: sn._x, y: sn._y });
+    }
+  });
+
   // Compute content bounds (needed for initial auto-fit and fitMap)
   let maxX = 0, maxY = 0;
   nodeKeys.forEach(sid => {
     const n = nodes[sid];
     maxX = Math.max(maxX, (n._x || 0) + BOX_W + MARGIN);
     maxY = Math.max(maxY, (n._y || 0) + BOX_H + MARGIN);
+  });
+  sccKeys.forEach(host => {
+    const sn = sccNodes[host];
+    maxX = Math.max(maxX, (sn._x || 0) + BOX_W + MARGIN);
+    maxY = Math.max(maxY, (sn._y || 0) + BOX_H + MARGIN);
   });
 
   let html = '';
@@ -2012,6 +2042,76 @@ function updateMap() {
       const badgeColor = '#da3633';
       html += `<circle cx="${x+BOX_W-14}" cy="${y+BOX_H-14}" r="11" fill="${badgeColor}" />`;
       html += `<text x="${x+BOX_W-14}" y="${y+BOX_H-10}" text-anchor="middle" font-size="10" fill="#fff">${vulnCount}</text>`;
+    }
+
+    html += '</g>';
+  });
+
+  // --- Draw SAP Cloud Connector nodes (hexagonal frame, distinct teal fill) ---
+  sccKeys.forEach(host => {
+    const sn = sccNodes[host];
+    const x = sn._x || 0, y = sn._y || 0;
+    const dragId = 'scc:' + host.replace(/'/g, "\\'");
+    const sccFill = '#0d2a2e';        // dark teal-tinted fill
+    const sccStroke = '#046c7a';      // matches CLOUD_CONNECTOR pill
+    const cveCount = ((sn.cves_confirmed || []).length + (sn.cves_suspected || []).length);
+    const borderC = sn.pwned ? '#8b0000' : (cveCount > 0 ? '#d29922' : sccStroke);
+    const borderW = sn.pwned ? 6 : 4;
+
+    html += `<g class="node-box" data-host="${escHtml(host)}" `
+         + `onmousedown="startDrag(event,'${dragId}')" `
+         + `onclick="showSCCDetail('${escHtml(host)}')">`;
+
+    // Hexagon path — flat-top hex inscribed in BOX_W x BOX_H
+    const hx = x, hy = y, hw = BOX_W, hh = BOX_H;
+    const cut = 22;  // hex shoulder cut
+    const hex = `M${hx+cut},${hy} L${hx+hw-cut},${hy} L${hx+hw},${hy+hh/2} `
+              + `L${hx+hw-cut},${hy+hh} L${hx+cut},${hy+hh} L${hx},${hy+hh/2} Z`;
+    html += `<path d="${hex}" fill="${sccFill}" stroke="${borderC}" stroke-width="${borderW}" />`;
+
+    // Header band
+    html += `<rect x="${x+cut-2}" y="${y}" width="${hw - 2*(cut-2)}" height="26" fill="${sccStroke}" opacity="0.35" />`;
+
+    // Title — "SCC" pill + host
+    html += `<text x="${x+cut+4}" y="${y+18}" fill="#fff" font-size="13" font-weight="bold" font-family="monospace">SCC</text>`;
+    html += `<text x="${x+cut+44}" y="${y+18}" fill="#cfd9df" font-size="11" font-family="monospace">${escHtml(host)}</text>`;
+
+    // Pwned bolt (top-right, mirroring SAP nodes)
+    if (sn.pwned) {
+      const lx = x + BOX_W + 2, ly = y - 2;
+      html += `<text x="${lx}" y="${ly}" font-size="28" fill="#f0883e"`
+           + ` stroke="#0d1117" stroke-width="2.5" paint-order="stroke"`
+           + ` text-anchor="middle" dominant-baseline="middle"`
+           + ` font-weight="bold" pointer-events="none">&#9889;</text>`;
+    }
+
+    // Body lines
+    let ty = y + 42;
+    if (sn.version) {
+      html += `<text x="${x+cut+4}" y="${ty}" fill="#8b949e" font-size="10" font-family="monospace">Version: ${escHtml(sn.version)} (${escHtml(sn.version_source || '?')})</text>`;
+      ty += 14;
+    }
+    if (sn.server_header) {
+      html += `<text x="${x+cut+4}" y="${ty}" fill="#8b949e" font-size="10" font-family="monospace">Server: ${escHtml(sn.server_header.slice(0, 26))}</text>`;
+      ty += 14;
+    }
+    if (sn.tls_fingerprint && sn.tls_fingerprint.tls_version) {
+      const tv = sn.tls_fingerprint.tls_version;
+      html += `<text x="${x+cut+4}" y="${ty}" fill="#8b949e" font-size="10" font-family="monospace">TLS: ${escHtml(tv)}</text>`;
+      ty += 14;
+    }
+    if (sn.bundle_hash) {
+      html += `<text x="${x+cut+4}" y="${ty}" fill="#6e7681" font-size="9" font-family="monospace">bundle: ${escHtml(sn.bundle_hash.slice(0, 14))}</text>`;
+      ty += 14;
+    }
+    html += `<text x="${x+cut+4}" y="${ty}" fill="#8b949e" font-size="10" font-family="monospace">Port: ${sn.admin_ui_port || 8443}</text>`;
+    ty += 14;
+
+    // CVE / status badge — bottom-right inside hex
+    if (cveCount > 0) {
+      const badgeColor = sn.pwned ? '#e74c3c' : '#d29922';
+      html += `<circle cx="${x+BOX_W-cut-6}" cy="${y+BOX_H-14}" r="10" fill="${badgeColor}" />`;
+      html += `<text x="${x+BOX_W-cut-6}" y="${y+BOX_H-10}" text-anchor="middle" font-size="10" fill="#fff" font-weight="bold">${cveCount}</text>`;
     }
 
     html += '</g>';
@@ -3136,6 +3236,58 @@ function showDetails(sid) {
     });
   });
 
+  panel.classList.add('visible');
+}
+
+// SAP Cloud Connector — read-only detail drawer (Week 1: no actions yet).
+function showSCCDetail(host) {
+  const sn = (mapState.scc_nodes || {})[host];
+  if (!sn) return;
+  const panel = document.getElementById('detail-panel');
+  if (panel.classList.contains('visible') && panel.dataset.sid === 'scc:' + host) {
+    panel.classList.remove('visible');
+    return;
+  }
+  panel.dataset.sid = 'scc:' + host;
+  const tls = sn.tls_fingerprint || {};
+  const cves = [].concat(sn.cves_confirmed || [], sn.cves_suspected || []);
+  panel.innerHTML = `
+    <span class="close-btn" onclick="this.parentElement.classList.remove('visible')">&times;</span>
+    <h3>&#9729; SAP Cloud Connector — ${escHtml(host)}</h3>
+    <div class="detail-section">
+      <div class="detail-row"><span class="detail-key">Host</span><span class="detail-val">${escHtml(sn.host || host)}</span></div>
+      <div class="detail-row"><span class="detail-key">Admin UI</span><span class="detail-val">https://${escHtml(host)}:${sn.admin_ui_port || 8443}/scc/ui</span></div>
+      <div class="detail-row"><span class="detail-key">Version</span><span class="detail-val">${escHtml(sn.version || 'unknown')}${sn.version_source ? ' <span style="color:#8b949e">(' + escHtml(sn.version_source) + ')</span>' : ''}</span></div>
+      <div class="detail-row"><span class="detail-key">Server hdr</span><span class="detail-val">${escHtml(sn.server_header || '?')}</span></div>
+      <div class="detail-row"><span class="detail-key">UI reachable</span><span class="detail-val">${sn.admin_ui_reachable ? '<span style="color:#3fb950">Yes</span>' : 'No'}</span></div>
+      <div class="detail-row"><span class="detail-key">Pwned</span><span class="detail-val">${sn.pwned ? '<span style="color:#f0883e">&#9889; YES</span>' : 'No'}</span></div>
+    </div>
+    <div class="detail-section">
+      <h4>TLS Fingerprint</h4>
+      <div class="detail-row"><span class="detail-key">Protocol</span><span class="detail-val">${escHtml(tls.tls_version || '?')}</span></div>
+      <div class="detail-row"><span class="detail-key">Cipher</span><span class="detail-val">${escHtml(tls.cipher || '?')}</span></div>
+      <div class="detail-row"><span class="detail-key">ALPN</span><span class="detail-val">${escHtml(tls.alpn || '?')}</span></div>
+      <div class="detail-row"><span class="detail-key">Subject</span><span class="detail-val" style="font-size:10px;word-break:break-all">${escHtml(tls.cert_subject || '?')}</span></div>
+      <div class="detail-row"><span class="detail-key">Issuer</span><span class="detail-val" style="font-size:10px;word-break:break-all">${escHtml(tls.cert_issuer || '?')}</span></div>
+      <div class="detail-row"><span class="detail-key">SAN</span><span class="detail-val" style="font-size:10px">${escHtml((tls.cert_san || []).join(', ') || '?')}</span></div>
+    </div>
+    <div class="detail-section">
+      <h4>Fingerprints</h4>
+      <div class="detail-row"><span class="detail-key">Bundle</span><span class="detail-val" style="font-family:monospace;font-size:11px">${escHtml(sn.bundle_hash || '—')}</span></div>
+      <div class="detail-row"><span class="detail-key">Favicon SHA256</span><span class="detail-val" style="font-family:monospace;font-size:10px;word-break:break-all">${escHtml((sn.favicon_sha256 || '').slice(0, 32) + ((sn.favicon_sha256 || '').length > 32 ? '…' : ''))}</span></div>
+      <div class="detail-row"><span class="detail-key">Favicon mmh3</span><span class="detail-val">${sn.favicon_mmh3 || '—'}</span></div>
+    </div>
+    ${cves.length ? `
+    <div class="detail-section">
+      <h4>CVE buckets</h4>
+      ${(sn.cves_confirmed || []).map(c => `<div class="detail-row"><span class="detail-key" style="color:#f85149">CONFIRMED</span><span class="detail-val">${escHtml(c)}</span></div>`).join('')}
+      ${(sn.cves_suspected || []).map(c => `<div class="detail-row"><span class="detail-key" style="color:#d29922">suspected</span><span class="detail-val">${escHtml(c)}</span></div>`).join('')}
+    </div>` : ''}
+    <div class="detail-section" style="color:#8b949e;font-size:11px">
+      Read-only fingerprint. Auth probes, mapping enumeration, and CVE checks
+      arrive in later weeks of the SCC plan.
+    </div>
+  `;
   panel.classList.add('visible');
 }
 
@@ -4659,6 +4811,7 @@ function toggleToolbar() {
 // --- Drag & Pan ---
 function _getDragTarget(sid) {
   if (sid.startsWith('unk:')) return unkPositions[sid.slice(4)];
+  if (sid.startsWith('scc:')) return (mapState.scc_nodes || {})[sid.slice(4)];
   return mapState.nodes[sid];
 }
 function startDrag(e, sid) {

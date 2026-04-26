@@ -842,6 +842,7 @@ class SAPMAPApi:
                 concurrent_hosts=concurrent_hosts,
                 port_timeout=port_timeout,
                 node_callback=lambda node: self.state.add_node(node),
+                scc_callback=lambda scc: self.state.scc_nodes.update({scc.host: scc}),
             )
 
             # Add any nodes that weren't already added via callback (e.g. deep mode)
