@@ -1059,12 +1059,74 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         sn.tunnel_region = region
                 sn.subaccount_uuids = list(dict.fromkeys(uuids))
                 sn.mappings = all_maps
+
+                # Promote per-mapping flags to the SCC node-level summary.
+                pp_any = any(m.get("principal_propagation") for m in all_maps)
+                sn.principal_propagation_enabled = pp_any
+
                 sapmap_findings.emit_finding(
                     "HIGH", host,
                     f"SCC mappings extracted: {len(all_maps)} mapping(s), "
                     f"{len(uuids)} subaccount(s)",
                     ref="scc.mappings.extracted",
                     meta={"subaccounts": len(uuids), "mappings": len(all_maps)})
+
+                # Emit risk findings per mapping.
+                for m in all_maps:
+                    label = (f"{m.get('virtual_host','?')}:{m.get('virtual_port',0)} "
+                             f"-> {m.get('internal_host','?')}:{m.get('internal_port',0)}")
+                    sid_label = m.get("sid") or "?"
+                    proto = (m.get("protocol") or "").upper()
+                    auth = m.get("authentication_mode") or ""
+                    bt = m.get("backend_type") or ""
+
+                    # KERBEROS / X509_GENERAL = principal propagation enabled.
+                    if auth in ("KERBEROS", "X509_GENERAL"):
+                        sapmap_findings.emit_finding(
+                            "HIGH", host,
+                            f"SCC mapping {label} [{sid_label}/{proto}] "
+                            f"uses {auth} principal propagation — backend trusts "
+                            f"any user the SCC asserts.",
+                            ref="scc.mapping.principal_propagation",
+                            meta={"mapping": label, "auth": auth,
+                                  "sid": sid_label, "backend_type": bt})
+
+                    # Path allowlist analysis: top-level "/", "/sap/", or
+                    # PATH_AND_ALL_SUB_PATHS broaden exposure dramatically.
+                    for r in (m.get("path_allowlist") or []):
+                        if not isinstance(r, dict):
+                            continue
+                        rpath = (r.get("path") or "").strip()
+                        rpolicy = (r.get("policy") or "").upper()
+                        if not r.get("enabled", True):
+                            continue
+                        is_subpath_match = (rpolicy == "PATH_AND_ALL_SUB_PATHS"
+                                            or (not r.get("exact_match_only", True)))
+                        if rpath == "/":
+                            sapmap_findings.emit_finding(
+                                "HIGH", host,
+                                f"SCC mapping {label} [{sid_label}] exposes "
+                                f"path '/' (full backend) to subaccount "
+                                f"{m.get('virtual_host','?')}.",
+                                ref="scc.mapping.path.root",
+                                meta={"mapping": label, "path": rpath, "sid": sid_label})
+                        elif rpath in ("/sap/", "/sap") and is_subpath_match:
+                            sapmap_findings.emit_finding(
+                                "MEDIUM", host,
+                                f"SCC mapping {label} [{sid_label}] allows "
+                                f"'/sap/' and all sub-paths — entire ABAP "
+                                f"namespace is reachable through the tunnel.",
+                                ref="scc.mapping.path.sap_namespace",
+                                meta={"mapping": label, "path": rpath, "sid": sid_label})
+
+                    # Map link: when internal_host matches a known SAP node,
+                    # tag that node so the front-end can draw an edge.
+                    ihost = m.get("internal_host") or ""
+                    if ihost:
+                        for n in api.state.nodes.values():
+                            if (n.hostname == ihost or n.ip == ihost) and host not in n.scc_links:
+                                n.scc_links.append(host)
+
                 logout(sess)
             except Exception as e:
                 print(f"[-] SCC {host}: mapping pull failed: {e}")
