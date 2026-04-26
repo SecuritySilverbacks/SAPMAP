@@ -154,26 +154,53 @@ def login(host: str, user: str, password: str,
     except Exception:
         pass
 
-    # Tomcat success → 302 with Location to /api/login (or original URL).
+    # Tomcat success → 302/303 with Location to /api/login (or original URL).
     # Tomcat failure → 200 with the login HTML re-served, no Location.
     if status in (301, 302, 303, 307, 308) and location:
-        # Verify by fetching a known authenticated endpoint.
-        v = _get_versions_raw(sess, timeout=timeout)
-        if v is not None:
+        # Verify by fetching the backends monitoring endpoint — JSON when
+        # authenticated, login-HTML otherwise.  Cache the payload so
+        # pull_subaccounts() doesn't have to re-fetch.
+        b = _get_backends_raw(sess, timeout=timeout)
+        if b is not None:
             sess.authenticated = True
             sess.csrf_token = csrf
-            sess.raw_versions = v
+            sess.raw_versions = b
+            v = _get_versions_raw(sess, timeout=timeout) or {}
             sess.version = v.get("connector") or v.get("version") or ""
             sess.build = v.get("build") or v.get("revision") or ""
             return sess
     return None
 
 
+def _get_backends_raw(sess: SCCAdminSession, timeout: float = 8.0) -> Optional[dict]:
+    """Fetch /api/monitoring/connections/backends.  This endpoint is the
+    authoritative post-auth probe on modern (2.16+) SCC builds: it
+    returns JSON when authed and the SAPUI5 login HTML otherwise.  The
+    payload contains the subaccount list inline along with their
+    backendConnections (mappings), so a single GET covers verification,
+    subaccount enumeration and mapping enumeration.
+    """
+    r = _request(sess, "/api/monitoring/connections/backends", timeout=timeout)
+    status = getattr(r, "status", 0) or getattr(r, "code", 0)
+    ct = ""
+    try:
+        ct = (r.headers.get("Content-Type", "") or "").lower()
+    except Exception:
+        pass
+    if status != 200 or "json" not in ct:
+        return None
+    try:
+        body = r.read(2 * 1024 * 1024)
+        return json.loads(body.decode("utf-8", "replace"))
+    except Exception as e:
+        logger.debug("backends parse failed: %s", e)
+        return None
+
+
 def _get_versions_raw(sess: SCCAdminSession, timeout: float = 8.0) -> Optional[dict]:
-    """Fetch /api/monitoring/versions.  Returns a parsed dict if the
-    response is JSON (i.e. we are authenticated), ``None`` otherwise.
-    Some SCC builds gate this endpoint behind auth; an HTML body means
-    "redirected back to login".
+    """Best-effort version fetch.  /api/monitoring/versions exists on
+    some SCC builds but 404s on others; treat absence as "no version
+    info" rather than auth failure.
     """
     r = _request(sess, "/api/monitoring/versions", timeout=timeout)
     status = getattr(r, "status", 0) or getattr(r, "code", 0)
@@ -187,8 +214,7 @@ def _get_versions_raw(sess: SCCAdminSession, timeout: float = 8.0) -> Optional[d
     try:
         body = r.read(64 * 1024)
         return json.loads(body.decode("utf-8", "replace"))
-    except Exception as e:
-        logger.debug("versions parse failed: %s", e)
+    except Exception:
         return None
 
 
@@ -199,15 +225,70 @@ def pull_versions(sess: SCCAdminSession, timeout: float = 8.0) -> dict:
 
 
 def pull_subaccounts(sess: SCCAdminSession, timeout: float = 8.0) -> list:
-    """Return [{subaccount, region, locationID, displayName, ...}, ...].
+    """Return [{subaccount, regionHost, locationID, backendConnections, ...}, ...].
 
-    Endpoint shape varies between SCC versions; we try the modern path
-    first, fall back to the legacy one.
+    Reads /api/monitoring/connections/backends — the same endpoint used
+    for auth verification, so the result may already be cached on the
+    session from login().
     """
     if not sess.authenticated:
         return []
-    for path in ("/api/configuration/subaccounts",
-                 "/api/configuration/connections"):
+    data = sess.raw_versions if isinstance(sess.raw_versions, dict) and sess.raw_versions.get("subaccounts") else None
+    if data is None:
+        data = _get_backends_raw(sess, timeout=timeout)
+    if not isinstance(data, dict):
+        return []
+    subs = data.get("subaccounts")
+    return subs if isinstance(subs, list) else []
+
+
+def _normalize_mapping(m: dict) -> dict:
+    """Shape one raw backendConnection / systemMapping entry to match
+    SCCMapping.from_dict().  Tolerant of field-name drift between SCC
+    builds.
+    """
+    return {
+        "virtual_host": m.get("virtualHost") or m.get("virtualUrl") or "",
+        "virtual_port": int(m.get("virtualPort") or 0),
+        "internal_host": m.get("internalHost") or m.get("localHost") or "",
+        "internal_port": int(m.get("internalPort") or m.get("localPort") or 0),
+        "protocol": m.get("protocol") or m.get("type") or "",
+        "path_allowlist": m.get("resources") or m.get("pathAllowlist") or [],
+        "path_wildcards": bool(m.get("pathWildcards", False)),
+        "backend_type": m.get("backendType") or "",
+        "principal_propagation": bool(m.get("authenticationMode") == "X509_GENERAL"
+                                      or m.get("principalPropagation", False)),
+    }
+
+
+def pull_mappings(sess: SCCAdminSession, subaccount_uuid: str,
+                  timeout: float = 8.0) -> list:
+    """Return the cloud-to-on-premise mapping table for one subaccount.
+
+    Mappings are inlined under each subaccount's ``backendConnections``
+    in the /api/monitoring/connections/backends payload.  Falls back to
+    the per-subaccount /cloudToOnPremise path on older SCC builds where
+    the monitoring endpoint omits them.
+    """
+    if not sess.authenticated or not subaccount_uuid:
+        return []
+    out = []
+    subs = pull_subaccounts(sess, timeout=timeout)
+    for s in subs:
+        if not isinstance(s, dict):
+            continue
+        if s.get("subaccount") != subaccount_uuid:
+            continue
+        for m in (s.get("backendConnections") or []):
+            if isinstance(m, dict):
+                out.append(_normalize_mapping(m))
+        if out:
+            return out
+        break
+
+    quoted = urllib.parse.quote(subaccount_uuid, safe="")
+    for path in (f"/api/configuration/subaccounts/{quoted}/cloudToOnPremise",
+                 f"/api/configuration/subaccounts/{quoted}/systemMappings"):
         r = _request(sess, path, timeout=timeout)
         status = getattr(r, "status", 0) or getattr(r, "code", 0)
         ct = ""
@@ -218,72 +299,22 @@ def pull_subaccounts(sess: SCCAdminSession, timeout: float = 8.0) -> list:
         if status != 200 or "json" not in ct:
             continue
         try:
-            data = json.loads(r.read(512 * 1024).decode("utf-8", "replace"))
+            data = json.loads(r.read(1024 * 1024).decode("utf-8", "replace"))
         except Exception:
             continue
+        raw = []
         if isinstance(data, list):
-            return data
-        if isinstance(data, dict):
-            for k in ("subaccounts", "items", "data"):
+            raw = data
+        elif isinstance(data, dict):
+            for k in ("systemMappings", "mappings", "items", "backendConnections"):
                 if isinstance(data.get(k), list):
-                    return data[k]
-    return []
-
-
-def pull_mappings(sess: SCCAdminSession, subaccount_uuid: str,
-                  timeout: float = 8.0) -> list:
-    """Return the cloud-to-on-premise mapping table for one subaccount.
-
-    Each entry is shaped to match SCCMapping.from_dict() so the caller can
-    persist directly.  Unknown fields in the raw payload are dropped.
-    """
-    if not sess.authenticated or not subaccount_uuid:
-        return []
-    quoted = urllib.parse.quote(subaccount_uuid, safe="")
-    paths = (
-        f"/api/configuration/subaccounts/{quoted}/cloudToOnPremise",
-        f"/api/configuration/subaccounts/{quoted}/systemMappings",
-    )
-    raw = []
-    for path in paths:
-        r = _request(sess, path, timeout=timeout)
-        status = getattr(r, "status", 0) or getattr(r, "code", 0)
-        ct = ""
-        try:
-            ct = (r.headers.get("Content-Type", "") or "").lower()
-        except Exception:
-            pass
-        if status == 200 and "json" in ct:
-            try:
-                data = json.loads(r.read(1024 * 1024).decode("utf-8", "replace"))
-                if isinstance(data, list):
-                    raw = data
+                    raw = data[k]
                     break
-                if isinstance(data, dict):
-                    for k in ("systemMappings", "mappings", "items"):
-                        if isinstance(data.get(k), list):
-                            raw = data[k]
-                            break
-                    if raw:
-                        break
-            except Exception:
-                continue
-    out = []
-    for m in raw:
-        if not isinstance(m, dict):
-            continue
-        out.append({
-            "virtual_host": m.get("virtualHost") or m.get("virtualUrl") or "",
-            "virtual_port": int(m.get("virtualPort") or 0),
-            "internal_host": m.get("internalHost") or m.get("localHost") or "",
-            "internal_port": int(m.get("internalPort") or m.get("localPort") or 0),
-            "protocol": m.get("protocol") or m.get("type") or "",
-            "path_allowlist": m.get("resources") or m.get("pathAllowlist") or [],
-            "path_wildcards": bool(m.get("pathWildcards", False)),
-            "backend_type": m.get("backendType") or "",
-            "principal_propagation": bool(m.get("authenticationMode") == "X509_GENERAL"
-                                          or m.get("principalPropagation", False)),
-        })
+        for m in raw:
+            if isinstance(m, dict):
+                out.append(_normalize_mapping(m))
+        if out:
+            break
     return out
 
 

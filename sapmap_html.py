@@ -786,6 +786,16 @@ body {
   <div class="ctx-item" data-action="map_reset_layout">&#128260; Reset Layout</div>
 </div>
 
+<!-- SAP Cloud Connector Context Menu -->
+<div class="ctx-menu" id="scc-ctx-menu">
+  <div class="ctx-item" data-action="scc_details">&#128269; View SCC Details</div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item" data-action="scc_probe_creds">&#128273; Probe Default Account (Administrator/manage)</div>
+  <div class="ctx-item" data-action="scc_pull_mappings">&#128194; Pull Mappings (prompts for user/pwd)</div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item" data-action="scc_delete" style="color:#f85149">&#128465; Remove from Map</div>
+</div>
+
 <!-- Connection Info Panel -->
 <div class="info-panel" id="info-panel"></div>
 <div id="toast-stack" style="position:fixed;right:16px;bottom:16px;z-index:2000;
@@ -2062,6 +2072,7 @@ function updateMap() {
 
     html += `<g class="node-box" data-host="${escHtml(host)}" `
          + `onmousedown="startDrag(event,'${dragId}')" `
+         + `oncontextmenu="showSCCCtxMenu(event,'${escHtml(host)}')" `
          + `onclick="showSCCDetail('${escHtml(host)}')">`;
 
     // Hexagon path — flat-top hex inscribed in BOX_W x BOX_H
@@ -2479,6 +2490,51 @@ document.getElementById('ctx-menu').addEventListener('click', function(e) {
   if (!item || item.classList.contains('disabled')) return;
   ctxAction(item.getAttribute('data-action'));
 });
+
+// --- SAP Cloud Connector context menu ---
+let selectedSccHost = null;
+
+function showSCCCtxMenu(e, host) {
+  e.preventDefault();
+  e.stopPropagation();
+  hideCtxMenu();
+  hideMapCtxMenu();
+  selectedSccHost = host;
+  const menu = document.getElementById('scc-ctx-menu');
+  menu.classList.add('visible');
+  // Position with viewport clamp
+  const w = menu.offsetWidth || 280;
+  const h = menu.offsetHeight || 200;
+  const x = Math.min(e.clientX, window.innerWidth - w - 8);
+  const y = Math.min(e.clientY, window.innerHeight - h - 8);
+  menu.style.left = x + 'px';
+  menu.style.top = y + 'px';
+}
+
+function hideSCCCtxMenu() {
+  document.getElementById('scc-ctx-menu').classList.remove('visible');
+}
+
+document.getElementById('scc-ctx-menu').addEventListener('click', function(e) {
+  const item = e.target.closest('.ctx-item[data-action]');
+  if (!item || item.classList.contains('disabled')) return;
+  const action = item.getAttribute('data-action');
+  hideSCCCtxMenu();
+  const host = selectedSccHost;
+  if (!host) return;
+  switch (action) {
+    case 'scc_details':       showSCCDetail(host); break;
+    case 'scc_probe_creds':   sccProbeCreds(host); break;
+    case 'scc_pull_mappings': sccPullMappings(host); break;
+    case 'scc_delete':        sccRemoveFromMap(host); break;
+  }
+});
+
+async function sccRemoveFromMap(host) {
+  if (!confirm('Remove SCC ' + host + ' from the map? (Local-only; will reappear on next scan if still present.)')) return;
+  if (mapState.scc_nodes) delete mapState.scc_nodes[host];
+  renderMap();
+}
 
 async function ctxAction(action) {
   hideCtxMenu();
@@ -5304,6 +5360,7 @@ document.getElementById('map-container').addEventListener('wheel', e => {
 
 document.addEventListener('click', e => {
   hideCtxMenu();
+  hideSCCCtxMenu();
   if (!e.target.closest('.info-panel') && !e.target.closest('.edge-line'))
     document.getElementById('info-panel').classList.remove('visible');
 });
@@ -5313,6 +5370,7 @@ document.addEventListener('contextmenu', e => {
   const mapSvg = document.getElementById('map-svg');
   const mapContainer = document.getElementById('map-container');
   hideCtxMenu();
+  hideSCCCtxMenu();
   hideMapCtxMenu();
   if (!nodeBox && (e.target === mapSvg || e.target === mapContainer ||
       mapSvg.contains(e.target) || mapContainer.contains(e.target))) {
