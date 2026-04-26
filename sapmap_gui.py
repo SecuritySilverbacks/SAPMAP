@@ -816,6 +816,7 @@ class SAPMAPApi:
             port_timeout = config.get("port_timeout", 3.0)
             alive_timeout = config.get("alive_timeout", 0.5)
             skip_alive = config.get("skip_alive", False)
+            scc_probe_default_creds = bool(config.get("scc_probe_default_creds", False))
 
             # Pass advanced params via module-level config
             sapmap_scanner.ALIVE_TIMEOUT = alive_timeout
@@ -843,6 +844,7 @@ class SAPMAPApi:
                 port_timeout=port_timeout,
                 node_callback=lambda node: self.state.add_node(node),
                 scc_callback=lambda scc: self.state.scc_nodes.update({scc.host: scc}),
+                scc_probe_default_creds=scc_probe_default_creds,
             )
 
             # Add any nodes that weren't already added via callback (e.g. deep mode)
@@ -973,6 +975,103 @@ def create_app(api: SAPMAPApi) -> Bottle:
     def scan_stop():
         response.content_type = "application/json"
         return json.dumps(api.stop_scan())
+
+    # -- SCC (Cloud Connector) on-demand actions --
+    @app.route("/api/scc/<host>/probe_creds", method="POST")
+    def scc_probe_creds(host):
+        response.content_type = "application/json"
+        sn = api.state.scc_nodes.get(host)
+        if not sn:
+            return json.dumps({"error": f"SCC node {host} not found"})
+
+        def _run():
+            _task_start(f"scc:{host}:probe_creds", f"SCC {host}: probing default creds")
+            try:
+                from sapmap_scc_admin import probe_default_creds, logout
+                live, sess, attempts = probe_default_creds(
+                    host, port=sn.admin_ui_port or 8443, timeout=8.0,
+                )
+                if live and sess:
+                    sn.default_creds_live = True
+                    sn.admin_session_obtained = True
+                    sn.pwned = True
+                    if sess.version:
+                        sn.version = sess.version
+                        sn.version_source = "api"
+                    sapmap_findings.emit_finding(
+                        "CRITICAL", host,
+                        f"SCC default credentials live: {sess.user}/manage",
+                        ref="scc.default.creds.live")
+                    logout(sess)
+                else:
+                    tried = ", ".join(a["user"] for a in attempts) or "none"
+                    sapmap_findings.emit_finding(
+                        "HIGH", host,
+                        f"SCC default-cred probe ran (rejected): tried {tried}",
+                        ref="scc.default.creds.absent.but.probed")
+            except Exception as e:
+                print(f"[-] SCC {host}: probe failed: {e}")
+            finally:
+                _task_end(f"scc:{host}:probe_creds")
+        threading.Thread(target=_run, daemon=True).start()
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/scc/<host>/pull_mappings", method="POST")
+    def scc_pull_mappings(host):
+        response.content_type = "application/json"
+        sn = api.state.scc_nodes.get(host)
+        if not sn:
+            return json.dumps({"error": f"SCC node {host} not found"})
+        data = request.json or {}
+        user = data.get("username", "")
+        pwd = data.get("password", "")
+        if not user or not pwd:
+            return json.dumps({"error": "username + password required"})
+
+        def _run():
+            _task_start(f"scc:{host}:pull_mappings", f"SCC {host}: pulling mappings")
+            try:
+                from sapmap_scc_admin import login, pull_subaccounts, pull_mappings, logout
+                sess = login(host, user, pwd, port=sn.admin_ui_port or 8443, timeout=10.0)
+                if not sess:
+                    sapmap_findings.emit_finding(
+                        "INFO", host,
+                        f"SCC mapping pull: login failed for {user}",
+                        ref="scc.admin.login.failed")
+                    return
+                sn.admin_session_obtained = True
+                if sess.version:
+                    sn.version = sess.version
+                    sn.version_source = "api"
+                subs = pull_subaccounts(sess, timeout=10.0) or []
+                all_maps = []
+                uuids = []
+                for s in subs:
+                    if not isinstance(s, dict):
+                        continue
+                    uuid = s.get("subaccount") or s.get("subaccountId") or s.get("uuid") or ""
+                    if uuid:
+                        uuids.append(uuid)
+                        m = pull_mappings(sess, uuid, timeout=10.0) or []
+                        all_maps.extend(m)
+                    region = s.get("region") or s.get("regionHost") or ""
+                    if region and region not in (sn.tunnel_region or ""):
+                        sn.tunnel_region = region
+                sn.subaccount_uuids = list(dict.fromkeys(uuids))
+                sn.mappings = all_maps
+                sapmap_findings.emit_finding(
+                    "HIGH", host,
+                    f"SCC mappings extracted: {len(all_maps)} mapping(s), "
+                    f"{len(uuids)} subaccount(s)",
+                    ref="scc.mappings.extracted",
+                    meta={"subaccounts": len(uuids), "mappings": len(all_maps)})
+                logout(sess)
+            except Exception as e:
+                print(f"[-] SCC {host}: mapping pull failed: {e}")
+            finally:
+                _task_end(f"scc:{host}:pull_mappings")
+        threading.Thread(target=_run, daemon=True).start()
+        return json.dumps({"status": "started"})
 
     # -- Node operations --
     @app.route("/api/node/<sid>/credentials", method="POST")

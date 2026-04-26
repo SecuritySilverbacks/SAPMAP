@@ -2112,10 +2112,15 @@ def enumerate_system_clients(host: str, disp_port: int, timeout: float = 5,
 # Build SCCNode from scan result (Cloud Connector fingerprint)
 # ---------------------------------------------------------------------------
 
-def _maybe_build_scc_node(scan_result: dict, timeout: float = 5.0) -> SCCNode:
+def _maybe_build_scc_node(scan_result: dict, timeout: float = 5.0,
+                          probe_default_creds: bool = False) -> SCCNode:
     """If 8443/tcp is open and looks like SCC, run the read-only fingerprint
     module and return a populated SCCNode.  Returns ``None`` when the host
     isn't an SCC (or 8443 is closed / fingerprint inconclusive).
+
+    When ``probe_default_creds`` is True, additionally attempts a single
+    form-auth POST per credential pair from
+    ``sapmap_scc_admin.DEFAULT_CREDENTIALS`` and emits a finding either way.
     """
     host = scan_result.get("host", "")
     open_ports = scan_result.get("open_ports", {})
@@ -2148,6 +2153,43 @@ def _maybe_build_scc_node(scan_result: dict, timeout: float = 5.0) -> SCCNode:
     print(f"[+] {host}: SAP Cloud Connector detected on :{SCC_DEFAULT_PORT}"
           f"{' v' + node.version if node.version else ''} "
           f"[server={node.server_header or '?'}]")
+
+    # Passive CVE buckets — version-range lookup, no probe.
+    if node.version:
+        try:
+            from sapmap_scc_cve_buckets import cves_for_version
+            for c in cves_for_version(node.version):
+                node.cves_suspected.append(c["cve"])
+                emit_finding(c["severity"], host,
+                             f"SCC {node.version}: {c['headline']}",
+                             cve=c["cve"], ref=c.get("ref", ""))
+        except Exception as e:
+            logger.debug("CVE bucket lookup failed for %s: %s", host, e)
+
+    # Opt-in default-credential probe (one POST per pair, no brute force).
+    if probe_default_creds:
+        try:
+            from sapmap_scc_admin import probe_default_creds as _probe, logout
+            live, sess, attempts = _probe(host, port=SCC_DEFAULT_PORT, timeout=timeout)
+            if live and sess:
+                node.default_creds_live = True
+                node.admin_session_obtained = True
+                node.pwned = True
+                if sess.version:
+                    node.version = sess.version
+                    node.version_source = "api"
+                emit_finding("CRITICAL", host,
+                             f"SCC default credentials live: {sess.user}/manage",
+                             ref="scc.default.creds.live")
+                logout(sess)
+            else:
+                tried = ", ".join(a["user"] for a in attempts) or "none"
+                emit_finding("HIGH", host,
+                             f"SCC default-cred probe ran (rejected): tried {tried}",
+                             ref="scc.default.creds.absent.but.probed")
+        except Exception as e:
+            logger.debug("Default-creds probe failed for %s: %s", host, e)
+
     return node
 
 
@@ -2463,7 +2505,8 @@ def discover_systems(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RAN
                      skip_alive: bool = False, concurrent_hosts: int = 5,
                      port_timeout: float = 3.0,
                      node_callback=None,
-                     scc_callback=None) -> list:
+                     scc_callback=None,
+                     scc_probe_default_creds: bool = False) -> list:
     """Main entry point: discover SAP systems on the network.
 
     Args:
@@ -2533,7 +2576,10 @@ def discover_systems(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RAN
 
             # SCC fingerprint — independent of SAP node enrichment so a host
             # that is *only* a Cloud Connector still surfaces on the map.
-            scc_node = _maybe_build_scc_node(result, timeout=min(timeout, 5.0))
+            scc_node = _maybe_build_scc_node(
+                result, timeout=min(timeout, 5.0),
+                probe_default_creds=scc_probe_default_creds,
+            )
             if scc_node and scc_callback:
                 try:
                     scc_callback(scc_node)
