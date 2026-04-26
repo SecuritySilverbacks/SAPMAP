@@ -1822,6 +1822,37 @@ function updateMap() {
       `fill="#8b949e" font-family="monospace" pointer-events="none">${escHtml(label)}</text>`;
   });
 
+  // --- SCC → SAP-node edges (Cloud Connector tunnel mappings) ---
+  Object.keys(nodes).forEach(sid => {
+    const n = nodes[sid];
+    const links = n.scc_links || [];
+    if (!links.length) return;
+    const tx = (n._x || 0) + BOX_W / 2, ty = (n._y || 0) + BOX_H / 2;
+    links.forEach(sccHost => {
+      const sn = (mapState.scc_nodes || {})[sccHost];
+      if (!sn) return;
+      const sx = (sn._x || 0) + BOX_W / 2, sy = (sn._y || 0) + BOX_H / 2;
+      // List the mappings between this SCC and this SAP node
+      const matches = (sn.mappings || []).filter(m => {
+        if (!m) return false;
+        const ih = m.internal_host || '';
+        return ih === n.hostname || ih === n.ip;
+      });
+      const ppHi = matches.some(m => m.principal_propagation);
+      const stroke = ppHi ? '#f0883e' : '#046c7a';
+      const width = ppHi ? 3 : 2;
+      const labelTxt = matches.length === 1
+        ? `${matches[0].virtual_host}:${matches[0].virtual_port} → ${matches[0].internal_host}:${matches[0].internal_port}`
+        : `${matches.length} mapping${matches.length === 1 ? '' : 's'}`;
+      html += `<line class="edge-line" x1="${sx}" y1="${sy}" x2="${tx}" y2="${ty}" ` +
+        `stroke="${stroke}" stroke-width="${width}" stroke-dasharray="6,4" fill="none" ` +
+        `pointer-events="none" />`;
+      const mx = (sx + tx) / 2, my = (sy + ty) / 2;
+      html += `<text x="${mx}" y="${my - 4}" text-anchor="middle" font-size="10" ` +
+        `fill="${ppHi ? '#f0883e' : '#9bb1c4'}" font-family="monospace" pointer-events="none">SCC: ${escHtml(labelTxt)}${ppHi ? ' [PP]' : ''}</text>`;
+    });
+  });
+
   // Draw nodes
   nodeKeys.forEach(sid => {
     const n = nodes[sid];
@@ -3344,14 +3375,39 @@ function showSCCDetail(host) {
     <div class="detail-section">
       <h4>Subaccounts &amp; Mappings</h4>
       <div class="detail-row"><span class="detail-key">Region</span><span class="detail-val">${escHtml(sn.tunnel_region || '?')}</span></div>
-      <div class="detail-row"><span class="detail-key">Subaccount UUIDs</span><span class="detail-val">${(sn.subaccount_uuids || []).length}</span></div>
+      <div class="detail-row"><span class="detail-key">Subaccount UUIDs</span><span class="detail-val">${(sn.subaccount_uuids || []).map(u => escHtml(u)).join('<br>') || '0'}</span></div>
       <div class="detail-row"><span class="detail-key">Mappings</span><span class="detail-val">${(sn.mappings || []).length}</span></div>
-      ${(sn.mappings || []).slice(0, 6).map(m => `
-        <div class="detail-row" style="font-size:11px">
-          <span class="detail-key">${escHtml((m.protocol || '').toUpperCase() || '?')}</span>
-          <span class="detail-val">${escHtml(m.virtual_host || '?')}:${m.virtual_port || '?'} → ${escHtml(m.internal_host || '?')}:${m.internal_port || '?'}${m.principal_propagation ? ' <span style="color:#f0883e">[PP]</span>' : ''}</span>
-        </div>`).join('')}
-      ${(sn.mappings || []).length > 6 ? `<div style="font-size:10px;color:#8b949e">+ ${(sn.mappings || []).length - 6} more</div>` : ''}
+      ${((sn.mappings || []).length === 0) ? '' : `
+      <table style="width:100%;border-collapse:collapse;margin-top:6px;font-size:11px">
+        <thead>
+          <tr style="background:#161b22;color:#8b949e;text-align:left">
+            <th style="padding:4px 6px;border-bottom:1px solid #30363d">Virtual</th>
+            <th style="padding:4px 6px;border-bottom:1px solid #30363d">Internal</th>
+            <th style="padding:4px 6px;border-bottom:1px solid #30363d">Proto</th>
+            <th style="padding:4px 6px;border-bottom:1px solid #30363d">SID</th>
+            <th style="padding:4px 6px;border-bottom:1px solid #30363d">Auth</th>
+            <th style="padding:4px 6px;border-bottom:1px solid #30363d">Resources</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${(sn.mappings || []).map(m => {
+            const auth = m.authentication_mode || '';
+            const ppHi = (auth === 'KERBEROS' || auth === 'X509_GENERAL');
+            const resList = (m.path_allowlist || []).filter(r => r && r.path).slice(0, 4)
+              .map(r => `<div style="font-family:monospace;color:${(r.policy === 'PATH_AND_ALL_SUB_PATHS' || !r.exact_match_only) ? '#f0883e' : '#cfd9df'}">${escHtml(r.path)}${(r.policy === 'PATH_AND_ALL_SUB_PATHS' || !r.exact_match_only) ? ' /*' : ''}</div>`).join('');
+            const moreRes = (m.path_allowlist || []).filter(r => r && r.path).length - 4;
+            return `
+              <tr>
+                <td style="padding:4px 6px;border-bottom:1px solid #21262d;font-family:monospace">${escHtml(m.virtual_host || '?')}:${m.virtual_port || '?'}</td>
+                <td style="padding:4px 6px;border-bottom:1px solid #21262d;font-family:monospace">${escHtml(m.internal_host || '?')}:${m.internal_port || '?'}</td>
+                <td style="padding:4px 6px;border-bottom:1px solid #21262d">${escHtml((m.protocol || '').toUpperCase())}</td>
+                <td style="padding:4px 6px;border-bottom:1px solid #21262d;font-weight:bold">${escHtml(m.sid || '')}</td>
+                <td style="padding:4px 6px;border-bottom:1px solid #21262d;color:${ppHi ? '#f0883e' : '#8b949e'}">${escHtml(auth || '-')}</td>
+                <td style="padding:4px 6px;border-bottom:1px solid #21262d">${resList || '<span style="color:#8b949e">-</span>'}${moreRes > 0 ? `<div style="color:#8b949e;font-size:10px">+ ${moreRes} more</div>` : ''}</td>
+              </tr>`;
+          }).join('')}
+        </tbody>
+      </table>`}
     </div>
     <div class="detail-section">
       <h4>Actions</h4>

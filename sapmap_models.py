@@ -239,6 +239,7 @@ class SAPNode:
     impact_results: list = field(default_factory=list)   # [ImpactResult.to_dict(), ...]
     saprouter: str = ""                 # SAProuter route string prefix (e.g., "/H/router/S/3299/W/pass")
     saprouter_info: dict = field(default_factory=dict)  # SAProuter info leak results
+    scc_links: list = field(default_factory=list)       # SCC hosts whose mappings reach this node
     position: Optional[tuple] = None    # (x, y) on map — None = auto-layout
 
     # Computed helpers
@@ -340,6 +341,7 @@ class SAPNode:
             "impact_results": self.impact_results,
             "saprouter": self.saprouter,
             "saprouter_info": self.saprouter_info,
+            "scc_links": list(self.scc_links),
             "position": list(self.position) if self.position else None,
         }
 
@@ -391,6 +393,7 @@ class SAPNode:
             impact_results=d.get("impact_results", []),
             saprouter=d.get("saprouter", ""),
             saprouter_info=d.get("saprouter_info", {}),
+            scc_links=list(d.get("scc_links", [])),
             position=tuple(d["position"]) if d.get("position") else None,
         )
         return node
@@ -507,8 +510,15 @@ class SCCMapping:
     protocol: str = ""           # HTTP | HTTPS | RFC | TCP | LDAP | MAIL
     path_allowlist: list = field(default_factory=list)
     path_wildcards: bool = False
-    backend_type: str = ""       # ABAP | JAVA | HANA | GENERIC
+    backend_type: str = ""       # abapSys | abapCloud | javaSys | hanaCloud | ...
     principal_propagation: bool = False
+    # v1 config API extras (round-tripped through state file)
+    authentication_mode: str = ""    # KERBEROS | X509_GENERAL | NONE | ...
+    sid: str = ""
+    host_in_header: str = ""         # VIRTUAL | INTERNAL
+    description: str = ""
+    total_resources: int = 0
+    enabled_resources: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -521,6 +531,12 @@ class SCCMapping:
             "path_wildcards": self.path_wildcards,
             "backend_type": self.backend_type,
             "principal_propagation": self.principal_propagation,
+            "authentication_mode": self.authentication_mode,
+            "sid": self.sid,
+            "host_in_header": self.host_in_header,
+            "description": self.description,
+            "total_resources": self.total_resources,
+            "enabled_resources": self.enabled_resources,
         }
 
     @classmethod
