@@ -582,6 +582,7 @@ body {
   <label>Alive Timeout:</label>
   <input type="number" id="adv-alive-timeout" value="0.5" min="0.2" max="5" step="0.1" style="width:50px" title="Timeout for host alive detection (seconds)">
   <label style="cursor:pointer"><input type="checkbox" id="adv-skip-alive" style="margin-right:3px">Skip Alive Sweep</label>
+  <label style="cursor:pointer" title="Send ONE login POST per Cloud Connector found (Administrator/manage). Off by default — leaves a failed-login audit entry on the SCC."><input type="checkbox" id="adv-scc-probe-creds" style="margin-right:3px">SCC: Probe Default Creds</label>
 </div>
 
 <!-- Activity Bar -->
@@ -1301,6 +1302,7 @@ async function startScan() {
     port_timeout: parseFloat(document.getElementById('adv-port-timeout').value) || 2.0,
     alive_timeout: parseFloat(document.getElementById('adv-alive-timeout').value) || 0.5,
     skip_alive: document.getElementById('adv-skip-alive').checked,
+    scc_probe_default_creds: !!(document.getElementById('adv-scc-probe-creds') && document.getElementById('adv-scc-probe-creds').checked),
   };
   // Reset console cursor so new scan output is visible
   consoleCursor = 0;
@@ -3283,12 +3285,55 @@ function showSCCDetail(host) {
       ${(sn.cves_confirmed || []).map(c => `<div class="detail-row"><span class="detail-key" style="color:#f85149">CONFIRMED</span><span class="detail-val">${escHtml(c)}</span></div>`).join('')}
       ${(sn.cves_suspected || []).map(c => `<div class="detail-row"><span class="detail-key" style="color:#d29922">suspected</span><span class="detail-val">${escHtml(c)}</span></div>`).join('')}
     </div>` : ''}
-    <div class="detail-section" style="color:#8b949e;font-size:11px">
-      Read-only fingerprint. Auth probes, mapping enumeration, and CVE checks
-      arrive in later weeks of the SCC plan.
+    <div class="detail-section">
+      <h4>Subaccounts &amp; Mappings</h4>
+      <div class="detail-row"><span class="detail-key">Region</span><span class="detail-val">${escHtml(sn.tunnel_region || '?')}</span></div>
+      <div class="detail-row"><span class="detail-key">Subaccount UUIDs</span><span class="detail-val">${(sn.subaccount_uuids || []).length}</span></div>
+      <div class="detail-row"><span class="detail-key">Mappings</span><span class="detail-val">${(sn.mappings || []).length}</span></div>
+      ${(sn.mappings || []).slice(0, 6).map(m => `
+        <div class="detail-row" style="font-size:11px">
+          <span class="detail-key">${escHtml((m.protocol || '').toUpperCase() || '?')}</span>
+          <span class="detail-val">${escHtml(m.virtual_host || '?')}:${m.virtual_port || '?'} → ${escHtml(m.internal_host || '?')}:${m.internal_port || '?'}${m.principal_propagation ? ' <span style="color:#f0883e">[PP]</span>' : ''}</span>
+        </div>`).join('')}
+      ${(sn.mappings || []).length > 6 ? `<div style="font-size:10px;color:#8b949e">+ ${(sn.mappings || []).length - 6} more</div>` : ''}
+    </div>
+    <div class="detail-section">
+      <h4>Actions</h4>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <button class="ctx-btn" onclick="sccProbeCreds('${escHtml(host)}')" style="background:#21262d;border:1px solid #30363d;color:#e6edf3;padding:6px 10px;border-radius:4px;cursor:pointer;text-align:left">&#128273; Probe default creds <span style="color:#8b949e;font-size:10px">(1 POST · Administrator/manage)</span></button>
+        <button class="ctx-btn" onclick="sccPullMappings('${escHtml(host)}')" style="background:#21262d;border:1px solid #30363d;color:#e6edf3;padding:6px 10px;border-radius:4px;cursor:pointer;text-align:left">&#128194; Pull mappings <span style="color:#8b949e;font-size:10px">(prompts user/pwd)</span></button>
+      </div>
     </div>
   `;
   panel.classList.add('visible');
+}
+
+async function sccProbeCreds(host) {
+  if (!confirm('Probe default Cloud Connector credentials (Administrator/manage)?\n\n' +
+               'Sends ONE login POST.  A failed login is logged on the SCC and may ' +
+               'increment a lockout counter for the Administrator account.')) return;
+  try {
+    flashActivity('SCC ' + host + ': probing creds', 8000);
+    const r = await fetch('/api/scc/' + encodeURIComponent(host) + '/probe_creds',
+                          { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const d = await r.json();
+    if (d.error) alert('Probe failed: ' + d.error);
+  } catch (e) { alert('Probe error: ' + e); }
+}
+
+async function sccPullMappings(host) {
+  const u = prompt('SCC admin username for ' + host + ':', 'Administrator');
+  if (!u) return;
+  const p = prompt('Password for ' + u + ':');
+  if (!p) return;
+  try {
+    flashActivity('SCC ' + host + ': pulling mappings', 12000);
+    const r = await fetch('/api/scc/' + encodeURIComponent(host) + '/pull_mappings',
+                          { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ username: u, password: p }) });
+    const d = await r.json();
+    if (d.error) alert('Pull failed: ' + d.error);
+  } catch (e) { alert('Pull error: ' + e); }
 }
 
 function showImpactDetail(sid) {
