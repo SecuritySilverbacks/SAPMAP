@@ -794,6 +794,7 @@ body {
   <div class="ctx-item" data-action="scc_pull_mappings">&#128194; Pull Mappings (prompts for user/pwd)</div>
   <div class="ctx-item" data-action="scc_probe_mappings">&#128225; Probe Mappings (TCP/HTTP smoke test)</div>
   <div class="ctx-item" data-action="scc_extract_keystore" style="color:#f85149">&#128272; Extract Keystore (FULL BACKUP — CROWN JEWELS)</div>
+  <div class="ctx-item" data-action="scc_decrypt_ssfs" style="color:#f85149">&#128275; Decrypt SSFS &amp; Unlock Keystores</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="scc_delete" style="color:#f85149">&#128465; Remove from Map</div>
 </div>
@@ -2617,6 +2618,7 @@ document.getElementById('scc-ctx-menu').addEventListener('click', function(e) {
     case 'scc_pull_mappings': sccPullMappings(host); break;
     case 'scc_probe_mappings': sccProbeMappings(host); break;
     case 'scc_extract_keystore': sccExtractKeystore(host); break;
+    case 'scc_decrypt_ssfs':  sccDecryptSsfs(host); break;
     case 'scc_delete':        sccRemoveFromMap(host); break;
   }
 });
@@ -3458,6 +3460,34 @@ function showSCCDetail(host) {
       <div class="detail-row"><span class="detail-key">Loot path</span><span class="detail-val" style="font-family:monospace;font-size:10px;word-break:break-all">${escHtml(sn.keystore_loot_path || '?')}</span></div>
       ${sn.tunnel_privkey_fp ? `<div class="detail-row"><span class="detail-key">System P12 sha256</span><span class="detail-val" style="font-family:monospace;font-size:10px;word-break:break-all">${escHtml(sn.tunnel_privkey_fp)}</span></div>` : ''}
       ${sn.pp_ca_privkey_fp ? `<div class="detail-row"><span class="detail-key">SSFS sha256</span><span class="detail-val" style="font-family:monospace;font-size:10px;word-break:break-all" title="SAP Secure Storage File System — contains the principal-propagation CA private key when configured">${escHtml(sn.pp_ca_privkey_fp)}</span></div>` : ''}
+      ${sn.ssfs_decrypted ? `
+        <div class="detail-row"><span class="detail-key" style="color:#f85149">SSFS</span><span class="detail-val" style="color:#3fb950">DECRYPTED · ${(sn.ssfs_secrets_keys || []).length} secret(s)</span></div>
+        <div class="detail-row"><span class="detail-key">Secrets file</span><span class="detail-val" style="font-family:monospace;font-size:10px;word-break:break-all" title="mode 0600 — review locally, never paste">${escHtml(sn.ssfs_secrets_path || '?')}</span></div>
+        <div class="detail-row"><span class="detail-key">Recovered keys</span><span class="detail-val" style="font-family:monospace;font-size:10px">${(sn.ssfs_secrets_keys || []).map(k => escHtml(k)).join('<br>') || '-'}</span></div>
+        ${(sn.unlocked_keystores || []).length === 0 ? '' : `
+          <div style="margin-top:6px;color:#8b949e;font-size:11px">Unlocked keystores (${(sn.unlocked_keystores || []).length}):</div>
+          <table style="width:100%;border-collapse:collapse;margin-top:4px;font-size:11px">
+            <thead>
+              <tr style="background:#161b22;color:#8b949e;text-align:left">
+                <th style="padding:4px 6px;border-bottom:1px solid #30363d">Path</th>
+                <th style="padding:4px 6px;border-bottom:1px solid #30363d">Subject</th>
+                <th style="padding:4px 6px;border-bottom:1px solid #30363d">Cert sha256</th>
+                <th style="padding:4px 6px;border-bottom:1px solid #30363d">Key</th>
+                <th style="padding:4px 6px;border-bottom:1px solid #30363d">Valid until</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${(sn.unlocked_keystores || []).map(k => `
+                <tr>
+                  <td style="padding:4px 6px;border-bottom:1px solid #21262d;font-family:monospace;font-size:10px;word-break:break-all">${escHtml(k.path || '?')}</td>
+                  <td style="padding:4px 6px;border-bottom:1px solid #21262d;font-size:10px;word-break:break-all">${escHtml(k.cert_subject || k.error || '-')}</td>
+                  <td style="padding:4px 6px;border-bottom:1px solid #21262d;font-family:monospace;font-size:10px">${escHtml((k.cert_sha256 || '').slice(0,16))}${k.cert_sha256 ? '…' : ''}</td>
+                  <td style="padding:4px 6px;border-bottom:1px solid #21262d;font-family:monospace;font-size:10px">${escHtml(k.key_type || '-')}${k.key_size ? '/' + k.key_size : ''}</td>
+                  <td style="padding:4px 6px;border-bottom:1px solid #21262d;font-size:10px">${escHtml((k.cert_not_after || '').slice(0,10))}</td>
+                </tr>`).join('')}
+            </tbody>
+          </table>`}
+      ` : '<div class="detail-row"><span class="detail-key">SSFS</span><span class="detail-val" style="color:#8b949e">not yet decrypted (right-click → Decrypt SSFS)</span></div>'}
     </div>` : ''}
     ${(sn.ha_role || sn.ha_shadow_host) ? `
     <div class="detail-section">
@@ -3520,6 +3550,7 @@ function showSCCDetail(host) {
         <button class="ctx-btn" onclick="sccPullMappings('${escHtml(host)}')" style="background:#21262d;border:1px solid #30363d;color:#e6edf3;padding:6px 10px;border-radius:4px;cursor:pointer;text-align:left">&#128194; Pull mappings <span style="color:#8b949e;font-size:10px">(prompts user/pwd)</span></button>
         <button class="ctx-btn" onclick="sccProbeMappings('${escHtml(host)}')" style="background:#21262d;border:1px solid #30363d;color:#e6edf3;padding:6px 10px;border-radius:4px;cursor:pointer;text-align:left">&#128225; Probe mappings <span style="color:#8b949e;font-size:10px">(TCP/HTTP smoke test)</span></button>
         <button class="ctx-btn" onclick="sccExtractKeystore('${escHtml(host)}')" style="background:#21262d;border:1px solid #f85149;color:#f85149;padding:6px 10px;border-radius:4px;cursor:pointer;text-align:left">&#128272; Extract keystore <span style="color:#8b949e;font-size:10px">(full backup zip — crown jewels)</span></button>
+        <button class="ctx-btn" onclick="sccDecryptSsfs('${escHtml(host)}')" style="background:#21262d;border:1px solid #f85149;color:#f85149;padding:6px 10px;border-radius:4px;cursor:pointer;text-align:left">&#128275; Decrypt SSFS &amp; unlock keystores <span style="color:#8b949e;font-size:10px">(needs JDK + libsapscc20jni)</span></button>
       </div>
     </div>
   `;
@@ -3576,6 +3607,91 @@ async function sccExtractKeystore(host) {
     const d = await r.json();
     if (d.error) alert('Extraction failed: ' + d.error);
   } catch (e) { alert('Extraction error: ' + e); }
+}
+
+function sccDecryptSsfsHelp() {
+  // Build / runtime prerequisites for the JNI helper, shown to operators
+  // who haven't run this before.  Mirrors what's in tools/ssfs_decrypt/.
+  const help = [
+    'SAPMAP — Decrypt SSFS & unlock keystores',
+    '==========================================',
+    '',
+    'PREREQUISITES (one-time, on a host that has the SAP Cloud Connector',
+    'installed — typically your lab box):',
+    '',
+    '1) JDK 8 or newer (javac + jar on PATH).',
+    '   Linux:   sudo apt install default-jdk    (or download from Adoptium)',
+    '   Windows: install Temurin JDK and add %JAVA_HOME%\\bin to PATH.',
+    '',
+    '2) The SAP-shipped native lib `libsapscc20jni.so` (Linux) or',
+    '   `sapscc20jni.dll` (Windows).  THIS IS NOT REDISTRIBUTABLE — copy it',
+    '   from a Cloud Connector install you legitimately have access to.',
+    '',
+    '   Default install paths:',
+    '     Linux:   /opt/sap/scc/lib/libsapscc20jni.so',
+    '     Windows: C:\\Program Files\\sapcc\\lib\\sapscc20jni.dll',
+    '              C:\\sap\\scc\\lib\\sapscc20jni.dll',
+    '',
+    '3) Build the JNI helper jar (one-time):',
+    '   cd <SAPMAP>/tools/ssfs_decrypt',
+    '   make                  # Linux / macOS',
+    '   build.bat             # Windows (cmd.exe)',
+    '   -> produces decrypt-ssfs.jar in that directory.',
+    '',
+    'When you click OK on the next prompt SAPMAP will ask for:',
+    '  - the path to libsapscc20jni.so / sapscc20jni.dll',
+    '    (file OR the directory containing it).  Leave blank to try the',
+    '    default install paths above.',
+    '  - optional: java binary path (default: `java` from PATH)',
+    '  - optional: SID  (default: SCC)',
+    '',
+    'The helper ONLY reads SSFS_SCC.KEY/.DAT pulled from the loot zip — no',
+    'SAP code is bundled in SAPMAP and the native lib stays on your host.',
+    '',
+    'OUTPUT:',
+    '  - findings: CRITICAL key NAMES + per-keystore unlock results',
+    '  - side file: ssfs_secrets_<ts>.json next to the loot zip (mode 0600)',
+    '    with the actual plaintext values — review locally, never paste'
+  ].join('\n');
+  alert(help);
+}
+
+async function sccDecryptSsfs(host) {
+  const sn = (mapState.scc_nodes || {})[host];
+  if (!sn) return;
+  if (!sn.keystore_extracted || !sn.keystore_loot_path) {
+    alert('No loot zip on ' + host + ' yet.\n\nRun "Extract Keystore" first — that produces the backup zip ' +
+          'containing SSFS_SCC.KEY/.DAT and the .p12 keystores that this step decrypts.');
+    return;
+  }
+  // Show the build / library instructions every time so the operator can
+  // copy paths without re-deriving them from docs.
+  sccDecryptSsfsHelp();
+  if (!confirm('Continue with SSFS decryption on ' + host + '?\n\n' +
+               'This will spawn a `java` subprocess that loads the SAP JNI library and calls ' +
+               'getRecord() against SSFS_SCC.KEY/.DAT extracted from the loot zip. ' +
+               'Plaintext values are written to a side file at mode 0600 — only key NAMES enter findings.')) return;
+  let dflt = (navigator.platform || '').toLowerCase().startsWith('win')
+              ? 'C:\\Program Files\\sapcc\\lib\\sapscc20jni.dll'
+              : '/opt/sap/scc/lib/libsapscc20jni.so';
+  const native = prompt('Path to libsapscc20jni.so / sapscc20jni.dll '
+                        + '(file OR containing directory; blank = try defaults):',
+                        dflt);
+  if (native === null) return;
+  const java_bin = prompt('Path to `java` binary (blank = `java` on PATH):', 'java');
+  if (java_bin === null) return;
+  const sid = prompt('SAP system name (SAPSYSTEMNAME env var; default SCC):', 'SCC');
+  if (sid === null) return;
+  try {
+    flashActivity('SCC ' + host + ': decrypting SSFS', 30000);
+    const r = await fetch('/api/scc/' + encodeURIComponent(host) + '/decrypt_ssfs',
+                          { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ scc_native_dir: native || '',
+                                                   java_bin: java_bin || 'java',
+                                                   sid: sid || 'SCC' }) });
+    const d = await r.json();
+    if (d.error) alert('SSFS decryption failed: ' + d.error);
+  } catch (e) { alert('SSFS decryption error: ' + e); }
 }
 
 async function sccProbeMappings(host) {
