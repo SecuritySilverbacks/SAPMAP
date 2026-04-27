@@ -2154,6 +2154,18 @@ def _maybe_build_scc_node(scan_result: dict, timeout: float = 5.0,
           f"{' v' + node.version if node.version else ''} "
           f"[server={node.server_header or '?'}]")
 
+    ver_label = f" v{node.version}" if node.version else ""
+    tls_v = (node.tls_fingerprint or {}).get("tls_version", "")
+    emit_finding("INFO", host,
+                 f"SAP Cloud Connector discovered on :{SCC_DEFAULT_PORT}{ver_label}"
+                 f" (TLS {tls_v or '?'}, Server: {node.server_header or '?'})",
+                 ref="scc.discovered",
+                 meta={"port": SCC_DEFAULT_PORT,
+                       "version": node.version,
+                       "version_source": node.version_source,
+                       "tls_version": tls_v,
+                       "server": node.server_header})
+
     # Passive CVE buckets — version-range lookup, no probe.
     if node.version:
         try:
