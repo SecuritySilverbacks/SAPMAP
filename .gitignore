@@ -16,3 +16,4 @@ nwrfcsdk/
 *.webarchive
 # Lab/user-specific target lists — may contain internal IPs/hostnames
 targets.txt
+loot/
