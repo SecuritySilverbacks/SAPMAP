@@ -519,6 +519,12 @@ class SCCMapping:
     description: str = ""
     total_resources: int = 0
     enabled_resources: int = 0
+    # Tunnel-relay smoke-test results (sapmap_scc_relay.probe_mapping).
+    reachable: Optional[bool] = None      # None = not yet probed
+    last_probed_at: str = ""              # ISO timestamp of latest probe
+    probe_latency_ms: int = 0             # round-trip of last successful probe
+    probe_signature: str = ""             # short HTTP banner / TLS / TCP-OK string
+    probe_error: str = ""                 # populated when reachable is False
 
     def to_dict(self) -> dict:
         return {
@@ -537,6 +543,11 @@ class SCCMapping:
             "description": self.description,
             "total_resources": self.total_resources,
             "enabled_resources": self.enabled_resources,
+            "reachable": self.reachable,
+            "last_probed_at": self.last_probed_at,
+            "probe_latency_ms": self.probe_latency_ms,
+            "probe_signature": self.probe_signature,
+            "probe_error": self.probe_error,
         }
 
     @classmethod

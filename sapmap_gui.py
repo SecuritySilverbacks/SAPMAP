@@ -1169,6 +1169,70 @@ def create_app(api: SAPMAPApi) -> Bottle:
         threading.Thread(target=_run, daemon=True).start()
         return json.dumps({"status": "started"})
 
+    @app.route("/api/scc/<host>/probe_mappings", method="POST")
+    def scc_probe_mappings(host):
+        """Tunnel-relay smoke test: TCP/HTTP probe every mapping's
+        internal endpoint to confirm the on-prem backend is actually
+        reachable from this network.  No credentials are sent."""
+        response.content_type = "application/json"
+        sn = api.state.scc_nodes.get(host)
+        if not sn:
+            return json.dumps({"error": f"SCC node {host} not found"})
+        if not sn.mappings:
+            return json.dumps({"error": "no mappings on this SCC — pull them first"})
+
+        def _run():
+            _task_start(f"scc:{host}:probe_mappings",
+                        f"SCC {host}: probing {len(sn.mappings)} mapping(s)")
+            try:
+                from sapmap_scc_relay import probe_mapping
+                ok_n = 0
+                fail_n = 0
+                for m in sn.mappings:
+                    if not isinstance(m, dict):
+                        continue
+                    res = probe_mapping(m, timeout=4.0)
+                    label = (f"{m.get('virtual_host','?')}:{m.get('virtual_port',0)}"
+                             f" -> {m.get('internal_host','?')}:{m.get('internal_port',0)}")
+                    sid_label = m.get("sid") or "?"
+                    proto = (m.get("protocol") or "").upper() or "TCP"
+                    if res["reachable"]:
+                        ok_n += 1
+                        sapmap_findings.emit_finding(
+                            "INFO", host,
+                            f"SCC mapping reachable: {label} [{sid_label}/{proto}]"
+                            f" — {res['probe_latency_ms']}ms"
+                            f"{(' · ' + res['probe_signature']) if res['probe_signature'] else ''}",
+                            ref="scc.mapping.reachable",
+                            meta={"mapping": label, "sid": sid_label,
+                                  "protocol": proto,
+                                  "latency_ms": res["probe_latency_ms"],
+                                  "signature": res["probe_signature"]})
+                    else:
+                        fail_n += 1
+                        sapmap_findings.emit_finding(
+                            "MEDIUM", host,
+                            f"SCC mapping UNREACHABLE: {label} [{sid_label}/{proto}]"
+                            f" — {res['probe_error']}.  Tunnel would 502 on cloud-side requests.",
+                            ref="scc.mapping.unreachable",
+                            meta={"mapping": label, "sid": sid_label,
+                                  "protocol": proto,
+                                  "error": res["probe_error"]})
+                sapmap_findings.emit_finding(
+                    "INFO", host,
+                    f"SCC tunnel-relay smoke test complete: "
+                    f"{ok_n} reachable, {fail_n} unreachable "
+                    f"(of {len(sn.mappings)} mapping(s)).",
+                    ref="scc.mapping.probe.summary",
+                    meta={"reachable": ok_n, "unreachable": fail_n,
+                          "total": len(sn.mappings)})
+            except Exception as e:
+                print(f"[-] SCC {host}: mapping probe failed: {e}")
+            finally:
+                _task_end(f"scc:{host}:probe_mappings")
+        threading.Thread(target=_run, daemon=True).start()
+        return json.dumps({"status": "started", "count": len(sn.mappings)})
+
     # -- Node operations --
     @app.route("/api/node/<sid>/credentials", method="POST")
     def node_credentials(sid):
