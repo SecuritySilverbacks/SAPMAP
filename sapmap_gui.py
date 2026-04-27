@@ -1040,6 +1040,24 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         ref="scc.admin.login.failed")
                     return
                 sn.admin_session_obtained = True
+                sn.pwned = True
+                # Cache verified Administrator credentials on the SCC node so
+                # subsequent map actions (e.g. tunnel-relay tests) can reuse
+                # them without prompting again.
+                from sapmap_models import Credentials
+                already = any(getattr(c, "username", "") == user
+                              for c in (sn.credentials or []))
+                if not already:
+                    sn.credentials.append(Credentials(
+                        username=user, password=pwd, verified=True,
+                    ))
+                sapmap_findings.emit_finding(
+                    "CRITICAL", host,
+                    f"SCC admin credentials verified: {user} — full Cloud "
+                    f"Connector configuration access (mappings, channels, "
+                    f"trust store, principal-propagation CA).",
+                    ref="scc.admin.creds.verified",
+                    meta={"user": user})
                 if sess.version:
                     sn.version = sess.version
                     sn.version_source = "api"
