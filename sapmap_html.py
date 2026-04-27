@@ -3621,27 +3621,47 @@ function sccDecryptSsfsHelp() {
     '',
     '1) JDK 8 or newer (javac + jar on PATH).',
     '   Linux:   sudo apt install default-jdk    (or download from Adoptium)',
+    '   macOS:   brew install openjdk           (or Adoptium .pkg installer)',
     '   Windows: install Temurin JDK and add %JAVA_HOME%\\bin to PATH.',
     '',
-    '2) The SAP-shipped native lib `libsapscc20jni.so` (Linux) or',
-    '   `sapscc20jni.dll` (Windows).  THIS IS NOT REDISTRIBUTABLE — copy it',
-    '   from a Cloud Connector install you legitimately have access to.',
+    '2) The SAP-shipped native lib — NOT REDISTRIBUTABLE.  Copy it from a',
+    '   Cloud Connector install you legitimately have access to:',
+    '     Linux:        libsapscc20jni.so',
+    '     Windows:      sapscc20jni.dll',
+    '     macOS:        libsapscc20jni.dylib',
     '',
     '   Default install paths:',
-    '     Linux:   /opt/sap/scc/lib/libsapscc20jni.so',
-    '     Windows: C:\\Program Files\\sapcc\\lib\\sapscc20jni.dll',
-    '              C:\\sap\\scc\\lib\\sapscc20jni.dll',
+    '     Linux:        /opt/sap/scc/lib/libsapscc20jni.so',
+    '     Windows:      C:\\Program Files\\sapcc\\lib\\sapscc20jni.dll',
+    '                   C:\\sap\\scc\\lib\\sapscc20jni.dll',
+    '     macOS:        /Applications/sapcc/lib/native/libsapscc20jni.dylib',
+    '                   ~/sapcc-osx-arm64/lib/native/libsapscc20jni.dylib',
+    '                   ~/sapcc-osx-x86_64/lib/native/libsapscc20jni.dylib',
     '',
-    '3) Build the JNI helper jar (one-time):',
+    '   ** macOS arch warning **',
+    '   The dylib ships in two flavours: arm64 (Apple Silicon) and x86_64',
+    '   (Intel).  Your JVM arch MUST match the dylib arch — an arm64 dylib',
+    '   cannot be loaded by an x86_64 JVM and vice-versa.  Check with:',
+    '       file /Applications/sapcc/lib/native/libsapscc20jni.dylib',
+    '       /usr/libexec/java_home -V',
+    '',
+    '3) Build the JNI helper jar (one-time, on ANY OS with a JDK):',
     '   cd <SAPMAP>/tools/ssfs_decrypt',
     '   make                  # Linux / macOS',
     '   build.bat             # Windows (cmd.exe)',
     '   -> produces decrypt-ssfs.jar in that directory.',
     '',
+    '   *** ONE jar fits all platforms ***',
+    '   The jar is pure-Java bytecode with no native code inside it.',
+    '   Java\'s System.loadLibrary() picks libsapscc20jni.so / .dll / .dylib',
+    '   for you at runtime, so the SAME decrypt-ssfs.jar runs on Linux,',
+    '   Windows, macOS arm64, AND macOS x86_64.  Build it once, copy it',
+    '   anywhere — only the matching native lib changes per host.',
+    '',
     'When you click OK on the next prompt SAPMAP will ask for:',
-    '  - the path to libsapscc20jni.so / sapscc20jni.dll',
-    '    (file OR the directory containing it).  Leave blank to try the',
-    '    default install paths above.',
+    '  - the path to libsapscc20jni.so / .dll / .dylib (file OR the',
+    '    directory containing it).  Leave blank to try the default install',
+    '    paths above.',
     '  - optional: java binary path (default: `java` from PATH)',
     '  - optional: SID  (default: SCC)',
     '',
@@ -3671,10 +3691,16 @@ async function sccDecryptSsfs(host) {
                'This will spawn a `java` subprocess that loads the SAP JNI library and calls ' +
                'getRecord() against SSFS_SCC.KEY/.DAT extracted from the loot zip. ' +
                'Plaintext values are written to a side file at mode 0600 — only key NAMES enter findings.')) return;
-  let dflt = (navigator.platform || '').toLowerCase().startsWith('win')
-              ? 'C:\\Program Files\\sapcc\\lib\\sapscc20jni.dll'
-              : '/opt/sap/scc/lib/libsapscc20jni.so';
-  const native = prompt('Path to libsapscc20jni.so / sapscc20jni.dll '
+  const _plat = (navigator.platform || '').toLowerCase();
+  let dflt;
+  if (_plat.startsWith('win')) {
+    dflt = 'C:\\Program Files\\sapcc\\lib\\sapscc20jni.dll';
+  } else if (_plat.startsWith('mac') || _plat.includes('darwin')) {
+    dflt = '/Applications/sapcc/lib/native/libsapscc20jni.dylib';
+  } else {
+    dflt = '/opt/sap/scc/lib/libsapscc20jni.so';
+  }
+  const native = prompt('Path to libsapscc20jni.so / sapscc20jni.dll / libsapscc20jni.dylib '
                         + '(file OR containing directory; blank = try defaults):',
                         dflt);
   if (native === null) return;
