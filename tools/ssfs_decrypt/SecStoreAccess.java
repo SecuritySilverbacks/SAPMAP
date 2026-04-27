@@ -6,15 +6,34 @@
 // JNI symbol Java_com_sap_scc_jni_SecStoreAccess_getRecord exported by the
 // SAP-shipped native library resolves.
 //
-// Build (Linux):
-//     make                                # produces decrypt-ssfs.jar
-// Build (Windows, from cmd.exe):
-//     build.bat                           # same output
+// THIS JAR IS PORTABLE.  Java's System.loadLibrary() picks the right
+// platform suffix for you (.so on Linux, .dll on Windows, .dylib on
+// macOS), so the same decrypt-ssfs.jar works on all three OSes.  Build
+// it ONCE on any host that has a JDK and copy the jar to the host that
+// also has libsapscc20jni.{so,dll,dylib} alongside SCC.
 //
-// Run:
-//     export SAPSYSTEMNAME=SCC
-//     export RSEC_SSFS_DATAPATH=/path/to/dir/holding/SSFS_SCC.{KEY,DAT}
+// Build (Linux / macOS):
+//     make                                # or: ./build.sh
+// Build (Windows, from cmd.exe):
+//     build.bat
+//
+// Run (Linux):
+//     export SAPSYSTEMNAME=<embedded SID>
+//     export RSEC_SSFS_DATAPATH=/path/to/dir/holding/SSFS_<SID>.{KEY,DAT}
 //     java -Dscc.jni.lib=/opt/sap/scc/lib/libsapscc20jni.so \
+//          -jar decrypt-ssfs.jar
+//
+// Run (macOS — same jar, different lib):
+//     export SAPSYSTEMNAME=<embedded SID>
+//     export RSEC_SSFS_DATAPATH=/path/to/scc_config
+//     java -Dscc.jni.lib=/Applications/sapcc/lib/native/libsapscc20jni.dylib \
+//          -jar decrypt-ssfs.jar
+//     # The dylib's CPU arch (arm64 vs x86_64) MUST match the JVM you launch.
+//
+// Run (Windows — same jar, different lib):
+//     set SAPSYSTEMNAME=<embedded SID>
+//     set RSEC_SSFS_DATAPATH=C:\SAP\scc20\scc_config
+//     java "-Dscc.jni.lib=C:\SAP\scc20\lib\native\sapscc20jni.dll" ^
 //          -jar decrypt-ssfs.jar
 //
 // Output is a single-line JSON document mapping each requested SSFS key

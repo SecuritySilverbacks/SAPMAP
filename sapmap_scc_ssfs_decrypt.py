@@ -55,11 +55,31 @@ DEFAULT_NATIVE_HINTS_LINUX = (
     "/opt/sap/scc/lib/libsapscc20jni.so",
     "/opt/sap/scc/libsapscc20jni.so",
     "/usr/lib/libsapscc20jni.so",
+    "/opt/sap/scc20/lib/native/libsapscc20jni.so",
 )
 DEFAULT_NATIVE_HINTS_WIN = (
     r"C:\Program Files\sapcc\lib\sapscc20jni.dll",
     r"C:\sap\scc\lib\sapscc20jni.dll",
     r"C:\sapcc\sapscc20jni.dll",
+    r"C:\SAP\scc20\lib\native\sapscc20jni.dll",
+    r"C:\SAP\scc20\util\sapscc20jni.dll",
+)
+# macOS hints — SAP ships ``libsapscc20jni.dylib`` inside the portable
+# archive (Intel and Apple-silicon flavours).  We honour both arch dirs
+# so an operator who copied the dylib to a custom path still hits one of
+# these.  The architecture must match the JVM you're running (an arm64
+# JVM cannot load an x86_64 dylib and vice-versa).
+DEFAULT_NATIVE_HINTS_MAC_ARM64 = (
+    "/Applications/sapcc/lib/native/libsapscc20jni.dylib",
+    os.path.expanduser("~/sapcc-osx-arm64/lib/native/libsapscc20jni.dylib"),
+    os.path.expanduser("~/sapcc/lib/native/libsapscc20jni.dylib"),
+    "/usr/local/sapcc/lib/native/libsapscc20jni.dylib",
+)
+DEFAULT_NATIVE_HINTS_MAC_X86_64 = (
+    "/Applications/sapcc/lib/native/libsapscc20jni.dylib",
+    os.path.expanduser("~/sapcc-osx-x86_64/lib/native/libsapscc20jni.dylib"),
+    os.path.expanduser("~/sapcc/lib/native/libsapscc20jni.dylib"),
+    "/usr/local/sapcc/lib/native/libsapscc20jni.dylib",
 )
 
 
@@ -103,13 +123,25 @@ def find_native_lib(scc_native_dir: Optional[str] = None) -> Optional[str]:
         if os.path.isfile(scc_native_dir):
             return scc_native_dir
         if os.path.isdir(scc_native_dir):
-            for name in ("libsapscc20jni.so", "sapscc20jni.dll"):
+            for name in ("libsapscc20jni.so",
+                         "sapscc20jni.dll",
+                         "libsapscc20jni.dylib"):
                 p = os.path.join(scc_native_dir, name)
                 if os.path.isfile(p):
                     return p
-    hints = (DEFAULT_NATIVE_HINTS_WIN
-             if platform.system().lower().startswith("win")
-             else DEFAULT_NATIVE_HINTS_LINUX)
+    sysname = platform.system().lower()
+    if sysname.startswith("win"):
+        hints = DEFAULT_NATIVE_HINTS_WIN
+    elif sysname == "darwin":
+        # On macOS pick the hint set matching the JVM/CPU arch — an
+        # arm64 dylib can't be loaded by an x86_64 JVM and vice-versa.
+        machine = (platform.machine() or "").lower()
+        if machine in ("arm64", "aarch64"):
+            hints = DEFAULT_NATIVE_HINTS_MAC_ARM64
+        else:
+            hints = DEFAULT_NATIVE_HINTS_MAC_X86_64
+    else:
+        hints = DEFAULT_NATIVE_HINTS_LINUX
     for h in hints:
         if os.path.isfile(h):
             return h
@@ -215,11 +247,22 @@ def decrypt_ssfs(loot_zip_path: str, *,
         env["SAPSYSTEMNAME"] = effective_sid
         env["RSEC_SSFS_DATAPATH"] = tmp
         # Make sure JNI can also locate the lib via OS search path.
-        if platform.system().lower().startswith("win"):
-            env["PATH"] = os.path.dirname(native) + os.pathsep + env.get("PATH", "")
+        sysname = platform.system().lower()
+        native_dir = os.path.dirname(native)
+        if sysname.startswith("win"):
+            env["PATH"] = native_dir + os.pathsep + env.get("PATH", "")
+        elif sysname == "darwin":
+            env["DYLD_LIBRARY_PATH"] = (
+                native_dir + os.pathsep
+                + env.get("DYLD_LIBRARY_PATH", ""))
+            # Newer macOS JVMs honour DYLD_FALLBACK_LIBRARY_PATH when
+            # SIP strips DYLD_LIBRARY_PATH on /usr/bin/java; set both.
+            env["DYLD_FALLBACK_LIBRARY_PATH"] = (
+                native_dir + os.pathsep
+                + env.get("DYLD_FALLBACK_LIBRARY_PATH", ""))
         else:
             env["LD_LIBRARY_PATH"] = (
-                os.path.dirname(native) + os.pathsep
+                native_dir + os.pathsep
                 + env.get("LD_LIBRARY_PATH", ""))
         try:
             proc = subprocess.run(cmd, env=env, capture_output=True,
