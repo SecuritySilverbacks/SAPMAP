@@ -1851,17 +1851,34 @@ function updateMap() {
       });
       if (!matches.length) return;
       const ppHi = matches.some(m => m.principal_propagation);
-      const stroke = ppHi ? '#f0883e' : '#046c7a';
-      const width = ppHi ? 3 : 2;
-      const labelTxt = matches.length === 1
+      // Reachability tally — derived from sapmap_scc_relay probe results.
+      const probed = matches.filter(m => m.reachable === true || m.reachable === false);
+      const reachOk = matches.filter(m => m.reachable === true).length;
+      const reachBad = matches.filter(m => m.reachable === false).length;
+      const allProbed = probed.length === matches.length;
+      // Color priority: red (any unreachable) > orange (PP) > green (all reach probed OK) > teal (default).
+      let stroke, labelColor;
+      if (reachBad > 0)               { stroke = '#f85149'; labelColor = '#f85149'; }
+      else if (ppHi)                  { stroke = '#f0883e'; labelColor = '#f0883e'; }
+      else if (allProbed && reachOk)  { stroke = '#3fb950'; labelColor = '#3fb950'; }
+      else                            { stroke = '#046c7a'; labelColor = '#9bb1c4'; }
+      const width = (ppHi || reachBad > 0) ? 3 : 2;
+      // Bundled-with-badge: one line per (SCC, SAP) pair regardless of how
+      // many mappings traverse it.  Label shows mapping count and (when
+      // probed) a reach badge "X/Y reach".
+      const baseLabel = matches.length === 1
         ? `${matches[0].virtual_host}:${matches[0].virtual_port} → ${matches[0].internal_host}:${matches[0].internal_port}`
-        : `${matches.length} mapping${matches.length === 1 ? '' : 's'}`;
+        : `${matches.length} mappings`;
+      const reachBadge = probed.length > 0
+        ? ` · ${reachOk}/${matches.length} reach`
+        : '';
+      const ppBadge = ppHi ? ' [PP]' : '';
       html += `<line class="edge-line" x1="${sx}" y1="${sy}" x2="${tx}" y2="${ty}" ` +
         `stroke="${stroke}" stroke-width="${width}" stroke-dasharray="6,4" fill="none" ` +
         `pointer-events="none" />`;
       const mx = (sx + tx) / 2, my = (sy + ty) / 2;
       html += `<text x="${mx}" y="${my - 4}" text-anchor="middle" font-size="10" ` +
-        `fill="${ppHi ? '#f0883e' : '#9bb1c4'}" font-family="monospace" pointer-events="none">SCC: ${escHtml(labelTxt)}${ppHi ? ' [PP]' : ''}</text>`;
+        `fill="${labelColor}" font-family="monospace" pointer-events="none">SCC: ${escHtml(baseLabel)}${reachBadge}${ppBadge}</text>`;
     });
   });
 
