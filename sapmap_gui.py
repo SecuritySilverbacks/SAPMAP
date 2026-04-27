@@ -1438,6 +1438,123 @@ def create_app(api: SAPMAPApi) -> Bottle:
         threading.Thread(target=_run, daemon=True).start()
         return json.dumps({"status": "started", "count": len(sn.mappings)})
 
+    @app.route("/api/scc/<host>/decrypt_ssfs", method="POST")
+    def scc_decrypt_ssfs(host):
+        """Decrypt SSFS_SCC inside the loot zip using the SAP-shipped JNI
+        helper, then unlock every .p12 with the recovered keystore password.
+        Persists plaintext SSFS values to a side file at mode 0600 — only
+        the key NAMES are surfaced via findings/drawer."""
+        response.content_type = "application/json"
+        sn = api.state.scc_nodes.get(host)
+        if not sn:
+            return json.dumps({"error": f"SCC node {host} not found"})
+        if not sn.keystore_loot_path or not os.path.isfile(sn.keystore_loot_path):
+            return json.dumps({"error": "no loot zip on this SCC — run "
+                                          "Extract Keystore first"})
+        data = request.json or {}
+        scc_native_dir = data.get("scc_native_dir", "") or data.get("scc_native_lib", "")
+        helper_jar = data.get("helper_jar", "") or None
+        java_bin = data.get("java_bin", "") or "java"
+        sid = data.get("sid", "") or "SCC"
+        timeout = float(data.get("timeout", 30.0))
+
+        def _run():
+            _task_start(f"scc:{host}:decrypt_ssfs",
+                        f"SCC {host}: decrypting SSFS + unlocking keystores")
+            try:
+                from sapmap_scc_ssfs_decrypt import decrypt_and_unlock
+                res = decrypt_and_unlock(
+                    sn.keystore_loot_path,
+                    scc_native_lib=scc_native_dir or None,
+                    helper_jar=helper_jar,
+                    java_bin=java_bin,
+                    sid=sid,
+                    timeout=timeout,
+                )
+                if not res.get("ok"):
+                    sapmap_findings.emit_finding(
+                        "INFO", host,
+                        f"SCC SSFS decryption failed: {res.get('error','?')}",
+                        ref="scc.ssfs.decrypt.failed",
+                        meta={"error": res.get("error")})
+                    return
+                sn.ssfs_decrypted = True
+                sn.ssfs_secrets_path = res.get("secrets_path", "")
+                sn.ssfs_secrets_keys = list(res.get("secrets_keys", []))
+                sn.unlocked_keystores = list(res.get("keystores", []))
+                # Replace the bytes-of-zip fingerprints from extract_keystore
+                # with REAL cert SHA-256s pulled from the unlocked p12s.
+                for k in sn.unlocked_keystores:
+                    p = (k.get("path") or "")
+                    sha = k.get("cert_sha256") or ""
+                    if p == "scc_config/scc.p12" and sha:
+                        sn.tunnel_privkey_fp = sha
+                # PP CA: pick the per-subaccount keystore whose extras /
+                # subject hint at the principal-propagation CA.  Heuristic:
+                # any keystore under scc_config/<region>/<uuid>/scc.p12 is
+                # a tunnel client keystore, BUT if the cert subject mentions
+                # "Principal" or "PrincipalPropagation" we treat it as the
+                # PP CA.  Otherwise leave pp_ca_privkey_fp as the SSFS hash
+                # written by extract_keystore.
+                for k in sn.unlocked_keystores:
+                    subj = (k.get("cert_subject") or "").lower()
+                    extras = " ".join(k.get("extra_subjects") or []).lower()
+                    if "principal" in subj or "principal" in extras:
+                        if k.get("cert_sha256"):
+                            sn.pp_ca_privkey_fp = k["cert_sha256"]
+                            break
+                # Findings — key NAMES only, never plaintext values.
+                key_names = ", ".join(sn.ssfs_secrets_keys) or "(none)"
+                sapmap_findings.emit_finding(
+                    "CRITICAL", host,
+                    f"SCC SSFS decrypted: {len(sn.ssfs_secrets_keys)} secret(s) "
+                    f"recovered [{key_names}].  Plaintext side-file "
+                    f"{sn.ssfs_secrets_path} (mode 0600).",
+                    ref="scc.ssfs.decrypted",
+                    meta={"secrets_path": sn.ssfs_secrets_path,
+                          "keys": list(sn.ssfs_secrets_keys),
+                          "native_lib": res.get("native_lib", "")})
+                # Per-keystore unlock findings.
+                for k in sn.unlocked_keystores:
+                    if k.get("error"):
+                        continue
+                    subj = k.get("cert_subject") or "(no cert)"
+                    sha = (k.get("cert_sha256") or "")[:16]
+                    sapmap_findings.emit_finding(
+                        "CRITICAL", host,
+                        f"SCC keystore unlocked: {k.get('path','?')} — "
+                        f"subject={subj} cert_sha256={sha}…  "
+                        f"{k.get('key_type','?')}/{k.get('key_size','?')} key.",
+                        ref="scc.ssfs.keystore.unlocked",
+                        meta={"path": k.get("path"),
+                              "cert_subject": subj,
+                              "cert_sha256": k.get("cert_sha256"),
+                              "key_type": k.get("key_type"),
+                              "key_size": k.get("key_size"),
+                              "valid_until": k.get("cert_not_after")})
+                # Non-keystore SSFS entries (proxy / kerberos / ldap / mail).
+                for kn in sn.ssfs_secrets_keys:
+                    if kn == "CLOUD_CONN/JAVA_KEYSTORE_PASSWORD":
+                        continue
+                    sapmap_findings.emit_finding(
+                        "HIGH", host,
+                        f"SCC SSFS secret recovered: {kn} — see "
+                        f"{sn.ssfs_secrets_path} for plaintext.",
+                        ref="scc.ssfs.secret.recovered",
+                        meta={"key": kn,
+                              "secrets_path": sn.ssfs_secrets_path})
+            except Exception as e:
+                print(f"[-] SCC {host}: SSFS decrypt failed: {e}")
+                sapmap_findings.emit_finding(
+                    "INFO", host,
+                    f"SCC SSFS decryption error: {e}",
+                    ref="scc.ssfs.decrypt.error",
+                    meta={"error": str(e)})
+            finally:
+                _task_end(f"scc:{host}:decrypt_ssfs")
+        threading.Thread(target=_run, daemon=True).start()
+        return json.dumps({"status": "started"})
+
     # -- Node operations --
     @app.route("/api/node/<sid>/credentials", method="POST")
     def node_credentials(sid):

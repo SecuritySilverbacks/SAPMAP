@@ -588,6 +588,11 @@ class SCCNode:
     tunnel_privkey_fp: str = ""
     pp_ca_privkey_fp: str = ""
     tunnel_replayed: bool = False
+    # SSFS decryption + p12 unlock (sapmap_scc_ssfs_decrypt).
+    ssfs_decrypted: bool = False
+    ssfs_secrets_path: str = ""             # plaintext side-file (mode 0600)
+    ssfs_secrets_keys: list = field(default_factory=list)   # KEY NAMES only
+    unlocked_keystores: list = field(default_factory=list)  # [{path, cert_subject, cert_sha256, ...}]
     pwned: bool = False
     findings: list = field(default_factory=list)
     credentials: list = field(default_factory=list)      # SCC local users (Credentials objects)
@@ -625,6 +630,10 @@ class SCCNode:
             "tunnel_privkey_fp": self.tunnel_privkey_fp,
             "pp_ca_privkey_fp": self.pp_ca_privkey_fp,
             "tunnel_replayed": self.tunnel_replayed,
+            "ssfs_decrypted": self.ssfs_decrypted,
+            "ssfs_secrets_path": self.ssfs_secrets_path,
+            "ssfs_secrets_keys": list(self.ssfs_secrets_keys),
+            "unlocked_keystores": [dict(k) for k in (self.unlocked_keystores or [])],
             "pwned": self.pwned,
             "findings": [f.to_dict() if hasattr(f, "to_dict") else f
                          for f in self.findings],
