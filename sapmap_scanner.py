@@ -2166,14 +2166,19 @@ def _maybe_build_scc_node(scan_result: dict, timeout: float = 5.0,
                        "tls_version": tls_v,
                        "server": node.server_header})
 
-    # Passive CVE buckets — version-range lookup, no probe.
+    # Passive CVE buckets — version-range lookup with bundle-hash promotion.
     if node.version:
         try:
-            from sapmap_scc_cve_buckets import cves_for_version
-            for c in cves_for_version(node.version):
-                node.cves_suspected.append(c["cve"])
+            from sapmap_scc_cve_buckets import score as _cve_score
+            res = _cve_score(node.version, node.bundle_hash or "")
+            node.cves_confirmed = list(res["confirmed"])
+            node.cves_suspected = list(res["suspected"])
+            node.cve_details = list(res["details"])
+            for c in res["details"]:
+                status = c.get("status", "suspected")
+                tag = "CONFIRMED" if status == "confirmed" else "suspected"
                 emit_finding(c["severity"], host,
-                             f"SCC {node.version}: {c['headline']}",
+                             f"SCC {node.version} [{tag}]: {c['headline']}",
                              cve=c["cve"], ref=c.get("ref", ""))
         except Exception as e:
             logger.debug("CVE bucket lookup failed for %s: %s", host, e)

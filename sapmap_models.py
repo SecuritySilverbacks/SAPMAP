@@ -577,6 +577,7 @@ class SCCNode:
     default_creds_live: bool = False
     cves_confirmed: list = field(default_factory=list)
     cves_suspected: list = field(default_factory=list)
+    cve_details: list = field(default_factory=list)   # [{cve, severity, headline, ref, status}, ...]
     subaccount_uuids: list = field(default_factory=list)
     location_ids: list = field(default_factory=list)
     tunnel_region: str = ""
@@ -613,6 +614,7 @@ class SCCNode:
             "default_creds_live": self.default_creds_live,
             "cves_confirmed": list(self.cves_confirmed),
             "cves_suspected": list(self.cves_suspected),
+            "cve_details": [dict(d) for d in (self.cve_details or [])],
             "subaccount_uuids": list(self.subaccount_uuids),
             "location_ids": list(self.location_ids),
             "tunnel_region": self.tunnel_region,
