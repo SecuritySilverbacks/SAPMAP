@@ -1082,6 +1082,14 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 pp_any = any(m.get("principal_propagation") for m in all_maps)
                 sn.principal_propagation_enabled = pp_any
 
+                # Clear any prior scc_links pointing at this SCC across
+                # all SAP nodes — we'll rebuild from the fresh mapping
+                # set below.  Without this, an earlier (over-broad) match
+                # can stick around when the rule is later tightened.
+                for n in api.state.nodes.values():
+                    if n.scc_links and host in n.scc_links:
+                        n.scc_links = [h for h in n.scc_links if h != host]
+
                 sapmap_findings.emit_finding(
                     "HIGH", host,
                     f"SCC mappings extracted: {len(all_maps)} mapping(s), "
@@ -1137,13 +1145,21 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                 ref="scc.mapping.path.sap_namespace",
                                 meta={"mapping": label, "path": rpath, "sid": sid_label})
 
-                    # Map link: when internal_host matches a known SAP node,
-                    # tag that node so the front-end can draw an edge.
+                    # Map link: tag the matching SAP node so the front-end
+                    # can draw an edge.  Mapping-SID is the strongest signal
+                    # — use that exclusively when present, otherwise fall
+                    # back to host/IP (which over-matches when several SIDs
+                    # share an IP, e.g. S4H + S4D + RD1 all on .209).
+                    msid = (m.get("sid") or "").strip().upper()
                     ihost = m.get("internal_host") or ""
-                    if ihost:
-                        for n in api.state.nodes.values():
-                            if (n.hostname == ihost or n.ip == ihost) and host not in n.scc_links:
-                                n.scc_links.append(host)
+                    for n in api.state.nodes.values():
+                        match = False
+                        if msid:
+                            match = (n.sid or "").upper() == msid
+                        elif ihost:
+                            match = (n.hostname == ihost or n.ip == ihost)
+                        if match and host not in n.scc_links:
+                            n.scc_links.append(host)
 
                 logout(sess)
             except Exception as e:

@@ -1538,10 +1538,16 @@ function updateMap() {
 
   // Auto-layout (grid) for nodes without positions
   // Place new nodes in free space, avoiding overlap with existing nodes
+  // (both SAP nodes AND already-placed SCC nodes — otherwise a fresh SAP
+  // discovery happily lands on top of an existing SCC because cols grew
+  // since the SCC was first parked).
   const placedBoxes = [];
   nodeKeys.forEach(sid => {
     const n = nodes[sid];
     if (n._x != null) placedBoxes.push({ x: n._x, y: n._y });
+  });
+  Object.values(mapState.scc_nodes || {}).forEach(sn => {
+    if (sn._x != null) placedBoxes.push({ x: sn._x, y: sn._y });
   });
 
   function overlapsAny(x, y) {
@@ -1832,12 +1838,17 @@ function updateMap() {
       const sn = (mapState.scc_nodes || {})[sccHost];
       if (!sn) return;
       const sx = (sn._x || 0) + BOX_W / 2, sy = (sn._y || 0) + BOX_H / 2;
-      // List the mappings between this SCC and this SAP node
+      // List the mappings between this SCC and this SAP node.
+      // Mapping-level SID is authoritative (a single IP often hosts
+      // multiple SIDs); host/ip only used as fallback when SID is empty.
       const matches = (sn.mappings || []).filter(m => {
         if (!m) return false;
+        const msid = (m.sid || '').toUpperCase();
+        if (msid) return msid === (n.sid || '').toUpperCase();
         const ih = m.internal_host || '';
         return ih === n.hostname || ih === n.ip;
       });
+      if (!matches.length) return;
       const ppHi = matches.some(m => m.principal_propagation);
       const stroke = ppHi ? '#f0883e' : '#046c7a';
       const width = ppHi ? 3 : 2;
