@@ -3423,9 +3423,29 @@ function showSCCDetail(host) {
     </div>
     ${cves.length ? `
     <div class="detail-section">
-      <h4>CVE buckets</h4>
-      ${(sn.cves_confirmed || []).map(c => `<div class="detail-row"><span class="detail-key" style="color:#f85149">CONFIRMED</span><span class="detail-val">${escHtml(c)}</span></div>`).join('')}
-      ${(sn.cves_suspected || []).map(c => `<div class="detail-row"><span class="detail-key" style="color:#d29922">suspected</span><span class="detail-val">${escHtml(c)}</span></div>`).join('')}
+      <h4>CVE buckets <span style="color:#8b949e;font-weight:normal;font-size:10px">(${(sn.cves_confirmed || []).length} confirmed, ${(sn.cves_suspected || []).length} suspected)</span></h4>
+      ${(() => {
+        const sevColor = { CRITICAL: '#f85149', HIGH: '#f0883e', MEDIUM: '#d29922', INFO: '#58a6ff' };
+        const det = (sn.cve_details || []);
+        if (det.length) {
+          return det.map(d => {
+            const isConf = d.status === 'confirmed';
+            const tag = isConf ? 'CONFIRMED' : 'suspected';
+            const tagColor = isConf ? '#f85149' : '#d29922';
+            const sCol = sevColor[(d.severity || '').toUpperCase()] || '#8b949e';
+            return `<div style="border-left:3px solid ${sCol};padding:6px 8px;margin:6px 0;background:#0d1117">
+                      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+                        <span style="font-family:monospace;font-weight:bold"><a href="${escHtml(d.ref || '#')}" target="_blank" style="color:#58a6ff;text-decoration:none">${escHtml(d.cve)}</a></span>
+                        <span style="font-size:10px"><span style="color:${tagColor};font-weight:bold">${tag}</span> · <span style="color:${sCol}">${escHtml(d.severity || '?')}</span></span>
+                      </div>
+                      <div style="font-size:11px;color:#cfd9df">${escHtml(d.headline || '')}</div>
+                    </div>`;
+          }).join('');
+        }
+        // Legacy fallback (state file from before cve_details existed).
+        return (sn.cves_confirmed || []).map(c => `<div class="detail-row"><span class="detail-key" style="color:#f85149">CONFIRMED</span><span class="detail-val" style="font-family:monospace">${escHtml(c)}</span></div>`).join('') +
+               (sn.cves_suspected || []).map(c => `<div class="detail-row"><span class="detail-key" style="color:#d29922">suspected</span><span class="detail-val" style="font-family:monospace">${escHtml(c)}</span></div>`).join('');
+      })()}
     </div>` : ''}
     ${(sn.ha_role || sn.ha_shadow_host) ? `
     <div class="detail-section">

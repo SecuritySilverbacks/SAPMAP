@@ -1061,6 +1061,36 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 if sess.version:
                     sn.version = sess.version
                     sn.version_source = "api"
+                # Re-score CVE buckets now that we have an authoritative
+                # version (and possibly an updated bundle hash).  The
+                # initial scanner pass uses the favicon/bundle-derived
+                # version which is sometimes coarser; the API banner is
+                # exact, so suspected entries can sharpen.
+                try:
+                    from sapmap_scc_cve_buckets import score as _cve_score
+                    res = _cve_score(sn.version or "", sn.bundle_hash or "")
+                    prev_conf = set(sn.cves_confirmed or [])
+                    prev_susp = set(sn.cves_suspected or [])
+                    sn.cves_confirmed = list(res["confirmed"])
+                    sn.cves_suspected = list(res["suspected"])
+                    sn.cve_details = list(res["details"])
+                    new_conf = set(sn.cves_confirmed) - prev_conf
+                    new_susp = set(sn.cves_suspected) - prev_susp
+                    for c in res["details"]:
+                        cve = c["cve"]
+                        if cve in new_conf:
+                            sapmap_findings.emit_finding(
+                                c["severity"], host,
+                                f"SCC {sn.version} [CONFIRMED via bundle hash]: "
+                                f"{c['headline']}",
+                                cve=cve, ref=c.get("ref", ""))
+                        elif cve in new_susp:
+                            sapmap_findings.emit_finding(
+                                c["severity"], host,
+                                f"SCC {sn.version} [suspected]: {c['headline']}",
+                                cve=cve, ref=c.get("ref", ""))
+                except Exception as e:
+                    print(f"[-] SCC {host}: CVE re-score failed: {e}")
                 # HA pair detection — populate ha_role / ha_shadow_host on
                 # the node and register the peer as a sibling SCC so it
                 # plots on the map with a shadow link.
