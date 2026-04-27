@@ -461,6 +461,56 @@ def pull_mappings(sess: SCCAdminSession, subaccount_uuid: str,
     return out
 
 
+def pull_ha_state(sess: SCCAdminSession, timeout: float = 8.0) -> dict:
+    """Return ``{role, peer_host, peer_role, raw}`` for the SCC's HA pair.
+
+    Sources ``/api/v1/configuration/connector`` (Basic-auth, JSON) and
+    extracts the ``ha`` block.  Standalone connectors return
+    ``role="master"`` with no peer; an HA-paired master returns the
+    shadow's host (and vice-versa) under ``ha.peer.host`` /
+    ``ha.shadowHost`` / ``ha.masterHost`` depending on SCC build.
+
+    Returns an empty dict on failure so callers can short-circuit.
+    """
+    if not sess or not sess.authenticated:
+        return {}
+    try:
+        url = f"{sess.base_url}/api/v1/configuration/connector"
+        req = _urlreq.Request(url, headers=_basic_headers(sess))
+        with sess.opener.open(req, timeout=timeout) as r:
+            body = r.read().decode("utf-8", errors="replace")
+    except Exception:
+        return {}
+    try:
+        data = json.loads(body)
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    ha = data.get("ha") or {}
+    if not isinstance(ha, dict):
+        return {}
+    role = (ha.get("role") or "").strip().lower()
+    # SCC builds vary in shape: peer info may live under .peer.{host,role},
+    # .shadowHost / .masterHost, or be entirely absent for standalones.
+    peer_host = ""
+    peer_role = ""
+    peer = ha.get("peer")
+    if isinstance(peer, dict):
+        peer_host = (peer.get("host") or peer.get("hostname") or "").strip()
+        peer_role = (peer.get("role") or "").strip().lower()
+    if not peer_host:
+        peer_host = (ha.get("shadowHost") or ha.get("masterHost") or "").strip()
+        if not peer_role and peer_host:
+            peer_role = "shadow" if role == "master" else "master"
+    return {
+        "role": role,
+        "peer_host": peer_host,
+        "peer_role": peer_role,
+        "raw": ha,
+    }
+
+
 def logout(sess: SCCAdminSession, timeout: float = 4.0) -> bool:
     if not sess or not sess.authenticated:
         return True
