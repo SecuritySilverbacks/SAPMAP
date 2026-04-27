@@ -1856,13 +1856,16 @@ function updateMap() {
       const reachOk = matches.filter(m => m.reachable === true).length;
       const reachBad = matches.filter(m => m.reachable === false).length;
       const allProbed = probed.length === matches.length;
-      // Color priority: red (any unreachable) > orange (PP) > green (all reach probed OK) > teal (default).
+      // Color priority: red (any unreachable) > green (all reach probed OK) > orange (PP, not yet probed) > teal (default).
+      // Reach is the more actionable signal once probed, so it wins over
+      // the PP highlight; PP is still surfaced via the [PP] label badge
+      // and the drawer Auth column.
       let stroke, labelColor;
-      if (reachBad > 0)               { stroke = '#f85149'; labelColor = '#f85149'; }
-      else if (ppHi)                  { stroke = '#f0883e'; labelColor = '#f0883e'; }
-      else if (allProbed && reachOk)  { stroke = '#3fb950'; labelColor = '#3fb950'; }
-      else                            { stroke = '#046c7a'; labelColor = '#9bb1c4'; }
-      const width = (ppHi || reachBad > 0) ? 3 : 2;
+      if (reachBad > 0)                       { stroke = '#f85149'; labelColor = '#f85149'; }
+      else if (allProbed && reachOk)          { stroke = '#3fb950'; labelColor = '#3fb950'; }
+      else if (ppHi)                          { stroke = '#f0883e'; labelColor = '#f0883e'; }
+      else                                    { stroke = '#046c7a'; labelColor = '#9bb1c4'; }
+      const width = (ppHi || reachBad > 0 || (allProbed && reachOk)) ? 3 : 2;
       // Bundled-with-badge: one line per (SCC, SAP) pair regardless of how
       // many mappings traverse it.  Label shows mapping count and (when
       // probed) a reach badge "X/Y reach".
