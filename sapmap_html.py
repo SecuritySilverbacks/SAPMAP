@@ -792,6 +792,7 @@ body {
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="scc_probe_creds">&#128273; Probe Default Account (Administrator/manage)</div>
   <div class="ctx-item" data-action="scc_pull_mappings">&#128194; Pull Mappings (prompts for user/pwd)</div>
+  <div class="ctx-item" data-action="scc_probe_mappings">&#128225; Probe Mappings (TCP/HTTP smoke test)</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="scc_delete" style="color:#f85149">&#128465; Remove from Map</div>
 </div>
@@ -2568,6 +2569,7 @@ document.getElementById('scc-ctx-menu').addEventListener('click', function(e) {
     case 'scc_details':       showSCCDetail(host); break;
     case 'scc_probe_creds':   sccProbeCreds(host); break;
     case 'scc_pull_mappings': sccPullMappings(host); break;
+    case 'scc_probe_mappings': sccProbeMappings(host); break;
     case 'scc_delete':        sccRemoveFromMap(host); break;
   }
 });
@@ -3397,6 +3399,7 @@ function showSCCDetail(host) {
             <th style="padding:4px 6px;border-bottom:1px solid #30363d">Proto</th>
             <th style="padding:4px 6px;border-bottom:1px solid #30363d">SID</th>
             <th style="padding:4px 6px;border-bottom:1px solid #30363d">Auth</th>
+            <th style="padding:4px 6px;border-bottom:1px solid #30363d" title="Tunnel-relay smoke test result">Reach</th>
             <th style="padding:4px 6px;border-bottom:1px solid #30363d">Resources</th>
           </tr>
         </thead>
@@ -3407,6 +3410,15 @@ function showSCCDetail(host) {
             const resList = (m.path_allowlist || []).filter(r => r && r.path).slice(0, 4)
               .map(r => `<div style="font-family:monospace;color:${(r.policy === 'PATH_AND_ALL_SUB_PATHS' || !r.exact_match_only) ? '#f0883e' : '#cfd9df'}">${escHtml(r.path)}${(r.policy === 'PATH_AND_ALL_SUB_PATHS' || !r.exact_match_only) ? ' /*' : ''}</div>`).join('');
             const moreRes = (m.path_allowlist || []).filter(r => r && r.path).length - 4;
+            let reachCell;
+            if (m.reachable === true) {
+              const sigTip = m.probe_signature ? ' · ' + m.probe_signature : '';
+              reachCell = `<span style="color:#3fb950;font-weight:bold" title="${escHtml(m.last_probed_at || '')}${escHtml(sigTip)}">&#10003; ${m.probe_latency_ms || 0}ms</span>`;
+            } else if (m.reachable === false) {
+              reachCell = `<span style="color:#f85149;font-weight:bold" title="${escHtml(m.probe_error || 'unreachable')}">&#10007; fail</span>`;
+            } else {
+              reachCell = '<span style="color:#8b949e">—</span>';
+            }
             return `
               <tr>
                 <td style="padding:4px 6px;border-bottom:1px solid #21262d;font-family:monospace">${escHtml(m.virtual_host || '?')}:${m.virtual_port || '?'}</td>
@@ -3414,6 +3426,7 @@ function showSCCDetail(host) {
                 <td style="padding:4px 6px;border-bottom:1px solid #21262d">${escHtml((m.protocol || '').toUpperCase())}</td>
                 <td style="padding:4px 6px;border-bottom:1px solid #21262d;font-weight:bold">${escHtml(m.sid || '')}</td>
                 <td style="padding:4px 6px;border-bottom:1px solid #21262d;color:${ppHi ? '#f0883e' : '#8b949e'}">${escHtml(auth || '-')}</td>
+                <td style="padding:4px 6px;border-bottom:1px solid #21262d;text-align:center">${reachCell}</td>
                 <td style="padding:4px 6px;border-bottom:1px solid #21262d">${resList || '<span style="color:#8b949e">-</span>'}${moreRes > 0 ? `<div style="color:#8b949e;font-size:10px">+ ${moreRes} more</div>` : ''}</td>
               </tr>`;
           }).join('')}
@@ -3425,6 +3438,7 @@ function showSCCDetail(host) {
       <div style="display:flex;flex-direction:column;gap:6px">
         <button class="ctx-btn" onclick="sccProbeCreds('${escHtml(host)}')" style="background:#21262d;border:1px solid #30363d;color:#e6edf3;padding:6px 10px;border-radius:4px;cursor:pointer;text-align:left">&#128273; Probe default creds <span style="color:#8b949e;font-size:10px">(1 POST · Administrator/manage)</span></button>
         <button class="ctx-btn" onclick="sccPullMappings('${escHtml(host)}')" style="background:#21262d;border:1px solid #30363d;color:#e6edf3;padding:6px 10px;border-radius:4px;cursor:pointer;text-align:left">&#128194; Pull mappings <span style="color:#8b949e;font-size:10px">(prompts user/pwd)</span></button>
+        <button class="ctx-btn" onclick="sccProbeMappings('${escHtml(host)}')" style="background:#21262d;border:1px solid #30363d;color:#e6edf3;padding:6px 10px;border-radius:4px;cursor:pointer;text-align:left">&#128225; Probe mappings <span style="color:#8b949e;font-size:10px">(TCP/HTTP smoke test)</span></button>
       </div>
     </div>
   `;
@@ -3457,6 +3471,22 @@ async function sccPullMappings(host) {
     const d = await r.json();
     if (d.error) alert('Pull failed: ' + d.error);
   } catch (e) { alert('Pull error: ' + e); }
+}
+
+async function sccProbeMappings(host) {
+  const sn = (mapState.scc_nodes || {})[host];
+  const n = (sn && sn.mappings) ? sn.mappings.length : 0;
+  if (n === 0) { alert('No mappings on ' + host + ' — pull them first.'); return; }
+  if (!confirm('Tunnel-relay smoke test on ' + n + ' mapping(s)?\n\n' +
+               'TCP/HTTP HEAD probe of each mapping\'s internal endpoint. ' +
+               'No credentials are sent. ~4s timeout per mapping.')) return;
+  try {
+    flashActivity('SCC ' + host + ': probing mappings', 8000 + n * 4000);
+    const r = await fetch('/api/scc/' + encodeURIComponent(host) + '/probe_mappings',
+                          { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const d = await r.json();
+    if (d.error) alert('Probe failed: ' + d.error);
+  } catch (e) { alert('Probe error: ' + e); }
 }
 
 function showImpactDetail(sid) {
