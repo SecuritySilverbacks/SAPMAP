@@ -592,6 +592,8 @@ class SCCNode:
     credentials: list = field(default_factory=list)      # SCC local users (Credentials objects)
     position: Optional[tuple] = None
     ha_shadow_host: str = ""
+    ha_role: str = ""               # "master" | "shadow" | "" (no HA / unknown)
+    ha_peer_role: str = ""          # role of ha_shadow_host ("shadow" if we are master, etc.)
     notes: str = ""
 
     def to_dict(self) -> dict:
@@ -628,6 +630,8 @@ class SCCNode:
                             for c in self.credentials],
             "position": list(self.position) if self.position else None,
             "ha_shadow_host": self.ha_shadow_host,
+            "ha_role": self.ha_role,
+            "ha_peer_role": self.ha_peer_role,
             "notes": self.notes,
             "kind": "scc",
         }

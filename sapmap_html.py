@@ -1882,6 +1882,31 @@ function updateMap() {
     });
   });
 
+  // --- SCC HA shadow links (master ↔ shadow) ---
+  // Draw once per pair: only emit from the host with the lexicographically
+  // smaller name to avoid duplicate overlapping segments.
+  const drawnHA = {};
+  Object.keys(sccNodes).forEach(host => {
+    const sn = sccNodes[host];
+    const peer = sn.ha_shadow_host || '';
+    if (!peer) return;
+    const pn = sccNodes[peer];
+    if (!pn) return;
+    const pairKey = [host, peer].sort().join('|');
+    if (drawnHA[pairKey]) return;
+    drawnHA[pairKey] = true;
+    const ax = (sn._x || 0) + BOX_W / 2, ay = (sn._y || 0) + BOX_H / 2;
+    const bx = (pn._x || 0) + BOX_W / 2, by = (pn._y || 0) + BOX_H / 2;
+    // Solid violet line — distinct from the teal/orange/red SCC→SAP edges.
+    html += `<line class="edge-line" x1="${ax}" y1="${ay}" x2="${bx}" y2="${by}" ` +
+      `stroke="#a371f7" stroke-width="2" stroke-dasharray="2,3" fill="none" pointer-events="none" />`;
+    const mx = (ax + bx) / 2, my = (ay + by) / 2;
+    const roleA = (sn.ha_role || '?').toUpperCase();
+    const roleB = (pn.ha_role || sn.ha_peer_role || '?').toUpperCase();
+    html += `<text x="${mx}" y="${my - 4}" text-anchor="middle" font-size="10" ` +
+      `fill="#a371f7" font-family="monospace" pointer-events="none">HA: ${escHtml(roleA)} ⇄ ${escHtml(roleB)}</text>`;
+  });
+
   // Draw nodes
   nodeKeys.forEach(sid => {
     const n = nodes[sid];
@@ -3401,6 +3426,12 @@ function showSCCDetail(host) {
       <h4>CVE buckets</h4>
       ${(sn.cves_confirmed || []).map(c => `<div class="detail-row"><span class="detail-key" style="color:#f85149">CONFIRMED</span><span class="detail-val">${escHtml(c)}</span></div>`).join('')}
       ${(sn.cves_suspected || []).map(c => `<div class="detail-row"><span class="detail-key" style="color:#d29922">suspected</span><span class="detail-val">${escHtml(c)}</span></div>`).join('')}
+    </div>` : ''}
+    ${(sn.ha_role || sn.ha_shadow_host) ? `
+    <div class="detail-section">
+      <h4>High Availability</h4>
+      <div class="detail-row"><span class="detail-key">Role</span><span class="detail-val" style="color:${sn.ha_role === 'master' ? '#3fb950' : (sn.ha_role === 'shadow' ? '#a371f7' : '#8b949e')}">${escHtml((sn.ha_role || 'standalone').toUpperCase())}</span></div>
+      ${sn.ha_shadow_host ? `<div class="detail-row"><span class="detail-key">Peer (${escHtml((sn.ha_peer_role || '?').toUpperCase())})</span><span class="detail-val" style="font-family:monospace"><a href="javascript:void(0)" onclick="showSCCDetail('${escHtml(sn.ha_shadow_host)}')" style="color:#58a6ff">${escHtml(sn.ha_shadow_host)}</a></span></div>` : '<div class="detail-row"><span class="detail-key">Peer</span><span class="detail-val" style="color:#8b949e">none (standalone)</span></div>'}
     </div>` : ''}
     <div class="detail-section">
       <h4>Subaccounts &amp; Mappings</h4>

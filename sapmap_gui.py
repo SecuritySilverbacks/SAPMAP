@@ -1031,7 +1031,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
         def _run():
             _task_start(f"scc:{host}:pull_mappings", f"SCC {host}: pulling mappings")
             try:
-                from sapmap_scc_admin import login, pull_subaccounts, pull_mappings, logout
+                from sapmap_scc_admin import login, pull_subaccounts, pull_mappings, pull_ha_state, logout
                 sess = login(host, user, pwd, port=sn.admin_ui_port or 8443, timeout=10.0)
                 if not sess:
                     sapmap_findings.emit_finding(
@@ -1061,6 +1061,56 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 if sess.version:
                     sn.version = sess.version
                     sn.version_source = "api"
+                # HA pair detection — populate ha_role / ha_shadow_host on
+                # the node and register the peer as a sibling SCC so it
+                # plots on the map with a shadow link.
+                ha = pull_ha_state(sess, timeout=8.0) or {}
+                if ha:
+                    sn.ha_role = ha.get("role", "") or ""
+                    sn.ha_peer_role = ha.get("peer_role", "") or ""
+                    peer_host = ha.get("peer_host", "") or ""
+                    sn.ha_shadow_host = peer_host
+                    if peer_host:
+                        sapmap_findings.emit_finding(
+                            "MEDIUM", host,
+                            f"SCC HA pair detected: {sn.ha_role or '?'} ↔ "
+                            f"{ha.get('peer_role') or '?'} {peer_host}. "
+                            f"Compromise of either node yields the same "
+                            f"tunnel privkey + PP CA — both must be patched.",
+                            ref="scc.ha.pair",
+                            meta={"role": sn.ha_role,
+                                  "peer_role": ha.get("peer_role"),
+                                  "peer_host": peer_host})
+                        # Register the peer as its own SCCNode so the
+                        # front-end draws it.  Don't overwrite an existing
+                        # entry — the peer may already have been scanned.
+                        if peer_host not in api.state.scc_nodes:
+                            from sapmap_models import SCCNode
+                            api.state.scc_nodes[peer_host] = SCCNode(
+                                host=peer_host,
+                                ip=peer_host,
+                                admin_ui_port=sn.admin_ui_port or 8443,
+                                ha_role=ha.get("peer_role", "") or "",
+                                ha_peer_role=sn.ha_role,
+                                ha_shadow_host=host,
+                                tunnel_region=sn.tunnel_region,
+                                notes=f"Discovered as HA peer of {host}",
+                            )
+                        else:
+                            peer_node = api.state.scc_nodes[peer_host]
+                            if not peer_node.ha_shadow_host:
+                                peer_node.ha_shadow_host = host
+                            if not peer_node.ha_role:
+                                peer_node.ha_role = ha.get("peer_role", "") or ""
+                            if not peer_node.ha_peer_role:
+                                peer_node.ha_peer_role = sn.ha_role
+                    else:
+                        sapmap_findings.emit_finding(
+                            "INFO", host,
+                            f"SCC HA: standalone (role={sn.ha_role or '?'}, "
+                            f"no shadow configured).",
+                            ref="scc.ha.standalone",
+                            meta={"role": sn.ha_role})
                 subs = pull_subaccounts(sess, timeout=10.0) or []
                 all_maps = []
                 uuids = []
