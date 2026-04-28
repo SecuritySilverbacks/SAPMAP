@@ -1224,14 +1224,58 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         meta={"mapping": label, "path": rpath, "sid": sid_label})
             msid = (m.get("sid") or "").strip().upper()
             ihost = m.get("internal_host") or ""
+            iport = int(m.get("internal_port") or 0)
+            matched_node = None
             for n in api.state.nodes.values():
                 match = False
                 if msid:
                     match = (n.sid or "").upper() == msid
                 elif ihost:
                     match = (n.hostname == ihost or n.ip == ihost)
-                if match and host not in n.scc_links:
-                    n.scc_links.append(host)
+                if match:
+                    matched_node = n
+                    break
+            if matched_node is None and (msid or ihost):
+                # Backend isn't on the map yet — synthesize a placeholder
+                # node so the mapping still draws an edge.  SID precedence:
+                # the mapping's sid (if set), else EXT_<ihost>_<iport>.
+                # Mirrors the UNK_/ACL_ pattern used by the scanner when
+                # it discovers a system without a clean SID.
+                is_ip = (ihost.count(".") == 3
+                         and all(p.isdigit() for p in ihost.split(".")))
+                if msid and msid not in api.state.nodes:
+                    new_sid = msid
+                else:
+                    slug = (ihost or "unknown").replace(".", "_").replace(":", "_")
+                    new_sid = (f"EXT_{slug}_{iport}" if iport
+                               else f"EXT_{slug}")
+                if new_sid in api.state.nodes:
+                    matched_node = api.state.nodes[new_sid]
+                else:
+                    sys_type = {
+                        "abapSys": "ABAP",
+                        "javaSys": "JAVA",
+                        "abapJavaSys": "ABAP+JAVA",
+                        "hanaDB": "HANA",
+                    }.get(m.get("backend_type", ""), "")
+                    placeholder = SAPNode(
+                        sid=new_sid,
+                        ip=ihost if is_ip else "",
+                        hostname="" if is_ip else ihost,
+                        system_type=sys_type,
+                    )
+                    api.state.add_node(placeholder)
+                    matched_node = placeholder
+                    sapmap_findings.emit_finding(
+                        "INFO", host,
+                        f"SCC mapping discovered new on-prem backend "
+                        f"{ihost}:{iport} [{new_sid}] — added to map.",
+                        ref="scc.mapping.discovered.node",
+                        meta={"sid": new_sid, "host": ihost, "port": iport,
+                              "backend_type": m.get("backend_type", ""),
+                              "auth": m.get("authentication_mode", "")})
+            if matched_node and host not in matched_node.scc_links:
+                matched_node.scc_links.append(host)
 
     def _apply_ssfs_decrypt_result(host, sn, res):
         """Update SCC node state + emit findings from a decrypt_and_unlock
