@@ -1729,11 +1729,27 @@ def create_app(api: SAPMAPApi) -> Bottle:
         new_nr = (data.get("instance_nr") or "").strip()
         if not (len(new_nr) == 2 and new_nr.isdigit()):
             return json.dumps({"error": "instance_nr must be two digits, e.g. 00"})
+        # Conventional SAP per-instance ports — without these on the
+        # InstanceInfo, GW-gated actions (RFC System Info, Check GW,
+        # Create User via GW) stay greyed out because the front-end
+        # checks for a 33NN port flagged as gateway.  Same flavour as
+        # the RFC-discovery path that creates new nodes.
+        canonical_ports = {
+            int(f"32{new_nr}"): "dispatcher",
+            int(f"33{new_nr}"): "gateway",
+            int(f"36{new_nr}"): "ms",
+            int(f"80{new_nr}"): "icm-http",
+        }
         if node.instances:
-            node.instances[0].instance_nr = new_nr
+            inst = node.instances[0]
+            inst.instance_nr = new_nr
+            for p, svc in canonical_ports.items():
+                inst.ports.setdefault(p, svc)
         else:
             node.instances.append(InstanceInfo(
-                instance_nr=new_nr, ip=node.ip or node.hostname or ""))
+                instance_nr=new_nr,
+                ip=node.ip or node.hostname or "",
+                ports=dict(canonical_ports)))
         print(f"[*] Instance number for {sid} set to: {new_nr}")
         return json.dumps({"status": "ok", "instance_nr": new_nr})
 
