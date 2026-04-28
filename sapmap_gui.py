@@ -1733,6 +1733,24 @@ def create_app(api: SAPMAPApi) -> Bottle:
         threading.Thread(target=_run, daemon=True).start()
         return json.dumps({"status": "started"})
 
+    @app.route("/api/scc/<host>/set_credentials", method="POST")
+    def scc_set_credentials(host):
+        """Store credentials for an SCC node so pull-mappings and
+        extract-keystore can auto-fill without prompting again."""
+        response.content_type = "application/json"
+        sn = api.state.scc_nodes.get(host)
+        if not sn:
+            return json.dumps({"error": f"SCC node {host} not found"})
+        data = request.json or {}
+        user = data.get("username", "").strip()
+        pwd = data.get("password", "")
+        if not user or not pwd:
+            return json.dumps({"error": "username and password are required"})
+        from sapmap_models import Credentials as _Creds
+        sn.credentials = [_Creds(username=user, password=pwd, verified=False)]
+        print(f"[*] SCC {host}: credentials stored for {user}")
+        return json.dumps({"ok": True})
+
     # -- Node operations --
     @app.route("/api/node/<sid>/credentials", method="POST")
     def node_credentials(sid):
@@ -1764,6 +1782,22 @@ def create_app(api: SAPMAPApi) -> Bottle:
             print(f"[!] Credentials saved for {sid} but could NOT verify — "
                   f"check the error above. User creation will likely fail.")
         return json.dumps({"success": True, "verified": creds.verified})
+
+    @app.route("/api/node/<sid>/harvest_scc", method="POST")
+    def node_harvest_scc(sid):
+        """Run harvest_scc_from_pwned_node in a background thread."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        def _run():
+            result = sapmap_exploit.harvest_scc_from_pwned_node(node, api.state)
+            if result.get("error"):
+                print(f"[-] {sid}: harvest_scc error: {result['error']}")
+
+        _bg(f"{sid}:harvest_scc", f"{sid}: Harvest SCC (post-RCE)", _run)
+        return json.dumps({"status": "started"})
 
     @app.route("/api/node/<sid>/deep_scan", method="POST")
     def node_deep_scan(sid):
