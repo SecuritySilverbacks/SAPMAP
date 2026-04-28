@@ -724,6 +724,7 @@ body {
       <div class="ctx-item" data-action="create_tcpip">&#128279; Create TCP/IP Dest (sapxpg)</div>
       <div class="ctx-item" data-action="os_terminal">&#128187; OS Command Terminal</div>
       <div class="ctx-item" data-action="reverse_shell">&#128279; Reverse Shell</div>
+      <div class="ctx-item" data-action="harvest_scc">&#9928; Harvest SCC (post-RCE)</div>
       <div class="ctx-sep"></div>
       <div class="ctx-item" data-action="propagate">&#128640; Propagate (exploit next hop)</div>
     </div>
@@ -791,8 +792,9 @@ body {
 <div class="ctx-menu" id="scc-ctx-menu">
   <div class="ctx-item" data-action="scc_details">&#128269; View SCC Details</div>
   <div class="ctx-sep"></div>
+  <div class="ctx-item" data-action="scc_set_credentials">&#128273; Set Credentials</div>
   <div class="ctx-item" data-action="scc_probe_creds">&#128273; Probe Default Account (Administrator/manage)</div>
-  <div class="ctx-item" data-action="scc_pull_mappings">&#128194; Pull Mappings (prompts for user/pwd)</div>
+  <div class="ctx-item" data-action="scc_pull_mappings">&#128194; Pull Mappings</div>
   <div class="ctx-item" data-action="scc_probe_mappings">&#128225; Probe Mappings (TCP/HTTP smoke test)</div>
   <div class="ctx-item" data-action="scc_extract_keystore" style="color:#f85149">&#128272; Extract Keystore + Decrypt SSFS (FULL BACKUP — CROWN JEWELS)</div>
   <div class="ctx-sep"></div>
@@ -833,6 +835,26 @@ body {
       <button class="btn" onclick="testCredentials()">Test Connection</button>
       <button class="btn btn-primary" onclick="saveCredentials()">Save &amp; Use</button>
       <button class="btn" onclick="closeModal('cred-modal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- SCC Credentials Modal -->
+<div class="modal-overlay" id="scc-cred-modal">
+  <div class="modal">
+    <h3>&#128273; SCC Credentials</h3>
+    <div id="scc-cred-system-info" style="font-size:12px;color:#8b949e;margin-bottom:12px"></div>
+    <div class="form-row">
+      <label>Username</label>
+      <input type="text" id="scc-cred-user" placeholder="Administrator">
+    </div>
+    <div class="form-row">
+      <label>Password</label>
+      <input type="password" id="scc-cred-pass" placeholder="">
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-primary" onclick="saveSCCCredentials()">Save</button>
+      <button class="btn" onclick="closeModal('scc-cred-modal')">Cancel</button>
     </div>
   </div>
 </div>
@@ -2631,12 +2653,13 @@ document.getElementById('scc-ctx-menu').addEventListener('click', function(e) {
   const host = selectedSccHost;
   if (!host) return;
   switch (action) {
-    case 'scc_details':       showSCCDetail(host); break;
-    case 'scc_probe_creds':   sccProbeCreds(host); break;
-    case 'scc_pull_mappings': sccPullMappings(host); break;
-    case 'scc_probe_mappings': sccProbeMappings(host); break;
+    case 'scc_details':          showSCCDetail(host); break;
+    case 'scc_set_credentials':  showSCCCredModal(host); break;
+    case 'scc_probe_creds':      sccProbeCreds(host); break;
+    case 'scc_pull_mappings':    sccPullMappings(host); break;
+    case 'scc_probe_mappings':   sccProbeMappings(host); break;
     case 'scc_extract_keystore': sccExtractKeystore(host); break;
-    case 'scc_delete':        sccRemoveFromMap(host); break;
+    case 'scc_delete':           sccRemoveFromMap(host); break;
   }
 });
 
@@ -2644,6 +2667,42 @@ async function sccRemoveFromMap(host) {
   if (!confirm('Remove SCC ' + host + ' from the map? (Local-only; will reappear on next scan if still present.)')) return;
   if (mapState.scc_nodes) delete mapState.scc_nodes[host];
   renderMap();
+}
+
+function _sccStoredCreds(host) {
+  // Return the first stored credential for an SCC node, or null.
+  const sn = (mapState.scc_nodes || {})[host];
+  const creds = sn && sn.credentials;
+  if (creds && creds.length > 0) return creds[0];
+  return null;
+}
+
+function showSCCCredModal(host) {
+  const stored = _sccStoredCreds(host);
+  document.getElementById('scc-cred-system-info').textContent =
+    'Cloud Connector: ' + host + (stored ? '  (stored credentials will be replaced)' : '');
+  document.getElementById('scc-cred-user').value = (stored && stored.username) ? stored.username : 'Administrator';
+  document.getElementById('scc-cred-pass').value = (stored && stored.password) ? stored.password : '';
+  document.getElementById('scc-cred-modal').dataset.host = host;
+  document.getElementById('scc-cred-modal').classList.add('visible');
+}
+
+async function saveSCCCredentials() {
+  const modal = document.getElementById('scc-cred-modal');
+  const host = modal.dataset.host;
+  const u = document.getElementById('scc-cred-user').value.trim();
+  const p = document.getElementById('scc-cred-pass').value;
+  if (!u || !p) { alert('Username and password are required.'); return; }
+  try {
+    flashActivity('SCC ' + host + ': saving credentials', 3000);
+    const r = await fetch('/api/scc/' + encodeURIComponent(host) + '/set_credentials',
+                          { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ username: u, password: p }) });
+    const d = await r.json();
+    if (d.error) { alert('Failed: ' + d.error); return; }
+    closeModal('scc-cred-modal');
+    await pollUpdates();
+  } catch (e) { alert('Error: ' + e); }
 }
 
 async function ctxAction(action) {
@@ -2936,6 +2995,19 @@ async function ctxAction(action) {
         api('POST', `node/${sid}/check_default_creds`);
       break;
     case 'set_saprouter': showSaprouterModal(sid); break;
+    case 'harvest_scc': {
+      const nh = (mapState.nodes || {})[sid];
+      const canHarvest = nh && (nh.gw_vulnerable || nh.cve_2025_31324_vulnerable);
+      if (!canHarvest) {
+        alert('Harvest SCC requires a pwned/vulnerable node (GW exploit or CVE-2025-31324).\n\nExploit the node first, then try again.');
+        break;
+      }
+      if (!confirm('Harvest SCC from ' + sid + '?\n\n' +
+                   'Runs ARP/host sweep, SSH-key hunt, and same-host SCC bundle ' +
+                   'exfiltration on the pwned node.  May write files to /tmp on target.')) break;
+      await api('POST', `node/${sid}/harvest_scc`);
+      break;
+    }
     case 'set_telnet_override': {
       const cur = n.telnet_override || '';
       const val = prompt(
@@ -3564,8 +3636,9 @@ function showSCCDetail(host) {
     <div class="detail-section">
       <h4>Actions</h4>
       <div style="display:flex;flex-direction:column;gap:6px">
+        <button class="ctx-btn" onclick="showSCCCredModal('${escHtml(host)}')" style="background:#21262d;border:1px solid #30363d;color:#e6edf3;padding:6px 10px;border-radius:4px;cursor:pointer;text-align:left">&#128273; Set Credentials <span style="color:#8b949e;font-size:10px">(stored, auto-fills pull/extract)</span></button>
         <button class="ctx-btn" onclick="sccProbeCreds('${escHtml(host)}')" style="background:#21262d;border:1px solid #30363d;color:#e6edf3;padding:6px 10px;border-radius:4px;cursor:pointer;text-align:left">&#128273; Probe default creds <span style="color:#8b949e;font-size:10px">(1 POST · Administrator/manage)</span></button>
-        <button class="ctx-btn" onclick="sccPullMappings('${escHtml(host)}')" style="background:#21262d;border:1px solid #30363d;color:#e6edf3;padding:6px 10px;border-radius:4px;cursor:pointer;text-align:left">&#128194; Pull mappings <span style="color:#8b949e;font-size:10px">(prompts user/pwd)</span></button>
+        <button class="ctx-btn" onclick="sccPullMappings('${escHtml(host)}')" style="background:#21262d;border:1px solid #30363d;color:#e6edf3;padding:6px 10px;border-radius:4px;cursor:pointer;text-align:left">&#128194; Pull mappings <span style="color:#8b949e;font-size:10px">(auto-fills if creds saved)</span></button>
         <button class="ctx-btn" onclick="sccProbeMappings('${escHtml(host)}')" style="background:#21262d;border:1px solid #30363d;color:#e6edf3;padding:6px 10px;border-radius:4px;cursor:pointer;text-align:left">&#128225; Probe mappings <span style="color:#8b949e;font-size:10px">(TCP/HTTP smoke test)</span></button>
         <button class="ctx-btn" onclick="sccExtractKeystore('${escHtml(host)}')" style="background:#21262d;border:1px solid #f85149;color:#f85149;padding:6px 10px;border-radius:4px;cursor:pointer;text-align:left">&#128272; Extract keystore + decrypt SSFS <span style="color:#8b949e;font-size:10px">(full backup zip — crown jewels)</span></button>
       </div>
@@ -3588,10 +3661,13 @@ async function sccProbeCreds(host) {
 }
 
 async function sccPullMappings(host) {
-  const u = prompt('SCC admin username for ' + host + ':', 'Administrator');
+  const stored = _sccStoredCreds(host);
+  const defUser = (stored && stored.username) ? stored.username : 'Administrator';
+  const defPass = (stored && stored.password) ? stored.password : '';
+  const u = prompt('SCC admin username for ' + host + ':', defUser);
   if (!u) return;
-  const p = prompt('Password for ' + u + ':');
-  if (!p) return;
+  const p = prompt('Password for ' + u + ':', defPass);
+  if (p === null) return;
   try {
     flashActivity('SCC ' + host + ': pulling mappings', 12000);
     const r = await fetch('/api/scc/' + encodeURIComponent(host) + '/pull_mappings',
@@ -3614,11 +3690,14 @@ async function sccExtractKeystore(host) {
                'NAMES enter findings.\n\n' +
                'The zip will be saved under ./loot/scc/' + host + '/ with mode 0600. ' +
                'Treat as crown-jewels material.')) return;
-  const u = prompt('SCC admin username for ' + host + ':', 'Administrator');
+  const stored = _sccStoredCreds(host);
+  const defUser = (stored && stored.username) ? stored.username : 'Administrator';
+  const defPass = (stored && stored.password) ? stored.password : '';
+  const u = prompt('SCC admin username for ' + host + ':', defUser);
   if (!u) return;
-  const p = prompt('Password for ' + u + ':');
-  if (!p) return;
-  const bp = prompt('Backup encryption password (passphrase that locks keystores in the zip):', p);
+  const p = prompt('Password for ' + u + ':', defPass);
+  if (p === null) return;
+  const bp = prompt('Backup encryption password (passphrase that locks keystores in the zip):', p || defPass);
   if (!bp) return;
   try {
     flashActivity('SCC ' + host + ': extracting keystore', 30000);
