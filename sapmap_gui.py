@@ -1135,23 +1135,43 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             if not peer_node.ha_peer_role:
                                 peer_node.ha_peer_role = sn.ha_role
                     else:
-                        # Print raw HA payload server-side so we can tell
-                        # whether the API didn't expose HA at all, or
-                        # exposed it under a shape pull_ha_state didn't
-                        # recognise.  Helps diagnose missing violet line.
+                        # Dump every endpoint we tried (status + body
+                        # prefix) so we can spot which URL exposes the
+                        # shadowHost / masterHost on this SCC build.
                         try:
                             print(f"[i] SCC {host}: HA raw payload = "
                                   f"{json.dumps(ha.get('raw', {}), default=str)[:1500]}")
                         except Exception:
                             print(f"[i] SCC {host}: HA raw payload "
                                   f"(unprintable): {ha.get('raw')}")
-                        sapmap_findings.emit_finding(
-                            "INFO", host,
-                            f"SCC HA: standalone (role={sn.ha_role or '?'}, "
-                            f"no shadow configured).",
-                            ref="scc.ha.standalone",
-                            meta={"role": sn.ha_role,
-                                  "raw": ha.get("raw", {})})
+                        for plog in (ha.get("probe_log") or []):
+                            try:
+                                pth, st, bp = plog
+                                print(f"[i] SCC {host}: HA probe "
+                                      f"{pth} -> HTTP {st}  body={bp!r}")
+                            except Exception:
+                                pass
+                        # role=shadow on its own already proves HA — no
+                        # standalone connector ever reports as shadow.
+                        if (sn.ha_role or "").lower() == "shadow":
+                            sapmap_findings.emit_finding(
+                                "MEDIUM", host,
+                                f"SCC HA: this connector is a SHADOW — "
+                                f"its master peer host could not be "
+                                f"located via the REST API.  Pull "
+                                f"backup to recover masterHost from "
+                                f"scc_config.ini.",
+                                ref="scc.ha.shadow.no_peer",
+                                meta={"role": sn.ha_role,
+                                      "raw": ha.get("raw", {})})
+                        else:
+                            sapmap_findings.emit_finding(
+                                "INFO", host,
+                                f"SCC HA: standalone (role={sn.ha_role or '?'}, "
+                                f"no shadow configured).",
+                                ref="scc.ha.standalone",
+                                meta={"role": sn.ha_role,
+                                      "raw": ha.get("raw", {})})
                 subs = pull_subaccounts(sess, timeout=10.0) or []
                 all_maps = []
                 uuids = []
