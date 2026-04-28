@@ -1719,6 +1719,24 @@ def create_app(api: SAPMAPApi) -> Bottle:
             print(f"[*] OS type for {sid} set to: {new_os}")
         return json.dumps({"status": "ok"})
 
+    @app.route("/api/node/<sid>/set_instance_nr", method="POST")
+    def node_set_instance_nr(sid):
+        response.content_type = "application/json"
+        data = request.json or {}
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        new_nr = (data.get("instance_nr") or "").strip()
+        if not (len(new_nr) == 2 and new_nr.isdigit()):
+            return json.dumps({"error": "instance_nr must be two digits, e.g. 00"})
+        if node.instances:
+            node.instances[0].instance_nr = new_nr
+        else:
+            node.instances.append(InstanceInfo(
+                instance_nr=new_nr, ip=node.ip or node.hostname or ""))
+        print(f"[*] Instance number for {sid} set to: {new_nr}")
+        return json.dumps({"status": "ok", "instance_nr": new_nr})
+
     @app.route("/api/node/<sid>/set_saprouter", method="POST")
     def node_set_saprouter(sid):
         response.content_type = "application/json"
