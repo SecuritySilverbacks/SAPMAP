@@ -1236,11 +1236,27 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     matched_node = n
                     break
             if matched_node is None and (msid or ihost):
-                # Backend isn't on the map yet — synthesize a placeholder
-                # node so the mapping still draws an edge.  SID precedence:
-                # the mapping's sid (if set), else EXT_<ihost>_<iport>.
-                # Mirrors the UNK_/ACL_ pattern used by the scanner when
-                # it discovers a system without a clean SID.
+                # Backend isn't on the map yet — only synthesize a
+                # placeholder if the smoke-test confirms the target is
+                # reachable from us through the same network path the
+                # SCC tunnel uses.  Avoids cluttering the map with dead
+                # / typo'd / decommissioned mappings.  probe_mapping
+                # mutates the mapping in place with reachable + latency
+                # + signature, so the drawer also benefits.
+                from sapmap_scc_relay import probe_mapping
+                probe = probe_mapping(m, timeout=3.0)
+                if not probe.get("reachable"):
+                    sapmap_findings.emit_finding(
+                        "INFO", host,
+                        f"SCC mapping {ihost}:{iport} [{msid or '?'}] "
+                        f"unreachable on smoke test — not adding to map "
+                        f"({probe.get('probe_error') or 'no response'}).",
+                        ref="scc.mapping.discovered.unreachable",
+                        meta={"host": ihost, "port": iport, "sid": msid,
+                              "error": probe.get("probe_error")})
+                    continue
+                # SID precedence: mapping.sid > EXT_<ihost>_<iport>.
+                # Mirrors the UNK_/ACL_ pattern used by the scanner.
                 is_ip = (ihost.count(".") == 3
                          and all(p.isdigit() for p in ihost.split(".")))
                 if msid and msid not in api.state.nodes:
@@ -1269,11 +1285,16 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     sapmap_findings.emit_finding(
                         "INFO", host,
                         f"SCC mapping discovered new on-prem backend "
-                        f"{ihost}:{iport} [{new_sid}] — added to map.",
+                        f"{ihost}:{iport} [{new_sid}] — reachable on smoke "
+                        f"test ({probe.get('probe_latency_ms', 0)}ms"
+                        f"{(' · ' + probe['probe_signature']) if probe.get('probe_signature') else ''})"
+                        f" — added to map.",
                         ref="scc.mapping.discovered.node",
                         meta={"sid": new_sid, "host": ihost, "port": iport,
                               "backend_type": m.get("backend_type", ""),
-                              "auth": m.get("authentication_mode", "")})
+                              "auth": m.get("authentication_mode", ""),
+                              "latency_ms": probe.get("probe_latency_ms", 0),
+                              "signature": probe.get("probe_signature", "")})
             if matched_node and host not in matched_node.scc_links:
                 matched_node.scc_links.append(host)
 
