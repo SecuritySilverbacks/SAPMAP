@@ -1155,92 +1155,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     region = s.get("region") or s.get("regionHost") or ""
                     if region and region not in (sn.tunnel_region or ""):
                         sn.tunnel_region = region
-                sn.subaccount_uuids = list(dict.fromkeys(uuids))
-                sn.mappings = all_maps
-
-                # Promote per-mapping flags to the SCC node-level summary.
-                pp_any = any(m.get("principal_propagation") for m in all_maps)
-                sn.principal_propagation_enabled = pp_any
-
-                # Clear any prior scc_links pointing at this SCC across
-                # all SAP nodes — we'll rebuild from the fresh mapping
-                # set below.  Without this, an earlier (over-broad) match
-                # can stick around when the rule is later tightened.
-                for n in api.state.nodes.values():
-                    if n.scc_links and host in n.scc_links:
-                        n.scc_links = [h for h in n.scc_links if h != host]
-
-                sapmap_findings.emit_finding(
-                    "HIGH", host,
-                    f"SCC mappings extracted: {len(all_maps)} mapping(s), "
-                    f"{len(uuids)} subaccount(s)",
-                    ref="scc.mappings.extracted",
-                    meta={"subaccounts": len(uuids), "mappings": len(all_maps)})
-
-                # Emit risk findings per mapping.
-                for m in all_maps:
-                    label = (f"{m.get('virtual_host','?')}:{m.get('virtual_port',0)} "
-                             f"-> {m.get('internal_host','?')}:{m.get('internal_port',0)}")
-                    sid_label = m.get("sid") or "?"
-                    proto = (m.get("protocol") or "").upper()
-                    auth = m.get("authentication_mode") or ""
-                    bt = m.get("backend_type") or ""
-
-                    # KERBEROS / X509_GENERAL = principal propagation enabled.
-                    if auth in ("KERBEROS", "X509_GENERAL"):
-                        sapmap_findings.emit_finding(
-                            "HIGH", host,
-                            f"SCC mapping {label} [{sid_label}/{proto}] "
-                            f"uses {auth} principal propagation — backend trusts "
-                            f"any user the SCC asserts.",
-                            ref="scc.mapping.principal_propagation",
-                            meta={"mapping": label, "auth": auth,
-                                  "sid": sid_label, "backend_type": bt})
-
-                    # Path allowlist analysis: top-level "/", "/sap/", or
-                    # PATH_AND_ALL_SUB_PATHS broaden exposure dramatically.
-                    for r in (m.get("path_allowlist") or []):
-                        if not isinstance(r, dict):
-                            continue
-                        rpath = (r.get("path") or "").strip()
-                        rpolicy = (r.get("policy") or "").upper()
-                        if not r.get("enabled", True):
-                            continue
-                        is_subpath_match = (rpolicy == "PATH_AND_ALL_SUB_PATHS"
-                                            or (not r.get("exact_match_only", True)))
-                        if rpath == "/":
-                            sapmap_findings.emit_finding(
-                                "HIGH", host,
-                                f"SCC mapping {label} [{sid_label}] exposes "
-                                f"path '/' (full backend) to subaccount "
-                                f"{m.get('virtual_host','?')}.",
-                                ref="scc.mapping.path.root",
-                                meta={"mapping": label, "path": rpath, "sid": sid_label})
-                        elif rpath in ("/sap/", "/sap") and is_subpath_match:
-                            sapmap_findings.emit_finding(
-                                "MEDIUM", host,
-                                f"SCC mapping {label} [{sid_label}] allows "
-                                f"'/sap/' and all sub-paths — entire ABAP "
-                                f"namespace is reachable through the tunnel.",
-                                ref="scc.mapping.path.sap_namespace",
-                                meta={"mapping": label, "path": rpath, "sid": sid_label})
-
-                    # Map link: tag the matching SAP node so the front-end
-                    # can draw an edge.  Mapping-SID is the strongest signal
-                    # — use that exclusively when present, otherwise fall
-                    # back to host/IP (which over-matches when several SIDs
-                    # share an IP, e.g. S4H + S4D + RD1 all on .209).
-                    msid = (m.get("sid") or "").strip().upper()
-                    ihost = m.get("internal_host") or ""
-                    for n in api.state.nodes.values():
-                        match = False
-                        if msid:
-                            match = (n.sid or "").upper() == msid
-                        elif ihost:
-                            match = (n.hostname == ihost or n.ip == ihost)
-                        if match and host not in n.scc_links:
-                            n.scc_links.append(host)
-
+                _apply_mappings_to_state(host, sn, all_maps, uuids)
                 logout(sess)
             except Exception as e:
                 print(f"[-] SCC {host}: mapping pull failed: {e}")
@@ -1248,6 +1163,75 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 _task_end(f"scc:{host}:pull_mappings")
         threading.Thread(target=_run, daemon=True).start()
         return json.dumps({"status": "started"})
+
+    def _apply_mappings_to_state(host, sn, all_maps, uuids):
+        """Persist mappings on the SCC node, rebuild scc_links across all
+        SAP nodes, and emit per-mapping risk findings.  Shared between
+        live admin pull and offline backup-zip parse."""
+        sn.subaccount_uuids = list(dict.fromkeys(uuids))
+        sn.mappings = all_maps
+        sn.principal_propagation_enabled = any(
+            m.get("principal_propagation") for m in all_maps)
+        for n in api.state.nodes.values():
+            if n.scc_links and host in n.scc_links:
+                n.scc_links = [h for h in n.scc_links if h != host]
+        sapmap_findings.emit_finding(
+            "HIGH", host,
+            f"SCC mappings extracted: {len(all_maps)} mapping(s), "
+            f"{len(uuids)} subaccount(s)",
+            ref="scc.mappings.extracted",
+            meta={"subaccounts": len(uuids), "mappings": len(all_maps)})
+        for m in all_maps:
+            label = (f"{m.get('virtual_host','?')}:{m.get('virtual_port',0)} "
+                     f"-> {m.get('internal_host','?')}:{m.get('internal_port',0)}")
+            sid_label = m.get("sid") or "?"
+            proto = (m.get("protocol") or "").upper()
+            auth = m.get("authentication_mode") or ""
+            bt = m.get("backend_type") or ""
+            if auth in ("KERBEROS", "X509_GENERAL"):
+                sapmap_findings.emit_finding(
+                    "HIGH", host,
+                    f"SCC mapping {label} [{sid_label}/{proto}] "
+                    f"uses {auth} principal propagation — backend trusts "
+                    f"any user the SCC asserts.",
+                    ref="scc.mapping.principal_propagation",
+                    meta={"mapping": label, "auth": auth,
+                          "sid": sid_label, "backend_type": bt})
+            for r in (m.get("path_allowlist") or []):
+                if not isinstance(r, dict):
+                    continue
+                rpath = (r.get("path") or "").strip()
+                rpolicy = (r.get("policy") or "").upper()
+                if not r.get("enabled", True):
+                    continue
+                is_subpath_match = (rpolicy == "PATH_AND_ALL_SUB_PATHS"
+                                    or (not r.get("exact_match_only", True)))
+                if rpath == "/":
+                    sapmap_findings.emit_finding(
+                        "HIGH", host,
+                        f"SCC mapping {label} [{sid_label}] exposes "
+                        f"path '/' (full backend) to subaccount "
+                        f"{m.get('virtual_host','?')}.",
+                        ref="scc.mapping.path.root",
+                        meta={"mapping": label, "path": rpath, "sid": sid_label})
+                elif rpath in ("/sap/", "/sap") and is_subpath_match:
+                    sapmap_findings.emit_finding(
+                        "MEDIUM", host,
+                        f"SCC mapping {label} [{sid_label}] allows "
+                        f"'/sap/' and all sub-paths — entire ABAP "
+                        f"namespace is reachable through the tunnel.",
+                        ref="scc.mapping.path.sap_namespace",
+                        meta={"mapping": label, "path": rpath, "sid": sid_label})
+            msid = (m.get("sid") or "").strip().upper()
+            ihost = m.get("internal_host") or ""
+            for n in api.state.nodes.values():
+                match = False
+                if msid:
+                    match = (n.sid or "").upper() == msid
+                elif ihost:
+                    match = (n.hostname == ihost or n.ip == ihost)
+                if match and host not in n.scc_links:
+                    n.scc_links.append(host)
 
     def _apply_ssfs_decrypt_result(host, sn, res):
         """Update SCC node state + emit findings from a decrypt_and_unlock
@@ -1427,6 +1411,29 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 if man_v and not sn.version:
                     sn.version = man_v
                     sn.version_source = "backup-manifest"
+                # Auto-map: parse cloud→on-prem mappings straight out of
+                # the backup zip (backends.xml per subaccount) so the
+                # operator gets the same map plot as the live "Pull
+                # Mappings" action without a second admin call.  Skip
+                # when sn.mappings is already populated by a recent live
+                # pull — avoid duplicate findings.
+                if not sn.mappings:
+                    try:
+                        from sapmap_scc_keystore import parse_mappings_from_zip
+                        mres = parse_mappings_from_zip(sn.keystore_loot_path)
+                        if mres.get("ok"):
+                            for region in (mres.get("regions") or []):
+                                if region and region not in (sn.tunnel_region or ""):
+                                    sn.tunnel_region = region
+                            _apply_mappings_to_state(
+                                host, sn,
+                                mres.get("mappings") or [],
+                                mres.get("subaccount_uuids") or [])
+                        else:
+                            print(f"[-] SCC {host}: offline mapping parse: "
+                                  f"{mres.get('error')}")
+                    except Exception as me:
+                        print(f"[-] SCC {host}: offline mapping parse failed: {me}")
                 # Auto-decrypt: pure-Python decryptor has no extra
                 # dependency cost, so chain decrypt+unlock immediately
                 # whenever the backup contains an SSFS blob.

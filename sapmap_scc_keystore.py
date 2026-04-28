@@ -60,6 +60,7 @@ import ssl
 import time
 import urllib.request as _urlreq
 import urllib.error as _urlerr
+import xml.etree.ElementTree as _ET
 import zipfile
 from datetime import datetime
 from typing import Optional
@@ -173,6 +174,148 @@ def parse_backup(zip_bytes: bytes) -> dict:
                 pass
     summary["ssfs_present"] = have_ssfs_key and have_ssfs_dat
     return summary
+
+
+def _xml_text(parent, tag: str, default: str = "") -> str:
+    el = parent.find(tag)
+    return (el.text or default).strip() if (el is not None and el.text is not None) else default
+
+
+def _safe_int(v, default: int = 0) -> int:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _parse_resources_xml(blob: bytes) -> list:
+    """Convert a per-mapping <virtualHost>_<virtualPort>.xml resource list
+    into the path_allowlist shape produced by the live admin API.
+
+    SCC on-disk fields:
+        resourceName  – the path
+        enabled       – bool
+        wildcard      – true means PATH_AND_ALL_SUB_PATHS, false means exact
+        websocketUpgradeAllowed
+        description
+    """
+    out: list = []
+    try:
+        root = _ET.fromstring(blob)
+    except _ET.ParseError:
+        return out
+    for r in root.iter("resource"):
+        path = _xml_text(r, "resourceName")
+        wildcard = _xml_text(r, "wildcard").lower() == "true"
+        enabled = _xml_text(r, "enabled", "true").lower() == "true"
+        out.append({
+            "path": path,
+            "policy": "PATH_AND_ALL_SUB_PATHS" if wildcard else "PATH",
+            "exact_match_only": not wildcard,
+            "enabled": enabled,
+            "description": _xml_text(r, "description"),
+            "websocket_upgrade_allowed":
+                _xml_text(r, "websocketUpgradeAllowed").lower() == "true",
+        })
+    return out
+
+
+def parse_mappings_from_zip(loot_zip_path: str) -> dict:
+    """Parse cloud→on-prem mappings straight out of a backup zip.
+
+    Walks ``scc_config/<region>/<uuid>/backends.xml`` for each subaccount,
+    expands the resource allowlist via the sibling
+    ``<virtualHost>_<virtualPort>.xml`` file, and returns a payload
+    matching what ``sapmap_scc_admin.pull_mappings`` produces over the
+    network — so callers can feed it through the same post-processing.
+
+    Returns::
+
+        {
+          "ok": True,
+          "mappings": [<normalized mapping dict>, ...],
+          "subaccount_uuids": [...],
+          "regions": [...],
+        }
+
+    or ``{"ok": False, "error": ...}`` on failure.
+    """
+    out_maps: list = []
+    uuids: list = []
+    regions: list = []
+    sub_dir_re = re.compile(
+        r"^scc_config/(?P<region>[^/]+)/(?P<sub>[0-9a-fA-F-]{36})/$")
+    backends_re = re.compile(
+        r"^scc_config/(?P<region>[^/]+)/(?P<sub>[0-9a-fA-F-]{36})/backends\.xml$")
+    try:
+        zf = zipfile.ZipFile(loot_zip_path)
+    except (zipfile.BadZipFile, FileNotFoundError) as e:
+        return {"ok": False, "error": f"bad loot zip: {e}"}
+    names = set(zf.namelist())
+    # Discover subaccount directories from any path beneath them, since
+    # zips may not include explicit directory entries.
+    discovered: dict[tuple[str, str], None] = {}
+    for n in names:
+        m = sub_dir_re.match(n) or sub_dir_re.match(n.rsplit("/", 1)[0] + "/")
+        if not m:
+            mb = backends_re.match(n)
+            if not mb:
+                continue
+            key = (mb.group("region"), mb.group("sub"))
+        else:
+            key = (m.group("region"), m.group("sub"))
+        discovered.setdefault(key, None)
+    for region, sub in discovered:
+        if sub not in uuids:
+            uuids.append(sub)
+        if region not in regions:
+            regions.append(region)
+        bn = f"scc_config/{region}/{sub}/backends.xml"
+        if bn not in names:
+            continue
+        try:
+            tree = _ET.fromstring(zf.read(bn))
+        except _ET.ParseError:
+            continue
+        for sm in tree.iter("systemMapping"):
+            vhost = _xml_text(sm, "virtualHost")
+            vport = _safe_int(_xml_text(sm, "virtualPort"))
+            auth = _xml_text(sm, "authenticationMode")
+            mapping = {
+                "virtual_host": vhost,
+                "virtual_port": vport,
+                "internal_host": _xml_text(sm, "internalHost"),
+                "internal_port": _safe_int(_xml_text(sm, "internalPort")),
+                "protocol": _xml_text(sm, "communicationProtocol"),
+                "path_allowlist": [],
+                "path_wildcards": False,
+                "backend_type": _xml_text(sm, "backendType"),
+                "principal_propagation": auth in ("X509_GENERAL", "KERBEROS"),
+                "authentication_mode": auth,
+                "sid": _xml_text(sm, "sid"),
+                "host_in_header": _xml_text(sm, "internalHostInHeader"),
+                "description": _xml_text(sm, "description"),
+                "total_resources": 0,
+                "enabled_resources": 0,
+                "subaccount": sub,
+                "region": region,
+            }
+            res_name = f"scc_config/{region}/{sub}/{vhost}_{vport}.xml"
+            if res_name in names:
+                try:
+                    mapping["path_allowlist"] = _parse_resources_xml(zf.read(res_name))
+                except KeyError:
+                    pass
+                mapping["total_resources"] = len(mapping["path_allowlist"])
+                mapping["enabled_resources"] = sum(
+                    1 for r in mapping["path_allowlist"] if r.get("enabled", True))
+            out_maps.append(mapping)
+    return {
+        "ok": True,
+        "mappings": out_maps,
+        "subaccount_uuids": uuids,
+        "regions": regions,
+    }
 
 
 def extract_keystore(host: str, user: str, password: str, *,
