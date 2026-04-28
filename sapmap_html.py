@@ -763,6 +763,7 @@ body {
       <div class="ctx-item" data-action="set_type">&#9881; Set System Type</div>
       <div class="ctx-item" data-action="set_db_type">&#9881; Set DB Type</div>
       <div class="ctx-item" data-action="set_os_type">&#9881; Set OS Type</div>
+      <div class="ctx-item" data-action="set_instance_nr">&#9881; Set Instance Number</div>
       <div class="ctx-item" data-action="set_saprouter">&#128268; Set SAProuter</div>
       <div class="ctx-item" data-action="set_telnet_override">&#128279; Set Telnet Endpoint (SSH tunnel)</div>
     </div>
@@ -932,6 +933,23 @@ body {
     <div class="form-actions">
       <button class="btn btn-primary" onclick="saveOsType()">Save</button>
       <button class="btn" onclick="closeModal('os-type-modal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Set Instance Number Modal -->
+<div class="modal-overlay" id="instance-nr-modal">
+  <div class="modal" onkeydown="if(event.key==='Enter'){event.preventDefault();saveInstanceNr();}">
+    <h3>&#9881; Set Instance Number</h3>
+    <div id="instance-nr-system-info" style="font-size:12px;color:#8b949e;margin-bottom:12px"></div>
+    <div class="form-row">
+      <label>Instance Number (00-97)</label>
+      <input type="text" id="instance-nr-input" maxlength="2" placeholder="00" style="width:80px;text-align:center;font-family:monospace">
+      <span style="font-size:10px;color:#484f58;margin-top:2px;display:block">Two-digit SAP instance number. Drives derived ports (32NN dispatcher, 33NN gateway, 36NN MS, 81NN ICM, 50NN+ Java) used by RFC and exploit actions.</span>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-primary" onclick="saveInstanceNr()">Save</button>
+      <button class="btn" onclick="closeModal('instance-nr-modal')">Cancel</button>
     </div>
   </div>
 </div>
@@ -2423,6 +2441,7 @@ function showCtxMenu(e, sid) {
     'set_type':         true,                       // always available
     'set_db_type':      true,                       // always available
     'set_os_type':      true,                       // always available
+    'set_instance_nr':  true,                       // always available
     'enum_clients':     true,                       // always (uses DIAG, no creds needed)
     'default_creds':    true,                       // always (uses DIAG, no creds needed)
     'check_router_info': true,                     // always (direct TCP, no creds)
@@ -2906,6 +2925,7 @@ async function ctxAction(action) {
     case 'set_type': showTypeModal(sid); break;
     case 'set_db_type': showDbTypeModal(sid); break;
     case 'set_os_type': showOsTypeModal(sid); break;
+    case 'set_instance_nr': showInstanceNrModal(sid); break;
     case 'check_router_info':
       await api('POST', `node/${sid}/check_router_info`); break;
     case 'router_scan': showRouterScanModal(sid); break;
@@ -3849,6 +3869,28 @@ async function saveOsType() {
   const newOs = document.getElementById('os-type-select').value;
   await api('POST', `node/${selectedNodeSid}/set_os_type`, { os_type: newOs });
   closeModal('os-type-modal');
+  startPolling();
+}
+function showInstanceNrModal(sid) {
+  const n = (mapState.nodes || {})[sid];
+  const cur = (n && n.instances && n.instances.length) ? n.instances[0].instance_nr : '';
+  document.getElementById('instance-nr-system-info').textContent =
+    sid + (cur ? ' (current: ' + cur + ')' : ' (no instance set)');
+  document.getElementById('instance-nr-input').value = cur || '';
+  document.getElementById('instance-nr-modal').classList.add('visible');
+  document.getElementById('instance-nr-input').focus();
+  document.getElementById('instance-nr-input').select();
+}
+async function saveInstanceNr() {
+  const raw = (document.getElementById('instance-nr-input').value || '').trim();
+  if (!/^\d{2}$/.test(raw)) {
+    alert('Instance number must be exactly two digits, e.g. 00 or 01.');
+    return;
+  }
+  const r = await api('POST', `node/${selectedNodeSid}/set_instance_nr`,
+                      { instance_nr: raw });
+  if (r && r.error) { alert('Set failed: ' + r.error); return; }
+  closeModal('instance-nr-modal');
   startPolling();
 }
 
