@@ -464,51 +464,107 @@ def pull_mappings(sess: SCCAdminSession, subaccount_uuid: str,
 def pull_ha_state(sess: SCCAdminSession, timeout: float = 8.0) -> dict:
     """Return ``{role, peer_host, peer_role, raw}`` for the SCC's HA pair.
 
-    Sources ``/api/v1/configuration/connector`` (Basic-auth, JSON) and
-    extracts the ``ha`` block.  Standalone connectors return
-    ``role="master"`` with no peer; an HA-paired master returns the
-    shadow's host (and vice-versa) under ``ha.peer.host`` /
-    ``ha.shadowHost`` / ``ha.masterHost`` depending on SCC build.
+    Tries multiple endpoints because SCC builds disagree on where HA
+    lives.  Known shapes (any one of these is a hit):
+      * ``GET /api/v1/configuration/connector`` → ``{ha:{role,peer:{host,role}}}``
+      * same endpoint → top-level ``{haRole, shadowHost, masterHost}``
+      * ``GET /api/v1/configuration/connector/highAvailability`` → dedicated
+        HA config with ``role``/``shadowHost``/``masterHost``/``masters``/``shadows``
+      * ``GET /api/monitoring/connector/state`` (newer builds) → state with
+        ``haRole`` + peer info
 
-    Returns an empty dict on failure so callers can short-circuit.
+    Returns an empty dict on hard failure so callers can short-circuit.
+    On success always returns ``raw`` containing the parsed payload that
+    matched, so the caller can log it when no peer was found.
     """
     if not sess or not sess.authenticated:
         return {}
-    try:
-        url = f"{sess.base_url}/api/v1/configuration/connector"
-        req = _urlreq.Request(url, headers=_basic_headers(sess))
-        with sess.opener.open(req, timeout=timeout) as r:
-            body = r.read().decode("utf-8", errors="replace")
-    except Exception:
-        return {}
-    try:
-        data = json.loads(body)
-    except Exception:
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    ha = data.get("ha") or {}
-    if not isinstance(ha, dict):
-        return {}
-    role = (ha.get("role") or "").strip().lower()
-    # SCC builds vary in shape: peer info may live under .peer.{host,role},
-    # .shadowHost / .masterHost, or be entirely absent for standalones.
-    peer_host = ""
-    peer_role = ""
-    peer = ha.get("peer")
-    if isinstance(peer, dict):
-        peer_host = (peer.get("host") or peer.get("hostname") or "").strip()
-        peer_role = (peer.get("role") or "").strip().lower()
-    if not peer_host:
-        peer_host = (ha.get("shadowHost") or ha.get("masterHost") or "").strip()
-        if not peer_role and peer_host:
-            peer_role = "shadow" if role == "master" else "master"
-    return {
-        "role": role,
-        "peer_host": peer_host,
-        "peer_role": peer_role,
-        "raw": ha,
-    }
+
+    def _get_json(path):
+        try:
+            url = f"{sess.base_url}{path}"
+            req = _urlreq.Request(url, headers=_basic_headers(sess))
+            with sess.opener.open(req, timeout=timeout) as r:
+                body = r.read().decode("utf-8", errors="replace")
+            return json.loads(body)
+        except Exception:
+            return None
+
+    def _extract(data):
+        """Pull (role, peer_host, peer_role) out of a heterogeneous payload."""
+        if not isinstance(data, dict):
+            return "", "", ""
+        # Shape 1: nested ha.{role, peer.{host,role}, shadowHost, masterHost}
+        ha = data.get("ha")
+        candidates = []
+        if isinstance(ha, dict):
+            candidates.append(ha)
+        # Shape 2: top-level (haRole/shadowHost/masterHost or role/peer)
+        candidates.append(data)
+        # Shape 3: highAvailability sub-object
+        hav = data.get("highAvailability")
+        if isinstance(hav, dict):
+            candidates.append(hav)
+        for c in candidates:
+            role = (c.get("role") or c.get("haRole") or "").strip().lower()
+            peer_host = ""
+            peer_role = ""
+            peer = c.get("peer")
+            if isinstance(peer, dict):
+                peer_host = (peer.get("host") or peer.get("hostname")
+                             or peer.get("hostName") or "").strip()
+                peer_role = (peer.get("role") or "").strip().lower()
+            if not peer_host:
+                # SCC sometimes lists shadows / masters as arrays
+                shadows = c.get("shadows") or c.get("shadowHosts")
+                masters = c.get("masters") or c.get("masterHosts")
+                if isinstance(shadows, list) and shadows:
+                    first = shadows[0]
+                    peer_host = (first.get("host") if isinstance(first, dict)
+                                 else str(first or "")).strip()
+                    peer_role = peer_role or "shadow"
+                elif isinstance(masters, list) and masters:
+                    first = masters[0]
+                    peer_host = (first.get("host") if isinstance(first, dict)
+                                 else str(first or "")).strip()
+                    peer_role = peer_role or "master"
+            if not peer_host:
+                peer_host = (c.get("shadowHost") or c.get("masterHost")
+                             or c.get("shadowHostName")
+                             or c.get("masterHostName") or "").strip()
+                if peer_host and not peer_role:
+                    peer_role = "shadow" if role == "master" else "master"
+            if role or peer_host:
+                return role, peer_host, peer_role
+        return "", "", ""
+
+    paths = [
+        "/api/v1/configuration/connector",
+        "/api/v1/configuration/connector/highAvailability",
+        "/api/v1/configuration/highAvailability",
+        "/api/monitoring/connector/state",
+        "/api/v1/system/state",
+    ]
+    raw_collected = {}
+    for p in paths:
+        data = _get_json(p)
+        if data is None:
+            continue
+        raw_collected[p] = data if not isinstance(data, dict) else (
+            data.get("ha") or data.get("highAvailability") or
+            {k: v for k, v in data.items()
+             if "ha" in k.lower() or "shadow" in k.lower()
+             or "master" in k.lower() or "role" in k.lower()
+             or "peer" in k.lower()}
+        )
+        role, peer_host, peer_role = _extract(data)
+        if peer_host:
+            return {"role": role, "peer_host": peer_host,
+                    "peer_role": peer_role, "raw": raw_collected}
+    # No peer found anywhere — return the raw blobs we collected so the
+    # caller can log them and we can debug what shape this build uses.
+    return {"role": "", "peer_host": "", "peer_role": "",
+            "raw": raw_collected}
 
 
 def logout(sess: SCCAdminSession, timeout: float = 4.0) -> bool:
