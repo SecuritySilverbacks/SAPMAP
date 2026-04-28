@@ -793,8 +793,7 @@ body {
   <div class="ctx-item" data-action="scc_probe_creds">&#128273; Probe Default Account (Administrator/manage)</div>
   <div class="ctx-item" data-action="scc_pull_mappings">&#128194; Pull Mappings (prompts for user/pwd)</div>
   <div class="ctx-item" data-action="scc_probe_mappings">&#128225; Probe Mappings (TCP/HTTP smoke test)</div>
-  <div class="ctx-item" data-action="scc_extract_keystore" style="color:#f85149">&#128272; Extract Keystore (FULL BACKUP — CROWN JEWELS)</div>
-  <div class="ctx-item" data-action="scc_decrypt_ssfs" style="color:#f85149">&#128275; Decrypt SSFS &amp; Unlock Keystores</div>
+  <div class="ctx-item" data-action="scc_extract_keystore" style="color:#f85149">&#128272; Extract Keystore + Decrypt SSFS (FULL BACKUP — CROWN JEWELS)</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="scc_delete" style="color:#f85149">&#128465; Remove from Map</div>
 </div>
@@ -2618,7 +2617,6 @@ document.getElementById('scc-ctx-menu').addEventListener('click', function(e) {
     case 'scc_pull_mappings': sccPullMappings(host); break;
     case 'scc_probe_mappings': sccProbeMappings(host); break;
     case 'scc_extract_keystore': sccExtractKeystore(host); break;
-    case 'scc_decrypt_ssfs':  sccDecryptSsfs(host); break;
     case 'scc_delete':        sccRemoveFromMap(host); break;
   }
 });
@@ -3549,8 +3547,7 @@ function showSCCDetail(host) {
         <button class="ctx-btn" onclick="sccProbeCreds('${escHtml(host)}')" style="background:#21262d;border:1px solid #30363d;color:#e6edf3;padding:6px 10px;border-radius:4px;cursor:pointer;text-align:left">&#128273; Probe default creds <span style="color:#8b949e;font-size:10px">(1 POST · Administrator/manage)</span></button>
         <button class="ctx-btn" onclick="sccPullMappings('${escHtml(host)}')" style="background:#21262d;border:1px solid #30363d;color:#e6edf3;padding:6px 10px;border-radius:4px;cursor:pointer;text-align:left">&#128194; Pull mappings <span style="color:#8b949e;font-size:10px">(prompts user/pwd)</span></button>
         <button class="ctx-btn" onclick="sccProbeMappings('${escHtml(host)}')" style="background:#21262d;border:1px solid #30363d;color:#e6edf3;padding:6px 10px;border-radius:4px;cursor:pointer;text-align:left">&#128225; Probe mappings <span style="color:#8b949e;font-size:10px">(TCP/HTTP smoke test)</span></button>
-        <button class="ctx-btn" onclick="sccExtractKeystore('${escHtml(host)}')" style="background:#21262d;border:1px solid #f85149;color:#f85149;padding:6px 10px;border-radius:4px;cursor:pointer;text-align:left">&#128272; Extract keystore <span style="color:#8b949e;font-size:10px">(full backup zip — crown jewels)</span></button>
-        <button class="ctx-btn" onclick="sccDecryptSsfs('${escHtml(host)}')" style="background:#21262d;border:1px solid #f85149;color:#f85149;padding:6px 10px;border-radius:4px;cursor:pointer;text-align:left">&#128275; Decrypt SSFS &amp; unlock keystores <span style="color:#8b949e;font-size:10px">(needs JDK + libsapscc20jni)</span></button>
+        <button class="ctx-btn" onclick="sccExtractKeystore('${escHtml(host)}')" style="background:#21262d;border:1px solid #f85149;color:#f85149;padding:6px 10px;border-radius:4px;cursor:pointer;text-align:left">&#128272; Extract keystore + decrypt SSFS <span style="color:#8b949e;font-size:10px">(full backup zip — crown jewels)</span></button>
       </div>
     </div>
   `;
@@ -3591,6 +3588,10 @@ async function sccExtractKeystore(host) {
                'containing every tunnel client cert + private key, the system ' +
                'identity keystore, the SSFS blob (PP CA private key), and the ' +
                'local users.xml.\n\n' +
+               'SAPMAP will then auto-decrypt the SSFS in pure Python (no JDK / ' +
+               'no SAP libs needed) and unlock every .p12 keystore in the zip. ' +
+               'Plaintext secrets land in a side-file at mode 0600; only key ' +
+               'NAMES enter findings.\n\n' +
                'The zip will be saved under ./loot/scc/' + host + '/ with mode 0600. ' +
                'Treat as crown-jewels material.')) return;
   const u = prompt('SCC admin username for ' + host + ':', 'Administrator');
@@ -3607,117 +3608,6 @@ async function sccExtractKeystore(host) {
     const d = await r.json();
     if (d.error) alert('Extraction failed: ' + d.error);
   } catch (e) { alert('Extraction error: ' + e); }
-}
-
-function sccDecryptSsfsHelp() {
-  // Build / runtime prerequisites for the JNI helper, shown to operators
-  // who haven't run this before.  Mirrors what's in tools/ssfs_decrypt/.
-  const help = [
-    'SAPMAP — Decrypt SSFS & unlock keystores',
-    '==========================================',
-    '',
-    'PREREQUISITES (one-time, on a host that has the SAP Cloud Connector',
-    'installed — typically your lab box):',
-    '',
-    '1) JDK 8 or newer (javac + jar on PATH).',
-    '   Linux:   sudo apt install default-jdk    (or download from Adoptium)',
-    '   macOS:   brew install openjdk           (or Adoptium .pkg installer)',
-    '   Windows: install Temurin JDK and add %JAVA_HOME%\\bin to PATH.',
-    '',
-    '2) The SAP-shipped native lib — NOT REDISTRIBUTABLE.  Copy it from a',
-    '   Cloud Connector install you legitimately have access to:',
-    '     Linux:        libsapscc20jni.so',
-    '     Windows:      sapscc20jni.dll',
-    '     macOS:        libsapscc20jni.dylib',
-    '',
-    '   Default install paths:',
-    '     Linux:        /opt/sap/scc/lib/libsapscc20jni.so',
-    '     Windows:      C:\\Program Files\\sapcc\\lib\\sapscc20jni.dll',
-    '                   C:\\sap\\scc\\lib\\sapscc20jni.dll',
-    '     macOS:        /Applications/sapcc/lib/native/libsapscc20jni.dylib',
-    '                   ~/sapcc-osx-arm64/lib/native/libsapscc20jni.dylib',
-    '                   ~/sapcc-osx-x86_64/lib/native/libsapscc20jni.dylib',
-    '',
-    '   ** macOS arch warning **',
-    '   The dylib ships in two flavours: arm64 (Apple Silicon) and x86_64',
-    '   (Intel).  Your JVM arch MUST match the dylib arch — an arm64 dylib',
-    '   cannot be loaded by an x86_64 JVM and vice-versa.  Check with:',
-    '       file /Applications/sapcc/lib/native/libsapscc20jni.dylib',
-    '       /usr/libexec/java_home -V',
-    '',
-    '3) Build the JNI helper jar (one-time, on ANY OS with a JDK):',
-    '   cd <SAPMAP>/tools/ssfs_decrypt',
-    '   make                  # Linux / macOS',
-    '   build.bat             # Windows (cmd.exe)',
-    '   -> produces decrypt-ssfs.jar in that directory.',
-    '',
-    '   *** ONE jar fits all platforms ***',
-    '   The jar is pure-Java bytecode with no native code inside it.',
-    '   Java\'s System.loadLibrary() picks libsapscc20jni.so / .dll / .dylib',
-    '   for you at runtime, so the SAME decrypt-ssfs.jar runs on Linux,',
-    '   Windows, macOS arm64, AND macOS x86_64.  Build it once, copy it',
-    '   anywhere — only the matching native lib changes per host.',
-    '',
-    'When you click OK on the next prompt SAPMAP will ask for:',
-    '  - the path to libsapscc20jni.so / .dll / .dylib (file OR the',
-    '    directory containing it).  Leave blank to try the default install',
-    '    paths above.',
-    '  - optional: java binary path (default: `java` from PATH)',
-    '  - optional: SID  (default: SCC)',
-    '',
-    'The helper ONLY reads SSFS_SCC.KEY/.DAT pulled from the loot zip — no',
-    'SAP code is bundled in SAPMAP and the native lib stays on your host.',
-    '',
-    'OUTPUT:',
-    '  - findings: CRITICAL key NAMES + per-keystore unlock results',
-    '  - side file: ssfs_secrets_<ts>.json next to the loot zip (mode 0600)',
-    '    with the actual plaintext values — review locally, never paste'
-  ].join('\n');
-  alert(help);
-}
-
-async function sccDecryptSsfs(host) {
-  const sn = (mapState.scc_nodes || {})[host];
-  if (!sn) return;
-  if (!sn.keystore_extracted || !sn.keystore_loot_path) {
-    alert('No loot zip on ' + host + ' yet.\n\nRun "Extract Keystore" first — that produces the backup zip ' +
-          'containing SSFS_SCC.KEY/.DAT and the .p12 keystores that this step decrypts.');
-    return;
-  }
-  // Show the build / library instructions every time so the operator can
-  // copy paths without re-deriving them from docs.
-  sccDecryptSsfsHelp();
-  if (!confirm('Continue with SSFS decryption on ' + host + '?\n\n' +
-               'This will spawn a `java` subprocess that loads the SAP JNI library and calls ' +
-               'getRecord() against SSFS_SCC.KEY/.DAT extracted from the loot zip. ' +
-               'Plaintext values are written to a side file at mode 0600 — only key NAMES enter findings.')) return;
-  const _plat = (navigator.platform || '').toLowerCase();
-  let dflt;
-  if (_plat.startsWith('win')) {
-    dflt = 'C:\\Program Files\\sapcc\\lib\\sapscc20jni.dll';
-  } else if (_plat.startsWith('mac') || _plat.includes('darwin')) {
-    dflt = '/Applications/sapcc/lib/native/libsapscc20jni.dylib';
-  } else {
-    dflt = '/opt/sap/scc/lib/libsapscc20jni.so';
-  }
-  const native = prompt('Path to libsapscc20jni.so / sapscc20jni.dll / libsapscc20jni.dylib '
-                        + '(file OR containing directory; blank = try defaults):',
-                        dflt);
-  if (native === null) return;
-  const java_bin = prompt('Path to `java` binary (blank = `java` on PATH):', 'java');
-  if (java_bin === null) return;
-  const sid = prompt('SAP system name (SAPSYSTEMNAME env var; default SCC):', 'SCC');
-  if (sid === null) return;
-  try {
-    flashActivity('SCC ' + host + ': decrypting SSFS', 30000);
-    const r = await fetch('/api/scc/' + encodeURIComponent(host) + '/decrypt_ssfs',
-                          { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ scc_native_dir: native || '',
-                                                   java_bin: java_bin || 'java',
-                                                   sid: sid || 'SCC' }) });
-    const d = await r.json();
-    if (d.error) alert('SSFS decryption failed: ' + d.error);
-  } catch (e) { alert('SSFS decryption error: ' + e); }
 }
 
 async function sccProbeMappings(host) {
