@@ -480,12 +480,27 @@ def pull_ha_state(sess: SCCAdminSession, timeout: float = 8.0) -> dict:
     if not sess or not sess.authenticated:
         return {}
 
+    probe_log = []  # diagnostic — (path, status, body_prefix or err)
+
     def _get_json(path):
         try:
             url = f"{sess.base_url}{path}"
             req = _urlreq.Request(url, headers=_basic_headers(sess))
             with sess.opener.open(req, timeout=timeout) as r:
+                status = r.status
                 body = r.read().decode("utf-8", errors="replace")
+        except _urlreq.HTTPError as he:
+            try:
+                err_body = he.read().decode("utf-8", errors="replace")[:120]
+            except Exception:
+                err_body = ""
+            probe_log.append((path, he.code, err_body))
+            return None
+        except Exception as e:
+            probe_log.append((path, 0, f"err:{type(e).__name__}:{str(e)[:80]}"))
+            return None
+        probe_log.append((path, status, body[:160]))
+        try:
             return json.loads(body)
         except Exception:
             return None
@@ -542,8 +557,18 @@ def pull_ha_state(sess: SCCAdminSession, timeout: float = 8.0) -> dict:
         "/api/v1/configuration/connector",
         "/api/v1/configuration/connector/highAvailability",
         "/api/v1/configuration/highAvailability",
+        "/api/v1/configuration/highAvailability/master",
+        "/api/v1/configuration/highAvailability/shadow",
+        "/api/v1/configuration/connector/master",
+        "/api/v1/configuration/connector/shadow",
+        "/api/v1/configuration/connector/shadowSystem",
+        "/api/v1/configuration/connector/masterSystem",
+        "/api/v1/connector/highAvailability",
+        "/api/v1/connector",
         "/api/monitoring/connector/state",
+        "/api/monitoring/highAvailability",
         "/api/v1/system/state",
+        "/api/v1/configuration",
     ]
     raw_collected = {}
     for p in paths:
@@ -560,11 +585,23 @@ def pull_ha_state(sess: SCCAdminSession, timeout: float = 8.0) -> dict:
         role, peer_host, peer_role = _extract(data)
         if peer_host:
             return {"role": role, "peer_host": peer_host,
-                    "peer_role": peer_role, "raw": raw_collected}
-    # No peer found anywhere — return the raw blobs we collected so the
-    # caller can log them and we can debug what shape this build uses.
-    return {"role": "", "peer_host": "", "peer_role": "",
-            "raw": raw_collected}
+                    "peer_role": peer_role, "raw": raw_collected,
+                    "probe_log": probe_log}
+    # No peer host found anywhere.  Stitch together the best role we saw
+    # across all responses — role="shadow" alone is enough to confirm HA
+    # is configured (a standalone connector is always role=master), so we
+    # still want to flag it even without an explicit masterHost.
+    best_role = ""
+    for p, data in raw_collected.items():
+        r, _, _ = _extract({"_": data} if not isinstance(data, dict)
+                           else data)
+        if r and not best_role:
+            best_role = r
+        if r == "shadow":
+            best_role = "shadow"
+            break
+    return {"role": best_role, "peer_host": "", "peer_role": "",
+            "raw": raw_collected, "probe_log": probe_log}
 
 
 def logout(sess: SCCAdminSession, timeout: float = 4.0) -> bool:
