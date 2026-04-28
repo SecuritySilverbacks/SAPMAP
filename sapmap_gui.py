@@ -1172,6 +1172,20 @@ def create_app(api: SAPMAPApi) -> Bottle:
         sn.mappings = all_maps
         sn.principal_propagation_enabled = any(
             m.get("principal_propagation") for m in all_maps)
+        # Probe every mapping upfront so the front-end edge color logic
+        # sees uniform `reachable` data across all mappings to a given
+        # backend.  Without this, only the placeholder-trigger mapping
+        # would be probed, and a later manual Probe Mappings sweep could
+        # leave one mapping reachable=true and a sibling reachable=false
+        # → red edge instead of green.
+        from sapmap_scc_relay import probe_mapping
+        for m in all_maps:
+            if not isinstance(m, dict):
+                continue
+            try:
+                probe_mapping(m, timeout=3.0)
+            except Exception:
+                pass
         for n in api.state.nodes.values():
             if n.scc_links and host in n.scc_links:
                 n.scc_links = [h for h in n.scc_links if h != host]
@@ -1237,23 +1251,18 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     break
             if matched_node is None and (msid or ihost):
                 # Backend isn't on the map yet — only synthesize a
-                # placeholder if the smoke-test confirms the target is
-                # reachable from us through the same network path the
-                # SCC tunnel uses.  Avoids cluttering the map with dead
-                # / typo'd / decommissioned mappings.  probe_mapping
-                # mutates the mapping in place with reachable + latency
-                # + signature, so the drawer also benefits.
-                from sapmap_scc_relay import probe_mapping
-                probe = probe_mapping(m, timeout=3.0)
-                if not probe.get("reachable"):
+                # placeholder if the upfront smoke-test confirmed the
+                # target is reachable.  Avoids cluttering the map with
+                # dead / typo'd / decommissioned mappings.
+                if not m.get("reachable"):
                     sapmap_findings.emit_finding(
                         "INFO", host,
                         f"SCC mapping {ihost}:{iport} [{msid or '?'}] "
                         f"unreachable on smoke test — not adding to map "
-                        f"({probe.get('probe_error') or 'no response'}).",
+                        f"({m.get('probe_error') or 'no response'}).",
                         ref="scc.mapping.discovered.unreachable",
                         meta={"host": ihost, "port": iport, "sid": msid,
-                              "error": probe.get("probe_error")})
+                              "error": m.get("probe_error")})
                     continue
                 # SID precedence: mapping.sid > EXT_<ihost>_<iport>.
                 # Mirrors the UNK_/ACL_ pattern used by the scanner.
@@ -1286,15 +1295,15 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         "INFO", host,
                         f"SCC mapping discovered new on-prem backend "
                         f"{ihost}:{iport} [{new_sid}] — reachable on smoke "
-                        f"test ({probe.get('probe_latency_ms', 0)}ms"
-                        f"{(' · ' + probe['probe_signature']) if probe.get('probe_signature') else ''})"
+                        f"test ({m.get('probe_latency_ms', 0)}ms"
+                        f"{(' · ' + m['probe_signature']) if m.get('probe_signature') else ''})"
                         f" — added to map.",
                         ref="scc.mapping.discovered.node",
                         meta={"sid": new_sid, "host": ihost, "port": iport,
                               "backend_type": m.get("backend_type", ""),
                               "auth": m.get("authentication_mode", ""),
-                              "latency_ms": probe.get("probe_latency_ms", 0),
-                              "signature": probe.get("probe_signature", "")})
+                              "latency_ms": m.get("probe_latency_ms", 0),
+                              "signature": m.get("probe_signature", "")})
             if matched_node and host not in matched_node.scc_links:
                 matched_node.scc_links.append(host)
 
