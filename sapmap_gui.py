@@ -1135,12 +1135,23 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             if not peer_node.ha_peer_role:
                                 peer_node.ha_peer_role = sn.ha_role
                     else:
+                        # Print raw HA payload server-side so we can tell
+                        # whether the API didn't expose HA at all, or
+                        # exposed it under a shape pull_ha_state didn't
+                        # recognise.  Helps diagnose missing violet line.
+                        try:
+                            print(f"[i] SCC {host}: HA raw payload = "
+                                  f"{json.dumps(ha.get('raw', {}), default=str)[:1500]}")
+                        except Exception:
+                            print(f"[i] SCC {host}: HA raw payload "
+                                  f"(unprintable): {ha.get('raw')}")
                         sapmap_findings.emit_finding(
                             "INFO", host,
                             f"SCC HA: standalone (role={sn.ha_role or '?'}, "
                             f"no shadow configured).",
                             ref="scc.ha.standalone",
-                            meta={"role": sn.ha_role})
+                            meta={"role": sn.ha_role,
+                                  "raw": ha.get("raw", {})})
                 subs = pull_subaccounts(sess, timeout=10.0) or []
                 all_maps = []
                 uuids = []
