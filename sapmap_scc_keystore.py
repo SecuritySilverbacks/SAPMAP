@@ -318,6 +318,83 @@ def parse_mappings_from_zip(loot_zip_path: str) -> dict:
     }
 
 
+def parse_ha_state_from_zip(loot_zip_path: str) -> dict:
+    """Pull HA state out of a backup zip's scc_config/scc_config.ini.
+
+    The REST API on most SCC builds only exposes ``ha:{role}`` and not
+    the shadow/master peer host or the ``isShadowEnabled`` /
+    ``isHaActive`` flags.  Those fields ARE present in scc_config.ini
+    inside the backup, so we parse them straight from the zip.
+
+    Returns::
+
+        {
+          "ok": True,
+          "role": "master" | "shadow" | "",
+          "is_shadow_enabled": bool,
+          "is_ha_active": bool,
+          "shadow_host": "<peer host when we are master>",
+          "master_host": "<peer host when we are shadow>",
+          "peer_host": "<the *other* host, role-aware>",
+          "peer_role": "shadow" | "master" | "",
+        }
+
+    The ini file is actually XML despite the .ini extension.  Unknown
+    fields are silently treated as empty.  ``ok=False`` on parse error.
+    """
+    try:
+        zf = zipfile.ZipFile(loot_zip_path)
+    except (zipfile.BadZipFile, FileNotFoundError) as e:
+        return {"ok": False, "error": f"bad loot zip: {e}"}
+    target = "scc_config/scc_config.ini"
+    if target not in zf.namelist():
+        return {"ok": False, "error": f"{target} not in zip"}
+    try:
+        blob = zf.read(target)
+    except KeyError as e:
+        return {"ok": False, "error": f"read failed: {e}"}
+    try:
+        root = _ET.fromstring(blob)
+    except _ET.ParseError as e:
+        return {"ok": False, "error": f"xml parse failed: {e}"}
+
+    def _gather(tag):
+        # findtext walks the immediate children only — search the whole
+        # tree because SCC nests these under different parents per build.
+        for el in root.iter(tag):
+            t = (el.text or "").strip()
+            if t:
+                return t
+        return ""
+
+    role = _gather("haRole").lower()
+    is_shadow_enabled = _gather("isShadowEnabled").lower() == "true"
+    is_ha_active = _gather("isHaActive").lower() == "true"
+    shadow_host = _gather("shadowHost") or _gather("shadowSystemHost") \
+        or _gather("shadowHostName")
+    master_host = _gather("masterHost") or _gather("masterSystemHost") \
+        or _gather("masterHostName")
+    if role == "master":
+        peer_host = shadow_host
+        peer_role = "shadow" if peer_host else ""
+    elif role == "shadow":
+        peer_host = master_host
+        peer_role = "master" if peer_host else ""
+    else:
+        peer_host = shadow_host or master_host
+        peer_role = ""
+    return {
+        "ok": True,
+        "role": role,
+        "is_shadow_enabled": is_shadow_enabled,
+        "is_ha_active": is_ha_active,
+        "shadow_host": shadow_host,
+        "master_host": master_host,
+        "peer_host": peer_host,
+        "peer_role": peer_role,
+    }
+
+
 def extract_keystore(host: str, user: str, password: str, *,
                      backup_password: Optional[str] = None,
                      port: int = 8443, timeout: float = 30.0,

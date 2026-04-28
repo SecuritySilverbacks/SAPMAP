@@ -1539,6 +1539,63 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                   f"{mres.get('error')}")
                     except Exception as me:
                         print(f"[-] SCC {host}: offline mapping parse failed: {me}")
+                # Auto-HA: scc_config.ini in the backup carries the full
+                # HA state (haRole / isShadowEnabled / isHaActive /
+                # shadowHost / masterHost), which the REST API doesn't
+                # expose on most builds.  Parse it here so the violet
+                # master↔shadow link gets drawn after a backup pull.
+                try:
+                    from sapmap_scc_keystore import parse_ha_state_from_zip
+                    hres = parse_ha_state_from_zip(sn.keystore_loot_path)
+                    if hres.get("ok"):
+                        sn.ha_role = hres.get("role", "") or sn.ha_role
+                        peer = hres.get("peer_host", "") or ""
+                        peer_role = hres.get("peer_role", "") or ""
+                        is_active = hres.get("is_ha_active", False)
+                        is_enabled = hres.get("is_shadow_enabled", False)
+                        if peer:
+                            sn.ha_shadow_host = peer
+                            sn.ha_peer_role = peer_role
+                            sapmap_findings.emit_finding(
+                                "MEDIUM", host,
+                                f"SCC HA pair detected (from backup): "
+                                f"{sn.ha_role or '?'} ↔ {peer_role or '?'} "
+                                f"{peer} (active={is_active}, "
+                                f"shadow_enabled={is_enabled}). "
+                                f"Compromise of either node yields the "
+                                f"same tunnel privkey + PP CA — both "
+                                f"must be patched.",
+                                ref="scc.ha.pair.backup",
+                                meta={"role": sn.ha_role,
+                                      "peer_role": peer_role,
+                                      "peer_host": peer,
+                                      "is_ha_active": is_active,
+                                      "is_shadow_enabled": is_enabled})
+                            if peer not in api.state.scc_nodes:
+                                from sapmap_models import SCCNode
+                                api.state.scc_nodes[peer] = SCCNode(
+                                    host=peer,
+                                    ip=peer,
+                                    admin_ui_port=sn.admin_ui_port or 8443,
+                                    ha_role=peer_role,
+                                    ha_peer_role=sn.ha_role,
+                                    ha_shadow_host=host,
+                                    tunnel_region=sn.tunnel_region,
+                                    notes=f"Discovered as HA peer of {host}",
+                                )
+                            else:
+                                pn = api.state.scc_nodes[peer]
+                                if not pn.ha_shadow_host:
+                                    pn.ha_shadow_host = host
+                                if not pn.ha_role:
+                                    pn.ha_role = peer_role
+                                if not pn.ha_peer_role:
+                                    pn.ha_peer_role = sn.ha_role
+                    else:
+                        print(f"[-] SCC {host}: HA-from-zip parse: "
+                              f"{hres.get('error')}")
+                except Exception as he:
+                    print(f"[-] SCC {host}: HA-from-zip parse failed: {he}")
                 # Auto-decrypt: pure-Python decryptor has no extra
                 # dependency cost, so chain decrypt+unlock immediately
                 # whenever the backup contains an SSFS blob.
