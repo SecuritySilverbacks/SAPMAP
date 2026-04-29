@@ -725,6 +725,7 @@ body {
       <div class="ctx-item" data-action="os_terminal">&#128187; OS Command Terminal</div>
       <div class="ctx-item" data-action="reverse_shell">&#128279; Reverse Shell</div>
       <div class="ctx-item" data-action="harvest_scc">&#9928; Harvest SCC (post-RCE)</div>
+      <div class="ctx-item" data-action="harvest_scc_mappings">&#128194; Harvest SCC Mappings (OS-exec)</div>
       <div class="ctx-sep"></div>
       <div class="ctx-item" data-action="propagate">&#128640; Propagate (exploit next hop)</div>
     </div>
@@ -2566,7 +2567,8 @@ function showCtxMenu(e, sid) {
     //   - CVE-2025-31324 webshell: Java only, unauth.
     'os_terminal':      hasGwVuln || (isAbapStack && hasCreatedUsers) || hasCve31324,
     'reverse_shell':    hasGwVuln || (isAbapStack && hasCreatedUsers) || hasCve31324,
-    'harvest_scc':      hasGwVuln || hasCve31324 || hasCreatedUsers,
+    'harvest_scc':          (hasGwVuln || hasCve31324 || hasCreatedUsers) && _hasSccOnSameHost(n),
+    'harvest_scc_mappings': (hasGwVuln || hasCve31324 || hasCreatedUsers) && _hasSccOnSameHost(n),
     'create_tcpip':     hasCreds,                   // need credentials/access
     'propagate':        hasCreds,                   // need access to propagate from
     'cleanup':          hasCreatedUsers,             // need created users to clean up
@@ -2620,7 +2622,8 @@ function showCtxMenu(e, sid) {
         : 'Requires Java/dual-stack + CVE-2025-31324, GW SAPXPG, or a Java admin user with a reachable CTC / telnet endpoint'),
     'os_terminal':      'Requires an OS-exec path: vulnerable GW (any stack), ABAP+created-user (SXPG), or CVE-2025-31324 webshell (Java)',
     'reverse_shell':    'Requires an OS-exec path: vulnerable GW (any stack), ABAP+created-user (SXPG), or CVE-2025-31324 webshell (Java)',
-    'harvest_scc':      'Requires OS-exec on this node: exploit GW (SAPXPG), CVE-2025-31324 webshell, or create a user first',
+    'harvest_scc':          'Requires OS-exec on this node AND an SCC on the same host IP',
+    'harvest_scc_mappings': 'Requires OS-exec on this node AND an SCC on the same host IP',
     'create_tcpip':     'Provide credentials or create a user first',
     'propagate':        'Provide credentials or create a user first',
     'cleanup':          'No created users to clean up',
@@ -3119,6 +3122,12 @@ async function ctxAction(action) {
                    'Runs ARP/host sweep, SSH-key hunt, and same-host SCC bundle ' +
                    'exfiltration on the pwned node.  May write files to /tmp on target.')) break;
       await api('POST', `node/${sid}/harvest_scc`);
+      break;
+    }
+    case 'harvest_scc_mappings': {
+      if (!confirm('Harvest SCC mappings from co-located SCC on ' + sid + ' via OS-exec?\n\nReads backends.xml directly from disk — no SCC admin credentials needed.')) break;
+      await api('POST', `node/${sid}/harvest_scc_mappings`);
+      showToast('SCC mapping harvest started — check findings panel', 'info');
       break;
     }
     case 'set_telnet_override': {
@@ -5150,6 +5159,19 @@ async function exportJSON() {
 function zoomIn() { viewBoxUserControlled = true; viewBox.w *= 0.8; viewBox.h *= 0.8; applyViewBox(); }
 function zoomOut() { viewBoxUserControlled = true; viewBox.w *= 1.25; viewBox.h *= 1.25; applyViewBox(); }
 function fitMap() { viewBoxUserControlled = false; viewBox.x = 0; viewBox.y = 0; viewBox.w = 1200; viewBox.h = 800; viewBox._nodeCount = 0; applyViewBox(); updateMap(); }
+function _hasSccOnSameHost(n) {
+  // Returns true when an SCCNode shares the same IP as SAP node n.
+  if (!n) return false;
+  const IP_RE = /^\d{1,3}(\.\d{1,3}){3}$/;
+  const nip = (n.ip && IP_RE.test(n.ip)) ? n.ip :
+              (n.hostname && IP_RE.test(n.hostname||'')) ? n.hostname : '';
+  if (!nip) return false;
+  return Object.values(mapState.scc_nodes || {}).some(sn => {
+    const snip = (sn.ip && IP_RE.test(sn.ip)) ? sn.ip :
+                 (sn.host && IP_RE.test(sn.host||'')) ? sn.host : '';
+    return snip === nip;
+  });
+}
 function resetLayout() {
   flashActivity('Rearranging: Reset');
   viewBoxUserControlled = false;

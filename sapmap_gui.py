@@ -2109,6 +2109,54 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:harvest_scc", f"{sid}: Harvest SCC (post-RCE)", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/harvest_scc_mappings", method="POST")
+    def node_harvest_scc_mappings(sid):
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        def _run():
+            _task_start(f"{sid}:harvest_scc_mappings",
+                        f"{sid}: harvesting SCC mappings via OS-exec")
+            try:
+                from sapmap_exploit import harvest_scc_mappings_from_pwned_node
+                res = harvest_scc_mappings_from_pwned_node(node, api.state)
+                if not res.get("ok"):
+                    print(f"[-] {sid}: harvest_scc_mappings: {res.get('error')}")
+                    return
+                # Find the SCC node matching this SAP node's IP
+                node_ip = (node.ip or node.hostname or "").lower()
+                scc_host = None
+                scc_node = None
+                for h, sn in api.state.scc_nodes.items():
+                    sn_ip = (sn.ip or sn.host or h or "").lower()
+                    if sn_ip == node_ip or h.lower() == node_ip:
+                        scc_host = h
+                        scc_node = sn
+                        break
+                if not scc_host:
+                    # Create a stub SCC node for this host
+                    from sapmap_models import SCCNode
+                    scc_host = node_ip
+                    scc_node = SCCNode(host=scc_host, ip=node_ip,
+                                       notes=f"Discovered via OS-exec harvest from {sid}")
+                    api.state.scc_nodes[scc_host] = scc_node
+                _apply_mappings_to_state(
+                    scc_host, scc_node,
+                    res.get("mappings") or [],
+                    res.get("subaccount_uuids") or [])
+                for region in (res.get("regions") or []):
+                    if region and region not in (scc_node.tunnel_region or ""):
+                        scc_node.tunnel_region = region
+            except Exception as e:
+                print(f"[-] {sid}: harvest_scc_mappings error: {e}")
+            finally:
+                _task_end(f"{sid}:harvest_scc_mappings")
+
+        threading.Thread(target=_run, daemon=True).start()
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/deep_scan", method="POST")
     def node_deep_scan(sid):
         response.content_type = "application/json"
