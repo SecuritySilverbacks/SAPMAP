@@ -1878,8 +1878,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     f"SCC password hash recovered for '{u['username']}' "
                     f"({u.get('algorithm','?')}, "
                     f"roles={u.get('roles','?')}) — "
-                    f"hashcat -m {u.get('hashcat_mode',0)} with "
-                    f"hash:salt format.",
+                    f"hashcat -m {u.get('hashcat_mode',0)} hash:salt, "
+                    f"or paste hash into https://crackstation.net for "
+                    f"instant rainbow-table lookup.",
                     ref="scc.users.hash_recovered",
                     meta={"username": u["username"],
                           "algorithm": u.get("algorithm"),
