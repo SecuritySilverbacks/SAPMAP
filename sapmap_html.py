@@ -2567,8 +2567,8 @@ function showCtxMenu(e, sid) {
     //   - CVE-2025-31324 webshell: Java only, unauth.
     'os_terminal':      hasGwVuln || (isAbapStack && hasCreatedUsers) || hasCve31324,
     'reverse_shell':    hasGwVuln || (isAbapStack && hasCreatedUsers) || hasCve31324,
-    'harvest_scc':          (hasGwVuln || hasCve31324 || hasCreatedUsers) && _hasSccOnSameHost(n),
-    'harvest_scc_mappings': (hasGwVuln || hasCve31324 || hasCreatedUsers) && _hasSccOnSameHost(n),
+    'harvest_scc':          hasGwVuln || hasCve31324 || hasCreatedUsers,
+    'harvest_scc_mappings': hasGwVuln || hasCve31324 || hasCreatedUsers,
     'create_tcpip':     hasCreds,                   // need credentials/access
     'propagate':        hasCreds,                   // need access to propagate from
     'cleanup':          hasCreatedUsers,             // need created users to clean up
@@ -2660,6 +2660,9 @@ function showCtxMenu(e, sid) {
     'impact_assess':              !isAbapStack,
     'lpe':                        !isAbapStack,
     'impact_assess_java':         !isJavaStack,
+    // SCC harvest items — hidden entirely unless an SCC is on the same host
+    'harvest_scc':          !_hasSccOnSameHost(n),
+    'harvest_scc_mappings': !_hasSccOnSameHost(n),
   };
 
   // Apply visibility + enable/disable state to each menu item
