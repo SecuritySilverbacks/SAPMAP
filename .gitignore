@@ -17,3 +17,9 @@ nwrfcsdk/
 # Lab/user-specific target lists — may contain internal IPs/hostnames
 targets.txt
 loot/
+# Local settings — contains API keys, never push to git
+settings.local.json
+# Sensitive key material — never push to git
+*.p12
+*.jks
+*.pfx

