@@ -220,6 +220,60 @@ def _parse_resources_xml(blob: bytes) -> list:
     return out
 
 
+def parse_mappings_from_backends_xml(
+    backends_xml: bytes,
+    region: str,
+    uuid: str,
+    resource_xmls: Optional[dict] = None,
+) -> list:
+    """Parse one backends.xml blob read from disk (not from zip).
+
+    ``resource_xmls`` maps resource filename stem to bytes,
+    e.g. ``{"192.168.2.209_8080": b"<?xml..."}``
+
+    Returns list of mapping dicts (same shape as parse_mappings_from_zip).
+    """
+    try:
+        tree = _ET.fromstring(backends_xml)
+    except _ET.ParseError:
+        return []
+    out = []
+    for sm in tree.iter("systemMapping"):
+        vhost = _xml_text(sm, "virtualHost")
+        vport = _safe_int(_xml_text(sm, "virtualPort"))
+        auth = _xml_text(sm, "authenticationMode")
+        mapping = {
+            "virtual_host": vhost,
+            "virtual_port": vport,
+            "internal_host": _xml_text(sm, "internalHost"),
+            "internal_port": _safe_int(_xml_text(sm, "internalPort")),
+            "protocol": _xml_text(sm, "communicationProtocol"),
+            "path_allowlist": [],
+            "path_wildcards": False,
+            "backend_type": _xml_text(sm, "backendType"),
+            "principal_propagation": auth in ("X509_GENERAL", "KERBEROS"),
+            "authentication_mode": auth,
+            "sid": _xml_text(sm, "sid"),
+            "host_in_header": _xml_text(sm, "internalHostInHeader"),
+            "description": _xml_text(sm, "description"),
+            "total_resources": 0,
+            "enabled_resources": 0,
+            "subaccount": uuid,
+            "region": region,
+        }
+        stem = f"{vhost}_{vport}"
+        if resource_xmls and stem in resource_xmls:
+            try:
+                mapping["path_allowlist"] = _parse_resources_xml(resource_xmls[stem])
+            except Exception:
+                pass
+        mapping["total_resources"] = len(mapping["path_allowlist"])
+        mapping["enabled_resources"] = sum(
+            1 for r in mapping["path_allowlist"] if r.get("enabled", True))
+        out.append(mapping)
+    return out
+
+
 def parse_mappings_from_zip(loot_zip_path: str) -> dict:
     """Parse cloud→on-prem mappings straight out of a backup zip.
 
