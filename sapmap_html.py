@@ -1593,66 +1593,90 @@ function updateMap() {
   const BOX_W = 240, BOX_H = 174, MARGIN = 60;
   const cols = Math.max(1, Math.min(4, nodeKeys.length));
 
-  // Auto-layout (grid) for nodes without positions
-  // Place new nodes in free space, avoiding overlap with existing nodes
-  // (both SAP nodes AND already-placed SCC nodes — otherwise a fresh SAP
-  // discovery happily lands on top of an existing SCC because cols grew
-  // since the SCC was first parked).
-  const placedBoxes = [];
-  nodeKeys.forEach(sid => {
-    const n = nodes[sid];
-    if (n._x != null) placedBoxes.push({ x: n._x, y: n._y });
-  });
-  Object.values(mapState.scc_nodes || {}).forEach(sn => {
-    if (sn._x != null) placedBoxes.push({ x: sn._x, y: sn._y });
-  });
-
-  function overlapsAny(x, y) {
-    for (const b of placedBoxes) {
-      if (Math.abs(x - b.x) < BOX_W + MARGIN/2 && Math.abs(y - b.y) < BOX_H + MARGIN/2)
-        return true;
-    }
-    return false;
-  }
-
-  nodeKeys.forEach((sid, idx) => {
-    const n = nodes[sid];
-    if (n._x == null) {
-      // Try grid position first, then search for free slot
-      let col = idx % cols, row = Math.floor(idx / cols);
-      let px = MARGIN + col * (BOX_W + MARGIN);
-      let py = MARGIN + row * (BOX_H + MARGIN);
-      if (overlapsAny(px, py)) {
-        // Scan grid slots until a free one is found
-        let found = false;
-        for (let r = 0; r < 100 && !found; r++) {
-          for (let c = 0; c < cols && !found; c++) {
-            px = MARGIN + c * (BOX_W + MARGIN);
-            py = MARGIN + r * (BOX_H + MARGIN);
-            if (!overlapsAny(px, py)) found = true;
-          }
-        }
-      }
-      n._x = px;
-      n._y = py;
-      placedBoxes.push({ x: px, y: py });
-    }
-  });
-
-  // --- SAP Cloud Connector nodes — placed alongside SAP nodes ---
+  // Auto-layout: zone-aware placement
+  // ------------------------------------------------------------------
+  // Nodes that share an IP (co-located on the same host) are placed in
+  // the same vertical column so their hosting-zone box doesn't overlap
+  // with other zones.  "Lone" nodes (unique IPs) each get their own
+  // column.  SCC nodes for the same IP share the column with their SAP
+  // siblings.
+  //
+  // Already-positioned nodes (n._x != null) are left untouched — the
+  // user may have manually arranged them.  Only fresh nodes get laid out.
+  // ------------------------------------------------------------------
   const sccNodes = mapState.scc_nodes || {};
   const sccKeys = Object.keys(sccNodes);
-  sccKeys.forEach((host, idx) => {
-    const sn = sccNodes[host];
-    if (sn._x == null) {
-      // Park new SCC nodes off to the right of the SAP-node grid so they
-      // never share a slot with a SAP node and a fresh discovery doesn't
-      // trip the overlap detector.
-      const baseX = MARGIN + cols * (BOX_W + MARGIN);
-      sn._x = baseX;
-      sn._y = MARGIN + idx * (BOX_H + MARGIN);
-      placedBoxes.push({ x: sn._x, y: sn._y });
+
+  const IP_RE_LO = /^\d{1,3}(\.\d{1,3}){3}$/;
+  const getIP = n => {
+    if (n.ip && IP_RE_LO.test(n.ip)) return n.ip;
+    if (n.hostname && IP_RE_LO.test(n.hostname)) return n.hostname;
+    if (n.host && IP_RE_LO.test(n.host)) return n.host;
+    return null;
+  };
+
+  // Build zone groups: ip → [ {kind:'sap'|'scc', id, obj} ]
+  const zoneGroups = {};   // ip  → array of members
+  const noIPGroup  = [];   // nodes/sccs with no known IP
+  nodeKeys.forEach(sid => {
+    const ip = getIP(nodes[sid]);
+    if (ip) { (zoneGroups[ip] = zoneGroups[ip] || []).push({kind:'sap', id:sid, obj:nodes[sid]}); }
+    else noIPGroup.push({kind:'sap', id:sid, obj:nodes[sid]});
+  });
+  sccKeys.forEach(host => {
+    const ip = getIP(sccNodes[host]);
+    if (ip) { (zoneGroups[ip] = zoneGroups[ip] || []).push({kind:'scc', id:host, obj:sccNodes[host]}); }
+    else noIPGroup.push({kind:'scc', id:host, obj:sccNodes[host]});
+  });
+
+  // Separate zones that are fully-placed (all members have _x) from
+  // those that need layout work.
+  const allGroups = [...Object.values(zoneGroups), ...(noIPGroup.length ? [noIPGroup] : [])];
+
+  // Determine the rightmost X already occupied by any placed node so
+  // we can park new zones to its right without overlapping.
+  let cursorX = MARGIN;
+  allGroups.forEach(members => {
+    members.forEach(({obj}) => {
+      if (obj._x != null) cursorX = Math.max(cursorX, obj._x + BOX_W + MARGIN * 2);
+    });
+  });
+
+  // Zone column width: up to 2 SAP-box widths side by side (SAP+SCC pair
+  // or lone SAP) plus a gap between zones.
+  const ZONE_GAP   = MARGIN * 2;   // horizontal gap between zones
+  const COL_STRIDE = BOX_W + MARGIN;
+
+  allGroups.forEach(members => {
+    // Skip groups that are already fully placed
+    const needsPlace = members.filter(m => m.obj._x == null);
+    if (!needsPlace.length) return;
+
+    // Find leftmost X of already-placed members in this group (so new
+    // members in the same zone land near their siblings).
+    let zoneX = null;
+    members.forEach(({obj}) => {
+      if (obj._x != null) zoneX = (zoneX == null) ? obj._x : Math.min(zoneX, obj._x);
+    });
+    if (zoneX == null) {
+      zoneX = cursorX;
     }
+
+    // Stack unplaced members in a single column, top-to-bottom.
+    // Find the lowest Y already occupied in this zone.
+    let zoneY = MARGIN;
+    members.forEach(({obj}) => {
+      if (obj._x != null) zoneY = Math.max(zoneY, obj._y + BOX_H + MARGIN);
+    });
+
+    needsPlace.forEach(({obj}) => {
+      obj._x = zoneX;
+      obj._y = zoneY;
+      zoneY += BOX_H + MARGIN;
+    });
+
+    // Advance the global cursor past this zone for the next group
+    cursorX = Math.max(cursorX, zoneX + BOX_W + ZONE_GAP);
   });
 
   // Compute content bounds (needed for initial auto-fit and fitMap)
