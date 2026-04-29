@@ -2159,22 +2159,22 @@ def create_app(api: SAPMAPApi) -> Bottle:
         if not resp.get("success"):
             return json.dumps({"error": f"hashes.com: {resp.get('message', 'unknown error')}"})
 
+        # API returns {founds: [...], unfounds: [...]} not {list: [...]}
         results = []
         cracked_count = 0
-        for item in (resp.get("list") or []):
+        for item in (resp.get("founds") or []):
             hex_hash = (item.get("hash") or "").lower()
-            found = item.get("found", False)
-            plaintext = item.get("plaintext", "") if found else ""
+            plaintext = item.get("plaintext", "")
             original = hash_map.get(hex_hash, {})
             username = original.get("username", "?")
             results.append({
                 "username": username,
                 "hash_hex": hex_hash,
-                "found": found,
+                "found": True,
                 "plaintext": plaintext,
                 "algorithm": item.get("algorithm", original.get("algorithm", "")),
             })
-            if found and plaintext:
+            if plaintext:
                 cracked_count += 1
                 # Store as SCC credential (same as scc_set_credentials)
                 from sapmap_models import Credentials as _Creds
@@ -2202,8 +2202,19 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 except Exception:
                     pass
 
+        for item in (resp.get("unfounds") or []):
+            hex_hash = (item.get("hash") or "").lower()
+            original = hash_map.get(hex_hash, {})
+            results.append({
+                "username": original.get("username", "?"),
+                "hash_hex": hex_hash,
+                "found": False,
+                "plaintext": "",
+                "algorithm": original.get("algorithm", ""),
+            })
         cost = resp.get("cost", 0)
-        print(f"[*] SCC {host}: hashes.com lookup: {cracked_count}/{len(results)} cracked, cost={cost} credits")
+        total = len(results)
+        print(f"[*] SCC {host}: hashes.com lookup: {cracked_count}/{total} cracked, cost={cost} credits")
         return json.dumps({"ok": True, "results": results,
                            "cracked": cracked_count, "cost": cost})
 
