@@ -547,6 +547,139 @@ def parse_user_hashes_from_xml(xml_bytes: bytes) -> dict:
     return {"ok": True, "users": users, "hashcat_commands": cmds}
 
 
+def try_decrypt_users_xml(zip_path: str, backup_password: str,
+                           loot_dir: str) -> Optional[str]:
+    """Attempt to decrypt config/users.xml from a backup zip.
+
+    Tries all known cipher approaches (PBKDF2+AES variants, RSEC).
+    Returns the path to the saved plaintext file on success, or None.
+
+    This is option-2 infrastructure — decryption will succeed once the
+    SCC backup cipher is RE'd (option 3 backlog) and the correct
+    approach is added here.  The backup_password parameter is stored
+    for future use even when all current approaches fail.
+    """
+    try:
+        import zipfile as _zf
+        zf = _zf.ZipFile(zip_path)
+        if "config/users.xml" not in zf.namelist():
+            return None
+        encrypted = zf.read("config/users.xml")
+        esalt = zf.read("esalt.bin") if "esalt.bin" in zf.namelist() else b""
+    except Exception:
+        return None
+
+    pw = backup_password.encode() if backup_password else b""
+    xml_bytes = None
+
+    # --- Approach A: zip-level password (standard AES-Zip) ---
+    if not xml_bytes:
+        try:
+            zf.setpassword(pw)
+            raw = zf.read("config/users.xml")
+            if raw[:1] in (b"<", b"\xef"):
+                xml_bytes = raw
+        except Exception:
+            pass
+
+    # --- Approach B: PBKDF2+AES-GCM (12B nonce per file) ---
+    if not xml_bytes and esalt and pw:
+        try:
+            from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+            from cryptography.hazmat.primitives import hashes
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+            for algo in [hashes.SHA256(), hashes.SHA1()]:
+                for iters in [10000, 65536, 100000]:
+                    for klen in [32, 16]:
+                        for salt_bytes in [esalt, esalt[:16], esalt[:28]]:
+                            try:
+                                kdf = PBKDF2HMAC(algorithm=algo, length=klen,
+                                                  salt=salt_bytes, iterations=iters)
+                                key = kdf.derive(pw)
+                                pt = AESGCM(key).decrypt(
+                                    encrypted[:12], encrypted[12:], None)
+                                if pt[:1] in (b"<", b"\xef"):
+                                    xml_bytes = pt
+                                    break
+                            except Exception:
+                                pass
+                        if xml_bytes:
+                            break
+                    if xml_bytes:
+                        break
+                if xml_bytes:
+                    break
+        except Exception:
+            pass
+
+    # --- Approach C: PBKDF2+AES-CBC (IV from esalt tail) ---
+    if not xml_bytes and esalt and pw:
+        try:
+            from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+            from cryptography.hazmat.primitives import hashes
+            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+            from cryptography.hazmat.primitives.padding import PKCS7
+            iv = esalt[-16:]
+            for algo in [hashes.SHA256(), hashes.SHA1()]:
+                for iters in [10000, 65536, 100000]:
+                    for klen in [32, 16]:
+                        try:
+                            kdf = PBKDF2HMAC(algorithm=algo, length=klen,
+                                              salt=esalt[:-16], iterations=iters)
+                            key = kdf.derive(pw)
+                            cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
+                            pt = cipher.decryptor().update(encrypted) + \
+                                 cipher.decryptor().finalize()
+                            up = PKCS7(128).unpadder()
+                            pt2 = up.update(pt) + up.finalize()
+                            if pt2[:1] in (b"<", b"\xef"):
+                                xml_bytes = pt2
+                                break
+                        except Exception:
+                            pass
+                    if xml_bytes:
+                        break
+                if xml_bytes:
+                    break
+        except Exception:
+            pass
+
+    # --- Approach D: RSEC cipher (SAP global master key) ---
+    if not xml_bytes:
+        try:
+            import sys as _sys
+            if "." not in _sys.path:
+                _sys.path.insert(0, ".")
+            from sap_rsec_cipher import rsec_decrypt, rsec_decrypt_key, RSEC_MASTER_KEY
+            # Decrypt esalt to get DEK, try decrypting users.xml
+            dec_esalt = rsec_decrypt(esalt, RSEC_MASTER_KEY)
+            for start in range(0, len(dec_esalt) - 23, 4):
+                dek = dec_esalt[start:start+24]
+                try:
+                    pt = rsec_decrypt(encrypted, dek)
+                    if pt[:1] in (b"<", b"\xef"):
+                        xml_bytes = pt
+                        break
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    if xml_bytes is None:
+        return None
+
+    # Save plaintext
+    os.makedirs(loot_dir, exist_ok=True)
+    out_path = os.path.join(loot_dir, "users_plaintext.xml")
+    with open(out_path, "wb") as fh:
+        fh.write(xml_bytes)
+    try:
+        os.chmod(out_path, 0o600)
+    except Exception:
+        pass
+    return out_path
+
+
 def extract_keystore(host: str, user: str, password: str, *,
                      backup_password: Optional[str] = None,
                      port: int = 8443, timeout: float = 30.0,

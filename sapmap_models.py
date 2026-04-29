@@ -601,6 +601,9 @@ class SCCNode:
     ha_role: str = ""               # "master" | "shadow" | "" (no HA / unknown)
     ha_peer_role: str = ""          # role of ha_shadow_host ("shadow" if we are master, etc.)
     notes: str = ""
+    # In-memory only — not persisted. Set when Extract Keystore is run.
+    backup_password: str = field(default="", repr=False)
+    users_xml_loot_path: str = ""   # path to cached plaintext users.xml on disk
 
     def to_dict(self) -> dict:
         return {
@@ -644,6 +647,7 @@ class SCCNode:
             "ha_role": self.ha_role,
             "ha_peer_role": self.ha_peer_role,
             "notes": self.notes,
+            "users_xml_loot_path": self.users_xml_loot_path,
             "kind": "scc",
         }
 
@@ -651,6 +655,8 @@ class SCCNode:
     def from_dict(cls, d: dict) -> SCCNode:
         known = {f.name for f in fields(cls)}
         clean = {k: v for k, v in d.items() if k in known}
+        # backup_password is session-only — never load from persisted state
+        clean.pop("backup_password", None)
         if isinstance(clean.get("position"), list):
             clean["position"] = tuple(clean["position"])
         findings_d = clean.get("findings", [])
