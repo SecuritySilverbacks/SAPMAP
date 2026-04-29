@@ -2229,9 +2229,8 @@ function updateMap() {
     // Header band
     html += `<rect x="${x+cut-2}" y="${y}" width="${hw - 2*(cut-2)}" height="26" fill="${sccStroke}" opacity="0.35" />`;
 
-    // Title — "SCC" pill + host
+    // Title — "SCC" label only (host moves into body like SAP nodes)
     html += `<text x="${x+cut+4}" y="${y+18}" fill="#fff" font-size="13" font-weight="bold" font-family="monospace">SCC</text>`;
-    html += `<text x="${x+cut+44}" y="${y+18}" fill="#cfd9df" font-size="11" font-family="monospace">${escHtml(host)}</text>`;
 
     // Pwned bolt (top-right, mirroring SAP nodes)
     if (sn.pwned) {
@@ -2242,8 +2241,10 @@ function updateMap() {
            + ` font-weight="bold" pointer-events="none">&#9889;</text>`;
     }
 
-    // Body lines
+    // Body lines — host first (IP or hostname), then details
     let ty = y + 42;
+    html += `<text x="${x+cut+4}" y="${ty}" fill="#cfd9df" font-size="11" font-weight="bold" font-family="monospace">${escHtml(host)}</text>`;
+    ty += 16;
     if (sn.version) {
       html += `<text x="${x+cut+4}" y="${ty}" fill="#8b949e" font-size="10" font-family="monospace">Version: ${escHtml(sn.version)} (${escHtml(sn.version_source || '?')})</text>`;
       ty += 14;
