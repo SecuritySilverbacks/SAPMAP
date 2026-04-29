@@ -3731,11 +3731,15 @@ async function sccDownloadHashes(host) {
   tbl += '</table>';
   document.getElementById('scc-hashes-table').innerHTML = tbl;
 
-  // Hashcat commands
+  // Hashcat commands + online rainbow table tip
   const cmds = r.hashcat_commands || [];
-  let cmdHtml = '';
+  let cmdHtml = '<div style="margin-top:8px;padding:8px 10px;background:#161b22;border:1px solid #30363d;border-radius:4px;font-size:12px">' +
+    '&#127760; <b style="color:#e6edf3">Quick win:</b> paste the hash value (left of the colon) directly into ' +
+    '<a href="https://crackstation.net" target="_blank" style="color:#58a6ff">crackstation.net</a> — ' +
+    'it checks against billions of pre-computed SHA-1 and SHA-256 entries instantly, no GPU needed.' +
+    '</div>';
   if (cmds.length) {
-    cmdHtml = '<div style="margin-top:8px"><div style="color:#8b949e;font-size:11px;margin-bottom:4px">Hashcat commands:</div>' +
+    cmdHtml += '<div style="margin-top:8px"><div style="color:#8b949e;font-size:11px;margin-bottom:4px">Offline brute-force (hashcat):</div>' +
       cmds.map(c => `<pre style="background:#161b22;padding:8px;border-radius:4px;font-size:11px;color:#e6edf3;margin:0 0 6px;overflow-x:auto">${escHtml(c)}</pre>`).join('') +
       '</div>';
   }
