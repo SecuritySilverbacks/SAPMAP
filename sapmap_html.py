@@ -525,6 +525,8 @@ body {
       <div class="dd-sep"></div>
       <div class="dd-item" onclick="showAddSystemModal()">&#10133; Add System Manually</div>
       <div class="dd-item" onclick="showSetPasswordModal()">&#128273; Set Default Password</div>
+      <div class="dd-sep"></div>
+      <div class="dd-item" onclick="showHashesApiKeyModal()">&#128273; Set hashes.com API Key</div>
     </div>
   </div>
   <div class="menu-item">View
@@ -3887,6 +3889,18 @@ function sccHashesCopy() {
   navigator.clipboard.writeText(lines).then(
     () => showToast('Hashes copied to clipboard', 'success'),
     () => showToast('Copy failed — select manually', 'error'));
+}
+
+async function showHashesApiKeyModal() {
+  // Show current status before opening
+  try {
+    const s = await fetch('/api/settings/local').then(r => r.json());
+    const info = document.getElementById('hashes-api-key-input');
+    if (info) info.placeholder = s.hashes_com_api_key_set
+      ? '(key already set — paste new key to replace)'
+      : 'paste key here';
+  } catch(e) {}
+  document.getElementById('hashes-api-modal').classList.add('visible');
 }
 
 async function saveHashesApiKey() {
