@@ -1746,6 +1746,76 @@ function updateMap() {
   const prevNodes = new Set(knownNodeSids);
   const prevConns = new Set(knownConnKeys);
 
+  // ── Hosting-zone background boxes ───────────────────────────────────────
+  // Group every node (SAP + SCC) by its canonical IP address.  Nodes that
+  // share an IP are co-located on the same physical host and get a common
+  // background zone drawn behind them.
+  {
+    const IP_RE = /^\d{1,3}(\.\d{1,3}){3}$/;
+    // ip -> [ {x, y, w, h, label, nodeType} ]
+    const zoneMap = {};
+    const addToZone = (ip, x, y, label, nodeType) => {
+      if (!ip || !IP_RE.test(ip)) return;
+      if (x == null || y == null) return;
+      if (!zoneMap[ip]) zoneMap[ip] = [];
+      zoneMap[ip].push({ x, y, w: BOX_W, h: BOX_H, label, nodeType });
+    };
+
+    Object.entries(nodes).forEach(([sid, n]) => {
+      const ip = n.ip || (IP_RE.test(n.hostname||'') ? n.hostname : '');
+      addToZone(ip, n._x, n._y, sid, 'sap');
+    });
+    Object.entries(sccNodes).forEach(([host, sn]) => {
+      const ip = sn.ip || (IP_RE.test(sn.host||'') ? sn.host : '');
+      addToZone(ip, sn._x, sn._y, host, 'scc');
+    });
+
+    const PAD = 28;
+    Object.entries(zoneMap).forEach(([ip, members]) => {
+      if (members.length < 2) return;
+      const xs = members.map(m => m.x);
+      const ys = members.map(m => m.y);
+      const zx = Math.min(...xs) - PAD;
+      const zy = Math.min(...ys) - PAD - 18;  // 18px headroom for label
+      const zw = Math.max(...members.map(m => m.x + m.w)) + PAD - zx;
+      const zh = Math.max(...members.map(m => m.y + m.h)) + PAD - zy;
+
+      // Subtle dark-teal zone fill + dashed border
+      html += `<rect x="${zx}" y="${zy}" width="${zw}" height="${zh}" ` +
+              `rx="14" fill="#111e26" fill-opacity="0.55" ` +
+              `stroke="#2e5060" stroke-width="1.5" stroke-dasharray="7,4" />`;
+
+      // Label: hostname from any member that has one, else the raw IP
+      const allNodes = [
+        ...Object.values(nodes).filter(n => {
+          const nip = n.ip || (IP_RE.test(n.hostname||'') ? n.hostname : '');
+          return nip === ip;
+        }),
+        ...Object.values(sccNodes).filter(sn => {
+          const snip = sn.ip || (IP_RE.test(sn.host||'') ? sn.host : '');
+          return snip === ip;
+        }),
+      ];
+      const hostnameHint = allNodes
+        .map(x => x.hostname || '')
+        .find(h => h && !IP_RE.test(h)) || '';
+      const labelText = hostnameHint ? `${ip}  (${hostnameHint})` : ip;
+      const typeIcons = [...new Set(members.map(m =>
+        m.nodeType === 'scc' ? '⬡ SCC' : '▣ SAP')
+      )].join('  ');
+
+      html += `<text x="${zx + 12}" y="${zy + 14}" ` +
+              `fill="#4a7a8a" font-size="10" font-weight="bold" ` +
+              `font-family="monospace" pointer-events="none">` +
+              `🖥 ${escHtml(labelText)}</text>`;
+      html += `<text x="${zx + zw - 8}" y="${zy + 14}" ` +
+              `text-anchor="end" fill="#2e5060" font-size="9" ` +
+              `font-family="monospace" pointer-events="none">` +
+              `${escHtml(typeIcons)}</text>`;
+    });
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
   // Draw connections first (behind nodes)
   const newConnKeys = new Set();
   conns.forEach((conn, ci) => {
