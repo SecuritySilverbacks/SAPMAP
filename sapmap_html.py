@@ -797,6 +797,7 @@ body {
   <div class="ctx-item" data-action="scc_pull_mappings">&#128194; Pull Mappings</div>
   <div class="ctx-item" data-action="scc_probe_mappings">&#128225; Probe Mappings (TCP/HTTP smoke test)</div>
   <div class="ctx-item" data-action="scc_extract_keystore" style="color:#f85149">&#128272; Extract Keystore + Decrypt SSFS (FULL BACKUP — CROWN JEWELS)</div>
+  <div class="ctx-item" data-action="scc_download_hashes">&#128196; Download Password Hashes</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="scc_delete" style="color:#f85149">&#128465; Remove from Map</div>
 </div>
@@ -855,6 +856,20 @@ body {
     <div class="form-actions">
       <button class="btn btn-primary" onclick="saveSCCCredentials()">Save</button>
       <button class="btn" onclick="closeModal('scc-cred-modal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- SCC Password Hashes Modal -->
+<div class="modal-overlay" id="scc-hashes-modal">
+  <div class="modal" style="max-width:720px;width:95vw">
+    <h3>&#128196; SCC Password Hashes</h3>
+    <div id="scc-hashes-source" style="font-size:11px;color:#8b949e;margin-bottom:10px"></div>
+    <div id="scc-hashes-table" style="overflow-x:auto;margin-bottom:12px"></div>
+    <div id="scc-hashes-cmds" style="margin-bottom:12px"></div>
+    <div class="form-actions">
+      <button class="btn btn-primary" onclick="sccHashesCopy()">Copy Hashes</button>
+      <button class="btn" onclick="closeModal('scc-hashes-modal')">Close</button>
     </div>
   </div>
 </div>
@@ -2660,8 +2675,9 @@ document.getElementById('scc-ctx-menu').addEventListener('click', function(e) {
     case 'scc_probe_creds':      sccProbeCreds(host); break;
     case 'scc_pull_mappings':    sccPullMappings(host); break;
     case 'scc_probe_mappings':   sccProbeMappings(host); break;
-    case 'scc_extract_keystore': sccExtractKeystore(host); break;
-    case 'scc_delete':           sccRemoveFromMap(host); break;
+    case 'scc_extract_keystore':  sccExtractKeystore(host); break;
+    case 'scc_download_hashes':  sccDownloadHashes(host); break;
+    case 'scc_delete':            sccRemoveFromMap(host); break;
   }
 });
 
@@ -3678,6 +3694,65 @@ async function sccPullMappings(host) {
     const d = await r.json();
     if (d.error) alert('Pull failed: ' + d.error);
   } catch (e) { alert('Pull error: ' + e); }
+}
+
+async function sccDownloadHashes(host) {
+  showToast(`Fetching SCC password hashes from ${host}…`, 'info');
+  let r;
+  try {
+    r = await fetch(`/api/scc/${encodeURIComponent(host)}/download_user_hashes`,
+                    {method:'POST', headers:{'Content-Type':'application/json'},
+                     body:JSON.stringify({})});
+    r = await r.json();
+  } catch(e) { showToast('Request failed: ' + e, 'error'); return; }
+
+  if (!r.ok) { showToast('Failed: ' + (r.error||'unknown'), 'error'); return; }
+
+  const modal = document.getElementById('scc-hashes-modal');
+  document.getElementById('scc-hashes-source').textContent =
+    'Source: ' + (r.source || 'unknown');
+
+  // Build hash table
+  const users = r.users || [];
+  let tbl = '<table style="width:100%;border-collapse:collapse;font-size:12px;font-family:monospace">' +
+    '<tr style="color:#8b949e;border-bottom:1px solid #30363d">' +
+    '<th style="text-align:left;padding:4px 8px">User</th>' +
+    '<th style="text-align:left;padding:4px 8px">Algo</th>' +
+    '<th style="text-align:left;padding:4px 8px">Roles</th>' +
+    '<th style="text-align:left;padding:4px 8px">Hash:Salt (hex)</th></tr>';
+  for (const u of users) {
+    const line = u.hashcat_line || (u.hash_hex ? u.hash_hex + ':' + u.salt_hex : '(no hash)');
+    tbl += `<tr style="border-bottom:1px solid #21262d">
+      <td style="padding:4px 8px;color:#e6edf3">${escHtml(u.username)}</td>
+      <td style="padding:4px 8px;color:${u.algorithm==='SHA-1'?'#f0883e':'#3fb950'}">${escHtml(u.algorithm||'?')}</td>
+      <td style="padding:4px 8px;color:#8b949e">${escHtml(u.roles||'')}</td>
+      <td style="padding:4px 8px;color:#79c0ff;word-break:break-all">${escHtml(line)}</td></tr>`;
+  }
+  tbl += '</table>';
+  document.getElementById('scc-hashes-table').innerHTML = tbl;
+
+  // Hashcat commands
+  const cmds = r.hashcat_commands || [];
+  let cmdHtml = '';
+  if (cmds.length) {
+    cmdHtml = '<div style="margin-top:8px"><div style="color:#8b949e;font-size:11px;margin-bottom:4px">Hashcat commands:</div>' +
+      cmds.map(c => `<pre style="background:#161b22;padding:8px;border-radius:4px;font-size:11px;color:#e6edf3;margin:0 0 6px;overflow-x:auto">${escHtml(c)}</pre>`).join('') +
+      '</div>';
+  }
+  document.getElementById('scc-hashes-cmds').innerHTML = cmdHtml;
+
+  // Store hash lines for copy button
+  modal._hashLines = users.filter(u=>u.hashcat_line).map(u=>u.hashcat_line);
+  modal.classList.add('visible');
+}
+
+function sccHashesCopy() {
+  const modal = document.getElementById('scc-hashes-modal');
+  const lines = (modal._hashLines || []).join('\n');
+  if (!lines) { showToast('No hashes to copy', 'warn'); return; }
+  navigator.clipboard.writeText(lines).then(
+    () => showToast('Hashes copied to clipboard', 'success'),
+    () => showToast('Copy failed — select manually', 'error'));
 }
 
 async function sccExtractKeystore(host) {
