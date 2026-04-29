@@ -868,9 +868,30 @@ body {
     <div id="scc-hashes-source" style="font-size:11px;color:#8b949e;margin-bottom:10px"></div>
     <div id="scc-hashes-table" style="overflow-x:auto;margin-bottom:12px"></div>
     <div id="scc-hashes-cmds" style="margin-bottom:12px"></div>
+    <div id="scc-hashes-online-results" style="margin-top:8px"></div>
     <div class="form-actions">
       <button class="btn btn-primary" onclick="sccHashesCopy()">Copy Hashes</button>
+      <button class="btn" id="hashes-lookup-btn" onclick="sccLookupHashesOnline()">&#128269; Lookup on hashes.com</button>
       <button class="btn" onclick="closeModal('scc-hashes-modal')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- hashes.com API Key Modal -->
+<div class="modal-overlay" id="hashes-api-modal">
+  <div class="modal" style="max-width:480px">
+    <h3>&#128273; hashes.com API Key</h3>
+    <div style="font-size:12px;color:#8b949e;margin-bottom:12px">
+      Get a free API key at <a href="https://hashes.com" target="_blank" style="color:#58a6ff">hashes.com</a>.
+      Stored locally in <code>settings.local.json</code> (gitignored, never pushed).
+    </div>
+    <div class="form-row">
+      <label>API Key</label>
+      <input type="password" id="hashes-api-key-input" placeholder="paste key here" autocomplete="off">
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-primary" onclick="saveHashesApiKey()">Save</button>
+      <button class="btn" onclick="closeModal('hashes-api-modal')">Cancel</button>
     </div>
   </div>
 </div>
@@ -3852,8 +3873,10 @@ async function sccDownloadHashes(host) {
   }
   document.getElementById('scc-hashes-cmds').innerHTML = cmdHtml;
 
-  // Store hash lines for copy button
+  // Store hash lines for copy button and users for online lookup
   modal._hashLines = users.filter(u=>u.hashcat_line).map(u=>u.hashcat_line);
+  modal._users = users;
+  modal.dataset.host = host;
   modal.classList.add('visible');
 }
 
@@ -3864,6 +3887,92 @@ function sccHashesCopy() {
   navigator.clipboard.writeText(lines).then(
     () => showToast('Hashes copied to clipboard', 'success'),
     () => showToast('Copy failed — select manually', 'error'));
+}
+
+async function saveHashesApiKey() {
+  const key = (document.getElementById('hashes-api-key-input').value || '').trim();
+  if (!key) { alert('Please enter an API key'); return; }
+  const r = await fetch('/api/settings/local', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({hashes_com_api_key: key})
+  });
+  const d = await r.json();
+  if (d.ok) {
+    showToast('hashes.com API key saved to settings.local.json', 'success');
+    closeModal('hashes-api-modal');
+  } else {
+    showToast('Failed to save: ' + (d.error||'?'), 'error');
+  }
+}
+
+async function sccLookupHashesOnline() {
+  const modal = document.getElementById('scc-hashes-modal');
+  const host = modal.dataset.host;
+  if (!host) { showToast('No SCC host in modal', 'error'); return; }
+
+  // Check if API key is set
+  const settingsR = await fetch('/api/settings/local');
+  const settings = await settingsR.json();
+  if (!settings.hashes_com_api_key_set) {
+    document.getElementById('hashes-api-key-input').value = '';
+    document.getElementById('hashes-api-modal').classList.add('visible');
+    return;
+  }
+
+  // Build hash list from stored modal data
+  const users = modal._users || [];
+  const hashes = users.filter(u => u.hash_hex).map(u => ({
+    username: u.username,
+    hash_hex: u.hash_hex,
+    algorithm: u.algorithm,
+    hashcat_line: u.hashcat_line,
+  }));
+  if (!hashes.length) { showToast('No hex hashes to look up', 'warn'); return; }
+
+  const btn = document.getElementById('hashes-lookup-btn');
+  if (btn) btn.textContent = '\u23f3 Looking up\u2026';
+  const resDiv = document.getElementById('scc-hashes-online-results');
+  if (resDiv) resDiv.innerHTML = '';
+
+  let r;
+  try {
+    r = await fetch(`/api/scc/${encodeURIComponent(host)}/lookup_hashes_online`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({hashes})
+    });
+    r = await r.json();
+  } catch(e) {
+    showToast('Request failed: ' + e, 'error');
+    if (btn) btn.textContent = '\ud83d\udd0d Lookup on hashes.com';
+    return;
+  }
+  if (btn) btn.textContent = '\ud83d\udd0d Lookup on hashes.com';
+
+  if (!r.ok) {
+    showToast('hashes.com: ' + (r.error||'error'), 'error');
+    return;
+  }
+
+  // Show results
+  let html = `<div style="margin-top:8px;padding:8px;background:#161b22;border-radius:4px;font-size:12px">` +
+    `<div style="color:#8b949e;margin-bottom:6px">hashes.com results \u2014 ` +
+    `${r.cracked}/${r.results.length} cracked, cost: ${r.cost} credit(s)</div>`;
+  for (const res of (r.results || [])) {
+    if (res.found) {
+      html += `<div style="color:#3fb950;font-family:monospace">\u2713 ${escHtml(res.username)}: <b>${escHtml(res.plaintext)}</b> \u2014 stored as SCC credential</div>`;
+    } else {
+      html += `<div style="color:#484f58;font-family:monospace">\u2717 ${escHtml(res.username)}: not found</div>`;
+    }
+  }
+  html += '</div>';
+  if (resDiv) resDiv.innerHTML = html;
+
+  if (r.cracked > 0) {
+    showToast(`${r.cracked} password(s) cracked \u2014 stored as SCC credentials`, 'success');
+    refreshState();
+  }
 }
 
 async function sccExtractKeystore(host) {
