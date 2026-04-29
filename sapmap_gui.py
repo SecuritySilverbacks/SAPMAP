@@ -1986,8 +1986,10 @@ def create_app(api: SAPMAPApi) -> Bottle:
             return json.dumps({"ok": False, "error": diag})
 
         # --- Parse XML ---------------------------------------------------
-        print(f"[*] SCC {host}: xml_bytes ({len(xml_bytes)}B) first 300: "
-              f"{xml_bytes[:300]!r}")
+        print(f"[*] SCC {host}: xml_bytes ({len(xml_bytes)}B) full hex:\n"
+              f"{xml_bytes.hex()}")
+        for i, line in enumerate(xml_bytes.split(b'\n'), 1):
+            print(f"  L{i:02d} ({len(line)}B): {line!r}")
         from sapmap_scc_keystore import parse_user_hashes_from_xml
         result = parse_user_hashes_from_xml(xml_bytes)
         if not result.get("ok"):
