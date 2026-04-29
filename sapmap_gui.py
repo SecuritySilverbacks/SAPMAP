@@ -1450,6 +1450,28 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         username=user, password=pwd, verified=True))
                 sn.keystore_extracted = True
                 sn.keystore_loot_path = res.get("loot_path", "")
+                # Store backup password in-memory for future decryption attempts
+                bpw = data.get("backup_password", "") or data.get("password", "")
+                if bpw:
+                    sn.backup_password = bpw
+
+                # Try to decrypt config/users.xml from the backup zip now
+                # (succeeds once option-3 cipher RE is done and wired in)
+                if sn.keystore_loot_path and bpw:
+                    try:
+                        from sapmap_scc_keystore import try_decrypt_users_xml
+                        loot_dir = os.path.dirname(sn.keystore_loot_path)
+                        cached = try_decrypt_users_xml(
+                            sn.keystore_loot_path, bpw, loot_dir)
+                        if cached:
+                            sn.users_xml_loot_path = cached
+                            print(f"[+] SCC {host}: users.xml decrypted and cached at {cached}")
+                        else:
+                            print(f"[*] SCC {host}: users.xml backup cipher not yet cracked "
+                                  f"(option-3 backlog) — backup_password stored for later")
+                    except Exception as ue:
+                        print(f"[-] SCC {host}: users.xml decrypt attempt error: {ue}")
+
                 sys_ks = res.get("system_keystore") or {}
                 tun_ks = res.get("tunnel_keystores") or []
                 # tunnel_privkey_fp = SHA-256 of the system identity p12;
@@ -1774,6 +1796,20 @@ def create_app(api: SAPMAPApi) -> Bottle:
         scc_addrs = {a.lower() for a in [sn.ip, sn.host, host] if a}
         print(f"[*] SCC {host}: download_user_hashes — "
               f"scc_addrs={scc_addrs}")
+
+        # --- Path 0: cached plaintext from previous extraction ----------
+        if not xml_bytes and sn.users_xml_loot_path:
+            try:
+                with open(sn.users_xml_loot_path, "rb") as fh:
+                    raw = fh.read()
+                if raw[:1] in (b"<", b"\xef"):
+                    xml_bytes = raw
+                    xml_source = f"cached plaintext ({sn.users_xml_loot_path})"
+                    print(f"[+] SCC {host}: users.xml from cache "
+                          f"({len(xml_bytes)} bytes)")
+            except Exception as e:
+                print(f"[-] SCC {host}: cache read error: {e}")
+                sn.users_xml_loot_path = ""  # clear stale path
 
         # --- Path 1: co-located pwned SAP node ---------------------------
         for n in api.state.nodes.values():
