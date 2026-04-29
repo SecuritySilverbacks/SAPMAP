@@ -541,8 +541,25 @@ def parse_user_hashes_from_xml(xml_bytes: bytes) -> dict:
             algo = raw_pw.split("}")[0].lstrip("{")
             hline = raw_pw
         elif raw_pw:
-            algo = "plaintext"
-            hline = raw_pw
+            # SCC 2.19+ stores raw hex hashes without any {algo} prefix.
+            # Detect by length + all-hex content.
+            _hex_chars = set("0123456789abcdefABCDEF")
+            _is_hex = raw_pw and all(c in _hex_chars for c in raw_pw)
+            if _is_hex and len(raw_pw) == 64:
+                # Raw SHA-256 (no prefix)
+                hash_hex = raw_pw.lower()
+                algo = "SHA-256"
+                mode = 1400
+                hline = hash_hex
+            elif _is_hex and len(raw_pw) == 40:
+                # Raw SHA-1 (no prefix)
+                hash_hex = raw_pw.lower()
+                algo = "SHA-1"
+                mode = 100
+                hline = hash_hex
+            else:
+                algo = "plaintext"
+                hline = raw_pw
 
         users.append({
             "username": uname,
@@ -606,6 +623,13 @@ def parse_user_hashes_from_xml(xml_bytes: bytes) -> dict:
     cmds = []
     modes_seen = {u["hashcat_mode"]: u["algorithm"]
                   for u in users if u["hashcat_mode"]}
+    if 100 in modes_seen:
+        cmds.append(
+            "hashcat -m 100 scc_sha256_raw.txt /path/to/wordlist.txt\n"
+            "# Raw SHA-256 hex (no prefix) — SCC 2.19+ format\n"
+            "# Also try -m 1400 if no hits")
+    if 1400 in modes_seen and 100 not in modes_seen:
+        pass   # handled below
     if 101 in modes_seen:
         cmds.append(
             "hashcat -m 101 scc_sha1_tomcat.txt /path/to/wordlist.txt\n"
@@ -614,10 +638,10 @@ def parse_user_hashes_from_xml(xml_bytes: bytes) -> dict:
         cmds.append(
             "hashcat -m 111 scc_ssha1.txt /path/to/wordlist.txt\n"
             "# Tomcat {SSHA} salted SHA-1 — format: hash:salt (hex)")
-    if 1400 in modes_seen:
+    if 1400 in modes_seen or 100 in modes_seen:
         cmds.append(
-            "hashcat -m 1400 scc_sha256.txt /path/to/wordlist.txt\n"
-            "# Tomcat {SHA-256} unsalted SHA-256 — format: hex hash")
+            "hashcat -m 1400 scc_sha256_raw.txt /path/to/wordlist.txt\n"
+            "# Unsalted SHA-256 (raw hex) — SCC 2.19+ and Tomcat {SHA-256} format")
     if 110 in modes_seen:
         cmds.append(
             "hashcat -m 110 scc_sha1_salted.txt /path/to/wordlist.txt\n"
