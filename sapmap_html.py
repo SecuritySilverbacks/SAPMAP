@@ -5155,6 +5155,7 @@ function resetLayout() {
   viewBoxUserControlled = false;
   viewBox.x = 0; viewBox.y = 0; viewBox._nodeCount = 0;
   Object.values(mapState.nodes || {}).forEach(n => { n._x = null; n._y = null; });
+  Object.values(mapState.scc_nodes || {}).forEach(sn => { sn._x = null; sn._y = null; });
   updateMap();
 }
 
@@ -5179,58 +5180,56 @@ function _loSortedNodeKeys() {
 
 function layoutCircle() {
   const sids = _loSortedNodeKeys();
-  if (sids.length === 0) return;
+  const sccHosts = Object.keys(mapState.scc_nodes || {}).sort();
+  const allItems = [
+    ...sids.map(id => ({ id, obj: (mapState.nodes||{})[id] })),
+    ...sccHosts.map(h => ({ id: h, obj: (mapState.scc_nodes||{})[h] })),
+  ];
+  if (allItems.length === 0) return;
   flashActivity('Rearranging: Circle');
-  const nodes = mapState.nodes;
-  // Radius scales with node count so boxes don't overlap on the ring.
-  const minR = 360;
-  const circ = sids.length * (_LO_BOX_W + _LO_MARGIN);
-  const r = Math.max(minR, circ / (2 * Math.PI));
-  // Centre of the ring; +radius padding on each side leaves room
-  // for boxes to extend past the ring centre coordinate.
+  // Radius scales with total node count so boxes never overlap on the ring.
+  const total = allItems.length;
+  const circ = total * (_LO_BOX_W + _LO_MARGIN);
+  const r = Math.max(360, circ / (2 * Math.PI));
   const cx = r + _LO_BOX_W;
   const cy = r + _LO_BOX_H;
-  sids.forEach((sid, i) => {
-    const angle = (2 * Math.PI * i) / sids.length - Math.PI / 2;  // start at top
-    _loCenter(nodes[sid], cx + r * Math.cos(angle),
-                              cy + r * Math.sin(angle));
+  allItems.forEach(({obj}, i) => {
+    const angle = (2 * Math.PI * i) / total - Math.PI / 2;
+    _loCenter(obj, cx + r * Math.cos(angle), cy + r * Math.sin(angle));
   });
   fitMap();
   updateMap();
 }
 
 function layoutStar() {
-  // Hub-and-spoke: pick the most-connected node as hub, ring the rest.
+  // Hub-and-spoke: most-connected SAP node at centre, everything else on ring.
   const sids = _loSortedNodeKeys();
-  if (sids.length === 0) return;
+  const sccHosts = Object.keys(mapState.scc_nodes || {}).sort();
+  if (sids.length === 0 && sccHosts.length === 0) return;
   flashActivity('Rearranging: Star');
-  const nodes = mapState.nodes;
+  const nodes = mapState.nodes || {};
   const conns = mapState.connections || [];
-  // Tally edge counts per SID — both source and target sides count.
   const deg = {};
   sids.forEach(s => { deg[s] = 0; });
   conns.forEach(c => {
     if (deg[c.source_sid] != null) deg[c.source_sid]++;
     if (deg[c.target_sid] != null) deg[c.target_sid]++;
   });
-  // Pick highest-degree node; tie-break by SID for stability.
   let hub = sids[0];
   sids.forEach(s => {
-    if (deg[s] > deg[hub] ||
-        (deg[s] === deg[hub] && s < hub)) hub = s;
+    if (!hub || deg[s] > deg[hub] || (deg[s] === deg[hub] && s < hub)) hub = s;
   });
-  const spokes = sids.filter(s => s !== hub);
-  const r = Math.max(360,
-      spokes.length * (_LO_BOX_W + _LO_MARGIN) / (2 * Math.PI));
+  const spokes = [
+    ...sids.filter(s => s !== hub).map(id => ({ obj: nodes[id] })),
+    ...sccHosts.map(h => ({ obj: (mapState.scc_nodes||{})[h] })),
+  ];
+  const r = Math.max(360, spokes.length * (_LO_BOX_W + _LO_MARGIN) / (2 * Math.PI));
   const cx = r + _LO_BOX_W;
   const cy = r + _LO_BOX_H;
-  // Hub at centre.
-  _loCenter(nodes[hub], cx, cy);
-  // Spokes around the ring (sorted, start at top).
-  spokes.forEach((sid, i) => {
+  if (hub) _loCenter(nodes[hub], cx, cy);
+  spokes.forEach(({obj}, i) => {
     const angle = (2 * Math.PI * i) / spokes.length - Math.PI / 2;
-    _loCenter(nodes[sid], cx + r * Math.cos(angle),
-                              cy + r * Math.sin(angle));
+    _loCenter(obj, cx + r * Math.cos(angle), cy + r * Math.sin(angle));
   });
   fitMap();
   updateMap();
@@ -5294,6 +5293,15 @@ function layoutHierarchy() {
       _loCenter(nodes[sid], xC, yC);
     });
   });
+  // SCC nodes have no RFC edges — stack them in a column to the right.
+  const sccHosts = Object.keys(mapState.scc_nodes || {}).sort();
+  if (sccHosts.length) {
+    const sccX = _LO_MARGIN + rowWidth + _LO_MARGIN + _LO_BOX_W / 2;
+    sccHosts.forEach((h, i) => {
+      const yC = _LO_MARGIN + i * (_LO_BOX_H + _LO_MARGIN) + _LO_BOX_H / 2;
+      _loCenter((mapState.scc_nodes||{})[h], sccX, yC);
+    });
+  }
   fitMap();
   updateMap();
 }
