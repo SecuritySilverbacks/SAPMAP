@@ -396,49 +396,26 @@ def parse_ha_state_from_zip(loot_zip_path: str) -> dict:
 
 
 def parse_user_hashes_from_xml(xml_bytes: bytes) -> dict:
-    """Parse SCC users.xml content (on-disk plaintext, not backup-zip).
+    """Parse SCC users.xml content (on-disk plaintext).
 
-    SCC stores local admin-UI user credentials in
-    ``/opt/sap/scc/config/users.xml``.  The password hash field and
-    algorithm vary by build:
+    Handles two formats:
 
-    Older builds (< ~2.15) — SHA-1 with hex or base64 salt+hash:
-        <Password algorithm="SHA-1" salt="<b64salt>" value="<b64hash>" />
+    **Tomcat tomcat-users.xml** (all known SCC builds on disk):
+        <user username="Administrator"
+              password="{SHA}base64hash" roles="sccAdministrator"/>
 
-    Newer builds (≥ 2.15) — PBKDF2-HMAC-SHA256 or plain SHA-256:
-        <Password algorithm="SHA-256" iterations="<n>"
-                  salt="<b64salt>" value="<b64hash>" />
+      Tomcat password prefixes:
+        {SHA}     → unsalted SHA-1   → hashcat -m 101 (or strip prefix, -m 100)
+        {SSHA}    → salted SHA-1     → extract hash+salt, hashcat -m 110
+        {SHA-256} → unsalted SHA-256 → hashcat -m 1400
+        plain     → plaintext        → no cracking needed
 
-    Both flavours: hash = ALGO(salt_bytes || password_bytes).
-    Hashcat modes:
-        SHA-1 plain  → -m 110  sha1($pass.$salt) — try also -m 111
-        SHA-256 plain → -m 1410 sha256($pass.$salt) — try -m 1411
-        PBKDF2-SHA256 → -m 10900
-
-    Returns::
-
-        {
-          "ok": True,
-          "users": [
-            {
-              "username": str,
-              "algorithm": "SHA-1" | "SHA-256" | "PBKDF2" | "",
-              "iterations": int,          # 1 for plain hash
-              "salt_b64": str,
-              "hash_b64": str,
-              "salt_hex": str,
-              "hash_hex": str,
-              "hashcat_line": str,        # ready-to-paste hash:salt
-              "hashcat_mode": int,        # best-guess mode
-              "locked": bool,
-              "roles": str,
-            }, ...
-          ],
-          "hashcat_commands": [str, ...],
-        }
+    **SCC custom XML** (older / non-Tomcat builds):
+        <User name="..."><Password algorithm="SHA-256" salt="..." value="..."/></User>
     """
     import base64 as _b64
     import binascii as _bx
+    import re as _re
 
     def _b64_to_hex(s):
         try:
@@ -446,64 +423,73 @@ def parse_user_hashes_from_xml(xml_bytes: bytes) -> dict:
         except Exception:
             return s
 
+    # Scrub bytes that are illegal in XML 1.0 (C0 controls except \t \n \r)
+    # but keep the content intact otherwise.
+    clean = _re.sub(rb'[\x00-\x08\x0b\x0c\x0e-\x1f]', b'', xml_bytes)
+
     try:
-        root = _ET.fromstring(xml_bytes)
+        root = _ET.fromstring(clean)
     except _ET.ParseError as e:
         return {"ok": False, "error": f"XML parse error: {e}"}
 
     users = []
-    for u in root.iter("User"):
-        uname = u.get("name") or u.get("userName") or ""
-        locked = (u.get("locked") or "").lower() == "true"
-        roles = u.get("roles") or u.get("role") or ""
-        pw = u.find("Password")
-        if pw is None:
-            pw = u.find("password")
-        if pw is None:
-            users.append({"username": uname, "locked": locked,
-                          "roles": roles, "algorithm": "",
-                          "hash_b64": "", "salt_b64": "",
-                          "hash_hex": "", "salt_hex": "",
-                          "hashcat_line": "", "hashcat_mode": 0,
-                          "iterations": 1})
+
+    # ── Format 1: Tomcat tomcat-users.xml ─────────────────────────────────
+    # Root element is <tomcat-users> (possibly with namespace prefix).
+    # User entries: <user username="..." password="..." roles="..."/>
+    # Namespace-aware iteration: strip namespace prefix for tag check.
+    for el in root.iter():
+        tag = el.tag.split("}")[-1] if "}" in el.tag else el.tag
+        if tag.lower() != "user":
             continue
-        algo_raw = (pw.get("algorithm") or pw.get("algo") or "").upper()
-        algo_raw = algo_raw.replace("-", "").replace("_", "")
-        iters = int(pw.get("iterations") or pw.get("count") or 1)
-        salt_b64 = (pw.get("salt") or pw.get("saltValue") or "").strip()
-        hash_b64 = (pw.get("value") or pw.get("hashValue") or "").strip()
-        # Some builds store hex directly
-        if not salt_b64:
-            salt_b64 = (pw.get("saltHex") or "")
-            if salt_b64:
-                salt_b64 = _b64.b64encode(
-                    bytes.fromhex(salt_b64)).decode()
-        if not hash_b64:
-            hash_b64 = (pw.get("hashHex") or "")
-            if hash_b64:
-                hash_b64 = _b64.b64encode(
-                    bytes.fromhex(hash_b64)).decode()
-        salt_hex = _b64_to_hex(salt_b64)
-        hash_hex = _b64_to_hex(hash_b64)
-        # Map algorithm to hashcat mode
-        if "SHA256" in algo_raw or "SHA2" in algo_raw:
-            if iters > 1:
-                algo = "PBKDF2-SHA256"
-                mode = 10900
-                # hashcat PBKDF2-SHA256 format: sha256:iters:b64salt:b64hash
-                hline = f"sha256:{iters}:{salt_b64}:{hash_b64}"
-            else:
-                algo = "SHA-256"
-                mode = 1410
-                hline = f"{hash_hex}:{salt_hex}"
-        elif "SHA1" in algo_raw or "SHA" in algo_raw:
+        uname = el.get("username") or el.get("name") or ""
+        if not uname:
+            continue
+        roles = el.get("roles") or el.get("role") or ""
+        raw_pw = (el.get("password") or "").strip()
+        locked = (el.get("locked") or "").lower() == "true"
+
+        algo = ""
+        hash_hex = ""
+        salt_hex = ""
+        hash_b64 = ""
+        salt_b64 = ""
+        mode = 0
+        hline = ""
+        iters = 1
+
+        if raw_pw.startswith("{SSHA}"):
+            # Salted SHA-1: base64(sha1(pass+salt) + salt), salt = last 4-8B
+            decoded = _b64.b64decode(raw_pw[6:])
+            hash_part = decoded[:20]    # first 20 bytes = SHA-1 hash
+            salt_part = decoded[20:]    # remaining bytes = salt
+            hash_hex = _bx.hexlify(hash_part).decode()
+            salt_hex = _bx.hexlify(salt_part).decode()
+            hash_b64 = _b64.b64encode(hash_part).decode()
+            salt_b64 = _b64.b64encode(salt_part).decode()
+            algo = "SHA-1 (salted)"
+            mode = 111   # sha1($salt.$pass) — Tomcat prepends salt
+            hline = f"{hash_hex}:{salt_hex}"
+        elif raw_pw.startswith("{SHA}"):
+            hash_b64 = raw_pw[5:]
+            hash_hex = _b64_to_hex(hash_b64)
             algo = "SHA-1"
-            mode = 110
-            hline = f"{hash_hex}:{salt_hex}"
-        else:
-            algo = algo_raw or "unknown"
-            mode = 0
-            hline = f"{hash_hex}:{salt_hex}"
+            mode = 101   # hashcat {SHA}base64 format directly
+            hline = f"{{SHA}}{hash_b64}"   # hashcat -m 101 expects this
+        elif raw_pw.startswith("{SHA-256}"):
+            hash_b64 = raw_pw[9:]
+            hash_hex = _b64_to_hex(hash_b64)
+            algo = "SHA-256"
+            mode = 1400  # unsalted SHA-256
+            hline = hash_hex
+        elif raw_pw.startswith("{"):
+            # Unknown prefix — store raw
+            algo = raw_pw.split("}")[0].lstrip("{")
+            hline = raw_pw
+        elif raw_pw:
+            algo = "plaintext"
+            hline = raw_pw
+
         users.append({
             "username": uname,
             "algorithm": algo,
@@ -516,33 +502,85 @@ def parse_user_hashes_from_xml(xml_bytes: bytes) -> dict:
             "hashcat_mode": mode,
             "locked": locked,
             "roles": roles,
+            "raw_password": raw_pw,
         })
 
-    # Build per-algorithm hashcat commands
+    # ── Format 2: SCC custom XML (<User>…<Password …/>…</User>) ───────────
+    if not users:
+        for u in root.iter("User"):
+            uname = u.get("name") or u.get("userName") or ""
+            locked = (u.get("locked") or "").lower() == "true"
+            roles = u.get("roles") or u.get("role") or ""
+            pw = u.find("Password") or u.find("password")
+            if pw is None:
+                users.append({"username": uname, "locked": locked,
+                              "roles": roles, "algorithm": "",
+                              "hash_b64": "", "salt_b64": "",
+                              "hash_hex": "", "salt_hex": "",
+                              "hashcat_line": "", "hashcat_mode": 0,
+                              "iterations": 1, "raw_password": ""})
+                continue
+            algo_raw = (pw.get("algorithm") or pw.get("algo") or "").upper()
+            algo_raw = algo_raw.replace("-", "").replace("_", "")
+            iters = int(pw.get("iterations") or pw.get("count") or 1)
+            salt_b64 = (pw.get("salt") or pw.get("saltValue") or "").strip()
+            hash_b64 = (pw.get("value") or pw.get("hashValue") or "").strip()
+            salt_hex = _b64_to_hex(salt_b64)
+            hash_hex = _b64_to_hex(hash_b64)
+            if "SHA256" in algo_raw or "SHA2" in algo_raw:
+                if iters > 1:
+                    algo, mode = "PBKDF2-SHA256", 10900
+                    hline = f"sha256:{iters}:{salt_b64}:{hash_b64}"
+                else:
+                    algo, mode = "SHA-256", 1410
+                    hline = f"{hash_hex}:{salt_hex}"
+            elif "SHA1" in algo_raw or "SHA" in algo_raw:
+                algo, mode = "SHA-1", 110
+                hline = f"{hash_hex}:{salt_hex}"
+            else:
+                algo, mode = algo_raw or "unknown", 0
+                hline = f"{hash_hex}:{salt_hex}"
+            users.append({
+                "username": uname, "algorithm": algo, "iterations": iters,
+                "salt_b64": salt_b64, "hash_b64": hash_b64,
+                "salt_hex": salt_hex, "hash_hex": hash_hex,
+                "hashcat_line": hline, "hashcat_mode": mode,
+                "locked": locked, "roles": roles, "raw_password": "",
+            })
+
+    # ── Hashcat command summary ────────────────────────────────────────────
     cmds = []
-    modes_seen = {}
-    for u in users:
-        m = u["hashcat_mode"]
-        if m and m not in modes_seen:
-            modes_seen[m] = u["algorithm"]
+    modes_seen = {u["hashcat_mode"]: u["algorithm"]
+                  for u in users if u["hashcat_mode"]}
+    if 101 in modes_seen:
+        cmds.append(
+            "hashcat -m 101 scc_sha1_tomcat.txt /path/to/wordlist.txt\n"
+            "# Tomcat {SHA}base64 format — hashcat reads {SHA}... directly")
+    if 111 in modes_seen:
+        cmds.append(
+            "hashcat -m 111 scc_ssha1.txt /path/to/wordlist.txt\n"
+            "# Tomcat {SSHA} salted SHA-1 — format: hash:salt (hex)")
+    if 1400 in modes_seen:
+        cmds.append(
+            "hashcat -m 1400 scc_sha256.txt /path/to/wordlist.txt\n"
+            "# Tomcat {SHA-256} unsalted SHA-256 — format: hex hash")
     if 110 in modes_seen:
         cmds.append(
-            "hashcat -m 110 scc_sha1_hashes.txt /path/to/wordlist.txt\n"
+            "hashcat -m 110 scc_sha1_salted.txt /path/to/wordlist.txt\n"
             "# SHA-1(pass+salt) — format: hash:salt (hex)\n"
-            "# If no hits: try -m 111  (SHA-1 with salt prepended)")
+            "# If no hits: try -m 111 (SHA-1 with salt prepended)")
     if 1410 in modes_seen:
         cmds.append(
-            "hashcat -m 1410 scc_sha256_hashes.txt /path/to/wordlist.txt\n"
-            "# SHA-256(pass+salt) — format: hash:salt (hex)\n"
-            "# If no hits: try -m 1411 (SHA-256 with salt prepended)")
+            "hashcat -m 1410 scc_sha256_salted.txt /path/to/wordlist.txt\n"
+            "# SHA-256(pass+salt) — format: hash:salt (hex)")
     if 10900 in modes_seen:
         cmds.append(
-            "hashcat -m 10900 scc_pbkdf2_hashes.txt /path/to/wordlist.txt\n"
+            "hashcat -m 10900 scc_pbkdf2.txt /path/to/wordlist.txt\n"
             "# PBKDF2-HMAC-SHA256 — format: sha256:iters:b64salt:b64hash")
     if not cmds and users:
         cmds.append(
             "# Algorithm unknown — check hash length and try:\n"
-            "# hashcat -m 110 (SHA-1) or -m 1410 (SHA-256)")
+            "# hashcat -m 100 (SHA-1) or -m 1400 (SHA-256)")
 
     return {"ok": True, "users": users, "hashcat_commands": cmds}
 
