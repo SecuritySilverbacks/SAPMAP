@@ -1986,9 +1986,12 @@ def create_app(api: SAPMAPApi) -> Bottle:
             return json.dumps({"ok": False, "error": diag})
 
         # --- Parse XML ---------------------------------------------------
+        print(f"[*] SCC {host}: xml_bytes ({len(xml_bytes)}B) first 300: "
+              f"{xml_bytes[:300]!r}")
         from sapmap_scc_keystore import parse_user_hashes_from_xml
         result = parse_user_hashes_from_xml(xml_bytes)
         if not result.get("ok"):
+            print(f"[-] SCC {host}: XML parse failed: {result.get('error')}")
             return json.dumps(result)
         users = result["users"]
         hashcat_cmds = result["hashcat_commands"]
