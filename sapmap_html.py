@@ -743,6 +743,7 @@ body {
       <div class="ctx-sep"></div>
       <div class="ctx-item" data-action="harvest_scc">&#9928; Harvest SCC Files (post-RCE)</div>
       <div class="ctx-item" data-action="harvest_scc_mappings">&#128194; Harvest SCC Mappings (OS-exec)</div>
+      <div class="ctx-item" data-action="harvest_scc_ssfs">&#128273; Decrypt On-Host SSFS (Recover Secrets)</div>
     </div>
   </div>
   <!-- Data Extraction submenu -->
@@ -2605,6 +2606,7 @@ function showCtxMenu(e, sid) {
     'reverse_shell':    hasGwVuln || (isAbapStack && hasCreatedUsers) || hasCve31324,
     'harvest_scc':          hasGwVuln || hasCve31324 || hasCreatedUsers,
     'harvest_scc_mappings': hasGwVuln || hasCve31324 || hasCreatedUsers,
+    'harvest_scc_ssfs':     hasGwVuln || hasCve31324 || hasCreatedUsers,
     'scc_via_sap_set_credentials':  true,
     'scc_via_sap_probe_creds':      true,
     'scc_via_sap_pull_mappings':    true,
@@ -2705,6 +2707,7 @@ function showCtxMenu(e, sid) {
     // SCC harvest items — hidden entirely unless an SCC is on the same host
     'harvest_scc':          !_hasSccOnSameHost(n),
     'harvest_scc_mappings': !_hasSccOnSameHost(n),
+    'harvest_scc_ssfs':     !_hasSccOnSameHost(n),
     // SCC submenu items — hidden when no SCC on same host
     'scc_via_sap_set_credentials':   !_hasSccOnSameHost(n),
     'scc_via_sap_probe_creds':       !_hasSccOnSameHost(n),
@@ -3205,6 +3208,15 @@ async function ctxAction(action) {
       if (!confirm('Harvest SCC mappings from co-located SCC on ' + sid + ' via OS-exec?\n\nReads backends.xml directly from disk — no SCC admin credentials needed.')) break;
       await api('POST', `node/${sid}/harvest_scc_mappings`);
       showToast('SCC mapping harvest started — check findings panel', 'info');
+      break;
+    }
+    case 'harvest_scc_ssfs': {
+      if (!confirm('Decrypt on-host SCC SSFS from ' + sid + ' via OS-exec?\n\n' +
+                   'Reads SSFS_SCC.KEY + SSFS_SCC.DAT directly from disk.\n' +
+                   'Recovers secrets such as JAVA_KEYSTORE_PASSWORD, PP CA key password.\n' +
+                   '(The backup zip SSFS is double-encrypted and yields 0 secrets — this does not.)')) break;
+      await api('POST', `node/${sid}/harvest_scc_ssfs`);
+      showToast('On-host SSFS decrypt started — check findings panel for recovered secrets', 'info');
       break;
     }
     // ── Cloud Connector submenu actions (proxy to SCC functions) ──────
