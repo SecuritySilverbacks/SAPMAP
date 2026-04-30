@@ -1366,15 +1366,24 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     sn.pp_ca_privkey_fp = k["cert_sha256"]
                     break
         key_names = ", ".join(sn.ssfs_secrets_keys) or "(none)"
-        sapmap_findings.emit_finding(
-            "CRITICAL", host,
-            f"SCC SSFS decrypted: {len(sn.ssfs_secrets_keys)} secret(s) "
-            f"recovered [{key_names}].  Plaintext side-file "
-            f"{sn.ssfs_secrets_path} (mode 0600).",
-            ref="scc.ssfs.decrypted",
-            meta={"secrets_path": sn.ssfs_secrets_path,
-                  "keys": list(sn.ssfs_secrets_keys),
-                  "native_lib": res.get("native_lib", "")})
+        # Skip the finding when 0 secrets were recovered — this happens
+        # with backup-zip SSFS (double-encrypted by backup process) and
+        # produces a misleading CRITICAL before the real result arrives
+        # from the on-host decrypt path.
+        if sn.ssfs_secrets_keys:
+            sapmap_findings.emit_finding(
+                "CRITICAL", host,
+                f"SCC SSFS decrypted: {len(sn.ssfs_secrets_keys)} secret(s) "
+                f"recovered [{key_names}].  Plaintext side-file "
+                f"{sn.ssfs_secrets_path} (mode 0600).",
+                ref="scc.ssfs.decrypted",
+                meta={"secrets_path": sn.ssfs_secrets_path,
+                      "keys": list(sn.ssfs_secrets_keys),
+                      "native_lib": res.get("native_lib", "")})
+        else:
+            print(f"[*] SCC {host}: SSFS decrypt yielded 0 secrets "
+                  f"(backup zip is double-encrypted — use 'Decrypt On-Host "
+                  f"SSFS' from a co-located pwned SAP node)")
         for k in sn.unlocked_keystores:
             if k.get("error"):
                 continue
