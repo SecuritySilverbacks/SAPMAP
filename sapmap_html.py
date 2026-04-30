@@ -3909,7 +3909,7 @@ async function sccPullMappings(host) {
 }
 
 async function sccDownloadHashes(host) {
-  showToast(`Fetching SCC password hashes from ${host}…`, 'info');
+  console.log(`[*] Fetching SCC password hashes from ${host}`);
   let r;
   try {
     r = await fetch(`/api/scc/${encodeURIComponent(host)}/download_user_hashes`,
@@ -4066,7 +4066,7 @@ async function sccLookupHashesOnline() {
   if (resDiv) resDiv.innerHTML = html;
 
   if (r.cracked > 0) {
-    showToast(`${r.cracked} password(s) cracked \u2014 stored as SCC credentials`, 'success');
+    console.log(`[+] ${r.cracked} SCC password(s) cracked — stored as credentials`);
     refreshState();
   }
 }
