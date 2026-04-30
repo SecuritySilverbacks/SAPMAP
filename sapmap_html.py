@@ -3208,34 +3208,22 @@ async function ctxAction(action) {
       break;
     }
     // ── Cloud Connector submenu actions (proxy to SCC functions) ──────
-    case 'scc_via_sap_set_credentials': {
-      const sccHost = _sccHostForNode(n);
-      if (sccHost) showSCCCredModal(sccHost);
-      break;
-    }
-    case 'scc_via_sap_probe_creds': {
-      const sccHost = _sccHostForNode(n);
-      if (sccHost) sccProbeCreds(sccHost);
-      break;
-    }
-    case 'scc_via_sap_pull_mappings': {
-      const sccHost = _sccHostForNode(n);
-      if (sccHost) sccPullMappings(sccHost);
-      break;
-    }
-    case 'scc_via_sap_probe_mappings': {
-      const sccHost = _sccHostForNode(n);
-      if (sccHost) sccProbeMappings(sccHost);
-      break;
-    }
-    case 'scc_via_sap_extract_keystore': {
-      const sccHost = _sccHostForNode(n);
-      if (sccHost) sccExtractKeystore(sccHost);
-      break;
-    }
+    // n is not in scope at the top switch level — resolve via sid.
+    case 'scc_via_sap_set_credentials':
+    case 'scc_via_sap_probe_creds':
+    case 'scc_via_sap_pull_mappings':
+    case 'scc_via_sap_probe_mappings':
+    case 'scc_via_sap_extract_keystore':
     case 'scc_via_sap_download_hashes': {
-      const sccHost = _sccHostForNode(n);
-      if (sccHost) sccDownloadHashes(sccHost);
+      const _sapNode = (mapState.nodes || {})[sid];
+      const _sccH = _sccHostForNode(_sapNode);
+      if (!_sccH) { showToast('No SCC found on same host as ' + sid, 'warn'); break; }
+      if (action === 'scc_via_sap_set_credentials')  showSCCCredModal(_sccH);
+      if (action === 'scc_via_sap_probe_creds')       sccProbeCreds(_sccH);
+      if (action === 'scc_via_sap_pull_mappings')     sccPullMappings(_sccH);
+      if (action === 'scc_via_sap_probe_mappings')    sccProbeMappings(_sccH);
+      if (action === 'scc_via_sap_extract_keystore')  sccExtractKeystore(_sccH);
+      if (action === 'scc_via_sap_download_hashes')   sccDownloadHashes(_sccH);
       break;
     }
     case 'set_telnet_override': {
