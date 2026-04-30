@@ -2772,6 +2772,31 @@ function showSCCCtxMenu(e, host) {
   hideMapCtxMenu();
   selectedSccHost = host;
   const menu = document.getElementById('scc-ctx-menu');
+
+  // Show stored credentials below the "Set Credentials" item — same
+  // pattern as ABAP nodes showing credentials in their context menu.
+  let oldInfo = menu.querySelector('.ctx-cred-info');
+  if (oldInfo) oldInfo.remove();
+  const sn = (mapState.scc_nodes || {})[host];
+  const creds = (sn && sn.credentials) ? sn.credentials : [];
+  if (creds.length > 0) {
+    const info = document.createElement('div');
+    info.className = 'ctx-cred-info';
+    info.style.cssText = 'padding:4px 12px;font-size:10px;color:#8b949e;border-top:1px solid #30363d;pointer-events:none';
+    const lines = creds.map(c => {
+      const u = c.username || c.user || '?';
+      const p = c.password || '';
+      return `\u2705 ${escHtml(u)}${p ? ' / ' + escHtml(p) : ''}`;
+    });
+    info.innerHTML = lines.join('<br>');
+    const credItem = menu.querySelector('[data-action="scc_set_credentials"]');
+    if (credItem && credItem.nextSibling) {
+      credItem.parentNode.insertBefore(info, credItem.nextSibling);
+    } else {
+      menu.appendChild(info);
+    }
+  }
+
   menu.classList.add('visible');
   // Position with viewport clamp
   const w = menu.offsetWidth || 280;
