@@ -3207,7 +3207,7 @@ async function ctxAction(action) {
     case 'harvest_scc_mappings': {
       if (!confirm('Harvest SCC mappings from co-located SCC on ' + sid + ' via OS-exec?\n\nReads backends.xml directly from disk — no SCC admin credentials needed.')) break;
       await api('POST', `node/${sid}/harvest_scc_mappings`);
-      showToast('SCC mapping harvest started — check findings panel', 'info');
+      console.log('[SCC] Mapping harvest started');
       break;
     }
     case 'harvest_scc_ssfs': {
@@ -3216,7 +3216,7 @@ async function ctxAction(action) {
                    'Recovers secrets such as JAVA_KEYSTORE_PASSWORD, PP CA key password.\n' +
                    '(The backup zip SSFS is double-encrypted and yields 0 secrets — this does not.)')) break;
       await api('POST', `node/${sid}/harvest_scc_ssfs`);
-      showToast('On-host SSFS decrypt started — check findings panel for recovered secrets', 'info');
+      console.log('[SCC] On-host SSFS decrypt started');
       break;
     }
     // ── Cloud Connector submenu actions (proxy to SCC functions) ──────
@@ -3916,9 +3916,9 @@ async function sccDownloadHashes(host) {
                     {method:'POST', headers:{'Content-Type':'application/json'},
                      body:JSON.stringify({})});
     r = await r.json();
-  } catch(e) { showToast('Request failed: ' + e, 'error'); return; }
+  } catch(e) { console.error('[SCC hashes] Request failed:', e); return; }
 
-  if (!r.ok) { showToast('Failed: ' + (r.error||'unknown'), 'error'); return; }
+  if (!r.ok) { console.error('[SCC hashes] Failed:', r.error||'unknown'); return; }
 
   const modal = document.getElementById('scc-hashes-modal');
   document.getElementById('scc-hashes-source').textContent =
