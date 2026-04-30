@@ -2179,8 +2179,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 # Store as SCC credential (same as scc_set_credentials)
                 from sapmap_models import Credentials as _Creds
                 sn.credentials = [_Creds(username=username, password=plaintext, verified=False)]
+                sn.pwned = True
                 print(f"[+] SCC {host}: hashes.com cracked {username} → "
-                      f"password stored as credential")
+                      f"password stored as credential, node marked pwned")
                 sapmap_findings.emit_finding(
                     "CRITICAL", host,
                     f"SCC password cracked for '{username}' via hashes.com rainbow table — "
