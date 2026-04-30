@@ -732,6 +732,18 @@ body {
       <div class="ctx-item" data-action="propagate">&#128640; Propagate (exploit next hop)</div>
     </div>
   </div>
+  <!-- Cloud Connector submenu (visible only when SCC is on same host) -->
+  <div class="ctx-group" id="ctx-scc-group">
+    <div class="ctx-item">&#9889; Cloud Connector</div>
+    <div class="ctx-sub">
+      <div class="ctx-item" data-action="scc_via_sap_set_credentials">&#128273; Set SCC Credentials</div>
+      <div class="ctx-item" data-action="scc_via_sap_probe_creds">&#128273; Probe Default Account (Administrator/manage)</div>
+      <div class="ctx-item" data-action="scc_via_sap_pull_mappings">&#128194; Pull Mappings</div>
+      <div class="ctx-item" data-action="scc_via_sap_probe_mappings">&#128225; Probe Mappings (TCP/HTTP smoke test)</div>
+      <div class="ctx-item" data-action="scc_via_sap_extract_keystore" style="color:#f85149">&#128272; Extract Keystore + Decrypt SSFS (CROWN JEWELS)</div>
+      <div class="ctx-item" data-action="scc_via_sap_download_hashes">&#128196; Harvest SCC Password Hashes</div>
+    </div>
+  </div>
   <!-- Data Extraction submenu -->
   <div class="ctx-group">
     <div class="ctx-item">&#128230; Data Extraction</div>
@@ -2592,6 +2604,12 @@ function showCtxMenu(e, sid) {
     'reverse_shell':    hasGwVuln || (isAbapStack && hasCreatedUsers) || hasCve31324,
     'harvest_scc':          hasGwVuln || hasCve31324 || hasCreatedUsers,
     'harvest_scc_mappings': hasGwVuln || hasCve31324 || hasCreatedUsers,
+    'scc_via_sap_set_credentials':  true,
+    'scc_via_sap_probe_creds':      true,
+    'scc_via_sap_pull_mappings':    true,
+    'scc_via_sap_probe_mappings':   true,
+    'scc_via_sap_extract_keystore': true,
+    'scc_via_sap_download_hashes':  hasGwVuln || hasCve31324 || hasCreatedUsers,
     'create_tcpip':     hasCreds,                   // need credentials/access
     'propagate':        hasCreds,                   // need access to propagate from
     'cleanup':          hasCreatedUsers,             // need created users to clean up
@@ -2686,6 +2704,13 @@ function showCtxMenu(e, sid) {
     // SCC harvest items — hidden entirely unless an SCC is on the same host
     'harvest_scc':          !_hasSccOnSameHost(n),
     'harvest_scc_mappings': !_hasSccOnSameHost(n),
+    // SCC submenu items — hidden when no SCC on same host
+    'scc_via_sap_set_credentials':   !_hasSccOnSameHost(n),
+    'scc_via_sap_probe_creds':       !_hasSccOnSameHost(n),
+    'scc_via_sap_pull_mappings':     !_hasSccOnSameHost(n),
+    'scc_via_sap_probe_mappings':    !_hasSccOnSameHost(n),
+    'scc_via_sap_extract_keystore':  !_hasSccOnSameHost(n),
+    'scc_via_sap_download_hashes':   !_hasSccOnSameHost(n),
   };
 
   // Apply visibility + enable/disable state to each menu item
@@ -3179,6 +3204,37 @@ async function ctxAction(action) {
       if (!confirm('Harvest SCC mappings from co-located SCC on ' + sid + ' via OS-exec?\n\nReads backends.xml directly from disk — no SCC admin credentials needed.')) break;
       await api('POST', `node/${sid}/harvest_scc_mappings`);
       showToast('SCC mapping harvest started — check findings panel', 'info');
+      break;
+    }
+    // ── Cloud Connector submenu actions (proxy to SCC functions) ──────
+    case 'scc_via_sap_set_credentials': {
+      const sccHost = _sccHostForNode(n);
+      if (sccHost) showSCCCredModal(sccHost);
+      break;
+    }
+    case 'scc_via_sap_probe_creds': {
+      const sccHost = _sccHostForNode(n);
+      if (sccHost) sccProbeCreds(sccHost);
+      break;
+    }
+    case 'scc_via_sap_pull_mappings': {
+      const sccHost = _sccHostForNode(n);
+      if (sccHost) sccPullMappings(sccHost);
+      break;
+    }
+    case 'scc_via_sap_probe_mappings': {
+      const sccHost = _sccHostForNode(n);
+      if (sccHost) sccProbeMappings(sccHost);
+      break;
+    }
+    case 'scc_via_sap_extract_keystore': {
+      const sccHost = _sccHostForNode(n);
+      if (sccHost) sccExtractKeystore(sccHost);
+      break;
+    }
+    case 'scc_via_sap_download_hashes': {
+      const sccHost = _sccHostForNode(n);
+      if (sccHost) sccDownloadHashes(sccHost);
       break;
     }
     case 'set_telnet_override': {
@@ -5322,6 +5378,21 @@ function _hasSccOnSameHost(n) {
                  (sn.host && IP_RE.test(sn.host||'')) ? sn.host : '';
     return snip === nip;
   });
+}
+
+function _sccHostForNode(n) {
+  // Returns the host key of the SCCNode on the same IP as SAP node n.
+  if (!n) return null;
+  const IP_RE = /^\d{1,3}(\.\d{1,3}){3}$/;
+  const nip = (n.ip && IP_RE.test(n.ip)) ? n.ip :
+              (n.hostname && IP_RE.test(n.hostname||'')) ? n.hostname : '';
+  if (!nip) return null;
+  for (const [host, sn] of Object.entries(mapState.scc_nodes || {})) {
+    const snip = (sn.ip && IP_RE.test(sn.ip)) ? sn.ip :
+                 (sn.host && IP_RE.test(sn.host||'')) ? sn.host : '';
+    if (snip === nip) return host;
+  }
+  return null;
 }
 function resetLayout() {
   flashActivity('Rearranging: Reset');
