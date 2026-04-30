@@ -726,8 +726,6 @@ body {
       <div class="ctx-item" data-action="create_tcpip">&#128279; Create TCP/IP Dest (sapxpg)</div>
       <div class="ctx-item" data-action="os_terminal">&#128187; OS Command Terminal</div>
       <div class="ctx-item" data-action="reverse_shell">&#128279; Reverse Shell</div>
-      <div class="ctx-item" data-action="harvest_scc">&#9928; Harvest SCC (post-RCE)</div>
-      <div class="ctx-item" data-action="harvest_scc_mappings">&#128194; Harvest SCC Mappings (OS-exec)</div>
       <div class="ctx-sep"></div>
       <div class="ctx-item" data-action="propagate">&#128640; Propagate (exploit next hop)</div>
     </div>
@@ -742,6 +740,9 @@ body {
       <div class="ctx-item" data-action="scc_via_sap_probe_mappings">&#128225; Probe Mappings (TCP/HTTP smoke test)</div>
       <div class="ctx-item" data-action="scc_via_sap_extract_keystore" style="color:#f85149">&#128272; Extract Keystore + Decrypt SSFS (CROWN JEWELS)</div>
       <div class="ctx-item" data-action="scc_via_sap_download_hashes">&#128196; Harvest SCC Password Hashes</div>
+      <div class="ctx-sep"></div>
+      <div class="ctx-item" data-action="harvest_scc">&#9928; Harvest SCC Files (post-RCE)</div>
+      <div class="ctx-item" data-action="harvest_scc_mappings">&#128194; Harvest SCC Mappings (OS-exec)</div>
     </div>
   </div>
   <!-- Data Extraction submenu -->
