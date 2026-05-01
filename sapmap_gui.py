@@ -1938,10 +1938,13 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     # Then reconstruct XML-like objects on the Python side.
                     #
                     # Command kept short enough to fit in SAPXPG PARAMS:
+                    # Use only single-quotes inside so the outer "-Command"
+                    # double-quote wrapper has no conflicts.
+                    # String concatenation avoids $() interpolation issues.
                     ps_cmd = (
                         f"[xml]$x=[IO.File]::ReadAllText('{fpath}');"
                         f"$x.SelectNodes('//user')|%"
-                        f"{{Write-Output \"$($_.username)|$($_.password)|$($_.roles)\"}}"
+                        f"{{Write-Output($_.username+'|'+$_.password+'|'+$_.roles)}}"
                     )
                     ps_out, ps_ok = _gw(
                         "powershell.exe",
