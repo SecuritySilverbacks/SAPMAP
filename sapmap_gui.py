@@ -1982,31 +1982,6 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     else:
                         print(f"[-] SCC {host}: findstr found no user "
                               f"attributes in output")
-                    print(f"[*] SCC {host}: powershell parse → "
-                          f"{len(ps_out)}B ok={ps_ok} out={ps_out[:80]!r}")
-                    raw = None
-                    if ps_out and "|" in ps_out:
-                        # Reconstruct minimal XML from pipe-delimited records
-                        lines = [l.strip() for l in ps_out.splitlines()
-                                 if "|" in l]
-                        xml_parts = [
-                            b'<?xml version="1.0" encoding="utf-8"?>',
-                            b'<tomcat-users>',
-                        ]
-                        for line in lines:
-                            parts = line.split("|")
-                            if len(parts) >= 2:
-                                uname = parts[0].strip()
-                                pwd   = parts[1].strip()
-                                roles = parts[2].strip() if len(parts) > 2 else ""
-                                xml_parts.append(
-                                    f'  <user username="{uname}" '
-                                    f'password="{pwd}" '
-                                    f'roles="{roles}"/>'.encode())
-                        xml_parts.append(b'</tomcat-users>')
-                        raw = b"\n".join(xml_parts)
-                        print(f"[*] SCC {host}: reconstructed XML "
-                              f"{len(raw)}B from {len(lines)} user(s)")
                 else:
                     linux_roots = [
                         "/opt/sap/scc",
