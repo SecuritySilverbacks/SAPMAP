@@ -701,6 +701,7 @@ body {
       <div class="ctx-item" data-action="check_ms">&#128270; Check MS Betrusted (CVE-2020-6207)</div>
       <div class="ctx-item" data-action="check_cve_31324">&#128270; Check CVE-2025-31324 (Java VisualComposer)</div>
       <div class="ctx-item" data-action="check_cve_6287">&#128270; Check CVE-2020-6287 (RECON)</div>
+      <div class="ctx-item" data-action="check_copyfail">&#128275; Check CVE-2026-31431 (Copy Fail LPE)</div>
       <div class="ctx-item" data-action="deep_scan">&#128260; Deep Scan (full SAPology)</div>
       <div class="ctx-item" data-action="retrieve_rfcs">&#128225; Retrieve RFC Connections</div>
       <div class="ctx-item" data-action="read_java_destinations">&#128225; Read Java JCo Destinations</div>
@@ -717,6 +718,7 @@ body {
     <div class="ctx-item">&#9876; Exploitation</div>
     <div class="ctx-sub">
       <div class="ctx-item" data-action="lpe">&#128274; ABAP Local Privilege Escalation</div>
+      <div class="ctx-item" data-action="exploit_copyfail">&#9889; Escalate to Root (Copy Fail LPE)</div>
       <div class="ctx-item" data-action="betrusted">&#128272; Betrusted — Inject Trusted IP (10KBLAZE)</div>
       <div class="ctx-item" data-action="create_user_betrusted">&#128272; Create User (10KBLAZE Full Chain)</div>
       <div class="ctx-item" data-action="create_user_java">&#128100; Create User (Java UME)</div>
@@ -2200,6 +2202,13 @@ function updateMap() {
         + ` text-anchor="middle" dominant-baseline="middle"`
         + ` font-weight="bold" pointer-events="none">&#9889;</text>`;
     }
+    // Root badge — shown when Copy Fail LPE has obtained root on this host
+    if (n.copyfail_root_obtained) {
+      html += `<text x="${x+BOX_W-30}" y="${y-2}" font-size="22" fill="#e6edf3"`
+           + ` stroke="#0d1117" stroke-width="2.5" paint-order="stroke"`
+           + ` text-anchor="middle" dominant-baseline="middle"`
+           + ` font-weight="bold" pointer-events="none">&#9650;</text>`;
+    }
 
     // Finding badge — count of unresolved (undismissed) CRITICAL/HIGH
     // for this SID.  Renders as a small numbered dot in the top-left
@@ -2542,6 +2551,7 @@ function showCtxMenu(e, sid) {
   const isJavaStack = sysType.indexOf('JAVA') !== -1;
   const isAbapStack = sysType.indexOf('ABAP') !== -1;
   const isSaprouter = sysType.indexOf('SAPROUTER') !== -1;
+  const isWindows = n && (n.os_type || '').toLowerCase().includes('windows');
   const hasCve31324 = n && n.cve_2025_31324_vulnerable;
   const hasCve6287  = n && n.cve_2020_6287_vulnerable;
   const hasGwPort = n && (n.instances || []).some(i => Object.entries(i.ports || {}).some(([p,s]) => s === 'gateway' || (p >= 3300 && p <= 3399)));
@@ -2578,6 +2588,8 @@ function showCtxMenu(e, sid) {
     'create_user_gw':   hasGwVuln,                  // need GW vulnerability
     'create_user_creds': hasCreds,                  // need credentials
     'lpe':              isAbapStack && hasCreds,    // ABAP-only (BAPI-driven)
+    'check_copyfail':   !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
+    'exploit_copyfail': !isWindows && !!(n && n.copyfail_vulnerable),
     'deep_scan':        true,                       // always available
     'retrieve_rfcs':    hasCreds,                   // need credentials/access
     'test_rfcs':        hasCreds && hasRFCs,        // need access + existing RFCs
@@ -2643,6 +2655,8 @@ function showCtxMenu(e, sid) {
     'create_user_gw':   'Requires a vulnerable RFC Gateway',
     'create_user_creds': 'Provide credentials first',
     'lpe':              'Provide credentials first',
+    'check_copyfail':   'Requires OS-exec on Linux host',
+    'exploit_copyfail': 'Run Check CVE-2026-31431 first — kernel must be vulnerable',
     'retrieve_rfcs':    'Provide credentials or create a user first',
     'test_rfcs':        'Retrieve RFC connections first',
     'read_java_destinations': (javaDeployBlocked
@@ -2704,6 +2718,8 @@ function showCtxMenu(e, sid) {
     'impact_assess':              !isAbapStack,
     'lpe':                        !isAbapStack,
     'impact_assess_java':         !isJavaStack,
+    'check_copyfail':   isWindows,
+    'exploit_copyfail': isWindows || !(n && n.copyfail_vulnerable),
     // SCC harvest items — hidden entirely unless an SCC is on the same host
     'harvest_scc':          !_hasSccOnSameHost(n),
     'harvest_scc_mappings': !_hasSccOnSameHost(n),
@@ -2920,6 +2936,17 @@ async function ctxAction(action) {
       await api('POST', `node/${sid}/check_cve_2025_31324`); break;
     case 'check_cve_6287':
       await api('POST', `node/${sid}/check_cve_2020_6287`); break;
+    case 'check_copyfail':
+      await api('POST', `node/${sid}/check_copyfail`);
+      showToast('Copy Fail check started', 'info');
+      break;
+    case 'exploit_copyfail': {
+      const cmd = prompt('Command to run as root on ' + sid + ':', 'id');
+      if (!cmd) break;
+      if (!confirm('Run Copy Fail LPE on ' + sid + '?\n\nThis will temporarily modify /usr/bin/su in kernel page cache to execute:\n  ' + cmd + '\n\nNon-persistent (page cache only, lost on reboot).')) break;
+      await api('POST', `node/${sid}/exploit_copyfail`, {command: cmd});
+      break;
+    }
     case 'read_java_destinations': {
       if (!confirm('Enumerate JCo destinations from J2EE_CONFIGENTRY?\n\n' +
                     'Decrypts each destination\'s password via SecStoreFS, ' +

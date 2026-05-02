@@ -242,6 +242,11 @@ class SAPNode:
     scc_links: list = field(default_factory=list)       # SCC hosts whose mappings reach this node
     position: Optional[tuple] = None    # (x, y) on map — None = auto-layout
 
+    # CVE-2026-31431 Copy Fail LPE state
+    copyfail_vulnerable: bool = False    # True if kernel + authencesn + python3.10+
+    copyfail_root_obtained: bool = False # True after successful root command execution
+    copyfail_kernel: str = ""            # kernel version string from uname -r
+
     # Computed helpers
     def has_access(self) -> bool:
         """True if we have any working credentials or created users."""
@@ -343,6 +348,9 @@ class SAPNode:
             "saprouter_info": self.saprouter_info,
             "scc_links": list(self.scc_links),
             "position": list(self.position) if self.position else None,
+            "copyfail_vulnerable": self.copyfail_vulnerable,
+            "copyfail_root_obtained": self.copyfail_root_obtained,
+            "copyfail_kernel": self.copyfail_kernel,
         }
 
     @classmethod
@@ -395,6 +403,9 @@ class SAPNode:
             saprouter_info=d.get("saprouter_info", {}),
             scc_links=list(d.get("scc_links", [])),
             position=tuple(d["position"]) if d.get("position") else None,
+            copyfail_vulnerable=d.get("copyfail_vulnerable", False),
+            copyfail_root_obtained=d.get("copyfail_root_obtained", False),
+            copyfail_kernel=d.get("copyfail_kernel", ""),
         )
         return node
 
