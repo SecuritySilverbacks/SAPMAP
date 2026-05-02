@@ -313,6 +313,95 @@ def _map_step(step: dict) -> tuple:
             payload["auto_targets"] = bool(step["auto_targets"])
         return ("POST", f"/api/node/{target}/router_scan", payload, True)
 
+    # ── SAP Cloud Connector actions ─────────────────────────────────────
+    # All scc_* actions use target as the SCC host (IP or hostname).
+    # All node_scc_* actions use target as the SAP node SID.
+
+    if action == "scc_set_credentials":
+        # Store SCC admin credentials for future pulls.
+        #   target:   SCC host (e.g. "192.168.2.167")
+        #   username: SCC admin username (default "Administrator")
+        #   password: SCC admin password
+        return ("POST", f"/api/scc/{target}/set_credentials", {
+            "username": step.get("username", "Administrator"),
+            "password": step.get("password", ""),
+        }, False)
+
+    if action == "scc_probe_creds":
+        # Probe SCC default credentials (Administrator/manage).
+        #   target: SCC host
+        return ("POST", f"/api/scc/{target}/probe_creds", {}, True)
+
+    if action == "scc_pull_mappings":
+        # Pull cloud→on-prem mappings via SCC admin REST API.
+        #   target:   SCC host
+        #   username: SCC admin username
+        #   password: SCC admin password
+        return ("POST", f"/api/scc/{target}/pull_mappings", {
+            "username": step.get("username", "Administrator"),
+            "password": step.get("password", ""),
+        }, True)
+
+    if action == "scc_probe_mappings":
+        # TCP/HTTP smoke-test every SCC mapping to check backend reachability.
+        #   target: SCC host
+        return ("POST", f"/api/scc/{target}/probe_mappings", {}, True)
+
+    if action == "scc_extract_keystore":
+        # Pull full SCC backup zip, extract keystores, decrypt SSFS.
+        # This is the crown-jewels action — add to DESTRUCTIVE_ACTIONS.
+        #   target:          SCC host
+        #   username:        SCC admin username
+        #   password:        SCC admin password
+        #   backup_password: zip encryption password (defaults to password)
+        return ("POST", f"/api/scc/{target}/extract_keystore", {
+            "username":        step.get("username", "Administrator"),
+            "password":        step.get("password", ""),
+            "backup_password": step.get("backup_password",
+                                        step.get("password", "")),
+        }, True)
+
+    if action == "scc_download_hashes":
+        # Download SCC password hashes (users.xml) via OS-exec / zip / REST.
+        #   target: SCC host
+        return ("POST", f"/api/scc/{target}/download_user_hashes", {}, True)
+
+    if action == "scc_lookup_hashes":
+        # Look up SCC hashes against hashes.com rainbow tables.
+        # api_key is optional — falls back to settings.local.json.
+        #   target:  SCC host
+        #   api_key: hashes.com API key (optional)
+        #   hashes:  list of {username, hash_hex, algorithm} (optional;
+        #            if omitted the route reads from the SCC node state)
+        payload = {}
+        if step.get("api_key"):
+            payload["api_key"] = step["api_key"]
+        if step.get("hashes"):
+            payload["hashes"] = step["hashes"]
+        return ("POST", f"/api/scc/{target}/lookup_hashes_online",
+                payload, True)
+
+    if action == "scc_decrypt_ssfs":
+        # Decrypt SSFS_SCC blob from a previously extracted backup zip.
+        #   target: SCC host
+        return ("POST", f"/api/scc/{target}/decrypt_ssfs", {}, True)
+
+    if action == "harvest_scc":
+        # Post-RCE SCC harvest from a pwned SAP node (ARP sweep, keystore
+        # bundle exfil, etc.).  Requires OS-exec on the target SAP node.
+        #   target: SAP node SID (not SCC host)
+        return ("POST", f"/api/node/{target}/harvest_scc", {}, True)
+
+    if action == "harvest_scc_mappings":
+        # Read SCC backends.xml directly via OS-exec on co-located SAP node.
+        #   target: SAP node SID
+        return ("POST", f"/api/node/{target}/harvest_scc_mappings", {}, True)
+
+    if action == "harvest_scc_ssfs":
+        # Read on-host SSFS_SCC.KEY/.DAT via OS-exec, decrypt secrets.
+        #   target: SAP node SID (node co-located with SCC)
+        return ("POST", f"/api/node/{target}/harvest_scc_ssfs", {}, True)
+
     raise ValueError(f"Unknown action: {action}")
 
 
@@ -324,6 +413,8 @@ def _map_step(step: dict) -> tuple:
 DESTRUCTIVE_ACTIONS = {
     "exploit_cve_31324",
     "create_user_java",
+    "scc_extract_keystore",   # pulls full backup + writes crown-jewels loot
+    "harvest_scc",            # writes files to /tmp on target host
 }
 
 
