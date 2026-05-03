@@ -225,11 +225,11 @@ def check_copyfail(node) -> dict:
     # Check authencesn via AF_ALG bind using long_params (avoids SAPXPG
     # quoting issues — the code string goes in LONG_PARAMS, not PARAMS).
     # Writes /tmp/.cf_chk if bind succeeds; we read it back to confirm.
-    # explicit flush+close so SAPXPG process termination doesn't
-    # leave the file buffer unflushed (same issue as noted in live testing)
+    # SAPXPG splits long_params on spaces before passing to python3, so
+    # the code must contain NO spaces.  Use __import__ instead of
+    # 'import socket' (which has a space), and no space in any token.
     chk_code = (
-        "import socket;"
-        "a=socket.socket(38,5,0);"
+        "a=__import__('socket').socket(38,5,0);"
         "a.bind(('aead','authencesn(hmac(sha256),cbc(aes))'));"
         "f=open('/tmp/.cf_chk','w');f.write('OK');f.flush();f.close();"
         "a.close()"
