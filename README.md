@@ -46,6 +46,7 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 - [Propagation](#propagation)
 - [SAProuter Support](#saprouter-support)
 - [SAP Secure Store Decryption](#sap-secure-store-rsectab-decryption)
+- [SAP Cloud Connector (SCC)](#sap-cloud-connector-scc)
 - [Standalone Tools](#standalone-tools)
 - [State Management](#state-management)
 - [Testing](#testing)
@@ -573,6 +574,146 @@ Decrypted entries are categorised and colour-coded in the UI:
 | SMTP | `BC_SX_SMTP` | Purple |
 | HMAC | `/HMAC_INDEP/...` | Grey |
 | PSE | `/STRUST_PSE_PIN/...` | Grey |
+
+---
+
+## SAP Cloud Connector (SCC)
+
+SAPMAP discovers, fingerprints, and exploits SAP Cloud Connector instances — the on-premise gateway that connects SAP BTP (cloud) to on-premise SAP systems. SCC nodes appear on the map as hexagonal boxes connected to their mapped on-premise backends.
+
+### Discovery & Detection
+
+SCC nodes are discovered automatically during network scans (port 8443/TCP). SAPMAP fingerprints the version, TLS cipher, and server banner unauthenticated, and matches against a CVE bucket table to flag known vulnerable builds.
+
+### Right-Click Menu (SCC Node)
+
+| Action | Description |
+|--------|-------------|
+| Set Credentials | Store SCC admin credentials (auto-fills all subsequent operations) |
+| Probe Default Account | Try `Administrator / manage` — emits CRITICAL finding if live |
+| Pull Mappings | Authenticated REST pull of all cloud→on-prem mappings; plots backends on map |
+| Probe Mappings | TCP/HTTP smoke-test every mapping to confirm backend reachability |
+| Extract Keystore + Decrypt SSFS | Full backup zip pull: tunnel certs, PP CA key, SSFS secrets (crown jewels) |
+| Download Password Hashes | Read `users.xml`, parse Tomcat-format hashes, show hashcat commands + crackstation.net link |
+| Decrypt On-Host SSFS | (from co-located SAP node) Read raw SSFS_SCC.KEY/.DAT via OS-exec and decrypt |
+
+### Cloud Connector Submenu (on co-located SAP/ABAP node)
+
+When an SCC is detected on the same host IP as an ABAP/Java node, a **Cloud Connector** submenu appears on that SAP node's right-click menu, giving access to all SCC operations without switching nodes:
+
+| Action | Description |
+|--------|-------------|
+| Set SCC Credentials | Store credentials for the co-located SCC |
+| Probe Default Account | Try default creds on co-located SCC |
+| Pull Mappings | Pull cloud→on-prem mappings via REST |
+| Probe Mappings | Smoke-test all mappings |
+| Extract Keystore + Decrypt SSFS | Full backup + SSFS extraction |
+| Harvest SCC Password Hashes | Read `users.xml` from disk via OS-exec (no SCC creds needed) |
+| Harvest SCC Files (post-RCE) | ARP sweep, SSH-key hunt, SSFS bundle exfil, HA peer discovery |
+| Harvest SCC Mappings (OS-exec) | Read `backends.xml` directly from disk (no SCC admin creds needed) |
+| Decrypt On-Host SSFS | Read raw SSFS files from disk and decrypt secrets |
+
+### hashes.com API Integration
+
+After downloading SCC password hashes, click **Lookup on hashes.com** in the hash modal to automatically look up hashes against online rainbow tables (SHA-1, SHA-256, PBKDF2). A cracked password is automatically stored as an SCC credential and the SCC node is marked as pwned (⚡).
+
+Set your API key once via **Settings → Set hashes.com API Key** (stored in `settings.local.json`, gitignored, never pushed).
+
+### High Availability (HA) Detection
+
+SAPMAP detects SCC HA master/shadow pairs. Run **Extract Keystore** on either node — it reads `scc_config/scc_config.ini` from the backup zip (`<haRole>`, `<shadowHost>`, `<masterHost>`) and draws a dashed **violet line** between the paired nodes labeled `HA: MASTER ⇄ SHADOW`.
+
+### Scripted Scenarios
+
+All SCC operations are scriptable. The `target` for SCC actions is the **SCC host IP** (e.g. `"192.168.2.167"`); for node-side harvest actions it is the **SAP SID** (e.g. `S4H`).
+
+#### SCC Script Actions
+
+| Action | Target | Parameters | Description |
+|--------|--------|-----------|-------------|
+| `scc_set_credentials` | SCC host | `username`, `password` | Store SCC admin credentials |
+| `scc_probe_creds` | SCC host | *(none)* | Try default `Administrator/manage` |
+| `scc_pull_mappings` | SCC host | `username`, `password` | Pull cloud→on-prem mappings via REST |
+| `scc_probe_mappings` | SCC host | *(none)* | TCP/HTTP smoke-test all mappings |
+| `scc_extract_keystore` | SCC host | `username`, `password`, `backup_password` | Full backup + SSFS extraction (**requires `--confirm`**) |
+| `scc_download_hashes` | SCC host | *(none)* | Download SCC `users.xml` password hashes |
+| `scc_lookup_hashes` | SCC host | `api_key` (optional) | Look up hashes via hashes.com API |
+| `scc_decrypt_ssfs` | SCC host | *(none)* | Decrypt SSFS from backup zip |
+| `harvest_scc` | SAP SID | *(none)* | Post-RCE SCC harvest from pwned SAP node (**requires `--confirm`**) |
+| `harvest_scc_mappings` | SAP SID | *(none)* | Read SCC `backends.xml` from disk via OS-exec |
+| `harvest_scc_ssfs` | SAP SID | *(none)* | Read on-host SSFS_SCC.KEY/.DAT and decrypt secrets |
+
+#### Example: Full SCC Compromise Chain
+
+```yaml
+name: "SCC Full Compromise"
+steps:
+  # Store credentials so subsequent steps auto-fill
+  - action: scc_set_credentials
+    target: "192.168.2.167"
+    username: Administrator
+    password: "Manage1"
+
+  # Pull mappings and plot backends on map
+  - action: scc_pull_mappings
+    target: "192.168.2.167"
+    username: Administrator
+    password: "Manage1"
+
+  # Smoke-test every backend
+  - action: scc_probe_mappings
+    target: "192.168.2.167"
+
+  # Crown jewels: backup + keystore + SSFS (requires --confirm)
+  - action: scc_extract_keystore
+    target: "192.168.2.167"
+    username: Administrator
+    password: "Manage1"
+    backup_password: "Manage1"
+
+  # Download user password hashes
+  - action: scc_download_hashes
+    target: "192.168.2.167"
+
+  # Look up hashes against hashes.com rainbow tables
+  - action: scc_lookup_hashes
+    target: "192.168.2.167"
+    api_key: "your_api_key_here"
+```
+
+#### Example: No-Creds SCC Compromise (via co-located pwned SAP node)
+
+```yaml
+name: "SCC via Pwned SAP Node"
+steps:
+  # Compromise the co-located SAP system first
+  - action: create_user
+    target: S4H
+    method: gw_exploit
+    client: "001"
+
+  # Read SCC mappings directly from disk (no SCC admin creds needed)
+  - action: harvest_scc_mappings
+    target: S4H
+
+  # Read and decrypt SSFS secrets from on-host files
+  - action: harvest_scc_ssfs
+    target: S4H
+
+  # Download SCC password hashes via OS-exec
+  - action: scc_download_hashes
+    target: "192.168.2.209"
+```
+
+### CVE Bucket Detection
+
+SAPMAP automatically flags SCC nodes whose version falls in a known-vulnerable range:
+
+| CVE | Affected | Severity | Description |
+|-----|---------|----------|-------------|
+| CVE-2024-25642 | SCC 2.0.0 – 2.16.1 | HIGH | TLS certificate validation flaw — patched in 2.16.2 |
+
+The bucket fires during **Pull Mappings** (authenticated version read) and produces a HIGH finding on the SCC node.
 
 ---
 
