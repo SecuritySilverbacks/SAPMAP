@@ -2589,7 +2589,7 @@ function showCtxMenu(e, sid) {
     'create_user_creds': hasCreds,                  // need credentials
     'lpe':              isAbapStack && hasCreds,    // ABAP-only (BAPI-driven)
     'check_copyfail':   !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
-    'exploit_copyfail': !isWindows && !!(n && n.copyfail_vulnerable),
+    'exploit_copyfail': !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
     'deep_scan':        true,                       // always available
     'retrieve_rfcs':    hasCreds,                   // need credentials/access
     'test_rfcs':        hasCreds && hasRFCs,        // need access + existing RFCs
@@ -2656,7 +2656,7 @@ function showCtxMenu(e, sid) {
     'create_user_creds': 'Provide credentials first',
     'lpe':              'Provide credentials first',
     'check_copyfail':   'Requires OS-exec on Linux host',
-    'exploit_copyfail': 'Run Check CVE-2026-31431 first — kernel must be vulnerable',
+    'exploit_copyfail': 'Requires OS-exec on Linux host — run Check first to confirm kernel is vulnerable',
     'retrieve_rfcs':    'Provide credentials or create a user first',
     'test_rfcs':        'Retrieve RFC connections first',
     'read_java_destinations': (javaDeployBlocked
@@ -2719,7 +2719,7 @@ function showCtxMenu(e, sid) {
     'lpe':                        !isAbapStack,
     'impact_assess_java':         !isJavaStack,
     'check_copyfail':   isWindows,
-    'exploit_copyfail': isWindows || !(n && n.copyfail_vulnerable),
+    'exploit_copyfail': isWindows,
     // SCC harvest items — hidden entirely unless an SCC is on the same host
     'harvest_scc':          !_hasSccOnSameHost(n),
     'harvest_scc_mappings': !_hasSccOnSameHost(n),

@@ -222,10 +222,21 @@ def check_copyfail(node) -> dict:
         result["reason"] = f"Kernel {kernel_str} is >= patched version"
         return result
 
-    # Check authencesn via AF_ALG bind (more reliable than /proc/crypto grep)
-    af_check = _r("python3", "-c 'import socket;a=socket.socket(38,5,0);a.bind((\"aead\",\"authencesn(hmac(sha256),cbc(aes))\"));print(\"OK\");a.close()'")
-    result["authencesn_ok"] = "OK" in af_check
-    result["details"]["authencesn"] = af_check
+    # Check authencesn via AF_ALG bind using long_params (avoids SAPXPG
+    # quoting issues — the code string goes in LONG_PARAMS, not PARAMS).
+    # Writes /tmp/.cf_chk if bind succeeds; we read it back to confirm.
+    chk_code = (
+        "import socket;"
+        "a=socket.socket(38,5,0);"
+        "a.bind(('aead','authencesn(hmac(sha256),cbc(aes))'));"
+        "f=open('/tmp/.cf_chk','w');f.write('OK');f.close();"
+        "a.close()"
+    )
+    execute_gw_command(node, "python3", "-c", long_params=chk_code)
+    chk_out = _r("cat", "/tmp/.cf_chk")
+    _r("rm", "-f /tmp/.cf_chk")
+    result["authencesn_ok"] = chk_out.strip() == "OK"
+    result["details"]["authencesn"] = chk_out
 
     if not result["authencesn_ok"]:
         result["reason"] = "authencesn bind failed — AF_ALG not exploitable"
