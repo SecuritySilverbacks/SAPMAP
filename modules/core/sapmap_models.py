@@ -680,6 +680,142 @@ class SCCNode:
 
 
 # ---------------------------------------------------------------------------
+# BTP — Subaccount + Destination
+# ---------------------------------------------------------------------------
+
+@dataclass
+class BTPDestination:
+    """A destination defined in an SAP BTP subaccount.
+
+    The high-value field is `password` — when the API token has the
+    ``destination_configuration.ApiAccess`` scope, BTP returns it in
+    cleartext for `BasicAuthentication` / `OAuth2Password` /
+    `OAuth2ClientCredentials` / `OAuth2SAMLBearerAssertion` flows.
+    Capturing it gives an attacker (or a SAPMAP operator) a plaintext
+    on-prem credential without touching the on-prem network.
+    """
+    subaccount_uuid: str = ""
+    name: str = ""
+    type: str = ""                       # "HTTP" | "RFC" | "MAIL" | "LDAP"
+    url: str = ""                        # http(s)://target.example or ashost
+    proxy_type: str = ""                 # "Internet" | "OnPremise" | "PrivateLink"
+    authentication: str = ""             # "BasicAuthentication" | "OAuth2..." | "PrincipalPropagation" | "NoAuthentication"
+    user: str = ""
+    # Cleartext password / secret captured via ApiAccess scope.  Empty
+    # when the scope is absent or the auth type doesn't expose creds
+    # (PrincipalPropagation, NoAuthentication).
+    password: str = ""
+    cleartext_captured: bool = False
+    # Inferred linkage to an on-prem SAP system on the map — populated
+    # by sap_btp.link_destinations_to_onprem() once the subaccount is
+    # enumerated.  Empty when the destination's URL doesn't match any
+    # known SAPNode IP/hostname.
+    linked_target_sid: str = ""
+    linked_via: str = ""                 # "ashost" | "url-host" | "scc-mapping"
+    # Audit fields
+    description: str = ""
+    additional_properties: dict = field(default_factory=dict)
+    captured_at: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "subaccount_uuid":      self.subaccount_uuid,
+            "name":                 self.name,
+            "type":                 self.type,
+            "url":                  self.url,
+            "proxy_type":           self.proxy_type,
+            "authentication":       self.authentication,
+            "user":                 self.user,
+            "password":             self.password,
+            "cleartext_captured":   self.cleartext_captured,
+            "linked_target_sid":    self.linked_target_sid,
+            "linked_via":           self.linked_via,
+            "description":          self.description,
+            "additional_properties": self.additional_properties,
+            "captured_at":          self.captured_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "BTPDestination":
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in (data or {}).items() if k in known})
+
+
+@dataclass
+class BTPSubaccountNode:
+    """An SAP BTP subaccount discovered via a `cf oauth-token`.
+
+    Drawn on the map as a "cloud" node above the on-prem layer, with
+    edges to the SCCs that tunnel into it and red edges to any on-prem
+    SAPNode whose credentials the BTP destinations leaked.
+    """
+    uuid: str = ""                       # GUID — primary identifier
+    display_name: str = ""
+    region: str = ""                     # "eu10" | "us10" | "ap10" | etc.
+    subdomain: str = ""
+    parent_global_account: str = ""
+    # SCC tunnel information — which Cloud Connectors register against
+    # this subaccount.  Each entry = a host string from
+    # /connectivity/v1/cloudConnectorMappings; cross-referenced against
+    # state.scc_nodes for the visual edge.
+    scc_locations: list = field(default_factory=list)   # [{location_id, scc_host_uuid}]
+    # Destinations harvested via /destinations.  Each one gets its own
+    # BTPDestination row with optional cleartext password captured.
+    destinations: list = field(default_factory=list)     # [BTPDestination.to_dict(), ...]
+    # IAS tenant FQDN attached to this subaccount (optional, populated
+    # in a follow-up Week-5 step).  Carried here as a forward slot so
+    # serialisation stays stable.
+    ias_tenant: str = ""
+    # Token telemetry — the token itself NEVER serialises (live in
+    # SAPMAPApi memory only).  These fields just carry whatever the
+    # token's `userInfo` claim revealed about *who* extracted what.
+    enumerated_via_user: str = ""
+    enumerated_via_email: str = ""
+    enumerated_at: str = ""
+    # Visual position on the map (cloud tier)
+    position: Optional[tuple] = None
+    # Truthy when at least one destination password was captured in
+    # cleartext, OR a custom IdP / wildcard PP rule was found.  Drives
+    # the ⚡ overlay on the cloud node.
+    pwned: bool = False
+    findings: list = field(default_factory=list)    # [Finding, ...]
+
+    def to_dict(self) -> dict:
+        return {
+            "uuid":                  self.uuid,
+            "display_name":          self.display_name,
+            "region":                self.region,
+            "subdomain":             self.subdomain,
+            "parent_global_account": self.parent_global_account,
+            "scc_locations":         list(self.scc_locations),
+            "destinations":          [
+                d.to_dict() if hasattr(d, "to_dict") else d
+                for d in (self.destinations or [])
+            ],
+            "ias_tenant":            self.ias_tenant,
+            "enumerated_via_user":   self.enumerated_via_user,
+            "enumerated_via_email":  self.enumerated_via_email,
+            "enumerated_at":         self.enumerated_at,
+            "position":              list(self.position) if self.position else None,
+            "pwned":                 self.pwned,
+            "findings":              [f.to_dict() if hasattr(f, "to_dict") else f
+                                       for f in (self.findings or [])],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "BTPSubaccountNode":
+        d = dict(data or {})
+        d["destinations"] = [BTPDestination.from_dict(x)
+                              for x in d.get("destinations", [])]
+        d["findings"] = [Finding(**x) if isinstance(x, dict) else x
+                          for x in d.get("findings", [])]
+        if d.get("position") and isinstance(d["position"], list):
+            d["position"] = tuple(d["position"])
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in d.items() if k in known})
+
+
+# ---------------------------------------------------------------------------
 # SAPMAPState — full session state (serializable)
 # ---------------------------------------------------------------------------
 
@@ -693,6 +829,7 @@ class SAPMAPState:
     created_destinations: list = field(default_factory=list)  # [{dest_name, source_sid, target_sid, ...}]
     rfc_check_cache: dict = field(default_factory=dict)  # {dest_name: result_dict}
     scc_nodes: dict = field(default_factory=dict)        # host -> SCCNode (Cloud Connectors)
+    btp_subaccounts: dict = field(default_factory=dict)  # uuid -> BTPSubaccountNode
     scan_config: dict = field(default_factory=dict)
     timestamp: str = ""
     version: str = "1.0"
@@ -932,6 +1069,9 @@ class SAPMAPState:
             "created_destinations": self.created_destinations,
             "rfc_check_cache": self.rfc_check_cache,
             "scc_nodes": {h: n.to_dict() for h, n in self.scc_nodes.items()},
+            "btp_subaccounts": {
+                u: n.to_dict() for u, n in self.btp_subaccounts.items()
+            },
         }
 
     @classmethod
@@ -949,6 +1089,8 @@ class SAPMAPState:
         state.created_destinations = d.get("created_destinations", [])
         for host, scc_d in d.get("scc_nodes", {}).items():
             state.scc_nodes[host] = SCCNode.from_dict(scc_d)
+        for uuid, sub_d in d.get("btp_subaccounts", {}).items():
+            state.btp_subaccounts[uuid] = BTPSubaccountNode.from_dict(sub_d)
         return state
 
     def to_json(self, indent: int = 2) -> str:
