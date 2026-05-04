@@ -47,6 +47,7 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 - [SAProuter Support](#saprouter-support)
 - [SAP Secure Store Decryption](#sap-secure-store-rsectab-decryption)
 - [SAP Cloud Connector (SCC)](#sap-cloud-connector-scc)
+- [Engagement Reports & Diffs](#engagement-reports--diffs)
 - [Standalone Tools](#standalone-tools)
 - [State Management](#state-management)
 - [Testing](#testing)
@@ -124,7 +125,12 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 - **Arbitrary table reads** — Download any SAP or Java DB table via RFC_READ_TABLE / dropped JSP JDBC.  Saved to loot/tables/
 - **Business Impact Assessment (BIA)** — Scenario-based queries against compromised systems (customer data breach, payroll, supply chain, etc.) — exports per-scenario CSV to loot/bia/
 - **Client role detection** — Identify production (P), QA (Q), test (T) systems from T000 with CCCORACTIV
-- **hashes.com integration** — Submit recovered hashes (ABAP BCODE/PASSCODE/PWDSALTEDHASH and SCC SHA-1/SHA-256/PBKDF2) directly to hashes.com rainbow-table API; cracked plaintext is auto-stored as a credential and the node is marked pwned
+- **hashes.com integration** — Submit recovered hashes (ABAP BCODE/PASSCODE/PWDSALTEDHASH and SCC SHA-1/SHA-256/PBKDF2) directly to hashes.com rainbow-table API; cracked plaintext is auto-stored as a credential and the node is marked pwned. Auto-lookup toggle (default ON) fires immediately after every hash extract; results fan out across users that share a hash so one cracked password lights up every account using it
+
+### Engagement Reports & Diffs
+- **Self-contained HTML engagement report** — File → Export Engagement Report writes both Markdown and HTML versions to `loot/reports/`. The HTML is presentable: gradient hero with colour-coded overall-risk pill, 9 KPI cards with delta colouring, severity-coloured finding cards, ranked attack-path table, **inline SVG snapshot of the discovered landscape** (auto-grid layout, ⚡ pwned overlay, red production halo), folded SCC + SAP inventory, masked credentials table, and **structural recommendations derived from state** (gateway ACL, MS ACL, SAProuter ACL, default-cred rotation, SecStore rotation, SCC default creds, IR for pwned PRD, untested-RFC-to-PRD review, etc., each with SAP Note refs)
+- **Diff between two .sapmap snapshots** — File → Diff Two Runs picks any two saved states (or one against the live in-memory state) and writes a self-contained HTML diff to `loot/reports/`. Hero strip is colour-banded ("MAJOR REGRESSION" / "New exposure" / "Remediation progress" / "No major change"), 9 signed-delta KPI cards, sections for new vs. remediated findings, new vs. disappeared trust chains, added/removed/changed nodes with before-after tables, and SCC + RFC connection deltas
+- **Trust-chain analysis** — BFS from every entry-point system across the RFC adjacency graph, ranks paths by severity (CRITICAL/HIGH/MEDIUM/LOW based on production endpoints + SAP_ALL throughout); includes **untested RFC edges** with an explicit `UNTESTED` flag (only proven-broken edges are dropped, so chains landing on PRD aren't silently hidden)
 
 ### Cleanup
 - **User deletion** — Remove all created SAPMAP users via BAPI_USER_DELETE
@@ -146,6 +152,8 @@ modules/
 │   ├── sapmap_findings.py             Critical-finding bus (independent of GUI)
 │   ├── sapmap_errors.py               format_rfc_exception() — pyrfc detail extractor
 │   ├── sapmap_stop.py                 Process-wide stop signal for background ops
+│   ├── sapmap_report.py               Engagement report — Markdown + self-contained HTML (KPIs, SVG landscape map, structural recommendations)
+│   ├── sapmap_diff.py                 Diff between two .sapmap snapshots (Markdown + HTML)
 │   ├── sapmap_gui.py                  Bottle HTTP server — 60+ REST API routes
 │   └── sapmap_html.py                 Single-page web application (HTML/CSS/JS)
 │
@@ -169,14 +177,16 @@ modules/
 │   └── sapmap_scc_relay.py            Reachability probe for SCC mappings
 │
 ├── exploitation/                      Initial-access exploits + RCE primitives
-│   ├── sapmap_exploit.py              Umbrella orchestrator — GW user create, JSP deploy, propagation
+│   ├── sapmap_exploit.py              Umbrella orchestrator (re-exports from siblings below)
 │   ├── sap_cve_2020_6287.py           RECON unauth user create
 │   ├── sap_cve_2025_31324.py          VisualComposer JSP webshell
-│   ├── sap_ms_betrusted.py            Message Server betrusted (10KBLAZE)
+│   ├── sap_ms_betrusted.py            Message Server betrusted (10KBLAZE) — protocol layer
+│   ├── sap_betrusted_chain.py         Full 10KBLAZE chain: betrusted → GW trust → user create
 │   ├── sap_gw_xpg_standalone.py       Standalone Gateway SAPXPG client
+│   ├── sap_db_sql_writers.py          GW-SAPXPG database SQL writers (HANA / MSSQL / Oracle / MaxDB)
 │   ├── sap_java_ctc.py                Java CTC ConfigServlet deploy
 │   ├── sap_java_telnet.py             Java telnet console deploy
-│   └── sapmap_copyfail.py             CVE-2026-31431 root LPE on Linux (page-cache patch)
+│   └── sapmap_copyfail.py             CVE-2026-31431 root LPE on Linux (page-cache patch) — validated on SLES 11 + 15 + 6.4.0
 │
 ├── postex/                            Post-exploitation: privesc + lateral movement
 │   ├── sapmap_lpe.py                  ABAP local privilege escalation registry
@@ -186,12 +196,15 @@ modules/
 ├── data_extraction/                   Credential / data harvesting
 │   ├── sapmap_secstore.py             ABAP RSECTAB / SSFS decryption + map integration
 │   ├── sap_java_secstore.py           Java SecStoreFS via dropped JSP
+│   ├── sap_java_secstore_runner.py    Java Secure Store extraction orchestrator (deploys JSP, decrypts entries, plots downstream creds)
 │   ├── sap_java_secstore_offline.py   Pure-Python Java SecStore decrypt (3DES era)
+│   ├── sap_java_runner.py             Java DB / data extraction (download_java_table, extract_java_password_hashes, assess_java_impact, read_java_destinations) + _wait_for_jsp_ready helper for the Tomcat / Jasper compile race
 │   ├── sap_java_db.py                 JDBC dump + UME hashes via JSP
 │   ├── poc_remote_abap_exec.py        XBP job-scheduling RCE for SQL extraction
 │   ├── sapmap_scc_admin.py            SCC authenticated REST helpers
 │   ├── sapmap_scc_keystore.py         SCC backup zip parsing + keystore extraction
-│   └── sapmap_scc_ssfs_decrypt.py     SCC SSFS decryption (JNI helper + on-host fallback)
+│   ├── sapmap_scc_ssfs_decrypt.py     SCC SSFS decryption (JNI helper + on-host fallback)
+│   └── sap_scc_harvest.py             SCC post-RCE harvest (ARP sweep, SSH key hunt, mappings exfil)
 │
 ├── business_impact/
 │   ├── sapmap_impact.py               ABAP-RFC business impact scenarios
@@ -773,6 +786,38 @@ The bucket fires during **Pull Mappings** (authenticated version read) and produ
 
 ---
 
+## Engagement Reports & Diffs
+
+Two file-menu actions turn the live engagement state into deliverables.
+
+### Export Engagement Report (HTML + Markdown)
+
+`File → Export Engagement Report` writes both formats to `loot/reports/sapmap_report_<ts>.{md,html}`.
+
+The **HTML version** is the one to hand to management:
+- **Hero strip** — engagement title, generation timestamp, colour-coded `Overall risk` pill (CRITICAL when production is pwned, HIGH when any CRITICAL finding exists, MEDIUM on HIGH-only, LOW for clean, UNKNOWN on empty state). Pulsing dot anchors the eye.
+- **9 KPI cards** — systems / pwned / production-pwned / critical / trust-chains-to-PRD / accounts-created / ABAP SecStore / Java SecStore / SCC count, each with a coloured left-border by severity.
+- **Inline SVG landscape map** — auto-grid layout (no external image), SAP nodes colour-coded by stack (ABAP blue, Java green, ABAP+JAVA purple, HANA red, SAProuter grey), Cloud Connectors as teal hexagons, ⚡ overlay on pwned, red halo on production, curved arrows for RFC trust edges (red for SAP_ALL, dashed for untested), legend in lower-right.
+- **CRITICAL + HIGH findings** as severity-bordered cards with description, detail, and a green-highlighted **Remediation** block.
+- **Trust-chains table** with `CRITICAL`/`HIGH`/`MEDIUM`/`LOW` coloured pills + `PRD` badges + narrative for the top 10.
+- **Landscape inventory** with PWNED + PRD badges per row, critical-count pill (red > 0, green = 0), and SCC nodes folded inline (no separate section).
+- **Recovered credentials** — passwords masked, source / verified pills.
+- **Recommendations** section — combines per-finding remediations with up to 10 **structural categories derived from state** (gateway ACL, MS ACL, SAProuter ACL, Java patching, default-cred rotation, SecStore rotation, SCC default creds, IR for pwned PRD, untested-RFC-to-PRD review, SCC keystore rebuild). Each carries category, scope (SIDs/hosts), title, multi-paragraph body, and SAP Note references. Cards are colour-coded by severity tier.
+- `@media print` rules — prints to PDF cleanly without surprises.
+
+### Diff Two Runs
+
+`File → Diff Two Runs` opens a picker with every `.sapmap` file under `states/` plus a "(live, in-memory state)" option. Pick a baseline and a current snapshot, click Compare. Both Markdown and HTML diff renderings are written to `loot/reports/sapmap_diff_<ts>.{md,html}`.
+
+The HTML diff has:
+- **Hero strip** colour-banded by severity: `MAJOR REGRESSION` (newly-pwned PRD or new chains → PRD), `New exposure` (new findings without offsetting fixes), `Remediation progress` (findings removed and none added), `No major change` (identical snapshots).
+- **9 signed-delta KPI cards** — newly pwned, new CRITICAL findings, new chains → PRD, findings added / remediated, nodes added / removed, trust chains added / removed.
+- **Sections** for new findings, remediated findings, new vs. disappeared trust chains, added/removed/changed nodes (with before-after tables for every changed field), connection promotions to SAP_ALL, SCC changes, and SAPMAP-created-account delta.
+
+The diff is a pure structural delta over JSON — **no live data is queried at diff time**, so it's safe to run repeatedly during and after an engagement.
+
+---
+
 ## Standalone Tools
 
 Each standalone tool works independently with no external dependencies (Python 3 stdlib only).  After the modules reorg they live under `modules/<group>/`, but you can run them by path or import them as a module.
@@ -1065,7 +1110,7 @@ Separate from session state, these persist across sessions:
 
 ## Testing
 
-SAPMAP includes a unit test suite (765 tests across 22 files) that validates core logic without network access:
+SAPMAP includes a unit test suite (835 tests across 25 files) that validates core logic without network access:
 
 ```bash
 python3 -m pytest tests/ -v
@@ -1082,6 +1127,9 @@ python3 -m pytest tests/ -v
 | `test_p3_features.py` | 30 | CopyFail kernel detection, check_copyfail early-exit branches, SCC fingerprint probe ladder, execute_local_command dest reuse |
 | `test_recent_features.py` | 29 | format_rfc_exception extractor, ensure_loot_dir + LOOT_* constants, download_password_hashes 5-method fallback chain, categorise_entry / classify_entry |
 | `test_secstore_decrypt.py` | 25 | RSECTAB decryption, keyprime derivation, IDENT categorisation, SSFS key extraction |
+| `test_report.py` | 25 | Engagement report Markdown + HTML — KPIs, finding cards, structural recommendations, SVG landscape map, password masking, HTML escape, SCCs folded into inventory |
+| `test_extracted_modules.py` | 23 | Smoke + import-shape tests for the 5 Tier-2 extracted modules: every public name resolves, AST scan for unresolved free names, signature drift, lazy-proxy hot-swap |
+| `test_diff.py` | 19 | Diff between .sapmap snapshots — added/removed/changed nodes, new/remediated findings, trust-chain delta, summary roll-up, Markdown + HTML rendering invariants |
 | `test_gw_protocol.py` | 12 | P1/P2 packet building, parse_response, hexdump, TLV encoding, SAPRFXPG |
 | `test_rsec_cipher.py` | 11 | RSECCipher encode/decode roundtrip, rsec_decrypt, rsec_decrypt_key |
 | `test_models.py` | 9 | Data model serialization, risk_level, best_credentials, state management |
