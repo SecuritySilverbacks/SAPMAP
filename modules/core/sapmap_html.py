@@ -2757,17 +2757,19 @@ function showCtxMenu(e, sid) {
     }
   });
 
-  // Hide the entire Cloud Connector submenu when none of its actions are
-  // visible — avoids showing a parent label that opens to an empty list.
-  // Currently every SCC action is gated on _hasSccOnSameHost(), so we hide
-  // the whole group when no SCC is registered on the same host as `n`.
-  const sccGroup = menu.querySelector('#ctx-scc-group');
-  if (sccGroup) {
-    const visibleSccItems = sccGroup.querySelectorAll(
-      '.ctx-sub > .ctx-item[data-action]:not([style*="display: none"])'
+  // Hide any submenu group whose actions are all hidden — avoids showing
+  // a parent label like "Business Impact" or "Data Extraction" that opens
+  // to an empty flyout (common on SAProuter / SCC nodes where most ABAP /
+  // Java actions are not applicable).  Walks every .ctx-group and hides
+  // the group when no [data-action] inside its .ctx-sub remains visible.
+  menu.querySelectorAll('.ctx-group').forEach(group => {
+    const sub = group.querySelector('.ctx-sub');
+    if (!sub) return;   // not a submenu — leave alone
+    const visibleItems = sub.querySelectorAll(
+      ':scope > .ctx-item[data-action]:not([style*="display: none"])'
     );
-    sccGroup.style.display = visibleSccItems.length === 0 ? 'none' : '';
-  }
+    group.style.display = visibleItems.length === 0 ? 'none' : '';
+  });
 
   // Show existing credentials / created users in the menu
   let oldInfo = menu.querySelector('.ctx-cred-info');
