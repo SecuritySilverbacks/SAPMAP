@@ -496,3 +496,79 @@ def test_probe_all_skips_non_dict_entries():
     # Only the dict entry should produce a result
     assert len(out) == 1
     assert out[0][0] == 2
+
+
+# ===========================================================================
+# 7. Windows multi-drive SCC discovery (sapmap_gui helpers)
+# ===========================================================================
+
+def test_enumerate_windows_drives_parses_fsutil_output():
+    """fsutil's 'Drives: A:\\ C:\\ D:\\ P:\\' must produce the right list."""
+    from sapmap_gui import _enumerate_windows_drives
+    fake_gw_output = "Drives: A:\\ C:\\ D:\\ P:\\"
+    out = _enumerate_windows_drives(lambda c, p: (fake_gw_output, True))
+    assert "C:" in out and "D:" in out and "P:" in out
+    # No mangling — drive letters stripped of backslashes, exact case
+    assert all(d.endswith(":") and len(d) == 2 for d in out)
+
+
+def test_enumerate_windows_drives_handles_string_return():
+    """Tuples (out, ok) AND bare strings must both work — different
+    callers in the codebase use different _gw shapes."""
+    from sapmap_gui import _enumerate_windows_drives
+    out = _enumerate_windows_drives(lambda c, p: "Drives: C:\\ D:\\")
+    assert "C:" in out and "D:" in out
+
+
+def test_enumerate_windows_drives_fallback_on_empty():
+    """fsutil silently failing must not produce an empty list — the
+    callers depend on at least C: being present."""
+    from sapmap_gui import _enumerate_windows_drives
+    out = _enumerate_windows_drives(lambda c, p: ("", True))
+    assert out == ["C:"]
+
+
+def test_enumerate_windows_drives_fallback_on_exception():
+    """If the gw helper raises, we still return C: rather than crash."""
+    from sapmap_gui import _enumerate_windows_drives
+    def boom(c, p):
+        raise RuntimeError("SAPXPG offline")
+    out = _enumerate_windows_drives(boom)
+    assert out == ["C:"]
+
+
+def test_enumerate_windows_drives_dedups_and_keeps_c_first():
+    """Even if fsutil reports drives without C:, C: still gets prepended."""
+    from sapmap_gui import _enumerate_windows_drives
+    out = _enumerate_windows_drives(lambda c, p: "Drives: D:\\ E:\\")
+    assert out[0] == "C:"
+    assert "D:" in out and "E:" in out
+
+
+def test_expand_scc_roots_across_drives_cross_product():
+    """Every drive × every template must appear in the output."""
+    from sapmap_gui import (_expand_scc_roots_across_drives,
+                             _WIN_SCC_ROOT_TEMPLATES)
+    drives = ["C:", "P:"]
+    out = _expand_scc_roots_across_drives(drives)
+    assert len(out) == len(drives) * len(_WIN_SCC_ROOT_TEMPLATES)
+    # Spot-checks: P:\SAP\scc20 must be there
+    assert r"P:\SAP\scc20" in out
+    assert r"C:\SAP\scc20" in out
+    # Path separators are backslashes (Windows form)
+    for r in out:
+        assert "\\" in r and "/" not in r
+
+
+def test_expand_scc_roots_includes_program_files_paths():
+    """Both Program Files variants must be included for every drive."""
+    from sapmap_gui import _expand_scc_roots_across_drives
+    out = _expand_scc_roots_across_drives(["P:"])
+    assert r"P:\Program Files\SAP\Cloud Connector" in out
+    assert r"P:\Program Files\SAP\SAP Cloud Connector" in out
+
+
+def test_expand_scc_roots_empty_drive_list():
+    """No drives → empty roots list (don't fabricate)."""
+    from sapmap_gui import _expand_scc_roots_across_drives
+    assert _expand_scc_roots_across_drives([]) == []
