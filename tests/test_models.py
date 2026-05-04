@@ -282,3 +282,35 @@ def test_sapmapstate_dedup_connection():
     # Should not duplicate — second call updates in place
     assert len(state.connections) == 1
     assert state.connections[0].rfc_user == "USER2"
+
+
+def test_state_stats_pwned_includes_sccs():
+    """Status bar should count SCCs with .pwned = True alongside SAP
+    nodes.  Without this, the live map shows N lightning bolts but the
+    counter shows N-k where k is the number of pwned SCCs (off-by-one
+    surprise observed in the field)."""
+    state = SAPMAPState()
+    n1 = SAPNode(sid="S4P", system_type="ABAP", pwned=True)
+    n2 = SAPNode(sid="S4D", system_type="ABAP", pwned=False)
+    state.add_node(n1)
+    state.add_node(n2)
+
+    class _SCC:
+        def __init__(self, host, pwned):
+            self.host = host
+            self.pwned = pwned
+        def to_dict(self):
+            return {"host": self.host, "pwned": self.pwned}
+
+    state.scc_nodes["scc1"] = _SCC("scc1", pwned=True)
+    state.scc_nodes["scc2"] = _SCC("scc2", pwned=False)
+
+    s = state.stats()
+    # 1 SAP pwned + 1 SCC pwned = 2 (SAP-only count would be 1)
+    assert s["pwned"] == 2
+
+
+def test_state_stats_pwned_zero_when_no_sccs_no_pwned_nodes():
+    state = SAPMAPState()
+    state.add_node(SAPNode(sid="S4D", system_type="ABAP", pwned=False))
+    assert state.stats()["pwned"] == 0
