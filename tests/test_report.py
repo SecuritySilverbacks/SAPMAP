@@ -11,7 +11,7 @@ from sapmap_models import (
     SAPMAPState, SAPNode, RFCConnection, Credentials, CreatedUser,
     Finding, Severity, InstanceInfo,
 )
-from sapmap_report import build_markdown_report
+from sapmap_report import build_markdown_report, build_html_report
 
 
 def _state_with_three_systems():
@@ -167,3 +167,69 @@ def test_report_is_well_formed_markdown():
     # No accidental Python repr leakage
     assert "<sapmap_models." not in md
     assert "None" not in md.split("\n")[0]   # title isn't None
+
+
+# ---------------------------------------------------------------------------
+# HTML report — single self-contained file for management hand-off
+# ---------------------------------------------------------------------------
+
+def test_html_report_is_self_contained_html():
+    """HTML output must be a complete document with embedded CSS and
+    no external resource references (no <script src>, no <link
+    href>) — opens cleanly in any browser without network."""
+    state = _state_with_three_systems()
+    html = build_html_report(state)
+    assert html.startswith("<!DOCTYPE html>")
+    assert "<style>" in html and "</style>" in html
+    assert "<script" not in html.lower()
+    assert "<link " not in html.lower()
+    assert "</html>" in html
+
+
+def test_html_report_includes_kpi_cards_and_findings():
+    state = _state_with_three_systems()
+    html = build_html_report(state)
+    # KPI label spelled out — visible to management
+    assert "Systems pwned" in html
+    assert "Production pwned" in html
+    assert "Critical findings" in html
+    # The actual finding name from S4P surfaces
+    assert "10KBLAZE Gateway exploit" in html
+    # SID pill renders the SID
+    assert "S4P" in html
+
+
+def test_html_report_risk_band_critical_when_prd_pwned():
+    """Production-pwned landscape must surface CRITICAL in the hero strip."""
+    state = _state_with_three_systems()
+    html = build_html_report(state)
+    assert "Overall risk: CRITICAL" in html
+
+
+def test_html_report_credentials_section_masks_passwords():
+    state = _state_with_three_systems()
+    html = build_html_report(state)
+    assert "Recovered credentials" in html
+    # Plaintext from the test fixtures must NEVER appear in the HTML
+    assert "Andinyougo123!" not in html
+
+
+def test_html_report_handles_empty_state():
+    html = build_html_report(SAPMAPState())
+    assert html.startswith("<!DOCTYPE html>")
+    assert "</html>" in html
+    # Empty state -> UNKNOWN risk band
+    assert "Overall risk: UNKNOWN" in html
+
+
+def test_html_report_html_escapes_node_data():
+    """Hostnames containing < > & " must be escaped, not raw."""
+    state = SAPMAPState()
+    n = SAPNode(sid="EVL", system_type="ABAP",
+                hostname='evil"<script>x</script>"', ip="10.0.0.99")
+    state.add_node(n)
+    html = build_html_report(state)
+    # Raw script tag must not appear
+    assert "<script>x</script>" not in html
+    # Escaped form must appear
+    assert "&lt;script&gt;" in html or "&quot;" in html
