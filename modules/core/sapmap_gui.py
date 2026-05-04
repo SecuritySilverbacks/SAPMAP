@@ -5889,4 +5889,100 @@ def create_app(api: SAPMAPApi) -> Bottle:
             import traceback; traceback.print_exc()
             return json.dumps({"ok": False, "error": str(e)})
 
+    # -- Diff between runs --
+    @app.route("/api/diff/list_states")
+    def diff_list_states():
+        """Return every .sapmap file in the states/ directory, plus a
+        synthetic 'in-memory' entry pointing at the live state."""
+        import sapmap_state as _ss
+        response.content_type = "application/json"
+        files = []
+        try:
+            for fn in sorted(os.listdir(_ss.STATE_DIR), reverse=True):
+                if not fn.endswith(".sapmap"):
+                    continue
+                path = os.path.join(_ss.STATE_DIR, fn)
+                try:
+                    st = os.stat(path)
+                    files.append({
+                        "path": path,
+                        "name": fn,
+                        "size": st.st_size,
+                        "mtime": datetime.fromtimestamp(st.st_mtime)
+                                  .strftime("%Y-%m-%d %H:%M:%S"),
+                    })
+                except OSError:
+                    continue
+        except FileNotFoundError:
+            pass
+        return json.dumps({"ok": True, "files": files})
+
+    @app.route("/api/diff/compute", method="POST")
+    def diff_compute():
+        """Body: {baseline: <path>, current: <path|"__in_memory__">}.
+        Loads both states (or uses live state for "__in_memory__"),
+        computes the diff, writes Markdown + HTML reports under
+        loot/reports/, returns metadata."""
+        from sapmap_diff import compute_state_diff, build_diff_html, build_diff_markdown
+        from sapmap_state import load_state
+        import sapmap_state as _ss
+        response.content_type = "application/json"
+        data = request.json or {}
+        base_path = (data.get("baseline") or "").strip()
+        curr_path = (data.get("current") or "").strip()
+        if not base_path or not curr_path:
+            return json.dumps({"ok": False,
+                               "error": "Both 'baseline' and 'current' required"})
+
+        try:
+            if base_path == "__in_memory__":
+                base_state = api.state
+                base_label = "(live, in-memory)"
+            else:
+                base_state = load_state(base_path)
+                base_label = os.path.basename(base_path)
+            if curr_path == "__in_memory__":
+                curr_state = api.state
+                curr_label = "(live, in-memory)"
+            else:
+                curr_state = load_state(curr_path)
+                curr_label = os.path.basename(curr_path)
+        except Exception as e:
+            return json.dumps({"ok": False,
+                               "error": f"Failed to load state file(s): {e}"})
+
+        try:
+            diff = compute_state_diff(base_state, curr_state,
+                                        baseline_label=base_label,
+                                        current_label=curr_label)
+            md = build_diff_markdown(diff)
+            html = build_diff_html(diff)
+
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            reports_dir = _ss.ensure_loot_dir("reports")
+            md_path = os.path.join(reports_dir, f"sapmap_diff_{ts}.md")
+            html_path = os.path.join(reports_dir, f"sapmap_diff_{ts}.html")
+            with open(md_path, "w", encoding="utf-8") as fh:
+                fh.write(md)
+            with open(html_path, "w", encoding="utf-8") as fh:
+                fh.write(html)
+
+            print(f"[+] Engagement diff (Markdown) -> {md_path} "
+                  f"({len(md)} bytes)")
+            print(f"[+] Engagement diff (HTML)     -> {html_path} "
+                  f"({len(html)} bytes)")
+            return json.dumps({
+                "ok":          True,
+                "summary":     diff["summary"],
+                "md_path":     md_path,
+                "html_path":   html_path,
+                "md_bytes":    len(md),
+                "html_bytes":  len(html),
+                "baseline_label": base_label,
+                "current_label":  curr_label,
+            })
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            return json.dumps({"ok": False, "error": str(e)})
+
     return app

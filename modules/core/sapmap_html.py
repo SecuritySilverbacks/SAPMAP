@@ -504,6 +504,7 @@ body {
       <div class="dd-sep"></div>
       <div class="dd-item" onclick="exportJSON()">&#128196; Export JSON</div>
       <div class="dd-item" onclick="exportReport()">&#128221; Export Engagement Report (HTML + Markdown)</div>
+      <div class="dd-item" onclick="openDiffModal()">&#128202; Diff Two Runs (compare snapshots)</div>
       <div class="dd-sep"></div>
       <div class="dd-item" onclick="if(confirm('Exit SAPMAP?'))api('POST','exit').then(()=>window.close())">&#10060; Exit</div>
     </div>
@@ -898,6 +899,33 @@ body {
       <button class="btn btn-primary" onclick="sccHashesCopy()">Copy Hashes</button>
       <button class="btn" id="hashes-lookup-btn" onclick="sccLookupHashesOnline()">&#128269; Lookup on hashes.com</button>
       <button class="btn" onclick="closeModal('scc-hashes-modal')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Diff Two Runs Modal -->
+<div class="modal-overlay" id="diff-modal">
+  <div class="modal" style="max-width:680px;width:95vw">
+    <h3>&#128202; Diff Two Runs</h3>
+    <div style="font-size:12px;color:#8b949e;margin-bottom:12px">
+      Compare two engagement snapshots — saved <code>.sapmap</code>
+      files in the <code>states/</code> folder, or your live in-memory
+      state.  Output: a self-contained HTML diff under
+      <code>loot/reports/</code> showing what changed (new pwns, new
+      findings, new attack paths to PRD, removed findings, etc.).
+    </div>
+    <div class="form-row">
+      <label>Baseline (older run)</label>
+      <select id="diff-baseline" style="width:100%"></select>
+    </div>
+    <div class="form-row">
+      <label>Current (newer run)</label>
+      <select id="diff-current" style="width:100%"></select>
+    </div>
+    <div id="diff-result" style="margin-top:12px"></div>
+    <div class="form-actions">
+      <button class="btn btn-primary" onclick="runDiffCompute()">Compare</button>
+      <button class="btn" onclick="closeModal('diff-modal')">Close</button>
     </div>
   </div>
 </div>
@@ -4034,6 +4062,124 @@ async function sccDownloadHashes(host) {
       console.log('[*] auto-lookup: skipped — settings probe failed:', e);
     }
   }
+}
+
+async function openDiffModal() {
+  // Populate both dropdowns with the contents of states/ + an
+  // in-memory option, then show the modal.
+  let r;
+  try {
+    r = await fetch('/api/diff/list_states').then(r => r.json());
+  } catch (e) {
+    showToast('Could not list states/: ' + e, {autoCloseMs: 6000});
+    return;
+  }
+  if (!r.ok) {
+    showToast('Could not list states/: ' + (r.error || '?'),
+              {autoCloseMs: 6000});
+    return;
+  }
+  const baseSel = document.getElementById('diff-baseline');
+  const currSel = document.getElementById('diff-current');
+  baseSel.innerHTML = '';
+  currSel.innerHTML = '';
+
+  // In-memory option always available (most useful default for
+  // "current") — paired with a "(pick a saved file)" placeholder for
+  // baseline.
+  const opts = [];
+  opts.push({value: '__in_memory__',
+              label: '(live, in-memory state)'});
+  for (const f of (r.files || [])) {
+    opts.push({value: f.path,
+                label: `${f.name}  —  ${f.mtime}  (${f.size} bytes)`});
+  }
+  for (const o of opts) {
+    const optB = document.createElement('option');
+    optB.value = o.value; optB.textContent = o.label;
+    baseSel.appendChild(optB);
+    const optC = document.createElement('option');
+    optC.value = o.value; optC.textContent = o.label;
+    currSel.appendChild(optC);
+  }
+
+  // Sensible defaults: oldest saved file as baseline, in-memory as
+  // current.
+  if ((r.files || []).length > 0) {
+    baseSel.value = r.files[r.files.length - 1].path;
+  }
+  currSel.value = '__in_memory__';
+
+  document.getElementById('diff-result').innerHTML = '';
+  document.getElementById('diff-modal').classList.add('visible');
+}
+
+async function runDiffCompute() {
+  const base = document.getElementById('diff-baseline').value;
+  const curr = document.getElementById('diff-current').value;
+  if (!base || !curr) {
+    showToast('Pick both baseline and current.', {autoCloseMs: 5000});
+    return;
+  }
+  if (base === curr) {
+    showToast('Baseline and current are the same — pick different snapshots.',
+              {autoCloseMs: 5000});
+    return;
+  }
+  const resDiv = document.getElementById('diff-result');
+  resDiv.innerHTML = '<div class="muted" style="padding:8px">Computing diff…</div>';
+  let r;
+  try {
+    r = await fetch('/api/diff/compute', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({baseline: base, current: curr}),
+    });
+    r = await r.json();
+  } catch (e) {
+    resDiv.innerHTML =
+      '<div style="color:#f85149;padding:8px">Request failed: '
+      + escHtml(String(e)) + '</div>';
+    return;
+  }
+  if (!r.ok) {
+    resDiv.innerHTML =
+      '<div style="color:#f85149;padding:8px">Diff failed: '
+      + escHtml(r.error || 'unknown') + '</div>';
+    return;
+  }
+  const s = r.summary || {};
+  resDiv.innerHTML =
+    '<div style="background:#161b22;border:1px solid #30363d;'
+    + 'border-radius:6px;padding:12px;font-size:12px;color:#c9d1d9">'
+    + '<div style="color:#3fb950;font-weight:600;margin-bottom:8px">'
+    + '✓ Diff written</div>'
+    + '<div style="display:grid;grid-template-columns:auto 1fr;'
+    + 'gap:4px 12px;font-family:monospace;font-size:11px">'
+    + '<div style="color:#8b949e">Newly pwned:</div>'
+    + '<div>' + (s.newly_pwned_count || 0)
+    + (s.newly_pwned_sids && s.newly_pwned_sids.length
+        ? ' — ' + escHtml(s.newly_pwned_sids.join(', ')) : '') + '</div>'
+    + '<div style="color:#8b949e">New CRITICAL findings:</div>'
+    + '<div>' + (s.newly_critical || 0) + '</div>'
+    + '<div style="color:#8b949e">New chains → PRD:</div>'
+    + '<div>' + (s.new_chains_to_prd || 0) + '</div>'
+    + '<div style="color:#8b949e">Findings added:</div>'
+    + '<div>' + (s.findings_added || 0) + '</div>'
+    + '<div style="color:#8b949e">Findings remediated:</div>'
+    + '<div>' + (s.findings_removed || 0) + '</div>'
+    + '<div style="color:#8b949e">Nodes added/removed:</div>'
+    + '<div>' + (s.nodes_added || 0) + ' / '
+    + (s.nodes_removed || 0) + '</div>'
+    + '</div>'
+    + '<div style="margin-top:10px;font-size:11px;'
+    + 'word-break:break-all;color:#c9d1d9">'
+    + '<b>HTML:</b> ' + escHtml(r.html_path) + '<br>'
+    + '<b>Markdown:</b> ' + escHtml(r.md_path)
+    + '</div>'
+    + '<div style="color:#8b949e;font-size:10px;margin-top:6px">'
+    + 'Open the HTML file in any browser for a presentable view.</div>'
+    + '</div>';
 }
 
 // localStorage-backed toggle (default ON).  Persists across reloads so
