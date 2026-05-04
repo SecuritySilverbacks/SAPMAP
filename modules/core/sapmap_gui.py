@@ -3050,6 +3050,16 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
         def _run():
             _task_start(f"{sid}:router_scan", f"Router Scan via {sid}")
+            # Clear any stale cancel state from previous scans / STOP presses.
+            # Without this, api.cancel_event stays set after a STOP and the
+            # very first is_set() inside scan_network_via_saprouter aborts
+            # the scan immediately ("Router scan cancelled").
+            api.cancel_event.clear()
+            try:
+                import sapmap_stop
+                sapmap_stop.reset_stop()
+            except Exception:
+                pass
             try:
                 nodes = sapmap_scanner.scan_network_via_saprouter(
                     saprouter_prefix=saprouter_prefix,
