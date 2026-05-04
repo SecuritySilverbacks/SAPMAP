@@ -5582,8 +5582,11 @@ function layoutByStack() {
   // Group nodes into clusters by system_type.  Each cluster gets its
   // own column; nodes within a cluster stack vertically.  Saproute
   // and unknown-stack nodes get their own columns at the right edge.
+  // SCC (Cloud Connector) nodes are placed in a dedicated column too
+  // so they don't stay at their stale previous coords.
   const sids = _loSortedNodeKeys();
-  if (sids.length === 0) return;
+  const sccHosts = Object.keys(mapState.scc_nodes || {}).sort();
+  if (sids.length === 0 && sccHosts.length === 0) return;
   flashActivity('Rearranging: Group by Stack');
   const nodes = mapState.nodes;
 
@@ -5595,7 +5598,7 @@ function layoutByStack() {
     if (t.includes('JAVA')) return 'JAVA';
     return 'Other';
   }
-  const order = ['ABAP', 'ABAP+JAVA', 'JAVA', 'SAProuter', 'Other'];
+  const order = ['ABAP', 'ABAP+JAVA', 'JAVA', 'SAProuter', 'SCC', 'Other'];
   const clusters = {};
   order.forEach(b => { clusters[b] = []; });
   sids.forEach(sid => {
@@ -5603,15 +5606,20 @@ function layoutByStack() {
     if (!clusters[b]) clusters[b] = [];
     clusters[b].push(sid);
   });
+  // SCC nodes live in their own bucket (keyed by host, not sid)
+  sccHosts.forEach(h => { clusters['SCC'].push(h); });
   // Drop empty clusters; keep order
   const populated = order.filter(b => clusters[b].length > 0);
   const xSpacing = _LO_BOX_W + _LO_MARGIN * 2;
   const ySpacing = _LO_BOX_H + _LO_MARGIN;
   populated.forEach((b, colIdx) => {
-    clusters[b].sort().forEach((sid, rowIdx) => {
+    clusters[b].sort().forEach((id, rowIdx) => {
       const xC = _LO_MARGIN + colIdx * xSpacing + _LO_BOX_W / 2;
       const yC = _LO_MARGIN + 30 + rowIdx * ySpacing + _LO_BOX_H / 2;
-      _loCenter(nodes[sid], xC, yC);
+      const obj = (b === 'SCC')
+        ? (mapState.scc_nodes || {})[id]
+        : nodes[id];
+      if (obj) _loCenter(obj, xC, yC);
     });
   });
   fitMap();
