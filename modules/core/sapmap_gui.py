@@ -452,6 +452,13 @@ _WIN_SCC_ROOT_TEMPLATES = (
     r"{drive}\SAP\scc22",
     r"{drive}\SAP\scc19",
     r"{drive}\sap\scc",
+    # Linux-style "usr" install root that some Windows operators copy
+    # over from their on-prem layout — observed live on a P:\ drive.
+    r"{drive}\usr\scc20",
+    r"{drive}\usr\scc",
+    r"{drive}\usr\scc21",
+    r"{drive}\usr\scc22",
+    r"{drive}\usr\scc19",
     r"{drive}\Program Files\SAP\Cloud Connector",
     r"{drive}\Program Files\SAP\SAP Cloud Connector",
 )
@@ -1966,18 +1973,21 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             print(f"[*] SCC {host}: found {candidate} on Windows")
                             break
                     # Fallback: dir /s /b glob across <drive>:\SAP\scc*
-                    # on every detected drive.
+                    # AND <drive>:\usr\scc* on every detected drive.
                     if not fpath:
                         for d in drives:
-                            glob_out, _ = _gw(
-                                "cmd.exe",
-                                rf"/c dir /s /b {d}\SAP\scc*\config\users.xml 2>nul")
-                            for line in glob_out.splitlines():
-                                line = line.strip()
-                                if line.lower().endswith("users.xml"):
-                                    fpath = line
-                                    print(f"[*] SCC {host}: glob found {fpath} "
-                                          f"on {d}")
+                            for top in (r"SAP", r"usr"):
+                                glob_out, _ = _gw(
+                                    "cmd.exe",
+                                    rf"/c dir /s /b {d}\{top}\scc*\config\users.xml 2>nul")
+                                for line in glob_out.splitlines():
+                                    line = line.strip()
+                                    if line.lower().endswith("users.xml"):
+                                        fpath = line
+                                        print(f"[*] SCC {host}: glob found {fpath} "
+                                              f"on {d}\\{top}")
+                                        break
+                                if fpath:
                                     break
                             if fpath:
                                 break
@@ -2580,19 +2590,23 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             scc_root = root
                             break
                     if not scc_root:
-                        # Glob fallback across every detected drive
+                        # Glob fallback across every detected drive +
+                        # both \SAP\ and \usr\ top-level layouts.
                         for d in drives:
-                            g = _gw("cmd.exe",
-                                    rf"/c dir /s /b {d}\SAP\scc*\scc_config\SSFS_SCC.KEY 2>nul")
-                            for line in g.splitlines():
-                                line = line.strip()
-                                if line.upper().endswith("SSFS_SCC.KEY"):
-                                    # line is full path to KEY; root is 2 levels up
-                                    import os as _os
-                                    scc_root = _os.path.dirname(
-                                        _os.path.dirname(line))
-                                    print(f"[*] {sid}: harvest_scc_ssfs glob → "
-                                          f"{scc_root} (on {d})")
+                            for top in (r"SAP", r"usr"):
+                                g = _gw("cmd.exe",
+                                        rf"/c dir /s /b {d}\{top}\scc*\scc_config\SSFS_SCC.KEY 2>nul")
+                                for line in g.splitlines():
+                                    line = line.strip()
+                                    if line.upper().endswith("SSFS_SCC.KEY"):
+                                        # full path to KEY; root is 2 levels up
+                                        import os as _os
+                                        scc_root = _os.path.dirname(
+                                            _os.path.dirname(line))
+                                        print(f"[*] {sid}: harvest_scc_ssfs glob → "
+                                              f"{scc_root} (on {d}\\{top})")
+                                        break
+                                if scc_root:
                                     break
                             if scc_root:
                                 break
