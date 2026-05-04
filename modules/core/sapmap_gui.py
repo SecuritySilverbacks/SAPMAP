@@ -4487,8 +4487,12 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     f"PWDSALTEDHASH (mode 10300): {f_issha}")
 
             # Summary
-            print(f"[+] {sid}: Extracted {len(hashes)} users "
-                  f"({quality} hashes)")
+            quality_label = {
+                "full":        "full BCODE/PASSCODE/PWDSALTEDHASH",
+                "half":        "half BCODE/PASSCODE + full PWDSALTEDHASH",
+                "issha_only":  "PWDSALTEDHASH only (mode 10300)",
+            }.get(quality, quality)
+            print(f"[+] {sid}: Extracted {len(hashes)} users — {quality_label}")
             print(f"    Raw JSON: {json_file}")
             for fw in files_written:
                 print(f"    {fw}")
