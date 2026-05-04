@@ -3366,14 +3366,22 @@ def scan_network_via_saprouter(
             # Store ACL info as a finding
             from sapmap_models import Finding, Severity
             node.findings.append(Finding(
-                title="SAP ports ACL-denied by SAProuter",
+                name="SAP ports ACL-denied by SAProuter",
                 description=(
                     f"SAProuter blocks access to {len(acl_ports)} SAP port(s) "
                     f"on this host: {', '.join(str(p) for p in sorted(acl_ports)[:20])}. "
                     f"The host is known to the SAProuter routing table."
                 ),
                 severity=Severity.INFO,
-                category="Network",
+                remediation=(
+                    "Confirm with the SAP basis team that this ACL behaviour "
+                    "is intended.  If the host is meant to be reachable from "
+                    "this side of the SAProuter, edit `saprouttab` to add an "
+                    "explicit allow-line for the required (source, target, "
+                    "port) tuple.  If not, this finding is informational — "
+                    "leave the ACL in place."
+                ),
+                detail=f"Denied ports: {', '.join(str(p) for p in sorted(acl_ports))}",
             ))
             nodes.append(node)
             if node_callback:
@@ -3391,14 +3399,22 @@ def scan_network_via_saprouter(
             if acl_ports:
                 from sapmap_models import Finding, Severity
                 node.findings.append(Finding(
-                    title="SAProuter ACL partially blocks this host",
+                    name="SAProuter ACL partially blocks this host",
                     description=(
                         f"SAProuter ACL denies access to {len(acl_ports)} "
                         f"port(s): {', '.join(str(p) for p in sorted(acl_ports)[:20])}. "
                         f"Other ports are accessible."
                     ),
                     severity=Severity.INFO,
-                    category="Network",
+                    remediation=(
+                        "Audit the saprouttab — the partial-allow pattern "
+                        "is unusual and often unintentional.  Either "
+                        "restrict the host fully (drop the open ports too) "
+                        "or open it fully if the use case requires it.  "
+                        "Half-open exposure surfaces in scans as a "
+                        "fingerprint of internal topology."
+                    ),
+                    detail=f"Denied ports: {', '.join(str(p) for p in sorted(acl_ports))}",
                 ))
 
         nodes.extend(host_nodes)

