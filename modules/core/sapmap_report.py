@@ -442,7 +442,8 @@ def build_html_report(state: SAPMAPState,
                          for s, f in high_findings) or \
                  '<div class="muted">No high findings.</div>'
 
-    # Inventory rows
+    # Inventory rows — SAP nodes first, then SCC nodes appended
+    # so management sees the whole landscape in one glance.
     inv_rows = ""
     for sid, n in sorted(state.nodes.items()):
         crit_count = sum(1 for f in (n.findings or [])
@@ -468,31 +469,38 @@ def build_html_report(state: SAPMAPState,
             f'<td class="num">{rfc_creds}</td>'
             f'</tr>'
         )
-
-    # SCC rows (only if any)
-    scc_html = ""
-    if sccs:
-        scc_rows = ""
-        for host, sn in sorted(sccs.items()):
-            cves = ", ".join(getattr(sn, "cves_suspected", []) or []) or "—"
-            default = ('<span class="badge badge-bad">LIVE</span>'
-                        if getattr(sn, "default_creds_live", False) else "—")
-            nmap = len(getattr(sn, "mappings", []) or [])
-            scc_rows += (
-                f'<tr>'
-                f'<td class="mono">{_hesc(host)}</td>'
-                f'<td>{_hesc(getattr(sn, "version", "") or "?")}</td>'
-                f'<td>{_hesc(cves)}</td>'
-                f'<td>{default}</td>'
-                f'<td class="num">{nmap}</td>'
-                f'</tr>'
-            )
-        scc_html = (
-            '<section><h2>🔌 SAP Cloud Connectors</h2>'
-            '<table class="grid"><thead><tr>'
-            '<th>Host</th><th>Version</th><th>CVEs</th>'
-            '<th>Default creds</th><th>Mappings</th>'
-            '</tr></thead><tbody>' + scc_rows + '</tbody></table></section>'
+    # Cloud Connector rows folded into the same table.  Columns mapped:
+    #   SID    -> "SCC"
+    #   Type   -> "Cloud Connector"
+    #   OS/DB  -> "—" (not applicable)
+    #   Host   -> the SCC host
+    #   Status -> ⚡ PWNED if default-creds live or pwned flag set
+    #   Tier   -> SCC version (so the operator sees "2.16.2" inline)
+    #   Crit   -> CVE-suspected count
+    #   "RFC creds" column repurposed -> mapping count
+    for host, sn in sorted(sccs.items()):
+        sn_pwned = (getattr(sn, "pwned", False)
+                     or getattr(sn, "default_creds_live", False))
+        cve_count = len(getattr(sn, "cves_suspected", []) or [])
+        nmap = len(getattr(sn, "mappings", []) or [])
+        version = getattr(sn, "version", "") or "?"
+        pwned_badge = ('<span class="badge badge-pwned">⚡ PWNED</span>'
+                        if sn_pwned else "")
+        crit_pill = (f'<span class="num-pill num-pill-bad">{cve_count}</span>'
+                      if cve_count else
+                      '<span class="num-pill num-pill-ok">0</span>')
+        inv_rows += (
+            f'<tr>'
+            f'<td class="mono"><b>SCC</b></td>'
+            f'<td>Cloud Connector</td>'
+            f'<td>—</td>'
+            f'<td>—</td>'
+            f'<td class="mono">{_hesc(host)}</td>'
+            f'<td>{pwned_badge}</td>'
+            f'<td title="SCC version">{_hesc(version)}</td>'
+            f'<td>{crit_pill}</td>'
+            f'<td class="num" title="cloud-to-on-premise mappings">{nmap}</td>'
+            f'</tr>'
         )
 
     # Recommendations
@@ -685,8 +693,6 @@ def build_html_report(state: SAPMAPState,
     </p>
     {cred_table}
   </section>
-
-  {scc_html}
 
   <section>
     <h2>📋 Recommendations</h2>

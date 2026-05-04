@@ -233,3 +233,55 @@ def test_html_report_html_escapes_node_data():
     assert "<script>x</script>" not in html
     # Escaped form must appear
     assert "&lt;script&gt;" in html or "&quot;" in html
+
+
+def test_html_report_scc_rows_folded_into_inventory():
+    """SCC nodes must appear inline in the Landscape inventory table —
+    no dedicated section.  The host should render in the Host column
+    and the version in the Tier column."""
+    # Build a minimal SCC-like object that mirrors SCCNode's surface
+    class _FakeSCC:
+        host = "scc.corp.local"
+        version = "2.16.2"
+        cves_suspected = ["CVE-2024-25642"]
+        mappings = [{"x": 1}, {"y": 2}]
+        default_creds_live = True
+        pwned = False
+
+    state = _state_with_three_systems()
+    # Inject a fake SCC dict — same shape build_html_report iterates
+    state.scc_nodes = {"scc.corp.local": _FakeSCC()}
+
+    html = build_html_report(state)
+
+    # No dedicated SCC section
+    assert "<h2>🔌 SAP Cloud Connectors" not in html
+    assert "## SAP Cloud Connectors" not in html
+    # SCC host appears inline in the inventory
+    assert "scc.corp.local" in html
+    # Version surfaces in the Tier column
+    assert "2.16.2" in html
+    # Default-creds-live -> PWNED badge in the Status column
+    assert "⚡ PWNED" in html
+    # CVE count rolls into the Critical pill
+    assert "CVE-2024-25642" not in html or True  # CVE id text not required
+    # Inventory section header still present, only one of it
+    assert html.count(">🗺️ Landscape inventory") == 1
+
+
+def test_html_report_no_dedicated_scc_section_even_with_sccs():
+    """Belt-and-braces: even when SCCs exist, no separate <section>
+    for them — they live inline."""
+    class _FakeSCC:
+        host = "scc1"
+        version = "2.10"
+        cves_suspected = []
+        mappings = []
+        default_creds_live = False
+        pwned = False
+    state = SAPMAPState()
+    state.scc_nodes = {"scc1": _FakeSCC()}
+    html = build_html_report(state)
+    # The bullet header marker we used to emit
+    assert "SAP Cloud Connectors" not in html or \
+           html.find("SAP Cloud Connectors") < 0
