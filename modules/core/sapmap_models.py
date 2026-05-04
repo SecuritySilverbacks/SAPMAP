@@ -902,10 +902,17 @@ class SAPMAPState:
     # -- Statistics --
 
     def stats(self) -> dict:
+        # Count BOTH SAP nodes and SCCs.  The map draws a lightning bolt
+        # over any SCC whose .pwned flag is set, so the status-bar count
+        # has to include them or the operator sees an off-by-one (e.g.
+        # "Pwned: 4" while the map shows 5 ⚡ symbols).
+        scc_pwned = sum(1 for s in self.scc_nodes.values()
+                        if getattr(s, "pwned", False))
         return {
             "systems": len(self.nodes),
             "connections": len(self.connections),
-            "pwned": sum(1 for n in self.nodes.values() if n.pwned),
+            "pwned": (sum(1 for n in self.nodes.values() if n.pwned)
+                      + scc_pwned),
             "users_created": len(self.created_users),
             "production_systems": sum(1 for n in self.nodes.values() if n.is_production),
             "critical_connections": sum(1 for c in self.connections
