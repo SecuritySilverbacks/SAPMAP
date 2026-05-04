@@ -5449,15 +5449,45 @@ async function exportJSON() {
 }
 
 async function exportReport() {
-  // Engagement-style Markdown report.  Server also archives a copy
-  // under loot/reports/ — this just kicks off the browser download.
+  // Engagement-style Markdown report.  pywebview's embedded Chromium
+  // does NOT reliably honour window.open('...', '_blank') — the
+  // request often gets dropped before it leaves the browser, so the
+  // backend endpoint never fires (no terminal log, no
+  // loot/reports/ archive).  Use fetch + Blob + a synthetic <a>
+  // download to force the request and trigger a real download.
   showToast(
     '<strong>📝 Generating engagement report…</strong>'
       + '<div style="color:#8b949e;font-size:11px;margin-top:4px">'
       + 'Markdown export — also archived to loot/reports/</div>',
     {autoCloseMs: 4000}
   );
-  window.open('/api/export/report', '_blank');
+  try {
+    const r = await fetch('/api/export/report');
+    if (!r.ok) {
+      showToast('Report export failed: HTTP ' + r.status, {autoCloseMs: 6000});
+      return;
+    }
+    // Pull filename from Content-Disposition if present
+    const cd = r.headers.get('content-disposition') || '';
+    const m = cd.match(/filename="?([^";]+)"?/i);
+    const fname = m ? m[1]
+                    : `sapmap_report_${Date.now()}.md`;
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fname;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      URL.revokeObjectURL(url);
+      a.remove();
+    }, 250);
+    console.log('[*] Engagement report downloaded as ' + fname);
+  } catch (e) {
+    showToast('Report export error: ' + e, {autoCloseMs: 8000});
+    console.error('[exportReport]', e);
+  }
 }
 
 // --- View controls ---
