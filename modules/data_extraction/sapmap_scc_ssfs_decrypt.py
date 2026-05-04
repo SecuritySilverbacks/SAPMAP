@@ -101,9 +101,12 @@ def find_helper_jar(start_dir: Optional[str] = None) -> Optional[str]:
     env = os.environ.get("SAPMAP_SSFS_JAR")
     if env and os.path.isfile(env):
         return env
+    # File now lives in modules/data_extraction/; tools/ stays at the
+    # project root, so we walk two directories up.
     here = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(os.path.dirname(here))
     candidates = [
-        os.path.join(here, "tools", "ssfs_decrypt", "decrypt-ssfs.jar"),
+        os.path.join(project_root, "tools", "ssfs_decrypt", "decrypt-ssfs.jar"),
         os.path.join(start_dir or os.getcwd(), "decrypt-ssfs.jar"),
     ]
     for c in candidates:

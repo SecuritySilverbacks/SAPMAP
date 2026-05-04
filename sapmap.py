@@ -34,6 +34,12 @@ from datetime import datetime
 # Ensure SAPMAP directory is in path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# Register the modules/* subpackages on sys.path so the existing flat
+# imports (`import sapmap_models`, `from sap_rfc_ctypes import ...`)
+# keep working after the file reorganisation.  Importing the modules
+# package once is enough — its __init__.py adds every subdir.
+import modules  # noqa: F401
+
 from sapmap_gui import SAPMAPApi, OutputCapture, create_app
 from sapmap_state import (load_state, save_state, auto_save_path,
                           load_rfc_cache_into, load_created_destinations_into)

@@ -917,7 +917,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
     # -- Favicon --
     @app.route("/favicon.ico")
     def favicon():
-        icons_dir = os.path.join(os.path.dirname(__file__), "icons")
+        # File now lives in modules/core/; icons/ stays at project root.
+        icons_dir = os.path.join(os.path.dirname(__file__),
+                                 "..", "..", "icons")
         return static_file("sapmap.ico", root=icons_dir)
 
     # -- Console polling --

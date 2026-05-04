@@ -17,15 +17,22 @@ from sapmap_models import SAPMAPState
 
 logger = logging.getLogger(__name__)
 
+# Project root — this file now lives in modules/core/, so climb two
+# directory levels to reach the SAPMAP project root.  All session
+# artefacts (state, loot) hang off here so that moving Python modules
+# around doesn't relocate user data.
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))))
+
 # Default state directory
-STATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "states")
+STATE_DIR = os.path.join(PROJECT_ROOT, "states")
 RFC_CACHE_FILE = os.path.join(STATE_DIR, ".sapmap_rfc_cache.json")
 DEST_LOG_FILE = os.path.join(STATE_DIR, ".sapmap_created_destinations.json")
 
 # Default loot directory — separate from state files. Contains downloaded
 # secrets, hashes, table dumps, BIA exports etc., organized by category
 # subdirectory.  Already excluded by .gitignore.
-LOOT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "loot")
+LOOT_DIR = os.path.join(PROJECT_ROOT, "loot")
 LOOT_SECSTORE_DIR = os.path.join(LOOT_DIR, "secstore")
 LOOT_HASHES_DIR = os.path.join(LOOT_DIR, "hashes")
 LOOT_TABLES_DIR = os.path.join(LOOT_DIR, "tables")

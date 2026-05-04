@@ -1716,7 +1716,9 @@ def _try_tableblock_compressed_fallback(conn, node: SAPNode) -> list:
     print(f"[*] {node.sid}: Trying GET_TABLEBLOCK_COMPRESSED_RFC on RFCDES ...")
     connections = []
 
-    decompress_bin = os.path.join(os.path.dirname(__file__), "sap_decompress")
+    # File now lives in modules/discovery/; sap_decompress stays at project root.
+    decompress_bin = os.path.join(os.path.dirname(__file__),
+                                   "..", "..", "sap_decompress")
     if not os.path.isfile(decompress_bin):
         print(f"[-] {node.sid}: sap_decompress binary not found, skipping")
         return connections
