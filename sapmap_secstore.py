@@ -1375,11 +1375,11 @@ def integrate_results(node, state, results: list):
 # Loot persistence
 # ---------------------------------------------------------------------------
 
-def save_loot(node_sid: str, results: list, states_dir: str) -> str:
+def save_loot(node_sid: str, results: list, loot_dir: str) -> str:
     """Save decrypted results as JSON loot file. Returns absolute file path."""
-    os.makedirs(states_dir, exist_ok=True)
+    os.makedirs(loot_dir, exist_ok=True)
     ts       = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = os.path.join(states_dir, f"secstore_{node_sid}_{ts}.json")
+    filename = os.path.join(loot_dir, f"secstore_{node_sid}_{ts}.json")
     with open(filename, "w") as f:
         json.dump(results, f, indent=2)
     return filename
