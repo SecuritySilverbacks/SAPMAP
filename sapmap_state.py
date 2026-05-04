@@ -23,9 +23,13 @@ RFC_CACHE_FILE = os.path.join(STATE_DIR, ".sapmap_rfc_cache.json")
 DEST_LOG_FILE = os.path.join(STATE_DIR, ".sapmap_created_destinations.json")
 
 # Default loot directory — separate from state files. Contains downloaded
-# secrets, hashes, table dumps, BIA exports etc.  Flat layout: every loot
-# artefact goes directly into LOOT_DIR.  Already excluded by .gitignore.
+# secrets, hashes, table dumps, BIA exports etc., organized by category
+# subdirectory.  Already excluded by .gitignore.
 LOOT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "loot")
+LOOT_SECSTORE_DIR = os.path.join(LOOT_DIR, "secstore")
+LOOT_HASHES_DIR = os.path.join(LOOT_DIR, "hashes")
+LOOT_TABLES_DIR = os.path.join(LOOT_DIR, "tables")
+LOOT_BIA_DIR = os.path.join(LOOT_DIR, "bia")
 
 
 def _ensure_state_dir():
@@ -33,10 +37,14 @@ def _ensure_state_dir():
     os.makedirs(STATE_DIR, exist_ok=True)
 
 
-def ensure_loot_dir() -> str:
-    """Create the loot directory if missing and return its path."""
-    os.makedirs(LOOT_DIR, exist_ok=True)
-    return LOOT_DIR
+def ensure_loot_dir(subdir: str = "") -> str:
+    """Create the loot directory (and optional subdir) and return its path.
+
+    Pass subdir="hashes", "secstore", "tables", "bia" or any custom name.
+    """
+    target = os.path.join(LOOT_DIR, subdir) if subdir else LOOT_DIR
+    os.makedirs(target, exist_ok=True)
+    return target
 
 
 def save_state(state: SAPMAPState, filepath: str) -> str:
