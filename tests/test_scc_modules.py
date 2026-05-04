@@ -414,6 +414,150 @@ def test_parse_user_hashes_handles_invalid_xml():
     assert "XML parse error" in out.get("error", "")
 
 
+# Real-world SCC 2.19+ users.xml with all <user> elements on a single
+# line (saved compact, attribute order is roles/groups/password/username).
+# Captured from a live target — was missing 8 of 9 users due to the
+# old per-line re.search() bug.
+_SCC_REAL_USERS_XML = (
+    b'<?xml version="1.0" encoding="UTF-8"?>'
+    b'<tomcat-users version="1.0" '
+    b'xsi:schemaLocation="http://tomcat.apache.org/xml tomcat-users.xsd" '
+    b'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
+    b'xmlns="http://tomcat.apache.org/xml">'
+    b'<role rolename="sccdisplay"/><role rolename="sccsupport"/>'
+    b'<role rolename="admin"/><role rolename="sccadmin"/>'
+    b'<role rolename="sccsubadmin"/><role rolename="sccmonitoring"/>'
+    b'<group roles="" groupname="initial"/>'
+    b'<user roles="admin" groups="" '
+    b'password="A004DC3E8EB6EBB2315929D0F72AEA87686B44A9CA7EF38EEECC7EA39975F15F" '
+    b'username="Administrator"/>'
+    b'<user roles="sccsupport" groups="" '
+    b'password="A0B939823E93066D336543F80047ACC8420956B52EFBF06064E8377DA662D818" '
+    b'username="SCC_Support"/>'
+    b'<user roles="sccdisplay" groups="" '
+    b'password="A0B939823E93066D336543F80047ACC8420956B52EFBF06064E8377DA662D818" '
+    b'username="SCC_Display"/>'
+    b'<user roles="sccsubadmin" groups="" '
+    b'password="A0B939823E93066D336543F80047ACC8420956B52EFBF06064E8377DA662D818" '
+    b'username="SCC_SubAdmin"/>'
+    b'<user roles="admin" groups="" '
+    b'password="181229424893bb65d94a74c2132b8b9e5adfe851464fdb5cb9f49e8a8204be7b" '
+    b'username="GJ"/>'
+    b'<user roles="sccmonitoring" groups="" '
+    b'password="A0B939823E93066D336543F80047ACC8420956B52EFBF06064E8377DA662D818" '
+    b'username="SCC_Mon"/>'
+    b'<user roles="sccmonitoring" groups="" '
+    b'password="A0B939823E93066D336543F80047ACC8420956B52EFBF06064E8377DA662D818" '
+    b'username="TestUser"/>'
+    b'<user roles="admin" groups="" '
+    b'password="A004DC3E8EB6EBB2315929D0F72AEA87686B44A9CA7EF38EEECC7EA39975F15F" '
+    b'username="P4S"/>'
+    b'</tomcat-users>'
+)
+
+
+def test_parse_user_hashes_real_world_compact_xml_extracts_all_users():
+    """Live SCC 2.19+ XML stores every user on the same line.  Parser
+    must extract all 9 users (Administrator, SCC_*, GJ, TestUser, P4S),
+    not just the first one."""
+    from sapmap_scc_keystore import parse_user_hashes_from_xml
+    out = parse_user_hashes_from_xml(_SCC_REAL_USERS_XML)
+    users = out.get("users", []) if isinstance(out, dict) else []
+    names = sorted(u["username"] for u in users)
+    assert names == sorted([
+        "Administrator", "SCC_Support", "SCC_Display", "SCC_SubAdmin",
+        "GJ", "SCC_Mon", "TestUser", "P4S",
+    ])
+    assert len(users) == 8
+    # Every user gets the raw-hex SHA-256 path (mode 1400)
+    assert all(u["hashcat_mode"] == 1400 for u in users)
+    assert all(len(u["hash_hex"]) == 64 for u in users)
+
+
+def test_parse_user_hashes_attribute_order_independent():
+    """SCC 2.19+ writes attrs in (roles, groups, password, username) order;
+    older Tomcat builds use (username, password, roles).  Parser must
+    handle either."""
+    from sapmap_scc_keystore import parse_user_hashes_from_xml
+    xml = (
+        b'<?xml version="1.0"?><tomcat-users>'
+        # roles-first attribute order (SCC 2.19+ form)
+        b'<user roles="admin" groups="" password="' + b'a' * 64
+        + b'" username="alice"/>'
+        b'</tomcat-users>'
+    )
+    out = parse_user_hashes_from_xml(xml)
+    users = out.get("users", [])
+    assert len(users) == 1
+    assert users[0]["username"] == "alice"
+    assert users[0]["roles"] == "admin"
+
+
+# ===========================================================================
+# 8. findstr post-processing — multi-<user> per line
+# ===========================================================================
+#
+# The Windows users.xml extraction path runs `findstr` against the file to
+# collapse it into matching lines, then rebuilds a clean XML byte string for
+# parse_user_hashes_from_xml.  The rebuild logic lives inline inside the
+# /api/scc/<host>/download_user_hashes handler so we exercise it via the
+# same regex/iter logic with a tiny helper.
+
+def _rebuild_xml_from_findstr_output(text: str) -> bytes:
+    """Mirror of the inline rebuild in sapmap_gui — extracted so we can
+    test the multi-element / attr-order behaviour directly."""
+    import re
+    user_re = re.compile(r"<user\b([^/>]*)/?\s*>", re.IGNORECASE)
+    attr_re = re.compile(r"(\w+)\s*=\s*[\"']([^\"']*)[\"']", re.IGNORECASE)
+    parts = [b'<?xml version="1.0" encoding="utf-8"?>', b'<tomcat-users>']
+    for m in user_re.finditer(text):
+        attrs = {k.lower(): v for k, v in attr_re.findall(m.group(1))}
+        uname = attrs.get("username", "")
+        if not uname:
+            continue
+        pwd = attrs.get("password", "")
+        roles = attrs.get("roles", "")
+        parts.append(
+            f'  <user username="{uname}" password="{pwd}" '
+            f'roles="{roles}"/>'.encode())
+    parts.append(b'</tomcat-users>')
+    return b"\n".join(parts)
+
+
+def test_findstr_rebuild_multi_user_single_line():
+    """Findstr returns the entire users.xml content as one line — rebuild
+    must extract every <user> element, not just the first."""
+    one_line = _SCC_REAL_USERS_XML.decode("utf-8")
+    raw = _rebuild_xml_from_findstr_output(one_line)
+    # Parse the rebuilt XML and check we have all 8 users
+    from sapmap_scc_keystore import parse_user_hashes_from_xml
+    out = parse_user_hashes_from_xml(raw)
+    users = out.get("users", [])
+    assert len(users) == 8
+    names = sorted(u["username"] for u in users)
+    assert "Administrator" in names
+    assert "GJ" in names
+    assert "P4S" in names
+
+
+def test_findstr_rebuild_attribute_order_independent():
+    """Real findstr output puts attrs in the file's order — must handle
+    roles/groups/password/username (SCC 2.19+ form)."""
+    text = ('<user roles="admin" groups="" '
+            'password="' + 'a' * 64 + '" username="alice"/>')
+    raw = _rebuild_xml_from_findstr_output(text)
+    assert b'username="alice"' in raw
+    assert b'password="' + b'a' * 64 + b'"' in raw
+
+
+def test_findstr_rebuild_skips_user_without_username():
+    """An empty username in the source must produce zero <user> in the rebuild."""
+    text = '<user roles="admin" password="abc"/>'
+    raw = _rebuild_xml_from_findstr_output(text)
+    # Should produce just the wrapper, no <user> entries
+    assert b"<user " not in raw
+
+
 # ===========================================================================
 # 6. sapmap_scc_relay.probe_mapping — mocked TCP/HTTP
 # ===========================================================================
