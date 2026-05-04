@@ -503,7 +503,7 @@ body {
       <div class="dd-item" onclick="saveState()">&#128190; Save State...</div>
       <div class="dd-sep"></div>
       <div class="dd-item" onclick="exportJSON()">&#128196; Export JSON</div>
-      <div class="dd-item" onclick="exportReport()">&#128221; Export Engagement Report (Markdown)</div>
+      <div class="dd-item" onclick="exportReport()">&#128221; Export Engagement Report (HTML + Markdown)</div>
       <div class="dd-sep"></div>
       <div class="dd-item" onclick="if(confirm('Exit SAPMAP?'))api('POST','exit').then(()=>window.close())">&#10060; Exit</div>
     </div>
@@ -5470,16 +5470,18 @@ async function exportReport() {
       return;
     }
     showToast(
-      '<strong style="color:#3fb950">📝 Engagement report saved</strong>'
+      '<strong style="color:#3fb950">📝 Engagement reports saved</strong>'
         + '<div style="color:#c9d1d9;font-size:11px;margin-top:6px;'
         + 'font-family:monospace;word-break:break-all">'
-        + escHtml(j.path) + '</div>'
-        + '<div style="color:#8b949e;font-size:10px;margin-top:4px">'
-        + j.bytes + ' bytes · ' + j.lines + ' lines · '
-        + 'open with any Markdown viewer</div>',
-      {autoCloseMs: 15000}
+        + '<b>HTML</b> (presentable):<br>' + escHtml(j.html_path) + '</div>'
+        + '<div style="color:#c9d1d9;font-size:11px;margin-top:6px;'
+        + 'font-family:monospace;word-break:break-all">'
+        + '<b>Markdown</b> (raw):<br>' + escHtml(j.md_path) + '</div>'
+        + '<div style="color:#8b949e;font-size:10px;margin-top:6px">'
+        + 'Open the HTML file in any browser → looks great, prints to PDF.</div>',
+      {autoCloseMs: 18000}
     );
-    console.log('[*] Engagement report saved to ' + j.path);
+    console.log('[*] Reports saved: ' + j.html_path + ' + ' + j.md_path);
   } catch (e) {
     showToast('Report export error: ' + e, {autoCloseMs: 8000});
     console.error('[exportReport]', e);

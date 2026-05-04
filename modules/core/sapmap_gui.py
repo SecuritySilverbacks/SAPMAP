@@ -5845,37 +5845,48 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
     @app.route("/api/export/report")
     def export_report():
-        """Build the Markdown engagement report, write it to
-        loot/reports/, and return JSON metadata.
+        """Build the engagement report in BOTH Markdown and HTML
+        formats and write them to loot/reports/.
 
-        We do NOT return the Markdown body as a downloadable file —
-        pywebview's embedded Chromium navigates the main window when
-        a blob/data response comes back, replacing the map with the
-        raw report.  The file is written server-side, the JSON
-        response carries the path so the GUI can show it in a toast.
+        The HTML version is a single self-contained file with embedded
+        CSS — opens in any browser, prints to PDF cleanly, looks like
+        something you can hand to management without apologising.
+
+        We do NOT stream either body back as a download — pywebview's
+        embedded Chromium navigates the main window when a blob/data
+        response comes back, which replaces the map with the raw
+        report.  Files are written server-side, the JSON response
+        carries the paths so the GUI can show them in a toast.
         """
-        from sapmap_report import build_markdown_report
+        from sapmap_report import build_markdown_report, build_html_report
         import sapmap_state as _ss
         response.content_type = "application/json"
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-        md = build_markdown_report(api.state)
-
         try:
+            md = build_markdown_report(api.state)
+            html = build_html_report(api.state)
             reports_dir = _ss.ensure_loot_dir("reports")
-            fpath = os.path.join(reports_dir, f"sapmap_report_{ts}.md")
-            with open(fpath, "w", encoding="utf-8") as fh:
+            md_path = os.path.join(reports_dir, f"sapmap_report_{ts}.md")
+            html_path = os.path.join(reports_dir, f"sapmap_report_{ts}.html")
+            with open(md_path, "w", encoding="utf-8") as fh:
                 fh.write(md)
-            print(f"[+] Engagement report written to {fpath} "
+            with open(html_path, "w", encoding="utf-8") as fh:
+                fh.write(html)
+            print(f"[+] Engagement report (Markdown) -> {md_path} "
                   f"({len(md)} bytes)")
+            print(f"[+] Engagement report (HTML)     -> {html_path} "
+                  f"({len(html)} bytes)")
             return json.dumps({
                 "ok": True,
-                "path": fpath,
-                "bytes": len(md),
-                "lines": len(md.splitlines()),
+                "md_path":   md_path,
+                "html_path": html_path,
+                "md_bytes":   len(md),
+                "html_bytes": len(html),
             })
         except Exception as e:
-            print(f"[-] Failed to write report under loot/reports/: {e}")
+            print(f"[-] Failed to write reports under loot/reports/: {e}")
+            import traceback; traceback.print_exc()
             return json.dumps({"ok": False, "error": str(e)})
 
     return app
