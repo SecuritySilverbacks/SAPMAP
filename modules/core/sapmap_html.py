@@ -887,6 +887,12 @@ body {
     <div id="scc-hashes-table" style="overflow-x:auto;margin-bottom:12px"></div>
     <div id="scc-hashes-cmds" style="margin-bottom:12px"></div>
     <div id="scc-hashes-online-results" style="margin-top:8px"></div>
+    <div style="font-size:11px;color:#8b949e;margin-top:10px;display:flex;align-items:center;gap:6px">
+      <input type="checkbox" id="hashes-auto-lookup-cb" onchange="setAutoLookupHashes(this.checked)" style="margin:0">
+      <label for="hashes-auto-lookup-cb" style="cursor:pointer">
+        Auto-lookup on hashes.com after each extract (when API key is set)
+      </label>
+    </div>
     <div class="form-actions">
       <button class="btn btn-primary" onclick="sccHashesCopy()">Copy Hashes</button>
       <button class="btn" id="hashes-lookup-btn" onclick="sccLookupHashesOnline()">&#128269; Lookup on hashes.com</button>
@@ -3989,6 +3995,39 @@ async function sccDownloadHashes(host) {
   modal._users = users;
   modal.dataset.host = host;
   modal.classList.add('visible');
+
+  // Sync the auto-lookup checkbox to the persisted preference
+  const autoCb = document.getElementById('hashes-auto-lookup-cb');
+  if (autoCb) autoCb.checked = getAutoLookupHashes();
+
+  // Auto-lookup if API key is set and the user hasn't disabled the toggle.
+  // Skip when there are zero crackable hashes — nothing to look up.
+  if (getAutoLookupHashes() && (modal._users || []).some(u => u.hash_hex)) {
+    try {
+      const settings = await fetch('/api/settings/local').then(r => r.json());
+      if (settings && settings.hashes_com_api_key_set) {
+        console.log(`[*] auto-lookup: firing hashes.com query for ${host}`);
+        sccLookupHashesOnline();
+      } else {
+        console.log('[*] auto-lookup: skipped — no hashes.com API key set');
+      }
+    } catch (e) {
+      console.log('[*] auto-lookup: skipped — settings probe failed:', e);
+    }
+  }
+}
+
+// localStorage-backed toggle (default ON).  Persists across reloads so
+// operators don't have to re-enable each session.
+function getAutoLookupHashes() {
+  const v = localStorage.getItem('sapmap.autoLookupHashes');
+  // Default to true if nothing was stored.
+  return v === null ? true : v === 'true';
+}
+
+function setAutoLookupHashes(on) {
+  localStorage.setItem('sapmap.autoLookupHashes', on ? 'true' : 'false');
+  console.log(`[*] auto-lookup on hashes.com: ${on ? 'enabled' : 'disabled'}`);
 }
 
 function sccHashesCopy() {
