@@ -269,6 +269,63 @@ def test_html_report_scc_rows_folded_into_inventory():
     assert html.count(">🗺️ Landscape inventory") == 1
 
 
+def test_html_report_includes_landscape_svg():
+    """A .html report must embed an inline SVG snapshot of the landscape
+    so management sees the picture before scrolling to the tables."""
+    state = _state_with_three_systems()
+    html = build_html_report(state)
+    assert "<h2>🗺️ Landscape map" in html
+    # Inline SVG, no <img src>, no external file
+    assert "<svg viewBox" in html
+    # SAP nodes render as <rect> bodies, SCC as <polygon>; we know
+    # there are no SCCs in this fixture, so just <rect> needed.
+    assert "<rect" in html
+    # Each SID label is plotted as <text> with the SID as the label
+    for sid in ("S4P", "S4D", "RD1"):
+        assert f">{sid}</text>" in html
+    # Legend is included
+    assert ">ABAP<" in html and ">Java<" in html
+
+
+def test_html_report_landscape_svg_marks_pwned_and_prd():
+    """Pwned nodes get a ⚡ overlay; production nodes get a red halo
+    rendered as an outer rect with stroke #dc2626."""
+    state = _state_with_three_systems()
+    html = build_html_report(state)
+    # ⚡ symbol from the pwned overlay (S4P + S4D are pwned in fixture)
+    assert ">⚡<" in html
+    # Production halo is drawn with explicit stroke colour
+    assert "#dc2626" in html
+
+
+def test_html_report_landscape_svg_renders_scc_hex():
+    """SCC nodes appear in the map as hexagonal polygons."""
+    class _FakeSCC:
+        host = "scc.corp"
+        version = "2.16.2"
+        cves_suspected = []
+        mappings = []
+        default_creds_live = False
+        pwned = False
+    state = _state_with_three_systems()
+    state.scc_nodes = {"scc.corp": _FakeSCC()}
+    html = build_html_report(state)
+    # Hexagon == <polygon> tag in the inline SVG
+    assert "<polygon points=" in html
+    assert ">SCC</text>" in html
+    # Version surfaces under the SCC node label
+    assert ">v2.16.2</text>" in html
+
+
+def test_html_report_empty_landscape_svg_falls_back_to_message():
+    """Empty state must NOT crash the SVG builder — show a tidy
+    placeholder instead."""
+    html = build_html_report(SAPMAPState())
+    assert "Landscape map" in html
+    # No SVG generated, but a placeholder div instead
+    assert "landscape map is empty" in html.lower()
+
+
 def test_html_report_no_dedicated_scc_section_even_with_sccs():
     """Belt-and-braces: even when SCCs exist, no separate <section>
     for them — they live inline."""
