@@ -5845,18 +5845,22 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
     @app.route("/api/export/report")
     def export_report():
-        """Build and return a Markdown engagement report.
+        """Build the Markdown engagement report, write it to
+        loot/reports/, and return JSON metadata.
 
-        Side-effect: also writes the same content to loot/reports/
-        so the operator gets an archived copy automatically.
+        We do NOT return the Markdown body as a downloadable file —
+        pywebview's embedded Chromium navigates the main window when
+        a blob/data response comes back, replacing the map with the
+        raw report.  The file is written server-side, the JSON
+        response carries the path so the GUI can show it in a toast.
         """
         from sapmap_report import build_markdown_report
         import sapmap_state as _ss
+        response.content_type = "application/json"
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         md = build_markdown_report(api.state)
 
-        # Side-effect: archive a copy under loot/reports/
         try:
             reports_dir = _ss.ensure_loot_dir("reports")
             fpath = os.path.join(reports_dir, f"sapmap_report_{ts}.md")
@@ -5864,13 +5868,14 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 fh.write(md)
             print(f"[+] Engagement report written to {fpath} "
                   f"({len(md)} bytes)")
+            return json.dumps({
+                "ok": True,
+                "path": fpath,
+                "bytes": len(md),
+                "lines": len(md.splitlines()),
+            })
         except Exception as e:
-            print(f"[-] Failed to archive report under loot/reports/: {e}")
-
-        response.content_type = "text/markdown; charset=utf-8"
-        response.headers["Content-Disposition"] = (
-            f'attachment; filename="sapmap_report_{ts}.md"'
-        )
-        return md
+            print(f"[-] Failed to write report under loot/reports/: {e}")
+            return json.dumps({"ok": False, "error": str(e)})
 
     return app

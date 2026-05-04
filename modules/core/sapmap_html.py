@@ -5449,41 +5449,37 @@ async function exportJSON() {
 }
 
 async function exportReport() {
-  // Engagement-style Markdown report.  pywebview's embedded Chromium
-  // does NOT reliably honour window.open('...', '_blank') — the
-  // request often gets dropped before it leaves the browser, so the
-  // backend endpoint never fires (no terminal log, no
-  // loot/reports/ archive).  Use fetch + Blob + a synthetic <a>
-  // download to force the request and trigger a real download.
+  // Engagement-style Markdown report.  We do NOT trigger a browser
+  // download — pywebview's embedded Chromium navigates the main
+  // window away when handed a blob/data response, replacing the map
+  // with the raw report content.  The endpoint writes the file
+  // server-side and returns JSON with the path, which we surface in
+  // a toast so the operator can open it externally.
   showToast(
     '<strong>📝 Generating engagement report…</strong>'
       + '<div style="color:#8b949e;font-size:11px;margin-top:4px">'
-      + 'Markdown export — also archived to loot/reports/</div>',
+      + 'Walking landscape state — saving to loot/reports/</div>',
     {autoCloseMs: 4000}
   );
   try {
     const r = await fetch('/api/export/report');
-    if (!r.ok) {
-      showToast('Report export failed: HTTP ' + r.status, {autoCloseMs: 6000});
+    const j = await r.json();
+    if (!j.ok) {
+      showToast('Report export failed: ' + (j.error || 'unknown'),
+                {autoCloseMs: 8000});
       return;
     }
-    // Pull filename from Content-Disposition if present
-    const cd = r.headers.get('content-disposition') || '';
-    const m = cd.match(/filename="?([^";]+)"?/i);
-    const fname = m ? m[1]
-                    : `sapmap_report_${Date.now()}.md`;
-    const blob = await r.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = fname;
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(() => {
-      URL.revokeObjectURL(url);
-      a.remove();
-    }, 250);
-    console.log('[*] Engagement report downloaded as ' + fname);
+    showToast(
+      '<strong style="color:#3fb950">📝 Engagement report saved</strong>'
+        + '<div style="color:#c9d1d9;font-size:11px;margin-top:6px;'
+        + 'font-family:monospace;word-break:break-all">'
+        + escHtml(j.path) + '</div>'
+        + '<div style="color:#8b949e;font-size:10px;margin-top:4px">'
+        + j.bytes + ' bytes · ' + j.lines + ' lines · '
+        + 'open with any Markdown viewer</div>',
+      {autoCloseMs: 15000}
+    );
+    console.log('[*] Engagement report saved to ' + j.path);
   } catch (e) {
     showToast('Report export error: ' + e, {autoCloseMs: 8000});
     console.error('[exportReport]', e);
