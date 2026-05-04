@@ -171,14 +171,42 @@ class TestFindAllChains:
             assert len(set(c.path_sids)) == len(c.path_sids)
 
     def test_logon_unsuccessful_not_traversed(self):
+        """A destination that has been TESTED and explicitly failed
+        logon must NOT appear in any chain — it's known-broken."""
         state = SAPMAPState()
         state.add_node(SAPNode(sid="A", ip="1", pwned=True))
         state.add_node(SAPNode(sid="B", ip="2"))
         state.add_connection(RFCConnection(
             source_sid="A", source_host="a", target_sid="B", target_host="b",
-            has_sap_all=True, logon_successful=False))
+            has_sap_all=True,
+            tested=True, logon_successful=False))
         chains = find_all_chains(state, print_fn=lambda *a: None)
         assert len(chains) == 0
+
+    def test_untested_edge_is_traversed_and_marked(self):
+        """An edge that has NEVER been tested (tested=False) must
+        still appear as a chain — the destination is configured on
+        disk and may very well work — but the hop is flagged so the
+        report reader sees it isn't validated yet.  Without this
+        carve-out, every blue 'RFC (untested)' arrow on the map was
+        silently dropped from chain analysis (regression observed
+        live: chains landing on PRD never surfaced)."""
+        state = SAPMAPState()
+        state.add_node(SAPNode(sid="A", ip="1", pwned=True))
+        state.add_node(SAPNode(sid="P", ip="2", is_production=True))
+        state.add_connection(RFCConnection(
+            source_sid="A", source_host="a", target_sid="P", target_host="p",
+            destination_name="A_TO_P", rfc_user="JORIS",
+            has_sap_all=True,
+            tested=False, logon_successful=False))
+        chains = find_all_chains(state, print_fn=lambda *a: None)
+        assert len(chains) == 1
+        c = chains[0]
+        assert c.start_sid == "A" and c.end_sid == "P"
+        assert c.end_is_production is True
+        # Hop method is annotated — operator can tell it isn't validated
+        assert "UNTESTED" in c.hops[0].method
+        assert "[untested]" in c.hops[0].description
 
     def test_self_connections_skipped(self):
         state = SAPMAPState()
