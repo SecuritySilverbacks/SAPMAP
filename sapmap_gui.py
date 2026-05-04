@@ -3191,11 +3191,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     "rows": r.get("rows", []),
                     "row_count": r.get("row_count", 0),
                 })
-                # Persist to loot/ as CSV
+                # Persist to loot/tables/ as CSV
                 import os as _os
                 from datetime import datetime as _dt
                 import sapmap_state as _ss
-                loot_dir = _ss.ensure_loot_dir()
+                loot_dir = _ss.ensure_loot_dir("tables")
                 ts = _dt.now().strftime("%Y%m%d_%H%M%S")
                 fpath = _os.path.join(loot_dir,
                     f"table_java_{sid}_{table.replace('.','_')}_{ts}.csv")
@@ -4413,7 +4413,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             import sapmap_state as _ss
-            loot_dir = _ss.ensure_loot_dir()
+            loot_dir = _ss.ensure_loot_dir("hashes")
 
             # Save raw JSON
             json_file = os.path.join(loot_dir, f"hashes_{sid}_{ts}.json")
@@ -4525,7 +4525,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                 import sapmap_state as _ss
                 outfile = os.path.join(
-                    _ss.ensure_loot_dir(),
+                    _ss.ensure_loot_dir("tables"),
                     f"table_{table}_{sid}_{ts}.json"
                 )
                 with open(outfile, "w") as f:
@@ -4555,7 +4555,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 err = [r for r in results if r.get("error")]
                 import sapmap_state as _ss
                 outfile = sapmap_secstore.save_loot(
-                    node.sid, results, _ss.ensure_loot_dir())
+                    node.sid, results, _ss.ensure_loot_dir("secstore"))
                 print(f"[+] SecStore {sid}: {len(results)} entries, "
                       f"{len(ok)} decrypted, {len(err)} errors → {outfile}")
                 if ok:
@@ -5618,9 +5618,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
             for row in records:
                 writer.writerow([str(row)])
 
-        # Save to loot/ folder
+        # Save to loot/bia/ folder
         import sapmap_state
-        loot_dir = sapmap_state.ensure_loot_dir()
+        loot_dir = sapmap_state.ensure_loot_dir("bia")
         # Sanitise the scenario name for the filename — slashes and
         # spaces would otherwise produce invalid paths.
         import re as _re
