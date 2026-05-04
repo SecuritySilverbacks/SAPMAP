@@ -28,8 +28,11 @@ from sapmap_config import (
 
 logger = logging.getLogger(__name__)
 
-# Add SAPology to path for imports
-_sapology_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "SAPology")
+# Add SAPology (sister project, sits next to SAPMAP root) to path for
+# imports.  This file now lives in modules/discovery/, so the SAPology
+# directory is three levels up.
+_sapology_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "..", "..", "..", "SAPology")
 if os.path.isdir(_sapology_dir) and _sapology_dir not in sys.path:
     sys.path.insert(0, _sapology_dir)
 
