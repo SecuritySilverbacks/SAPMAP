@@ -529,6 +529,7 @@ body {
       <div class="dd-item" onclick="showSetPasswordModal()">&#128273; Set Default Password</div>
       <div class="dd-sep"></div>
       <div class="dd-item" onclick="showHashesApiKeyModal()">&#128273; Set hashes.com API Key</div>
+      <div class="dd-item" onclick="showBtpTokenModal()">&#9729;&#65039; BTP — Paste cf oauth-token</div>
     </div>
   </div>
   <div class="menu-item">View
@@ -899,6 +900,48 @@ body {
       <button class="btn btn-primary" onclick="sccHashesCopy()">Copy Hashes</button>
       <button class="btn" id="hashes-lookup-btn" onclick="sccLookupHashesOnline()">&#128269; Lookup on hashes.com</button>
       <button class="btn" onclick="closeModal('scc-hashes-modal')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- BTP Token Paste Modal -->
+<div class="modal-overlay" id="btp-token-modal">
+  <div class="modal" style="max-width:720px;width:95vw">
+    <h3>&#9729;&#65039; SAP BTP — Paste cf oauth-token</h3>
+    <div style="font-size:12px;color:#8b949e;margin-bottom:12px">
+      Paste the output of <code>cf oauth-token</code> (a JWT starting
+      with <code>eyJ</code>).  SAPMAP decodes the token offline to learn
+      its region + identity, stores it in process memory only (NEVER
+      written to disk), and exposes BTP enumeration actions
+      (subaccounts, SCC mappings, destinations with cleartext capture).
+      <br><br>
+      <b>Operational guard-rails:</b> rate-limit 1 req/100 ms with hard
+      cap of 200 req/min.  Every outbound BTP API call is logged to the
+      console with the token's fingerprint.  Token wiped on process exit.
+    </div>
+    <div class="form-row">
+      <label>cf oauth-token (JWT)</label>
+      <textarea id="btp-token-input" rows="3" placeholder="eyJhbGciOiJSUzI1NiIs..."
+                style="width:100%;font-family:monospace;font-size:11px"></textarea>
+    </div>
+    <div id="btp-token-status" style="margin-top:10px"></div>
+    <div class="form-actions">
+      <button class="btn btn-primary" onclick="btpStoreToken()">Store + validate</button>
+      <button class="btn" onclick="btpClearTokens()">Clear all stored tokens</button>
+      <button class="btn" onclick="closeModal('btp-token-modal')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- BTP Subaccount drawer (right side) — shown via showBtpSubaccount() -->
+<div class="modal-overlay" id="btp-sub-modal">
+  <div class="modal" style="max-width:860px;width:95vw">
+    <h3 id="btp-sub-title">&#9729;&#65039; BTP Subaccount</h3>
+    <div id="btp-sub-meta" style="font-size:11px;color:#8b949e;margin-bottom:12px"></div>
+    <div id="btp-sub-actions" style="margin-bottom:14px"></div>
+    <div id="btp-sub-destinations"></div>
+    <div class="form-actions">
+      <button class="btn" onclick="closeModal('btp-sub-modal')">Close</button>
     </div>
   </div>
 </div>
@@ -4062,6 +4105,183 @@ async function sccDownloadHashes(host) {
       console.log('[*] auto-lookup: skipped — settings probe failed:', e);
     }
   }
+}
+
+// =====================================================================
+// BTP — token paste, subaccount enumeration, destination capture
+// =====================================================================
+
+async function showBtpTokenModal() {
+  const m = document.getElementById('btp-token-modal');
+  document.getElementById('btp-token-input').value = '';
+  // Show currently-stored tokens (regions only — never the token itself)
+  let regions = [];
+  try {
+    const r = await fetch('/api/btp/regions').then(r => r.json());
+    regions = r.regions || [];
+  } catch (e) { /* ignore */ }
+  const status = document.getElementById('btp-token-status');
+  if (regions.length) {
+    status.innerHTML =
+      '<div style="background:#161b22;border:1px solid #30363d;border-radius:6px;'
+      + 'padding:8px 10px;font-size:11px">'
+      + '<div style="color:#3fb950">Tokens currently stored for: '
+      + regions.map(r => '<code>' + escHtml(r) + '</code>').join(', ')
+      + '</div></div>';
+  } else {
+    status.innerHTML =
+      '<div class="muted" style="padding:6px;font-size:11px">No BTP tokens '
+      + 'stored yet — paste one above.</div>';
+  }
+  m.classList.add('visible');
+}
+
+async function btpStoreToken() {
+  const tok = (document.getElementById('btp-token-input').value || '').trim();
+  if (!tok) {
+    showToast('Paste a token first.', {autoCloseMs: 4000});
+    return;
+  }
+  let r;
+  try {
+    r = await fetch('/api/btp/set_token', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({token: tok}),
+    }).then(r => r.json());
+  } catch (e) {
+    showToast('Token validation request failed: ' + e, {autoCloseMs: 6000});
+    return;
+  }
+  const status = document.getElementById('btp-token-status');
+  if (!r.ok) {
+    status.innerHTML =
+      '<div style="background:#fef0f0;border:1px solid #f5b5b5;color:#b51c1c;'
+      + 'padding:8px 10px;border-radius:6px;font-size:12px">'
+      + escHtml(r.error || 'unknown error') + '</div>';
+    return;
+  }
+  // Wipe the textarea — token is server-side now, no need to keep DOM copy
+  document.getElementById('btp-token-input').value = '';
+  status.innerHTML =
+    '<div style="background:#dafbe1;border:1px solid #b5e0b5;color:#1a7f37;'
+    + 'padding:8px 10px;border-radius:6px;font-size:12px">'
+    + '<b>✓ Token stored</b> (region <code>' + escHtml(r.region) + '</code>'
+    + ', user <b>' + escHtml(r.user || '?') + '</b>'
+    + ', fingerprint <code>' + escHtml(r.fingerprint) + '</code>'
+    + ', expires in ' + (r.expires_in_seconds || 0) + ' s'
+    + (r.expired ? ' — <b style="color:#b51c1c">ALREADY EXPIRED</b>' : '')
+    + ')</div>'
+    + '<div style="margin-top:10px"><button class="btn btn-primary" '
+    + 'onclick="btpEnumerate(\'' + escHtml(r.region) + '\')">'
+    + 'Enumerate subaccounts in ' + escHtml(r.region) + '</button></div>';
+  showToast(
+    '<b>✓ BTP token stored</b><div style="font-size:11px;color:#8b949e;'
+    + 'margin-top:4px">Region: ' + escHtml(r.region)
+    + ' · User: ' + escHtml(r.user || '?') + '</div>',
+    {autoCloseMs: 8000});
+}
+
+async function btpClearTokens() {
+  if (!confirm('Clear ALL stored BTP tokens? This wipes them from process memory.'))
+    return;
+  await fetch('/api/btp/clear_token', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({}),
+  });
+  document.getElementById('btp-token-status').innerHTML =
+    '<div class="muted" style="padding:6px;font-size:11px">All BTP tokens '
+    + 'cleared.</div>';
+  showToast('BTP tokens cleared.', {autoCloseMs: 4000});
+}
+
+async function btpEnumerate(region) {
+  showToast('<b>Enumerating BTP region ' + escHtml(region) + '…</b>',
+            {autoCloseMs: 4000});
+  let r;
+  try {
+    r = await fetch('/api/btp/enumerate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({region}),
+    }).then(r => r.json());
+  } catch (e) {
+    showToast('BTP enumeration failed: ' + e, {autoCloseMs: 6000});
+    return;
+  }
+  if (!r.ok) {
+    showToast('BTP enumeration failed: ' + (r.error || '?'),
+              {autoCloseMs: 8000});
+    return;
+  }
+  // Render a quick summary inline in the token modal
+  let html = '<div style="background:#161b22;border:1px solid #30363d;'
+    + 'border-radius:6px;padding:10px;margin-top:10px;font-size:12px;'
+    + 'color:#c9d1d9">'
+    + '<div style="color:#3fb950;font-weight:600;margin-bottom:8px">'
+    + '✓ Found ' + r.subaccount_count + ' subaccount(s), '
+    + r.scc_mapping_count + ' SCC mapping(s)</div>';
+  for (const s of (r.subaccounts || [])) {
+    html += '<div style="padding:6px 0;border-top:1px solid #30363d;'
+      + 'display:flex;justify-content:space-between;align-items:center;gap:8px">'
+      + '<div><b>' + escHtml(s.display_name || s.uuid)
+      + '</b> <span class="muted">'
+      + '· <code>' + escHtml(s.uuid.substring(0, 8))
+      + '…</code> · ' + s.scc_mappings + ' SCC tunnel(s)</span></div>'
+      + '<button class="btn" style="padding:3px 10px;font-size:11px" '
+      + 'onclick="btpPullDestinations(\'' + escHtml(s.uuid) + '\',\''
+      + escHtml(s.display_name || s.uuid) + '\')">Pull destinations</button>'
+      + '</div>';
+  }
+  html += '</div>';
+  document.getElementById('btp-token-status').innerHTML += html;
+}
+
+async function btpPullDestinations(uuid, displayName) {
+  showToast('<b>Pulling destinations for '
+            + escHtml(displayName) + '…</b>'
+            + '<div style="font-size:11px;color:#8b949e;margin-top:4px">'
+            + 'Per-destination "find" call to materialise cleartext where '
+            + 'the token allows.</div>',
+            {autoCloseMs: 5000});
+  let r;
+  try {
+    r = await fetch('/api/btp/pull_destinations/' + encodeURIComponent(uuid),
+                    {method: 'POST',
+                     headers: {'Content-Type': 'application/json'},
+                     body: '{}'})
+      .then(r => r.json());
+  } catch (e) {
+    showToast('Pull destinations failed: ' + e, {autoCloseMs: 6000});
+    return;
+  }
+  if (!r.ok) {
+    showToast('Pull destinations failed: ' + (r.error || '?'),
+              {autoCloseMs: 8000});
+    return;
+  }
+  const captured = r.cleartext_captured || 0;
+  const linked = r.linked_to_onprem || 0;
+  const prdTargets = r.prd_targets || 0;
+  const colour = (captured && prdTargets) ? '#f85149'
+                : (captured ? '#db6d28' : '#3fb950');
+  showToast(
+    '<b style="color:' + colour + '">' + escHtml(displayName) + '</b>'
+    + '<div style="font-size:12px;margin-top:6px">'
+    + r.destinations + ' destination(s) · '
+    + '<b>' + captured + '</b> cleartext captured · '
+    + '<b>' + linked + '</b> linked to on-prem'
+    + (prdTargets ? ' · <b style="color:#f85149">'
+        + prdTargets + ' reach PRD</b>' : '') + '</div>'
+    + '<div style="font-size:10px;color:#8b949e;margin-top:6px">'
+    + 'Captured creds added to the matching SAPNode.credentials. '
+    + 'Synthetic RFC edges drawn BTP→on-prem so trust-chain analysis '
+    + 'walks them.</div>',
+    {autoCloseMs: 14000});
+  // If a state refresh function exists, kick it so the map redraws
+  if (typeof refreshState === 'function') refreshState();
+  else if (typeof updateMap === 'function') updateMap();
 }
 
 async function openDiffModal() {
