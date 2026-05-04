@@ -30,6 +30,7 @@ import string
 import urllib.error
 import urllib.parse
 import urllib.request
+from sapmap_errors import format_rfc_exception
 
 logger = logging.getLogger(__name__)
 
@@ -591,7 +592,7 @@ def deploy_create_user_jsp_via_cve_31324(node, writer_fn) -> dict:
         from sap_cve_2025_31324 import write_file_via_shell
     except Exception as e:
         return {"success": False,
-                "error": f"sap_cve_2025_31324 module not importable: {e}"}
+                "error": f"sap_cve_2025_31324 module not importable: {format_rfc_exception(e)}"}
 
     jsp_name = _random_jsp_name("ume")
     target_path = f"{dir_path}\\{jsp_name}"

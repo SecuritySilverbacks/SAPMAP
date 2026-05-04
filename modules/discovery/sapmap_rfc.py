@@ -146,7 +146,7 @@ def test_connection(node: SAPNode, creds: Credentials = None) -> bool:
                       f"inst={creds.instance_nr})")
             return ok
     except Exception as e:
-        err = str(e)
+        err = format_rfc_exception(e)
         print(f"[-] Connection test failed for {node.sid}: {err}")
         if "password" in err.lower() or "logon" in err.lower():
             print(f"    Check username/password and client number")
@@ -183,7 +183,7 @@ def check_user_exists(node: SAPNode, username: str,
                         return False
                 return True
     except Exception as e:
-        logger.debug(f"User check failed for {username}@{node.sid}: {e}")
+        logger.debug(f"User check failed for {username}@{node.sid}: {format_rfc_exception(e)}")
         return False
 
 
@@ -243,12 +243,12 @@ def get_user_details(node: SAPNode, username: str,
             result_info["has_sap_all"] = "SAP_ALL" in result_info["profiles"]
 
     except Exception as e:
-        error_msg = str(e)
+        error_msg = format_rfc_exception(e)
         if "authorization" in error_msg.lower() or "AUTHORIZATION" in error_msg:
             result_info["error"] = "No authorization for BAPI_USER_GET_DETAIL"
         else:
             result_info["error"] = error_msg
-        logger.debug(f"User detail retrieval failed for {username}@{node.sid}: {e}")
+        logger.debug(f"User detail retrieval failed for {username}@{node.sid}: {format_rfc_exception(e)}")
 
     return result_info
 
@@ -354,9 +354,9 @@ def _susr_suim_sap_all_check(conn, destination: str, username: str) -> dict:
         return {"profiles": profiles, "has_sap_all": has_sap_all, "error": ""}
 
     except Exception as e:
-        logger.debug(f"SUSR_SUIM fallback failed: {e}")
+        logger.debug(f"SUSR_SUIM fallback failed: {format_rfc_exception(e)}")
         return {"profiles": [], "has_sap_all": False,
-                "error": f"SUSR_SUIM fallback failed: {e}"}
+                "error": f"SUSR_SUIM fallback failed: {format_rfc_exception(e)}"}
 
 
 def get_direct_user_profiles(target_node: SAPNode, username: str,
@@ -400,10 +400,10 @@ def get_direct_user_profiles(target_node: SAPNode, username: str,
                     or "SAP_ALL" in out["roles"]):
                 out["has_sap_all"] = True
     except Exception as e:
-        msg = str(e).split("\n")[0][:200]
+        msg = format_rfc_exception(e).split("\n")[0][:200]
         out["error"] = msg
         logger.debug(f"direct BAPI_USER_GET_DETAIL on {target_node.sid} "
-                      f"for {username} failed: {e}")
+                      f"for {username} failed: {format_rfc_exception(e)}")
     return out
 
 
@@ -447,8 +447,8 @@ def get_remote_user_profiles(node: SAPNode, username: str,
                 print(f"[*] {node.sid}: No profiles found for {username} via {destination}")
 
     except Exception as e:
-        result_info["error"] = str(e)
-        logger.debug(f"Remote user detail retrieval failed: {e}")
+        result_info["error"] = format_rfc_exception(e)
+        logger.debug(f"Remote user detail retrieval failed: {format_rfc_exception(e)}")
 
     return result_info
 
@@ -497,7 +497,7 @@ def reset_user_password_via_bapi(node: SAPNode, username: str,
                         result["message"] = msg
                         return result
             except Exception as e:
-                logger.debug(f"BAPI_USER_UNLOCK failed: {e}")
+                logger.debug(f"BAPI_USER_UNLOCK failed: {format_rfc_exception(e)}")
 
             # 2. BAPI_USER_CHANGE — reset password.  PASSWORDX flags
             #    which PASSWORD substructure fields we actually want
@@ -547,15 +547,15 @@ def reset_user_password_via_bapi(node: SAPNode, username: str,
                         print(f"[!] {node.sid}: SAP_ALL re-assign "
                               f"warning: {r.get('MESSAGE', '')}")
             except Exception as e:
-                print(f"[!] {node.sid}: SAP_ALL re-assign skipped: {e}")
+                print(f"[!] {node.sid}: SAP_ALL re-assign skipped: {format_rfc_exception(e)}")
 
             result["success"] = True
             result["message"] = (f"User {username} password reset "
                                   f"+ SAP_ALL re-assigned")
     except Exception as e:
-        result["message"] = str(e)
-        logger.error(f"BAPI user reset failed: {e}")
-        print(f"[-] {node.sid}: password reset error: {e}")
+        result["message"] = format_rfc_exception(e)
+        logger.error(f"BAPI user reset failed: {format_rfc_exception(e)}")
+        print(f"[-] {node.sid}: password reset error: {format_rfc_exception(e)}")
 
     return result
 
@@ -581,7 +581,7 @@ def delete_user_via_bapi(node: SAPNode, username: str,
             result["success"] = True
             result["message"] = f"User {username} deleted"
     except Exception as e:
-        result["message"] = str(e)
+        result["message"] = format_rfc_exception(e)
     return result
 
 
@@ -661,15 +661,15 @@ def create_user_via_bapi(node: SAPNode, username: str, password: str,
                 else:
                     print(f"[+] {node.sid}: SAP_ALL profile assigned to {username}")
             except Exception as e:
-                print(f"[!] {node.sid}: Could not assign SAP_ALL: {e}")
+                print(f"[!] {node.sid}: Could not assign SAP_ALL: {format_rfc_exception(e)}")
 
             result["success"] = True
             result["message"] = f"User {username} created with SAP_ALL"
 
     except Exception as e:
-        result["message"] = str(e)
-        logger.error(f"BAPI user creation failed: {e}")
-        print(f"[-] {node.sid}: User creation error: {e}")
+        result["message"] = format_rfc_exception(e)
+        logger.error(f"BAPI user creation failed: {format_rfc_exception(e)}")
+        print(f"[-] {node.sid}: User creation error: {format_rfc_exception(e)}")
 
     return result
 
@@ -732,7 +732,7 @@ def _run_abap_program(conn, abap_lines: list, program_name: str = "ZSAPMAP") -> 
     except Exception as e:
         return {
             "success": False, "output": [],
-            "fm_name": fm_name, "error": str(e),
+            "fm_name": fm_name, "error": format_rfc_exception(e),
         }
 
 
@@ -852,9 +852,9 @@ def create_user_via_destination(node: SAPNode, destination: str,
                     print(f"[-] {node.sid}: Unexpected output: {output}")
 
     except Exception as e:
-        result["message"] = str(e)
-        logger.error(f"Remote user creation via DESTINATION: {e}")
-        print(f"[-] {node.sid}: Remote user creation error: {e}")
+        result["message"] = format_rfc_exception(e)
+        logger.error(f"Remote user creation via DESTINATION: {format_rfc_exception(e)}")
+        print(f"[-] {node.sid}: Remote user creation error: {format_rfc_exception(e)}")
 
     return result
 
@@ -881,8 +881,8 @@ def delete_user(node: SAPNode, username: str,
             print(f"[+] User {username} deleted from {node.sid}")
             return True
     except Exception as e:
-        logger.error(f"User deletion failed for {username}@{node.sid}: {e}")
-        print(f"[-] {node.sid}: Delete error: {e}")
+        logger.error(f"User deletion failed for {username}@{node.sid}: {format_rfc_exception(e)}")
+        print(f"[-] {node.sid}: Delete error: {format_rfc_exception(e)}")
         return False
 
 
@@ -1045,20 +1045,20 @@ def test_rfc_destination(node: SAPNode, destination_name: str,
                 _test_via_dest_check(conn, destination_name, result)
 
     except Exception as e:
-        err_msg = str(e).split("\n")[0]
+        err_msg = format_rfc_exception(e).split("\n")[0]
         result["error"] = err_msg
-        logger.debug(f"RFC check failed for {destination_name}@{node.sid}: {e}")
+        logger.debug(f"RFC check failed for {destination_name}@{node.sid}: {format_rfc_exception(e)}")
 
         # If the error is due to RFC_GET_FUNCTION_INTERFACE not authorized,
         # try again with call_raw (bypasses the SDK metadata lookup)
-        if "RFC_GET_FUNCTION_INTERFACE" in str(e) or "No RFC authorization" in str(e):
+        if "RFC_GET_FUNCTION_INTERFACE" in format_rfc_exception(e) or "No RFC authorization" in format_rfc_exception(e):
             try:
                 with _get_connection(node, creds) as conn:
                     _test_via_dest_check_raw(conn, destination_name, result)
                     result["error"] = ""  # clear the error on success
             except Exception as e2:
-                result["error"] = str(e2).split("\n")[0]
-                logger.debug(f"call_raw DEST_CHECK also failed: {e2}")
+                result["error"] = format_rfc_exception(e2).split("\n")[0]
+                logger.debug(f"call_raw DEST_CHECK also failed: {format_rfc_exception(e2)}")
 
     # Cache the result
     if rfc_check_cache is not None:
@@ -1213,7 +1213,7 @@ def ping_rfc_destination(node: SAPNode, destination_name: str,
                 else:
                     raise
     except Exception as e:
-        result["error"] = str(e)
+        result["error"] = format_rfc_exception(e)
 
     # Skip cascading fallbacks when our primary timed out — that
     # means the destination's gateway/host IS unreachable (not just
@@ -1227,14 +1227,14 @@ def ping_rfc_destination(node: SAPNode, destination_name: str,
         try:
             result.update(_ping_via_iwb_check(node, destination_name, creds))
         except Exception as e2:
-            logger.debug(f"IWB_SHE check also failed: {e2}")
+            logger.debug(f"IWB_SHE check also failed: {format_rfc_exception(e2)}")
 
     # Last-resort fallback: parse RFCDES options and try direct TCP connect
     if not result["ping_ok"] and result["error"] and not primary_timed_out:
         try:
             result.update(_ping_via_direct_connect(node, destination_name, creds))
         except Exception as e2:
-            logger.debug(f"Direct connect fallback also failed: {e2}")
+            logger.debug(f"Direct connect fallback also failed: {format_rfc_exception(e2)}")
 
     return result
 
@@ -1273,7 +1273,7 @@ def _ping_via_iwb_check(node, destination_name, creds=None):
             else:
                 result["error"] = msg or f"IWB check subrc={subrc}"
         except Exception as e:
-            result["error"] = str(e).split("\n")[0]
+            result["error"] = format_rfc_exception(e).split("\n")[0]
     return result
 
 
@@ -1324,7 +1324,7 @@ def _ping_via_direct_connect(node, destination_name, creds=None):
                 logger.info(f"Direct connect to {destination_name} "
                             f"({host}:{gw_port}) succeeded")
             except Exception as e:
-                result["error"] = f"TCP connect to {host}:{gw_port} failed: {e}"
+                result["error"] = f"TCP connect to {host}:{gw_port} failed: {format_rfc_exception(e)}"
 
             # Try RFC_SYSTEM_INFO via direct connection to get SID
             if result["ping_ok"]:
@@ -1370,7 +1370,7 @@ def get_remote_sysinfo(node: SAPNode, destination_name: str,
                 result["sid"] = (export.get("RFCSYSID", "") or "").strip()
                 result["hostname"] = (export.get("RFCHOST", "") or "").strip()
     except Exception as e:
-        result["error"] = str(e)
+        result["error"] = format_rfc_exception(e)
 
     return result
 
@@ -1491,7 +1491,7 @@ def retrieve_rfc_connections(node: SAPNode, creds: Credentials = None) -> list:
                     print(f"[*] {node.sid}: No spool output, trying table fallback...")
                     connections = _try_rfc_read_table_fallback(conn, node)
             except Exception as e:
-                logger.debug(f"Spool read error: {e}")
+                logger.debug(f"Spool read error: {format_rfc_exception(e)}")
                 connections = _try_rfc_read_table_fallback(conn, node)
 
             # XMI Logoff
@@ -1506,14 +1506,14 @@ def retrieve_rfc_connections(node: SAPNode, creds: Credentials = None) -> list:
                 connections = _try_rfc_read_table_fallback(conn, node)
 
     except Exception as e:
-        logger.error(f"RFC connection retrieval failed for {node.sid}: {e}")
-        print(f"[-] {node.sid}: Failed to retrieve RFC connections: {e}")
+        logger.error(f"RFC connection retrieval failed for {node.sid}: {format_rfc_exception(e)}")
+        print(f"[-] {node.sid}: Failed to retrieve RFC connections: {format_rfc_exception(e)}")
         # Last resort: try RFCDES in a fresh connection
         try:
             with _get_connection(node, creds) as conn:
                 connections = _try_rfc_read_table_fallback(conn, node)
         except Exception as e2:
-            logger.debug(f"RFCDES fallback also failed: {e2}")
+            logger.debug(f"RFCDES fallback also failed: {format_rfc_exception(e2)}")
 
     # 3rd fallback: bypass RFC_GET_FUNCTION_INTERFACE using call_raw
     if not connections:
@@ -1521,7 +1521,7 @@ def retrieve_rfc_connections(node: SAPNode, creds: Credentials = None) -> list:
             with _get_connection(node, creds) as conn:
                 connections = _try_rfcdes_raw_fallback(conn, node)
         except Exception as e3:
-            logger.debug(f"call_raw RFCDES fallback also failed: {e3}")
+            logger.debug(f"call_raw RFCDES fallback also failed: {format_rfc_exception(e3)}")
 
     # 4th fallback: GET_TABLEBLOCK_COMPRESSED_RFC (bypasses both
     # RFC_GET_FUNCTION_INTERFACE and RFC_READ_TABLE authorization)
@@ -1530,7 +1530,7 @@ def retrieve_rfc_connections(node: SAPNode, creds: Credentials = None) -> list:
             with _get_connection(node, creds) as conn:
                 connections = _try_tableblock_compressed_fallback(conn, node)
         except Exception as e4:
-            logger.debug(f"GET_TABLEBLOCK_COMPRESSED_RFC fallback failed: {e4}")
+            logger.debug(f"GET_TABLEBLOCK_COMPRESSED_RFC fallback failed: {format_rfc_exception(e4)}")
 
     return connections
 
@@ -1616,8 +1616,8 @@ def _try_rfc_read_table_fallback(conn, node: SAPNode) -> list:
               f"with stored passwords via RFCDES")
 
     except Exception as e:
-        logger.debug(f"RFCDES read failed: {e}")
-        print(f"[-] {node.sid}: Could not read RFCDES table: {e}")
+        logger.debug(f"RFCDES read failed: {format_rfc_exception(e)}")
+        print(f"[-] {node.sid}: Could not read RFCDES table: {format_rfc_exception(e)}")
 
     return connections
 
@@ -1693,8 +1693,8 @@ def _try_rfcdes_raw_fallback(conn, node: SAPNode) -> list:
               f"with stored passwords via call_raw RFCDES")
 
     except Exception as e:
-        logger.debug(f"call_raw RFCDES failed: {e}")
-        print(f"[-] {node.sid}: call_raw RFCDES fallback failed: {e}")
+        logger.debug(f"call_raw RFCDES failed: {format_rfc_exception(e)}")
+        print(f"[-] {node.sid}: call_raw RFCDES fallback failed: {format_rfc_exception(e)}")
 
     return connections
 
@@ -1855,8 +1855,8 @@ def _try_tableblock_compressed_fallback(conn, node: SAPNode) -> list:
               f"with stored passwords via GET_TABLEBLOCK_COMPRESSED_RFC")
 
     except Exception as e:
-        logger.debug(f"GET_TABLEBLOCK_COMPRESSED_RFC failed: {e}")
-        print(f"[-] {node.sid}: GET_TABLEBLOCK_COMPRESSED_RFC fallback failed: {e}")
+        logger.debug(f"GET_TABLEBLOCK_COMPRESSED_RFC failed: {format_rfc_exception(e)}")
+        print(f"[-] {node.sid}: GET_TABLEBLOCK_COMPRESSED_RFC fallback failed: {format_rfc_exception(e)}")
 
     return connections
 
@@ -1935,20 +1935,8 @@ def read_table(node: SAPNode, table_name: str, fields: list = None,
                 rows.append(row_dict)
 
     except Exception as e:
-        # pyrfc raises ABAPApplicationError / ABAPRuntimeError / etc. with
-        # extra attributes (key, message, msg_class, msg_number, msg_type).
-        # The default str(e) often collapses to "Number:000" with no useful
-        # detail — extract every populated attribute so the operator can
-        # tell NOT_AUTHORIZED from DATA_BUFFER_EXCEEDED at a glance.
-        extras = []
-        for attr in ("key", "message", "msg_class", "msg_number",
-                     "msg_type", "msg_v1", "msg_v2", "msg_v3", "msg_v4"):
-            v = getattr(e, attr, None)
-            if v:
-                extras.append(f"{attr}={v}")
-        detail = f"{type(e).__name__}: {e}"
-        if extras:
-            detail += "  [" + ", ".join(extras) + "]"
+        from sapmap_errors import format_rfc_exception
+        detail = format_rfc_exception(e)
         logger.error(f"Table read failed for {table_name}@{node.sid}: {detail}")
         print(f"[-] {node.sid}: Could not read {table_name}: {detail}")
 
@@ -2247,8 +2235,8 @@ def get_client_roles(node: SAPNode, creds: Credentials = None) -> list:
                     })
 
     except Exception as e:
-        logger.debug(f"Client role read failed for {node.sid}: {e}")
-        print(f"[-] {node.sid}: Could not read client roles: {e}")
+        logger.debug(f"Client role read failed for {node.sid}: {format_rfc_exception(e)}")
+        print(f"[-] {node.sid}: Could not read client roles: {format_rfc_exception(e)}")
 
     return clients
 
@@ -2318,9 +2306,9 @@ def create_tcpip_destination(node: SAPNode, target_host: str,
                 print(f"[+] {node.sid}: Created TCP/IP dest {dest_name} → "
                       f"{target_host} (gw={gw_service})")
     except Exception as e:
-        result["message"] = str(e)
-        print(f"[-] {node.sid}: TCP/IP dest creation error: {e}")
-        logger.debug(f"TCP/IP dest creation failed: {e}")
+        result["message"] = format_rfc_exception(e)
+        print(f"[-] {node.sid}: TCP/IP dest creation error: {format_rfc_exception(e)}")
+        logger.debug(f"TCP/IP dest creation failed: {format_rfc_exception(e)}")
 
     return result
 
@@ -2407,8 +2395,8 @@ def execute_remote_command(node: SAPNode, destination: str,
                 result["error"] = f"SXPG status: {ret_status}"
 
     except Exception as e:
-        result["error"] = str(e)
-        logger.debug(f"SXPG remote command failed via {destination}: {e}")
+        result["error"] = format_rfc_exception(e)
+        logger.debug(f"SXPG remote command failed via {destination}: {format_rfc_exception(e)}")
 
     return result
 
