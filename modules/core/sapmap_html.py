@@ -2761,14 +2761,18 @@ function showCtxMenu(e, sid) {
   // a parent label like "Business Impact" or "Data Extraction" that opens
   // to an empty flyout (common on SAProuter / SCC nodes where most ABAP /
   // Java actions are not applicable).  Walks every .ctx-group and hides
-  // the group when no [data-action] inside its .ctx-sub remains visible.
+  // it when zero [data-action] items inside its .ctx-sub remain visible.
+  // Uses a direct .style.display check rather than an attribute selector
+  // because browsers normalise inline styles inconsistently (with/without
+  // a space after the colon, with/without trailing semicolon) and
+  // [style*="display: none"] misses some of those forms.
   menu.querySelectorAll('.ctx-group').forEach(group => {
     const sub = group.querySelector('.ctx-sub');
     if (!sub) return;   // not a submenu — leave alone
-    const visibleItems = sub.querySelectorAll(
-      ':scope > .ctx-item[data-action]:not([style*="display: none"])'
-    );
-    group.style.display = visibleItems.length === 0 ? 'none' : '';
+    const all = sub.querySelectorAll(':scope > .ctx-item[data-action]');
+    let visible = 0;
+    all.forEach(it => { if (it.style.display !== 'none') visible++; });
+    group.style.display = visible === 0 ? 'none' : '';
   });
 
   // Show existing credentials / created users in the menu
