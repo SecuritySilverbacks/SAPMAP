@@ -568,6 +568,20 @@ def test_expand_scc_roots_includes_program_files_paths():
     assert r"P:\Program Files\SAP\SAP Cloud Connector" in out
 
 
+def test_expand_scc_roots_includes_usr_layout():
+    """The Linux-style \\usr\\scc* layout (observed live on a P:\\ drive)
+    must be probed for every drive."""
+    from sapmap_gui import _expand_scc_roots_across_drives
+    out = _expand_scc_roots_across_drives(["P:"])
+    assert r"P:\usr\scc20" in out
+    assert r"P:\usr\scc" in out
+    assert r"P:\usr\scc21" in out
+    assert r"P:\usr\scc22" in out
+    assert r"P:\usr\scc19" in out
+    # And the same for C:
+    assert r"C:\usr\scc20" in _expand_scc_roots_across_drives(["C:"])
+
+
 def test_expand_scc_roots_empty_drive_list():
     """No drives → empty roots list (don't fabricate)."""
     from sapmap_gui import _expand_scc_roots_across_drives
