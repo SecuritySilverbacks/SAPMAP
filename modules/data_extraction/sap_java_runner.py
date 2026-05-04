@@ -25,11 +25,14 @@ import re
 
 from sapmap_models import (
     SAPNode, SAPMAPState, Credentials, Finding, Severity, RFCConnection,
+    InstanceInfo,
 )
 from sapmap_errors import format_rfc_exception
 from sapmap_exploit import (
     _deploy_jsp_via_ctc,
     _deploy_jsp_via_telnet,
+    _ctc_deploy_available,
+    _telnet_deploy_available,
     execute_cve_2025_31324_via_shell,
 )
 
