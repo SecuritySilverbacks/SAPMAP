@@ -828,6 +828,11 @@ class SAPMAPApi:
         self.scan_state = "idle"  # idle, running, complete, cancelled, error
         self.scan_error = ""
         self.operation_lock = threading.Lock()
+        # BTP token store — process-memory only, NEVER serialised to
+        # disk via SAPMAPState.  Map: region -> token string.  An
+        # operator pasting a new token for the same region replaces
+        # the previous one.  A blank token clears the slot.
+        self.btp_tokens: dict = {}
 
     def start_scan(self, config):
         if self.scan_running:
@@ -5984,5 +5989,186 @@ def create_app(api: SAPMAPApi) -> Bottle:
         except Exception as e:
             import traceback; traceback.print_exc()
             return json.dumps({"ok": False, "error": str(e)})
+
+    # ----------------------------------------------------------------
+    # BTP — subaccount + destinations enumeration via cf oauth-token
+    # ----------------------------------------------------------------
+    @app.route("/api/btp/set_token", method="POST")
+    def btp_set_token():
+        """Body: {token: <jwt>}.  Decodes the token to learn its region
+        and identity, stores it in process memory keyed by region, and
+        returns a sanitised summary suitable for the GUI.
+
+        Token NEVER serialises to disk — kept on api.btp_tokens dict,
+        wiped on process exit.
+        """
+        from sap_btp import validate_token
+        response.content_type = "application/json"
+        data = request.json or {}
+        token = (data.get("token") or "").strip()
+        if not token:
+            return json.dumps({"ok": False,
+                               "error": "Empty token — paste a `cf oauth-token` value"})
+        info = validate_token(token)
+        if not info.get("ok"):
+            return json.dumps(info)
+        region = info["region"]
+        if not region or region == "(unknown)":
+            return json.dumps({
+                "ok": False,
+                "error": (f"Could not extract region from token's `iss` claim "
+                          f"(got {info.get('issuer','')!r}).  Token may be from "
+                          f"a non-public BTP region or hand-rolled — abort.")
+            })
+        api.btp_tokens[region] = token
+        print(f"[+] BTP token stored for region={region} "
+              f"user={info.get('user','')} "
+              f"expires_in={info.get('expires_in_seconds',0)}s "
+              f"(fingerprint={info['fingerprint']})")
+        # Don't echo the token; return only its fingerprint + identity
+        info.pop("issuer", None); info.pop("audience", None)
+        info["stored"] = True
+        return json.dumps(info)
+
+    @app.route("/api/btp/clear_token", method="POST")
+    def btp_clear_token():
+        response.content_type = "application/json"
+        data = request.json or {}
+        region = (data.get("region") or "").strip()
+        if region:
+            api.btp_tokens.pop(region, None)
+            print(f"[*] BTP token cleared for region={region}")
+        else:
+            api.btp_tokens.clear()
+            print("[*] BTP tokens cleared (all regions)")
+        return json.dumps({"ok": True, "regions_left": list(api.btp_tokens.keys())})
+
+    @app.route("/api/btp/regions")
+    def btp_regions():
+        """List the regions for which a token is currently stored."""
+        response.content_type = "application/json"
+        return json.dumps({"ok": True,
+                           "regions": list(api.btp_tokens.keys())})
+
+    @app.route("/api/btp/enumerate", method="POST")
+    def btp_enumerate():
+        """Body: {region: <string>}.  Hits the BTP API to list every
+        subaccount the token can reach + every Cloud Connector tunnel
+        registered with them.  Pre-creates BTPSubaccountNode objects
+        in api.state.btp_subaccounts (no destinations yet — those are
+        pulled by /api/btp/pull_destinations).
+        """
+        from sap_btp import (
+            enumerate_subaccounts, pull_scc_mappings,
+        )
+        from sapmap_models import BTPSubaccountNode
+        response.content_type = "application/json"
+        data = request.json or {}
+        region = (data.get("region") or "").strip()
+        token = api.btp_tokens.get(region) or ""
+        if not token:
+            return json.dumps({"ok": False,
+                               "error": f"No token stored for region {region!r}"})
+        try:
+            subs = enumerate_subaccounts(token, region)
+            mappings = pull_scc_mappings(token, region)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+        # Index mappings by subaccount uuid for the per-sub block
+        m_by_sub: dict = {}
+        for m in mappings:
+            m_by_sub.setdefault(m.get("subaccount_uuid", ""), []).append(m)
+
+        added = 0
+        now_iso = datetime.now().isoformat()
+        for s in subs:
+            uuid = s["uuid"]
+            if not uuid:
+                continue
+            sub_node = api.state.btp_subaccounts.get(uuid)
+            if sub_node is None:
+                sub_node = BTPSubaccountNode(uuid=uuid)
+                api.state.btp_subaccounts[uuid] = sub_node
+                added += 1
+            sub_node.display_name = s.get("display_name") or sub_node.display_name
+            sub_node.region = s.get("region") or region
+            sub_node.subdomain = s.get("subdomain") or sub_node.subdomain
+            sub_node.parent_global_account = (
+                s.get("parent_global_account")
+                or sub_node.parent_global_account)
+            sub_node.scc_locations = m_by_sub.get(uuid, [])
+            sub_node.enumerated_at = now_iso
+        print(f"[+] BTP {region}: enumerated {len(subs)} subaccount(s), "
+              f"{len(mappings)} SCC mapping(s); {added} new")
+        return json.dumps({
+            "ok": True,
+            "subaccount_count": len(subs),
+            "scc_mapping_count": len(mappings),
+            "new": added,
+            "subaccounts": [
+                {"uuid": s["uuid"],
+                 "display_name": s.get("display_name", ""),
+                 "subdomain": s.get("subdomain", ""),
+                 "scc_mappings": len(m_by_sub.get(s["uuid"], []))}
+                for s in subs
+            ],
+        })
+
+    @app.route("/api/btp/pull_destinations/<uuid>", method="POST")
+    def btp_pull_destinations(uuid):
+        """Pull every destination for the given subaccount, capture
+        cleartext where the token allows, and link captured creds to
+        on-prem SAPNodes.  Mutates api.state."""
+        from sap_btp import pull_destinations, link_destinations_to_onprem
+        response.content_type = "application/json"
+        sub = api.state.btp_subaccounts.get(uuid)
+        if not sub:
+            return json.dumps({"ok": False,
+                               "error": f"Unknown BTP subaccount {uuid!r}.  "
+                                         "Run /api/btp/enumerate first."})
+        token = api.btp_tokens.get(sub.region) or ""
+        if not token:
+            return json.dumps({"ok": False,
+                               "error": f"No token stored for region "
+                                         f"{sub.region!r}"})
+        try:
+            dests, err = pull_destinations(token, sub.region, uuid)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+        if err:
+            return json.dumps({"ok": False, "error": err})
+        sub.destinations = dests
+        # Link captured creds to on-prem SAPNodes
+        linked = link_destinations_to_onprem(api.state, sub)
+        captured = sum(1 for d in dests if d.cleartext_captured)
+        prd_targets = sum(
+            1 for d in dests
+            if d.linked_target_sid
+            and api.state.nodes.get(d.linked_target_sid)
+            and api.state.nodes[d.linked_target_sid].is_production)
+        print(f"[+] BTP {sub.region}/{uuid[:8]}: pulled {len(dests)} "
+              f"destination(s), {captured} cleartext, {linked} linked "
+              f"to on-prem, {prd_targets} reach PRD")
+        if captured:
+            try:
+                sapmap_findings.emit_finding(
+                    "CRITICAL", f"BTP:{uuid[:8]}",
+                    f"BTP subaccount {sub.display_name or uuid} stores "
+                    f"{captured} cleartext on-prem credential(s) in "
+                    f"destinations.  Anyone with the "
+                    f"`destination_configuration.ApiAccess` scope on "
+                    f"this subaccount can pull them.",
+                    ref="btp.cleartext.captured",
+                    meta={"subaccount": uuid, "count": captured})
+            except Exception:
+                pass
+        return json.dumps({
+            "ok": True,
+            "destinations": len(dests),
+            "cleartext_captured": captured,
+            "linked_to_onprem": linked,
+            "prd_targets": prd_targets,
+        })
 
     return app
