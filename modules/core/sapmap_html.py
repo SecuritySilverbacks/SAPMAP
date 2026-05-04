@@ -503,6 +503,7 @@ body {
       <div class="dd-item" onclick="saveState()">&#128190; Save State...</div>
       <div class="dd-sep"></div>
       <div class="dd-item" onclick="exportJSON()">&#128196; Export JSON</div>
+      <div class="dd-item" onclick="exportReport()">&#128221; Export Engagement Report (Markdown)</div>
       <div class="dd-sep"></div>
       <div class="dd-item" onclick="if(confirm('Exit SAPMAP?'))api('POST','exit').then(()=>window.close())">&#10060; Exit</div>
     </div>
@@ -5445,6 +5446,18 @@ function handleFileLoad(input) {
 }
 async function exportJSON() {
   window.open('/api/export/json', '_blank');
+}
+
+async function exportReport() {
+  // Engagement-style Markdown report.  Server also archives a copy
+  // under loot/reports/ — this just kicks off the browser download.
+  showToast(
+    '<strong>📝 Generating engagement report…</strong>'
+      + '<div style="color:#8b949e;font-size:11px;margin-top:4px">'
+      + 'Markdown export — also archived to loot/reports/</div>',
+    {autoCloseMs: 4000}
+  );
+  window.open('/api/export/report', '_blank');
 }
 
 // --- View controls ---

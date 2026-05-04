@@ -5843,4 +5843,34 @@ def create_app(api: SAPMAPApi) -> Bottle:
         )
         return api.state.to_json(indent=2)
 
+    @app.route("/api/export/report")
+    def export_report():
+        """Build and return a Markdown engagement report.
+
+        Side-effect: also writes the same content to loot/reports/
+        so the operator gets an archived copy automatically.
+        """
+        from sapmap_report import build_markdown_report
+        import sapmap_state as _ss
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        md = build_markdown_report(api.state)
+
+        # Side-effect: archive a copy under loot/reports/
+        try:
+            reports_dir = _ss.ensure_loot_dir("reports")
+            fpath = os.path.join(reports_dir, f"sapmap_report_{ts}.md")
+            with open(fpath, "w", encoding="utf-8") as fh:
+                fh.write(md)
+            print(f"[+] Engagement report written to {fpath} "
+                  f"({len(md)} bytes)")
+        except Exception as e:
+            print(f"[-] Failed to archive report under loot/reports/: {e}")
+
+        response.content_type = "text/markdown; charset=utf-8"
+        response.headers["Content-Disposition"] = (
+            f'attachment; filename="sapmap_report_{ts}.md"'
+        )
+        return md
+
     return app
