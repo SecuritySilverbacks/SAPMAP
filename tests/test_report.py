@@ -326,6 +326,80 @@ def test_html_report_empty_landscape_svg_falls_back_to_message():
     assert "landscape map is empty" in html.lower()
 
 
+def test_recommendations_derived_from_landscape_state():
+    """Recommendations must be richer than just remediation strings
+    pulled out of findings — the landscape itself drives structural
+    advice (GW ACL, MS ACL, SAProuter ACL, default-cred rotation,
+    SecStore rotation, SCC default creds, etc.)."""
+    from sapmap_report import _derive_landscape_recommendations
+    state = SAPMAPState()
+
+    # Pwned production system with vulnerable gateway
+    s4p = SAPNode(sid="S4P", system_type="ABAP", is_production=True,
+                  pwned=True, gw_vulnerable=True,
+                  ms_vulnerable=True)
+    s4p.credentials.append(Credentials(username="DDIC", password="x",
+                                          client="000", verified=True))
+    s4p.secstore_entries = [{"ident": "/RFC/X", "password": "y"}]
+    state.add_node(s4p)
+
+    # SAProuter
+    rd1 = SAPNode(sid="RD1", system_type="SAPROUTER", hostname="router")
+    rd1.saprouter_info = {"clients": [{"host": "10.0.0.1"}]}
+    state.add_node(rd1)
+
+    # Untested RFC into PRD
+    s4d = SAPNode(sid="S4D", system_type="ABAP", is_production=False)
+    state.add_node(s4d)
+    state.add_connection(RFCConnection(
+        source_sid="S4D", source_host="s4dhost",
+        target_sid="S4P", target_host="s4phost",
+        destination_name="S4D_TO_S4P", has_sap_all=False,
+        tested=False, logon_successful=False))
+
+    recs = _derive_landscape_recommendations(state)
+    titles = [r["title"] for r in recs]
+
+    # All the major categories should be represented
+    assert any("reginfo / secinfo" in t for t in titles), \
+        "Missing GW ACL recommendation"
+    assert any("Message Server" in t for t in titles), \
+        "Missing MS ACL recommendation"
+    assert any("saprouttab" in t for t in titles), \
+        "Missing SAProuter ACL recommendation"
+    assert any("default account password" in t for t in titles), \
+        "Missing default-cred rotation recommendation"
+    assert any("Secure Store" in t for t in titles), \
+        "Missing SecStore rotation recommendation"
+    assert any("compromised" in t for t in titles), \
+        "Missing IR / production-pwned recommendation"
+    assert any("RFC destinations pointing at production" in t for t in titles), \
+        "Missing untested-RFC-to-PRD review recommendation"
+
+    # Every entry has the required fields
+    for r in recs:
+        for k in ("category", "scope", "title", "body", "refs"):
+            assert r.get(k), f"recommendation missing {k}: {r}"
+
+
+def test_html_report_recommendations_section_renders_derived_cards():
+    """The HTML rec section must render the derived structural
+    recommendations as styled cards, not just an <ol>."""
+    state = SAPMAPState()
+    state.add_node(SAPNode(sid="S4P", system_type="ABAP",
+                            is_production=True, pwned=True,
+                            gw_vulnerable=True))
+    html = build_html_report(state)
+    # Subheading present
+    assert "Landscape-wide structural remediations" in html
+    # Reco cards rendered
+    assert 'class="reco"' in html
+    assert 'class="reco-cat"' in html
+    # The GW ACL reco surfaces
+    assert "reginfo / secinfo" in html
+    assert "SAP Note 1408081" in html
+
+
 def test_html_report_no_dedicated_scc_section_even_with_sccs():
     """Belt-and-braces: even when SCCs exist, no separate <section>
     for them — they live inline."""

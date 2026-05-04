@@ -237,23 +237,292 @@ def _scc_section(state: SAPMAPState) -> list:
     return out
 
 
+def _derive_landscape_recommendations(state: SAPMAPState) -> list:
+    """Inspect the whole landscape state and produce structural
+    remediation guidance — independent of whether individual findings
+    happened to carry a remediation field.
+
+    Returns a list of dicts: {category, scope, title, body, refs}.
+    Each entry is a single concrete action for one or more SIDs.
+    """
+    nodes = list(state.nodes.values())
+    sccs = list((getattr(state, "scc_nodes", {}) or {}).values())
+    items = []
+
+    # 1. Gateway ACL — applies to every node where gw_vulnerable=True
+    gw_sids = sorted(n.sid for n in nodes if getattr(n, "gw_vulnerable", False))
+    if gw_sids:
+        items.append({
+            "category": "Gateway hardening",
+            "scope": ", ".join(gw_sids),
+            "title": "Tighten SAP Gateway reginfo / secinfo ACLs",
+            "body": (
+                "Every listed system accepted unauthenticated SAPXPG "
+                "registrations, allowing arbitrary OS command execution "
+                "(10KBLAZE / CVE-2019-0344 family).  Edit the gateway "
+                "ACL files (gw/reg_info, gw/sec_info) to enforce "
+                "explicit allow-lists for both REGISTERED and started "
+                "external programs, set gw/sim_mode = 0 and "
+                "gw/acl_mode = 1, then restart the dispatcher.  Verify "
+                "with `gwmon` that PROGRAM=sapxpg is rejected from any "
+                "host that is not explicitly trusted."
+            ),
+            "refs": "SAP Note 1408081, 1444282, 1425765",
+        })
+
+    # 2. Message-server ACL — CVE-2020-6207 / 10KBLAZE betrusted prereq
+    ms_sids = sorted(n.sid for n in nodes
+                       if getattr(n, "ms_vulnerable", False))
+    if ms_sids:
+        items.append({
+            "category": "Message Server hardening",
+            "scope": ", ".join(ms_sids),
+            "title": "Restrict Message Server internal port (39NN) to ACL",
+            "body": (
+                "These systems exposed the MS internal port (39NN) "
+                "without an effective ACL, enabling 10KBLAZE betrusted "
+                "(CVE-2020-6207).  Set ms/monitor = 0 only after "
+                "creating ms/acl_info with an explicit HOST= allow-list "
+                "for the application servers, and firewall the internal "
+                "port off the management network.  39NN must NEVER be "
+                "reachable from clients."
+            ),
+            "refs": "SAP Note 2841053, 2922964",
+        })
+
+    # 3. CVE-2025-31324 — VisualComposer JSP webshell
+    vc_sids = sorted(n.sid for n in nodes
+                       if getattr(n, "cve_2025_31324_vulnerable", False))
+    if vc_sids:
+        items.append({
+            "category": "Java patching",
+            "scope": ", ".join(vc_sids),
+            "title": "Patch CVE-2025-31324 (VisualComposer metadatauploader)",
+            "body": (
+                "Authentication bypass in the VC metadatauploader servlet "
+                "allows arbitrary JSP upload and unauthenticated RCE.  "
+                "Apply the SAP Note for your kernel level immediately and "
+                "audit /irj/ for any leftover JSP webshells (SAPMAP "
+                "drops JSPs prefixed with 4-letter random names — search "
+                "for files modified after the engagement window).  Until "
+                "patched, take the affected /developmentserver/ context "
+                "offline."
+            ),
+            "refs": "SAP Note 3594142",
+        })
+
+    # 4. SAProuter ACL
+    routers = [n for n in nodes
+               if (n.system_type or "").upper() == "SAPROUTER"]
+    saprouter_info_leak = any(getattr(n, "saprouter_info", None) for n in routers)
+    if routers:
+        items.append({
+            "category": "SAProuter hardening",
+            "scope": ", ".join(sorted(n.sid for n in routers)),
+            "title": "Apply restrictive saprouttab + disable info leak",
+            "body": (
+                "SAProuter answered ROUTER_ADM info requests"
+                + (" (info leak confirmed during the engagement — "
+                   "internal client list and routtab were extracted)"
+                   if saprouter_info_leak else "")
+                + ".  Edit `saprouttab` to allow only specific "
+                "(source, target, port) tuples — never wildcard `*` for "
+                "any field on production routers.  Run with `-K /path/"
+                "to/SNCenv` to require SNC peer auth.  Add `-X 1` to "
+                "block ROUTER_ADM info requests from unauthenticated "
+                "callers.  Block port 3299 on the perimeter firewall to "
+                "anyone outside the SAP support net."
+            ),
+            "refs": "SAP Note 1895350, 1853140",
+        })
+
+    # 5. Default credentials still live
+    default_cred_sids = []
+    for n in nodes:
+        for c in (n.credentials or []):
+            if (c.username or "").upper() in (
+                "DDIC", "SAP*", "SAPCPIC", "EARLYWATCH", "TMSADM",
+                "SAPSERVICE",
+            ) and c.verified:
+                default_cred_sids.append(n.sid)
+                break
+    if default_cred_sids:
+        items.append({
+            "category": "Default credentials",
+            "scope": ", ".join(sorted(set(default_cred_sids))),
+            "title": "Rotate every default account password and lock unused ones",
+            "body": (
+                "SAPMAP successfully logged on with one or more SAP "
+                "default credentials (DDIC / SAP* / TMSADM / "
+                "EARLYWATCH / SAPCPIC / SAPSERVICE).  Set strong unique "
+                "passwords on every client (000, 001, custom), set "
+                "USTYP=B for batch-only accounts, and lock SAP* via "
+                "login/no_automatic_user_sapstar = 1.  Audit USR02 with "
+                "RSUSR003 monthly."
+            ),
+            "refs": "SAP Note 622464, 1414256",
+        })
+
+    # 6. RFC SecStore exposure
+    secstore_present = sum(len(n.secstore_entries or []) for n in nodes)
+    java_secstore_present = sum(len(n.java_secstore_entries or [])
+                                  for n in nodes)
+    if secstore_present or java_secstore_present:
+        items.append({
+            "category": "Secure Store rotation",
+            "scope": "all systems with extracted SecStore data",
+            "title": "Rotate every credential exposed in the Secure Store dumps",
+            "body": (
+                f"SAPMAP decrypted {secstore_present} ABAP RSECTAB "
+                f"entries and {java_secstore_present} Java SecStoreFS "
+                "entries.  Each entry typically holds a service / "
+                "RFC / DBCON / SMTP password used by automated jobs.  "
+                "Rotate ALL of them: download the loot/secstore/ JSON "
+                "files, identify each destination's owning user, and "
+                "change the password through the destination's normal "
+                "channel (SM59 for RFC, ConfigTool for Java JCo, "
+                "DBA Cockpit for DBCON).  Then rekey RSECTAB with "
+                "`rsecssfx changekey` (ABAP) or ConfigTool > Cluster-"
+                "data > Secure Storage > Change Key (Java)."
+            ),
+            "refs": "SAP Note 2293011, 3153525",
+        })
+
+    # 7. SCC default credentials
+    scc_default_live = [s for s in sccs
+                          if getattr(s, "default_creds_live", False)]
+    if scc_default_live:
+        items.append({
+            "category": "SAP Cloud Connector",
+            "scope": ", ".join(getattr(s, "host", "?") for s in scc_default_live),
+            "title": "Rotate Cloud Connector Administrator/manage credential",
+            "body": (
+                "SAPMAP authenticated to the Cloud Connector admin REST "
+                "API with the factory default 'Administrator/manage'.  "
+                "An attacker with this access reads every cloud-to-on-"
+                "premise mapping, dumps the system keystore (every "
+                "principal-propagation private key), and can pivot into "
+                "the on-premise backends through the SCC tunnel.  Set a "
+                "strong unique password and enable LDAP / SAML SSO if "
+                "available."
+            ),
+            "refs": "SAP Note 2696233 (general SCC hardening guide)",
+        })
+
+    # 8. Production systems pwned — biggest fish, always surface
+    prd_pwned = [n for n in nodes if n.is_production and n.pwned]
+    if prd_pwned:
+        items.append({
+            "category": "Incident response",
+            "scope": ", ".join(sorted(n.sid for n in prd_pwned)),
+            "title": "Treat these production systems as compromised",
+            "body": (
+                "SAPMAP gained interactive access to production "
+                "system(s) listed above.  Engage incident response: "
+                "review SAL audit logs (transaction RSAU_READ_LOG) for "
+                "any activity outside the engagement window, force a "
+                "password reset on every dialog user, rotate every "
+                "RFC destination password, audit USR02 last-login "
+                "timestamps for anomalies, and rebuild any host where "
+                "OS-level command execution was demonstrated."
+            ),
+            "refs": "SAP Note 2191612 (SAL hardening)",
+        })
+
+    # 9. Untested RFC trust edges that point AT production
+    prd_sids = {n.sid for n in nodes if n.is_production}
+    untested_into_prd = [c for c in (state.connections or [])
+                          if c.target_sid in prd_sids
+                          and not c.tested]
+    if untested_into_prd:
+        items.append({
+            "category": "RFC trust review",
+            "scope": ", ".join(sorted({c.source_sid + " -> " + c.target_sid
+                                       for c in untested_into_prd})),
+            "title": "Review RFC destinations pointing at production",
+            "body": (
+                f"{len(untested_into_prd)} RFC destination(s) "
+                "configured on non-production systems target production "
+                "as their endpoint.  These are LATERAL-MOVEMENT paths: "
+                "anyone who pwns a non-prod system inherits the "
+                "destination's stored credentials and can connect to "
+                "prod with them.  Audit each destination's stored user "
+                "via SM59 -> Logon & Security -> remove any with "
+                "stored passwords, switch to trusted-system + ticketed "
+                "logon, or — if you can't avoid stored creds — at "
+                "least ensure the user is a tightly-scoped service "
+                "user, never SAP_ALL."
+            ),
+            "refs": "SAP Note 128447, 2008727",
+        })
+
+    # 10. Cracked SCC password hashes
+    scc_pwned = [s for s in sccs
+                  if getattr(s, "pwned", False)
+                  or getattr(s, "default_creds_live", False)]
+    if scc_pwned:
+        items.append({
+            "category": "SAP Cloud Connector",
+            "scope": ", ".join(getattr(s, "host", "?") for s in scc_pwned),
+            "title": "Rebuild SCC keystores after credential compromise",
+            "body": (
+                "Cloud Connectors marked PWNED had at least one "
+                "Administrator hash crackable from users.xml — the "
+                "operator could mint new admin sessions at any time.  "
+                "After rotating the password, regenerate every "
+                "subaccount tunnel keystore (scc_config/<region>/<uuid>/"
+                "scc.p12) and the principal-propagation CA.  The "
+                "previous keys must be considered exposed."
+            ),
+            "refs": "SAP Cloud Connector documentation > Disaster Recovery",
+        })
+
+    return items
+
+
 def _recommendations_section(state: SAPMAPState) -> list:
-    """De-duplicated remediation steps pulled from findings."""
+    """Recommendations section — combines per-finding remediation text
+    with the structural landscape recommendations derived from the
+    state itself (so the section is comprehensive even when
+    individual findings don't carry full remediation prose)."""
     out = ["## Recommendations", ""]
+
+    derived = _derive_landscape_recommendations(state)
+
+    # Per-finding bullets, deduped by remediation text
     seen = set()
-    bullets = []
+    finding_bullets = []
     for n in state.nodes.values():
         for f in n.findings or []:
             r = (f.remediation or "").strip()
             if not r or r in seen:
                 continue
             seen.add(r)
-            bullets.append(f"- **{n.sid}** — {_esc(r)}")
-    if not bullets:
-        out.append("_No specific remediation steps emitted by findings._")
-    else:
-        out.extend(bullets)
-    out.append("")
+            finding_bullets.append(f"- **{n.sid}** — {_esc(r)}")
+
+    if derived:
+        out.append("### Landscape-wide structural remediations")
+        out.append("")
+        for i, r in enumerate(derived, 1):
+            out.append(f"#### {i}. {r['title']}")
+            out.append("")
+            out.append(f"**Applies to:** {_esc(r['scope'])}  ")
+            out.append(f"**Category:** {_esc(r['category'])}  ")
+            out.append(f"**References:** {_esc(r['refs'])}")
+            out.append("")
+            out.append(_esc(r["body"]))
+            out.append("")
+
+    if finding_bullets:
+        out.append("### Per-finding remediation")
+        out.append("")
+        out.extend(finding_bullets)
+        out.append("")
+
+    if not derived and not finding_bullets:
+        out.append("_No remediation guidance applicable — landscape is "
+                   "either empty or fully patched._")
+        out.append("")
     return out
 
 
@@ -754,7 +1023,35 @@ def build_html_report(state: SAPMAPState,
             f'</tr>'
         )
 
-    # Recommendations
+    # Recommendations: structural (derived from state) + per-finding
+    derived = _derive_landscape_recommendations(state)
+    cat_colors = {
+        "Gateway hardening":         "#f85149",
+        "Message Server hardening":  "#f85149",
+        "Java patching":             "#f85149",
+        "SAProuter hardening":       "#db6d28",
+        "Default credentials":       "#db6d28",
+        "Secure Store rotation":     "#db6d28",
+        "SAP Cloud Connector":       "#db6d28",
+        "Incident response":         "#f85149",
+        "RFC trust review":          "#d4a72c",
+    }
+    derived_html = ""
+    for r in derived:
+        col = cat_colors.get(r["category"], "#0969da")
+        derived_html += (
+            f'<div class="reco" style="border-left:4px solid {col}">'
+            f'<div class="reco-head">'
+            f'<span class="reco-cat" style="background:{col}">'
+            f'{_hesc(r["category"])}</span>'
+            f'<span class="reco-title">{_hesc(r["title"])}</span>'
+            f'</div>'
+            f'<div class="reco-meta"><b>Applies to:</b> '
+            f'{_hesc(r["scope"])} · <b>Refs:</b> {_hesc(r["refs"])}</div>'
+            f'<div class="reco-body">{_hesc(r["body"])}</div>'
+            f'</div>'
+        )
+
     seen = set()
     rec_items = []
     for n in state.nodes.values():
@@ -763,8 +1060,21 @@ def build_html_report(state: SAPMAPState,
             if r and r not in seen:
                 seen.add(r)
                 rec_items.append(f'<li><b>{_hesc(n.sid)}</b> — {_hesc(r)}</li>')
-    rec_html = ("<ol>" + "".join(rec_items) + "</ol>") if rec_items else \
-                '<div class="muted">No specific remediation steps emitted.</div>'
+    finding_html = ("<ol>" + "".join(rec_items) + "</ol>") if rec_items else ""
+
+    if derived_html or finding_html:
+        rec_html = (
+            (('<h3 style="margin:18px 0 10px;color:#374151;font-size:14px">'
+              'Landscape-wide structural remediations</h3>'
+              + derived_html)
+             if derived_html else "")
+            + (('<h3 style="margin:24px 0 10px;color:#374151;font-size:14px">'
+                'Per-finding remediation</h3>' + finding_html)
+               if finding_html else "")
+        )
+    else:
+        rec_html = ('<div class="muted">No remediation guidance applicable — '
+                     'landscape is either empty or fully patched.</div>')
 
     # Recovered creds (passwords masked)
     cred_rows = ""
@@ -869,6 +1179,14 @@ def build_html_report(state: SAPMAPState,
         border-left:3px solid #1a7f37}}
   .muted{{color:#8b949e;font-style:italic;padding:8px}}
   ol{{padding-left:22px;margin:0}} ol li{{margin-bottom:8px;font-size:14px}}
+  .reco{{background:#fafbfc;border-radius:8px;padding:14px 18px;margin-bottom:12px}}
+  .reco-head{{display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap}}
+  .reco-cat{{display:inline-block;padding:3px 10px;border-radius:4px;
+        color:#fff;font-weight:600;font-size:10px;letter-spacing:.5px;
+        text-transform:uppercase}}
+  .reco-title{{font-weight:600;font-size:14px;color:#1f2937}}
+  .reco-meta{{font-size:11px;color:#6b7280;margin-bottom:8px}}
+  .reco-body{{font-size:13px;color:#374151;line-height:1.55}}
   footer{{text-align:center;color:#8b949e;font-size:11px;margin-top:32px}}
   @media print{{body{{background:#fff}} section{{box-shadow:none;border:1px solid #e1e4e8}}}}
 </style>
