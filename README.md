@@ -72,15 +72,19 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 
 ### Exploitation
 - **Gateway SAPXPG exploit** — Unauthenticated OS command execution via the 10KBLAZE technique (P1→P2→P3→P4 protocol chain)
+- **CVE-2025-31324 (VisualComposer metadatauploader)** — Unauth Java JSP webshell deployment with chunked-base64 file write, OS-aware command wrapping (cmd.exe / /bin/sh), session-resilient shell tracking
+- **Message Server betrusted (CVE-2020-6207 / 10KBLAZE)** — Register a fake dispatcher with the MS so the attacker IP is added to the SAP Gateway's trusted-host list, enabling unauthenticated OS command execution via SAPXPG
 - **Direct database injection** — Create SAP users by injecting into USR02/UST04/USRBF2 tables via SQL CLI tools (hdbsql, sqlcli, sqlcmd, sqlplus, db2)
 - **BAPI user creation** — Authenticated user creation with SAP_ALL via BAPI_USER_CREATE1
 - **SXPG remote execution** — Create users on remote systems via TCP/IP RFC destinations and SXPG_STEP_XPG_START
+- **Java post-RECON deploy paths** — CTC ConfigServlet and Telnet console deploy of JSPs once a Java UME admin has been created (handles hardened PI/MDM systems where /irj/ is blocked)
 - **Post-creation verification** — Confirm user exists and has SAP_ALL via RFC logon + BAPI_USER_GET_DETAIL
 
 ### Local Privilege Escalation
 - **Extensible LPE framework** — Plugin-style `@lpe_method` decorator: add new methods by writing one function
 - **BAPI profile assignment** — Direct RFC call to assign SAP_ALL via BAPI_USER_PROFILES_ASSIGN (requires S_RFC)
 - **WebGUI RSBDCOS0 exploit** — Reverse-engineered WebGUI HTTP protocol to execute OS commands via RSBDCOS0, running SQL INSERTs to assign SAP_ALL directly in the database — bypasses S_RFC authorization entirely
+- **CVE-2026-31431 "Copy Fail" (root LPE on Linux)** — One-shot root OS command execution via AF_ALG authencesn page-cache patching of `/usr/bin/su` with a minimal ELF.  Validated live against SUSE Linux 6.4.0 (s4hadm → uid=0) through SAPXPG.  Non-persistent (reverts on reboot or page-cache eviction).  Pre-flight check confirms vulnerable kernel + AF_ALG primitive before the destructive step
 
 ### Lateral Movement
 - **RFC connection mapping** — Retrieve all Type 3 and TCP/IP RFC destinations from compromised systems
@@ -113,10 +117,14 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 - **RFC SDK integration** — NW RFC SDK's native `saprouter` parameter used for authenticated connections
 
 ### Data Extraction
-- **Password hash download** — Extract BCODE/PASSCODE/PWDSALTEDHASH from USR02 (includes iSSHA-1 salted hashes)
-- **Arbitrary table reads** — Download any SAP table via RFC_READ_TABLE
+- **Password hash download (5-method fallback chain)** — (1) SXPG database CLI for full BCODE/PASSCODE/PWDSALTEDHASH via `sqlplus` / `hdbsql` / `sqlcmd` — (2) wide RFC_READ_TABLE on USR02 with all fields — (3) RAW-less retry (PWDSALTEDHASH only — the modern iSSHA-1 hash, hashcat mode 10300) — (4) **legacy USR02** (BCODE + PASSCODE without PWDSALTEDHASH for pre-6.40 SAP_BASIS Oracle landscapes) — (5) bare user inventory.  Existing TCP/IP destination reuse to sidestep the FL046 / S_RFC_ADM dest-creation restriction
+- **Java password hashes** — Dump UME_STRINGS j_user / j_password pairs via dropped JSP for offline cracking
+- **ABAP SecStore (RSECTAB) decryption** — Full decryption chain (see below) writes loot/secstore/secstore_<SID>_<ts>.json
+- **Java SecStore (SecStoreFS) decryption** — Server-side decryption via dropped JSP, classifies entries (sapjsf / jdbc_local / jco_dest / configentry), auto-plots downstream ABAP credentials onto the map.  Loot saved to loot/secstore/java_secstore_<SID>_<ts>.json
+- **Arbitrary table reads** — Download any SAP or Java DB table via RFC_READ_TABLE / dropped JSP JDBC.  Saved to loot/tables/
+- **Business Impact Assessment (BIA)** — Scenario-based queries against compromised systems (customer data breach, payroll, supply chain, etc.) — exports per-scenario CSV to loot/bia/
 - **Client role detection** — Identify production (P), QA (Q), test (T) systems from T000 with CCCORACTIV
-- **SecStore download** — Decrypt and export all RSECTAB entries as categorised JSON loot
+- **hashes.com integration** — Submit recovered hashes (ABAP BCODE/PASSCODE/PWDSALTEDHASH and SCC SHA-1/SHA-256/PBKDF2) directly to hashes.com rainbow-table API; cracked plaintext is auto-stored as a credential and the node is marked pwned
 
 ### Cleanup
 - **User deletion** — Remove all created SAPMAP users via BAPI_USER_DELETE
@@ -126,36 +134,84 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 
 ## Architecture
 
-```
-sapmap.py                    Entry point — CLI args, server launch, state management
-│
-├── sapmap_gui.py            Bottle HTTP server — 50+ REST API routes
-│   └── sapmap_html.py       Single-page web application (HTML/CSS/JS)
-│
-├── sapmap_scanner.py        Network discovery — fast/deep scan, SAPControl, RFC probing
-├── sapmap_exploit.py        Exploitation engine — GW exploit, BAPI, SXPG, propagation
-├── sapmap_lpe.py            Local privilege escalation — extensible method registry (WebGUI, BAPI)
-├── sapmap_rfc.py            Authenticated RFC operations — BAPI calls, table reads, destination testing
-│
-├── sapmap_secstore.py       SecStore (RSECTAB) decryption — SSFS key extraction, 3DES decrypt, map integration
-├── sapmap_models.py         Data models — SAPNode, RFCConnection, CreatedUser, SAPMAPState
-├── sapmap_config.py         Configuration — SQL templates, password hashes, defaults, colors
-├── sapmap_state.py          State persistence — save/load JSON, RFC cache, destinations
-└── sapmap_cleanup.py        Cleanup — delete users, remove destinations
-```
-
-### Standalone Tools
+The codebase is organised under `modules/` by concern.  `sapmap.py` at the project root is the entry point; every other Python file lives in a topical subpackage.
 
 ```
-sap_gw_xpg_standalone.py    Gateway SAPXPG exploit — raw SAP NI protocol (stdlib only)
-sap_ms_betrusted.py          10KBlaze betrusted — MS registration + NILIST IP injection (stdlib only)
-sap_rfc_system_info.py       Unauthenticated RFC_SYSTEM_INFO retrieval with SAProuter support
-sap_client_enum.py           DIAG protocol client enumeration (stdlib only)
-sap_rfc_ctypes.py            RFC connection library — ctypes wrapper for SAP NW RFC SDK
-sap_default_creds.py         Default SAP credential scanner via DIAG protocol
-sap_rsec_cipher.py           SAP RSECCipher — proprietary DES variant for SSFS encryption
-sap_saprouter.py             SAProuter NI protocol tunnel for routing through SAP Router
+sapmap.py                              Entry point — CLI args, server launch, state management
+modules/
+├── core/
+│   ├── sapmap_models.py               Data models — SAPNode, RFCConnection, CreatedUser, SAPMAPState
+│   ├── sapmap_state.py                State persistence — save/load JSON, RFC cache, loot dir helpers
+│   ├── sapmap_config.py               Configuration — SQL templates, password hashes, defaults
+│   ├── sapmap_findings.py             Critical-finding bus (independent of GUI)
+│   ├── sapmap_errors.py               format_rfc_exception() — pyrfc detail extractor
+│   ├── sapmap_stop.py                 Process-wide stop signal for background ops
+│   ├── sapmap_gui.py                  Bottle HTTP server — 60+ REST API routes
+│   └── sapmap_html.py                 Single-page web application (HTML/CSS/JS)
+│
+├── automation/
+│   └── sapmap_script.py               YAML / JSON script runner for repeatable scenarios
+│
+├── protocols/                         Low-level SAP protocol primitives
+│   ├── sap_rfc_ctypes.py              ctypes wrapper for SAP NW RFC SDK
+│   ├── sap_rfc_system_info.py         Unauthenticated RFC_SYSTEM_INFO probing
+│   ├── sap_rsec_cipher.py             SAP RSECCipher — proprietary 8-round Feistel 3DES
+│   ├── sap_router_info.py             SAProuter ROUTER_ADM info request
+│   └── sap_saprouter.py               SAProuter NI_ROUTE tunnel
+│
+├── discovery/                         Network discovery + recon
+│   ├── sapmap_scanner.py              Fast/deep scan, SAPControl, RFC probing
+│   ├── sapmap_rfc.py                  Authenticated RFC operations — BAPI, table reads, dest mgmt
+│   ├── sap_client_enum.py             DIAG client enumeration
+│   ├── sap_default_creds.py           Default SAP credential scanner via DIAG
+│   ├── sapmap_scc_fingerprint.py      SCC TLS / HTTP / favicon fingerprint ladder
+│   ├── sapmap_scc_cve_buckets.py      Version → CVE lookup for fingerprinted SCC instances
+│   └── sapmap_scc_relay.py            Reachability probe for SCC mappings
+│
+├── exploitation/                      Initial-access exploits + RCE primitives
+│   ├── sapmap_exploit.py              Umbrella orchestrator — GW user create, JSP deploy, propagation
+│   ├── sap_cve_2020_6287.py           RECON unauth user create
+│   ├── sap_cve_2025_31324.py          VisualComposer JSP webshell
+│   ├── sap_ms_betrusted.py            Message Server betrusted (10KBLAZE)
+│   ├── sap_gw_xpg_standalone.py       Standalone Gateway SAPXPG client
+│   ├── sap_java_ctc.py                Java CTC ConfigServlet deploy
+│   ├── sap_java_telnet.py             Java telnet console deploy
+│   └── sapmap_copyfail.py             CVE-2026-31431 root LPE on Linux (page-cache patch)
+│
+├── postex/                            Post-exploitation: privesc + lateral movement
+│   ├── sapmap_lpe.py                  ABAP local privilege escalation registry
+│   ├── sap_ume_user_create.py         Java UME admin user creation
+│   └── sapmap_chain.py                Multi-hop RFC trust-chain analysis
+│
+├── data_extraction/                   Credential / data harvesting
+│   ├── sapmap_secstore.py             ABAP RSECTAB / SSFS decryption + map integration
+│   ├── sap_java_secstore.py           Java SecStoreFS via dropped JSP
+│   ├── sap_java_secstore_offline.py   Pure-Python Java SecStore decrypt (3DES era)
+│   ├── sap_java_db.py                 JDBC dump + UME hashes via JSP
+│   ├── poc_remote_abap_exec.py        XBP job-scheduling RCE for SQL extraction
+│   ├── sapmap_scc_admin.py            SCC authenticated REST helpers
+│   ├── sapmap_scc_keystore.py         SCC backup zip parsing + keystore extraction
+│   └── sapmap_scc_ssfs_decrypt.py     SCC SSFS decryption (JNI helper + on-host fallback)
+│
+├── business_impact/
+│   ├── sapmap_impact.py               ABAP-RFC business impact scenarios
+│   └── sap_java_impact.py             Java equivalent (J2EE_CONFIGENTRY-driven)
+│
+└── ops/
+    └── sapmap_cleanup.py              Cleanup — delete users, remove destinations
 ```
+
+The `modules/__init__.py` registers each subpackage on `sys.path` so existing flat imports (`import sapmap_models`, `from sap_rfc_ctypes import ...`) continue to work.
+
+### Loot vs State directories
+
+- **`states/`** — session state files: `.sapmap` autosaves, RFC check cache, destination log
+- **`loot/`** — downloaded artefacts, organised by category (gitignored):
+  - `loot/hashes/` — ABAP BCODE/PASSCODE/PWDSALTEDHASH dumps + Java UME hashes + SecStore configentry secrets, both as raw JSON and ready-to-crack hashcat files
+  - `loot/secstore/` — decrypted ABAP RSECTAB and Java SecStoreFS entries (JSON)
+  - `loot/tables/` — ABAP and Java DB table dumps (JSON / CSV)
+  - `loot/bia/` — Business Impact Assessment exports per scenario (CSV)
+  - `loot/scc/<host>/` — SCC backup zips, decrypted SSFS secrets, cracked passwords
 
 ### Key Data Models
 
@@ -478,7 +534,7 @@ Each SQL statement is wrapped in the appropriate DB CLI command (hdbsql for HANA
 
 ### Adding New LPE Methods
 
-New methods can be added by defining a decorated function in `sapmap_lpe.py` — no GUI, API, or framework changes needed:
+New methods can be added by defining a decorated function in `modules/postex/sapmap_lpe.py` — no GUI, API, or framework changes needed:
 
 ```python
 @lpe_method("my_new_method", "Description shown in console output", priority=75)
@@ -719,24 +775,24 @@ The bucket fires during **Pull Mappings** (authenticated version read) and produ
 
 ## Standalone Tools
 
-Each standalone tool works independently with no external dependencies (Python 3 stdlib only).
+Each standalone tool works independently with no external dependencies (Python 3 stdlib only).  After the modules reorg they live under `modules/<group>/`, but you can run them by path or import them as a module.
 
-### sap_ms_betrusted.py
+### sap_ms_betrusted.py — 10KBLAZE betrusted (`modules/exploitation/`)
 
-10KBlaze betrusted exploit — register a fake application server with the SAP Message Server to inject the attacker's IP into the Gateway's trusted host list:
+Register a fake application server with the SAP Message Server to inject the attacker's IP into the Gateway's trusted host list:
 
 ```bash
 # Check if MS internal port is unprotected (CVE-2020-6207)
-python3 sap_ms_betrusted.py check-acl -t 192.168.1.100 -n 0
+python3 modules/exploitation/sap_ms_betrusted.py check-acl -t 192.168.1.100 -n 0
 
 # Run the betrusted attack (inject attacker IP as trusted)
-python3 sap_ms_betrusted.py exploit \
+python3 modules/exploitation/sap_ms_betrusted.py exploit \
     -t 192.168.1.100 -p 3901 -n 0 \
     -a 192.168.2.210 \
     --dp-version 14 -v
 
 # For older kernels (742): use dp-version 11
-python3 sap_ms_betrusted.py exploit \
+python3 modules/exploitation/sap_ms_betrusted.py exploit \
     -t 192.168.1.100 -p 3941 -n 40 \
     -a 192.168.2.210 \
     --dp-version 11 --old-kernel -v
@@ -744,38 +800,40 @@ python3 sap_ms_betrusted.py exploit \
 
 After betrusted injects trust, use `sap_gw_xpg_standalone.py` to execute commands via the gateway. The betrusted connection must stay open while running SAPXPG (trust is revoked on disconnect).
 
-### sap_gw_xpg_standalone.py
+### sap_gw_xpg_standalone.py — Gateway SAPXPG (`modules/exploitation/`)
 
 Gateway SAPXPG command execution:
 
 ```bash
-python3 sap_gw_xpg_standalone.py \
+python3 modules/exploitation/sap_gw_xpg_standalone.py \
     --host 192.168.1.100 --port 3300 \
     --sid S4H --hostname s4hanadev \
     --command whoami --params "" \
     --kernel 793 -v
 ```
 
-### sap_rfc_system_info.py
+### sap_rfc_system_info.py — Unauthenticated system info (`modules/protocols/`)
 
 Unauthenticated system info retrieval (supports SAProuter):
 
 ```bash
-python3 sap_rfc_system_info.py -t 192.168.1.100 -p 3300 -v
-python3 sap_rfc_system_info.py -t 172.31.14.107 -p 3200 -R 3.221.134.53:3299 -v
+python3 modules/protocols/sap_rfc_system_info.py -t 192.168.1.100 -p 3300 -v
+python3 modules/protocols/sap_rfc_system_info.py -t 172.31.14.107 -p 3200 -R 3.221.134.53:3299 -v
 ```
 
 Extracts SID, hostname, OS, kernel version, database type, and IP addresses using four probe methods (V6 single-packet, V2 error leak, Chipik-style, DIAG login screen).
 
-### sap_client_enum.py
-
-DIAG-based client enumeration:
+### sap_client_enum.py — DIAG client enumeration (`modules/discovery/`)
 
 ```bash
-python3 sap_client_enum.py -t 192.168.1.100 -p 3200
+python3 modules/discovery/sap_client_enum.py -t 192.168.1.100 -p 3200
 ```
 
 Discovers valid client numbers (000–999) by testing DIAG logon responses.
+
+### sapmap_copyfail.py — CVE-2026-31431 root LPE (`modules/exploitation/`)
+
+Programmatic check + one-shot root command execution against an authenticated SAP node (uses SAPXPG to drop the patcher and read its output back).  Validated live on SUSE Linux 6.4.0; safe pre-flight verifies the kernel range AND a working AF_ALG `authencesn` bind before doing anything destructive.  Imported from the GUI via the right-click LPE menu — the standalone module is also importable for scripted scenarios.
 
 ---
 
@@ -867,7 +925,7 @@ steps:
 | `download_secstore` | `target` | Decrypt SecStore (RSECTAB) — RFC/DB/CTS/SMTP passwords |
 | `impact_assess` | `target`, `client` (optional), `scenario` (optional) | Run business impact assessment (all or one scenario) |
 | `impact_show` | `target` | Print all impact results to the console |
-| `impact_export` | `target`, `scenario` (optional — omit to export all) | Export impact data to CSV in the states/ folder |
+| `impact_export` | `target`, `scenario` (optional — omit to export all) | Export impact data to CSV in `loot/bia/` (`bia_<SID>_<scenario>.csv`) |
 
 #### Landscape Analysis
 
@@ -1007,29 +1065,34 @@ Separate from session state, these persist across sessions:
 
 ## Testing
 
-SAPMAP includes a unit test suite (405 tests) that validates core logic without network access:
+SAPMAP includes a unit test suite (765 tests across 22 files) that validates core logic without network access:
 
 ```bash
 python3 -m pytest tests/ -v
 ```
 
+`tests/conftest.py` registers the `modules/*` subpackages on `sys.path` so test files can keep their flat-import style.  All tests run in ~17 seconds.
+
 | Test File | Tests | Coverage |
 |-----------|-------|----------|
 | `test_ms_betrusted.py` | 114 | MS header build/parse, LOGIN/LOGOUT/MOD_STATE, ADM records, DP info, NILIST reply, opcode parsing |
-| `test_10kblaze.py` | 42 | P1 lu_name fix, app-server name derivation, DP versions, NILIST IP reply, hostname extraction |
 | `test_10kblaze_extended.py` | 57 | MS_CHANGE_IP, MS_SET_LOGON, GWMON reply, old NILIST body, NI framing, GW sub-structures |
+| `test_scc_modules.py` | 48 | CVE buckets, SCC mapping normalisation, backup-zip parsing, users.xml multi-user / attribute-order, probe_mapping, Windows multi-drive discovery, \usr\scc layout |
+| `test_10kblaze.py` | 42 | P1 lu_name fix, app-server name derivation, DP versions, NILIST IP reply, hostname extraction |
+| `test_p3_features.py` | 30 | CopyFail kernel detection, check_copyfail early-exit branches, SCC fingerprint probe ladder, execute_local_command dest reuse |
+| `test_recent_features.py` | 29 | format_rfc_exception extractor, ensure_loot_dir + LOOT_* constants, download_password_hashes 5-method fallback chain, categorise_entry / classify_entry |
 | `test_secstore_decrypt.py` | 25 | RSECTAB decryption, keyprime derivation, IDENT categorisation, SSFS key extraction |
-| `test_rsec_cipher.py` | 11 | RSECCipher encode/decode roundtrip, rsec_decrypt, rsec_decrypt_key |
 | `test_gw_protocol.py` | 12 | P1/P2 packet building, parse_response, hexdump, TLV encoding, SAPRFXPG |
+| `test_rsec_cipher.py` | 11 | RSECCipher encode/decode roundtrip, rsec_decrypt, rsec_decrypt_key |
 | `test_models.py` | 9 | Data model serialization, risk_level, best_credentials, state management |
 | `test_config.py` | 8 | Username generation, DB type normalization, SQL generators |
-| Other tests | ~127 | Router, shell, scanner configuration |
+| `test_chain.py`, `test_impact.py`, `test_java_*.py`, `test_router_*.py`, `test_saprouter.py`, `test_shell.py`, `test_cve_2020_6287.py`, `test_additions_today.py`, `test_java_secstore_offline.py` | ~380 | RFC trust chains, business impact engine, Java CTC/Telnet deploy helpers, SAProuter NI tunnel, router info, SAP shell builders, CVE-2020-6287 user creation, miscellaneous additions |
 
 ---
 
 ## Configuration
 
-Key constants in `sapmap_config.py`:
+Key constants in `modules/core/sapmap_config.py`:
 
 ### User Creation
 
