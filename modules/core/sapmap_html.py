@@ -2757,6 +2757,18 @@ function showCtxMenu(e, sid) {
     }
   });
 
+  // Hide the entire Cloud Connector submenu when none of its actions are
+  // visible — avoids showing a parent label that opens to an empty list.
+  // Currently every SCC action is gated on _hasSccOnSameHost(), so we hide
+  // the whole group when no SCC is registered on the same host as `n`.
+  const sccGroup = menu.querySelector('#ctx-scc-group');
+  if (sccGroup) {
+    const visibleSccItems = sccGroup.querySelectorAll(
+      '.ctx-sub > .ctx-item[data-action]:not([style*="display: none"])'
+    );
+    sccGroup.style.display = visibleSccItems.length === 0 ? 'none' : '';
+  }
+
   // Show existing credentials / created users in the menu
   let oldInfo = menu.querySelector('.ctx-cred-info');
   if (oldInfo) oldInfo.remove();
