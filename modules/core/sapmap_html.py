@@ -4725,7 +4725,7 @@ function showJavaSecStoreToast(sid) {
       + '<button class="btn" style="padding:3px 10px;font-size:11px"'
         + ' data-close>Dismiss</button>'
     + '</div>',
-    {stickUntilClose: true}
+    {autoCloseMs: 12000}
   );
 }
 
