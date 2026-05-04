@@ -331,6 +331,257 @@ def _kpi_card(label: str, value: str, sub: str = "", color: str = "") -> str:
     )
 
 
+def _build_landscape_svg(state: SAPMAPState) -> str:
+    """Render an inline SVG snapshot of the landscape for the HTML report.
+
+    Self-contained — no external resources, no JS.  Layouts:
+      * Auto grid sized so every node fits without overlap.
+      * SAP nodes drawn as rounded rectangles, colour-coded:
+            ABAP   = blue,  Java = green,  Both = purple,
+            HANA DB= red,   SAProuter = grey,  unknown = stone.
+      * Cloud Connector nodes drawn as hexagons (matches map style).
+      * Pwned nodes get an orange ⚡ overlay; production nodes a red
+        outer halo.
+      * RFC connections drawn as arrows; SAP_ALL edges in red, normal
+        in grey.  The line is dashed when the destination logon is
+        untested.
+      * SVG is responsive (viewBox + width:100%) so it always fits
+        the page width and scales when the report is printed to PDF.
+    """
+    sap_nodes = list(state.nodes.values())
+    scc_nodes = list((getattr(state, "scc_nodes", {}) or {}).values())
+    items = [("sap", n) for n in sorted(sap_nodes, key=lambda n: n.sid)]
+    items += [("scc", s) for s in sorted(scc_nodes,
+                                          key=lambda s: getattr(s, "host", ""))]
+
+    if not items:
+        return ('<div class="muted" style="text-align:center;padding:24px">'
+                'No systems discovered yet — landscape map is empty.</div>')
+
+    # ------------------------------------------------------------------
+    # Auto-grid layout — choose a column count that gives a roughly
+    # 16:9 frame for the count we have, so the picture is never too
+    # tall or too wide.
+    # ------------------------------------------------------------------
+    import math
+    n = len(items)
+    cols = max(1, min(n, int(math.ceil(math.sqrt(n * 1.6)))))
+    rows = int(math.ceil(n / cols))
+    box_w, box_h = 170, 70
+    h_gap, v_gap = 28, 36
+    margin = 30
+    width = margin * 2 + cols * box_w + (cols - 1) * h_gap
+    height = margin * 2 + rows * box_h + (rows - 1) * v_gap
+
+    # SID/host -> (cx, cy) so we can draw connection lines on top
+    pos = {}
+    for idx, (kind, node) in enumerate(items):
+        col = idx % cols
+        row = idx // cols
+        cx = margin + col * (box_w + h_gap) + box_w / 2
+        cy = margin + row * (box_h + v_gap) + box_h / 2
+        key = node.sid if kind == "sap" else getattr(node, "host", "")
+        pos[(kind, key)] = (cx, cy)
+
+    # ------------------------------------------------------------------
+    # Connection layer (drawn FIRST so nodes overlay it)
+    # ------------------------------------------------------------------
+    edges_svg = []
+    for c in (state.connections or []):
+        src = pos.get(("sap", c.source_sid))
+        dst = pos.get(("sap", c.target_sid))
+        if not src or not dst or src == dst:
+            continue
+        sap_all = bool(getattr(c, "has_sap_all", False))
+        tested = bool(getattr(c, "logon_successful", False))
+        stroke = "#dc2626" if sap_all else "#94a3b8"
+        sw = 2.2 if sap_all else 1.4
+        dash = "" if tested else 'stroke-dasharray="5,4"'
+        # Slight curve so parallel edges don't perfectly overlap.
+        mx = (src[0] + dst[0]) / 2
+        my = (src[1] + dst[1]) / 2 - 8
+        edges_svg.append(
+            f'<path d="M {src[0]:.1f} {src[1]:.1f} Q {mx:.1f} {my:.1f} '
+            f'{dst[0]:.1f} {dst[1]:.1f}" stroke="{stroke}" '
+            f'stroke-width="{sw}" fill="none" {dash} '
+            f'marker-end="url(#arr-{"sapall" if sap_all else "norm"})"/>'
+        )
+
+    # ------------------------------------------------------------------
+    # Node layer
+    # ------------------------------------------------------------------
+    def _sap_colour(node):
+        t = (node.system_type or "").upper()
+        db = (node.db_type or "").upper()
+        if t == "SAPROUTER":
+            return "#475569", "#1f2937"      # fill, stroke (grey)
+        if "ABAP" in t and "JAVA" in t:
+            return "#7c3aed", "#5b21b6"      # purple
+        if "JAVA" in t:
+            return "#15803d", "#166534"      # green
+        if "ABAP" in t:
+            return "#1d4ed8", "#1e3a8a"      # blue
+        if "HANA" in t or db == "HDB":
+            return "#b91c1c", "#7f1d1d"      # red
+        return "#374151", "#1f2937"
+
+    nodes_svg = []
+    for kind, node in items:
+        if kind == "sap":
+            sid = node.sid
+            host_text = node.hostname or node.ip or ""
+            type_text = node.system_type or ""
+            cx, cy = pos[("sap", sid)]
+            fill, stroke = _sap_colour(node)
+            x = cx - box_w / 2
+            y = cy - box_h / 2
+            # Production halo
+            if getattr(node, "is_production", False):
+                nodes_svg.append(
+                    f'<rect x="{x-4:.1f}" y="{y-4:.1f}" '
+                    f'width="{box_w+8}" height="{box_h+8}" rx="12" ry="12" '
+                    f'fill="none" stroke="#dc2626" stroke-width="2.5"/>'
+                )
+            # Body
+            nodes_svg.append(
+                f'<rect x="{x:.1f}" y="{y:.1f}" '
+                f'width="{box_w}" height="{box_h}" rx="8" ry="8" '
+                f'fill="{fill}" stroke="{stroke}" stroke-width="1.5"/>'
+            )
+            # SID line
+            nodes_svg.append(
+                f'<text x="{cx:.1f}" y="{cy-12:.1f}" '
+                f'fill="#fff" font-size="18" font-weight="700" '
+                f'text-anchor="middle" font-family="-apple-system,Segoe UI,'
+                f'Helvetica,Arial,sans-serif">{_hesc(sid)}</text>'
+            )
+            # Type / host meta
+            nodes_svg.append(
+                f'<text x="{cx:.1f}" y="{cy+6:.1f}" fill="#cbd5e1" '
+                f'font-size="10.5" text-anchor="middle" '
+                f'font-family="-apple-system,Segoe UI,Helvetica,Arial,'
+                f'sans-serif">{_hesc(type_text)}</text>'
+            )
+            host_short = host_text if len(host_text) <= 22 else host_text[:21] + "…"
+            nodes_svg.append(
+                f'<text x="{cx:.1f}" y="{cy+22:.1f}" fill="#94a3b8" '
+                f'font-size="10" text-anchor="middle" '
+                f'font-family="-apple-system,Segoe UI,Helvetica,Arial,'
+                f'sans-serif">{_hesc(host_short)}</text>'
+            )
+            # Pwned bolt
+            if getattr(node, "pwned", False):
+                nodes_svg.append(
+                    f'<circle cx="{x+box_w-12:.1f}" cy="{y+12:.1f}" '
+                    f'r="11" fill="#f59e0b" stroke="#fff" stroke-width="2"/>'
+                )
+                nodes_svg.append(
+                    f'<text x="{x+box_w-12:.1f}" y="{y+16:.1f}" '
+                    f'fill="#fff" font-size="13" font-weight="900" '
+                    f'text-anchor="middle">⚡</text>'
+                )
+        else:   # scc — hexagonal frame
+            host = getattr(node, "host", "")
+            ver = getattr(node, "version", "") or "?"
+            cx, cy = pos[("scc", host)]
+            x, y = cx - box_w / 2, cy - box_h / 2
+            # Hex points (flat-topped, fits in box_w x box_h)
+            inset = 18
+            hx = (
+                f'{x+inset:.1f},{y:.1f} '
+                f'{x+box_w-inset:.1f},{y:.1f} '
+                f'{x+box_w:.1f},{y+box_h/2:.1f} '
+                f'{x+box_w-inset:.1f},{y+box_h:.1f} '
+                f'{x+inset:.1f},{y+box_h:.1f} '
+                f'{x:.1f},{y+box_h/2:.1f}'
+            )
+            sn_pwned = (getattr(node, "pwned", False)
+                         or getattr(node, "default_creds_live", False))
+            fill = "#0e7490"   # teal
+            stroke = "#155e75"
+            nodes_svg.append(
+                f'<polygon points="{hx}" fill="{fill}" '
+                f'stroke="{stroke}" stroke-width="1.5"/>'
+            )
+            nodes_svg.append(
+                f'<text x="{cx:.1f}" y="{cy-10:.1f}" '
+                f'fill="#fff" font-size="14" font-weight="700" '
+                f'text-anchor="middle" font-family="-apple-system,Segoe UI,'
+                f'Helvetica,Arial,sans-serif">SCC</text>'
+            )
+            host_short = host if len(host) <= 22 else host[:21] + "…"
+            nodes_svg.append(
+                f'<text x="{cx:.1f}" y="{cy+6:.1f}" fill="#cbd5e1" '
+                f'font-size="10" text-anchor="middle" '
+                f'font-family="-apple-system,Segoe UI,Helvetica,Arial,'
+                f'sans-serif">{_hesc(host_short)}</text>'
+            )
+            nodes_svg.append(
+                f'<text x="{cx:.1f}" y="{cy+22:.1f}" fill="#94a3b8" '
+                f'font-size="10" text-anchor="middle" '
+                f'font-family="-apple-system,Segoe UI,Helvetica,Arial,'
+                f'sans-serif">v{_hesc(ver)}</text>'
+            )
+            if sn_pwned:
+                nodes_svg.append(
+                    f'<circle cx="{x+box_w-14:.1f}" cy="{y+14:.1f}" '
+                    f'r="11" fill="#f59e0b" stroke="#fff" stroke-width="2"/>'
+                )
+                nodes_svg.append(
+                    f'<text x="{x+box_w-14:.1f}" y="{y+18:.1f}" '
+                    f'fill="#fff" font-size="13" font-weight="900" '
+                    f'text-anchor="middle">⚡</text>'
+                )
+
+    # ------------------------------------------------------------------
+    # Legend (small, lower-right)
+    # ------------------------------------------------------------------
+    legend = (
+        f'<g transform="translate({width-260:.1f},{height-46:.1f})">'
+        f'<rect x="0" y="0" width="248" height="36" rx="6" ry="6" '
+        f'fill="#fff" stroke="#e5e7eb" stroke-width="1"/>'
+        f'<rect x="10" y="10" width="14" height="14" rx="3" '
+        f'fill="#1d4ed8"/><text x="30" y="22" font-size="10" '
+        f'fill="#374151" font-family="-apple-system,Segoe UI,sans-serif">ABAP</text>'
+        f'<rect x="68" y="10" width="14" height="14" rx="3" '
+        f'fill="#15803d"/><text x="88" y="22" font-size="10" '
+        f'fill="#374151" font-family="-apple-system,Segoe UI,sans-serif">Java</text>'
+        f'<polygon points="124,10 134,10 138,17 134,24 124,24 120,17" '
+        f'fill="#0e7490"/><text x="142" y="22" font-size="10" '
+        f'fill="#374151" font-family="-apple-system,Segoe UI,sans-serif">SCC</text>'
+        f'<circle cx="172" cy="17" r="6" fill="#f59e0b"/>'
+        f'<text x="183" y="22" font-size="10" fill="#374151" '
+        f'font-family="-apple-system,Segoe UI,sans-serif">⚡ pwned</text>'
+        f'</g>'
+    )
+
+    # ------------------------------------------------------------------
+    # Assemble — viewBox makes it scale to container width
+    # ------------------------------------------------------------------
+    arrow_defs = (
+        '<defs>'
+        '<marker id="arr-norm" viewBox="0 0 10 10" refX="10" refY="5" '
+        'markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
+        '<path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker>'
+        '<marker id="arr-sapall" viewBox="0 0 10 10" refX="10" refY="5" '
+        'markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
+        '<path d="M0,0 L10,5 L0,10 z" fill="#dc2626"/></marker>'
+        '</defs>'
+    )
+
+    svg = (
+        f'<svg viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg" '
+        f'style="width:100%;height:auto;background:#f8fafc;border-radius:8px;'
+        f'border:1px solid #e2e8f0">'
+        + arrow_defs
+        + "".join(edges_svg)
+        + "".join(nodes_svg)
+        + legend
+        + '</svg>'
+    )
+    return svg
+
+
 def build_html_report(state: SAPMAPState,
                         engagement_name: Optional[str] = None) -> str:
     """Build a single self-contained HTML page with embedded CSS.
@@ -658,6 +909,17 @@ def build_html_report(state: SAPMAPState,
                 "#f85149" if scc_pwned else
                 ("#0969da" if sccs else "#d0d7de"))}
   </div>
+
+  <section>
+    <h2>🗺️ Landscape map</h2>
+    <p style="font-size:12px;color:#6b7280;margin:0 0 14px">
+      Auto-laid-out snapshot of every discovered system.  Pwned systems
+      carry a ⚡ badge; production systems have a red halo.  Solid red
+      arrows mark RFC trust edges that grant SAP_ALL on the target;
+      dashed lines mark untested destinations.
+    </p>
+    {_build_landscape_svg(state)}
+  </section>
 
   <section>
     <h2>🛑 Critical findings ({len(crit_findings)})</h2>
