@@ -151,13 +151,27 @@ def find_all_chains(state: SAPMAPState, max_depth: int = 6,
     pf = print_fn or (lambda *a: None)
 
     # Build adjacency: sid → [(target_sid, RFCConnection), ...]
+    # Edge inclusion policy:
+    #   tested = True  + logon_successful = True   → traverse (proven)
+    #   tested = True  + logon_successful = False  → skip (known-broken)
+    #   tested = False                              → traverse (untested,
+    #                                                  the destination
+    #                                                  EXISTS on disk
+    #                                                  on the source —
+    #                                                  it's a possible
+    #                                                  chain the operator
+    #                                                  hasn't validated
+    #                                                  yet).
+    # Without the "tested && !ok" carve-out, the analyser silently
+    # ignored every blue "RFC (untested)" edge on the map and produced
+    # an empty chain list even when arrows clearly pointed at PRD.
     adj = {}
     for conn in state.connections:
         src = conn.source_sid
         tgt = conn.target_sid
         if not src or not tgt or src == tgt:
             continue
-        if not conn.logon_successful:
+        if conn.tested and not conn.logon_successful:
             continue
         if src not in adj:
             adj[src] = []
@@ -201,14 +215,25 @@ def find_all_chains(state: SAPMAPState, max_depth: int = 6,
                     continue
                 visited_from_entry.add(target_sid)
 
+                # If the edge hasn't been logon-tested, flag the hop so
+                # the headline / report reader sees that the link is
+                # configured but not yet validated.  We still include
+                # it in the chain so management sees the topology risk.
+                untested = not conn.tested
+                method = "BAPI (SAP_ALL)" if conn.has_sap_all else "RFC logon"
+                if untested:
+                    method += " — UNTESTED"
                 hop = ChainHop(
                     source_sid=current_sid,
                     target_sid=target_sid,
                     destination_name=conn.destination_name or "",
                     rfc_user=conn.rfc_user or "",
                     has_sap_all=conn.has_sap_all,
-                    method="BAPI (SAP_ALL)" if conn.has_sap_all else "RFC logon",
-                    description=f"via {conn.destination_name}" if conn.destination_name else "",
+                    method=method,
+                    description=(
+                        (f"via {conn.destination_name}" if conn.destination_name else "")
+                        + (" [untested]" if untested else "")
+                    ).strip(),
                 )
                 new_path = path + [hop]
 
