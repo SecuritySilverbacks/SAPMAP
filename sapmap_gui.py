@@ -3191,13 +3191,13 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     "rows": r.get("rows", []),
                     "row_count": r.get("row_count", 0),
                 })
-                # Persist to states/ as CSV
+                # Persist to loot/ as CSV
                 import os as _os
                 from datetime import datetime as _dt
-                states_dir = _os.path.join(_os.path.dirname(__file__), "states")
-                _os.makedirs(states_dir, exist_ok=True)
+                import sapmap_state as _ss
+                loot_dir = _ss.ensure_loot_dir()
                 ts = _dt.now().strftime("%Y%m%d_%H%M%S")
-                fpath = _os.path.join(states_dir,
+                fpath = _os.path.join(loot_dir,
                     f"table_java_{sid}_{table.replace('.','_')}_{ts}.csv")
                 import csv as _csv
                 with open(fpath, "w", newline="", encoding="utf-8") as fh:
@@ -4412,11 +4412,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 return
 
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            states_dir = os.path.join(os.path.dirname(__file__), "states")
-            os.makedirs(states_dir, exist_ok=True)
+            import sapmap_state as _ss
+            loot_dir = _ss.ensure_loot_dir()
 
             # Save raw JSON
-            json_file = os.path.join(states_dir, f"hashes_{sid}_{ts}.json")
+            json_file = os.path.join(loot_dir, f"hashes_{sid}_{ts}.json")
             with open(json_file, "w") as f:
                 json.dump(hashes, f, indent=2)
 
@@ -4461,7 +4461,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
             passcode_mode = "7800" if quality == "full" else "7801"
 
             if bcode_lines:
-                f_bcode = os.path.join(states_dir,
+                f_bcode = os.path.join(loot_dir,
                     f"hashcat_{sid}_bcode_m{bcode_mode}_{ts}.txt")
                 with open(f_bcode, "w") as f:
                     f.write("\n".join(bcode_lines) + "\n")
@@ -4469,7 +4469,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     f"BCODE (mode {bcode_mode}): {f_bcode}")
 
             if passcode_lines:
-                f_passcode = os.path.join(states_dir,
+                f_passcode = os.path.join(loot_dir,
                     f"hashcat_{sid}_passcode_m{passcode_mode}_{ts}.txt")
                 with open(f_passcode, "w") as f:
                     f.write("\n".join(passcode_lines) + "\n")
@@ -4477,7 +4477,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     f"PASSCODE (mode {passcode_mode}): {f_passcode}")
 
             if issha_lines:
-                f_issha = os.path.join(states_dir,
+                f_issha = os.path.join(loot_dir,
                     f"hashcat_{sid}_issha_m10300_{ts}.txt")
                 with open(f_issha, "w") as f:
                     f.write("\n".join(issha_lines) + "\n")
@@ -4523,11 +4523,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
             rows = sapmap_rfc.read_table(node, table, fields, where, max_rows, creds)
             if rows:
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                import sapmap_state as _ss
                 outfile = os.path.join(
-                    os.path.dirname(__file__), "states",
+                    _ss.ensure_loot_dir(),
                     f"table_{table}_{sid}_{ts}.json"
                 )
-                os.makedirs(os.path.dirname(outfile), exist_ok=True)
                 with open(outfile, "w") as f:
                     json.dump(rows, f, indent=2)
                 print(f"[+] {len(rows)} rows from {table} saved to {outfile}")
@@ -4553,8 +4553,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 sapmap_secstore.integrate_results(node, api.state, results)
                 ok  = [r for r in results if not r.get("error") and r.get("password")]
                 err = [r for r in results if r.get("error")]
-                states_dir = os.path.join(os.path.dirname(__file__), "states")
-                outfile = sapmap_secstore.save_loot(node.sid, results, states_dir)
+                import sapmap_state as _ss
+                outfile = sapmap_secstore.save_loot(
+                    node.sid, results, _ss.ensure_loot_dir())
                 print(f"[+] SecStore {sid}: {len(results)} entries, "
                       f"{len(ok)} decrypted, {len(err)} errors → {outfile}")
                 if ok:
@@ -5617,15 +5618,15 @@ def create_app(api: SAPMAPApi) -> Bottle:
             for row in records:
                 writer.writerow([str(row)])
 
-        # Save to states/ folder
+        # Save to loot/ folder
         import sapmap_state
-        os.makedirs(sapmap_state.STATE_DIR, exist_ok=True)
+        loot_dir = sapmap_state.ensure_loot_dir()
         # Sanitise the scenario name for the filename — slashes and
         # spaces would otherwise produce invalid paths.
         import re as _re
         safe_scn = _re.sub(r"[^A-Za-z0-9._-]+", "_", scenario_name)
-        filename = f"{sid}_{safe_scn}.csv"
-        filepath = os.path.join(sapmap_state.STATE_DIR, filename)
+        filename = f"bia_{sid}_{safe_scn}.csv"
+        filepath = os.path.join(loot_dir, filename)
         with open(filepath, "w", newline="") as f:
             f.write(buf.getvalue())
 

@@ -3129,7 +3129,7 @@ async function ctxAction(action) {
         if (!confirm('Extract Java password material?\n\n' +
                       'Pulls UME_STRINGS j_user/j_password pairs (UME hashes) ' +
                       'AND J2EE_CONFIGENTRY password-like rows (cleartext after ' +
-                      'SecStoreFS decryption).  Output saved to states/ as ' +
+                      'SecStoreFS decryption).  Output saved to loot/ as ' +
                       'hashes_java_<SID>_<ts>.txt.')) break;
         await api('POST', `node/${sid}/extract_java_hashes`);
       } else {
