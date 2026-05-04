@@ -21,6 +21,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Optional
+from sapmap_errors import format_rfc_exception
 
 logger = logging.getLogger(__name__)
 
@@ -680,7 +681,7 @@ def decrypt_files_offline(properties_text: str, key_bytes: bytes,
     try:
         version, keyphrase = extract_keyphrase(key_bytes)
     except Exception as e:
-        result["error"] = f"key parse failed: {e}"
+        result["error"] = f"key parse failed: {format_rfc_exception(e)}"
         return result
     result["version"] = version
     algorithm = detect_algorithm(version)
@@ -739,7 +740,7 @@ def decrypt_files_offline(properties_text: str, key_bytes: bytes,
                     pt = pt[4:4 + declared]
             entries[name] = pt.decode("utf-8", errors="replace")
         except Exception as e:
-            entries[name] = f"<decrypt error: {e}>"
+            entries[name] = f"<decrypt error: {format_rfc_exception(e)}>"
     result["entries"] = entries
     result["success"] = True
     return result

