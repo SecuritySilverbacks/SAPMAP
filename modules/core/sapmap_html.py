@@ -1658,6 +1658,13 @@ async function pollUpdates() {
           state.scc_nodes[h]._y = oldScc[h]._y;
         }
       }
+      const oldBtp = mapState.btp_subaccounts || {};
+      for (const u in state.btp_subaccounts || {}) {
+        if (oldBtp[u] && oldBtp[u]._x != null) {
+          state.btp_subaccounts[u]._x = oldBtp[u]._x;
+          state.btp_subaccounts[u]._y = oldBtp[u]._y;
+        }
+      }
       mapState = state;
       activeTasks = state.active_tasks || {};
       updateMap();
@@ -1706,8 +1713,9 @@ function updateMap() {
   const conns = mapState.connections || [];
   const nodeKeys = Object.keys(nodes);
   const _sccCount = Object.keys(mapState.scc_nodes || {}).length;
+  const _btpCount = Object.keys(mapState.btp_subaccounts || {}).length;
 
-  if (nodeKeys.length === 0 && _sccCount === 0) {
+  if (nodeKeys.length === 0 && _sccCount === 0 && _btpCount === 0) {
     document.getElementById('empty-msg').style.display = 'block';
     document.getElementById('legend-bar').style.display = 'none';
     document.getElementById('map-svg').innerHTML = '';
@@ -1733,6 +1741,14 @@ function updateMap() {
   // ------------------------------------------------------------------
   const sccNodes = mapState.scc_nodes || {};
   const sccKeys = Object.keys(sccNodes);
+  const btpNodes = mapState.btp_subaccounts || {};
+  const btpKeys = Object.keys(btpNodes);
+
+  // Cloud-tier reservation: BTP subaccounts live in a strip above
+  // the on-prem layer.  When at least one BTP node exists, on-prem
+  // zone layouts start one row + gap further down so the cloud tier
+  // has breathing room.
+  const TOP_TIER_H = btpKeys.length > 0 ? (BOX_H + MARGIN * 2) : 0;
 
   const IP_RE_LO = /^\d{1,3}(\.\d{1,3}){3}$/;
   const getIP = n => {
@@ -1790,8 +1806,9 @@ function updateMap() {
     }
 
     // Stack unplaced members in a single column, top-to-bottom.
-    // Find the lowest Y already occupied in this zone.
-    let zoneY = MARGIN;
+    // Find the lowest Y already occupied in this zone.  When BTP nodes
+    // exist they take the top tier; on-prem zones start below it.
+    let zoneY = MARGIN + TOP_TIER_H;
     members.forEach(({obj}) => {
       if (obj._x != null) zoneY = Math.max(zoneY, obj._y + BOX_H + MARGIN);
     });
@@ -1806,6 +1823,26 @@ function updateMap() {
     cursorX = Math.max(cursorX, zoneX + BOX_W + ZONE_GAP);
   });
 
+  // BTP cloud tier: place subaccount nodes in a horizontal strip at
+  // the top of the canvas.  Manually-positioned nodes are left alone.
+  if (btpKeys.length > 0) {
+    let btpX = MARGIN;
+    btpKeys.forEach(uuid => {
+      const bn = btpNodes[uuid];
+      if (bn._x != null) {
+        btpX = Math.max(btpX, bn._x + BOX_W + MARGIN);
+      }
+    });
+    btpKeys.forEach(uuid => {
+      const bn = btpNodes[uuid];
+      if (bn._x == null) {
+        bn._x = btpX;
+        bn._y = MARGIN;
+        btpX += BOX_W + MARGIN;
+      }
+    });
+  }
+
   // Compute content bounds (needed for initial auto-fit and fitMap)
   let maxX = 0, maxY = 0;
   nodeKeys.forEach(sid => {
@@ -1817,6 +1854,11 @@ function updateMap() {
     const sn = sccNodes[host];
     maxX = Math.max(maxX, (sn._x || 0) + BOX_W + MARGIN);
     maxY = Math.max(maxY, (sn._y || 0) + BOX_H + MARGIN);
+  });
+  btpKeys.forEach(uuid => {
+    const bn = btpNodes[uuid];
+    maxX = Math.max(maxX, (bn._x || 0) + BOX_W + MARGIN);
+    maxY = Math.max(maxY, (bn._y || 0) + BOX_H + MARGIN);
   });
 
   let html = '';
@@ -1969,8 +2011,19 @@ function updateMap() {
 
   // Draw connections first (behind nodes)
   const newConnKeys = new Set();
+  // Resolve BTP-sentinel source SIDs ("BTP:<uuid8>") against the
+  // btp_subaccounts dict so synthetic BTP→on-prem edges from
+  // link_destinations_to_onprem actually render.
+  const _resolveBtpSrc = (sid) => {
+    if (!sid || !sid.startsWith('BTP:')) return null;
+    const suffix = sid.slice(4);
+    for (const u in btpNodes) {
+      if (u.startsWith(suffix)) return btpNodes[u];
+    }
+    return null;
+  };
   conns.forEach((conn, ci) => {
-    const srcNode = nodes[conn.source_sid];
+    let srcNode = nodes[conn.source_sid] || _resolveBtpSrc(conn.source_sid);
     let tgtNode = nodes[conn.target_sid];
 
     if (!tgtNode && showUnknown) {
@@ -2498,6 +2551,89 @@ function updateMap() {
       const badgeColor = sn.pwned ? '#e74c3c' : '#d29922';
       html += `<circle cx="${x+BOX_W-cut-6}" cy="${y+BOX_H-14}" r="10" fill="${badgeColor}" />`;
       html += `<text x="${x+BOX_W-cut-6}" y="${y+BOX_H-10}" text-anchor="middle" font-size="10" fill="#fff" font-weight="bold">${cveCount}</text>`;
+    }
+
+    html += '</g>';
+  });
+
+  // --- Draw BTP subaccount nodes (cloud silhouette, sky-blue tint) ---
+  btpKeys.forEach(uuid => {
+    const bn = btpNodes[uuid];
+    const x = bn._x || 0, y = bn._y || 0;
+    const dragId = 'btp:' + uuid.replace(/'/g, "\\'");
+    const btpFill = '#0e2636';        // dark navy fill
+    const btpStroke = '#5dade2';      // sky-blue
+    const dests = (bn.destinations || []);
+    const cleartextCount = dests.filter(d => d && d.cleartext_captured).length;
+    const linkedCount = dests.filter(d => d && d.linked_target_sid).length;
+    const borderC = bn.pwned ? '#8b0000' : (cleartextCount > 0 ? '#d29922' : btpStroke);
+    const borderW = bn.pwned ? 6 : 4;
+
+    html += `<g class="node-box" data-btp="${escHtml(uuid)}" `
+         + `onmousedown="startDrag(event,'${dragId}')" `
+         + `onclick="showBTPDetail('${escHtml(uuid)}')">`;
+
+    // Cloud silhouette: three humps on top, flat-ish bottom.
+    // Sized to fit BOX_W (240) x BOX_H (174) with a bit of padding.
+    const cloud = `M${x+30},${y+55} `
+                + `C${x+10},${y+55} ${x+10},${y+25} ${x+45},${y+30} `
+                + `C${x+50},${y+5} ${x+95},${y+5} ${x+105},${y+30} `
+                + `C${x+115},${y+10} ${x+160},${y+10} ${x+170},${y+35} `
+                + `C${x+205},${y+30} ${x+235},${y+45} ${x+225},${y+70} `
+                + `C${x+240},${y+95} ${x+220},${y+125} ${x+195},${y+118} `
+                + `L${x+45},${y+118} `
+                + `C${x+15},${y+125} ${x+0},${y+95} ${x+18},${y+78} `
+                + `C${x+5},${y+65} ${x+15},${y+50} ${x+30},${y+55} Z`;
+    html += `<path d="${cloud}" fill="${btpFill}" stroke="${borderC}" stroke-width="${borderW}" />`;
+
+    // Header band ("BTP" label + cloud glyph)
+    html += `<text x="${x+BOX_W/2}" y="${y+50}" text-anchor="middle" `
+         + `fill="#5dade2" font-size="14" font-weight="bold" `
+         + `font-family="monospace" pointer-events="none">&#9729; BTP</text>`;
+
+    // Pwned bolt (top-right)
+    if (bn.pwned) {
+      const lx = x + BOX_W - 10, ly = y + 18;
+      html += `<text x="${lx}" y="${ly}" font-size="28" fill="#f0883e"`
+           + ` stroke="#0d1117" stroke-width="2.5" paint-order="stroke"`
+           + ` text-anchor="middle" dominant-baseline="middle"`
+           + ` font-weight="bold" pointer-events="none">&#9889;</text>`;
+    }
+
+    // Body lines — region / subdomain / counts
+    const subLabel = bn.display_name || bn.subdomain || uuid.slice(0, 8);
+    let ty = y + 75;
+    html += `<text x="${x+BOX_W/2}" y="${ty}" text-anchor="middle" fill="#cfd9df" `
+         + `font-size="11" font-weight="bold" font-family="monospace">`
+         + `${escHtml(subLabel.slice(0, 28))}</text>`;
+    ty += 14;
+    if (bn.region) {
+      html += `<text x="${x+BOX_W/2}" y="${ty}" text-anchor="middle" fill="#8b949e" `
+           + `font-size="10" font-family="monospace">Region: ${escHtml(bn.region)}</text>`;
+      ty += 13;
+    }
+    if (bn.subdomain && bn.subdomain !== subLabel) {
+      html += `<text x="${x+BOX_W/2}" y="${ty}" text-anchor="middle" fill="#8b949e" `
+           + `font-size="10" font-family="monospace">${escHtml(bn.subdomain.slice(0, 28))}</text>`;
+      ty += 13;
+    }
+    html += `<text x="${x+BOX_W/2}" y="${ty}" text-anchor="middle" fill="#8b949e" `
+         + `font-size="10" font-family="monospace">`
+         + `Destinations: ${dests.length}</text>`;
+    ty += 13;
+    if (cleartextCount > 0) {
+      html += `<text x="${x+BOX_W/2}" y="${ty}" text-anchor="middle" fill="#e74c3c" `
+           + `font-size="10" font-weight="bold" font-family="monospace">`
+           + `Cleartext: ${cleartextCount}${linkedCount ? ' (' + linkedCount + ' linked)' : ''}</text>`;
+      ty += 13;
+    }
+
+    // Critical-finding badge
+    if (cleartextCount > 0) {
+      const badgeColor = bn.pwned ? '#e74c3c' : '#d29922';
+      html += `<circle cx="${x+BOX_W-30}" cy="${y+BOX_H-30}" r="10" fill="${badgeColor}" />`;
+      html += `<text x="${x+BOX_W-30}" y="${y+BOX_H-26}" text-anchor="middle" `
+           + `font-size="10" fill="#fff" font-weight="bold">${cleartextCount}</text>`;
     }
 
     html += '</g>';
@@ -4004,6 +4140,49 @@ function showSCCDetail(host) {
         <button class="ctx-btn" onclick="sccProbeMappings('${escHtml(host)}')" style="background:#21262d;border:1px solid #30363d;color:#e6edf3;padding:6px 10px;border-radius:4px;cursor:pointer;text-align:left">&#128225; Probe mappings <span style="color:#8b949e;font-size:10px">(TCP/HTTP smoke test)</span></button>
         <button class="ctx-btn" onclick="sccExtractKeystore('${escHtml(host)}')" style="background:#21262d;border:1px solid #f85149;color:#f85149;padding:6px 10px;border-radius:4px;cursor:pointer;text-align:left">&#128272; Extract keystore + decrypt SSFS <span style="color:#8b949e;font-size:10px">(full backup zip — crown jewels)</span></button>
       </div>
+    </div>
+  `;
+  panel.classList.add('visible');
+}
+
+function showBTPDetail(uuid) {
+  const bn = (mapState.btp_subaccounts || {})[uuid];
+  if (!bn) return;
+  const panel = document.getElementById('detail-panel');
+  if (panel.classList.contains('visible') && panel.dataset.sid === 'btp:' + uuid) {
+    panel.classList.remove('visible');
+    return;
+  }
+  panel.dataset.sid = 'btp:' + uuid;
+  const dests = bn.destinations || [];
+  const cleartext = dests.filter(d => d && d.cleartext_captured);
+  const linked = dests.filter(d => d && d.linked_target_sid);
+  const destRows = dests.map(d => {
+    const flags = [];
+    if (d.cleartext_captured) flags.push('<span style="color:#e74c3c;font-weight:bold">CLEARTEXT</span>');
+    if (d.linked_target_sid) flags.push('<span style="color:#3fb950">→ ' + escHtml(d.linked_target_sid) + '</span>');
+    return `<div style="border-left:3px solid #5dade2;padding:6px 8px;margin:6px 0;background:#0d1117">
+      <div style="font-weight:bold;font-family:monospace">${escHtml(d.name || '?')}</div>
+      <div style="font-size:11px;color:#8b949e;font-family:monospace;word-break:break-all">${escHtml(d.url || '')}</div>
+      <div style="font-size:11px;color:#8b949e">Auth: ${escHtml(d.authentication || '?')}${d.user ? ' · User: ' + escHtml(d.user) : ''}</div>
+      ${flags.length ? '<div style="font-size:11px;margin-top:4px">' + flags.join(' · ') + '</div>' : ''}
+    </div>`;
+  }).join('');
+  panel.innerHTML = `
+    <span class="close-btn" onclick="this.parentElement.classList.remove('visible')">&times;</span>
+    <h3>&#9729; BTP Subaccount — ${escHtml(bn.display_name || bn.subdomain || uuid.slice(0, 8))}</h3>
+    <div class="detail-section">
+      <div class="detail-row"><span class="detail-key">UUID</span><span class="detail-val" style="font-family:monospace;font-size:11px;word-break:break-all">${escHtml(uuid)}</span></div>
+      <div class="detail-row"><span class="detail-key">Region</span><span class="detail-val">${escHtml(bn.region || '?')}</span></div>
+      <div class="detail-row"><span class="detail-key">Subdomain</span><span class="detail-val">${escHtml(bn.subdomain || '?')}</span></div>
+      <div class="detail-row"><span class="detail-key">Global account</span><span class="detail-val">${escHtml(bn.parent_global_account || '—')}</span></div>
+      <div class="detail-row"><span class="detail-key">Pwned</span><span class="detail-val">${bn.pwned ? '<span style="color:#f0883e">&#9889; YES</span>' : 'No'}</span></div>
+      <div class="detail-row"><span class="detail-key">Enumerated by</span><span class="detail-val">${escHtml(bn.enumerated_via_user || bn.enumerated_via_email || '?')}</span></div>
+      <div class="detail-row"><span class="detail-key">Enumerated at</span><span class="detail-val" style="font-size:11px">${escHtml(bn.enumerated_at || '?')}</span></div>
+    </div>
+    <div class="detail-section">
+      <h4>Destinations <span style="color:#8b949e;font-weight:normal;font-size:10px">(${dests.length} total · ${cleartext.length} cleartext · ${linked.length} linked)</span></h4>
+      ${destRows || '<div style="color:#8b949e;font-size:11px">No destinations captured.</div>'}
     </div>
   `;
   panel.classList.add('visible');
@@ -6391,6 +6570,7 @@ function toggleToolbar() {
 function _getDragTarget(sid) {
   if (sid.startsWith('unk:')) return unkPositions[sid.slice(4)];
   if (sid.startsWith('scc:')) return (mapState.scc_nodes || {})[sid.slice(4)];
+  if (sid.startsWith('btp:')) return (mapState.btp_subaccounts || {})[sid.slice(4)];
   return mapState.nodes[sid];
 }
 function startDrag(e, sid) {
