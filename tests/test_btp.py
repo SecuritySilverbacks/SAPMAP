@@ -70,6 +70,40 @@ def test_extract_region_handles_unparseable_iss():
     assert extract_region_from_token(tok) == ""
 
 
+def test_extract_region_handles_uaa_cf_form():
+    """Live `cf oauth-token` issues a JWT whose `iss` points at the
+    UAA endpoint: uaa.cf.<region>.hana.ondemand.com — NOT authentication
+    / api.  Caught live: original regex required authentication/api
+    prefix and missed every real cf-issued token."""
+    tok = _make_jwt({
+        "iss": "https://uaa.cf.eu10.hana.ondemand.com/oauth/token",
+    })
+    assert extract_region_from_token(tok) == "eu10"
+
+
+def test_extract_region_handles_api_cf_form():
+    tok = _make_jwt({
+        "iss": "https://api.cf.us10.hana.ondemand.com/oauth/token",
+    })
+    assert extract_region_from_token(tok) == "us10"
+
+
+def test_extract_region_handles_custom_subdomain():
+    """Custom IdP / branded auth endpoint: <whatever>.authentication.
+    <region>.hana.ondemand.com — must still extract the region."""
+    tok = _make_jwt({
+        "iss": "https://acme.authentication.eu20.hana.ondemand.com/oauth/token",
+    })
+    assert extract_region_from_token(tok) == "eu20"
+
+
+def test_extract_region_handles_japan_region():
+    tok = _make_jwt({
+        "iss": "https://uaa.cf.jp10.hana.ondemand.com/oauth/token",
+    })
+    assert extract_region_from_token(tok) == "jp10"
+
+
 def test_validate_token_returns_summary():
     tok = _make_jwt({
         "iss": "https://api.authentication.eu10.hana.ondemand.com/oauth/token",

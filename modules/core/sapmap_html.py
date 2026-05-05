@@ -4155,9 +4155,14 @@ async function btpStoreToken() {
   }
   const status = document.getElementById('btp-token-status');
   if (!r.ok) {
+    // user-select:text + cursor:text so the operator can copy the
+    // error message (often contains the iss claim or an HTTP body
+    // that's worth pasting into a search / bug report).
     status.innerHTML =
       '<div style="background:#fef0f0;border:1px solid #f5b5b5;color:#b51c1c;'
-      + 'padding:8px 10px;border-radius:6px;font-size:12px">'
+      + 'padding:8px 10px;border-radius:6px;font-size:12px;'
+      + 'user-select:text;-webkit-user-select:text;cursor:text;'
+      + 'word-break:break-word;font-family:monospace">'
       + escHtml(r.error || 'unknown error') + '</div>';
     return;
   }
@@ -4165,7 +4170,8 @@ async function btpStoreToken() {
   document.getElementById('btp-token-input').value = '';
   status.innerHTML =
     '<div style="background:#dafbe1;border:1px solid #b5e0b5;color:#1a7f37;'
-    + 'padding:8px 10px;border-radius:6px;font-size:12px">'
+    + 'padding:8px 10px;border-radius:6px;font-size:12px;'
+    + 'user-select:text;-webkit-user-select:text;cursor:text">'
     + '<b>✓ Token stored</b> (region <code>' + escHtml(r.region) + '</code>'
     + ', user <b>' + escHtml(r.user || '?') + '</b>'
     + ', fingerprint <code>' + escHtml(r.fingerprint) + '</code>'
