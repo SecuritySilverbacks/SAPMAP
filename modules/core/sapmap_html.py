@@ -2215,6 +2215,43 @@ function updateMap() {
     });
   });
 
+  // --- SCC ↔ BTP-subaccount edges (Cloud Connector → cloud tunnel) ---
+  // SCCNode.subaccount_uuids is authoritative; fall back to
+  // BTPSubaccountNode.scc_locations[].scc_host_uuid matching the SCC host.
+  Object.keys(sccNodes).forEach(host => {
+    const sn = sccNodes[host];
+    const sccUuids = (sn.subaccount_uuids || []).map(u => (u || '').toLowerCase());
+    btpKeys.forEach(uuid => {
+      const bn = btpNodes[uuid];
+      const uuidLc = (uuid || '').toLowerCase();
+      let matched = sccUuids.includes(uuidLc);
+      let locId = '';
+      if (!matched) {
+        const locs = bn.scc_locations || [];
+        for (const loc of locs) {
+          const sh = ((loc && loc.scc_host_uuid) || '').toLowerCase();
+          if (sh && (sh === host.toLowerCase() || sh === (sn.host || '').toLowerCase())) {
+            matched = true;
+            locId = loc.location_id || '';
+            break;
+          }
+        }
+      }
+      if (!matched) return;
+      const sx = (sn._x || 0) + BOX_W / 2;
+      const sy = (sn._y || 0) + BOX_H / 2;
+      const tx = (bn._x || 0) + BOX_W / 2;
+      const ty = (bn._y || 0) + BOX_H / 2;
+      html += `<line class="edge-line" x1="${sx}" y1="${sy}" x2="${tx}" y2="${ty}" ` +
+        `stroke="#5dade2" stroke-width="2.5" stroke-dasharray="4,4" fill="none" ` +
+        `pointer-events="none" />`;
+      const mx = (sx + tx) / 2, my = (sy + ty) / 2;
+      const lbl = locId ? `SCC tunnel: ${locId}` : 'SCC tunnel';
+      html += `<text x="${mx}" y="${my - 4}" text-anchor="middle" font-size="10" ` +
+        `fill="#5dade2" font-family="monospace" pointer-events="none">${escHtml(lbl)}</text>`;
+    });
+  });
+
   // --- SCC HA shadow links (master ↔ shadow) ---
   // Draw once per pair: only emit from the host with the lexicographically
   // smaller name to avoid duplicate overlapping segments.
@@ -4157,14 +4194,22 @@ function showBTPDetail(uuid) {
   const dests = bn.destinations || [];
   const cleartext = dests.filter(d => d && d.cleartext_captured);
   const linked = dests.filter(d => d && d.linked_target_sid);
-  const destRows = dests.map(d => {
+  const destRows = dests.map((d, di) => {
     const flags = [];
     if (d.cleartext_captured) flags.push('<span style="color:#e74c3c;font-weight:bold">CLEARTEXT</span>');
     if (d.linked_target_sid) flags.push('<span style="color:#3fb950">→ ' + escHtml(d.linked_target_sid) + '</span>');
+    const pwId = 'btp-pw-' + uuid.slice(0, 8) + '-' + di;
+    const pwBlock = d.password ? `
+      <div style="font-size:11px;margin-top:4px;display:flex;align-items:center;gap:6px">
+        <span style="color:#8b949e">Password:</span>
+        <code id="${pwId}" style="background:#161b22;padding:2px 6px;border-radius:3px;font-family:monospace;color:#f85149;user-select:text">${escHtml(d.password)}</code>
+        <button onclick="navigator.clipboard.writeText(${JSON.stringify(d.password)});this.textContent='copied';setTimeout(()=>this.textContent='copy',1200)" style="background:#21262d;border:1px solid #30363d;color:#e6edf3;padding:2px 8px;border-radius:3px;font-size:10px;cursor:pointer">copy</button>
+      </div>` : '';
     return `<div style="border-left:3px solid #5dade2;padding:6px 8px;margin:6px 0;background:#0d1117">
       <div style="font-weight:bold;font-family:monospace">${escHtml(d.name || '?')}</div>
       <div style="font-size:11px;color:#8b949e;font-family:monospace;word-break:break-all">${escHtml(d.url || '')}</div>
       <div style="font-size:11px;color:#8b949e">Auth: ${escHtml(d.authentication || '?')}${d.user ? ' · User: ' + escHtml(d.user) : ''}</div>
+      ${pwBlock}
       ${flags.length ? '<div style="font-size:11px;margin-top:4px">' + flags.join(' · ') + '</div>' : ''}
     </div>`;
   }).join('');
