@@ -206,9 +206,126 @@ def _destinations_root(region: str) -> str:
             f".hana.ondemand.com/destination-configuration/v1")
 
 
+def detect_token_kind(claims: dict) -> Tuple[str, str]:
+    """Classify a decoded JWT into one of:
+
+      * ``cf``           — stock `cf oauth-token`; carries
+                            ``cloud_controller.*`` scopes; reaches
+                            CF API (orgs / spaces / apps / SIs).
+      * ``destination``  — minted from a destination service-key via
+                            client-credentials grant; reaches the
+                            Destination Service (cleartext capture)
+                            for ONE subaccount only.
+      * ``connectivity`` — minted from a connectivity service-key;
+                            reaches the SCC tunnel API for ONE
+                            subaccount only.
+      * ``xsuaa``        — minted from an xsuaa service-key; can
+                            mint other tokens but doesn't directly
+                            reach BTP control plane.
+      * ``subaccount``   — BTP cockpit / btp-cli token; reaches
+                            ``/v1/accounts/subaccounts`` and the BTP
+                            global-account API.
+      * ``other``        — anything else — surface so the operator
+                            knows we recognised it but don't know
+                            what to do with it.
+
+    Returns ``(kind, human_readable_description)``.
+
+    Detection uses ``aud`` (audience) + ``cid``/``client_id`` + ``scope``
+    claims rather than relying on literal scope strings like
+    ``destination_configuration.ApiAccess`` — those are SAP shorthand
+    that don't appear verbatim in real tokens (the actual scope is
+    prefixed with the xsappname, e.g. ``destination-xsappname!b404
+    .AccessClientSecrets``).
+    """
+    if not claims:
+        return ("unknown", "token did not decode")
+    aud = claims.get("aud", []) or []
+    if isinstance(aud, str):
+        aud = [aud]
+    cid = (claims.get("cid") or claims.get("client_id")
+            or claims.get("azp") or "")
+    scopes = list(claims.get("scope") or claims.get("scopes") or [])
+
+    aud_str = " ".join(str(a) for a in aud).lower()
+    cid_l = str(cid).lower()
+    scope_str = " ".join(str(s) for s in scopes).lower()
+
+    # Destination-service token from cf create-service-key destination
+    if ("destination-xsappname" in cid_l
+            or "destination-xsappname" in aud_str
+            or any("destination" in s and (".destination_read" in s.lower()
+                                             or ".accessclientsecrets" in s.lower())
+                    for s in scopes)):
+        return ("destination",
+                "Destination-service token (client-credentials).  "
+                "Reaches the Destination Service for ONE subaccount; "
+                "AccessClientSecrets scope means cleartext passwords "
+                "will be captured.")
+
+    # Connectivity-service token (SCC tunnel API)
+    if "connectivity" in cid_l or any("connectivity" in s.lower() for s in scopes):
+        return ("connectivity",
+                "Connectivity-service token.  Reaches the SCC tunnel "
+                "API for ONE subaccount; useful for live tunnel-replay "
+                "and mapping enumeration.")
+
+    # XSUAA service-key token (rarely useful directly)
+    if "xsuaa" in cid_l and "xsuaa" in aud_str:
+        return ("xsuaa",
+                "XSUAA-service token.  Used to mint other tokens via "
+                "client-credentials; doesn't directly reach BTP "
+                "control-plane endpoints.")
+
+    # Subaccount-admin / global-account token (BTP cockpit / btp-cli)
+    if any(s.startswith("subaccount.")
+            or s == "global_account.viewer"
+            or s == "global_account.admin"
+            or s.startswith("accounts.")
+            for s in scopes):
+        return ("subaccount",
+                "Subaccount-admin / global-account-viewer token.  "
+                "Reaches /v1/accounts/subaccounts and the BTP control "
+                "plane.")
+
+    # Stock cf user token
+    if ("cloud_controller" in scope_str
+            or "cf" in str(cid).lower() == "cf"
+            or cid == "cf"):
+        return ("cf",
+                "Stock `cf oauth-token` (Cloud Foundry user token).  "
+                "Reaches /v3/organizations, /v3/spaces, /v3/apps, "
+                "/v3/service_instances; CANNOT see destinations or "
+                "subaccount admin endpoints.")
+    return ("other",
+            "Unrecognised token kind.  Audience / cid / scopes don't "
+            "match any known BTP API client pattern — SAPMAP can't "
+            "guess where to route it.")
+
+
+def extract_subaccount_id_from_destination_token(claims: dict) -> str:
+    """A destination-service token issued via client-credentials carries
+    the bound subaccount's UUID in ``ext_attr.subaccountid`` (SAP-
+    specific extended claim).  Returns ``""`` when not present."""
+    ext = claims.get("ext_attr") or {}
+    if isinstance(ext, dict):
+        return ext.get("subaccountid") or ext.get("zid") or ""
+    return ""
+
+
+def extract_subdomain_from_token(claims: dict) -> str:
+    """Subdomain (`ext_attr.zdn`) — useful for display."""
+    ext = claims.get("ext_attr") or {}
+    if isinstance(ext, dict):
+        return ext.get("zdn") or ""
+    return ""
+
+
 def validate_token(token: str) -> dict:
     """Decode the JWT and return a summary suitable for the GUI:
-    region, identity, expiry, scopes.  Pure offline — no network.
+    region, identity, expiry, scopes, and **token kind** (cf /
+    destination / connectivity / xsuaa / subaccount / other).  Pure
+    offline — no network.
     """
     claims = decode_token_claims(token)
     if not claims:
@@ -216,6 +333,8 @@ def validate_token(token: str) -> dict:
     region = extract_region_from_token(token)
     exp = claims.get("exp", 0) or 0
     expires_in = int(exp - time.time()) if exp else 0
+    kind, kind_desc = detect_token_kind(claims)
+    sub_uuid = extract_subaccount_id_from_destination_token(claims)
     return {
         "ok":       True,
         "region":   region or "(unknown)",
@@ -225,6 +344,10 @@ def validate_token(token: str) -> dict:
         "scopes":   list(claims.get("scope") or claims.get("scopes") or []),
         "issuer":   claims.get("iss", ""),
         "audience": claims.get("aud", ""),
+        "kind":     kind,
+        "kind_description": kind_desc,
+        "bound_subaccount_uuid": sub_uuid,
+        "subdomain": extract_subdomain_from_token(claims),
         "expires_in_seconds": expires_in,
         "expired":  expires_in <= 0,
         "fingerprint": _token_fingerprint(token),
@@ -468,6 +591,29 @@ def pull_destinations(token: str, region: str,
         )
         out.append(d)
     return out, ""
+
+
+def pull_destinations_via_destination_token(
+        token: str, region: str) -> Tuple[list, str, str]:
+    """Variant of pull_destinations() that works with a token minted
+    from a destination service-key (client-credentials grant).
+
+    Such tokens are scoped to ONE subaccount — the one the service
+    instance lives in.  We extract that subaccount's UUID from the
+    token's ``ext_attr.subaccountid`` claim, then call the same
+    /destination-configuration/v1 endpoints as pull_destinations(),
+    which DO accept this token because the audience (``destination-
+    xsappname!b<id>``) matches.
+
+    Returns ``(destinations, error, subaccount_uuid)``.
+    """
+    claims = decode_token_claims(token)
+    sub_uuid = extract_subaccount_id_from_destination_token(claims)
+    if not sub_uuid:
+        return [], ("token has no ext_attr.subaccountid claim — "
+                     "can't determine which subaccount it's bound to"), ""
+    dests, err = pull_destinations(token, region, sub_uuid)
+    return dests, err, sub_uuid
 
 
 # ---------------------------------------------------------------------------
