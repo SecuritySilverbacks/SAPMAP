@@ -233,7 +233,16 @@ body {
 .modal {
   background: #1c2128; border: 1px solid #30363d; border-radius: 10px;
   width: 440px; padding: 20px; box-shadow: 0 12px 40px rgba(0,0,0,.5);
+  /* Scroll when content overflows viewport (e.g. BTP enumerate result
+     panel can grow several thousand pixels on landscapes with many
+     CF service instances). */
+  max-height: 90vh; overflow-y: auto;
+  /* Slim scrollbar so the modal still looks tidy when scrolling. */
+  scrollbar-width: thin; scrollbar-color: #484f58 #1c2128;
 }
+.modal::-webkit-scrollbar { width: 8px; }
+.modal::-webkit-scrollbar-track { background: #1c2128; }
+.modal::-webkit-scrollbar-thumb { background: #484f58; border-radius: 4px; }
 .modal h3 { font-size: 14px; color: #f0883e; margin-bottom: 16px; }
 .modal .form-row { margin-bottom: 10px; }
 .modal .form-row label { display: block; font-size: 11px; color: #8b949e; margin-bottom: 3px; }
