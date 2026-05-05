@@ -233,6 +233,87 @@ def test_enumerate_subaccounts_rejects_unknown_region():
     assert out == []
 
 
+def test_pull_cf_topology_returns_orgs_spaces_apps():
+    """A `cf oauth-token` carries cloud_controller.read; this should
+    pull orgs / spaces / apps / service-instances even when the
+    token has zero subaccount-admin scopes (the live regression
+    case: 0 subaccounts but operator can clearly see orgs via
+    `cf login`)."""
+    from sap_btp import pull_cf_topology
+
+    orgs = json.dumps({"resources": [
+        {"guid": "org-1", "name": "NCMI_GmbH_l6qhhky80rjwmvbz"},
+        {"guid": "org-2", "name": "NCMI GmbH_researchlab-yehctg7m"},
+    ], "pagination": {"next": None}}).encode()
+    spaces = json.dumps({"resources": [
+        {"guid": "sp-1", "name": "dev",
+         "relationships": {"organization": {"data": {"guid": "org-1"}}}},
+    ], "pagination": {"next": None}}).encode()
+    apps = json.dumps({"resources": [
+        {"guid": "app-1", "name": "my-app", "state": "STARTED",
+         "relationships": {"space": {"data": {"guid": "sp-1"}}}},
+    ], "pagination": {"next": None}}).encode()
+    sis = json.dumps({"resources": [
+        {"guid": "si-1", "name": "my-destination", "type": "managed",
+         "relationships": {"service_plan": {"data": {"guid": "plan-1"}}}},
+        {"guid": "si-2", "name": "my-xsuaa", "type": "managed",
+         "relationships": {"service_plan": {"data": {"guid": "plan-2"}}}},
+        {"guid": "si-3", "name": "my-redis", "type": "managed",
+         "relationships": {"service_plan": {"data": {"guid": "plan-3"}}}},
+    ], "pagination": {"next": None}}).encode()
+
+    def fake_get(url, token, **kw):
+        if "/v3/organizations" in url:        return (200, {}, orgs)
+        if "/v3/spaces" in url:                return (200, {}, spaces)
+        if "/v3/apps" in url:                  return (200, {}, apps)
+        if "/v3/service_instances" in url:    return (200, {}, sis)
+        return (404, {}, b"")
+
+    with patch("sap_btp._btp_get", side_effect=fake_get):
+        out = pull_cf_topology("token", "eu10-004")
+
+    assert len(out["orgs"]) == 2
+    assert any(o["name"] == "NCMI_GmbH_l6qhhky80rjwmvbz" for o in out["orgs"])
+    assert len(out["spaces"]) == 1
+    assert out["spaces"][0]["org_guid"] == "org-1"
+    assert len(out["apps"]) == 1
+    assert out["apps"][0]["state"] == "STARTED"
+    assert len(out["service_instances"]) == 3
+    # destination + xsuaa flagged as escalation hints; redis is not
+    hint_names = [h["service_instance_name"] for h in out["escalation_hints"]]
+    assert "my-destination" in hint_names
+    assert "my-xsuaa" in hint_names
+    assert "my-redis" not in hint_names
+
+
+def test_pull_cf_topology_records_errors_per_path():
+    """If one of the v3 endpoints returns 401/403, the rest should
+    still succeed and the error gets surfaced in `errors[]`."""
+    from sap_btp import pull_cf_topology
+
+    def fake_get(url, token, **kw):
+        if "/v3/organizations" in url:
+            return (403, {}, b'{"error":"forbidden"}')
+        if "/v3/spaces" in url:
+            return (200, {}, b'{"resources":[],"pagination":{"next":null}}')
+        if "/v3/apps" in url:
+            return (200, {}, b'{"resources":[],"pagination":{"next":null}}')
+        if "/v3/service_instances" in url:
+            return (200, {}, b'{"resources":[],"pagination":{"next":null}}')
+        return (404, {}, b"")
+
+    with patch("sap_btp._btp_get", side_effect=fake_get):
+        out = pull_cf_topology("token", "eu10-004")
+    assert out["orgs"] == []          # 403 didn't crash, just empty
+    assert any("HTTP 403" in e for e in out["errors"])
+
+
+def test_pull_cf_topology_rejects_unsupported_region():
+    from sap_btp import pull_cf_topology
+    out = pull_cf_topology("token", "totally-bogus")
+    assert out.get("error") == "unsupported region"
+
+
 def test_pull_scc_mappings_parses_response():
     canned = json.dumps({"value": [
         {"locationId": "MAIN",
