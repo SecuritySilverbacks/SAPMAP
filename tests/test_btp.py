@@ -140,6 +140,134 @@ def test_url_builders_accept_hyphenated_region():
     assert "eu10-004" in dst
 
 
+def test_detect_token_kind_cf_user():
+    """Stock cf oauth-token: cid='cf', has cloud_controller scopes."""
+    from sap_btp import detect_token_kind
+    claims = {
+        "cid": "cf",
+        "scope": ["openid", "cloud_controller.read", "cloud_controller.write"],
+        "aud": ["cloud_controller", "cf"],
+    }
+    kind, desc = detect_token_kind(claims)
+    assert kind == "cf"
+    assert "Cloud Foundry" in desc
+
+
+def test_detect_token_kind_destination_service():
+    """Token from `cf create-service-key destination` exchanged via
+    client-credentials.  cid contains `destination-xsappname` and
+    scopes are prefixed with the xsappname."""
+    from sap_btp import detect_token_kind
+    claims = {
+        "cid": "sb-clonef757fd169c4f4166b2dfeeee449d7f2f!b609810|destination-xsappname!b404",
+        "aud": ["destination-xsappname!b404", "uaa"],
+        "scope": [
+            "uaa.resource",
+            "destination-xsappname!b404.Destination_Read",
+            "destination-xsappname!b404.AccessClientSecrets",
+        ],
+    }
+    kind, desc = detect_token_kind(claims)
+    assert kind == "destination"
+    assert "Destination Service" in desc
+
+
+def test_detect_token_kind_subaccount_admin():
+    from sap_btp import detect_token_kind
+    claims = {
+        "scope": ["subaccount.admin", "global_account.viewer"],
+        "aud": ["accounts"],
+        "cid": "btp-cli",
+    }
+    kind, _ = detect_token_kind(claims)
+    assert kind == "subaccount"
+
+
+def test_detect_token_kind_other():
+    from sap_btp import detect_token_kind
+    claims = {"scope": ["random.thing"], "aud": ["unknown"], "cid": "x"}
+    kind, _ = detect_token_kind(claims)
+    assert kind == "other"
+
+
+def test_extract_subaccount_id_from_destination_token():
+    """Destination tokens carry the bound subaccount UUID in
+    ext_attr.subaccountid (SAP-specific extended claim)."""
+    from sap_btp import extract_subaccount_id_from_destination_token
+    claims = {"ext_attr": {"subaccountid": "abcd-1234-uuid",
+                            "zdn": "researchlab-yehctg7m"}}
+    assert extract_subaccount_id_from_destination_token(claims) == "abcd-1234-uuid"
+    assert extract_subaccount_id_from_destination_token({}) == ""
+
+
+def test_validate_token_includes_kind_and_bound_subaccount():
+    """End-to-end: a destination-service token's validate_token()
+    response includes kind='destination' and the bound subaccount
+    UUID extracted from ext_attr.subaccountid."""
+    payload = {
+        "iss": "https://researchlab-yehctg7m.authentication.eu10.hana.ondemand.com/oauth/token",
+        "cid": "sb-clone1234!b609810|destination-xsappname!b404",
+        "aud": ["destination-xsappname!b404", "uaa"],
+        "scope": [
+            "uaa.resource",
+            "destination-xsappname!b404.AccessClientSecrets",
+        ],
+        "ext_attr": {"subaccountid": "abcd-bound-sub", "zdn": "researchlab-yehctg7m"},
+        "exp": int(time.time()) + 3600,
+    }
+    tok = _make_jwt(payload)
+    out = validate_token(tok)
+    assert out["ok"] is True
+    assert out["kind"] == "destination"
+    assert out["bound_subaccount_uuid"] == "abcd-bound-sub"
+    assert out["subdomain"] == "researchlab-yehctg7m"
+    assert out["region"] == "eu10"
+
+
+def test_pull_destinations_via_destination_token_uses_bound_uuid():
+    """The destination-token variant should auto-extract the subaccount
+    UUID from the token's ext_attr.subaccountid and call the same
+    /destinations endpoints as pull_destinations()."""
+    from sap_btp import pull_destinations_via_destination_token
+    payload = {
+        "iss": "https://x.authentication.eu10.hana.ondemand.com/oauth/token",
+        "ext_attr": {"subaccountid": "abcd-bound-sub"},
+        "scope": ["destination-xsappname!b404.AccessClientSecrets"],
+    }
+    tok = _make_jwt(payload)
+
+    listing = json.dumps([{"Name": "X", "URL": "http://x"}]).encode()
+    detail = json.dumps({"destinationConfiguration": {
+        "Name": "X", "URL": "http://x",
+        "Authentication": "BasicAuthentication",
+        "User": "u", "Password": "p"}}).encode()
+
+    def fake_get(url, token, **kw):
+        return (200, {}, listing if "subaccountDestinations" in url else detail)
+
+    with patch("sap_btp._btp_get", side_effect=fake_get):
+        dests, err, sub_uuid = pull_destinations_via_destination_token(
+            tok, "eu10")
+    assert err == ""
+    assert sub_uuid == "abcd-bound-sub"
+    assert len(dests) == 1
+    assert dests[0].cleartext_captured is True
+
+
+def test_pull_destinations_via_destination_token_fails_without_subaccount_claim():
+    """If the token has no ext_attr.subaccountid, the helper must
+    return a clear error rather than guessing."""
+    from sap_btp import pull_destinations_via_destination_token
+    tok = _make_jwt({
+        "iss": "https://x.authentication.eu10.hana.ondemand.com/oauth/token",
+        # no ext_attr at all
+    })
+    dests, err, sub_uuid = pull_destinations_via_destination_token(tok, "eu10")
+    assert dests == []
+    assert sub_uuid == ""
+    assert "ext_attr.subaccountid" in err
+
+
 def test_validate_token_returns_summary():
     tok = _make_jwt({
         "iss": "https://api.authentication.eu10.hana.ondemand.com/oauth/token",

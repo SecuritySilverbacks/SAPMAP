@@ -6050,6 +6050,81 @@ def create_app(api: SAPMAPApi) -> Bottle:
         return json.dumps({"ok": True,
                            "regions": list(api.btp_tokens.keys())})
 
+    @app.route("/api/btp/pull_destinations_for_token", method="POST")
+    def btp_pull_destinations_for_token():
+        """For a destination-service-scoped token (cf create-service-key
+        destination ...), pull every destination from the bound
+        subaccount and capture cleartext where AccessClientSecrets is
+        granted.  No subaccount enumeration step needed - the token
+        IS scoped to one specific subaccount."""
+        from sap_btp import (
+            pull_destinations_via_destination_token,
+            link_destinations_to_onprem,
+            extract_subaccount_id_from_destination_token,
+            extract_subdomain_from_token,
+            decode_token_claims,
+        )
+        from sapmap_models import BTPSubaccountNode
+        response.content_type = "application/json"
+        data = request.json or {}
+        region = (data.get("region") or "").strip()
+        token = api.btp_tokens.get(region) or ""
+        if not token:
+            return json.dumps({"ok": False,
+                               "error": f"No token stored for region {region!r}"})
+        try:
+            dests, err, sub_uuid = pull_destinations_via_destination_token(
+                token, region)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+        if err:
+            return json.dumps({"ok": False, "error": err})
+
+        # Materialise / refresh the BTPSubaccountNode for the bound sub
+        sub_node = api.state.btp_subaccounts.get(sub_uuid)
+        if sub_node is None:
+            sub_node = BTPSubaccountNode(uuid=sub_uuid)
+            api.state.btp_subaccounts[sub_uuid] = sub_node
+        claims = decode_token_claims(token)
+        sub_node.region = region
+        sub_node.subdomain = (extract_subdomain_from_token(claims)
+                                or sub_node.subdomain)
+        sub_node.enumerated_at = datetime.now().isoformat()
+        sub_node.destinations = dests
+
+        linked = link_destinations_to_onprem(api.state, sub_node)
+        captured = sum(1 for d in dests if d.cleartext_captured)
+        prd_targets = sum(
+            1 for d in dests
+            if d.linked_target_sid
+            and api.state.nodes.get(d.linked_target_sid)
+            and api.state.nodes[d.linked_target_sid].is_production)
+        print(f"[+] BTP {region}/{sub_uuid[:8]}: pulled {len(dests)} "
+              f"destination(s) via destination-service token, "
+              f"{captured} cleartext, {linked} linked to on-prem, "
+              f"{prd_targets} reach PRD")
+        if captured:
+            try:
+                sapmap_findings.emit_finding(
+                    "CRITICAL", f"BTP:{sub_uuid[:8]}",
+                    f"BTP subaccount {sub_node.subdomain or sub_uuid} "
+                    f"stores {captured} cleartext on-prem credential(s) "
+                    f"in destinations.  Anyone with AccessClientSecrets "
+                    f"on the destination service can pull them.",
+                    ref="btp.cleartext.captured",
+                    meta={"subaccount": sub_uuid, "count": captured})
+            except Exception:
+                pass
+        return json.dumps({
+            "ok":                  True,
+            "subaccount_uuid":     sub_uuid,
+            "subdomain":           sub_node.subdomain,
+            "destinations":        len(dests),
+            "cleartext_captured":  captured,
+            "linked_to_onprem":    linked,
+            "prd_targets":         prd_targets,
+        })
+
     @app.route("/api/btp/enumerate", method="POST")
     def btp_enumerate():
         """Body: {region: <string>}.  Hits the BTP API to list every
@@ -6078,40 +6153,76 @@ def create_app(api: SAPMAPApi) -> Bottle:
             return json.dumps({"ok": False,
                                "error": f"No token stored for region {region!r}"})
 
-        # Decode token scopes once so the response can flag what the
-        # token CAN'T do, helping the operator understand 0-result
-        # outcomes.
+        # Decode token claims and detect kind so we route enumeration
+        # to the APIs the token can actually reach.  Probing wrong
+        # APIs (e.g. CF API with a destination-scoped token) returns
+        # 401 noise, not real errors.
+        from sap_btp import detect_token_kind
         claims = decode_token_claims(token)
         scopes = list(claims.get("scope") or claims.get("scopes") or [])
-        scope_warnings = []
-        if not any(s == "destination_configuration.ApiAccess"
-                   or s.startswith("destination_configuration.")
-                   for s in scopes):
-            scope_warnings.append(
-                "Token lacks `destination_configuration.ApiAccess` — "
-                "destinations CAN be listed (metadata only) but stored "
-                "passwords / client secrets will NOT be returned in "
-                "cleartext.  To get cleartext: bind a Destination "
-                "Service instance (cf create-service-key) and exchange "
-                "its client_id/client_secret at the XSUAA token endpoint "
-                "for a destination-scoped token.")
-        if not any(s.startswith("subaccount.")
-                   or s == "global_account.viewer"
-                   or s == "global_account.admin"
-                   for s in scopes):
-            scope_warnings.append(
-                "Token lacks subaccount-admin / global-account-viewer "
-                "scopes — `/v1/accounts/subaccounts` will return 0 "
-                "subaccounts.  This is normal for a stock `cf "
-                "oauth-token`; to enumerate subaccounts you need a "
-                "token from the BTP cockpit (cli: `btp login` then "
-                "`btp get-passcode`) or a global-account-admin "
-                "service-key.")
+        kind, kind_desc = detect_token_kind(claims)
 
+        # Build kind-aware warnings.  Don't warn about scopes the token
+        # doesn't NEED for what it's good at.
+        scope_warnings = []
+        if kind == "cf":
+            scope_warnings.append(
+                "Token kind: `cf` (Cloud Foundry user token).  Reaches "
+                "CF API only — destinations and subaccount admin "
+                "endpoints are out of scope.  To get cleartext "
+                "destinations, mint a destination-service token: "
+                "`cf create-service destination lite sapmap-dest && "
+                "cf create-service-key sapmap-dest sapmap-dest-key && "
+                "cf service-key sapmap-dest sapmap-dest-key`, then "
+                "exchange uaa.clientid/uaa.clientsecret at uaa.url for "
+                "a `client_credentials` token.")
+        elif kind == "destination":
+            scope_warnings.append(
+                "Token kind: `destination` (service-key issued).  "
+                "Reaches the Destination Service for ONE bound "
+                "subaccount.  Subaccount enumeration + CF API are out "
+                "of scope.  Use the **Pull destinations** action (no "
+                "subaccount picker needed) to capture cleartext.")
+        elif kind == "subaccount":
+            pass     # full BTP-control-plane access — no warnings needed
+        elif kind == "other":
+            scope_warnings.append(
+                "Token kind: `other` (unrecognised).  Audience / cid / "
+                "scopes don't match any known BTP API client pattern. "
+                "SAPMAP will probe everything but expect noisy 401s.")
+        else:
+            scope_warnings.append(f"Token kind: `{kind}` — "
+                                    f"{kind_desc}")
+
+        # Route the actual API probes by kind so we don't spray 401s
+        # against APIs the token can't talk to.
         try:
-            subs = enumerate_subaccounts(token, region)
-            mappings = pull_scc_mappings(token, region)
-            cf_topology = pull_cf_topology(token, region)
+            if kind == "cf":
+                # CF tokens can ONLY do orgs/spaces/apps/SIs.
+                subs = []
+                mappings = []
+                cf_topology = pull_cf_topology(token, region)
+            elif kind == "destination":
+                # Destination tokens go straight to /destinations —
+                # the operator should click "Pull destinations" on the
+                # button surfaced when this kind is detected.  We
+                # don't pull them automatically here so the workflow
+                # stays predictable.
+                subs = []
+                mappings = []
+                cf_topology = {"orgs": [], "spaces": [], "apps": [],
+                                "service_instances": [],
+                                "escalation_hints": [], "errors": []}
+            elif kind == "subaccount":
+                # Full control plane.
+                subs = enumerate_subaccounts(token, region)
+                mappings = pull_scc_mappings(token, region)
+                cf_topology = pull_cf_topology(token, region)
+            else:
+                # Try everything; expect some 401s.
+                subs = enumerate_subaccounts(token, region)
+                mappings = pull_scc_mappings(token, region)
+                cf_topology = pull_cf_topology(token, region)
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -6147,6 +6258,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
               f"{len(cf_topology.get('service_instances', []))} service-instances)")
         return json.dumps({
             "ok": True,
+            "kind":             kind,
+            "kind_description": kind_desc,
             "subaccount_count": len(subs),
             "scc_mapping_count": len(mappings),
             "new": added,

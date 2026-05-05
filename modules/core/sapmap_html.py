@@ -4177,6 +4177,26 @@ async function btpStoreToken() {
   }
   // Wipe the textarea — token is server-side now, no need to keep DOM copy
   document.getElementById('btp-token-input').value = '';
+  // Token kind drives which action button to show.  cf -> Enumerate
+  // (lists CF orgs/spaces).  destination -> Pull destinations
+  // directly (single bound subaccount).  subaccount -> Enumerate
+  // (lists every subaccount the token reaches).
+  const kindLabel = {
+    'cf':           'Cloud Foundry user token',
+    'destination':  'Destination-service token',
+    'connectivity': 'Connectivity-service token',
+    'xsuaa':        'XSUAA service token',
+    'subaccount':   'Subaccount-admin / global-account token',
+    'other':        'Unrecognised',
+    'unknown':      'Unknown',
+  }[r.kind] || r.kind || 'Unknown';
+  const kindColour = {
+    'destination': '#3fb950',
+    'subaccount':  '#3fb950',
+    'cf':          '#0969da',
+    'other':       '#d4a72c',
+  }[r.kind] || '#8b949e';
+
   status.innerHTML =
     '<div style="background:#dafbe1;border:1px solid #b5e0b5;color:#1a7f37;'
     + 'padding:8px 10px;border-radius:6px;font-size:12px;'
@@ -4187,9 +4207,27 @@ async function btpStoreToken() {
     + ', expires in ' + (r.expires_in_seconds || 0) + ' s'
     + (r.expired ? ' — <b style="color:#b51c1c">ALREADY EXPIRED</b>' : '')
     + ')</div>'
-    + '<div style="margin-top:10px"><button class="btn btn-primary" '
-    + 'onclick="btpEnumerate(\'' + escHtml(r.region) + '\')">'
-    + 'Enumerate subaccounts in ' + escHtml(r.region) + '</button></div>';
+    // Kind banner — explains what THIS token can do
+    + '<div style="margin-top:8px;padding:8px 10px;border-radius:6px;'
+    + 'border:1px solid ' + kindColour + ';background:#1f2329;'
+    + 'color:#c9d1d9;font-size:11px;user-select:text;-webkit-user-select:text">'
+    + '<b style="color:' + kindColour + '">Token kind:</b> '
+    + escHtml(kindLabel)
+    + (r.bound_subaccount_uuid
+        ? '<br><span class="muted">Bound subaccount:</span> <code>'
+          + escHtml(r.bound_subaccount_uuid) + '</code>'
+          + (r.subdomain ? ' (' + escHtml(r.subdomain) + ')' : '')
+        : '')
+    + '<br><span class="muted">' + escHtml(r.kind_description || '')
+    + '</span></div>'
+    // Kind-aware action button
+    + (r.kind === 'destination'
+        ? '<div style="margin-top:10px"><button class="btn btn-primary" '
+          + 'onclick="btpPullForToken(\'' + escHtml(r.region) + '\')">'
+          + 'Pull destinations (capture cleartext)</button></div>'
+        : '<div style="margin-top:10px"><button class="btn btn-primary" '
+          + 'onclick="btpEnumerate(\'' + escHtml(r.region) + '\')">'
+          + 'Enumerate ' + escHtml(r.region) + '</button></div>');
   showToast(
     '<b>✓ BTP token stored</b><div style="font-size:11px;color:#8b949e;'
     + 'margin-top:4px">Region: ' + escHtml(r.region)
@@ -4209,6 +4247,55 @@ async function btpClearTokens() {
     '<div class="muted" style="padding:6px;font-size:11px">All BTP tokens '
     + 'cleared.</div>';
   showToast('BTP tokens cleared.', {autoCloseMs: 4000});
+}
+
+async function btpPullForToken(region) {
+  // Direct destination-pull for destination-service-scoped tokens.
+  // The token IS the subaccount (via ext_attr.subaccountid claim) —
+  // no enumeration step needed.  Server extracts the bound subaccount
+  // UUID, calls /destinations, captures cleartext, links to on-prem.
+  showToast('<b>Pulling destinations…</b>'
+            + '<div style="font-size:11px;color:#8b949e;margin-top:4px">'
+            + 'Per-destination "find" call to materialise cleartext '
+            + 'where AccessClientSecrets is granted.</div>',
+            {autoCloseMs: 5000});
+  let r;
+  try {
+    r = await fetch('/api/btp/pull_destinations_for_token', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({region}),
+    }).then(r => r.json());
+  } catch (e) {
+    showToast('Pull destinations failed: ' + e, {autoCloseMs: 6000});
+    return;
+  }
+  if (!r.ok) {
+    showToast('Pull destinations failed: ' + (r.error || '?'),
+              {autoCloseMs: 8000});
+    return;
+  }
+  const captured = r.cleartext_captured || 0;
+  const linked = r.linked_to_onprem || 0;
+  const prdTargets = r.prd_targets || 0;
+  const colour = (captured && prdTargets) ? '#f85149'
+                : (captured ? '#db6d28' : '#3fb950');
+  showToast(
+    '<b style="color:' + colour + '">'
+    + escHtml(r.subdomain || r.subaccount_uuid) + '</b>'
+    + '<div style="font-size:12px;margin-top:6px">'
+    + r.destinations + ' destination(s) · '
+    + '<b>' + captured + '</b> cleartext captured · '
+    + '<b>' + linked + '</b> linked to on-prem'
+    + (prdTargets ? ' · <b style="color:#f85149">'
+        + prdTargets + ' reach PRD</b>' : '') + '</div>'
+    + '<div style="font-size:10px;color:#8b949e;margin-top:6px">'
+    + 'Captured creds added to the matching SAPNode.credentials. '
+    + 'Synthetic RFC edges drawn BTP→on-prem so trust-chain analysis '
+    + 'walks them.</div>',
+    {autoCloseMs: 14000});
+  if (typeof refreshState === 'function') refreshState();
+  else if (typeof updateMap === 'function') updateMap();
 }
 
 async function btpEnumerate(region) {
