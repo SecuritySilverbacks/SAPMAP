@@ -4222,12 +4222,40 @@ async function btpEnumerate(region) {
     return;
   }
   // Render a quick summary inline in the token modal
+  const cf = r.cf_topology || {};
+  const orgs = cf.orgs || [], spaces = cf.spaces || [],
+        apps = cf.apps || [], sis = cf.service_instances || [],
+        hints = cf.escalation_hints || [];
+
   let html = '<div style="background:#161b22;border:1px solid #30363d;'
     + 'border-radius:6px;padding:10px;margin-top:10px;font-size:12px;'
-    + 'color:#c9d1d9">'
-    + '<div style="color:#3fb950;font-weight:600;margin-bottom:8px">'
-    + '✓ Found ' + r.subaccount_count + ' subaccount(s), '
+    + 'color:#c9d1d9;user-select:text;-webkit-user-select:text">';
+
+  // Scope warnings (always render first so the operator sees them)
+  if ((r.scope_warnings || []).length) {
+    html += '<div style="background:#fff8c5;color:#7d4e00;'
+      + 'border:1px solid #d4a72c;border-radius:4px;padding:8px 10px;'
+      + 'margin-bottom:10px;font-size:11px">'
+      + '<b>⚠️ Token-scope limitations</b><br>';
+    for (const w of r.scope_warnings) {
+      html += '• ' + escHtml(w).replace(/`([^`]+)`/g,
+                  '<code>$1</code>') + '<br>';
+    }
+    html += '</div>';
+  }
+
+  // BTP-side block (subaccounts + SCC mappings)
+  html += '<div style="font-weight:600;margin-bottom:6px;color:'
+    + (r.subaccount_count > 0 ? '#3fb950' : '#8b949e') + '">'
+    + (r.subaccount_count > 0 ? '✓' : 'ℹ︎')
+    + ' BTP control plane: ' + r.subaccount_count + ' subaccount(s), '
     + r.scc_mapping_count + ' SCC mapping(s)</div>';
+  if (r.subaccount_count === 0) {
+    html += '<div style="color:#8b949e;font-style:italic;font-size:11px;'
+      + 'margin-bottom:8px">'
+      + '0 subaccounts is normal for a stock `cf oauth-token`. '
+      + 'See scope warning above for how to escalate.</div>';
+  }
   for (const s of (r.subaccounts || [])) {
     html += '<div style="padding:6px 0;border-top:1px solid #30363d;'
       + 'display:flex;justify-content:space-between;align-items:center;gap:8px">'
@@ -4240,6 +4268,71 @@ async function btpEnumerate(region) {
       + escHtml(s.display_name || s.uuid) + '\')">Pull destinations</button>'
       + '</div>';
   }
+
+  // Cloud Foundry topology — what the cf-scoped token CAN see.
+  if (orgs.length || spaces.length || apps.length || sis.length) {
+    html += '<div style="margin-top:14px;padding-top:10px;'
+      + 'border-top:1px solid #30363d;font-weight:600;color:#58a6ff">'
+      + '☁️ Cloud Foundry topology (visible via <code>cloud_controller.read</code>)</div>';
+    html += '<div style="font-size:11px;color:#c9d1d9;margin-top:4px">'
+      + '<b>' + orgs.length + '</b> org' + (orgs.length === 1 ? '' : 's') + ' · '
+      + '<b>' + spaces.length + '</b> space' + (spaces.length === 1 ? '' : 's') + ' · '
+      + '<b>' + apps.length + '</b> app' + (apps.length === 1 ? '' : 's') + ' · '
+      + '<b>' + sis.length + '</b> service instance' + (sis.length === 1 ? '' : 's')
+      + '</div>';
+    if (orgs.length) {
+      html += '<div style="margin-top:6px;font-size:11px"><span class="muted">Orgs:</span> '
+        + orgs.map(o => '<code>' + escHtml(o.name || o.guid) + '</code>').join(', ')
+        + '</div>';
+    }
+    if (spaces.length && spaces.length <= 30) {
+      html += '<div style="margin-top:4px;font-size:11px"><span class="muted">Spaces:</span> '
+        + spaces.map(s => '<code>' + escHtml(s.name || s.guid) + '</code>').join(', ')
+        + '</div>';
+    }
+    if (apps.length && apps.length <= 30) {
+      html += '<div style="margin-top:4px;font-size:11px"><span class="muted">Apps:</span> '
+        + apps.map(a => '<code>' + escHtml(a.name)
+            + (a.state && a.state !== 'STARTED' ? ':' + a.state.toLowerCase() : '')
+            + '</code>').join(', ')
+        + '</div>';
+    }
+    if (sis.length && sis.length <= 40) {
+      html += '<div style="margin-top:4px;font-size:11px"><span class="muted">Service instances:</span> '
+        + sis.map(s => '<code>' + escHtml(s.name) + '</code>').join(', ')
+        + '</div>';
+    }
+
+    // Escalation hints — likely Destination / Connectivity / XSUAA
+    // bindings whose client_id+client_secret can mint a higher-
+    // scoped token.
+    if (hints.length) {
+      html += '<div style="margin-top:10px;background:#1f1a0e;'
+        + 'border:1px solid #db6d28;border-radius:4px;padding:8px 10px;'
+        + 'font-size:11px;color:#f0883e">'
+        + '<b>⚡ Escalation hints (' + hints.length + ')</b><br>'
+        + '<span style="color:#c9d1d9">These service instances likely '
+        + 'host credentials that mint higher-scoped BTP tokens.  '
+        + 'Run <code>cf service-key &lt;name&gt; &lt;keyname&gt;</code> '
+        + 'to extract their client_id / client_secret, then exchange '
+        + 'at XSUAA for a token with destination_configuration.'
+        + 'ApiAccess.</span><ul style="margin:6px 0 0 16px;padding:0">';
+      for (const h of hints) {
+        html += '<li><code>' + escHtml(h.service_instance_name)
+          + '</code></li>';
+      }
+      html += '</ul></div>';
+    }
+  }
+
+  // Bubble up any HTTP errors from the CF/BTP probes
+  if ((cf.errors || []).length) {
+    html += '<div style="margin-top:8px;font-size:10px;color:#8b949e">'
+      + '<b>Probe errors:</b><br>'
+      + cf.errors.map(e => '• ' + escHtml(e)).join('<br>')
+      + '</div>';
+  }
+
   html += '</div>';
   document.getElementById('btp-token-status').innerHTML += html;
 }

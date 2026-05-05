@@ -6054,12 +6054,20 @@ def create_app(api: SAPMAPApi) -> Bottle:
     def btp_enumerate():
         """Body: {region: <string>}.  Hits the BTP API to list every
         subaccount the token can reach + every Cloud Connector tunnel
-        registered with them.  Pre-creates BTPSubaccountNode objects
-        in api.state.btp_subaccounts (no destinations yet — those are
+        registered with them.  ALSO pulls the Cloud Foundry topology
+        (orgs / spaces / apps / service instances) — this is the data
+        a stock `cf oauth-token` can actually see, since CF tokens
+        carry `cloud_controller.read` rather than the
+        subaccount-admin / destination_configuration.ApiAccess scopes
+        needed for the BTP-control-plane endpoints.
+
+        Pre-creates BTPSubaccountNode objects in
+        api.state.btp_subaccounts (no destinations yet — those are
         pulled by /api/btp/pull_destinations).
         """
         from sap_btp import (
-            enumerate_subaccounts, pull_scc_mappings,
+            enumerate_subaccounts, pull_scc_mappings, pull_cf_topology,
+            decode_token_claims,
         )
         from sapmap_models import BTPSubaccountNode
         response.content_type = "application/json"
@@ -6069,9 +6077,41 @@ def create_app(api: SAPMAPApi) -> Bottle:
         if not token:
             return json.dumps({"ok": False,
                                "error": f"No token stored for region {region!r}"})
+
+        # Decode token scopes once so the response can flag what the
+        # token CAN'T do, helping the operator understand 0-result
+        # outcomes.
+        claims = decode_token_claims(token)
+        scopes = list(claims.get("scope") or claims.get("scopes") or [])
+        scope_warnings = []
+        if not any(s == "destination_configuration.ApiAccess"
+                   or s.startswith("destination_configuration.")
+                   for s in scopes):
+            scope_warnings.append(
+                "Token lacks `destination_configuration.ApiAccess` — "
+                "destinations CAN be listed (metadata only) but stored "
+                "passwords / client secrets will NOT be returned in "
+                "cleartext.  To get cleartext: bind a Destination "
+                "Service instance (cf create-service-key) and exchange "
+                "its client_id/client_secret at the XSUAA token endpoint "
+                "for a destination-scoped token.")
+        if not any(s.startswith("subaccount.")
+                   or s == "global_account.viewer"
+                   or s == "global_account.admin"
+                   for s in scopes):
+            scope_warnings.append(
+                "Token lacks subaccount-admin / global-account-viewer "
+                "scopes — `/v1/accounts/subaccounts` will return 0 "
+                "subaccounts.  This is normal for a stock `cf "
+                "oauth-token`; to enumerate subaccounts you need a "
+                "token from the BTP cockpit (cli: `btp login` then "
+                "`btp get-passcode`) or a global-account-admin "
+                "service-key.")
+
         try:
             subs = enumerate_subaccounts(token, region)
             mappings = pull_scc_mappings(token, region)
+            cf_topology = pull_cf_topology(token, region)
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -6100,7 +6140,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
             sub_node.scc_locations = m_by_sub.get(uuid, [])
             sub_node.enumerated_at = now_iso
         print(f"[+] BTP {region}: enumerated {len(subs)} subaccount(s), "
-              f"{len(mappings)} SCC mapping(s); {added} new")
+              f"{len(mappings)} SCC mapping(s); {added} new BTP node(s) "
+              f"(plus CF topology: {len(cf_topology.get('orgs', []))} orgs, "
+              f"{len(cf_topology.get('spaces', []))} spaces, "
+              f"{len(cf_topology.get('apps', []))} apps, "
+              f"{len(cf_topology.get('service_instances', []))} service-instances)")
         return json.dumps({
             "ok": True,
             "subaccount_count": len(subs),
@@ -6113,6 +6157,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
                  "scc_mappings": len(m_by_sub.get(s["uuid"], []))}
                 for s in subs
             ],
+            "cf_topology": cf_topology,
+            "scopes": scopes,
+            "scope_warnings": scope_warnings,
         })
 
     @app.route("/api/btp/pull_destinations/<uuid>", method="POST")

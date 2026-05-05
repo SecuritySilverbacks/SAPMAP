@@ -262,6 +262,102 @@ def enumerate_subaccounts(token: str, region: str) -> list:
     return []
 
 
+def pull_cf_topology(token: str, region: str) -> dict:
+    """Pull the Cloud Foundry topology the token can see.
+
+    Returns ``{orgs, spaces, apps, service_instances, escalation_hints}``.
+
+    Why this matters: a stock ``cf login`` token only carries the
+    ``cloud_controller.*`` scopes — enough to list orgs/spaces/apps
+    via the CF API but NOT enough to hit the BTP Accounts service or
+    the Destination Service.  The operator still wants to see what
+    they CAN reach (matches the org list shown by ``cf login``), and
+    we surface any service bindings to ``destination`` /
+    ``connectivity`` instances as **escalation hints** — those bindings
+    contain the client_id / client_secret needed to mint a higher-
+    scoped token via XSUAA.
+    """
+    if not region or not _REGION_RE.match(region):
+        return {"error": "unsupported region"}
+    api = _api_root(region)
+
+    out = {
+        "orgs": [], "spaces": [], "apps": [],
+        "service_instances": [],
+        "escalation_hints": [],
+        "errors": [],
+    }
+
+    def _paged_get(path: str) -> list:
+        """Iterate a CF v3 paginated collection until exhausted."""
+        items = []
+        url = f"{api}{path}"
+        for _ in range(20):    # hard cap — CF tenants don't legitimately page > 20 deep here
+            code, _hdrs, body = _btp_get(url, token)
+            if code != 200:
+                out["errors"].append(f"GET {url} -> HTTP {code}: "
+                                       f"{body[:120]!r}")
+                break
+            data = _json_or_none(body) or {}
+            items.extend(data.get("resources", []))
+            nxt = (data.get("pagination", {}).get("next") or {}).get("href")
+            if not nxt:
+                break
+            url = nxt
+        return items
+
+    out["orgs"] = [
+        {"guid": o.get("guid"), "name": o.get("name")}
+        for o in _paged_get("/v3/organizations?per_page=200")
+    ]
+    out["spaces"] = [
+        {"guid": s.get("guid"), "name": s.get("name"),
+         "org_guid": ((s.get("relationships") or {})
+                       .get("organization", {}).get("data", {}).get("guid"))}
+        for s in _paged_get("/v3/spaces?per_page=200")
+    ]
+    out["apps"] = [
+        {"guid": a.get("guid"), "name": a.get("name"),
+         "state": a.get("state"),
+         "space_guid": ((a.get("relationships") or {})
+                         .get("space", {}).get("data", {}).get("guid"))}
+        for a in _paged_get("/v3/apps?per_page=200")
+    ]
+    si = _paged_get("/v3/service_instances?per_page=200")
+    out["service_instances"] = [
+        {"guid": s.get("guid"), "name": s.get("name"),
+         "type": s.get("type"),
+         "service_offering":
+            ((s.get("relationships") or {})
+              .get("service_plan", {}).get("data", {}).get("guid"))}
+        for s in si
+    ]
+    # Escalation hint: service instances backed by destination /
+    # connectivity / xsuaa offerings.  We can't tell the offering
+    # NAME from the relationship link alone (would need another
+    # round of /v3/service_plans + /v3/service_offerings calls), so
+    # we use the instance NAME as a heuristic — operators almost
+    # always name them after the offering ("destination", "conn",
+    # "xsuaa", "my-dest-service", etc.).
+    for s in si:
+        n = (s.get("name") or "").lower()
+        if any(kw in n for kw in ("destination", "connectivity", "xsuaa",
+                                    "uaa", "credstore")):
+            out["escalation_hints"].append({
+                "service_instance_name": s.get("name"),
+                "guid": s.get("guid"),
+                "reason": (
+                    "Likely a Destination / Connectivity / XSUAA service "
+                    "instance.  Its service-credential-binding contains "
+                    "client_id + client_secret that mint higher-scoped "
+                    "tokens via XSUAA - try `cf service-key <name> <key>` "
+                    "or pull /v3/service_credential_bindings to get the "
+                    "credentials, then exchange for a token with "
+                    "destination_configuration.ApiAccess scope."),
+            })
+    return out
+
+
 def pull_scc_mappings(token: str, region: str) -> list:
     """List every Cloud Connector tunnel registered with the
     subaccounts this token reaches.
