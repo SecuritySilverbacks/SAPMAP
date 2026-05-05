@@ -105,14 +105,15 @@ def decode_token_claims(token: str) -> dict:
 
 
 def extract_region_from_token(token: str) -> str:
-    """Extract the BTP region (eu10, us10, ap10, …) from the token's
-    `iss` claim.
+    """Extract the BTP region (eu10, us10, ap10, eu10-004, …) from
+    the token's `iss` claim.
 
     BTP exposes several `iss` host shapes — every one of them ends in
     ``<region>.hana.ondemand.com`` where the region is a 2-3 letter
-    geographic code followed by a digit cluster (e.g. eu10, us10,
-    ap10, jp10, ca10, br10).  We match on the LAST subdomain before
-    ``.hana.ondemand.com``, regardless of the prefix:
+    geographic code, an integer, and an OPTIONAL hyphenated suffix
+    used for capacity-sharded sub-regions (e.g. ``eu10-004``,
+    ``us10-002``, ``jp10-001``).  We match on the LAST subdomain
+    before ``.hana.ondemand.com``, regardless of the prefix:
 
       api.authentication.<region>.hana.ondemand.com   (XSUAA)
       uaa.cf.<region>.hana.ondemand.com               (CF UAA)
@@ -123,11 +124,11 @@ def extract_region_from_token(token: str) -> str:
     """
     claims = decode_token_claims(token)
     iss = claims.get("iss") or claims.get("issuer") or ""
-    # Region: 2-3 letters + 1-3 digits, immediately before
-    # .hana.ondemand.com .  Anchored to a dot so it can't accidentally
-    # match a subdomain that happens to end in two letters + digits.
+    # Region: 2-3 letters + 1-3 digits + optional "-NNN" sub-region.
+    # Anchored to a dot so it can't accidentally match a subdomain
+    # that happens to end in letters+digits.
     m = re.search(
-        r"\.([a-z]{2,3}\d{1,3})\.hana\.ondemand\.com",
+        r"\.([a-z]{2,3}\d{1,3}(?:-\d{1,4})?)\.hana\.ondemand\.com",
         iss,
     )
     return m.group(1) if m else ""
@@ -183,7 +184,9 @@ def _json_or_none(body: bytes):
 # BTP regions that Cloud Foundry / Connectivity APIs are reachable on.
 # The pattern is consistent: api.cf.<region>.hana.ondemand.com plus
 # destination-configuration.cfapps.<region>.hana.ondemand.com .
-_REGION_RE = re.compile(r"^[a-z]{2,3}\d{1,3}$")
+# Region grammar: 2-3 letters + 1-3 digits + optional "-NNN" sharded
+# sub-region (e.g. eu10, eu10-004, us10-002, jp10-001).
+_REGION_RE = re.compile(r"^[a-z]{2,3}\d{1,3}(?:-\d{1,4})?$")
 
 
 def _api_root(region: str) -> str:

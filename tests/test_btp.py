@@ -104,6 +104,42 @@ def test_extract_region_handles_japan_region():
     assert extract_region_from_token(tok) == "jp10"
 
 
+def test_extract_region_handles_hyphenated_subregion():
+    """SAP BTP shards parent regions for capacity (eu10-001, eu10-004,
+    us10-002, etc.).  Caught live: a real customer's token had iss
+    https://uaa.cf.eu10-004.hana.ondemand.com/oauth/token and the
+    original regex (which required pure letters+digits with no
+    hyphen) rejected it."""
+    tok = _make_jwt({
+        "iss": "https://uaa.cf.eu10-004.hana.ondemand.com/oauth/token",
+    })
+    assert extract_region_from_token(tok) == "eu10-004"
+
+
+def test_extract_region_handles_us_subregion():
+    tok = _make_jwt({
+        "iss": "https://api.cf.us10-002.hana.ondemand.com/oauth/token",
+    })
+    assert extract_region_from_token(tok) == "us10-002"
+
+
+def test_url_builders_accept_hyphenated_region():
+    """Belt-and-braces: even if region extraction is right, the URL
+    builders enforce a region grammar before constructing API URLs.
+    Hyphenated forms must pass that gate too."""
+    from sap_btp import _api_root, _destinations_root, _REGION_RE
+    # The shared validator regex
+    assert _REGION_RE.match("eu10-004")
+    assert _REGION_RE.match("us10")
+    assert _REGION_RE.match("eu10")
+    assert not _REGION_RE.match("totally-bogus")
+    # The builders accept the sharded form
+    api = _api_root("eu10-004")
+    assert "eu10-004" in api
+    dst = _destinations_root("eu10-004")
+    assert "eu10-004" in dst
+
+
 def test_validate_token_returns_summary():
     tok = _make_jwt({
         "iss": "https://api.authentication.eu10.hana.ondemand.com/oauth/token",
