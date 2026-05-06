@@ -2867,6 +2867,101 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:deep_scan", "Deep Scan", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/standard_scan", method="POST")
+    def node_standard_scan(sid):
+        """Run the same discovery sweep used at startup, scoped to a
+        single host.  Used to promote a BTP-discovered placeholder
+        (`discovered_via_btp=True`) into a fully-fingerprinted node:
+        port scan, SAP banner / RFC_SYSTEM_INFO, client enumeration,
+        SCC sibling detection.  Replaces the placeholder's SID with
+        whatever real SID the scanner reports."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        host = node.ip or node.hostname
+        if not host:
+            return json.dumps({"error":
+                f"Node {sid} has no ip / hostname to scan"})
+        cfg = api.state.scan_config or {}
+        inst_from = int(cfg.get("inst_from", 0))
+        inst_to = int(cfg.get("inst_to", 99))
+        timeout = float(cfg.get("timeout", 3.0))
+        threads = int(cfg.get("threads", 30))
+        port_timeout = float(cfg.get("port_timeout", 3.0))
+
+        def _run():
+            print(f"[*] Standard scan starting on {host} "
+                  f"(placeholder {sid}) — running discovery sweep …")
+            try:
+                discovered = sapmap_scanner.discover_systems(
+                    [host],
+                    instance_range=(inst_from, inst_to),
+                    timeout=timeout, threads=threads,
+                    fast_mode=True,
+                    cancel_event=api.cancel_event,
+                    skip_alive=True,
+                    port_timeout=port_timeout,
+                    node_callback=lambda n: api.state.add_node(n),
+                    scc_callback=lambda s: api.state.scc_nodes.update(
+                        {s.host: s}),
+                )
+            except Exception as e:
+                print(f"[-] Standard scan failed on {host}: {e}")
+                return
+            real_nodes = [n for n in (discovered or [])
+                          if not n.discovered_via_btp]
+            if not real_nodes:
+                print(f"[*] Standard scan: no SAP system fingerprinted "
+                      f"on {host} — placeholder {sid} kept as-is")
+                return
+            # Promote: when the scanner found exactly one real node on
+            # this host, splice it into the BTP edges that pointed at
+            # the placeholder so the connection lines move with the
+            # promotion.  Then remove the placeholder.
+            promoted = real_nodes[0]
+            if promoted.sid == sid:
+                # Same SID — scanner happened to reuse our placeholder
+                # naming.  Just drop the discovery flag.
+                promoted.discovered_via_btp = False
+                api.state.nodes[sid] = promoted
+                print(f"[+] Standard scan promoted {sid} in place "
+                      f"({promoted.system_type or 'unknown'})")
+                return
+            # Re-point connections
+            moved = 0
+            for c in api.state.connections:
+                if c.target_sid == sid:
+                    c.target_sid = promoted.sid
+                    moved += 1
+                if c.source_sid == sid:
+                    c.source_sid = promoted.sid
+                    moved += 1
+            # Carry over any creds the BTP linker pushed onto the
+            # placeholder so they aren't lost when the placeholder is
+            # removed.
+            for cred in node.credentials or []:
+                if not any(x.username == cred.username
+                           and x.password == cred.password
+                           for x in promoted.credentials):
+                    promoted.credentials.append(cred)
+            for f in node.findings or []:
+                promoted.findings.append(f)
+            # Update destination linkage on every BTP subaccount that
+            # pointed at the placeholder.
+            for sub in api.state.btp_subaccounts.values():
+                for d in sub.destinations or []:
+                    if (getattr(d, "linked_target_sid", None)
+                            == sid):
+                        d.linked_target_sid = promoted.sid
+            api.state.remove_node(sid)
+            print(f"[+] Standard scan promoted {sid} → {promoted.sid} "
+                  f"({promoted.system_type or 'unknown'}); {moved} "
+                  f"edge(s) re-pointed")
+
+        _bg(f"{sid}:standard_scan", "Standard Scan", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/set_type", method="POST")
     def node_set_type(sid):
         response.content_type = "application/json"
