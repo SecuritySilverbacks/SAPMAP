@@ -4617,8 +4617,13 @@ async function btpEnumerate(region) {
       + 'margin-bottom:10px;font-size:11px">'
       + '<b>⚠️ Token-scope limitations</b><br>';
     for (const w of r.scope_warnings) {
-      html += '• ' + escHtml(w).replace(/`([^`]+)`/g,
-                  '<code>$1</code>') + '<br>';
+      // Backticks → <code>, \n → <br>, "  N. " → indented bullets
+      // so multi-step recipes (e.g. how to mint a destination token)
+      // render as a readable list rather than one wall of text.
+      const rendered = escHtml(w)
+        .replace(/`([^`]+)`/g, '<code>$1</code>')
+        .replace(/\n/g, '<br>');
+      html += '• ' + rendered + '<br>';
     }
     html += '</div>';
   }

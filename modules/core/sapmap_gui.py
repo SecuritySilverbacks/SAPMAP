@@ -6278,15 +6278,30 @@ def create_app(api: SAPMAPApi) -> Bottle:
         scope_warnings = []
         if kind == "cf":
             scope_warnings.append(
-                "Token kind: `cf` (Cloud Foundry user token).  Reaches "
-                "CF API only — destinations and subaccount admin "
-                "endpoints are out of scope.  To get cleartext "
-                "destinations, mint a destination-service token: "
-                "`cf create-service destination lite sapmap-dest && "
+                "Token kind: `cf` (Cloud Foundry user token).  This is "
+                "the normal output of `cf oauth-token`; it reaches the "
+                "CF API (orgs / spaces / apps / service instances) but "
+                "destinations and subaccount admin endpoints are out of "
+                "scope.  To capture cleartext destinations, mint a "
+                "destination-service token:\n"
+                "  1. `cf login -a https://api.cf.eu10-<NN>.hana.ondemand.com` "
+                "(replace `<NN>` with the region suffix shown in BTP "
+                "cockpit, e.g. `004`).\n"
+                "  2. Pick an org during login; note the org and space "
+                "names.\n"
+                "  3. `cf target -o \"<ORG>\" -s <SPACE>` to point at the "
+                "subaccount you want to read.\n"
+                "  4. `cf create-service destination lite sapmap-dest && "
                 "cf create-service-key sapmap-dest sapmap-dest-key && "
-                "cf service-key sapmap-dest sapmap-dest-key`, then "
-                "exchange uaa.clientid/uaa.clientsecret at uaa.url for "
-                "a `client_credentials` token.")
+                "cf service-key sapmap-dest sapmap-dest-key`.\n"
+                "  5. From step 4's output grab `uaa.url`, `uaa.clientid` "
+                "and `uaa.clientsecret`, then exchange for a token:\n"
+                "     `curl -X POST \"<UAA_URL>/oauth/token\" "
+                "-u '<CLIENT_ID>:<CLIENT_SECRET>' "
+                "-d \"grant_type=client_credentials\" | jq -r .access_token`\n"
+                "  6. Paste that token back into SAPMAP — it will be "
+                "auto-detected as `destination` kind and the "
+                "**Pull destinations** action will appear.")
         elif kind == "destination":
             scope_warnings.append(
                 "Token kind: `destination` (service-key issued).  "
