@@ -687,6 +687,39 @@ def test_link_to_onprem_dedupes_repeated_calls():
                and c.source_sid.startswith("BTP:")) == 1
 
 
+def test_link_to_onprem_carries_jco_client_and_sysnr_onto_edge():
+    """RFC destinations from BTP carry the target client / sysnr in
+    JCo properties (jco.client.client / jco.client.sysnr).  Verify
+    those propagate onto the synthetic RFCConnection (and the
+    Credentials pushed onto the target node) — defaulting to "000"
+    is wrong when the destination targets a non-default client."""
+    state = _state_with_s4p()
+    sub = BTPSubaccountNode(uuid="abcd-1234", region="eu10")
+    sub.destinations.append(BTPDestination(
+        subaccount_uuid="abcd-1234",
+        name="BTP_to_S4P", type="RFC",
+        url="s4phost",  # bare host (RFC style)
+        authentication="BasicAuthentication",
+        user="joris", password="MyPass", cleartext_captured=True,
+        additional_properties={
+            "jco.client.client": "001",
+            "jco.client.sysnr": "00",
+        },
+    ))
+    link_destinations_to_onprem(state, sub)
+    edge = next(c for c in state.connections
+                 if c.source_sid.startswith("BTP:")
+                    and c.target_sid == "S4P")
+    assert edge.client == "001", \
+        f"client must come from jco.client.client, got {edge.client!r}"
+    assert edge.target_instance_nr == "00", \
+        f"target_instance_nr must come from jco.client.sysnr, " \
+        f"got {edge.target_instance_nr!r}"
+    cred = next(c for c in state.nodes["S4P"].credentials
+                 if c.username == "joris")
+    assert cred.client == "001"
+
+
 def test_link_to_onprem_materialises_placeholder_for_unknown_target():
     """When the destination's host doesn't match any known on-prem
     SAPNode, a placeholder node is created (discovered_via_btp=True)
