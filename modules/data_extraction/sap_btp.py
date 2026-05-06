@@ -731,6 +731,8 @@ def link_destinations_to_onprem(state: SAPMAPState,
         synthetic_dest = f"BTP:{subaccount.uuid[:8]}::{d.name}"
         if not any(c.destination_name == synthetic_dest
                    for c in state.connections):
+            platform = ((d.additional_properties or {})
+                         .get("sap-platform", "")).upper()
             state.connections.append(RFCConnection(
                 source_sid=f"BTP:{subaccount.uuid[:8]}",
                 source_host=subaccount.subdomain or subaccount.uuid,
@@ -742,6 +744,7 @@ def link_destinations_to_onprem(state: SAPMAPState,
                 conn_type="http" if d.url.startswith("http") else "rfc",
                 http_url=d.url if d.url.startswith("http") else "",
                 http_auth_type=d.authentication,
+                http_target_platform=platform,
                 tested=False,
                 logon_successful=False,
                 # has_sap_all = unknown until tested; default False

