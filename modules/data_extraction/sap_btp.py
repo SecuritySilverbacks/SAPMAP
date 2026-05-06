@@ -737,7 +737,10 @@ def link_destinations_to_onprem(state: SAPMAPState,
          flags it UNTESTED.
       3. Annotate the destination's linked_target_sid for the GUI.
 
-    Returns the number of credentials newly linked.
+    Returns the number of destinations that resolved to a target
+    SAPNode (each gets `d.linked_target_sid` set + a synthetic edge);
+    NOT the number of unique credentials added (those are deduped
+    against existing target.credentials).
 
     No live SAP traffic — pure structural state mutation.
     """
@@ -775,8 +778,14 @@ def link_destinations_to_onprem(state: SAPMAPState,
                 continue
             match_sid = _materialise_btp_target(state, target_host, d)
             match_via = "btp-discovery"
+        # Count every destination that resolved to a target SAPNode,
+        # NOT just the first one whose credential is unique.  Three
+        # destinations on the same back-end with the same service user
+        # = three "linked" destinations from the operator's POV; the
+        # cred dedupe below is an internal storage optimisation.
         d.linked_target_sid = match_sid
         d.linked_via = match_via
+        linked += 1
 
         target = state.nodes[match_sid]
         # Read mandant from JCo property when present; HTTP destinations
@@ -803,7 +812,6 @@ def link_destinations_to_onprem(state: SAPMAPState,
                     username=d.user, password=d.password,
                     client=dest_client, verified=False,
                 ))
-                linked += 1
                 # Also drop a finding on the target SAPNode so the
                 # report explains where these creds came from.
                 target.findings.append(Finding(

@@ -687,6 +687,29 @@ def test_link_to_onprem_dedupes_repeated_calls():
                and c.source_sid.startswith("BTP:")) == 1
 
 
+def test_link_to_onprem_counts_every_resolved_destination():
+    """The `linked` return value reports destinations resolved to a
+    target SAPNode, not unique credentials.  Three destinations on
+    the same target sharing a single service user = 3 linked, not 1
+    (cred dedupe is internal to storage and shouldn't leak into the
+    operator-facing counter)."""
+    state = _state_with_s4p()
+    sub = BTPSubaccountNode(uuid="abcd-1234", region="eu10")
+    for name in ("Dest_A", "Dest_B", "Dest_C"):
+        sub.destinations.append(BTPDestination(
+            subaccount_uuid="abcd-1234",
+            name=name, type="HTTP", url="http://s4phost",
+            authentication="BasicAuthentication",
+            user="svc", password="same-pw", cleartext_captured=True,
+        ))
+    linked = link_destinations_to_onprem(state, sub)
+    assert linked == 3, \
+        f"all three destinations resolve to S4P, got linked={linked}"
+    # Storage still dedupes the credential
+    assert sum(1 for c in state.nodes["S4P"].credentials
+                if c.username == "svc") == 1
+
+
 def test_link_to_onprem_carries_jco_client_and_sysnr_onto_edge():
     """RFC destinations from BTP carry the target client / sysnr in
     JCo properties (jco.client.client / jco.client.sysnr).  Verify
