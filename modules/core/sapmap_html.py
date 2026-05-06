@@ -3699,10 +3699,21 @@ function showConnInfo(e, connIdx) {
       <div class="info-row"><span class="info-label">URL:</span><span class="info-val" style="word-break:break-all">${escHtml(conn.http_url || '?')}</span></div>
       <div class="info-row"><span class="info-label">Auth type:</span><span class="info-val">${escHtml(conn.http_auth_type || '?')}</span></div>
       ${conn.http_proxy ? `<div class="info-row"><span class="info-label">Proxy:</span><span class="info-val">${escHtml(conn.http_proxy)}</span></div>` : ''}
+      ${conn.http_target_platform ? `<div class="info-row"><span class="info-label">Platform:</span><span class="info-val">${escHtml(conn.http_target_platform)}</span></div>` : ''}
       <div class="info-row"><span class="info-label">User:</span><span class="info-val">${escHtml(conn.rfc_user || '?')}</span></div>
       ${conn.secstore_password ? `<div class="info-row"><span class="info-label">SecStore Pwd:</span><span class="info-val ss-reveal" style="color:#3fb950;cursor:pointer"><span class="ss-masked">&#9679;&#9679;&#9679;&#9679; (${conn.secstore_password.length} chars) — click to reveal</span><span class="ss-plain" style="display:none">${escHtml(conn.secstore_password)}</span></span></div>` : ''}
       <div class="info-section" style="color:#8b949e;font-size:11px">
-        Java HTTP destination — if ${escHtml(conn.rfc_user || 'the user')} has UME admin, you can log into the target Java stack's NWA / CTC ConfigServlet / Telnet console with these creds and drop a JSP for full OS access.
+        ${(() => {
+          const plat = (conn.http_target_platform || '').toUpperCase();
+          const u = escHtml(conn.rfc_user || 'the user');
+          if (plat === 'ABAP') {
+            return `ABAP HTTP destination — if ${u} carries SAP_ALL (or S_USER_GRP / S_USER_AGR with full activity) you can log straight into SAP GUI / Fiori / SOAP or call BAPI_USER_CREATE1 against the target client to mint a foothold.  Test Connection runs basic-auth, then probes profiles via direct RFC.`;
+          }
+          if (plat === 'JAVA') {
+            return `Java HTTP destination — if ${u} has UME admin, you can log into the target Java stack's NWA / CTC ConfigServlet / Telnet console with these creds and drop a JSP for full OS access.`;
+          }
+          return `HTTP destination — Test Connection probes basic-auth against the URL.  When the target maps to an ABAP node, profiles + SAP_ALL get fetched via direct RFC; when it maps to a Java node, the credential goes to UME tooling.`;
+        })()}
       </div>
     ` : isTypeT ? `
       <div class="info-row"><span class="info-label">Port:</span><span class="info-val">${escHtml(gwPort)}</span></div>
@@ -3725,10 +3736,10 @@ function showConnInfo(e, connIdx) {
       <div class="info-row"><span class="info-label">Risk:</span><span class="info-val"><span class="risk-badge ${riskClass}">${risk}</span></span></div>
     </div>
     <div style="text-align:right;margin-top:8px;display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">
-      ${(!isTypeT && !isHttp && conn.logon_successful && conn.has_sap_all && conn.target_sid) ?
-        `<button class="btn" style="background:#b33;color:#fff" onclick="createUserViaRfc('${escHtml(conn.source_sid)}','${escHtml(conn.destination_name)}','${escHtml(conn.target_sid)}')">Create Remote User</button>` : ''}
-      ${isHttp ? '' :
-        `<button class="btn" onclick="testSingleRfc('${escHtml(conn.source_sid)}','${escHtml(conn.destination_name)}',${connIdx})">Test Connection</button>`}
+      ${(!isTypeT && conn.logon_successful && conn.has_sap_all && conn.target_sid) ?
+        `<button class="btn" style="background:#b33;color:#fff" onclick="createUserOnTarget('${escHtml(conn.source_sid)}','${escHtml(conn.destination_name)}','${escHtml(conn.target_sid)}')">Create Remote User</button>` : ''}
+      ${isTypeT ? '' :
+        `<button class="btn" onclick="testConnection('${escHtml(conn.source_sid)}','${escHtml(conn.destination_name)}',${connIdx})">Test Connection</button>`}
       <button class="btn" onclick="document.getElementById('info-panel').classList.remove('visible')">Close</button>
     </div>
   `;
@@ -3769,6 +3780,32 @@ async function createUserViaRfc(sourceSid, destName, targetSid) {
     destination_name: destName,
     target_sid: targetSid
   });
+  startPolling();
+}
+
+// Generic dispatcher — routes BTP-sourced edges to /api/btp/* endpoints,
+// everything else to the existing per-node endpoints.  Same payload either
+// way so the modal poller doesn't need to know which path was taken.
+async function testConnection(sid, destName, connIdx) {
+  if ((sid || '').startsWith('BTP:')) {
+    await api('POST', 'btp/test_destination', {
+      source_sid: sid, destination_name: destName });
+  } else {
+    await api('POST', `node/${sid}/test_rfc_single`, {
+      destination_name: destName });
+  }
+  startPolling();
+}
+
+async function createUserOnTarget(sourceSid, destName, targetSid) {
+  document.getElementById('info-panel').classList.remove('visible');
+  if ((sourceSid || '').startsWith('BTP:')) {
+    await api('POST', 'btp/create_user_on_target', {
+      source_sid: sourceSid, destination_name: destName, target_sid: targetSid });
+  } else {
+    await api('POST', `node/${sourceSid}/create_user_via_rfc`, {
+      destination_name: destName, target_sid: targetSid });
+  }
   startPolling();
 }
 

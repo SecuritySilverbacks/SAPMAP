@@ -453,6 +453,13 @@ class RFCConnection:
     http_url: str = ""              # full target URL for HTTP destinations
     http_auth_type: str = ""        # BASICAUTHENTICATION | SSO2 | X509 | NONE
     http_proxy: str = ""            # "host:port" if the destination uses one
+    # Target platform stack for HTTP destinations.  BTP-sourced edges
+    # carry this from the destination's sap-platform additional
+    # property ("ABAP" | "JAVA"); on-prem-sourced edges may leave it
+    # empty.  Used by the HTTP modal to render platform-specific
+    # exploitation tips and to decide whether to fetch ABAP profiles
+    # after a successful basic-auth probe.
+    http_target_platform: str = ""
 
     # SecStore
     secstore_password: str = ""  # Decrypted password from RSECTAB (if matched)
@@ -493,6 +500,7 @@ class RFCConnection:
             "http_url": self.http_url,
             "http_auth_type": self.http_auth_type,
             "http_proxy": self.http_proxy,
+            "http_target_platform": self.http_target_platform,
             "secstore_password": self.secstore_password,
         }
 
