@@ -44,7 +44,7 @@ from typing import Optional, Tuple
 
 from sapmap_models import (
     BTPSubaccountNode, BTPDestination, RFCConnection, SAPMAPState,
-    Credentials, Finding, Severity,
+    Credentials, Finding, Severity, SAPNode, InstanceInfo,
 )
 from sapmap_errors import format_rfc_exception
 
@@ -575,11 +575,38 @@ def pull_destinations(token: str, region: str,
         }
         additional = {k: v for k, v in cfg.items() if k not in skip}
 
+        # RFC destinations don't use URL — the target host lives in
+        # JCo properties (jco.client.ashost / .sysnr / .client / .user
+        # / .passwd).  Synthesise a host string into d.url so the
+        # downstream linker (`_hostname_in_url`) finds the target the
+        # same way it finds HTTP destinations.
+        dtype = (cfg.get("Type") or cfg.get("type") or "HTTP")
+        url = (cfg.get("URL") or cfg.get("url") or "")
+        if not url and dtype.upper() == "RFC":
+            ashost = (cfg.get("jco.client.ashost")
+                      or cfg.get("ashost") or "")
+            sysnr = (cfg.get("jco.client.sysnr")
+                     or cfg.get("sysnr") or "")
+            if ashost:
+                # bare host[:sysnr-port] form — _hostname_in_url
+                # already strips :port to get just the host
+                url = f"{ashost}:33{sysnr}" if sysnr else ashost
+        # RFC destinations also carry user / password in JCo-namespaced
+        # keys; the BTP /destinations endpoint only exposes them when
+        # the token has ApiAccess scope.
+        if not user:
+            user = (cfg.get("jco.client.user")
+                    or cfg.get("ashost.user") or "")
+        if not password:
+            password = (cfg.get("jco.client.passwd")
+                        or cfg.get("Passwd") or cfg.get("passwd") or "")
+            cleartext = bool(password)
+
         d = BTPDestination(
             subaccount_uuid=subaccount_uuid,
             name=name,
-            type=(cfg.get("Type") or cfg.get("type") or "HTTP"),
-            url=(cfg.get("URL") or cfg.get("url") or ""),
+            type=dtype,
+            url=url,
             proxy_type=(cfg.get("ProxyType") or cfg.get("proxyType") or ""),
             authentication=auth,
             user=user,
@@ -634,6 +661,68 @@ def _hostname_in_url(url: str) -> str:
         return ""
 
 
+# IPv4 detector for SID synthesis — a hostname like 'host.example.com'
+# becomes 'BTPDISC_HOST', an IP like '192.168.2.209' becomes
+# 'BTPDISC_192_168_2_209' so two destinations sharing the same target
+# IP merge onto one synthetic node.
+_IP_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+
+
+def _materialise_btp_target(state: SAPMAPState,
+                              host: str,
+                              d: BTPDestination) -> str:
+    """Create (or return) a placeholder SAPNode for a BTP destination
+    whose target host isn't on the map yet.  Returns the SID.
+
+    The node gets `discovered_via_btp = True` so the GUI can render it
+    distinctly until the operator runs Test Connection / scan and
+    promotes it.  Reuses an existing placeholder when one already
+    matches the host (so 3 destinations to the same back-end
+    materialise just one node).
+    """
+    # Reuse if a previous destination already created the placeholder
+    for sid, node in state.nodes.items():
+        if not node.discovered_via_btp:
+            continue
+        if (node.ip or "").lower() == host or (node.hostname or "").lower() == host:
+            return sid
+
+    # Synthesise a stable SID from the host
+    is_ip = bool(_IP_RE.match(host))
+    slug = (host.replace(".", "_").replace("-", "_")
+                 .replace(":", "_").upper())
+    sid_base = f"BTPDISC_{slug}"
+    sid = sid_base
+    n = 2
+    while sid in state.nodes:
+        sid = f"{sid_base}_{n}"
+        n += 1
+
+    platform = ((d.additional_properties or {})
+                 .get("sap-platform", "")).upper()
+    additional = d.additional_properties or {}
+    sysnr = (additional.get("jco.client.sysnr")
+             or additional.get("sysnr") or "")
+    client = (additional.get("jco.client.client")
+              or additional.get("client") or "")
+    inst = []
+    if sysnr:
+        inst.append(InstanceInfo(
+            instance_nr=str(sysnr).zfill(2),
+            ip=host if is_ip else ""))
+    placeholder = SAPNode(
+        sid=sid,
+        system_type=platform or "UNKNOWN",
+        hostname="" if is_ip else host,
+        ip=host if is_ip else "",
+        instances=inst,
+        clients=[{"nr": str(client).zfill(3)}] if client else [],
+        discovered_via_btp=True,
+    )
+    state.nodes[sid] = placeholder
+    return sid
+
+
 def link_destinations_to_onprem(state: SAPMAPState,
                                   subaccount: BTPSubaccountNode) -> int:
     """For every destination on the subaccount with a captured
@@ -676,7 +765,16 @@ def link_destinations_to_onprem(state: SAPMAPState,
                 match_sid, match_via = sid, "hostname"
                 break
         if not match_sid:
-            continue
+            # No on-prem match — materialise a placeholder SAPNode so
+            # the destination still shows up on the map.  Skip
+            # obviously-bogus loopback hosts (localhost / 127.x) since
+            # they're misconfigurations, not real targets.
+            looped = (target_host in ("localhost", "127.0.0.1")
+                      or target_host.startswith("127."))
+            if looped:
+                continue
+            match_sid = _materialise_btp_target(state, target_host, d)
+            match_via = "btp-discovery"
         d.linked_target_sid = match_sid
         d.linked_via = match_via
 

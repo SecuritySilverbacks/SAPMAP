@@ -531,6 +531,48 @@ def test_pull_destinations_no_password_when_scope_absent():
     assert dests[0].password == ""
 
 
+def test_pull_destinations_captures_rfc_type_via_jco_props():
+    """RFC destinations don't carry a URL field — the target host
+    lives in jco.client.ashost.  Verify the puller synthesises a
+    host-bearing url so the linker can match it."""
+    listing = json.dumps([
+        {"Name": "BTP_to_S4H", "Type": "RFC"}
+    ]).encode()
+    detail = json.dumps({
+        "destinationConfiguration": {
+            "Name": "BTP_to_S4H", "Type": "RFC",
+            "Description": "to S4H",
+            "ProxyType": "OnPremise",
+            "Authentication": "BasicAuthentication",
+            "jco.client.ashost": "192.168.2.209",
+            "jco.client.sysnr": "00",
+            "jco.client.client": "001",
+            "jco.client.user": "joris",
+            "jco.client.passwd": "MyPass",
+        }
+    }).encode()
+
+    def fake_get(url, token, **kw):
+        if "/subaccountDestinations" in url:
+            return (200, {}, listing)
+        return (200, {}, detail)
+
+    with patch("sap_btp._btp_get", side_effect=fake_get):
+        dests, err = pull_destinations("token", "eu10", "abcd-1234")
+    assert err == ""
+    assert len(dests) == 1
+    d = dests[0]
+    assert d.type == "RFC"
+    assert d.user == "joris"
+    assert d.password == "MyPass"
+    assert d.cleartext_captured is True
+    # URL synthesised from ashost + sysnr — host-only is enough for
+    # downstream `_hostname_in_url` to extract the IP.
+    assert "192.168.2.209" in d.url
+    assert d.additional_properties.get("jco.client.sysnr") == "00"
+    assert d.additional_properties.get("jco.client.client") == "001"
+
+
 def test_pull_destinations_handles_oauth_client_credentials():
     """OAuth2ClientCredentials destinations carry clientId + clientSecret
     instead of User + Password.  Both must surface as user / password
@@ -645,7 +687,10 @@ def test_link_to_onprem_dedupes_repeated_calls():
                and c.source_sid.startswith("BTP:")) == 1
 
 
-def test_link_to_onprem_skips_destinations_with_unknown_target():
+def test_link_to_onprem_materialises_placeholder_for_unknown_target():
+    """When the destination's host doesn't match any known on-prem
+    SAPNode, a placeholder node is created (discovered_via_btp=True)
+    so the destination still appears on the map."""
     state = _state_with_s4p()
     sub = BTPSubaccountNode(uuid="abcd-1234", region="eu10")
     sub.destinations.append(BTPDestination(
@@ -655,9 +700,32 @@ def test_link_to_onprem_skips_destinations_with_unknown_target():
         user="u", password="p", cleartext_captured=True,
     ))
     linked = link_destinations_to_onprem(state, sub)
-    assert linked == 0
+    # Cleartext linked — placeholder node exists and got the cred
+    assert linked == 1
+    # Existing on-prem node was not touched
     assert not any(c.username == "u"
                    for c in state.nodes["S4P"].credentials)
+    # Placeholder appears in the map state with the discovery flag set
+    placeholder = next(
+        (n for n in state.nodes.values() if n.discovered_via_btp), None)
+    assert placeholder is not None
+    assert placeholder.hostname == "nowhere.example.com"
+
+
+def test_link_to_onprem_skips_loopback_destinations():
+    """localhost / 127.x targets are misconfigurations, not real
+    back-ends — no placeholder, no credential linkage."""
+    state = _state_with_s4p()
+    sub = BTPSubaccountNode(uuid="abcd-1234", region="eu10")
+    sub.destinations.append(BTPDestination(
+        subaccount_uuid="abcd-1234",
+        name="LOOPBACK", url="http://localhost:8080",
+        authentication="BasicAuthentication",
+        user="u", password="p", cleartext_captured=True,
+    ))
+    linked = link_destinations_to_onprem(state, sub)
+    assert linked == 0
+    assert not any(n.discovered_via_btp for n in state.nodes.values())
 
 
 def test_hostname_in_url_handles_http_and_rfc_forms():

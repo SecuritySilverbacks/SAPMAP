@@ -2299,6 +2299,17 @@ function updateMap() {
     let fill = '#16213e';
     let borderColor = '#2ecc71';
     let borderWidth = 4;
+    // BTP-discovery placeholder: muted fill + dashed amber border so
+    // operators can tell at a glance which nodes came from a BTP
+    // destination but haven't been independently scanned yet.
+    const isBtpDiscovered = !!n.discovered_via_btp;
+    let nodeDash = '';
+    if (isBtpDiscovered) {
+      fill = '#1f2333';
+      borderColor = '#a371f7';
+      borderWidth = 3;
+      nodeDash = ' stroke-dasharray="8,5"';
+    }
 
     if (n.is_production) fill = '#4a1a1a';
     else if (Object.keys(n.clients || {}).length > 0) fill = '#4a3a1a';
@@ -2335,7 +2346,14 @@ function updateMap() {
 
     // Box
     html += `<rect x="${x}" y="${y}" width="${BOX_W}" height="${BOX_H}" ` +
-      `rx="6" fill="${fill}" stroke="${borderColor}" stroke-width="${borderWidth}" />`;
+      `rx="6" fill="${fill}" stroke="${borderColor}" stroke-width="${borderWidth}"${nodeDash} />`;
+    if (isBtpDiscovered) {
+      // Tiny "via BTP" tag in the top-right corner so the dashed
+      // border isn't the only visual signal.
+      html += `<text x="${x+BOX_W-8}" y="${y+18}" text-anchor="end" ` +
+        `font-size="10" fill="#a371f7" font-family="monospace" ` +
+        `font-weight="bold">via BTP</text>`;
+    }
 
     // Header band
     html += `<rect x="${x}" y="${y}" width="${BOX_W}" height="28" rx="6" fill="${borderColor}" opacity="0.25" />`;

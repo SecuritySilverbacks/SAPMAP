@@ -247,6 +247,12 @@ class SAPNode:
     copyfail_root_obtained: bool = False # True after successful root command execution
     copyfail_kernel: str = ""            # kernel version string from uname -r
 
+    # Discovery provenance.  Set when a node is materialised purely
+    # from a BTP destination (no scanner / RFC observation yet) so the
+    # GUI can render it as an unverified placeholder until the
+    # operator runs Test Connection / scan against it.
+    discovered_via_btp: bool = False
+
     # Computed helpers
     def has_access(self) -> bool:
         """True if we have any working credentials or created users."""
@@ -351,6 +357,7 @@ class SAPNode:
             "copyfail_vulnerable": self.copyfail_vulnerable,
             "copyfail_root_obtained": self.copyfail_root_obtained,
             "copyfail_kernel": self.copyfail_kernel,
+            "discovered_via_btp": self.discovered_via_btp,
         }
 
     @classmethod
@@ -406,6 +413,7 @@ class SAPNode:
             copyfail_vulnerable=d.get("copyfail_vulnerable", False),
             copyfail_root_obtained=d.get("copyfail_root_obtained", False),
             copyfail_kernel=d.get("copyfail_kernel", ""),
+            discovered_via_btp=d.get("discovered_via_btp", False),
         )
         return node
 
