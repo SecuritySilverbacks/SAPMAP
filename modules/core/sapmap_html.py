@@ -708,6 +708,7 @@ body {
   <div class="ctx-group">
     <div class="ctx-item">&#128225; Scanning</div>
     <div class="ctx-sub">
+      <div class="ctx-item" data-action="standard_scan">&#128270; Standard Scan (fingerprint host)</div>
       <div class="ctx-item" data-action="rfc_system_info">&#128225; RFC System Info</div>
       <div class="ctx-item" data-action="check_gw">&#128270; Check GW Vulnerability</div>
       <div class="ctx-item" data-action="check_ms">&#128270; Check MS Betrusted (CVE-2020-6207)</div>
@@ -2869,6 +2870,7 @@ function showCtxMenu(e, sid) {
     'check_copyfail':   !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
     'exploit_copyfail': !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
     'deep_scan':        true,                       // always available
+    'standard_scan':    !!n.discovered_via_btp,     // BTP placeholders only
     'retrieve_rfcs':    hasCreds,                   // need credentials/access
     'test_rfcs':        hasCreds && hasRFCs,        // need access + existing RFCs
     'read_java_destinations': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy),
@@ -3410,6 +3412,8 @@ async function ctxAction(action) {
       await api('POST', `node/${sid}/lpe`); break;
     case 'deep_scan':
       await api('POST', `node/${sid}/deep_scan`); break;
+    case 'standard_scan':
+      await api('POST', `node/${sid}/standard_scan`); break;
     case 'retrieve_rfcs':
       await api('POST', `node/${sid}/retrieve_rfcs`); break;
     case 'test_rfcs':
