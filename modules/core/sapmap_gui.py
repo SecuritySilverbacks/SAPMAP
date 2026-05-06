@@ -6552,9 +6552,28 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     conn.tested = True
                     print(f"[-] BTP test: {conn.check_error}")
                     return
+                # When the destination URL has no path (or just "/"), the
+                # ICF root usually answers 404 even for valid creds.
+                # Append the SAP GUI-for-HTML probe path with the
+                # destination's client so basic-auth actually fires.
+                # 401 means "wrong credential", 403/200 mean "credential
+                # accepted (but maybe no permission for webgui)".  An
+                # operator-supplied path (e.g. /sap/myservice) is left
+                # alone.
+                from urllib.parse import urlparse, urlunparse
+                probe_url = url
+                parts = urlparse(url)
+                if not parts.path or parts.path in ("/", ""):
+                    client = (conn.client or "000")
+                    probe_path = "/sap/bc/gui/sap/its/webgui"
+                    probe_query = (
+                        f"sap-client={client}&sap-language=EN")
+                    probe_url = urlunparse((
+                        parts.scheme, parts.netloc,
+                        probe_path, "", probe_query, ""))
                 t0 = _t.time()
                 try:
-                    req = urllib.request.Request(url, method="GET")
+                    req = urllib.request.Request(probe_url, method="GET")
                     tok = base64.b64encode(
                         f"{user}:{pwd}".encode("utf-8")).decode("ascii")
                     req.add_header("Authorization", f"Basic {tok}")
@@ -6567,22 +6586,35 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         code = r.getcode()
                         conn.latency_ms = int((_t.time() - t0) * 1000)
                         conn.ping_ok = True
-                        conn.logon_successful = code < 400
+                        conn.logon_successful = code != 401
                         conn.logon_tested = True
-                        print(f"[+] BTP test: HTTP {code} from {url} "
-                              f"({conn.latency_ms}ms) — basic-auth OK")
+                        print(f"[+] BTP test: HTTP {code} from "
+                              f"{probe_url} ({conn.latency_ms}ms) — "
+                              f"basic-auth OK")
                 except urllib.error.HTTPError as he:
                     conn.latency_ms = int((_t.time() - t0) * 1000)
                     conn.ping_ok = True
-                    conn.logon_successful = he.code < 400
+                    # 401 = wrong credential.  403 = creds OK but
+                    # missing S_ICF / S_SERVICE for webgui — still a
+                    # valid logon.  Anything else < 500 also counts
+                    # the basic-auth as accepted (the ICF responder
+                    # ran past the auth challenge).
+                    conn.logon_successful = (he.code != 401
+                                              and he.code < 500)
                     conn.logon_tested = True
                     conn.check_error = f"HTTP {he.code}"
-                    print(f"[-] BTP test: HTTP {he.code} from {url} "
-                          f"({conn.latency_ms}ms) — basic-auth "
-                          f"{'OK' if conn.logon_successful else 'rejected'}")
+                    verdict = ("rejected" if he.code == 401
+                                else ("OK (no service auth)"
+                                       if he.code == 403
+                                       else "OK"
+                                       if conn.logon_successful
+                                       else "server error"))
+                    print(f"[-] BTP test: HTTP {he.code} from "
+                          f"{probe_url} ({conn.latency_ms}ms) — "
+                          f"basic-auth {verdict}")
                 except Exception as e:
                     conn.check_error = str(e)[:200]
-                    print(f"[-] BTP test: {url} unreachable — "
+                    print(f"[-] BTP test: {probe_url} unreachable — "
                           f"{conn.check_error}")
                 conn.tested = True
 
