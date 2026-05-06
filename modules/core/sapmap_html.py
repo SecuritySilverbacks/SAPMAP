@@ -6370,6 +6370,7 @@ function resetLayout() {
   viewBox.x = 0; viewBox.y = 0; viewBox._nodeCount = 0;
   Object.values(mapState.nodes || {}).forEach(n => { n._x = null; n._y = null; });
   Object.values(mapState.scc_nodes || {}).forEach(sn => { sn._x = null; sn._y = null; });
+  Object.values(mapState.btp_subaccounts || {}).forEach(bn => { bn._x = null; bn._y = null; });
   updateMap();
 }
 
@@ -6392,6 +6393,23 @@ function _loSortedNodeKeys() {
   return Object.keys(nodes).sort();
 }
 
+// Place BTP subaccount nodes in a horizontal strip starting at
+// (xStart, yStart) and return the vertical space they consumed
+// (0 when there are none).  Every alternative layout calls this
+// first so the cloud tier never collides with on-prem clusters.
+function _loPlaceBtpTier(xStart, yStart) {
+  const btp = mapState.btp_subaccounts || {};
+  const uuids = Object.keys(btp).sort();
+  if (!uuids.length) return 0;
+  uuids.forEach((u, i) => {
+    const obj = btp[u];
+    if (!obj) return;
+    obj._x = xStart + i * (_LO_BOX_W + _LO_MARGIN);
+    obj._y = yStart;
+  });
+  return _LO_BOX_H + _LO_MARGIN * 2;
+}
+
 function layoutCircle() {
   const sids = _loSortedNodeKeys();
   const sccHosts = Object.keys(mapState.scc_nodes || {}).sort();
@@ -6405,8 +6423,10 @@ function layoutCircle() {
   const total = allItems.length;
   const circ = total * (_LO_BOX_W + _LO_MARGIN);
   const r = Math.max(360, circ / (2 * Math.PI));
+  // BTP cloud tier sits above the ring so it doesn't overlap centre / spokes.
+  const btpTier = _loPlaceBtpTier(_LO_MARGIN, _LO_MARGIN);
   const cx = r + _LO_BOX_W;
-  const cy = r + _LO_BOX_H;
+  const cy = btpTier + r + _LO_BOX_H;
   allItems.forEach(({obj}, i) => {
     const angle = (2 * Math.PI * i) / total - Math.PI / 2;
     _loCenter(obj, cx + r * Math.cos(angle), cy + r * Math.sin(angle));
@@ -6438,8 +6458,10 @@ function layoutStar() {
     ...sccHosts.map(h => ({ obj: (mapState.scc_nodes||{})[h] })),
   ];
   const r = Math.max(360, spokes.length * (_LO_BOX_W + _LO_MARGIN) / (2 * Math.PI));
+  // BTP cloud tier sits above the hub-and-spoke pattern.
+  const btpTier = _loPlaceBtpTier(_LO_MARGIN, _LO_MARGIN);
   const cx = r + _LO_BOX_W;
-  const cy = r + _LO_BOX_H;
+  const cy = btpTier + r + _LO_BOX_H;
   if (hub) _loCenter(nodes[hub], cx, cy);
   spokes.forEach(({obj}, i) => {
     const angle = (2 * Math.PI * i) / spokes.length - Math.PI / 2;
@@ -6498,9 +6520,11 @@ function layoutHierarchy() {
   const xSpacing = _LO_BOX_W + _LO_MARGIN;
   const maxRow = Math.max(...layerKeys.map(k => buckets[k].length));
   const rowWidth = maxRow * xSpacing;
+  // BTP cloud tier sits above the on-prem hierarchy.
+  const btpTier = _loPlaceBtpTier(_LO_MARGIN, _LO_MARGIN);
   layerKeys.forEach((lk, layerIdx) => {
     const row = buckets[lk].sort();
-    const yC = _LO_MARGIN + layerIdx * ySpacing + _LO_BOX_H / 2;
+    const yC = _LO_MARGIN + btpTier + layerIdx * ySpacing + _LO_BOX_H / 2;
     const xPad = (rowWidth - row.length * xSpacing) / 2;
     row.forEach((sid, i) => {
       const xC = _LO_MARGIN + xPad + i * xSpacing + _LO_BOX_W / 2;
@@ -6512,7 +6536,7 @@ function layoutHierarchy() {
   if (sccHosts.length) {
     const sccX = _LO_MARGIN + rowWidth + _LO_MARGIN + _LO_BOX_W / 2;
     sccHosts.forEach((h, i) => {
-      const yC = _LO_MARGIN + i * (_LO_BOX_H + _LO_MARGIN) + _LO_BOX_H / 2;
+      const yC = _LO_MARGIN + btpTier + i * (_LO_BOX_H + _LO_MARGIN) + _LO_BOX_H / 2;
       _loCenter((mapState.scc_nodes||{})[h], sccX, yC);
     });
   }
@@ -6554,10 +6578,13 @@ function layoutByStack() {
   const populated = order.filter(b => clusters[b].length > 0);
   const xSpacing = _LO_BOX_W + _LO_MARGIN * 2;
   const ySpacing = _LO_BOX_H + _LO_MARGIN;
+  // Reserve a cloud-tier strip at the top for BTP subaccount nodes
+  // so the on-prem stack columns don't end up underneath them.
+  const btpTier = _loPlaceBtpTier(_LO_MARGIN, _LO_MARGIN);
   populated.forEach((b, colIdx) => {
     clusters[b].sort().forEach((id, rowIdx) => {
       const xC = _LO_MARGIN + colIdx * xSpacing + _LO_BOX_W / 2;
-      const yC = _LO_MARGIN + 30 + rowIdx * ySpacing + _LO_BOX_H / 2;
+      const yC = _LO_MARGIN + 30 + btpTier + rowIdx * ySpacing + _LO_BOX_H / 2;
       const obj = (b === 'SCC')
         ? (mapState.scc_nodes || {})[id]
         : nodes[id];
