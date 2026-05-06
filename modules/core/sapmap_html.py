@@ -4202,8 +4202,8 @@ function showBTPDetail(uuid) {
     const pwBlock = d.password ? `
       <div style="font-size:11px;margin-top:4px;display:flex;align-items:center;gap:6px">
         <span style="color:#8b949e">Password:</span>
-        <code id="${pwId}" style="background:#161b22;padding:2px 6px;border-radius:3px;font-family:monospace;color:#f85149;user-select:text">${escHtml(d.password)}</code>
-        <button onclick="navigator.clipboard.writeText(${JSON.stringify(d.password)});this.textContent='copied';setTimeout(()=>this.textContent='copy',1200)" style="background:#21262d;border:1px solid #30363d;color:#e6edf3;padding:2px 8px;border-radius:3px;font-size:10px;cursor:pointer">copy</button>
+        <code id="${pwId}" style="background:#161b22;padding:2px 6px;border-radius:3px;font-family:monospace;color:#f85149;user-select:text;word-break:break-all">${escHtml(d.password)}</code>
+        <button data-pw="${escHtml(d.password)}" onclick="navigator.clipboard.writeText(this.dataset.pw);this.textContent='copied';setTimeout(()=>this.textContent='copy',1200)" style="background:#21262d;border:1px solid #30363d;color:#e6edf3;padding:2px 8px;border-radius:3px;font-size:10px;cursor:pointer">copy</button>
       </div>` : '';
     return `<div style="border-left:3px solid #5dade2;padding:6px 8px;margin:6px 0;background:#0d1117">
       <div style="font-weight:bold;font-family:monospace">${escHtml(d.name || '?')}</div>
