@@ -779,6 +779,19 @@ def link_destinations_to_onprem(state: SAPMAPState,
         d.linked_via = match_via
 
         target = state.nodes[match_sid]
+        # Read mandant from JCo property when present; HTTP destinations
+        # don't carry it so we still fall back to "000" so RFC retries
+        # have a sane default.
+        dest_client = ((d.additional_properties or {})
+                        .get("jco.client.client", "")
+                        or (d.additional_properties or {}).get("client", "")
+                        or "")
+        dest_client = str(dest_client).zfill(3) if dest_client else "000"
+        dest_sysnr = ((d.additional_properties or {})
+                       .get("jco.client.sysnr", "")
+                       or (d.additional_properties or {}).get("sysnr", "")
+                       or "")
+        dest_sysnr = str(dest_sysnr).zfill(2) if dest_sysnr else ""
         # Push captured creds onto the target node — dedupe by
         # (username, password) so re-runs don't duplicate.
         if d.cleartext_captured and d.user and d.password:
@@ -788,7 +801,7 @@ def link_destinations_to_onprem(state: SAPMAPState,
             if not already:
                 target.credentials.append(Credentials(
                     username=d.user, password=d.password,
-                    client="000", verified=False,
+                    client=dest_client, verified=False,
                 ))
                 linked += 1
                 # Also drop a finding on the target SAPNode so the
@@ -836,9 +849,10 @@ def link_destinations_to_onprem(state: SAPMAPState,
                 source_host=subaccount.subdomain or subaccount.uuid,
                 target_sid=match_sid,
                 target_host=target_host,
+                target_instance_nr=dest_sysnr,
                 destination_name=synthetic_dest,
                 rfc_user=d.user,
-                client="000",
+                client=dest_client,
                 conn_type="http" if d.url.startswith("http") else "rfc",
                 http_url=d.url if d.url.startswith("http") else "",
                 http_auth_type=d.authentication,
