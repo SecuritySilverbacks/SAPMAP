@@ -178,6 +178,76 @@ def test_read_oa2c_falls_back_to_token_url_field():
     assert profiles[0]["token_endpoint"] == "https://legacy/oauth/token"
 
 
+def test_read_oa2c_falls_back_to_oa2c_config_when_oa2c_client_errors():
+    """User's S4H showed OA2C_CLIENT raising RFC_READ_TABLE message
+    AD718 (TABLE_WITHOUT_DATA).  The reader should fall through to
+    the next table-name variant instead of giving up."""
+    node = SAPNode(sid="S4H", system_type="ABAP",
+                    hostname="s4hanadev", ip="192.168.2.209")
+
+    def fake(node, table_name, **kw):
+        if table_name == "OA2C_CLIENT":
+            raise RuntimeError(
+                "RFC_ABAP_EXCEPTION: ID:AD Type:E Number:718 OA2C_CLIENT")
+        if table_name == "OA2C_CONFIG":
+            return [{"CLIENT_UUID": "BB", "CLIENT_ID": "fallback-cid",
+                     "TOKEN_ENDPOINT": "https://fb/oauth/token"}]
+        return []
+
+    with patch("sapmap_rfc.read_table", side_effect=fake):
+        profiles = read_oa2c_profiles(node)
+    assert len(profiles) == 1
+    assert profiles[0]["client_id"] == "fallback-cid"
+
+
+def test_read_oa2c_heuristically_matches_kernel_specific_column_names():
+    """A kernel patch that names the token endpoint
+    ``OAUTH2_TOKEN_URL`` (substring-matches our hint ``TOKEN_URL``)
+    should still be picked up — that's the whole point of dropping
+    the hardcoded field list."""
+    node = SAPNode(sid="S4H", system_type="ABAP",
+                    hostname="s4hanadev", ip="192.168.2.209")
+    rows = {
+        "OA2C_CLIENT": [{
+            "CONFIG_ID":         "CC",   # alt CLIENT_UUID name
+            "CLIENT_ID":         "cid",
+            "OAUTH2_TOKEN_URL":  "https://k/oauth/token",
+            "CLIENT_SECRET_METHOD": "BASIC",
+        }],
+        "OA2C_CLIENT_EXT": [],
+    }
+    with _patch_read_table(rows):
+        profiles = read_oa2c_profiles(node)
+    assert len(profiles) == 1
+    p = profiles[0]
+    assert p["client_uuid"] == "cc"
+    assert p["token_endpoint"] == "https://k/oauth/token"
+    assert p["auth_method"] == "BASIC"
+
+
+def test_read_oa2c_no_field_list_passed_to_read_table():
+    """RFC_READ_TABLE message AD718 fires when ANY pre-listed FIELDS
+    entry doesn't exist on the target kernel.  The reader must call
+    read_table with fields=None (i.e. all columns) so kernel-specific
+    column drift can't blow up the call."""
+    node = SAPNode(sid="S4H", system_type="ABAP",
+                    hostname="s4hanadev", ip="192.168.2.209")
+    seen_field_args = []
+
+    def fake(node, table_name, **kw):
+        seen_field_args.append(kw.get("fields"))
+        return []
+
+    with patch("sapmap_rfc.read_table", side_effect=fake):
+        read_oa2c_profiles(node)
+    # Every read_table invocation must have fields=None — no
+    # pre-listed columns.  At least one call must have happened
+    # (the OA2C_CLIENT probe).
+    assert seen_field_args, "read_table was never called"
+    assert all(f is None for f in seen_field_args), (
+        f"reader still pre-lists fields on some call: {seen_field_args}")
+
+
 # ---- end-to-end: harvester sees OA2C profile + secstore secret ------
 
 def test_harvester_picks_up_oa2c_profile_with_matched_secret():
