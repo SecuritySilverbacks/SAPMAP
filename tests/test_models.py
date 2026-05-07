@@ -314,3 +314,21 @@ def test_state_stats_pwned_zero_when_no_sccs_no_pwned_nodes():
     state = SAPMAPState()
     state.add_node(SAPNode(sid="S4D", system_type="ABAP", pwned=False))
     assert state.stats()["pwned"] == 0
+
+
+def test_state_stats_pwned_includes_btp_subaccounts():
+    """Same off-by-one risk as SCCs: the map draws a ⚡ over any
+    BTPSubaccountNode.pwned=True, so the status-bar Pwned counter
+    has to include those or operator sees N+k bolts vs N count
+    (operator screenshot showed S4H + BTP both ⚡ but counter said 1)."""
+    from sapmap_models import BTPSubaccountNode
+    state = SAPMAPState()
+    state.add_node(SAPNode(sid="S4H", system_type="ABAP", pwned=True))
+    state.btp_subaccounts["aa-bb"] = BTPSubaccountNode(
+        uuid="aa-bb", subdomain="researchlab",
+        region="eu10", pwned=True)
+    state.btp_subaccounts["cc-dd"] = BTPSubaccountNode(
+        uuid="cc-dd", subdomain="empty", region="eu10", pwned=False)
+    s = state.stats()
+    # 1 SAP pwned + 1 BTP pwned = 2 (SAP-only count would be 1)
+    assert s["pwned"] == 2
