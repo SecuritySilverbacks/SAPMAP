@@ -2559,6 +2559,28 @@ function updateMap() {
       html += `<text x="${x+BOX_W-14}" y="${y+BOX_H-10}" text-anchor="middle" font-size="10" fill="#fff">${vulnCount}</text>`;
     }
 
+    // BTP-pivot hint: when SecStore extraction recovered an OAuth
+    // 2.0 client_secret (/OA2C/CS_<UUID>_NN row), surface a small
+    // cloud icon in the bottom-left corner so the operator notices
+    // the system has unexploited cloud-pivot material — even when
+    // the harvest hasn't been kicked off yet.  Hover for the next
+    // step.
+    const _hasOauthSecret = (n.secstore_entries || []).some(
+      e => e && e.category === 'oauth2_client');
+    if (_hasOauthSecret) {
+      const cx = x + 18, cy = y + BOX_H - 14;
+      html += `<g pointer-events="all" style="cursor:help">`
+           + `<title>OAuth 2.0 client_secret in SecStore — choose `
+           + `Exploitation → Harvest BTP Credentials to read `
+           + `destinations from connected BTP tenants</title>`
+           + `<circle cx="${cx}" cy="${cy}" r="11" fill="#0e2636" `
+           + `stroke="#a371f7" stroke-width="1.5" />`
+           + `<text x="${cx}" y="${cy+5}" text-anchor="middle" `
+           + `font-size="14" fill="#a371f7" pointer-events="none">`
+           + `&#9729;</text>`
+           + `</g>`;
+    }
+
     html += '</g>';
   });
 
