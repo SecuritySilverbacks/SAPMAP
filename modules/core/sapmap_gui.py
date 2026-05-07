@@ -2567,6 +2567,16 @@ def create_app(api: SAPMAPApi) -> Bottle:
         node.credentials.append(creds)
         if creds.verified:
             print(f"[+] Credentials saved and verified for {sid}")
+            # Auto-run the capability analyser — every verified RFC
+            # login gives us enough access to read the auth tables
+            # and translate the user's privilege set into
+            # business-language capabilities.
+            try:
+                import sapmap_capability_analyser
+                sapmap_capability_analyser.analyse(node, creds)
+            except Exception as e:
+                print(f"[-] {sid}: capability analyser auto-run "
+                      f"failed — {e!s}")
         else:
             print(f"[!] Credentials saved for {sid} but could NOT verify — "
                   f"check the error above. User creation will likely fail.")
@@ -4041,9 +4051,58 @@ def create_app(api: SAPMAPApi) -> Bottle:
             if created:
                 api.state.track_created_user(created)
                 sapmap_exploit._post_exploit_enrichment(node, api.state, proven_type="ABAP")
+                # Auto-run the capability analyser — operator just
+                # owned a new user; surfacing what that user can
+                # actually do is the natural next step.
+                try:
+                    import sapmap_capability_analyser
+                    sapmap_capability_analyser.analyse(node)
+                except Exception as e:
+                    print(f"[-] {sid}: capability analyser auto-run "
+                          f"failed — {e!s}")
 
         _bg(f"{sid}:create_user", "Create User", _run)
         return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/analyse_capabilities", method="POST")
+    def node_analyse_capabilities(sid):
+        """Run the role / profile capability analyser against every
+        user we own on this node.  Auto-runs after create_user and
+        verified credential save; this endpoint exposes the same
+        action for explicit invocation (operator wants to refresh
+        after a privilege change, or wants to opt into the COUNT(*)
+        row probe that's skipped on the auto-run path)."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        probe = bool(data.get("probe_row_counts", False))
+
+        def _run():
+            try:
+                import sapmap_capability_analyser
+                sapmap_capability_analyser.analyse(
+                    node, probe_row_counts=probe)
+            except Exception as e:
+                print(f"[-] {sid}: capability analyser failed — "
+                      f"{e!s}")
+
+        _bg(f"{sid}:analyse_capabilities",
+            "Analyse user capabilities", _run)
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/capability_rules.yaml")
+    def capability_rules_yaml():
+        """Export the capability lookup table as YAML so customers
+        can extend it with site-specific Z-objects.  Read-only;
+        no per-engagement state."""
+        import sapmap_capability_analyser
+        response.content_type = "application/x-yaml; charset=utf-8"
+        response.set_header(
+            "Content-Disposition",
+            "attachment; filename=\"sapmap_capability_rules.yaml\"")
+        return sapmap_capability_analyser.export_rules_yaml()
 
     @app.route("/api/node/<sid>/lpe", method="POST")
     def node_lpe(sid):

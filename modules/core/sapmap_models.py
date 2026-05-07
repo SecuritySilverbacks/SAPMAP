@@ -262,6 +262,20 @@ class SAPNode:
     # to_dict() stays JSON-safe.
     oauth2_profiles: list = field(default_factory=list)
 
+    # Capability analyser results — what each pwned/credentialed user
+    # on this node can actually read/do, mapped from raw auth-object
+    # rows (AGR_USERS / AGR_1251 / UST04) to human-readable
+    # capabilities ("Vendor bank read", "GL detail read", "OS command
+    # execution").  Populated by sapmap_capability_analyser.analyse().
+    # One entry per user we own:
+    #   {username, client, capabilities: [{auth_object, fields,
+    #     capability, tables, severity}], blast_radius, summary}
+    capability_results: list = field(default_factory=list)
+    # Per-table COUNT(*) cache populated lazily by the row-count
+    # probe so a CISO-facing line "BSEG = 20.7M rows" stays cheap on
+    # repeat opens (BSEG is huge; uncached COUNT(*) burns seconds).
+    capability_row_counts: dict = field(default_factory=dict)
+
     # Computed helpers
     def has_access(self) -> bool:
         """True if we have any working credentials or created users."""
@@ -368,6 +382,8 @@ class SAPNode:
             "copyfail_kernel": self.copyfail_kernel,
             "discovered_via_btp": self.discovered_via_btp,
             "oauth2_profiles": list(self.oauth2_profiles),
+            "capability_results": list(self.capability_results),
+            "capability_row_counts": dict(self.capability_row_counts),
         }
 
     @classmethod
@@ -425,6 +441,9 @@ class SAPNode:
             copyfail_kernel=d.get("copyfail_kernel", ""),
             discovered_via_btp=d.get("discovered_via_btp", False),
             oauth2_profiles=list(d.get("oauth2_profiles", [])),
+            capability_results=list(d.get("capability_results", [])),
+            capability_row_counts=dict(
+                d.get("capability_row_counts", {})),
         )
         return node
 
