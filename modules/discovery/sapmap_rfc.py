@@ -1994,7 +1994,8 @@ def get_table_columns(node: SAPNode, table_name: str,
 
 def read_table(node: SAPNode, table_name: str, fields: list = None,
                where: str = "", max_rows: int = 500,
-               creds: Credentials = None) -> list:
+               creds: Credentials = None,
+               long_strings: bool = False) -> list:
     """Read data from an SAP table via RFC_READ_TABLE.
 
     Args:
@@ -2002,6 +2003,13 @@ def read_table(node: SAPNode, table_name: str, fields: list = None,
         fields: list of field names to retrieve
         where: WHERE clause (e.g., "BNAME = 'DDIC'")
         max_rows: maximum rows to return
+        long_strings: when True, set USE_ET_DATA_4_RETURN='X' on the
+            RFC_READ_TABLE call so the kernel returns rows in the
+            ET_DATA table whose WA is an unbounded STRING — bypasses
+            the standard 512-byte WA limit AND lets the kernel
+            include ABAP STRING / RAWSTRING / XSTRING columns that
+            it normally drops from DATA.  Newer S/4 kernels ship
+            with this; older ones ignore the flag and use DATA.
 
     Returns:
         list of dicts with field values
@@ -2025,6 +2033,8 @@ def read_table(node: SAPNode, table_name: str, fields: list = None,
                     options.append({"TEXT": chunk})
                     where = where[72:]
                 params["OPTIONS"] = options
+            if long_strings:
+                params["USE_ET_DATA_4_RETURN"] = "X"
 
             result = conn.call(RFC_READ_TABLE, **params)
 
@@ -2034,8 +2044,11 @@ def read_table(node: SAPNode, table_name: str, fields: list = None,
             field_offsets = [(int(f.get("OFFSET", 0)), int(f.get("LENGTH", 0)))
                             for f in field_meta]
 
-            # Parse data rows
-            data = result.get("DATA", [])
+            # ET_DATA wins when populated — its WA is STRING-typed so
+            # it carries values RFC_READ_TABLE's standard 512-byte WA
+            # would have truncated/omitted.  Falls through to DATA on
+            # kernels that don't honour USE_ET_DATA_4_RETURN.
+            data = result.get("ET_DATA") or result.get("DATA") or []
             for row in data:
                 wa = row.get("WA", "")
                 parts = wa.split("|")
