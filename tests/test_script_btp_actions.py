@@ -116,6 +116,28 @@ def test_mint_btp_token_carries_uaa_url_and_creds():
     assert body["uaa_url"].endswith("/oauth/token")
     assert body["client_id"] == "sb-cid!b1"
     assert body["client_secret"] == "raw-secret"
+    # from_harvest defaults to False so the existing manual flow
+    # still works exactly as before.
+    assert body.get("from_harvest") in (False, None, "")
+
+
+def test_mint_btp_token_passes_from_harvest_flag():
+    """`from_harvest: true` lets the demo playbook run end-to-end
+    without the operator having to copy creds out of the harvest
+    log into the mint step.  The action map must propagate it
+    plus an optional candidate_index."""
+    method, path, body, _ = _map_step(_step(
+        "mint_btp_token",
+        target="S4H",
+        from_harvest=True,
+        candidate_index=2))
+    assert (method, path) == ("POST", "/api/node/S4H/mint_btp_token")
+    assert body["from_harvest"] is True
+    assert body["candidate_index"] == 2
+    # Manual fields stay empty when from_harvest fills in for them.
+    assert body["uaa_url"] == ""
+    assert body["client_id"] == ""
+    assert body["client_secret"] == ""
 
 
 def test_mint_btp_token_supports_path_prefix_for_client_secret():

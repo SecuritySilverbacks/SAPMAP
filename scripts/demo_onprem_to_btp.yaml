@@ -75,23 +75,34 @@ steps:
     target: S4H
 
   # 6. Mint a BTP access token using a harvested OAuth client.
-  #    Fill in `uaa_url`, `client_id` and `client_secret` from the
-  #    harvest output (step 5).  The endpoint auto-enumerates the
-  #    bound subaccount's destinations after a successful mint, so
-  #    cleartext on-prem credentials sitting on the BTP side land
-  #    on the map automatically — no separate pull step needed.
+  #    `from_harvest: true` auto-picks the first candidate that step
+  #    5 produced — no manual copy-paste of uaa_url / client_id /
+  #    client_secret needed.  Use `candidate_index: N` to pick a
+  #    different one when the harvester returns multiple.
   #
-  #    Use `path:<file>` to load the client_secret from disk so the
-  #    YAML never has to carry a real secret in version control.
-  #
-  #    Replace the placeholders below with your tenant's values
-  #    (e.g. uaa_url ends in
-  #    `<subdomain>.authentication.<region>.hana.ondemand.com/oauth/token`).
+  #    The endpoint auto-enumerates the bound subaccount's
+  #    destinations after a successful mint, so cleartext on-prem
+  #    credentials sitting on the BTP side land on the map
+  #    automatically — no separate pull step needed.
   - action: mint_btp_token
     target: S4H
-    uaa_url: "https://<subdomain>.authentication.<region>.hana.ondemand.com/oauth/token"
-    client_id: "sb-clone…!b…|destination-xsappname!b…"
-    client_secret: "path:./loot/btp/sapmap_dest_secret.txt"
+    from_harvest: true
+    # candidate_index: 0   # uncomment + change to mint with a
+    #                      # specific candidate when there's more
+    #                      # than one BTP-bound profile
+
+  # ---------------------------------------------------------------
+  # Manual override — uncomment ONE of the two blocks above this
+  # line and use the explicit-values form below instead when you
+  # want to mint with a specific (uaa_url, client_id, client_secret)
+  # triplet.  `path:<file>` loads the secret from disk so it stays
+  # out of version control.
+  # ---------------------------------------------------------------
+  # - action: mint_btp_token
+  #   target: S4H
+  #   uaa_url: "https://<subdomain>.authentication.<region>.hana.ondemand.com/oauth/token"
+  #   client_id: "sb-clone…!b…|destination-xsappname!b…"
+  #   client_secret: "path:./loot/btp/sapmap_dest_secret.txt"
 
   - action: layout
     mode: hierarchy     # or: star | circle | stack | hierarchy | reset

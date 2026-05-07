@@ -3051,7 +3051,15 @@ def create_app(api: SAPMAPApi) -> Bottle:
         a BTP access token via XSUAA's `/oauth/token` and store it in
         api.btp_tokens.  Auto-fires the existing /api/btp/enumerate
         flow against the resulting region so the cloud topology
-        appears on the map without a second click."""
+        appears on the map without a second click.
+
+        Accepts ``from_harvest: true`` to bypass manual cred entry —
+        the endpoint runs harvest_btp_candidates inline, picks the
+        candidate at ``candidate_index`` (default 0), and mints with
+        that.  Lets a script chain harvest → mint without the
+        operator having to copy values out of one step's log into
+        the next step's YAML.
+        """
         from sap_onprem_to_btp import mint_btp_token
         from sap_btp import (extract_region_from_token,
                               decode_token_claims)
@@ -3063,6 +3071,50 @@ def create_app(api: SAPMAPApi) -> Bottle:
         uaa_url = (data.get("uaa_url") or "").strip()
         client_id = (data.get("client_id") or "").strip()
         client_secret = (data.get("client_secret") or "").strip()
+
+        # `from_harvest: true` mode — auto-pick a candidate from a
+        # fresh harvest pass.  Lets the demo playbook run end to
+        # end without the operator needing to copy creds out of
+        # the harvest log into the mint step.
+        from_harvest = data.get("from_harvest", False)
+        if isinstance(from_harvest, str):
+            from_harvest = from_harvest.lower() in (
+                "true", "1", "yes", "on")
+        if from_harvest and not (uaa_url and client_id and client_secret):
+            from sap_onprem_to_btp import harvest_btp_candidates
+            from sap_oa2c import read_oa2c_profiles
+            is_abap = "ABAP" in (node.system_type or "").upper()
+            if is_abap and not node.oauth2_profiles:
+                # Refresh OA2C in case the operator skipped a
+                # standalone harvest_btp_creds step.
+                try:
+                    node.oauth2_profiles = read_oa2c_profiles(node)
+                except Exception as e:
+                    print(f"[-] {sid}: implicit OA2C read failed — "
+                          f"{e!s}")
+            cands = harvest_btp_candidates(api.state, node)
+            idx = int(data.get("candidate_index", 0))
+            if not cands:
+                return json.dumps({"error":
+                    "from_harvest=true but harvest returned 0 "
+                    "candidates.  Check that retrieve_rfcs + "
+                    "download_secstore have run on this node, "
+                    "and that OA2C_CONFIG holds at least one "
+                    "*.hana.ondemand.com profile with a matching "
+                    "/OA2C/CS_<UUID>_NN secstore secret."})
+            if idx >= len(cands):
+                return json.dumps({"error":
+                    f"candidate_index={idx} out of range "
+                    f"(harvester returned {len(cands)} candidates)"})
+            picked = cands[idx]
+            uaa_url = picked["uaa_url"]
+            client_id = picked["client_id"]
+            client_secret = picked["client_secret"]
+            print(f"[*] {sid}: from_harvest picked candidate "
+                  f"#{idx} — {picked.get('source')!r} / "
+                  f"{picked.get('label', '?')[:60]} "
+                  f"(client_id={client_id[:40]}…, "
+                  f"region_hint={picked.get('region_hint', '?')})")
         missing = [name for name, val in (
             ("uaa_url", uaa_url),
             ("client_id", client_id),
