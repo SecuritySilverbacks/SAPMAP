@@ -92,3 +92,6 @@ steps:
     uaa_url: "https://<subdomain>.authentication.<region>.hana.ondemand.com/oauth/token"
     client_id: "sb-clone…!b…|destination-xsappname!b…"
     client_secret: "path:./loot/btp/sapmap_dest_secret.txt"
+
+  - action: layout
+    mode: hierarchy     # or: star | circle | stack | hierarchy | reset
