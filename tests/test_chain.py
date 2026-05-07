@@ -216,6 +216,82 @@ class TestFindAllChains:
         chains = find_all_chains(state, print_fn=lambda *a: None)
         assert len(chains) == 0
 
+    def test_btp_subaccount_with_cleartext_is_an_entry_point(self):
+        """Operator's symptom: 4 cleartext-captured BTP destinations
+        landed on a PRD-flagged S4H, but Analyse Chains returned
+        zero paths — BTP subaccounts weren't being collected as
+        entry points even when their pwned flag was True.  Synthetic
+        BTP→on-prem edges in state.connections were a dead-end
+        loop because BFS never seeded a "BTP:..." starting SID."""
+        from sapmap_models import BTPSubaccountNode
+
+        state = SAPMAPState()
+        # On-prem PRD target — the same shape we'd expect for an
+        # S4H box that an operator just minted creds for.
+        state.add_node(SAPNode(sid="S4H", ip="192.168.2.209",
+                                hostname="s4hanadev",
+                                is_production=True))
+        # BTP subaccount that captured a cleartext destination
+        # password during link_destinations_to_onprem.  pwned=True
+        # is the canonical "this BTP entry point is exploitable"
+        # signal.
+        sub = BTPSubaccountNode(
+            uuid="90a90189-aaaa-bbbb-cccc-dddddddddddd",
+            subdomain="researchlab-yehctg7m", region="eu10",
+            pwned=True)
+        state.btp_subaccounts[sub.uuid] = sub
+        # Synthetic edge written by link_destinations_to_onprem:
+        # source_sid uses the BTP:<uuid8> sentinel; tested=False
+        # so the analyser walks it with the UNTESTED flag.
+        state.connections.append(RFCConnection(
+            source_sid=f"BTP:{sub.uuid[:8]}",
+            source_host=sub.subdomain,
+            target_sid="S4H", target_host="s4hanadev",
+            destination_name=f"BTP:{sub.uuid[:8]}::DemoDest",
+            rfc_user="joris", client="001",
+            conn_type="http",
+            tested=False, logon_successful=False,
+        ))
+
+        chains = find_all_chains(state, print_fn=lambda *a: None)
+        assert len(chains) == 1, (
+            "BTP subaccount with cleartext destinations must be a "
+            "valid chain entry point")
+        c = chains[0]
+        # Chain reads BTP:<uuid8> → S4H, lands on production.
+        assert c.start_sid == f"BTP:{sub.uuid[:8]}"
+        assert c.end_sid == "S4H"
+        assert c.end_is_production is True
+        assert c.entry_method == "btp_destination_leak"
+        # Hop is annotated UNTESTED so the report reader knows the
+        # cred hasn't been validated yet (clicking Test Connection
+        # in the GUI would flip that).
+        assert "UNTESTED" in c.hops[0].method
+
+    def test_btp_subaccount_without_cleartext_is_not_an_entry_point(self):
+        """A BTP subaccount that's been enumerated but produced no
+        cleartext credentials (token lacked ApiAccess) MUST NOT seed
+        a chain — there's nothing exploitable on it."""
+        from sapmap_models import BTPSubaccountNode
+
+        state = SAPMAPState()
+        state.add_node(SAPNode(sid="S4H", ip="192.168.2.209",
+                                is_production=True))
+        sub = BTPSubaccountNode(
+            uuid="00000000-1111-2222-3333-444444444444",
+            subdomain="empty-sub", region="eu10",
+            pwned=False)   # <-- key bit
+        state.btp_subaccounts[sub.uuid] = sub
+        state.connections.append(RFCConnection(
+            source_sid=f"BTP:{sub.uuid[:8]}",
+            source_host=sub.subdomain,
+            target_sid="S4H", target_host="s4hanadev",
+            destination_name=f"BTP:{sub.uuid[:8]}::SomeDest",
+            tested=False, logon_successful=False,
+        ))
+        chains = find_all_chains(state, print_fn=lambda *a: None)
+        assert chains == []
+
 
 # ---------------------------------------------------------------------------
 # Ranking and filtering

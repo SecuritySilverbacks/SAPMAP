@@ -133,6 +133,8 @@ def _entry_description(method: str) -> str:
         "compromised": "Already compromised",
         "rfc_destination": "RFC destination with SAP_ALL",
         "secstore_direct": "SecStore password extraction",
+        "btp_destination_leak":
+            "BTP destination cleartext capture (cloud → on-prem)",
     }
     return descs.get(method, method)
 
@@ -177,13 +179,31 @@ def find_all_chains(state: SAPMAPState, max_depth: int = 6,
             adj[src] = []
         adj[src].append((tgt, conn))
 
-    # Find entry points
-    entries = []
+    # Find entry points.  Each entry is a (sid, entry_method) pair so
+    # we can mix on-prem SAPNode entries with BTP-subaccount entries
+    # without forcing a fake SAPNode shim through the rest of the
+    # pipeline.  BTP-source edges in state.connections use the
+    # sentinel "BTP:<uuid8>" SID, which the BFS already walks happily
+    # — we just need to seed BFS with those SIDs so they actually act
+    # as starting points.
+    entries: list = []   # [(sid, method), ...]
     for sid, node in state.nodes.items():
         if node.pwned or node.gw_vulnerable or node.ms_vulnerable:
-            entries.append(node)
+            entries.append((sid, _entry_method(node)))
         elif any(c.verified for c in node.credentials):
-            entries.append(node)
+            entries.append((sid, _entry_method(node)))
+
+    # BTP subaccounts with at least one cleartext destination captured
+    # are entry points: anyone with the right BTP token (or the
+    # service-key creds we just minted) can walk the synthetic
+    # BTP:<uuid8> → on-prem edges and reach whatever those
+    # destinations point at.  BTPSubaccountNode.pwned flips True the
+    # moment link_destinations_to_onprem captures the first
+    # cleartext credential.
+    for uuid, sub in (state.btp_subaccounts or {}).items():
+        if not getattr(sub, "pwned", False):
+            continue
+        entries.append((f"BTP:{uuid[:8]}", "btp_destination_leak"))
 
     if not entries:
         pf("[*] No entry points found (no compromised/exploitable systems)")
@@ -195,9 +215,7 @@ def find_all_chains(state: SAPMAPState, max_depth: int = 6,
     chains = []
     seen_paths = set()
 
-    for entry in entries:
-        entry_sid = entry.sid
-        entry_m = _entry_method(entry)
+    for entry_sid, entry_m in entries:
 
         # BFS: queue holds (current_sid, path_so_far)
         queue = deque()
