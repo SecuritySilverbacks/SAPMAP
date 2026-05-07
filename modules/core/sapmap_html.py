@@ -1718,7 +1718,27 @@ function updateMap() {
   const _btpCount = Object.keys(mapState.btp_subaccounts || {}).length;
 
   if (nodeKeys.length === 0 && _sccCount === 0 && _btpCount === 0) {
-    document.getElementById('empty-msg').style.display = 'block';
+    const _msg = document.getElementById('empty-msg');
+    // Swap the "start a scan" prompt for live-progress text once a
+    // scan is actually running — covers both the toolbar Scan
+    // button and the script-runner-driven `scan` action.
+    const _scanState = (mapState.scan_state || '').toLowerCase();
+    if (_scanState === 'running') {
+      _msg.textContent = 'A scan has started — discovered systems '
+                          + 'will appear here as soon as they are '
+                          + 'fingerprinted…';
+    } else if (_scanState === 'cancelled') {
+      _msg.textContent = 'Scan cancelled — no systems were '
+                          + 'discovered.  Start another scan or load '
+                          + 'a saved state.';
+    } else if (_scanState === 'error') {
+      _msg.textContent = 'Scan errored — check the console output. '
+                          + 'Start another scan or load a saved state.';
+    } else {
+      _msg.textContent = 'Start a scan or load a saved state to '
+                          + 'discover SAP systems';
+    }
+    _msg.style.display = 'block';
     document.getElementById('legend-bar').style.display = 'none';
     document.getElementById('map-svg').innerHTML = '';
     return;
