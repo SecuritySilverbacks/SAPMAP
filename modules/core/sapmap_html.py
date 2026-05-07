@@ -771,7 +771,6 @@ body {
       <div class="ctx-item" data-action="download_java_secstore">&#128273; Download Java Secure Store</div>
       <div class="ctx-item" data-action="view_java_secstore">&#128203; View Java Secure Store Results</div>
       <div class="ctx-item" data-action="download_table">&#128229; Download Table Data</div>
-      <div class="ctx-item" data-action="read_oa2c">&#9729; Read OA2C OAuth Profiles</div>
     </div>
   </div>
   <!-- Business Impact submenu -->
@@ -2887,9 +2886,6 @@ function showCtxMenu(e, sid) {
     'view_java_secstore':     n && n.java_secstore_checked,
     'download_table':     (isAbapStack && hasCreds) ||
                           (isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy)),
-    // OA2C tables only exist on ABAP stacks; needs RFC creds to call
-    // RFC_READ_TABLE.  Java-only systems hide it.
-    'read_oa2c':          isAbapStack && hasCreds,
     'impact_assess':      hasCreds,                   // need credentials/access
     'impact_view':        (n.impact_results||[]).length > 0,
     'impact_assess_java': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy),
@@ -3472,8 +3468,6 @@ async function ctxAction(action) {
       }
       break;
     }
-    case 'read_oa2c':
-      await api('POST', `node/${sid}/read_oa2c`); break;
     case 'impact_assess': {
       const n_ia = (mapState.nodes || {})[sid];
       // Collect all unique clients from credentials + created users
@@ -5542,9 +5536,10 @@ async function showHarvestBtpCredsModal(sid) {
         <button onclick="this.closest('.modal-overlay').remove()" style="background:transparent;border:0;color:#c9d1d9;font-size:22px;cursor:pointer">&times;</button>
       </div>
       <div style="font-size:12px;color:#8b949e;margin-bottom:10px;line-height:1.45">
-        Scans this node's already-captured artefacts (SM59 destinations to <code>*.hana.ondemand.com</code>, ABAP RSECTAB, Java SecStoreFS) for
-        BTP-shaped <code>(client_id, client_secret)</code> pairs.  Click <b>Mint</b> on a row to exchange at the destination's XSUAA <code>/oauth/token</code>
-        endpoint with <code>grant_type=client_credentials</code> and store the resulting BTP token; the cloud topology is then enumerated automatically.
+        Refreshes <code>OA2C_CLIENT</code> + <code>OA2C_CLIENT_EXT</code> (transaction <b>OA2C_CONFIG</b>) and scans this node's already-captured artefacts
+        (SM59 destinations to <code>*.hana.ondemand.com</code>, ABAP RSECTAB, Java SecStoreFS) for BTP-shaped <code>(client_id, client_secret)</code> pairs.
+        Click <b>Mint</b> on a row to exchange at the destination's XSUAA <code>/oauth/token</code> endpoint with <code>grant_type=client_credentials</code>
+        and store the resulting BTP token; the cloud topology is then enumerated automatically.
       </div>
       ${cands.length === 0 ? `
         <div style="padding:14px;background:#0d1117;border:1px dashed #30363d;border-radius:6px;text-align:center;color:#8b949e;font-size:12px">

