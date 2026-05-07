@@ -237,6 +237,44 @@ def _scc_section(state: SAPMAPState) -> list:
     return out
 
 
+def _btp_section(state: SAPMAPState) -> list:
+    """BTP subaccounts — what the cloud side gave up to us.
+
+    One row per subaccount with the headline numbers (destinations
+    captured, cleartext recovered, on-prem nodes linked).  Skipped
+    entirely when no subaccount has been enumerated."""
+    subs = (getattr(state, "btp_subaccounts", {}) or {})
+    if not subs:
+        return []
+    out = ["## SAP BTP subaccounts", ""]
+    out.append("| Subdomain | Region | Destinations | Cleartext | "
+               "Linked on-prem | Pwned |")
+    out.append("| --- | --- | --- | --- | --- | --- |")
+    for uuid, sub in sorted(
+            subs.items(),
+            key=lambda kv: (getattr(kv[1], "subdomain", "")
+                             or kv[0])):
+        dests = list(getattr(sub, "destinations", []) or [])
+        clear = sum(1 for d in dests
+                    if getattr(d, "cleartext_captured", False)
+                    or (isinstance(d, dict) and d.get(
+                        "cleartext_captured")))
+        linked = sum(1 for d in dests
+                     if (getattr(d, "linked_target_sid", "")
+                         or (isinstance(d, dict)
+                             and d.get("linked_target_sid"))))
+        pwned_mark = "⚡" if getattr(sub, "pwned", False) else "—"
+        sub_label = (getattr(sub, "subdomain", "")
+                     or getattr(sub, "display_name", "")
+                     or uuid[:8])
+        out.append(
+            f"| {_esc(sub_label)} | "
+            f"{_esc(getattr(sub, 'region', '') or '?')} | "
+            f"{len(dests)} | {clear} | {linked} | {pwned_mark} |")
+    out.append("")
+    return out
+
+
 def _derive_landscape_recommendations(state: SAPMAPState) -> list:
     """Inspect the whole landscape state and produce structural
     remediation guidance — independent of whether individual findings
@@ -566,6 +604,11 @@ def build_markdown_report(state: SAPMAPState,
         sections.append("---")
         sections.append("")
         sections.extend(scc_section)
+    btp_section = _btp_section(state)
+    if btp_section:
+        sections.append("---")
+        sections.append("")
+        sections.extend(btp_section)
     sections.append("---")
     sections.append("")
     sections.extend(_recommendations_section(state))
@@ -619,9 +662,16 @@ def _build_landscape_svg(state: SAPMAPState) -> str:
     """
     sap_nodes = list(state.nodes.values())
     scc_nodes = list((getattr(state, "scc_nodes", {}) or {}).values())
+    btp_subs = list(
+        (getattr(state, "btp_subaccounts", {}) or {}).values())
     items = [("sap", n) for n in sorted(sap_nodes, key=lambda n: n.sid)]
     items += [("scc", s) for s in sorted(scc_nodes,
                                           key=lambda s: getattr(s, "host", ""))]
+    # BTP subaccounts get listed alongside on-prem SAP / SCC; same
+    # rounded-rect grid layout, distinct cloud silhouette + sky-blue
+    # fill so the cloud tier is unmissable on the engagement map.
+    items += [("btp", b) for b in sorted(
+        btp_subs, key=lambda b: getattr(b, "uuid", ""))]
 
     if not items:
         return ('<div class="muted" style="text-align:center;padding:24px">'
@@ -642,23 +692,45 @@ def _build_landscape_svg(state: SAPMAPState) -> str:
     width = margin * 2 + cols * box_w + (cols - 1) * h_gap
     height = margin * 2 + rows * box_h + (rows - 1) * v_gap
 
-    # SID/host -> (cx, cy) so we can draw connection lines on top
+    # SID/host/uuid -> (cx, cy) so we can draw connection lines on top
     pos = {}
     for idx, (kind, node) in enumerate(items):
         col = idx % cols
         row = idx // cols
         cx = margin + col * (box_w + h_gap) + box_w / 2
         cy = margin + row * (box_h + v_gap) + box_h / 2
-        key = node.sid if kind == "sap" else getattr(node, "host", "")
+        if kind == "sap":
+            key = node.sid
+        elif kind == "scc":
+            key = getattr(node, "host", "")
+        else:   # btp
+            key = getattr(node, "uuid", "")
         pos[(kind, key)] = (cx, cy)
 
     # ------------------------------------------------------------------
     # Connection layer (drawn FIRST so nodes overlay it)
     # ------------------------------------------------------------------
+    # Resolve BTP-sentinel source SIDs ("BTP:<uuid8>") against the
+    # btp_subaccounts dict so synthetic BTP -> on-prem edges actually
+    # land on the report map (otherwise these chains were invisible
+    # even though the chain analyser walked them).
+    btp_pos_by_short_uuid: dict = {}
+    for b in btp_subs:
+        u = getattr(b, "uuid", "") or ""
+        if u:
+            btp_pos_by_short_uuid[u[:8].lower()] = pos.get(("btp", u))
+
+    def _edge_pos(sid: str):
+        if not sid:
+            return None
+        if sid.startswith("BTP:"):
+            return btp_pos_by_short_uuid.get(sid[4:].lower())
+        return pos.get(("sap", sid))
+
     edges_svg = []
     for c in (state.connections or []):
-        src = pos.get(("sap", c.source_sid))
-        dst = pos.get(("sap", c.target_sid))
+        src = _edge_pos(c.source_sid)
+        dst = _edge_pos(c.target_sid)
         if not src or not dst or src == dst:
             continue
         sap_all = bool(getattr(c, "has_sap_all", False))
@@ -749,7 +821,7 @@ def _build_landscape_svg(state: SAPMAPState) -> str:
                     f'fill="#fff" font-size="13" font-weight="900" '
                     f'text-anchor="middle">⚡</text>'
                 )
-        else:   # scc — hexagonal frame
+        elif kind == "scc":   # hexagonal frame
             host = getattr(node, "host", "")
             ver = getattr(node, "version", "") or "?"
             cx, cy = pos[("scc", host)]
@@ -801,13 +873,75 @@ def _build_landscape_svg(state: SAPMAPState) -> str:
                     f'fill="#fff" font-size="13" font-weight="900" '
                     f'text-anchor="middle">⚡</text>'
                 )
+        else:   # btp — cloud silhouette
+            uuid = getattr(node, "uuid", "")
+            label = (getattr(node, "display_name", "")
+                     or getattr(node, "subdomain", "")
+                     or uuid[:8])
+            region = getattr(node, "region", "") or "?"
+            cx, cy = pos[("btp", uuid)]
+            x, y = cx - box_w / 2, cy - box_h / 2
+            # Cloud silhouette — three humps on top, flat bottom.
+            # Sized to fit the same box_w x box_h as the SAP / SCC
+            # rectangles so the grid stays even.
+            cloud_path = (
+                f"M{x+24:.1f},{y+22:.1f} "
+                f"C{x+8:.1f},{y+22:.1f} {x+8:.1f},{y+10:.1f} "
+                f"{x+30:.1f},{y+12:.1f} "
+                f"C{x+34:.1f},{y+2:.1f} {x+62:.1f},{y+2:.1f} "
+                f"{x+70:.1f},{y+12:.1f} "
+                f"C{x+78:.1f},{y+4:.1f} {x+108:.1f},{y+4:.1f} "
+                f"{x+114:.1f},{y+14:.1f} "
+                f"C{x+box_w-22:.1f},{y+12:.1f} "
+                f"{x+box_w-6:.1f},{y+22:.1f} "
+                f"{x+box_w-12:.1f},{y+34:.1f} "
+                f"C{x+box_w-4:.1f},{y+48:.1f} "
+                f"{x+box_w-22:.1f},{y+box_h-6:.1f} "
+                f"{x+box_w-32:.1f},{y+box_h-12:.1f} "
+                f"L{x+30:.1f},{y+box_h-12:.1f} "
+                f"C{x+10:.1f},{y+box_h-4:.1f} "
+                f"{x:.1f},{y+38:.1f} "
+                f"{x+12:.1f},{y+30:.1f} "
+                f"C{x+2:.1f},{y+24:.1f} {x+10:.1f},{y+18:.1f} "
+                f"{x+24:.1f},{y+22:.1f} Z")
+            bn_pwned = bool(getattr(node, "pwned", False))
+            fill = "#0ea5e9"     # sky blue
+            stroke = "#0369a1"
+            nodes_svg.append(
+                f'<path d="{cloud_path}" fill="{fill}" stroke="{stroke}" '
+                f'stroke-width="1.5"/>')
+            # Header text — "☁ BTP"
+            nodes_svg.append(
+                f'<text x="{cx:.1f}" y="{cy-12:.1f}" '
+                f'fill="#fff" font-size="14" font-weight="700" '
+                f'text-anchor="middle" font-family="-apple-system,Segoe UI,'
+                f'Helvetica,Arial,sans-serif">☁ BTP</text>')
+            label_short = label if len(label) <= 22 else label[:21] + "…"
+            nodes_svg.append(
+                f'<text x="{cx:.1f}" y="{cy+6:.1f}" fill="#e0f2fe" '
+                f'font-size="10.5" text-anchor="middle" '
+                f'font-family="-apple-system,Segoe UI,Helvetica,Arial,'
+                f'sans-serif">{_hesc(label_short)}</text>')
+            nodes_svg.append(
+                f'<text x="{cx:.1f}" y="{cy+22:.1f}" fill="#bae6fd" '
+                f'font-size="10" text-anchor="middle" '
+                f'font-family="-apple-system,Segoe UI,Helvetica,Arial,'
+                f'sans-serif">{_hesc(region)}</text>')
+            if bn_pwned:
+                nodes_svg.append(
+                    f'<circle cx="{x+box_w-14:.1f}" cy="{y+14:.1f}" '
+                    f'r="11" fill="#f59e0b" stroke="#fff" stroke-width="2"/>')
+                nodes_svg.append(
+                    f'<text x="{x+box_w-14:.1f}" y="{y+18:.1f}" '
+                    f'fill="#fff" font-size="13" font-weight="900" '
+                    f'text-anchor="middle">⚡</text>')
 
     # ------------------------------------------------------------------
     # Legend (small, lower-right)
     # ------------------------------------------------------------------
     legend = (
-        f'<g transform="translate({width-260:.1f},{height-46:.1f})">'
-        f'<rect x="0" y="0" width="248" height="36" rx="6" ry="6" '
+        f'<g transform="translate({width-310:.1f},{height-46:.1f})">'
+        f'<rect x="0" y="0" width="298" height="36" rx="6" ry="6" '
         f'fill="#fff" stroke="#e5e7eb" stroke-width="1"/>'
         f'<rect x="10" y="10" width="14" height="14" rx="3" '
         f'fill="#1d4ed8"/><text x="30" y="22" font-size="10" '
@@ -818,8 +952,12 @@ def _build_landscape_svg(state: SAPMAPState) -> str:
         f'<polygon points="124,10 134,10 138,17 134,24 124,24 120,17" '
         f'fill="#0e7490"/><text x="142" y="22" font-size="10" '
         f'fill="#374151" font-family="-apple-system,Segoe UI,sans-serif">SCC</text>'
-        f'<circle cx="172" cy="17" r="6" fill="#f59e0b"/>'
-        f'<text x="183" y="22" font-size="10" fill="#374151" '
+        # Cloud glyph for BTP — small ☁ in sky blue
+        f'<text x="172" y="22" font-size="14" fill="#0ea5e9">☁</text>'
+        f'<text x="187" y="22" font-size="10" fill="#374151" '
+        f'font-family="-apple-system,Segoe UI,sans-serif">BTP</text>'
+        f'<circle cx="222" cy="17" r="6" fill="#f59e0b"/>'
+        f'<text x="233" y="22" font-size="10" fill="#374151" '
         f'font-family="-apple-system,Segoe UI,sans-serif">⚡ pwned</text>'
         f'</g>'
     )
@@ -1020,6 +1158,51 @@ def build_html_report(state: SAPMAPState,
             f'<td title="SCC version">{_hesc(version)}</td>'
             f'<td>{crit_pill}</td>'
             f'<td class="num" title="cloud-to-on-premise mappings">{nmap}</td>'
+            f'</tr>'
+        )
+
+    # BTP subaccounts in the same inventory grid — keeps everything
+    # the operator pwned visible in one table.  Cleartext-captured
+    # destinations count as "Critical" in the grid (mirrors how the
+    # GUI flags them); linked-on-prem count goes in the right-hand
+    # numeric column for parity with SCC's "mappings" cell.
+    btp_subs = (getattr(state, "btp_subaccounts", {}) or {})
+    for uuid, sub in sorted(
+            btp_subs.items(),
+            key=lambda kv: (getattr(kv[1], "subdomain", "")
+                             or kv[0])):
+        dests = list(getattr(sub, "destinations", []) or [])
+        cleartext_n = sum(1 for d in dests
+                          if getattr(d, "cleartext_captured", False)
+                          or (isinstance(d, dict)
+                              and d.get("cleartext_captured")))
+        linked_n = sum(1 for d in dests
+                       if (getattr(d, "linked_target_sid", "")
+                           or (isinstance(d, dict)
+                               and d.get("linked_target_sid"))))
+        sub_label = (getattr(sub, "subdomain", "")
+                     or getattr(sub, "display_name", "")
+                     or uuid[:8])
+        bn_pwned = bool(getattr(sub, "pwned", False))
+        pwned_badge = ('<span class="badge badge-pwned">⚡ PWNED</span>'
+                        if bn_pwned else "")
+        crit_pill = (
+            f'<span class="num-pill num-pill-bad">{cleartext_n}</span>'
+            if cleartext_n else
+            '<span class="num-pill num-pill-ok">0</span>')
+        inv_rows += (
+            f'<tr>'
+            f'<td class="mono"><b>BTP</b></td>'
+            f'<td>BTP subaccount</td>'
+            f'<td>—</td>'
+            f'<td>—</td>'
+            f'<td class="mono">{_hesc(sub_label)}</td>'
+            f'<td>{pwned_badge}</td>'
+            f'<td title="BTP region">'
+            f'{_hesc(getattr(sub, "region", "") or "?")}</td>'
+            f'<td>{crit_pill}</td>'
+            f'<td class="num" title="destinations linked to on-prem">'
+            f'{linked_n}</td>'
             f'</tr>'
         )
 
