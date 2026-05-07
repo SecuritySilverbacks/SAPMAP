@@ -88,10 +88,25 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 - **CVE-2026-31431 "Copy Fail" (root LPE on Linux)** — One-shot root OS command execution via AF_ALG authencesn page-cache patching of `/usr/bin/su` with a minimal ELF.  Validated live against SUSE Linux 6.4.0 (s4hadm → uid=0) through SAPXPG.  Non-persistent (reverts on reboot or page-cache eviction).  Pre-flight check confirms vulnerable kernel + AF_ALG primitive before the destructive step
 
 ### Lateral Movement
-- **RFC connection mapping** — Retrieve all Type 3 and TCP/IP RFC destinations from compromised systems
+- **RFC connection mapping** — Retrieve all Type 3, Type-G HTTP-to-external, and Type-H HTTP-to-ABAP RFC destinations from compromised systems (SM59 + RFCDES + SecStore-recovered passwords)
 - **Destination testing** — Validate logon, ping, and latency via /SDF/RFC_CHECK with automatic fallback to DEST_CHECK_CONNECTION on older systems
 - **Automated propagation** — Iteratively exploit RFC connections to move across the landscape
 - **Attack path visualization** — Color-coded connections showing SAP_ALL access, gateway exploit paths, and risk levels
+
+### SAP BTP (Cloud) Integration
+Both directions of the on-prem ↔ cloud trust boundary are mapped automatically:
+
+**Cloud → on-prem.** Paste a BTP access token (`cf oauth-token`, a destination-service service-key token, or a btp-cli / cockpit token) via *File → Actions → BTP OAuth Token*.  SAPMAP detects the token kind (`cf`, `destination`, `subaccount`) from `aud`/`cid`/`scope` claims and routes enumeration to the APIs that token can actually reach — no 401 noise spraying APIs that aren't in scope.  For destination-service tokens it pulls every destination on the bound subaccount, captures cleartext where `destination_configuration.ApiAccess` is granted, and links each cleartext credential to a matching on-prem `SAPNode`.  Unknown back-end hosts are auto-materialised as `BTPDISC_*` placeholder nodes with a dashed amber border so the operator can see "BTP knows about this back-end, you haven't scanned it yet"; *Standard Scan* fires automatically to fingerprint them and promote to a real node.
+
+**On-prem → cloud (reverse pivot).** *Right-click any pwned ABAP node → Exploitation → Harvest BTP Credentials* mines four sources for BTP-shaped `(client_id, client_secret, uaa_url)` tuples in one click:
+  1. SM59 outbound destinations to `*.hana.ondemand.com` (Type-G with SecStore-recovered passwords).
+  2. Transaction `OA2C_CONFIG` profiles (`OA2C_CLIENT` + `OA2C_CLIENT_EXT` joined on `CLIENT_UUID`, matched to `/OA2C/CS_<UUID>_NN` secstore secrets).
+  3. ABAP RSECTAB rows mentioning a BTP host.
+  4. Java SecStoreFS rows for SAP CPI / Cloud Integration.
+
+The OA2C reader uses a three-tier resilience chain: `DDIF_FIELDINFO_GET` for column discovery (independent of `RFC_READ_TABLE`'s 512-byte WA limit), `RFC_READ_TABLE` with `USE_ET_DATA_4_RETURN='X'` for STRING-typed columns, then `RFC_ABAP_INSTALL_AND_RUN` as the final fallback when the kernel still drops STRING values.  Click *Mint* on a candidate and SAPMAP exchanges at XSUAA's `/oauth/token` with `grant_type=client_credentials`, stores the token, and auto-fires the cloud-side enumeration so the cloud topology populates the map without a second click.
+
+**SCC ↔ BTP edges.** Sky-blue dashed lines link every Cloud Connector to every BTP subaccount it tunnels into (sourced from `SCCNode.subaccount_uuids` plus `BTPSubaccountNode.scc_locations`).  Synthetic BTP→on-prem RFC edges (`source_sid="BTP:<uuid8>"`) are first-class members of the trust-chain analyser, so a cloud token leaking an on-prem credential shows up as a CRITICAL chain finding alongside any classic ABAP→ABAP edge.
 
 ### Interactive Map
 - **SVG-based visualization** — Drag-and-drop system nodes with persistent positions
@@ -978,6 +993,23 @@ steps:
 |--------|-----------|-------------|
 | `analyze_chains` | *(none)* | Discover RFC trust chain escalation paths across the landscape |
 | `highlight_chain` | `start` + `end` (SIDs), or `index` (0-based) | Highlight an attack chain on the map with pulsing red path |
+
+#### BTP — Cloud-Side (with a stored token)
+
+| Action | Parameters | Description |
+|--------|-----------|-------------|
+| `btp_set_token` | `region` (optional — auto-derived from token's `iss` claim), `token` (JWT, or `path:<file>` to load from disk) | Store a BTP access token in process memory for later enumerate / pull-destinations calls |
+| `btp_enumerate` | `region` | Kind-aware enumeration over the stored token (CF API for `cf` tokens; subaccount + SCC mappings for `subaccount` tokens; bound subaccount surface for `destination` tokens) |
+| `btp_pull_destinations_for_token` | `region` | For a destination-service-scoped token, pull every destination on the bound subaccount, capture cleartext where `ApiAccess` is granted, link to on-prem SAPNodes and auto-Standard-Scan any new placeholder |
+| `btp_test_destination` | `source_sid` (`BTP:<uuid8>`), `destination_name` | Test a synthetic BTP→on-prem edge — HTTP basic-auth probe + ABAP RFC profile fetch incl. SAP_ALL when target is ABAP |
+| `btp_create_user_on_target` | `source_sid`, `destination_name`, `target_sid` | After a successful test that flips `has_sap_all`, mint a SAPMAP user on the target ABAP via the captured creds |
+
+#### BTP — On-Prem → Cloud Lateral Pivot
+
+| Action | Parameters | Description |
+|--------|-----------|-------------|
+| `harvest_btp_creds` | `target` (must be ABAP for OA2C refresh) | Refresh `OA2C_CLIENT[+_EXT]` and scan SM59 destinations + ABAP RSECTAB + Java SecStoreFS + OA2C profiles for BTP-shaped credentials.  Returns candidates ready to mint |
+| `mint_btp_token` | `target` (source node SID), `uaa_url`, `client_id`, `client_secret` (or `path:<file>`) | Exchange `(client_id, client_secret)` at XSUAA's `/oauth/token` for a BTP access token, store keyed by region (auto-derived from `iss` claim).  Auto-fires the cloud-side enumeration on completion |
 
 ### Per-Step Options
 
