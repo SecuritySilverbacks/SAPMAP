@@ -3093,9 +3093,75 @@ def create_app(api: SAPMAPApi) -> Bottle:
                       "uaa_url": uaa_url})
         except Exception:
             pass
+
+        # Auto-enumerate destinations on the bound subaccount.
+        # Default ON because the only useful next step after minting
+        # is reading the destinations the token unlocks.  Pass
+        # auto_enumerate=false to opt out (e.g. when chaining the
+        # explicit btp_pull_destinations_for_token step from a script).
+        auto = data.get("auto_enumerate", True)
+        if isinstance(auto, str):
+            auto = auto.lower() not in ("false", "0", "no", "off")
+        enum_result: dict = {}
+        if auto:
+            try:
+                from sap_btp import (
+                    pull_destinations_via_destination_token,
+                    link_destinations_to_onprem,
+                    extract_subaccount_id_from_destination_token,
+                    extract_subdomain_from_token,
+                )
+                from sapmap_models import BTPSubaccountNode
+                dests, err, sub_uuid = (
+                    pull_destinations_via_destination_token(
+                        token, region))
+                if err:
+                    print(f"[-] {sid}: auto-enumerate after mint "
+                          f"failed — {err}")
+                    enum_result = {"error": err}
+                else:
+                    sub_node = api.state.btp_subaccounts.get(sub_uuid)
+                    if sub_node is None:
+                        sub_node = BTPSubaccountNode(uuid=sub_uuid)
+                        api.state.btp_subaccounts[sub_uuid] = sub_node
+                    sub_node.region = region
+                    sub_node.subdomain = (
+                        extract_subdomain_from_token(claims)
+                        or sub_node.subdomain)
+                    sub_node.enumerated_at = (
+                        datetime.now().isoformat())
+                    sub_node.destinations = dests
+                    before_disc = {
+                        s for s, n in api.state.nodes.items()
+                        if n.discovered_via_btp}
+                    linked = link_destinations_to_onprem(
+                        api.state, sub_node)
+                    new_disc = [
+                        s for s, n in api.state.nodes.items()
+                        if n.discovered_via_btp
+                           and s not in before_disc]
+                    for new_sid in new_disc:
+                        if hasattr(api, "_kick_standard_scan"):
+                            api._kick_standard_scan(new_sid)
+                    captured = sum(1 for d in dests
+                                    if d.cleartext_captured)
+                    print(f"[+] {sid}: post-mint enumerate — "
+                          f"{len(dests)} destination(s), {captured} "
+                          f"cleartext, {linked} linked to on-prem "
+                          f"(subaccount {sub_uuid[:8]})")
+                    enum_result = {
+                        "subaccount_uuid": sub_uuid,
+                        "destinations": len(dests),
+                        "cleartext_captured": captured,
+                        "linked_to_onprem": linked,
+                    }
+            except Exception as e:
+                print(f"[-] {sid}: auto-enumerate after mint raised "
+                      f"— {e!s}")
+                enum_result = {"error": str(e)[:200]}
+
         return json.dumps({"ok": True, "region": region,
-                           "auto_enumerate_url":
-                               "/api/btp/pull_destinations_for_token"})
+                           "enumerate": enum_result})
 
     @app.route("/api/node/<sid>/set_type", method="POST")
     def node_set_type(sid):
