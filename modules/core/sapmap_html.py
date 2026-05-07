@@ -4038,8 +4038,8 @@ function showDetails(sid) {
     ${(() => {
       const ss = n.secstore_entries || [];
       if (ss.length === 0) return '';
-      const catColors = {rfc:'#f0883e',db:'#58a6ff',cts:'#3fb950',smtp:'#bc8cff',hmac:'#484f58',pse:'#484f58',other:'#484f58'};
-      const catLabels = {rfc:'RFC',db:'DB',cts:'CTS',smtp:'SMTP',hmac:'HMAC',pse:'PSE',other:'?'};
+      const catColors = {rfc:'#f0883e',db:'#58a6ff',cts:'#3fb950',smtp:'#bc8cff',hmac:'#484f58',pse:'#484f58',oauth2_client:'#a371f7',other:'#484f58'};
+      const catLabels = {rfc:'RFC',db:'DB',cts:'CTS',smtp:'SMTP',hmac:'HMAC',pse:'PSE',oauth2_client:'OAuth',other:'?'};
       return '<div class="detail-section"><h4>&#128273; SecStore (' + ss.length + ' entries)</h4>' +
         ss.filter(e => !e.error).map(e => {
           const cat = e.category || 'other';
@@ -4050,7 +4050,7 @@ function showDetails(sid) {
           const masked = plen > 0 ? '&#9679;'.repeat(Math.min(plen, 8)) + ' (' + plen + ' chars)' : '(empty)';
           const ident = e.ident_clean || e.ident || '?';
           return '<div class="detail-row ss-reveal" style="cursor:pointer">' +
-            '<span class="detail-key" style="color:' + col + ';min-width:36px">' + lbl + '</span>' +
+            '<span class="detail-key" style="color:' + col + ';min-width:50px">' + lbl + '</span>' +
             '<span class="detail-val" style="font-size:11px">' + escHtml(ident) +
             '<br><span class="ss-masked" style="color:#8b949e">' + masked + '</span>' +
             '<span class="ss-plain" style="display:none;color:#3fb950">' + escHtml(pwd) + '</span>' +
