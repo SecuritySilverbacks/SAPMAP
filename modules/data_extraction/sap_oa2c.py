@@ -188,27 +188,122 @@ def _columns_matching_hints(sample_row: dict) -> tuple:
 
 def _reread_with_explicit_columns(node: SAPNode, table: str,
                                      columns: list,
-                                     creds: Optional[Credentials]) -> list:
+                                     creds: Optional[Credentials],
+                                     *,
+                                     long_strings: bool = False) -> list:
     """Re-issue RFC_READ_TABLE asking ONLY for the named columns.
-    The kernel packs only those fields into the work area, so wide
-    STRING columns (e.g. token_endpoint URLs) come back fully even
-    when the all-columns read truncated them to empty."""
+
+    When ``long_strings`` is True, sets ``USE_ET_DATA_4_RETURN='X'``
+    so the kernel returns rows in ET_DATA (STRING-typed WA) — newer
+    S/4 kernels honour this and ship STRING / RAWSTRING / XSTRING
+    columns that the standard DATA path silently omits.  Older
+    kernels just ignore the flag and behave as before.
+    """
     if not columns:
         return []
     import sapmap_rfc
     from sapmap_errors import format_rfc_exception
+    label = "long-strings re-read" if long_strings else "targeted re-read"
     try:
         rows = sapmap_rfc.read_table(node, table, fields=list(columns),
-                                       creds=creds, max_rows=500) or []
-        print(f"[+] {node.sid}: {table} re-read with "
+                                       creds=creds, max_rows=500,
+                                       long_strings=long_strings) or []
+        print(f"[+] {node.sid}: {table} {label} with "
               f"{len(columns)} explicit column(s) → {len(rows)} "
-              f"row(s) (full URL field values now reachable)")
+              f"row(s)"
+              + (" (ET_DATA path; STRING columns now populated)"
+                 if long_strings else ""))
         return rows
     except Exception as e:
-        print(f"[-] {node.sid}: {table} targeted re-read failed — "
-              f"{format_rfc_exception(e)[:160]}.  Falling back to the "
-              f"all-columns rows; wide URL fields may be empty.")
+        print(f"[-] {node.sid}: {table} {label} failed — "
+              f"{format_rfc_exception(e)[:160]}.")
         return []
+
+
+def _read_via_abap_fallback(node: SAPNode, table: str,
+                              columns: list,
+                              creds: Optional[Credentials]) -> list:
+    """RFC_READ_TABLE silently omits STRING / RAWSTRING / XSTRING
+    columns from its result — it can only marshal fixed-length CHAR
+    types into the workarea.  S/4 OA2C_CLIENT stores CLIENT_ID,
+    TOKEN_ENDPOINT, AUTHORIZATION_ENDPOINT as STRING, so they never
+    come back even with explicit FIELDS.
+
+    Workaround: run a small ABAP report via RFC_ABAP_INSTALL_AND_RUN
+    (the same primitive sapmap_secstore uses to read RSECTAB) that
+    SELECTs the requested columns and WRITEs them as
+    ``KEY|VALUE`` / ``~~~ROW`` markers we can parse back here.
+    Has no type restrictions because the values live in ABAP memory,
+    not in an RFC workarea.  Requires SDIFRUNTIME-class auth — fits
+    SAPMAP's existing "operator owns this ABAP system" assumption.
+
+    Returns rows in the same shape as ``read_table`` (list of dicts
+    keyed by column name) or ``[]`` if the FM is blocked / fails.
+    """
+    import sapmap_rfc
+    if not columns:
+        return []
+    table_lower = table.lower()
+    abap = [
+        "REPORT zsap_oa2c LINE-SIZE 1023.",
+        f"DATA: lt TYPE TABLE OF {table_lower},",
+        f"      c  TYPE {table_lower}.",
+        f"SELECT * FROM {table_lower} INTO TABLE lt.",
+        "LOOP AT lt INTO c.",
+        "  WRITE: / '~~~ROW'.",
+    ]
+    for col in columns:
+        line = f"  WRITE: / '{col}|' NO-GAP, c-{col.lower()}."
+        if len(line) <= 72:
+            abap.append(line)
+        else:
+            # ABAP statement continuation on a second line keeps us
+            # under the 72-char PROGTAB limit for monstrously long
+            # column names.
+            abap.append(f"  WRITE: / '{col}|' NO-GAP,")
+            abap.append(f"           c-{col.lower()}.")
+    abap.append("ENDLOOP.")
+
+    try:
+        with sapmap_rfc._get_connection(node, creds) as conn:
+            print(f"[*] {node.sid}: STRING-typed columns omitted by "
+                  f"RFC_READ_TABLE — falling back to "
+                  f"RFC_ABAP_INSTALL_AND_RUN to read {table} "
+                  f"({len(columns)} columns) directly.")
+            run = sapmap_rfc._run_abap_program(conn, abap,
+                                                 "ZSAPMAP_OA2C")
+    except Exception as e:
+        from sapmap_errors import format_rfc_exception
+        print(f"[-] {node.sid}: ABAP fallback could not establish RFC "
+              f"connection — {format_rfc_exception(e)[:160]}")
+        return []
+
+    if not run.get("success"):
+        print(f"[-] {node.sid}: ABAP-side OA2C read failed via "
+              f"{run.get('fm_name', '?')} — "
+              f"{(run.get('error') or '')[:160]}.  Operator may "
+              f"need OS-exec to fall through to a direct DB read "
+              f"(hdbsql / sqlplus / db2).")
+        return []
+
+    rows: list = []
+    cur: dict = {}
+    for line in run.get("output") or []:
+        s = line.strip()
+        if s.startswith("~~~ROW"):
+            if cur:
+                rows.append(cur)
+            cur = {}
+            continue
+        if "|" not in s:
+            continue
+        key, _, val = s.partition("|")
+        cur[key.strip()] = val.strip()
+    if cur:
+        rows.append(cur)
+    print(f"[+] {node.sid}: ABAP-side {table} read returned "
+          f"{len(rows)} row(s) — STRING fields now populated")
+    return rows
 
 
 def read_oa2c_profiles(node: SAPNode,
@@ -280,14 +375,42 @@ def read_oa2c_profiles(node: SAPNode,
               f"kernel.  Full column list: {', '.join(columns)}")
         return []
 
+    # Tier 1 — RFC_READ_TABLE with USE_ET_DATA_4_RETURN='X'.  Newer
+    # S/4 kernels honour this flag and stream STRING-typed columns
+    # through ET_DATA (whose WA is STRING-typed and unbounded), so
+    # token_endpoint / client_id come back populated even when they
+    # are declared as ABAP STRING.  Older kernels just ignore the
+    # flag and behave like the standard read.
     print(f"[*] {node.sid}: requesting {table} columns "
-          f"{targeted_cols} via RFC_READ_TABLE (DDIF-driven)…")
+          f"{targeted_cols} via RFC_READ_TABLE with "
+          f"USE_ET_DATA_4_RETURN='X' (long-string path)…")
     clients = _reread_with_explicit_columns(
-        node, table, targeted_cols, creds)
+        node, table, targeted_cols, creds, long_strings=True)
     if not clients:
         print(f"[*] {node.sid}: {table} returned 0 rows — table "
               f"exists but has no OAuth profiles configured")
         return []
+
+    # When the kernel doesn't honour USE_ET_DATA_4_RETURN, the
+    # STRING columns are silently dropped from row 0.  Detect that
+    # and fall through to Tier 2 (ABAP-side read) which has no type
+    # restrictions because values live in ABAP memory, not in an
+    # RFC workarea.
+    sample_keys = {k.upper() for k in clients[0].keys()}
+    missing = [c for c in targeted_cols if c.upper() not in sample_keys]
+    if missing:
+        print(f"[*] {node.sid}: kernel didn't return {missing} via "
+              f"ET_DATA — likely an older S/4 patch that ignores "
+              f"USE_ET_DATA_4_RETURN.  Trying RFC_ABAP_INSTALL_AND_RUN "
+              f"fallback…")
+        abap_rows = _read_via_abap_fallback(
+            node, table, targeted_cols, creds)
+        if abap_rows:
+            clients = abap_rows
+        else:
+            print(f"[*] {node.sid}: ABAP fallback yielded nothing — "
+                  f"keeping the partial RFC_READ_TABLE rows; URL "
+                  f"fields will be empty.")
 
     # Extension table is best-effort — when missing, grant_type just
     # stays empty and the operator can edit it manually before mint.
