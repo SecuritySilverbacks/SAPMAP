@@ -505,12 +505,22 @@ def _map_step(step: dict) -> tuple:
         # XSUAA's /oauth/token for a BTP access token.  Stores the
         # result in api.btp_tokens keyed by the token's region (so
         # btp_pull_destinations_for_token can chain on top).
-        #   target:        SAP node SID the secret was harvested from
-        #   uaa_url:       XSUAA token endpoint (full URL or bare host)
-        #   client_id:     OAuth client_id (from OA2C_CLIENT or paste)
-        #   client_secret: OAuth client_secret (from /OA2C/CS_*_NN
-        #                  or paste; supports path:<file>)
+        #
+        #   target:           SAP node SID the secret was harvested from
+        #   from_harvest:     when True, auto-pick a candidate from
+        #                     harvest_btp_candidates instead of taking
+        #                     uaa_url/client_id/client_secret manually.
+        #                     Default mode for the demo playbook so the
+        #                     script runs end-to-end without copy-paste.
+        #   candidate_index:  which harvest candidate to use when
+        #                     from_harvest=True (default 0 = first).
+        #   uaa_url:          XSUAA token endpoint (full URL or bare host)
+        #   client_id:        OAuth client_id (from OA2C_CLIENT or paste)
+        #   client_secret:    OAuth client_secret (from /OA2C/CS_*_NN
+        #                     or paste; supports path:<file>)
         return ("POST", f"/api/node/{target}/mint_btp_token", {
+            "from_harvest": step.get("from_harvest", False),
+            "candidate_index": step.get("candidate_index", 0),
             "uaa_url": step.get("uaa_url", ""),
             "client_id": step.get("client_id", ""),
             "client_secret": _read_token(
