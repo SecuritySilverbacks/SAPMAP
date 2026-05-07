@@ -2820,7 +2820,20 @@ function updateMap() {
   // Update tracking sets
   knownNodeSids = new Set(nodeKeys);
   knownConnKeys = newConnKeys;
-  if (firstRender) firstRender = false;
+  if (firstRender) {
+    firstRender = false;
+    // Default view: Group-by-Stack.  When nodes appear for the
+    // first time in this session, apply the canonical stack
+    // layout so ABAP / JAVA / SCC land in tidy columns.  Deferred
+    // one tick (setTimeout 0) so the current updateMap completes
+    // before layoutByStack triggers a re-render.  Skipped when
+    // there are no nodes yet (waiting on a scan).
+    if (nodeKeys.length > 0 || _sccCount > 0) {
+      setTimeout(() => {
+        try { layoutByStack(); } catch (_) {}
+      }, 0);
+    }
+  }
 
   // Schedule fast re-renders while nodes are still fading in
   if (Object.keys(fadingNodes).length > 0) {
