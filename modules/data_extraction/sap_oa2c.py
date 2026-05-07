@@ -391,18 +391,31 @@ def read_oa2c_profiles(node: SAPNode,
               f"exists but has no OAuth profiles configured")
         return []
 
-    # When the kernel doesn't honour USE_ET_DATA_4_RETURN, the
-    # STRING columns are silently dropped from row 0.  Detect that
-    # and fall through to Tier 2 (ABAP-side read) which has no type
-    # restrictions because values live in ABAP memory, not in an
-    # RFC workarea.
+    # When the kernel doesn't honour USE_ET_DATA_4_RETURN — or
+    # honours it nominally but doesn't actually populate the STRING
+    # columns — fall through to Tier 2 (ABAP-side read).  Two failure
+    # modes seen in the wild:
+    #   1. Column key entirely missing from row 0 (older patches).
+    #   2. Column key present but value is empty (kernel acknowledged
+    #      the flag but the deep-type data still didn't make it).
+    # Both are "Tier-1 didn't actually deliver" — fall through.
     sample_keys = {k.upper() for k in clients[0].keys()}
     missing = [c for c in targeted_cols if c.upper() not in sample_keys]
-    if missing:
-        print(f"[*] {node.sid}: kernel didn't return {missing} via "
-              f"ET_DATA — likely an older S/4 patch that ignores "
-              f"USE_ET_DATA_4_RETURN.  Trying RFC_ABAP_INSTALL_AND_RUN "
-              f"fallback…")
+    canary_uuid = _pick(clients[0], _FIELD_HINTS["client_uuid"])
+    canary_token = _pick(clients[0], _FIELD_HINTS["token_endpoint"])
+    canary_cid = _pick(clients[0], _FIELD_HINTS["client_id"])
+    string_cols_empty = (not canary_token) and (not canary_cid)
+    if missing or string_cols_empty:
+        if missing:
+            reason = (f"kernel didn't return columns {missing} via "
+                       f"ET_DATA (likely older S/4 patch ignoring "
+                       f"USE_ET_DATA_4_RETURN)")
+        else:
+            reason = (f"ET_DATA returned column NAMES but client_id "
+                       f"and token_endpoint are both empty — STRING "
+                       f"values dropped despite the flag")
+        print(f"[*] {node.sid}: {reason}.  Trying "
+              f"RFC_ABAP_INSTALL_AND_RUN fallback…")
         abap_rows = _read_via_abap_fallback(
             node, table, targeted_cols, creds)
         if abap_rows:

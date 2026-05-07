@@ -2049,8 +2049,33 @@ def read_table(node: SAPNode, table_name: str, fields: list = None,
             # would have truncated/omitted.  Falls through to DATA on
             # kernels that don't honour USE_ET_DATA_4_RETURN.
             data = result.get("ET_DATA") or result.get("DATA") or []
+            if long_strings and data:
+                # Diagnostic: dump the first row's shape so kernel-
+                # specific ET_DATA quirks are visible to the operator
+                # without having to instrument live calls.
+                first = data[0] if isinstance(data[0], dict) else {}
+                shape_keys = sorted(first.keys()) if first else []
+                wa_preview = (first.get("WA", "")[:120]
+                               if first else "")
+                print(f"[*] {node.sid}: {table_name} ET_DATA shape — "
+                      f"{len(data)} row(s); row[0] keys: {shape_keys}; "
+                      f"WA[:120]: {wa_preview!r}")
             for row in data:
                 wa = row.get("WA", "")
+                # Two ET_DATA shapes seen in the wild:
+                #   1. {"WA": "val1|val2|val3"} — standard delimited
+                #   2. {"CLIENT_UUID": "AABB", "CLIENT_ID": "cid", …}
+                #      — typed-struct rows keyed by column name
+                #      (some S/4 patches return this when
+                #      USE_ET_DATA_4_RETURN is honoured).
+                if not wa and any(fn in row for fn in field_names):
+                    row_dict = {}
+                    for fname in field_names:
+                        v = row.get(fname, "")
+                        row_dict[fname] = (v.strip() if isinstance(v, str)
+                                            else v)
+                    rows.append(row_dict)
+                    continue
                 parts = wa.split("|")
                 row_dict = {}
                 for i, fname in enumerate(field_names):
