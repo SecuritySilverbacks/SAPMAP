@@ -2822,15 +2822,16 @@ function updateMap() {
   knownConnKeys = newConnKeys;
   if (firstRender) {
     firstRender = false;
-    // Default view: Group-by-Stack.  When nodes appear for the
-    // first time in this session, apply the canonical stack
-    // layout so ABAP / JAVA / SCC land in tidy columns.  Deferred
-    // one tick (setTimeout 0) so the current updateMap completes
-    // before layoutByStack triggers a re-render.  Skipped when
+    // Default view: Hierarchy.  When nodes appear for the first
+    // time in this session, apply the layered top-down RFC-flow
+    // layout so trust direction reads at a glance (sources of
+    // edges on upper layers, targets below).  Deferred one tick
+    // (setTimeout 0) so the current updateMap completes before
+    // layoutHierarchy triggers its own re-render.  Skipped when
     // there are no nodes yet (waiting on a scan).
     if (nodeKeys.length > 0 || _sccCount > 0) {
       setTimeout(() => {
-        try { layoutByStack(); } catch (_) {}
+        try { layoutHierarchy(); } catch (_) {}
       }, 0);
     }
   }
@@ -5652,19 +5653,18 @@ async function doMintBtpToken(sid, idx) {
     return;
   }
   result.style.color = '#3fb950';
-  result.textContent = `Token minted for region ${r.region}.  Auto-enumerating destinations …`;
-  // Auto-fire the destination-token pull so the cloud topology
-  // appears on the map without a second click.
-  try {
-    const e = await api('POST', 'btp/pull_destinations_for_token', { region: r.region });
-    if (e && e.ok) {
-      result.textContent += ` ✓ ${e.destinations} destination(s) captured, ${e.cleartext_captured} cleartext, ${e.linked_to_onprem} linked.`;
-    } else if (e && e.error) {
-      result.textContent += ` (enumerate: ${e.error})`;
-    }
-  } catch (err) {
-    result.textContent += ` (enumerate failed: ${err})`;
+  // The mint endpoint auto-enumerates server-side and returns the
+  // result inline (`r.enumerate`), so no second HTTP call needed.
+  const e = r.enumerate || {};
+  let line = `Token minted for region ${r.region}.`;
+  if (e.error) {
+    line += `  (auto-enumerate: ${e.error})`;
+  } else if (typeof e.destinations === 'number') {
+    line += ` ✓ ${e.destinations} destination(s) captured, `
+          + `${e.cleartext_captured} cleartext, `
+          + `${e.linked_to_onprem} linked.`;
   }
+  result.textContent = line;
   startPolling();
 }
 
