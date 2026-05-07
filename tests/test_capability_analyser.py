@@ -280,6 +280,114 @@ def test_analyse_skips_when_no_users_to_analyse():
     assert rt.called is False
 
 
+def test_analyse_synthesises_full_capability_set_for_sap_all_profile():
+    """SAPMAP-created users land via BAPI_USER_PROFILES_ASSIGN with
+    PROFILE=SAP_ALL — they have NO role assignments at all, so the
+    role-based resolver alone produces zero capabilities (operator
+    saw exactly this in the engagement report).  Detecting SAP_ALL
+    in UST04 must synthesise the full rule-table as the user's
+    capability set."""
+    state = SAPMAPState()
+    node = SAPNode(sid="S4H", system_type="ABAP",
+                    hostname="s4hanadev", ip="192.168.2.209",
+                    is_production=True)
+    state.add_node(node)
+    node.created_users.append(CreatedUser(
+        sid="S4H", username="SAPMAP00", client="001",
+        hostname="s4hanadev", ip="192.168.2.209",
+        instance_nr="00", method="gw_exploit"))
+
+    def fake_read(node_arg, table_name, **kw):
+        if table_name == "AGR_USERS":
+            # No roles — SAP_ALL was assigned via profile path
+            return []
+        if table_name == "UST04":
+            return [{"BNAME": "SAPMAP00", "PROFILE": "SAP_ALL"}]
+        return []
+
+    with patch("sapmap_rfc.read_table", side_effect=fake_read):
+        results = analyse(node)
+
+    assert len(results) == 1
+    r = results[0]
+    # Full rule table synthesised — operator should see vendor-bank
+    # edit, debugger-with-replace, finance master read, etc.
+    objs = {c["auth_object"] for c in r["capabilities"]}
+    assert "F_LFA1_APP" in objs
+    assert "S_DEVELOP" in objs
+    assert "S_TABU_DIS" in objs
+    assert "S_RFC" in objs
+    # Summary mentions the SAP_ALL grant explicitly
+    assert "SAP_ALL" in r["summary"]
+    # And every capability records the profile path in its `why`
+    sample = r["capabilities"][0]
+    assert "SAP_ALL profile" in sample["why"]
+    # Finding emitted at CRITICAL severity (highest tier from any
+    # synthesised capability)
+    cap_findings = [f for f in node.findings
+                     if f.name == "Role / profile capability inventory"]
+    assert len(cap_findings) == 1
+    assert cap_findings[0].severity == Severity.CRITICAL
+
+
+def test_analyse_merges_role_caps_with_profile_caps():
+    """A user with BOTH a role grant (S_TABU_DIS DICBERCLS=FI) AND
+    SAP_ALL via profile should end up with the full profile-derived
+    capability set, with the role-side `why` text preserved on the
+    overlapping entries."""
+    state = SAPMAPState()
+    node = SAPNode(sid="S4H", system_type="ABAP")
+    state.add_node(node)
+    node.credentials.append(Credentials(
+        username="JORIS", password="x", client="001", verified=True))
+
+    def fake_read(node_arg, table_name, **kw):
+        if table_name == "AGR_USERS":
+            return [{"AGR_NAME": "Z_FI", "UNAME": "JORIS"}]
+        if table_name == "AGR_1251":
+            return [{"AGR_NAME": "Z_FI", "OBJECT": "S_TABU_DIS",
+                     "FIELD": "DICBERCLS", "LOW": "FI"}]
+        if table_name == "UST04":
+            return [{"BNAME": "JORIS", "PROFILE": "SAP_ALL"}]
+        return []
+
+    with patch("sapmap_rfc.read_table", side_effect=fake_read):
+        results = analyse(node)
+
+    r = results[0]
+    # Should have the FULL profile-derived set, not just the FI row
+    assert len(r["capabilities"]) == len(_CAPABILITY_RULES)
+
+
+def test_analyse_no_super_profile_no_synthesis():
+    """Counter-test: a user holding only ordinary profiles (no
+    SAP_ALL / SAP_NEW / S_A.SYSTEM) doesn't trigger synthesis.
+    Only the role-based capabilities surface."""
+    state = SAPMAPState()
+    node = SAPNode(sid="S4H", system_type="ABAP")
+    state.add_node(node)
+    node.credentials.append(Credentials(
+        username="HR_VIEWER", password="x", client="001", verified=True))
+
+    def fake_read(node_arg, table_name, **kw):
+        if table_name == "AGR_USERS":
+            return [{"AGR_NAME": "Z_HR", "UNAME": "HR_VIEWER"}]
+        if table_name == "AGR_1251":
+            return [{"AGR_NAME": "Z_HR", "OBJECT": "P_ORGIN",
+                     "FIELD": "INFTY", "LOW": "0008"}]
+        if table_name == "UST04":
+            return [{"BNAME": "HR_VIEWER", "PROFILE": "Z_HR_BASIC"}]
+        return []
+
+    with patch("sapmap_rfc.read_table", side_effect=fake_read):
+        results = analyse(node)
+    r = results[0]
+    objs = {c["auth_object"] for c in r["capabilities"]}
+    # Just the HR rule — no SAP_ALL synthesis
+    assert objs == {"P_ORGIN"}
+    assert "SAP_ALL" not in r["summary"]
+
+
 def test_analyse_replaces_stale_results_for_same_user():
     """Re-running analyse() against the same user must overwrite
     the prior result, not stack a duplicate.  Operator may have

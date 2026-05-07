@@ -367,12 +367,20 @@ def _blast_radius(capabilities: list) -> str:
 
 def _english_summary(username: str, sid: str, client: str,
                        capabilities: list,
-                       row_counts: dict) -> str:
+                       row_counts: dict,
+                       super_profile: str = "") -> str:
     """Produce the CISO-grade single paragraph that lands in the
     engagement report.  Uses cached row counts when available so
     the line dollar-quantifies the actual data reach
-    ("LFBK = 2,107 IBANs")."""
+    ("LFBK = 2,107 IBANs").  Mentions a held super-profile (SAP_ALL
+    / SAP_NEW / S_A.SYSTEM …) up-front when present — that's the
+    most operationally important fact about the user."""
     if not capabilities:
+        if super_profile:
+            return (f"User {username} on {sid} client {client} "
+                    f"holds the {super_profile} profile — full "
+                    f"unrestricted access; no further privilege "
+                    f"check needed.")
         return (f"User {username} on {sid} client {client} has no "
                 f"privileged authorisation objects recovered.")
     bullets = []
@@ -389,8 +397,10 @@ def _english_summary(username: str, sid: str, client: str,
         if len(tables) > 4:
             annotated.append(f"+{len(tables) - 4} more")
         bullets.append(f"**{c['capability']}** ({', '.join(annotated)})")
-    head = (f"User {username} on {sid} client {client} can: "
-            + "; ".join(bullets) + ".")
+    prefix = (f"User {username} on {sid} client {client}")
+    if super_profile:
+        prefix += f" holds the **{super_profile}** profile and"
+    head = f"{prefix} can: " + "; ".join(bullets) + "."
     blast = _blast_radius(capabilities)
     return f"{head}  Estimated blast-radius: {blast}."
 
@@ -403,6 +413,64 @@ def _english_summary(username: str, sid: str, client: str,
 # kernel patch starts shipping a different shape.
 _AGR_USERS_FIELDS = ["AGR_NAME", "UNAME"]
 _AGR_1251_FIELDS = ["AGR_NAME", "OBJECT", "FIELD", "LOW", "HIGH"]
+_UST04_FIELDS = ["BNAME", "PROFILE"]
+
+# SAP-shipped "everything" profiles.  Holding any of these makes the
+# user equivalent to every rule in _CAPABILITY_RULES being matched
+# (SAP_ALL = all auth objects with full ranges; SAP_NEW = the same for
+# auth objects added in newer releases; S_A.SYSTEM / S_A.ADMIN are
+# admin sub-profiles that carry SAP_ALL-equivalent privilege on
+# almost every kernel).  This is the path SAPMAP-created users take
+# (BAPI_USER_PROFILES_ASSIGN with PROFILE=SAP_ALL) — they don't have
+# any role rows in AGR_USERS, so the role-based resolver alone
+# silently produces zero capabilities for them.  Operator's
+# screenshot confirmed this exact symptom.
+_SUPER_PROFILES = {"SAP_ALL", "SAP_NEW", "S_A.SYSTEM",
+                    "S_A.ADMIN", "SAP_ADMIN"}
+
+
+def _read_user_profiles(node: SAPNode, username: str,
+                          creds: Optional[Credentials]) -> list:
+    """Pull the profile list for a user from UST04 (user -> profile
+    mapping).  Returns a list of profile names (uppercase, stripped).
+    Empty on read failure — caller falls back to role-only resolution
+    in that case."""
+    import sapmap_rfc
+    user_upper = (username or "").strip().upper()
+    if not user_upper:
+        return []
+    try:
+        rows = sapmap_rfc.read_table(
+            node, "UST04", fields=_UST04_FIELDS,
+            where=f"BNAME = '{user_upper}'",
+            creds=creds, max_rows=500) or []
+    except Exception as e:
+        print(f"[-] {node.sid}: UST04 read failed for "
+              f"{user_upper} — {e!s}")
+        return []
+    return [(r.get("PROFILE", "") or "").strip().upper()
+            for r in rows if r.get("PROFILE")]
+
+
+def _capabilities_from_super_profile(profile_name: str) -> list:
+    """When a user holds SAP_ALL (or an equivalent admin profile),
+    they have every capability in the rule table by definition.
+    Synthesise the full list rather than just emitting one
+    "SAP_ALL holder" line — the report stays useful for operators
+    who want to know which finance/HR/wire-fraud table the user can
+    actually touch."""
+    out = []
+    for obj, pred, cap, tables, sev, why in _CAPABILITY_RULES:
+        out.append({
+            "auth_object": obj,
+            "fields": dict(pred),
+            "capability": cap,
+            "tables": list(tables),
+            "severity": int(sev),
+            "why": f"Granted implicitly via {profile_name} profile — "
+                    f"{why}",
+        })
+    return out
 
 
 def _read_user_grants(node: SAPNode, username: str,
@@ -530,8 +598,39 @@ def analyse(node: SAPNode,
     for u in users:
         username = u["username"]
         client = u["client"]
+
+        # Two grant paths:
+        #   1. role -> auth-object rows (AGR_USERS x AGR_1251)
+        #   2. profile rows (UST04) — catches SAP_ALL/SAP_NEW
+        #      assignments that don't go through any role.  Critical
+        #      for SAPMAP-created users: BAPI_USER_PROFILES_ASSIGN
+        #      gives them SAP_ALL via the profile path with no role
+        #      assignments at all.
         rows = _read_user_grants(node, username, creds)
         capabilities = _resolve_user_capabilities(rows)
+
+        profiles = _read_user_profiles(node, username, creds)
+        super_profile = next(
+            (p for p in profiles if p in _SUPER_PROFILES), None)
+        if super_profile:
+            print(f"[!] {node.sid}: {username} holds {super_profile} "
+                  f"profile — synthesising full capability set")
+            super_caps = _capabilities_from_super_profile(super_profile)
+            # Merge — same (auth_object, capability) signature wins
+            # the higher-severity tier.
+            seen = {(c["auth_object"], c["capability"]): c
+                    for c in capabilities}
+            for sc in super_caps:
+                key = (sc["auth_object"], sc["capability"])
+                if key not in seen:
+                    seen[key] = sc
+                    capabilities.append(sc)
+                else:
+                    # Bump severity to whichever is higher; keep the
+                    # role-based "why" text since it has the
+                    # actual auth-object grant string.
+                    seen[key]["severity"] = max(
+                        seen[key]["severity"], sc["severity"])
 
         # Optional row-count probe — only the first time we see each
         # table, cached on the node.  Skipped by default.
@@ -542,7 +641,8 @@ def analyse(node: SAPNode,
 
         summary = _english_summary(
             username, node.sid, client, capabilities,
-            node.capability_row_counts or {})
+            node.capability_row_counts or {},
+            super_profile=super_profile or "")
         blast = _blast_radius(capabilities)
         result = {
             "username": username,
