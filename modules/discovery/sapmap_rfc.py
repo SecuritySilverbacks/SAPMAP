@@ -1964,6 +1964,34 @@ def _build_rfcdes_conn(node: SAPNode, dest_name: str,
 # Read table data
 # ---------------------------------------------------------------------------
 
+def get_table_columns(node: SAPNode, table_name: str,
+                       creds: Credentials = None) -> list:
+    """Return the full list of column names on `table_name` via
+    DDIF_FIELDINFO_GET.  Unlike RFC_READ_TABLE — which silently
+    drops trailing columns when the row is wider than its 512-byte
+    work area — DDIF reads the dictionary metadata directly and is
+    independent of row width.  Returns ``[]`` on any failure
+    (auth missing, FM unavailable, etc.) so the caller can decide
+    whether to fall back to a heuristic read."""
+    cols = []
+    try:
+        with _get_connection(node, creds) as conn:
+            res = conn.call("DDIF_FIELDINFO_GET",
+                             TABNAME=table_name)
+            for row in (res.get("DFIES_TAB", []) or []):
+                name = (row.get("FIELDNAME") or "").strip()
+                if name and not name.startswith(".INCLUDE"):
+                    cols.append(name)
+    except Exception as e:
+        from sapmap_errors import format_rfc_exception
+        logger.debug(f"DDIF_FIELDINFO_GET on {table_name}@{node.sid} "
+                     f"failed: {format_rfc_exception(e)}")
+        print(f"[-] {node.sid}: DDIF_FIELDINFO_GET({table_name}) "
+              f"failed — falling back to RFC_READ_TABLE for "
+              f"column discovery")
+    return cols
+
+
 def read_table(node: SAPNode, table_name: str, fields: list = None,
                where: str = "", max_rows: int = 500,
                creds: Credentials = None) -> list:

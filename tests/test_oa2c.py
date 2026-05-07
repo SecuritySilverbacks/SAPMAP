@@ -91,14 +91,40 @@ def test_categoriser_does_not_misfire_on_other_oa2c_namespace_keys():
 
 # ---- read_oa2c_profiles (mocked sapmap_rfc.read_table) ---------------
 
+class _Patcher:
+    """Combine read_table + get_table_columns mocks into one
+    context manager so tests don't have to nest two patches.
+
+    Args:
+      table_to_rows: {table_name: [row_dict, ...]}.  Used as the
+        return value for both get_table_columns (extracts column
+        names from the first row's keys) and read_table.
+    """
+
+    def __init__(self, table_to_rows: dict):
+        self.rows = table_to_rows
+
+    def __enter__(self):
+        self._read_patch = patch(
+            "sapmap_rfc.read_table",
+            side_effect=lambda node, name, **kw:
+                list(self.rows.get(name, [])))
+        self._cols_patch = patch(
+            "sapmap_rfc.get_table_columns",
+            side_effect=lambda node, name, **kw:
+                (list(self.rows.get(name, [{}])[0].keys())
+                 if self.rows.get(name) else []))
+        self._read_patch.start()
+        self._cols_patch.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._read_patch.stop()
+        self._cols_patch.stop()
+
+
 def _patch_read_table(table_to_rows: dict):
-    """Build a fake `sapmap_rfc.read_table(node, table, ...)` that
-    returns the rows we mapped per table name.  Matches whichever
-    table name the caller passes (since the OA2C reader only reads
-    OA2C_CLIENT and OA2C_CLIENT_EXT)."""
-    def fake(node, table_name, **kw):
-        return list(table_to_rows.get(table_name, []))
-    return patch("sapmap_rfc.read_table", side_effect=fake)
+    return _Patcher(table_to_rows)
 
 
 def test_read_oa2c_joins_client_with_client_ext_on_uuid():
@@ -178,23 +204,26 @@ def test_read_oa2c_falls_back_to_token_url_field():
     assert profiles[0]["token_endpoint"] == "https://legacy/oauth/token"
 
 
-def test_read_oa2c_falls_back_to_oa2c_config_when_oa2c_client_errors():
-    """User's S4H showed OA2C_CLIENT raising RFC_READ_TABLE message
-    AD718 (TABLE_WITHOUT_DATA).  The reader should fall through to
-    the next table-name variant instead of giving up."""
+def test_read_oa2c_falls_back_to_oa2c_config_when_oa2c_client_absent():
+    """When DDIF says OA2C_CLIENT doesn't exist on this kernel, the
+    reader should walk through the table-name variants until one is
+    populated (operator's S4H showed OA2C_CLIENT existing, but
+    older or specialised systems may only carry OA2C_CONFIG)."""
     node = SAPNode(sid="S4H", system_type="ABAP",
                     hostname="s4hanadev", ip="192.168.2.209")
 
-    def fake(node, table_name, **kw):
-        if table_name == "OA2C_CLIENT":
-            raise RuntimeError(
-                "RFC_ABAP_EXCEPTION: ID:AD Type:E Number:718 OA2C_CLIENT")
+    def fake_cols(node, table_name, **kw):
+        return ["CLIENT_UUID", "CLIENT_ID", "TOKEN_ENDPOINT"] \
+            if table_name == "OA2C_CONFIG" else []
+
+    def fake_read(node, table_name, **kw):
         if table_name == "OA2C_CONFIG":
             return [{"CLIENT_UUID": "BB", "CLIENT_ID": "fallback-cid",
                      "TOKEN_ENDPOINT": "https://fb/oauth/token"}]
         return []
 
-    with patch("sapmap_rfc.read_table", side_effect=fake):
+    with patch("sapmap_rfc.get_table_columns", side_effect=fake_cols), \
+         patch("sapmap_rfc.read_table", side_effect=fake_read):
         profiles = read_oa2c_profiles(node)
     assert len(profiles) == 1
     assert profiles[0]["client_id"] == "fallback-cid"
@@ -225,85 +254,91 @@ def test_read_oa2c_heuristically_matches_kernel_specific_column_names():
     assert p["auth_method"] == "BASIC"
 
 
-def test_read_oa2c_first_pass_is_discovery_with_no_field_list():
-    """RFC_READ_TABLE message AD718 fires when ANY pre-listed FIELDS
-    entry doesn't exist on the target kernel.  The discovery pass
-    (the FIRST call against any candidate table) must therefore use
-    fields=None.  Later passes may re-read with explicit columns
-    once we've seen what the kernel actually exposes."""
+def test_read_oa2c_uses_ddif_for_column_discovery_then_targeted_read():
+    """The bulk RFC_READ_TABLE call drops trailing columns when the
+    row exceeds its 512-byte work area — operator's S/4 OA2C_CLIENT
+    has 25+ columns, so the all-columns probe missed CLIENT_ID and
+    TOKEN_ENDPOINT entirely.  Reader must use DDIF_FIELDINFO_GET to
+    enumerate ALL columns first, then issue an explicit-FIELDS
+    RFC_READ_TABLE for just the matched ones."""
     node = SAPNode(sid="S4H", system_type="ABAP",
                     hostname="s4hanadev", ip="192.168.2.209")
-    calls = []   # [(table_name, fields), ...]
+    full_columns = [
+        "MANDT", "CLIENT_UUID", "PROFILE", "SPS_NAME", "CLIENT_ID",
+        "CREATED_BY", "CREATED_ON", "CREATED_AT", "CHANGED_BY",
+        "CHANGED_ON", "CHANGED_AT", "AUTHORIZATION_ENDPOINT",
+        "TOKEN_ENDPOINT", "REVOCATION_ENDPOINT",
+        "AUTHENTICATION_METHOD", "AUTH_CODE_ALLOWED",
+        "SAML20_ALLOWED", "REFRESH_ALLOWED", "RT_VALIDITY",
+        "REDIRECT_URI_HOST", "REDIRECT_URI_PORT",
+        "CS_SEGMENT_COUNT", "TARGET_PATH", "RESOURCE_ACCESS",
+    ]
+    ddif_calls = []
+    read_calls = []
 
-    def fake(node, table_name, **kw):
-        calls.append((table_name, kw.get("fields")))
-        return []
+    def fake_cols(node, table_name, **kw):
+        ddif_calls.append(table_name)
+        return list(full_columns) if table_name == "OA2C_CLIENT" else []
 
-    with patch("sapmap_rfc.read_table", side_effect=fake):
-        read_oa2c_profiles(node)
-    assert calls, "read_table was never called"
-    # The first invocation against any table is the all-columns
-    # discovery pass — fields must be None there.
-    seen_first_per_table: dict = {}
-    for table, fields in calls:
-        if table not in seen_first_per_table:
-            seen_first_per_table[table] = fields
-    for table, fields in seen_first_per_table.items():
-        assert fields is None, (
-            f"first read of {table} pre-lists fields={fields!r} — "
-            f"the discovery pass must use fields=None to dodge "
-            f"AD718 on kernel-specific column drift")
-
-
-def test_read_oa2c_does_targeted_reread_when_first_pass_returns_rows():
-    """When the all-columns discovery returns ≥1 row, the reader
-    must reissue RFC_READ_TABLE asking ONLY for the matched columns
-    — RFC_READ_TABLE's 512-byte WA truncates wide STRING fields when
-    every column is read at once, so wide URL columns silently come
-    back empty.  Operator hit this exact bug on an S/4 box where
-    OA2C_CLIENT exposed CHANGED_*, CREATED_*, CS_SEGMENT_COUNT,
-    CONFIGURATION… and the URL columns (alphabetically last) lost
-    their values."""
-    node = SAPNode(sid="S4H", system_type="ABAP",
-                    hostname="s4hanadev", ip="192.168.2.209")
-    calls = []
-
-    def fake(node, table_name, **kw):
-        calls.append((table_name, kw.get("fields")))
+    def fake_read(node, table_name, **kw):
+        read_calls.append((table_name, kw.get("fields")))
         if table_name != "OA2C_CLIENT":
             return []
-        if kw.get("fields") is None:
-            # First pass: all columns, but URL came back empty due to
-            # WA buffer truncation.
-            return [{
-                "CLIENT_UUID":          "AABBCCDD",
-                "CLIENT_ID":            "cid-from-discovery",
-                "AUTHENTICATION_METHOD": "BASIC",
-                "TOKEN_ENDPOINT":       "",
-                "CONFIGURATION":        "",
-                "CHANGED_AT":           "20260101",
-                "MANDT":                "001",
-            }]
-        # Targeted re-read: only the wanted columns, full values.
         return [{
             "CLIENT_UUID":           "AABBCCDD",
-            "CLIENT_ID":             "cid-from-discovery",
+            "CLIENT_ID":             "cid-from-targeted-read",
             "AUTHENTICATION_METHOD": "BASIC",
             "TOKEN_ENDPOINT":
-                "https://x.authentication.eu10.hana.ondemand.com/oauth/token",
+                "https://x.authentication.eu10.hana.ondemand.com",
         }]
 
-    with patch("sapmap_rfc.read_table", side_effect=fake):
+    with patch("sapmap_rfc.get_table_columns", side_effect=fake_cols), \
+         patch("sapmap_rfc.read_table", side_effect=fake_read):
         profiles = read_oa2c_profiles(node)
-    # Targeted re-read happened → URL field is populated.
+
+    # DDIF discovered the schema first (independent of WA cut-off).
+    assert "OA2C_CLIENT" in ddif_calls
+    # The actual data read used a targeted FIELDS list that included
+    # CLIENT_ID and TOKEN_ENDPOINT — columns that the all-columns
+    # probe was hiding.
+    oa2c_reads = [(t, f) for t, f in read_calls if t == "OA2C_CLIENT"]
+    assert oa2c_reads, "OA2C_CLIENT was never read"
+    fields_used = oa2c_reads[0][1]
+    assert fields_used is not None, \
+        "reader must pass explicit FIELDS, not None"
+    assert "CLIENT_ID" in fields_used
+    assert "TOKEN_ENDPOINT" in fields_used
+    assert "CLIENT_UUID" in fields_used
+    # End-to-end: profile has the URL.
     assert len(profiles) == 1
-    assert profiles[0]["token_endpoint"].endswith("/oauth/token")
-    # First call to OA2C_CLIENT had fields=None (discovery), a later
-    # call had explicit field names (targeted).
-    fields_for_oa2c_client = [f for t, f in calls if t == "OA2C_CLIENT"]
-    assert fields_for_oa2c_client[0] is None
-    assert any(f is not None and "TOKEN_ENDPOINT" in f
-                for f in fields_for_oa2c_client[1:])
+    assert profiles[0]["token_endpoint"].startswith("https://x.")
+    assert profiles[0]["client_id"] == "cid-from-targeted-read"
+
+
+def test_read_oa2c_picks_up_authentication_method_explicitly():
+    """AUTHENTICATION_METHOD doesn't substring-match AUTH_METHOD
+    (no underscore between AUTH and ENTICATION).  The hint table
+    must list AUTHENTICATION_METHOD directly so S/4's column gets
+    matched."""
+    node = SAPNode(sid="S4H", system_type="ABAP",
+                    hostname="s4hanadev", ip="192.168.2.209")
+    cols = ["CLIENT_UUID", "CLIENT_ID", "TOKEN_ENDPOINT",
+             "AUTHENTICATION_METHOD"]
+
+    def fake_cols(node, name, **kw):
+        return cols if name == "OA2C_CLIENT" else []
+
+    def fake_read(node, name, **kw):
+        if name != "OA2C_CLIENT":
+            return []
+        return [{"CLIENT_UUID": "AA", "CLIENT_ID": "cid",
+                 "TOKEN_ENDPOINT": "https://x.hana.ondemand.com",
+                 "AUTHENTICATION_METHOD": "1"}]
+
+    with patch("sapmap_rfc.get_table_columns", side_effect=fake_cols), \
+         patch("sapmap_rfc.read_table", side_effect=fake_read):
+        profiles = read_oa2c_profiles(node)
+    assert profiles[0]["auth_method"] == "1"
 
 
 # ---- end-to-end: harvester sees OA2C profile + secstore secret ------

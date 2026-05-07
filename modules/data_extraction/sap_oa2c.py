@@ -48,9 +48,12 @@ _FIELD_HINTS = {
     "auth_endpoint":   ("AUTHORIZATION_ENDPOINT", "AUTH_URL",
                          "AUTH_ENDPOINT"),
     "issuer":          ("ISSUER",),
-    "auth_method":     ("CLIENT_AUTHENTICATION", "AUTH_METHOD",
-                         "CLIENT_SECRET_METHOD"),
-    "description":     ("DESCRIPTION", "PROF_NAME"),
+    # AUTHENTICATION_METHOD is the S/4 column name; substring-match
+    # against AUTH_METHOD doesn't hit (no underscore between AUTH and
+    # METHOD in AUTHENTICATION_METHOD), so list it explicitly.
+    "auth_method":     ("CLIENT_AUTHENTICATION", "AUTHENTICATION_METHOD",
+                         "AUTH_METHOD", "CLIENT_SECRET_METHOD"),
+    "description":     ("DESCRIPTION", "PROF_NAME", "SPS_NAME"),
     "profile":         ("PROFILE_UUID", "PROFILE", "PROF_ID"),
 }
 
@@ -231,41 +234,60 @@ def read_oa2c_profiles(node: SAPNode,
     """
     print(f"[*] {node.sid}: reading OAuth 2.0 client config "
           f"(transaction OA2C_CONFIG tables)")
-    table, clients = _try_read_first_populated(
-        node, _CLIENT_TABLE_VARIANTS, creds)
-    if not clients:
-        print(f"[*] {node.sid}: no OAuth client config visible across "
-              f"{', '.join(_CLIENT_TABLE_VARIANTS)} — either the "
-              f"system has no OAuth profiles configured, or this "
-              f"kernel exposes them under a table name SAPMAP "
-              f"doesn't probe yet (let us know in an issue if "
-              f"OAUC2_CONFIG transaction shows profiles but this "
-              f"call returns 0).")
+
+    # Step 1: discover the FULL column list via DDIF_FIELDINFO_GET.
+    # This is independent of RFC_READ_TABLE's 512-byte WA, so it
+    # returns every column on the table — the bulk RFC_READ_TABLE
+    # discovery missed columns positioned past the WA cut-off.
+    import sapmap_rfc
+    table = ""
+    columns: list = []
+    for tbl in _CLIENT_TABLE_VARIANTS:
+        cols = sapmap_rfc.get_table_columns(node, tbl, creds=creds)
+        if cols:
+            print(f"[+] {node.sid}: DDIF says {tbl} has "
+                  f"{len(cols)} column(s): {', '.join(cols)}")
+            table = tbl
+            columns = cols
+            break
+        print(f"[*] {node.sid}: DDIF returned no columns for {tbl} "
+              f"(table doesn't exist on this kernel)")
+    if not table:
+        print(f"[-] {node.sid}: DDIF discovery failed across "
+              f"{', '.join(_CLIENT_TABLE_VARIANTS)} — falling back "
+              f"to RFC_READ_TABLE all-columns probe (may miss "
+              f"columns past the 512-byte WA cut-off)")
+        table, fallback_rows = _try_read_first_populated(
+            node, _CLIENT_TABLE_VARIANTS, creds)
+        if not fallback_rows:
+            print(f"[*] {node.sid}: no OAuth client config visible "
+                  f"across {', '.join(_CLIENT_TABLE_VARIANTS)}")
+            return []
+        columns = list(fallback_rows[0].keys())
+
+    # Step 2: pick the columns we want from the FULL list.
+    targeted_cols, _col_to_logical = _columns_matching_hints(
+        {c: "" for c in columns})
+    # Always include CLIENT_UUID so we have the secstore join key.
+    for col in columns:
+        if col.upper() in ("CLIENT_UUID", "CONFIG_ID"):
+            if col not in targeted_cols:
+                targeted_cols.append(col)
+            break
+    if not targeted_cols:
+        print(f"[-] {node.sid}: {table} has no columns matching any "
+              f"OA2C hint — schema may be entirely different on this "
+              f"kernel.  Full column list: {', '.join(columns)}")
         return []
 
-    # The all-columns read above tells us which columns the kernel
-    # actually exposes; reissue the call asking ONLY for the columns
-    # we care about so RFC_READ_TABLE's 512-byte work-area limit can't
-    # silently empty wide STRING columns like TOKEN_ENDPOINT.  The
-    # operator's S/4 example: 12+ columns including big audit fields
-    # (CHANGED_AT/BY/ON, CREATED_AT/BY/ON, CONFIGURATION blob); when
-    # all of them share the WA buffer, TOKEN_ENDPOINT comes back "".
-    targeted_cols, _col_to_logical = _columns_matching_hints(clients[0])
-    if targeted_cols:
-        # Always include CLIENT_UUID so we have the join key.
-        if not any(c.upper() in ("CLIENT_UUID", "CONFIG_ID")
-                    for c in targeted_cols):
-            for k in clients[0].keys():
-                if k.upper() in ("CLIENT_UUID", "CONFIG_ID"):
-                    targeted_cols.append(k)
-                    break
-        print(f"[*] {node.sid}: re-reading {table} with explicit "
-              f"columns {targeted_cols} so wide URL fields aren't "
-              f"truncated by the 512-byte WA buffer…")
-        targeted = _reread_with_explicit_columns(
-            node, table, targeted_cols, creds)
-        if targeted:
-            clients = targeted
+    print(f"[*] {node.sid}: requesting {table} columns "
+          f"{targeted_cols} via RFC_READ_TABLE (DDIF-driven)…")
+    clients = _reread_with_explicit_columns(
+        node, table, targeted_cols, creds)
+    if not clients:
+        print(f"[*] {node.sid}: {table} returned 0 rows — table "
+              f"exists but has no OAuth profiles configured")
+        return []
 
     # Extension table is best-effort — when missing, grant_type just
     # stays empty and the operator can edit it manually before mint.
