@@ -1213,6 +1213,11 @@ _RE_DBCON = re.compile(r"^/DBCON/(.+)$")
 _RE_CTS = re.compile(r"^/CTS/")
 _RE_STRUST = re.compile(r"^/STRUST_PSE_PIN/")
 _RE_HMAC = re.compile(r"^/HMAC_INDEP/")
+# OAuth 2.0 Client secret stored against the CLIENT_UUID from
+# OA2C_CLIENT.  /OA2C/CS_<32HEX>_<NN>: the hex blob is the CLIENT_UUID
+# with hyphens stripped, NN is a sequence number for rotated secrets.
+_RE_OA2C_CS = re.compile(
+    r"^/OA2C/CS_([0-9A-Fa-f]{32})_(\d+)\s*$")
 
 
 def categorise_entry(entry: dict) -> dict:
@@ -1278,6 +1283,14 @@ def categorise_entry(entry: dict) -> dict:
     # --- HMAC ---
     if _RE_HMAC.match(ident):
         entry["category"] = "hmac"
+        return entry
+
+    # --- OAuth 2.0 client secret (transaction OA2C_CONFIG) ---
+    m = _RE_OA2C_CS.match(ident)
+    if m:
+        entry["category"]    = "oauth2_client"
+        entry["client_uuid"] = m.group(1).lower()
+        entry["secret_seq"]  = m.group(2)
         return entry
 
     # --- PSE / certificate PIN ---
