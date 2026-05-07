@@ -515,6 +515,145 @@ def _derive_landscape_recommendations(state: SAPMAPState) -> list:
             "refs": "SAP Cloud Connector documentation > Disaster Recovery",
         })
 
+    # ---------------------------------------------------------------
+    # BTP (cloud-side) findings — both directions.  Surfaced when
+    # state.btp_subaccounts has anything actionable, regardless of
+    # whether on-prem nodes happen to exist on the map.
+    # ---------------------------------------------------------------
+    btp_subs = list((getattr(state, "btp_subaccounts", {})
+                     or {}).values())
+
+    # 11. Cleartext destinations on a BTP subaccount.  Anyone with
+    # the same scope on the same subaccount can read these
+    # passwords; rotating them is the only reliable mitigation.
+    cleartext_subs = []
+    cleartext_total = 0
+    linked_total = 0
+    for sub in btp_subs:
+        dests = list(getattr(sub, "destinations", []) or [])
+        cleartext_n = sum(1 for d in dests
+                          if getattr(d, "cleartext_captured", False)
+                          or (isinstance(d, dict)
+                              and d.get("cleartext_captured")))
+        linked_n = sum(1 for d in dests
+                       if (getattr(d, "linked_target_sid", "")
+                           or (isinstance(d, dict)
+                               and d.get("linked_target_sid"))))
+        if cleartext_n:
+            cleartext_subs.append(sub)
+            cleartext_total += cleartext_n
+            linked_total += linked_n
+    if cleartext_subs:
+        labels = []
+        for sub in cleartext_subs:
+            labels.append(getattr(sub, "subdomain", "")
+                          or getattr(sub, "display_name", "")
+                          or getattr(sub, "uuid", "?")[:8])
+        items.append({
+            "category": "BTP destination service",
+            "scope": ", ".join(sorted(set(labels))),
+            "title": "Replace stored on-prem credentials in BTP "
+                      "destinations with Principal Propagation",
+            "body": (
+                f"{cleartext_total} BTP destination(s) on "
+                f"{len(cleartext_subs)} subaccount(s) hold cleartext "
+                f"on-prem credentials retrievable by anyone with the "
+                f"`destination_configuration.ApiAccess` scope (a "
+                f"per-subaccount admin-equivalent claim).  "
+                f"{linked_total} of those linked to a SAPMAP-known "
+                f"on-prem SAPNode.  Migrate every Basic / "
+                f"OAuth2Password destination to Principal "
+                f"Propagation (X.509 mTLS to the Cloud Connector) "
+                f"or OAuth2SAMLBearerAssertion against IAS so the "
+                f"on-prem credential never leaves the on-prem "
+                f"system.  Audit and minimise the BTP users with "
+                f"the ApiAccess scope; this scope reads every "
+                f"destination password in cleartext.  Rotate every "
+                f"on-prem password that was leaked, then audit "
+                f"USR02 last-login history for activity outside "
+                f"the engagement window."
+            ),
+            "refs": ("SAP Help Portal — Configure Principal "
+                      "Propagation; SAP Note 3021915"),
+        })
+
+    # 12. Service-key tokens / OAuth profiles on-prem that mint
+    # BTP tokens.  Captured /OA2C/CS_<UUID>_NN secstore secrets are
+    # equivalent to long-lived BTP service-key passwords — they
+    # mint tokens at XSUAA without any extra checks.
+    oauth_profile_sids = []
+    for n in nodes:
+        ent = list(getattr(n, "oauth2_profiles", []) or [])
+        if not ent:
+            # also count secstore_entries categorised as oauth2_client
+            ent = [e for e in (n.secstore_entries or [])
+                    if isinstance(e, dict)
+                    and e.get("category") == "oauth2_client"]
+        if ent:
+            oauth_profile_sids.append(n.sid)
+    if oauth_profile_sids:
+        items.append({
+            "category": "OA2C OAuth client config",
+            "scope": ", ".join(sorted(oauth_profile_sids)),
+            "title": "Treat OA2C client_secret leaks as BTP "
+                      "service-key compromise",
+            "body": (
+                "These ABAP systems hold OAuth 2.0 Client config "
+                "(transaction OA2C_CONFIG, table OA2C_CLIENT) "
+                "whose client_secret was recoverable from RSECTAB "
+                "(`/OA2C/CS_<UUID>_NN` rows).  Each "
+                "(client_id, client_secret) pair is a long-lived "
+                "credential that mints BTP access tokens at XSUAA "
+                "with whatever scopes the destination service-key "
+                "carries — typically destination read across the "
+                "bound subaccount.  After rotating the on-prem "
+                "credential and the SecStore key, also rotate the "
+                "BTP-side service-key (`cf delete-service-key` + "
+                "`cf create-service-key`) so the leaked secret "
+                "stops working entirely.  Restrict S_TABU_DIS / "
+                "S_RFC for OA2C_CLIENT to a short admin allow-list."
+            ),
+            "refs": ("SAP Note 3021915; BTP Destination Service "
+                      "Security Guide"),
+        })
+
+    # 13. SCC ↔ BTP tunnel review — when an SCC links to a
+    # subaccount that we proved had cleartext credentials, the
+    # tunnel itself doubles as the lateral path.  Surface it.
+    scc_btp_pairs = []
+    for s in sccs:
+        for u in (getattr(s, "subaccount_uuids", []) or []):
+            for sub in btp_subs:
+                if (getattr(sub, "uuid", "") == u
+                        and getattr(sub, "pwned", False)):
+                    scc_btp_pairs.append(
+                        (getattr(s, "host", "?"),
+                         getattr(sub, "subdomain", "")
+                         or u[:8]))
+    if scc_btp_pairs:
+        scope = ", ".join(sorted({f"{h} ↔ {sd}"
+                                    for h, sd in scc_btp_pairs}))
+        items.append({
+            "category": "SCC × BTP integration",
+            "scope": scope,
+            "title": "Review SCC location IDs and tighten "
+                      "subaccount tunnel ACLs",
+            "body": (
+                "These Cloud Connectors tunnel into BTP "
+                "subaccounts that had cleartext destination "
+                "credentials.  An attacker who controls the SCC "
+                "host can read every System Mapping (cloud → "
+                "on-prem rule) and replay the tunnel-side "
+                "credential into any of those backends.  Restrict "
+                "SCC location IDs (one per subaccount with strict "
+                "ACL), enforce mTLS principal propagation on every "
+                "mapping, and disable any host:port mapping that "
+                "doesn't have an explicit downstream-system check."
+            ),
+            "refs": ("SAP Cloud Connector — Subaccount Setup; "
+                      "Hardening Guide"),
+        })
+
     return items
 
 

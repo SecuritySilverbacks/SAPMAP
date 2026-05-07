@@ -2778,11 +2778,28 @@ function updateMap() {
   // Chain highlight overlay: draw glowing path + hop badges
   if (_highlightedChain && _highlightedChain.length >= 2) {
     const BOX_W_h = 240, BOX_H_h = 174;
+    // Resolve chain SIDs against on-prem nodes AND BTP subaccounts.
+    // BTP-rooted chains start with a "BTP:<uuid8>" sentinel that
+    // doesn't exist in mapState.nodes — without this branch the
+    // highlight loop bailed silently and "Click to highlight on
+    // map" looked broken.
+    const _resolveChainSid = (sid) => {
+      if (!sid) return null;
+      if (nodes[sid]) return nodes[sid];
+      if (sid.startsWith('BTP:')) {
+        const suffix = sid.slice(4).toLowerCase();
+        for (const u in btpNodes) {
+          if (u.toLowerCase().startsWith(suffix)) return btpNodes[u];
+        }
+      }
+      return null;
+    };
     // Draw glowing edges between consecutive nodes in the chain
     for (let i = 0; i < _highlightedChain.length - 1; i++) {
       const srcSid = _highlightedChain[i];
       const tgtSid = _highlightedChain[i + 1];
-      const srcN = nodes[srcSid]; const tgtN = nodes[tgtSid];
+      const srcN = _resolveChainSid(srcSid);
+      const tgtN = _resolveChainSid(tgtSid);
       if (!srcN || !tgtN) continue;
       const sx = (srcN._x||0) + BOX_W_h/2, sy = (srcN._y||0) + BOX_H_h/2;
       const tx = (tgtN._x||0) + BOX_W_h/2, ty = (tgtN._y||0) + BOX_H_h/2;
@@ -2799,7 +2816,7 @@ function updateMap() {
     // Hop number badges on each node in the chain
     for (let i = 0; i < _highlightedChain.length; i++) {
       const nSid = _highlightedChain[i];
-      const nNode = nodes[nSid];
+      const nNode = _resolveChainSid(nSid);
       if (!nNode) continue;
       const bx = (nNode._x||0) + BOX_W_h - 8, by = (nNode._y||0) - 8;
       const isStart = (i === 0), isEnd = (i === _highlightedChain.length - 1);
