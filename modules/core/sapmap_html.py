@@ -771,6 +771,7 @@ body {
       <div class="ctx-item" data-action="download_java_secstore">&#128273; Download Java Secure Store</div>
       <div class="ctx-item" data-action="view_java_secstore">&#128203; View Java Secure Store Results</div>
       <div class="ctx-item" data-action="download_table">&#128229; Download Table Data</div>
+      <div class="ctx-item" data-action="read_oa2c">&#9729; Read OA2C OAuth Profiles</div>
     </div>
   </div>
   <!-- Business Impact submenu -->
@@ -2886,6 +2887,9 @@ function showCtxMenu(e, sid) {
     'view_java_secstore':     n && n.java_secstore_checked,
     'download_table':     (isAbapStack && hasCreds) ||
                           (isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy)),
+    // OA2C tables only exist on ABAP stacks; needs RFC creds to call
+    // RFC_READ_TABLE.  Java-only systems hide it.
+    'read_oa2c':          isAbapStack && hasCreds,
     'impact_assess':      hasCreds,                   // need credentials/access
     'impact_view':        (n.impact_results||[]).length > 0,
     'impact_assess_java': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy),
@@ -3468,6 +3472,8 @@ async function ctxAction(action) {
       }
       break;
     }
+    case 'read_oa2c':
+      await api('POST', `node/${sid}/read_oa2c`); break;
     case 'impact_assess': {
       const n_ia = (mapState.nodes || {})[sid];
       // Collect all unique clients from credentials + created users

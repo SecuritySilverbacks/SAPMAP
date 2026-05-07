@@ -253,6 +253,15 @@ class SAPNode:
     # operator runs Test Connection / scan against it.
     discovered_via_btp: bool = False
 
+    # OAuth2 client profiles configured on this ABAP system (transaction
+    # OA2C_CONFIG).  Each row joins OA2C_CLIENT (client_id, token
+    # endpoint, …) with OA2C_CLIENT_EXT (grant_type) by CLIENT_UUID;
+    # the matching client_secret lives in RSECTAB under
+    # /OA2C/CS_<CLIENT_UUID-no-hyphens>_<NN>.  Populated by
+    # /api/node/<sid>/read_oa2c.  Each entry is a plain dict so
+    # to_dict() stays JSON-safe.
+    oauth2_profiles: list = field(default_factory=list)
+
     # Computed helpers
     def has_access(self) -> bool:
         """True if we have any working credentials or created users."""
@@ -358,6 +367,7 @@ class SAPNode:
             "copyfail_root_obtained": self.copyfail_root_obtained,
             "copyfail_kernel": self.copyfail_kernel,
             "discovered_via_btp": self.discovered_via_btp,
+            "oauth2_profiles": list(self.oauth2_profiles),
         }
 
     @classmethod
@@ -414,6 +424,7 @@ class SAPNode:
             copyfail_root_obtained=d.get("copyfail_root_obtained", False),
             copyfail_kernel=d.get("copyfail_kernel", ""),
             discovered_via_btp=d.get("discovered_via_btp", False),
+            oauth2_profiles=list(d.get("oauth2_profiles", [])),
         )
         return node
 

