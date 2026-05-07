@@ -254,6 +254,52 @@ def _scc_section(state: SAPMAPState) -> list:
     return out
 
 
+def _capability_section(state: SAPMAPState) -> list:
+    """User capability inventory — one paragraph per (user, client)
+    pair we own.  This is the section CISOs print: it's the only
+    place in the report that translates raw SAP_ALL into business
+    English ("can read 14,382 salary records, 2,107 vendor IBANs,
+    20.7M GL line items")."""
+    rows = []
+    for sid, n in sorted(state.nodes.items()):
+        for r in (n.capability_results or []):
+            rows.append((sid, r))
+    if not rows:
+        return []
+    out = ["## User capability inventory", ""]
+    out.append(
+        "What each user we own can actually read or do, mapped from "
+        "raw `AGR_USERS` / `AGR_1251` / `UST04` rows to business "
+        "capabilities.  This is the practical blast-radius — far "
+        "more decision-useful than `SAP_ALL: yes/no`.")
+    out.append("")
+    for sid, r in rows:
+        caps = r.get("capabilities") or []
+        sev = max((c.get("severity", 1) for c in caps), default=1)
+        sev_label = {5: "CRITICAL", 4: "HIGH",
+                     3: "MEDIUM", 2: "LOW", 1: "INFO"}.get(sev, "INFO")
+        out.append(
+            f"### {sev_label} — {r.get('username', '?')} on {sid} "
+            f"client {r.get('client', '?')}")
+        out.append("")
+        out.append(_esc(r.get("summary") or ""))
+        out.append("")
+        out.append(f"_Blast-radius: {_esc(r.get('blast_radius', ''))}_")
+        out.append("")
+        if caps:
+            out.append("| Auth object | Capability | Affected tables |")
+            out.append("| --- | --- | --- |")
+            for c in sorted(caps,
+                             key=lambda x: -x.get("severity", 0)):
+                tbls = ", ".join(c.get("tables", []) or []) or "—"
+                out.append(
+                    f"| `{_esc(c.get('auth_object', ''))}` | "
+                    f"{_esc(c.get('capability', ''))} | "
+                    f"{_esc(tbls)} |")
+            out.append("")
+    return out
+
+
 def _btp_section(state: SAPMAPState) -> list:
     """BTP subaccounts — what the cloud side gave up to us.
 
@@ -755,6 +801,11 @@ def build_markdown_report(state: SAPMAPState,
     sections.append("---")
     sections.append("")
     sections.extend(_credentials_section(state))
+    cap_section = _capability_section(state)
+    if cap_section:
+        sections.append("---")
+        sections.append("")
+        sections.extend(cap_section)
     scc_section = _scc_section(state)
     if scc_section:
         sections.append("---")
@@ -1455,6 +1506,73 @@ def build_html_report(state: SAPMAPState,
         f'<tbody>{cred_rows}</tbody></table>'
     ) if cred_rows else '<div class="muted">No credentials recovered.</div>'
 
+    # User capability inventory — translate raw SAP_ALL into business
+    # English.  One block per (user, client) pair we own.  Skipped
+    # entirely when the analyser hasn't run yet.
+    cap_blocks = []
+    cap_sev_colors = {5: "#e74c3c", 4: "#e67e22",
+                       3: "#f1c40f", 2: "#3498db", 1: "#95a5a6"}
+    cap_sev_labels = {5: "CRITICAL", 4: "HIGH",
+                       3: "MEDIUM", 2: "LOW", 1: "INFO"}
+    for sid, n in sorted(state.nodes.items()):
+        for r in (n.capability_results or []):
+            caps = r.get("capabilities") or []
+            sev_max = max((c.get("severity", 1) for c in caps),
+                            default=1)
+            sev_color = cap_sev_colors.get(sev_max, "#95a5a6")
+            sev_label = cap_sev_labels.get(sev_max, "INFO")
+            user = _hesc(r.get("username", "?"))
+            client = _hesc(r.get("client", "?"))
+            blast = _hesc(r.get("blast_radius", ""))
+            summary = _hesc(r.get("summary", ""))
+            rows_html = ""
+            for c in sorted(caps,
+                            key=lambda x: -x.get("severity", 0)):
+                col = cap_sev_colors.get(c.get("severity", 1),
+                                          "#95a5a6")
+                tbls = ", ".join(c.get("tables", []) or []) or "—"
+                rows_html += (
+                    f'<tr>'
+                    f'<td><span class="badge" style="background:'
+                    f'{col};color:#fff;font-size:10px;padding:'
+                    f'2px 6px;border-radius:3px">'
+                    f'{cap_sev_labels.get(c.get("severity", 1), "INFO")}'
+                    f'</span></td>'
+                    f'<td class="mono">{_hesc(c.get("auth_object", ""))}</td>'
+                    f'<td>{_hesc(c.get("capability", ""))}</td>'
+                    f'<td class="mono" style="font-size:11px">'
+                    f'{_hesc(tbls)}</td>'
+                    f'</tr>')
+            cap_blocks.append(
+                f'<div style="border-left:4px solid {sev_color};'
+                f'padding:14px 18px;margin:14px 0;'
+                f'background:#fbfbfd;border-radius:6px">'
+                f'<div style="font-size:12px;font-weight:600;'
+                f'color:{sev_color};text-transform:uppercase;'
+                f'letter-spacing:.4px;margin-bottom:4px">'
+                f'{sev_label} — {user} on {_hesc(sid)} client {client}'
+                f'</div>'
+                f'<p style="margin:0 0 6px;font-size:13.5px;'
+                f'line-height:1.55">{summary}</p>'
+                f'<p style="margin:0 0 10px;font-size:12px;'
+                f'color:#6b7280;font-style:italic">'
+                f'Blast-radius: {blast}</p>'
+                f'<table class="grid" style="font-size:12px">'
+                f'<thead><tr><th>Tier</th><th>Auth object</th>'
+                f'<th>Capability</th><th>Affected tables</th>'
+                f'</tr></thead><tbody>{rows_html}</tbody></table>'
+                f'</div>')
+    if cap_blocks:
+        capability_html = (
+            '<section><h2>📊 User capability inventory</h2>'
+            '<p style="font-size:12px;color:#6b7280;margin:0 0 12px">'
+            'What each user we own can actually do, mapped from raw '
+            '<code>AGR_USERS</code> / <code>AGR_1251</code> / '
+            '<code>UST04</code> rows to business capabilities.'
+            '</p>' + "".join(cap_blocks) + '</section>')
+    else:
+        capability_html = ""
+
     return f"""<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8">
@@ -1637,6 +1755,8 @@ def build_html_report(state: SAPMAPState,
     </p>
     {cred_table}
   </section>
+
+  {capability_html}
 
   <section>
     <h2>📋 Recommendations</h2>

@@ -709,6 +709,7 @@ body {
     <div class="ctx-item">&#128225; Scanning</div>
     <div class="ctx-sub">
       <div class="ctx-item" data-action="standard_scan">&#128270; Standard Scan (fingerprint host)</div>
+      <div class="ctx-item" data-action="analyse_capabilities">&#128201; Analyse User Capabilities</div>
       <div class="ctx-item" data-action="rfc_system_info">&#128225; RFC System Info</div>
       <div class="ctx-item" data-action="check_gw">&#128270; Check GW Vulnerability</div>
       <div class="ctx-item" data-action="check_ms">&#128270; Check MS Betrusted (CVE-2020-6207)</div>
@@ -2966,6 +2967,9 @@ function showCtxMenu(e, sid) {
     'exploit_copyfail': !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
     'deep_scan':        true,                       // always available
     'standard_scan':    !!n.discovered_via_btp,     // BTP placeholders only
+    // ABAP-only; needs at least one verified cred or created user
+    // so the analyser has somebody to analyse.
+    'analyse_capabilities': isAbapStack && (hasCreds || hasCreatedUsers),
     'retrieve_rfcs':    hasCreds,                   // need credentials/access
     'test_rfcs':        hasCreds && hasRFCs,        // need access + existing RFCs
     'read_java_destinations': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy),
@@ -3513,6 +3517,19 @@ async function ctxAction(action) {
       await api('POST', `node/${sid}/deep_scan`); break;
     case 'standard_scan':
       await api('POST', `node/${sid}/standard_scan`); break;
+    case 'analyse_capabilities': {
+      const probe = confirm(
+        'Run user capability analyser on ' + sid + '?\n\n' +
+        'Reads AGR_USERS / AGR_1251 / UST04 to map every user we ' +
+        'own to human-readable business capabilities (e.g. ' +
+        '"can read BSEG", "can edit vendor IBANs in LFBK").\n\n' +
+        'Click OK to also run COUNT(*) row probes on each named ' +
+        'table for the engagement report ("BSEG = 20.7M rows") — ' +
+        'a few seconds longer.\nCancel to skip the row probes.');
+      await api('POST', `node/${sid}/analyse_capabilities`,
+                { probe_row_counts: probe });
+      break;
+    }
     case 'retrieve_rfcs':
       await api('POST', `node/${sid}/retrieve_rfcs`); break;
     case 'test_rfcs':
@@ -4158,6 +4175,43 @@ function showDetails(sid) {
         }).join('') +
         (withData.length > 3 ? '<div style="font-size:11px;color:#58a6ff;cursor:pointer;margin-top:4px" onclick="showImpactDetail(\'' + escHtml(n.sid) + '\')">+ ' + (withData.length - 3) + ' more &rarr;</div>' : '') +
         '</div>';
+    })()}
+    ${(() => {
+      const cr = n.capability_results || [];
+      if (cr.length === 0) return '';
+      const tierColors = {5:'#e74c3c', 4:'#e67e22', 3:'#f1c40f', 2:'#3498db', 1:'#95a5a6'};
+      return '<div class="detail-section"><h4>&#128202; User Capability Inventory ('
+        + cr.length + ' user' + (cr.length === 1 ? '' : 's') + ')</h4>'
+        + cr.map(r => {
+            const caps = r.capabilities || [];
+            const top = caps.slice(0, 4);
+            const more = caps.length - top.length;
+            const userBadge = '<b style="color:#f0883e">' + escHtml(r.username)
+                            + '</b>@<span style="color:#8b949e">'
+                            + escHtml(r.client) + '</span>';
+            const blast = '<span style="font-size:10px;color:#8b949e">'
+                        + escHtml(r.blast_radius || '') + '</span>';
+            const head = '<div style="margin:6px 0 4px">' + userBadge + '<br>' + blast + '</div>';
+            const list = top.map(c => {
+                const col = tierColors[c.severity] || '#95a5a6';
+                const tbls = (c.tables || []).slice(0, 3).join(', ')
+                           + ((c.tables || []).length > 3
+                              ? ' +' + ((c.tables || []).length - 3) : '');
+                return '<div class="detail-row" title="' + escHtml(c.why || '') + '">'
+                    + '<span class="detail-key" style="color:' + col + ';min-width:46px">'
+                    + escHtml(c.auth_object) + '</span>'
+                    + '<span class="detail-val" style="font-size:11px">'
+                    + escHtml(c.capability)
+                    + '<br><span style="color:#6e7681;font-size:10px">'
+                    + escHtml(tbls) + '</span></span></div>';
+            }).join('');
+            const tail = more > 0
+              ? '<div style="font-size:10px;color:#6e7681;margin:4px 0 0">+ '
+                + more + ' more capability' + (more === 1 ? '' : 'ies') + '</div>'
+              : '';
+            return head + list + tail;
+        }).join('<hr style="border:0;border-top:1px solid #30363d;margin:8px 0">')
+        + '</div>';
     })()}
   `;
 
