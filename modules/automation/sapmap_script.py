@@ -524,15 +524,31 @@ def _read_token(value: str) -> str:
     """Load a secret value from disk when it's prefixed with
     `path:`; return it verbatim otherwise.  Lets scripts reference
     long JWTs / client secrets via a file path so the YAML stays
-    short and the secret doesn't have to live in version control."""
+    short and the secret doesn't have to live in version control.
+
+    File-load failures are reported on stderr / the SAPMAP console
+    so the operator can correlate "uaa_url/client_id/client_secret
+    are required" with the actual root cause (missing file, bad
+    permissions, blank file, …) instead of guessing.
+    """
     if isinstance(value, str) and value.startswith("path:"):
         path = value[5:].strip()
         try:
             with open(os.path.expanduser(path), "r") as fh:
-                return fh.read().strip()
-        except Exception as e:
-            logger.warning(f"Could not read token from {path!r}: {e}")
+                content = fh.read().strip()
+        except FileNotFoundError:
+            print(f"[SCRIPT] ERROR: secret file not found at "
+                  f"{path!r} — fill it in (echo '<secret>' > "
+                  f"{path}) before running the playbook.")
             return ""
+        except Exception as e:
+            print(f"[SCRIPT] ERROR: cannot read secret from "
+                  f"{path!r}: {e}")
+            return ""
+        if not content:
+            print(f"[SCRIPT] WARNING: secret file {path!r} exists "
+                  f"but is empty — value will be treated as missing.")
+        return content
     return value or ""
 
 
