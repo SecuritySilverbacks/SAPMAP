@@ -141,14 +141,71 @@ def _try_read_first_populated(node: SAPNode, table_variants: tuple,
             print(f"[*] {node.sid}: {tbl} exists but returned 0 rows")
             continue
         cols = sorted(rows[0].keys())
+        # Show ALL columns when the diagnostic matters (≥1 row found)
+        # so the operator can spot a wide STRING column that
+        # RFC_READ_TABLE chopped off.
+        head = ', '.join(cols[:8])
+        tail = (' (+'+str(len(cols)-8)+' more: '
+                + ', '.join(cols[8:])+')') if len(cols) > 8 else ''
         print(f"[+] {node.sid}: {tbl} → {len(rows)} row(s); "
-              f"columns: {', '.join(cols[:8])}"
-              f"{' …' if len(cols) > 8 else ''}")
+              f"columns: {head}{tail}")
         return tbl, rows
     if last_error:
         print(f"[*] {node.sid}: every probed table errored — last: "
               f"{last_error}")
     return "", []
+
+
+def _columns_matching_hints(sample_row: dict) -> tuple:
+    """Inspect one row of a freshly-discovered table and figure out
+    which columns we actually need.  Returns ``(wanted_columns,
+    column_to_logical_name)`` where wanted_columns is a sorted list
+    of column names to re-request explicitly via
+    ``RFC_READ_TABLE``'s FIELDS parameter.  This avoids RFC_READ_TABLE's
+    512-byte work-area truncation that silently empties wide URL
+    columns when every column is read at once.
+    """
+    upper_to_orig = {k.upper(): k for k in sample_row.keys()}
+    wanted: dict = {}   # original_name → logical_name (for later mapping)
+    all_hints = []
+    for logical, hint_tuple in _FIELD_HINTS.items():
+        for h in hint_tuple:
+            all_hints.append((logical, h))
+    # Exact-match passes first so a column literally named
+    # TOKEN_ENDPOINT wins over OAUTH2_TOKEN_URL when both exist.
+    for logical, hint in all_hints:
+        if hint in upper_to_orig:
+            wanted.setdefault(upper_to_orig[hint], logical)
+    for logical, hint in all_hints:
+        for col_upper, col_orig in upper_to_orig.items():
+            if hint in col_upper and col_orig not in wanted:
+                wanted[col_orig] = logical
+    return sorted(wanted.keys()), wanted
+
+
+def _reread_with_explicit_columns(node: SAPNode, table: str,
+                                     columns: list,
+                                     creds: Optional[Credentials]) -> list:
+    """Re-issue RFC_READ_TABLE asking ONLY for the named columns.
+    The kernel packs only those fields into the work area, so wide
+    STRING columns (e.g. token_endpoint URLs) come back fully even
+    when the all-columns read truncated them to empty."""
+    if not columns:
+        return []
+    import sapmap_rfc
+    from sapmap_errors import format_rfc_exception
+    try:
+        rows = sapmap_rfc.read_table(node, table, fields=list(columns),
+                                       creds=creds, max_rows=500) or []
+        print(f"[+] {node.sid}: {table} re-read with "
+              f"{len(columns)} explicit column(s) → {len(rows)} "
+              f"row(s) (full URL field values now reachable)")
+        return rows
+    except Exception as e:
+        print(f"[-] {node.sid}: {table} targeted re-read failed — "
+              f"{format_rfc_exception(e)[:160]}.  Falling back to the "
+              f"all-columns rows; wide URL fields may be empty.")
+        return []
 
 
 def read_oa2c_profiles(node: SAPNode,
@@ -186,6 +243,30 @@ def read_oa2c_profiles(node: SAPNode,
               f"call returns 0).")
         return []
 
+    # The all-columns read above tells us which columns the kernel
+    # actually exposes; reissue the call asking ONLY for the columns
+    # we care about so RFC_READ_TABLE's 512-byte work-area limit can't
+    # silently empty wide STRING columns like TOKEN_ENDPOINT.  The
+    # operator's S/4 example: 12+ columns including big audit fields
+    # (CHANGED_AT/BY/ON, CREATED_AT/BY/ON, CONFIGURATION blob); when
+    # all of them share the WA buffer, TOKEN_ENDPOINT comes back "".
+    targeted_cols, _col_to_logical = _columns_matching_hints(clients[0])
+    if targeted_cols:
+        # Always include CLIENT_UUID so we have the join key.
+        if not any(c.upper() in ("CLIENT_UUID", "CONFIG_ID")
+                    for c in targeted_cols):
+            for k in clients[0].keys():
+                if k.upper() in ("CLIENT_UUID", "CONFIG_ID"):
+                    targeted_cols.append(k)
+                    break
+        print(f"[*] {node.sid}: re-reading {table} with explicit "
+              f"columns {targeted_cols} so wide URL fields aren't "
+              f"truncated by the 512-byte WA buffer…")
+        targeted = _reread_with_explicit_columns(
+            node, table, targeted_cols, creds)
+        if targeted:
+            clients = targeted
+
     # Extension table is best-effort — when missing, grant_type just
     # stays empty and the operator can edit it manually before mint.
     print(f"[*] {node.sid}: looking up grant types in "
@@ -222,11 +303,12 @@ def read_oa2c_profiles(node: SAPNode,
     print(f"[+] {node.sid}: parsed {len(profiles)} OAuth profile(s) "
           f"from {table} ({n_btp} BTP-bound)")
     if n_no_token:
+        # Every column from row 0 — un-truncated, so we can extend
+        # the hint table for this kernel patch in a follow-up.
         print(f"[*] {node.sid}: {n_no_token} profile(s) had no "
-              f"recognisable token endpoint column — kernel may "
-              f"split the URL across separate columns.  "
-              f"Original column names from row 0: "
-              f"{', '.join(sorted(clients[0].keys())[:12])}")
+              f"recognisable token endpoint column.  Full column "
+              f"list from row 0: "
+              f"{', '.join(sorted(clients[0].keys()))}")
     return profiles
 
 

@@ -225,27 +225,85 @@ def test_read_oa2c_heuristically_matches_kernel_specific_column_names():
     assert p["auth_method"] == "BASIC"
 
 
-def test_read_oa2c_no_field_list_passed_to_read_table():
+def test_read_oa2c_first_pass_is_discovery_with_no_field_list():
     """RFC_READ_TABLE message AD718 fires when ANY pre-listed FIELDS
-    entry doesn't exist on the target kernel.  The reader must call
-    read_table with fields=None (i.e. all columns) so kernel-specific
-    column drift can't blow up the call."""
+    entry doesn't exist on the target kernel.  The discovery pass
+    (the FIRST call against any candidate table) must therefore use
+    fields=None.  Later passes may re-read with explicit columns
+    once we've seen what the kernel actually exposes."""
     node = SAPNode(sid="S4H", system_type="ABAP",
                     hostname="s4hanadev", ip="192.168.2.209")
-    seen_field_args = []
+    calls = []   # [(table_name, fields), ...]
 
     def fake(node, table_name, **kw):
-        seen_field_args.append(kw.get("fields"))
+        calls.append((table_name, kw.get("fields")))
         return []
 
     with patch("sapmap_rfc.read_table", side_effect=fake):
         read_oa2c_profiles(node)
-    # Every read_table invocation must have fields=None — no
-    # pre-listed columns.  At least one call must have happened
-    # (the OA2C_CLIENT probe).
-    assert seen_field_args, "read_table was never called"
-    assert all(f is None for f in seen_field_args), (
-        f"reader still pre-lists fields on some call: {seen_field_args}")
+    assert calls, "read_table was never called"
+    # The first invocation against any table is the all-columns
+    # discovery pass — fields must be None there.
+    seen_first_per_table: dict = {}
+    for table, fields in calls:
+        if table not in seen_first_per_table:
+            seen_first_per_table[table] = fields
+    for table, fields in seen_first_per_table.items():
+        assert fields is None, (
+            f"first read of {table} pre-lists fields={fields!r} — "
+            f"the discovery pass must use fields=None to dodge "
+            f"AD718 on kernel-specific column drift")
+
+
+def test_read_oa2c_does_targeted_reread_when_first_pass_returns_rows():
+    """When the all-columns discovery returns ≥1 row, the reader
+    must reissue RFC_READ_TABLE asking ONLY for the matched columns
+    — RFC_READ_TABLE's 512-byte WA truncates wide STRING fields when
+    every column is read at once, so wide URL columns silently come
+    back empty.  Operator hit this exact bug on an S/4 box where
+    OA2C_CLIENT exposed CHANGED_*, CREATED_*, CS_SEGMENT_COUNT,
+    CONFIGURATION… and the URL columns (alphabetically last) lost
+    their values."""
+    node = SAPNode(sid="S4H", system_type="ABAP",
+                    hostname="s4hanadev", ip="192.168.2.209")
+    calls = []
+
+    def fake(node, table_name, **kw):
+        calls.append((table_name, kw.get("fields")))
+        if table_name != "OA2C_CLIENT":
+            return []
+        if kw.get("fields") is None:
+            # First pass: all columns, but URL came back empty due to
+            # WA buffer truncation.
+            return [{
+                "CLIENT_UUID":          "AABBCCDD",
+                "CLIENT_ID":            "cid-from-discovery",
+                "AUTHENTICATION_METHOD": "BASIC",
+                "TOKEN_ENDPOINT":       "",
+                "CONFIGURATION":        "",
+                "CHANGED_AT":           "20260101",
+                "MANDT":                "001",
+            }]
+        # Targeted re-read: only the wanted columns, full values.
+        return [{
+            "CLIENT_UUID":           "AABBCCDD",
+            "CLIENT_ID":             "cid-from-discovery",
+            "AUTHENTICATION_METHOD": "BASIC",
+            "TOKEN_ENDPOINT":
+                "https://x.authentication.eu10.hana.ondemand.com/oauth/token",
+        }]
+
+    with patch("sapmap_rfc.read_table", side_effect=fake):
+        profiles = read_oa2c_profiles(node)
+    # Targeted re-read happened → URL field is populated.
+    assert len(profiles) == 1
+    assert profiles[0]["token_endpoint"].endswith("/oauth/token")
+    # First call to OA2C_CLIENT had fields=None (discovery), a later
+    # call had explicit field names (targeted).
+    fields_for_oa2c_client = [f for t, f in calls if t == "OA2C_CLIENT"]
+    assert fields_for_oa2c_client[0] is None
+    assert any(f is not None and "TOKEN_ENDPOINT" in f
+                for f in fields_for_oa2c_client[1:])
 
 
 # ---- end-to-end: harvester sees OA2C profile + secstore secret ------
