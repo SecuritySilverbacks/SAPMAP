@@ -2919,6 +2919,14 @@ function showCtxMenu(e, sid) {
 
   // Determine node capabilities
   const hasCreds = n && ((n.credentials || []).length > 0 || (n.created_users || []).length > 0 || n.pwned);
+  // Strict: a credential we KNOW works.  Required by every ABAP
+  // data-extraction action (retrieve_rfcs / download_hashes /
+  // download_secstore / download_table / client_roles /
+  // analyse_capabilities / impact_assess / create_tcpip).
+  // node.pwned alone (e.g. GW-vuln before user-creation) is not
+  // enough — the BAPI / RFC_READ_TABLE calls need an actual logon.
+  const hasVerifiedCred = !!(n &&
+    (n.credentials || []).some(c => c && c.verified));
   const hasGwVuln = n && n.gw_vulnerable;
   const hasMsVuln = n && n.ms_vulnerable;
   const hasMsPort = n && n.ms_port > 0;
@@ -2945,6 +2953,11 @@ function showCtxMenu(e, sid) {
   const hasJavaDeploy = hasJavaAdmin && !javaDeployBlocked;
   const hasRFCs = (mapState.connections || []).some(c => c.source_sid === sid);
   const hasUntested = (mapState.connections || []).some(c => c.source_sid === sid && !c.tested);
+  // Composite: every ABAP RFC-driven data-extraction action gates
+  // on this.  ABAP stack + (verified cred OR a SAPMAP-created user
+  // — the latter implies its own working password).
+  const hasUsableAbapAccess = isAbapStack
+    && (hasVerifiedCred || hasCreatedUsers);
 
   // Enable/disable rules per action
   const rules = {
@@ -2967,24 +2980,34 @@ function showCtxMenu(e, sid) {
     'exploit_copyfail': !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
     'deep_scan':        true,                       // always available
     'standard_scan':    !!n.discovered_via_btp,     // BTP placeholders only
-    // ABAP-only; needs at least one verified cred or created user
-    // so the analyser has somebody to analyse.
-    'analyse_capabilities': isAbapStack && (hasCreds || hasCreatedUsers),
-    'retrieve_rfcs':    hasCreds,                   // need credentials/access
-    'test_rfcs':        hasCreds && hasRFCs,        // need access + existing RFCs
+    // ABAP-only AND needs a real credential (verified RFC login or
+    // a SAPMAP-created user) — the analyser reads AGR_USERS / UST04
+    // via RFC; node.pwned alone (e.g. pwned via GW exploit without
+    // a user created yet) doesn't give us a way to call those reads.
+    'analyse_capabilities': isAbapStack && (
+        (n && (n.credentials || []).some(c => c && c.verified))
+        || hasCreatedUsers),
+    'retrieve_rfcs':    hasUsableAbapAccess,        // ABAP-only RFC + BAPI
+    'test_rfcs':        hasUsableAbapAccess && hasRFCs,
     'read_java_destinations': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy),
     // ABAP path uses RFC BAPIs (SAP_ALL user or gateway); Java path
     // needs a JSP-deploy primitive. A RECON UME user alone with no
     // reachable CTC/telnet cannot extract hashes/tables, so gate the
     // Java branch on hasJavaDeploy rather than hasJavaAdmin.
-    'download_hashes':    (isAbapStack && hasCreds) ||
+    'download_hashes':    hasUsableAbapAccess ||
                           (isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy)),
-    'download_secstore':  hasCreds,                   // need credentials/access
+    'download_secstore':  hasUsableAbapAccess,        // RSECTAB is ABAP
     'download_java_secstore': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy),
     'view_java_secstore':     n && n.java_secstore_checked,
-    'download_table':     (isAbapStack && hasCreds) ||
+    'download_table':     hasUsableAbapAccess ||
                           (isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy)),
-    'impact_assess':      hasCreds,                   // need credentials/access
+    // ABAP-only AND needs a real credential (verified RFC login or
+    // a SAPMAP-created user).  node.pwned alone isn't enough — the
+    // BAPI / RFC_READ_TABLE calls behind the impact scenarios fail
+    // without a working logon.
+    'impact_assess':      isAbapStack && (
+        (n && (n.credentials || []).some(c => c && c.verified))
+        || hasCreatedUsers),
     'impact_view':        (n.impact_results||[]).length > 0,
     'impact_assess_java': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy),
     // Three OS-exec paths:
@@ -3004,14 +3027,19 @@ function showCtxMenu(e, sid) {
     'scc_via_sap_probe_mappings':   true,
     'scc_via_sap_extract_keystore': true,
     'scc_via_sap_download_hashes':  hasGwVuln || hasCve31324 || hasCreatedUsers,
-    'create_tcpip':     hasCreds,                   // need credentials/access
+    // ABAP-only — Type-T destination + RFC_DESTINATION_INSERT need a
+    // working ABAP logon.  Same verified-cred / created-user gate as
+    // the other RFC-driven actions.
+    'create_tcpip':     isAbapStack && (
+        (n && (n.credentials || []).some(c => c && c.verified))
+        || hasCreatedUsers),
     'propagate':        hasCreds,                   // need access to propagate from
     // Harvest is pure introspection over already-captured state, so
     // any node will return *something* (often nothing, that's fine).
     // Always available — operator decides whether to mint.
     'harvest_btp_creds': true,
     'cleanup':          hasCreatedUsers,             // need created users to clean up
-    'client_roles':     hasCreds,                   // need credentials/access
+    'client_roles':     hasUsableAbapAccess,        // ABAP-only RFC reads
     'set_type':         true,                       // always available
     'set_db_type':      true,                       // always available
     'set_os_type':      true,                       // always available
@@ -3040,23 +3068,34 @@ function showCtxMenu(e, sid) {
     'lpe':              'Provide credentials first',
     'check_copyfail':   'Requires OS-exec on Linux host',
     'exploit_copyfail': 'Requires OS-exec on Linux host — run Check first to confirm kernel is vulnerable',
-    'retrieve_rfcs':    'Provide credentials or create a user first',
-    'test_rfcs':        'Retrieve RFC connections first',
+    'retrieve_rfcs':    'Needs a verified RFC credential or a SAPMAP-created user — RSRFCCHK and the RFCDES read both require a working logon.',
+    'test_rfcs':        (!hasRFCs
+        ? 'Retrieve RFC connections first.'
+        : 'Needs a verified RFC credential or a SAPMAP-created user.'),
     'read_java_destinations': (javaDeployBlocked
         ? 'RECON admin user exists but no JSP-deploy primitive is reachable (CTC ConfigServlet removed, admin telnet firewalled). System is hardened — data extraction not available from here.'
         : 'Requires Java/dual-stack + CVE-2025-31324, GW SAPXPG, or a Java admin user with a reachable CTC / telnet endpoint'),
     'download_hashes':    (isJavaStack && !isAbapStack && javaDeployBlocked
         ? 'RECON admin user exists but no JSP-deploy primitive is reachable (CTC ConfigServlet removed, admin telnet firewalled). Hashes cannot be extracted from a Java-only hardened target.'
-        : 'Provide credentials or create a user first'),
-    'download_secstore':  'Provide credentials or create a user first',
+        : (isAbapStack
+            ? 'Needs a verified RFC credential or a SAPMAP-created user — USR02 read needs an actual ABAP logon.'
+            : 'Java stack: requires CVE-2025-31324, GW SAPXPG, or a Java admin user with a reachable CTC / telnet endpoint.')),
+    'download_secstore':  'Needs a verified RFC credential or a SAPMAP-created user — the RSECTAB read needs an actual ABAP logon.',
     'download_java_secstore': (javaDeployBlocked
         ? 'RECON admin user exists but no JSP-deploy primitive is reachable (CTC ConfigServlet removed, admin telnet firewalled). System is hardened — data extraction not available from here.'
         : 'Requires Java/dual-stack + CVE-2025-31324, GW SAPXPG, or a Java admin user with a reachable CTC / telnet endpoint'),
     'view_java_secstore':     'Run Download Java Secure Store first',
     'download_table':     (isJavaStack && !isAbapStack && javaDeployBlocked
         ? 'RECON admin user exists but no JSP-deploy primitive is reachable (CTC ConfigServlet removed, admin telnet firewalled). Tables cannot be dumped from a Java-only hardened target.'
-        : 'Provide credentials or create a user first'),
-    'impact_assess':      'Provide credentials or create a user first',
+        : (isAbapStack
+            ? 'Needs a verified RFC credential or a SAPMAP-created user — RFC_READ_TABLE needs an actual ABAP logon.'
+            : 'Java stack: requires CVE-2025-31324, GW SAPXPG, or a Java admin user with a reachable CTC / telnet endpoint.')),
+    'impact_assess':      (!isAbapStack
+        ? 'Run Business Impact Scenarios is ABAP-only — BSEG / LFBK / PA0008 are ABAP DDIC tables.'
+        : 'Needs a verified RFC credential or a SAPMAP-created user — the impact scenarios run BAPI / RFC_READ_TABLE calls that require an actual logon.  node.pwned alone (e.g. via GW exploit before user creation) is not enough.'),
+    'analyse_capabilities': (!isAbapStack
+        ? 'Capability analyser is ABAP-only — it reads AGR_USERS / AGR_1251 / UST04 to map a user\\'s privileges.  Java systems use a different role model.'
+        : 'Needs a verified RFC credential or a SAPMAP-created user — the analyser reads AGR_USERS / UST04 via RFC.  Save credentials or create a user first.'),
     'impact_view':        'Run impact assessment first',
     'impact_assess_java': (javaDeployBlocked
         ? 'RECON admin user exists but no JSP-deploy primitive is reachable (CTC ConfigServlet removed, admin telnet firewalled). System is hardened — data extraction not available from here.'
@@ -3065,10 +3104,12 @@ function showCtxMenu(e, sid) {
     'reverse_shell':    'Requires an OS-exec path: vulnerable GW (any stack), ABAP+created-user (SXPG), or CVE-2025-31324 webshell (Java)',
     'harvest_scc':          'Requires OS-exec on this node AND an SCC on the same host IP',
     'harvest_scc_mappings': 'Requires OS-exec on this node AND an SCC on the same host IP',
-    'create_tcpip':     'Provide credentials or create a user first',
+    'create_tcpip':     (!isAbapStack
+        ? 'Create TCP/IP Dest is ABAP-only — RFC Type-T destinations + RFC_DESTINATION_INSERT live on the ABAP stack.'
+        : 'Needs a verified RFC credential or a SAPMAP-created user — RFC_DESTINATION_INSERT requires an actual logon.  Save credentials or create a user first.'),
     'propagate':        'Provide credentials or create a user first',
     'cleanup':          'No created users to clean up',
-    'client_roles':     'Provide credentials or create a user first',
+    'client_roles':     'Needs a verified RFC credential or a SAPMAP-created user — the role-walk reads AGR_USERS / AGR_DEFINE via RFC.',
   };
 
   // Items hidden entirely (not just disabled) when the node type doesn't
@@ -3097,6 +3138,9 @@ function showCtxMenu(e, sid) {
     'view_java_secstore':         !isJavaStack,
     'read_java_destinations':     !isJavaStack,
     'check_cve_6287':             !isJavaStack,
+    'check_cve_31324':            !isJavaStack,
+    'exploit_cve_31324_drop':     !isJavaStack,
+    'analyse_capabilities':       !isAbapStack,
     'set_telnet_override':        !isJavaStack,
     'impact_assess':              !isAbapStack,
     'lpe':                        !isAbapStack,
