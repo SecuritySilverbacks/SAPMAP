@@ -41,6 +41,62 @@ def _btp_http_dest_conn(*, source_sid="S4P",
 
 # --- _is_btp_host / _region_from_host --------------------------------
 
+def test_hostname_handles_bare_host_strings():
+    """OA2C_CLIENT.TOKEN_ENDPOINT in S/4 stores the endpoint without
+    a scheme — _hostname must accept the bare hostname or the
+    harvester silently rejects every OAuth profile."""
+    from sap_onprem_to_btp import _hostname
+    bare = "researchlab-yehctg7m.authentication.eu10.hana.ondemand.com"
+    assert _hostname(bare) == bare
+    assert _hostname(f"{bare}:443") == bare
+    assert _hostname(f"{bare}/oauth/token") == bare
+    assert _hostname(f"https://{bare}/oauth/token") == bare
+    assert _hostname("") == ""
+
+
+def test_harvester_accepts_oa2c_profile_with_bare_token_endpoint():
+    """Operator's S/4 produced an OA2C profile whose TOKEN_ENDPOINT
+    came back as the bare host (no https:// prefix).  The harvester
+    must still match it as BTP-bound and produce a candidate."""
+    from sap_onprem_to_btp import harvest_btp_candidates
+    from sapmap_models import SAPMAPState
+    state = SAPMAPState()
+    node = SAPNode(sid="S4H", system_type="ABAP",
+                    hostname="s4hanadev", ip="192.168.2.209")
+    state.add_node(node)
+
+    # Exact shape of a profile read from S/4 OA2C_CLIENT — bare host,
+    # no scheme.
+    bare_host = ("researchlab-yehctg7m.authentication.eu10."
+                  "hana.ondemand.com")
+    node.oauth2_profiles = [{
+        "client_uuid":   "000c29a997dc1fd192bd715b4a56c000",
+        "client_id":     ("sb-clonef757fd169c4f4166b2dfeeee449d7f2f"
+                           "!b609810|destination-xsappname!b404"),
+        "token_endpoint": bare_host,
+        "grant_type":    "CLIENT_CREDENTIALS",
+        "auth_method":   "1",
+        "description":   "Z_OAUTH",
+        "profile":       "Z_OAUTH",
+    }]
+    node.secstore_entries = [{
+        "ident_clean":
+            "/OA2C/CS_000C29A997DC1FD192BD715B4A56C000_00",
+        "password":      "the-secret",
+        "category":      "oauth2_client",
+    }]
+
+    cands = harvest_btp_candidates(state, node)
+    assert len(cands) == 1
+    c = cands[0]
+    assert c["client_secret"] == "the-secret"
+    # uaa_url must be a usable token endpoint — scheme prepended +
+    # /oauth/token appended (since this is an authentication-host).
+    assert c["uaa_url"].startswith("https://")
+    assert c["uaa_url"].endswith("/oauth/token")
+    assert c["region_hint"] == "eu10"
+
+
 def test_is_btp_host_matches_only_btp_suffix():
     assert _is_btp_host("api.cf.eu10.hana.ondemand.com") is True
     assert _is_btp_host("FOO.HANA.ONDEMAND.COM") is True
