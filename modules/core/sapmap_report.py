@@ -58,6 +58,16 @@ def _executive_summary(state: SAPMAPState) -> list:
     scc_pwned = sum(1 for s in (getattr(state, "scc_nodes", {}) or {}).values()
                     if getattr(s, "pwned", False)
                     or getattr(s, "default_creds_live", False))
+    btp_count = len(getattr(state, "btp_subaccounts", {}) or {})
+    btp_pwned = sum(
+        1 for b in (getattr(state, "btp_subaccounts", {}) or {}).values()
+        if getattr(b, "pwned", False))
+    conns_md = list(state.connections or [])
+    conn_total_md = len(conns_md)
+    conn_sap_all_md = sum(1 for c in conns_md
+                           if getattr(c, "has_sap_all", False))
+    conn_tested_ok_md = sum(1 for c in conns_md
+                             if getattr(c, "logon_successful", False))
 
     findings_total = sum(len(n.findings or []) for n in nodes)
     crit = sum(1 for n in nodes for f in (n.findings or [])
@@ -75,6 +85,13 @@ def _executive_summary(state: SAPMAPState) -> list:
          f"{len(nodes)} ({abap} ABAP, {java} Java, {routers} SAProuter)"),
         ("SAP Cloud Connectors",
          f"{scc_count} ({scc_pwned} with cracked admin)" if scc_count else "0"),
+        ("BTP subaccounts",
+         (f"{btp_count} ({btp_pwned} with cleartext destinations)"
+          if btp_count else "0")),
+        ("Connections (RFC + HTTP destinations)",
+         (f"{conn_total_md} total — {conn_sap_all_md} grant SAP_ALL, "
+          f"{conn_tested_ok_md} tested OK"
+          if conn_total_md else "0")),
         ("Systems pwned",
          f"{len(pwned)} / {len(nodes)} ({pct_pwned}%)"),
         ("**Production systems pwned**",
@@ -1154,6 +1171,18 @@ def build_html_report(state: SAPMAPState,
     scc_pwned = sum(1 for s in sccs.values()
                     if getattr(s, "pwned", False)
                     or getattr(s, "default_creds_live", False))
+    btp_subs = (getattr(state, "btp_subaccounts", {}) or {})
+    btp_pwned = sum(1 for b in btp_subs.values()
+                     if getattr(b, "pwned", False))
+    # Edge counts.  "Total" includes every RFC / HTTP / synthetic
+    # destination on the map; "SAP_ALL" surfaces the biggest-blast-
+    # radius edges so the KPI card reads as a risk number, not just a
+    # topology number.
+    conns = list(state.connections or [])
+    conn_total = len(conns)
+    conn_sap_all = sum(1 for c in conns if getattr(c, "has_sap_all", False))
+    conn_tested_ok = sum(1 for c in conns
+                         if getattr(c, "logon_successful", False))
 
     crit_findings = []
     high_findings = []
@@ -1537,6 +1566,12 @@ def build_html_report(state: SAPMAPState,
     {_kpi_card("Trust chains", str(chain_count),
                 f"{prd_chain_count} reach PRD",
                 "#f85149" if prd_chain_count else "#0969da")}
+    {_kpi_card("Connections", str(conn_total),
+                (f"{conn_sap_all} grant SAP_ALL · "
+                 f"{conn_tested_ok} tested OK"
+                 if conn_total else "no destinations captured"),
+                "#f85149" if conn_sap_all else
+                ("#0969da" if conn_total else "#d0d7de"))}
     {_kpi_card("SAPMAP accounts created", str(created), "", "#6f42c1")}
     {_kpi_card("ABAP SecStore decrypted", str(secstore_total),
                 "RFC / DB / CTS passwords", "#6f42c1")}
@@ -1548,6 +1583,13 @@ def build_html_report(state: SAPMAPState,
                 ("0 compromised" if sccs else "none in scope"),
                 "#f85149" if scc_pwned else
                 ("#0969da" if sccs else "#d0d7de"))}
+    {_kpi_card("BTP subaccounts", f"{len(btp_subs)}",
+                (f"{btp_pwned} with cleartext destinations"
+                 if btp_pwned else
+                 ("0 cleartext captured" if btp_subs
+                  else "none in scope")),
+                "#f85149" if btp_pwned else
+                ("#0969da" if btp_subs else "#d0d7de"))}
   </div>
 
   <section>
