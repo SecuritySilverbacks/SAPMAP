@@ -3063,9 +3063,30 @@ def create_app(api: SAPMAPApi) -> Bottle:
         uaa_url = (data.get("uaa_url") or "").strip()
         client_id = (data.get("client_id") or "").strip()
         client_secret = (data.get("client_secret") or "").strip()
-        if not uaa_url or not client_id or not client_secret:
+        missing = [name for name, val in (
+            ("uaa_url", uaa_url),
+            ("client_id", client_id),
+            ("client_secret", client_secret),
+        ) if not val]
+        if missing:
             return json.dumps({"error":
-                "uaa_url, client_id and client_secret are required"})
+                f"missing required field(s): {', '.join(missing)}.  "
+                f"For scripts: did the path: file resolve?  "
+                f"For the GUI: every text box must be non-empty."})
+        # Catch the obvious "operator copy-pasted the example
+        # playbook without filling in placeholders" case so the
+        # next error is targeted at the actual cause.
+        placeholders = [name for name, val in (
+            ("uaa_url", uaa_url),
+            ("client_id", client_id),
+            ("client_secret", client_secret),
+        ) if "<" in val and ">" in val]
+        if placeholders:
+            return json.dumps({"error":
+                f"placeholder syntax (`<…>`) detected in "
+                f"{', '.join(placeholders)} — replace with the "
+                f"actual values from the harvest output before "
+                f"running the mint step."})
         token, err = mint_btp_token(uaa_url, client_id, client_secret)
         if err:
             print(f"[-] {sid}: BTP token mint failed — {err}")
