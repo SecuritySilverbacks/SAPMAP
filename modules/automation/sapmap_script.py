@@ -38,6 +38,11 @@ Supported actions:
     check_cve_31324, check_cve_6287, check_all_cve_31324,
     # Java exploitation (requires --confirm on the CLI)
     exploit_cve_31324, create_user_java,
+    # BTP — cloud-side enumeration with a stored token
+    btp_set_token, btp_enumerate, btp_pull_destinations_for_token,
+    btp_test_destination, btp_create_user_on_target,
+    # BTP — on-prem → cloud lateral pivot
+    harvest_btp_creds, mint_btp_token,
     # Macros (expanded at load time into multiple sub-steps)
     java_pipeline
 """
@@ -415,7 +420,120 @@ def _map_step(step: dict) -> tuple:
             "command": step.get("command", "id"),
         }, True)
 
+    # --- BTP (cloud) actions ----------------------------------------------
+    # Two directions:
+    #   * cloud → on-prem: paste a BTP token, enumerate the cloud
+    #     topology, capture cleartext destinations on the bound
+    #     subaccount, walk down to ABAP/Java targets.
+    #   * on-prem → cloud (reverse pivot): mine a pwned ABAP system's
+    #     stored creds (SM59 destinations / OA2C OAuth client config /
+    #     RSECTAB / Java SecStoreFS), exchange them at XSUAA for a BTP
+    #     token, then run the cloud-side enumeration on top.
+
+    if action == "btp_set_token":
+        # Store a BTP access token in process memory for later
+        # enumerate / pull-destinations calls.
+        #   region: BTP region (eu10 / eu10-004 / us10 / …); when
+        #           omitted the runner extracts it from the token's
+        #           iss claim server-side.
+        #   token:  the JWT access token (or path:<file> to read it
+        #           from disk so secrets don't show up in script YAML)
+        return ("POST", "/api/btp/set_token", {
+            "region": step.get("region", ""),
+            "token": _read_token(step.get("token", "")),
+        }, True)
+
+    if action == "btp_enumerate":
+        # Kind-aware enumeration over a stored BTP token: for cf
+        # tokens this surfaces orgs / spaces / apps / service
+        # instances + escalation hints; for subaccount-admin tokens
+        # it walks every subaccount + SCC mapping; for destination-
+        # service tokens it surfaces the bound subaccount and the
+        # operator runs btp_pull_destinations_for_token next.
+        #   region: which stored token to use
+        return ("POST", "/api/btp/enumerate", {
+            "region": step.get("region", ""),
+        }, True)
+
+    if action == "btp_pull_destinations_for_token":
+        # For a destination-service-scoped token, pull every
+        # destination on the bound subaccount and link cleartext
+        # creds to on-prem SAPNodes.  Auto-fires Standard Scan on
+        # any newly-materialised BTPDISC_* placeholder.
+        #   region: which stored token to use
+        return ("POST", "/api/btp/pull_destinations_for_token", {
+            "region": step.get("region", ""),
+        }, True)
+
+    if action == "btp_test_destination":
+        # Test a synthetic BTP→on-prem edge with the captured
+        # cleartext credential.  HTTP basic-auth probe + (when the
+        # target is ABAP) a direct RFC profile fetch incl. SAP_ALL.
+        #   source_sid:       BTP:<uuid8> sentinel from the linker
+        #   destination_name: synthetic BTP:<uuid8>::<dest_name>
+        return ("POST", "/api/btp/test_destination", {
+            "source_sid": step.get("source_sid", ""),
+            "destination_name": step.get("destination_name", ""),
+        }, True)
+
+    if action == "btp_create_user_on_target":
+        # After a successful btp_test_destination flips logon_successful
+        # AND has_sap_all, mint a SAPMAP user on the target ABAP via
+        # the captured creds (BTP→on-prem lateral move).
+        #   source_sid:       BTP:<uuid8>
+        #   destination_name: synthetic BTP:<uuid8>::<dest_name>
+        #   target_sid:       linked on-prem SID
+        return ("POST", "/api/btp/create_user_on_target", {
+            "source_sid": step.get("source_sid", ""),
+            "destination_name": step.get("destination_name", ""),
+            "target_sid": step.get("target_sid", ""),
+        }, True)
+
+    if action == "harvest_btp_creds":
+        # On-prem → BTP harvest.  Refreshes node.oauth2_profiles
+        # via OA2C_CLIENT[+_EXT] then scans the four sources for
+        # BTP-shaped (client_id, client_secret, uaa_url) tuples.
+        # Returns the candidate list in `result.candidates` (use
+        # `capture: NAME` to bind it to a script variable so the
+        # next step can mint with it).
+        #   target: SAP node SID (must be ABAP for OA2C refresh)
+        return ("POST", f"/api/node/{target}/harvest_btp_creds",
+                {}, True)
+
+    if action == "mint_btp_token":
+        # Exchange a captured (uaa_url, client_id, client_secret) at
+        # XSUAA's /oauth/token for a BTP access token.  Stores the
+        # result in api.btp_tokens keyed by the token's region (so
+        # btp_pull_destinations_for_token can chain on top).
+        #   target:        SAP node SID the secret was harvested from
+        #   uaa_url:       XSUAA token endpoint (full URL or bare host)
+        #   client_id:     OAuth client_id (from OA2C_CLIENT or paste)
+        #   client_secret: OAuth client_secret (from /OA2C/CS_*_NN
+        #                  or paste; supports path:<file>)
+        return ("POST", f"/api/node/{target}/mint_btp_token", {
+            "uaa_url": step.get("uaa_url", ""),
+            "client_id": step.get("client_id", ""),
+            "client_secret": _read_token(
+                step.get("client_secret", "")),
+        }, True)
+
     raise ValueError(f"Unknown action: {action}")
+
+
+def _read_token(value: str) -> str:
+    """Load a secret value from disk when it's prefixed with
+    `path:`; return it verbatim otherwise.  Lets scripts reference
+    long JWTs / client secrets via a file path so the YAML stays
+    short and the secret doesn't have to live in version control."""
+    if isinstance(value, str) and value.startswith("path:"):
+        path = value[5:].strip()
+        try:
+            with open(os.path.expanduser(path), "r") as fh:
+                return fh.read().strip()
+        except Exception as e:
+            logger.warning(f"Could not read token from {path!r}: {e}")
+            return ""
+    return value or ""
 
 
 # Exploitation actions — these require an explicit --confirm on the CLI
@@ -515,6 +633,15 @@ _ACTION_LABELS = {
     "router_scan":            "Scanning internal net via SAProuter",
     "layout":                 "Rearranging map",
     "sleep":                  "Pausing",
+    # BTP (cloud) actions
+    "btp_set_token":              "Storing BTP token",
+    "btp_enumerate":              "Enumerating BTP cloud topology",
+    "btp_pull_destinations_for_token":
+                                  "Pulling BTP destinations",
+    "btp_test_destination":       "Testing BTP-on-prem edge",
+    "btp_create_user_on_target":  "Creating user via BTP edge",
+    "harvest_btp_creds":          "Harvesting BTP credentials",
+    "mint_btp_token":             "Minting BTP token",
 }
 
 

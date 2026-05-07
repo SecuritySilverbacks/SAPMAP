@@ -1827,8 +1827,29 @@ function updateMap() {
 
   // BTP cloud tier: place subaccount nodes in a horizontal strip at
   // the top of the canvas.  Manually-positioned nodes are left alone.
+  // When on-prem nodes already occupy the top row (e.g. they were
+  // dragged there or laid out before any BTP node existed), shift
+  // the new BTP node past their rightmost edge so it doesn't land
+  // ON TOP of S4H — operator's exact symptom after a harvest+mint
+  // round.
   if (btpKeys.length > 0) {
     let btpX = MARGIN;
+    // Anchor past every already-positioned node that overlaps the
+    // BTP-tier vertical band [MARGIN, MARGIN + BOX_H].
+    const _topBandHi = MARGIN + BOX_H;
+    Object.values(nodes).forEach(n => {
+      if (n._x != null && n._y != null
+          && n._y < _topBandHi && n._y + BOX_H > MARGIN) {
+        btpX = Math.max(btpX, n._x + BOX_W + MARGIN);
+      }
+    });
+    Object.values(sccNodes).forEach(sn => {
+      if (sn._x != null && sn._y != null
+          && sn._y < _topBandHi && sn._y + BOX_H > MARGIN) {
+        btpX = Math.max(btpX, sn._x + BOX_W + MARGIN);
+      }
+    });
+    // Also stack BTP nodes that already have positions
     btpKeys.forEach(uuid => {
       const bn = btpNodes[uuid];
       if (bn._x != null) {
