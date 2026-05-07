@@ -403,6 +403,59 @@ def test_read_oa2c_falls_through_to_abap_when_string_cols_still_missing():
     assert profiles[0]["token_endpoint"].endswith("/oauth/token")
 
 
+def test_read_oa2c_falls_through_when_et_data_returned_keys_but_empty_values():
+    """Operator's S/4: USE_ET_DATA_4_RETURN was honoured (Tier-1
+    returned `→ 1 row(s)` with all 7 keys present), but the actual
+    VALUES for STRING columns came back empty.  Reader must still
+    detect this and fall through to Tier-2 — checking for
+    "missing key" alone isn't enough."""
+    node = SAPNode(sid="S4H", system_type="ABAP",
+                    hostname="s4hanadev", ip="192.168.2.209")
+    cols = ["CLIENT_UUID", "CLIENT_ID", "TOKEN_ENDPOINT"]
+
+    def fake_cols(node, table_name, **kw):
+        return cols if table_name == "OA2C_CLIENT" else []
+
+    def fake_read(node, table_name, **kw):
+        if table_name != "OA2C_CLIENT":
+            return []
+        # Keys present, but the STRING values are empty — exact
+        # symptom seen in the operator's run.
+        return [{"CLIENT_UUID": "AABB", "CLIENT_ID": "",
+                 "TOKEN_ENDPOINT": ""}]
+
+    abap_calls = []
+
+    def fake_run_abap(conn, abap_lines, program_name="ZSAPMAP"):
+        abap_calls.append(program_name)
+        return {
+            "success": True,
+            "fm_name": "RFC_ABAP_INSTALL_AND_RUN",
+            "error": "",
+            "output": [
+                "~~~ROW",
+                "CLIENT_UUID| AABB",
+                "CLIENT_ID| cid-from-abap",
+                "TOKEN_ENDPOINT| https://x.hana.ondemand.com/oauth/token",
+            ],
+        }
+
+    class _StubConn:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    with patch("sapmap_rfc.get_table_columns", side_effect=fake_cols), \
+         patch("sapmap_rfc.read_table", side_effect=fake_read), \
+         patch("sapmap_rfc._get_connection", return_value=_StubConn()), \
+         patch("sapmap_rfc._run_abap_program", side_effect=fake_run_abap):
+        profiles = read_oa2c_profiles(node)
+    assert abap_calls == ["ZSAPMAP_OA2C"], (
+        "Tier-2 didn't fire even though Tier-1 returned empty "
+        f"STRING values: {abap_calls}")
+    assert profiles[0]["client_id"] == "cid-from-abap"
+    assert profiles[0]["token_endpoint"].endswith("/oauth/token")
+
+
 def test_read_oa2c_skips_abap_when_kernel_already_returned_strings():
     """Counter-test: when Tier-1 (long-strings) returns every column
     populated, Tier-2 (ABAP) must NOT fire.  Avoids unnecessary
