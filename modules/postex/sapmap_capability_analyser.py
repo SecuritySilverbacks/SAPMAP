@@ -547,27 +547,46 @@ def _candidate_users(node: SAPNode) -> list:
     return users
 
 
+_ROW_PROBE_PSEUDO_TABLES = {
+    # Sentinels that appear in CAPABILITY_RULES.tables but aren't real
+    # DDIC tables — skip them silently rather than spamming the console
+    # with TABLE_NOT_AVAILABLE errors.
+    "kernel",  # S_C_FUNCT — direct C call, no table backing it
+}
+
+
 def _row_count_for_table(node: SAPNode, table: str,
                           creds: Optional[Credentials]) -> int:
-    """Count rows of a single table.  Cached on
-    `node.capability_row_counts` so a CISO-facing line stays cheap on
-    repeat opens.  Returns -1 on failure."""
+    """Probe whether a table exists from this user's perspective.
+    Cached on `node.capability_row_counts` so a CISO-facing line stays
+    cheap on repeat opens.  Returns -1 on failure / unknown."""
     if table in (node.capability_row_counts or {}):
         return int(node.capability_row_counts[table])
     if not table or " " in table or "." in table:
         # Skip pseudo-table labels like "any ABAP program" /
         # "any read-classified table".
         return -1
+    if table.lower() in _ROW_PROBE_PSEUDO_TABLES:
+        node.capability_row_counts[table] = -1
+        return -1
     import sapmap_rfc
     try:
+        # Probe with a single short field (MANDT) instead of fields=None.
+        # RFC_READ_TABLE's WA buffer is ~512 bytes per row, which can't
+        # hold every column of a wide DDIC table (USR02, BSEG, etc.) and
+        # raises DATA_BUFFER_EXCEEDED.  We only need existence here, so
+        # one field is enough — and MANDT exists on every client-aware
+        # table.  quiet=True suppresses the noisy "Could not read X"
+        # console line; the analyser already handles the -1 sentinel.
         rows = sapmap_rfc.read_table(
-            node, table, fields=None, creds=creds, max_rows=1) or []
-        # RFC_READ_TABLE doesn't return COUNT(*) directly, but the
-        # FIELDS metadata + a 1-row read is enough to confirm the
-        # table exists.  For an actual count we'd ideally call
-        # RFC_DB_LSEL or DDIF_NAMETAB_GET, but staying within the
-        # existing read_table primitive keeps the dependency
-        # surface tiny.  Fall back to "rows >= 1" sentinel.
+            node, table, fields=["MANDT"], creds=creds,
+            max_rows=1, quiet=True) or []
+        if not rows:
+            # MANDT-less table (e.g. some kernel/profile tables) — retry
+            # with a default probe.  Still quiet; failure is fine.
+            rows = sapmap_rfc.read_table(
+                node, table, fields=None, creds=creds,
+                max_rows=1, quiet=True) or []
         node.capability_row_counts[table] = -1 if not rows else 1
         return -1 if not rows else 1
     except Exception:
