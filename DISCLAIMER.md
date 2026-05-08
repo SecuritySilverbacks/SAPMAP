@@ -12,6 +12,10 @@ exploits against SAP NetWeaver ABAP and Java stacks, including:
 - CVE-2020-6286 — CTCWebService `queryProtocol` traversal
 - ABAP BAPI-level user creation, role assignment, SecStore extraction
 - Java UME user creation, SecStore decryption, and credential propagation
+- **Linux root LPE** — Copy Fail (CVE-2026-31431) and Dirty Frag (no
+  CVE; embargo broken pre-disclosure 2026; no upstream patch at time
+  of writing).  Both temporarily patch `/usr/bin/su` in the kernel
+  page cache to obtain `uid=0`.
 
 Running any of these against a system you do not own, or do not have
 **explicit, written authorization** to test, is **illegal** in most

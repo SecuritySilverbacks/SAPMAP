@@ -148,6 +148,24 @@ the placeholder line about item #9 above.
 
 ---
 
+## Already shipped (out of backlog scope)
+
+For status awareness while the backlog above stays focused on *new*
+work:
+
+- **Linux root LPE** — both Copy Fail (CVE-2026-31431) and Dirty Frag
+  (no CVE; embargo broke 2026, no upstream patch yet) ship via the
+  unified `Check Linux Root LPE` / `Escalate to Root` menu items.
+  Backend auto-picker (`sapmap_lpe_auto`) prefers Copy Fail when both
+  are viable (pure-Python, smaller blast radius); falls back to Dirty
+  Frag on Copy-Fail-immune kernels.  Override via
+  `SAPMAP_LPE_FORCE=copyfail|dirtyfrag`.
+- **Capability analyser** (#7).
+- **Cloud Connector + BTP module** (#9) — see plan in
+  `08_cloud_connector_implementation_plan.md`; major sub-items
+  (fingerprint, default-creds probe, JCEKS extraction, BTP harvest +
+  token mint) are landed.
+
 ## Caveats
 
 - CVE numbers for 2024–2026 were compiled by research agents from

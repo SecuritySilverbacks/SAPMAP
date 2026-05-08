@@ -407,16 +407,20 @@ def _map_step(step: dict) -> tuple:
         #   target: SAP node SID (node co-located with SCC)
         return ("POST", f"/api/node/{target}/harvest_scc_ssfs", {}, True)
 
-    if action == "check_copyfail":
-        # Check if the host is vulnerable to CVE-2026-31431 (Copy Fail LPE).
+    if action in ("check_linux_lpe", "check_copyfail"):
+        # Probe Linux root LPE viability (Copy Fail + Dirty Frag).
+        # ``check_copyfail`` is the legacy alias kept for older scripts.
         #   target: SAP node SID (must have OS-exec path, Linux only)
-        return ("POST", f"/api/node/{target}/check_copyfail", {}, True)
+        return ("POST", f"/api/node/{target}/check_linux_lpe", {}, True)
 
-    if action == "exploit_copyfail":
-        # Execute a shell command as root via CVE-2026-31431 Copy Fail LPE.
+    if action in ("exploit_linux_lpe", "exploit_copyfail"):
+        # Execute a shell command as root using the best-available
+        # Linux LPE technique (Copy Fail when viable, otherwise Dirty
+        # Frag).  ``exploit_copyfail`` is the legacy alias kept for
+        # older scripts.
         #   target:  SAP node SID
         #   command: shell command to run as root (default: "id")
-        return ("POST", f"/api/node/{target}/exploit_copyfail", {
+        return ("POST", f"/api/node/{target}/exploit_linux_lpe", {
             "command": step.get("command", "id"),
         }, True)
 
@@ -572,7 +576,8 @@ DESTRUCTIVE_ACTIONS = {
     "create_user_java",
     "scc_extract_keystore",   # pulls full backup + writes crown-jewels loot
     "harvest_scc",            # writes files to /tmp on target host
-    "exploit_copyfail",       # patches /usr/bin/su page cache to exec as root
+    "exploit_copyfail",       # legacy alias — patches /usr/bin/su page cache
+    "exploit_linux_lpe",      # auto-picker: Copy Fail or Dirty Frag
 }
 
 

