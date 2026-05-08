@@ -715,7 +715,7 @@ body {
       <div class="ctx-item" data-action="check_ms">&#128270; Check MS Betrusted (CVE-2020-6207)</div>
       <div class="ctx-item" data-action="check_cve_31324">&#128270; Check CVE-2025-31324 (Java VisualComposer)</div>
       <div class="ctx-item" data-action="check_cve_6287">&#128270; Check CVE-2020-6287 (RECON)</div>
-      <div class="ctx-item" data-action="check_copyfail">&#128275; Check CVE-2026-31431 (Copy Fail LPE)</div>
+      <div class="ctx-item" data-action="check_linux_lpe">&#128275; Check Linux Root LPE (Copy Fail / Dirty Frag)</div>
       <div class="ctx-item" data-action="deep_scan">&#128260; Deep Scan (full SAPology)</div>
       <div class="ctx-item" data-action="retrieve_rfcs">&#128225; Retrieve RFC Connections</div>
       <div class="ctx-item" data-action="read_java_destinations">&#128225; Read Java JCo Destinations</div>
@@ -732,7 +732,7 @@ body {
     <div class="ctx-item">&#9876; Exploitation</div>
     <div class="ctx-sub">
       <div class="ctx-item" data-action="lpe">&#128274; ABAP Local Privilege Escalation</div>
-      <div class="ctx-item" data-action="exploit_copyfail">&#9889; Escalate to Root (Copy Fail LPE)</div>
+      <div class="ctx-item" data-action="exploit_linux_lpe">&#9889; Escalate to Root (auto: Copy Fail / Dirty Frag)</div>
       <div class="ctx-item" data-action="betrusted">&#128272; Betrusted — Inject Trusted IP (10KBLAZE)</div>
       <div class="ctx-item" data-action="create_user_betrusted">&#128272; Create User (10KBLAZE Full Chain)</div>
       <div class="ctx-item" data-action="create_user_java">&#128100; Create User (Java UME)</div>
@@ -2442,8 +2442,9 @@ function updateMap() {
         + ` text-anchor="middle" dominant-baseline="middle"`
         + ` font-weight="bold" pointer-events="none">&#9889;</text>`;
     }
-    // Root badge — shown when Copy Fail LPE has obtained root on this host
-    if (n.copyfail_root_obtained) {
+    // Root badge — shown when EITHER Copy Fail or Dirty Frag has
+    // obtained root on this host.
+    if (n.copyfail_root_obtained || n.dirtyfrag_root_obtained) {
       html += `<text x="${x+BOX_W-30}" y="${y-2}" font-size="22" fill="#e6edf3"`
            + ` stroke="#0d1117" stroke-width="2.5" paint-order="stroke"`
            + ` text-anchor="middle" dominant-baseline="middle"`
@@ -2977,8 +2978,8 @@ function showCtxMenu(e, sid) {
     'create_user_gw':   hasGwVuln,                  // need GW vulnerability
     'create_user_creds': hasCreds,                  // need credentials
     'lpe':              isAbapStack && hasCreds,    // ABAP-only (BAPI-driven)
-    'check_copyfail':   !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
-    'exploit_copyfail': !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
+    'check_linux_lpe':   !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
+    'exploit_linux_lpe': !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
     'deep_scan':        true,                       // always available
     'standard_scan':    !!n.discovered_via_btp,     // BTP placeholders only
     // ABAP-only AND needs a real credential (verified RFC login or
@@ -3067,8 +3068,8 @@ function showCtxMenu(e, sid) {
     'create_user_gw':   'Requires a vulnerable RFC Gateway',
     'create_user_creds': 'Provide credentials first',
     'lpe':              'Provide credentials first',
-    'check_copyfail':   'Requires OS-exec on Linux host',
-    'exploit_copyfail': 'Requires OS-exec on Linux host — run Check first to confirm kernel is vulnerable',
+    'check_linux_lpe':   'Requires OS-exec on Linux host',
+    'exploit_linux_lpe': 'Requires OS-exec on Linux host — run Check first to confirm at least one technique (Copy Fail or Dirty Frag) is viable',
     'retrieve_rfcs':    'Needs a verified RFC credential or a SAPMAP-created user — RSRFCCHK and the RFCDES read both require a working logon.',
     'test_rfcs':        (!hasRFCs
         ? 'Retrieve RFC connections first.'
@@ -3146,8 +3147,8 @@ function showCtxMenu(e, sid) {
     'impact_assess':              !isAbapStack,
     'lpe':                        !isAbapStack,
     'impact_assess_java':         !isJavaStack,
-    'check_copyfail':   isWindows,
-    'exploit_copyfail': isWindows,
+    'check_linux_lpe':   isWindows,
+    'exploit_linux_lpe': isWindows,
     // SCC harvest items — hidden entirely unless an SCC is on the same host
     'harvest_scc':          !_hasSccOnSameHost(n),
     'harvest_scc_mappings': !_hasSccOnSameHost(n),
@@ -3382,15 +3383,23 @@ async function ctxAction(action) {
       await api('POST', `node/${sid}/check_cve_2025_31324`); break;
     case 'check_cve_6287':
       await api('POST', `node/${sid}/check_cve_2020_6287`); break;
-    case 'check_copyfail':
-      await api('POST', `node/${sid}/check_copyfail`);
-      showToast('Copy Fail check started', 'info');
+    case 'check_linux_lpe':
+      await api('POST', `node/${sid}/check_linux_lpe`);
+      showToast('Linux LPE check started — probing both Copy Fail and Dirty Frag', 'info');
       break;
-    case 'exploit_copyfail': {
+    case 'exploit_linux_lpe': {
       const cmd = prompt('Command to run as root on ' + sid + ':', 'id');
       if (!cmd) break;
-      if (!confirm('Run Copy Fail LPE on ' + sid + '?\n\nThis will temporarily modify /usr/bin/su in kernel page cache to execute:\n  ' + cmd + '\n\nNon-persistent (page cache only, lost on reboot).')) break;
-      await api('POST', `node/${sid}/exploit_copyfail`, {command: cmd});
+      if (!confirm(
+            'Run Linux LPE on ' + sid + '?\n\n' +
+            'SAPMAP picks the best technique automatically: Copy Fail '
+            + '(CVE-2026-31431) when viable, otherwise Dirty Frag (no '
+            + 'CVE — embargo broke).\n\n'
+            + 'Both temporarily patch /usr/bin/su in the kernel page '
+            + 'cache to execute:\n  ' + cmd + '\n\n'
+            + 'Non-persistent (page cache only, lost on reboot or '
+            + '`echo 3 > /proc/sys/vm/drop_caches`).')) break;
+      await api('POST', `node/${sid}/exploit_linux_lpe`, {command: cmd});
       break;
     }
     case 'read_java_destinations': {
