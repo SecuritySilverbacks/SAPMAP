@@ -349,6 +349,70 @@ def test_execute_local_command_creates_new_dest_when_no_match():
     assert run.call_args.args[1] == "SAPMAP_NEW_DEST"
 
 
+def test_execute_local_command_skips_sapmap_dests_for_other_sids():
+    """Regression: the dest-reuse loop must NEVER pick up a SAPMAP-named
+    destination created for a DIFFERENT SID, even if its RFCOPTIONS
+    happens to share a substring with the local node's host alias.
+    Otherwise SXPG silently sends commands to the wrong system and the
+    download_password_hashes flow hangs/errors with no useful log."""
+    import sapmap_rfc
+
+    conn = _FakeConn(rfcdes_rows=[
+        # SAPMAP destination for a DIFFERENT SID — must be skipped even
+        # though its options happen to mention LOCALHOST/127.0.0.1.
+        "SAPMAP_W74_20260305165242|T|PROGRAM=SAPXPG GWHOST=127.0.0.1 GWSERV=3300",
+    ])
+    ctx = _FakeCtx(conn)
+
+    with patch.object(sapmap_rfc, "_get_connection", return_value=ctx), \
+         patch.object(sapmap_rfc, "create_tcpip_destination",
+                      return_value={"success": True,
+                                    "dest_name": "SAPMAP_S4H_FRESH",
+                                    "message": "ok"}) as mk_dest, \
+         patch.object(sapmap_rfc, "execute_remote_command",
+                      return_value={"success": True, "output": [], "error": ""}) as run:
+        from sapmap_models import SAPNode, InstanceInfo
+        node = SAPNode(sid="S4H", ip="10.0.0.5",
+                       hostname="s4hhost.corp.example.com",
+                       system_type="ABAP")
+        node.instances.append(InstanceInfo(instance_nr="00", ip="10.0.0.5",
+                                            ports={3300: "gateway"}))
+        sapmap_rfc.execute_local_command(node, "id", "", _creds())
+
+    # Must NOT reuse the W74-named dest; must create a fresh one.
+    mk_dest.assert_called_once()
+    assert run.call_args.args[1] == "SAPMAP_S4H_FRESH"
+
+
+def test_execute_local_command_prefers_sapmap_dest_for_own_sid():
+    """When both a SAPMAP_<own-sid>_* dest AND a generic localhost dest
+    exist, the SAPMAP-prefixed one for THIS node wins — it's the highest-
+    confidence match (we created it ourselves, for this exact node)."""
+    import sapmap_rfc
+
+    conn = _FakeConn(rfcdes_rows=[
+        # Generic operator-created dest matching by host alias
+        "OLD_LOOP|T|PROGRAM=SAPXPG GWHOST=LOCALHOST GWSERV=3300",
+        # Our own SAPMAP-created dest for this SID — should win
+        "SAPMAP_S4H_20260101000000|T|PROGRAM=SAPXPG GWHOST=10.0.0.5 GWSERV=3300",
+    ])
+    ctx = _FakeCtx(conn)
+
+    with patch.object(sapmap_rfc, "_get_connection", return_value=ctx), \
+         patch.object(sapmap_rfc, "create_tcpip_destination") as mk_dest, \
+         patch.object(sapmap_rfc, "execute_remote_command",
+                      return_value={"success": True, "output": [], "error": ""}) as run:
+        from sapmap_models import SAPNode, InstanceInfo
+        node = SAPNode(sid="S4H", ip="10.0.0.5", hostname="s4hhost",
+                       system_type="ABAP")
+        node.instances.append(InstanceInfo(instance_nr="00", ip="10.0.0.5",
+                                            ports={3300: "gateway"}))
+        sapmap_rfc.execute_local_command(node, "id", "", _creds())
+
+    mk_dest.assert_not_called()
+    assert run.call_args.args[1] == "SAPMAP_S4H_20260101000000"
+
+
 def test_execute_local_command_skips_non_sapxpg_dests():
     """Type-T destinations that are NOT sapxpg (e.g. registered programs
     for external RFC servers) must not be matched even if the host string
