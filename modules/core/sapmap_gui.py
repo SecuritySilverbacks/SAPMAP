@@ -848,14 +848,21 @@ class SAPMAPApi:
         self.scan_state = "running"
         self.scan_error = ""
 
-        # Clear console and findings buffer
-        global _console_lines
-        with _console_lock:
-            _console_lines = []
+        # Clear findings buffer (banner + drawer reset for the new scan).
+        # Keep the console buffer intact across scans — the operator wants
+        # to see prior scan output too.  Append a visible divider so the
+        # boundary between scans stays obvious.
         sapmap_findings.clear()
 
         targets_str = config.get("targets", "").strip()
         scan_label = f"Scan on target {targets_str}" if targets_str else "Network Scan"
+
+        ts = datetime.now().strftime("%H:%M:%S")
+        _add_console_line(
+            ts,
+            f"────────  New scan: {targets_str or '(no targets)'}  ────────",
+            css_class="cl-info",
+        )
 
         def _scan_fn():
             _task_start("_scan", scan_label)

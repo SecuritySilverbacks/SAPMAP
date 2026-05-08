@@ -1501,9 +1501,10 @@ async function startScan() {
     skip_alive: document.getElementById('adv-skip-alive').checked,
     scc_probe_default_creds: !!(document.getElementById('adv-scc-probe-creds') && document.getElementById('adv-scc-probe-creds').checked),
   };
-  // Reset console cursor so new scan output is visible
-  consoleCursor = 0;
-  document.getElementById('console-body').innerHTML = '';
+  // Keep console history across scans — the operator wants to see prior
+  // scan output too.  The backend appends a "New scan: ..." divider so
+  // the boundary between scans stays obvious; polling picks up the
+  // divider plus all subsequent lines from where the cursor left off.
   // Reset the findings bus (banner + drawer) for the new scan
   findingsCursor = 0;
   _activeFindings = [];
