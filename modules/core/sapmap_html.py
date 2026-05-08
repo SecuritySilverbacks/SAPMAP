@@ -3094,7 +3094,7 @@ function showCtxMenu(e, sid) {
         ? 'Run Business Impact Scenarios is ABAP-only — BSEG / LFBK / PA0008 are ABAP DDIC tables.'
         : 'Needs a verified RFC credential or a SAPMAP-created user — the impact scenarios run BAPI / RFC_READ_TABLE calls that require an actual logon.  node.pwned alone (e.g. via GW exploit before user creation) is not enough.'),
     'analyse_capabilities': (!isAbapStack
-        ? 'Capability analyser is ABAP-only — it reads AGR_USERS / AGR_1251 / UST04 to map a user\\'s privileges.  Java systems use a different role model.'
+        ? 'Capability analyser is ABAP-only — it reads AGR_USERS / AGR_1251 / UST04 to map a user\'s privileges.  Java systems use a different role model.'
         : 'Needs a verified RFC credential or a SAPMAP-created user — the analyser reads AGR_USERS / UST04 via RFC.  Save credentials or create a user first.'),
     'impact_view':        'Run impact assessment first',
     'impact_assess_java': (javaDeployBlocked
