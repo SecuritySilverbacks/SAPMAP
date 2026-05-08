@@ -1995,7 +1995,8 @@ def get_table_columns(node: SAPNode, table_name: str,
 def read_table(node: SAPNode, table_name: str, fields: list = None,
                where: str = "", max_rows: int = 500,
                creds: Credentials = None,
-               long_strings: bool = False) -> list:
+               long_strings: bool = False,
+               quiet: bool = False) -> list:
     """Read data from an SAP table via RFC_READ_TABLE.
 
     Args:
@@ -2010,6 +2011,11 @@ def read_table(node: SAPNode, table_name: str, fields: list = None,
             include ABAP STRING / RAWSTRING / XSTRING columns that
             it normally drops from DATA.  Newer S/4 kernels ship
             with this; older ones ignore the flag and use DATA.
+        quiet: when True, suppress the "Could not read <table>" console
+            line on failure.  The error still goes to logger.error for
+            diagnostics.  Used by callers that probe table existence
+            speculatively (e.g. capability-analyser row-count cache)
+            and handle the failure themselves.
 
     Returns:
         list of dicts with field values
@@ -2089,7 +2095,8 @@ def read_table(node: SAPNode, table_name: str, fields: list = None,
         from sapmap_errors import format_rfc_exception
         detail = format_rfc_exception(e)
         logger.error(f"Table read failed for {table_name}@{node.sid}: {detail}")
-        print(f"[-] {node.sid}: Could not read {table_name}: {detail}")
+        if not quiet:
+            print(f"[-] {node.sid}: Could not read {table_name}: {detail}")
 
     return rows
 
