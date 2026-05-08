@@ -15,10 +15,26 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-ROOT="$(cd "$HERE/../.." && pwd)"
 SRC="$HERE/exp.c"
 OUT="$HERE/df_static"
-BLOB_PY="$ROOT/modules/exploitation/_dirtyfrag_blob.py"
+
+# Find a SAPMAP checkout to drop the blob into: walk up from $HERE
+# until we see "modules/exploitation/".  If we don't find one (e.g.
+# the build host got a hand-copied tarball of just tools/dirtyfrag/),
+# write the blob next to the script and print scp instructions at
+# the end.
+BLOB_PY=""
+candidate="$HERE"
+for _ in 1 2 3 4 5; do
+    candidate="$(dirname "$candidate")"
+    if [ -d "$candidate/modules/exploitation" ]; then
+        BLOB_PY="$candidate/modules/exploitation/_dirtyfrag_blob.py"
+        break
+    fi
+done
+if [ -z "$BLOB_PY" ]; then
+    BLOB_PY="$HERE/_dirtyfrag_blob.py"
+fi
 
 if [ ! -f "$SRC" ]; then
     echo "ERROR: $SRC not found.  Run from a checkout of SAPMAP." >&2
@@ -32,13 +48,20 @@ if [ "${DOCKER:-0}" = "1" ]; then
         -w /work \
         alpine:3.20 sh -c '
             apk add --no-cache gcc musl-dev linux-headers >/dev/null
-            gcc -O2 -static -Wall -o df_static exp.c
+            gcc -O2 -static -Wall -Wno-unused-result -Wno-unused-function -o df_static exp.c
             strip df_static
             ls -la df_static
         '
 else
     if ! command -v gcc >/dev/null 2>&1; then
-        echo "ERROR: gcc not found.  Install gcc + static libc (e.g. on alpine: apk add gcc musl-dev linux-headers), or re-run with DOCKER=1." >&2
+        cat >&2 <<'MSG'
+ERROR: gcc not found.  Install gcc + the static libc package, then re-run.
+  SLES / openSUSE :  sudo zypper install gcc glibc-devel-static
+  RHEL / CentOS   :  sudo dnf   install gcc glibc-static
+  Debian / Ubuntu :  sudo apt   install gcc libc6-dev
+  Alpine          :  sudo apk   add gcc musl-dev linux-headers
+Or re-run on macOS/Windows with DOCKER=1 to build via an alpine container.
+MSG
         exit 1
     fi
     UNAME_S="$(uname -s)"
@@ -54,7 +77,7 @@ else
     fi
     echo "[*] Building with local gcc..."
     cd "$HERE"
-    gcc -O2 -static -Wall -o df_static exp.c
+    gcc -O2 -static -Wall -Wno-unused-result -Wno-unused-function -o df_static exp.c
     strip df_static
     ls -la df_static
 fi
@@ -98,5 +121,25 @@ print(f"[+] Wrote {len(data)} bytes ({len(hexstr)} hex chars) to {os.path.basena
 print(f"[+] sha256: {sha}")
 PY
 
-echo "[+] Done.  modules/exploitation/_dirtyfrag_blob.py is ready."
-echo "    SAPMAP will pick it up on next launch."
+echo "[+] Done.  Blob written to:"
+echo "      $BLOB_PY"
+case "$BLOB_PY" in
+    "$HERE/_dirtyfrag_blob.py")
+        echo
+        echo "[!] No SAPMAP checkout detected above this directory."
+        echo "    Copy the blob into your SAPMAP repo and commit it:"
+        echo "      scp $BLOB_PY <dev-host>:<sapmap-repo>/modules/exploitation/"
+        echo "      cd <sapmap-repo>"
+        echo "      git add modules/exploitation/_dirtyfrag_blob.py"
+        echo "      git commit -m 'Vendor dirtyfrag binary blob (linux x86_64)'"
+        echo "      git push"
+        echo "    After that, every operator that pulls SAPMAP gets the"
+        echo "    working binary for free — no further build step needed."
+        ;;
+    *)
+        echo "    SAPMAP will pick it up on next launch."
+        echo "    Commit + push it so other operators don't need to rebuild:"
+        echo "      git add modules/exploitation/_dirtyfrag_blob.py"
+        echo "      git commit -m 'Vendor dirtyfrag binary blob (linux x86_64)'"
+        ;;
+esac
