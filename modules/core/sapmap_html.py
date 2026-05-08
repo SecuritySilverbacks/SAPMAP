@@ -836,6 +836,20 @@ body {
   <div class="ctx-item" data-action="scc_delete" style="color:#f85149">&#128465; Remove from Map</div>
 </div>
 
+<!-- BTP Subaccount Context Menu -->
+<div class="ctx-menu" id="btp-ctx-menu">
+  <div class="ctx-item" data-action="btp_details">&#128269; View Subaccount Details</div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item" data-action="btp_pull_destinations">&#128229; Refresh Destinations</div>
+  <div class="ctx-item" data-action="btp_highlight_links">&#128279; Highlight Linked On-prem Targets</div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item" data-action="btp_copy_uuid">&#128203; Copy Subaccount UUID</div>
+  <div class="ctx-item" data-action="btp_copy_subdomain">&#128203; Copy Subdomain</div>
+  <div class="ctx-item" data-action="btp_copy_region">&#128203; Copy Region</div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item" data-action="btp_remove" style="color:#f85149">&#128465; Remove from Map</div>
+</div>
+
 <!-- Connection Info Panel -->
 <div class="info-panel" id="info-panel"></div>
 <div id="toast-stack" style="position:fixed;right:16px;bottom:16px;z-index:2000;
@@ -2694,7 +2708,8 @@ function updateMap() {
 
     html += `<g class="node-box" data-btp="${escHtml(uuid)}" `
          + `onmousedown="startDrag(event,'${dragId}')" `
-         + `onclick="showBTPDetail('${escHtml(uuid)}')">`;
+         + `onclick="showBTPDetail('${escHtml(uuid)}')" `
+         + `oncontextmenu="showBTPCtxMenu(event,'${escHtml(uuid)}')">`;
 
     // Cloud silhouette: three humps on top, flat-ish bottom.
     // Sized to fit BOX_W (240) x BOX_H (174) with a bit of padding.
@@ -2915,6 +2930,8 @@ function showCtxMenu(e, sid) {
   e.preventDefault();
   e.stopPropagation();
   hideMapCtxMenu();
+  hideSCCCtxMenu();
+  hideBTPCtxMenu();
   selectedNodeSid = sid;
   const n = (mapState.nodes || {})[sid];
   const menu = document.getElementById('ctx-menu');
@@ -3262,6 +3279,7 @@ function showSCCCtxMenu(e, host) {
   e.stopPropagation();
   hideCtxMenu();
   hideMapCtxMenu();
+  hideBTPCtxMenu();
   selectedSccHost = host;
   const menu = document.getElementById('scc-ctx-menu');
 
@@ -3326,6 +3344,133 @@ async function sccRemoveFromMap(host) {
   if (!confirm('Remove SCC ' + host + ' from the map? (Local-only; will reappear on next scan if still present.)')) return;
   if (mapState.scc_nodes) delete mapState.scc_nodes[host];
   renderMap();
+}
+
+// --- BTP subaccount context menu --------------------------------------
+let selectedBtpUuid = null;
+
+function showBTPCtxMenu(e, uuid) {
+  e.preventDefault();
+  e.stopPropagation();
+  hideCtxMenu();
+  hideSCCCtxMenu();
+  hideMapCtxMenu();
+  selectedBtpUuid = uuid;
+  const menu = document.getElementById('btp-ctx-menu');
+  // Disable copy items when the underlying field is empty so the
+  // operator gets visual feedback rather than a silent no-op.
+  const bn = (mapState.btp_subaccounts || {})[uuid] || {};
+  const setEnabled = (action, enabled) => {
+    const el = menu.querySelector(`[data-action="${action}"]`);
+    if (!el) return;
+    if (enabled) el.classList.remove('disabled');
+    else         el.classList.add('disabled');
+  };
+  setEnabled('btp_copy_subdomain', !!bn.subdomain);
+  setEnabled('btp_copy_region',    !!bn.region);
+  const linkedCount = (bn.destinations || [])
+    .filter(d => d && d.linked_target_sid).length;
+  setEnabled('btp_highlight_links', linkedCount > 0);
+  menu.classList.add('visible');
+  const w = menu.offsetWidth || 280;
+  const h = menu.offsetHeight || 200;
+  const x = Math.min(e.clientX, window.innerWidth  - w - 8);
+  const y = Math.min(e.clientY, window.innerHeight - h - 8);
+  menu.style.left = x + 'px';
+  menu.style.top  = y + 'px';
+}
+
+function hideBTPCtxMenu() {
+  document.getElementById('btp-ctx-menu').classList.remove('visible');
+}
+
+document.getElementById('btp-ctx-menu').addEventListener('click', function(e) {
+  const item = e.target.closest('.ctx-item[data-action]');
+  if (!item || item.classList.contains('disabled')) return;
+  const action = item.getAttribute('data-action');
+  hideBTPCtxMenu();
+  const uuid = selectedBtpUuid;
+  if (!uuid) return;
+  const bn = (mapState.btp_subaccounts || {})[uuid] || {};
+  switch (action) {
+    case 'btp_details':
+      showBTPDetail(uuid);
+      break;
+    case 'btp_pull_destinations':
+      btpRefreshDestinations(uuid);
+      break;
+    case 'btp_highlight_links':
+      btpHighlightLinkedTargets(uuid);
+      break;
+    case 'btp_copy_uuid':
+      _copyToClipboard(uuid, 'UUID');
+      break;
+    case 'btp_copy_subdomain':
+      _copyToClipboard(bn.subdomain || '', 'subdomain');
+      break;
+    case 'btp_copy_region':
+      _copyToClipboard(bn.region || '', 'region');
+      break;
+    case 'btp_remove':
+      btpRemoveFromMap(uuid);
+      break;
+  }
+});
+
+async function btpRefreshDestinations(uuid) {
+  flashActivity('BTP ' + uuid.slice(0, 8) + ': re-pulling destinations', 8000);
+  try {
+    const r = await fetch('/api/btp/pull_destinations/' + encodeURIComponent(uuid),
+                          { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+    const d = await r.json();
+    if (d.error) {
+      alert('Refresh failed: ' + d.error);
+    } else {
+      showToast('BTP destinations refreshed', 'info');
+    }
+  } catch (e) {
+    alert('Refresh error: ' + e);
+  }
+}
+
+function btpHighlightLinkedTargets(uuid) {
+  const bn = (mapState.btp_subaccounts || {})[uuid];
+  if (!bn) return;
+  const targets = (bn.destinations || [])
+    .map(d => d && d.linked_target_sid)
+    .filter(Boolean);
+  const unique = Array.from(new Set(targets));
+  if (unique.length === 0) {
+    showToast('No linked on-prem targets to highlight', 'info');
+    return;
+  }
+  unique.forEach(sid => { try { _pulseNode(sid, 'CRITICAL'); } catch (_) {} });
+  showToast(`Pulsing ${unique.length} linked target${unique.length>1?'s':''}: ${unique.join(', ')}`, 'info');
+}
+
+function btpRemoveFromMap(uuid) {
+  if (!confirm('Remove BTP subaccount ' + (uuid.slice(0, 8)) + '… from the map?\n\n'
+              + '(Local-only; will reappear next time you re-enumerate '
+              + 'with a token for the same subaccount.)')) return;
+  if (mapState.btp_subaccounts) delete mapState.btp_subaccounts[uuid];
+  renderMap();
+}
+
+function _copyToClipboard(text, label) {
+  if (!text) { showToast('Nothing to copy', 'info'); return; }
+  try {
+    navigator.clipboard.writeText(text);
+    showToast(`Copied ${label} to clipboard`, 'info');
+  } catch (e) {
+    // Fallback for older browsers / restrictive contexts
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch (_) {}
+    ta.remove();
+    showToast(`Copied ${label} to clipboard`, 'info');
+  }
 }
 
 function _sccStoredCreds(host) {
@@ -7468,6 +7613,7 @@ document.getElementById('map-container').addEventListener('wheel', e => {
 document.addEventListener('click', e => {
   hideCtxMenu();
   hideSCCCtxMenu();
+  hideBTPCtxMenu();
   if (!e.target.closest('.info-panel') && !e.target.closest('.edge-line'))
     document.getElementById('info-panel').classList.remove('visible');
 });
@@ -7478,6 +7624,7 @@ document.addEventListener('contextmenu', e => {
   const mapContainer = document.getElementById('map-container');
   hideCtxMenu();
   hideSCCCtxMenu();
+  hideBTPCtxMenu();
   hideMapCtxMenu();
   if (!nodeBox && (e.target === mapSvg || e.target === mapContainer ||
       mapSvg.contains(e.target) || mapContainer.contains(e.target))) {
