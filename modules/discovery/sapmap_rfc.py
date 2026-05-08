@@ -2600,21 +2600,41 @@ def execute_local_command(node: SAPNode, command: str, params: str,
                             host_aliases.add(h.split(".", 1)[0])
                 host_aliases.update({"LOCALHOST", "127.0.0.1"})
 
+                # Prefix SAPMAP itself uses for dests targeting THIS node.
+                own_prefix = f"SAPMAP_{node.sid.upper()}_"
+
+                own_match = None       # SAPMAP-created for this exact SID
+                alias_match = None     # operator-created, host alias hits
                 for row in table_result.get("DATA", []):
                     line = row.get("WA", "") if isinstance(row, dict) else str(row)
                     parts = line.split("|")
-                    if len(parts) >= 3:
-                        name = parts[0].strip()
-                        opts = parts[2].strip().upper()
-                        # Must run sapxpg via gateway (program=sapxpg)
-                        if "SAPXPG" not in opts:
-                            continue
-                        # Match if any host alias appears in the options
-                        if any(h and h in opts for h in host_aliases):
-                            dest_name = name
-                            print(f"[*] {node.sid}: Reusing existing "
-                                  f"TCP/IP dest {name!r} for SXPG")
-                            break
+                    if len(parts) < 3:
+                        continue
+                    name = parts[0].strip()
+                    opts = parts[2].strip().upper()
+                    # Must run sapxpg via gateway (program=sapxpg)
+                    if "SAPXPG" not in opts:
+                        continue
+                    name_up = name.upper()
+                    if name_up.startswith(own_prefix):
+                        own_match = name
+                        break  # best possible match — stop scanning
+                    if name_up.startswith("SAPMAP_"):
+                        # SAPMAP-named for a DIFFERENT SID — never reuse;
+                        # would silently send commands to the wrong host.
+                        continue
+                    if alias_match is None and any(
+                            h and h in opts for h in host_aliases):
+                        alias_match = name
+
+                if own_match:
+                    dest_name = own_match
+                    print(f"[*] {node.sid}: Reusing SAPMAP-created "
+                          f"TCP/IP dest {dest_name!r} for SXPG")
+                elif alias_match:
+                    dest_name = alias_match
+                    print(f"[*] {node.sid}: Reusing existing "
+                          f"TCP/IP dest {dest_name!r} for SXPG")
             except Exception:
                 pass  # RFC_READ_TABLE might not be available
     except Exception:
