@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<trustConfiguration>
+    <lastUpdated>2025-09-08 18:07:30:111</lastUpdated>
+    <configurations>
+        <idPConfiguration>
+            <name>Subaccount=00000000-0000-0000-0000-000000000002, kid=default-jwt-key-bbbbbbbbbb</name>
+            <description>JSON Web Token (JWT) key, used by the SAP UAA (XSUAA) to sign JWT access tokens.</description>
+            <enabled>true</enabled>
+            <id>10</id>
+            <publicKey>-----BEGIN PUBLIC KEY-----
+PLACEHOLDER_FOR_TEST_FIXTURE_ONLY
+-----END PUBLIC KEY-----</publicKey>
+        </idPConfiguration>
+        <idPConfiguration>
+            <name>Subaccount=00000000-0000-0000-0000-000000000002, kid=ias-jwt-key-cccccccccc</name>
+            <description>JSON Web Token (JWT) key, used by the SAP IAS to sign JWT access tokens.</description>
+            <enabled>true</enabled>
+            <id>20</id>
+            <publicKey>-----BEGIN PUBLIC KEY-----
+PLACEHOLDER_FOR_TEST_FIXTURE_ONLY
+-----END PUBLIC KEY-----</publicKey>
+        </idPConfiguration>
+    </configurations>
+</trustConfiguration>
