@@ -678,6 +678,14 @@ class SCCNode:
     # In-memory only — not persisted. Set when Extract Keystore is run.
     backup_password: str = field(default="", repr=False)
     users_xml_loot_path: str = ""   # path to cached plaintext users.xml on disk
+    # Principal-Propagation analyser result (sapmap_scc_pp_analyzer).
+    # Populated after every keystore extract / mapping harvest, plus
+    # on-demand via the "Analyse Principal Propagation" menu action.
+    # Shape: {ok, method, findings: [...], summary: {critical, high, medium},
+    #         pp_config: {...}, trust: {...}, analyzed_at: "..."}.
+    pp_analysis: dict = field(default_factory=dict)
+    pp_analysis_at: str = ""        # ISO timestamp of last analyse run
+    pp_weak_count: int = 0          # critical+high count for badge rendering
 
     def to_dict(self) -> dict:
         return {
@@ -722,6 +730,9 @@ class SCCNode:
             "ha_peer_role": self.ha_peer_role,
             "notes": self.notes,
             "users_xml_loot_path": self.users_xml_loot_path,
+            "pp_analysis": dict(self.pp_analysis or {}),
+            "pp_analysis_at": self.pp_analysis_at,
+            "pp_weak_count": self.pp_weak_count,
             "kind": "scc",
         }
 
