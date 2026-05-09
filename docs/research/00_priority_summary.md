@@ -165,6 +165,16 @@ work:
   `08_cloud_connector_implementation_plan.md`; major sub-items
   (fingerprint, default-creds probe, JCEKS extraction, BTP harvest +
   token mint) are landed.
+- **SCC Principal-Propagation analyser** — static rule engine over
+  the SCC backup zip's `<principalPropagationConfiguration>` and
+  per-subaccount `trustcfg_<uuid>.xml` files. Flags
+  `${name}`/`${email}` CN bindings with no `<condition>`, hardcoded
+  privileged-user mappings (DDIC/SAP*), long forwarded-cert
+  validity, and multi-IdP / external-IdP trust setups. Schema
+  reference in
+  [09_principal_propagation_schema.md](09_principal_propagation_schema.md).
+  Auto-runs after every Extract Keystore; manual re-run via the
+  SCC right-click menu.
 
 ## Caveats
 

@@ -832,6 +832,7 @@ body {
   <div class="ctx-item" data-action="scc_probe_mappings">&#128225; Probe Mappings (TCP/HTTP smoke test)</div>
   <div class="ctx-item" data-action="scc_extract_keystore" style="color:#f85149">&#128272; Extract Keystore + Decrypt SSFS (FULL BACKUP — CROWN JEWELS)</div>
   <div class="ctx-item" data-action="scc_download_hashes">&#128196; Download Password Hashes</div>
+  <div class="ctx-item" data-action="scc_analyse_pp">&#128269; Analyse Principal-Propagation Trust</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="scc_delete" style="color:#f85149">&#128465; Remove from Map</div>
 </div>
@@ -2690,6 +2691,21 @@ function updateMap() {
       html += `<text x="${x+BOX_W-cut-6}" y="${y+BOX_H-10}" text-anchor="middle" font-size="10" fill="#fff" font-weight="bold">${cveCount}</text>`;
     }
 
+    // Principal-Propagation weak-rule badge — bottom-left inside hex.
+    // Only renders when the analyser has seen something CRITICAL/HIGH;
+    // colour follows severity-style convention (red for CRITICAL,
+    // amber for HIGH-only).  Tooltip surfaces the count breakdown.
+    const ppWeak = sn.pp_weak_count || 0;
+    const ppSummary = ((sn.pp_analysis || {}).summary) || {};
+    if (ppWeak > 0) {
+      const ppColor = (ppSummary.critical || 0) > 0 ? '#f85149' : '#f0883e';
+      const ppTip = `PP analyser: ${ppSummary.critical || 0} CRITICAL · ${ppSummary.high || 0} HIGH · ${ppSummary.medium || 0} MEDIUM`;
+      html += `<g><title>${escHtml(ppTip)}</title>`
+           + `<circle cx="${x+cut+10}" cy="${y+BOX_H-14}" r="10" fill="${ppColor}" />`
+           + `<text x="${x+cut+10}" y="${y+BOX_H-10}" text-anchor="middle" font-size="11" fill="#fff" font-weight="bold">PP</text>`
+           + `</g>`;
+    }
+
     html += '</g>';
   });
 
@@ -3336,6 +3352,7 @@ document.getElementById('scc-ctx-menu').addEventListener('click', function(e) {
     case 'scc_probe_mappings':   sccProbeMappings(host); break;
     case 'scc_extract_keystore':  sccExtractKeystore(host); break;
     case 'scc_download_hashes':  sccDownloadHashes(host); break;
+    case 'scc_analyse_pp':        sccAnalysePP(host); break;
     case 'scc_delete':            sccRemoveFromMap(host); break;
   }
 });
@@ -3344,6 +3361,27 @@ async function sccRemoveFromMap(host) {
   if (!confirm('Remove SCC ' + host + ' from the map? (Local-only; will reappear on next scan if still present.)')) return;
   if (mapState.scc_nodes) delete mapState.scc_nodes[host];
   renderMap();
+}
+
+async function sccAnalysePP(host) {
+  // The analyser is also auto-run after Extract Keystore — this menu
+  // item is the manual re-run for when the operator has edited the
+  // backup or wants a fresh pass without re-pulling.
+  const sn = (mapState.scc_nodes || {})[host] || {};
+  if (!sn.keystore_extracted) {
+    alert('Run Extract Keystore first — the PP analyser reads '
+          + '<principalPropagationConfiguration> + trustcfg_*.xml '
+          + 'from the backup zip on disk.');
+    return;
+  }
+  flashActivity('SCC ' + host + ': re-analysing PP trust', 5000);
+  try {
+    const r = await fetch('/api/scc/' + encodeURIComponent(host) + '/analyse_pp',
+                          { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+    const d = await r.json();
+    if (d.error) alert('PP analyse failed: ' + d.error);
+    else showToast('PP analyser re-run — see findings drawer', 'info');
+  } catch (e) { alert('PP analyse error: ' + e); }
 }
 
 // --- BTP subaccount context menu --------------------------------------
@@ -4532,6 +4570,51 @@ function showSCCDetail(host) {
       <div class="detail-row"><span class="detail-key">Role</span><span class="detail-val" style="color:${sn.ha_role === 'master' ? '#3fb950' : (sn.ha_role === 'shadow' ? '#a371f7' : '#8b949e')}">${escHtml((sn.ha_role || 'standalone').toUpperCase())}</span></div>
       ${sn.ha_shadow_host ? `<div class="detail-row"><span class="detail-key">Peer (${escHtml((sn.ha_peer_role || '?').toUpperCase())})</span><span class="detail-val" style="font-family:monospace"><a href="javascript:void(0)" onclick="showSCCDetail('${escHtml(sn.ha_shadow_host)}')" style="color:#58a6ff">${escHtml(sn.ha_shadow_host)}</a></span></div>` : '<div class="detail-row"><span class="detail-key">Peer</span><span class="detail-val" style="color:#8b949e">none (standalone)</span></div>'}
     </div>` : ''}
+    ${(() => {
+      // --- Principal Propagation analysis ---
+      const ppa = sn.pp_analysis || {};
+      const ppFindings = ppa.findings || [];
+      const ppCfg = (ppa.pp_config || {});
+      const summary = ppa.summary || {};
+      if (!ppa.ok && !ppFindings.length && !ppCfg.subject_patterns) return '';
+      const sevColor = { CRITICAL: '#f85149', HIGH: '#f0883e', MEDIUM: '#d29922' };
+      const subjRows = (ppCfg.subject_patterns || []).map((sp, idx) => {
+        const dn = (sp.dn_entries || [])
+          .map(e => `<span style="color:#79c0ff">${escHtml(e.key)}</span>=<span style="color:#cfd9df">${escHtml(e.value)}</span>`)
+          .join(', ');
+        const cond = sp.condition ? `<div style="font-size:10px;color:#8b949e">condition: ${escHtml(sp.condition)}</div>` : '';
+        return `<div style="border-left:3px solid #5dade2;padding:6px 8px;margin:6px 0;background:#0d1117;font-family:monospace;font-size:11px">${dn || '<span style="color:#8b949e">(empty)</span>'}${cond}</div>`;
+      }).join('') || '<div style="color:#8b949e;font-size:11px">No subjectPatterns configured.</div>';
+      const findingRows = ppFindings.map(f => {
+        const sCol = sevColor[(f.severity || '').toUpperCase()] || '#8b949e';
+        const why = (f.why || []).map(w => `<li>${escHtml(w)}</li>`).join('');
+        return `<div style="border-left:3px solid ${sCol};padding:6px 8px;margin:6px 0;background:#0d1117">
+                  <div style="display:flex;justify-content:space-between;align-items:baseline">
+                    <span style="font-weight:bold;color:${sCol}">${escHtml(f.severity || '?')}</span>
+                    <span style="font-family:monospace;font-size:10px;color:#8b949e">${escHtml(f.ref || '')}</span>
+                  </div>
+                  <div style="font-size:11px;color:#cfd9df;margin:4px 0">${escHtml(f.headline || '')}</div>
+                  ${why ? `<ul style="font-size:10px;color:#8b949e;margin:4px 0 4px 16px;padding:0">${why}</ul>` : ''}
+                  ${f.recommendation ? `<div style="font-size:10px;color:#3fb950;margin-top:4px">&#10004; ${escHtml(f.recommendation)}</div>` : ''}
+                </div>`;
+      }).join('') || '<div style="color:#3fb950;font-size:11px">No PP weaknesses found.</div>';
+      const tsTip = ppa.analyzed_at ? `last run: ${escHtml(ppa.analyzed_at)}` : '';
+      return `
+      <div class="detail-section">
+        <h4>Principal Propagation
+          <span style="color:#8b949e;font-weight:normal;font-size:10px" title="${tsTip}">
+            (${summary.critical || 0} CRITICAL · ${summary.high || 0} HIGH · ${summary.medium || 0} MEDIUM)
+          </span>
+        </h4>
+        <div class="detail-row"><span class="detail-key">Mode</span><span class="detail-val" style="font-family:monospace">${escHtml(ppCfg.mode || '?')}</span></div>
+        <div class="detail-row"><span class="detail-key">Validity</span><span class="detail-val">${ppCfg.validity_mins || 0} min</span></div>
+        <div class="detail-row"><span class="detail-key">SSO tolerance</span><span class="detail-val">${ppCfg.sso_tolerance_h || 0} h</span></div>
+        <div style="color:#8b949e;font-size:11px;margin-top:6px">Subject patterns:</div>
+        ${subjRows}
+        <div style="color:#8b949e;font-size:11px;margin-top:6px">Findings:</div>
+        ${findingRows}
+      </div>`;
+    })()}
     <div class="detail-section">
       <h4>Subaccounts &amp; Mappings</h4>
       <div class="detail-row"><span class="detail-key">Region</span><span class="detail-val">${escHtml(sn.tunnel_region || '?')}</span></div>

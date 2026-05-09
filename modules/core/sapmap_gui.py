@@ -1701,6 +1701,40 @@ def create_app(api: SAPMAPApi) -> Bottle:
                               f"{hres.get('error')}")
                 except Exception as he:
                     print(f"[-] SCC {host}: HA-from-zip parse failed: {he}")
+                # Auto-analyse: read scc_config.ini's
+                # <principalPropagationConfiguration> + every
+                # trustcfg_<uuid>.xml from the backup zip and run
+                # static rules over them (sapmap_scc_pp_analyzer).
+                # Findings emitted directly into the bus so they show
+                # up in the banner / drawer alongside the keystore-
+                # extracted findings.
+                try:
+                    from sapmap_scc_keystore import (
+                        parse_pp_config_from_zip, parse_pp_trust_from_zip,
+                    )
+                    from sapmap_scc_pp_analyzer import analyze_backup
+                    pp = parse_pp_config_from_zip(sn.keystore_loot_path)
+                    trust = parse_pp_trust_from_zip(sn.keystore_loot_path)
+                    bundle = analyze_backup(pp, trust, mappings=sn.mappings)
+                    sn.pp_analysis = bundle
+                    sn.pp_analysis_at = bundle.get("analyzed_at", "")
+                    crit = bundle["summary"].get("critical", 0)
+                    high = bundle["summary"].get("high", 0)
+                    sn.pp_weak_count = crit + high
+                    for f in bundle["findings"]:
+                        sapmap_findings.emit_finding(
+                            f["severity"], host,
+                            f["headline"]
+                            + " — "
+                            + f.get("recommendation", ""),
+                            ref=f["ref"],
+                            meta={"why": f.get("why", []),
+                                  "raw": f.get("raw", {})})
+                    print(f"[*] SCC {host}: PP analyser — "
+                          f"{crit} CRITICAL, {high} HIGH, "
+                          f"{bundle['summary'].get('medium', 0)} MEDIUM")
+                except Exception as ae:
+                    print(f"[-] SCC {host}: PP analyser failed: {ae}")
                 # Auto-decrypt: pure-Python decryptor has no extra
                 # dependency cost, so chain decrypt+unlock immediately
                 # whenever the backup contains an SSFS blob.
@@ -1832,6 +1866,56 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 _task_end(f"scc:{host}:probe_mappings")
         threading.Thread(target=_run, daemon=True).start()
         return json.dumps({"status": "started", "count": len(sn.mappings)})
+
+    @app.route("/api/scc/<host>/analyse_pp", method="POST")
+    def scc_analyse_pp(host):
+        """Re-run the principal-propagation analyser against the most
+        recent backup zip for this SCC.  Auto-runs after Extract
+        Keystore; this route lets the operator re-analyse on demand
+        (e.g. after editing the ini file out-of-band) without re-
+        pulling the whole backup."""
+        response.content_type = "application/json"
+        sn = api.state.scc_nodes.get(host)
+        if not sn:
+            return json.dumps({"error": f"SCC node {host} not found"})
+        if not sn.keystore_loot_path or not os.path.isfile(sn.keystore_loot_path):
+            return json.dumps({"error": "no loot zip on this SCC — run "
+                                          "Extract Keystore first"})
+
+        def _run():
+            _task_start(f"scc:{host}:analyse_pp",
+                        f"SCC {host}: PP analyser")
+            try:
+                from sapmap_scc_keystore import (
+                    parse_pp_config_from_zip, parse_pp_trust_from_zip,
+                )
+                from sapmap_scc_pp_analyzer import analyze_backup
+                pp = parse_pp_config_from_zip(sn.keystore_loot_path)
+                trust = parse_pp_trust_from_zip(sn.keystore_loot_path)
+                bundle = analyze_backup(pp, trust, mappings=sn.mappings)
+                sn.pp_analysis = bundle
+                sn.pp_analysis_at = bundle.get("analyzed_at", "")
+                crit = bundle["summary"].get("critical", 0)
+                high = bundle["summary"].get("high", 0)
+                sn.pp_weak_count = crit + high
+                for f in bundle["findings"]:
+                    sapmap_findings.emit_finding(
+                        f["severity"], host,
+                        f["headline"]
+                        + " — "
+                        + f.get("recommendation", ""),
+                        ref=f["ref"],
+                        meta={"why": f.get("why", []),
+                              "raw": f.get("raw", {})})
+                print(f"[+] SCC {host}: PP analyser re-run — "
+                      f"{crit} CRITICAL, {high} HIGH, "
+                      f"{bundle['summary'].get('medium', 0)} MEDIUM")
+            except Exception as e:
+                print(f"[-] SCC {host}: analyse_pp failed: {e}")
+            finally:
+                _task_end(f"scc:{host}:analyse_pp")
+        threading.Thread(target=_run, daemon=True).start()
+        return json.dumps({"status": "started"})
 
     @app.route("/api/scc/<host>/decrypt_ssfs", method="POST")
     def scc_decrypt_ssfs(host):

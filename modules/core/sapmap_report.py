@@ -557,6 +557,67 @@ def _derive_landscape_recommendations(state: SAPMAPState) -> list:
             "refs": "SAP Note 128447, 2008727",
         })
 
+    # 9b. SCC Principal-Propagation weak rules.  Surfaced when the PP
+    # analyser found at least one CRITICAL/HIGH finding on any SCC —
+    # weak <subjectPatterns> let any cloud user impersonate any
+    # on-prem ABAP user under LOCAL PP mode.  See
+    # docs/research/09_principal_propagation_schema.md.
+    pp_weak_sccs = []
+    for s in sccs:
+        ppa = getattr(s, "pp_analysis", None) or {}
+        summary = ppa.get("summary") or {}
+        if (summary.get("critical", 0) + summary.get("high", 0)) > 0:
+            pp_weak_sccs.append(s)
+    if pp_weak_sccs:
+        # Build a short bullet of each affected SCC's worst finding so
+        # the report explains what the operator is fixing.
+        bullets = []
+        for s in pp_weak_sccs:
+            ppa = getattr(s, "pp_analysis", {}) or {}
+            findings = (ppa.get("findings") or [])
+            critical = [f for f in findings if f.get("severity") == "CRITICAL"]
+            high = [f for f in findings if f.get("severity") == "HIGH"]
+            top = (critical or high)[:1]
+            if not top:
+                continue
+            t = top[0]
+            bullets.append(
+                f"  • {getattr(s, 'host', '?')}: "
+                f"{t.get('headline','?')} (ref: {t.get('ref','?')})")
+        bullet_text = "\n".join(bullets)
+        items.append({
+            "category": "SAP Cloud Connector — Principal Propagation",
+            "scope": ", ".join(getattr(s, "host", "?") for s in pp_weak_sccs),
+            "title": "Tighten <subjectPatterns> in scc_config.ini",
+            "body": (
+                "The principal-propagation analyser flagged "
+                f"{len(pp_weak_sccs)} Cloud Connector(s) with weak "
+                "user-mapping rules. Under "
+                "principalPropagationMode=LOCAL, SCC mints a "
+                "forwarded X.509 cert with a Subject CN built from "
+                "the cloud caller's identity claim and presents it "
+                "to the on-prem ABAP system.  The on-prem system "
+                "trusts SCC's PP CA via STRUSTSSO2 and resolves the "
+                "CN to an ABAP user via USREXTID.  When the CN "
+                "template binds to a caller-controlled placeholder "
+                "(${name}, ${email}) without a constraining "
+                "<condition>, any cloud user can pick any on-prem "
+                "user.\n\n"
+                f"Affected:\n{bullet_text}\n\n"
+                "Recommendation: bind CN to a stable cloud-side "
+                "identifier (e.g. ${user_uuid}); add a <condition> "
+                "that scopes the rule to a specific cloud user "
+                "group / verified email domain; pair this with a "
+                "USREXTID review on the on-prem side so each cloud "
+                "user maps to exactly one ABAP user."
+            ),
+            "refs": (
+                "SAP Cloud Connector documentation > Configure "
+                "Principal Propagation; "
+                "docs/research/09_principal_propagation_schema.md"
+            ),
+        })
+
     # 10. Cracked SCC password hashes
     scc_pwned = [s for s in sccs
                   if getattr(s, "pwned", False)
