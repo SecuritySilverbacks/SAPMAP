@@ -618,6 +618,63 @@ def _derive_landscape_recommendations(state: SAPMAPState) -> list:
             ),
         })
 
+    # 9c. PP impersonation surface — concrete on-prem users a cloud
+    # caller can impersonate when (a) a weak SCC PP rule is in place
+    # AND (b) USREXTID has matching CN-style entries on the linked
+    # ABAP system.  This is the chain that turns a CRITICAL config
+    # finding into a one-shot pwn primitive.
+    pp_imp_nodes = []
+    for n in nodes:
+        imp = getattr(n, "pp_impersonation", None) or {}
+        if (imp.get("exploitability") in ("trivial", "constrained")
+                and (imp.get("matched_users") or [])):
+            pp_imp_nodes.append(n)
+    if pp_imp_nodes:
+        bullets = []
+        for n in pp_imp_nodes:
+            imp = n.pp_impersonation
+            matched = imp.get("matched_users") or []
+            privs = imp.get("privileged_users") or []
+            priv_names = sorted({p["bname"] for p in privs}) if privs else []
+            head = (
+                f"  • {n.sid} (via SCC {imp.get('scc_host','?')}): "
+                f"{len(matched)} ABAP user(s) reachable via PP rule "
+                f"{imp.get('rule_template','?')}.")
+            if priv_names:
+                head += (
+                    f"  Privileged accounts: "
+                    f"{', '.join(priv_names)}.")
+            bullets.append(head)
+        items.append({
+            "category": "SAP Cloud Connector — Principal Propagation",
+            "scope": ", ".join(n.sid for n in pp_imp_nodes),
+            "title": (
+                "Cloud→on-prem impersonation reachable through SCC "
+                "tunnel (concrete user list)"),
+            "body": (
+                "By combining the weak <subjectPatterns> rule on the "
+                "linked SAP Cloud Connector with the on-prem USREXTID "
+                "table, a cloud caller authenticated against the bound "
+                "BTP subaccount can land on the on-prem ABAP system as "
+                "any of the users below — without ever holding a "
+                "valid on-prem credential.\n\n"
+                f"Affected:\n{chr(10).join(bullets)}\n\n"
+                "Recommendation: SAP Note 622464 (USREXTID hardening): "
+                "remove generic CN→user mappings; restrict each cloud "
+                "user to exactly one ABAP user via a stable "
+                "identifier (UUID); pair this with the SCC-side fix "
+                "(constrain <subjectPatterns> via <condition>).  "
+                "Until both halves are fixed, treat the on-prem ABAP "
+                "user list as compromised."
+            ),
+            "refs": (
+                "SAP Note 622464; "
+                "SAP Cloud Connector documentation > "
+                "Configure Principal Propagation; "
+                "docs/research/09_principal_propagation_schema.md"
+            ),
+        })
+
     # 10. Cracked SCC password hashes
     scc_pwned = [s for s in sccs
                   if getattr(s, "pwned", False)

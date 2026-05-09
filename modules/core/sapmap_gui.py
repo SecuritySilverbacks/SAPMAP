@@ -3072,6 +3072,105 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 f"Could not schedule scan for {sid}"})
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/read_usrextid", method="POST")
+    def node_read_usrextid(sid):
+        """Read USREXTID — the on-prem cert-CN → ABAP user mapping
+        table.  Pairs with the SCC PP analyser to enumerate exactly
+        which ABAP users a cloud caller can impersonate when a weak
+        <subjectPatterns> rule is in place upstream.
+
+        After the read, cross-link with every linked SCC's PP analysis
+        and stash the impersonation surface on
+        ``node.pp_impersonation``.  CRITICAL findings emitted into the
+        bus when the surface includes privileged accounts."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        def _run():
+            _task_start(f"{sid}:read_usrextid",
+                        f"{sid}: reading USREXTID")
+            try:
+                from sapmap_rfc import download_usrextid
+                rows = download_usrextid(node) or []
+                node.usrextid_entries = rows
+                print(f"[+] {sid}: USREXTID read — {len(rows)} entry(s)")
+                # Cross-link with every linked SCC's PP rule.  We pick
+                # the first SCC with PP analysis for the impersonation
+                # report; if multiple SCCs link to this node, the
+                # operator can re-run after switching focus.
+                from sapmap_scc_pp_analyzer import analyze_pp_impersonation
+                linked = node.scc_links or []
+                imp = None
+                used_scc = ""
+                for sh in linked:
+                    sn = api.state.scc_nodes.get(sh)
+                    if not sn:
+                        continue
+                    ppa = getattr(sn, "pp_analysis", None) or {}
+                    pp = ppa.get("pp_config") or {}
+                    if pp.get("ok"):
+                        imp = analyze_pp_impersonation(pp, rows)
+                        imp["scc_host"] = sh
+                        used_scc = sh
+                        break
+                if imp is None and rows:
+                    imp = {
+                        "ok": True,
+                        "rule_template": "",
+                        "rule_caller_controlled": False,
+                        "matched_users": [],
+                        "privileged_users": [],
+                        "exploitability": "blocked",
+                        "notes": (
+                            "No SCC linked to this node has a parsed "
+                            "PP config yet — run Extract Keystore on "
+                            "the SCC first."),
+                    }
+                if imp is None:
+                    imp = {"ok": True, "rule_template": "",
+                           "rule_caller_controlled": False,
+                           "matched_users": [], "privileged_users": [],
+                           "exploitability": "blocked",
+                           "notes": "USREXTID empty + no SCC PP "
+                                    "config available."}
+                node.pp_impersonation = imp
+                privs = imp.get("privileged_users") or []
+                matched = imp.get("matched_users") or []
+                if privs:
+                    sapmap_findings.emit_finding(
+                        "CRITICAL", sid,
+                        f"Cloud→on-prem impersonation reachable via "
+                        f"SCC {used_scc}: PP rule "
+                        f"{imp.get('rule_template','?')} maps cloud "
+                        f"caller into {len(matched)} ABAP user(s) "
+                        f"on {sid}, including "
+                        f"{len(privs)} privileged: "
+                        f"{', '.join(sorted(set(p['bname'] for p in privs)))}.",
+                        ref="scc.pp.impersonation.privileged",
+                        meta={"scc_host": used_scc,
+                              "rule": imp.get("rule_template"),
+                              "matched_count": len(matched),
+                              "privileged_users": [p["bname"] for p in privs]})
+                elif matched and imp.get("rule_caller_controlled"):
+                    sapmap_findings.emit_finding(
+                        "HIGH", sid,
+                        f"PP impersonation reachable via SCC "
+                        f"{used_scc}: {len(matched)} ABAP user(s) "
+                        f"on {sid} have a USREXTID entry the cloud "
+                        f"caller can claim via the "
+                        f"{imp.get('rule_template','?')} rule.",
+                        ref="scc.pp.impersonation.unprivileged",
+                        meta={"scc_host": used_scc,
+                              "matched_count": len(matched)})
+            except Exception as e:
+                print(f"[-] {sid}: read_usrextid error: {e}")
+            finally:
+                _task_end(f"{sid}:read_usrextid")
+        threading.Thread(target=_run, daemon=True).start()
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/read_oa2c", method="POST")
     def node_read_oa2c(sid):
         """Read transaction OA2C_CONFIG's tables (OA2C_CLIENT +

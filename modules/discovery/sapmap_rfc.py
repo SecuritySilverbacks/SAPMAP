@@ -2344,6 +2344,40 @@ def _download_hashes_via_sxpg(node: SAPNode,
 
 
 # ---------------------------------------------------------------------------
+# External-ID mapping (USREXTID) — the on-prem side of principal propagation
+# ---------------------------------------------------------------------------
+
+def download_usrextid(node: SAPNode, creds: Credentials = None,
+                       max_rows: int = 9999) -> list:
+    """Read USREXTID — the table that maps incoming X.509 cert subjects
+    (or SNC names) to ABAP usernames.
+
+    USREXTID is the on-prem side of every principal-propagation flow:
+    when SCC mints a forwarded cert with subject ``CN=<x>``, the ABAP
+    kernel resolves that CN through USREXTID to find the actual ABAP
+    user the request runs as.
+
+    Columns:
+
+      * ``MANDT``   — client (000 means cross-client)
+      * ``BNAME``   — ABAP user the EXTID resolves to
+      * ``EXTID``   — the cert subject / SNC name (typically ``CN=...``)
+      * ``TYPE``    — ``DN`` (full distinguished name match) or ``CN``
+                      (cn-only match, governed by the kernel parameter
+                      ``login/certificate_mapping_rulebased``)
+      * ``SEQNO``   — sequence number for multi-DN-per-user
+
+    Returns the list of row dicts (empty list on failure — failures are
+    already logged through ``read_table``'s normal path).
+    """
+    rows = read_table(
+        node, "USREXTID",
+        fields=["MANDT", "BNAME", "EXTID", "TYPE", "SEQNO"],
+        creds=creds, max_rows=max_rows)
+    return rows or []
+
+
+# ---------------------------------------------------------------------------
 # Client role detection
 # ---------------------------------------------------------------------------
 
