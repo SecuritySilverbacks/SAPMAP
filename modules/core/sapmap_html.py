@@ -660,6 +660,9 @@ body {
     <span class="legend-item"><span class="legend-swatch" style="background:#a371f7;border:2px dotted #a371f7;background:transparent"></span> HTTP destination</span>
     <span class="legend-item"><span class="legend-swatch" style="background:#ff6b35;border:2px dashed #ff6b35;background:transparent"></span> TCP/IP (sapxpg)</span>
     <span class="legend-item"><span class="legend-swatch" style="background:#046c7a"></span> SAP Cloud Connector</span>
+    <span class="legend-item" title="All SCC mappings to this ABAP node have been smoke-tested and reach the backend successfully"><span class="legend-swatch" style="background:transparent;border-top:2px dashed #3fb950;border-radius:0;width:18px;height:0"></span> SCC tunnel: reach OK</span>
+    <span class="legend-item" title="At least one SCC mapping to this ABAP node failed its smoke test"><span class="legend-swatch" style="background:transparent;border-top:2px dashed #f85149;border-radius:0;width:18px;height:0"></span> SCC tunnel: unreachable</span>
+    <span class="legend-item" title="SCC mapping uses principal propagation (KERBEROS / X509_*) — pair with the PP analyser finding"><span class="legend-swatch" style="background:transparent;border-top:2px dashed #f0883e;border-radius:0;width:18px;height:0"></span> SCC tunnel: PP enabled</span>
     <span style="flex:1"></span>
     <label style="cursor:pointer;display:flex;align-items:center;gap:6px;padding:2px 10px;border:1px solid #30363d;border-radius:4px;background:#161b22;color:#c9d1d9;font-size:11px"><input type="checkbox" id="show-unknown" style="accent-color:#f0883e;width:14px;height:14px" onchange="updateMap()"> Show unknown targets</label>
   </div>
