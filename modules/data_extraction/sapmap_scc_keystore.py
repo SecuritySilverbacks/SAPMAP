@@ -65,6 +65,11 @@ import zipfile
 from datetime import datetime
 from typing import Optional
 
+# Single source of truth for "this mapping uses PP and the SCC will mint
+# a forwarded cert via the local PP CA" — see
+# docs/research/09_principal_propagation_schema.md.
+from sapmap_scc_admin import _is_pp_auth_mode
+
 
 def _slug(s: str) -> str:
     """Filesystem-safe slug for use in loot file paths."""
@@ -251,7 +256,7 @@ def parse_mappings_from_backends_xml(
             "path_allowlist": [],
             "path_wildcards": False,
             "backend_type": _xml_text(sm, "backendType"),
-            "principal_propagation": auth in ("X509_GENERAL", "KERBEROS"),
+            "principal_propagation": _is_pp_auth_mode(auth),
             "authentication_mode": auth,
             "sid": _xml_text(sm, "sid"),
             "host_in_header": _xml_text(sm, "internalHostInHeader"),
@@ -344,7 +349,7 @@ def parse_mappings_from_zip(loot_zip_path: str) -> dict:
                 "path_allowlist": [],
                 "path_wildcards": False,
                 "backend_type": _xml_text(sm, "backendType"),
-                "principal_propagation": auth in ("X509_GENERAL", "KERBEROS"),
+                "principal_propagation": _is_pp_auth_mode(auth),
                 "authentication_mode": auth,
                 "sid": _xml_text(sm, "sid"),
                 "host_in_header": _xml_text(sm, "internalHostInHeader"),

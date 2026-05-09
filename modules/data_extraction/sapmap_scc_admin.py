@@ -306,6 +306,34 @@ def _safe_int(v, default: int = 0) -> int:
         return default
 
 
+# Auth modes that drive principal propagation through the local PP CA.
+# Anything ending in _LOCAL means SCC mints a fresh forwarded cert
+# (subject filled from <subjectPatterns>) signed by the SSFS-stored
+# PP CA, so weak <subjectPatterns> rules apply equally to all of them.
+# Source: docs/research/09_principal_propagation_schema.md.
+_PP_AUTH_MODES = frozenset({
+    "KERBEROS",
+    "X509_GENERAL",
+    "X509_CERTIFICATE",
+    "X509_CERTIFICATE_LOCAL",
+    "NONE_CERTIFICATE_LOCAL",
+})
+
+
+def _is_pp_auth_mode(auth_mode: str) -> bool:
+    """Return True for any authenticationMode that triggers PP cert
+    minting on the SCC side."""
+    if not auth_mode:
+        return False
+    am = auth_mode.strip().upper()
+    if am in _PP_AUTH_MODES:
+        return True
+    # Defensive: match any future _LOCAL variant.
+    if am.endswith("_CERTIFICATE_LOCAL"):
+        return True
+    return False
+
+
 def _normalize_mapping(m: dict) -> dict:
     """Shape one raw systemMapping entry to match SCCMapping.from_dict().
 
@@ -326,8 +354,9 @@ def _normalize_mapping(m: dict) -> dict:
         "path_allowlist": m.get("resources") or m.get("pathAllowlist") or [],
         "path_wildcards": bool(m.get("pathWildcards", False)),
         "backend_type": m.get("backendType") or "",
-        "principal_propagation": (auth_mode in ("X509_GENERAL", "KERBEROS")
-                                  or bool(m.get("principalPropagation", False))),
+        "principal_propagation": (
+            _is_pp_auth_mode(auth_mode)
+            or bool(m.get("principalPropagation", False))),
         "authentication_mode": auth_mode,
         "sid": m.get("sid") or "",
         "host_in_header": m.get("hostInHeader") or "",
