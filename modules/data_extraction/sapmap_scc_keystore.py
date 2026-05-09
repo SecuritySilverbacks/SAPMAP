@@ -377,6 +377,159 @@ def parse_mappings_from_zip(loot_zip_path: str) -> dict:
     }
 
 
+def parse_pp_config_from_zip(loot_zip_path: str) -> dict:
+    """Pull principal-propagation config out of scc_config/scc_config.ini.
+
+    Returns::
+
+        {
+          "ok": True,
+          "mode": "LOCAL" | "KERBEROS" | "SECURE_LOGIN_SERVER" | ... | "",
+          "subject_patterns": [
+              {
+                "dn_entries": [{"key": "CN", "value": "${name}"}, ...],
+                "condition":   "...",
+                "description": "...",
+              },
+              ...
+          ],
+          "validity_mins":  60,
+          "sso_tolerance_h": 2,
+          "raw_xml":         "<...truncated for readability...>",
+        }
+
+    Returns ``{"ok": False, "error": "..."}`` on parse failure or when
+    the file is missing.  Schema reference:
+    docs/research/09_principal_propagation_schema.md.
+    """
+    target = "scc_config/scc_config.ini"
+    try:
+        zf = zipfile.ZipFile(loot_zip_path)
+    except (zipfile.BadZipFile, FileNotFoundError) as e:
+        return {"ok": False, "error": f"bad loot zip: {e}"}
+    if target not in zf.namelist():
+        return {"ok": False, "error": f"{target} not in zip"}
+    try:
+        blob = zf.read(target)
+        root = _ET.fromstring(blob)
+    except (KeyError, _ET.ParseError) as e:
+        return {"ok": False, "error": f"parse error: {e}"}
+
+    pp = root.find("principalPropagationConfiguration")
+    if pp is None:
+        return {"ok": True, "mode": "", "subject_patterns": [],
+                "validity_mins": 0, "sso_tolerance_h": 0,
+                "raw_xml": ""}
+
+    patterns = []
+    for sp in pp.findall("subjectPatterns/subjectPattern"):
+        entries = []
+        for e in sp.findall("dnEntries/entry"):
+            entries.append({
+                "key":   (e.findtext("key") or "").strip(),
+                "value": (e.findtext("value") or "").strip(),
+            })
+        patterns.append({
+            "dn_entries":  entries,
+            "condition":   (sp.findtext("condition") or "").strip(),
+            "description": (sp.findtext("description") or "").strip(),
+        })
+
+    def _int(name: str, default: int = 0) -> int:
+        try:
+            return int((pp.findtext(name) or "").strip() or default)
+        except ValueError:
+            return default
+
+    return {
+        "ok": True,
+        "mode":            (pp.findtext("principalPropagationMode") or "").strip(),
+        "subject_patterns": patterns,
+        "validity_mins":   _int("certificateValidityPeriodInMins"),
+        "sso_tolerance_h": _int("ssoToleranceInHours"),
+        "raw_xml":         _ET.tostring(pp, encoding="unicode"),
+    }
+
+
+def parse_pp_trust_from_zip(loot_zip_path: str) -> dict:
+    """Walk every scc_config/<region>/<uuid>/trustcfg_<uuid>.xml.
+
+    These files (SCC 2.18+, optional — gated on ``<autoSyncTrust>``)
+    carry the cloud-side IdP signing keys SCC trusts for inbound JWT
+    validation per subaccount.
+
+    Returns::
+
+        {
+          "ok": True,
+          "by_subaccount": {
+            "<uuid>": {
+              "region":      "...",
+              "last_updated": "...",
+              "idps": [
+                {
+                  "name":        "...",
+                  "description": "...",
+                  "id":          "...",
+                  "enabled":     True,
+                  "issuer_kind": "xsuaa" | "ias" | "external" | "",
+                },
+                ...
+              ],
+            },
+            ...
+          }
+        }
+
+    Empty ``by_subaccount`` is normal — many backups have no trustcfg
+    files (operator hasn't enabled trust sync).
+    """
+    out: dict = {"ok": True, "by_subaccount": {}}
+    try:
+        zf = zipfile.ZipFile(loot_zip_path)
+    except (zipfile.BadZipFile, FileNotFoundError) as e:
+        return {"ok": False, "error": f"bad loot zip: {e}"}
+    trust_re = re.compile(
+        r"^scc_config/(?P<region>[^/]+)/(?P<sub>[0-9a-fA-F-]{36})/"
+        r"trustcfg_(?P<sub2>[0-9a-fA-F-]{36})\.xml$")
+    for name in zf.namelist():
+        m = trust_re.match(name)
+        if not m:
+            continue
+        region = m.group("region")
+        sub = m.group("sub")
+        try:
+            tree = _ET.fromstring(zf.read(name))
+        except _ET.ParseError:
+            continue
+        last_updated = (tree.findtext("lastUpdated") or "").strip()
+        idps = []
+        for cfg in tree.findall("configurations/idPConfiguration"):
+            desc = (cfg.findtext("description") or "").strip()
+            descl = desc.lower()
+            if "xsuaa" in descl or "sap uaa" in descl:
+                kind = "xsuaa"
+            elif "ias" in descl or "identity authentication" in descl:
+                kind = "ias"
+            elif desc:
+                kind = "external"
+            else:
+                kind = ""
+            idps.append({
+                "name":        (cfg.findtext("name") or "").strip(),
+                "description": desc,
+                "id":          (cfg.findtext("id") or "").strip(),
+                "enabled":     (cfg.findtext("enabled") or "").strip().lower() == "true",
+                "issuer_kind": kind,
+            })
+        out["by_subaccount"][sub] = {
+            "region":       region,
+            "last_updated": last_updated,
+            "idps":         idps,
+        }
+    return out
+
+
 def parse_ha_state_from_zip(loot_zip_path: str) -> dict:
     """Pull HA state out of a backup zip's scc_config/scc_config.ini.
 
