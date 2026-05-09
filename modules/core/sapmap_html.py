@@ -772,6 +772,7 @@ body {
       <div class="ctx-item" data-action="download_java_secstore">&#128273; Download Java Secure Store</div>
       <div class="ctx-item" data-action="view_java_secstore">&#128203; View Java Secure Store Results</div>
       <div class="ctx-item" data-action="download_table">&#128229; Download Table Data</div>
+      <div class="ctx-item" data-action="read_usrextid">&#128279; Read USREXTID (PP impersonation surface)</div>
     </div>
   </div>
   <!-- Business Impact submenu -->
@@ -3075,6 +3076,7 @@ function showCtxMenu(e, sid) {
     'harvest_btp_creds': true,
     'cleanup':          hasCreatedUsers,             // need created users to clean up
     'client_roles':     hasUsableAbapAccess,        // ABAP-only RFC reads
+    'read_usrextid':    hasUsableAbapAccess,        // ABAP-only RFC reads
     'set_type':         true,                       // always available
     'set_db_type':      true,                       // always available
     'set_os_type':      true,                       // always available
@@ -3145,6 +3147,7 @@ function showCtxMenu(e, sid) {
     'propagate':        'Provide credentials or create a user first',
     'cleanup':          'No created users to clean up',
     'client_roles':     'Needs a verified RFC credential or a SAPMAP-created user — the role-walk reads AGR_USERS / AGR_DEFINE via RFC.',
+    'read_usrextid':    'Needs a verified RFC credential or a SAPMAP-created user — USREXTID read uses RFC_READ_TABLE.',
   };
 
   // Items hidden entirely (not just disabled) when the node type doesn't
@@ -3155,6 +3158,7 @@ function showCtxMenu(e, sid) {
     'credentials':      !isAbapStack,
     'enum_clients':     !isAbapStack,
     'client_roles':     !isAbapStack,
+    'read_usrextid':    !isAbapStack,
     'default_creds':    !isAbapStack,
     'retrieve_rfcs':    !isAbapStack,
     'test_rfcs':        !isAbapStack,
@@ -3858,6 +3862,10 @@ async function ctxAction(action) {
       break;
     case 'client_roles':
       await api('POST', `node/${sid}/client_roles`); break;
+    case 'read_usrextid':
+      await api('POST', `node/${sid}/read_usrextid`);
+      showToast('USREXTID read started — check findings drawer for PP impersonation surface', 'info');
+      break;
     case 'set_type': showTypeModal(sid); break;
     case 'set_db_type': showDbTypeModal(sid); break;
     case 'set_os_type': showOsTypeModal(sid); break;
@@ -4449,6 +4457,52 @@ function showDetails(sid) {
             return head + list + tail;
         }).join('<hr style="border:0;border-top:1px solid #30363d;margin:8px 0">')
         + '</div>';
+    })()}
+    ${(() => {
+      // --- USREXTID + PP impersonation surface ---
+      const ux = n.usrextid_entries || [];
+      const imp = n.pp_impersonation || {};
+      if (ux.length === 0 && !imp.rule_template) return '';
+      const sevOf = (imp.exploitability === 'trivial')   ? '#f85149'
+                   : (imp.exploitability === 'constrained') ? '#f0883e'
+                   : '#3fb950';
+      const matched = imp.matched_users || [];
+      const privs = imp.privileged_users || [];
+      const privSet = new Set(privs.map(p => (p.bname || '').toUpperCase()));
+      const rows = ux.slice(0, 50).map(r => {
+        const isPriv = privSet.has((r.BNAME || '').toUpperCase());
+        const isMatched = matched.some(m => m.bname === r.BNAME && m.extid_full === r.EXTID);
+        const rowColor = isPriv ? '#f85149' : (isMatched ? '#f0883e' : '#cfd9df');
+        return `<tr>
+                  <td style="padding:3px 6px;border-bottom:1px solid #21262d;font-family:monospace;color:${rowColor}">${escHtml(r.BNAME || '')}${isPriv ? ' &#9889;' : ''}</td>
+                  <td style="padding:3px 6px;border-bottom:1px solid #21262d;font-family:monospace;font-size:10px;word-break:break-all">${escHtml(r.EXTID || '')}</td>
+                  <td style="padding:3px 6px;border-bottom:1px solid #21262d;font-family:monospace;font-size:10px;color:#8b949e">${escHtml(r.TYPE || '')}</td>
+                  <td style="padding:3px 6px;border-bottom:1px solid #21262d;font-family:monospace;font-size:10px;color:#8b949e">${escHtml(r.MANDT || '')}</td>
+                </tr>`;
+      }).join('');
+      return `
+      <div class="detail-section">
+        <h4>&#128279; PP Impersonation Surface
+          ${imp.exploitability ? `<span style="color:${sevOf};font-weight:normal;font-size:10px">(${escHtml(imp.exploitability.toUpperCase())})</span>` : ''}
+        </h4>
+        ${imp.rule_template ? `<div class="detail-row"><span class="detail-key">SCC PP rule</span><span class="detail-val" style="font-family:monospace;color:#79c0ff">${escHtml(imp.rule_template)}</span></div>` : ''}
+        ${imp.scc_host ? `<div class="detail-row"><span class="detail-key">Via SCC</span><span class="detail-val" style="font-family:monospace"><a href="javascript:void(0)" onclick="showSCCDetail('${escHtml(imp.scc_host)}')" style="color:#58a6ff">${escHtml(imp.scc_host)}</a></span></div>` : ''}
+        <div class="detail-row"><span class="detail-key">USREXTID rows</span><span class="detail-val">${ux.length}</span></div>
+        <div class="detail-row"><span class="detail-key">Impersonatable</span><span class="detail-val">${matched.length}${privs.length ? ` <span style="color:#f85149">(${privs.length} privileged)</span>` : ''}</span></div>
+        ${imp.notes ? `<div style="font-size:11px;color:#cfd9df;margin:6px 0;padding:6px 8px;background:#0d1117;border-left:3px solid ${sevOf}">${escHtml(imp.notes)}</div>` : ''}
+        ${ux.length === 0 ? '' : `
+        <table style="width:100%;border-collapse:collapse;margin-top:6px;font-size:11px">
+          <thead>
+            <tr style="background:#161b22;color:#8b949e;text-align:left">
+              <th style="padding:3px 6px;border-bottom:1px solid #30363d">ABAP user</th>
+              <th style="padding:3px 6px;border-bottom:1px solid #30363d">EXTID</th>
+              <th style="padding:3px 6px;border-bottom:1px solid #30363d">Type</th>
+              <th style="padding:3px 6px;border-bottom:1px solid #30363d">Client</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>${ux.length > 50 ? `<div style="color:#8b949e;font-size:10px;margin-top:4px">… and ${ux.length - 50} more rows</div>` : ''}`}
+      </div>`;
     })()}
   `;
 

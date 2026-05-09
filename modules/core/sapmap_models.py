@@ -262,6 +262,18 @@ class SAPNode:
     # operator runs Test Connection / scan against it.
     discovered_via_btp: bool = False
 
+    # USREXTID table — on-prem cert-CN → ABAP user mapping.  Populated
+    # by Data Extraction → Read USREXTID.  Each entry is a row dict
+    # with MANDT/BNAME/EXTID/TYPE/SEQNO.  Pairs with the SCC PP
+    # analyser (sapmap_scc_pp_analyzer.analyze_pp_impersonation) to
+    # answer "which ABAP users can a cloud caller impersonate
+    # through this SCC tunnel".
+    usrextid_entries: list = field(default_factory=list)
+    pp_impersonation: dict = field(default_factory=dict)
+        # {ok, rule_template, rule_caller_controlled, matched_users:[],
+        #  privileged_users:[], exploitability:"trivial"|"constrained"
+        #  |"blocked", notes, scc_host:"<host>"}
+
     # OAuth2 client profiles configured on this ABAP system (transaction
     # OA2C_CONFIG).  Each row joins OA2C_CLIENT (client_id, token
     # endpoint, …) with OA2C_CLIENT_EXT (grant_type) by CLIENT_UUID;
@@ -395,6 +407,8 @@ class SAPNode:
             "linux_lpe_method": self.linux_lpe_method,
             "discovered_via_btp": self.discovered_via_btp,
             "oauth2_profiles": list(self.oauth2_profiles),
+            "usrextid_entries": list(self.usrextid_entries),
+            "pp_impersonation": dict(self.pp_impersonation or {}),
             "capability_results": list(self.capability_results),
             "capability_row_counts": dict(self.capability_row_counts),
         }

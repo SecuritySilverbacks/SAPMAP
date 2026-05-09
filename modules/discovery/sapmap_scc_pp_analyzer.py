@@ -479,6 +479,164 @@ def analyze_pp_trust(trust: dict) -> list:
     return findings
 
 
+def _extract_cn(extid: str) -> str:
+    """Pull the CN value out of a DN string.
+
+    USREXTID.EXTID is typically a full ``CN=<x>,OU=<y>,O=<z>`` DN, but
+    when ``login/certificate_mapping_rulebased=1`` it can be a bare
+    CN.  Normalise to just the CN value (case-insensitive on the key).
+    """
+    if not extid:
+        return ""
+    s = extid.strip()
+    if "=" not in s:
+        return s  # bare CN, kernel param mode
+    # Walk DN segments — handle escaped commas inside CN values.
+    parts = []
+    buf = []
+    esc = False
+    for ch in s:
+        if esc:
+            buf.append(ch); esc = False
+        elif ch == "\\":
+            esc = True
+        elif ch == ",":
+            parts.append("".join(buf)); buf = []
+        else:
+            buf.append(ch)
+    parts.append("".join(buf))
+    for p in parts:
+        kv = p.strip().split("=", 1)
+        if len(kv) == 2 and kv[0].strip().upper() == "CN":
+            return kv[1].strip()
+    return ""
+
+
+def analyze_pp_impersonation(pp: dict, usrextid_rows: list) -> dict:
+    """Given the SCC's PP subject pattern + the on-prem USREXTID
+    table, enumerate which ABAP users a cloud caller can impersonate.
+
+    Returns::
+
+        {
+          "ok":              True,
+          "rule_template":   "CN=${name}",
+          "rule_caller_controlled": True | False,
+          "matched_users":   [ {bname, extid_cn, extid_full, type, mandt}, ... ],
+          "privileged_users": [ ... subset where BNAME is in PRIVILEGED_LITERALS ],
+          "exploitability":  "trivial" | "constrained" | "blocked",
+          "notes":           "...",
+        }
+    """
+    out = {
+        "ok": True, "rule_template": "", "rule_caller_controlled": False,
+        "matched_users": [], "privileged_users": [],
+        "exploitability": "blocked",
+        "notes": "",
+    }
+    if not pp or not pp.get("ok"):
+        out["notes"] = "PP config not parsed yet."
+        return out
+    patterns = pp.get("subject_patterns") or []
+    if not patterns:
+        # No patterns -> SCC default behaviour ≈ caller-controlled
+        out["rule_template"] = "(empty subjectPatterns — default)"
+        out["rule_caller_controlled"] = True
+    else:
+        # Take the first <subjectPattern> — production configs we've
+        # seen have exactly one.  Multi-pattern setups should be the
+        # subject of a future enhancement once we have a sample.
+        sp = patterns[0]
+        cn_entry = next((e for e in (sp.get("dn_entries") or [])
+                         if (e.get("key") or "").upper() == "CN"), None)
+        if cn_entry:
+            classified = _classify_dn_entry(cn_entry)
+            tpl = (cn_entry.get("value") or "").strip()
+            out["rule_template"] = "CN=" + tpl
+            out["rule_caller_controlled"] = bool(
+                classified["has_caller_controlled"])
+            out["rule_hardcoded_literal"] = classified["is_literal"]
+        else:
+            out["rule_template"] = "(no CN entry)"
+
+    if not usrextid_rows:
+        out["notes"] = (
+            "USREXTID has not been read yet — run "
+            "Data Extraction → Read USREXTID on the on-prem ABAP "
+            "node to enumerate impersonation targets.")
+        return out
+
+    # Score each USREXTID row.
+    matched = []
+    for row in usrextid_rows or []:
+        if not isinstance(row, dict):
+            continue
+        bname = (row.get("BNAME") or "").strip()
+        extid = (row.get("EXTID") or "").strip()
+        rtype = (row.get("TYPE") or "").strip()
+        mandt = (row.get("MANDT") or "").strip()
+        cn = _extract_cn(extid)
+        if not bname:
+            continue
+        # Caller-controlled rule: every USREXTID row is a potential
+        # impersonation target.  The cloud caller can claim any name /
+        # email that matches an existing CN entry.
+        if out["rule_caller_controlled"]:
+            matched.append({
+                "bname": bname, "extid_cn": cn,
+                "extid_full": extid, "type": rtype, "mandt": mandt,
+            })
+        elif out.get("rule_hardcoded_literal"):
+            # Hardcoded literal -> only the EXACT CN literal works.
+            tpl = out["rule_template"].split("=", 1)[-1].strip()
+            if cn.upper() == tpl.upper():
+                matched.append({
+                    "bname": bname, "extid_cn": cn,
+                    "extid_full": extid, "type": rtype, "mandt": mandt,
+                })
+
+    out["matched_users"] = matched
+    privs = [r for r in matched
+             if r["bname"].upper() in PRIVILEGED_LITERALS]
+    out["privileged_users"] = privs
+
+    if matched:
+        if privs:
+            out["exploitability"] = "trivial"
+            out["notes"] = (
+                f"Cloud caller can impersonate "
+                f"{len(matched)} ABAP user(s) on this system, "
+                f"including {len(privs)} privileged account(s): "
+                f"{', '.join(sorted(set(p['bname'] for p in privs)))}.")
+        elif out["rule_caller_controlled"]:
+            out["exploitability"] = "trivial"
+            out["notes"] = (
+                f"Cloud caller can impersonate "
+                f"{len(matched)} ABAP user(s) on this system.  None "
+                f"are on the privileged-literal allow-list, but every "
+                f"matched user is a real ABAP login — blast radius "
+                f"depends on each one's role assignments.")
+        else:
+            out["exploitability"] = "constrained"
+            out["notes"] = (
+                f"PP rule maps to a fixed CN; "
+                f"{len(matched)} USREXTID entry(s) match.  Caller "
+                f"becomes those users only — verify their roles.")
+    else:
+        if out["rule_caller_controlled"]:
+            out["exploitability"] = "blocked"
+            out["notes"] = (
+                "Caller-controlled rule, but USREXTID has no "
+                "CN-style entries — no impersonation possible until "
+                "an ABAP admin maps a CN→user pair.")
+        else:
+            out["exploitability"] = "blocked"
+            out["notes"] = (
+                "PP rule's CN literal does not match any USREXTID "
+                "entry — no impersonation reachable.")
+    return out
+
+
 def analyze_backup(pp: dict, trust: Optional[dict] = None,
                     mappings: Optional[list] = None) -> dict:
     """Convenience entry point that runs both rule sets and bundles

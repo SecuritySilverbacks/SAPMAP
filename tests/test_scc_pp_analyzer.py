@@ -244,6 +244,100 @@ def test_multi_idp_xsuaa_plus_ias_yields_medium():
 # 5. Round-trip parser ↔ live backup
 # ===========================================================================
 
+# ===========================================================================
+# 6. analyze_pp_impersonation — USREXTID cross-link
+# ===========================================================================
+
+_USREXT_ROWS = [
+    # Routine office users
+    {"MANDT": "100", "BNAME": "ALICE",  "EXTID": "CN=alice@acme.example.com",      "TYPE": "DN", "SEQNO": "0"},
+    {"MANDT": "100", "BNAME": "BOB",    "EXTID": "CN=bob@acme.example.com",        "TYPE": "DN", "SEQNO": "0"},
+    # Privileged user with a CN entry — the killer signal
+    {"MANDT": "100", "BNAME": "DDIC",   "EXTID": "CN=DDIC,OU=Basis,O=Acme",        "TYPE": "DN", "SEQNO": "0"},
+    {"MANDT": "100", "BNAME": "SAP*",   "EXTID": "CN=SAP*,O=Acme",                 "TYPE": "DN", "SEQNO": "0"},
+    # Service account
+    {"MANDT": "100", "BNAME": "BATCH1", "EXTID": "CN=BATCH1,OU=BatchJobs,O=Acme",  "TYPE": "DN", "SEQNO": "0"},
+]
+
+
+def test_pp_impersonation_caller_controlled_rule_flags_everyone():
+    """${name} rule + populated USREXTID = every row is impersonatable,
+    privileged users surface as a separate list."""
+    from sapmap_scc_pp_analyzer import analyze_pp_impersonation
+    pp = _parse_pp_xml("scc_config_critical_name.ini")
+    imp = analyze_pp_impersonation(pp, _USREXT_ROWS)
+    assert imp["ok"] is True
+    assert imp["rule_caller_controlled"] is True
+    assert imp["exploitability"] == "trivial"
+    assert len(imp["matched_users"]) == len(_USREXT_ROWS)
+    priv_names = {p["bname"] for p in imp["privileged_users"]}
+    assert "DDIC" in priv_names
+    assert "SAP*" in priv_names
+
+
+def test_pp_impersonation_hardcoded_rule_only_matches_literal():
+    """Hardcoded CN=DDIC rule matches the single DDIC USREXTID row.
+    Exploitability is still 'trivial' because every cloud caller maps
+    to a privileged user — not 'constrained'."""
+    from sapmap_scc_pp_analyzer import analyze_pp_impersonation
+    pp = _parse_pp_xml("scc_config_high_hardcoded_ddic.ini")
+    imp = analyze_pp_impersonation(pp, _USREXT_ROWS)
+    assert imp["rule_caller_controlled"] is False
+    matched = [m["bname"] for m in imp["matched_users"]]
+    assert matched == ["DDIC"]
+    # Privileged literal mapping = trivial (cloud caller IS DDIC)
+    assert imp["exploitability"] == "trivial"
+    assert any(p["bname"] == "DDIC" for p in imp["privileged_users"])
+
+
+def test_pp_impersonation_hardcoded_to_unprivileged_is_constrained():
+    """Hardcoded mapping to a non-privileged user is 'constrained' —
+    every cloud caller becomes that one specific user, blast radius
+    depends on that user's role assignments."""
+    from sapmap_scc_pp_analyzer import analyze_pp_impersonation
+    pp = {
+        "ok": True, "mode": "LOCAL",
+        "subject_patterns": [{"dn_entries": [{"key": "CN", "value": "BATCH1"}],
+                                "condition": "", "description": ""}],
+        "validity_mins": 60, "sso_tolerance_h": 2, "raw_xml": "",
+    }
+    imp = analyze_pp_impersonation(pp, _USREXT_ROWS)
+    assert imp["rule_caller_controlled"] is False
+    matched = [m["bname"] for m in imp["matched_users"]]
+    assert matched == ["BATCH1"]
+    assert imp["exploitability"] == "constrained"
+    assert imp["privileged_users"] == []
+
+
+def test_pp_impersonation_clean_rule_no_matches():
+    """Stable ${user_uuid} CN rule + condition + no UUIDs in USREXTID
+    = nothing impersonatable.  Caller-controlled is False so only an
+    exact UUID literal would have matched."""
+    from sapmap_scc_pp_analyzer import analyze_pp_impersonation
+    pp = _parse_pp_xml("scc_config_clean_scoped.ini")
+    imp = analyze_pp_impersonation(pp, _USREXT_ROWS)
+    assert imp["rule_caller_controlled"] is False
+    assert imp["exploitability"] == "blocked"
+    assert imp["matched_users"] == []
+
+
+def test_pp_impersonation_empty_usrextid_returns_helpful_note():
+    from sapmap_scc_pp_analyzer import analyze_pp_impersonation
+    pp = _parse_pp_xml("scc_config_critical_name.ini")
+    imp = analyze_pp_impersonation(pp, [])
+    assert imp["matched_users"] == []
+    assert "USREXTID has not been read" in imp["notes"]
+
+
+def test_extract_cn_handles_full_dn_and_bare_cn():
+    from sapmap_scc_pp_analyzer import _extract_cn
+    assert _extract_cn("CN=alice,OU=Eng,O=Acme") == "alice"
+    assert _extract_cn("alice@example.com") == "alice@example.com"
+    # Escaped comma inside CN (rare but valid)
+    assert _extract_cn(r"CN=Smith\, John,O=Acme") == "Smith, John"
+    assert _extract_cn("") == ""
+
+
 def test_parser_roundtrip_against_live_backup_if_present():
     """Smoke test against the operator's real backup zips when they
     exist in the working tree.  Skipped silently when not — keeps
