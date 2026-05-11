@@ -7,13 +7,13 @@
 # tools/btp_ssh_bridge/README.md for the operational recipe.
 ---
 applications:
-  - name:      sapmap-probe-bridge
-    instances: 1
-    memory:    64M
-    disk_quota: 64M
+  - name:         sapmap-probe-bridge
+    instances:    1
+    memory:       64M
     buildpacks:
       - staticfile_buildpack
-    health-check-type: process
-    no-route: false
-    routes:
-      - route: sapmap-probe-bridge-${random-word}.${domain}
+    # Let CF mint a random hostname under the default shared domain
+    # for this org/space.  Avoids name collisions when multiple
+    # operators push this app concurrently in the same subaccount,
+    # and is supported across every CF API version we care about.
+    random-route: true

@@ -81,6 +81,7 @@ cf delete sapmap-probe-bridge -f -r    # -r also removes the route
 
 | Symptom | Likely cause |
 |---|---|
+| `cf push` returns HTTP 500 / `UnknownError` | Older versions of this manifest used `${random-word}.${domain}` route templates which not every CF API can resolve.  Pull the latest `manifest.yml` (uses `random-route: true` instead) and retry. |
 | `cf push` fails with "no available cells" | Subaccount is out of memory quota — free some up or shrink another app |
 | `cf ssh` says "SSH support is disabled for app" | Run `cf enable-ssh sapmap-probe-bridge && cf restart sapmap-probe-bridge` |
 | Tunnel opens but probe still times out | Wrong region in the `cf ssh -L` target — check `cf api` matches the SCC's region |
