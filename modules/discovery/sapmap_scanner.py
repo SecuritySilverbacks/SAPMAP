@@ -1396,6 +1396,81 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
                 and info.get("_is_java") and info.get("_is_abap")):
             break  # Found both stacks, no need to continue
 
+    # /sap/public/info pre-auth fingerprint — fills any RFCSI fields the
+    # gateway probe couldn't extract.  ABAP-only ICF service: a Java
+    # stack returns 404 on this path, so we skip when SAPControl has
+    # already pinned the stack to Java-only.  When SAPControl never
+    # exposed an ICM port (firewalled, no SAPControl, …) fall back to
+    # the standard ABAP ICM defaults (80NN and 5XX80).
+    is_java_only = info.get("_is_java") and not info.get("_is_abap")
+    if is_java_only:
+        print(f"[*] {tag}: skipping /sap/public/info — SAPControl reports "
+              f"Java-only stack (ABAP ICF path not bound)")
+    else:
+        pi_targets = []
+        for inst_nr, (http_p, _https_p) in (
+                info.get("http_ports") or {}).items():
+            if http_p:
+                pi_targets.append((inst_nr, int(http_p), "sapcontrol"))
+        if not pi_targets:
+            for inst_nr in ordered_nrs:
+                pi_targets.append((inst_nr, 8000 + inst_nr, "default-80NN"))
+                pi_targets.append((inst_nr, 50080 + inst_nr * 100,
+                                    "default-5XX80"))
+            print(f"[*] {tag}: SAPControl exposed no ICM HTTP port — "
+                  f"falling back to default ICM ports "
+                  f"({', '.join(str(p) for _, p, _ in pi_targets)}) "
+                  f"for /sap/public/info")
+        else:
+            print(f"[*] {tag}: probing /sap/public/info on "
+                  f"{len(pi_targets)} ICM port(s) from SAPControl: "
+                  f"{', '.join(str(p) for _, p, _ in pi_targets)}")
+        pi_to = min(timeout, 5)
+        any_success = False
+        for inst_nr, port, port_src in pi_targets:
+            print(f"[*] {tag}: GET http://{host}:{port}/sap/public/info "
+                  f"(inst {inst_nr:02d}, source={port_src}, "
+                  f"timeout={pi_to}s)"
+                  f"{' via SAProuter' if saprouter else ''}")
+            pi = query_public_info(host, port, timeout=pi_to,
+                                    saprouter=saprouter)
+            status = getattr(query_public_info, "_last_status", "?")
+            if not pi:
+                print(f"[-] {tag}: /sap/public/info ({host}:{port}): "
+                      f"{status}")
+                continue
+            for k in ("sid", "hostname", "os_type", "db_type",
+                       "kernel", "sap_release", "ip"):
+                if pi.get(k) and not info.get(k):
+                    info[k] = pi[k]
+            if pi.get("db_host") and not info.get("db_host"):
+                info["db_host"] = pi["db_host"]
+            if pi.get("timezone") and not info.get("timezone"):
+                info["timezone"] = pi["timezone"]
+            if info["sid"]:
+                tag = info["sid"]
+            # /sap/public/info answering is a positive ABAP signal — Java
+            # stacks don't bind this ICF path.
+            info["_is_abap"] = True
+            info["_public_info_source"] = f"{host}:{port}"
+            any_success = True
+            print(f"[+] {tag}: /sap/public/info ({host}:{port}): "
+                  f"SID={pi.get('sid') or '?'}, "
+                  f"Host={pi.get('hostname') or '?'}, "
+                  f"OS={pi.get('os_type') or '?'}, "
+                  f"DB={pi.get('db_type') or '?'}, "
+                  f"Kernel={pi.get('kernel') or '?'}, "
+                  f"Release={pi.get('sap_release') or '?'}"
+                  + (f", DBHost={pi['db_host']}" if pi.get('db_host')
+                     else "")
+                  + (f", TZ={pi['timezone']}" if pi.get('timezone')
+                     else ""))
+            break
+        if not any_success and pi_targets:
+            print(f"[-] {tag}: /sap/public/info exhausted "
+                  f"{len(pi_targets)} candidate port(s) — no usable "
+                  f"response")
+
     # SID still unknown?  Fall back to the DIAG dispatcher probe on 32XX.
     # This is the only metadata channel left when the gateway (33XX) and
     # SAPControl (5XX13) are both firewalled but the dispatcher port is
@@ -1657,6 +1732,124 @@ def _query_sapcontrol_sid(host: str, port: int, timeout: float = 3,
     except Exception:
         pass
     return (sid, is_java, is_abap, db_type, http_port, https_port)
+
+
+def query_public_info(host: str, http_port: int,
+                       timeout: float = 5,
+                       saprouter: str = "") -> dict:
+    """GET /sap/public/info on an ABAP ICM port — returns parsed system info.
+
+    `/sap/public/info` is an ICF service on NetWeaver ABAP that returns
+    a SOAP envelope wrapping RFCSI_EXPORT (same shape as authenticated
+    RFC_SYSTEM_INFO), pre-auth on most kernels.  Java stacks do not bind
+    this path (404), so a successful parse is also a positive ABAP
+    signal.
+
+    Returns dict with whichever keys were populated: sid, hostname,
+    os_type, db_type, kernel, sap_release, ip, db_host, timezone.
+    Returns {} on any failure (port closed, non-200, non-SAP body,
+    parse error).
+    """
+    import re as _re
+
+    # Stash a short status code on the function object for callers that
+    # want to log the failure reason.  Mirrors the
+    # _query_sapcontrol_sid._last_decided_by pattern used elsewhere
+    # in this module.
+    query_public_info._last_status = "init"
+
+    try:
+        if saprouter:
+            from sap_saprouter import connect_through_saprouter
+            sock = connect_through_saprouter(
+                saprouter + f"/H/{host}/S/{http_port}",
+                timeout=timeout, talk_mode=1,
+            )
+        else:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            sock.connect((host, http_port))
+        # Plain GET — ABAP ICF returns the SOAP envelope without auth on
+        # most kernels.  Use HTTP/1.0 + Connection: close so the server
+        # signals end-of-body by closing the socket (no chunked parsing).
+        req = (
+            f"GET /sap/public/info HTTP/1.0\r\n"
+            f"Host: {host}:{http_port}\r\n"
+            f"User-Agent: sapmap\r\n"
+            f"Accept: text/xml,*/*\r\n"
+            f"Connection: close\r\n"
+            f"\r\n"
+        )
+        sock.sendall(req.encode())
+        resp = b""
+        try:
+            while len(resp) < 65536:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                resp += chunk
+        except socket.timeout:
+            pass
+        try:
+            sock.close()
+        except Exception:
+            pass
+    except (ConnectionRefusedError, OSError) as e:
+        query_public_info._last_status = f"connect_failed:{type(e).__name__}"
+        return {}
+    except Exception as e:
+        query_public_info._last_status = f"error:{type(e).__name__}"
+        return {}
+
+    if not resp:
+        query_public_info._last_status = "no_response"
+        return {}
+
+    # Split header / body
+    sep = resp.find(b"\r\n\r\n")
+    if sep < 0:
+        query_public_info._last_status = "malformed_response"
+        return {}
+    head = resp[:sep].decode("iso-8859-1", errors="replace")
+    body_bytes = resp[sep + 4:]
+
+    # Only accept HTTP 200.  404 = ABAP service is hidden or this is a
+    # Java stack; 401 = old kernels that gate /sap/public/* behind auth
+    # (pre-Note 1486029).
+    status_line = head.split("\r\n", 1)[0]
+    m_status = _re.search(r"HTTP/\S+\s+(\d{3})", status_line)
+    http_code = m_status.group(1) if m_status else "???"
+    if " 200" not in status_line:
+        query_public_info._last_status = f"http_{http_code}"
+        return {}
+    if b"RFCSI_EXPORT" not in body_bytes and b"RFCSYSID" not in body_bytes:
+        query_public_info._last_status = "http_200_no_rfcsi"
+        return {}
+
+    body = body_bytes.decode("iso-8859-1", errors="replace")
+
+    def _field(name: str) -> str:
+        # Namespace prefixes vary across kernels ("rfc:", "n0:", default).
+        # Strip any namespace prefix off the tag name when matching.
+        m = _re.search(
+            rf'<(?:[A-Za-z0-9_]+:)?{name}(?:\s[^>]*)?>([^<]*)'
+            rf'</(?:[A-Za-z0-9_]+:)?{name}>',
+            body)
+        return m.group(1).strip() if m else ""
+
+    out = {
+        "sid": _field("RFCSYSID"),
+        "hostname": _field("RFCHOST2") or _field("RFCHOST"),
+        "os_type": _field("RFCOPSYS"),
+        "db_type": _field("RFCDBSYS"),
+        "kernel": _field("RFCKERNRL"),
+        "sap_release": _field("RFCSAPRL"),
+        "ip": _field("RFCIPV6ADDR") or _field("RFCIPADDR"),
+        "db_host": _field("RFCDBHOST"),
+        "timezone": _field("RFCTZONE"),
+    }
+    query_public_info._last_status = "ok"
+    return {k: v for k, v in out.items() if v}
 
 
 def _query_sapstart_banner(host: str, port: int,

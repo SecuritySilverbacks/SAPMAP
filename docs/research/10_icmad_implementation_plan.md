@@ -69,6 +69,15 @@ After re-reading every public PoC and the Onapsis whitepaper:
 internal admin surface as a process running on localhost. No session
 required, no victim traffic required, one-shot deterministic."*
 
+**Important caveat from SAP Note 3123396 (v22, 2022-03-22):** the bug
+only materialises into an exploit *when a gateway sits in front of the
+ICM* (SAP Web Dispatcher, 3rd-party load balancer, reverse proxy).
+"Direct access to SAP application servers is not vulnerable" — though
+detection (the 2-response signature on a keep-alive socket) still
+works against direct ICM because the ICM is both gateway and backend
+in that case. See §C.2 for the topology table that drives the
+severity logic.
+
 ---
 
 ## B. The MPI desync primitive
@@ -163,24 +172,82 @@ Probe 4 is the only one that fires the actual desync. It is:
 
 ### C.1 Kernel patch boundary
 
-Build a single dict, version-pin the source. **The two sources we have
-disagree** — cross-check against SAP Note 3123396 before code is shipped:
+Authoritative numbers from **SAP Note 3123396 v22 (2022-03-22)** —
+"Support Package Patches" table. Fixed at patch level **≥ the number
+below**. Both earlier sources we had (`06_initial_access.md` and the
+research-agent crawl) were wrong — neither matches the actual note.
 
-| Kernel | `06_initial_access.md` says | Research-agent crawl says |
+| Component | Kernel / WD branch | Fixed at PL ≥ |
 |---|---|---|
-| 7.22 EXT | ≥ 1016 | ≥ 1018 |
-| 7.49 | ≥ 1107 | ≥ 1112 |
-| 7.53 | ≥ 819 | ≥ 819 (agree) |
-| 7.77 | ≥ 211 | ≥ 419 |
-| 7.81 | ≥ 78 | ≥ 219 |
-| 7.85 | ≥ 35 | ≥ 119 |
-| 7.86 | ≥ 3 | ≥ 22 |
+| KERNEL | 7.22 (also 7.22 EXT, 7.22 EX2; 64-BIT and UC variants) | **1101** (rolling: 1115) |
+| WEBDISP | 7.22_EXT | **1115** |
+| KERNEL | 7.49 (also KRNL64NUC, KRNL64UC variants) | **1036** |
+| WEBDISP | 7.49 | **1036** |
+| KERNEL | 7.53 (also CONTSERV 7.53) | **915** |
+| WEBDISP | 7.53 | **915** |
+| KERNEL | 7.77 | **429** |
+| WEBDISP | 7.77 | **429** |
+| KERNEL | 7.81 | **227** |
+| WEBDISP | 7.81 | **227** |
+| KERNEL | 7.85 | **69** |
+| WEBDISP | 7.85 | **69** |
+| KERNEL | 7.86 | **15** |
+| KERNEL | 7.87 | **4** |
+| KERNEL | 8.04 64-BIT UNICODE | **207** |
 
-This is an open question (see §I). Until resolved, use the
-`06_initial_access.md` numbers (they were entered by hand from the
-original SAP advisory) and emit `info` severity rather than `high` when
+**Out-of-maintenance:** pre-7.22 kernels are *not* covered by this
+note — assume vulnerable. SAP's wording: *"Versions of SAP Kernel and
+SAP Web Dispatcher that are out of maintenance and therefore not
+covered by this note are affected by the vulnerability."*
+
+Use these numbers in `ICMAD_FIXED_PATCHES`. Emit `info` severity when
 the only evidence is the patch-table lookup. Promote to `high` only
-when probe 4 succeeds.
+when probe 4 succeeds, and to `critical` when probe D.2 confirms ACL
+bypass to a high-value path.
+
+### C.2 Vulnerability scope — gateway-in-front constraint
+
+SAP Note 3123396 is explicit about *when* the bug actually
+materialises into an exploit:
+
+> *"The vulnerability exists when HTTP(S) clients (like browsers or
+> other systems) access the SAP application server or SAP Web
+> Dispatcher* **through** *an HTTP gateway that terminates TLS (in
+> case of HTTPS) and processes the HTTP requests. […] Direct access
+> to SAP application servers is not vulnerable."*
+
+The five scenarios from the note:
+
+| # | Topology | Vulnerable component(s) |
+|---|---|---|
+| 1 | client → app server (direct) | **none** — "not vulnerable" |
+| 2 | client → SAP WebDisp → app server | app server |
+| 3 | client → WebDisp1 → WebDisp2 → app server | WebDisp2 + app server |
+| 4 | client → 3rd-party gateway → SAP WebDisp → app server | WebDisp + app server |
+| 5 | client → 3rd-party gateway → app server | app server |
+
+**This nuances the build plan in two ways:**
+
+1. **Detection (D.1) can still fire on direct ICM** because the
+   ICM itself behaves as both gateway and backend across a single
+   keep-alive socket — the MPI buffer pollution still produces the
+   2-response signature on the wire. The Onapsis scanner relies on
+   exactly this and works against direct ICM in practice. So D.1
+   remains useful as a "is the kernel patched?" oracle even on
+   topology #1.
+2. **Exploitation (D.2 / D.3) needs a gateway in the path.** The
+   `X-Forwarded-For: 127.0.0.1` loopback-trust trick that gets the
+   smuggled inner request promoted to "ICM-local" only works when
+   the backend trusts a *real* upstream gateway — its own ICM
+   parsing-from-its-own-pipe doesn't grant that trust.
+
+Engagement-report wording therefore has to differentiate "kernel
+unpatched (PL behind 3123396)" from "kernel unpatched AND
+reachable-through-gateway". The former is a finding; the latter is
+the actual exploit chain. Default reporting: emit the **higher**
+severity only when SAPMAP can prove a gateway sits in front (e.g.
+the discovered ICM port also responds at a separate WD port, or
+the engagement scope includes a 3rd-party LB).
 
 ---
 
@@ -491,9 +558,12 @@ the heap-dump chain is in scope.
 
 ## I. Verification / open questions
 
-1. **Patch-boundary table.** Two source sets disagree (see §C.1). The
-   implementer should pull SAP Note 3123396 directly (Onapsis advisory
-   ONAPSIS-2022-0001) and replace the dict literal before shipping.
+1. ~~**Patch-boundary table.**~~ **RESOLVED 2026-05-11.** SAP Note
+   3123396 v22 was pulled directly and the authoritative numbers are
+   now in §C.1. Both earlier sources (`06_initial_access.md` hand-entry
+   and the research-agent crawl) were wrong. The numbers in §C.1 are
+   ground truth — also update `06_initial_access.md` §4.3 when shipping
+   the code.
 2. **Standalone Web Dispatcher detection.** SAPMAP's `SAPNode` model
    doesn't currently have a `is_web_dispatcher` flag. The TLS-fingerprint
    pattern from

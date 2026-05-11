@@ -339,17 +339,35 @@ conn.call('RFC_READ_TABLE', QUERY_TABLE='TPFET',
 No stable unauth fingerprint for patch itself. Heuristic:
 
 1. `/sap/public/info` → kernel/patch.
-2. Lookup:
-   - Kernel 7.22 EXT → patch ≥ 1016
-   - Kernel 7.49 → ≥ 1107
-   - Kernel 7.53 → ≥ 819
-   - Kernel 7.77 → ≥ 211
-   - Kernel 7.81 → ≥ 78
-   - Kernel 7.85 → ≥ 35
-   - Kernel 7.86 → ≥ 3
-3. If below → "vulnerable to CVE-2022-22536 — SAP Note 3123427".
+2. Lookup against authoritative table from **SAP Note 3123396 v22
+   (2022-03-22)** — fixed at patch level ≥:
+   - Kernel 7.22 / 7.22 EXT / 7.22 EX2 → **1101** (rolling: 1115)
+   - Kernel 7.49 → **1036**
+   - Kernel 7.53 (incl. Content Server 7.53) → **915**
+   - Kernel 7.77 → **429**
+   - Kernel 7.81 → **227**
+   - Kernel 7.85 → **69**
+   - Kernel 7.86 → **15**
+   - Kernel 7.87 → **4**
+   - Kernel 8.04 64-BIT UNICODE → **207**
+   - Web Dispatcher branches: same per-version number as above
+     (7.22_EXT WD = 1115; 7.49 = 1036; 7.53 = 915; 7.77 = 429;
+     7.81 = 227; 7.85 = 69)
+   - Pre-7.22 kernels: out of maintenance → assume vulnerable
+3. If below → "vulnerable to CVE-2022-22536 — SAP Note 3123396".
 
-Actively probing for the bug (crafted pipelined request) is exploit, not check.
+> **Topology caveat (from SAP Note 3123396 §Reason and
+> Prerequisites):** the bug only exploits when an HTTP gateway
+> (Web Dispatcher or 3rd-party reverse proxy) sits between the
+> client and the ICM. "Direct access to SAP application servers is
+> not vulnerable" — though the kernel still ships the buggy MPI
+> code, so the patch-level finding stands regardless of topology.
+> Severity should escalate when SAPMAP can prove a gateway is in
+> the path.
+
+Actively probing for the bug (crafted pipelined request) is exploit,
+not check. See [10_icmad_implementation_plan.md](10_icmad_implementation_plan.md)
+for the exploitation plan (detection, ACL bypass, heap-dump chain).
 
 ### 4.4 CVE-2020-6287 (RECON) unauth fingerprint
 
@@ -457,14 +475,20 @@ HEAD `/CTCWebService/CTCWebServiceBean?wsdl`:
 
 | Kernel | Last known-bad patch | CVEs |
 |---|---|---|
-| 7.21 / 7.22 | any < 1016 | CVE-2022-22536, 2020-6287 |
-| 7.49 | < 1107 | ICMAD |
-| 7.53 | < 819 | ICMAD |
-| 7.77 | < 211 | ICMAD |
-| 7.81 | < 78 | ICMAD |
-| 7.85 | < 35 | ICMAD |
+| pre-7.22 | out of maintenance — assume any | CVE-2022-22536, 2020-6287 |
+| 7.22 / 7.22 EXT / 7.22 EX2 | < 1101 | CVE-2022-22536, 2020-6287 |
+| 7.49 | < 1036 | ICMAD |
+| 7.53 | < 915 | ICMAD |
+| 7.77 | < 429 | ICMAD |
+| 7.81 | < 227 | ICMAD |
+| 7.85 | < 69 | ICMAD |
+| 7.86 | < 15 | ICMAD |
+| 7.87 | < 4 | ICMAD |
+| 8.04 64-BIT UC | < 207 | ICMAD |
 | 7.89 | < early | recent fixes |
 | 7.94 | < 0 | Visual Composer RCE 2025-31324 at VCFRAMEWORK 7.50 SP27 |
+
+ICMAD patch numbers above: SAP Note 3123396 v22 (authoritative).
 
 ---
 
@@ -570,15 +594,20 @@ If vulnerable AND kernel < patched → finding. SAPMAP already has exploit; add 
 
 ### #3 — Kernel-to-CVE ICMAD check (CVE-2022-22536)
 
-Pure table lookup on #1 output.
+Pure table lookup on #1 output. Numbers from SAP Note 3123396 v22
+(authoritative). Detection (the 2-response signature on a keep-alive
+socket) is shipped as a separate exploit-grade probe — see
+[10_icmad_implementation_plan.md](10_icmad_implementation_plan.md).
 
 ```python
 ICMAD_FIXED = {
-  '7.22':1016,'7.49':1107,'7.53':819,'7.77':211,
-  '7.81':78,'7.85':35,'7.86':3,'7.89':1,
+  '7.22':1101,'7.22EXT':1101,'7.22EX2':1101,
+  '7.49':1036,'7.53':915,'7.77':429,
+  '7.81':227,'7.85':69,'7.86':15,'7.87':4,
+  '8.04':207,
 }
 if kernrel in ICMAD_FIXED and int(patchlvl) < ICMAD_FIXED[kernrel]:
-    yield finding("CVE-2022-22536 ICMAD — SAP Note 3123427 missing")
+    yield finding("CVE-2022-22536 ICMAD — SAP Note 3123396 missing")
 ```
 
 ### #4 — Message Server HTTP monitor leak
