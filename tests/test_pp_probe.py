@@ -332,6 +332,26 @@ def test_verify_pp_returns_tunnel_unreachable_when_connect_fails():
     assert out["verdict"] == "tunnel_unreachable"
 
 
+def _scc_with_mapping(host="10.0.0.99", target_ip="10.0.0.5",
+                       target_port=8080, vhost="acme-s4h.example.com",
+                       vport=8080):
+    """SCC node that has a Cloud-to-On-Premise mapping exposing
+    ``target_ip:target_port`` via ``vhost:vport``.  Needed by every
+    verify_pp test that exercises the temp-destination path."""
+    sn = _scc(host=host)
+    sn.mappings = [{
+        "virtual_host":  vhost,
+        "virtual_port":  vport,
+        "internal_host": target_ip,
+        "internal_port": target_port,
+        "protocol":      "HTTP",
+        "principal_propagation": True,
+        "authentication_mode":   "X509_GENERAL",
+        "sid": "TGT",
+    }]
+    return sn
+
+
 def test_verify_pp_creates_temp_destination_when_none_exists():
     """If the subaccount has no matching PP destination, the probe
     should auto-create a temp one and clean it up afterwards."""
@@ -342,29 +362,86 @@ def test_verify_pp_creates_temp_destination_when_none_exists():
     state.btp_subaccounts[sub_uuid] = BTPSubaccountNode(
         uuid=sub_uuid, region="eu10", destinations=[])
 
-    fake_cfg = {"ok": True, "url": "http://10.0.0.5:8080",
+    fake_cfg = {"ok": True, "url": "http://acme-s4h.example.com:8080",
                 "auth_tokens": [], "destination": {}, "raw": {}, "error": ""}
     fake_primary = {"status": 200, "headers": {"sap-username": "JORIS"},
                     "body_snippet": "", "latency_ms": 30, "error": "",
-                    "connect_status": 200, "connect_error": ""}
+                    "proxy_host": "localhost", "proxy_port": 20003}
     fake_whoami = {"status": 200, "headers": {}, "body_snippet": "",
                     "latency_ms": 28, "error": "",
-                    "connect_status": 200, "connect_error": ""}
+                    "proxy_host": "localhost", "proxy_port": 20003}
 
     with patch("sap_pp_probe.create_temp_pp_destination",
                return_value={"ok": True, "message": "created",
-                              "dest_name": "SAPMAP_PP_PROBE_FAKE_TGT"}) as mk, \
+                              "dest_name": "SAPMAP_PP_PROBE_FAKE_TGT",
+                              "url": "http://acme-s4h.example.com:8080"}) as mk, \
          patch("sap_pp_probe.fetch_destination_config", return_value=fake_cfg), \
          patch("sap_pp_probe.http_probe_via_connectivity_proxy",
                side_effect=[fake_primary, fake_whoami]), \
          patch("sap_pp_probe.delete_destination",
                return_value={"status": 204, "body": ""}) as rm:
-        out = verify_pp(state, _node(), _scc(), sub_uuid,
+        out = verify_pp(state, _node(), _scc_with_mapping(), sub_uuid,
                          token=_fake_jwt("eu10"), cleanup_after=True)
     assert out["ok"] is True
     assert out["destination_was_temp"] is True
     mk.assert_called_once()
+    # The temp destination must have been created with the SCC
+    # mapping context — the connectivity proxy routes by virtualHost.
+    kwargs = mk.call_args.kwargs
+    mapping = kwargs.get("scc_mapping") or {}
+    assert mapping.get("virtual_host") == "acme-s4h.example.com"
+    assert int(mapping.get("virtual_port")) == 8080
     rm.assert_called_once()
+
+
+def test_verify_pp_no_scc_mapping_aborts_before_create():
+    """When the SCC has no mapping exposing this target, creating a
+    temp destination at the on-prem IP would just produce an RST from
+    the connectivity proxy.  Abort with a clear message instead."""
+    from sapmap_models import SAPMAPState, BTPSubaccountNode
+    from sap_pp_probe import verify_pp
+    state = SAPMAPState()
+    sub_uuid = "00000000-0000-0000-0000-000000000001"
+    state.btp_subaccounts[sub_uuid] = BTPSubaccountNode(
+        uuid=sub_uuid, region="eu10", destinations=[])
+    # SCC has NO mappings at all — fixture uses the original _scc()
+    with patch("sap_pp_probe.create_temp_pp_destination") as mk, \
+         patch("sap_pp_probe.fetch_destination_config") as cfg, \
+         patch("sap_pp_probe.http_probe_via_connectivity_proxy") as probe:
+        out = verify_pp(state, _node(), _scc(), sub_uuid,
+                         token=_fake_jwt("eu10"), cleanup_after=False)
+    assert out["verdict"] == "prereq_missing"
+    assert "No SCC mapping" in out["error"]
+    mk.assert_not_called()
+    cfg.assert_not_called()
+    probe.assert_not_called()
+
+
+def test_create_temp_pp_destination_uses_virtual_host():
+    """Unit test for create_temp_pp_destination: when given an SCC
+    mapping, the destination URL must point at the virtualHost,
+    not the target's internal IP."""
+    from sap_pp_probe import create_temp_pp_destination
+    mapping = {
+        "virtual_host":  "acme-s4h.example.com",
+        "virtual_port":  8080,
+        "internal_host": "10.0.0.5",
+        "internal_port": 8080,
+        "protocol":      "HTTP",
+    }
+    with patch("sap_pp_probe._json_post",
+               return_value={"status": 201, "body": "{}"}) as post:
+        out = create_temp_pp_destination(
+            "fake-jwt", "eu10", _node(), "TEMP_NAME",
+            scc_mapping=mapping)
+    assert out["ok"] is True
+    assert out["url"] == "http://acme-s4h.example.com:8080"
+    # The body sent to BTP carries the virtual-host URL, not the
+    # target_node.ip (10.0.0.5).
+    posted_body = post.call_args.args[2]
+    assert posted_body["URL"] == "http://acme-s4h.example.com:8080"
+    assert posted_body["Authentication"] == "PrincipalPropagation"
+    assert posted_body["ProxyType"] == "OnPremise"
 
 
 # ===========================================================================
