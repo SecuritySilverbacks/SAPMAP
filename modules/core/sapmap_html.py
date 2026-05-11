@@ -3982,8 +3982,6 @@ async function ctxAction(action) {
       showToast('USREXTID read started — check findings drawer for PP impersonation surface', 'info');
       break;
     case 'verify_pp_impersonation': {
-      // Build a confirm dialog with the resolved chain so the operator
-      // sees exactly which path is about to be exercised live.
       const n2 = (mapState.nodes || {})[sid];
       const sccHost = (n2.scc_links || []).find(h => (mapState.scc_nodes || {})[h]) || '?';
       const sn2 = (mapState.scc_nodes || {})[sccHost] || {};
@@ -3996,20 +3994,54 @@ async function ctxAction(action) {
         : '(no rule)';
       const internalProxy =
         `connectivityproxy.internal.cf.${region}.hana.ondemand.com:20003`;
-      const overrideActive = (mapState.btp_proxy_override || '').trim();
+      let overrideActive = (mapState.btp_proxy_override || '').trim();
+
+      // Foolproof first step: when no override is set, the probe is
+      // almost certain to time out (the default internal hostname is
+      // CF-internal).  Ask up-front, persist the answer server-side,
+      // and skip the confirm dialog's default-proxy footgun.
+      if (!overrideActive) {
+        const v = prompt(
+          'No BTP connectivity-proxy override is set.\n\n'
+          + 'The PP probe drives an HTTP CONNECT through:\n'
+          + '  ' + internalProxy + '\n'
+          + 'That hostname is CF-internal — from a developer machine\n'
+          + 'you almost always need a cf-ssh tunnel.  See\n'
+          + 'tools/btp_ssh_bridge/README.md for the ready-made bridge\n'
+          + 'app.  Typical local target after the tunnel is up:\n'
+          + '  localhost:20003\n\n'
+          + 'Enter host:port to use for this and every following probe\n'
+          + '(persisted on the server for the session).  Or leave blank\n'
+          + 'to fall back to the internal hostname (only viable when\n'
+          + 'SAPMAP itself runs inside BTP\'s CF runtime).',
+          'localhost:20003');
+        if (v === null) break;
+        const trimmed = (v || '').trim();
+        if (trimmed) {
+          const r = await fetch('/api/btp/proxy_override', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({proxy_host: trimmed}),
+          }).then(r => r.json()).catch(() => null);
+          if (r && r.ok) {
+            overrideActive = trimmed;
+            // Reflect locally so the next render picks it up without
+            // waiting for the polling cycle.
+            mapState.btp_proxy_override = trimmed;
+            showToast('PP-probe proxy → ' + trimmed
+                      + ' (saved for the session)',
+                      {autoCloseMs: 4000});
+          } else {
+            alert('Failed to store override: ' + ((r && r.error) || '?'));
+            break;
+          }
+        }
+        // else: empty input means "use default anyway" — fall through
+      }
+
       const proxyLine = overrideActive
         ? overrideActive + '  (override active — Settings → BTP Connectivity Proxy Override to change)'
-        : internalProxy + '  (default; not reachable from outside BTP)';
-      const tunnelHint = overrideActive
-        ? ''
-        : ('\nNOTE: BTP\'s connectivity proxy is NOT publicly reachable —\n'
-            + 'it only accepts traffic from within BTP\'s CF runtime.\n'
-            + 'Set up a tunnel and an override:\n'
-            + '  1. cf ssh -L 20003:' + internalProxy + ' <your-app>\n'
-            + '     (See tools/btp_ssh_bridge/README.md for a ready-made app.)\n'
-            + '  2. Set the override in Settings → BTP Connectivity\n'
-            + '     Proxy Override (persists for the session).\n'
-            + 'Or click Cancel here for a one-shot prompt.\n');
+        : internalProxy + '  (default; reachable only from inside BTP)';
       const msg = (
         'Send a LIVE principal-propagation impersonation probe?\n\n'
         + 'Source : cloud token for region ' + (regions.join(', ') || '(none)') + '\n'
@@ -4017,24 +4049,10 @@ async function ctxAction(action) {
         + 'Via SCC: ' + sccHost + '\n'
         + 'Target : ' + sid + '\n'
         + 'PP rule: ' + ruleStr + '\n'
-        + 'Proxy  : ' + proxyLine + '\n'
-        + tunnelHint
-        + '\nThe probe is READ-ONLY (GET /sap/bc/ping + whoami).\n'
+        + 'Proxy  : ' + proxyLine + '\n\n'
+        + 'The probe is READ-ONLY (GET /sap/bc/ping + whoami).\n'
         + 'Continue?');
-      if (!confirm(msg)) {
-        // One-shot override prompt — useful when the operator hasn't
-        // set the session-wide override yet but has a tunnel running.
-        const oneshot = prompt(
-          'One-shot proxy override (host:port).  Leave blank to abort.\n'
-          + 'For a persistent setting use Settings → BTP Connectivity\n'
-          + 'Proxy Override instead.',
-          overrideActive || 'localhost:20003');
-        if (!oneshot) break;
-        await api('POST', `node/${sid}/verify_pp_impersonation`,
-                   {proxy_host: oneshot});
-        showToast('PP probe started (via ' + oneshot + ')', 'info');
-        break;
-      }
+      if (!confirm(msg)) break;
       await api('POST', `node/${sid}/verify_pp_impersonation`, {});
       const usingProxy = overrideActive || internalProxy;
       showToast('PP probe started via ' + usingProxy, 'info');
