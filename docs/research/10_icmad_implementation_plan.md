@@ -14,8 +14,20 @@ The roadmap pointer in [`00_priority_summary.md`](00_priority_summary.md)
 Target output: **~350 LOC of new Python** in one new module
 `sap_cve_2022_22536.py`, plus ~80 LOC of glue in `sapmap_scanner.py` /
 `sapmap_gui.py` / context-menu wiring, one new finding category, one new
-node-attribute flag, no new model classes. Build window: **3–4 days**,
-not 1 week.
+node-attribute flag, **one new `SAPNode.is_web_dispatcher` bool**
+(decision 3 below). Build window: **3–4 days**, not 1 week.
+
+## Locked design decisions (2026-05-11, user-confirmed)
+
+These were open in v1 of the plan; settled now so the implementer
+doesn't have to re-ask.
+
+| # | Decision | Settled |
+|---|---|---|
+| 1 | **Discovery trigger** — does D.1 detect run automatically inside `enrich_system_info()`, or strictly opt-in via context menu? | **Strictly opt-in.** ICMAD probes only fire from the right-click "⚡ Check ICMAD" action. No auto-fire during scanning, no opportunistic probe during RFC_SYSTEM_INFO. |
+| 2 | **Heap-dump pull (D.3) in v1?** | **Yes, v1.** The `/heapdump/` → SecStore-key chain is the impact story; without it ICMAD is a tick-box. Gated behind explicit confirm dialog. |
+| 3 | **Add `SAPNode.is_web_dispatcher` flag in v1?** | **Yes, v1.** The bug only exploits *through a gateway* (§C.2), so severity logic needs to know whether a WD sits in front. Includes a small TLS/HTTP fingerprint helper. |
+| 4 | **Severity for the patch-table-only finding** (kernel PL behind 3123396, but no smuggle probe has fired yet) | **`info`.** Promote to **`high`** only when D.1 smuggle probe succeeds. Promote to **`critical`** when D.2 confirms ACL bypass to a high-value path, or when D.3 captures a heap dump. |
 
 ---
 
@@ -379,28 +391,36 @@ re-implement everything.
 
 `icmad.desync.confirmed`
 
-- Severity: **HIGH** when probe 4 confirms; **MEDIUM** when only the
-  kernel patch table flags it.
+- Severity (per locked decision 4):
+  - **`info`** when only the kernel patch table flags it (patch level
+    behind 3123396, no smuggle probe fired yet).
+  - **`high`** when D.1 smuggle probe (probe 4 in §C) confirms a
+    2-response signature.
 - Title: *"ICM HTTP request smuggling (CVE-2022-22536)"*
 - Detail: kernel + patch level + probe response.
-- Remediation: SAP Note 3123427 (kernel) + 3123396 (Web Dispatcher) +
-  workaround `wdisp/additional_conn_close=1` if patch can't ship
-  immediately.
+- Remediation: SAP Note 3123396 — patch the SAP Kernel and SAP Web
+  Dispatcher to the version-specific PL listed in §C.1. If patch
+  can't ship immediately, the SAP-documented workarounds are
+  3137885 (ICM) and 3138881 (WebDisp's
+  `wdisp/additional_conn_close=1`). Note that 3138881's parameter is
+  being deprecated per SAP Note 3200257 and is known to break AS
+  Java per SAP Note 3147927 — patching is the only long-term fix.
 
 `icmad.acl.bypass.confirmed`
 
-- Severity: **CRITICAL** when smuggled path returns 200 for an
-  authenticated admin endpoint; **HIGH** for sensitive-but-non-admin
+- Severity (per locked decision 4): **`critical`** when smuggled path
+  returns 200 for an authenticated admin endpoint or
+  `/heapdump/`-class endpoint; **`high`** for sensitive-but-non-admin
   paths.
 - Per-path detail. Promotes the node's `has_critical_finding` flag.
 
 `icmad.heapdump.captured`
 
-- Severity: **CRITICAL**. Pwned-state.
+- Severity: **`critical`**. Pwned-state.
 - Detail: file path of saved heap dump + size + whether SecStore key
-  recovery succeeded.
+  recovery succeeded + how many JCo passwords were decrypted.
 
-### F.2 SAPNode attributes (no new model fields needed)
+### F.2 SAPNode attributes
 
 Reuse existing pattern from `cve_2020_6287_port` / `cve_2020_6287_evidence`:
 
@@ -411,23 +431,37 @@ Reuse existing pattern from `cve_2020_6287_port` / `cve_2020_6287_evidence`:
 - `cve_2022_22536_acl_bypass: dict` — `{path: status_code}` for the
   curated catalogue, populated only when D.2 runs
 
+Per locked decision 3, one new model field:
+
+- `is_web_dispatcher: bool` (defaults False) on `SAPNode`. Set by a
+  new tiny fingerprint helper (`Server: SAP Web Dispatcher <ver>`
+  HTTP response header, or TLS-ServerHello-based hint as a fallback).
+  Drives the severity-escalation logic for ICMAD (§C.2): a
+  WD-fronted system is in scenarios 2/3/4 of SAP Note 3123396 → real
+  exploit chain; a direct-ICM system is in scenario 1 → finding
+  only.
+
 ### F.3 Context-menu wiring
 
-Add to the ABAP-node right-click menu (gated on `system_type in
-{"ABAP", "ABAP+JAVA", "JAVA"}` — pure-ABAP is in scope because the ICM
-runs there too, and pure-Java is in scope for the heap-dump chain):
+Per locked decision 1: **strictly opt-in.** No code path in
+`enrich_system_info()` or any scanner pass invokes ICMAD probes
+automatically. Every probe fires only from a deliberate right-click
+action by the operator.
 
-- **Exploitation → ⚡ Check ICMAD (CVE-2022-22536)** — runs detect mode
-  (always safe-ish, opt-in only because of the wire-noise)
-- **Exploitation → ⚡ ICMAD → ACL-bypass sweep** — runs D.2, gated on
-  prior detect success
-- **Exploitation → ⚡ ICMAD → Pull heap dump** — runs D.3, gated on D.2
-  showing `/heapdump/` reachable, gated on explicit confirm prompt
+Add to the right-click menu (gated on `system_type in {"ABAP",
+"ABAP+JAVA", "JAVA"}` OR `is_web_dispatcher == True` — pure-ABAP is in
+scope because the ICM runs there too, pure-Java is in scope for the
+heap-dump chain, and standalone WDs are in scope because they ARE the
+gateway that makes the bug exploitable):
 
-Edge case for **standalone Web Dispatcher** nodes (which `SAPNode` doesn't
-currently distinguish from app-server nodes — see §I): same menu items.
-The desync works against a Web Dispatcher in front of the actual ICM
-just as well.
+- **Exploitation → ⚡ Check ICMAD (CVE-2022-22536)** — runs D.1
+  (kernel-patch lookup + smuggle probe). Always opt-in. Throttled to
+  one probe per ICM per 30 s (§G).
+- **Exploitation → ⚡ ICMAD → ACL-bypass sweep** — runs D.2, enabled
+  only after D.1 confirms vulnerability (`cve_2022_22536_port` set).
+- **Exploitation → ⚡ ICMAD → Pull heap dump** — runs D.3, enabled
+  only after D.2 confirms `/heapdump/` is reachable, gated behind an
+  explicit confirm dialog showing expected download size + duration.
 
 ### F.4 GUI — visual indicator
 
@@ -493,32 +527,41 @@ Rules baked into the module:
 
 ## H. Day-by-day implementation plan
 
-Build window: **3 working days for D.1 + D.2**, **+1 day for D.3** if
-the heap-dump chain is in scope.
+Build window: **4 working days** for D.1 + D.2 + D.3 (v1 per locked
+decision 2 includes heap-dump pull).
 
-### Day 1 — Detection (D.1)
+### Day 1 — Detection (D.1) + WD fingerprint
 
 - New module `sap_cve_2022_22536.py` (~150 LOC):
   - `_build_detect_payload(host, port)` — returns the canonical
-    Onapsis-style request bytes.
+    Onapsis-style request bytes (Content-Length: 82646, 82642 bytes of
+    `A` padding, smuggled `GET / HTTP/1.1`).
   - `_count_responses(buf)` — regex on `HTTP/\S+ (\d{3})`, returns
     list of statuses.
   - `probe_icmad(host, port, https=False, saprouter="", timeout=10)`
     → returns dict `{vulnerable: bool, responses: list[int],
     evidence: bytes, error: str}`.
-  - Patch-table dict `ICMAD_FIXED_PATCHES` (use the
-    `06_initial_access.md` numbers, with `# TODO §I` comment).
-- Hook into `enrich_system_info()` in `sapmap_scanner.py`: after the
-  `/sap/public/info` block, if `info["http_ports"]` non-empty and not a
-  Java-only stack, call `probe_icmad()` on the first available HTTP
-  port. Populate `info["cve_2022_22536_port"]` / `_https` / `_evidence`.
-- Wire emission of `icmad.desync.confirmed` finding via
-  `sapmap_findings.emit_finding()`.
+  - `ICMAD_FIXED_PATCHES` patch-table dict — use the authoritative
+    numbers from §C.1 (already pulled from SAP Note 3123396 v22).
+- WD fingerprint helper (~30 LOC) — new function in
+  `sapmap_scanner.py`, sets `node.is_web_dispatcher` from a baseline
+  `HEAD /` Server-header probe + TLS-handshake fallback. Per locked
+  decision 3.
+- **No hook into `enrich_system_info()`** — per locked decision 1,
+  ICMAD is strictly opt-in. The WD fingerprint runs only during the
+  standard fast-scan port-fingerprint pass; the ICMAD probes themselves
+  fire only from the context-menu action wired in Day 2.
 - Tests: parser unit tests (single response vs ≥2 responses vs
-  malformed), patch-boundary tests for every kernel in the table.
+  malformed), patch-boundary tests for every kernel in §C.1's table,
+  WD-vs-ABAP-vs-Java header-fingerprint discrimination.
 
-### Day 2 — ACL bypass (D.2)
+### Day 2 — D.1 GUI wiring + ACL bypass (D.2)
 
+- GUI handler `/api/node/<sid>/icmad_check` — wraps `probe_icmad()`;
+  matches the existing `node_check_gw` shape in `sapmap_gui.py:3933`.
+  Populates `node.cve_2022_22536_port` / `_https` / `_evidence` on
+  success. Per locked decision 4: emits the finding at `info` on
+  patch-only and `high` on smuggle-probe success.
 - Extend `sap_cve_2022_22536.py` (~120 LOC additional):
   - `_build_acl_bypass_payload(target_path, host, port)` — the
     chunked-trailer variant with `X-Forwarded-For: 127.0.0.1`.
@@ -527,32 +570,38 @@ the heap-dump chain is in scope.
   - `_baseline_request(host, port, path, …)` — same path without
     smuggle, for status comparison.
 - Curated path catalogue (§E) as a module constant.
-- GUI handler `/api/node/<sid>/icmad_acl_bypass` — pattern matches the
-  existing `node_check_gw` shape in `sapmap_gui.py:3933`.
-- Context-menu entries in `sapmap_html.py` — gate on
+- GUI handler `/api/node/<sid>/icmad_acl_bypass`.
+- Context-menu entries in `sapmap_html.py` — gate on `system_type` or
+  `is_web_dispatcher`; sub-items gate progressively on
   `cve_2022_22536_port`.
 - Tests: synthetic fixture responses, path-status mapping, refusal to
   run when desync not yet confirmed.
 
-### Day 3 — Reporting, GUI badges, throttling, engagement-report section
+### Day 3 — Heap-dump chain (D.3, in v1 per locked decision 2)
 
-- Visual indicator on the node SVG (matches CVE-2020-6287 badge
-  pattern).
-- Engagement-report markdown section.
-- Throttle wrapper (one ICMAD probe per ICM per 30 s; reuse the
-  existing `sapmap_pacer` if it has the API, else build a tiny
-  per-host lock).
-- Integration test: full flow on a recorded fixture.
-
-### Day 4 (optional) — Heap-dump chain (D.3)
-
-- `node_icmad_heapdump_pull` GUI handler.
+- `node_icmad_heapdump_pull` GUI handler with explicit confirm dialog
+  (size + estimated duration).
 - Streaming download with progress; gates on size; ABORT after 2 GB
   unless operator overrides.
 - Pipe into `sap_java_secstore_offline.recover_master_key_from_heap()`
   (already exists per `07_java_secstore_recovery.md`).
 - If key recovers, feed into the existing JCo decrypt → ABAP pivot
-  flow; new finding `icmad.heapdump.captured` with chain details.
+  flow; new finding `icmad.heapdump.captured` (`critical`) with chain
+  details.
+
+### Day 4 — Reporting, GUI badges, throttling, engagement-report section
+
+- Visual indicator on the node SVG (matches CVE-2020-6287 badge
+  pattern).
+- Engagement-report markdown section per §F.5.
+- Throttle wrapper (one ICMAD probe per ICM per 30 s; reuse the
+  existing `sapmap_pacer` if it has the API, else build a tiny
+  per-host lock).
+- Severity escalation logic in `sapmap_findings`: read
+  `node.is_web_dispatcher` to decide whether the patch-table finding
+  text emphasises "exploit chain reachable" or "patch hygiene only".
+- Integration test: full flow on a recorded fixture (Day 1 + 2 + 3
+  end-to-end against captured bytes).
 
 ---
 
@@ -564,15 +613,14 @@ the heap-dump chain is in scope.
    and the research-agent crawl) were wrong. The numbers in §C.1 are
    ground truth — also update `06_initial_access.md` §4.3 when shipping
    the code.
-2. **Standalone Web Dispatcher detection.** SAPMAP's `SAPNode` model
-   doesn't currently have a `is_web_dispatcher` flag. The TLS-fingerprint
-   pattern from
-   [`08_cloud_connector_implementation_plan.md`](08_cloud_connector_implementation_plan.md)
-   §A.1 may be adaptable — Web Dispatcher ships with the same
-   sapwebdisp + ICM stack. Recommend adding `node.is_web_dispatcher`
-   bool to `SAPNode` and a fingerprint that compares
+2. ~~**Standalone Web Dispatcher detection.**~~ **RESOLVED 2026-05-11
+   (locked decision 3).** Adding `node.is_web_dispatcher` bool to
+   `SAPNode` is in v1 scope. Fingerprint plan: compare
    `Server: SAP NetWeaver Application Server <ver> / ICM <ver>` vs.
-   `Server: SAP Web Dispatcher <ver>`.
+   `Server: SAP Web Dispatcher <ver>` from a baseline `HEAD /` probe;
+   fall back to the TLS-handshake hints described in
+   [`08_cloud_connector_implementation_plan.md`](08_cloud_connector_implementation_plan.md)
+   §A.1 when the header is suppressed by `icm/HTTP/server_header_suppression`.
 3. **Content Server.** Same vulnerable ICM, separate patch cycle,
    typically firewalled but reachable from app servers. Should the
    ICMAD module also fingerprint a Content Server signature? Out of
@@ -615,8 +663,23 @@ matter.
 - **NVD.** [nvd.nist.gov/vuln/detail/CVE-2022-22536](https://nvd.nist.gov/vuln/detail/cve-2022-22536)
   → CVSS 10.0, vendor advisory link.
 - **SAP Notes (launchpad-gated, customer login required):**
-  3123396 (patch), 3138881 (Web Dispatcher-only mitigation), 3137885
-  (kernel fix boundary).
+  - **3123396** — the actual patch + Support Package Patches table.
+    Numbers pulled into §C.1 of this plan, version-pinned at v22
+    (2022-03-22).
+  - **3137885** — ICM-side workaround for 3123396.
+  - **3138881** — `wdisp/additional_conn_close=1` Web Dispatcher
+    workaround.
+  - **3147927** — `wdisp/additional_conn_close` causes errors for AS
+    Java backends. Cite in remediation copy.
+  - **3148968** — FAQ for 3123396 (customer-facing context).
+  - **3200257** — Deprecation of `wdisp/additional_conn_close`. Means
+    the workaround is being phased out; patching is the only
+    durable fix.
+  - **2083594** — SAP Kernel Versions and Patch Levels reference,
+    needed when cross-checking customer kernels.
+  - **3127829** — Rewriting rules in SAP Web Dispatcher and ICM —
+    useful background for understanding what gets stripped/added
+    in the gateway hop.
 
 Skip:
 
