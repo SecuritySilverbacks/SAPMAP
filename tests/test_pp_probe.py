@@ -1,0 +1,273 @@
+#!/usr/bin/env python3
+"""Tests for sap_pp_probe — the live PP-impersonation verifier.
+
+All network traffic is mocked.  The two interesting paths are:
+
+  * HTTP CONNECT handshake parsing + tunnelled GET response parsing
+    (verified via low-level byte buffers fed into the parser helpers).
+  * Whoami detection — header sniffing across the documented variants.
+"""
+from __future__ import annotations
+
+from unittest.mock import patch
+
+
+# ===========================================================================
+# Helpers
+# ===========================================================================
+
+def _node(sid="TGT", ip="10.0.0.5", hostname="tgt.example.com"):
+    from sapmap_models import SAPNode, InstanceInfo
+    n = SAPNode(sid=sid, ip=ip, hostname=hostname, system_type="ABAP")
+    n.instances.append(InstanceInfo(instance_nr="00", ip=ip,
+                                     ports={8080: "http"}))
+    return n
+
+
+def _scc(host="10.0.0.99"):
+    from sapmap_models import SCCNode
+    return SCCNode(host=host, ip=host,
+                   subaccount_uuids=["00000000-0000-0000-0000-000000000001"])
+
+
+# ===========================================================================
+# Parser primitives — header / status / body splitting
+# ===========================================================================
+
+def test_parse_status_line_basic():
+    from sap_pp_probe import _parse_status_line
+    assert _parse_status_line(b"HTTP/1.1 200 OK\r\nfoo: bar") == 200
+    assert _parse_status_line(b"HTTP/1.1 401 Unauthorized\r\n") == 401
+    assert _parse_status_line(b"HTTP/1.1 502 Bad Gateway\r\n") == 502
+    assert _parse_status_line(b"") == 0
+    assert _parse_status_line(b"garbage") == 0
+
+
+def test_parse_headers_lowercases_and_strips():
+    from sap_pp_probe import _parse_headers
+    head = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Type:  text/plain  \r\n"
+        b"SAP-Username: JORIS\r\n"
+        b"Set-Cookie: foo=bar; Path=/\r\n")
+    out = _parse_headers(head)
+    assert out["content-type"] == "text/plain"
+    assert out["sap-username"] == "JORIS"
+    assert "set-cookie" in out
+
+
+# ===========================================================================
+# Whoami detection
+# ===========================================================================
+
+def test_detect_user_sap_username_header_high_confidence():
+    from sap_pp_probe import detect_user_in_response
+    probe = {"headers": {"sap-username": "JORIS"}, "body_snippet": ""}
+    user, conf = detect_user_in_response(probe)
+    assert user == "JORIS"
+    assert conf == "HIGH"
+
+
+def test_detect_user_x_sap_user_name_header():
+    from sap_pp_probe import detect_user_in_response
+    probe = {"headers": {"x-sap-user-name": "DDIC"}, "body_snippet": ""}
+    user, conf = detect_user_in_response(probe)
+    assert user == "DDIC"
+    assert conf == "HIGH"
+
+
+def test_detect_user_falls_back_to_body_match():
+    from sap_pp_probe import detect_user_in_response
+    body = '{"data":{"sap-username":"BATCH1","client":"100"}}'
+    probe = {"headers": {}, "body_snippet": body}
+    user, conf = detect_user_in_response(probe)
+    assert user == "BATCH1"
+    assert conf == "HIGH"
+
+
+def test_detect_user_no_signal_returns_blank():
+    from sap_pp_probe import detect_user_in_response
+    probe = {"headers": {"content-type": "text/plain"}, "body_snippet": "ok"}
+    user, conf = detect_user_in_response(probe)
+    assert user == ""
+    assert conf == ""
+
+
+# ===========================================================================
+# find_pp_destination — picks the right destination shape
+# ===========================================================================
+
+def test_find_pp_destination_matches_principal_propagation_onprem():
+    from sapmap_models import SAPMAPState, BTPSubaccountNode
+    from sap_pp_probe import find_pp_destination
+    state = SAPMAPState()
+    sub_uuid = "00000000-0000-0000-0000-000000000001"
+    state.btp_subaccounts[sub_uuid] = BTPSubaccountNode(
+        uuid=sub_uuid, region="eu10",
+        destinations=[
+            {"name": "WRONG_AUTH", "authentication": "BasicAuthentication",
+             "proxy_type": "OnPremise", "url": "http://10.0.0.5:8080"},
+            {"name": "WRONG_PROXY", "authentication": "PrincipalPropagation",
+             "proxy_type": "Internet", "url": "http://10.0.0.5:8080"},
+            {"name": "RIGHT", "authentication": "PrincipalPropagation",
+             "proxy_type": "OnPremise", "url": "http://10.0.0.5:8080"},
+            {"name": "WRONG_HOST", "authentication": "PrincipalPropagation",
+             "proxy_type": "OnPremise", "url": "http://10.0.0.99:8080"},
+        ],
+    )
+    target = _node()
+    d = find_pp_destination(state, sub_uuid, target)
+    assert d is not None
+    assert d["name"] == "RIGHT"
+
+
+def test_find_pp_destination_returns_none_when_no_match():
+    from sapmap_models import SAPMAPState, BTPSubaccountNode
+    from sap_pp_probe import find_pp_destination
+    state = SAPMAPState()
+    sub_uuid = "00000000-0000-0000-0000-000000000001"
+    state.btp_subaccounts[sub_uuid] = BTPSubaccountNode(
+        uuid=sub_uuid, region="eu10",
+        destinations=[
+            {"name": "OTHER", "authentication": "PrincipalPropagation",
+             "proxy_type": "OnPremise", "url": "http://other.example.com:8080"},
+        ],
+    )
+    assert find_pp_destination(state, sub_uuid, _node()) is None
+
+
+# ===========================================================================
+# End-to-end orchestration — mock the network helpers
+# ===========================================================================
+
+def _mock_state_with_pp_dest(scc_host="10.0.0.99"):
+    """Build SAPMAPState with one SCC, one bound BTP subaccount, and a
+    PP-typed destination pointing at the target."""
+    from sapmap_models import SAPMAPState, BTPSubaccountNode
+    state = SAPMAPState()
+    sub_uuid = "00000000-0000-0000-0000-000000000001"
+    state.btp_subaccounts[sub_uuid] = BTPSubaccountNode(
+        uuid=sub_uuid, region="eu10",
+        destinations=[{
+            "name": "S4H_PP", "authentication": "PrincipalPropagation",
+            "proxy_type": "OnPremise", "url": "http://10.0.0.5:8080",
+        }],
+    )
+    return state, sub_uuid
+
+
+def test_verify_pp_confirmed_with_header_whoami():
+    from sap_pp_probe import verify_pp
+    state, sub_uuid = _mock_state_with_pp_dest()
+    target, scc = _node(), _scc()
+
+    fake_cfg = {"ok": True, "status": 200, "url": "http://10.0.0.5:8080",
+                "auth_tokens": [], "destination": {}, "raw": {}, "error": ""}
+    fake_primary = {"status": 200, "headers": {"sap-username": "DDIC"},
+                    "body_snippet": "", "latency_ms": 42, "error": "",
+                    "connect_status": 200, "connect_error": ""}
+    fake_whoami = {"status": 200, "headers": {}, "body_snippet": "",
+                    "latency_ms": 38, "error": "",
+                    "connect_status": 200, "connect_error": ""}
+
+    with patch("sap_pp_probe.fetch_destination_config", return_value=fake_cfg), \
+         patch("sap_pp_probe.http_probe_via_connectivity_proxy",
+               side_effect=[fake_primary, fake_whoami]):
+        # Token doesn't matter for the mocks but must parse for region.
+        out = verify_pp(state, target, scc, sub_uuid,
+                         token=_fake_jwt("eu10"), cleanup_after=False)
+    assert out["ok"] is True
+    assert out["verdict"] == "confirmed"
+    assert out["user"] == "DDIC"
+    assert out["confidence"] == "HIGH"
+    assert out["http_status"] == 200
+    assert out["destination_used"] == "S4H_PP"
+    assert out["destination_was_temp"] is False
+    assert "verified_at" in out and out["verified_at"]
+
+
+def test_verify_pp_returns_auth_rejected_on_401():
+    from sap_pp_probe import verify_pp
+    state, sub_uuid = _mock_state_with_pp_dest()
+    fake_cfg = {"ok": True, "url": "http://10.0.0.5:8080",
+                "auth_tokens": [], "destination": {}, "raw": {}, "error": ""}
+    fake_primary = {"status": 401, "headers": {},
+                    "body_snippet": "", "latency_ms": 22, "error": "",
+                    "connect_status": 200, "connect_error": ""}
+
+    with patch("sap_pp_probe.fetch_destination_config", return_value=fake_cfg), \
+         patch("sap_pp_probe.http_probe_via_connectivity_proxy",
+               return_value=fake_primary):
+        out = verify_pp(state, _node(), _scc(), sub_uuid,
+                         token=_fake_jwt("eu10"), cleanup_after=False)
+    assert out["ok"] is False
+    assert out["verdict"] == "auth_rejected"
+    assert "401" in (out.get("error") or "")
+
+
+def test_verify_pp_returns_tunnel_unreachable_when_connect_fails():
+    from sap_pp_probe import verify_pp
+    state, sub_uuid = _mock_state_with_pp_dest()
+    fake_cfg = {"ok": True, "url": "http://10.0.0.5:8080",
+                "auth_tokens": [], "destination": {}, "raw": {}, "error": ""}
+    fake_primary = {"status": 0, "headers": {}, "body_snippet": "",
+                    "latency_ms": 0, "error": "CONNECT returned HTTP 407",
+                    "connect_status": 407,
+                    "connect_error": "CONNECT returned HTTP 407"}
+
+    with patch("sap_pp_probe.fetch_destination_config", return_value=fake_cfg), \
+         patch("sap_pp_probe.http_probe_via_connectivity_proxy",
+               return_value=fake_primary):
+        out = verify_pp(state, _node(), _scc(), sub_uuid,
+                         token=_fake_jwt("eu10"), cleanup_after=False)
+    assert out["ok"] is False
+    assert out["verdict"] == "tunnel_unreachable"
+
+
+def test_verify_pp_creates_temp_destination_when_none_exists():
+    """If the subaccount has no matching PP destination, the probe
+    should auto-create a temp one and clean it up afterwards."""
+    from sapmap_models import SAPMAPState, BTPSubaccountNode
+    from sap_pp_probe import verify_pp
+    state = SAPMAPState()
+    sub_uuid = "00000000-0000-0000-0000-000000000001"
+    state.btp_subaccounts[sub_uuid] = BTPSubaccountNode(
+        uuid=sub_uuid, region="eu10", destinations=[])
+
+    fake_cfg = {"ok": True, "url": "http://10.0.0.5:8080",
+                "auth_tokens": [], "destination": {}, "raw": {}, "error": ""}
+    fake_primary = {"status": 200, "headers": {"sap-username": "JORIS"},
+                    "body_snippet": "", "latency_ms": 30, "error": "",
+                    "connect_status": 200, "connect_error": ""}
+    fake_whoami = {"status": 200, "headers": {}, "body_snippet": "",
+                    "latency_ms": 28, "error": "",
+                    "connect_status": 200, "connect_error": ""}
+
+    with patch("sap_pp_probe.create_temp_pp_destination",
+               return_value={"ok": True, "message": "created",
+                              "dest_name": "SAPMAP_PP_PROBE_FAKE_TGT"}) as mk, \
+         patch("sap_pp_probe.fetch_destination_config", return_value=fake_cfg), \
+         patch("sap_pp_probe.http_probe_via_connectivity_proxy",
+               side_effect=[fake_primary, fake_whoami]), \
+         patch("sap_pp_probe.delete_destination",
+               return_value={"status": 204, "body": ""}) as rm:
+        out = verify_pp(state, _node(), _scc(), sub_uuid,
+                         token=_fake_jwt("eu10"), cleanup_after=True)
+    assert out["ok"] is True
+    assert out["destination_was_temp"] is True
+    mk.assert_called_once()
+    rm.assert_called_once()
+
+
+# ===========================================================================
+# Test helpers
+# ===========================================================================
+
+def _fake_jwt(region: str) -> str:
+    """Build a JWT-shaped string whose payload has the iss field that
+    extract_region_from_token recognises.  Signature is a dummy."""
+    import base64, json
+    payload = {"iss": f"https://example.authentication.{region}.hana.ondemand.com/oauth/token"}
+    h = base64.urlsafe_b64encode(b'{"alg":"none"}').rstrip(b"=").decode()
+    p = base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=").decode()
+    return f"{h}.{p}.sig"

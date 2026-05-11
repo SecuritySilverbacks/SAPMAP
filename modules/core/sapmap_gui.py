@@ -969,6 +969,10 @@ class SAPMAPApi:
         d["scan_error"] = self.scan_error
         d["stats"] = self.state.stats()
         d["active_tasks"] = _get_active_tasks()
+        # Tokens themselves NEVER cross to the frontend, only the
+        # list of regions for which a token is in memory — used to
+        # gate the PP-impersonation-verify menu item.
+        d["btp_token_regions"] = list((self.btp_tokens or {}).keys())
         return d
 
 
@@ -3070,6 +3074,129 @@ def create_app(api: SAPMAPApi) -> Bottle:
         if not _kick_standard_scan(sid):
             return json.dumps({"error":
                 f"Could not schedule scan for {sid}"})
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/verify_pp_impersonation", method="POST")
+    def node_verify_pp(sid):
+        """Live verification of cloud→on-prem PP impersonation.
+
+        Picks a PP destination on the bound BTP subaccount (or
+        creates a temporary one), opens an HTTP CONNECT tunnel
+        through the BTP connectivity proxy, sends a single
+        /sap/bc/ping + a whoami probe, and reports whether the
+        request landed on this on-prem ABAP system as an
+        impersonated user.  Cleans up temp destinations afterwards.
+
+        Body params (all optional — auto-detected from node + state):
+          scc_host: SCC host to route through.  Defaults to the
+                    first scc_links entry on the node.
+          subaccount_uuid: BTP subaccount to source the call from.
+                    Defaults to the first subaccount_uuids on the SCC.
+          keep_destination: when truthy, don't delete the temp
+                    destination after the probe so the operator can
+                    re-use it manually (default False).
+        """
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        data = request.json or {}
+
+        # ---- Resolve which SCC + subaccount + token to use ----
+        scc_host = (data.get("scc_host") or "").strip()
+        if not scc_host:
+            for sh in (node.scc_links or []):
+                if sh in api.state.scc_nodes:
+                    scc_host = sh
+                    break
+        scc_node = api.state.scc_nodes.get(scc_host) if scc_host else None
+        if not scc_node:
+            return json.dumps({"error":
+                "No SCC linked to this node — run Standard Scan + "
+                "Pull Mappings on the SCC first"})
+
+        subaccount_uuid = (data.get("subaccount_uuid") or "").strip()
+        if not subaccount_uuid:
+            for u in (scc_node.subaccount_uuids or []):
+                if u in (api.state.btp_subaccounts or {}):
+                    subaccount_uuid = u
+                    break
+            if not subaccount_uuid and scc_node.subaccount_uuids:
+                subaccount_uuid = scc_node.subaccount_uuids[0]
+        if not subaccount_uuid:
+            return json.dumps({"error":
+                "No BTP subaccount bound to this SCC — run BTP "
+                "enumerate with a cf token first"})
+
+        # Pick the token: prefer the region attached to the
+        # subaccount we just resolved, fall back to any single
+        # token in the store.
+        from sap_btp import decode_token_claims, extract_region_from_token
+        region = ""
+        sub = (api.state.btp_subaccounts or {}).get(subaccount_uuid)
+        if sub and getattr(sub, "region", ""):
+            region = sub.region
+        token = ""
+        if region:
+            token = api.btp_tokens.get(region, "")
+        if not token:
+            # Fall back to any token whose region matches the
+            # subaccount, then to any token at all if only one.
+            for r, t in (api.btp_tokens or {}).items():
+                if not region or r == region:
+                    token = t
+                    region = r
+                    break
+        if not token:
+            return json.dumps({"error":
+                "No BTP token in memory — Mint BTP Token or paste a "
+                "cf oauth-token first"})
+
+        keep = bool(data.get("keep_destination", False))
+
+        def _run():
+            _task_start(f"{sid}:verify_pp",
+                        f"{sid}: live PP impersonation probe")
+            try:
+                from sap_pp_probe import verify_pp
+                bundle = verify_pp(
+                    api.state, node, scc_node, subaccount_uuid,
+                    token, cleanup_after=(not keep))
+                node.pp_verification = bundle
+                node.pp_verification_confirmed = bool(bundle.get("ok"))
+                if bundle.get("ok"):
+                    user = bundle.get("user") or "<unknown user>"
+                    conf = bundle.get("confidence") or "MEDIUM"
+                    sapmap_findings.emit_finding(
+                        "CRITICAL", sid,
+                        f"PP impersonation CONFIRMED on {sid} via SCC "
+                        f"{scc_node.host} (live probe).  Landed as "
+                        f"ABAP user {user!r} "
+                        f"(confidence {conf}, "
+                        f"HTTP {bundle.get('http_status','?')}, "
+                        f"{bundle.get('latency_ms','?')} ms).",
+                        ref="scc.pp.impersonation.confirmed",
+                        meta={"scc_host": scc_node.host,
+                              "user": user,
+                              "confidence": conf,
+                              "destination": bundle.get("destination_used", ""),
+                              "verified_at": bundle.get("verified_at", "")})
+                else:
+                    verdict = bundle.get("verdict") or "?"
+                    sapmap_findings.emit_finding(
+                        "INFO", sid,
+                        f"PP impersonation probe on {sid} via SCC "
+                        f"{scc_node.host}: {verdict} — "
+                        f"{bundle.get('error','no detail')}",
+                        ref=f"scc.pp.impersonation.probe.{verdict}",
+                        meta={"scc_host": scc_node.host,
+                              "verdict": verdict,
+                              "error": bundle.get("error", "")})
+            except Exception as e:
+                print(f"[-] {sid}: verify_pp_impersonation failed: {e}")
+            finally:
+                _task_end(f"{sid}:verify_pp")
+        threading.Thread(target=_run, daemon=True).start()
         return json.dumps({"status": "started"})
 
     @app.route("/api/node/<sid>/read_usrextid", method="POST")
