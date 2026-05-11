@@ -2044,11 +2044,24 @@ def read_table(node: SAPNode, table_name: str, fields: list = None,
 
             result = conn.call(RFC_READ_TABLE, **params)
 
-            # Parse field metadata
+            # Parse field metadata.
+            #
+            # NB: when USE_ET_DATA_4_RETURN='X' is set, some S/4 kernels
+            # populate ET_DATA but leave the FIELDS table EMPTY (the
+            # metadata is normally synthesised for DATA, not ET_DATA).
+            # Parsing the WA without column names produces a list of
+            # empty dicts — visible to callers as "rows exist but every
+            # BNAME / EXTID / TYPE is missing".  Recover by using our
+            # REQUESTED ``fields`` as the column ordering — the kernel
+            # honours the requested order in the WA on every version
+            # we've seen.
             field_meta = result.get("FIELDS", [])
             field_names = [f.get("FIELDNAME", "").strip() for f in field_meta]
             field_offsets = [(int(f.get("OFFSET", 0)), int(f.get("LENGTH", 0)))
                             for f in field_meta]
+            if not field_names and fields:
+                field_names = list(fields)
+                field_offsets = [(0, 0)] * len(field_names)
 
             # ET_DATA wins when populated — its WA is STRING-typed so
             # it carries values RFC_READ_TABLE's standard 512-byte WA
