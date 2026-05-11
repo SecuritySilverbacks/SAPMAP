@@ -329,6 +329,93 @@ def test_pp_impersonation_empty_usrextid_returns_helpful_note():
     assert "USREXTID has not been read" in imp["notes"]
 
 
+def test_pp_impersonation_ignores_non_pp_usrextid_types():
+    """USREXTID rows with TYPE=HX (cert hash), KB (Kerberos),
+    NT (NT domain) etc. are NOT reachable through SCC PP — the
+    cert SCC mints is a fresh X.509 with a subject DN, which
+    resolves only against TYPE=DN/LD rows.  Bug fix: previous
+    versions counted every row regardless of TYPE."""
+    from sapmap_scc_pp_analyzer import analyze_pp_impersonation
+    pp = _parse_pp_xml("scc_config_critical_name.ini")
+    rows = [
+        {"MANDT": "100", "BNAME": "ALICE",
+         "EXTID": "ABCDEF0123456789",
+         "TYPE": "HX",  "SEQNO": "0"},   # cert hash — irrelevant
+        {"MANDT": "100", "BNAME": "JOE",
+         "EXTID": "joe@KERBEROS.LOCAL",
+         "TYPE": "KB",  "SEQNO": "0"},   # Kerberos — irrelevant
+        {"MANDT": "100", "BNAME": "BOB",
+         "EXTID": "ACME\\bob",
+         "TYPE": "NT",  "SEQNO": "0"},   # NT domain — irrelevant
+    ]
+    imp = analyze_pp_impersonation(pp, rows)
+    assert imp["matched_users"] == []
+    assert imp["exploitability"] == "blocked"
+    assert imp["usrextid_buckets"]["user_mapping"] == 0
+    assert imp["usrextid_buckets"]["other"] == 3
+    assert "no DN / LD typed entries" in imp["notes"]
+
+
+def test_pp_impersonation_ca_only_emits_advisory():
+    """USREXTID with only TYPE=CA rows (CA trust setup, no specific
+    user mappings yet) flags 'blocked' but the notes mention that
+    every USR02 user with a CN-matching name is *also* impersonatable
+    when login/certificate_mapping_rulebased=1."""
+    from sapmap_scc_pp_analyzer import analyze_pp_impersonation
+    pp = _parse_pp_xml("scc_config_critical_name.ini")
+    rows = [
+        {"MANDT": "100", "BNAME": "*",
+         "EXTID": "CN=Acme Corp CA, O=Acme Corp",
+         "TYPE": "CA", "SEQNO": "0"},
+    ]
+    imp = analyze_pp_impersonation(pp, rows)
+    assert imp["matched_users"] == []
+    assert imp["usrextid_buckets"]["ca_trust"] == 1
+    assert imp["usrextid_buckets"]["user_mapping"] == 0
+    # The CA-trust advisory must mention USR02 + the rulebased flag
+    assert "USR02" in imp["notes"]
+    assert "rulebased" in imp["notes"]
+
+
+def test_pp_impersonation_filters_dn_without_cn():
+    """DN-typed USREXTID rows whose EXTID has no CN= component
+    (e.g. only O= / OU=) cannot resolve the SCC's CN-bound rule
+    even when caller-controlled — must not show up in matched."""
+    from sapmap_scc_pp_analyzer import analyze_pp_impersonation
+    pp = _parse_pp_xml("scc_config_critical_name.ini")
+    rows = [
+        {"MANDT": "100", "BNAME": "ALICE",
+         "EXTID": "OU=Eng, O=Acme",   # no CN= portion
+         "TYPE": "DN", "SEQNO": "0"},
+        {"MANDT": "100", "BNAME": "BOB",
+         "EXTID": "CN=bob@acme.example.com, OU=Eng, O=Acme",
+         "TYPE": "DN", "SEQNO": "0"},
+    ]
+    imp = analyze_pp_impersonation(pp, rows)
+    names = [m["bname"] for m in imp["matched_users"]]
+    assert names == ["BOB"]
+    assert imp["usrextid_buckets"]["user_mapping"] == 2
+
+
+def test_pp_impersonation_bucket_counts_are_accurate():
+    """Sanity: bucket counts must sum to the input row total
+    (minus rows without BNAME, which are skipped)."""
+    from sapmap_scc_pp_analyzer import analyze_pp_impersonation
+    pp = _parse_pp_xml("scc_config_critical_name.ini")
+    rows = [
+        {"MANDT": "100", "BNAME": "A",  "EXTID": "CN=a", "TYPE": "DN"},
+        {"MANDT": "100", "BNAME": "B",  "EXTID": "CN=b", "TYPE": "LD"},
+        {"MANDT": "100", "BNAME": "*",  "EXTID": "CN=CA","TYPE": "CA"},
+        {"MANDT": "100", "BNAME": "C",  "EXTID": "...",  "TYPE": "HX"},
+        {"MANDT": "100", "BNAME": "",   "EXTID": "...",  "TYPE": "DN"},  # skipped
+    ]
+    imp = analyze_pp_impersonation(pp, rows)
+    b = imp["usrextid_buckets"]
+    assert b["user_mapping"] == 2  # A (DN), B (LD)
+    assert b["ca_trust"] == 1       # *
+    assert b["other"] == 1          # C (HX)
+
+
 def test_extract_cn_handles_full_dn_and_bare_cn():
     from sapmap_scc_pp_analyzer import _extract_cn
     assert _extract_cn("CN=alice,OU=Eng,O=Acme") == "alice"

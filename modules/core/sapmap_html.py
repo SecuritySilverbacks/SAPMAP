@@ -4582,14 +4582,18 @@ function showDetails(sid) {
       // (config weakness exists upstream, but no on-prem users to
       // land on).  Distinguish that from "never read" so the
       // operator knows whether to run the action again.
+      const buckets = imp.usrextid_buckets || {};
       const headlineLabel = (() => {
         if (!everRead) return 'NOT YET PROBED';
         if (imp.exploitability === 'trivial') return 'TRIVIAL — pwn ready';
         if (imp.exploitability === 'constrained') return 'CONSTRAINED — bounded pwn';
         if (imp.exploitability === 'blocked' && ux.length === 0)
             return 'BLOCKED — USREXTID empty (no PP targets)';
+        if (imp.exploitability === 'blocked'
+              && (buckets.user_mapping || 0) === 0)
+            return 'BLOCKED — no DN/LD-typed USREXTID rows (PP cert can\'t resolve)';
         if (imp.exploitability === 'blocked')
-            return 'BLOCKED — PP rule does not match any USREXTID entry';
+            return 'BLOCKED — PP rule does not match any USREXTID DN/LD entry';
         return (imp.exploitability || 'unknown').toUpperCase();
       })();
       const headlineColor = !everRead ? '#8b949e' : sevOf;
@@ -4616,7 +4620,7 @@ function showDetails(sid) {
         ${imp.notes && everRead ? `<div style="font-size:11px;color:#cfd9df;margin:6px 0;padding:6px 8px;background:#0d1117;border-left:3px solid ${sevOf}">${escHtml(imp.notes)}</div>` : ''}
         ${imp.rule_template ? `<div class="detail-row"><span class="detail-key">SCC PP rule</span><span class="detail-val" style="font-family:monospace;color:#79c0ff">${escHtml(imp.rule_template)}</span></div>` : ''}
         ${imp.scc_host ? `<div class="detail-row"><span class="detail-key">Via SCC</span><span class="detail-val" style="font-family:monospace"><a href="javascript:void(0)" onclick="showSCCDetail('${escHtml(imp.scc_host)}')" style="color:#58a6ff;text-decoration:underline;cursor:pointer">${escHtml(imp.scc_host)}</a> &nbsp;<span style="color:#8b949e;font-size:10px">(click to jump)</span></span></div>` : ''}
-        <div class="detail-row"><span class="detail-key">USREXTID rows</span><span class="detail-val">${ux.length}</span></div>
+        <div class="detail-row"><span class="detail-key">USREXTID rows</span><span class="detail-val">${ux.length}${(buckets.user_mapping !== undefined) ? ` <span style="color:#8b949e;font-size:10px">(DN/LD: ${buckets.user_mapping || 0}, CA: ${buckets.ca_trust || 0}, other: ${buckets.other || 0})</span>` : ''}</span></div>
         <div class="detail-row"><span class="detail-key">Impersonatable</span><span class="detail-val">${matched.length}${privs.length ? ` <span style="color:#f85149">(${privs.length} privileged)</span>` : ''}</span></div>
         ${everRead ? `<div class="detail-row"><span class="detail-key">Last read</span><span class="detail-val" style="font-size:10px;color:#8b949e">${escHtml(n.usrextid_read_at || '')}</span></div>` : ''}
         ${(() => {

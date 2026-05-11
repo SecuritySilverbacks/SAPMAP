@@ -81,6 +81,24 @@ MAX_REASONABLE_SSO_TOLERANCE_H = 8
 # because that's where the weak-template attack lives.
 LOCAL_PP_MODE = "LOCAL"
 
+# USREXTID.TYPE values that map a specific cert subject to a specific
+# ABAP user.  Only DN and LD entries are directly reachable through
+# an SCC PP-minted X.509:
+#   DN  — DN of certificate  (X.500 distinguished name)
+#   LD  — DN for directory logon (LDAP)
+# Reference: SAP table USREXTID, transaction SE16 / VUSREXTID.
+USRMAPPING_TYPES = frozenset({"DN", "LD"})
+
+# CA — DN of an issuing CA.  These rows do NOT map a specific cert to
+# a specific ABAP user; they declare "any cert signed by this CA is
+# accepted, and the kernel then resolves the cert's CN to an ABAP
+# user via login/certificate_mapping_rulebased".  Surfaced separately.
+CA_TRUST_TYPES = frozenset({"CA"})
+
+# Other USREXTID types that do NOT participate in SCC PP cert-based
+# auth — listed here for completeness in the per-system summary.
+NON_CERT_TYPES = frozenset({"HX", "ID", "KB", "MP", "NT", "SA", "X"})
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -566,22 +584,53 @@ def analyze_pp_impersonation(pp: dict, usrextid_rows: list) -> dict:
             "node to enumerate impersonation targets.")
         return out
 
-    # Score each USREXTID row.
-    matched = []
+    # Bucket the rows by TYPE.  Only DN / LD types map a specific
+    # cert subject to a specific ABAP user via PP; CA entries are CA
+    # trust declarations (require a separate USR02 cross-link to
+    # enumerate impersonatable users); HX / KB / NT / etc. are
+    # unrelated auth mechanisms.
+    user_mapping_rows: list = []
+    ca_trust_rows: list = []
+    other_rows: list = []
     for row in usrextid_rows or []:
         if not isinstance(row, dict):
             continue
         bname = (row.get("BNAME") or "").strip()
-        extid = (row.get("EXTID") or "").strip()
-        rtype = (row.get("TYPE") or "").strip()
-        mandt = (row.get("MANDT") or "").strip()
-        cn = _extract_cn(extid)
+        rtype = (row.get("TYPE") or "").strip().upper()
         if not bname:
             continue
-        # Caller-controlled rule: every USREXTID row is a potential
-        # impersonation target.  The cloud caller can claim any name /
-        # email that matches an existing CN entry.
+        if rtype in USRMAPPING_TYPES:
+            user_mapping_rows.append(row)
+        elif rtype in CA_TRUST_TYPES:
+            ca_trust_rows.append(row)
+        else:
+            other_rows.append(row)
+
+    # Surface the type breakdown so the operator sees what the
+    # analyser actually considered — matters when the verdict is
+    # "blocked" but USREXTID has lots of (non-PP-reachable) rows.
+    out["usrextid_buckets"] = {
+        "user_mapping": len(user_mapping_rows),
+        "ca_trust":     len(ca_trust_rows),
+        "other":        len(other_rows),
+    }
+
+    # Score each user-mapping row.  CA-trust rows get a separate
+    # advisory note further down.
+    matched = []
+    for row in user_mapping_rows:
+        bname = (row.get("BNAME") or "").strip()
+        extid = (row.get("EXTID") or "").strip()
+        rtype = (row.get("TYPE") or "").strip().upper()
+        mandt = (row.get("MANDT") or "").strip()
+        cn = _extract_cn(extid)
+        # Caller-controlled rule: every DN-typed entry whose DN
+        # contains a CN= component is a potential impersonation
+        # target — the cloud caller can claim any name / email that
+        # matches its CN portion via the IdP claim.
         if out["rule_caller_controlled"]:
+            if not cn:
+                continue  # DN without CN= component — kernel skips it
             matched.append({
                 "bname": bname, "extid_cn": cn,
                 "extid_full": extid, "type": rtype, "mandt": mandt,
@@ -600,6 +649,28 @@ def analyze_pp_impersonation(pp: dict, usrextid_rows: list) -> dict:
              if r["bname"].upper() in PRIVILEGED_LITERALS]
     out["privileged_users"] = privs
 
+    # CA-trust advisory — separate signal: when CA-typed rows exist,
+    # the kernel resolves any cert signed by that CA via the cert's
+    # CN against USR02 (with login/certificate_mapping_rulebased=1)
+    # OR a USREXTID DN/LD entry.  If USR02 is broad and the rule is
+    # caller-controlled, every ABAP user with a CN-matching login is
+    # impersonatable — but we'd need USR02 data to enumerate.
+    ca_advisory = ""
+    if ca_trust_rows and out["rule_caller_controlled"]:
+        ca_users = sorted({(r.get("BNAME") or "").strip()
+                            for r in ca_trust_rows})
+        ca_advisory = (
+            f"Additionally, USREXTID declares CA trust for "
+            f"{len(ca_trust_rows)} issuing CA(s) (BNAME(s): "
+            f"{', '.join(ca_users)}).  When "
+            f"login/certificate_mapping_rulebased=1 the kernel also "
+            f"resolves the cert's CN against USR02 directly — so "
+            f"every ABAP user whose login matches a name a cloud "
+            f"caller can claim is *additionally* impersonatable.  "
+            f"Run Download Hashes / Capability Analyser to enumerate "
+            f"USR02.")
+
+    # Verdict
     if matched:
         if privs:
             out["exploitability"] = "trivial"
@@ -625,15 +696,49 @@ def analyze_pp_impersonation(pp: dict, usrextid_rows: list) -> dict:
     else:
         if out["rule_caller_controlled"]:
             out["exploitability"] = "blocked"
-            out["notes"] = (
-                "Caller-controlled rule, but USREXTID has no "
-                "CN-style entries — no impersonation possible until "
-                "an ABAP admin maps a CN→user pair.")
+            if not user_mapping_rows:
+                # USREXTID is populated but only with CA / HX / KB /
+                # NT / etc. — none of which produce a direct SCC PP
+                # mapping target.
+                bits = []
+                if ca_trust_rows:
+                    bits.append(
+                        f"{len(ca_trust_rows)} CA-trust row(s) "
+                        f"(TYPE=CA — defines which issuers are "
+                        f"trusted, not a user mapping)")
+                if other_rows:
+                    type_summary = ", ".join(
+                        sorted({(r.get('TYPE') or '').strip().upper()
+                                for r in other_rows
+                                if (r.get('TYPE') or '').strip()}))
+                    bits.append(
+                        f"{len(other_rows)} non-PP row(s) "
+                        f"(TYPE={type_summary} — Kerberos / NT / "
+                        f"SAML / cert-hash etc.)")
+                out["notes"] = (
+                    "USREXTID has no DN / LD typed entries (which "
+                    "are what SCC's PP-minted X.509 certs resolve "
+                    "against).  Found: " + "; ".join(bits or [
+                        "no rows with a BNAME"]) + ".  No "
+                    "impersonation is reachable through the SCC PP "
+                    "path until an ABAP admin adds a USREXTID row "
+                    "with TYPE=DN and a CN= component matching a "
+                    "name a cloud caller can claim.")
+            else:
+                # We had DN/LD rows but none had a CN= component
+                out["notes"] = (
+                    f"USREXTID has {len(user_mapping_rows)} DN/LD "
+                    f"row(s), but none contain a CN= component in "
+                    f"their EXTID — the SCC PP rule (CN-bound) has "
+                    f"nothing to resolve against.")
         else:
             out["exploitability"] = "blocked"
             out["notes"] = (
                 "PP rule's CN literal does not match any USREXTID "
-                "entry — no impersonation reachable.")
+                "DN/LD entry — no impersonation reachable.")
+
+    if ca_advisory:
+        out["notes"] = (out["notes"] + "\n\n" + ca_advisory).strip()
     return out
 
 
