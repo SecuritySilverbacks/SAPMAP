@@ -636,6 +636,8 @@ def _derive_landscape_recommendations(state: SAPMAPState) -> list:
             matched = imp.get("matched_users") or []
             privs = imp.get("privileged_users") or []
             priv_names = sorted({p["bname"] for p in privs}) if privs else []
+            ver = getattr(n, "pp_verification", None) or {}
+            confirmed = bool(getattr(n, "pp_verification_confirmed", False))
             head = (
                 f"  • {n.sid} (via SCC {imp.get('scc_host','?')}): "
                 f"{len(matched)} ABAP user(s) reachable via PP rule "
@@ -644,13 +646,27 @@ def _derive_landscape_recommendations(state: SAPMAPState) -> list:
                 head += (
                     f"  Privileged accounts: "
                     f"{', '.join(priv_names)}.")
+            if confirmed:
+                v_user = ver.get("user") or "<unknown user>"
+                v_conf = ver.get("confidence") or "MEDIUM"
+                head += (
+                    f"  **LIVE-VERIFIED on "
+                    f"{ver.get('verified_at','?')}**: probe landed "
+                    f"as {v_user} (confidence {v_conf}, HTTP "
+                    f"{ver.get('http_status','?')}, "
+                    f"{ver.get('latency_ms','?')} ms).")
             bullets.append(head)
         items.append({
             "category": "SAP Cloud Connector — Principal Propagation",
             "scope": ", ".join(n.sid for n in pp_imp_nodes),
             "title": (
-                "Cloud→on-prem impersonation reachable through SCC "
-                "tunnel (concrete user list)"),
+                ("Cloud→on-prem impersonation CONFIRMED through SCC "
+                 "tunnel (live-verified, concrete user list)")
+                if any(getattr(n, "pp_verification_confirmed", False)
+                       for n in pp_imp_nodes)
+                else
+                ("Cloud→on-prem impersonation reachable through SCC "
+                 "tunnel (concrete user list)")),
             "body": (
                 "By combining the weak <subjectPatterns> rule on the "
                 "linked SAP Cloud Connector with the on-prem USREXTID "

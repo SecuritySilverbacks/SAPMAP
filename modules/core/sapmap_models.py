@@ -271,6 +271,13 @@ class SAPNode:
     usrextid_entries: list = field(default_factory=list)
     usrextid_read_at: str = ""   # ISO timestamp — empty = never read
     pp_impersonation: dict = field(default_factory=dict)
+    # Live PP-impersonation verification (sap_pp_probe.verify_pp).
+    # ``pp_verification`` is the full bundle returned by the probe;
+    # ``pp_verification_confirmed`` is the quick boolean for badge /
+    # report rendering.  Last verification timestamp is inside the
+    # bundle as ``verified_at``.
+    pp_verification: dict = field(default_factory=dict)
+    pp_verification_confirmed: bool = False
         # {ok, rule_template, rule_caller_controlled, matched_users:[],
         #  privileged_users:[], exploitability:"trivial"|"constrained"
         #  |"blocked", notes, scc_host:"<host>"}
@@ -411,6 +418,8 @@ class SAPNode:
             "usrextid_entries": list(self.usrextid_entries),
             "usrextid_read_at": self.usrextid_read_at,
             "pp_impersonation": dict(self.pp_impersonation or {}),
+            "pp_verification": dict(self.pp_verification or {}),
+            "pp_verification_confirmed": self.pp_verification_confirmed,
             "capability_results": list(self.capability_results),
             "capability_row_counts": dict(self.capability_row_counts),
         }

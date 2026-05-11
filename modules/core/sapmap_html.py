@@ -663,6 +663,7 @@ body {
     <span class="legend-item" title="All SCC mappings to this ABAP node have been smoke-tested and reach the backend successfully"><span class="legend-swatch" style="background:transparent;border-top:2px dashed #3fb950;border-radius:0;width:18px;height:0"></span> SCC tunnel: reach OK</span>
     <span class="legend-item" title="At least one SCC mapping to this ABAP node failed its smoke test"><span class="legend-swatch" style="background:transparent;border-top:2px dashed #f85149;border-radius:0;width:18px;height:0"></span> SCC tunnel: unreachable</span>
     <span class="legend-item" title="SCC mapping uses principal propagation (KERBEROS / X509_*) — pair with the PP analyser finding"><span class="legend-swatch" style="background:transparent;border-top:2px dashed #f0883e;border-radius:0;width:18px;height:0"></span> SCC tunnel: PP enabled</span>
+    <span class="legend-item" title="PP impersonation live-verified — a SAPMAP probe successfully landed a request as an impersonated on-prem user"><span class="legend-swatch" style="background:transparent;border-top:3px solid #f85149;border-radius:0;width:18px;height:0"></span> SCC tunnel: PP CONFIRMED</span>
     <span style="flex:1"></span>
     <label style="cursor:pointer;display:flex;align-items:center;gap:6px;padding:2px 10px;border:1px solid #30363d;border-radius:4px;background:#161b22;color:#c9d1d9;font-size:11px"><input type="checkbox" id="show-unknown" style="accent-color:#f0883e;width:14px;height:14px" onchange="updateMap()"> Show unknown targets</label>
   </div>
@@ -748,6 +749,7 @@ body {
       <div class="ctx-sep"></div>
       <div class="ctx-item" data-action="propagate">&#128640; Propagate (exploit next hop)</div>
       <div class="ctx-item" data-action="harvest_btp_creds">&#9729; Harvest BTP Credentials (lateral to cloud)</div>
+      <div class="ctx-item" data-action="verify_pp_impersonation">&#127919; Verify PP Impersonation (Live Probe)</div>
     </div>
   </div>
   <!-- Cloud Connector submenu (visible only when SCC is on same host) -->
@@ -2250,16 +2252,19 @@ function updateMap() {
       const reachOk = matches.filter(m => m.reachable === true).length;
       const reachBad = matches.filter(m => m.reachable === false).length;
       const allProbed = probed.length === matches.length;
-      // Color priority: red (any unreachable) > green (all reach probed OK) > orange (PP, not yet probed) > teal (default).
-      // Reach is the more actionable signal once probed, so it wins over
-      // the PP highlight; PP is still surfaced via the [PP] label badge
-      // and the drawer Auth column.
-      let stroke, labelColor;
-      if (reachBad > 0)                       { stroke = '#f85149'; labelColor = '#f85149'; }
-      else if (allProbed && reachOk)          { stroke = '#3fb950'; labelColor = '#3fb950'; }
-      else if (ppHi)                          { stroke = '#f0883e'; labelColor = '#f0883e'; }
-      else                                    { stroke = '#046c7a'; labelColor = '#9bb1c4'; }
-      const width = (ppHi || reachBad > 0 || (allProbed && reachOk)) ? 3 : 2;
+      // PP impersonation has been LIVE-VERIFIED through this exact
+      // SCC: paints the edge solid red as the killer signal.
+      const ppVerified = !!n.pp_verification_confirmed
+            && ((n.pp_verification || {}).scc_host === sccHost);
+      // Color priority: solid red (live-verified PP) > red dashed (any unreachable) >
+      // green (all reach probed OK) > orange (PP, not yet probed) > teal (default).
+      let stroke, labelColor, dashArrayPP;
+      if (ppVerified)                         { stroke = '#f85149'; labelColor = '#f85149'; dashArrayPP = ''; }
+      else if (reachBad > 0)                  { stroke = '#f85149'; labelColor = '#f85149'; dashArrayPP = '6,4'; }
+      else if (allProbed && reachOk)          { stroke = '#3fb950'; labelColor = '#3fb950'; dashArrayPP = '6,4'; }
+      else if (ppHi)                          { stroke = '#f0883e'; labelColor = '#f0883e'; dashArrayPP = '6,4'; }
+      else                                    { stroke = '#046c7a'; labelColor = '#9bb1c4'; dashArrayPP = '6,4'; }
+      const width = (ppVerified ? 4 : (ppHi || reachBad > 0 || (allProbed && reachOk)) ? 3 : 2);
       // Bundled-with-badge: one line per (SCC, SAP) pair regardless of how
       // many mappings traverse it.  Label shows mapping count and (when
       // probed) a reach badge "X/Y reach".
@@ -2269,9 +2274,10 @@ function updateMap() {
       const reachBadge = probed.length > 0
         ? ` · ${reachOk}/${matches.length} reach`
         : '';
-      const ppBadge = ppHi ? ' [PP]' : '';
+      const ppBadge = ppVerified ? ' [PP CONFIRMED]' : (ppHi ? ' [PP]' : '');
+      const dashAttr = dashArrayPP ? ` stroke-dasharray="${dashArrayPP}"` : '';
       html += `<line class="edge-line" x1="${sx}" y1="${sy}" x2="${tx}" y2="${ty}" ` +
-        `stroke="${stroke}" stroke-width="${width}" stroke-dasharray="6,4" fill="none" ` +
+        `stroke="${stroke}" stroke-width="${width}"${dashAttr} fill="none" ` +
         `pointer-events="none" />`;
       const mx = (sx + tx) / 2, my = (sy + ty) / 2;
       html += `<text x="${mx}" y="${my - 4}" text-anchor="middle" font-size="10" ` +
@@ -3080,6 +3086,25 @@ function showCtxMenu(e, sid) {
     'cleanup':          hasCreatedUsers,             // need created users to clean up
     'client_roles':     hasUsableAbapAccess,        // ABAP-only RFC reads
     'read_usrextid':    hasUsableAbapAccess,        // ABAP-only RFC reads
+    // PP impersonation verification — needs all of:
+    //   1. node has a linked SCC,
+    //   2. that SCC has a PP analysis (rule parsed),
+    //   3. PP rule is exploitable (not BLOCKED),
+    //   4. at least one BTP token is in process memory.
+    'verify_pp_impersonation': (() => {
+      const links = n.scc_links || [];
+      if (!links.length) return false;
+      const sccs = mapState.scc_nodes || {};
+      const exp = (n.pp_impersonation || {}).exploitability || '';
+      const hasViableRule = links.some(h => {
+        const sn = sccs[h];
+        if (!sn) return false;
+        const ppa = sn.pp_analysis || {};
+        return !!ppa.pp_config;
+      });
+      const hasToken = !!(mapState.btp_token_regions || []).length;
+      return hasViableRule && hasToken && exp !== 'blocked';
+    })(),
     'set_type':         true,                       // always available
     'set_db_type':      true,                       // always available
     'set_os_type':      true,                       // always available
@@ -3151,6 +3176,24 @@ function showCtxMenu(e, sid) {
     'cleanup':          'No created users to clean up',
     'client_roles':     'Needs a verified RFC credential or a SAPMAP-created user — the role-walk reads AGR_USERS / AGR_DEFINE via RFC.',
     'read_usrextid':    'Needs a verified RFC credential or a SAPMAP-created user — USREXTID read uses RFC_READ_TABLE.',
+    'verify_pp_impersonation': (() => {
+      const links = n.scc_links || [];
+      if (!links.length)
+        return 'No SCC linked to this node — run Standard Scan + Pull Mappings on the SCC first.';
+      const sccs = mapState.scc_nodes || {};
+      const haveAnyAnalysis = links.some(h => {
+        const sn = sccs[h];
+        return sn && (sn.pp_analysis || {}).pp_config;
+      });
+      if (!haveAnyAnalysis)
+        return 'Linked SCC has no PP analysis yet — Extract Keystore on the SCC first.';
+      if (!(mapState.btp_token_regions || []).length)
+        return 'No BTP token in memory — Mint BTP Token or paste a cf oauth-token first.';
+      const exp = (n.pp_impersonation || {}).exploitability || '';
+      if (exp === 'blocked')
+        return 'PP analyser verdict is BLOCKED — no impersonation surface to verify.';
+      return '';
+    })(),
   };
 
   // Items hidden entirely (not just disabled) when the node type doesn't
@@ -3869,6 +3912,35 @@ async function ctxAction(action) {
       await api('POST', `node/${sid}/read_usrextid`);
       showToast('USREXTID read started — check findings drawer for PP impersonation surface', 'info');
       break;
+    case 'verify_pp_impersonation': {
+      // Build a confirm dialog with the resolved chain so the operator
+      // sees exactly which path is about to be exercised live.
+      const n2 = (mapState.nodes || {})[sid];
+      const sccHost = (n2.scc_links || []).find(h => (mapState.scc_nodes || {})[h]) || '?';
+      const sn2 = (mapState.scc_nodes || {})[sccHost] || {};
+      const subUuid = (sn2.subaccount_uuids || [])[0] || '';
+      const regions = mapState.btp_token_regions || [];
+      const rule = ((sn2.pp_analysis || {}).pp_config || {}).subject_patterns;
+      const ruleStr = rule && rule[0]
+        ? ((rule[0].dn_entries || []).map(e => `${e.key}=${e.value}`).join(', '))
+        : '(no rule)';
+      const msg = (
+        'Send a LIVE principal-propagation impersonation probe?\n\n'
+        + 'Source : cloud token for region ' + (regions.join(', ') || '(none)') + '\n'
+        + 'Subacc : ' + (subUuid ? subUuid.slice(0, 8) + '…' : '(none)') + '\n'
+        + 'Via SCC: ' + sccHost + '\n'
+        + 'Target : ' + sid + '\n'
+        + 'PP rule: ' + ruleStr + '\n\n'
+        + 'SAPMAP will (a) find or create a PrincipalPropagation\n'
+        + 'destination, (b) GET /sap/bc/ping through the BTP\n'
+        + 'connectivity proxy, (c) probe a whoami endpoint for the\n'
+        + 'impersonated user, and (d) delete any temporary destination.\n\n'
+        + 'The probe is READ-ONLY. Continue?');
+      if (!confirm(msg)) break;
+      await api('POST', `node/${sid}/verify_pp_impersonation`, {});
+      showToast('PP impersonation probe started — watch findings drawer', 'info');
+      break;
+    }
     case 'set_type': showTypeModal(sid); break;
     case 'set_db_type': showDbTypeModal(sid); break;
     case 'set_os_type': showOsTypeModal(sid); break;
@@ -4511,6 +4583,30 @@ function showDetails(sid) {
         <div class="detail-row"><span class="detail-key">USREXTID rows</span><span class="detail-val">${ux.length}</span></div>
         <div class="detail-row"><span class="detail-key">Impersonatable</span><span class="detail-val">${matched.length}${privs.length ? ` <span style="color:#f85149">(${privs.length} privileged)</span>` : ''}</span></div>
         ${everRead ? `<div class="detail-row"><span class="detail-key">Last read</span><span class="detail-val" style="font-size:10px;color:#8b949e">${escHtml(n.usrextid_read_at || '')}</span></div>` : ''}
+        ${(() => {
+          // --- Live verification result ---
+          const v = n.pp_verification || {};
+          if (!v.verified_at && !v.verdict) return '';
+          const verdict = v.verdict || '?';
+          const ok = !!v.ok || verdict === 'confirmed';
+          const col = ok ? '#f85149'
+                          : (verdict === 'auth_rejected' ? '#f0883e' : '#8b949e');
+          const headline = ok
+            ? `PP IMPERSONATION CONFIRMED — HTTP ${v.http_status || '?'} (${v.latency_ms || '?'} ms)`
+            : `PROBE: ${verdict.toUpperCase()}`;
+          const userBlock = v.user
+            ? `<div style="font-family:monospace;color:#e6edf3"><b>Landed as:</b> ${escHtml(v.user)} <span style="color:#8b949e;font-size:10px">(confidence ${escHtml(v.confidence || '?')})</span></div>`
+            : (ok ? '<div style="color:#8b949e;font-size:10px">User name could not be detected from response headers — HTTP 200 confirms impersonation but we did not see a sap-username header.</div>' : '');
+          return `
+          <div style="margin-top:8px;padding:8px 10px;background:#0d1117;border-left:3px solid ${col}">
+            <div style="font-weight:bold;color:${col};font-size:12px">&#127919; ${escHtml(headline)}</div>
+            ${userBlock}
+            <div style="color:#8b949e;font-size:10px;margin-top:4px">
+              Destination: <code>${escHtml(v.destination_used || '?')}</code>${v.destination_was_temp ? ' (temp, deleted)' : ''} · verified at ${escHtml(v.verified_at || '?')}
+            </div>
+            ${v.error ? `<div style="color:#f85149;font-size:10px;margin-top:4px">${escHtml(v.error)}</div>` : ''}
+          </div>`;
+        })()}
         ${ux.length === 0 ? '' : `
         <table style="width:100%;border-collapse:collapse;margin-top:6px;font-size:11px">
           <thead>
