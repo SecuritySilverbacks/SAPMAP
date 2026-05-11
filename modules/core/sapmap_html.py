@@ -190,10 +190,17 @@ body {
   background: #1c2128; border: 1px solid #30363d; border-radius: 8px;
   min-width: 260px; padding: 4px 0; box-shadow: 0 8px 24px rgba(0,0,0,.5);
   z-index: 2100;
+  /* Hard cap so a very tall submenu still fits when both flip-up and
+     the bottom of the viewport are tight; the user scrolls inside. */
+  max-height: 90vh; overflow-y: auto;
 }
 .ctx-group:hover > .ctx-sub { display: block; }
 /* Flip submenu left if it would overflow viewport (set by JS) */
 .ctx-sub.flip-left { left: auto; right: 100%; }
+/* Flip submenu up — anchor its bottom to the parent row's bottom —
+   when opening downward would overflow the viewport (set by JS in
+   showCtxMenu / showSCCCtxMenu / showBTPCtxMenu). */
+.ctx-sub.flip-up { top: auto; bottom: -4px; }
 
 /* === Info Panel (connection details) === */
 .info-panel {
@@ -3317,11 +3324,38 @@ function showCtxMenu(e, sid) {
   menu.style.left = menuX + 'px';
   menu.style.top = menuY + 'px';
 
-  // Flip flyout submenus left if they would overflow the viewport
-  menu.querySelectorAll('.ctx-sub').forEach(sub => {
+  // Flip flyout submenus left if they would overflow horizontally,
+  // and up if they would overflow vertically — measured on the
+  // actual <ctx-group> positions in the now-visible menu.
+  _reflowSubmenus(menu, menuX, menuRect.width);
+}
+
+// Compute submenu flip flags for every <ctx-group> in a menu.
+// Used by showCtxMenu / showSCCCtxMenu / showBTPCtxMenu after the
+// parent menu has been positioned so getBoundingClientRect returns
+// final coordinates.
+function _reflowSubmenus(menu, menuX, menuWidth) {
+  menu.querySelectorAll('.ctx-group').forEach(group => {
+    const sub = group.querySelector('.ctx-sub');
+    if (!sub) return;
     sub.classList.remove('flip-left');
-    if (menuX + menuRect.width + 260 > window.innerWidth) {
+    sub.classList.remove('flip-up');
+
+    // Horizontal: if the parent menu sits near the right edge, the
+    // submenu would overflow off-screen → flip it to the left.
+    if (menuX + menuWidth + 260 > window.innerWidth) {
       sub.classList.add('flip-left');
+    }
+
+    // Vertical: estimate submenu height from its child count + a
+    // small per-row constant (28px ~ matches the .ctx-item padding).
+    // If opening downward from this group would clip the viewport,
+    // flip the submenu up so its bottom edge aligns with this row.
+    const groupRect = group.getBoundingClientRect();
+    const childCount = sub.querySelectorAll('.ctx-item, .ctx-sep').length;
+    const estHeight = Math.max(childCount * 28 + 16, 60);
+    if (groupRect.top + estHeight > window.innerHeight - 8) {
+      sub.classList.add('flip-up');
     }
   });
 }
@@ -3381,6 +3415,7 @@ function showSCCCtxMenu(e, host) {
   const y = Math.min(e.clientY, window.innerHeight - h - 8);
   menu.style.left = x + 'px';
   menu.style.top = y + 'px';
+  _reflowSubmenus(menu, x, w);
 }
 
 function hideSCCCtxMenu() {
@@ -3466,6 +3501,7 @@ function showBTPCtxMenu(e, uuid) {
   const y = Math.min(e.clientY, window.innerHeight - h - 8);
   menu.style.left = x + 'px';
   menu.style.top  = y + 'px';
+  _reflowSubmenus(menu, x, w);
 }
 
 function hideBTPCtxMenu() {
