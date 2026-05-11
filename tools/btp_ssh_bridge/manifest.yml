@@ -1,0 +1,19 @@
+# Minimal CF app whose only purpose is to be a target for ``cf ssh``,
+# so an operator on a developer workstation can tunnel through the BTP
+# connectivity proxy (which is only reachable from inside the CF
+# runtime).  Total cost: 64 MB of memory in your subaccount.
+#
+# Used by the SAPMAP PP-impersonation live probe.  See
+# tools/btp_ssh_bridge/README.md for the operational recipe.
+---
+applications:
+  - name:      sapmap-probe-bridge
+    instances: 1
+    memory:    64M
+    disk_quota: 64M
+    buildpacks:
+      - staticfile_buildpack
+    health-check-type: process
+    no-route: false
+    routes:
+      - route: sapmap-probe-bridge-${random-word}.${domain}
