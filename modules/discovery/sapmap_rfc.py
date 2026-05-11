@@ -2367,14 +2367,44 @@ def download_usrextid(node: SAPNode, creds: Credentials = None,
                       ``login/certificate_mapping_rulebased``)
       * ``SEQNO``   — sequence number for multi-DN-per-user
 
-    Returns the list of row dicts (empty list on failure — failures are
-    already logged through ``read_table``'s normal path).
+    EXTID is ``CHAR(1024)`` on standard kernels.  Combined with the
+    other fields, each row easily overflows RFC_READ_TABLE's default
+    512-byte WA buffer (DATA_BUFFER_EXCEEDED → silent 0 rows on most
+    callers).  We set ``long_strings=True`` so the kernel returns rows
+    via the unbounded ET_DATA STRING field on modern S/4 kernels.
+
+    On the rare older kernel that doesn't honour ``USE_ET_DATA_4_RETURN``
+    we fall back to a 2-column probe (MANDT/BNAME) — enough to confirm
+    the table has entries even if we can't read the EXTID payload —
+    and tag those rows with ``EXTID = "(truncated — old kernel)"``.
+
+    Returns the list of row dicts (empty list on genuine empty table
+    or failure).
     """
     rows = read_table(
         node, "USREXTID",
         fields=["MANDT", "BNAME", "EXTID", "TYPE", "SEQNO"],
-        creds=creds, max_rows=max_rows)
-    return rows or []
+        creds=creds, max_rows=max_rows,
+        long_strings=True)
+    if rows:
+        return rows
+    # Fallback: probe without EXTID so we at least know whether the
+    # table is empty or just too wide for this kernel's buffer.
+    fallback = read_table(
+        node, "USREXTID",
+        fields=["MANDT", "BNAME", "TYPE"],
+        creds=creds, max_rows=max_rows,
+        quiet=True)
+    if not fallback:
+        return []
+    print(f"[!] {node.sid}: USREXTID full read returned 0 rows, but "
+          f"a MANDT/BNAME probe found {len(fallback)} entries — kernel "
+          f"likely ignores USE_ET_DATA_4_RETURN.  EXTID values are "
+          f"truncated in the fallback view.")
+    for r in fallback:
+        r["EXTID"] = "(truncated — kernel does not honour ET_DATA)"
+        r["SEQNO"] = ""
+    return fallback
 
 
 # ---------------------------------------------------------------------------

@@ -4465,10 +4465,26 @@ function showDetails(sid) {
       // --- USREXTID + PP impersonation surface ---
       const ux = n.usrextid_entries || [];
       const imp = n.pp_impersonation || {};
-      if (ux.length === 0 && !imp.rule_template) return '';
+      const everRead = !!n.usrextid_read_at;
+      if (ux.length === 0 && !imp.rule_template && !everRead) return '';
       const sevOf = (imp.exploitability === 'trivial')   ? '#f85149'
                    : (imp.exploitability === 'constrained') ? '#f0883e'
                    : '#3fb950';
+      // Headline reframe: "blocked" is good news for the customer
+      // (config weakness exists upstream, but no on-prem users to
+      // land on).  Distinguish that from "never read" so the
+      // operator knows whether to run the action again.
+      const headlineLabel = (() => {
+        if (!everRead) return 'NOT YET PROBED';
+        if (imp.exploitability === 'trivial') return 'TRIVIAL — pwn ready';
+        if (imp.exploitability === 'constrained') return 'CONSTRAINED — bounded pwn';
+        if (imp.exploitability === 'blocked' && ux.length === 0)
+            return 'BLOCKED — USREXTID empty (no PP targets)';
+        if (imp.exploitability === 'blocked')
+            return 'BLOCKED — PP rule does not match any USREXTID entry';
+        return (imp.exploitability || 'unknown').toUpperCase();
+      })();
+      const headlineColor = !everRead ? '#8b949e' : sevOf;
       const matched = imp.matched_users || [];
       const privs = imp.privileged_users || [];
       const privSet = new Set(privs.map(p => (p.bname || '').toUpperCase()));
@@ -4486,13 +4502,15 @@ function showDetails(sid) {
       return `
       <div class="detail-section">
         <h4>&#128279; PP Impersonation Surface
-          ${imp.exploitability ? `<span style="color:${sevOf};font-weight:normal;font-size:10px">(${escHtml(imp.exploitability.toUpperCase())})</span>` : ''}
+          <span style="color:${headlineColor};font-weight:normal;font-size:10px">(${escHtml(headlineLabel)})</span>
         </h4>
+        ${!everRead ? `<button class="ctx-btn" onclick="api('POST','node/${escHtml(n.sid)}/read_usrextid');showToast('USREXTID read started','info')" style="background:#21262d;border:1px solid #30363d;color:#e6edf3;padding:6px 10px;border-radius:4px;cursor:pointer;font-size:11px;margin-bottom:8px">&#9851; Read USREXTID now</button>` : ''}
+        ${imp.notes && everRead ? `<div style="font-size:11px;color:#cfd9df;margin:6px 0;padding:6px 8px;background:#0d1117;border-left:3px solid ${sevOf}">${escHtml(imp.notes)}</div>` : ''}
         ${imp.rule_template ? `<div class="detail-row"><span class="detail-key">SCC PP rule</span><span class="detail-val" style="font-family:monospace;color:#79c0ff">${escHtml(imp.rule_template)}</span></div>` : ''}
-        ${imp.scc_host ? `<div class="detail-row"><span class="detail-key">Via SCC</span><span class="detail-val" style="font-family:monospace"><a href="javascript:void(0)" onclick="showSCCDetail('${escHtml(imp.scc_host)}')" style="color:#58a6ff">${escHtml(imp.scc_host)}</a></span></div>` : ''}
+        ${imp.scc_host ? `<div class="detail-row"><span class="detail-key">Via SCC</span><span class="detail-val" style="font-family:monospace"><a href="javascript:void(0)" onclick="showSCCDetail('${escHtml(imp.scc_host)}')" style="color:#58a6ff;text-decoration:underline;cursor:pointer">${escHtml(imp.scc_host)}</a> &nbsp;<span style="color:#8b949e;font-size:10px">(click to jump)</span></span></div>` : ''}
         <div class="detail-row"><span class="detail-key">USREXTID rows</span><span class="detail-val">${ux.length}</span></div>
         <div class="detail-row"><span class="detail-key">Impersonatable</span><span class="detail-val">${matched.length}${privs.length ? ` <span style="color:#f85149">(${privs.length} privileged)</span>` : ''}</span></div>
-        ${imp.notes ? `<div style="font-size:11px;color:#cfd9df;margin:6px 0;padding:6px 8px;background:#0d1117;border-left:3px solid ${sevOf}">${escHtml(imp.notes)}</div>` : ''}
+        ${everRead ? `<div class="detail-row"><span class="detail-key">Last read</span><span class="detail-val" style="font-size:10px;color:#8b949e">${escHtml(n.usrextid_read_at || '')}</span></div>` : ''}
         ${ux.length === 0 ? '' : `
         <table style="width:100%;border-collapse:collapse;margin-top:6px;font-size:11px">
           <thead>

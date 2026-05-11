@@ -269,6 +269,7 @@ class SAPNode:
     # answer "which ABAP users can a cloud caller impersonate
     # through this SCC tunnel".
     usrextid_entries: list = field(default_factory=list)
+    usrextid_read_at: str = ""   # ISO timestamp — empty = never read
     pp_impersonation: dict = field(default_factory=dict)
         # {ok, rule_template, rule_caller_controlled, matched_users:[],
         #  privileged_users:[], exploitability:"trivial"|"constrained"
@@ -408,6 +409,7 @@ class SAPNode:
             "discovered_via_btp": self.discovered_via_btp,
             "oauth2_profiles": list(self.oauth2_profiles),
             "usrextid_entries": list(self.usrextid_entries),
+            "usrextid_read_at": self.usrextid_read_at,
             "pp_impersonation": dict(self.pp_impersonation or {}),
             "capability_results": list(self.capability_results),
             "capability_row_counts": dict(self.capability_row_counts),

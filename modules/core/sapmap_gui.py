@@ -3095,7 +3095,17 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 from sapmap_rfc import download_usrextid
                 rows = download_usrextid(node) or []
                 node.usrextid_entries = rows
-                print(f"[+] {sid}: USREXTID read — {len(rows)} entry(s)")
+                from datetime import datetime as _dt, timezone as _tz
+                node.usrextid_read_at = (
+                    _dt.now(_tz.utc).isoformat(timespec="seconds"))
+                if not rows:
+                    print(f"[*] {sid}: USREXTID is empty — no cert/SNC "
+                          f"→ ABAP user mappings configured on this "
+                          f"system.  Even with a weak SCC PP rule "
+                          f"upstream there is no on-prem user to "
+                          f"land on yet.")
+                else:
+                    print(f"[+] {sid}: USREXTID read — {len(rows)} entry(s)")
                 # Cross-link with every linked SCC's PP rule.  We pick
                 # the first SCC with PP analysis for the impersonation
                 # report; if multiple SCCs link to this node, the
