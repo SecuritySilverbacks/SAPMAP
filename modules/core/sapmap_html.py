@@ -546,6 +546,7 @@ body {
       <div class="dd-sep"></div>
       <div class="dd-item" onclick="showHashesApiKeyModal()">&#128273; Set hashes.com API Key</div>
       <div class="dd-item" onclick="showBtpTokenModal()">&#9729;&#65039; BTP — Paste cf oauth-token</div>
+      <div class="dd-item" onclick="showBtpProxyModal()">&#9729;&#65039; BTP — Connectivity Proxy Override</div>
     </div>
   </div>
   <div class="menu-item">View
@@ -969,6 +970,38 @@ body {
       <button class="btn btn-primary" onclick="btpStoreToken()">Store + validate</button>
       <button class="btn" onclick="btpClearTokens()">Clear all stored tokens</button>
       <button class="btn" onclick="closeModal('btp-token-modal')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- BTP Connectivity Proxy Override Modal -->
+<div class="modal-overlay" id="btp-proxy-modal">
+  <div class="modal" style="max-width:680px;width:95vw">
+    <h3>&#9729;&#65039; BTP — Connectivity Proxy Override</h3>
+    <div style="font-size:12px;color:#8b949e;margin-bottom:12px">
+      The PP-impersonation live probe drives an HTTP CONNECT through
+      BTP's connectivity proxy:
+      <code>connectivityproxy.internal.cf.&lt;region&gt;.hana.ondemand.com:20003</code>.
+      That hostname is <b>not</b> publicly reachable — it only accepts
+      connections from inside BTP's Cloud Foundry runtime.  Set an
+      override here when you're tunnelling via <code>cf ssh</code> from
+      a developer machine.  See
+      <code>tools/btp_ssh_bridge/README.md</code> for the recipe.
+      <br><br>
+      <b>Scope:</b> in-memory only, applies to every PP-impersonation
+      probe started from this SAPMAP process until you Clear it or
+      restart the app.  Server-side, no token bytes involved.
+    </div>
+    <div class="form-row">
+      <label>Proxy host:port</label>
+      <input type="text" id="btp-proxy-input" placeholder="localhost:20003"
+              style="width:100%;font-family:monospace;font-size:12px">
+    </div>
+    <div id="btp-proxy-status" style="margin-top:10px;font-size:11px"></div>
+    <div class="form-actions">
+      <button class="btn btn-primary" onclick="btpStoreProxyOverride()">Set override</button>
+      <button class="btn" onclick="btpClearProxyOverride()">Clear override</button>
+      <button class="btn" onclick="closeModal('btp-proxy-modal')">Close</button>
     </div>
   </div>
 </div>
@@ -3963,6 +3996,20 @@ async function ctxAction(action) {
         : '(no rule)';
       const internalProxy =
         `connectivityproxy.internal.cf.${region}.hana.ondemand.com:20003`;
+      const overrideActive = (mapState.btp_proxy_override || '').trim();
+      const proxyLine = overrideActive
+        ? overrideActive + '  (override active — Settings → BTP Connectivity Proxy Override to change)'
+        : internalProxy + '  (default; not reachable from outside BTP)';
+      const tunnelHint = overrideActive
+        ? ''
+        : ('\nNOTE: BTP\'s connectivity proxy is NOT publicly reachable —\n'
+            + 'it only accepts traffic from within BTP\'s CF runtime.\n'
+            + 'Set up a tunnel and an override:\n'
+            + '  1. cf ssh -L 20003:' + internalProxy + ' <your-app>\n'
+            + '     (See tools/btp_ssh_bridge/README.md for a ready-made app.)\n'
+            + '  2. Set the override in Settings → BTP Connectivity\n'
+            + '     Proxy Override (persists for the session).\n'
+            + 'Or click Cancel here for a one-shot prompt.\n');
       const msg = (
         'Send a LIVE principal-propagation impersonation probe?\n\n'
         + 'Source : cloud token for region ' + (regions.join(', ') || '(none)') + '\n'
@@ -3970,29 +4017,27 @@ async function ctxAction(action) {
         + 'Via SCC: ' + sccHost + '\n'
         + 'Target : ' + sid + '\n'
         + 'PP rule: ' + ruleStr + '\n'
-        + 'Proxy  : ' + internalProxy + '\n\n'
-        + 'NOTE: BTP\'s connectivity proxy is NOT publicly reachable —\n'
-        + 'it only accepts traffic from within BTP\'s CF runtime.\n'
-        + 'From a developer machine you need a tunnel.  Typical setup:\n'
-        + '  cf ssh -L 20003:' + internalProxy + ' <your-app>\n'
-        + 'Then click Cancel here and re-run with the prompt below to\n'
-        + 'point the probe at localhost:20003.\n\n'
-        + 'The probe is READ-ONLY (GET /sap/bc/ping + whoami).\n'
-        + 'Continue with the default (internal) proxy?');
+        + 'Proxy  : ' + proxyLine + '\n'
+        + tunnelHint
+        + '\nThe probe is READ-ONLY (GET /sap/bc/ping + whoami).\n'
+        + 'Continue?');
       if (!confirm(msg)) {
-        // Offer the override path
-        const override = prompt(
-          'Optional: enter a custom proxy host:port (e.g. localhost:20003 '
-          + 'when tunnelling via cf ssh).  Leave blank to abort.',
-          'localhost:20003');
-        if (!override) break;
+        // One-shot override prompt — useful when the operator hasn't
+        // set the session-wide override yet but has a tunnel running.
+        const oneshot = prompt(
+          'One-shot proxy override (host:port).  Leave blank to abort.\n'
+          + 'For a persistent setting use Settings → BTP Connectivity\n'
+          + 'Proxy Override instead.',
+          overrideActive || 'localhost:20003');
+        if (!oneshot) break;
         await api('POST', `node/${sid}/verify_pp_impersonation`,
-                   {proxy_host: override});
-        showToast('PP impersonation probe started (via ' + override + ')', 'info');
+                   {proxy_host: oneshot});
+        showToast('PP probe started (via ' + oneshot + ')', 'info');
         break;
       }
       await api('POST', `node/${sid}/verify_pp_impersonation`, {});
-      showToast('PP impersonation probe started — watch findings drawer', 'info');
+      const usingProxy = overrideActive || internalProxy;
+      showToast('PP probe started via ' + usingProxy, 'info');
       break;
     }
     case 'set_type': showTypeModal(sid); break;
@@ -5195,6 +5240,67 @@ async function btpClearTokens() {
     '<div class="muted" style="padding:6px;font-size:11px">All BTP tokens '
     + 'cleared.</div>';
   showToast('BTP tokens cleared.', {autoCloseMs: 4000});
+}
+
+// ---- BTP Connectivity-Proxy override (helper for PP live probe) ----
+async function showBtpProxyModal() {
+  const m = document.getElementById('btp-proxy-modal');
+  document.getElementById('btp-proxy-status').innerHTML = '';
+  // Prefill with whatever the server says is currently set; fall back
+  // to localhost:20003 (the conventional cf-ssh tunnel target).
+  let current = '';
+  try {
+    const r = await fetch('/api/btp/proxy_override',
+                          {method: 'GET'}).then(r => r.json());
+    current = (r && r.proxy_host) || '';
+  } catch (_) { /* network blip — keep default */ }
+  document.getElementById('btp-proxy-input').value =
+    current || 'localhost:20003';
+  if (current) {
+    document.getElementById('btp-proxy-status').innerHTML =
+      '<div style="color:#3fb950">&#10004; Active override: <code>'
+      + escHtml(current) + '</code></div>';
+  } else {
+    document.getElementById('btp-proxy-status').innerHTML =
+      '<div style="color:#8b949e">No override set — probe will use '
+      + 'the internal BTP proxy hostname (only reachable from inside '
+      + 'BTP\'s CF runtime).</div>';
+  }
+  m.classList.add('visible');
+}
+
+async function btpStoreProxyOverride() {
+  const v = (document.getElementById('btp-proxy-input').value || '').trim();
+  if (!v) {
+    document.getElementById('btp-proxy-status').innerHTML =
+      '<div style="color:#f0883e">Enter a host:port (or use Clear).</div>';
+    return;
+  }
+  const r = await fetch('/api/btp/proxy_override', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({proxy_host: v}),
+  }).then(r => r.json());
+  if (r && r.ok) {
+    document.getElementById('btp-proxy-status').innerHTML =
+      '<div style="color:#3fb950">&#10004; Override set: <code>'
+      + escHtml(v) + '</code></div>';
+    showToast('PP-probe connectivity proxy → ' + v, {autoCloseMs: 4000});
+  } else {
+    document.getElementById('btp-proxy-status').innerHTML =
+      '<div style="color:#f85149">Failed: ' + escHtml((r && r.error) || '?')
+      + '</div>';
+  }
+}
+
+async function btpClearProxyOverride() {
+  await fetch('/api/btp/proxy_override',
+              {method: 'DELETE'}).then(r => r.json());
+  document.getElementById('btp-proxy-input').value = '';
+  document.getElementById('btp-proxy-status').innerHTML =
+    '<div style="color:#8b949e">Override cleared — probe will use the '
+    + 'internal BTP proxy hostname again.</div>';
+  showToast('PP-probe proxy override cleared.', {autoCloseMs: 4000});
 }
 
 async function btpPullForToken(region) {

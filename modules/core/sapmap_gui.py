@@ -833,6 +833,13 @@ class SAPMAPApi:
         # operator pasting a new token for the same region replaces
         # the previous one.  A blank token clears the slot.
         self.btp_tokens: dict = {}
+        # BTP connectivity-proxy override.  Set by the operator via
+        # Settings → BTP Connectivity Proxy Override (or per-call body
+        # param).  Used by the PP-impersonation live probe — empty =
+        # use the default internal hostname (only reachable from
+        # inside BTP CF runtime); non-empty = a host:port the
+        # operator has tunnelled to via ``cf ssh``.
+        self.btp_proxy_override: str = ""
 
     def start_scan(self, config):
         if self.scan_running:
@@ -973,6 +980,7 @@ class SAPMAPApi:
         # list of regions for which a token is in memory — used to
         # gate the PP-impersonation-verify menu item.
         d["btp_token_regions"] = list((self.btp_tokens or {}).keys())
+        d["btp_proxy_override"] = self.btp_proxy_override or ""
         return d
 
 
@@ -3153,14 +3161,21 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 "cf oauth-token first"})
 
         keep = bool(data.get("keep_destination", False))
-        # Per-call connectivity-proxy override.  Operator typically
-        # sets this when tunnelling the probe through ``cf ssh`` from
-        # a developer workstation (the internal connectivity proxy
-        # isn't publicly reachable).  Stored as an env var so the
-        # underlying probe picks it up.
+        # Connectivity-proxy override.  Resolution priority:
+        #   1. per-request body param (one-shot override)
+        #   2. server-wide setting on api.btp_proxy_override
+        #   3. fall back to the default internal hostname (probe will
+        #      timeout from outside BTP and print the cf-ssh hint).
+        # Set via env var because the probe reads SAPMAP_BTP_PROXY
+        # from there — that path is already covered by the unit
+        # tests for the probe module.
         proxy_override = (data.get("proxy_host") or "").strip()
+        if not proxy_override:
+            proxy_override = (api.btp_proxy_override or "").strip()
         if proxy_override:
             os.environ["SAPMAP_BTP_PROXY"] = proxy_override
+        else:
+            os.environ.pop("SAPMAP_BTP_PROXY", None)
 
         def _run():
             _task_start(f"{sid}:verify_pp",
@@ -6835,6 +6850,39 @@ def create_app(api: SAPMAPApi) -> Bottle:
         response.content_type = "application/json"
         return json.dumps({"ok": True,
                            "regions": list(api.btp_tokens.keys())})
+
+    @app.route("/api/btp/proxy_override", method="GET")
+    def btp_get_proxy_override():
+        """Return the current connectivity-proxy override (or '')."""
+        response.content_type = "application/json"
+        return json.dumps({"ok": True,
+                           "proxy_host": api.btp_proxy_override or ""})
+
+    @app.route("/api/btp/proxy_override", method="POST")
+    def btp_set_proxy_override():
+        """Set the connectivity-proxy override used by the PP-
+        impersonation live probe.  Stored in process memory only —
+        wiped on restart, never written to disk.
+
+        Body: ``{"proxy_host": "localhost:20003"}``
+        """
+        response.content_type = "application/json"
+        data = request.json or {}
+        v = (data.get("proxy_host") or "").strip()
+        if not v:
+            return json.dumps({"ok": False,
+                               "error": "proxy_host required"})
+        api.btp_proxy_override = v
+        print(f"[*] BTP connectivity-proxy override set: {v!r}")
+        return json.dumps({"ok": True, "proxy_host": v})
+
+    @app.route("/api/btp/proxy_override", method="DELETE")
+    def btp_clear_proxy_override():
+        """Clear the connectivity-proxy override."""
+        response.content_type = "application/json"
+        api.btp_proxy_override = ""
+        print("[*] BTP connectivity-proxy override cleared")
+        return json.dumps({"ok": True, "proxy_host": ""})
 
     @app.route("/api/btp/pull_destinations_for_token", method="POST")
     def btp_pull_destinations_for_token():
