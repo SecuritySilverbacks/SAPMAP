@@ -205,6 +205,57 @@ def test_verify_pp_returns_auth_rejected_on_401():
     assert "401" in (out.get("error") or "")
 
 
+def test_verify_pp_logs_verdict_line_on_no_status_path(capsys):
+    """Regression: when the probe returns with no HTTP status (e.g.
+    proxy closed the connection without responding), the operator
+    must still see a single ``[-] PP-verify ...`` line — earlier
+    versions exited silently after the ``[*] probing...`` line."""
+    from sap_pp_probe import verify_pp
+    state, sub_uuid = _mock_state_with_pp_dest()
+    fake_cfg = {"ok": True, "url": "http://10.0.0.5:8080",
+                "auth_tokens": [], "destination": {}, "raw": {}, "error": ""}
+    fake_primary = {
+        "status": 0, "headers": {}, "body_snippet": "",
+        "latency_ms": 5,
+        "error": "OSError: connection reset by peer",
+        "proxy_host": "localhost", "proxy_port": 20003,
+    }
+    with patch("sap_pp_probe.fetch_destination_config", return_value=fake_cfg), \
+         patch("sap_pp_probe.http_probe_via_connectivity_proxy",
+               return_value=fake_primary):
+        out = verify_pp(state, _node(), _scc(), sub_uuid,
+                         token=_fake_jwt("eu10"), cleanup_after=False)
+    assert out["verdict"] == "tunnel_unreachable"
+    captured = capsys.readouterr().out
+    assert "[-] PP-verify" in captured
+    assert "probe failed" in captured
+    assert "localhost:20003" in captured
+
+
+def test_verify_pp_verified_at_always_set():
+    """verified_at must be populated on every return path so the
+    findings dedupe sees a unique timestamp suffix per attempt."""
+    from sap_pp_probe import verify_pp
+    state, sub_uuid = _mock_state_with_pp_dest()
+    fake_cfg = {"ok": True, "url": "http://10.0.0.5:8080",
+                "auth_tokens": [], "destination": {}, "raw": {}, "error": ""}
+    fake_primary = {
+        "status": 0, "headers": {}, "body_snippet": "",
+        "latency_ms": 5,
+        "error": "TimeoutError: timed out",
+        "proxy_host": "localhost", "proxy_port": 20003,
+    }
+    with patch("sap_pp_probe.fetch_destination_config", return_value=fake_cfg), \
+         patch("sap_pp_probe.http_probe_via_connectivity_proxy",
+               return_value=fake_primary):
+        out = verify_pp(state, _node(), _scc(), sub_uuid,
+                         token=_fake_jwt("eu10"), cleanup_after=False)
+    assert out["verified_at"], (
+        "verified_at must be set even on the tunnel_unreachable "
+        "early-return so the route handler can append it to the "
+        "emit_finding message and bypass dedupe.")
+
+
 def test_verify_pp_returns_tunnel_unreachable_when_connect_fails():
     from sap_pp_probe import verify_pp
     state, sub_uuid = _mock_state_with_pp_dest()

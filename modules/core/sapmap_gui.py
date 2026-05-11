@@ -3187,6 +3187,14 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     token, cleanup_after=(not keep))
                 node.pp_verification = bundle
                 node.pp_verification_confirmed = bool(bundle.get("ok"))
+                # Include the probe's verified_at timestamp in the
+                # message so emit_finding's 60-second dedupe window
+                # doesn't swallow repeated probe attempts — operators
+                # routinely run the action multiple times in close
+                # succession while tuning the tunnel/destination, and
+                # need to see every result.
+                vat = bundle.get("verified_at") or ""
+                stamp = f" [{vat}]" if vat else ""
                 if bundle.get("ok"):
                     user = bundle.get("user") or "<unknown user>"
                     conf = bundle.get("confidence") or "MEDIUM"
@@ -3197,24 +3205,25 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         f"ABAP user {user!r} "
                         f"(confidence {conf}, "
                         f"HTTP {bundle.get('http_status','?')}, "
-                        f"{bundle.get('latency_ms','?')} ms).",
+                        f"{bundle.get('latency_ms','?')} ms)." + stamp,
                         ref="scc.pp.impersonation.confirmed",
                         meta={"scc_host": scc_node.host,
                               "user": user,
                               "confidence": conf,
                               "destination": bundle.get("destination_used", ""),
-                              "verified_at": bundle.get("verified_at", "")})
+                              "verified_at": vat})
                 else:
                     verdict = bundle.get("verdict") or "?"
                     sapmap_findings.emit_finding(
                         "INFO", sid,
                         f"PP impersonation probe on {sid} via SCC "
                         f"{scc_node.host}: {verdict} — "
-                        f"{bundle.get('error','no detail')}",
+                        f"{bundle.get('error','no detail')}" + stamp,
                         ref=f"scc.pp.impersonation.probe.{verdict}",
                         meta={"scc_host": scc_node.host,
                               "verdict": verdict,
-                              "error": bundle.get("error", "")})
+                              "error": bundle.get("error", ""),
+                              "verified_at": vat})
             except Exception as e:
                 print(f"[-] {sid}: verify_pp_impersonation failed: {e}")
             finally:
