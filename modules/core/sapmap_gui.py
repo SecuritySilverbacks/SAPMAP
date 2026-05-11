@@ -3153,6 +3153,14 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 "cf oauth-token first"})
 
         keep = bool(data.get("keep_destination", False))
+        # Per-call connectivity-proxy override.  Operator typically
+        # sets this when tunnelling the probe through ``cf ssh`` from
+        # a developer workstation (the internal connectivity proxy
+        # isn't publicly reachable).  Stored as an env var so the
+        # underlying probe picks it up.
+        proxy_override = (data.get("proxy_host") or "").strip()
+        if proxy_override:
+            os.environ["SAPMAP_BTP_PROXY"] = proxy_override
 
         def _run():
             _task_start(f"{sid}:verify_pp",

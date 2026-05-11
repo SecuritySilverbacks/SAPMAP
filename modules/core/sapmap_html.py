@@ -3956,23 +3956,41 @@ async function ctxAction(action) {
       const sn2 = (mapState.scc_nodes || {})[sccHost] || {};
       const subUuid = (sn2.subaccount_uuids || [])[0] || '';
       const regions = mapState.btp_token_regions || [];
+      const region = regions[0] || '<region>';
       const rule = ((sn2.pp_analysis || {}).pp_config || {}).subject_patterns;
       const ruleStr = rule && rule[0]
         ? ((rule[0].dn_entries || []).map(e => `${e.key}=${e.value}`).join(', '))
         : '(no rule)';
+      const internalProxy =
+        `connectivityproxy.internal.cf.${region}.hana.ondemand.com:20003`;
       const msg = (
         'Send a LIVE principal-propagation impersonation probe?\n\n'
         + 'Source : cloud token for region ' + (regions.join(', ') || '(none)') + '\n'
         + 'Subacc : ' + (subUuid ? subUuid.slice(0, 8) + '…' : '(none)') + '\n'
         + 'Via SCC: ' + sccHost + '\n'
         + 'Target : ' + sid + '\n'
-        + 'PP rule: ' + ruleStr + '\n\n'
-        + 'SAPMAP will (a) find or create a PrincipalPropagation\n'
-        + 'destination, (b) GET /sap/bc/ping through the BTP\n'
-        + 'connectivity proxy, (c) probe a whoami endpoint for the\n'
-        + 'impersonated user, and (d) delete any temporary destination.\n\n'
-        + 'The probe is READ-ONLY. Continue?');
-      if (!confirm(msg)) break;
+        + 'PP rule: ' + ruleStr + '\n'
+        + 'Proxy  : ' + internalProxy + '\n\n'
+        + 'NOTE: BTP\'s connectivity proxy is NOT publicly reachable —\n'
+        + 'it only accepts traffic from within BTP\'s CF runtime.\n'
+        + 'From a developer machine you need a tunnel.  Typical setup:\n'
+        + '  cf ssh -L 20003:' + internalProxy + ' <your-app>\n'
+        + 'Then click Cancel here and re-run with the prompt below to\n'
+        + 'point the probe at localhost:20003.\n\n'
+        + 'The probe is READ-ONLY (GET /sap/bc/ping + whoami).\n'
+        + 'Continue with the default (internal) proxy?');
+      if (!confirm(msg)) {
+        // Offer the override path
+        const override = prompt(
+          'Optional: enter a custom proxy host:port (e.g. localhost:20003 '
+          + 'when tunnelling via cf ssh).  Leave blank to abort.',
+          'localhost:20003');
+        if (!override) break;
+        await api('POST', `node/${sid}/verify_pp_impersonation`,
+                   {proxy_host: override});
+        showToast('PP impersonation probe started (via ' + override + ')', 'info');
+        break;
+      }
       await api('POST', `node/${sid}/verify_pp_impersonation`, {});
       showToast('PP impersonation probe started — watch findings drawer', 'info');
       break;

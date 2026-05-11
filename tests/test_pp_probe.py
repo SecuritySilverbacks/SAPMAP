@@ -260,6 +260,78 @@ def test_verify_pp_creates_temp_destination_when_none_exists():
 
 
 # ===========================================================================
+# Connectivity-proxy resolution
+# ===========================================================================
+
+def test_resolve_proxy_endpoint_defaults_to_internal_hostname():
+    """No override → use the documented internal CF hostname.  This
+    won't resolve from outside BTP, but the verify_pp orchestrator
+    catches the timeout and surfaces the cf-ssh workaround."""
+    from sap_pp_probe import _resolve_proxy_endpoint
+    h, p = _resolve_proxy_endpoint("eu10", use_tls=False)
+    assert h == "connectivityproxy.internal.cf.eu10.hana.ondemand.com"
+    assert p == 20003
+    h, p = _resolve_proxy_endpoint("eu10", use_tls=True)
+    assert p == 20004
+
+
+def test_resolve_proxy_endpoint_env_override_host_only(monkeypatch):
+    """SAPMAP_BTP_PROXY=localhost → host=localhost, port default."""
+    from sap_pp_probe import _resolve_proxy_endpoint
+    monkeypatch.setenv("SAPMAP_BTP_PROXY", "localhost")
+    h, p = _resolve_proxy_endpoint("eu10", use_tls=False)
+    assert h == "localhost"
+    assert p == 20003
+
+
+def test_resolve_proxy_endpoint_env_override_host_and_port(monkeypatch):
+    """SAPMAP_BTP_PROXY=localhost:20003 — cf-ssh tunnel pattern."""
+    from sap_pp_probe import _resolve_proxy_endpoint
+    monkeypatch.setenv("SAPMAP_BTP_PROXY", "localhost:20003")
+    h, p = _resolve_proxy_endpoint("eu10", use_tls=False)
+    assert h == "localhost"
+    assert p == 20003
+
+
+def test_resolve_proxy_endpoint_env_override_bad_port_falls_back(monkeypatch):
+    """Malformed port suffix → take the whole thing as host, fall back
+    to the default port."""
+    from sap_pp_probe import _resolve_proxy_endpoint
+    monkeypatch.setenv("SAPMAP_BTP_PROXY", "proxy.example.com:notaport")
+    h, p = _resolve_proxy_endpoint("eu10", use_tls=False)
+    # Falls back to default port; host kept as the literal string
+    assert p == 20003
+
+
+def test_verify_pp_tunnel_unreachable_surfaces_cf_ssh_hint():
+    """When the CONNECT phase times out, the orchestrator's error
+    message should mention the cf-ssh tunnel workaround so the
+    operator can act on it without having to re-read SAP docs."""
+    from sap_pp_probe import verify_pp
+    state, sub_uuid = _mock_state_with_pp_dest()
+    fake_cfg = {"ok": True, "url": "http://10.0.0.5:8080",
+                "auth_tokens": [], "destination": {}, "raw": {}, "error": ""}
+    fake_primary = {
+        "status": 0, "headers": {}, "body_snippet": "",
+        "latency_ms": 0,
+        "error": "TimeoutError: timed out",
+        "connect_status": 0, "connect_error": "TimeoutError: timed out",
+        "proxy_host": "connectivityproxy.internal.cf.eu10.hana.ondemand.com",
+        "proxy_port": 20003,
+    }
+    with patch("sap_pp_probe.fetch_destination_config", return_value=fake_cfg), \
+         patch("sap_pp_probe.http_probe_via_connectivity_proxy",
+               return_value=fake_primary):
+        out = verify_pp(state, _node(), _scc(), sub_uuid,
+                         token=_fake_jwt("eu10"), cleanup_after=False)
+    assert out["verdict"] == "tunnel_unreachable"
+    err = out["error"]
+    assert "cf ssh" in err.lower()
+    assert "SAPMAP_BTP_PROXY" in err
+    assert "20003" in err
+
+
+# ===========================================================================
 # Test helpers
 # ===========================================================================
 
