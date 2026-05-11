@@ -113,3 +113,55 @@ def test_read_table_typed_struct_rows_still_work(monkeypatch):
             long_strings=True)
     assert len(rows) == 1
     assert rows[0]["BNAME"] == "DDIC"
+
+
+def test_read_table_typed_struct_lowercase_keys(monkeypatch):
+    """Regression for the S4H operator bug: kernel returned ET_DATA
+    rows as typed structs with lowercase column names — our case-
+    sensitive lookup missed them and emitted empty dicts.  The fix
+    normalises lookup to uppercase before comparing."""
+    import sapmap_rfc
+    rfc_result = {
+        "FIELDS":  [],
+        "ET_DATA": [
+            {"mandt": "001", "bname": "DDIC",
+             "extid": "joris.vdvis@securitybridge.com",
+             "type":  "DN", "seqno": "000"},
+            {"mandt": "001", "bname": "JORIS",
+             "extid": "joris@example.com",
+             "type":  "LD", "seqno": "000"},
+        ],
+    }
+    with _fake_conn(rfc_result) as ctx_factory:
+        monkeypatch.setattr(sapmap_rfc, "_get_connection", ctx_factory)
+        rows = sapmap_rfc.read_table(
+            _node(), "USREXTID",
+            fields=["MANDT", "BNAME", "EXTID", "TYPE", "SEQNO"],
+            long_strings=True)
+    assert len(rows) == 2
+    assert rows[0]["BNAME"] == "DDIC"
+    assert rows[0]["EXTID"] == "joris.vdvis@securitybridge.com"
+    assert rows[0]["TYPE"] == "DN"
+    assert rows[1]["BNAME"] == "JORIS"
+    assert rows[1]["TYPE"] == "LD"
+
+
+def test_read_table_typed_struct_with_wa_present_but_no_delim(monkeypatch):
+    """Edge case: kernel returns BOTH a WA (empty / non-delimited) and
+    typed-struct keys.  Parser should prefer the typed-struct payload
+    so the columns get populated correctly."""
+    import sapmap_rfc
+    rfc_result = {
+        "FIELDS":  [],
+        "ET_DATA": [
+            {"WA": "", "BNAME": "DDIC", "EXTID": "x",
+             "TYPE": "DN", "MANDT": "001", "SEQNO": "0"},
+        ],
+    }
+    with _fake_conn(rfc_result) as ctx_factory:
+        monkeypatch.setattr(sapmap_rfc, "_get_connection", ctx_factory)
+        rows = sapmap_rfc.read_table(
+            _node(), "USREXTID",
+            fields=["MANDT", "BNAME", "EXTID", "TYPE", "SEQNO"],
+            long_strings=True)
+    assert rows[0]["BNAME"] == "DDIC"
