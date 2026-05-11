@@ -2078,19 +2078,41 @@ def read_table(node: SAPNode, table_name: str, fields: list = None,
                                if first else "")
                 print(f"[*] {node.sid}: {table_name} ET_DATA shape — "
                       f"{len(data)} row(s); row[0] keys: {shape_keys}; "
-                      f"WA[:120]: {wa_preview!r}")
+                      f"WA[:120]: {wa_preview!r}; "
+                      f"field_names: {field_names}")
+
+            # Two ET_DATA shapes seen in the wild:
+            #   1. {"WA": "val1|val2|val3"} — standard delimited (older
+            #      kernels and DATA fallback).
+            #   2. {"CLIENT_UUID": "AABB", "CLIENT_ID": "cid", …}
+            #      — typed-struct rows keyed by column name.  Some S/4
+            #      patches return this when USE_ET_DATA_4_RETURN='X'.
+            #      Key casing varies: uppercase (most kernels), lower
+            #      (some pyrfc bindings), and PascalCase (rare).  Match
+            #      case-insensitively so we don't silently emit empty
+            #      row dicts when the kernel is being fancy.
+            def _typed_struct_lookup(row_keys_lc, row, fname):
+                k = row_keys_lc.get(fname.upper())
+                if k is None:
+                    return None
+                return row.get(k)
+
             for row in data:
-                wa = row.get("WA", "")
-                # Two ET_DATA shapes seen in the wild:
-                #   1. {"WA": "val1|val2|val3"} — standard delimited
-                #   2. {"CLIENT_UUID": "AABB", "CLIENT_ID": "cid", …}
-                #      — typed-struct rows keyed by column name
-                #      (some S/4 patches return this when
-                #      USE_ET_DATA_4_RETURN is honoured).
-                if not wa and any(fn in row for fn in field_names):
+                if not isinstance(row, dict):
+                    continue
+                wa = row.get("WA", "") or row.get("Wa", "") or row.get("wa", "")
+                row_keys_lc = {k.upper(): k for k in row.keys()
+                                if isinstance(k, str)}
+                # Detect typed-struct rows: any of our requested fields
+                # appears as a row key (case-insensitive).
+                typed_match = any(fn.upper() in row_keys_lc
+                                   for fn in field_names)
+                if typed_match and (not wa or "|" not in wa):
                     row_dict = {}
                     for fname in field_names:
-                        v = row.get(fname, "")
+                        v = _typed_struct_lookup(row_keys_lc, row, fname)
+                        if v is None:
+                            v = ""
                         row_dict[fname] = (v.strip() if isinstance(v, str)
                                             else v)
                     rows.append(row_dict)
@@ -2103,6 +2125,26 @@ def read_table(node: SAPNode, table_name: str, fields: list = None,
                     else:
                         row_dict[fname] = ""
                 rows.append(row_dict)
+
+            # Sanity check — if EVERY parsed row has all-empty values
+            # for the requested fields, our parser missed the schema.
+            # Print a loud diagnostic so the operator can capture the
+            # raw ET_DATA shape and report it.  We do NOT retry
+            # automatically here (the caller should — e.g.
+            # download_usrextid has a long_strings → MANDT/BNAME-only
+            # fallback that survives this).
+            if long_strings and rows and fields and all(
+                    not any((r.get(f) or "").strip() for f in fields)
+                    for r in rows):
+                from sapmap_errors import format_rfc_exception  # noqa
+                logger.error(
+                    f"{table_name}@{node.sid}: long_strings parse "
+                    f"produced empty rows — ET_DATA shape did not "
+                    f"match either delimited-WA or typed-struct form.")
+                if not quiet:
+                    print(f"[!] {node.sid}: {table_name} long_strings "
+                          f"parse produced empty rows.  Raw ET_DATA "
+                          f"row[0] = {data[0]!r}.")
 
     except Exception as e:
         from sapmap_errors import format_rfc_exception
@@ -2399,10 +2441,25 @@ def download_usrextid(node: SAPNode, creds: Credentials = None,
         fields=["MANDT", "BNAME", "EXTID", "TYPE", "SEQNO"],
         creds=creds, max_rows=max_rows,
         long_strings=True)
-    if rows:
+
+    # Sanity: even when long_strings returned rows, the parser may have
+    # produced empty dicts on a kernel that returns ET_DATA in some
+    # unrecognised shape.  Detect that and treat as "no rows" so the
+    # fallback fires.
+    has_usable_bname = any((r.get("BNAME") or "").strip()
+                            for r in (rows or []))
+    if rows and has_usable_bname:
         return rows
+    if rows and not has_usable_bname:
+        print(f"[!] {node.sid}: USREXTID long_strings returned "
+              f"{len(rows)} row(s) but BNAME is empty in all of them — "
+              f"parser couldn't match the ET_DATA shape.  Falling back "
+              f"to a narrower DATA-mode read (EXTID will be truncated).")
+
     # Fallback: probe without EXTID so we at least know whether the
-    # table is empty or just too wide for this kernel's buffer.
+    # table is empty or just too wide for this kernel's buffer.  The
+    # 3-column WA fits in the 512-byte buffer no matter what, so we
+    # always get usable BNAME / TYPE.
     fallback = read_table(
         node, "USREXTID",
         fields=["MANDT", "BNAME", "TYPE"],
@@ -2410,13 +2467,30 @@ def download_usrextid(node: SAPNode, creds: Credentials = None,
         quiet=True)
     if not fallback:
         return []
-    print(f"[!] {node.sid}: USREXTID full read returned 0 rows, but "
-          f"a MANDT/BNAME probe found {len(fallback)} entries — kernel "
-          f"likely ignores USE_ET_DATA_4_RETURN.  EXTID values are "
-          f"truncated in the fallback view.")
+    # Now try to fetch EXTID values per BNAME so the operator still
+    # sees something useful, even if truncated.  Same kernel, but with
+    # a tight WHERE — each row's WA only carries (MANDT|EXTID|SEQNO)
+    # which is well under the buffer cap when EXTID is bounded.
+    extids = read_table(
+        node, "USREXTID",
+        fields=["MANDT", "BNAME", "EXTID", "SEQNO"],
+        creds=creds, max_rows=max_rows,
+        quiet=True)
+    extid_map = {}
+    for r in (extids or []):
+        key = (r.get("MANDT", ""), r.get("BNAME", ""), r.get("SEQNO", ""))
+        ev = (r.get("EXTID") or "").strip()
+        if ev:
+            extid_map[key] = ev
+    print(f"[!] {node.sid}: USREXTID fallback read — "
+          f"{len(fallback)} BNAME/TYPE row(s), "
+          f"{len(extid_map)} EXTID payload(s) recovered.")
     for r in fallback:
-        r["EXTID"] = "(truncated — kernel does not honour ET_DATA)"
-        r["SEQNO"] = ""
+        key = (r.get("MANDT", ""), r.get("BNAME", ""),
+               r.get("SEQNO", ""))
+        r["EXTID"] = extid_map.get(key, "(EXTID unreadable — "
+                                          "wide field, kernel quirk)")
+        r["SEQNO"] = r.get("SEQNO", "")
     return fallback
 
 
