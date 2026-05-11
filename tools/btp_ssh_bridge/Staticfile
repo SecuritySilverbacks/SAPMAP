@@ -1,0 +1,6 @@
+# Minimal Cloud Foundry staticfile_buildpack config.
+# Nginx serves the directory contents on $PORT.  We don't actually
+# care about the served content — the app exists only so we can
+# ``cf ssh`` into it.
+root: .
+directory: visible
