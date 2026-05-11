@@ -44,7 +44,7 @@ SecStore decrypt, BAPI user creation.
 - **Exploit:** CL.TE or TE.CL desync against ICM on port 80NN / 44NN. Smuggle a request that hits an authenticated path by prepending to the victim's session. Weaponizable as: (a) leak SSO cookies / MYSAPSSO2 tickets, (b) hit `/sap/bc/gui/sap/its/webgui` authenticated to run transactions, (c) replay against `/sap/bc/soap/rfc`.
 - **PoC:** Multiple on GitHub — [ZZ-SOCMAP/CVE-2022-22536](https://github.com/ZZ-SOCMAP/CVE-2022-22536), antx-code/CVE-2022-22536, BecodoExploit-mrCAT/SAPGateBreaker-Exploit, errorfiathck/icmad-exploit; Onapsis "ICMAD" writeup; CISA KEV-listed.
 - **Patch status 2026:** Patch released Feb 2022. Despite age, SAPMAP-typical engagements still find unpatched Content Server and older Web Dispatcher instances because they sit in DMZ/isolated tiers that miss the main ABAP patch cycle.
-- **Fit:** **HIGH.** ICMAD steals live sessions that SAPMAP pivots into existing BAPI/RFC primitives. Pure stdlib HTTP, no SAP protocols. Small effort (~200 LOC) — new `sap_cve_2022_22536.py`.
+- **Fit:** **HIGH** — but *not* for session theft (no public PoC reproduces that; race-bound, unreliable on engagement day). The realistic primitive is **ACL bypass via loopback-trusted smuggled inner request**, chaining to `/heapdump/` → SecStore-key recovery (existing SAPMAP primitive) and `/CTC/ConfigServlet` (RCE on unpatched J2EE). Pure stdlib HTTP, no SAP protocols. ~350 LOC over 3–4 days. **See implementation plan in [`10_icmad_implementation_plan.md`](10_icmad_implementation_plan.md).**
 
 ### 5. SAP Management Console (sapstartsrv) `OSExecute` — authenticated OS-cmd via SOAP
 
@@ -186,7 +186,7 @@ A SAPMAP extension that tries the **authenticated RFC code-injection sweep** (gi
 
 | # | Add | Capability | Effort |
 |---|---|---|---|
-| 1 | **CVE-2022-22536 ICMAD smuggler** | Unauth session-hijack → hijacked SSO ticket into RFC engine. Widest reach. | **Small** ~200 LOC |
+| 1 | **CVE-2022-22536 ICMAD smuggler** ([plan](10_icmad_implementation_plan.md)) | Unauth **ACL bypass** to internal admin surface — `/heapdump/` → SecStore key → JCo decrypt chain. Widest reach. (Session-hijack framing deprecated — see plan §A.) | **Small** ~350 LOC, 3–4 days |
 | 2 | **CVE-2025-42999 chain into 31324** | Patch-tail exploitation 12+ months. Reuses upload primitive. | **Small** ~150 LOC |
 | 3 | **CVE-2025-42957 DMIS as `@lpe_method`** | Turns SAPMAP00 into SAP_ALL on S/4HANA. Actively exploited. | **Small** ~150 LOC |
 | 4 | **CVE-2025-42944 P4 module + port fingerprint** | Second unauth Java RCE. Internal-segment lateral gold. | **Medium** ~400-500 LOC |
