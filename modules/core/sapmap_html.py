@@ -976,11 +976,11 @@ body {
 
 <!-- BTP Connectivity Proxy Override Modal -->
 <div class="modal-overlay" id="btp-proxy-modal">
-  <div class="modal" style="max-width:680px;width:95vw">
+  <div class="modal" style="max-width:720px;width:95vw">
     <h3>&#9729;&#65039; BTP — Connectivity Proxy Override</h3>
     <div style="font-size:12px;color:#8b949e;margin-bottom:12px">
-      The PP-impersonation live probe drives an HTTP CONNECT through
-      BTP's connectivity proxy:
+      The PP-impersonation live probe drives a forward-proxy HTTP
+      request through BTP's connectivity proxy:
       <code>connectivityproxy.internal.cf.&lt;region&gt;.hana.ondemand.com:20003</code>.
       That hostname is <b>not</b> publicly reachable — it only accepts
       connections from inside BTP's Cloud Foundry runtime.  Set an
@@ -988,19 +988,33 @@ body {
       a developer machine.  See
       <code>tools/btp_ssh_bridge/README.md</code> for the recipe.
       <br><br>
-      <b>Scope:</b> in-memory only, applies to every PP-impersonation
-      probe started from this SAPMAP process until you Clear it or
-      restart the app.  Server-side, no token bytes involved.
+      The proxy <b>also</b> wants a Connectivity-service-bound JWT for
+      its <code>Proxy-Authorization</code> header.  If the probe returns
+      HTTP 407, paste a connectivity-service token below — get it by
+      binding the Connectivity service to the bridge app, cf-ssh-ing
+      in, and running a <code>client_credentials</code> curl call
+      against the bound UAA.
+      <br><br>
+      <b>Scope:</b> both fields are in-memory only, wiped on restart,
+      never written to disk.
     </div>
     <div class="form-row">
       <label>Proxy host:port</label>
       <input type="text" id="btp-proxy-input" placeholder="localhost:20003"
               style="width:100%;font-family:monospace;font-size:12px">
     </div>
+    <div class="form-row" style="margin-top:10px">
+      <label>Connectivity-service JWT
+        <span style="color:#8b949e;font-size:10px">(Proxy-Authorization, optional)</span>
+      </label>
+      <textarea id="btp-proxy-auth-input" rows="3"
+                placeholder="eyJhbGciOiJSUzI1NiIs... (only needed when probe returns HTTP 407)"
+                style="width:100%;font-family:monospace;font-size:11px"></textarea>
+    </div>
     <div id="btp-proxy-status" style="margin-top:10px;font-size:11px"></div>
     <div class="form-actions">
-      <button class="btn btn-primary" onclick="btpStoreProxyOverride()">Set override</button>
-      <button class="btn" onclick="btpClearProxyOverride()">Clear override</button>
+      <button class="btn btn-primary" onclick="btpStoreProxyOverride()">Save</button>
+      <button class="btn" onclick="btpClearProxyOverride()">Clear all</button>
       <button class="btn" onclick="closeModal('btp-proxy-modal')">Close</button>
     </div>
   </div>
@@ -5264,46 +5278,68 @@ async function btpClearTokens() {
 async function showBtpProxyModal() {
   const m = document.getElementById('btp-proxy-modal');
   document.getElementById('btp-proxy-status').innerHTML = '';
-  // Prefill with whatever the server says is currently set; fall back
-  // to localhost:20003 (the conventional cf-ssh tunnel target).
+  document.getElementById('btp-proxy-auth-input').value = '';
   let current = '';
+  let authPresent = false;
   try {
     const r = await fetch('/api/btp/proxy_override',
                           {method: 'GET'}).then(r => r.json());
     current = (r && r.proxy_host) || '';
-  } catch (_) { /* network blip — keep default */ }
+    authPresent = !!(r && r.proxy_auth_token_present);
+  } catch (_) { /* network blip — keep defaults */ }
   document.getElementById('btp-proxy-input').value =
     current || 'localhost:20003';
-  if (current) {
+  if (authPresent) {
+    document.getElementById('btp-proxy-auth-input').placeholder =
+      'A connectivity-service token IS already stored (not shown for safety). '
+      + 'Paste a new one to replace it, or use Clear all.';
+  }
+  const bits = [];
+  if (current)
+    bits.push('Proxy host:port: <code>' + escHtml(current) + '</code>');
+  if (authPresent)
+    bits.push('Connectivity-service token: stored');
+  if (bits.length) {
     document.getElementById('btp-proxy-status').innerHTML =
-      '<div style="color:#3fb950">&#10004; Active override: <code>'
-      + escHtml(current) + '</code></div>';
+      '<div style="color:#3fb950">&#10004; Active: '
+      + bits.join('; ') + '</div>';
   } else {
     document.getElementById('btp-proxy-status').innerHTML =
-      '<div style="color:#8b949e">No override set — probe will use '
-      + 'the internal BTP proxy hostname (only reachable from inside '
-      + 'BTP\'s CF runtime).</div>';
+      '<div style="color:#8b949e">Nothing set — probe will use the '
+      + 'internal BTP proxy hostname AND the user JWT for proxy auth '
+      + '(likely HTTP 407 from outside BTP).</div>';
   }
   m.classList.add('visible');
 }
 
 async function btpStoreProxyOverride() {
-  const v = (document.getElementById('btp-proxy-input').value || '').trim();
-  if (!v) {
+  const host = (document.getElementById('btp-proxy-input').value || '').trim();
+  const auth = (document.getElementById('btp-proxy-auth-input').value || '').trim();
+  if (!host && !auth) {
     document.getElementById('btp-proxy-status').innerHTML =
-      '<div style="color:#f0883e">Enter a host:port (or use Clear).</div>';
+      '<div style="color:#f0883e">Enter a host:port and/or a '
+      + 'connectivity-service JWT.</div>';
     return;
   }
+  const body = {};
+  if (host) body.proxy_host = host;
+  if (auth) body.proxy_auth_token = auth;
   const r = await fetch('/api/btp/proxy_override', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({proxy_host: v}),
+    body: JSON.stringify(body),
   }).then(r => r.json());
   if (r && r.ok) {
+    const lines = [];
+    if (r.proxy_host)
+      lines.push('proxy host: <code>' + escHtml(r.proxy_host) + '</code>');
+    if (r.proxy_auth_token_present)
+      lines.push('connectivity-service token: stored');
     document.getElementById('btp-proxy-status').innerHTML =
-      '<div style="color:#3fb950">&#10004; Override set: <code>'
-      + escHtml(v) + '</code></div>';
-    showToast('PP-probe connectivity proxy → ' + v, {autoCloseMs: 4000});
+      '<div style="color:#3fb950">&#10004; Saved &middot; '
+      + lines.join('; ') + '</div>';
+    document.getElementById('btp-proxy-auth-input').value = '';  // don't leave plaintext in the field
+    showToast('PP-probe settings saved', {autoCloseMs: 4000});
   } else {
     document.getElementById('btp-proxy-status').innerHTML =
       '<div style="color:#f85149">Failed: ' + escHtml((r && r.error) || '?')
@@ -5315,10 +5351,11 @@ async function btpClearProxyOverride() {
   await fetch('/api/btp/proxy_override',
               {method: 'DELETE'}).then(r => r.json());
   document.getElementById('btp-proxy-input').value = '';
+  document.getElementById('btp-proxy-auth-input').value = '';
   document.getElementById('btp-proxy-status').innerHTML =
-    '<div style="color:#8b949e">Override cleared — probe will use the '
-    + 'internal BTP proxy hostname again.</div>';
-  showToast('PP-probe proxy override cleared.', {autoCloseMs: 4000});
+    '<div style="color:#8b949e">All cleared.</div>';
+  showToast('PP-probe proxy override + auth token cleared.',
+            {autoCloseMs: 4000});
 }
 
 async function btpPullForToken(region) {

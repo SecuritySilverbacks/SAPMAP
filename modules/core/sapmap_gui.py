@@ -840,6 +840,11 @@ class SAPMAPApi:
         # inside BTP CF runtime); non-empty = a host:port the
         # operator has tunnelled to via ``cf ssh``.
         self.btp_proxy_override: str = ""
+        # Connectivity-service token for the Proxy-Authorization
+        # header on the live PP probe.  Obtained via the connectivity
+        # service binding's ``client_credentials`` grant — see
+        # tools/btp_ssh_bridge/README.md.  Process-memory only.
+        self.btp_proxy_auth_token: str = ""
 
     def start_scan(self, config):
         if self.scan_running:
@@ -981,6 +986,7 @@ class SAPMAPApi:
         # gate the PP-impersonation-verify menu item.
         d["btp_token_regions"] = list((self.btp_tokens or {}).keys())
         d["btp_proxy_override"] = self.btp_proxy_override or ""
+        d["btp_proxy_auth_token_present"] = bool(self.btp_proxy_auth_token)
         return d
 
 
@@ -3176,6 +3182,14 @@ def create_app(api: SAPMAPApi) -> Bottle:
             os.environ["SAPMAP_BTP_PROXY"] = proxy_override
         else:
             os.environ.pop("SAPMAP_BTP_PROXY", None)
+        # Connectivity-service token for Proxy-Authorization.
+        proxy_auth = (data.get("proxy_auth_token") or "").strip()
+        if not proxy_auth:
+            proxy_auth = (api.btp_proxy_auth_token or "").strip()
+        if proxy_auth:
+            os.environ["SAPMAP_BTP_PROXY_AUTH_TOKEN"] = proxy_auth
+        else:
+            os.environ.pop("SAPMAP_BTP_PROXY_AUTH_TOKEN", None)
 
         def _run():
             _task_start(f"{sid}:verify_pp",
@@ -6862,36 +6876,58 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
     @app.route("/api/btp/proxy_override", method="GET")
     def btp_get_proxy_override():
-        """Return the current connectivity-proxy override (or '')."""
+        """Return the current connectivity-proxy override + whether
+        a connectivity-service auth token is in memory (the token
+        value itself NEVER crosses to the frontend)."""
         response.content_type = "application/json"
-        return json.dumps({"ok": True,
-                           "proxy_host": api.btp_proxy_override or ""})
+        return json.dumps({
+            "ok":               True,
+            "proxy_host":       api.btp_proxy_override or "",
+            "proxy_auth_token_present": bool(api.btp_proxy_auth_token),
+        })
 
     @app.route("/api/btp/proxy_override", method="POST")
     def btp_set_proxy_override():
-        """Set the connectivity-proxy override used by the PP-
-        impersonation live probe.  Stored in process memory only —
-        wiped on restart, never written to disk.
+        """Set the connectivity-proxy override AND/OR the connectivity-
+        service auth token used by the PP-impersonation live probe.
+        Stored in process memory only — wiped on restart, never
+        written to disk.
 
-        Body: ``{"proxy_host": "localhost:20003"}``
+        Body (all optional, at least one required):
+          ``{"proxy_host":       "localhost:20003"}``
+          ``{"proxy_auth_token": "<JWT from connectivity service>"}``
         """
         response.content_type = "application/json"
         data = request.json or {}
-        v = (data.get("proxy_host") or "").strip()
-        if not v:
+        host = (data.get("proxy_host") or "").strip()
+        auth_tok = (data.get("proxy_auth_token") or "").strip()
+        if not host and not auth_tok:
             return json.dumps({"ok": False,
-                               "error": "proxy_host required"})
-        api.btp_proxy_override = v
-        print(f"[*] BTP connectivity-proxy override set: {v!r}")
-        return json.dumps({"ok": True, "proxy_host": v})
+                               "error": "proxy_host and/or "
+                                         "proxy_auth_token required"})
+        if host:
+            api.btp_proxy_override = host
+            print(f"[*] BTP connectivity-proxy override set: {host!r}")
+        if auth_tok:
+            api.btp_proxy_auth_token = auth_tok
+            print(f"[*] BTP connectivity-service auth token stored "
+                  f"({len(auth_tok)} chars)")
+        return json.dumps({
+            "ok":          True,
+            "proxy_host":  api.btp_proxy_override or "",
+            "proxy_auth_token_present": bool(api.btp_proxy_auth_token),
+        })
 
     @app.route("/api/btp/proxy_override", method="DELETE")
     def btp_clear_proxy_override():
-        """Clear the connectivity-proxy override."""
+        """Clear the connectivity-proxy override AND the connectivity-
+        service auth token."""
         response.content_type = "application/json"
         api.btp_proxy_override = ""
-        print("[*] BTP connectivity-proxy override cleared")
-        return json.dumps({"ok": True, "proxy_host": ""})
+        api.btp_proxy_auth_token = ""
+        print("[*] BTP connectivity-proxy override + auth token cleared")
+        return json.dumps({"ok": True, "proxy_host": "",
+                           "proxy_auth_token_present": False})
 
     @app.route("/api/btp/pull_destinations_for_token", method="POST")
     def btp_pull_destinations_for_token():

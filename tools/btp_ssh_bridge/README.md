@@ -62,6 +62,47 @@ Leave that terminal open.  `localhost:20003` is now a TCP forward into
 BTP's connectivity proxy.  Sanity-check with `nc -zv localhost 20003` —
 should report "succeeded".
 
+## Get a connectivity-service token (HTTP 407 path)
+
+If the probe runs through the tunnel but the connectivity proxy
+returns **HTTP 407 Proxy Authentication Required**, the proxy is
+rejecting the user JWT as proxy auth — it wants a
+**connectivity-service-bound** token instead.  Those are minted by the
+Connectivity service's own UAA via the `client_credentials` grant.
+
+You only have to do this once per engagement — the token stays valid
+for an hour or two.
+
+```bash
+# 1. Bind the Connectivity service to the bridge app and restart so
+#    VCAP_SERVICES gets populated.
+cf bind-service sapmap-probe-bridge connectivity
+cf restart      sapmap-probe-bridge
+
+# 2. cf ssh into the app and mint a token
+cf ssh sapmap-probe-bridge
+# inside the container:
+CRED=$(echo "$VCAP_SERVICES" | jq -r '.connectivity[0].credentials')
+URL=$(echo  "$CRED" | jq -r .url)
+CID=$(echo  "$CRED" | jq -r .clientid)
+SEC=$(echo  "$CRED" | jq -r .clientsecret)
+TOK=$(curl -s -X POST "$URL/oauth/token" \
+        -d "grant_type=client_credentials&client_id=$CID&client_secret=$SEC" \
+      | jq -r .access_token)
+echo "$TOK"          # copy this; paste into SAPMAP
+exit
+```
+
+In SAPMAP: **File → ☁ BTP — Connectivity Proxy Override** → paste the
+token into the *Connectivity-service JWT* field → **Save**.  Re-run
+the probe; the 407 should now be replaced with a real upstream HTTP
+status from S4H.
+
+> The connectivity-service token IS sensitive material — it grants
+> access to call your subaccount's connectivity proxy.  SAPMAP stores
+> it in process memory only and never writes it to disk.  Don't paste
+> it into chat / tickets / screenshots.
+
 ## Run the probe
 
 In SAPMAP, right-click the ABAP node → Exploitation → **🎯 Verify PP
