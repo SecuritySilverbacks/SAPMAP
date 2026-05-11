@@ -74,12 +74,25 @@ You only have to do this once per engagement — the token stays valid
 for an hour or two.
 
 ```bash
-# 1. Bind the Connectivity service to the bridge app and restart so
-#    VCAP_SERVICES gets populated.
-cf bind-service sapmap-probe-bridge connectivity
+# 1. Discover the Connectivity service offering + plans.  In every
+#    BTP CF subaccount the offering is called "connectivity"; the
+#    free plan is "lite".  Verify with:
+#       cf marketplace -e connectivity
+#    (Lists rows like:  connectivity  lite, connectivity_proxy)
+
+# 2. Create a connectivity service INSTANCE.  cf bind-service wants
+#    an instance name, not the offering name — and instances must be
+#    explicitly created per space.
+cf create-service connectivity lite sapmap-connectivity
+# Wait for the instance to be ready (usually instant):
+cf service sapmap-connectivity      # → "status: create succeeded"
+
+# 3. Bind the instance to the bridge app and restart so VCAP_SERVICES
+#    picks up the credentials.
+cf bind-service sapmap-probe-bridge sapmap-connectivity
 cf restart      sapmap-probe-bridge
 
-# 2. cf ssh into the app and mint a token
+# 4. cf ssh into the app and mint a token
 cf ssh sapmap-probe-bridge
 # inside the container:
 CRED=$(echo "$VCAP_SERVICES" | jq -r '.connectivity[0].credentials')
@@ -145,6 +158,8 @@ cf delete sapmap-probe-bridge -f -r    # -r also removes the route
 | Tunnel opens but probe still times out | Wrong region in the `cf ssh -L` target — check `cf api` matches the SCC's region |
 | `cf ssh` says "SSH is disabled for the space" | Org/Space SSH policy blocks it — ask an org manager to `cf allow-space-ssh <space>` |
 | Probe runs but returns 401 | PP cert was minted but the on-prem USREXTID rule didn't resolve to a real ABAP user — re-check the PP analyser verdict |
+| `cf bind-service` says "Service instance 'connectivity' not found" | You need to CREATE the instance first — `cf bind-service` expects an instance name, not the service offering name.  Run `cf create-service connectivity lite sapmap-connectivity`, then bind that instance. |
+| `cf create-service connectivity lite` fails with "service not found" | The subaccount may not have the Connectivity service entitled to this space.  Ask an org manager / global account admin to entitle "connectivity, lite" via BTP Cockpit → Entity Configuration → Entitlements. |
 
 ## Cost
 
