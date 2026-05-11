@@ -332,6 +332,90 @@ def test_verify_pp_tunnel_unreachable_surfaces_cf_ssh_hint():
 
 
 # ===========================================================================
+# Forward-proxy wire format — absolute URI in request line, no CONNECT
+# ===========================================================================
+
+def test_http_probe_uses_forward_proxy_not_connect(monkeypatch):
+    """Regression: BTP's connectivity proxy on port 20003 is a plain
+    HTTP forward proxy.  Earlier versions sent ``CONNECT host:port``
+    and got HTTP 405 back ("HTTPS proxying is not supported").  The
+    fix uses an absolute URI in the request line.  This test pins
+    the wire format by capturing the bytes sent to the socket."""
+    import sap_pp_probe
+    captured = {"sent": b""}
+
+    class FakeSocket:
+        def __init__(self):
+            self.recv_buf = (
+                b"HTTP/1.1 200 OK\r\n"
+                b"sap-username: DDIC\r\n"
+                b"content-length: 2\r\n"
+                b"connection: close\r\n\r\n"
+                b"OK")
+        def settimeout(self, _): pass
+        def sendall(self, data): captured["sent"] += data
+        def recv(self, n):
+            chunk, self.recv_buf = self.recv_buf[:n], self.recv_buf[n:]
+            return chunk
+        def close(self): pass
+
+    monkeypatch.setattr(sap_pp_probe.socket, "create_connection",
+                         lambda addr, timeout=None: FakeSocket())
+
+    out = sap_pp_probe.http_probe_via_connectivity_proxy(
+        user_jwt="eyJ.fake.jwt",
+        region="eu10",
+        target_url="http://192.168.2.209:8080",
+        path="/sap/bc/ping",
+        scc_location_id="",
+    )
+    sent = captured["sent"].decode("utf-8", "replace")
+    # Must NOT use CONNECT
+    assert not sent.startswith("CONNECT "), (
+        "Probe regressed to CONNECT-style tunneling — proxy rejects "
+        "that with 405.  Wire bytes:\n" + sent[:200])
+    # Must use forward-proxy absolute URI
+    assert sent.startswith(
+        "GET http://192.168.2.209:8080/sap/bc/ping HTTP/1.1\r\n"), (
+        "Wire format wrong.  First line should be the absolute URI:\n"
+        + sent[:120])
+    # Required headers
+    assert "Proxy-Authorization: Bearer eyJ.fake.jwt" in sent
+    assert "Host: 192.168.2.209:8080" in sent
+    # Response was parsed cleanly
+    assert out["status"] == 200
+    assert out["headers"]["sap-username"] == "DDIC"
+
+
+def test_http_probe_includes_scc_location_id_header(monkeypatch):
+    """When the operator's subaccount has a custom SCC location_id,
+    the probe must include ``SAP-Connectivity-SCC-Location_ID``."""
+    import sap_pp_probe
+    captured = {"sent": b""}
+
+    class FakeSocket:
+        def __init__(self):
+            self.recv_buf = b"HTTP/1.1 200 OK\r\n\r\n"
+        def settimeout(self, _): pass
+        def sendall(self, d): captured["sent"] += d
+        def recv(self, n):
+            chunk, self.recv_buf = self.recv_buf[:n], self.recv_buf[n:]
+            return chunk
+        def close(self): pass
+
+    monkeypatch.setattr(sap_pp_probe.socket, "create_connection",
+                         lambda addr, timeout=None: FakeSocket())
+    sap_pp_probe.http_probe_via_connectivity_proxy(
+        user_jwt="t", region="eu10",
+        target_url="http://10.0.0.5:8080",
+        path="/sap/bc/ping",
+        scc_location_id="DC01",
+    )
+    sent = captured["sent"].decode("utf-8", "replace")
+    assert "SAP-Connectivity-SCC-Location_ID: DC01" in sent
+
+
+# ===========================================================================
 # Test helpers
 # ===========================================================================
 
