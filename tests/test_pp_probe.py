@@ -232,6 +232,63 @@ def test_verify_pp_logs_verdict_line_on_no_status_path(capsys):
     assert "localhost:20003" in captured
 
 
+def test_verify_pp_connection_reset_with_user_fallback_surfaces_token_recipe():
+    """Some connectivity-proxy versions RST the socket for a bad
+    Proxy-Authorization (others return HTTP 407 — see test above).
+    When we're still on the user-JWT fallback, the operator's fix is
+    the same as the 407 case.  The error message must surface the
+    connectivity-service-token recipe so the operator can act on it
+    without reading docs."""
+    from sap_pp_probe import verify_pp
+    state, sub_uuid = _mock_state_with_pp_dest()
+    fake_cfg = {"ok": True, "url": "http://10.0.0.5:8080",
+                "auth_tokens": [], "destination": {}, "raw": {}, "error": ""}
+    fake_primary = {
+        "status": 0, "headers": {}, "body_snippet": "",
+        "latency_ms": 12,
+        "error": "ConnectionResetError: [Errno 54] Connection reset by peer",
+        "proxy_host": "localhost", "proxy_port": 20003,
+        "auth_source": "user_fallback",
+    }
+    with patch("sap_pp_probe.fetch_destination_config", return_value=fake_cfg), \
+         patch("sap_pp_probe.http_probe_via_connectivity_proxy",
+               return_value=fake_primary):
+        out = verify_pp(state, _node(), _scc(), sub_uuid,
+                         token=_fake_jwt("eu10"), cleanup_after=False)
+    assert out["verdict"] == "tunnel_unreachable"
+    err = out["error"]
+    # Must mention: cf create-service, jq VCAP_SERVICES, the override UI.
+    assert "cf create-service" in err
+    assert "connectivity" in err.lower()
+    assert "VCAP_SERVICES" in err
+    assert "Connectivity-service JWT" in err
+
+
+def test_verify_pp_connection_reset_with_explicit_token_warns_token_issue():
+    """Same RST, but with a connectivity-service token already in
+    place — the proxy is rejecting that one specifically.  Message
+    should point at token-issues (expired / wrong subaccount), not
+    the original setup recipe."""
+    from sap_pp_probe import verify_pp
+    state, sub_uuid = _mock_state_with_pp_dest()
+    fake_cfg = {"ok": True, "url": "http://10.0.0.5:8080",
+                "auth_tokens": [], "destination": {}, "raw": {}, "error": ""}
+    fake_primary = {
+        "status": 0, "headers": {}, "body_snippet": "",
+        "latency_ms": 12,
+        "error": "ConnectionResetError: connection reset by peer",
+        "proxy_host": "localhost", "proxy_port": 20003,
+        "auth_source": "connectivity",
+    }
+    with patch("sap_pp_probe.fetch_destination_config", return_value=fake_cfg), \
+         patch("sap_pp_probe.http_probe_via_connectivity_proxy",
+               return_value=fake_primary):
+        out = verify_pp(state, _node(), _scc(), sub_uuid,
+                         token=_fake_jwt("eu10"), cleanup_after=False)
+    err = out["error"]
+    assert "token expired" in err.lower() or "different subaccount" in err.lower()
+
+
 def test_verify_pp_verified_at_always_set():
     """verified_at must be populated on every return path so the
     findings dedupe sees a unique timestamp suffix per attempt."""
