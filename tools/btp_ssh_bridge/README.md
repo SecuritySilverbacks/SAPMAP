@@ -25,13 +25,23 @@ cf target -o "<your-org>" -s "<your-space>"
 cd tools/btp_ssh_bridge
 cf push
 
-# Verify it's running
+# CF apps default to SSH-DISABLED on most BTP subaccounts.  Enable it
+# on the app, then restart so the diego cell picks up the change.
+# (You can verify with `cf ssh-enabled sapmap-probe-bridge`.)
+cf enable-ssh sapmap-probe-bridge
+cf restart    sapmap-probe-bridge
+
+# Verify it's running with SSH ready
 cf apps | grep sapmap-probe-bridge
 # expected: sapmap-probe-bridge   started   1/1   64M   64M   sapmap-probe-bridge-…
 ```
 
 `cf push` will read `manifest.yml` + `Staticfile` from the current
 directory and use the `staticfile_buildpack`.  Total time ~60s.
+
+> If `cf enable-ssh` reports "SSH support is disabled for the space",
+> ask an org manager to run `cf allow-space-ssh <your-space>` first.
+> Per-app SSH can't override a per-space disallow.
 
 ## Open the tunnel
 
@@ -83,7 +93,7 @@ cf delete sapmap-probe-bridge -f -r    # -r also removes the route
 |---|---|
 | `cf push` returns HTTP 500 / `UnknownError` | Older versions of this manifest used `${random-word}.${domain}` route templates which not every CF API can resolve.  Pull the latest `manifest.yml` (uses `random-route: true` instead) and retry. |
 | `cf push` fails with "no available cells" | Subaccount is out of memory quota — free some up or shrink another app |
-| `cf ssh` says "SSH support is disabled for app" | Run `cf enable-ssh sapmap-probe-bridge && cf restart sapmap-probe-bridge` |
+| `cf ssh` says "SSH support is disabled for app" | Run `cf enable-ssh sapmap-probe-bridge && cf restart sapmap-probe-bridge` (this is the default on most BTP subaccounts — the one-time setup above already covers it) |
 | Tunnel opens but probe still times out | Wrong region in the `cf ssh -L` target — check `cf api` matches the SCC's region |
 | `cf ssh` says "SSH is disabled for the space" | Org/Space SSH policy blocks it — ask an org manager to `cf allow-space-ssh <space>` |
 | Probe runs but returns 401 | PP cert was minted but the on-prem USREXTID rule didn't resolve to a real ABAP user — re-check the PP analyser verdict |
