@@ -43,6 +43,13 @@ directory and use the `staticfile_buildpack`.  Total time ~60s.
 > ask an org manager to run `cf allow-space-ssh <your-space>` first.
 > Per-app SSH can't override a per-space disallow.
 
+> **Why is `cf enable-ssh` a separate step?**  CF's app manifest spec
+> has no `enable-ssh` key — SSH is toggled via a dedicated API call
+> (`PATCH /v3/apps/<guid>/features/ssh`), so it can't be encoded in
+> `manifest.yml` no matter how we'd like to.  The `cf enable-ssh`
+> command is the supported way to flip that flag, and it needs a
+> `cf restart` for the change to take effect on the diego cell.
+
 ## Open the tunnel
 
 ```bash
