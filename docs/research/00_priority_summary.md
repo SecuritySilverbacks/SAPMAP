@@ -27,7 +27,7 @@ even for authenticated admins. NWA always shows `********`.
 
 | # | Addition | Effort | Why |
 |---|---|---|---|
-| 1 | **CVE-2022-22536 ICMAD HTTP smuggler** | ~200 LOC new module | Unauth session-hijack → feeds stolen MYSAPSSO2 into existing RFC engine. ABAP + Java + Content Server + WebDisp. CISA KEV-listed, still unpatched on DMZ tiers. |
+| 1 | **CVE-2022-22536 ICMAD HTTP smuggler** — see plan in [`10_icmad_implementation_plan.md`](10_icmad_implementation_plan.md) | ~350 LOC new module, 3–4 days | Unauth **ACL bypass** to internal admin surface (`/heapdump/`, `/CTC/ConfigServlet`, `/sap/admin/*`) via MPI desync — *not* session theft (deprecated framing). Chains into existing SecStore key recovery on AS Java. ABAP + Java + Content Server + WebDisp. CISA KEV-listed, still unpatched on DMZ tiers. |
 | 2 | **CVE-2025-42999 deserialization chain** | ~150 LOC added to `sap_cve_2025_31324.py` | Covers systems patched for 31324 but not 42999 (April 2025 vs May 2025 releases → 12-month tail). Reuses the upload primitive. |
 | 3 | **PI CPACache dumper** (`sap_java_cpa_dump.py`) | ~260 LOC (200 Py + 60 JSP) | Decrypts every PI channel password (downstream ABAP/LDAP/JDBC/SFTP) via static XOR-0x74. Immediate Java→ABAP pivot on PI. |
 | 4 | **SAPLogonTicket forger** (`sap_java_ticket_forge.py`) | ~400 LOC | Extract TicketKeystore private key via JSP, mint MYSAPSSO2 for any user, hop to every trusting ABAP. No password ever. Graph explosion. |
@@ -70,7 +70,7 @@ extraction and opens ABAP pivots from any RECON-created Java admin.
 
 Adds the highest-impact CVEs SAPMAP is currently missing.
 
-- **#1** ICMAD
+- **#1** ICMAD — elaborated in [`10_icmad_implementation_plan.md`](10_icmad_implementation_plan.md)
 - **#2** CVE-2025-42999 chain
 - **#5** CVE-2025-42957 DMIS
 - **#6** `/sap/public/info` pre-auth
