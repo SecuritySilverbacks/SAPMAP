@@ -14,6 +14,7 @@ Supports two modes:
 import ipaddress
 import logging
 import os
+import re
 import socket
 import sys
 import threading
@@ -1850,6 +1851,113 @@ def query_public_info(host: str, http_port: int,
     }
     query_public_info._last_status = "ok"
     return {k: v for k, v in out.items() if v}
+
+
+# ---------------------------------------------------------------------------
+# Web Dispatcher fingerprint
+# ---------------------------------------------------------------------------
+#
+# CVE-2022-22536 (ICMAD) only exploits to its full chain when an HTTP
+# gateway sits in front (Web Dispatcher or 3rd-party reverse proxy).
+# We surface that distinction in the node model via
+# ``SAPNode.is_web_dispatcher`` so the ICMAD severity logic can promote
+# "patch missing" from info → high only when there's a real gateway.
+
+_WD_PATTERNS = (
+    # Server header — definitive when present.  WD ships its own banner.
+    (re.compile(rb"Server:\s*SAP\s+Web\s+Dispatcher", re.I), "server_banner"),
+    # 503 + ICMENOSERVERFOUND on /unknown is characteristic of a WD with
+    # no backend group matching the URI — bare ICMs don't emit this code.
+    (re.compile(rb"x-sap-icm-err-id:\s*ICMENOSERVERFOUND", re.I),
+        "icm_no_server_err"),
+)
+
+
+def fingerprint_web_dispatcher(host: str, port: int,
+                                 *, https: bool = False,
+                                 timeout: float = 5,
+                                 saprouter: str = "") -> dict:
+    """HTTP-fingerprint a host:port pair as a Web Dispatcher.
+
+    Returns ``{"is_wd": bool, "evidence": str, "server_header": str,
+    "status": int}``.  ``evidence`` names the matched signal: one of
+    "server_banner" (definitive), "icm_no_server_err" (strong hint —
+    WD with no backend group), or "" (no WD signals).
+
+    Two probes:
+      1. ``GET /`` — most WDs answer with a `Server: SAP Web Dispatcher
+         <version>` banner unless ``icm/HTTP/server_header_suppression=1``.
+      2. ``GET /sapmap-icmad-no-such-path-XXXX`` — designed to miss any
+         configured backend group; a WD answers 503 with
+         ``x-sap-icm-err-id: ICMENOSERVERFOUND``, while a bare ICM
+         answers 404 (the ICF rejector) without that header.
+
+    Either signal flips ``is_wd=True``.  We don't recurse beyond two
+    probes — engagement-day rule §G keeps wire-noise predictable.
+    """
+    out = {"is_wd": False, "evidence": "", "server_header": "",
+            "status": 0}
+
+    paths = ["/", "/sapmap-icmad-no-such-path-fingerprint"]
+    for path in paths:
+        try:
+            if saprouter:
+                from sap_saprouter import connect_through_saprouter
+                sock = connect_through_saprouter(
+                    saprouter + f"/H/{host}/S/{port}",
+                    timeout=timeout, talk_mode=1,
+                )
+            else:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(timeout)
+                sock.connect((host, port))
+            if https:
+                import ssl as _ssl
+                ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
+                ctx.check_hostname = False
+                ctx.verify_mode = _ssl.CERT_NONE
+                try:
+                    ctx.minimum_version = _ssl.TLSVersion.TLSv1
+                except (AttributeError, ValueError):
+                    pass
+                sock = ctx.wrap_socket(sock, server_hostname=host)
+            sock.sendall(
+                f"GET {path} HTTP/1.0\r\n"
+                f"Host: {host}:{port}\r\n"
+                f"User-Agent: sapmap-wd-fp\r\n"
+                f"Connection: close\r\n\r\n".encode("iso-8859-1")
+            )
+            resp = b""
+            try:
+                while len(resp) < 8192:
+                    chunk = sock.recv(2048)
+                    if not chunk:
+                        break
+                    resp += chunk
+            except socket.timeout:
+                pass
+            try:
+                sock.close()
+            except Exception:
+                pass
+        except Exception:
+            continue
+
+        if not resp:
+            continue
+        m_status = re.search(rb"HTTP/\S+\s+(\d{3})", resp)
+        if m_status and not out["status"]:
+            out["status"] = int(m_status.group(1))
+        m_server = re.search(rb"\r\nServer:\s*([^\r\n]+)", resp)
+        if m_server and not out["server_header"]:
+            out["server_header"] = m_server.group(1).decode(
+                "iso-8859-1", errors="replace").strip()
+        for pat, label in _WD_PATTERNS:
+            if pat.search(resp):
+                out["is_wd"] = True
+                out["evidence"] = label
+                return out
+    return out
 
 
 def _query_sapstart_banner(host: str, port: int,

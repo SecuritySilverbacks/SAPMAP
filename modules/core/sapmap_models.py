@@ -218,6 +218,24 @@ class SAPNode:
     cve_2020_6287_port: int = 0
     cve_2020_6287_https: bool = False
     cve_2020_6287_evidence: str = ""
+    # CVE-2022-22536 (ICMAD) — ICM/Web Dispatcher HTTP request smuggling.
+    # Per SAP Note 3123396, the bug ONLY exploits when a gateway (Web
+    # Dispatcher or 3rd-party reverse proxy) sits in front; direct ICM
+    # access is detectable on the wire but the loopback-trust ACL bypass
+    # has nowhere to land.  Severity therefore differentiates "kernel
+    # behind patch table" (info) vs "smuggle probe confirmed on the
+    # wire" (high) vs "ACL bypass confirmed reaching a sensitive path"
+    # (critical) — see docs/research/10_icmad_implementation_plan.md.
+    cve_2022_22536_checked: bool = False
+    cve_2022_22536_vulnerable: bool = False
+    cve_2022_22536_port: int = 0
+    cve_2022_22536_https: bool = False
+    cve_2022_22536_evidence: str = ""           # ≤256 bytes of the 2nd response
+    cve_2022_22536_acl_bypass: dict = field(default_factory=dict)
+    # {path: {"status": int, "snippet": str, "via": "smuggle"|"baseline"}}
+    # WD fingerprint flag — populated by a tiny TLS/HTTP probe.  Drives
+    # ICMAD severity escalation (gateway-fronted = real exploit chain).
+    is_web_dispatcher: bool = False
     # Telnet console endpoint override (e.g. "127.0.0.1:50008" when the
     # target's admin telnet is localhost-bound and the operator has an
     # SSH tunnel).  Empty => derive from node.ip + default 5NN08.
@@ -392,6 +410,13 @@ class SAPNode:
             "cve_2020_6287_port": self.cve_2020_6287_port,
             "cve_2020_6287_https": self.cve_2020_6287_https,
             "cve_2020_6287_evidence": self.cve_2020_6287_evidence,
+            "cve_2022_22536_checked": self.cve_2022_22536_checked,
+            "cve_2022_22536_vulnerable": self.cve_2022_22536_vulnerable,
+            "cve_2022_22536_port": self.cve_2022_22536_port,
+            "cve_2022_22536_https": self.cve_2022_22536_https,
+            "cve_2022_22536_evidence": self.cve_2022_22536_evidence,
+            "cve_2022_22536_acl_bypass": dict(self.cve_2022_22536_acl_bypass or {}),
+            "is_web_dispatcher": self.is_web_dispatcher,
             "telnet_override": self.telnet_override,
             "java_deploy_blocked": self.java_deploy_blocked,
             "java_secstore_checked": self.java_secstore_checked,
@@ -460,6 +485,13 @@ class SAPNode:
             cve_2020_6287_port=d.get("cve_2020_6287_port", 0),
             cve_2020_6287_https=d.get("cve_2020_6287_https", False),
             cve_2020_6287_evidence=d.get("cve_2020_6287_evidence", ""),
+            cve_2022_22536_checked=d.get("cve_2022_22536_checked", False),
+            cve_2022_22536_vulnerable=d.get("cve_2022_22536_vulnerable", False),
+            cve_2022_22536_port=d.get("cve_2022_22536_port", 0),
+            cve_2022_22536_https=d.get("cve_2022_22536_https", False),
+            cve_2022_22536_evidence=d.get("cve_2022_22536_evidence", ""),
+            cve_2022_22536_acl_bypass=d.get("cve_2022_22536_acl_bypass", {}),
+            is_web_dispatcher=d.get("is_web_dispatcher", False),
             telnet_override=d.get("telnet_override", ""),
             java_deploy_blocked=d.get("java_deploy_blocked", False),
             java_secstore_checked=d.get("java_secstore_checked", False),
