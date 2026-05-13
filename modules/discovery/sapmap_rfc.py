@@ -82,6 +82,7 @@ from sapmap_config import (
     sapmap_username,
 )
 
+from sapmap_errors import format_rfc_exception
 from sap_rfc_ctypes import (
     ABAPApplicationError,
     RFCTYPE_CHAR, RFCTYPE_TABLE, RFCTYPE_INT, RFCTYPE_BYTE, RFCTYPE_NUM,
