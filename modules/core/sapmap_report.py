@@ -412,6 +412,86 @@ def _derive_landscape_recommendations(state: SAPMAPState) -> list:
             "refs": "SAP Note 3594142",
         })
 
+    # 3b. CVE-2022-22536 (ICMAD)
+    icmad_live = sorted(n.sid for n in nodes
+                          if getattr(n, "cve_2022_22536_vulnerable", False))
+    icmad_patch = sorted(n.sid for n in nodes
+                           if (getattr(n, "cve_2022_22536_checked", False)
+                                and not getattr(n,
+                                                  "cve_2022_22536_vulnerable",
+                                                  False)
+                                and any(getattr(f, "name", "").startswith(
+                                    "CVE-2022-22536")
+                                          for f in (n.findings or []))))
+    icmad_bypassed_paths = {}
+    icmad_heap_pwned = []
+    for n in nodes:
+        bypass_map = getattr(n, "cve_2022_22536_acl_bypass", None) or {}
+        for path, info in bypass_map.items():
+            if (info or {}).get("via") == "smuggle":
+                icmad_bypassed_paths.setdefault(n.sid, []).append(path)
+        if any(getattr(f, "name", "").endswith(
+                  "HPROF heap dump captured")
+                 for f in (n.findings or [])):
+            icmad_heap_pwned.append(n.sid)
+
+    if icmad_live or icmad_patch or icmad_bypassed_paths or icmad_heap_pwned:
+        scope_parts = []
+        if icmad_live:
+            scope_parts.append("live: " + ", ".join(icmad_live))
+        if icmad_patch:
+            scope_parts.append("patch-only: " + ", ".join(icmad_patch))
+        body = (
+            "SAP Note 3123396 (CVE-2022-22536, CVSS 10.0) — HTTP "
+            "request smuggling / concatenation in the ICM and Web "
+            "Dispatcher.  An unauthenticated attacker can prepend "
+            "arbitrary inner-request bytes onto a victim's HTTP "
+            "request, bypassing wdisp/permission_table to reach "
+            "administrative paths the gateway is supposed to block "
+            "(/heapdump/, /CTC/ConfigServlet, /sld/, etc.)."
+        )
+        if icmad_live:
+            body += (f"\n\nLive smuggle confirmed on: "
+                      f"{', '.join(icmad_live)}.")
+        if icmad_patch:
+            body += (f"\n\nKernel patch hygiene only (no live signature "
+                      f"observed — likely the deprecated workaround "
+                      f"wdisp/additional_conn_close=1 is active): "
+                      f"{', '.join(icmad_patch)}.")
+        if icmad_bypassed_paths:
+            body += "\n\nACL bypass confirmed on the following paths:"
+            for sid, paths in sorted(icmad_bypassed_paths.items()):
+                body += (f"\n  • {sid}: "
+                          f"{', '.join(sorted(paths))}")
+        if icmad_heap_pwned:
+            body += (f"\n\nHPROF heap dump captured on: "
+                      f"{', '.join(icmad_heap_pwned)}.  These dumps "
+                      f"contain SecStoreFS keyphrase bytes and JCo "
+                      f"destination passwords in cleartext — "
+                      f"engagement-day pwn.")
+        body += (
+            "\n\nApply the version-specific patch level listed in SAP "
+            "Note 3123396 to BOTH SAP Kernel and SAP Web Dispatcher "
+            "(7.22 ≥ PL1101, 7.49 ≥ PL1036, 7.53 ≥ PL915, 7.77 ≥ "
+            "PL429, 7.81 ≥ PL227, 7.85 ≥ PL69, 7.86 ≥ PL15, 7.87 ≥ "
+            "PL4, 8.04 ≥ PL207).  The workaround "
+            "wdisp/additional_conn_close=1 (SAP Note 3138881) is "
+            "deprecated per Note 3200257 and known to break AS Java "
+            "backends per Note 3147927 — patching is the only "
+            "durable fix."
+        )
+        items.append({
+            "category": "Web Dispatcher / ICM patching",
+            "scope": "; ".join(scope_parts) or "as listed",
+            "title": ("Patch CVE-2022-22536 (ICMAD HTTP request "
+                       "smuggling) on every Web Dispatcher and ICM"),
+            "body": body,
+            "refs": ("SAP Note 3123396 (patch table), 3138881 "
+                      "(deprecated workaround), 3147927 (workaround "
+                      "AS Java side-effects), 3200257 (workaround "
+                      "deprecation)"),
+        })
+
     # 4. SAProuter ACL
     routers = [n for n in nodes
                if (n.system_type or "").upper() == "SAPROUTER"]

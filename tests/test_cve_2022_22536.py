@@ -550,6 +550,164 @@ def test_download_heap_dump_streams_to_disk(monkeypatch, tmp_path):
     assert on_disk[:18] == b"JAVA PROFILE 1.0.2"
 
 
+def test_throttle_blocks_second_probe_within_window(monkeypatch):
+    """Two rapid probes against the same (host, port) — the second must
+    be refused with error='throttled'."""
+    import sap_cve_2022_22536 as mod
+
+    mod.clear_throttle()
+    # Make the underlying socket connect always fail (we don't care
+    # about the result — we only want to know whether the throttle
+    # gated the call).
+    monkeypatch.setattr(mod, "_open_socket",
+                         lambda *a, **k: (_ for _ in ()).throw(
+                             ConnectionRefusedError("test")))
+
+    r1 = mod.probe_icmad("throttle.test", 8000, verbose=False)
+    r2 = mod.probe_icmad("throttle.test", 8000, verbose=False)
+    # First probe attempts the connection (errors out)
+    assert r1["error"].startswith("connect_") or r1["error"] == ""
+    # Second probe is short-circuited by the throttle
+    assert r2["error"] == "throttled"
+    assert "throttled" in r2["evidence"]
+
+
+def test_throttle_allows_different_host(monkeypatch):
+    """Two probes to different hosts must both run."""
+    import sap_cve_2022_22536 as mod
+    mod.clear_throttle()
+    monkeypatch.setattr(mod, "_open_socket",
+                         lambda *a, **k: (_ for _ in ()).throw(
+                             ConnectionRefusedError("test")))
+
+    r1 = mod.probe_icmad("host-a.test", 8000, verbose=False)
+    r2 = mod.probe_icmad("host-b.test", 8000, verbose=False)
+    assert r1["error"] != "throttled"
+    assert r2["error"] != "throttled"
+
+
+def test_throttle_skip_flag_bypasses(monkeypatch):
+    """skip_throttle=True must skip the cool-down check."""
+    import sap_cve_2022_22536 as mod
+    mod.clear_throttle()
+    monkeypatch.setattr(mod, "_open_socket",
+                         lambda *a, **k: (_ for _ in ()).throw(
+                             ConnectionRefusedError("test")))
+
+    r1 = mod.probe_icmad("h", 8000, verbose=False)
+    r2 = mod.probe_icmad("h", 8000, skip_throttle=True, verbose=False)
+    assert r2["error"] != "throttled"
+
+
+def test_clear_throttle_all_resets_state():
+    import sap_cve_2022_22536 as mod
+    # Manually pollute the state then clear it
+    mod._THROTTLE_LAST[("dummy", 1)] = 999999.0
+    mod.clear_throttle()
+    assert mod._THROTTLE_LAST == {}
+
+
+def test_clear_throttle_single_entry():
+    import sap_cve_2022_22536 as mod
+    mod._THROTTLE_LAST.clear()
+    mod._THROTTLE_LAST[("a", 1)] = 100.0
+    mod._THROTTLE_LAST[("b", 2)] = 200.0
+    mod.clear_throttle("a", 1)
+    assert ("a", 1) not in mod._THROTTLE_LAST
+    assert ("b", 2) in mod._THROTTLE_LAST
+
+
+# ---------------------------------------------------------------------------
+# Day 4 — engagement report section
+# ---------------------------------------------------------------------------
+
+def test_report_emits_icmad_section_when_vulnerable_node_present():
+    """A node flagged vulnerable for CVE-2022-22536 must add a
+    'Web Dispatcher / ICM patching' item to the recommendations list."""
+    from sapmap_models import SAPMAPState
+    from sapmap_report import _derive_landscape_recommendations
+
+    state = SAPMAPState()
+    node = SAPNode(sid="WDP", system_type="ABAP",
+                    ip="10.0.0.1", hostname="wd")
+    node.cve_2022_22536_checked = True
+    node.cve_2022_22536_vulnerable = True
+    node.cve_2022_22536_port = 44300
+    node.cve_2022_22536_https = True
+    state.nodes["WDP"] = node
+
+    recs = _derive_landscape_recommendations(state)
+    icmad_items = [r for r in recs
+                     if "CVE-2022-22536" in r.get("title", "")]
+    assert len(icmad_items) == 1
+    item = icmad_items[0]
+    assert "Web Dispatcher / ICM patching" in item["category"]
+    assert "3123396" in item["refs"]
+    assert "WDP" in item["scope"]
+
+
+def test_report_includes_acl_bypass_paths_in_body():
+    """When the node's cve_2022_22536_acl_bypass dict has via=smuggle
+    entries, the report body must list them."""
+    from sapmap_models import SAPMAPState
+    from sapmap_report import _derive_landscape_recommendations
+
+    state = SAPMAPState()
+    node = SAPNode(sid="WDP", system_type="ABAP",
+                    ip="10.0.0.1", hostname="wd")
+    node.cve_2022_22536_vulnerable = True
+    node.cve_2022_22536_acl_bypass = {
+        "/heapdump/": {"status": 200, "snippet": "JAVA PROFILE",
+                        "via": "smuggle"},
+        "/sld/":      {"status": 200, "snippet": "<sld>",
+                        "via": "smuggle"},
+        "/nwa/":      {"status": 302, "snippet": "Found",
+                        "via": "blocked"},  # NOT bypassed — should not appear
+    }
+    state.nodes["WDP"] = node
+
+    recs = _derive_landscape_recommendations(state)
+    item = next(r for r in recs if "CVE-2022-22536" in r.get("title", ""))
+    assert "/heapdump/" in item["body"]
+    assert "/sld/" in item["body"]
+    assert "ACL bypass confirmed" in item["body"]
+    # The non-bypassed path must NOT be in the list
+    body_section = item["body"].split("ACL bypass confirmed")[1].split(
+        "Apply the version-specific")[0]
+    assert "/nwa/" not in body_section
+
+
+def test_report_handles_patch_only_finding():
+    """A node with patch-table finding but no live signal still emits
+    the section, in the 'patch-only' scope group."""
+    from sapmap_models import SAPMAPState
+    from sapmap_report import _derive_landscape_recommendations
+
+    state = SAPMAPState()
+    node = SAPNode(sid="WDX", system_type="JAVA",
+                    ip="10.0.0.2", hostname="wdx")
+    node.cve_2022_22536_checked = True
+    node.cve_2022_22536_vulnerable = False
+    # Manually add the patch-table finding
+    node.findings.append(Finding(
+        name="CVE-2022-22536 (ICMAD) — kernel patch hygiene",
+        severity=Severity.INFO,
+        description="Kernel 7.77 PL 123 behind fix boundary",
+        remediation="apply 3123396",
+        detail="Port 44300/HTTPS · …",
+    ))
+    state.nodes["WDX"] = node
+
+    recs = _derive_landscape_recommendations(state)
+    item = next(r for r in recs if "CVE-2022-22536" in r.get("title", ""))
+    assert "patch-only" in item["scope"]
+    assert "WDX" in item["scope"]
+
+
+# Imports needed at the top of these tests' file scope
+from sapmap_models import SAPNode, Finding, Severity  # noqa: E402
+
+
 def test_download_heap_dump_respects_size_cap(monkeypatch, tmp_path):
     """max_bytes hard-cap stops the stream even if more is available."""
     import sap_cve_2022_22536 as mod
