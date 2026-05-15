@@ -19,7 +19,8 @@ from bottle import Bottle, BaseRequest, request, response, static_file
 BaseRequest.MEMFILE_MAX = 512 * 1024 * 1024
 
 from sapmap_models import (SAPMAPState, SAPNode, InstanceInfo, RFCConnection,
-                           Credentials, CreatedUser)
+                           Credentials, CreatedUser, Finding, Severity)
+from sapmap_findings import emit_finding
 from sapmap_html import get_html
 import sapmap_scanner
 import sapmap_rfc
@@ -3962,6 +3963,158 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 print(f"[~] {sid}: MS port {node.ms_port} reachable but ACL-protected")
 
         _bg(f"{sid}:check_ms", "Check MS Betrusted", _run)
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/check_cve_2022_22536", method="POST")
+    def node_check_cve_2022_22536(sid):
+        """Probe a node for CVE-2022-22536 (ICMAD) — HTTP request smuggling.
+
+        Combines the SAP-Note-3123396 patch table lookup against the
+        node's kernel + PL, and a live smuggle probe (Onapsis-style
+        82646-byte payload) on every discovered ICM port.  Strictly
+        opt-in per the locked design (no auto-fire from scanners).
+
+        Severity ladder:
+          * Live probe confirms 2-response signature       → HIGH
+          * Patch table flags kernel but no live signal    → INFO
+          * Probe negative AND kernel >= fix boundary      → no finding
+        """
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        # Allow ABAP, Java, dual-stack — and standalone Web Dispatchers
+        # (which SAPNode now flags via is_web_dispatcher).
+        sys_type = (node.system_type or "").upper()
+        in_scope = (
+            any(tag in sys_type for tag in ("ABAP", "JAVA"))
+            or node.is_web_dispatcher
+        )
+        if not in_scope:
+            return json.dumps({
+                "error": ("Not an ABAP / Java / Web-Dispatcher node — "
+                          "ICMAD only applies to ICM-fronted systems")
+            })
+
+        def _run():
+            print(f"[*] {sid}: Checking CVE-2022-22536 (ICMAD)...")
+            try:
+                found = sapmap_scanner.check_cve_2022_22536(node)
+            except Exception as e:
+                print(f"[-] {sid}: ICMAD probe failed: {e}")
+                return
+            if node.cve_2022_22536_vulnerable:
+                print(f"[+] {sid}: VULNERABLE — smuggle confirmed on port "
+                      f"{node.cve_2022_22536_port}"
+                      f"{'/HTTPS' if node.cve_2022_22536_https else '/HTTP'}"
+                      f" · {node.cve_2022_22536_evidence[:120]}")
+            elif found:
+                # Patch-table-only finding (info severity)
+                print(f"[!] {sid}: patch-hygiene only — kernel behind fix "
+                      f"boundary, no live smuggle signature observed")
+            else:
+                print(f"[*] {sid}: not vulnerable (probe + patch-table both clean)")
+
+        _bg(f"{sid}:check_cve_22536", "Check CVE-2022-22536 (ICMAD)", _run)
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/icmad_acl_bypass", method="POST")
+    def node_icmad_acl_bypass(sid):
+        """Run the D.2 ACL-bypass sweep against the curated path catalogue.
+
+        Enabled only after D.1 detection confirms the node has the bug
+        (``cve_2022_22536_vulnerable=True``).  Iterates 12 hand-picked
+        admin / recon paths via the SAPGateBreaker-style TE-chunked
+        smuggle and reports each one's verdict.
+        """
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        if not node.cve_2022_22536_port:
+            return json.dumps({
+                "error": ("Run Check CVE-2022-22536 first to find a "
+                          "vulnerable ICM port")
+            })
+
+        def _run():
+            from sap_cve_2022_22536 import run_acl_bypass
+            host = node.ip or node.hostname
+            port = node.cve_2022_22536_port
+            https = node.cve_2022_22536_https
+            outer_path = (request.json or {}).get("outer_path",
+                                                    "/sap/admin/public/default.html") if request.json else "/sap/admin/public/default.html"
+
+            print(f"[*] {sid}: ICMAD ACL-bypass sweep on "
+                  f"{host}:{port}{'/HTTPS' if https else '/HTTP'} "
+                  f"(outer={outer_path})")
+            verdicts = run_acl_bypass(host, port, https=https,
+                                        saprouter=node.saprouter or "",
+                                        outer_path=outer_path,
+                                        verbose=True)
+            confirmed = [(p, r) for p, r in verdicts["results"].items()
+                          if r["bypass_confirmed"]]
+            node.cve_2022_22536_acl_bypass = {
+                p: {"status": r["smuggled_status"],
+                    "snippet": r["smuggled_snippet"][:160],
+                    "via": "smuggle" if r["bypass_confirmed"] else "blocked"}
+                for p, r in verdicts["results"].items()
+            }
+            for path, r in confirmed:
+                sev = ("CRITICAL" if r["admin_grade"] == "critical"
+                        else "HIGH" if r["admin_grade"] == "high"
+                        else "MEDIUM")
+                emit_finding(
+                    sev, sid,
+                    f"ICMAD ACL bypass: {path} reached via desync "
+                    f"(baseline={r['baseline_status']} → "
+                    f"smuggled={r['smuggled_status']})",
+                    cve="CVE-2022-22536",
+                )
+                if not any(f.detail and path in f.detail
+                              and f.name.startswith("CVE-2022-22536")
+                              for f in node.findings):
+                    severity_obj = (Severity.CRITICAL
+                                     if r["admin_grade"] == "critical"
+                                     else Severity.HIGH
+                                     if r["admin_grade"] == "high"
+                                     else Severity.MEDIUM)
+                    node.findings.append(Finding(
+                        name=(f"CVE-2022-22536 — ACL bypass "
+                              f"({r['admin_grade'].upper()}): {path}"),
+                        severity=severity_obj,
+                        description=(
+                            f"The smuggled inner request to {path} reached "
+                            f"a backend handler that was supposed to be "
+                            f"gated by the Web Dispatcher's "
+                            f"wdisp/permission_table.  Baseline direct "
+                            f"GET returned {r['baseline_status']}; "
+                            f"smuggled GET via CVE-2022-22536 returned "
+                            f"{r['smuggled_status']}.  {r['rationale']}"
+                        ),
+                        remediation=(
+                            "Patch CVE-2022-22536 per SAP Note 3123396 — "
+                            "URL-filter hardening alone does not stop the "
+                            "smuggle.  If patch can't ship, set "
+                            "wdisp/additional_conn_close=1 per SAP Note "
+                            "3138881 (deprecated workaround, but blocks "
+                            "the inter-request bleed)."
+                        ),
+                        detail=(f"Path {path} · downstream="
+                                f"{r['downstream'] or 'recon-only'}"),
+                    ))
+                    if r["admin_grade"] in ("critical", "high"):
+                        node.has_critical_finding = True
+            if confirmed:
+                print(f"[+] {sid}: ICMAD ACL bypass confirmed on "
+                      f"{len(confirmed)} path(s): "
+                      f"{', '.join(p for p, _ in confirmed)}")
+            else:
+                print(f"[*] {sid}: ICMAD ACL-bypass sweep complete — "
+                      f"no path bypassed the WD's permission table")
+
+        _bg(f"{sid}:icmad_acl_bypass", "ICMAD ACL Bypass Sweep", _run)
         return json.dumps({"status": "started"})
 
     @app.route("/api/node/<sid>/check_cve_2020_6287", method="POST")

