@@ -1196,6 +1196,183 @@ def check_cve_2020_6287(node: SAPNode, timeout: float = 10.0) -> bool:
     return False
 
 
+def check_cve_2022_22536(node: SAPNode, timeout: float = 12.0,
+                          outer_path: str = "") -> bool:
+    """Probe a node for CVE-2022-22536 (ICMAD) — HTTP request smuggling.
+
+    Combines two signals (per the locked design — see
+    docs/research/10_icmad_implementation_plan.md §F.1):
+
+      1. Patch-table lookup against SAP Note 3123396 v22's kernel boundaries.
+         Fires whenever the node's kernel release + patch level are below
+         the fix line.  Severity: info.
+      2. Live smuggle probe (Onapsis-canonical CL=82646 payload) against
+         every discovered ICM HTTP/HTTPS port.  A 2-response signature on a
+         single TCP socket confirms the bug fires on the wire.  Severity:
+         high (or critical if it later chains via D.2/D.3).
+
+    The two halves are independent — patch-table can fire without a live
+    signal (kernel info from RFC_SYSTEM_INFO + an unreachable ICM), and
+    the live probe can fire even when we have no kernel info (operator
+    runs against an unknown WD).  ``severity`` in the finding is set per
+    the locked policy: info on patch-only, high on smuggle confirm.
+
+    Per locked decision 1, this runs strictly opt-in from the context-menu
+    action — no auto-fire from enrich_system_info() or any scanner pass.
+
+    Returns True iff something was flagged (either signal).
+    """
+    try:
+        from sap_cve_2022_22536 import assess_icmad
+    except ImportError:
+        logger.warning("sap_cve_2022_22536 not available — skipping")
+        return False
+
+    host = node.ip or node.hostname
+    if not host:
+        return False
+
+    # Build the list of (port, https) candidates to probe.  Prefer ports
+    # we already know are ICM HTTP (set by SAPControl during fingerprint
+    # or by enrich_system_info()); fall back to standard 8000+NN / 5XX00
+    # defaults when nothing better is known.
+    candidates = []
+    for inst in node.instances:
+        for port, svc in (inst.ports or {}).items():
+            svc_low = (svc or "").lower()
+            if any(tag in svc_low for tag in ("icm", "http", "wd",
+                                                "webdisp")):
+                use_https = (svc_low.find("https") != -1
+                              or 44300 <= port <= 44399
+                              or 50000 <= port <= 59999 and port % 100 == 1)
+                candidates.append((port, use_https))
+    if not candidates:
+        for inst in node.instances:
+            try:
+                nr = int(inst.instance_nr)
+            except (ValueError, TypeError):
+                continue
+            candidates.append((8000 + nr, False))         # default ICM HTTP
+            candidates.append((44300 + nr, True))         # default ICM HTTPS
+            candidates.append((50000 + nr * 100, False))  # AS Java HTTP
+            candidates.append((50001 + nr * 100, True))   # AS Java HTTPS
+    if not candidates:
+        candidates = [(8000, False), (44300, True), (50000, False)]
+
+    node.cve_2022_22536_checked = True
+    saprouter = node.saprouter or ""
+    found_any = False
+
+    for port, use_https in candidates:
+        if not _scan_port(host, port, timeout=2.0):
+            continue
+        try:
+            v = assess_icmad(
+                host, port, https=use_https, saprouter=saprouter,
+                timeout=timeout,
+                kernel_release=node.kernel or "",
+                kernel_patch=getattr(node, "kernel_patch", "") or "",
+                is_web_dispatcher=node.is_web_dispatcher,
+                outer_path=outer_path or "/sap/admin/public/default.html",
+                verbose=True,
+            )
+        except Exception as e:
+            logger.warning("ICMAD probe error on %s:%d — %s",
+                            host, port, e)
+            continue
+
+        sev = v.get("severity") or ""
+        probe = v.get("probe") or {}
+        patch = v.get("patch_status") or {}
+
+        if probe.get("vulnerable"):
+            node.cve_2022_22536_vulnerable = True
+            node.cve_2022_22536_port = port
+            node.cve_2022_22536_https = use_https
+            node.cve_2022_22536_evidence = (
+                probe.get("raw_head", b"")[:256].decode(
+                    "iso-8859-1", errors="replace")
+            )
+            emit_finding("HIGH", node.sid,
+                          f"CVE-2022-22536 (ICMAD) smuggle confirmed on "
+                          f"port {port}",
+                          cve="CVE-2022-22536")
+            if not any(f.name.startswith("CVE-2022-22536")
+                          for f in node.findings):
+                node.findings.append(Finding(
+                    name=("CVE-2022-22536 (ICMAD) — smuggle confirmed "
+                           "on the wire"),
+                    severity=Severity.HIGH,
+                    description=(
+                        "SAP NetWeaver / Web Dispatcher ICM mis-handles "
+                        "memory pipe (MPI) buffer boundaries, allowing an "
+                        "unauthenticated attacker to prepend arbitrary "
+                        "bytes onto a follow-up HTTP request.  The live "
+                        "smuggle probe observed ≥ 2 HTTP responses on a "
+                        "single TCP socket — the canonical wire-level "
+                        "vulnerability signature.  Chains to ACL bypass "
+                        "(reaching /heapdump/, /CTC/ConfigServlet, etc. "
+                        "past a hardened wdisp/permission_table) and from "
+                        "there to SecStore master-key recovery via HPROF."
+                    ),
+                    remediation=(
+                        "Apply SAP Note 3123396: patch SAP Kernel and SAP "
+                        "Web Dispatcher to the version-specific PL listed "
+                        "in the note (e.g. 7.53 ≥ PL915, 7.77 ≥ PL429).  "
+                        "Workaround 3138881 sets wdisp/additional_conn_close=1 "
+                        "but is being deprecated per Note 3200257."
+                    ),
+                    detail=(f"Port {port}{'/HTTPS' if use_https else '/HTTP'} "
+                            f"· {probe.get('evidence', '')}"),
+                ))
+            found_any = True
+            return True
+
+        # No live signature, but patch-table flagged it as vulnerable.
+        # Emit an info-severity finding so the operator sees patch hygiene.
+        if (sev == "info" and patch.get("status") == "vulnerable"
+                and not node.cve_2022_22536_vulnerable):
+            node.cve_2022_22536_port = port
+            node.cve_2022_22536_https = use_https
+            node.cve_2022_22536_evidence = v.get("summary", "")
+            emit_finding("INFO", node.sid,
+                          v.get("summary",
+                                 "CVE-2022-22536 (ICMAD) patch hygiene"),
+                          cve="CVE-2022-22536")
+            if not any(f.name.startswith("CVE-2022-22536")
+                          for f in node.findings):
+                node.findings.append(Finding(
+                    name=("CVE-2022-22536 (ICMAD) — kernel patch hygiene"),
+                    severity=Severity.INFO,
+                    description=(
+                        f"Kernel {patch.get('release', '?')}"
+                        f"{' ' + patch.get('variant', '') if patch.get('variant') else ''} "
+                        f"PL {patch.get('pl', '?')} is behind the fix "
+                        f"boundary (≥ {patch.get('fixed_at', '?')}) for "
+                        f"CVE-2022-22536 (ICMAD).  The live smuggle probe "
+                        f"did not produce a 2-response signature on this "
+                        f"endpoint, which can mean the workaround "
+                        f"wdisp/additional_conn_close=1 is set (closing "
+                        f"WD↔backend connections after each request), or "
+                        f"the URL filter denied the probe's outer path.  "
+                        f"Either way the kernel is unpatched and the "
+                        f"workaround is being deprecated by SAP."
+                    ),
+                    remediation=(
+                        "Apply SAP Note 3123396 to bring the kernel to "
+                        "the per-release fix PL (table in the note's "
+                        "'Support Package Patches' section)."
+                    ),
+                    detail=(f"Port {port}{'/HTTPS' if use_https else '/HTTP'} "
+                            f"· {probe.get('evidence', '')}"),
+                ))
+            found_any = True
+            # Don't return — keep probing other ports in case one fires
+            # the live signature, which promotes to HIGH.
+
+    return found_any
+
+
 # ---------------------------------------------------------------------------
 # System info enrichment (unauthenticated)
 # ---------------------------------------------------------------------------

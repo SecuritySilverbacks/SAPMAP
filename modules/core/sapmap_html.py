@@ -727,6 +727,7 @@ body {
       <div class="ctx-item" data-action="check_ms">&#128270; Check MS Betrusted (CVE-2020-6207)</div>
       <div class="ctx-item" data-action="check_cve_31324">&#128270; Check CVE-2025-31324 (Java VisualComposer)</div>
       <div class="ctx-item" data-action="check_cve_6287">&#128270; Check CVE-2020-6287 (RECON)</div>
+      <div class="ctx-item" data-action="check_cve_22536">&#128270; Check CVE-2022-22536 (ICMAD smuggle)</div>
       <div class="ctx-item" data-action="check_linux_lpe">&#128275; Check Linux Root LPE (Copy Fail / Dirty Frag)</div>
       <div class="ctx-item" data-action="deep_scan">&#128260; Deep Scan (full SAPology)</div>
       <div class="ctx-item" data-action="retrieve_rfcs">&#128225; Retrieve RFC Connections</div>
@@ -749,6 +750,7 @@ body {
       <div class="ctx-item" data-action="create_user_betrusted">&#128272; Create User (10KBLAZE Full Chain)</div>
       <div class="ctx-item" data-action="create_user_java">&#128100; Create User (Java UME)</div>
       <div class="ctx-item" data-action="exploit_cve_31324_drop">&#128272; Drop JSP Webshell (CVE-2025-31324)</div>
+      <div class="ctx-item" data-action="icmad_acl_bypass">&#9889; ICMAD ACL Bypass Sweep (CVE-2022-22536)</div>
       <div class="ctx-item" data-action="create_user_gw">&#128100; Create User (GW Exploit)</div>
       <div class="ctx-item" data-action="create_user_creds">&#128100; Create User (Credentials)</div>
       <div class="ctx-item" data-action="create_tcpip">&#128279; Create TCP/IP Dest (sapxpg)</div>
@@ -3068,7 +3070,9 @@ function showCtxMenu(e, sid) {
     'check_ms':              true,                    // always (probes 39NN directly)
     'check_cve_31324':       isJavaStack,             // Java-only vulnerability
     'check_cve_6287':        isJavaStack,             // Java-only RECON check
+    'check_cve_22536':       isAbapStack || isJavaStack || !!n.is_web_dispatcher,
     'exploit_cve_31324_drop': hasCve31324,            // need confirmed CVE-2025-31324
+    'icmad_acl_bypass':      !!n.cve_2022_22536_port, // need confirmed ICMAD port (live or patch-table)
     'create_user_java':      isJavaStack && (hasCve31324 || hasCve6287 || hasGwVuln),
     'betrusted':             hasMsPort,              // need a known MS port
     'create_user_betrusted': hasMsVuln || hasGwVuln, // need vulnerable MS or GW
@@ -3180,7 +3184,9 @@ function showCtxMenu(e, sid) {
     'create_user_betrusted': 'Requires a vulnerable MS (betrusted) or gateway',
     'check_cve_31324':       'Only applicable to Java / double-stack systems',
     'check_cve_6287':        'Only applicable to Java / double-stack systems',
+    'check_cve_22536':       'Only applicable to ICM-fronted nodes (ABAP / Java / Web Dispatcher)',
     'exploit_cve_31324_drop': 'Run Check CVE-2025-31324 first; vulnerability required',
+    'icmad_acl_bypass':       'Run Check CVE-2022-22536 first to discover a vulnerable ICM port',
     'create_user_java':      'Requires Java / dual-stack system AND a usable CVE-2025-31324, RECON, or GW SAPXPG vuln',
     'create_user_gw':   'Requires a vulnerable RFC Gateway',
     'create_user_creds': 'Provide credentials first',
@@ -3699,6 +3705,20 @@ async function ctxAction(action) {
       await api('POST', `node/${sid}/check_cve_2025_31324`); break;
     case 'check_cve_6287':
       await api('POST', `node/${sid}/check_cve_2020_6287`); break;
+    case 'check_cve_22536':
+      await api('POST', `node/${sid}/check_cve_2022_22536`); break;
+    case 'icmad_acl_bypass': {
+      const outer = prompt(
+        'Outer POST path that the WD forwards to the backend\n' +
+        '(e.g. /sap/admin/public/default.html for default WDs, /nwa/ for '
+        + 'NWA-fronted setups):',
+        '/sap/admin/public/default.html'
+      );
+      if (outer === null) break;
+      await api('POST', `node/${sid}/icmad_acl_bypass`, { outer_path: outer });
+      showToast('ICMAD ACL-bypass sweep started — see console for per-path verdicts', 'info');
+      break;
+    }
     case 'check_linux_lpe':
       await api('POST', `node/${sid}/check_linux_lpe`);
       showToast('Linux LPE check started — probing both Copy Fail and Dirty Frag', 'info');
