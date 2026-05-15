@@ -133,6 +133,19 @@ def test_detect_payload_advertises_canonical_cl():
         b"POST /sap/admin/public/default.html HTTP/1.1\r\n")
 
 
+def test_detect_payload_honours_custom_outer_path():
+    """When the Onapsis canonical path 503's on a target (because the
+    WD's URL filter denies it), the operator can point the smuggle at
+    a path that actually forwards to the backend — e.g. /nwa/ on an
+    AS Java WD config."""
+    payload = _build_detect_payload("h", 1, outer_path="/nwa/")
+    assert payload.startswith(b"POST /nwa/ HTTP/1.1\r\n")
+    # CL header still the canonical Onapsis magic number
+    assert b"Content-Length: 82646\r\n" in payload
+    # Inner smuggle still lives in the tail
+    assert payload.endswith(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+
+
 def test_detect_payload_contains_smuggled_inner_request():
     payload = _build_detect_payload("h", 1)
     # Inner request lives in the trailing bytes
