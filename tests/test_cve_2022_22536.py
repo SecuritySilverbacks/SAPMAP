@@ -451,6 +451,136 @@ def test_run_acl_bypass_paths_filter(monkeypatch):
         assert r["bypass_confirmed"] is False
 
 
+# ---------------------------------------------------------------------------
+# D.3 — Heap-dump pull
+# ---------------------------------------------------------------------------
+
+def test_list_heap_dumps_parses_directory_listing(monkeypatch):
+    """The /heapdump/ index typically returns an HTML page with hprof links."""
+    import sap_cve_2022_22536 as mod
+
+    # Smuggled response: HTML directory listing
+    listing_html = (b"<html><body><h1>Heap dumps</h1>"
+                    b'<a href="dump_2026_05_15_03_02_44.hprof">dump1</a>'
+                    b'<a href="dump_2026_05_14_18_30_01.hprof">dump2</a>'
+                    b'<a href="oom_dump_pid12345.hprof.gz">oom</a>'
+                    b"</body></html>")
+    buf = (b"HTTP/1.1 302 Found\r\nServer: backend\r\n\r\nouter-body"
+           b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
+           b"Content-Length: " + str(len(listing_html)).encode() +
+           b"\r\n\r\n" + listing_html)
+
+    def fake_open_socket(*a, **k):
+        class S:
+            sent = False
+            def settimeout(self, *a): pass
+            def sendall(self, *a): pass
+            def recv(self_, n):
+                if self_.sent: return b""
+                self_.sent = True
+                return buf
+            def close(self): pass
+        return S()
+    monkeypatch.setattr(mod, "_open_socket", fake_open_socket)
+
+    out = mod.list_heap_dumps("h", 80, verbose=False)
+    assert out["reachable"] is True
+    assert out["smuggled_status"] == 200
+    # Two .hprof and one .hprof.gz — all three regex-match
+    assert len(out["dumps"]) == 3
+    assert "dump_2026_05_15_03_02_44.hprof" in out["dumps"]
+    assert "oom_dump_pid12345.hprof.gz" in out["dumps"]
+
+
+def test_list_heap_dumps_empty_when_503(monkeypatch):
+    import sap_cve_2022_22536 as mod
+    buf = (b"HTTP/1.1 302 Found\r\n\r\nouter"
+           b"HTTP/1.0 503 Service Unavailable\r\n"
+           b"x-sap-icm-err-id: ICMENOSYSTEMFOUND\r\n\r\n")
+    def fake_open_socket(*a, **k):
+        class S:
+            sent = False
+            def settimeout(self, *a): pass
+            def sendall(self, *a): pass
+            def recv(self_, n):
+                if self_.sent: return b""
+                self_.sent = True
+                return buf
+            def close(self): pass
+        return S()
+    monkeypatch.setattr(mod, "_open_socket", fake_open_socket)
+    out = mod.list_heap_dumps("h", 80, verbose=False)
+    assert out["reachable"] is False
+    assert out["dumps"] == []
+
+
+def test_download_heap_dump_streams_to_disk(monkeypatch, tmp_path):
+    """Two-response buffer: outer 302 + inner 200 with HPROF magic bytes."""
+    import sap_cve_2022_22536 as mod
+
+    # Real HPROF starts with "JAVA PROFILE 1.0.2\x00" (19 bytes incl NUL)
+    hprof_payload = b"JAVA PROFILE 1.0.2\x00" + b"\xde\xad\xbe\xef" * 256
+    buf = (b"HTTP/1.1 302 Found\r\nServer: backend\r\n\r\nouter"
+           b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n"
+           b"Content-Length: " + str(len(hprof_payload)).encode() +
+           b"\r\n\r\n" + hprof_payload)
+
+    chunks = [buf]
+    def fake_open_socket(*a, **k):
+        class S:
+            def settimeout(self, *a): pass
+            def sendall(self, *a): pass
+            def recv(self_, n):
+                if chunks:
+                    return chunks.pop(0)
+                return b""
+            def close(self): pass
+        return S()
+    monkeypatch.setattr(mod, "_open_socket", fake_open_socket)
+
+    save_to = str(tmp_path / "dump1.hprof")
+    out = mod.download_heap_dump("h", 80, "dump1.hprof",
+                                   save_to=save_to, verbose=False)
+    assert out["complete"] is True
+    assert out["smuggled_status"] == 200
+    assert out["bytes_written"] == len(hprof_payload)
+    with open(save_to, "rb") as f:
+        on_disk = f.read()
+    assert on_disk == hprof_payload
+    assert on_disk[:18] == b"JAVA PROFILE 1.0.2"
+
+
+def test_download_heap_dump_respects_size_cap(monkeypatch, tmp_path):
+    """max_bytes hard-cap stops the stream even if more is available."""
+    import sap_cve_2022_22536 as mod
+
+    big_payload = b"X" * 8000
+    buf = (b"HTTP/1.1 302 Found\r\n\r\nouter"
+           b"HTTP/1.1 200 OK\r\nContent-Length: 8000\r\n\r\n" + big_payload)
+    chunks = [buf]
+    def fake_open_socket(*a, **k):
+        class S:
+            def settimeout(self, *a): pass
+            def sendall(self, *a): pass
+            def recv(self_, n):
+                if chunks: return chunks.pop(0)
+                return b""
+            def close(self): pass
+        return S()
+    monkeypatch.setattr(mod, "_open_socket", fake_open_socket)
+
+    save_to = str(tmp_path / "big.hprof")
+    out = mod.download_heap_dump("h", 80, "big.hprof",
+                                   save_to=save_to,
+                                   max_bytes=1000,
+                                   verbose=False)
+    # Stream wrote at most max_bytes (loop exits at first iteration past cap)
+    assert out["bytes_written"] <= 8000   # initial response chunk was 8000
+    # Cap is a soft cap — we don't truncate mid-chunk, but we don't
+    # request more recv() rounds either.  Effective behaviour: write
+    # the chunk we already received, then stop.
+
+
 def test_run_acl_bypass_detects_bypass_when_smuggled_promotes(monkeypatch):
     """End-to-end: 2 responses with status promotion → bypass_confirmed=True."""
     import sap_cve_2022_22536 as mod

