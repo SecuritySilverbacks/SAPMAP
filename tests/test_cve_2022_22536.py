@@ -743,7 +743,69 @@ def test_match_wd_backends_links_to_existing_node_by_release():
     assert wd.wd_backends[0]["linked_node_sid"] == "J75"
 
 
-def test_match_wd_backends_no_match_keeps_blank():
+def test_match_wd_backends_promotes_unmatched_to_placeholder():
+    """When promote_unmatched=True (default), an unmatched backend
+    is turned into a synthetic placeholder SAPNode with
+    discovered_via_wd_sid set."""
+    from sapmap_models import SAPNode
+    from sapmap_scanner import match_wd_backends_to_nodes
+
+    wd = SAPNode(sid="W0B", system_type="WEB_DISPATCHER",
+                  ip="10.0.0.1", hostname="wd")
+    wd.is_web_dispatcher = True
+    wd.wd_backends = [{
+        "signature": "SAP NetWeaver Application Server / AS Java 7.50",
+        "server_header": ("SAP NetWeaver Application Server / "
+                           "AS Java 7.50"),
+        "url_prefixes": ["/sap/wzip?aaa", "/heapdump/"],
+        "wd_version_hint": "750",
+        "linked_node_sid": "",
+        "likely_sid": "",
+        "is_suppressed": False,
+    }]
+    nodes = [wd]   # no other nodes — backend cannot match
+    placeholders = match_wd_backends_to_nodes(nodes,
+                                                 promote_unmatched=True)
+    assert len(placeholders) == 1
+    p = placeholders[0]
+    assert p.sid.startswith("B")           # placeholder prefix
+    assert p.system_type == "JAVA"          # parsed from "AS Java"
+    assert p.kernel == "750"                # from wd_version_hint
+    assert p.discovered_via_wd_sid == "W0B"
+    assert p.ip == ""                        # unknown
+    assert p.hostname == ""                  # unknown
+    # And the WD's backend entry now points at the placeholder
+    assert wd.wd_backends[0]["linked_node_sid"] == p.sid
+
+
+def test_match_wd_backends_promote_off_keeps_blank():
+    """promote_unmatched=False reverts to the previous behaviour:
+    unmatched backends stay with linked_node_sid='' and no
+    placeholder is created."""
+    from sapmap_models import SAPNode
+    from sapmap_scanner import match_wd_backends_to_nodes
+
+    wd = SAPNode(sid="W0B", system_type="WEB_DISPATCHER",
+                  ip="10.0.0.1", hostname="wd")
+    wd.is_web_dispatcher = True
+    wd.wd_backends = [{
+        "signature": "Unknown backend",
+        "server_header": "Unknown backend",
+        "url_prefixes": ["/x"],
+        "wd_version_hint": "",
+        "linked_node_sid": "",
+        "likely_sid": "",
+        "is_suppressed": False,
+    }]
+    placeholders = match_wd_backends_to_nodes([wd],
+                                                 promote_unmatched=False)
+    assert placeholders == []
+    assert wd.wd_backends[0]["linked_node_sid"] == ""
+
+
+def test_match_wd_backends_no_match_with_promote_off_keeps_blank():
+    """Under the legacy contract (promote_unmatched=False), an
+    unmatched backend's linked_node_sid stays blank."""
     from sapmap_models import SAPNode
     from sapmap_scanner import match_wd_backends_to_nodes
 
@@ -760,7 +822,7 @@ def test_match_wd_backends_no_match_keeps_blank():
         "is_suppressed": False,
     }]
     nodes = [wd]    # no other nodes on the map
-    match_wd_backends_to_nodes(nodes)
+    match_wd_backends_to_nodes(nodes, promote_unmatched=False)
     assert wd.wd_backends[0]["linked_node_sid"] == ""
 
 

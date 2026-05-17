@@ -3875,9 +3875,11 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
     return nodes
 
 
-def match_wd_backends_to_nodes(nodes: list) -> None:
+def match_wd_backends_to_nodes(nodes: list,
+                                  promote_unmatched: bool = True) -> list:
     """Post-scan pass: link each WD's wd_backends entries to existing
-    SAPNodes on the map.
+    SAPNodes on the map, AND optionally create synthetic placeholder
+    nodes for backends that don't match any existing node.
 
     For each (WD-node, backend-entry) pair, set
     backend["linked_node_sid"] to the SID of the SAPNode that most
@@ -3890,17 +3892,37 @@ def match_wd_backends_to_nodes(nodes: list) -> None:
       3. The Server-header signature contains a SAPNode's hostname
          (rare — most banners don't leak hostnames).
 
-    Nodes that don't match are left with linked_node_sid="" so the
-    operator sees them as "external / not-on-the-map" backends.
-    Called once per `discover_systems` invocation and also re-runnable
-    via the GUI "rediscover WD backends" menu item.
+    Unmatched backends — i.e. the WD revealed there's a backend it
+    talks to, but the wire-level data is too thin to identify it as
+    an existing on-map SAPNode — are turned into SYNTHETIC PLACEHOLDER
+    nodes if ``promote_unmatched=True`` (the default).  Synthetic nodes
+    carry the marker ``discovered_via_wd_sid`` set to the source WD's
+    SID; the GUI renders them with a dashed border + lower opacity to
+    visually distinguish from confirmed-on-the-wire nodes.
+
+    Returns the list of newly-created placeholder SAPNodes (empty when
+    promote_unmatched=False or every backend already linked).  Caller
+    is responsible for adding them to whatever state container holds
+    the map (state.add_node(...) in the GUI handler; nodes.append(...)
+    inline for discover_systems).
     """
     if not nodes:
-        return
+        return []
+    new_nodes: list = []
+    # Snapshot the current node set so each placeholder gets a unique
+    # SID based on a counter local to the source WD.
+    existing_sids = {n.sid for n in nodes}
     for wd in nodes:
         if not getattr(wd, "is_web_dispatcher", False):
             continue
         backends = getattr(wd, "wd_backends", []) or []
+        # Per-WD index for synthetic-SID synthesis ("BK0B1", "BK0B2"...)
+        synth_idx = 0
+        # Strip the "W" prefix off the WD's SID for the placeholder
+        # prefix.  e.g. WD "W0B" -> placeholder "B0B<n>"; WD "WDP"
+        # (operator-typed) -> placeholder "BDP<n>".
+        wd_sid = wd.sid or "WD"
+        prefix_hex = wd_sid[1:3] if len(wd_sid) >= 3 else "XX"
         for bk in backends:
             sig = bk.get("server_header", "") or ""
             if not sig:
@@ -3910,6 +3932,7 @@ def match_wd_backends_to_nodes(nodes: list) -> None:
             # Application Server 7.54 / AS Java 7.50" should match
             # any Java node with sap_release=750 OR kernel=754.
             sig_lower = sig.lower()
+            matched = False
             for other in nodes:
                 if other is wd:
                     continue
@@ -3918,8 +3941,6 @@ def match_wd_backends_to_nodes(nodes: list) -> None:
                 for key in (other.sap_release, other.kernel):
                     if not key:
                         continue
-                    # Build candidate substrings from the kernel/release
-                    # value, e.g. "750" -> "7.50".
                     if (key.isdigit() and len(key) in (3, 4)):
                         dotted = f"{key[0]}.{key[1:]}"
                         if dotted in sig:
@@ -3931,7 +3952,40 @@ def match_wd_backends_to_nodes(nodes: list) -> None:
                     hits.append(other.hostname)
                 if hits:
                     bk["linked_node_sid"] = other.sid
+                    matched = True
                     break
+            if matched or not promote_unmatched:
+                continue
+            # Synthesise a placeholder node for this backend.  The
+            # SID has a leading "B" so it can't collide with the
+            # router (R-prefix), WD (W-prefix), or real-system SIDs.
+            synth_idx += 1
+            candidate_sid = f"B{prefix_hex}{synth_idx}"
+            # Bump if collision (rare, but guard anyway)
+            while candidate_sid in existing_sids:
+                synth_idx += 1
+                candidate_sid = f"B{prefix_hex}{synth_idx}"
+            existing_sids.add(candidate_sid)
+            # Pull stack hint from the Server header
+            stype = "SAP"
+            if "AS Java" in sig:
+                stype = "JAVA"
+            elif "AS ABAP" in sig:
+                stype = "ABAP"
+            # Kernel: prefer the wd_version_hint already extracted
+            kernel = bk.get("wd_version_hint", "") or ""
+            placeholder = SAPNode(
+                sid=candidate_sid,
+                system_type=stype,
+                hostname="",        # unknown — only the WD knows
+                ip="",              # unknown
+                instances=[],       # nothing scanned directly
+                kernel=kernel,
+            )
+            placeholder.discovered_via_wd_sid = wd_sid
+            bk["linked_node_sid"] = candidate_sid
+            new_nodes.append(placeholder)
+    return new_nodes
 
 
 def discover_systems(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
@@ -4071,9 +4125,19 @@ def discover_systems(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RAN
               f"Clients:{len(node.clients)}{flag}")
     print(f"[*] ========================================")
 
-    # Cross-link WD-to-backend edges across the discovered nodes.
+    # Cross-link WD-to-backend edges across the discovered nodes,
+    # and auto-synthesise placeholder SAPNodes for any backend that
+    # the WD revealed but that didn't match a real on-map node.
     # Cheap (in-memory string matching, no I/O); runs once per scan.
-    match_wd_backends_to_nodes(nodes)
+    placeholders = match_wd_backends_to_nodes(nodes,
+                                                 promote_unmatched=True)
+    if placeholders:
+        print(f"[+] Promoted {len(placeholders)} WD-discovered backend(s) "
+              f"to placeholder node(s):")
+        for p in placeholders:
+            print(f"      • {p.sid} ({p.system_type}, kernel={p.kernel or '?'})"
+                  f"  -- discovered via {p.discovered_via_wd_sid}")
+        nodes.extend(placeholders)
 
     return nodes
 

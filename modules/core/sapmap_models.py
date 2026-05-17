@@ -250,6 +250,13 @@ class SAPNode:
     # by server-header substring or shared kernel).  Drives the
     # WD → backend edges in the landscape SVG.
     wd_backends: list = field(default_factory=list)
+    # Set when this SAPNode is a SYNTHETIC PLACEHOLDER auto-created
+    # from a WD's backend topology — i.e. we know SOMETHING is behind
+    # the WD (because the WD's Server header was different from the
+    # WD-local handler's), but we don't know its real SID/IP/hostname.
+    # Holds the SID of the WD that revealed it.  GUI renders these
+    # placeholder nodes with a dashed border + lower opacity.
+    discovered_via_wd_sid: str = ""
     # Telnet console endpoint override (e.g. "127.0.0.1:50008" when the
     # target's admin telnet is localhost-bound and the operator has an
     # SSH tunnel).  Empty => derive from node.ip + default 5NN08.
@@ -434,6 +441,7 @@ class SAPNode:
             "wd_cache_enabled": self.wd_cache_enabled,
             "wd_cache_evidence": self.wd_cache_evidence,
             "wd_backends": list(self.wd_backends or []),
+            "discovered_via_wd_sid": self.discovered_via_wd_sid,
             "telnet_override": self.telnet_override,
             "java_deploy_blocked": self.java_deploy_blocked,
             "java_secstore_checked": self.java_secstore_checked,
@@ -512,6 +520,7 @@ class SAPNode:
             wd_cache_enabled=d.get("wd_cache_enabled", False),
             wd_cache_evidence=d.get("wd_cache_evidence", ""),
             wd_backends=d.get("wd_backends", []),
+            discovered_via_wd_sid=d.get("discovered_via_wd_sid", ""),
             telnet_override=d.get("telnet_override", ""),
             java_deploy_blocked=d.get("java_deploy_blocked", False),
             java_secstore_checked=d.get("java_secstore_checked", False),
