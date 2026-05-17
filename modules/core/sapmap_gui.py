@@ -3630,7 +3630,15 @@ def create_app(api: SAPMAPApi) -> Bottle:
         new_type = data.get("system_type", "").strip()
         if new_type:
             node.system_type = new_type
-            print(f"[*] System type for {sid} set to: {new_type}")
+            # Keep the WD flag in sync with the system_type pick so the
+            # ICMAD severity logic + GUI menu gating see consistent
+            # state.  Pick WEB_DISPATCHER -> is_web_dispatcher=True;
+            # pick any other type -> clear the flag (operator might
+            # have mis-flagged it earlier).
+            node.is_web_dispatcher = (new_type.upper() == "WEB_DISPATCHER")
+            print(f"[*] System type for {sid} set to: {new_type}"
+                  + (" (is_web_dispatcher=True)"
+                     if node.is_web_dispatcher else ""))
         return json.dumps({"status": "ok"})
 
     @app.route("/api/node/<sid>/set_db_type", method="POST")

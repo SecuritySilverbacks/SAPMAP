@@ -1125,6 +1125,7 @@ body {
         <option value="BUSINESSOBJECTS">BusinessObjects</option>
         <option value="CLOUD_CONNECTOR">Cloud Connector</option>
         <option value="CONTENT_SERVER">Content Server</option>
+        <option value="WEB_DISPATCHER">Web Dispatcher</option>
         <option value="SAPROUTER">SAPRouter</option>
         <option value="MDM">MDM</option>
         <option value="HANA">HANA</option>
@@ -3119,7 +3120,11 @@ function showCtxMenu(e, sid) {
     'credentials':      true,                       // always available
     'rfc_system_info':  hasGwPort,                   // need a gateway port
     'check_gw':         hasGwPort,                   // need a gateway port
-    'check_ms':              true,                    // always (probes 39NN directly)
+    // Probes the message server internal port (39NN) for CVE-2020-6207
+    // ACL bypass.  A standalone Web Dispatcher has no message server
+    // and no 39NN — disable for pure-WD nodes (still allowed when the
+    // host runs ABAP/Java alongside the WD).
+    'check_ms':         isAbapStack || isJavaStack,
     'check_cve_31324':       isJavaStack,             // Java-only vulnerability
     'check_cve_6287':        isJavaStack,             // Java-only RECON check
     'check_cve_22536':       isAbapStack || isJavaStack || !!n.is_web_dispatcher,
@@ -3193,10 +3198,12 @@ function showCtxMenu(e, sid) {
         (n && (n.credentials || []).some(c => c && c.verified))
         || hasCreatedUsers),
     'propagate':        hasCreds,                   // need access to propagate from
-    // Harvest is pure introspection over already-captured state, so
-    // any node will return *something* (often nothing, that's fine).
-    // Always available — operator decides whether to mint.
-    'harvest_btp_creds': true,
+    // Harvest is pure introspection over already-captured state
+    // (secstore_entries, java_destinations, JCo creds) — works on
+    // any ABAP/Java node.  Standalone WDs don't have any such state
+    // (a WD only forwards traffic; it doesn't store JCo destinations
+    // or SecStore entries), so hide it on pure-WD nodes.
+    'harvest_btp_creds': isAbapStack || isJavaStack,
     'cleanup':          hasCreatedUsers,             // need created users to clean up
     'client_roles':     hasUsableAbapAccess,        // ABAP-only RFC reads
     'read_usrextid':    hasUsableAbapAccess,        // ABAP-only RFC reads
@@ -3242,6 +3249,10 @@ function showCtxMenu(e, sid) {
     'check_cve_6287':        'Only applicable to Java / double-stack systems',
     'check_cve_22536':       'Only applicable to ICM-fronted nodes (ABAP / Java / Web Dispatcher)',
     'wd_rediscover':         'Only applicable to confirmed Web Dispatcher nodes',
+    'check_ms':              ('Probes the message server internal port (39NN) — '
+                              'not applicable to standalone Web Dispatchers'),
+    'harvest_btp_creds':     ('Reads JCo destinations / SecStore entries — '
+                              'standalone Web Dispatchers don\'t store any'),
     'exploit_cve_31324_drop': 'Run Check CVE-2025-31324 first; vulnerability required',
     'icmad_acl_bypass':       'Run Check CVE-2022-22536 first to discover a vulnerable ICM port',
     'icmad_heapdump_pull':    'Run ICMAD ACL Bypass Sweep first; /heapdump/ must bypass to enable HPROF pull',
@@ -3336,6 +3347,13 @@ function showCtxMenu(e, sid) {
     'create_user_gw':        !(isAbapStack || isJavaStack),
     // SAProuter-only: reads the ROUTER_ADM info page
     'check_router_info': !isSaprouter,
+    // Items that don't apply to a standalone Web Dispatcher (no
+    // message server, no JCo destinations, no SecStore): hide them
+    // outright on pure-WD nodes so the menu stays tidy.
+    'check_ms':         !!n.is_web_dispatcher
+                          && !isAbapStack && !isJavaStack,
+    'harvest_btp_creds': !!n.is_web_dispatcher
+                            && !isAbapStack && !isJavaStack,
     // Java-only (dual-stack also counts as Java here)
     'download_java_secstore':     !isJavaStack,
     'view_java_secstore':         !isJavaStack,
