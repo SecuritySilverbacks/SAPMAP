@@ -1355,15 +1355,23 @@ def check_cve_2022_22536(node: SAPNode, timeout: float = 12.0,
         if not _scan_port(host, port, timeout=2.0):
             continue
         try:
-            v = assess_icmad(
-                host, port, https=use_https, saprouter=saprouter,
+            # When the operator didn't override outer_path, leave it
+            # unset so assess_icmad / probe_icmad fall through to the
+            # canonical /sap/wzip?aaa default.  Critical: do NOT pass
+            # "/sap/admin/public/default.html" here — that path is
+            # served LOCALLY by most WDs with connection: close, which
+            # closes the socket before the smuggle re-parse can fire.
+            kwargs = dict(
+                https=use_https, saprouter=saprouter,
                 timeout=timeout,
                 kernel_release=node.kernel or "",
                 kernel_patch=getattr(node, "kernel_patch", "") or "",
                 is_web_dispatcher=node.is_web_dispatcher,
-                outer_path=outer_path or "/sap/admin/public/default.html",
                 verbose=True,
             )
+            if outer_path:
+                kwargs["outer_path"] = outer_path
+            v = assess_icmad(host, port, **kwargs)
         except Exception as e:
             logger.warning("ICMAD probe error on %s:%d — %s",
                             host, port, e)
@@ -1476,6 +1484,73 @@ def check_cve_2022_22536(node: SAPNode, timeout: float = 12.0,
             found_any = True
             # Don't return — keep probing other ports in case one fires
             # the live signature, which promotes to HIGH.
+
+        # Confirmed-WD-but-kernel-unknown branch.  When the WD has its
+        # Server header suppressed (icm/HTTP/server_header_suppression=1)
+        # and no kernel info reached us via RFC_SYSTEM_INFO / SAPControl,
+        # the patch-table lookup returns "unknown" and the previous
+        # branch above doesn't fire.  But this IS a confirmed WD — the
+        # scanner ran fingerprint_web_dispatcher and labelled it.  Don't
+        # let it fall through to silent "not vulnerable" just because
+        # we can't extract a PL number — emit an info finding so the
+        # operator sees the suspect node.
+        elif (node.is_web_dispatcher
+                and patch.get("status") == "unknown"
+                and not probe.get("vulnerable")
+                and not node.cve_2022_22536_vulnerable):
+            node.cve_2022_22536_port = port
+            node.cve_2022_22536_https = use_https
+            node.cve_2022_22536_evidence = (
+                "Confirmed Web Dispatcher; kernel/PL could not be "
+                "extracted from server headers (likely suppressed via "
+                "icm/HTTP/server_header_suppression=1).  Live smuggle "
+                "probe inconclusive — ICMAD is race-conditional and a "
+                "single negative is not proof of mitigation."
+            )
+            emit_finding(
+                "INFO", node.sid,
+                "CVE-2022-22536 (ICMAD) suspect — confirmed Web "
+                "Dispatcher, kernel/PL unknown",
+                cve="CVE-2022-22536",
+            )
+            if not any(f.name.startswith("CVE-2022-22536")
+                          for f in node.findings):
+                node.findings.append(Finding(
+                    name=("CVE-2022-22536 (ICMAD) — suspect "
+                           "(confirmed WD, kernel unverified)"),
+                    severity=Severity.INFO,
+                    description=(
+                        "This host is a confirmed SAP Web Dispatcher "
+                        "(via /sap/wdisp/admin probe or Server banner), "
+                        "but the kernel release + patch level couldn't "
+                        "be determined automatically — the Server "
+                        "header is likely suppressed via "
+                        "icm/HTTP/server_header_suppression=1.\n\n"
+                        "The live smuggle probe did not fire on this "
+                        "attempt, but ICMAD is race-conditional and a "
+                        "single negative attempt is not proof of "
+                        "mitigation.  Manually verify the WD's patch "
+                        "level by running `sapwebdisp -V` on the WD "
+                        "host or asking the customer; cross-reference "
+                        "against SAP Note 3123396 (7.22 ≥ PL1101, "
+                        "7.49 ≥ PL1036, 7.53 ≥ PL915, 7.77 ≥ PL429, "
+                        "7.81 ≥ PL227, 7.85 ≥ PL69, 7.86 ≥ PL15, "
+                        "7.87 ≥ PL4, 8.04 ≥ PL207).\n\n"
+                        "Alternatively: re-fire the ICMAD probe after "
+                        "60 s of idle (the WD's backend connection "
+                        "pool needs to be quiet for the smuggle to "
+                        "re-parse), or try a different outer_path "
+                        "that's known to forward to a backend on this "
+                        "WD's wdisp/system_X config."
+                    ),
+                    remediation=(
+                        "Apply SAP Note 3123396 if the WD's kernel "
+                        "patch level is below the fix boundary."
+                    ),
+                    detail=(f"Port {port}{'/HTTPS' if use_https else '/HTTP'} "
+                            f"· {probe.get('evidence', '')}"),
+                ))
+            found_any = True
 
     return found_any
 
@@ -2169,6 +2244,12 @@ def query_public_info(host: str, http_port: int,
 _WD_PATTERNS = (
     (re.compile(rb"\r\nServer:\s*SAP\s+Web\s+Dispatcher", re.I),
         "server_banner"),
+    # The WD's own error pages carry this comment in the body even
+    # when icm/HTTP/server_header_suppression=1 strips the Server
+    # header.  Most reliable signal when the WD has been hardened.
+    (re.compile(rb"This\s+error\s+page\s+was\s+generated\s+by\s+SAP\s+"
+                  rb"Web\s+Dispatcher", re.I),
+        "error_page_comment"),
     # Both ICMENOSERVERFOUND and ICMENOSYSTEMFOUND are WD-specific
     # error IDs:
     #   ICMENOSERVERFOUND  — no app server in the load-balancing group
