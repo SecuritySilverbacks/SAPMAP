@@ -3965,6 +3965,91 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:check_ms", "Check MS Betrusted", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/wd_rediscover", method="POST")
+    def node_wd_rediscover(sid):
+        """Re-run the WD cache + backend-topology discovery on a node.
+
+        Useful when the operator has changed something on the WD
+        (toggled wdisp/cache_enabled, added a wdisp/system_X entry,
+        rotated certs) and wants the SAPMAP map updated without a
+        full re-scan of every host.  Enabled only when
+        node.is_web_dispatcher=True.
+        """
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        if not node.is_web_dispatcher:
+            return json.dumps({"error": "Not a Web Dispatcher node"})
+
+        # Find the WD's HTTPS / HTTP port
+        wd_port = 0
+        wd_https = False
+        for inst in node.instances:
+            for p, svc in (inst.ports or {}).items():
+                low = (svc or "").lower()
+                if low.startswith("wd_"):
+                    wd_port = p
+                    wd_https = low == "wd_https"
+                    break
+            if wd_port:
+                break
+        if not wd_port:
+            return json.dumps({"error": "No WD port found on node"})
+
+        def _run():
+            try:
+                from sapmap_scanner import (
+                    detect_wd_cache, discover_wd_backends,
+                    match_wd_backends_to_nodes,
+                )
+                host = node.ip or node.hostname
+                print(f"[*] {sid}: WD rediscover on {host}:{wd_port}"
+                      f"{'/HTTPS' if wd_https else '/HTTP'}")
+                # Cache state
+                cache = detect_wd_cache(host, wd_port, https=wd_https,
+                                          timeout=6,
+                                          saprouter=node.saprouter or "")
+                node.wd_cache_enabled = bool(cache.get("enabled"))
+                node.wd_cache_evidence = cache.get("evidence", "")
+                if cache.get("enabled"):
+                    print(f"[+] {sid}: cache ENABLED "
+                          f"({cache['evidence']})")
+                else:
+                    print(f"[*] {sid}: cache disabled or no signal "
+                          f"({cache.get('evidence', '')})")
+                # Backend topology
+                bk_result = discover_wd_backends(
+                    host, wd_port, https=wd_https,
+                    timeout=6, saprouter=node.saprouter or "",
+                    verbose=True)
+                node.wd_backends = [dict(b, linked_node_sid="")
+                                      for b in bk_result["backends"]]
+                # Re-run cross-node matching now that this WD has fresh
+                # backend data
+                match_wd_backends_to_nodes(list(api.state.nodes.values()))
+                # Surface linked-node summary
+                linked = [b for b in node.wd_backends
+                            if b.get("linked_node_sid")]
+                print(f"[+] {sid}: rediscover complete — "
+                      f"{len(node.wd_backends)} backend(s), "
+                      f"{len(linked)} linked to on-map nodes")
+                for b in node.wd_backends:
+                    tgt = (b.get("linked_node_sid")
+                            or '<not on map>')
+                    srv = b.get("server_header") or '<suppressed>'
+                    print(f"      → {tgt:8s} [{srv[:60]}] "
+                          f"{len(b.get('url_prefixes', []))} prefix(es)")
+            except Exception as e:
+                import traceback
+                print(f"[-] {sid}: WD rediscover failed: "
+                      f"{type(e).__name__}: {e}")
+                traceback.print_exc()
+
+        _bg(f"{sid}:wd_rediscover", "WD Rediscover (cache + backends)",
+              _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/check_cve_2022_22536", method="POST")
     def node_check_cve_2022_22536(sid):
         """Probe a node for CVE-2022-22536 (ICMAD) — HTTP request smuggling.

@@ -769,6 +769,48 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
                     print(f"[+]   {host}:{p:<6} CONFIRMED SAP Web "
                           f"Dispatcher{ver}  ({fp['evidence']}, "
                           f"confidence={fp['confidence']})")
+                    # Cache + backend topology — best-effort, failures
+                    # are non-fatal.  Run synchronously here so
+                    # _build_nodes_from_fast_scan() can stamp the
+                    # results onto the SAPNode.
+                    try:
+                        cache = detect_wd_cache(host, p, https=is_https,
+                                                  timeout=min(timeout, 5))
+                        result["wd_info"][p]["cache"] = cache
+                        if cache.get("enabled"):
+                            print(f"[!]   {host}:{p:<6} cache ENABLED "
+                                  f"({cache['evidence']}) — promotes "
+                                  f"ICMAD chain (b) cache-poisoning")
+                        else:
+                            print(f"[*]   {host}:{p:<6} cache "
+                                  f"disabled / no signal "
+                                  f"({cache.get('evidence', '')})")
+                    except Exception as e:
+                        print(f"[-]   {host}:{p:<6} cache detect "
+                              f"error: {e}")
+                    try:
+                        backends = discover_wd_backends(
+                            host, p, https=is_https,
+                            timeout=min(timeout, 5), verbose=False)
+                        result["wd_info"][p]["backends"] = backends
+                        bcount = len(backends["backends"])
+                        wlocal = len(backends["wd_local_prefixes"])
+                        wrej = len(backends["wd_rejected_prefixes"])
+                        print(f"[+]   {host}:{p:<6} backend topology: "
+                              f"{bcount} backend(s), {wlocal} WD-local, "
+                              f"{wrej} rejected")
+                        for bk in backends["backends"]:
+                            srv = bk["server_header"] or "<suppressed>"
+                            print(f"        → backend [{srv[:60]}] "
+                                  f"serves {len(bk['url_prefixes'])} "
+                                  f"prefix(es): "
+                                  f"{', '.join(bk['url_prefixes'][:3])}"
+                                  + ("..."
+                                     if len(bk["url_prefixes"]) > 3
+                                     else ""))
+                    except Exception as e:
+                        print(f"[-]   {host}:{p:<6} backend discover "
+                              f"error: {e}")
                 elif fp["is_sap_icm"]:
                     # SAP ICM but not specifically WD — could be an app
                     # server's ICM exposed on a non-standard port.  Keep
@@ -1389,16 +1431,36 @@ def check_cve_2022_22536(node: SAPNode, timeout: float = 12.0,
                 probe.get("raw_head", b"")[:256].decode(
                     "iso-8859-1", errors="replace")
             )
-            emit_finding("HIGH", node.sid,
+            # Severity escalation: HIGH by default, CRITICAL when the
+            # WD cache is enabled (ICMAD chain (b) is then directly
+            # exploitable — smuggled responses get cached and served
+            # to other clients).
+            sev_label = ("CRITICAL"
+                          if getattr(node, "wd_cache_enabled", False)
+                          else "HIGH")
+            emit_finding(sev_label, node.sid,
                           f"CVE-2022-22536 (ICMAD) smuggle confirmed on "
-                          f"port {port}",
+                          f"port {port}"
+                          + (" — cache-poisoning chain reachable "
+                             "(wdisp/cache_enabled=1 observed)"
+                             if sev_label == "CRITICAL" else ""),
                           cve="CVE-2022-22536")
             if not any(f.name.startswith("CVE-2022-22536")
                           for f in node.findings):
+                finding_sev = (Severity.CRITICAL
+                                if getattr(node, "wd_cache_enabled", False)
+                                else Severity.HIGH)
+                finding_name = (
+                    "CVE-2022-22536 (ICMAD) — smuggle confirmed + "
+                    "WD cache enabled (cache-poisoning chain "
+                    "reachable)"
+                    if finding_sev == Severity.CRITICAL
+                    else "CVE-2022-22536 (ICMAD) — smuggle confirmed "
+                          "on the wire"
+                )
                 node.findings.append(Finding(
-                    name=("CVE-2022-22536 (ICMAD) — smuggle confirmed "
-                           "on the wire"),
-                    severity=Severity.HIGH,
+                    name=finding_name,
+                    severity=finding_sev,
                     description=(
                         "SAP NetWeaver / Web Dispatcher ICM mis-handles "
                         "memory pipe (MPI) buffer boundaries, allowing "
@@ -2487,6 +2549,434 @@ def fingerprint_web_dispatcher(host: str, port: int,
     return out
 
 
+# ---------------------------------------------------------------------------
+# Web Dispatcher cache detection
+# ---------------------------------------------------------------------------
+#
+# `wdisp/cache_enabled=1` is the parameter that turns on HTTP response
+# caching in the WD.  When ON, the WD caches backend responses based on
+# `sap-cache-control` directives the backend ships (e.g.
+# `sap-cache-control: +86400`).  This MATTERS for ICMAD because it
+# unlocks documented exploit chain (b) — cache poisoning, where a
+# smuggled response gets cached and served to legitimate users.
+#
+# Detection (unauthenticated):
+#   1. Pick a path the WD forwards to backend that we expect to be
+#      cacheable (the SAP logon-page assets carry `sap-cache-control:
+#      +86400` by default on virtually every NW Java backend).
+#   2. Fire two identical GETs with a brief gap.
+#   3. Compare responses for cache evidence:
+#       * RFC-7234 `Age: N` header with N>0 on the SECOND response →
+#         definitive HIT.
+#       * `x-cache: HIT` / `x-cache-status` (some kernels add this).
+#       * Significantly faster second response time (T2 < 30% of T1)
+#         → medium confidence (could also be TCP keep-alive warmup).
+#       * Same exact response body + matching `Last-Modified` header →
+#         only weak — backends serving static assets always return
+#         same body.
+#
+# Returns a dict matching the same shape as fingerprint_web_dispatcher
+# so the scan-result pipeline can carry it forward consistently.
+
+# Paths that almost always carry `sap-cache-control: +86400` on a
+# default AS Java backend.  Probed in order until one returns 200.
+_WD_CACHE_PROBES = (
+    "/sap/public/bc/ur/Login/assets/corbu/sap_logo.png",
+    "/logon_ui_resources/layout/sap_logo.png",
+    "/sap/public/bc/ur/Login/assets/sap/sap_logo.gif",
+)
+
+
+def detect_wd_cache(host: str, port: int, *,
+                      https: bool = False,
+                      timeout: float = 5,
+                      saprouter: str = "") -> dict:
+    """Detect whether the WD has HTTP caching enabled.
+
+    Returns:
+        {
+          "enabled": bool,
+          "confidence": "high" | "medium" | "low" | "",
+          "evidence": str,        — short label naming the matched signal
+          "age_seconds": int,     — value of Age: header on hit (0 if none)
+          "probe_path": str,      — which DETECT_PATH actually responded 200
+          "t1_ms": int,           — first-request round-trip time
+          "t2_ms": int,           — second-request round-trip time
+        }
+    """
+    import time as _time
+    out = {"enabled": False, "confidence": "", "evidence": "",
+            "age_seconds": 0, "probe_path": "", "t1_ms": 0, "t2_ms": 0}
+
+    # Find a probe path that the WD will forward AND that should be
+    # cacheable.  Returns the first one that 200's.
+    probe_path = ""
+    for path in _WD_CACHE_PROBES:
+        try:
+            sock = _open_socket_for_wd(host, port, https=https,
+                                          timeout=timeout,
+                                          saprouter=saprouter)
+        except Exception:
+            continue
+        try:
+            sock.sendall(
+                f"GET {path} HTTP/1.0\r\n"
+                f"Host: {host}:{port}\r\n"
+                f"Connection: close\r\n\r\n".encode("iso-8859-1")
+            )
+            buf = b""
+            while len(buf) < 4096:
+                try:
+                    c = sock.recv(2048)
+                except (socket.timeout, ConnectionResetError,
+                         ssl.SSLEOFError):
+                    break
+                if not c:
+                    break
+                buf += c
+        finally:
+            try: sock.close()
+            except Exception: pass
+        m = re.search(rb"HTTP/\S+\s+(\d{3})", buf)
+        if m and m.group(1) == b"200":
+            probe_path = path
+            break
+    if not probe_path:
+        out["evidence"] = "no_cacheable_path_found"
+        return out
+    out["probe_path"] = probe_path
+
+    # Helper: one GET; returns (elapsed_ms, response_bytes).
+    def _fetch():
+        t0 = _time.time()
+        try:
+            sock = _open_socket_for_wd(host, port, https=https,
+                                          timeout=timeout,
+                                          saprouter=saprouter)
+        except Exception:
+            return 0, b""
+        try:
+            sock.sendall(
+                f"GET {probe_path} HTTP/1.0\r\n"
+                f"Host: {host}:{port}\r\n"
+                f"Connection: close\r\n\r\n".encode("iso-8859-1")
+            )
+            buf = b""
+            while len(buf) < 16384:
+                try:
+                    c = sock.recv(4096)
+                except (socket.timeout, ConnectionResetError,
+                         ssl.SSLEOFError):
+                    break
+                if not c:
+                    break
+                buf += c
+        finally:
+            try: sock.close()
+            except Exception: pass
+        return int((_time.time() - t0) * 1000), buf
+
+    out["t1_ms"], buf1 = _fetch()
+    _time.sleep(1.2)
+    out["t2_ms"], buf2 = _fetch()
+    if not buf2:
+        return out
+
+    # Signal 1: Age: N (N > 0) on the second response → cache HIT
+    m_age = re.search(rb"\r\n[Aa]ge:\s*(\d+)", buf2)
+    if m_age:
+        age_val = int(m_age.group(1))
+        if age_val > 0:
+            out["enabled"] = True
+            out["confidence"] = "high"
+            out["evidence"] = f"age_header:{age_val}"
+            out["age_seconds"] = age_val
+            return out
+    # Signal 2: x-cache: HIT (some WD versions add this)
+    m_xc = re.search(rb"\r\n[Xx]-[Cc]ache:\s*([^\r\n]+)", buf2)
+    if m_xc and b"HIT" in m_xc.group(1).upper():
+        out["enabled"] = True
+        out["confidence"] = "high"
+        out["evidence"] = ("x_cache_hit:" +
+                            m_xc.group(1).decode("iso-8859-1",
+                                                  errors="replace").strip())
+        return out
+    # Signal 3: significantly faster second response — medium confidence
+    if (out["t1_ms"] >= 50 and out["t2_ms"] > 0
+            and out["t2_ms"] < out["t1_ms"] * 0.35):
+        out["enabled"] = True
+        out["confidence"] = "medium"
+        out["evidence"] = (f"timing_ratio:t1={out['t1_ms']}ms,"
+                            f"t2={out['t2_ms']}ms")
+        return out
+    # No cache signal — cache is off OR this path isn't cached
+    out["evidence"] = "no_cache_signal"
+    return out
+
+
+def _open_socket_for_wd(host: str, port: int, *,
+                          https: bool, timeout: float,
+                          saprouter: str) -> socket.socket:
+    """Internal helper — same socket setup as fingerprint_web_dispatcher.
+
+    Pulled out so the cache detection + backend discovery can reuse the
+    SAProuter + SSL wrapping without duplicating the boilerplate.
+    """
+    if saprouter:
+        from sap_saprouter import connect_through_saprouter
+        sock = connect_through_saprouter(
+            saprouter + f"/H/{host}/S/{port}",
+            timeout=timeout, talk_mode=1,
+        )
+    else:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect((host, port))
+    if https:
+        import ssl as _ssl
+        ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = _ssl.CERT_NONE
+        try:
+            ctx.minimum_version = _ssl.TLSVersion.TLSv1
+        except (AttributeError, ValueError):
+            pass
+        sock = ctx.wrap_socket(sock, server_hostname=host)
+    return sock
+
+
+# ---------------------------------------------------------------------------
+# WD-to-backend edge discovery
+# ---------------------------------------------------------------------------
+#
+# Probe a curated set of SAP-canonical URL prefixes through the WD and
+# observe which prefixes get forwarded (versus served locally with the
+# WD's own 503).  Forwarded responses carry the backend's `Server:`
+# header (e.g. "SAP NetWeaver Application Server 7.54 / AS Java 7.50")
+# — we group prefixes by that signature, treating each unique signature
+# as one backend.  This works WITHOUT authentication on the WD's admin
+# UI: the WD exposes every backend it touches just by responding from
+# it, and the `Server:` header is the discriminator.
+#
+# Edge cases handled:
+#   * `connection: close` responses from the WD's local handlers
+#     (e.g. `/sap/admin/public/default.html`) are filtered out — they
+#     don't represent a real backend.
+#   * `503 ICMENOSERVERFOUND` / `ICMENOSYSTEMFOUND` are filtered out —
+#     the WD's URL filter rejected before any backend was touched.
+#   * Stripped `Server:` headers (when the backend ALSO suppresses)
+#     get bucketed under an "unidentified backend" signature so the
+#     operator at least sees that the prefix forwarded somewhere.
+
+# Curated probe paths — covers ABAP, Java, SCC, SLD, NWA, Webdynpro.
+# Order matters: paths most likely to give a unique backend response
+# come first.
+_WD_BACKEND_PROBE_PATHS = (
+    "/sap/wzip?aaa",                            # canonical 404-friendly
+    "/sap/public/info",                          # ABAP RFCSI_EXPORT mirror
+    "/sap/public/bc/ur/Login/assets/corbu/sap_logo.png",
+    "/sap/bc/ping",                              # ABAP ping
+    "/sap/bc/webdynpro/sap/itadmin",             # WebDynpro admin
+    "/heapdump/",                                # AS Java heapdump
+    "/heapdump",                                 # AS Java (no slash variant)
+    "/nwa/",                                     # NetWeaver Admin
+    "/UserAdmin/",                               # AS Java UME
+    "/sld/",                                     # System Landscape Directory
+    "/logon_ui_resources/",                      # Java logon assets
+    "/sapmc/sapmc.html",                         # SAP Management Console
+    "/CTC/ConfigServlet",                        # Java CTC
+    "/EemAdminService/EemAdmin",                 # SolMan EEM
+    "/scc/",                                     # SAP Cloud Connector
+    "/run/jsp/index.jsp",                        # Java JSP runtime
+    "/webdynpro/dispatcher/",                    # WebDynpro entry
+)
+
+
+def discover_wd_backends(host: str, port: int, *,
+                            https: bool = False,
+                            timeout: float = 5,
+                            saprouter: str = "",
+                            verbose: bool = True) -> dict:
+    """Probe SAP-canonical URL prefixes and group responses by backend.
+
+    Returns:
+        {
+          "wd_endpoint": "<host>:<port>",
+          "https": bool,
+          "prefix_results": {
+              prefix: {
+                  "status": int,
+                  "server_header": str,        — "" when suppressed
+                  "served_by": "wd_local" | "backend" | "wd_rejected",
+                  "elapsed_ms": int,
+              },
+              ...
+          },
+          "backends": [
+              {
+                  "signature": str,             — Server header text
+                                                  OR "<suppressed>"
+                                                  (one bucket per
+                                                  unique backend)
+                  "url_prefixes": list[str],   — prefixes that route
+                                                  to this backend
+                  "server_header": str,
+                  "wd_version_hint": str,      — extracted from header
+                  "likely_sid": str,            — heuristic guess from
+                                                  banner or prefix
+                  "is_suppressed": bool,
+              },
+              ...
+          ],
+          "wd_local_prefixes": list[str],      — paths served by the WD
+                                                  itself (Connection: close)
+          "wd_rejected_prefixes": list[str],   — 503 ICMENO… paths
+        }
+    """
+    if verbose:
+        scheme = "https" if https else "http"
+        print(f"[*] WD backends: discovering on {scheme}://{host}:{port} "
+              f"(probing {len(_WD_BACKEND_PROBE_PATHS)} canonical "
+              f"prefixes)")
+
+    out = {
+        "wd_endpoint": f"{host}:{port}",
+        "https": https,
+        "prefix_results": {},
+        "backends": [],
+        "wd_local_prefixes": [],
+        "wd_rejected_prefixes": [],
+    }
+
+    # Per-signature bucket: signature → list of prefixes
+    from collections import defaultdict, OrderedDict
+    by_signature = OrderedDict()
+    backend_headers = {}    # signature → first observed Server header
+
+    for path in _WD_BACKEND_PROBE_PATHS:
+        import time as _t
+        t0 = _t.time()
+        try:
+            sock = _open_socket_for_wd(host, port, https=https,
+                                          timeout=timeout,
+                                          saprouter=saprouter)
+        except Exception as e:
+            out["prefix_results"][path] = {
+                "status": 0, "server_header": "",
+                "served_by": "error",
+                "elapsed_ms": int((_t.time() - t0) * 1000),
+                "error": type(e).__name__,
+            }
+            continue
+
+        try:
+            sock.sendall(
+                f"GET {path} HTTP/1.0\r\n"
+                f"Host: {host}:{port}\r\n"
+                f"User-Agent: sapmap-wd-bk\r\n"
+                f"Connection: close\r\n\r\n".encode("iso-8859-1")
+            )
+            buf = b""
+            while len(buf) < 8192:
+                try:
+                    c = sock.recv(2048)
+                except (socket.timeout, ConnectionResetError,
+                         ssl.SSLEOFError):
+                    break
+                if not c:
+                    break
+                buf += c
+        finally:
+            try: sock.close()
+            except Exception: pass
+
+        elapsed = int((_t.time() - t0) * 1000)
+        m_status = re.search(rb"HTTP/\S+\s+(\d{3})", buf)
+        status = int(m_status.group(1)) if m_status else 0
+        m_server = re.search(rb"\r\n[Ss]erver:\s*([^\r\n]+)", buf)
+        server_hdr = (m_server.group(1).decode("iso-8859-1",
+                                                  errors="replace").strip()
+                        if m_server else "")
+        # Classify the response source
+        is_wd_rejected = (status == 503
+                            and (b"ICMENOSERVERFOUND" in buf
+                                 or b"ICMENOSYSTEMFOUND" in buf))
+        is_wd_local = (
+            not is_wd_rejected and
+            (b"This error page was generated by SAP Web Dispatcher"
+                in buf
+                or b"SAP Web Dispatcher" in (server_hdr.encode()
+                                                if server_hdr else b""))
+        )
+        # Connection: close in the response from a 200 path = WD-local
+        # static handler (forces close on its own static responses).
+        if (not is_wd_rejected and not is_wd_local
+                and status == 200
+                and re.search(rb"\r\n[Cc]onnection:\s*close",
+                                buf.split(b"\r\n\r\n", 1)[0]
+                                if b"\r\n\r\n" in buf else buf)
+                and b"sap-cache-control" not in buf.lower()):
+            # Connection: close without backend cache headers — looks
+            # WD-local.  But if the Server header names a NetWeaver
+            # AS, treat as backend.
+            if "Application Server" not in server_hdr:
+                is_wd_local = True
+
+        if is_wd_rejected:
+            served_by = "wd_rejected"
+            out["wd_rejected_prefixes"].append(path)
+        elif is_wd_local:
+            served_by = "wd_local"
+            out["wd_local_prefixes"].append(path)
+        else:
+            served_by = "backend"
+            sig = server_hdr or "<suppressed>"
+            by_signature.setdefault(sig, []).append(path)
+            backend_headers[sig] = server_hdr
+
+        out["prefix_results"][path] = {
+            "status": status, "server_header": server_hdr,
+            "served_by": served_by, "elapsed_ms": elapsed,
+        }
+        if verbose:
+            verdict = {
+                "wd_rejected": "REJECTED  (WD URL filter)",
+                "wd_local":    "WD-LOCAL  (static handler)",
+                "backend":     f"BACKEND   ({server_hdr[:60] or 'suppressed'})",
+                "error":       "ERROR",
+            }.get(served_by, served_by)
+            print(f"[*]   {path:55s} {status:>3}  {verdict}")
+
+    # Assemble backend records
+    for sig, prefixes in by_signature.items():
+        srv = backend_headers[sig]
+        is_supp = sig == "<suppressed>"
+        # Heuristic SID extraction from prefixes the backend serves —
+        # not always present, but cheap signal.
+        likely_sid = ""
+        # Heuristic kernel/release extraction from "SAP NetWeaver
+        # Application Server X.YZ / AS Java X.YY" banner.
+        m_ver = re.search(r"AS\s+(?:Java|ABAP)\s+([0-9]+\.[0-9]+)", srv)
+        wd_version_hint = m_ver.group(1).replace(".", "") if m_ver else ""
+        out["backends"].append({
+            "signature": sig,
+            "url_prefixes": list(prefixes),
+            "server_header": srv,
+            "wd_version_hint": wd_version_hint,
+            "likely_sid": likely_sid,
+            "is_suppressed": is_supp,
+        })
+
+    if verbose:
+        print(f"[+] WD backends: discovered {len(out['backends'])} "
+              f"distinct backend(s), {len(out['wd_local_prefixes'])} "
+              f"WD-local, {len(out['wd_rejected_prefixes'])} rejected")
+        for bk in out["backends"]:
+            print(f"      • {bk['server_header'] or '<suppressed>':60s} "
+                  f"({len(bk['url_prefixes'])} prefix(es))")
+    return out
+
+
 def _query_sapstart_banner(host: str, port: int,
                               timeout: float = 3,
                               use_ssl: bool = False) -> dict:
@@ -3388,6 +3878,21 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
                                 + fp["wd_version"].split(".")[1]
                         except (IndexError, AttributeError):
                             pass
+                    # Stamp cache state + discovered backends onto the
+                    # node so the GUI / report / ICMAD severity logic
+                    # can use them without re-probing.
+                    cache_info = fp.get("cache") or {}
+                    if cache_info.get("enabled"):
+                        node.wd_cache_enabled = True
+                        node.wd_cache_evidence = cache_info.get(
+                            "evidence", "")
+                    backends_info = fp.get("backends") or {}
+                    raw_backends = backends_info.get("backends", []) or []
+                    if raw_backends:
+                        node.wd_backends = [
+                            dict(b, linked_node_sid="")
+                            for b in raw_backends
+                        ]
                     break
             if node.is_web_dispatcher:
                 break
@@ -3398,6 +3903,65 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
         nodes.append(node)
 
     return nodes
+
+
+def match_wd_backends_to_nodes(nodes: list) -> None:
+    """Post-scan pass: link each WD's wd_backends entries to existing
+    SAPNodes on the map.
+
+    For each (WD-node, backend-entry) pair, set
+    backend["linked_node_sid"] to the SID of the SAPNode that most
+    likely IS this backend.  Match heuristics, in order:
+
+      1. The same IP appears in another node's instances.ports (rare
+         on truly standalone WDs but common on co-located lab setups).
+      2. The Server-header signature contains a SAPNode's
+         sap_release / kernel.
+      3. The Server-header signature contains a SAPNode's hostname
+         (rare — most banners don't leak hostnames).
+
+    Nodes that don't match are left with linked_node_sid="" so the
+    operator sees them as "external / not-on-the-map" backends.
+    Called once per `discover_systems` invocation and also re-runnable
+    via the GUI "rediscover WD backends" menu item.
+    """
+    if not nodes:
+        return
+    for wd in nodes:
+        if not getattr(wd, "is_web_dispatcher", False):
+            continue
+        backends = getattr(wd, "wd_backends", []) or []
+        for bk in backends:
+            sig = bk.get("server_header", "") or ""
+            if not sig:
+                continue
+            # Strategy 1+2: look for a SAPNode whose release/kernel
+            # appears in the Server string.  "SAP NetWeaver
+            # Application Server 7.54 / AS Java 7.50" should match
+            # any Java node with sap_release=750 OR kernel=754.
+            sig_lower = sig.lower()
+            for other in nodes:
+                if other is wd:
+                    continue
+                hits = []
+                # Look for "AS Java X.YY" / "AS ABAP X.YY" tokens
+                for key in (other.sap_release, other.kernel):
+                    if not key:
+                        continue
+                    # Build candidate substrings from the kernel/release
+                    # value, e.g. "750" -> "7.50".
+                    if (key.isdigit() and len(key) in (3, 4)):
+                        dotted = f"{key[0]}.{key[1:]}"
+                        if dotted in sig:
+                            hits.append(dotted)
+                # Strategy 3: hostname substring match (when available)
+                if (other.hostname
+                        and other.hostname.lower() in sig_lower
+                        and len(other.hostname) > 3):
+                    hits.append(other.hostname)
+                if hits:
+                    bk["linked_node_sid"] = other.sid
+                    break
 
 
 def discover_systems(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
@@ -3536,6 +4100,10 @@ def discover_systems(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RAN
               f"K:{node.kernel:4s} DB:{node.db_type:4s} "
               f"Clients:{len(node.clients)}{flag}")
     print(f"[*] ========================================")
+
+    # Cross-link WD-to-backend edges across the discovered nodes.
+    # Cheap (in-memory string matching, no I/O); runs once per scan.
+    match_wd_backends_to_nodes(nodes)
 
     return nodes
 

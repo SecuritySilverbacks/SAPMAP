@@ -728,6 +728,7 @@ body {
       <div class="ctx-item" data-action="check_cve_31324">&#128270; Check CVE-2025-31324 (Java VisualComposer)</div>
       <div class="ctx-item" data-action="check_cve_6287">&#128270; Check CVE-2020-6287 (RECON)</div>
       <div class="ctx-item" data-action="check_cve_22536">&#128270; Check CVE-2022-22536 (ICMAD smuggle)</div>
+      <div class="ctx-item" data-action="wd_rediscover">&#128260; Rediscover WD topology (cache + backends)</div>
       <div class="ctx-item" data-action="check_linux_lpe">&#128275; Check Linux Root LPE (Copy Fail / Dirty Frag)</div>
       <div class="ctx-item" data-action="deep_scan">&#128260; Deep Scan (full SAPology)</div>
       <div class="ctx-item" data-action="retrieve_rfcs">&#128225; Retrieve RFC Connections</div>
@@ -2342,6 +2343,55 @@ function updateMap() {
     });
   });
 
+  // --- WD → backend edges (Web Dispatcher routing topology) ---
+  // For every node that is_web_dispatcher and has wd_backends entries
+  // with a linked_node_sid, draw an edge from the WD to the linked
+  // SAPNode.  Edge label shows the count of URL prefixes routed to
+  // that backend (e.g. "WD: 4 prefixes" or
+  // "WD: /sap/*, /nwa/*" when there are few enough to fit).
+  // Backends without a linked_node_sid (i.e. the backend isn't on the
+  // map yet) are NOT drawn here — they appear in the details panel
+  // and engagement report only, to keep the SVG clean.
+  Object.keys(nodes).forEach(wsid => {
+    const wn = nodes[wsid];
+    if (!wn.is_web_dispatcher) return;
+    const backends = wn.wd_backends || [];
+    if (!backends.length) return;
+    const sx = (wn._x || 0) + BOX_W / 2;
+    const sy = (wn._y || 0) + BOX_H / 2;
+    backends.forEach(bk => {
+      const targetSid = (bk.linked_node_sid || '').toUpperCase();
+      if (!targetSid) return;
+      const tn = nodes[targetSid];
+      if (!tn) return;
+      const tx = (tn._x || 0) + BOX_W / 2;
+      const ty = (tn._y || 0) + BOX_H / 2;
+      // Edge style: cyan to match the WEB_DISPATCHER node colour;
+      // dashed when the backend's Server header was suppressed
+      // (less certain about identity); solid otherwise.
+      const stroke = '#4d9eb6';
+      const dash = bk.is_suppressed ? ' stroke-dasharray="4,3"' : '';
+      html += `<line class="edge-line" x1="${sx}" y1="${sy}" ` +
+        `x2="${tx}" y2="${ty}" stroke="${stroke}" stroke-width="2"` +
+        `${dash} fill="none" pointer-events="none" />`;
+      const mx = (sx + tx) / 2, my = (sy + ty) / 2;
+      const prefixes = bk.url_prefixes || [];
+      let label;
+      if (prefixes.length === 0) {
+        label = 'WD route';
+      } else if (prefixes.length === 1) {
+        label = `WD: ${prefixes[0]}`;
+      } else if (prefixes.length <= 3) {
+        label = `WD: ${prefixes.join(', ')}`;
+      } else {
+        label = `WD: ${prefixes.length} prefixes`;
+      }
+      html += `<text x="${mx}" y="${my - 4}" text-anchor="middle" ` +
+        `font-size="10" fill="#9bb1c4" font-family="monospace" ` +
+        `pointer-events="none">${escHtml(label)}</text>`;
+    });
+  });
+
   // --- SCC ↔ BTP-subaccount edges (Cloud Connector → cloud tunnel) ---
   // SCCNode.subaccount_uuids is authoritative; fall back to
   // BTPSubaccountNode.scc_locations[].scc_host_uuid matching the SCC host.
@@ -3073,6 +3123,7 @@ function showCtxMenu(e, sid) {
     'check_cve_31324':       isJavaStack,             // Java-only vulnerability
     'check_cve_6287':        isJavaStack,             // Java-only RECON check
     'check_cve_22536':       isAbapStack || isJavaStack || !!n.is_web_dispatcher,
+    'wd_rediscover':         !!n.is_web_dispatcher,
     'exploit_cve_31324_drop': hasCve31324,            // need confirmed CVE-2025-31324
     'icmad_acl_bypass':      !!n.cve_2022_22536_port, // need confirmed ICMAD port (live or patch-table)
     'icmad_heapdump_pull':   !!(n.cve_2022_22536_acl_bypass
@@ -3190,6 +3241,7 @@ function showCtxMenu(e, sid) {
     'check_cve_31324':       'Only applicable to Java / double-stack systems',
     'check_cve_6287':        'Only applicable to Java / double-stack systems',
     'check_cve_22536':       'Only applicable to ICM-fronted nodes (ABAP / Java / Web Dispatcher)',
+    'wd_rediscover':         'Only applicable to confirmed Web Dispatcher nodes',
     'exploit_cve_31324_drop': 'Run Check CVE-2025-31324 first; vulnerability required',
     'icmad_acl_bypass':       'Run Check CVE-2022-22536 first to discover a vulnerable ICM port',
     'icmad_heapdump_pull':    'Run ICMAD ACL Bypass Sweep first; /heapdump/ must bypass to enable HPROF pull',
@@ -3713,6 +3765,10 @@ async function ctxAction(action) {
       await api('POST', `node/${sid}/check_cve_2020_6287`); break;
     case 'check_cve_22536':
       await api('POST', `node/${sid}/check_cve_2022_22536`); break;
+    case 'wd_rediscover':
+      await api('POST', `node/${sid}/wd_rediscover`);
+      showToast('WD topology rediscovery started — see console for cache + backend results', 'info');
+      break;
     case 'icmad_acl_bypass': {
       const outer = prompt(
         'Outer GET path the WD will FORWARD to a backend (not serve\n' +
