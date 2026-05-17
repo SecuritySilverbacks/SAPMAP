@@ -4038,13 +4038,38 @@ def create_app(api: SAPMAPApi) -> Bottle:
                           "vulnerable ICM port")
             })
 
+        # Snapshot the request payload NOW, before the background
+        # thread starts.  Bottle's `request` object is thread-local —
+        # accessing it from inside _run() (which runs after this
+        # handler has returned) raises and silently kills the thread,
+        # which is why the previous version of this handler produced
+        # zero terminal output despite the "started" popup.
+        try:
+            body_snapshot = request.json or {}
+        except Exception:
+            body_snapshot = {}
+        outer_path_param = body_snapshot.get("outer_path", "/sap/wzip?aaa") \
+                              or "/sap/wzip?aaa"
+
         def _run():
+            # Belt-and-braces: wrap the entire body so any unexpected
+            # exception surfaces to the console instead of silently
+            # killing the daemon thread (which is what hid the
+            # request.json bug for the previous build).
+            try:
+                _run_acl_bypass_body()
+            except Exception as e:
+                import traceback
+                print(f"[-] {sid}: ICMAD ACL-bypass sweep crashed: "
+                      f"{type(e).__name__}: {e}")
+                traceback.print_exc()
+
+        def _run_acl_bypass_body():
             from sap_cve_2022_22536 import run_acl_bypass
             host = node.ip or node.hostname
             port = node.cve_2022_22536_port
             https = node.cve_2022_22536_https
-            outer_path = (request.json or {}).get("outer_path",
-                                                    "/sap/wzip?aaa") if request.json else "/sap/wzip?aaa"
+            outer_path = outer_path_param
 
             print(f"[*] {sid}: ICMAD ACL-bypass sweep on "
                   f"{host}:{port}{'/HTTPS' if https else '/HTTP'} "
