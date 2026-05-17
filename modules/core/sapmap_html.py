@@ -3249,10 +3249,8 @@ function showCtxMenu(e, sid) {
     'check_cve_6287':        'Only applicable to Java / double-stack systems',
     'check_cve_22536':       'Only applicable to ICM-fronted nodes (ABAP / Java / Web Dispatcher)',
     'wd_rediscover':         'Only applicable to confirmed Web Dispatcher nodes',
-    'check_ms':              ('Probes the message server internal port (39NN) — '
-                              'not applicable to standalone Web Dispatchers'),
-    'harvest_btp_creds':     ('Reads JCo destinations / SecStore entries — '
-                              'standalone Web Dispatchers don\'t store any'),
+    'check_ms':              'Probes the message server internal port (39NN) — not applicable to standalone Web Dispatchers',
+    'harvest_btp_creds':     'Reads JCo destinations / SecStore entries — standalone Web Dispatchers don\'t store any',
     'exploit_cve_31324_drop': 'Run Check CVE-2025-31324 first; vulnerability required',
     'icmad_acl_bypass':       'Run Check CVE-2022-22536 first to discover a vulnerable ICM port',
     'icmad_heapdump_pull':    'Run ICMAD ACL Bypass Sweep first; /heapdump/ must bypass to enable HPROF pull',
