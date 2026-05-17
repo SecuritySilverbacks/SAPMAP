@@ -983,6 +983,38 @@ def test_report_includes_acl_bypass_paths_in_body():
     assert "/nwa/" not in body_section
 
 
+def test_report_explains_topology_when_smuggle_confirmed_but_no_bypass():
+    """When the live smuggle fires (HIGH finding) but the bypass
+    sweep found nothing, the report must include the topology-
+    nuance paragraph so the engagement doesn't oversell the chain."""
+    from sapmap_models import SAPMAPState
+    from sapmap_report import _derive_landscape_recommendations
+
+    state = SAPMAPState()
+    node = SAPNode(sid="WDP", system_type="WEB_DISPATCHER",
+                    ip="10.0.0.1", hostname="wd")
+    node.cve_2022_22536_vulnerable = True       # smuggle fired
+    node.cve_2022_22536_port = 44300
+    node.cve_2022_22536_acl_bypass = {           # …but no bypass
+        "/heapdump/": {"status": 403, "snippet": "no auth",
+                        "via": "blocked"},
+        "/sap/admin/": {"status": 301, "snippet": "redirect",
+                         "via": "blocked"},
+    }
+    state.nodes["WDP"] = node
+
+    recs = _derive_landscape_recommendations(state)
+    item = next(r for r in recs if "CVE-2022-22536" in r.get("title", ""))
+    # Topology nuance must appear
+    assert "Note on directly demonstrable impact" in item["body"]
+    assert "topology" in item["body"]
+    assert "Trust-spoof via future upstream gateway" in item["body"]
+    assert "Cache poisoning" in item["body"]
+    assert "Session hijack" in item["body"]
+    # Doesn't downgrade the verdict
+    assert "does NOT downgrade" in item["body"]
+
+
 def test_report_handles_patch_only_finding():
     """A node with patch-table finding but no live signal still emits
     the section, in the 'patch-only' scope group."""
