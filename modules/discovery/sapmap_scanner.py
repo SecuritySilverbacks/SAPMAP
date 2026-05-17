@@ -24,7 +24,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from sapmap_models import SAPNode, InstanceInfo, Finding, Severity, SCCNode
 from sapmap_config import (
     DEFAULT_INSTANCE_RANGE, DEFAULT_THREADS, DEFAULT_TIMEOUT,
-    FAST_SCAN_PORT_PATTERNS,
+    FAST_SCAN_PORT_PATTERNS, WELL_KNOWN_WD_PORTS,
 )
 
 logger = logging.getLogger(__name__)
@@ -614,7 +614,16 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
     if cancel_event and cancel_event.is_set():
         return result
     if not skip_quick_check:
-        QUICK_PORTS = list(range(3200, 3300)) + [8000, 8443, 50013, 50113, 50213, 50313, 54213, 1128]
+        # Quick probe set: dispatcher range (3200-3299) + SAPControl 5XX13
+        # + SAPHostControl (1128) + the WD well-known ports.  The WD
+        # ports go in here so a host that ONLY runs a hardened DMZ WD
+        # (no dispatcher port, no SAPControl) still trips the quick
+        # check and gets a full scan.
+        QUICK_PORTS = (
+            list(range(3200, 3300))
+            + [50013, 50113, 50213, 50313, 54213, 1128]
+            + list(WELL_KNOWN_WD_PORTS)
+        )
         quick_timeout = min(timeout, 1.5)
         quick_hit = False
         qe = ThreadPoolExecutor(max_workers=min(len(QUICK_PORTS), 20))
@@ -681,6 +690,16 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
     # a host that ONLY runs SCC (no dispatcher 32XX) is still recognised by
     # the scanner; the quick-probe above already lists 8443 to keep alive.
     ports_pass1.append((SCC_DEFAULT_PORT, "scc_admin", "XX"))
+    # SAP Web Dispatcher well-known ports — see WELL_KNOWN_WD_PORTS in
+    # sapmap_config.py.  Added to Pass 1 so a hardened DMZ WD (no 32XX,
+    # no SAPControl) still gets discovered.  Each port goes in as
+    # "wd_candidate" with instance "WD" (no real instance number — the
+    # WD doesn't expose one over plain HTTP).  Post-scan we run
+    # fingerprint_web_dispatcher() to confirm each candidate is really
+    # a SAP WD (vs. an arbitrary HTTP service that happens to listen
+    # on the same port) and promote confirmed ones to is_web_dispatcher.
+    for wd_port in WELL_KNOWN_WD_PORTS:
+        ports_pass1.append((wd_port, "wd_candidate", "WD"))
 
     if _cancelled():
         return result
@@ -705,6 +724,69 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
             break
         if not _verify_sap_diag(host, port, timeout=min(timeout, 2.0)):
             del result["open_ports"][port]
+
+    # Verify WD-candidate ports (80/443/8000/8080/8443/44300/50000/50001
+    # and friends).  Any TCP service may listen on those ports, so we
+    # MUST fingerprint each one as a real SAP WD/ICM before promoting
+    # it into a SAPNode — otherwise a plain nginx on port 443 would
+    # become a false positive "SAP WD" node.
+    wd_candidate_ports = [p for p, info in result["open_ports"].items()
+                            if info["service"] == "wd_candidate"]
+    if wd_candidate_ports and not _cancelled():
+        print(f"[*] {host}: Fingerprinting {len(wd_candidate_ports)} "
+              f"WD-candidate port(s) with /sap/wdisp/admin probe ...")
+        # WD-fingerprint takes ~3-5s per port; cap concurrency at 4 so a
+        # host with all 9 WD candidates open doesn't burn 9 × 5s serially.
+        result.setdefault("wd_info", {})
+        with ThreadPoolExecutor(max_workers=4) as wexec:
+            future_map = {}
+            for p in wd_candidate_ports:
+                # HTTPS heuristic: 443, 8443, 44300, 50001 are TLS by default
+                is_https = p in (443, 8443, 44300, 50001)
+                future_map[wexec.submit(
+                    fingerprint_web_dispatcher, host, p,
+                    https=is_https,
+                    timeout=min(timeout, 4),
+                    saprouter="",     # WD fingerprint goes direct
+                )] = (p, is_https)
+            for fut in as_completed(future_map):
+                if _cancelled():
+                    break
+                p, is_https = future_map[fut]
+                try:
+                    fp = fut.result()
+                except Exception as e:
+                    print(f"[-]   {host}:{p}  WD fingerprint error: {e}")
+                    del result["open_ports"][p]
+                    continue
+                if fp["is_wd"]:
+                    # Confirmed SAP WD — rename service to reflect
+                    # confidence + protocol so downstream code knows.
+                    svc = f"wd_{'https' if is_https else 'http'}"
+                    result["open_ports"][p]["service"] = svc
+                    result["wd_info"][p] = fp
+                    ver = f" v{fp['wd_version']}" if fp["wd_version"] else ""
+                    print(f"[+]   {host}:{p:<6} CONFIRMED SAP Web "
+                          f"Dispatcher{ver}  ({fp['evidence']}, "
+                          f"confidence={fp['confidence']})")
+                elif fp["is_sap_icm"]:
+                    # SAP ICM but not specifically WD — could be an app
+                    # server's ICM exposed on a non-standard port.  Keep
+                    # the port but label it appropriately; downstream
+                    # node-builder will treat as a Java/ABAP ICM port.
+                    svc = f"icm_{'https' if is_https else 'http'}"
+                    result["open_ports"][p]["service"] = svc
+                    result["wd_info"][p] = fp
+                    print(f"[+]   {host}:{p:<6} SAP ICM (not WD)  "
+                          f"({fp['evidence']})")
+                else:
+                    # Non-SAP service squatting the port (nginx, IIS,
+                    # apache, etc.) — drop it from open_ports so we
+                    # don't synthesise a false-positive node.
+                    srv = fp["server_header"] or "<no Server header>"
+                    print(f"[-]   {host}:{p:<6} non-SAP service "
+                          f"({srv[:50]})  — dropping")
+                    del result["open_ports"][p]
 
     if _cancelled():
         return result
@@ -2058,15 +2140,49 @@ def query_public_info(host: str, http_port: int,
 # We surface that distinction in the node model via
 # ``SAPNode.is_web_dispatcher`` so the ICMAD severity logic can promote
 # "patch missing" from info → high only when there's a real gateway.
+#
+# Confidence ladder for the signals below, strongest → weakest:
+#   * server_banner          — Server: SAP Web Dispatcher <version>
+#                                literally identifies the binary.  Most
+#                                reliable when present, but suppressed
+#                                by `icm/HTTP/server_header_suppression=1`.
+#   * wdisp_admin_realm      — /sap/wdisp/admin returns 401 with
+#                                WWW-Authenticate Basic realm; the
+#                                /sap/wdisp/* prefix is specifically a
+#                                WD admin handler (NOT bound by app-
+#                                server ICMs).  Strong hint even when
+#                                Server is suppressed.
+#   * icm_no_server_err      — 503 + x-sap-icm-err-id: ICMENOSERVERFOUND
+#                                on a path with no SRCURL match.  Both
+#                                WD and ICM emit this; weaker hint
+#                                without corroboration.
+#   * sap_icm_err_id_present — any x-sap-icm-err-id header value is
+#                                proof we're talking to a SAP ICM/WD,
+#                                without telling us which.
 
 _WD_PATTERNS = (
-    # Server header — definitive when present.  WD ships its own banner.
-    (re.compile(rb"Server:\s*SAP\s+Web\s+Dispatcher", re.I), "server_banner"),
-    # 503 + ICMENOSERVERFOUND on /unknown is characteristic of a WD with
-    # no backend group matching the URI — bare ICMs don't emit this code.
-    (re.compile(rb"x-sap-icm-err-id:\s*ICMENOSERVERFOUND", re.I),
+    (re.compile(rb"\r\nServer:\s*SAP\s+Web\s+Dispatcher", re.I),
+        "server_banner"),
+    # Both ICMENOSERVERFOUND and ICMENOSYSTEMFOUND are WD-specific
+    # error IDs:
+    #   ICMENOSERVERFOUND  — no app server in the load-balancing group
+    #   ICMENOSYSTEMFOUND  — no wdisp/system_X matched the URI
+    # Both indicate "this is a WD that knows about routing tables",
+    # which app-server ICMs don't have.
+    (re.compile(rb"x-sap-icm-err-id:\s*ICMENO(?:SERVER|SYSTEM)FOUND",
+                  re.I),
         "icm_no_server_err"),
+    # Redirect to /sap/wdisp/admin/public/default.html is also a
+    # WD-specific binding — only WDs have this admin handler.
+    (re.compile(rb"\r\nLocation:\s*[^\r\n]*?/sap/wdisp/admin/public/",
+                  re.I),
+        "wdisp_admin_redirect"),
 )
+
+_WD_VERSION_RE = re.compile(
+    rb"SAP\s+Web\s+Dispatcher[\s/]+([0-9]+\.[0-9]+(?:\.[0-9]+)?)", re.I)
+_KERNEL_RELEASE_RE = re.compile(
+    rb"sapwebdisp[^0-9]*([0-9]{3})\b", re.I)
 
 
 def fingerprint_web_dispatcher(host: str, port: int,
@@ -2075,26 +2191,54 @@ def fingerprint_web_dispatcher(host: str, port: int,
                                  saprouter: str = "") -> dict:
     """HTTP-fingerprint a host:port pair as a Web Dispatcher.
 
-    Returns ``{"is_wd": bool, "evidence": str, "server_header": str,
-    "status": int}``.  ``evidence`` names the matched signal: one of
-    "server_banner" (definitive), "icm_no_server_err" (strong hint —
-    WD with no backend group), or "" (no WD signals).
+    Returns a dict:
+        {
+          "is_wd": bool,        — True iff any WD-specific signal matched
+          "confidence": str,    — "high" | "medium" | "low" | ""
+          "evidence": str,      — short label naming the matched signal
+          "server_header": str, — full Server: header if not suppressed
+          "wd_version": str,    — "7.53.0" / "7.77.123" — extracted from
+                                  the Server banner if present
+          "status": int,        — HTTP status on the first probe
+          "via": str,           — "direct" | "saprouter"
+          "is_sap_icm": bool,   — True iff ANY x-sap-icm-err-id seen
+                                  (confirms a SAP ICM, even when we
+                                  can't tell WD vs app-server ICM apart)
+        }
 
-    Two probes:
-      1. ``GET /`` — most WDs answer with a `Server: SAP Web Dispatcher
-         <version>` banner unless ``icm/HTTP/server_header_suppression=1``.
-      2. ``GET /sapmap-icmad-no-such-path-XXXX`` — designed to miss any
-         configured backend group; a WD answers 503 with
-         ``x-sap-icm-err-id: ICMENOSERVERFOUND``, while a bare ICM
-         answers 404 (the ICF rejector) without that header.
+    Three probes, executed in order — stop early on first definitive hit:
+      1. ``GET /`` — most WDs answer with a ``Server: SAP Web Dispatcher
+         <version>`` banner unless the header is suppressed.
+      2. ``GET /sap/wdisp/admin`` — the WD's own admin handler.  This
+         path is specifically bound to WD (NOT to AS Java / AS ABAP
+         ICMs), so a 401/403 (auth required) is a strong WD signal.
+         403 with ICMENOSERVERFOUND means /sap/wdisp/admin isn't
+         routed and we're talking to an ICM, not a WD.
+      3. ``GET /sapmap-no-such-path-<random>`` — designed to miss any
+         backend group; a WD answers 503 with ``x-sap-icm-err-id:
+         ICMENOSERVERFOUND``, while a non-SAP service won't.
 
-    Either signal flips ``is_wd=True``.  We don't recurse beyond two
-    probes — engagement-day rule §G keeps wire-noise predictable.
+    Confidence:
+      * high   — server_banner OR wdisp_admin_realm matched.
+      * medium — icm_no_server_err on the bogus-path probe.
+      * low    — only is_sap_icm (proves SAP ICM but not WD).
+      * ""     — no SAP signals at all (probably a non-SAP HTTP svc).
     """
-    out = {"is_wd": False, "evidence": "", "server_header": "",
-            "status": 0}
+    out = {"is_wd": False, "confidence": "", "evidence": "",
+            "server_header": "", "wd_version": "", "status": 0,
+            "via": "saprouter" if saprouter else "direct",
+            "is_sap_icm": False}
 
-    paths = ["/", "/sapmap-icmad-no-such-path-fingerprint"]
+    paths = [
+        "/",
+        # The 301 from /sap/wdisp/admin matches via _WD_PATTERNS's
+        # Location: header regex.  The final /default.html catches the
+        # real 401 Basic realm when the WD is fully configured.
+        "/sap/wdisp/admin",
+        "/sap/wdisp/admin/public/default.html",
+        "/sapmap-no-such-path-fingerprint-9b3f7c",
+    ]
+
     for path in paths:
         try:
             if saprouter:
@@ -2141,6 +2285,8 @@ def fingerprint_web_dispatcher(host: str, port: int,
 
         if not resp:
             continue
+
+        # Extract status + Server header (first probe wins)
         m_status = re.search(rb"HTTP/\S+\s+(\d{3})", resp)
         if m_status and not out["status"]:
             out["status"] = int(m_status.group(1))
@@ -2148,11 +2294,53 @@ def fingerprint_web_dispatcher(host: str, port: int,
         if m_server and not out["server_header"]:
             out["server_header"] = m_server.group(1).decode(
                 "iso-8859-1", errors="replace").strip()
+        # WD version from the Server banner
+        m_ver = _WD_VERSION_RE.search(resp)
+        if m_ver and not out["wd_version"]:
+            out["wd_version"] = m_ver.group(1).decode("ascii",
+                                                         errors="replace")
+        # SAP ICM marker (weakest signal — tells us SAP, not WD/ICM)
+        if b"x-sap-icm-err-id:" in resp.lower() or b"X-SAP-ICM-ERR-ID:" in resp:
+            out["is_sap_icm"] = True
+        # Strong signals — definitive
         for pat, label in _WD_PATTERNS:
             if pat.search(resp):
                 out["is_wd"] = True
                 out["evidence"] = label
+                out["confidence"] = (
+                    "high" if label == "server_banner" else "medium")
+                # server_banner is fully definitive; bail
+                if label == "server_banner":
+                    return out
+        # /sap/wdisp/admin gives a 301 redirect on most WD configs
+        # (matched via _WD_PATTERNS Location: regex above);
+        # /sap/wdisp/admin/public/default.html is where the actual auth
+        # gate sits — 401 with WWW-Authenticate: Basic realm="WEB ADMIN"
+        # is the definitive signal.  If we got ICMENO(SERVER|SYSTEM)FOUND
+        # on either path, it means the path is NOT bound — this server
+        # isn't a WD (or the WD is hardened past identifying itself
+        # via the admin handler).
+        if path in ("/sap/wdisp/admin",
+                     "/sap/wdisp/admin/public/default.html"):
+            probe_status = int(m_status.group(1)) if m_status else 0
+            has_icm_err = (b"ICMENOSERVERFOUND" in resp
+                            or b"ICMENOSYSTEMFOUND" in resp)
+            if probe_status in (401, 403) and not has_icm_err:
+                out["is_wd"] = True
+                out["evidence"] = "wdisp_admin_realm"
+                out["confidence"] = "high"
+                # Definitive — no more probes needed
                 return out
+
+    if out["is_wd"]:
+        return out
+
+    # No definitive WD signal — set the SAP-ICM-only "low" confidence
+    # so the operator sees we hit *something* SAP, just not specifically
+    # a WD.
+    if out["is_sap_icm"]:
+        out["confidence"] = "low"
+        out["evidence"] = "sap_icm_err_id_present"
     return out
 
 
@@ -2859,6 +3047,32 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
             router_sid = router_sid or _router_sid_for(host)
             instance_sid_map[inst_nr] = router_sid
 
+    # Phase A3: WD-only instances.  A host that runs ONLY a Web
+    # Dispatcher (no co-located ABAP/Java instance) doesn't expose a
+    # 32XX dispatcher or 5XX13 SAPControl, so the SID-discovery cascade
+    # above yields nothing.  We synthesise a stable per-host SID of the
+    # form "W" + last-octet-hex so the WD lands on the map as its own
+    # node (matching the saprouter convention) and gets fingerprinted
+    # downstream as system_type=WEB_DISPATCHER.
+    wd_sid = None
+    wd_services_set = {"wd_http", "wd_https"}
+    for inst_nr in list(instance_nrs):
+        inst_services = {
+            info["service"] for port, info in open_ports.items()
+            if info["instance_nr"] == inst_nr
+        }
+        if (inst_services & wd_services_set
+                and not (inst_services - wd_services_set - {"icm_http",
+                                                              "icm_https"})
+                and inst_nr not in instance_sid_map):
+            try:
+                last = int(host.split(".")[-1]) & 0xFF
+            except Exception:
+                import zlib
+                last = zlib.crc32(host.encode("utf-8", "replace")) & 0xFF
+            wd_sid = wd_sid or f"W{last:02X}"
+            instance_sid_map[inst_nr] = wd_sid
+
     # Phase B: Assign unresolved instances to the first known SID (or UNK).
     # Skip router_sid when picking the default — the router should never
     # become the host for orphan instances on the same IP.
@@ -2937,6 +3151,10 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
         has_dispatcher = "dispatcher" in sid_port_services
         has_saprouter = "saprouter" in sid_port_services
         has_saphost = any(s in ("saphost_http", "saphost_https") for s in sid_port_services)
+        has_wd = any(s in ("wd_http", "wd_https") for s in sid_port_services)
+        has_icm_only = (not has_dispatcher
+                          and any(s in ("icm_http", "icm_https")
+                                    for s in sid_port_services))
         type_parts = []
         if sc_is_abap or has_dispatcher:
             type_parts.append("ABAP")
@@ -2944,6 +3162,8 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
             type_parts.append("JAVA")
         if type_parts:
             system_type = "+".join(type_parts)
+        elif has_wd:
+            system_type = "WEB_DISPATCHER"
         elif has_saprouter:
             system_type = "SAPROUTER"
         elif has_hana_port:
@@ -3006,6 +3226,28 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
             sap_release=sys_info.get("sap_release", ""),
             clients=clients,
         )
+        # Tag confirmed Web Dispatchers (drives ICMAD severity ladder
+        # in check_cve_2022_22536 + GUI menu gating in sapmap_html).
+        # Also stash the kernel/version extracted from the WD's Server
+        # banner if we got it — feeds the patch-table verdict.
+        wd_info_map = scan_result.get("wd_info", {}) if isinstance(
+            scan_result, dict) else {}
+        for inst in instances:
+            for p in inst.ports:
+                if p in wd_info_map and wd_info_map[p].get("is_wd"):
+                    node.is_web_dispatcher = True
+                    fp = wd_info_map[p]
+                    if fp.get("wd_version") and not node.kernel:
+                        # WD version is reported like "7.53.0" — keep
+                        # only the major.minor for the kernel field.
+                        try:
+                            node.kernel = fp["wd_version"].split(".")[0] \
+                                + fp["wd_version"].split(".")[1]
+                        except (IndexError, AttributeError):
+                            pass
+                    break
+            if node.is_web_dispatcher:
+                break
         # Attach saprouter prefix so all subsequent operations (exploit, RFC,
         # secstore, SXPG) automatically route through the tunnel.
         if saprouter:

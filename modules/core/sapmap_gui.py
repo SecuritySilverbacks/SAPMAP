@@ -4044,7 +4044,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
             port = node.cve_2022_22536_port
             https = node.cve_2022_22536_https
             outer_path = (request.json or {}).get("outer_path",
-                                                    "/sap/admin/public/default.html") if request.json else "/sap/admin/public/default.html"
+                                                    "/sap/wzip?aaa") if request.json else "/sap/wzip?aaa"
 
             print(f"[*] {sid}: ICMAD ACL-bypass sweep on "
                   f"{host}:{port}{'/HTTPS' if https else '/HTTP'} "
@@ -4142,7 +4142,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
             })
         body = request.json or {}
         dump_name = body.get("dump", "")
-        outer_path = body.get("outer_path", "/sap/admin/public/default.html")
+        outer_path = body.get("outer_path", "/sap/wzip?aaa")
 
         host = node.ip or node.hostname
         port = node.cve_2022_22536_port
