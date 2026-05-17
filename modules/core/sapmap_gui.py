@@ -270,9 +270,12 @@ def _bg(key: str, label: str, fn):
     threading.Thread(target=_wrapper, daemon=True).start()
 
 
-def _enrich_wd_backends_from_admin_table(wd_node, systems: list) -> None:
+def _enrich_wd_backends_from_admin_table(wd_node, systems: list,
+                                            state=None) -> list:
     """Upgrade the WD's wd_backends list with real SID + MSHOST + MSPORT
-    info from an authenticated wdisp/system_* readout.
+    info from an authenticated wdisp/system_* readout, AND auto-create
+    placeholder SAPNodes for each newly-revealed backend that isn't
+    already on the map.
 
     Strategy:
       * For each parsed system, look for an existing wd_backends entry
@@ -280,18 +283,24 @@ def _enrich_wd_backends_from_admin_table(wd_node, systems: list) -> None:
         found, fill in the SID / MSHOST / MSPORT on that entry.
       * For each system with NO matching wd_backends entry, append a
         new entry derived purely from the admin readout.
-      * For each enriched entry, attempt to match against a real
-        on-map node by SID/IP/hostname; otherwise we still leave the
-        existing synthetic placeholder linked.
+      * For each admin-derived entry whose SID is now known: look for
+        a SAPNode with that exact SID on the map; if missing, create
+        a placeholder SAPNode using the REAL SID + MSHOST/MSPORT
+        (vs. the Server-header bucket's synthetic B0B1-style SID).
+        Auto-add it to state if a state container was supplied.
+      * Always wire backend["linked_node_sid"] to whichever SAPNode
+        (real or placeholder) corresponds to the backend.
+
+    Returns the list of newly-created placeholder SAPNodes so the
+    caller can ack them (the GUI handler logs them).
 
     The result: the WD's backend list goes from "1 bucket of all
-    Java 7.50 prefixes" (Server-header bucketing) to "GSM via SSL on
-    sapgsm:8121, J75 on 192.168.2.208:8101, JP1 on 10.10.1.31:8101"
-    (real identities) — and the edge labels on the map become
-    accurate per-backend instead of one fat WD→placeholder edge.
+    Java 7.50 prefixes" (Server-header bucketing) to "GSM at sapgsm:8121,
+    J75 at 192.168.2.208:8101, JP1 at 10.10.1.31:8101" — and each
+    becomes its own labelled node + edge on the map.
     """
     if not systems:
-        return
+        return []
     existing = list(wd_node.wd_backends or [])
 
     def _srcurl_prefixes(srcurl_str: str) -> list:
@@ -346,15 +355,66 @@ def _enrich_wd_backends_from_admin_table(wd_node, systems: list) -> None:
     wd_node.wd_backends = existing
     print(f"[+] {wd_node.sid}: wd_backends enriched with admin-table "
           f"data — {len(systems)} system_* entry(ies) merged in")
-    # Re-link placeholders + real nodes
-    try:
-        from sapmap_scanner import match_wd_backends_to_nodes
-        # match against the live state — we don't have the api state
-        # ref here, so caller must ensure node is in some collection.
-        # We rely on match_wd_backends_to_nodes's promote_unmatched
-        # to handle anything we miss.
-    except Exception:
-        pass
+
+    # Auto-create placeholder SAPNodes for newly-revealed backends
+    # that aren't already on the map.  Uses the REAL SID we just
+    # learned, MSHOST/MSPORT for the placeholder's hostname/instance,
+    # and discovered_via_wd_sid to mark provenance.
+    new_placeholders = []
+    if state is None:
+        # Caller didn't pass a state container — nothing to add to.
+        return new_placeholders
+    for bk in wd_node.wd_backends:
+        sid_uc = (bk.get("likely_sid") or "").upper()
+        mshost = bk.get("wd_mshost", "")
+        msport = bk.get("wd_msport", 0)
+        if not sid_uc:
+            continue
+        # Already linked to a real or placeholder node?
+        if bk.get("linked_node_sid"):
+            existing_linked = state.nodes.get(bk["linked_node_sid"])
+            if existing_linked:
+                # If the linked node is a synthetic B*-prefix
+                # placeholder AND we now have a real SID for it,
+                # upgrade by relinking to a fresh real-SID placeholder
+                # (and leave the synthetic in place — operator can
+                # delete the orphan manually).
+                if not (existing_linked.sid.startswith("B")
+                        and existing_linked.sid != sid_uc):
+                    continue
+        # Is there already a node with this real SID?
+        if sid_uc in state.nodes:
+            bk["linked_node_sid"] = sid_uc
+            continue
+        # Create a placeholder with the real SID
+        from sapmap_models import SAPNode, InstanceInfo
+        placeholder = SAPNode(
+            sid=sid_uc,
+            system_type="SAP",        # no stack hint from admin alone
+            hostname=mshost or "",
+            ip="",                    # mshost may be DNS name, not IP
+            instances=[],
+        )
+        placeholder.discovered_via_wd_sid = wd_node.sid
+        # If MSPORT is known, capture it as an InstanceInfo so the
+        # node has at least one port the operator can see / probe.
+        if msport:
+            placeholder.instances.append(InstanceInfo(
+                instance_nr="??",
+                ip="",
+                ports={msport: "ms_server"},
+            ))
+        bk["linked_node_sid"] = sid_uc
+        new_placeholders.append(placeholder)
+        state.add_node(placeholder)
+    if new_placeholders:
+        print(f"[+] {wd_node.sid}: promoted "
+              f"{len(new_placeholders)} admin-discovered backend(s) "
+              f"to placeholder node(s):")
+        for p in new_placeholders:
+            print(f"      + {p.sid:8s} (MSHOST={p.hostname or '?'}, "
+                  f"discovered_via_wd_sid={p.discovered_via_wd_sid})")
+    return new_placeholders
 # ===========================================================================
 
 import socket as _socket_mod
@@ -4252,7 +4312,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                               f"{len(systems)} wdisp/system_* "
                               f"entry/entries from "
                               f"{r['endpoint_used']}")
-                        _enrich_wd_backends_from_admin_table(node, systems)
+                        _enrich_wd_backends_from_admin_table(
+                            node, systems, state=api.state)
                     else:
                         print(f"[-] {sid}: backend-table extraction "
                               f"failed: {r['error']}")
@@ -4381,8 +4442,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         print(f"[+] {sid}: parsed "
                               f"{len(r['systems'])} wdisp/system_* "
                               f"entry/entries")
-                        _enrich_wd_backends_from_admin_table(node,
-                                                              r["systems"])
+                        _enrich_wd_backends_from_admin_table(
+                            node, r["systems"], state=api.state)
                     else:
                         print(f"[-] {sid}: backend-table extraction "
                               f"failed: {r['error']}")
