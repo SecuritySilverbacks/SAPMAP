@@ -959,6 +959,51 @@ def test_parse_wdisp_systems_handles_html_wrapper():
     assert out[0]["msport"] == 8100
 
 
+def test_parse_wdisp_systems_handles_split_cell_table():
+    """The SAPUI5 admin UI (.icp pages) renders parameter rows with
+    the parameter NAME in one <td> and the VALUE in the next <td> —
+    no `=` between them in the source HTML.  Parser must reconstruct
+    the equals sign from the HTML structure."""
+    from sap_wdisp_admin import _parse_wdisp_systems
+    text = (
+        "<html><body><table>"
+        "<tr><th>Parameter</th><th>Value</th></tr>"
+        "<tr><td>wdisp/system_0</td>"
+        "<td>SID=GSM, MSHOST=sapgsm, MSPORT=8121, SSL_ENCRYPT=2</td>"
+        "</tr>"
+        "<tr><td>wdisp/system_2</td>"
+        "<td>SID=J75, MSHOST=192.168.2.208, MSPORT=8101, SSL_ENCRYPT=0</td>"
+        "</tr>"
+        "<tr><td>wdisp/system_3</td>"
+        "<td>SID=JP1, MSHOST=10.10.1.31, MSPORT=8101, "
+        "SSL_ENCRYPT=0, SRCURL=/nwa/;/webdynpro/</td>"
+        "</tr>"
+        "</table></body></html>"
+    )
+    out = _parse_wdisp_systems(text)
+    assert len(out) == 3
+    sids = {e["sid"]: e for e in out}
+    assert "GSM" in sids and "J75" in sids and "JP1" in sids
+    assert sids["GSM"]["mshost"] == "sapgsm"
+    assert sids["GSM"]["msport"] == 8121
+    assert sids["GSM"]["ssl_encrypt"] == 2
+    assert sids["J75"]["mshost"] == "192.168.2.208"
+    assert sids["JP1"]["srcurl"].startswith("/nwa/")
+
+
+def test_html_to_text_collapses_table_cells():
+    """The HTML stripper must paste together row content so the
+    parameter regex can find continuous tokens."""
+    from sap_wdisp_admin import _html_to_text
+    html = ("<tr><td>wdisp/system_0</td>"
+            "<td>SID=GSM, MSHOST=sapgsm</td></tr>")
+    out = _html_to_text(html)
+    # The synthetic `=` between name and value gets inserted so the
+    # existing parameter-line regex can match
+    assert "wdisp/system_0 = SID=GSM" in out
+    assert "MSHOST=sapgsm" in out
+
+
 def test_parse_wdisp_systems_empty_input():
     """No wdisp/system_* lines = empty list (not an exception)."""
     from sap_wdisp_admin import _parse_wdisp_systems

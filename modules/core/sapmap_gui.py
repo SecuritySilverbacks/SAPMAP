@@ -4624,10 +4624,15 @@ def create_app(api: SAPMAPApi) -> Bottle:
         def _run():
             import os, time
             from sap_cve_2022_22536 import download_heap_dump
-            loot_dir = os.path.join(os.path.expanduser("~"),
-                                      ".sapmap", "loot", sid)
-            try: os.makedirs(loot_dir, exist_ok=True)
-            except OSError: loot_dir = "/tmp"
+            # Project-rooted loot dir (loot/<sid>/) — matches the
+            # convention from sapmap_state.ensure_loot_dir() so all
+            # SAPMAP artefacts land alongside the source tree, not
+            # under ~/.sapmap/.  Already covered by .gitignore.
+            try:
+                from sapmap_state import ensure_loot_dir
+                loot_dir = ensure_loot_dir(sid)
+            except Exception:
+                loot_dir = "/tmp"
             ts = time.strftime("%Y%m%d_%H%M%S")
             base = os.path.basename(dump_name).replace("/", "_") or "heapdump"
             save_to = os.path.join(loot_dir,
