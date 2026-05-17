@@ -794,9 +794,15 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
 
     # Pass 2: Gateway + HANA SQL ports — only for discovered instances
     if result["has_sap"] and not _cancelled():
+        # Pseudo-instances "XX" (SAPControl/host-agent) and "WD"
+        # (Web Dispatcher candidate ports) have no instance number;
+        # we can't derive 33XX/3XX13/50000+nn*100 from them and
+        # int() would blow up.  Skip them — those instance buckets
+        # were never going to need a Pass 2 anyway.
         found_instances = sorted(set(
             v["instance_nr"] for v in result["open_ports"].values()
-            if v["instance_nr"] != "XX"
+            if v["instance_nr"] not in ("XX", "WD")
+            and (v["instance_nr"] or "").isdigit()
         ))
         pass2_ports = []
         for inst_str in found_instances:
