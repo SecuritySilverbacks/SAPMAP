@@ -2481,12 +2481,26 @@ function updateMap() {
     // operators can tell at a glance which nodes came from a BTP
     // destination but haven't been independently scanned yet.
     const isBtpDiscovered = !!n.discovered_via_btp;
+    // WD-discovery placeholder: synthesised from a Web Dispatcher's
+    // backend routing topology when no real on-map node matched the
+    // backend's Server-header signature.  We know SOMETHING is back
+    // there (the WD's Server header proved it) but the wire-level
+    // data is too thin to invent a real SID/IP/hostname.
+    const isWdDiscovered = !!n.discovered_via_wd_sid;
     let nodeDash = '';
     if (isBtpDiscovered) {
       fill = '#1f2333';
       borderColor = '#a371f7';
       borderWidth = 3;
       nodeDash = ' stroke-dasharray="8,5"';
+    } else if (isWdDiscovered) {
+      // Cyan-ish dashed border that matches the WD's own color
+      // scheme; lighter fill so the placeholder visually recedes
+      // compared to confirmed-on-the-wire nodes.
+      fill = '#16213e';
+      borderColor = '#4d9eb6';
+      borderWidth = 3;
+      nodeDash = ' stroke-dasharray="6,4"';
     }
 
     if (n.is_production) fill = '#4a1a1a';
@@ -2531,6 +2545,14 @@ function updateMap() {
       html += `<text x="${x+BOX_W-8}" y="${y+18}" text-anchor="end" ` +
         `font-size="10" fill="#a371f7" font-family="monospace" ` +
         `font-weight="bold">via BTP</text>`;
+    } else if (isWdDiscovered) {
+      // "via WD <sid>" — names the WD that revealed this backend
+      // so the operator can find the routing edge that supplied
+      // the placeholder identity.
+      const tag = `via WD ${escHtml(n.discovered_via_wd_sid)}`;
+      html += `<text x="${x+BOX_W-8}" y="${y+18}" text-anchor="end" ` +
+        `font-size="10" fill="#4d9eb6" font-family="monospace" ` +
+        `font-weight="bold">${tag}</text>`;
     }
 
     // Header band

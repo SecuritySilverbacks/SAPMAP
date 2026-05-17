@@ -4033,15 +4033,34 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     verbose=True)
                 node.wd_backends = [dict(b, linked_node_sid="")
                                       for b in bk_result["backends"]]
-                # Re-run cross-node matching now that this WD has fresh
-                # backend data
-                match_wd_backends_to_nodes(list(api.state.nodes.values()))
+                # Re-run cross-node matching with placeholder
+                # promotion ON: any backend that doesn't already
+                # match a real on-map SAPNode gets a synthetic
+                # placeholder node with discovered_via_wd_sid set
+                # to this WD's SID.  Operator can rename/delete
+                # the placeholder once they learn the real
+                # SID/IP/hostname.
+                placeholders = match_wd_backends_to_nodes(
+                    list(api.state.nodes.values()),
+                    promote_unmatched=True)
+                for p in placeholders:
+                    api.state.add_node(p)
+                if placeholders:
+                    print(f"[+] {sid}: promoted "
+                          f"{len(placeholders)} backend(s) to "
+                          f"placeholder node(s):")
+                    for p in placeholders:
+                        print(f"      + {p.sid} "
+                              f"({p.system_type}, "
+                              f"kernel={p.kernel or '?'})")
                 # Surface linked-node summary
                 linked = [b for b in node.wd_backends
                             if b.get("linked_node_sid")]
                 print(f"[+] {sid}: rediscover complete — "
                       f"{len(node.wd_backends)} backend(s), "
-                      f"{len(linked)} linked to on-map nodes")
+                      f"{len(linked)} linked to on-map nodes "
+                      f"(of which {len(placeholders)} newly "
+                      f"synthesised)")
                 for b in node.wd_backends:
                     tgt = (b.get("linked_node_sid")
                             or '<not on map>')
