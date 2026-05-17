@@ -3715,10 +3715,13 @@ async function ctxAction(action) {
       await api('POST', `node/${sid}/check_cve_2022_22536`); break;
     case 'icmad_acl_bypass': {
       const outer = prompt(
-        'Outer POST path that the WD forwards to the backend\n' +
-        '(e.g. /sap/admin/public/default.html for default WDs, /nwa/ for '
-        + 'NWA-fronted setups):',
-        '/sap/admin/public/default.html'
+        'Outer GET path the WD will FORWARD to a backend (not serve\n' +
+        'locally) — the smuggle needs the backend response\'s\n' +
+        'keep-alive to survive long enough for the re-parse.\n\n' +
+        '/sap/wzip?aaa is the canonical (forwards on /sap/* SRCURL,\n' +
+        '404\'s cleanly, keep-alive intact).  Override for atypical\n' +
+        'configs (e.g. /nwa/ for NWA-routed WDs).',
+        '/sap/wzip?aaa'
       );
       if (outer === null) break;
       await api('POST', `node/${sid}/icmad_acl_bypass`, { outer_path: outer });
@@ -3727,8 +3730,10 @@ async function ctxAction(action) {
     }
     case 'icmad_heapdump_pull': {
       const outer = prompt(
-        'Outer POST path for the smuggle (must forward to backend):',
-        '/sap/admin/public/default.html'
+        'Outer GET path the WD forwards to backend (same constraint as\n' +
+        'the ACL-bypass sweep — needs to keep the connection alive\n' +
+        'so the smuggle re-parse can fire):',
+        '/sap/wzip?aaa'
       );
       if (outer === null) break;
       // Step 1: list dumps

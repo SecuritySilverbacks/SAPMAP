@@ -345,6 +345,44 @@ FAST_SCAN_PORT_PATTERNS = {
     "dispatcher": 3200,    # 3200 + instance_nr
 }
 
+# ---------------------------------------------------------------------------
+# SAP Web Dispatcher ports
+# ---------------------------------------------------------------------------
+#
+# The WD is the front-end SAP customers expose on the internet — typically
+# behind a CDN / WAF, but often directly reachable from a developer
+# workstation in lab and engagement-day scenarios.  The same `sapwebdisp`
+# binary that runs as the WD also runs as the ICM in every NW kernel,
+# so the port patterns overlap with regular ABAP/Java instance HTTP
+# ports.  We split the list into two buckets:
+#
+#   (a) WELL_KNOWN_WD_PORTS — fixed-number ports configured via
+#       `icm/server_port_<n>=PROT=...,PORT=NNNN` in `sapwebdisp.pfl`.
+#       80 / 443 / 8080 / 8443 are the production-facing canonical
+#       choices; 8000 / 8001 are common dev / sandbox defaults.
+#   (b) Instance-relative ports — 80NN (HTTP, where NN is the instance
+#       number) and 443NN (HTTPS) follow the SAP `icm/server_port`
+#       formula and are already scanned via the per-instance Java
+#       HTTP/HTTPS pattern below; 44300+NN (HTTPS) is the historical
+#       SAP-default HTTPS port and likewise per-instance.
+#
+# Both buckets feed `fast_scan_host`'s Pass 1 so a host that *only*
+# runs a WD (no dispatcher 32XX) still gets discovered — without this,
+# a hardened DMZ WD with only 443/tcp open would be invisible to
+# SAPMAP and the operator would never see the ICMAD finding.
+
+WELL_KNOWN_WD_PORTS = (
+    80,        # HTTP — most common production facing
+    443,       # HTTPS — most common production facing (TLS)
+    8000,      # HTTP — SAP-default ICM port 0 (no instance number)
+    8001,      # HTTP — secondary
+    8080,      # HTTP — alternate, often used behind a reverse proxy
+    8443,      # HTTPS — alternate; also SAP Cloud Connector default
+    44300,     # HTTPS — SAP-default WD HTTPS port at instance 00
+    50000,     # HTTP — AS Java default instance 00 (overlap with WD)
+    50001,     # HTTPS — AS Java default instance 00
+)
+
 # Additional ports for deep scan (beyond SAPology's full set)
 DEEP_SCAN_EXTRA_PORTS = [
     39013, 39015,           # HANA
@@ -367,6 +405,9 @@ SYSTEM_TYPE_COLORS = {
     "CLOUD_CONNECTOR": "#046c7a",
     "CONTENT_SERVER":  "#256f3a",
     "SAPROUTER":       "#788fa6",
+    "WEB_DISPATCHER":  "#4d9eb6",   # softer cyan — matches the
+                                      # "front-end-only" semantics; close
+                                      # to SAProuter but cool, not warm
     "MDM":             "#5d36ff",
     "HANA":            "#aa0808",
     "MAXDB":           "#e07900",
