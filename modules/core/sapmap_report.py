@@ -463,6 +463,41 @@ def _derive_landscape_recommendations(state: SAPMAPState) -> list:
             for sid, paths in sorted(icmad_bypassed_paths.items()):
                 body += (f"\n  • {sid}: "
                           f"{', '.join(sorted(paths))}")
+        elif icmad_live:
+            # Smuggle confirmed but no path bypassed.  Make sure the
+            # engagement report doesn't oversell the chain — be
+            # explicit about why the on-the-wire bug doesn't
+            # automatically chain to admin access in this topology.
+            body += (
+                "\n\nNote on directly demonstrable impact: the ACL "
+                "bypass sweep tested 12 hand-picked admin paths and "
+                "did NOT observe any status promotion (4XX/5XX → 2XX) "
+                "on this deployment.  That outcome is consistent with "
+                "a topology where this Web Dispatcher is the front-"
+                "end (no upstream trusted proxy whose mTLS / SAP-"
+                "trusted-reverse-proxy attestations the smuggle could "
+                "inherit) AND the backend AS Java instances have "
+                "reasonable trust configs (they do NOT auto-trust "
+                "X-Forwarded-For: 127.0.0.1 headers from non-trusted-"
+                "proxy sources — which is the SAPGateBreaker / "
+                "exploit-db 52109 bypass primitive).\n\n"
+                "This does NOT downgrade the finding.  SAP's CVSS "
+                "10.0 rating and CISA KEV listing both attach to the "
+                "wire-level bug itself, not to a specific chain.  "
+                "Documented chains (per SAP Note 3123396) that "
+                "remain reachable on this kernel without re-running "
+                "the probe:\n"
+                "  (a) Trust-spoof via future upstream gateway — if "
+                "an F5 / nginx / another WD is added in front later, "
+                "the smuggle immediately reaches admin paths gated "
+                "by icm/trusted_reverse_proxy_*.\n"
+                "  (b) Cache poisoning — if wdisp/cache_enabled is "
+                "ever flipped on for cache performance, the smuggle "
+                "can inject responses served to other clients.\n"
+                "  (c) Session hijack — under concurrent legitimate "
+                "user load, smuggled bytes prepend onto the next "
+                "user's request, hijacking their session.  Race-"
+                "conditional and not demonstrated here.")
         if icmad_heap_pwned:
             body += (f"\n\nHPROF heap dump captured on: "
                       f"{', '.join(icmad_heap_pwned)}.  These dumps "
