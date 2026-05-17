@@ -729,6 +729,8 @@ body {
       <div class="ctx-item" data-action="check_cve_6287">&#128270; Check CVE-2020-6287 (RECON)</div>
       <div class="ctx-item" data-action="check_cve_22536">&#128270; Check CVE-2022-22536 (ICMAD smuggle)</div>
       <div class="ctx-item" data-action="wd_rediscover">&#128260; Rediscover WD topology (cache + backends)</div>
+      <div class="ctx-item" data-action="wd_admin_creds">&#128273; Add WD admin credentials (webadm / pull backend table)</div>
+      <div class="ctx-item" data-action="wd_admin_probe_defaults">&#128270; Probe WD admin default credentials</div>
       <div class="ctx-item" data-action="check_linux_lpe">&#128275; Check Linux Root LPE (Copy Fail / Dirty Frag)</div>
       <div class="ctx-item" data-action="deep_scan">&#128260; Deep Scan (full SAPology)</div>
       <div class="ctx-item" data-action="retrieve_rfcs">&#128225; Retrieve RFC Connections</div>
@@ -923,6 +925,35 @@ body {
     <div class="form-actions">
       <button class="btn btn-primary" onclick="saveSCCCredentials()">Save</button>
       <button class="btn" onclick="closeModal('scc-cred-modal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- WD admin Credentials Modal -->
+<div class="modal-overlay" id="wd-cred-modal">
+  <div class="modal">
+    <h3>&#128273; WD admin Credentials (/sap/wdisp/admin)</h3>
+    <div id="wd-cred-system-info" style="font-size:12px;color:#8b949e;margin-bottom:12px"></div>
+    <div style="font-size:11px;color:#8b949e;margin-bottom:12px;line-height:1.4">
+      Enter the WD admin Basic-auth credentials.  The generator-stamped username
+      is typically <code>webadm</code> (see the user line at the top of the
+      <code>WDP_W00_*</code> profile).  Once saved, the credentials are used to
+      pull the full <code>wdisp/system_*</code> table and the WD's kernel info
+      &mdash; resolving every backend SID + MSHOST + MSPORT, including backends
+      that share the same Server header on the wire.
+    </div>
+    <div class="form-row">
+      <label>Username</label>
+      <input type="text" id="wd-cred-user" placeholder="webadm">
+    </div>
+    <div class="form-row">
+      <label>Password</label>
+      <input type="password" id="wd-cred-pass" placeholder="">
+    </div>
+    <div class="form-actions">
+      <button class="btn" onclick="testWdCredentials()">Test &amp; Save</button>
+      <button class="btn btn-primary" onclick="saveWdCredentialsAndExtract()">Save &amp; Pull Backend Table</button>
+      <button class="btn" onclick="closeModal('wd-cred-modal')">Cancel</button>
     </div>
   </div>
 </div>
@@ -3151,6 +3182,8 @@ function showCtxMenu(e, sid) {
     'check_cve_6287':        isJavaStack,             // Java-only RECON check
     'check_cve_22536':       isAbapStack || isJavaStack || !!n.is_web_dispatcher,
     'wd_rediscover':         !!n.is_web_dispatcher,
+    'wd_admin_creds':        !!n.is_web_dispatcher,
+    'wd_admin_probe_defaults': !!n.is_web_dispatcher,
     'exploit_cve_31324_drop': hasCve31324,            // need confirmed CVE-2025-31324
     'icmad_acl_bypass':      !!n.cve_2022_22536_port, // need confirmed ICMAD port (live or patch-table)
     'icmad_heapdump_pull':   !!(n.cve_2022_22536_acl_bypass
@@ -3271,6 +3304,8 @@ function showCtxMenu(e, sid) {
     'check_cve_6287':        'Only applicable to Java / double-stack systems',
     'check_cve_22536':       'Only applicable to ICM-fronted nodes (ABAP / Java / Web Dispatcher)',
     'wd_rediscover':         'Only applicable to confirmed Web Dispatcher nodes',
+    'wd_admin_creds':        'Only applicable to confirmed Web Dispatcher nodes',
+    'wd_admin_probe_defaults': 'Only applicable to confirmed Web Dispatcher nodes',
     'check_ms':              'Probes the message server internal port (39NN) — not applicable to standalone Web Dispatchers',
     'harvest_btp_creds':     'Reads JCo destinations / SecStore entries — standalone Web Dispatchers don\'t store any',
     'exploit_cve_31324_drop': 'Run Check CVE-2025-31324 first; vulnerability required',
@@ -3782,6 +3817,52 @@ async function saveSCCCredentials() {
   } catch (e) { alert('Error: ' + e); }
 }
 
+// --- WD admin credentials modal ----------------------------------------
+function showWdCredModal(sid) {
+  const node = mapState.nodes[sid] || {};
+  const stored = (node.credentials || []).find(c =>
+    c && (c.kind === 'wd_admin' || (c.username || '').toLowerCase() === 'webadm'));
+  document.getElementById('wd-cred-system-info').textContent =
+    'WD: ' + sid + (stored ? '  (stored credentials will be replaced)' : '');
+  document.getElementById('wd-cred-user').value =
+    (stored && stored.username) ? stored.username : 'webadm';
+  document.getElementById('wd-cred-pass').value =
+    (stored && stored.password) ? stored.password : '';
+  document.getElementById('wd-cred-modal').dataset.sid = sid;
+  document.getElementById('wd-cred-modal').classList.add('visible');
+}
+
+async function _saveWdCredsCore(extract) {
+  const modal = document.getElementById('wd-cred-modal');
+  const sid = modal.dataset.sid;
+  const u = document.getElementById('wd-cred-user').value.trim();
+  const p = document.getElementById('wd-cred-pass').value;
+  if (!u || !p) { alert('Username and password are required.'); return; }
+  try {
+    flashActivity('WD ' + sid + ': saving + testing credentials', 3000);
+    const r = await fetch('/api/node/' + encodeURIComponent(sid)
+                            + '/wd_admin_set_credentials',
+                          { method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                              username: u, password: p,
+                              extract_systems: !!extract,
+                            }) });
+    const d = await r.json();
+    if (d.error) { alert('Failed: ' + d.error); return; }
+    closeModal('wd-cred-modal');
+    await pollUpdates();
+    showToast(
+      extract
+        ? 'WD credentials saved; backend-table extraction running — see console'
+        : 'WD credentials saved & tested',
+      'info');
+  } catch (e) { alert('Error: ' + e); }
+}
+
+async function testWdCredentials() { await _saveWdCredsCore(false); }
+async function saveWdCredentialsAndExtract() { await _saveWdCredsCore(true); }
+
 async function ctxAction(action) {
   hideCtxMenu();
   if (!selectedNodeSid) return;
@@ -3806,6 +3887,13 @@ async function ctxAction(action) {
     case 'wd_rediscover':
       await api('POST', `node/${sid}/wd_rediscover`);
       showToast('WD topology rediscovery started — see console for cache + backend results', 'info');
+      break;
+    case 'wd_admin_creds':
+      showWdCredModal(sid);
+      break;
+    case 'wd_admin_probe_defaults':
+      await api('POST', `node/${sid}/wd_admin_probe_defaults`);
+      showToast('Probing WD admin default credentials — see console for verdict', 'info');
       break;
     case 'icmad_acl_bypass': {
       const outer = prompt(
