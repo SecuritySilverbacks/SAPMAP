@@ -517,6 +517,315 @@ def test_well_known_wd_ports_includes_canonical_set():
     assert required.issubset(set(WELL_KNOWN_WD_PORTS))
 
 
+# ---------------------------------------------------------------------------
+# detect_wd_cache — Age header / x-cache / timing-ratio signals
+# ---------------------------------------------------------------------------
+
+class _SeqSock:
+    """Scriptable socket factory that returns different payloads on
+    successive calls.  Each instance is a one-shot socket; the factory
+    advances through a list."""
+    def __init__(self, payloads):
+        self.idx = 0
+        self.payloads = payloads
+    def __call__(self, *a, **k):
+        idx = self.idx
+        self.idx += 1
+        payload = (self.payloads[idx]
+                    if idx < len(self.payloads) else b"")
+        return _ScriptedSock(payload)
+
+
+def test_detect_wd_cache_picks_up_age_header(monkeypatch):
+    """RFC-7234 `Age: N` (N>0) on the second response → high
+    confidence cache enabled."""
+    import sapmap_scanner
+    p1 = (b"HTTP/1.0 200 OK\r\nServer: backend\r\nContent-Length: 4\r\n"
+          b"\r\nbody")
+    p2 = (b"HTTP/1.0 200 OK\r\nServer: backend\r\nAge: 42\r\n"
+          b"Content-Length: 4\r\n\r\nbody")
+    # detect_wd_cache calls _open_socket_for_wd (which constructs
+    # socket.socket); each call returns a new _ScriptedSock.  But the
+    # probe path-finder ALSO does one or more sockets first.
+    #
+    # Cheaper: monkeypatch _open_socket_for_wd directly so we control
+    # exactly what each call returns.
+    seq = [
+        # First call: probe-path finder probes /sap/public/.../sap_logo.png
+        # and expects 200.  Give it a 200 response from a backend.
+        p1,
+        # Second + third calls: the two timed fetches in _fetch().
+        p1,
+        p2,
+    ]
+    state = {"idx": 0}
+    def fake_open_socket(host, port, https=False, timeout=5, saprouter=""):
+        idx = state["idx"]
+        state["idx"] += 1
+        return _ScriptedSock(seq[idx] if idx < len(seq) else b"")
+    monkeypatch.setattr(sapmap_scanner, "_open_socket_for_wd",
+                         fake_open_socket)
+
+    out = sapmap_scanner.detect_wd_cache("h", 443, https=False, timeout=2)
+    assert out["enabled"] is True
+    assert out["confidence"] == "high"
+    assert out["age_seconds"] == 42
+    assert out["evidence"].startswith("age_header:")
+
+
+def test_detect_wd_cache_xcache_hit(monkeypatch):
+    """x-cache: HIT on the second response → high confidence."""
+    import sapmap_scanner
+    p1 = b"HTTP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n"
+    p2 = (b"HTTP/1.0 200 OK\r\nx-cache: HIT from wd-edge\r\n"
+          b"Content-Length: 0\r\n\r\n")
+    seq = [p1, p1, p2]
+    state = {"idx": 0}
+    def fake_open_socket(host, port, https=False, timeout=5, saprouter=""):
+        idx = state["idx"]
+        state["idx"] += 1
+        return _ScriptedSock(seq[idx] if idx < len(seq) else b"")
+    monkeypatch.setattr(sapmap_scanner, "_open_socket_for_wd",
+                         fake_open_socket)
+    out = sapmap_scanner.detect_wd_cache("h", 443)
+    assert out["enabled"] is True
+    assert out["confidence"] == "high"
+    assert "HIT" in out["evidence"]
+
+
+def test_detect_wd_cache_no_signal_returns_false(monkeypatch):
+    """No Age, no x-cache, no faster response → cache_enabled=False."""
+    import sapmap_scanner
+    p = b"HTTP/1.0 200 OK\r\nContent-Length: 4\r\n\r\nbody"
+    state = {"idx": 0}
+    def fake_open_socket(host, port, https=False, timeout=5, saprouter=""):
+        idx = state["idx"]
+        state["idx"] += 1
+        return _ScriptedSock(p if idx <= 4 else b"")
+    monkeypatch.setattr(sapmap_scanner, "_open_socket_for_wd",
+                         fake_open_socket)
+    out = sapmap_scanner.detect_wd_cache("h", 443)
+    assert out["enabled"] is False
+    assert out["evidence"] == "no_cache_signal"
+
+
+def test_detect_wd_cache_no_cacheable_path(monkeypatch):
+    """When every probe path 404's, detect_wd_cache returns
+    enabled=False with evidence='no_cacheable_path_found'."""
+    import sapmap_scanner
+    p = b"HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\n\r\n"
+    state = {"idx": 0}
+    def fake_open_socket(host, port, https=False, timeout=5, saprouter=""):
+        state["idx"] += 1
+        return _ScriptedSock(p)
+    monkeypatch.setattr(sapmap_scanner, "_open_socket_for_wd",
+                         fake_open_socket)
+    out = sapmap_scanner.detect_wd_cache("h", 443)
+    assert out["enabled"] is False
+    assert out["evidence"] == "no_cacheable_path_found"
+
+
+# ---------------------------------------------------------------------------
+# discover_wd_backends — Server-header bucketing
+# ---------------------------------------------------------------------------
+
+def test_discover_wd_backends_buckets_by_server(monkeypatch):
+    """Two prefixes go to backend A, two go to backend B, one is
+    WD-local, one is 503-rejected → 2 backends, 1 wd_local, 1 rejected."""
+    import sapmap_scanner
+
+    # Six probe-paths in order; we control what each returns
+    responses = [
+        # /sap/wzip?aaa  → 404 from backend A
+        b"HTTP/1.0 404 Not Found\r\n"
+        b"Server: SAP NetWeaver Application Server / AS Java 7.50\r\n"
+        b"Content-Length: 0\r\n\r\n",
+        # /sap/public/info  → 404 from backend A (same server)
+        b"HTTP/1.0 404 Not Found\r\n"
+        b"Server: SAP NetWeaver Application Server / AS Java 7.50\r\n"
+        b"Content-Length: 0\r\n\r\n",
+        # /sap/public/bc/...sap_logo.png → 200 from backend A
+        b"HTTP/1.0 200 OK\r\n"
+        b"Server: SAP NetWeaver Application Server / AS Java 7.50\r\n"
+        b"sap-cache-control: +86400\r\nContent-Length: 0\r\n\r\n",
+        # /sap/bc/ping  → 200 from backend B (different server!)
+        b"HTTP/1.0 200 OK\r\n"
+        b"Server: SAP NetWeaver Application Server / ABAP 7.55\r\n"
+        b"Content-Length: 0\r\n\r\n",
+        # /sap/bc/webdynpro/sap/itadmin → 401 from backend B
+        b"HTTP/1.0 401 Unauthorized\r\n"
+        b"Server: SAP NetWeaver Application Server / ABAP 7.55\r\n"
+        b"Content-Length: 0\r\n\r\n",
+        # /heapdump/  → WD-rejected
+        b"HTTP/1.0 503 Service Unavailable\r\n"
+        b"x-sap-icm-err-id: ICMENOSYSTEMFOUND\r\n"
+        b"Content-Length: 0\r\n\r\n",
+    ]
+    # Fill in 200/forwarded for all remaining probe paths (consistent
+    # data, simpler bucketing)
+    while len(responses) < len(sapmap_scanner._WD_BACKEND_PROBE_PATHS):
+        responses.append(responses[0])
+
+    state = {"idx": 0}
+    def fake_open_socket(host, port, https=False, timeout=5, saprouter=""):
+        idx = state["idx"]
+        state["idx"] += 1
+        return _ScriptedSock(
+            responses[idx] if idx < len(responses) else b"")
+    monkeypatch.setattr(sapmap_scanner, "_open_socket_for_wd",
+                         fake_open_socket)
+
+    out = sapmap_scanner.discover_wd_backends("h", 443, verbose=False)
+    # 2 unique backends (Java 7.50 + ABAP 7.55)
+    assert len(out["backends"]) >= 2
+    # Backend A (Java) serves at least 3 prefixes
+    java_bk = next(b for b in out["backends"]
+                     if "AS Java 7.50" in b["server_header"])
+    assert len(java_bk["url_prefixes"]) >= 3
+    # Backend B (ABAP) serves at least 2 prefixes
+    abap_bk = next(b for b in out["backends"]
+                     if "ABAP 7.55" in b["server_header"])
+    assert len(abap_bk["url_prefixes"]) >= 2
+    # /heapdump/ ended up rejected
+    assert "/heapdump/" in out["wd_rejected_prefixes"]
+
+
+def test_discover_wd_backends_extracts_version_hint(monkeypatch):
+    """The wd_version_hint field reads the AS Java X.YY token from the
+    Server header so we can feed the ICMAD patch-table check."""
+    import sapmap_scanner
+    responses = [
+        b"HTTP/1.0 404 Not Found\r\n"
+        b"Server: SAP NetWeaver Application Server / AS Java 7.50\r\n"
+        b"Content-Length: 0\r\n\r\n"
+    ] * len(sapmap_scanner._WD_BACKEND_PROBE_PATHS)
+    state = {"idx": 0}
+    def fake_open_socket(host, port, https=False, timeout=5, saprouter=""):
+        idx = state["idx"]
+        state["idx"] += 1
+        return _ScriptedSock(
+            responses[idx] if idx < len(responses) else b"")
+    monkeypatch.setattr(sapmap_scanner, "_open_socket_for_wd",
+                         fake_open_socket)
+    out = sapmap_scanner.discover_wd_backends("h", 443, verbose=False)
+    bk = out["backends"][0]
+    assert bk["wd_version_hint"] == "750"
+
+
+# ---------------------------------------------------------------------------
+# match_wd_backends_to_nodes — cross-link to existing SAPNodes
+# ---------------------------------------------------------------------------
+
+def test_match_wd_backends_links_to_existing_node_by_release():
+    """A backend whose Server: header includes 'AS Java 7.50' should
+    auto-link to a SAPNode with sap_release='750'."""
+    from sapmap_models import SAPNode
+    from sapmap_scanner import match_wd_backends_to_nodes
+
+    wd = SAPNode(sid="W0B", system_type="WEB_DISPATCHER",
+                  ip="10.0.0.1", hostname="wd")
+    wd.is_web_dispatcher = True
+    wd.wd_backends = [{
+        "signature": "SAP NetWeaver Application Server / AS Java 7.50",
+        "server_header": ("SAP NetWeaver Application Server / "
+                           "AS Java 7.50"),
+        "url_prefixes": ["/sap/wzip?aaa", "/heapdump/"],
+        "wd_version_hint": "750",
+        "linked_node_sid": "",
+        "likely_sid": "",
+        "is_suppressed": False,
+    }]
+    java_node = SAPNode(sid="J75", system_type="JAVA",
+                          ip="10.0.0.2", hostname="java",
+                          sap_release="750")
+    nodes = [wd, java_node]
+    match_wd_backends_to_nodes(nodes)
+    assert wd.wd_backends[0]["linked_node_sid"] == "J75"
+
+
+def test_match_wd_backends_no_match_keeps_blank():
+    from sapmap_models import SAPNode
+    from sapmap_scanner import match_wd_backends_to_nodes
+
+    wd = SAPNode(sid="W0B", system_type="WEB_DISPATCHER",
+                  ip="10.0.0.1", hostname="wd")
+    wd.is_web_dispatcher = True
+    wd.wd_backends = [{
+        "signature": "Backend nobody knows about",
+        "server_header": "Backend nobody knows about",
+        "url_prefixes": ["/x"],
+        "wd_version_hint": "",
+        "linked_node_sid": "",
+        "likely_sid": "",
+        "is_suppressed": False,
+    }]
+    nodes = [wd]    # no other nodes on the map
+    match_wd_backends_to_nodes(nodes)
+    assert wd.wd_backends[0]["linked_node_sid"] == ""
+
+
+def test_match_wd_backends_skips_non_wd_nodes():
+    """match_wd_backends_to_nodes should ignore nodes that aren't WDs."""
+    from sapmap_models import SAPNode
+    from sapmap_scanner import match_wd_backends_to_nodes
+
+    n1 = SAPNode(sid="ABC", system_type="ABAP", ip="10.0.0.1")
+    n1.wd_backends = [{"server_header": "x", "linked_node_sid": ""}]
+    # is_web_dispatcher=False, so match should leave wd_backends alone
+    match_wd_backends_to_nodes([n1])
+    assert n1.wd_backends[0]["linked_node_sid"] == ""
+
+
+# ---------------------------------------------------------------------------
+# ICMAD severity escalation when cache is enabled
+# ---------------------------------------------------------------------------
+
+def test_icmad_severity_critical_when_cache_enabled(monkeypatch):
+    """A node with wd_cache_enabled=True + smuggle confirmed should
+    fire CRITICAL (not HIGH) — cache-poisoning chain is reachable."""
+    from sapmap_models import SAPNode, InstanceInfo, Severity
+    import sapmap_scanner as scanner
+
+    node = SAPNode(sid="WDP", system_type="WEB_DISPATCHER",
+                    ip="10.0.0.1", hostname="wd")
+    node.is_web_dispatcher = True
+    node.wd_cache_enabled = True
+    node.wd_cache_evidence = "age_header:42"
+    node.instances.append(InstanceInfo(instance_nr="WD",
+                                         ports={44300: "wd_https"}))
+
+    # Stub assess_icmad to return vulnerable=True
+    def fake_assess(host, port, **kw):
+        return {
+            "patch_status": {"status": "unknown", "release": "",
+                              "variant": "", "pl": -1,
+                              "fixed_at": None},
+            "probe": {
+                "vulnerable": True,
+                "responses": [404, 503],
+                "response_count": 2,
+                "raw_head": b"HTTP/1.1 404 NF\r\n\r\nbody",
+                "evidence": "ok",
+                "elapsed_ms": 100,
+                "error": "",
+                "attempts": 1,
+            },
+            "severity": "high",
+            "summary": "ICMAD CONFIRMED via smuggle probe",
+        }
+    monkeypatch.setattr("sap_cve_2022_22536.assess_icmad", fake_assess)
+    monkeypatch.setattr(scanner, "_scan_port",
+                         lambda *a, **k: True)
+
+    scanner.check_cve_2022_22536(node, timeout=2)
+    # Should have ONE finding at CRITICAL with cache mention
+    icmad_findings = [f for f in node.findings
+                        if f.name.startswith("CVE-2022-22536")]
+    assert len(icmad_findings) == 1
+    assert icmad_findings[0].severity == Severity.CRITICAL
+    assert "cache" in icmad_findings[0].name.lower()
+
+
 def test_synthesised_wd_sid_format():
     """A WD-only host gets a stable W<hex> SID matching the saprouter
     convention (R<hex>).  Same IP last octet → same SID across runs."""

@@ -236,6 +236,20 @@ class SAPNode:
     # WD fingerprint flag — populated by a tiny TLS/HTTP probe.  Drives
     # ICMAD severity escalation (gateway-fronted = real exploit chain).
     is_web_dispatcher: bool = False
+    # WD cache state — drives ICMAD severity (cache-poisoning chain
+    # only fires when the WD has wdisp/cache_enabled=1).  Discovered by
+    # detect_wd_cache() via Age/x-cache header + timing comparison on a
+    # cacheable static asset.  See _WD_CACHE_PROBES in sapmap_scanner.
+    wd_cache_enabled: bool = False
+    wd_cache_evidence: str = ""
+    # WD-to-backend routing topology — populated by discover_wd_backends().
+    # Each entry is a dict: {signature, url_prefixes, server_header,
+    # wd_version_hint, likely_sid, linked_node_sid, is_suppressed}.
+    # `linked_node_sid` is filled in post-discovery when one of the
+    # observed backends matches a SAPNode already on the map (matched
+    # by server-header substring or shared kernel).  Drives the
+    # WD → backend edges in the landscape SVG.
+    wd_backends: list = field(default_factory=list)
     # Telnet console endpoint override (e.g. "127.0.0.1:50008" when the
     # target's admin telnet is localhost-bound and the operator has an
     # SSH tunnel).  Empty => derive from node.ip + default 5NN08.
@@ -417,6 +431,9 @@ class SAPNode:
             "cve_2022_22536_evidence": self.cve_2022_22536_evidence,
             "cve_2022_22536_acl_bypass": dict(self.cve_2022_22536_acl_bypass or {}),
             "is_web_dispatcher": self.is_web_dispatcher,
+            "wd_cache_enabled": self.wd_cache_enabled,
+            "wd_cache_evidence": self.wd_cache_evidence,
+            "wd_backends": list(self.wd_backends or []),
             "telnet_override": self.telnet_override,
             "java_deploy_blocked": self.java_deploy_blocked,
             "java_secstore_checked": self.java_secstore_checked,
@@ -492,6 +509,9 @@ class SAPNode:
             cve_2022_22536_evidence=d.get("cve_2022_22536_evidence", ""),
             cve_2022_22536_acl_bypass=d.get("cve_2022_22536_acl_bypass", {}),
             is_web_dispatcher=d.get("is_web_dispatcher", False),
+            wd_cache_enabled=d.get("wd_cache_enabled", False),
+            wd_cache_evidence=d.get("wd_cache_evidence", ""),
+            wd_backends=d.get("wd_backends", []),
             telnet_override=d.get("telnet_override", ""),
             java_deploy_blocked=d.get("java_deploy_blocked", False),
             java_secstore_checked=d.get("java_secstore_checked", False),
