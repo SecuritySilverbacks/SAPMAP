@@ -888,6 +888,129 @@ def test_icmad_severity_critical_when_cache_enabled(monkeypatch):
     assert "cache" in icmad_findings[0].name.lower()
 
 
+# ---------------------------------------------------------------------------
+# sap_wdisp_admin — default-creds probe + system-table parser
+# ---------------------------------------------------------------------------
+
+def test_wd_admin_default_creds_includes_webadm():
+    """The default list must include the operator-stamped 'webadm'
+    user — that's the canonical username SAP generates when the WD
+    profile is created."""
+    from sap_wdisp_admin import DEFAULT_WD_CREDENTIALS
+    usernames = {u for u, _ in DEFAULT_WD_CREDENTIALS}
+    assert "webadm" in usernames
+    assert "wdadmin" in usernames
+    assert "sapadmin" in usernames
+    # Sanity: at least 8 unique combos so a v1 probe sweep is
+    # meaningful but not so big it noisily hammers the WD.
+    assert 8 <= len(DEFAULT_WD_CREDENTIALS) <= 25
+
+
+def test_parse_wdisp_systems_extracts_full_table():
+    """The parser must extract SID, MSHOST, MSPORT, SSL_ENCRYPT, and
+    SRCURL from realistic SAP parameter-readout output (matches the
+    exact format from the user's WDP_W00_SAPGSM profile)."""
+    from sap_wdisp_admin import _parse_wdisp_systems
+    text = (
+        "Some other parameter line above\n"
+        "wdisp/system_0 = SID=GSM, MSHOST=sapgsm, MSPORT=8121, "
+        "SSL_ENCRYPT=2\n"
+        "wdisp/system_2=SID=J75, MSHOST=192.168.2.208, MSPORT=8101, "
+        "SSL_ENCRYPT=0\n"
+        "wdisp/system_3=SID=JP1, MSHOST=10.10.1.31, MSPORT=8101, "
+        "SSL_ENCRYPT=0, SRCURL=/nwa/;/webdynpro/;/UserAdmin/;/sapmc/;"
+        "/sap/;/logon_ui_resources/\n"
+        "Some unrelated trailing line\n"
+    )
+    out = _parse_wdisp_systems(text)
+    assert len(out) == 3
+    # system_0
+    assert out[0]["system_index"] == 0
+    assert out[0]["sid"] == "GSM"
+    assert out[0]["mshost"] == "sapgsm"
+    assert out[0]["msport"] == 8121
+    assert out[0]["ssl_encrypt"] == 2
+    # system_2 — default-route (no SRCURL)
+    assert out[1]["sid"] == "J75"
+    assert out[1]["mshost"] == "192.168.2.208"
+    assert out[1]["msport"] == 8101
+    assert out[1]["ssl_encrypt"] == 0
+    assert out[1]["srcurl"] == ""
+    # system_3 — explicit SRCURL list
+    assert out[2]["sid"] == "JP1"
+    assert out[2]["mshost"] == "10.10.1.31"
+    assert "/nwa/" in out[2]["srcurl"]
+
+
+def test_parse_wdisp_systems_handles_html_wrapper():
+    """The parser must tolerate the admin UI's HTML wrapping —
+    parameters typically render inside <pre> or <td> blocks."""
+    from sap_wdisp_admin import _parse_wdisp_systems
+    text = (
+        "<html><body><table>"
+        "<tr><td>wdisp/system_0 = SID=ABC, MSHOST=app1.example, "
+        "MSPORT=8100, SSL_ENCRYPT=0</td></tr>"
+        "</table></body></html>"
+    )
+    out = _parse_wdisp_systems(text)
+    assert len(out) == 1
+    assert out[0]["sid"] == "ABC"
+    assert out[0]["mshost"] == "app1.example"
+    assert out[0]["msport"] == 8100
+
+
+def test_parse_wdisp_systems_empty_input():
+    """No wdisp/system_* lines = empty list (not an exception)."""
+    from sap_wdisp_admin import _parse_wdisp_systems
+    assert _parse_wdisp_systems("") == []
+    assert _parse_wdisp_systems("HTTP/1.1 200 OK\r\n\r\nHello") == []
+
+
+def test_fetch_wd_systems_requires_credentials():
+    """Calling without user/pwd must short-circuit."""
+    from sap_wdisp_admin import fetch_wd_systems
+    r = fetch_wd_systems("h", 443, https=True)
+    assert r["ok"] is False
+    assert r["error"] == "credentials_required"
+
+
+# ---------------------------------------------------------------------------
+# Auto-relink hook in state.add_node()
+# ---------------------------------------------------------------------------
+
+def test_add_node_re_links_wd_backends_when_real_node_arrives():
+    """Adding a real SAPNode whose kernel/release matches an existing
+    WD's wd_backends placeholder should auto-relink the placeholder
+    to the real node, without re-running the full WD discovery."""
+    from sapmap_models import SAPMAPState, SAPNode
+
+    state = SAPMAPState()
+    wd = SAPNode(sid="W0B", system_type="WEB_DISPATCHER",
+                  ip="10.10.0.11", hostname="wd")
+    wd.is_web_dispatcher = True
+    wd.wd_backends = [{
+        "signature": "SAP NetWeaver Application Server / AS Java 7.50",
+        "server_header": ("SAP NetWeaver Application Server / "
+                           "AS Java 7.50"),
+        "url_prefixes": ["/sap/wzip?aaa", "/heapdump/"],
+        "wd_version_hint": "750",
+        "linked_node_sid": "B0B1",   # currently linked to placeholder
+        "likely_sid": "",
+        "is_suppressed": False,
+    }]
+    state.add_node(wd)
+
+    # Now a real Java node lands on the map — kernel matches
+    real = SAPNode(sid="J75", system_type="JAVA",
+                    ip="192.168.2.208", hostname="java",
+                    sap_release="750")
+    state.add_node(real)
+
+    # After add_node, the WD's backend entry should auto-relink to
+    # the real node (overriding the placeholder reference).
+    assert wd.wd_backends[0]["linked_node_sid"] == "J75"
+
+
 def test_synthesised_wd_sid_format():
     """A WD-only host gets a stable W<hex> SID matching the saprouter
     convention (R<hex>).  Same IP last octet → same SID across runs."""

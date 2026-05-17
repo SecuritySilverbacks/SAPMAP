@@ -122,6 +122,25 @@ class Credentials:
     client: str = "000"
     instance_nr: str = "00"
     verified: bool = False     # True if test connection succeeded
+    # Tag distinguishing which auth surface this credential is for.
+    # "" = generic SAP RFC/DIAG (default).
+    # "wd_admin" = HTTP Basic auth on the WD's /sap/wdisp/admin.
+    # "scc"      = SCC's Spring-Security admin login.
+    # Allows downstream actions to find the right credential for the
+    # right surface without ambiguity (e.g. the WD admin-table puller
+    # looks for kind=='wd_admin', not the ABAP DDIC user).
+    kind: str = ""
+    # Optional alias for instance_nr — historic SAPMAP code uses both
+    # `instance_nr` and `instance`; accept either at construction time.
+    instance: str = ""
+
+    def __post_init__(self):
+        # Reconcile the dual-field thing: if caller passed `instance`,
+        # mirror it onto instance_nr.  Keeps to_dict round-trips clean.
+        if self.instance and not self.instance_nr:
+            self.instance_nr = self.instance
+        elif self.instance_nr and not self.instance:
+            self.instance = self.instance_nr
 
     def to_dict(self) -> dict:
         return {
@@ -130,11 +149,16 @@ class Credentials:
             "client": self.client,
             "instance_nr": self.instance_nr,
             "verified": self.verified,
+            "kind": self.kind,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> Credentials:
-        return cls(**d)
+        # Drop any unknown keys so the dataclass __init__ doesn't choke
+        # on legacy / future fields.
+        known = {"username", "password", "client", "instance_nr",
+                  "verified", "kind"}
+        return cls(**{k: v for k, v in d.items() if k in known})
 
 
 # ---------------------------------------------------------------------------
@@ -1012,6 +1036,23 @@ class SAPMAPState:
                 emit_finding(
                     "INFO", node.sid,
                     f"New {sys_type} system plotted — {host}{kernel}",
+                )
+            except Exception:
+                pass
+            # Re-link any WD-discovered backend placeholders that
+            # match the newly-added node's kernel/release/hostname.
+            # Without this, a WD-only first scan + a separate scan of
+            # the backend IP leaves the WD's wd_backends entry stuck
+            # on the placeholder.  Cheap (in-memory string match);
+            # bails silently if the scanner module isn't importable
+            # (keeps the model module dependency-free for tests).
+            try:
+                import sapmap_scanner as _scanner
+                _scanner.match_wd_backends_to_nodes(
+                    list(self.nodes.values()),
+                    promote_unmatched=False,    # don't create new
+                                                  # placeholders here;
+                                                  # only RE-link.
                 )
             except Exception:
                 pass

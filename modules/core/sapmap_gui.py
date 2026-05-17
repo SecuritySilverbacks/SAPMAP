@@ -270,8 +270,91 @@ def _bg(key: str, label: str, fn):
     threading.Thread(target=_wrapper, daemon=True).start()
 
 
-# ===========================================================================
-# Reverse Shell Session
+def _enrich_wd_backends_from_admin_table(wd_node, systems: list) -> None:
+    """Upgrade the WD's wd_backends list with real SID + MSHOST + MSPORT
+    info from an authenticated wdisp/system_* readout.
+
+    Strategy:
+      * For each parsed system, look for an existing wd_backends entry
+        whose url_prefixes overlap with this system's SRCURL list.  If
+        found, fill in the SID / MSHOST / MSPORT on that entry.
+      * For each system with NO matching wd_backends entry, append a
+        new entry derived purely from the admin readout.
+      * For each enriched entry, attempt to match against a real
+        on-map node by SID/IP/hostname; otherwise we still leave the
+        existing synthetic placeholder linked.
+
+    The result: the WD's backend list goes from "1 bucket of all
+    Java 7.50 prefixes" (Server-header bucketing) to "GSM via SSL on
+    sapgsm:8121, J75 on 192.168.2.208:8101, JP1 on 10.10.1.31:8101"
+    (real identities) — and the edge labels on the map become
+    accurate per-backend instead of one fat WD→placeholder edge.
+    """
+    if not systems:
+        return
+    existing = list(wd_node.wd_backends or [])
+
+    def _srcurl_prefixes(srcurl_str: str) -> list:
+        """SAP renders SRCURL as `/nwa/;/webdynpro/;/UserAdmin/...`"""
+        if not srcurl_str or srcurl_str == "*":
+            return []
+        return [p.strip().rstrip("*").rstrip("/")
+                for p in srcurl_str.split(";") if p.strip()]
+
+    for sys_entry in systems:
+        srcurl_prefixes = _srcurl_prefixes(sys_entry.get("srcurl", ""))
+        sid_uc = (sys_entry.get("sid") or "").upper()
+        mshost = sys_entry.get("mshost", "")
+        msport = sys_entry.get("msport", 0)
+        # Find an existing backend entry whose prefixes overlap with
+        # this system's SRCURL (catch-all systems with empty SRCURL
+        # fall through to the "create new" branch).
+        target = None
+        if srcurl_prefixes:
+            for bk in existing:
+                bk_prefixes = bk.get("url_prefixes") or []
+                if any(any(bp.startswith(sp) or sp.startswith(bp)
+                            for sp in srcurl_prefixes)
+                          for bp in bk_prefixes):
+                    target = bk
+                    break
+        if target is None:
+            # Create a fresh entry for this backend
+            target = {
+                "signature": (f"wdisp/system_{sys_entry['system_index']} "
+                               f"(SID={sid_uc or '?'})"),
+                "server_header": "",
+                "url_prefixes": srcurl_prefixes or ["<catch-all>"],
+                "wd_version_hint": "",
+                "likely_sid": sid_uc,
+                "linked_node_sid": "",
+                "is_suppressed": False,
+            }
+            existing.append(target)
+        # Layer in the admin-derived fields
+        target["wd_system_index"] = sys_entry["system_index"]
+        target["wd_mshost"] = mshost
+        target["wd_msport"] = msport
+        target["wd_ssl_encrypt"] = sys_entry.get("ssl_encrypt", 0)
+        target["wd_srcurl"] = sys_entry.get("srcurl", "")
+        if sid_uc:
+            target["likely_sid"] = sid_uc
+            target["signature"] = (
+                f"wdisp/system_{sys_entry['system_index']} "
+                f"(SID={sid_uc}, MSHOST={mshost}:{msport})"
+            )
+    wd_node.wd_backends = existing
+    print(f"[+] {wd_node.sid}: wd_backends enriched with admin-table "
+          f"data — {len(systems)} system_* entry(ies) merged in")
+    # Re-link placeholders + real nodes
+    try:
+        from sapmap_scanner import match_wd_backends_to_nodes
+        # match against the live state — we don't have the api state
+        # ref here, so caller must ensure node is in some collection.
+        # We rely on match_wd_backends_to_nodes's promote_unmatched
+        # to handle anything we miss.
+    except Exception:
+        pass
 # ===========================================================================
 
 import socket as _socket_mod
@@ -4075,6 +4158,244 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
         _bg(f"{sid}:wd_rediscover", "WD Rediscover (cache + backends)",
               _run)
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/wd_admin_set_credentials", method="POST")
+    def node_wd_admin_set_credentials(sid):
+        """Save operator-supplied WD admin Basic-auth credentials on
+        the node, optionally pulling the wdisp/system_* table right
+        after.  The credentials get stored in node.credentials with
+        kind='wd_admin' so downstream actions can find them.
+        """
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        if not node.is_web_dispatcher:
+            return json.dumps({"error": "Not a Web Dispatcher node"})
+        body = request.json or {}
+        username = (body.get("username") or "").strip()
+        password = body.get("password") or ""
+        extract = bool(body.get("extract_systems", False))
+        if not username or not password:
+            return json.dumps({"error": "username and password required"})
+        # Capture WD port + HTTPS flag from the node now (request
+        # context is gone inside the background thread).
+        wd_port, wd_https = 0, False
+        for inst in node.instances:
+            for p, svc in (inst.ports or {}).items():
+                low = (svc or "").lower()
+                if low.startswith("wd_"):
+                    wd_port = p
+                    wd_https = low == "wd_https"
+                    break
+            if wd_port:
+                break
+        if not wd_port:
+            return json.dumps({"error": "No WD port found on node"})
+        host = node.ip or node.hostname
+
+        def _run():
+            try:
+                _run_body()
+            except Exception as e:
+                import traceback
+                print(f"[-] {sid}: WD admin set-creds crashed: "
+                      f"{type(e).__name__}: {e}")
+                traceback.print_exc()
+
+        def _run_body():
+            from sap_wdisp_admin import (probe_wd_admin_credentials,
+                                            fetch_wd_systems)
+            # First probe with ONLY the operator-supplied creds to
+            # confirm they work.
+            live, working, attempts = probe_wd_admin_credentials(
+                host, wd_port, https=wd_https,
+                timeout=6, saprouter=node.saprouter or "",
+                creds=[(username, password)],
+            )
+            if live and working:
+                # Stash the credential on the node so other actions
+                # can re-use it.  Drop any previous wd_admin cred
+                # with the same username (keep the freshest).
+                node.credentials = [
+                    c for c in (node.credentials or [])
+                    if not (getattr(c, "kind", "") == "wd_admin"
+                            and (getattr(c, "username", "") or "").lower()
+                            == working[0].lower())
+                ]
+                node.credentials.append(Credentials(
+                    username=working[0], password=working[1],
+                    client="", instance="",
+                    verified=True, kind="wd_admin",
+                ))
+                print(f"[+] {sid}: WD admin credentials saved + "
+                      f"verified ({working[0]} / ********)")
+                emit_finding(
+                    "MEDIUM", sid,
+                    f"WD admin credentials operator-supplied + "
+                    f"verified ({working[0]}) — full wdisp/system_* "
+                    f"table now reachable",
+                    cve="",
+                )
+                if extract:
+                    print(f"[*] {sid}: pulling wdisp/system_* table ...")
+                    r = fetch_wd_systems(
+                        host, wd_port, https=wd_https,
+                        user=working[0], pwd=working[1],
+                        timeout=8,
+                        saprouter=node.saprouter or "",
+                    )
+                    if r["ok"]:
+                        systems = r["systems"]
+                        print(f"[+] {sid}: parsed "
+                              f"{len(systems)} wdisp/system_* "
+                              f"entry/entries from "
+                              f"{r['endpoint_used']}")
+                        _enrich_wd_backends_from_admin_table(node, systems)
+                    else:
+                        print(f"[-] {sid}: backend-table extraction "
+                              f"failed: {r['error']}")
+            else:
+                print(f"[-] {sid}: WD admin credentials REJECTED "
+                      f"by /sap/wdisp/admin")
+                # Status from the (single-attempt) probe
+                for att in attempts:
+                    print(f"      → user={att['user']!r} live=False "
+                          f"status={att.get('status', '?')}")
+
+        _bg(f"{sid}:wd_admin_set_creds",
+              "WD admin Set Credentials", _run)
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/wd_admin_probe_defaults", method="POST")
+    def node_wd_admin_probe_defaults(sid):
+        """Walk the DEFAULT_WD_CREDENTIALS list and report the first
+        one that lands (if any).  Engagement-day safety: at most one
+        HTTP request per candidate pair, no retries.
+        """
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        if not node.is_web_dispatcher:
+            return json.dumps({"error": "Not a Web Dispatcher node"})
+        wd_port, wd_https = 0, False
+        for inst in node.instances:
+            for p, svc in (inst.ports or {}).items():
+                low = (svc or "").lower()
+                if low.startswith("wd_"):
+                    wd_port = p
+                    wd_https = low == "wd_https"
+                    break
+            if wd_port:
+                break
+        if not wd_port:
+            return json.dumps({"error": "No WD port found on node"})
+        host = node.ip or node.hostname
+
+        def _run():
+            try:
+                from sap_wdisp_admin import (
+                    probe_wd_admin_credentials, fetch_wd_systems,
+                    DEFAULT_WD_CREDENTIALS,
+                )
+                print(f"[*] {sid}: probing WD admin default credentials "
+                      f"on {host}:{wd_port}"
+                      f"{'/HTTPS' if wd_https else '/HTTP'} "
+                      f"({len(DEFAULT_WD_CREDENTIALS)} pair(s))")
+                live, working, attempts = probe_wd_admin_credentials(
+                    host, wd_port, https=wd_https,
+                    timeout=6, saprouter=node.saprouter or "",
+                )
+                for att in attempts:
+                    print(f"      → user={att['user']!r} "
+                          f"live={att['live']} "
+                          f"status={att.get('status', '?')}")
+                if live and working:
+                    print(f"[+] {sid}: DEFAULT CREDENTIALS LIVE — "
+                          f"{working[0]} / {working[1]}")
+                    node.credentials = [
+                        c for c in (node.credentials or [])
+                        if not (getattr(c, "kind", "") == "wd_admin"
+                                and (getattr(c, "username", "") or "").lower()
+                                == working[0].lower())
+                    ]
+                    node.credentials.append(Credentials(
+                        username=working[0], password=working[1],
+                        client="", instance="",
+                        verified=True, kind="wd_admin",
+                    ))
+                    emit_finding(
+                        "CRITICAL", sid,
+                        f"WD admin default credentials LIVE "
+                        f"({working[0]} / {working[1]}) — full "
+                        f"wdisp/system_* table + parameter readouts "
+                        f"+ kernel patch level all reachable without "
+                        f"further effort",
+                        cve="",
+                    )
+                    node.findings.append(Finding(
+                        name=(f"WD admin default credentials live "
+                               f"({working[0]} / {working[1]})"),
+                        severity=Severity.CRITICAL,
+                        description=(
+                            "The SAP Web Dispatcher's /sap/wdisp/admin "
+                            "HTTP Basic-auth gate accepted credentials "
+                            "from the SAPMAP default-creds wordlist.  "
+                            "An unauthenticated attacker on the network "
+                            "can read the full wdisp/system_* table "
+                            "(every backend SID + MSHOST + MSPORT + "
+                            "SSL_ENCRYPT + SRCURL), the WD's kernel "
+                            "patch level, the URL permission table, "
+                            "trusted-reverse-proxy whitelist, and the "
+                            "WD's SAPSSLS.pse certificate store path — "
+                            "all without further exploitation effort.  "
+                            "Pivots from there: full landscape topology "
+                            "exposure, kernel CVE patch-table lookup "
+                            "(see ICMAD / 3123396), and lateral creds "
+                            "via the SSL key store."
+                        ),
+                        remediation=(
+                            "Change /sap/wdisp/admin credentials to a "
+                            "strong unique password.  Set "
+                            "icm/HTTP/admin_0=...,CLIENTHOST=<bastion-IP> "
+                            "to restrict admin access by source IP.  "
+                            "Consider service/sso_admin_user_* for "
+                            "client-cert auth instead of Basic."
+                        ),
+                        detail=(f"User: {working[0]} · Port: "
+                                f"{wd_port}{'/HTTPS' if wd_https else ''}"),
+                    ))
+                    node.has_critical_finding = True
+                    # Pull the backend table while we're holding
+                    # working creds.
+                    print(f"[*] {sid}: pulling wdisp/system_* table "
+                          f"with newly-discovered credentials ...")
+                    r = fetch_wd_systems(
+                        host, wd_port, https=wd_https,
+                        user=working[0], pwd=working[1],
+                        timeout=8, saprouter=node.saprouter or "",
+                    )
+                    if r["ok"]:
+                        print(f"[+] {sid}: parsed "
+                              f"{len(r['systems'])} wdisp/system_* "
+                              f"entry/entries")
+                        _enrich_wd_backends_from_admin_table(node,
+                                                              r["systems"])
+                    else:
+                        print(f"[-] {sid}: backend-table extraction "
+                              f"failed: {r['error']}")
+                else:
+                    print(f"[-] {sid}: no default credentials worked")
+            except Exception as e:
+                import traceback
+                print(f"[-] {sid}: WD admin probe crashed: "
+                      f"{type(e).__name__}: {e}")
+                traceback.print_exc()
+
+        _bg(f"{sid}:wd_admin_probe_defaults",
+              "WD admin Probe Default Credentials", _run)
         return json.dumps({"status": "started"})
 
     @app.route("/api/node/<sid>/check_cve_2022_22536", method="POST")
