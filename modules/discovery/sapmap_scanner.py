@@ -769,48 +769,18 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
                     print(f"[+]   {host}:{p:<6} CONFIRMED SAP Web "
                           f"Dispatcher{ver}  ({fp['evidence']}, "
                           f"confidence={fp['confidence']})")
-                    # Cache + backend topology — best-effort, failures
-                    # are non-fatal.  Run synchronously here so
-                    # _build_nodes_from_fast_scan() can stamp the
-                    # results onto the SAPNode.
-                    try:
-                        cache = detect_wd_cache(host, p, https=is_https,
-                                                  timeout=min(timeout, 5))
-                        result["wd_info"][p]["cache"] = cache
-                        if cache.get("enabled"):
-                            print(f"[!]   {host}:{p:<6} cache ENABLED "
-                                  f"({cache['evidence']}) — promotes "
-                                  f"ICMAD chain (b) cache-poisoning")
-                        else:
-                            print(f"[*]   {host}:{p:<6} cache "
-                                  f"disabled / no signal "
-                                  f"({cache.get('evidence', '')})")
-                    except Exception as e:
-                        print(f"[-]   {host}:{p:<6} cache detect "
-                              f"error: {e}")
-                    try:
-                        backends = discover_wd_backends(
-                            host, p, https=is_https,
-                            timeout=min(timeout, 5), verbose=False)
-                        result["wd_info"][p]["backends"] = backends
-                        bcount = len(backends["backends"])
-                        wlocal = len(backends["wd_local_prefixes"])
-                        wrej = len(backends["wd_rejected_prefixes"])
-                        print(f"[+]   {host}:{p:<6} backend topology: "
-                              f"{bcount} backend(s), {wlocal} WD-local, "
-                              f"{wrej} rejected")
-                        for bk in backends["backends"]:
-                            srv = bk["server_header"] or "<suppressed>"
-                            print(f"        → backend [{srv[:60]}] "
-                                  f"serves {len(bk['url_prefixes'])} "
-                                  f"prefix(es): "
-                                  f"{', '.join(bk['url_prefixes'][:3])}"
-                                  + ("..."
-                                     if len(bk["url_prefixes"]) > 3
-                                     else ""))
-                    except Exception as e:
-                        print(f"[-]   {host}:{p:<6} backend discover "
-                              f"error: {e}")
+                    # NOTE: cache detection + backend topology discovery
+                    # are NOT run here.  Both send 3-17 GET probes
+                    # through the WD which warms the backend connection
+                    # pool, making the subsequent ICMAD smuggle probe
+                    # miss (the bug fires on first request to a freshly
+                    # established backend connection, see plan §G race
+                    # caveat).  Operator can run them on-demand from
+                    # the "Rediscover WD topology" right-click menu.
+                    print(f"[*]   {host}:{p:<6} cache + backend "
+                          f"discovery skipped (right-click → 'Rediscover "
+                          f"WD topology' to run; keeps WD pool idle "
+                          f"so the ICMAD smuggle fires cleanly)")
                 elif fp["is_sap_icm"]:
                     # SAP ICM but not specifically WD — could be an app
                     # server's ICM exposed on a non-standard port.  Keep
