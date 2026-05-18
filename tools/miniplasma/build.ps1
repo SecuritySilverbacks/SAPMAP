@@ -217,7 +217,11 @@ if (-not $SkipObfuscation) {
     } finally {
         Pop-Location
     }
-    $ConfusedExe = Join-Path $Src "bin\Release\confused\mp_bin.exe"
+    # ConfuserEx preserves the input module's relative path (from
+    # baseDir) under outputDir.  Our .crproj says module path =
+    # "net472\mp_bin.exe", so the obfuscated file lands at
+    # bin\Release\confused\net472\mp_bin.exe (not just confused\).
+    $ConfusedExe = Join-Path $Src "bin\Release\confused\net472\mp_bin.exe"
     if (-not (Test-Path $ConfusedExe)) {
         Write-Error "ConfuserEx did not produce $ConfusedExe."
         exit 1
