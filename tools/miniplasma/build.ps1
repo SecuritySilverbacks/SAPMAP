@@ -48,6 +48,20 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Force TLS 1.2 for all web requests in this session.  Windows PowerShell
+# 5.1 (the default `powershell.exe` interpreter) defaults to TLS 1.0/1.1,
+# which dist.nuget.org and GitHub both rejected as of mid-2020.  Without
+# this line, Invoke-WebRequest dies with:
+#     "The request was aborted: Could not create SSL/TLS secure channel."
+# Has to be set BEFORE any Invoke-WebRequest call.
+try {
+    [Net.ServicePointManager]::SecurityProtocol = (
+        [Net.ServicePointManager]::SecurityProtocol -bor
+        [Net.SecurityProtocolType]::Tls12)
+} catch {
+    Write-Warning "Could not enable TLS 1.2 on this PS version: $_"
+}
+
 # Resolve the script's own directory.  Use $PSScriptRoot (always set
 # when a script is being executed, PS 3.0+).  Fall back to MyInvocation
 # only if PSScriptRoot is somehow empty, and finally to the current
