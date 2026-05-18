@@ -3543,22 +3543,32 @@ function showCtxMenu(e, sid) {
     }
   });
 
-  // Hide any submenu group whose actions are all hidden — avoids showing
-  // a parent label like "Business Impact" or "Data Extraction" that opens
-  // to an empty flyout (common on SAProuter / SCC nodes where most ABAP /
-  // Java actions are not applicable).  Walks every .ctx-group and hides
-  // it when zero [data-action] items inside its .ctx-sub remain visible.
-  // Uses a direct .style.display check rather than an attribute selector
-  // because browsers normalise inline styles inconsistently (with/without
-  // a space after the colon, with/without trailing semicolon) and
-  // [style*="display: none"] misses some of those forms.
+  // Hide any submenu group whose actions are all hidden OR all greyed
+  // out — avoids showing a parent label like "Business Impact" /
+  // "Data Extraction" / "Cloud Connector" that opens to a flyout where
+  // nothing is actionable.  Operator feedback: an all-greyed flyout is
+  // just visual noise that wastes a click.
+  //
+  // An item counts as "actionable" when it is BOTH visible
+  // (style.display !== 'none') AND enabled (not carrying the .disabled
+  // class).  When every [data-action] in a .ctx-sub fails one or both
+  // checks, the parent .ctx-group is collapsed entirely.
+  //
+  // Uses direct .style.display + classList checks rather than attribute
+  // selectors because browsers normalise inline styles inconsistently
+  // (with/without a space after the colon, with/without trailing
+  // semicolon) and [style*="display: none"] misses some of those forms.
   menu.querySelectorAll('.ctx-group').forEach(group => {
     const sub = group.querySelector('.ctx-sub');
     if (!sub) return;   // not a submenu — leave alone
     const all = sub.querySelectorAll(':scope > .ctx-item[data-action]');
-    let visible = 0;
-    all.forEach(it => { if (it.style.display !== 'none') visible++; });
-    group.style.display = visible === 0 ? 'none' : '';
+    let actionable = 0;
+    all.forEach(it => {
+      if (it.style.display === 'none') return;
+      if (it.classList.contains('disabled')) return;
+      actionable++;
+    });
+    group.style.display = actionable === 0 ? 'none' : '';
   });
 
   // Show existing credentials / created users in the menu
