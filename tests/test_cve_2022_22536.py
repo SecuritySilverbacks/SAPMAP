@@ -2147,6 +2147,48 @@ def test_probe_wd_admin_credentials_returns_resolved_https_for_caller(monkeypatc
     assert resolved is True   # unchanged — no fallback fired
 
 
+def test_derive_instance_from_wd_port_recognises_80NN_range():
+    """Lab regression: 172.31.14.107 was scanned as two separate
+    SAP systems — SW1 on port 51113 (instance 11 SAPControl) and
+    W6B on port 8011 (also instance 11, the SAP-default 80NN HTTP
+    port).  The merge needs to recognise that 8011 maps to instance
+    11 via the SAP 80NN formula so the fold-into-existing-SID logic
+    works.
+    """
+    from sapmap_scanner import _derive_instance_from_wd_port
+    # 80NN HTTP
+    assert _derive_instance_from_wd_port(8000) == "00"
+    assert _derive_instance_from_wd_port(8011) == "11"
+    assert _derive_instance_from_wd_port(8097) == "97"
+    # 443NN HTTPS
+    assert _derive_instance_from_wd_port(44300) == "00"
+    assert _derive_instance_from_wd_port(44311) == "11"
+    assert _derive_instance_from_wd_port(44397) == "97"
+
+
+def test_derive_instance_from_wd_port_returns_empty_for_canonical_ports():
+    """Canonical WD ports (80, 443, 8080, 8443, 50000, 50001) don't
+    follow the 80NN/443NN formula — they're production-facing
+    fixed choices.  Must return "" so the WD synthesis logic
+    creates a standalone Wxx node for those (and doesn't try to
+    merge into an unrelated instance)."""
+    from sapmap_scanner import _derive_instance_from_wd_port
+    for p in (80, 443, 50000, 50001, 22, 21, 7777):
+        assert _derive_instance_from_wd_port(p) == "", (
+            f"port {p} should NOT yield an instance")
+
+
+def test_derive_instance_from_wd_port_boundaries():
+    """Just outside the 80NN / 443NN ranges → "" — guards against
+    8100 / 8200 / 44400 etc. being accidentally claimed as instances
+    98 / 99 / etc. when they're not real SAP convention."""
+    from sapmap_scanner import _derive_instance_from_wd_port
+    assert _derive_instance_from_wd_port(7999) == ""
+    assert _derive_instance_from_wd_port(8098) == ""
+    assert _derive_instance_from_wd_port(44299) == ""
+    assert _derive_instance_from_wd_port(44398) == ""
+
+
 def test_set_wd_port_protocol_helper_flips_port_label():
     """The gui helper that persists the resolved protocol back onto
     the SAPNode must update the port label exactly — no double-
