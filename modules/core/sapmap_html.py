@@ -3520,16 +3520,24 @@ function showCtxMenu(e, sid) {
   _reflowSubmenus(menu, menuX, menuRect.width);
 }
 
-// Compute submenu flip flags for every <ctx-group> in a menu.
+// Compute submenu flip flags for every <ctx-group> in a menu, AND
+// set an inline max-height that matches the actual available space
+// in the chosen direction.  Without the explicit max-height bound,
+// a tall submenu in flip-up mode would grow freely above the parent
+// row and clip off the TOP of the viewport (where it sits BEHIND
+// the browser chrome and can't be scrolled into view).
+//
 // Used by showCtxMenu / showSCCCtxMenu / showBTPCtxMenu after the
 // parent menu has been positioned so getBoundingClientRect returns
 // final coordinates.
 function _reflowSubmenus(menu, menuX, menuWidth) {
+  const SAFE = 8;  // px gutter to keep the submenu off the edges
   menu.querySelectorAll('.ctx-group').forEach(group => {
     const sub = group.querySelector('.ctx-sub');
     if (!sub) return;
     sub.classList.remove('flip-left');
     sub.classList.remove('flip-up');
+    sub.style.maxHeight = '';   // clear any prior inline cap
 
     // Horizontal: if the parent menu sits near the right edge, the
     // submenu would overflow off-screen → flip it to the left.
@@ -3537,15 +3545,39 @@ function _reflowSubmenus(menu, menuX, menuWidth) {
       sub.classList.add('flip-left');
     }
 
-    // Vertical: estimate submenu height from its child count + a
-    // small per-row constant (28px ~ matches the .ctx-item padding).
-    // If opening downward from this group would clip the viewport,
-    // flip the submenu up so its bottom edge aligns with this row.
+    // Vertical: pick the flip direction with MORE available space.
+    // The submenu's actual height is bounded by an inline max-height
+    // matching that space, so overflow-y:auto kicks in cleanly and
+    // the user can scroll.  Replaces the previous "estimate from
+    // childCount * 28" heuristic which was both inaccurate AND
+    // didn't bound the upward case at all.
     const groupRect = group.getBoundingClientRect();
-    const childCount = sub.querySelectorAll('.ctx-item, .ctx-sep').length;
-    const estHeight = Math.max(childCount * 28 + 16, 60);
-    if (groupRect.top + estHeight > window.innerHeight - 8) {
+    // Space available if submenu opens downward (its top aligned
+    // with the parent group's top, per CSS `top: -4px`).
+    const spaceDown = window.innerHeight - groupRect.top - SAFE;
+    // Space available if submenu flips upward (its bottom aligned
+    // with the parent group's bottom, per CSS `bottom: -4px`).
+    const spaceUp = groupRect.bottom - SAFE;
+
+    // Measure natural height by briefly showing the submenu off-
+    // screen (visibility:hidden) and reading scrollHeight.  Cheaper
+    // than counting children for accuracy when the submenu has
+    // grouped subitems / separators / variable-height content.
+    const prevDisplay = sub.style.display;
+    const prevVis = sub.style.visibility;
+    sub.style.display = 'block';
+    sub.style.visibility = 'hidden';
+    const naturalH = sub.scrollHeight;
+    sub.style.display = prevDisplay;
+    sub.style.visibility = prevVis;
+
+    // Flip up only when down would clip AND up has more space.
+    const wantsFlipUp = (naturalH > spaceDown) && (spaceUp > spaceDown);
+    if (wantsFlipUp) {
       sub.classList.add('flip-up');
+      sub.style.maxHeight = Math.max(spaceUp, 120) + 'px';
+    } else {
+      sub.style.maxHeight = Math.max(spaceDown, 120) + 'px';
     }
   });
 }
