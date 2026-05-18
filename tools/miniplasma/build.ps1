@@ -47,8 +47,22 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$Here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Src  = Join-Path $Here "src"
+
+# Resolve the script's own directory.  Use $PSScriptRoot (always set
+# when a script is being executed, PS 3.0+).  Fall back to MyInvocation
+# only if PSScriptRoot is somehow empty, and finally to the current
+# directory.  Older PS / certain wrappers leave MyInvocation.MyCommand.Path
+# empty - Split-Path -Parent "" then dies with the same error the
+# operator reported.
+if ($PSScriptRoot) {
+    $Here = $PSScriptRoot
+} elseif ($MyInvocation.MyCommand.Path) {
+    $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
+} else {
+    $Here = (Get-Location).Path
+}
+$Src = Join-Path $Here "src"
+Write-Host "[*] Script dir   : $Here"
 
 # ---------------------------------------------------------------------------
 # Locate SAPMAP root
