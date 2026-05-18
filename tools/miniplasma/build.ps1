@@ -270,7 +270,7 @@ $header += $nl
 $header += 'Holds the SAPMAP-vendored MiniPlasma binary (.NET 4.7.2, Costura-merged,' + $nl
 $header += 'ConfuserEx-obfuscated) as a hex blob.  The blob is delivered to the' + $nl
 $header += 'target via SAPXPG cmd.exe + certutil -decode, written to' + $nl
-$header += '%TEMP%\mp_bin.exe, then run.  See modules/exploitation/sapmap_miniplasma.py.' + $nl
+$header += '%TEMP%/mp_bin.exe, then run.  See modules/exploitation/sapmap_miniplasma.py.' + $nl
 $header += '"""' + $nl
 $header += $nl
 $header += 'MINIPLASMA_SHA256 = "' + $sha + '"' + $nl
