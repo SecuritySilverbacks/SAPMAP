@@ -23,3 +23,13 @@ settings.local.json
 *.p12
 *.jks
 *.pfx
+
+# MiniPlasma build artefacts — NuGet restore output, MSBuild outputs,
+# ConfuserEx download cache.  The shipped binary lives in
+# modules/exploitation/_miniplasma_blob.py; everything under tools/
+# is per-build-host transient.
+tools/miniplasma/packages/
+tools/miniplasma/src/bin/
+tools/miniplasma/src/obj/
+tools/miniplasma/confuser/
+tools/miniplasma/nuget.exe

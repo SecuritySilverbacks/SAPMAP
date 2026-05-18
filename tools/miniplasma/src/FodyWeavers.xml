@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Weavers xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <!-- Embed NtApiDotNet.dll + Microsoft.Win32.TaskScheduler.dll into mp_bin.exe
+       so the binary is self-contained — no side-loadable DLLs needed on
+       the target.  Costura.Fody embeds at compile-time. -->
+  <Costura />
+</Weavers>
