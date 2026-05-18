@@ -15,10 +15,23 @@ import pytest
 # Helpers
 # ===========================================================================
 
-def _node(os_type="Windows Server 2019"):
+def _node(os_type="Windows Server 2019", *, gw=True, cve_31324=False):
+    """Build a test SAPNode for the Windows LPE flow.
+
+    Defaults to ``gw_vulnerable=True`` so _make_exec selects the
+    gateway SAPXPG path - matches how the original tests were
+    structured before _make_exec existed.  Tests that want to
+    exercise the CVE-2025-31324 JSP-shell path can pass
+    ``cve_31324=True, gw=False``.
+    """
     from sapmap_models import SAPNode
-    return SAPNode(sid="WIN", ip="10.0.0.2", hostname="winhost",
-                   system_type="ABAP", os_type=os_type)
+    n = SAPNode(sid="WIN", ip="10.0.0.2", hostname="winhost",
+                  system_type="ABAP", os_type=os_type)
+    n.gw_vulnerable = gw
+    if cve_31324:
+        n.cve_2025_31324_vulnerable = True
+        n.cve_2025_31324_port = 50000
+    return n
 
 
 def _exec_gw_canned(map_in_out):
@@ -250,6 +263,53 @@ def test_miniplasma_blob_missing_makes_vulnerable_false():
         out = check_miniplasma(_node())
     assert out["vulnerable"] is False
     assert "blob isn't vendored" in out["reason"] or "build" in out["reason"]
+
+
+def test_miniplasma_no_exec_primitive_short_circuits():
+    """A Windows node WITHOUT gw_vulnerable AND WITHOUT
+    cve_2025_31324_vulnerable cannot have MiniPlasma dispatched at
+    all - operator needs to confirm one of the vulnerable paths first.
+    Must return early with a clear actionable reason."""
+    from sapmap_miniplasma import check_miniplasma
+    n = _node(gw=False, cve_31324=False)
+    with patch("sapmap_exploit.execute_gw_command") as gw, \
+         patch("sapmap_exploit.execute_cve_2025_31324_via_shell") as jsp:
+        out = check_miniplasma(n)
+    assert out["vulnerable"] is False
+    assert "exec primitive" in out["reason"] or "OS-exec" in out["reason"]
+    gw.assert_not_called()
+    jsp.assert_not_called()
+
+
+def test_miniplasma_picks_jsp_shell_when_cve_31324_available():
+    """When CVE-2025-31324 is available, exec routes through the JSP
+    shell rather than gateway SAPXPG - operator-reported lab path for
+    Java-on-Windows stacks where the gateway isn't vulnerable."""
+    from sapmap_miniplasma import check_miniplasma
+    # Java/Win node with the JSP shell path enabled and gateway disabled.
+    n = _node(gw=False, cve_31324=True)
+    # Fake the JSP shell exec to return canned cmd /C ver / cldflt / .NET
+    def _fake_jsp(node, command, timeout=20.0, auto_drop=True):
+        low = command.lower()
+        if "ver" in command.lower() and "release" not in low and "cldflt" not in low:
+            return {"output": ["Microsoft Windows [Version 10.0.19045.3803]"],
+                    "success": True}
+        if "cldflt.sys" in low:
+            return {"output": ["cldflt.sys"], "success": True}
+        if "release" in low:
+            return {"output": ["    Release    REG_DWORD    0x80ed8"],
+                    "success": True}
+        return {"output": [], "success": True}
+    with patch("sapmap_exploit.execute_cve_2025_31324_via_shell",
+                 side_effect=_fake_jsp) as jsp_mock, \
+         patch("sapmap_exploit.execute_gw_command") as gw_mock, \
+         patch("sapmap_miniplasma.is_blob_available", return_value=True):
+        out = check_miniplasma(n)
+    assert out["vulnerable"] is True
+    assert out["details"]["exec_via"] == "jsp_shell"
+    # Crucially: the gateway must NOT have been called at all
+    gw_mock.assert_not_called()
+    assert jsp_mock.called
 
 
 def test_miniplasma_full_viability_with_blob():
