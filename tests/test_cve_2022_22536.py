@@ -826,6 +826,44 @@ def test_match_wd_backends_no_match_with_promote_off_keeps_blank():
     assert wd.wd_backends[0]["linked_node_sid"] == ""
 
 
+def test_remove_node_detaches_wd_backend_links():
+    """When the operator deletes a real-SID placeholder, every WD's
+    `wd_backends` entries that linked to it must lose the reference.
+    Without this, the next rediscover surfaces the phantom and
+    re-creates the synthetic B-prefix placeholder."""
+    from sapmap_models import SAPMAPState, SAPNode
+
+    state = SAPMAPState()
+    wd = SAPNode(sid="W0B", system_type="WEB_DISPATCHER",
+                  ip="10.0.0.1", hostname="wd")
+    wd.is_web_dispatcher = True
+    wd.wd_backends = [{
+        "signature": "SAP NetWeaver AS Java 7.50",
+        "server_header": "SAP NetWeaver AS Java 7.50",
+        "url_prefixes": ["/sap/*"],
+        "wd_version_hint": "750",
+        "linked_node_sid": "JP1",   # links to the real-SID placeholder
+        "likely_sid": "JP1",
+        "is_suppressed": False,
+    }]
+    state.add_node(wd)
+
+    jp1 = SAPNode(sid="JP1", system_type="JAVA",
+                   hostname="10.10.1.31")
+    jp1.discovered_via_wd_sid = "W0B"
+    state.add_node(jp1)
+
+    # Delete JP1 — the WD's backend entry must lose the link
+    ok = state.remove_node("JP1")
+    assert ok is True
+    assert "JP1" not in state.nodes
+    assert wd.wd_backends[0]["linked_node_sid"] == ""
+    # But the backend entry itself, the URL prefixes, the admin
+    # metadata all stay on the WD so re-promote is possible later.
+    assert wd.wd_backends[0]["likely_sid"] == "JP1"
+    assert wd.wd_backends[0]["url_prefixes"] == ["/sap/*"]
+
+
 def test_match_wd_backends_skips_non_wd_nodes():
     """match_wd_backends_to_nodes should ignore nodes that aren't WDs."""
     from sapmap_models import SAPNode

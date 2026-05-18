@@ -1076,13 +1076,28 @@ class SAPMAPState:
                     break
 
     def remove_node(self, sid: str) -> bool:
-        """Remove a node and all associated connections/created users."""
+        """Remove a node and all associated connections/created users.
+
+        Also detaches any WD `wd_backends` entries that pointed at this
+        SID via `linked_node_sid`, so the WD's backend list doesn't
+        carry phantom references that would re-create the placeholder
+        on the next rediscover.
+        """
         if sid not in self.nodes:
             return False
         del self.nodes[sid]
         self.connections = [c for c in self.connections
                            if c.source_sid != sid and c.target_sid != sid]
         self.created_users = [u for u in self.created_users if u.sid != sid]
+        # Detach WD backend links pointing at the now-deleted node so
+        # an operator-initiated delete doesn't surface as a phantom
+        # reference on the next rediscover.  The corresponding URL
+        # prefixes / admin-table data stay on the WD's wd_backends so
+        # the operator can re-promote if they delete by accident.
+        for wd in self.nodes.values():
+            for bk in (getattr(wd, "wd_backends", None) or []):
+                if bk.get("linked_node_sid", "") == sid:
+                    bk["linked_node_sid"] = ""
         return True
 
     def get_node(self, sid: str) -> Optional[SAPNode]:
