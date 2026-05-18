@@ -359,12 +359,18 @@ FAST_SCAN_PORT_PATTERNS = {
 #   (a) WELL_KNOWN_WD_PORTS — fixed-number ports configured via
 #       `icm/server_port_<n>=PROT=...,PORT=NNNN` in `sapwebdisp.pfl`.
 #       80 / 443 / 8080 / 8443 are the production-facing canonical
-#       choices; 8000 / 8001 are common dev / sandbox defaults.
+#       choices; 8000-8020 covers SAP-default `80NN` (instance 00-20)
+#       for standalone WDs that DON'T expose a dispatcher 32XX (so
+#       the per-instance HTTP/HTTPS pattern never fires on them).
+#       Operator lab WD on 172.31.14.107:8011 (instance 11) was
+#       missed pre-this-expansion — confirmed regression added.
 #   (b) Instance-relative ports — 80NN (HTTP, where NN is the instance
 #       number) and 443NN (HTTPS) follow the SAP `icm/server_port`
 #       formula and are already scanned via the per-instance Java
 #       HTTP/HTTPS pattern below; 44300+NN (HTTPS) is the historical
-#       SAP-default HTTPS port and likewise per-instance.
+#       SAP-default HTTPS port and likewise per-instance.  Those
+#       patterns only fire for hosts where a dispatcher 32XX has
+#       already been seen — standalone WDs are caught by bucket (a).
 #
 # Both buckets feed `fast_scan_host`'s Pass 1 so a host that *only*
 # runs a WD (no dispatcher 32XX) still gets discovered — without this,
@@ -374,8 +380,13 @@ FAST_SCAN_PORT_PATTERNS = {
 WELL_KNOWN_WD_PORTS = (
     80,        # HTTP — most common production facing
     443,       # HTTPS — most common production facing (TLS)
-    8000,      # HTTP — SAP-default ICM port 0 (no instance number)
-    8001,      # HTTP — secondary
+    # 80NN — SAP-default WD HTTP port for instance NN.  Cover
+    # instances 00-20 explicitly so standalone WDs without a
+    # dispatcher 32XX still get hit on Pass 1 of the fast scan.
+    # Instance numbers above 20 are rare in the field — operator
+    # can add them via FAST_SCAN_PORT_PATTERNS if they encounter one.
+    8000, 8001, 8002, 8003, 8004, 8005, 8006, 8007, 8008, 8009, 8010,
+    8011, 8012, 8013, 8014, 8015, 8016, 8017, 8018, 8019, 8020,
     8080,      # HTTP — alternate, often used behind a reverse proxy
     8443,      # HTTPS — alternate; also SAP Cloud Connector default
     44300,     # HTTPS — SAP-default WD HTTPS port at instance 00
