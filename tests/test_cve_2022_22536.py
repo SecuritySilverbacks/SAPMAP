@@ -1997,15 +1997,16 @@ def _stub_http_get(plan):
 
 def test_probe_wd_admin_credentials_auto_falls_back_to_https(monkeypatch):
     """When the caller says https=False but the WD is actually TLS-
-    wrapped (port 8011 lab regression), pre-flight returns status=0;
-    the probe must retry once with https=True and proceed."""
+    wrapped (port 8011 lab regression), the first probe candidate's
+    HTTP attempt connection-fails; the probe must retry once with
+    https=True and proceed."""
     from sap_wdisp_admin import probe_wd_admin_credentials
     import sap_wdisp_admin as mod
 
-    # Plan:
-    #  call 0 — pre-flight HTTP  → status=0 (TLS-on-HTTP confusion)
-    #  call 1 — pre-flight HTTPS → 401 + realm  (fallback succeeds)
-    #  call 2 — authed HTTPS    → 200  (creds accepted)
+    # Plan (walking the first verify candidate):
+    #  call 0 — navData.icp HTTP   → status=0 (TLS-on-HTTP confusion)
+    #  call 1 — navData.icp HTTPS  → 401 + realm  (fallback succeeds)
+    #  call 2 — authed HTTPS       → 200  (creds accepted)
     realm_head = (b"HTTP/1.0 401 Unauthorized\r\n"
                    b'WWW-Authenticate: Basic realm="WEB ADMIN"\r\n')
     stub = _stub_http_get([
@@ -2032,13 +2033,16 @@ def test_probe_wd_admin_credentials_auto_falls_back_to_https(monkeypatch):
     assert stub.calls[2]["https"] is True       # authed call uses HTTPS
 
 
-def test_probe_wd_admin_credentials_aborts_when_both_protocols_fail(monkeypatch):
-    """status=0 on BOTH HTTP and HTTPS pre-flights → host unreachable;
-    return early with empty attempts (no per-credential calls)."""
+def test_probe_wd_admin_credentials_aborts_when_all_paths_fail(monkeypatch):
+    """status=0 on every candidate path (HTTP + HTTPS) → host
+    unreachable; return early with empty attempts (no per-credential
+    calls).  Each candidate now causes 2 calls (HTTP + HTTPS flip),
+    so a 5-candidate list × 2 = up to 10 calls before bail-out."""
     from sap_wdisp_admin import probe_wd_admin_credentials
     import sap_wdisp_admin as mod
 
-    stub = _stub_http_get([(0, b"", b""), (0, b"", b"")])
+    # Empty plan — every call returns (0, b"", b"") per stub default
+    stub = _stub_http_get([])
     monkeypatch.setattr(mod, "_http_get", stub)
 
     live, working, attempts, resolved = probe_wd_admin_credentials(
@@ -2048,45 +2052,50 @@ def test_probe_wd_admin_credentials_aborts_when_both_protocols_fail(monkeypatch)
     assert live is False
     assert working is None
     assert attempts == [], "no per-credential calls when host unreachable"
-    # Exactly 2 calls — HTTP pre-flight + HTTPS pre-flight, no creds attempts
-    assert len(stub.calls) == 2
 
 
-def test_probe_wd_admin_credentials_proceeds_when_preflight_returns_302(monkeypatch):
-    """Some WD admin handlers redirect unauthenticated requests to a
-    login UI (302) instead of returning 401.  The old code aborted
-    here with empty attempts; the new code must proceed to the
-    credential loop and accept the user-supplied creds."""
-    from sap_wdisp_admin import probe_wd_admin_credentials
-    import sap_wdisp_admin as mod
-
-    stub = _stub_http_get([
-        (302, b"HTTP/1.0 302 Found\r\nLocation: /login\r\n", b""),
-        (200, b"HTTP/1.0 200 OK\r\n", b"OK"),
-    ])
-    monkeypatch.setattr(mod, "_http_get", stub)
-
-    live, working, attempts, resolved = probe_wd_admin_credentials(
-        "wd.example", 443, https=True, timeout=1,
-        creds=[("webadm", "secret")], verbose=False,
-    )
-    assert live is True
-    assert working == ("webadm", "secret")
-    assert len(attempts) == 1
-    assert attempts[0]["status"] == 200
-
-
-def test_probe_wd_admin_credentials_treats_302_authed_as_live(monkeypatch):
-    """Some kernels redirect the authed default.html to the SAPUI5 SPA
-    (302) instead of serving the static page directly.  302 with a
-    valid Authorization header is auth-accepted, not rejected."""
+def test_probe_wd_admin_credentials_walks_to_gated_candidate_path(monkeypatch):
+    """When the first candidate (navData.icp) returns 200 anonymously
+    (some kernels), the probe must keep walking and pick the next
+    candidate that returns 401 — that's the real auth gate.  This
+    is the canonical fix for the operator-reported lab regression
+    where default.html was anonymous and gave false-positive verify."""
     from sap_wdisp_admin import probe_wd_admin_credentials
     import sap_wdisp_admin as mod
 
     realm_head = (b"HTTP/1.0 401 Unauthorized\r\n"
                    b'WWW-Authenticate: Basic realm="WEB ADMIN"\r\n')
     stub = _stub_http_get([
-        (401, realm_head, b""),       # pre-flight
+        # Candidate 1: navData.icp → 200 anonymous (skip — not gated)
+        (200, b"HTTP/1.0 200 OK\r\n", b"<nav json>"),
+        # Candidate 2: parameter.icp → 401 (this is the gate)
+        (401, realm_head, b""),
+        # Authed probe against parameter.icp → 200 (creds accepted)
+        (200, b"HTTP/1.0 200 OK\r\n", b"<params>"),
+    ])
+    monkeypatch.setattr(mod, "_http_get", stub)
+
+    live, working, attempts, _ = probe_wd_admin_credentials(
+        "wd.example", 8443, https=True, timeout=1,
+        creds=[("webadm", "secret")], verbose=False,
+    )
+    assert live is True
+    assert len(attempts) == 1
+    # verify_path must be the 2nd candidate (the gated one), not the 1st
+    assert "/icp/parameter.icp" in attempts[0]["verify_path"]
+
+
+def test_probe_wd_admin_credentials_treats_302_authed_as_live(monkeypatch):
+    """Some kernels redirect authed paths to the SAPUI5 SPA (302)
+    instead of serving the content directly.  302 with a valid
+    Authorization header is auth-accepted, not rejected."""
+    from sap_wdisp_admin import probe_wd_admin_credentials
+    import sap_wdisp_admin as mod
+
+    realm_head = (b"HTTP/1.0 401 Unauthorized\r\n"
+                   b'WWW-Authenticate: Basic realm="WEB ADMIN"\r\n')
+    stub = _stub_http_get([
+        (401, realm_head, b""),       # pre-flight unauth → 401 gate
         (302, b"HTTP/1.0 302 Found\r\nLocation: /sap/wdisp/admin/icp/\r\n", b""),
     ])
     monkeypatch.setattr(mod, "_http_get", stub)
@@ -2100,16 +2109,18 @@ def test_probe_wd_admin_credentials_treats_302_authed_as_live(monkeypatch):
 
 
 def test_probe_wd_admin_credentials_401_authed_means_rejected(monkeypatch):
-    """A 401 response WITH the operator's Authorization header is the
-    only unambiguous rejection signal — that case still returns live=False."""
+    """A 401 response WITH the operator's Authorization header is
+    rejection — UNLESS HTTP→HTTPS retry succeeds.  Here BOTH
+    protocols 401 with the same creds, so the final verdict is
+    live=False (creds are genuinely wrong)."""
     from sap_wdisp_admin import probe_wd_admin_credentials
     import sap_wdisp_admin as mod
 
     realm_head = (b"HTTP/1.0 401 Unauthorized\r\n"
                    b'WWW-Authenticate: Basic realm="WEB ADMIN"\r\n')
     stub = _stub_http_get([
-        (401, realm_head, b""),       # pre-flight (no auth)
-        (401, realm_head, b""),       # authed → still 401 → really rejected
+        (401, realm_head, b""),       # pre-flight (no auth) → gated
+        (401, realm_head, b""),       # authed HTTPS → still 401
     ])
     monkeypatch.setattr(mod, "_http_get", stub)
 
@@ -2122,6 +2133,42 @@ def test_probe_wd_admin_credentials_401_authed_means_rejected(monkeypatch):
     assert len(attempts) == 1
     assert attempts[0]["status"] == 401
     assert attempts[0]["live"] is False
+
+
+def test_probe_wd_admin_credentials_http_401_retries_on_https(monkeypatch):
+    """The KEY operator-reported regression: WD on 172.31.14.107:8011
+    served the SPA landing page anonymously over HTTP but rejected
+    Basic auth on /icp/* — admin was actually HTTPS-only.  When HTTP
+    + correct creds yields 401, the probe must retry the SAME creds
+    over HTTPS and switch resolved_https when that works."""
+    from sap_wdisp_admin import probe_wd_admin_credentials
+    import sap_wdisp_admin as mod
+
+    realm_head = (b"HTTP/1.0 401 Unauthorized\r\n"
+                   b'WWW-Authenticate: Basic realm="WEB ADMIN"\r\n')
+    stub = _stub_http_get([
+        # Pre-flight: navData.icp HTTP unauth → 401 (real gate)
+        (401, realm_head, b""),
+        # Authed HTTP → still 401 (Basic auth HTTPS-only on this profile)
+        (401, realm_head, b""),
+        # HTTPS retry with same creds → 200 (admin honors Basic over HTTPS)
+        (200, b"HTTP/1.0 200 OK\r\n", b"<nav json>"),
+    ])
+    monkeypatch.setattr(mod, "_http_get", stub)
+
+    live, working, attempts, resolved = probe_wd_admin_credentials(
+        "172.31.14.107", 8011, https=False,
+        timeout=1, creds=[("webadm", "ab3x$waA31")],
+        verbose=False,
+    )
+    assert live is True, ("HTTPS retry should accept the creds that "
+                          "the HTTP-Basic gate rejected")
+    assert working == ("webadm", "ab3x$waA31")
+    assert resolved is True, ("resolved_https should flip to True so "
+                              "follow-up fetch_wd_systems uses HTTPS")
+    # Three calls in total: unauth HTTP, authed HTTP, authed HTTPS retry
+    assert len(stub.calls) == 3
+    assert stub.calls[2]["https"] is True
 
 
 def test_probe_wd_admin_credentials_returns_resolved_https_for_caller(monkeypatch):
