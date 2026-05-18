@@ -3452,6 +3452,21 @@ function showCtxMenu(e, sid) {
                           && !isAbapStack && !isJavaStack,
     'harvest_btp_creds': !!n.is_web_dispatcher
                             && !isAbapStack && !isJavaStack,
+    // WD-specific management actions — only meaningful on a
+    // confirmed Web Dispatcher node.  Hide outright on ABAP /
+    // Java / SAProuter / HANA so the menu doesn't carry options
+    // that can never do anything useful on those nodes.
+    'wd_rediscover':           !n.is_web_dispatcher,
+    'wd_admin_creds':          !n.is_web_dispatcher,
+    'wd_admin_probe_defaults': !n.is_web_dispatcher,
+    // ICMAD bypass + heapdump pull — only the WD path makes sense
+    // for the smuggle-vs-permission_table primitive (per SAP Note
+    // 3123396 scenarios 2-5).  A pure ABAP / Java node without a
+    // gateway in front has no permission_table to bypass.  The
+    // detection probe (check_cve_22536) stays visible everywhere
+    // — the bug is in the ICM itself and detection applies broadly.
+    'icmad_acl_bypass':        !n.is_web_dispatcher,
+    'icmad_heapdump_pull':     !n.is_web_dispatcher,
     // Java-only (dual-stack also counts as Java here)
     'download_java_secstore':     !isJavaStack,
     'view_java_secstore':         !isJavaStack,
