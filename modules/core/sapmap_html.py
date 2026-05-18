@@ -3206,6 +3206,14 @@ function showCtxMenu(e, sid) {
   const isJavaStack = sysType.indexOf('JAVA') !== -1;
   const isAbapStack = sysType.indexOf('ABAP') !== -1;
   const isSaprouter = sysType.indexOf('SAPROUTER') !== -1;
+  // Strict "dedicated Web Dispatcher" check.  We can't use
+  // n.is_web_dispatcher here — that flag goes True for ANY node
+  // whose ICM port fingerprints as a WD, including Java NW
+  // dispatchers (the underlying sapwd/sapwebdisp binary is shared).
+  // The user-facing classification is system_type, so use it
+  // directly: only system_type === 'WEB_DISPATCHER' counts as
+  // "a dedicated WD where /sap/wdisp/admin makes sense".
+  const isWebDispatcher = sysType === 'WEB_DISPATCHER';
   const isWindows = n && (n.os_type || '').toLowerCase().includes('windows');
   const hasCve31324 = n && n.cve_2025_31324_vulnerable;
   const hasCve6287  = n && n.cve_2020_6287_vulnerable;
@@ -3246,10 +3254,10 @@ function showCtxMenu(e, sid) {
     'check_cve_31324':       isJavaStack,             // Java-only vulnerability
     'check_cve_6287':        isJavaStack,             // Java-only RECON check
     'check_cve_22536':       isAbapStack || isJavaStack || !!n.is_web_dispatcher,
-    'wd_rediscover':         !!n.is_web_dispatcher,
-    'wd_admin_creds':        !!n.is_web_dispatcher,
-    'wd_admin_probe_defaults': !!n.is_web_dispatcher,
-    'wd_extract_icmauth':    !!n.is_web_dispatcher,
+    'wd_rediscover':         isWebDispatcher,
+    'wd_admin_creds':        isWebDispatcher,
+    'wd_admin_probe_defaults': isWebDispatcher,
+    'wd_extract_icmauth':    isWebDispatcher,
     'exploit_cve_31324_drop': hasCve31324,            // need confirmed CVE-2025-31324
     'icmad_acl_bypass':      !!n.cve_2022_22536_port, // need confirmed ICMAD port (live or patch-table)
     'icmad_heapdump_pull':   !!(n.cve_2022_22536_acl_bypass
@@ -3483,13 +3491,23 @@ function showCtxMenu(e, sid) {
     'harvest_btp_creds': !!n.is_web_dispatcher
                             && !isAbapStack && !isJavaStack,
     // WD-specific management actions — only meaningful on a
-    // confirmed Web Dispatcher node.  Hide outright on ABAP /
+    // dedicated Web Dispatcher node.  Hide outright on ABAP /
     // Java / SAProuter / HANA so the menu doesn't carry options
     // that can never do anything useful on those nodes.
-    'wd_rediscover':           !n.is_web_dispatcher,
-    'wd_admin_creds':          !n.is_web_dispatcher,
-    'wd_admin_probe_defaults': !n.is_web_dispatcher,
-    'wd_extract_icmauth':      !n.is_web_dispatcher,
+    //
+    // Gate strictly on system_type === 'WEB_DISPATCHER' (not on
+    // n.is_web_dispatcher) — the underlying sapwd/sapwebdisp binary
+    // is shared between dedicated WDs and Java NetWeaver ICMs, so a
+    // Java instance's ICM port (e.g. J75:50000) often fingerprints
+    // as a WD and flips is_web_dispatcher=True even though
+    // /sap/wdisp/admin doesn't actually exist on that node.
+    // Operator-reported regression: J75 (system_type=JAVA) was
+    // showing the WD menu items because the JAVA ICM fingerprinted
+    // as a WD.
+    'wd_rediscover':           !isWebDispatcher,
+    'wd_admin_creds':          !isWebDispatcher,
+    'wd_admin_probe_defaults': !isWebDispatcher,
+    'wd_extract_icmauth':      !isWebDispatcher,
     // ICMAD bypass + heapdump pull — only the WD path makes sense
     // for the smuggle-vs-permission_table primitive (per SAP Note
     // 3123396 scenarios 2-5).  A pure ABAP / Java node without a
