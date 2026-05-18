@@ -29,15 +29,15 @@
 
   <ItemGroup>
     <!-- Costura.Fody: embeds dependencies into the main .exe at compile
-         time.  PrivateAssets="all" means the Costura attribute doesn't
-         leak into mp_bin.exe's metadata. -->
+         time.  PrivateAssets="all" stops the Costura attribute from
+         leaking into mp_bin.exe's metadata.  Costura 6.2+ flags any
+         IncludeAssets override as a warning ("recommended to completely
+         remove"), so we let it default to all assets. -->
     <PackageReference Include="Costura.Fody" Version="6.2.0">
       <PrivateAssets>all</PrivateAssets>
-      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
     <PackageReference Include="Fody" Version="6.9.3">
       <PrivateAssets>all</PrivateAssets>
-      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
     <!-- The real exploit dependencies.  Costura merges these into
          mp_bin.exe so the target doesn't need them side-loaded. -->
