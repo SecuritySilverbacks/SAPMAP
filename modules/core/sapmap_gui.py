@@ -364,6 +364,11 @@ def _enrich_wd_backends_from_admin_table(wd_node, systems: list,
     if state is None:
         # Caller didn't pass a state container — nothing to add to.
         return new_placeholders
+
+    # Track which orphan-B placeholders this enrichment supersedes —
+    # ones the WD previously had a backend pointing at, that now have
+    # a real-SID placeholder to point at instead.  Pruned at the end.
+    orphan_b_candidates = set()
     for bk in wd_node.wd_backends:
         sid_uc = (bk.get("likely_sid") or "").upper()
         mshost = bk.get("wd_mshost", "")
@@ -375,22 +380,43 @@ def _enrich_wd_backends_from_admin_table(wd_node, systems: list,
             existing_linked = state.nodes.get(bk["linked_node_sid"])
             if existing_linked:
                 # If the linked node is a synthetic B*-prefix
-                # placeholder AND we now have a real SID for it,
-                # upgrade by relinking to a fresh real-SID placeholder
-                # (and leave the synthetic in place — operator can
-                # delete the orphan manually).
-                if not (existing_linked.sid.startswith("B")
-                        and existing_linked.sid != sid_uc):
+                # placeholder, mark it for orphan pruning now that
+                # we have the real SID.  We unlink first; if no
+                # other backend (on any WD) still references it,
+                # it's deleted from state at the end.
+                if (existing_linked.sid.startswith("B")
+                        and existing_linked.sid != sid_uc
+                        and getattr(existing_linked,
+                                     "discovered_via_wd_sid", "")):
+                    orphan_b_candidates.add(existing_linked.sid)
+                    bk["linked_node_sid"] = ""    # break the link
+                else:
                     continue
         # Is there already a node with this real SID?
         if sid_uc in state.nodes:
             bk["linked_node_sid"] = sid_uc
             continue
-        # Create a placeholder with the real SID
+        # Create a placeholder with the real SID.  Deduce the SAP
+        # instance number from the MS port using SAP's own formula:
+        #   MSPORT 81NN → instance NN  (Java MS HTTP)
+        #   MSPORT 36NN → instance NN  (ABAP MS internal)
+        #   MSPORT 39NN → instance NN  (ABAP MS internal, exposed)
         from sapmap_models import SAPNode, InstanceInfo
+        inst_nr = "??"
+        for prefix in (8100, 3600, 3900):
+            if prefix <= msport < prefix + 100:
+                inst_nr = f"{msport - prefix:02d}"
+                break
+        # Stack-type heuristic: MSPORT 81NN → Java; 36NN/39NN → ABAP.
+        # No reliable signal otherwise.
+        stype = "SAP"
+        if 8100 <= msport < 8200:
+            stype = "JAVA"
+        elif 3600 <= msport < 3700 or 3900 <= msport < 4000:
+            stype = "ABAP"
         placeholder = SAPNode(
             sid=sid_uc,
-            system_type="SAP",        # no stack hint from admin alone
+            system_type=stype,
             hostname=mshost or "",
             ip="",                    # mshost may be DNS name, not IP
             instances=[],
@@ -398,21 +424,54 @@ def _enrich_wd_backends_from_admin_table(wd_node, systems: list,
         placeholder.discovered_via_wd_sid = wd_node.sid
         # If MSPORT is known, capture it as an InstanceInfo so the
         # node has at least one port the operator can see / probe.
+        # The dispatcher port (32NN) on the same instance is the
+        # natural complementary fingerprint target.
         if msport:
+            ports = {msport: "ms_server"}
+            if inst_nr.isdigit():
+                disp = 3200 + int(inst_nr)
+                ports[disp] = "dispatcher"
             placeholder.instances.append(InstanceInfo(
-                instance_nr="??",
+                instance_nr=inst_nr,
                 ip="",
-                ports={msport: "ms_server"},
+                ports=ports,
             ))
         bk["linked_node_sid"] = sid_uc
         new_placeholders.append(placeholder)
         state.add_node(placeholder)
+
+    # Orphan-prune: any B-prefix placeholder this WD no longer refers
+    # to (and that no OTHER WD on the map references either) gets
+    # deleted from state.  Keeps the map clean after the admin-table
+    # upgrade.
+    if orphan_b_candidates:
+        # Build a set of every backend.linked_node_sid still in use
+        # across every WD in the live state
+        still_referenced = set()
+        for n in state.nodes.values():
+            for bk in (getattr(n, "wd_backends", []) or []):
+                lsid = bk.get("linked_node_sid", "")
+                if lsid:
+                    still_referenced.add(lsid)
+        for orphan_sid in orphan_b_candidates:
+            if orphan_sid in still_referenced:
+                continue   # another WD still uses this placeholder
+            if orphan_sid in state.nodes:
+                del state.nodes[orphan_sid]
+                print(f"[-] {wd_node.sid}: removed orphan placeholder "
+                      f"{orphan_sid} (superseded by real-SID "
+                      f"placeholder from admin-table)")
+
     if new_placeholders:
         print(f"[+] {wd_node.sid}: promoted "
               f"{len(new_placeholders)} admin-discovered backend(s) "
               f"to placeholder node(s):")
         for p in new_placeholders:
-            print(f"      + {p.sid:8s} (MSHOST={p.hostname or '?'}, "
+            i = p.instances[0] if p.instances else None
+            inst_hint = (f", inst {i.instance_nr}" if i and i.instance_nr
+                          else "")
+            print(f"      + {p.sid:8s} (type={p.system_type}, "
+                  f"MSHOST={p.hostname or '?'}{inst_hint}, "
                   f"discovered_via_wd_sid={p.discovered_via_wd_sid})")
     return new_placeholders
 # ===========================================================================

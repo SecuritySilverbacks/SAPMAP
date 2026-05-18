@@ -3198,7 +3198,13 @@ function showCtxMenu(e, sid) {
     'check_linux_lpe':   !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
     'exploit_linux_lpe': !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
     'deep_scan':        true,                       // always available
-    'standard_scan':    !!n.discovered_via_btp,     // BTP placeholders only
+    // BTP-discovered placeholders OR WD-discovered placeholders that
+    // carry a MSHOST.  Both lack a real port-scan footprint until the
+    // operator explicitly runs Standard Scan against the hostname/IP
+    // the parent (BTP destination / WD wdisp/system_*) revealed.
+    'standard_scan':    !!n.discovered_via_btp
+                          || !!(n.discovered_via_wd_sid
+                                && (n.hostname || n.ip)),
     // ABAP-only AND needs a real credential (verified RFC login or
     // a SAPMAP-created user) — the analyser reads AGR_USERS / UST04
     // via RFC; node.pwned alone (e.g. pwned via GW exploit without
