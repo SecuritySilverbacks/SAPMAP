@@ -270,6 +270,25 @@ def _bg(key: str, label: str, fn):
     threading.Thread(target=_wrapper, daemon=True).start()
 
 
+def _set_wd_port_protocol(node, wd_port: int, https: bool) -> None:
+    """Flip a WD port's service label between ``wd_http`` and ``wd_https``.
+
+    Called when ``probe_wd_admin_credentials`` auto-resolves the
+    protocol via fallback — the scanner's HTTPS heuristic only tags
+    443 / 8443 / 44300 / 50001 as TLS, which misses operator-deployed
+    TLS WDs on non-canonical ports (8011, 50301, etc.).  Once the
+    probe figures out the actual protocol, persist it on the node so
+    subsequent operations (Rediscover topology, ICMAD probes, icmauth
+    extraction) hit the right scheme without re-discovering it.
+    """
+    new_label = "wd_https" if https else "wd_http"
+    for inst in node.instances:
+        if not inst.ports:
+            continue
+        if wd_port in inst.ports:
+            inst.ports[wd_port] = new_label
+
+
 def _enrich_wd_backends_from_admin_table(wd_node, systems: list,
                                             state=None) -> list:
     """Upgrade the WD's wd_backends list with real SID + MSHOST + MSPORT
@@ -4365,12 +4384,25 @@ def create_app(api: SAPMAPApi) -> Bottle:
             from sap_wdisp_admin import (probe_wd_admin_credentials,
                                             fetch_wd_systems)
             # First probe with ONLY the operator-supplied creds to
-            # confirm they work.
-            live, working, attempts = probe_wd_admin_credentials(
-                host, wd_port, https=wd_https,
-                timeout=6, saprouter=node.saprouter or "",
-                creds=[(username, password)],
+            # confirm they work.  probe_wd_admin_credentials auto-flips
+            # HTTP↔HTTPS when the configured protocol connection-fails;
+            # we capture the resolved protocol so the follow-up
+            # fetch_wd_systems call (and the node's port service
+            # label) use the right one.
+            live, working, attempts, resolved_https = (
+                probe_wd_admin_credentials(
+                    host, wd_port, https=wd_https,
+                    timeout=6, saprouter=node.saprouter or "",
+                    creds=[(username, password)],
+                )
             )
+            if resolved_https != wd_https:
+                # Auto-fallback fired — update the node's port label
+                # so subsequent operations (Rediscover topology, ICMAD
+                # probes, icmauth extraction) use the right protocol.
+                _set_wd_port_protocol(node, wd_port, resolved_https)
+                print(f"[*] {sid}: WD port {wd_port} protocol auto-"
+                      f"corrected to {'wd_https' if resolved_https else 'wd_http'}")
             if live and working:
                 # Stash the credential on the node so other actions
                 # can re-use it.  Drop any previous wd_admin cred
@@ -4398,7 +4430,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 if extract:
                     print(f"[*] {sid}: pulling wdisp/system_* table ...")
                     r = fetch_wd_systems(
-                        host, wd_port, https=wd_https,
+                        host, wd_port, https=resolved_https,
                         user=working[0], pwd=working[1],
                         timeout=8,
                         saprouter=node.saprouter or "",
@@ -4462,10 +4494,17 @@ def create_app(api: SAPMAPApi) -> Bottle:
                       f"on {host}:{wd_port}"
                       f"{'/HTTPS' if wd_https else '/HTTP'} "
                       f"({len(DEFAULT_WD_CREDENTIALS)} pair(s))")
-                live, working, attempts = probe_wd_admin_credentials(
-                    host, wd_port, https=wd_https,
-                    timeout=6, saprouter=node.saprouter or "",
+                live, working, attempts, resolved_https = (
+                    probe_wd_admin_credentials(
+                        host, wd_port, https=wd_https,
+                        timeout=6, saprouter=node.saprouter or "",
+                    )
                 )
+                if resolved_https != wd_https:
+                    _set_wd_port_protocol(node, wd_port, resolved_https)
+                    print(f"[*] {sid}: WD port {wd_port} protocol auto-"
+                          f"corrected to "
+                          f"{'wd_https' if resolved_https else 'wd_http'}")
                 for att in attempts:
                     print(f"      → user={att['user']!r} "
                           f"live={att['live']} "
@@ -4531,7 +4570,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     print(f"[*] {sid}: pulling wdisp/system_* table "
                           f"with newly-discovered credentials ...")
                     r = fetch_wd_systems(
-                        host, wd_port, https=wd_https,
+                        host, wd_port, https=resolved_https,
                         user=working[0], pwd=working[1],
                         timeout=8, saprouter=node.saprouter or "",
                     )
