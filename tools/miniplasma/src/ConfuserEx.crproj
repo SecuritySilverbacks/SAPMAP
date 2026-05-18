@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ConfuserEx project for the SAPMAP-modified MiniPlasma binary.
+
+  Goals:
+    * Defeat static signatures on the merged dependencies (NtApiDotNet,
+      Costura attachment names) which are heavily flagged by Defender
+      and most EDRs.
+    * Keep the binary functional — `cldfltrace` is a race condition,
+      we can't tolerate runtime overhead from heavy obfuscation.
+
+  Choices:
+    * normal preset is too aggressive (constants encryption breaks
+      Costura's resource lookup); we hand-pick protections instead.
+    * Disable control-flow obfuscation on the static native interop
+      (cldapi.dll P/Invoke).  Renaming/anti-tamper is safe.
+    * Compress=false — Costura already merges everything; an extra
+      compression layer just slows startup.
+
+  Run via build.ps1: invokes Confuser.CLI.exe ConfuserEx.crproj.
+-->
+<project outputDir="..\..\bin\Release\confused" baseDir="..\..\bin\Release" xmlns="http://confuser.codeplex.com">
+  <module path="mp_bin.exe">
+    <rule pattern="true" preset="none" inherit="false">
+      <!-- Rename: scrambles type/method/field names.  Safe with
+           Costura because Fody runs at compile-time before Confuser
+           sees the assembly. -->
+      <protection id="rename">
+        <argument name="mode" value="unicode" />
+        <argument name="renameArgs" value="false" />
+      </protection>
+      <!-- Anti-tamper: detects in-memory patching of the assembly.
+           Cheap and useful against trivial unhooking. -->
+      <protection id="anti tamper" />
+      <!-- Anti-debug: thwarts trivial reverse-engineering via the
+           default debug detection routines. -->
+      <protection id="anti debug" />
+      <!-- Constants encryption: encrypts string literals (e.g. the
+           "\Registry\User\.DEFAULT\..." paths that scream malicious).
+           Done in dynamic mode so Costura's resource lookups still work. -->
+      <protection id="constants">
+        <argument name="mode" value="dynamic" />
+        <argument name="elements" value="SNI" />
+        <argument name="cfg" value="false" />
+      </protection>
+    </rule>
+  </module>
+</project>

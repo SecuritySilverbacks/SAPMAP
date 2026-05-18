@@ -731,6 +731,7 @@ body {
       <div class="ctx-item" data-action="check_cve_22536">&#128270; Check CVE-2022-22536 (ICMAD smuggle)</div>
       <div class="ctx-item" data-action="wd_rediscover">&#128260; Rediscover WD topology (cache + backends)</div>
       <div class="ctx-item" data-action="check_linux_lpe">&#128275; Check Linux Root LPE (Copy Fail / Dirty Frag)</div>
+      <div class="ctx-item" data-action="check_windows_lpe">&#128274; Check Windows SYSTEM LPE (MiniPlasma / cldflt)</div>
       <div class="ctx-item" data-action="deep_scan">&#128260; Deep Scan (full SAPology)</div>
       <div class="ctx-item" data-action="retrieve_rfcs">&#128225; Retrieve RFC Connections</div>
       <div class="ctx-item" data-action="read_java_destinations">&#128225; Read Java JCo Destinations</div>
@@ -748,6 +749,7 @@ body {
     <div class="ctx-sub">
       <div class="ctx-item" data-action="lpe">&#128274; ABAP Local Privilege Escalation</div>
       <div class="ctx-item" data-action="exploit_linux_lpe">&#9889; Escalate to Root (auto: Copy Fail / Dirty Frag)</div>
+      <div class="ctx-item" data-action="exploit_windows_lpe">&#9889; Escalate to SYSTEM (MiniPlasma / cldflt)</div>
       <div class="ctx-item" data-action="betrusted">&#128272; Betrusted — Inject Trusted IP (10KBLAZE)</div>
       <div class="ctx-item" data-action="create_user_betrusted">&#128272; Create User (10KBLAZE Full Chain)</div>
       <div class="ctx-item" data-action="create_user_java">&#128100; Create User (Java UME)</div>
@@ -3271,6 +3273,8 @@ function showCtxMenu(e, sid) {
     'lpe':              isAbapStack && hasCreds,    // ABAP-only (BAPI-driven)
     'check_linux_lpe':   !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
     'exploit_linux_lpe': !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
+    'check_windows_lpe':   isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
+    'exploit_windows_lpe': isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
     'deep_scan':        true,                       // always available
     // BTP-discovered placeholders OR WD-discovered placeholders that
     // carry a MSHOST.  Both lack a real port-scan footprint until the
@@ -3398,6 +3402,8 @@ function showCtxMenu(e, sid) {
     'lpe':              'Provide credentials first',
     'check_linux_lpe':   'Requires OS-exec on Linux host',
     'exploit_linux_lpe': 'Requires OS-exec on Linux host — run Check first to confirm at least one technique (Copy Fail or Dirty Frag) is viable',
+    'check_windows_lpe':   'Requires OS-exec on a Windows host (GW SAPXPG, CVE-2025-31324 shell, or SAPMAP-created OS-user)',
+    'exploit_windows_lpe': 'Requires OS-exec on Windows host — run Check first to confirm MiniPlasma is viable (Win10 1709+ / Server 2019+ with cldflt.sys + .NET 4.7.2+)',
     'retrieve_rfcs':    'Needs a verified RFC credential or a SAPMAP-created user — RSRFCCHK and the RFCDES read both require a working logon.',
     'test_rfcs':        (!hasRFCs
         ? 'Retrieve RFC connections first.'
@@ -3530,6 +3536,8 @@ function showCtxMenu(e, sid) {
     'impact_assess_java':         !isJavaStack,
     'check_linux_lpe':   isWindows,
     'exploit_linux_lpe': isWindows,
+    'check_windows_lpe':   !isWindows,
+    'exploit_windows_lpe': !isWindows,
     // SCC harvest items — hidden entirely unless an SCC is on the same host
     'harvest_scc':          !_hasSccOnSameHost(n),
     'harvest_scc_mappings': !_hasSccOnSameHost(n),
@@ -4169,6 +4177,24 @@ async function ctxAction(action) {
             + 'Non-persistent (page cache only, lost on reboot or '
             + '`echo 3 > /proc/sys/vm/drop_caches`).')) break;
       await api('POST', `node/${sid}/exploit_linux_lpe`, {command: cmd});
+      break;
+    }
+    case 'check_windows_lpe':
+      await api('POST', `node/${sid}/check_windows_lpe`);
+      showToast('Windows LPE check started — probing MiniPlasma (cldflt race)', 'info');
+      break;
+    case 'exploit_windows_lpe': {
+      const cmd = prompt('Command to run as NT AUTHORITY\\SYSTEM on ' + sid + ':', 'whoami');
+      if (!cmd) break;
+      if (!confirm(
+            'Run Windows LPE on ' + sid + '?\n\n'
+            + 'Technique: MiniPlasma — exploits CVE-2020-17103 (silently '
+            + 'un-patched per Nightmare-Eclipse 2025) via a race condition '
+            + 'in cldflt!HsmOsBlockPlaceholderAccess.  Trampolines into '
+            + 'SYSTEM via the WER scheduled task, then runs:\n  ' + cmd + '\n\n'
+            + 'Non-persistent.  Race-condition based — retry once if the '
+            + 'first attempt times out.  Affects Win10 1709+ / Server 2019+.')) break;
+      await api('POST', `node/${sid}/exploit_windows_lpe`, {command: cmd});
       break;
     }
     case 'read_java_destinations': {

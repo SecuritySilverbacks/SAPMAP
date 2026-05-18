@@ -319,6 +319,18 @@ class SAPNode:
     dirtyfrag_kernel: str = ""
     linux_lpe_method: str = ""           # "copyfail" / "dirtyfrag" / ""
 
+    # Windows LPE state.  Currently one technique:
+    #   * MiniPlasma — cldflt.sys race (CVE-2020-17103, silently un-patched
+    #     per Nightmare-Eclipse's 2025 reinvestigation).  Vendored .NET
+    #     4.7.2 single-file binary; SAPXPG-delivered, runs the wrapper
+    #     batch as NT AUTHORITY\SYSTEM via WER scheduled-task hijack.
+    # ``windows_lpe_method`` records which technique the auto-picker
+    # selected on the most recent check ("miniplasma" / "").
+    miniplasma_vulnerable: bool = False  # True if Win10 1709+ + cldflt.sys + .NET 4.7.2
+    miniplasma_system_obtained: bool = False  # True after successful SYSTEM cmd
+    miniplasma_os_build: str = ""        # e.g. "10.0.19045" — from cmd /C ver
+    windows_lpe_method: str = ""         # "miniplasma" / ""
+
     # Discovery provenance.  Set when a node is materialised purely
     # from a BTP destination (no scanner / RFC observation yet) so the
     # GUI can render it as an unverified placeholder until the
@@ -487,6 +499,10 @@ class SAPNode:
             "dirtyfrag_root_obtained": self.dirtyfrag_root_obtained,
             "dirtyfrag_kernel": self.dirtyfrag_kernel,
             "linux_lpe_method": self.linux_lpe_method,
+            "miniplasma_vulnerable": self.miniplasma_vulnerable,
+            "miniplasma_system_obtained": self.miniplasma_system_obtained,
+            "miniplasma_os_build": self.miniplasma_os_build,
+            "windows_lpe_method": self.windows_lpe_method,
             "discovered_via_btp": self.discovered_via_btp,
             "oauth2_profiles": list(self.oauth2_profiles),
             "usrextid_entries": list(self.usrextid_entries),
@@ -566,6 +582,11 @@ class SAPNode:
             dirtyfrag_root_obtained=d.get("dirtyfrag_root_obtained", False),
             dirtyfrag_kernel=d.get("dirtyfrag_kernel", ""),
             linux_lpe_method=d.get("linux_lpe_method", ""),
+            miniplasma_vulnerable=d.get("miniplasma_vulnerable", False),
+            miniplasma_system_obtained=d.get(
+                "miniplasma_system_obtained", False),
+            miniplasma_os_build=d.get("miniplasma_os_build", ""),
+            windows_lpe_method=d.get("windows_lpe_method", ""),
             discovered_via_btp=d.get("discovered_via_btp", False),
             oauth2_profiles=list(d.get("oauth2_profiles", [])),
             capability_results=list(d.get("capability_results", [])),
