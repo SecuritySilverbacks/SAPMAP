@@ -44,6 +44,36 @@ from sapmap_findings import emit_finding
 
 
 # ---------------------------------------------------------------------------
+# SAP port → instance number derivation
+# ---------------------------------------------------------------------------
+
+def _derive_instance_from_wd_port(port: int) -> str:
+    """Map a SAP HTTP/HTTPS port to its instance number, when it follows
+    SAP's 80NN / 443NN convention.
+
+    Returns the two-digit instance number (e.g. "11" for port 8011 or
+    44311) or "" when the port doesn't follow the formula.  Used to
+    fold a WD's HTTP/HTTPS port into the same SAPNode as the
+    matching SAPControl port (5XX13) on the same instance — a real
+    operator regression was two separate nodes for one host: SW1 on
+    port 51113 (inst 11) and W6B on port 8011 (also inst 11).
+
+    Out-of-pattern ports (80, 443, 8080, 8443, 50000, 50001) return
+    "" so the existing "WD" placeholder logic still creates a
+    standalone WD node for those — those genuinely don't map to an
+    instance number, they're just the production-facing canonical
+    HTTP/HTTPS choices.
+    """
+    # 80NN HTTP — instances 00..97 (kernel limit on instance number)
+    if 8000 <= port <= 8097:
+        return f"{port - 8000:02d}"
+    # 443NN HTTPS — instances 00..97
+    if 44300 <= port <= 44397:
+        return f"{port - 44300:02d}"
+    return ""
+
+
+# ---------------------------------------------------------------------------
 # Target parsing (IP ranges, subnets, files)
 # ---------------------------------------------------------------------------
 
@@ -765,9 +795,25 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
                     svc = f"wd_{'https' if is_https else 'http'}"
                     result["open_ports"][p]["service"] = svc
                     result["wd_info"][p] = fp
+                    # If the port follows SAP's 80NN / 443NN instance
+                    # formula, derive the real instance number from it
+                    # (8011 → 11, 44311 → 11) and re-tag the candidate's
+                    # instance_nr.  Without this, the WD's port lives
+                    # under the placeholder instance "WD" and the node-
+                    # builder synthesises a separate "Wxx" node even
+                    # when the same instance has SAPControl on 5XX13
+                    # already feeding a real SID — operator-reported
+                    # 172.31.14.107 regression: SW1 (inst 11, port
+                    # 51113) and W6B (port 8011) shown as two separate
+                    # systems despite being the same instance 11 WD.
+                    derived_inst = _derive_instance_from_wd_port(p)
+                    if derived_inst:
+                        result["open_ports"][p]["instance_nr"] = derived_inst
                     ver = f" v{fp['wd_version']}" if fp["wd_version"] else ""
+                    inst_tag = (f" inst={derived_inst}"
+                                if derived_inst else "")
                     print(f"[+]   {host}:{p:<6} CONFIRMED SAP Web "
-                          f"Dispatcher{ver}  ({fp['evidence']}, "
+                          f"Dispatcher{ver}{inst_tag}  ({fp['evidence']}, "
                           f"confidence={fp['confidence']})")
                     # NOTE: cache detection + backend topology discovery
                     # are NOT run here.  Both send 3-17 GET probes
@@ -789,7 +835,15 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
                     svc = f"icm_{'https' if is_https else 'http'}"
                     result["open_ports"][p]["service"] = svc
                     result["wd_info"][p] = fp
-                    print(f"[+]   {host}:{p:<6} SAP ICM (not WD)  "
+                    # 80NN / 443NN — same instance-derivation as the WD
+                    # branch above so an ICM on 8011 folds into the same
+                    # SAPNode as that instance's SAPControl on 51113.
+                    derived_inst = _derive_instance_from_wd_port(p)
+                    if derived_inst:
+                        result["open_ports"][p]["instance_nr"] = derived_inst
+                    inst_tag = (f" inst={derived_inst}"
+                                if derived_inst else "")
+                    print(f"[+]   {host}:{p:<6} SAP ICM (not WD){inst_tag}  "
                           f"({fp['evidence']})")
                 else:
                     # Non-SAP service squatting the port (nginx, IIS,
