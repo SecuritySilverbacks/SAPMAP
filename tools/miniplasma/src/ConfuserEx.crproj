@@ -41,16 +41,15 @@
     <rule pattern="true" preset="none" inherit="false">
       <!-- Rename: scrambles type/method/field names.  Safe with
            Costura because Fody runs at compile-time before Confuser
-           sees the assembly. -->
+           sees the assembly.  Defeats most static-signature scanners
+           because Defender etc. pattern-match on the
+           "PoC_AbortHydration_ArbitraryRegKey_EoP" namespace and
+           well-known method names. -->
       <protection id="rename">
         <argument name="mode" value="unicode" />
         <argument name="renameArgs" value="false" />
       </protection>
-      <!-- Anti-tamper: detects in-memory patching of the assembly.
-           Cheap and useful against trivial unhooking. -->
-      <protection id="anti tamper" />
-      <!-- Anti-debug: thwarts trivial reverse-engineering via the
-           default debug detection routines. -->
+      <!-- Anti-debug: runtime check, doesn't touch PE structure. -->
       <protection id="anti debug" />
       <!-- Constants encryption: encrypts string literals (e.g. the
            "\Registry\User\.DEFAULT\..." paths that scream malicious).
@@ -60,6 +59,21 @@
         <argument name="elements" value="SNI" />
         <argument name="cfg" value="false" />
       </protection>
+      <!-- NOTE: 'anti tamper' DELIBERATELY DROPPED.  ConfuserEx's
+           anti-tamper protection rewrites the assembly's metadata
+           section to detect in-memory patching, which interacts
+           poorly with .NET binaries that have native interop
+           (mp_bin.exe P/Invokes cldapi.dll).  The resulting PE
+           header makes Windows' loader reject the file with the
+           classic-but-misleading "Unsupported 16-Bit Application"
+           dialog instead of running it.  Operator-reported lab
+           regression on 10.10.0.11 confirmed this.
+
+           If a future engagement needs anti-tamper, retest the
+           binary launches cleanly on a vanilla Windows 10 build
+           BEFORE shipping the blob.  Single-line uncomment + rebuild
+           via tools/miniplasma/build.ps1 — but the IOC savings
+           are marginal vs. the risk of bricking the exploit. -->
     </rule>
   </module>
 </project>
