@@ -69,8 +69,16 @@ Write-Host "[*] Script dir   : $Here"
 # ---------------------------------------------------------------------------
 if (-not $SapmapRoot) {
     $candidate = $Here
-    for ($i = 0; $i -lt 5; $i++) {
-        $candidate = Split-Path -Parent $candidate
+    for ($i = 0; $i -lt 6; $i++) {
+        # Stop when the parent walk produces no further movement
+        # (drive root reached, e.g. "C:\" -> "").  Without this
+        # guard, Split-Path -Parent "" later throws "Cannot bind
+        # argument to parameter 'Path' because it is an empty string."
+        $parent = Split-Path -Parent $candidate
+        if (-not $parent -or $parent -eq $candidate) {
+            break
+        }
+        $candidate = $parent
         if (Test-Path (Join-Path $candidate "modules\exploitation")) {
             $SapmapRoot = $candidate
             break
@@ -78,7 +86,22 @@ if (-not $SapmapRoot) {
     }
 }
 if (-not $SapmapRoot -or -not (Test-Path (Join-Path $SapmapRoot "modules\exploitation"))) {
-    Write-Error "SAPMAP root not found.  Pass -SapmapRoot <path>."
+    Write-Error @"
+SAPMAP root not found.
+
+Auto-detect walked up from "$Here" looking for a "modules\exploitation"
+directory and found none.  Two options:
+
+  1. Run the script from INSIDE a SAPMAP checkout:
+       cd C:\path\to\SAPMAP\tools\miniplasma
+       .\build.ps1
+
+  2. Pass the SAPMAP root explicitly:
+       .\build.ps1 -SapmapRoot C:\path\to\SAPMAP
+
+The build needs to know where to drop the resulting hex blob
+(modules\exploitation\_miniplasma_blob.py).
+"@
     exit 1
 }
 $BlobPy = Join-Path $SapmapRoot "modules\exploitation\_miniplasma_blob.py"
