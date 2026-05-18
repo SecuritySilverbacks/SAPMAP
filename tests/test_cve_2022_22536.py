@@ -2055,22 +2055,28 @@ def test_probe_wd_admin_credentials_aborts_when_all_paths_fail(monkeypatch):
 
 
 def test_probe_wd_admin_credentials_walks_to_gated_candidate_path(monkeypatch):
-    """When the first candidate (navData.icp) returns 200 anonymously
-    (some kernels), the probe must keep walking and pick the next
-    candidate that returns 401 — that's the real auth gate.  This
-    is the canonical fix for the operator-reported lab regression
-    where default.html was anonymous and gave false-positive verify."""
+    """When the first candidate (whatever it is) returns 200 anonymously,
+    the probe must keep walking and pick the next candidate that
+    returns 401 — that's the real auth gate.  This is the canonical
+    fix for the operator-reported lab regression where default.html
+    was anonymous and gave a false-positive verify.
+
+    Implementation note: the verify-candidate list grew over time
+    (newer kernels added more paths), so this test stubs the FIRST
+    candidate as 200-anonymous and the SECOND candidate as 401, then
+    checks that the second one's path is what got used.
+    """
     from sap_wdisp_admin import probe_wd_admin_credentials
     import sap_wdisp_admin as mod
 
     realm_head = (b"HTTP/1.0 401 Unauthorized\r\n"
                    b'WWW-Authenticate: Basic realm="WEB ADMIN"\r\n')
     stub = _stub_http_get([
-        # Candidate 1: navData.icp → 200 anonymous (skip — not gated)
-        (200, b"HTTP/1.0 200 OK\r\n", b"<nav json>"),
-        # Candidate 2: parameter.icp → 401 (this is the gate)
+        # Candidate 1: → 200 anonymous (skip — not gated)
+        (200, b"HTTP/1.0 200 OK\r\n", b"<spa index>"),
+        # Candidate 2: → 401 (this is the gate)
         (401, realm_head, b""),
-        # Authed probe against parameter.icp → 200 (creds accepted)
+        # Authed probe → 200 (creds accepted)
         (200, b"HTTP/1.0 200 OK\r\n", b"<params>"),
     ])
     monkeypatch.setattr(mod, "_http_get", stub)
@@ -2081,8 +2087,11 @@ def test_probe_wd_admin_credentials_walks_to_gated_candidate_path(monkeypatch):
     )
     assert live is True
     assert len(attempts) == 1
-    # verify_path must be the 2nd candidate (the gated one), not the 1st
-    assert "/icp/parameter.icp" in attempts[0]["verify_path"]
+    # verify_path must be the 2nd candidate's path (the second call's
+    # `path`), not the 1st — and crucially NOT default.html (which
+    # would mean we landed on the anonymous fallback).
+    assert attempts[0]["verify_path"] == stub.calls[1]["path"]
+    assert "default.html" not in attempts[0]["verify_path"]
 
 
 def test_probe_wd_admin_credentials_treats_302_authed_as_live(monkeypatch):
