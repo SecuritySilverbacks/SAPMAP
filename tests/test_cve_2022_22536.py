@@ -1714,3 +1714,220 @@ def test_run_acl_bypass_detects_bypass_when_smuggled_promotes(monkeypatch):
     assert r["baseline_status"] == 503
     assert "hprof" in r["smuggled_snippet"]
     assert r["admin_grade"] == "critical"
+
+
+# ---------------------------------------------------------------------------
+# icmauth.txt — WD password-hash file parser
+# ---------------------------------------------------------------------------
+#
+# Tests cover:
+#   * the canonical lab-WD example the user provided (webadm / SHA-384)
+#   * every algorithm we expect to encounter (SHA, SHA256, SHA384, SHA512)
+#   * comment / blank-line handling (must be ignored without raising)
+#   * malformed lines (must be dropped silently, not crash the parser)
+#   * hex-digest length sanity (SHA-384 must be 96 hex chars)
+#   * hashcat_line shape `user:hexhash` ready for `hashcat -m <mode>`
+
+
+def test_parse_icmauth_handles_canonical_sha384_webadm_line():
+    """The exact example the user pulled from the lab WD on 10.10.0.11."""
+    from sap_wdisp_admin import parse_icmauth
+    body = (
+        "# Authentication file for ICM and SAP Web Dispatcher authentication\n"
+        "webadm:{SHA384}JElZSxeYdaMxO+pxADLgVmt5MnTZsJoDXRfCBvhgEM1JRychHCM9iVzFO0Z1PuuM:admin\n"
+    )
+    out = parse_icmauth(body)
+    assert len(out) == 1
+    rec = out[0]
+    assert rec["username"] == "webadm"
+    assert rec["algorithm"] == "SHA384"
+    assert rec["comment"] == "admin"
+    # SHA-384 digest = 48 bytes = 96 hex chars
+    assert len(rec["hash_hex"]) == 96
+    assert all(c in "0123456789abcdef" for c in rec["hash_hex"])
+    assert rec["hashcat_mode"] == 10800
+    assert rec["hashcat_line"] == f"webadm:{rec['hash_hex']}"
+
+
+def test_parse_icmauth_sha384_base64_to_hex_roundtrip():
+    """The parser converts `{SHA384}<base64>` → lowercase hex.  Verify
+    the conversion against an independent base64→hex round-trip.
+
+    Note: SAP's icmauth does NOT store plain SHA-384(password) — it
+    appears to hash `user:realm:password` (HTTP Digest HA1 style),
+    so hashes.com may need salt-aware modes to crack these.  The
+    parser's job is just the format conversion; semantic correctness
+    of the digest content is hashes.com's problem.
+    """
+    import base64
+    from sap_wdisp_admin import parse_icmauth
+    b64 = ("JElZSxeYdaMxO+pxADLgVmt5MnTZsJoDXRfCBvhgEM1J"
+           "RychHCM9iVzFO0Z1PuuM")
+    expected_hex = base64.b64decode(b64).hex()
+    rec = parse_icmauth(f"webadm:{{SHA384}}{b64}:admin")[0]
+    assert rec["hash_hex"] == expected_hex
+    # SHA-384 = 48 bytes
+    assert len(rec["hash_hex"]) == 96
+    # The digest must round-trip cleanly through base64 (b64 → bytes → b64
+    # without truncation), confirming we didn't lose bits to padding.
+    redigest = base64.b64decode(b64)
+    assert base64.b64encode(redigest).decode("ascii").rstrip("=") == b64.rstrip("=")
+
+
+def test_parse_icmauth_handles_all_sha_variants():
+    """Each algorithm tag maps to the right hashcat mode + hex length."""
+    import base64
+    import hashlib
+    from sap_wdisp_admin import parse_icmauth
+
+    cases = [
+        ("SHA",    hashlib.sha1,   100,  20),
+        ("SHA256", hashlib.sha256, 1400, 32),
+        ("SHA384", hashlib.sha384, 10800, 48),
+        ("SHA512", hashlib.sha512, 1700, 64),
+    ]
+    lines = []
+    for tag, hfn, _, _ in cases:
+        digest = hfn(b"hunter2").digest()
+        b64 = base64.b64encode(digest).decode("ascii")
+        lines.append(f"u_{tag.lower()}:{{{tag}}}{b64}:role={tag}")
+    parsed = parse_icmauth("\n".join(lines))
+    assert len(parsed) == len(cases)
+    for rec, (tag, hfn, mode, nbytes) in zip(parsed, cases):
+        assert rec["algorithm"] == tag
+        assert rec["hashcat_mode"] == mode
+        assert len(rec["hash_hex"]) == nbytes * 2
+        assert rec["hash_hex"] == hfn(b"hunter2").hexdigest()
+        assert rec["comment"] == f"role={tag}"
+
+
+def test_parse_icmauth_skips_blank_and_comment_lines():
+    from sap_wdisp_admin import parse_icmauth
+    body = (
+        "\n"
+        "# top comment\n"
+        "\n"
+        "webadm:{SHA384}JElZSxeYdaMxO+pxADLgVmt5MnTZsJoDXRfCBvhgEM1JRychHCM9iVzFO0Z1PuuM:admin\n"
+        "# trailing comment\n"
+        "\n"
+    )
+    out = parse_icmauth(body)
+    assert len(out) == 1
+    assert out[0]["username"] == "webadm"
+
+
+def test_parse_icmauth_drops_malformed_lines_without_raising():
+    """Garbled lines (missing braces, missing colons, plain text) must
+    not crash the parser; valid lines around them still parse."""
+    from sap_wdisp_admin import parse_icmauth
+    body = (
+        "garbage line with no colons\n"
+        "user_only:\n"
+        "user:notbracketed:hash\n"          # missing {ALGO}
+        "u2:{SHA384}:nopayload\n"            # empty base64 → skipped
+        "webadm:{SHA384}JElZSxeYdaMxO+pxADLgVmt5MnTZsJoDXRfCBvhgEM1JRychHCM9iVzFO0Z1PuuM:admin\n"
+    )
+    out = parse_icmauth(body)
+    assert len(out) == 1
+    assert out[0]["username"] == "webadm"
+
+
+def test_parse_icmauth_accepts_bytes_input():
+    """Auto-fetch path hands us bytes from the HTTP body; parser must
+    accept either str or bytes transparently."""
+    from sap_wdisp_admin import parse_icmauth
+    body = b"webadm:{SHA384}JElZSxeYdaMxO+pxADLgVmt5MnTZsJoDXRfCBvhgEM1JRychHCM9iVzFO0Z1PuuM:admin\n"
+    out = parse_icmauth(body)
+    assert len(out) == 1
+    assert out[0]["username"] == "webadm"
+
+
+def test_parse_icmauth_multiple_users_with_shared_hash_kept_separate():
+    """Two users with the same digest must each appear in the output
+    as a separate record (de-dup happens server-side at submit time,
+    not in the parser)."""
+    from sap_wdisp_admin import parse_icmauth
+    sha = "JElZSxeYdaMxO+pxADLgVmt5MnTZsJoDXRfCBvhgEM1JRychHCM9iVzFO0Z1PuuM"
+    body = (
+        f"webadm:{{SHA384}}{sha}:admin\n"
+        f"opadmin:{{SHA384}}{sha}:operator\n"
+    )
+    out = parse_icmauth(body)
+    assert len(out) == 2
+    assert out[0]["username"] == "webadm"
+    assert out[1]["username"] == "opadmin"
+    assert out[0]["hash_hex"] == out[1]["hash_hex"]
+
+
+def test_parse_icmauth_username_with_dot_allowed():
+    """Generator-stamped usernames sometimes contain a dot (e.g.
+    SAP convention `sap.admin`) — the parser must keep the full
+    name without truncating at the dot."""
+    from sap_wdisp_admin import parse_icmauth
+    body = ("sap.admin:{SHA384}JElZSxeYdaMxO+pxADLgVmt5MnTZsJoDXRfCBvhgEM1J"
+            "RychHCM9iVzFO0Z1PuuM:role\n")
+    out = parse_icmauth(body)
+    assert len(out) == 1
+    assert out[0]["username"] == "sap.admin"
+
+
+def test_parse_icmauth_unpadded_base64_padded_automatically():
+    """Some kernels emit unpadded base64 — the parser fixes padding
+    rather than dropping the line."""
+    import base64
+    import hashlib
+    from sap_wdisp_admin import parse_icmauth
+    digest = hashlib.sha384(b"admin").digest()
+    b64_padded = base64.b64encode(digest).decode("ascii")  # has trailing =
+    b64_unpadded = b64_padded.rstrip("=")
+    body = f"webadm:{{SHA384}}{b64_unpadded}:admin\n"
+    out = parse_icmauth(body)
+    assert len(out) == 1
+    assert out[0]["hash_hex"] == hashlib.sha384(b"admin").hexdigest()
+
+
+def test_parse_icmauth_no_comment_field_handled():
+    """`user:{SHA384}<b64>` with NO trailing :comment is legal — empty
+    comment should not break the parse."""
+    from sap_wdisp_admin import parse_icmauth
+    body = ("webadm:{SHA384}JElZSxeYdaMxO+pxADLgVmt5MnTZsJoDXRfCBvhgEM1J"
+            "RychHCM9iVzFO0Z1PuuM\n")
+    out = parse_icmauth(body)
+    assert len(out) == 1
+    assert out[0]["username"] == "webadm"
+    assert out[0]["comment"] == ""
+
+
+def test_parse_icmauth_empty_input_returns_empty_list():
+    from sap_wdisp_admin import parse_icmauth
+    assert parse_icmauth("") == []
+    assert parse_icmauth(b"") == []
+    assert parse_icmauth("# only a comment\n\n") == []
+
+
+def test_icmauth_probe_url_list_includes_canonical_endpoints():
+    """The auto-fetch probe list should include at least the
+    well-known WD admin file-viewer URL shapes we'd expect to
+    serve icmauth.txt on a kernel that exposes it."""
+    from sap_wdisp_admin import _WD_ADMIN_ICMAUTH_PROBES
+    probes = list(_WD_ADMIN_ICMAUTH_PROBES)
+    assert len(probes) >= 6
+    # icp-based file readers
+    assert any(p.endswith("icmauth.icp") for p in probes)
+    # ShowFile.html action
+    assert any("ShowFile" in p for p in probes)
+    # Every probe must be under /sap/wdisp/admin/
+    for p in probes:
+        assert p.startswith("/sap/wdisp/admin/"), \
+            f"Probe {p!r} should be under WD admin namespace"
+
+
+def test_download_icmauth_returns_needs_creds_when_user_blank():
+    """Calling with empty creds must short-circuit cleanly — no
+    network calls, no exceptions."""
+    from sap_wdisp_admin import download_icmauth
+    r = download_icmauth("host.example", 44300, https=True,
+                            user="", pwd="", verbose=False)
+    assert r["ok"] is False
+    assert r["error"] == "credentials_required"
+    assert r["probes_tried"] == []

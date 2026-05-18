@@ -731,6 +731,7 @@ body {
       <div class="ctx-item" data-action="wd_rediscover">&#128260; Rediscover WD topology (cache + backends)</div>
       <div class="ctx-item" data-action="wd_admin_creds">&#128273; Add WD admin credentials (webadm / pull backend table)</div>
       <div class="ctx-item" data-action="wd_admin_probe_defaults">&#128270; Probe WD admin default credentials</div>
+      <div class="ctx-item" data-action="wd_extract_icmauth">&#128272; Extract WD password hashes (icmauth.txt)</div>
       <div class="ctx-item" data-action="check_linux_lpe">&#128275; Check Linux Root LPE (Copy Fail / Dirty Frag)</div>
       <div class="ctx-item" data-action="deep_scan">&#128260; Deep Scan (full SAPology)</div>
       <div class="ctx-item" data-action="retrieve_rfcs">&#128225; Retrieve RFC Connections</div>
@@ -954,6 +955,33 @@ body {
       <button class="btn" onclick="testWdCredentials()">Test &amp; Save</button>
       <button class="btn btn-primary" onclick="saveWdCredentialsAndExtract()">Save &amp; Pull Backend Table</button>
       <button class="btn" onclick="closeModal('wd-cred-modal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- WD icmauth.txt Paste Modal -->
+<div class="modal-overlay" id="wd-icmauth-modal">
+  <div class="modal" style="max-width:720px;width:95vw">
+    <h3>&#128272; WD icmauth.txt &mdash; Paste Password Hashes</h3>
+    <div id="wd-icmauth-reason" style="font-size:12px;color:#f0883e;margin-bottom:10px"></div>
+    <div style="font-size:11px;color:#8b949e;margin-bottom:12px;line-height:1.4">
+      SAP locks <code>icmauth.txt</code> behind the OS filesystem on most
+      installs, so the WD admin's web UI does not serve it.  Grab it manually:
+      <ul style="margin:6px 0 6px 18px;padding:0">
+        <li><b>Windows:</b> <code>C:\usr\sap\&lt;SAPSID&gt;\SYS\global\security\data\icmauth.txt</code></li>
+        <li><b>UNIX:</b> <code>/usr/sap/&lt;SAPSID&gt;/SYS/global/security/data/icmauth.txt</code></li>
+      </ul>
+      Paste the full file contents below.  Each line is parsed
+      <code>user:{SHA384}&lt;base64&gt;:comment</code> and converted to a
+      hashcat-ready hex digest.  When a <b>hashes.com</b> API key is
+      configured in Settings, the parsed hashes are auto-submitted for a
+      rainbow-table lookup &mdash; cracked plaintexts get stored as
+      <code>wd_admin</code> credentials on this node.
+    </div>
+    <textarea id="wd-icmauth-text" rows="8" style="width:100%;font-family:monospace;font-size:12px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:8px" placeholder="# Authentication file for ICM and SAP Web Dispatcher authentication&#10;webadm:{SHA384}JElZSxeYdaMxO+pxADLgVmt5MnTZsJoDXRfCBvhgEM1JRychHCM9iVzFO0Z1PuuM:admin"></textarea>
+    <div class="form-actions" style="margin-top:12px">
+      <button class="btn btn-primary" onclick="submitIcmauthPaste()">Parse &amp; Lookup on hashes.com</button>
+      <button class="btn" onclick="closeModal('wd-icmauth-modal')">Cancel</button>
     </div>
   </div>
 </div>
@@ -3221,6 +3249,7 @@ function showCtxMenu(e, sid) {
     'wd_rediscover':         !!n.is_web_dispatcher,
     'wd_admin_creds':        !!n.is_web_dispatcher,
     'wd_admin_probe_defaults': !!n.is_web_dispatcher,
+    'wd_extract_icmauth':    !!n.is_web_dispatcher,
     'exploit_cve_31324_drop': hasCve31324,            // need confirmed CVE-2025-31324
     'icmad_acl_bypass':      !!n.cve_2022_22536_port, // need confirmed ICMAD port (live or patch-table)
     'icmad_heapdump_pull':   !!(n.cve_2022_22536_acl_bypass
@@ -3349,6 +3378,7 @@ function showCtxMenu(e, sid) {
     'wd_rediscover':         'Only applicable to confirmed Web Dispatcher nodes',
     'wd_admin_creds':        'Only applicable to confirmed Web Dispatcher nodes',
     'wd_admin_probe_defaults': 'Only applicable to confirmed Web Dispatcher nodes',
+    'wd_extract_icmauth':    'Only applicable to confirmed Web Dispatcher nodes',
     'check_ms':              'Probes the message server internal port (39NN) — not applicable to standalone Web Dispatchers',
     'harvest_btp_creds':     'Reads JCo destinations / SecStore entries — standalone Web Dispatchers don\'t store any',
     'exploit_cve_31324_drop': 'Run Check CVE-2025-31324 first; vulnerability required',
@@ -3459,6 +3489,7 @@ function showCtxMenu(e, sid) {
     'wd_rediscover':           !n.is_web_dispatcher,
     'wd_admin_creds':          !n.is_web_dispatcher,
     'wd_admin_probe_defaults': !n.is_web_dispatcher,
+    'wd_extract_icmauth':      !n.is_web_dispatcher,
     // ICMAD bypass + heapdump pull — only the WD path makes sense
     // for the smuggle-vs-permission_table primitive (per SAP Note
     // 3123396 scenarios 2-5).  A pure ABAP / Java node without a
@@ -3953,6 +3984,48 @@ async function _saveWdCredsCore(extract) {
 async function testWdCredentials() { await _saveWdCredsCore(false); }
 async function saveWdCredentialsAndExtract() { await _saveWdCredsCore(true); }
 
+// --- WD icmauth.txt paste modal ----------------------------------------
+function showIcmauthPasteModal(sid, reason) {
+  const modal = document.getElementById('wd-icmauth-modal');
+  modal.dataset.sid = sid;
+  document.getElementById('wd-icmauth-reason').textContent =
+    reason ? ('Auto-fetch unavailable: ' + reason
+              + ' — paste icmauth.txt below to continue.') : '';
+  document.getElementById('wd-icmauth-text').value = '';
+  modal.classList.add('visible');
+}
+
+async function submitIcmauthPaste() {
+  const modal = document.getElementById('wd-icmauth-modal');
+  const sid = modal.dataset.sid;
+  const text = document.getElementById('wd-icmauth-text').value;
+  if (!text || text.length < 16) {
+    alert('Paste the icmauth.txt contents first.');
+    return;
+  }
+  try {
+    flashActivity('WD ' + sid + ': parsing pasted icmauth.txt', 3000);
+    const r = await fetch('/api/node/' + encodeURIComponent(sid)
+                            + '/wd_extract_icmauth',
+                          { method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ raw_text: text }) });
+    const d = await r.json();
+    if (d.error) { alert('Failed: ' + d.error); return; }
+    closeModal('wd-icmauth-modal');
+    const n = d.parsed_count || 0;
+    const cracked = d.cracked_count || 0;
+    let msg = 'icmauth.txt: parsed ' + n + ' hash(es)';
+    if (d.hashes_com_attempted) {
+      msg += ', hashes.com cracked ' + cracked + '/' + n;
+    } else if (d.hashes_com_skipped_reason) {
+      msg += ' (hashes.com skipped: ' + d.hashes_com_skipped_reason + ')';
+    }
+    showToast(msg, cracked > 0 ? 'success' : 'info');
+    await pollUpdates();
+  } catch (e) { alert('Error: ' + e); }
+}
+
 async function ctxAction(action) {
   hideCtxMenu();
   if (!selectedNodeSid) return;
@@ -3985,6 +4058,19 @@ async function ctxAction(action) {
       await api('POST', `node/${sid}/wd_admin_probe_defaults`);
       showToast('Probing WD admin default credentials — see console for verdict', 'info');
       break;
+    case 'wd_extract_icmauth': {
+      // Step 1: try the admin file-viewer endpoints with stored creds.
+      // The backend always responds — when it can't fetch on its own
+      // it returns {needs_paste: true} so the operator can paste the
+      // icmauth.txt content from a manual filesystem grab.
+      const r = await api('POST', `node/${sid}/wd_extract_icmauth`);
+      if (r && r.needs_paste) {
+        showIcmauthPasteModal(sid, r.reason || '');
+      } else {
+        showToast('icmauth.txt extraction started — see console for hashes + hashes.com lookup', 'info');
+      }
+      break;
+    }
     case 'icmad_acl_bypass': {
       const outer = prompt(
         'Outer GET path the WD will FORWARD to a backend (not serve\n' +
