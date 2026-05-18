@@ -3876,10 +3876,9 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
 
 
 def match_wd_backends_to_nodes(nodes: list,
-                                  promote_unmatched: bool = True) -> list:
+                                  promote_unmatched: bool = False) -> list:
     """Post-scan pass: link each WD's wd_backends entries to existing
-    SAPNodes on the map, AND optionally create synthetic placeholder
-    nodes for backends that don't match any existing node.
+    SAPNodes on the map.
 
     For each (WD-node, backend-entry) pair, set
     backend["linked_node_sid"] to the SID of the SAPNode that most
@@ -3894,17 +3893,25 @@ def match_wd_backends_to_nodes(nodes: list,
 
     Unmatched backends — i.e. the WD revealed there's a backend it
     talks to, but the wire-level data is too thin to identify it as
-    an existing on-map SAPNode — are turned into SYNTHETIC PLACEHOLDER
-    nodes if ``promote_unmatched=True`` (the default).  Synthetic nodes
-    carry the marker ``discovered_via_wd_sid`` set to the source WD's
-    SID; the GUI renders them with a dashed border + lower opacity to
-    visually distinguish from confirmed-on-the-wire nodes.
+    an existing on-map SAPNode — are LEFT WITH linked_node_sid=""
+    by default.  Engagement-day reality: a Server-header bucket
+    ("AS Java 7.50") is too generic to deserve a synthetic node on
+    the map — the WD's wd_backends list (visible in the node-details
+    panel) carries the same information without cluttering the SVG.
+    Real-SID placeholders are created only by the admin-table
+    extraction path (_enrich_wd_backends_from_admin_table) which
+    has authoritative SID + MSHOST + MSPORT.
 
-    Returns the list of newly-created placeholder SAPNodes (empty when
-    promote_unmatched=False or every backend already linked).  Caller
-    is responsible for adding them to whatever state container holds
-    the map (state.add_node(...) in the GUI handler; nodes.append(...)
-    inline for discover_systems).
+    Pass ``promote_unmatched=True`` to opt into the legacy behaviour
+    where each unmatched backend gets a synthetic placeholder SAPNode
+    with a B-prefix SID (e.g. ``B0B1`` for WD ``W0B``'s first
+    unmatched backend).  Kept as an option for operators who want
+    *some* visual signal even when the bucket is generic.
+
+    Returns the list of newly-created placeholder SAPNodes (empty
+    when promote_unmatched=False or every backend already linked).
+    Caller is responsible for adding them to whatever state
+    container holds the map.
     """
     if not nodes:
         return []
@@ -4125,12 +4132,13 @@ def discover_systems(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RAN
               f"Clients:{len(node.clients)}{flag}")
     print(f"[*] ========================================")
 
-    # Cross-link WD-to-backend edges across the discovered nodes,
-    # and auto-synthesise placeholder SAPNodes for any backend that
-    # the WD revealed but that didn't match a real on-map node.
-    # Cheap (in-memory string matching, no I/O); runs once per scan.
+    # Cross-link WD-to-backend edges across the discovered nodes.
+    # NOTE: promote_unmatched=False — Server-header buckets are too
+    # generic to deserve synthetic placeholder nodes on the map.
+    # Real-SID placeholders come from the admin-table extraction
+    # path (operator-triggered via "Add WD admin credentials").
     placeholders = match_wd_backends_to_nodes(nodes,
-                                                 promote_unmatched=True)
+                                                 promote_unmatched=False)
     if placeholders:
         print(f"[+] Promoted {len(placeholders)} WD-discovered backend(s) "
               f"to placeholder node(s):")

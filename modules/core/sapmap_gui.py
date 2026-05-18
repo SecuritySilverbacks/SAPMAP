@@ -4276,22 +4276,23 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     except Exception as e:
                         print(f"[-] {sid}: admin-table extract "
                               f"crashed: {type(e).__name__}: {e}")
-                # Re-run cross-node matching with placeholder
-                # promotion ON for any backends that DIDN'T get
-                # linked via the admin-table step above.
+                # Re-run cross-node matching (link-only mode).
+                # Synthetic B-prefix placeholders are NOT auto-created
+                # from Server-header buckets — those are too generic
+                # to deserve a node on the map.  Real-SID placeholders
+                # come from the admin-table extraction above (when
+                # wd_admin credentials are stored on the node); the
+                # WD's wd_backends list still carries the bucket data
+                # for the node-details panel display.
                 placeholders = match_wd_backends_to_nodes(
                     list(api.state.nodes.values()),
-                    promote_unmatched=True)
+                    promote_unmatched=False)
                 for p in placeholders:
                     api.state.add_node(p)
                 if placeholders:
-                    print(f"[+] {sid}: promoted "
+                    print(f"[+] {sid}: linked "
                           f"{len(placeholders)} backend(s) to "
-                          f"placeholder node(s):")
-                    for p in placeholders:
-                        print(f"      + {p.sid} "
-                              f"({p.system_type}, "
-                              f"kernel={p.kernel or '?'})")
+                          f"existing on-map node(s)")
                 # Surface linked-node summary
                 linked = [b for b in node.wd_backends
                             if b.get("linked_node_sid")]
