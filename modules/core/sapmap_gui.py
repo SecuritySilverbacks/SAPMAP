@@ -4453,6 +4453,30 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 for att in attempts:
                     print(f"      → user={att['user']!r} live=False "
                           f"status={att.get('status', '?')}")
+                # Actionable next steps for the operator — independent
+                # verification matters more than re-running through the
+                # GUI, because the GUI exposes no extra signal beyond
+                # what curl shows.
+                vp = (attempts[-1].get("verify_path", "")
+                      if attempts else "")
+                vh = (attempts[-1].get("https", False)
+                      if attempts else False)
+                scheme = "https" if vh else "http"
+                print(f"[*] {sid}: cross-check with curl from the SAME "
+                      f"host you tested the browser from — if curl "
+                      f"also gets 401, the WD's icmauth.txt does not "
+                      f"have these creds:")
+                print(f"      curl -u '{username}:<password>' "
+                      f"'{scheme}://{host}:{wd_port}{vp or '/sap/wdisp/admin/icp/navData.icp'}'")
+                print(f"[*] {sid}: if curl from your box returns 200 "
+                      f"but SAPMAP gets 401, the WD has an IP-based "
+                      f"ACL (icm/HTTP/admin_X=CLIENTHOST=...) — run "
+                      f"SAPMAP from the allowed source IP.")
+                print(f"[*] {sid}: also possible: your earlier browser "
+                      f"session was logged in with a different cred, "
+                      f"a cached SSO ticket, or a client certificate "
+                      f"— retest in a private/incognito browser window "
+                      f"to verify the password char-by-char.")
 
         _bg(f"{sid}:wd_admin_set_creds",
               "WD admin Set Credentials", _run)
