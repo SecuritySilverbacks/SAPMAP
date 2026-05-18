@@ -19,18 +19,25 @@
 
   Run via build.ps1: invokes Confuser.CLI.exe ConfuserEx.crproj.
 -->
-<project outputDir="bin\Release\confused" baseDir="bin\Release\net472" xmlns="http://confuser.codeplex.com">
-  <!-- baseDir above is where ConfuserEx looks for both the input
-       module AND its dependencies during the Type-scanner phase.
-       Costura's DisableCleanup='true' (FodyWeavers.xml) keeps the
-       side-loaded NtApiDotNet.dll + Microsoft.Win32.TaskScheduler.dll
-       in baseDir so the scanner can resolve them.
+<project outputDir="confused" baseDir="bin\Release" xmlns="http://confuser.codeplex.com">
+  <!-- ConfuserEx 1.6.0 treats outputDir as RELATIVE TO baseDir, not
+       relative to the project file.  We exploit that: baseDir =
+       "bin\Release", module path = "net472\mp_bin.exe", outputDir =
+       "confused" -> obfuscated artefact lands at
+       "<src>\bin\Release\confused\mp_bin.exe", which matches what
+       build.ps1 expects.
 
-       NB: ConfuserEx CLI 1.6.0 (mkaring fork) ships a strict XSD that
-       sometimes rejects <probePath> + <module> in sequence even
-       though the project schema documents it as legal.  We avoid the
-       element entirely - baseDir alone is sufficient. -->
-  <module path="mp_bin.exe">
+       baseDir is also where ConfuserEx looks for the input module's
+       dependencies during the Type-scanner phase.  Costura's
+       DisableCleanup='true' (FodyWeavers.xml) keeps the side-loaded
+       NtApiDotNet.dll + Microsoft.Win32.TaskScheduler.dll in
+       bin\Release\net472 so the scanner finds them when walking
+       refs from mp_bin.exe.
+
+       NB: avoiding <probePath> + <module> sequence here because the
+       ConfuserEx 1.6.0 XSD validator rejects it despite the project
+       schema documenting it as legal. -->
+  <module path="net472\mp_bin.exe">
     <rule pattern="true" preset="none" inherit="false">
       <!-- Rename: scrambles type/method/field names.  Safe with
            Costura because Fody runs at compile-time before Confuser
