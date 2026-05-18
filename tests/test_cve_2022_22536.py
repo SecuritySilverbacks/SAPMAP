@@ -517,6 +517,24 @@ def test_well_known_wd_ports_includes_canonical_set():
     assert required.issubset(set(WELL_KNOWN_WD_PORTS))
 
 
+def test_well_known_wd_ports_covers_80NN_instance_range_00_to_20():
+    """Standalone WDs without a dispatcher 32XX don't trigger the
+    per-instance HTTP/HTTPS pattern, so 80NN (the SAP default for
+    instance NN) must live in WELL_KNOWN_WD_PORTS directly.
+
+    Lab regression: a WD on 172.31.14.107:8011 (instance 11) was
+    missed before this range was added — Pass 1 only saw 8000/8001
+    and skipped past 8011 without a probe.  Lock 8000-8020 in.
+    """
+    from sapmap_config import WELL_KNOWN_WD_PORTS
+    for nn in range(0, 21):           # 00..20 inclusive
+        port = 8000 + nn
+        assert port in WELL_KNOWN_WD_PORTS, (
+            f"port {port} (instance {nn:02d}) missing from "
+            f"WELL_KNOWN_WD_PORTS — a standalone WD on this port "
+            f"will be invisible to fast_scan_host Pass 1")
+
+
 # ---------------------------------------------------------------------------
 # detect_wd_cache — Age header / x-cache / timing-ratio signals
 # ---------------------------------------------------------------------------
