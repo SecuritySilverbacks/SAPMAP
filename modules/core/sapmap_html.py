@@ -2439,15 +2439,20 @@ function updateMap() {
           lines.push(`+${prefixes.length - MAX_LINES} more`);
         }
       }
-      // Centre the block vertically around the edge midpoint
+      // Centre the block vertically around the edge midpoint.
+      // pointer-events="auto" so the SVG <title> tooltip fires on
+      // hover (the default for SVG <text> is "visiblePainted" which
+      // works, but inheriting from a parent <g> with pointer-events
+      // disabled would block it — set it explicitly to be safe).
       const totalH = lines.length * lineH;
       const startY = my - (totalH / 2) - 2;
       html += `<text x="${mx}" y="${startY}" text-anchor="middle" ` +
         `font-size="10" fill="#9bb1c4" font-family="monospace" ` +
-        `pointer-events="none">`;
-      html += `<title>${escHtml('WD ' + wn.sid + ' route to '
-                                + tn.sid + ':\n'
-                                + prefixes.join('\n'))}</title>`;
+        `style="cursor: help" pointer-events="auto">`;
+      html += `<title>${escHtml('WD ' + wn.sid + ' → backend ' +
+                                  tn.sid + '\n\nSRCURL prefixes ('
+                                  + prefixes.length + '):\n  '
+                                  + prefixes.join('\n  '))}</title>`;
       lines.forEach((line, i) => {
         html += `<tspan x="${mx}" dy="${i === 0 ? 0 : lineH}">`
               + escHtml(line) + `</tspan>`;

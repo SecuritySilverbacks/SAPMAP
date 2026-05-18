@@ -944,6 +944,35 @@ def test_wd_admin_default_creds_includes_webadm():
     assert 8 <= len(DEFAULT_WD_CREDENTIALS) <= 25
 
 
+def test_parse_wdisp_systems_srcurl_keeps_semicolon_list():
+    """SRCURL's value contains `;` as the internal separator between
+    paths.  The parser must capture the FULL list, not stop at the
+    first `;`.  This was a real bug — the kv-value regex excluded
+    `;`, so SRCURL=/nwa/;/webdynpro/;... was being captured as just
+    '/nwa/'."""
+    from sap_wdisp_admin import _parse_wdisp_systems
+    text = (
+        "wdisp/system_3=SID=JP1, MSHOST=10.10.1.31, MSPORT=8101, "
+        "SSL_ENCRYPT=0, "
+        "SRCURL=/nwa/;/webdynpro/;/UserAdmin/;/sapmc/;/sap/;"
+        "/logon_ui_resources/\n"
+    )
+    out = _parse_wdisp_systems(text)
+    assert len(out) == 1
+    assert out[0]["sid"] == "JP1"
+    # SRCURL must contain ALL six prefixes
+    srcurl = out[0]["srcurl"]
+    assert "/nwa/" in srcurl
+    assert "/webdynpro/" in srcurl
+    assert "/UserAdmin/" in srcurl
+    assert "/sapmc/" in srcurl
+    assert "/sap/" in srcurl
+    assert "/logon_ui_resources/" in srcurl
+    # Confirm the split produces the right list
+    prefixes = [p for p in srcurl.split(";") if p]
+    assert len(prefixes) == 6
+
+
 def test_parse_wdisp_systems_extracts_full_table():
     """The parser must extract SID, MSHOST, MSPORT, SSL_ENCRYPT, and
     SRCURL from realistic SAP parameter-readout output (matches the
