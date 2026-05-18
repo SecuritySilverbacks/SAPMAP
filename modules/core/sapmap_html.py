@@ -2407,20 +2407,52 @@ function updateMap() {
         `x2="${tx}" y2="${ty}" stroke="${stroke}" stroke-width="2"` +
         `${dash} fill="none" pointer-events="none" />`;
       const mx = (sx + tx) / 2, my = (sy + ty) / 2;
-      const prefixes = bk.url_prefixes || [];
-      let label;
-      if (prefixes.length === 0) {
-        label = 'WD route';
-      } else if (prefixes.length === 1) {
-        label = `WD: ${prefixes[0]}`;
-      } else if (prefixes.length <= 3) {
-        label = `WD: ${prefixes.join(', ')}`;
-      } else {
-        label = `WD: ${prefixes.length} prefixes`;
+      // Prefer the admin-table SRCURL (authoritative from
+      // wdisp/system_*) over the Server-header bucket's
+      // url_prefixes (inferred from per-path probes).  The bucket
+      // can collapse multiple real backends into one entry; the
+      // admin SRCURL is per-system, so it's the right per-edge
+      // label when available.
+      let prefixes = [];
+      if (bk.wd_srcurl) {
+        prefixes = bk.wd_srcurl.split(';')
+          .map(s => s.trim())
+          .filter(s => s.length > 0);
       }
-      html += `<text x="${mx}" y="${my - 4}" text-anchor="middle" ` +
+      if (!prefixes.length) prefixes = bk.url_prefixes || [];
+
+      // Render as a stacked block of <tspan> lines so the entire
+      // SRCURL list is visible — `WD: /nwa/`, `/webdynpro/`,
+      // `/UserAdmin/`, etc.  Cap at 6 visible lines + "+N more" so
+      // very wide WD configs don't dominate the map.  Full list
+      // available on hover via <title>.
+      const MAX_LINES = 6;
+      const lineH = 11;          // px between lines
+      const lines = ['WD:'];
+      if (prefixes.length === 0) {
+        lines[0] = 'WD route';
+      } else {
+        for (let i = 0; i < prefixes.length && i < MAX_LINES; i++) {
+          lines.push(prefixes[i] || '<catch-all>');
+        }
+        if (prefixes.length > MAX_LINES) {
+          lines.push(`+${prefixes.length - MAX_LINES} more`);
+        }
+      }
+      // Centre the block vertically around the edge midpoint
+      const totalH = lines.length * lineH;
+      const startY = my - (totalH / 2) - 2;
+      html += `<text x="${mx}" y="${startY}" text-anchor="middle" ` +
         `font-size="10" fill="#9bb1c4" font-family="monospace" ` +
-        `pointer-events="none">${escHtml(label)}</text>`;
+        `pointer-events="none">`;
+      html += `<title>${escHtml('WD ' + wn.sid + ' route to '
+                                + tn.sid + ':\n'
+                                + prefixes.join('\n'))}</title>`;
+      lines.forEach((line, i) => {
+        html += `<tspan x="${mx}" dy="${i === 0 ? 0 : lineH}">`
+              + escHtml(line) + `</tspan>`;
+      });
+      html += `</text>`;
     });
   });
 
