@@ -1,7 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
-<Weavers xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-  <!-- Embed NtApiDotNet.dll + Microsoft.Win32.TaskScheduler.dll into mp_bin.exe
-       so the binary is self-contained — no side-loadable DLLs needed on
-       the target.  Costura.Fody embeds at compile-time. -->
-  <Costura />
+<Weavers>
+  <!-- Embed NtApiDotNet.dll + Microsoft.Win32.TaskScheduler.dll into
+       mp_bin.exe so the binary is self-contained - no side-loadable
+       DLLs needed on the target.
+
+       DisableCleanup='true' keeps the side-loaded .dll files in
+       bin\Release\net472\ AFTER Costura merges them into mp_bin.exe.
+       Without it, Costura deletes them post-merge - which is fine at
+       runtime (the .exe is self-contained) but breaks ConfuserEx's
+       reference-resolution step, which needs to read the dependency
+       assemblies as files to analyze type references during the
+       'Type scanner' phase.
+
+       The shipped artefact (the ConfuserEx-obfuscated .exe that ends
+       up in _miniplasma_blob.py) is still self-contained - we just
+       leave the post-Costura-pre-ConfuserEx artefacts around in the
+       build output dir so ConfuserEx has something to chew on. -->
+  <Costura DisableCleanup='true' />
 </Weavers>

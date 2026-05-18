@@ -20,6 +20,12 @@
   Run via build.ps1: invokes Confuser.CLI.exe ConfuserEx.crproj.
 -->
 <project outputDir="bin\Release\confused" baseDir="bin\Release\net472" xmlns="http://confuser.codeplex.com">
+  <!-- Where to find dependency assemblies during the Type-scanner
+       phase.  baseDir is already searched implicitly, but listing it
+       again as a probePath plus the global NuGet cache means
+       Costura-embedded deps resolve cleanly even if Costura's
+       DisableCleanup happens to be flipped off. -->
+  <probePath>bin\Release\net472</probePath>
   <module path="mp_bin.exe">
     <rule pattern="true" preset="none" inherit="false">
       <!-- Rename: scrambles type/method/field names.  Safe with
