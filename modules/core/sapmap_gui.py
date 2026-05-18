@@ -4228,20 +4228,57 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 else:
                     print(f"[*] {sid}: cache disabled or no signal "
                           f"({cache.get('evidence', '')})")
-                # Backend topology
+                # Backend topology — Server-header bucket
                 bk_result = discover_wd_backends(
                     host, wd_port, https=wd_https,
                     timeout=6, saprouter=node.saprouter or "",
                     verbose=True)
                 node.wd_backends = [dict(b, linked_node_sid="")
                                       for b in bk_result["backends"]]
+                # Chain the admin-table extraction when working
+                # wd_admin credentials are stored on the node.  This
+                # is the authoritative source — Server-header
+                # buckets collapse multiple real backends into one
+                # entry; the admin readout splits them apart with
+                # real SID + MSHOST + MSPORT.  Without this, every
+                # rediscover would revert the map to the bucketed
+                # view and re-create the synthetic B-prefix
+                # placeholders the operator just got rid of.
+                wd_cred = None
+                for c in (node.credentials or []):
+                    if getattr(c, "kind", "") == "wd_admin":
+                        wd_cred = c
+                        break
+                if wd_cred:
+                    print(f"[*] {sid}: stored wd_admin credentials "
+                          f"found ({wd_cred.username}) — chaining "
+                          f"admin-table extraction")
+                    try:
+                        from sap_wdisp_admin import fetch_wd_systems
+                        r = fetch_wd_systems(
+                            host, wd_port, https=wd_https,
+                            user=wd_cred.username,
+                            pwd=wd_cred.password,
+                            timeout=8,
+                            saprouter=node.saprouter or "",
+                        )
+                        if r["ok"]:
+                            print(f"[+] {sid}: admin-table parsed "
+                                  f"{len(r['systems'])} wdisp/system_*"
+                                  f" entry/entries")
+                            _enrich_wd_backends_from_admin_table(
+                                node, r["systems"], state=api.state)
+                        else:
+                            print(f"[-] {sid}: admin-table extract "
+                                  f"failed ({r['error']}) — falling "
+                                  f"back to Server-header bucket "
+                                  f"placeholders")
+                    except Exception as e:
+                        print(f"[-] {sid}: admin-table extract "
+                              f"crashed: {type(e).__name__}: {e}")
                 # Re-run cross-node matching with placeholder
-                # promotion ON: any backend that doesn't already
-                # match a real on-map SAPNode gets a synthetic
-                # placeholder node with discovered_via_wd_sid set
-                # to this WD's SID.  Operator can rename/delete
-                # the placeholder once they learn the real
-                # SID/IP/hostname.
+                # promotion ON for any backends that DIDN'T get
+                # linked via the admin-table step above.
                 placeholders = match_wd_backends_to_nodes(
                     list(api.state.nodes.values()),
                     promote_unmatched=True)
