@@ -288,28 +288,118 @@ def test_miniplasma_picks_jsp_shell_when_cve_31324_available():
     from sapmap_miniplasma import check_miniplasma
     # Java/Win node with the JSP shell path enabled and gateway disabled.
     n = _node(gw=False, cve_31324=True)
-    # Fake the JSP shell exec to return canned cmd /C ver / cldflt / .NET
+    # Pre-populate a shell so _make_exec doesn't try to auto-drop one
+    # (auto-drop would hit the network in unit-test context).  In the
+    # real flow auto-drop fires + succeeds before this point.
+    n.cve_2025_31324_shells = [{"url": "http://10.0.0.2:50000/sap/irj/test.jsp"}]
+
+    # Fake the JSP shell exec to return canned cmd /C ver / cldflt / .NET.
+    # _exec_jsp strips the outer `cmd.exe /C ` prefix, so we see commands
+    # like "ver", "dir /b ...\\cldflt.sys 2>nul", "reg query .../v Release".
+    # Order matters: cldflt check first (drivers substring contains "ver").
     def _fake_jsp(node, command, timeout=20.0, auto_drop=True):
-        low = command.lower()
-        if "ver" in command.lower() and "release" not in low and "cldflt" not in low:
-            return {"output": ["Microsoft Windows [Version 10.0.19045.3803]"],
-                    "success": True}
+        low = command.lower().strip()
         if "cldflt.sys" in low:
             return {"output": ["cldflt.sys"], "success": True}
         if "release" in low:
             return {"output": ["    Release    REG_DWORD    0x80ed8"],
                     "success": True}
+        if low == "ver":
+            return {"output": ["Microsoft Windows [Version 10.0.19045.3803]"],
+                    "success": True}
         return {"output": [], "success": True}
     with patch("sapmap_exploit.execute_cve_2025_31324_via_shell",
                  side_effect=_fake_jsp) as jsp_mock, \
          patch("sapmap_exploit.execute_gw_command") as gw_mock, \
+         patch("sapmap_exploit.drop_cve_2025_31324_shell") as drop_mock, \
          patch("sapmap_miniplasma.is_blob_available", return_value=True):
         out = check_miniplasma(n)
     assert out["vulnerable"] is True
     assert out["details"]["exec_via"] == "jsp_shell"
     # Crucially: the gateway must NOT have been called at all
     gw_mock.assert_not_called()
+    # Since shells was pre-populated, auto-drop must NOT fire
+    drop_mock.assert_not_called()
     assert jsp_mock.called
+
+
+def test_miniplasma_auto_drops_jsp_shell_when_none_exists():
+    """When cve_2025_31324_vulnerable but no shell dropped yet,
+    _make_exec must proactively auto-drop one (otherwise the blind
+    Runtime.exec fallback inside execute_cve_2025_31324_via_shell
+    returns empty output for every command and we'd misdiagnose the
+    failure as "not Windows")."""
+    from sapmap_miniplasma import check_miniplasma
+    n = _node(gw=False, cve_31324=True)
+    # Start with NO shells - auto-drop must fire.
+
+    def _fake_drop(node):
+        # Successful auto-drop: populate the shell list as real
+        # drop_cve_2025_31324_shell would.
+        node.cve_2025_31324_shells.append(
+            {"url": "http://10.0.0.2:50000/sap/irj/dropped.jsp"})
+        return {"success": True, "error": ""}
+
+    def _fake_jsp(node, command, timeout=20.0, auto_drop=True):
+        # Note: _exec_jsp strips the outer `cmd.exe /C ` prefix before
+        # calling us, so the JSP shell sees raw commands like:
+        #   "ver"
+        #   "dir /b ...\\cldflt.sys 2>nul"
+        #   "reg query ...\\NDP\\v4\\Full /v Release"
+        # Order matters: cldflt check first (most specific) so it
+        # doesn't collide with the "ver" substring (drivers has "ver").
+        low = command.lower().strip()
+        if "cldflt.sys" in low:
+            return {"output": ["cldflt.sys"], "success": True}
+        if "release" in low:
+            return {"output": ["    Release    REG_DWORD    0x80ed8"],
+                    "success": True}
+        if low == "ver":
+            return {"output": ["Microsoft Windows [Version 10.0.19045.0]"],
+                    "success": True}
+        return {"output": [], "success": True}
+
+    with patch("sapmap_exploit.drop_cve_2025_31324_shell",
+                 side_effect=_fake_drop) as drop_mock, \
+         patch("sapmap_exploit.execute_cve_2025_31324_via_shell",
+                 side_effect=_fake_jsp), \
+         patch("sapmap_miniplasma.is_blob_available", return_value=True):
+        out = check_miniplasma(n)
+    assert out["vulnerable"] is True
+    assert out["details"]["exec_via"] == "jsp_shell"
+    # Auto-drop should have been invoked exactly once
+    assert drop_mock.call_count == 1
+    # The drop populated the shells list
+    assert len(n.cve_2025_31324_shells) == 1
+
+
+def test_miniplasma_jsp_drop_failure_falls_through_to_gw():
+    """When auto-drop fails AND the gateway is also vulnerable,
+    _make_exec must fall through to the gateway path rather than
+    return None.  Belt-and-braces for hybrid-foothold targets."""
+    from sapmap_miniplasma import check_miniplasma
+    # Both vuln flags set; auto-drop will fail; gateway path takes over.
+    n = _node(gw=True, cve_31324=True)
+
+    def _fake_drop(node):
+        return {"success": False, "error": "simulated network error"}
+
+    fake_gw = _exec_gw_canned({
+        ("cmd.exe", "/C ver"):    ["Microsoft Windows [Version 10.0.19045.0]"],
+        ("cmd.exe", "cldflt.sys"): ["cldflt.sys"],
+        ("cmd.exe", "Release"): ["    Release    REG_DWORD    0x80ed8"],
+    })
+    with patch("sapmap_exploit.drop_cve_2025_31324_shell",
+                 side_effect=_fake_drop), \
+         patch("sapmap_exploit.execute_cve_2025_31324_via_shell") as jsp_mock, \
+         patch("sapmap_exploit.execute_gw_command", side_effect=fake_gw), \
+         patch("sapmap_miniplasma.is_blob_available", return_value=True):
+        out = check_miniplasma(n)
+    assert out["vulnerable"] is True
+    # Crucially: fell through to gateway since JSP drop failed
+    assert out["details"]["exec_via"] == "gw_sapxpg"
+    # JSP shell exec must NEVER have been called (drop failed first)
+    jsp_mock.assert_not_called()
 
 
 def test_miniplasma_full_viability_with_blob():
