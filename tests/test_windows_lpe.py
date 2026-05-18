@@ -139,14 +139,22 @@ def test_decode_certutil_b64_returns_none_on_garbage():
 # Base64 chunker
 # ===========================================================================
 
-def test_chunk_b64_splits_below_cmd_limit():
-    """cmd.exe caps the command line at 8191 chars.  Each chunk must
-    fit comfortably below that even after we wrap it in the
-    `cmd.exe /C echo CHUNK >> FILE` invocation."""
+def test_chunk_b64_splits_below_sapxpg_limit():
+    """SAPXPG's PARAMS field silently truncates above ~255 bytes on
+    many kernels.  The cmd.exe echo wrapper adds ~30 bytes, so chunks
+    must stay <=100 to leave a comfortable margin (matches the
+    chunk_size used by the existing CVE-2025-31324 Windows JSP
+    uploader in sapmap_exploit.py, proven reliable in production).
+
+    Larger chunks (e.g. 6000) trip the silent truncation, producing
+    a corrupted assembled binary that surfaces as "Unsupported 16-Bit
+    Application" or similar PE-loader failures - operator-reported
+    regression that prompted the chunk-size drop."""
     from sapmap_miniplasma import _chunk_b64
     payload = b"X" * 20_000
-    chunks = _chunk_b64(payload, chunk_size=6000)
-    assert all(len(c) <= 6000 for c in chunks)
+    chunks = _chunk_b64(payload)
+    assert all(len(c) <= 100 for c in chunks), (
+        "every chunk must fit under SAPXPG's silent-truncation point")
     # All chunks reassembled must round-trip
     import base64
     rebuilt = base64.b64decode("".join(chunks))
