@@ -20,12 +20,16 @@
   Run via build.ps1: invokes Confuser.CLI.exe ConfuserEx.crproj.
 -->
 <project outputDir="bin\Release\confused" baseDir="bin\Release\net472" xmlns="http://confuser.codeplex.com">
-  <!-- Where to find dependency assemblies during the Type-scanner
-       phase.  baseDir is already searched implicitly, but listing it
-       again as a probePath plus the global NuGet cache means
-       Costura-embedded deps resolve cleanly even if Costura's
-       DisableCleanup happens to be flipped off. -->
-  <probePath>bin\Release\net472</probePath>
+  <!-- baseDir above is where ConfuserEx looks for both the input
+       module AND its dependencies during the Type-scanner phase.
+       Costura's DisableCleanup='true' (FodyWeavers.xml) keeps the
+       side-loaded NtApiDotNet.dll + Microsoft.Win32.TaskScheduler.dll
+       in baseDir so the scanner can resolve them.
+
+       NB: ConfuserEx CLI 1.6.0 (mkaring fork) ships a strict XSD that
+       sometimes rejects <probePath> + <module> in sequence even
+       though the project schema documents it as legal.  We avoid the
+       element entirely - baseDir alone is sufficient. -->
   <module path="mp_bin.exe">
     <rule pattern="true" preset="none" inherit="false">
       <!-- Rename: scrambles type/method/field names.  Safe with
