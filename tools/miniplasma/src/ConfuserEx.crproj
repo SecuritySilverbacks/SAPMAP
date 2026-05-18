@@ -19,7 +19,7 @@
 
   Run via build.ps1: invokes Confuser.CLI.exe ConfuserEx.crproj.
 -->
-<project outputDir="..\..\bin\Release\confused" baseDir="..\..\bin\Release" xmlns="http://confuser.codeplex.com">
+<project outputDir="..\..\bin\Release\confused" baseDir="..\..\bin\Release\net472" xmlns="http://confuser.codeplex.com">
   <module path="mp_bin.exe">
     <rule pattern="true" preset="none" inherit="false">
       <!-- Rename: scrambles type/method/field names.  Safe with
