@@ -714,6 +714,7 @@ body {
   <!-- Top-level quick actions -->
   <div class="ctx-item" data-action="details">&#128269; View System Details</div>
   <div class="ctx-item" data-action="findings">&#128203; View SAPology Findings</div>
+  <div class="ctx-item" data-action="wd_admin_creds">&#128273; Add WD admin credentials (webadm / pull backend table)</div>
   <div class="ctx-item" data-action="credentials">&#128273; Provide Credentials</div>
   <div class="ctx-sep"></div>
   <!-- Scanning submenu -->
@@ -729,9 +730,6 @@ body {
       <div class="ctx-item" data-action="check_cve_6287">&#128270; Check CVE-2020-6287 (RECON)</div>
       <div class="ctx-item" data-action="check_cve_22536">&#128270; Check CVE-2022-22536 (ICMAD smuggle)</div>
       <div class="ctx-item" data-action="wd_rediscover">&#128260; Rediscover WD topology (cache + backends)</div>
-      <div class="ctx-item" data-action="wd_admin_creds">&#128273; Add WD admin credentials (webadm / pull backend table)</div>
-      <div class="ctx-item" data-action="wd_admin_probe_defaults">&#128270; Probe WD admin default credentials</div>
-      <div class="ctx-item" data-action="wd_extract_icmauth">&#128272; Extract WD password hashes (icmauth.txt)</div>
       <div class="ctx-item" data-action="check_linux_lpe">&#128275; Check Linux Root LPE (Copy Fail / Dirty Frag)</div>
       <div class="ctx-item" data-action="deep_scan">&#128260; Deep Scan (full SAPology)</div>
       <div class="ctx-item" data-action="retrieve_rfcs">&#128225; Retrieve RFC Connections</div>
@@ -754,6 +752,7 @@ body {
       <div class="ctx-item" data-action="create_user_betrusted">&#128272; Create User (10KBLAZE Full Chain)</div>
       <div class="ctx-item" data-action="create_user_java">&#128100; Create User (Java UME)</div>
       <div class="ctx-item" data-action="exploit_cve_31324_drop">&#128272; Drop JSP Webshell (CVE-2025-31324)</div>
+      <div class="ctx-item" data-action="wd_admin_probe_defaults">&#128270; Probe WD admin default credentials</div>
       <div class="ctx-item" data-action="icmad_acl_bypass">&#9889; ICMAD ACL Bypass Sweep (CVE-2022-22536)</div>
       <div class="ctx-item" data-action="icmad_heapdump_pull">&#128190; ICMAD &#8594; Pull Heap Dump (HPROF)</div>
       <div class="ctx-item" data-action="create_user_gw">&#128100; Create User (GW Exploit)</div>
@@ -788,6 +787,7 @@ body {
     <div class="ctx-item">&#128230; Data Extraction</div>
     <div class="ctx-sub">
       <div class="ctx-item" data-action="download_hashes">&#128273; Extract Hashes for Cracking</div>
+      <div class="ctx-item" data-action="wd_extract_icmauth">&#128272; Extract WD password hashes (icmauth.txt)</div>
       <div class="ctx-item" data-action="download_secstore">&#128273; Download SecStore (RSECTAB)</div>
       <div class="ctx-item" data-action="download_java_secstore">&#128273; Download Java Secure Store</div>
       <div class="ctx-item" data-action="view_java_secstore">&#128203; View Java Secure Store Results</div>
