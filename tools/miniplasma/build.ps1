@@ -157,34 +157,27 @@ Then re-run this script.
 }
 Write-Host "[*] msbuild      : $MSBuild"
 
-$Nuget = Get-Command nuget.exe -ErrorAction SilentlyContinue
-if (-not $Nuget) {
-    $localNuget = Join-Path $Here "nuget.exe"
-    Write-Host "[*] nuget.exe    : not on PATH - downloading to $localNuget"
-    Invoke-WebRequest -Uri "https://dist.nuget.org/win-x86-commandline/latest/nuget.exe" -OutFile $localNuget
-    $NugetPath = $localNuget
-} else {
-    $NugetPath = $Nuget.Source
-}
-Write-Host "[*] nuget        : $NugetPath"
-
 # ---------------------------------------------------------------------------
-# Restore + build
+# Restore + build (SDK-style: msbuild handles NuGet restore inline)
 # ---------------------------------------------------------------------------
-Write-Host "[*] Restoring NuGet packages..."
+Write-Host "[*] Restoring + building Release (SDK-style)..."
 Push-Location $Src
 try {
-    & $NugetPath restore "packages.config" -PackagesDirectory "..\packages" -NonInteractive
-    if ($LASTEXITCODE -ne 0) { throw "nuget restore failed" }
+    # SDK-style projects: `msbuild /t:Restore` resolves PackageReference
+    # items from the global NuGet cache (or downloads them).  Then a
+    # second pass builds.  Running both targets in one invocation works
+    # too but produces noisier output - split for clarity.
+    & $MSBuild "SAPMAP_MiniPlasma.csproj" /t:Restore /v:minimal /nologo
+    if ($LASTEXITCODE -ne 0) { throw "msbuild restore failed" }
 
-    Write-Host "[*] Building Release..."
-    & $MSBuild "SAPMAP_MiniPlasma.csproj" /p:Configuration=Release /p:Platform=AnyCPU /v:minimal /nologo
-    if ($LASTEXITCODE -ne 0) { throw "msbuild failed" }
+    & $MSBuild "SAPMAP_MiniPlasma.csproj" /t:Build /p:Configuration=Release /p:Platform=AnyCPU /v:minimal /nologo
+    if ($LASTEXITCODE -ne 0) { throw "msbuild build failed" }
 } finally {
     Pop-Location
 }
 
-$ReleaseExe = Join-Path $Src "bin\Release\mp_bin.exe"
+# SDK-style projects emit to bin\<Config>\<TFM>\<assembly>.exe
+$ReleaseExe = Join-Path $Src "bin\Release\net472\mp_bin.exe"
 if (-not (Test-Path $ReleaseExe)) {
     Write-Error "Expected build output $ReleaseExe not found."
     exit 1
