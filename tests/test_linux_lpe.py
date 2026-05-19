@@ -475,6 +475,107 @@ def test_copyfail_uses_unique_result_path_per_run():
         f"of the S4H bug; got: {result_paths!r}")
 
 
+def test_copyfail_rejects_sudo_error_text_as_b64():
+    """Regression for the S4H 'garbled root output' bug.  When the
+    exploit lost the race + the unique RESULT path didn't exist,
+    the read-back path was:
+
+      1. `base64 /tmp/.cf_result_<id>` -> stderr 'No such file...'
+         (success=False, output captured may include error msg)
+      2. fallback: `sudo base64 /tmp/.cf_result_<id>` -> sudo isn't
+         NOPASSWD on this SAP user, so sudo prints e.g.
+         '[sudo] password for s4hadm:' or
+         'sudo: a password is required' to stderr.
+      3. The old guard only checked for 'No such file' substring -
+         missed the sudo error markers - let the text through.
+      4. _b64.b64decode treats the sudo error as base64-encoded
+         data -> garbage bytes -> surfaces as the operator's
+         'root command output' in the GUI.
+
+    With the hardened guard, _read_b64 must return None in step 2,
+    making the runner correctly report failure instead."""
+    from sapmap_copyfail import run_as_root
+
+    n = _node()
+    n.gw_vulnerable = True
+    n.copyfail_kernel = "6.18.21"
+
+    def _fake_egc(node, prog, params="", long_params=""):
+        # Exploit script runs - simulate the race-lost exploit_out.
+        if prog == "python3" and params == "/tmp/.cf_s.py":
+            return {
+                "output": ["Password: su: Authentication token "
+                            "manipulation error"],
+                "success": True,
+            }
+        # base64 of the unique RESULT path - file doesn't exist.
+        if prog == "base64" and ".cf_result_" in params:
+            return {
+                "output": [f"base64: {params}: No such file or directory"],
+                "success": False,
+            }
+        # sudo fallback - returns the sudo error text the old guard
+        # would have mistakenly b64decoded.
+        if prog == "sudo" and "base64" in params and ".cf_result_" in params:
+            return {
+                "output": ["[sudo] password for s4hadm: ",
+                          "sudo: a password is required"],
+                "success": False,
+            }
+        return {"output": [], "success": True}
+
+    with patch("sapmap_exploit.execute_gw_command", side_effect=_fake_egc):
+        out = run_as_root(n, "id")
+
+    # With the hardened guard, _read_b64 returns None -> ok=False -
+    # NOT a fake-success uid=0(root) reading garbage from the sudo
+    # error text.
+    assert out["ok"] is False, (
+        f"Race-lost exploit + sudo-fallback error must surface as "
+        f"failure, not as a garbled-bytes 'success'.  got: {out!r}")
+    assert "missing after exploit" in out["error"]
+    # The actual stdout returned to the caller MUST NOT contain
+    # garbage bytes from the b64-decoded sudo error.
+    assert not out["stdout"], (
+        f"stdout must be empty when the file is missing; got "
+        f"{out['stdout']!r}")
+
+
+def test_copyfail_rejects_random_non_b64_text():
+    """Belt and braces: even if the marker list is incomplete, the
+    strict base64-alphabet check must catch anything that isn't
+    valid base64.  Simulates a fallback returning text with chars
+    outside [A-Za-z0-9+/=]."""
+    from sapmap_copyfail import run_as_root
+
+    n = _node()
+    n.gw_vulnerable = True
+    n.copyfail_kernel = "6.18.21"
+
+    def _fake_egc(node, prog, params="", long_params=""):
+        if prog == "python3" and params == "/tmp/.cf_s.py":
+            return {"output": ["exploit failed silently"], "success": True}
+        if prog == "base64" and ".cf_result_" in params:
+            # Some weird error containing spaces, dashes, colons -
+            # all chars NOT in base64 alphabet, but NOT in our
+            # error-marker list either.  Strict-alphabet check
+            # must catch this.
+            return {
+                "output": ["base64: unknown option -- ?",
+                          "Try 'base64 --help' for more information."],
+                "success": False,
+            }
+        if prog == "sudo":
+            return {"output": ["random-unrecognized-error"], "success": False}
+        return {"output": [], "success": True}
+
+    with patch("sapmap_exploit.execute_gw_command", side_effect=_fake_egc):
+        out = run_as_root(n, "id")
+
+    assert out["ok"] is False
+    assert not out["stdout"]
+
+
 def test_copyfail_surfaces_auth_token_failure_marker():
     """When Copy Fail loses the race, /usr/bin/su prints
     `su: Authentication token manipulation error` to stderr.
