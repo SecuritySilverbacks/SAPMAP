@@ -950,6 +950,105 @@ def test_copyfail_intermittent_failure_diagnosis():
         f"deterministic; got: {out['error']!r}")
 
 
+def test_copyfail_empty_result_file_reported_as_success_for_detached_payloads():
+    """CRITICAL: when the operator command is a detached shell
+    payload (e.g. `(nohup python3 -c '<bind_shell>' &)`), the
+    wrapper script produces ZERO stdout (everything redirected
+    to /dev/null + backgrounded).  The result file IS created
+    by the wrapper's `>` redirect but it's EMPTY.
+
+    `_read_b64` must return ``b""`` (empty bytes - legitimate
+    success signal) for an empty file, NOT None (which would
+    indicate "exploit failed").
+
+    Operator-reported S4D regression: bind-shell deployment via
+    linuxlpe_root lost 5/5 race attempts according to SAPMAP -
+    but the exploit had actually succeeded every time, listener
+    was open on the target.  Root cause: the OLD condition
+    `not ok or not out or "No such file" in out` treated
+    ok=True/out="" as "base64 returned nothing, fall back to
+    sudo", sudo wasn't NOPASSWD-configured, sudo error text got
+    caught by err_markers, returned None.
+
+    Fix: distinguish "base64 succeeded with empty output (file
+    exists, is empty)" from "base64 failed or file missing".
+    Empty + ok=True -> return b"".  Empty + ok=False -> None."""
+    from sapmap_copyfail import run_as_root
+
+    n = _node()
+    n.gw_vulnerable = True
+    n.copyfail_kernel = "6.18.21"
+
+    def _fake_egc(node, prog, params="", long_params=""):
+        # Exploit script runs cleanly (no stdout from the
+        # detached payload).
+        if prog == "python3" and params == "/tmp/.cf_s.py":
+            return {"output": [], "success": True}
+        # base64 of the unique RESULT path - file EXISTS but
+        # is EMPTY (the detached payload produced no stdout).
+        # SAPXPG returns empty output, success=True.
+        if prog == "base64" and ".cf_result_" in params:
+            return {"output": [], "success": True}
+        # sudo MUST NOT be called when the first base64 already
+        # succeeded.  If this branch fires, the fix is broken.
+        if prog == "sudo":
+            raise AssertionError(
+                "sudo fallback fired for an empty-but-successful "
+                "base64 call; the empty-file regression has "
+                "returned")
+        return {"output": [], "success": True}
+
+    with patch("sapmap_exploit.execute_gw_command", side_effect=_fake_egc):
+        out = run_as_root(n, "(nohup python3 -c '...' &)")
+
+    # Exploit succeeded with empty result (detached payload).
+    # Must report ok=True, NOT race-lost.
+    assert out["ok"] is True, (
+        f"Empty result file must be reported as success for "
+        f"detached payloads (bind/reverse shell); got: {out!r}")
+    # stdout is the empty bytes decoded to string.
+    assert out["stdout"] == "", (
+        f"Empty result -> empty stdout; got: {out['stdout']!r}")
+
+
+def test_copyfail_missing_result_file_still_reported_as_failure():
+    """The empty-file fix must not break the actual race-lost
+    detection.  When the file is MISSING (not just empty), the
+    exploit truly failed and we must still report ok=False.
+
+    Distinguishing characteristic: SAPXPG returns success=False
+    (or success=True with "No such file" in output, depending
+    on the kernel's base64 behavior) for a missing file, vs
+    success=True with empty output for an empty file."""
+    from sapmap_copyfail import run_as_root
+
+    n = _node()
+    n.gw_vulnerable = True
+    n.copyfail_kernel = "6.18.21"
+
+    def _fake_egc(node, prog, params="", long_params=""):
+        if prog == "python3" and params == "/tmp/.cf_s.py":
+            return {"output": ["Password: su: Authentication token "
+                                "manipulation error"], "success": True}
+        # base64 of missing file - returns "No such file"
+        # error message, success=False.
+        if prog == "base64" and ".cf_result_" in params:
+            return {"output": [f"base64: {params}: No such file"],
+                    "success": False}
+        # sudo also fails (file genuinely missing)
+        if prog == "sudo" and "base64" in params:
+            return {"output": ["[sudo] password for s4dadm:"],
+                    "success": False}
+        return {"output": [], "success": True}
+
+    with patch("sapmap_exploit.execute_gw_command", side_effect=_fake_egc):
+        out = run_as_root(n, "id")
+
+    # Missing file -> race lost (real failure).
+    assert out["ok"] is False
+    assert "missing after exploit" in out["error"]
+
+
 def test_copyfail_rejects_sudo_error_text_as_b64():
     """Regression for the S4H 'garbled root output' bug.  When the
     exploit lost the race + the unique RESULT path didn't exist,
