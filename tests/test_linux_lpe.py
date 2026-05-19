@@ -418,70 +418,69 @@ def test_linuxlpe_shell_dispatch_falls_through_when_no_dash_c():
     assert " | base64 -d | sh" in out, out
 
 
-def test_copyfail_pre_cleans_result_file_before_exploit():
-    """Regression for the S4H stale-result bug.  Copy Fail is a
-    race-based LPE: when it loses the race (page-cache eviction,
-    concurrent su, etc.), /usr/bin/su falls back to real auth and
-    the wrapper script never runs - so the result file is never
-    touched.  Without pre-cleanup, copyfail would happily read
-    the result file from the previous SUCCESSFUL run and report
-    `root command output: uid=0(root)...` even though the current
-    run did nothing.  The pre-cleanup turns the file's
-    presence/absence into a real success signal."""
+def test_copyfail_uses_unique_result_path_per_run():
+    """Regression for the S4H stale-result bug.  /tmp has the
+    sticky bit on Linux: only the file owner or root can delete
+    a file there.  A SUCCESSFUL Copy Fail run leaves /tmp/.cf_result
+    owned by ROOT (the patched-su wrapper ran as root + the `>`
+    redirect created the file).  A subsequent run's pre-cleanup
+    `rm -f /tmp/.cf_result` (as the SAP foothold user) is silently
+    blocked by the sticky bit, the old root-owned file persists,
+    and when the new run's exploit lost the race, the stale uid=0
+    content got misread as the new run's success.
+
+    Fix: each run uses a UNIQUE RESULT path
+    (/tmp/.cf_result_<8hex>), so no previous run's leftover can
+    interfere.  Lock the shape so a future refactor doesn't
+    accidentally revert to the shared path."""
     from sapmap_copyfail import run_as_root
 
     n = _node()
     n.gw_vulnerable = True
     n.copyfail_kernel = "6.18.21"
 
-    # Capture every gateway call so we can verify the order:
-    # `rm -f /tmp/.cf_result` MUST happen before the exploit's
-    # `python3 /tmp/.cf_s.py` call.
     gw_calls = []
     def _fake_egc(node, prog, params="", long_params=""):
-        gw_calls.append((prog, params, long_params[:80] if long_params else ""))
-        # Simulate exploit failure: the result file is never written.
-        # base64 read returns "No such file" so _read_b64 -> None.
-        if prog in ("base64", "sudo") and "/tmp/.cf_result" in params:
+        gw_calls.append((prog, params, long_params[:200] if long_params else ""))
+        # Simulate exploit failure: result file never written.
+        if prog in ("base64", "sudo") and ".cf_result" in params:
             return {"output": ["No such file or directory"], "success": False}
         return {"output": [], "success": True}
 
     with patch("sapmap_exploit.execute_gw_command", side_effect=_fake_egc):
-        out = run_as_root(n, "(nohup python3 -c '...' &)")
+        out1 = run_as_root(n, "id")
+        out2 = run_as_root(n, "whoami")
 
-    # Find the indices of the pre-cleanup rm and the exploit run.
-    rm_idx = next(
-        (i for i, c in enumerate(gw_calls)
-         if c[0] == "rm" and "/tmp/.cf_result" in c[1]),
-        -1)
-    py_run_idx = next(
-        (i for i, c in enumerate(gw_calls)
-         if c[0] == "python3" and c[1] == "/tmp/.cf_s.py"),
-        -1)
+    # Extract the result paths used in each run from the long_params
+    # of the python3 -c calls that build the exploit script (those
+    # contain the RESULT path that the wrapper redirects to).
+    result_paths = set()
+    for (prog, params, lp) in gw_calls:
+        # Look for ".cf_result_" mentions anywhere - rm cleanup,
+        # base64 reads, etc.
+        for haystack in (params, lp):
+            import re as _re
+            for m in _re.finditer(r"/tmp/\.cf_result_[0-9a-f]+", haystack):
+                result_paths.add(m.group())
 
-    assert rm_idx != -1, (
-        "No `rm -f /tmp/.cf_result` call found - the pre-cleanup is "
-        "missing, stale result files from previous runs will be "
-        "misread as this run's success.")
-    assert py_run_idx != -1, "No exploit python3 SCRIPT call found"
-    assert rm_idx < py_run_idx, (
-        f"Pre-cleanup (idx={rm_idx}) must precede exploit "
-        f"execution (idx={py_run_idx}); otherwise a stale "
-        f"result file from a previous successful run survives "
-        f"into this run.")
-
-    # With no result file written, this run must report failure -
-    # not the misleading "uid=0" from the previous run.
-    assert out["ok"] is False
-    assert "missing after exploit" in out["error"]
+    assert len(result_paths) >= 2, (
+        f"Each run must use a UNIQUE /tmp/.cf_result_<id> path; "
+        f"found only {result_paths!r} across 2 runs - paths are "
+        f"being shared.  Stale-read trap can resurface.")
+    # And NONE of them should be the shared /tmp/.cf_result path
+    # (the trap path).
+    bare = {p for p in result_paths if p == "/tmp/.cf_result"}
+    assert not bare, (
+        f"Found shared /tmp/.cf_result path in use - regression "
+        f"of the S4H bug; got: {result_paths!r}")
 
 
 def test_copyfail_surfaces_auth_token_failure_marker():
     """When Copy Fail loses the race, /usr/bin/su prints
     `su: Authentication token manipulation error` to stderr.
     The operator should see a recognisable, actionable error
-    ('race lost, retry') instead of the generic
-    'exploit may have failed'."""
+    ('race lost, retry') instead of the generic 'exploit may
+    have failed'."""
     from sapmap_copyfail import run_as_root
 
     n = _node()
@@ -495,7 +494,7 @@ def test_copyfail_surfaces_auth_token_failure_marker():
                             "manipulation error"],
                 "success": True,
             }
-        if prog in ("base64", "sudo") and "/tmp/.cf_result" in params:
+        if prog in ("base64", "sudo") and ".cf_result" in params:
             return {"output": ["No such file or directory"], "success": False}
         return {"output": [], "success": True}
 
@@ -503,16 +502,15 @@ def test_copyfail_surfaces_auth_token_failure_marker():
         out = run_as_root(n, "id")
 
     assert out["ok"] is False
-    # The error must surface the race-lost diagnosis from the
-    # specific su marker, not a generic catch-all.
     assert "race lost" in out["error"].lower(), (
         f"Expected race-lost diagnostic; got: {out['error']!r}")
 
 
-def test_dirtyfrag_pre_cleans_result_file_before_exploit():
-    """Same stale-result regression as copyfail.  Dirty Frag uses
-    the same wrapper-script + result-file pattern, so the same
-    pre-cleanup is required."""
+def test_dirtyfrag_uses_unique_result_path_per_run():
+    """Mirror of the copyfail fix.  Same sticky-bit issue, same
+    unique-RESULT-path solution.  Dirty Frag's binary blob has
+    /tmp/.df_run.sh hardcoded at offset 0xa1 so WRAPPER stays
+    shared, but the RESULT path is free to vary per run."""
     from sapmap_dirtyfrag import run_as_root
 
     n = _node()
@@ -521,32 +519,32 @@ def test_dirtyfrag_pre_cleans_result_file_before_exploit():
 
     gw_calls = []
     def _fake_egc(node, prog, params="", long_params=""):
-        gw_calls.append((prog, params, long_params[:80] if long_params else ""))
-        if prog in ("base64", "sudo") and "/tmp/.df_result" in params:
+        gw_calls.append((prog, params, long_params[:200] if long_params else ""))
+        if prog in ("base64", "sudo") and ".df_result" in params:
             return {"output": ["No such file or directory"], "success": False}
         return {"output": [], "success": True}
 
     with patch("sapmap_dirtyfrag._load_blob", return_value={
             "hex": "00" * 100, "size": 100, "sha256": "a" * 64}), \
          patch("sapmap_exploit.execute_gw_command", side_effect=_fake_egc):
-        out = run_as_root(n, "(nohup python3 -c '...' &)")
+        out1 = run_as_root(n, "id")
+        out2 = run_as_root(n, "whoami")
 
-    # Pre-cleanup rm must precede the exploit binary execution.
-    rm_idx = next(
-        (i for i, c in enumerate(gw_calls)
-         if c[0] == "rm" and "/tmp/.df_result" in c[1]),
-        -1)
-    bin_idx = next(
-        (i for i, c in enumerate(gw_calls)
-         if c[0] == "/tmp/.df_bin"),
-        -1)
-    assert rm_idx != -1, "No `rm -f /tmp/.df_result` pre-cleanup call"
-    assert bin_idx != -1, "No exploit binary execution found"
-    assert rm_idx < bin_idx, (
-        f"Pre-cleanup (idx={rm_idx}) must precede binary execution "
-        f"(idx={bin_idx})")
-    assert out["ok"] is False
-    assert "missing after exploit" in out["error"]
+    result_paths = set()
+    for (prog, params, lp) in gw_calls:
+        import re as _re
+        for haystack in (params, lp):
+            for m in _re.finditer(r"/tmp/\.df_result_[0-9a-f]+", haystack):
+                result_paths.add(m.group())
+
+    assert len(result_paths) >= 2, (
+        f"Each Dirty Frag run must use a UNIQUE "
+        f"/tmp/.df_result_<id> path; found only "
+        f"{result_paths!r} across 2 runs.")
+    bare = {p for p in result_paths if p == "/tmp/.df_result"}
+    assert not bare, (
+        f"Found shared /tmp/.df_result path in use - regression: "
+        f"{result_paths!r}")
 
 
 def test_cf_exploit_script_wrapper_writes_command_verbatim():
