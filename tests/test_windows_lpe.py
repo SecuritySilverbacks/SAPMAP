@@ -1169,6 +1169,63 @@ def test_run_windows_lpe_forwards_fire_and_forget_to_efspotato():
     assert captured_kwargs["command"] == "powershell -enc shellpayload"
 
 
+# ===========================================================================
+# SYSTEM badge — Windows mirror of the Linux ROOT triangle
+# ===========================================================================
+# When EfsPotato / GodPotato / MiniPlasma lands SYSTEM, the host's SVG
+# box in the map gets a blue diamond in its top-right (same position
+# as the Linux root triangle, distinct shape + colour).  Hover tooltip
+# names the winning technique.  These tests lock the wiring against
+# silent refactor breakage — a renamed model field would otherwise
+# leave the badge dark with no test failure.
+
+
+def test_system_badge_references_all_three_winlpe_obtained_flags():
+    """The SVG badge JS must read EACH of the three *_system_obtained
+    fields.  If any one is renamed without updating the badge code, the
+    operator loses the visual signal for that technique - and the bug
+    is invisible until someone happens to use that technique in the
+    lab.  Lock all three field names here."""
+    import sapmap_html
+    html = sapmap_html.get_html()
+    assert "n.efspotato_system_obtained" in html, (
+        "EfsPotato SYSTEM flag missing from badge wiring")
+    assert "n.godpotato_system_obtained" in html, (
+        "GodPotato SYSTEM flag missing from badge wiring")
+    assert "n.miniplasma_system_obtained" in html, (
+        "MiniPlasma SYSTEM flag missing from badge wiring")
+
+
+def test_system_badge_uses_distinct_glyph_from_linux_root():
+    """Linux uses ▲ (U+25B2 / &#9650;).  Windows MUST use a different
+    shape so a glance at the map distinguishes the two without
+    reading colour - colour-blindness accessibility + screenshots
+    in grayscale reports.  Currently: ◆ (U+25C6 / &#9670; diamond)."""
+    import sapmap_html
+    html = sapmap_html.get_html()
+    assert "&#9650;" in html, "Linux root ▲ glyph removed?"
+    assert "&#9670;" in html, "Windows SYSTEM ◆ glyph missing"
+
+
+def test_system_badge_tooltip_names_winning_technique():
+    """The diamond has a <title> child that names which Windows LPE
+    technique landed SYSTEM (EfsPotato / GodPotato / MiniPlasma).
+    Operator hovers the icon -> immediately sees which exploit ran,
+    without having to open the side panel.  Lock the three method
+    names in the tooltip string."""
+    import sapmap_html
+    html = sapmap_html.get_html()
+    # The badge JS builds the tooltip from a ternary chain:
+    #   winLpeMethod = efspotato ? 'EfsPotato'
+    #                : godpotato ? 'GodPotato'
+    #                : 'MiniPlasma'
+    assert "'EfsPotato'" in html
+    assert "'GodPotato'" in html
+    assert "'MiniPlasma'" in html
+    # The tooltip wraps that into "NT AUTHORITY\SYSTEM obtained via X"
+    assert "NT AUTHORITY" in html and "SYSTEM obtained via" in html
+
+
 def test_run_windows_lpe_default_fire_and_forget_is_false():
     """OS Command Terminal calls run_windows_lpe WITHOUT the
     fire_and_forget kwarg — the operator expects captured stdout so
