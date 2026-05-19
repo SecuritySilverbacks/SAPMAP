@@ -6785,7 +6785,16 @@ def create_app(api: SAPMAPApi) -> Bottle:
                               "for SYSTEM elevation (delivers EfsPotato/"
                               "GodPotato binary + runs payload as SYSTEM)...")
                 from sapmap_winlpe_auto import run_windows_lpe
-                lpe_res = run_windows_lpe(node, full_cmd)
+                # fire_and_forget=True - the WMI-detached PowerShell
+                # writes to its network socket, not stdout, so the
+                # underlying Potato runner uses the "process spawned"
+                # signal for success instead of "stdout captured"
+                # (otherwise empty post-separator stdout would always
+                # be reported as failure even when the SYSTEM child
+                # spawned cleanly and the reverse/bind shell is now
+                # running).
+                lpe_res = run_windows_lpe(node, full_cmd,
+                                            fire_and_forget=True)
                 # Adapter to the {success, output, error} shape the
                 # rest of the shell-start flow expects.
                 result = {
