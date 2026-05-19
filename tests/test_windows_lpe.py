@@ -1080,7 +1080,13 @@ def test_long_command_dropped_as_wrapper_batch_via_base64():
     with patch("sapmap_efspotato._load_blob", return_value={
             "hex": "00", "size": 1, "sha256": "a" * 64}), \
          patch("sapmap_efspotato._make_exec",
-                 return_value=(_fake_gw, 100, "gw_sapxpg")):
+                 return_value=(_fake_gw, 100, "gw_sapxpg")), \
+         patch("time.sleep"):
+        # patch time.sleep globally so the new post-exploit
+        # diagnostic probe's 4s wait (for the .bat + inner
+        # PowerShell to settle before reading the diag file +
+        # netstat snapshot) doesn't slow tests.  In unit context
+        # the gw is mocked so there's nothing to actually wait for.
         out = run_as_system(_node(), long_cmd, fire_and_forget=True)
 
     assert out["ok"] is True, out
@@ -1148,6 +1154,106 @@ def test_long_command_dropped_as_wrapper_batch_via_base64():
             f"{quote_count} in {params!r}.  Adjacent `\"\"` pairs "
             f"break CommandLineToArgvW parsing and the SYSTEM "
             f"child dies before running the PowerShell wrapper.")
+
+
+def test_long_command_path_probes_diag_file_after_exploit():
+    """The wrapper-batch path embeds bat_started / bat_done markers
+    around the operator command and writes them to a diag file.
+    After fire-and-forget success, the runner must read that diag
+    file back via SAPXPG + dump netstat so the operator sees
+    WHICH stage failed when the listener doesn't connect despite
+    the SYSTEM spawn signal firing.
+
+    Lock the probe: (a) `type "<diag>"` call happens after the
+    EfsPotato call, (b) `netstat -an -p TCP | findstr LISTENING`
+    call happens too."""
+    from sapmap_efspotato import run_as_system, _TARGET_EXE, _TARGET_DIAG
+
+    gw_calls = []
+    def _fake_gw(prog, params="", lp=""):
+        gw_calls.append((prog, params))
+        if prog == _TARGET_EXE:
+            return _EFSPOTATO_BANNER_SPAWNED, True
+        # Simulate the diag file existing with both markers (happy
+        # path: .bat ran to completion).
+        if prog == "cmd.exe" and "type" in params and "ef_diag" in params:
+            return ("bat_started 14:30:00 as SAPServiceTWT\r\n"
+                    "bat_done errlvl=0 time=14:30:01\r\n"), True
+        # Simulate a netstat snapshot.
+        if prog == "cmd.exe" and "netstat" in params:
+            return ("  TCP    0.0.0.0:4444    0.0.0.0:0    LISTENING\r\n"
+                    "  TCP    0.0.0.0:445     0.0.0.0:0    LISTENING\r\n"), True
+        return "", True
+
+    long_cmd = "powershell.exe -NoProfile -EncodedCommand " + "Q" * 3500
+
+    with patch("sapmap_efspotato._load_blob", return_value={
+            "hex": "00", "size": 1, "sha256": "a" * 64}), \
+         patch("sapmap_efspotato._make_exec",
+                 return_value=(_fake_gw, 100, "gw_sapxpg")), \
+         patch("time.sleep"):
+        out = run_as_system(_node(), long_cmd, fire_and_forget=True)
+
+    assert out["ok"] is True, out
+
+    # Diag file read-back call (`type "<diag>"`).
+    diag_reads = [a for (p, a) in gw_calls
+                    if p == "cmd.exe" and "type" in a and "ef_diag" in a]
+    assert len(diag_reads) >= 1, (
+        "Diag file should be probed via `cmd /C type <diag>` on the "
+        "wrapper-batch path; gw_calls didn't contain one")
+
+    # netstat LISTENING dump
+    netstat_calls = [a for (p, a) in gw_calls
+                       if p == "cmd.exe" and "netstat" in a]
+    assert len(netstat_calls) >= 1, (
+        "netstat LISTENING snapshot should be probed after exploit; "
+        "operator needs to see whether the bind-shell port opened "
+        "on the target.")
+
+
+def test_short_command_path_skips_diag_probe():
+    """The diag probe only makes sense when the wrapper-batch path
+    was taken (the diag file is only WRITTEN by the wrapper batch).
+    On the short-command path (OS Terminal `whoami` etc.), the
+    diag probe must be skipped - probing a non-existent file
+    every time would just waste a SAPXPG round-trip + pollute the
+    log with confusing 'diag not found' lines."""
+    from sapmap_efspotato import run_as_system, _TARGET_EXE
+
+    gw_calls = []
+    def _fake_gw(prog, params="", lp=""):
+        gw_calls.append((prog, params))
+        if prog == _TARGET_EXE:
+            return _EFSPOTATO_BANNER_SPAWNED, True
+        return "", True
+
+    with patch("sapmap_efspotato._load_blob", return_value={
+            "hex": "00", "size": 1, "sha256": "a" * 64}), \
+         patch("sapmap_efspotato._make_exec",
+                 return_value=(_fake_gw, 100, "gw_sapxpg")), \
+         patch("time.sleep"):
+        # Short command + fire_and_forget=True (hypothetical case
+        # where a short shell payload still uses fire_and_forget)
+        out = run_as_system(_node(), "powershell -enc XYZ",
+                              fire_and_forget=True)
+
+    assert out["ok"] is True, out
+
+    # No `type` probe of the diag file (cleanup `del`s with
+    # ef_diag in the path are fine - those run on every path).
+    # And no netstat probe at all.
+    diag_reads = [a for (p, a) in gw_calls
+                    if p == "cmd.exe"
+                    and "type" in a and "ef_diag" in a]
+    netstat_calls = [a for (p, a) in gw_calls
+                       if p == "cmd.exe" and "netstat" in a]
+    assert len(diag_reads) == 0, (
+        f"Short-command path must NOT probe diag file; got: "
+        f"{diag_reads}")
+    assert len(netstat_calls) == 0, (
+        f"Short-command path must NOT probe netstat; got: "
+        f"{netstat_calls}")
 
 
 def test_short_command_skips_wrapper_batch():
