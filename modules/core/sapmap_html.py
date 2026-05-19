@@ -1434,6 +1434,7 @@ body {
           <option value="gateway">Gateway (unauthenticated)</option>
           <option value="sxpg">SXPG (via SAP_ALL user)</option>
           <option value="cve_31324">CVE-2025-31324 (Java unauth)</option>
+          <option value="winlpe_system" id="term-method-winlpe">&#128293; NT AUTHORITY\SYSTEM (via Windows LPE)</option>
         </select>
       </div>
       <div style="flex:3">
@@ -7195,9 +7196,23 @@ function showTerminalModal(sid) {
   addT('gateway', 'Gateway (unauthenticated)', !hasGw);
   if (isAbapT) addT('sxpg', 'SXPG (via SAP_ALL user)', !hasCreated);
   addT('cve_31324', 'CVE-2025-31324 (Java unauth)', !hasCve);
-  methodSel.value = hasCve ? 'cve_31324'
-                           : (hasGw ? 'gateway'
-                                    : (isAbapT ? 'sxpg' : 'gateway'));
+  // SYSTEM via Windows LPE — needs a viable Windows LPE technique
+  // (EfsPotato / GodPotato / MiniPlasma) AND the operator must have
+  // run Check Windows SYSTEM LPE first so the picker's per-technique
+  // state is populated.
+  const hasWinLpe = n && (n.efspotato_vulnerable
+                            || n.godpotato_vulnerable
+                            || n.miniplasma_vulnerable);
+  addT('winlpe_system',
+       '🔥 NT AUTHORITY\\SYSTEM (via Windows LPE)',
+       !hasWinLpe);
+  // Default-select the highest-value method available - SYSTEM
+  // outranks everything else; otherwise fall back to CVE-2025-31324
+  // (best non-SYSTEM Windows path) then gateway / sxpg.
+  methodSel.value = hasWinLpe ? 'winlpe_system'
+                              : (hasCve ? 'cve_31324'
+                                        : (hasGw ? 'gateway'
+                                                 : (isAbapT ? 'sxpg' : 'gateway')));
   // Info text
   let info = [];
   if (hasGw) info.push('Gateway: vulnerable');
@@ -7206,6 +7221,12 @@ function showTerminalModal(sid) {
     info.push(hasCveShell
       ? 'CVE-2025-31324: vulnerable (shell dropped — output captured)'
       : 'CVE-2025-31324: vulnerable (no shell — run "Drop JSP Webshell" for output)');
+  }
+  if (hasWinLpe) {
+    const technique = n.efspotato_vulnerable ? 'EfsPotato'
+                       : n.godpotato_vulnerable ? 'GodPotato'
+                                                 : 'MiniPlasma';
+    info.push('Windows LPE: ' + technique + ' viable (SYSTEM via Win LPE menu)');
   }
   document.getElementById('term-info').textContent = info.join(' | ') || 'No execution method available';
   document.getElementById('term-cmdline').value = 'whoami';
@@ -7276,14 +7297,29 @@ async function showShellModal(sid) {
   addS('gateway', 'Gateway (unauthenticated)', !hasGw);
   if (isAbapS) addS('sxpg', 'SXPG (via SAP_ALL user)', !hasCreated);
   addS('cve_31324', 'CVE-2025-31324 (Java unauth)', !hasCve);
-  methodSel.value = hasCve ? 'cve_31324'
-                           : (hasGw ? 'gateway'
-                                    : (isAbapS ? 'sxpg' : 'gateway'));
+  // SYSTEM via Windows LPE — only meaningful for Windows targets +
+  // a viable Windows LPE technique was reported by Check Windows LPE.
+  const hasWinLpeS = n && (n.efspotato_vulnerable
+                             || n.godpotato_vulnerable
+                             || n.miniplasma_vulnerable);
+  addS('winlpe_system',
+       '🔥 NT AUTHORITY\\SYSTEM (via Windows LPE)',
+       !hasWinLpeS);
+  methodSel.value = hasWinLpeS ? 'winlpe_system'
+                               : (hasCve ? 'cve_31324'
+                                         : (hasGw ? 'gateway'
+                                                  : (isAbapS ? 'sxpg' : 'gateway')));
 
   let info = [];
   if (hasGw) info.push('Gateway: vulnerable');
   if (hasCreated && isAbapS) info.push('SXPG: user available');
   if (hasCve) info.push('CVE-2025-31324: vulnerable');
+  if (hasWinLpeS) {
+    const techS = n.efspotato_vulnerable ? 'EfsPotato'
+                   : n.godpotato_vulnerable ? 'GodPotato'
+                                              : 'MiniPlasma';
+    info.push('Windows LPE: ' + techS + ' viable - shell will run as SYSTEM');
+  }
   document.getElementById('shell-info').textContent = info.join(' | ');
 
   // Auto-detect callback IP
