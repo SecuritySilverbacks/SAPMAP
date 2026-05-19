@@ -1039,6 +1039,137 @@ def _make_fake_gw_for_efspotato(efspotato_banner_by_pipe):
     return _fake_gw
 
 
+def test_long_command_dropped_as_wrapper_batch_via_base64():
+    """SAPXPG PARAMS truncates at ~255 bytes.  Operator-reported
+    regression on TWT (ABAP/Windows, gateway-only path): the
+    bind-shell PowerShell wrapper command (~3000 chars) caused
+    EfsPotato to fail with `no process created` on every pipe in
+    <1s — symptom of EfsPotato receiving a mangled argv (no
+    closing quote + no pipe argument) because SAPXPG silently
+    truncated PARAMS to the first 255 bytes.
+
+    Fix: when inner_cmd would exceed the 200-byte conservative
+    budget, drop the operator command as a wrapper .bat via the
+    same base64 + certutil chain we already use for the binary
+    itself, then invoke EfsPotato with a short
+    `cmd /c <wrap.bat>` reference.  The .bat carries the full
+    operator command intact, and what reaches the gateway is
+    ~70 bytes — well inside the budget.
+
+    Lock both halves of the fix: (a) wrapper .bat IS delivered
+    via certutil-decode of a .b64, and (b) EfsPotato is invoked
+    with the SHORT bat reference, not the original 3000-char
+    inner_cmd."""
+    from sapmap_efspotato import run_as_system, _TARGET_EXE, _TARGET_WRAP
+
+    # Capture every gateway call so we can inspect what was
+    # delivered + how EfsPotato was finally invoked.
+    gw_calls = []
+    def _fake_gw(prog, params="", lp=""):
+        gw_calls.append((prog, params))
+        if prog == _TARGET_EXE:
+            return _EFSPOTATO_BANNER_SPAWNED, True
+        return "", True
+
+    # Build a long operator command simulating the bind-shell
+    # encoded PowerShell wrapper from the TWT regression.  3500
+    # chars is well past the 200-byte threshold.
+    long_cmd = ("powershell.exe -NoProfile -EncodedCommand "
+                + "Q" * 3500)
+
+    with patch("sapmap_efspotato._load_blob", return_value={
+            "hex": "00", "size": 1, "sha256": "a" * 64}), \
+         patch("sapmap_efspotato._make_exec",
+                 return_value=(_fake_gw, 100, "gw_sapxpg")):
+        out = run_as_system(_node(), long_cmd, fire_and_forget=True)
+
+    assert out["ok"] is True, out
+
+    # (a) Wrapper .bat must have been certutil-decoded from a
+    # .b64.  Look for a `certutil.exe -decode` call that
+    # references the wrapper path.
+    decode_calls = [
+        a for (p, a) in gw_calls
+        if p == "cmd.exe"
+        and "certutil.exe -decode" in a
+        and "ef_run.bat" in a
+    ]
+    assert len(decode_calls) >= 1, (
+        "Wrapper batch certutil-decode never invoked; gw_calls: "
+        + repr([a[:120] for (p, a) in gw_calls[:30]]))
+
+    # The .b64 staging file must have been chunked-echoed to
+    # disk before the decode (>=1 echo call that writes to
+    # ef_run.bat.b64).
+    echo_calls = [
+        a for (p, a) in gw_calls
+        if p == "cmd.exe" and "echo" in a and "ef_run.bat.b64" in a
+    ]
+    assert len(echo_calls) >= 1, (
+        "Wrapper .b64 was never written via chunked echo")
+
+    # (b) EfsPotato MUST have been invoked with a short cmd line
+    # that references the wrapper - NOT the original 3000-char
+    # inner_cmd.
+    efspotato_calls = [(p, a) for (p, a) in gw_calls if p == _TARGET_EXE]
+    assert len(efspotato_calls) >= 1, "EfsPotato never invoked"
+    for (_, params) in efspotato_calls:
+        # Sanity: the SAPXPG-bound params must be small.  ~70 bytes
+        # in practice; 150 is a safe upper bound that still catches
+        # any regression where the long inner_cmd leaks through.
+        assert len(params) < 150, (
+            f"EfsPotato params should be ~70 bytes after wrapping; "
+            f"got {len(params)} bytes: {params[:200]!r}")
+        # And the params must reference the wrapper bat path so
+        # EfsPotato is actually running our wrapper rather than
+        # something else.
+        assert "ef_run.bat" in params, (
+            f"EfsPotato params don't reference wrapper batch: "
+            f"{params[:200]!r}")
+
+
+def test_short_command_skips_wrapper_batch():
+    """OS Terminal `whoami` -> inner_cmd `cmd /c whoami` (13 chars).
+    Must NOT trigger the wrapper-batch delivery — that's extra
+    SAPXPG round-trips for no reason and leaves a .bat artefact on
+    disk.  The short-command happy path must invoke EfsPotato
+    directly with the original inner_cmd."""
+    from sapmap_efspotato import run_as_system, _TARGET_EXE
+
+    gw_calls = []
+    def _fake_gw(prog, params="", lp=""):
+        gw_calls.append((prog, params))
+        if prog == _TARGET_EXE:
+            return _EFSPOTATO_BANNER_SPAWNED + "nt authority\\system\r\n", True
+        return "", True
+
+    with patch("sapmap_efspotato._load_blob", return_value={
+            "hex": "00", "size": 1, "sha256": "a" * 64}), \
+         patch("sapmap_efspotato._make_exec",
+                 return_value=(_fake_gw, 100, "gw_sapxpg")):
+        out = run_as_system(_node(), "whoami")
+
+    assert out["ok"] is True, out
+
+    # No wrapper certutil decode + no .b64 echo for the wrapper.
+    decode_calls = [
+        a for (p, a) in gw_calls
+        if p == "cmd.exe"
+        and "certutil.exe -decode" in a
+        and "ef_run.bat" in a
+    ]
+    assert len(decode_calls) == 0, (
+        f"Short command shouldn't trigger wrapper batch; got: "
+        f"{decode_calls}")
+
+    # EfsPotato received the original inner_cmd directly.
+    efspotato_calls = [(p, a) for (p, a) in gw_calls if p == _TARGET_EXE]
+    assert len(efspotato_calls) >= 1
+    assert "whoami" in efspotato_calls[0][1], (
+        f"EfsPotato should have run whoami directly; got: "
+        f"{efspotato_calls[0][1]!r}")
+
+
 def test_fire_and_forget_succeeds_when_spawn_signal_present_but_no_stdout():
     """The SJJ regression: EfsPotato landed CreateProcessAsUser
     (banner shows "[!] process with pid: 9872 created."), but the
