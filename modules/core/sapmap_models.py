@@ -338,7 +338,17 @@ class SAPNode:
     godpotato_system_obtained: bool = False
     godpotato_os_build: str = ""
     godpotato_has_impersonate: bool = False
-    windows_lpe_method: str = ""         # "miniplasma" / "godpotato" / ""
+    # EfsPotato — SeImpersonate → SYSTEM via MS-EFSR coercion of lsass.
+    # Works on Server 2012-2022 + Win10/11 AND handles NETWORK SERVICE
+    # token contexts where GodPotato's DCOM trick can't promote the
+    # impersonation level.  Same prerequisites: SeImpersonate +
+    # .NET 4.7.2+.  Preferred over GodPotato for the broadest
+    # service-account coverage.
+    efspotato_vulnerable: bool = False
+    efspotato_system_obtained: bool = False
+    efspotato_os_build: str = ""
+    efspotato_has_impersonate: bool = False
+    windows_lpe_method: str = ""         # "miniplasma" / "godpotato" / "efspotato" / ""
 
     # Discovery provenance.  Set when a node is materialised purely
     # from a BTP destination (no scanner / RFC observation yet) so the
@@ -515,6 +525,10 @@ class SAPNode:
             "godpotato_system_obtained": self.godpotato_system_obtained,
             "godpotato_os_build": self.godpotato_os_build,
             "godpotato_has_impersonate": self.godpotato_has_impersonate,
+            "efspotato_vulnerable": self.efspotato_vulnerable,
+            "efspotato_system_obtained": self.efspotato_system_obtained,
+            "efspotato_os_build": self.efspotato_os_build,
+            "efspotato_has_impersonate": self.efspotato_has_impersonate,
             "windows_lpe_method": self.windows_lpe_method,
             "discovered_via_btp": self.discovered_via_btp,
             "oauth2_profiles": list(self.oauth2_profiles),
@@ -605,6 +619,12 @@ class SAPNode:
             godpotato_os_build=d.get("godpotato_os_build", ""),
             godpotato_has_impersonate=d.get(
                 "godpotato_has_impersonate", False),
+            efspotato_vulnerable=d.get("efspotato_vulnerable", False),
+            efspotato_system_obtained=d.get(
+                "efspotato_system_obtained", False),
+            efspotato_os_build=d.get("efspotato_os_build", ""),
+            efspotato_has_impersonate=d.get(
+                "efspotato_has_impersonate", False),
             windows_lpe_method=d.get("windows_lpe_method", ""),
             discovered_via_btp=d.get("discovered_via_btp", False),
             oauth2_profiles=list(d.get("oauth2_profiles", [])),

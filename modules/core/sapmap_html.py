@@ -731,7 +731,7 @@ body {
       <div class="ctx-item" data-action="check_cve_22536">&#128270; Check CVE-2022-22536 (ICMAD smuggle)</div>
       <div class="ctx-item" data-action="wd_rediscover">&#128260; Rediscover WD topology (cache + backends)</div>
       <div class="ctx-item" data-action="check_linux_lpe">&#128275; Check Linux Root LPE (Copy Fail / Dirty Frag)</div>
-      <div class="ctx-item" data-action="check_windows_lpe">&#128274; Check Windows SYSTEM LPE (auto: GodPotato / MiniPlasma)</div>
+      <div class="ctx-item" data-action="check_windows_lpe">&#128274; Check Windows SYSTEM LPE (auto: EfsPotato / GodPotato / MiniPlasma)</div>
       <div class="ctx-item" data-action="deep_scan">&#128260; Deep Scan (full SAPology)</div>
       <div class="ctx-item" data-action="retrieve_rfcs">&#128225; Retrieve RFC Connections</div>
       <div class="ctx-item" data-action="read_java_destinations">&#128225; Read Java JCo Destinations</div>
@@ -749,7 +749,7 @@ body {
     <div class="ctx-sub">
       <div class="ctx-item" data-action="lpe">&#128274; ABAP Local Privilege Escalation</div>
       <div class="ctx-item" data-action="exploit_linux_lpe">&#9889; Escalate to Root (auto: Copy Fail / Dirty Frag)</div>
-      <div class="ctx-item" data-action="exploit_windows_lpe">&#9889; Escalate to SYSTEM (auto: GodPotato / MiniPlasma)</div>
+      <div class="ctx-item" data-action="exploit_windows_lpe">&#9889; Escalate to SYSTEM (auto: EfsPotato / GodPotato / MiniPlasma)</div>
       <div class="ctx-item" data-action="betrusted">&#128272; Betrusted — Inject Trusted IP (10KBLAZE)</div>
       <div class="ctx-item" data-action="create_user_betrusted">&#128272; Create User (10KBLAZE Full Chain)</div>
       <div class="ctx-item" data-action="create_user_java">&#128100; Create User (Java UME)</div>
@@ -4189,12 +4189,14 @@ async function ctxAction(action) {
       if (!confirm(
             'Run Windows LPE on ' + sid + '?\n\n'
             + 'SAPMAP auto-picks the best technique:\n'
+            + '  - EfsPotato (SeImpersonate -> SYSTEM via MS-EFSRPC coercion) '
+            + 'when the user holds SeImpersonatePrivilege.  Broadest '
+            + 'service-account coverage (handles NETWORK SERVICE / IIS '
+            + 'APPPOOL).  Multi-pipe fallback (lsarpc/efsrpc/samr/netlogon).\n'
             + '  - GodPotato (SeImpersonate -> SYSTEM via DCOM unmarshal) '
-            + 'when the user holds SeImpersonatePrivilege.  Deterministic. '
-            + 'Covers Server 2012 - 2022 + Win10/11.\n'
+            + 'as fallback if EFSRPC is locked down.\n'
             + '  - MiniPlasma (cldflt race, CVE-2020-17103 un-patched) when '
-            + 'GodPotato is not viable.  Race-condition based. Covers Win10 '
-            + '1709+ / Server 2019+ only.\n\n'
+            + 'no SeImpersonate held.  Win10 1709+ / Server 2019+ only.\n\n'
             + 'Command:\n  ' + cmd + '\n\n'
             + 'Non-persistent.  Output captured to a temp file and read back.')) break;
       await api('POST', `node/${sid}/exploit_windows_lpe`, {command: cmd});
