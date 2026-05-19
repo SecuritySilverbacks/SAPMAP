@@ -518,6 +518,41 @@ def test_copyfail_exploit_script_warms_su_page_cache_before_patches():
         "_write4 patch loop in the exploit template")
 
 
+def test_copyfail_exploit_script_hammers_su_first_page_before_fork():
+    """In addition to the full-file warm-up read at the start of
+    the script, the template runs a tight loop right before
+    os.fork() that re-reads /usr/bin/su's first 4KB N times.
+
+    Rationale: even after the warm-up, the kernel's LRU /
+    kswapd can evict the patched page between the _write4 loop
+    and execve.  Re-reading the page bumps its LRU position
+    multiple times in quick succession, making eviction in the
+    critical patch→fork→execve window much less likely.
+
+    Operator-reported S4D regression: bind-shell deployment lost
+    5/5 attempts with EMPTY stdout (= execve in the patched-su
+    shellcode silently failed because the patched page was
+    evicted by the time execve loaded /usr/bin/su).  Hammer-loop
+    fixes this; warm-up alone wasn't enough."""
+    import sapmap_copyfail
+    tmpl = sapmap_copyfail._EXPLOIT_TEMPLATE
+    # Hammer-loop appears AFTER the _write4 patch loop and
+    # BEFORE the os.fork() call.  Look for a re-read of
+    # /usr/bin/su between those landmarks.
+    write4_idx = tmpl.index("_write4(_i, _elf[_i:_i + 4])")
+    fork_idx = tmpl.index("_pid = os.fork()")
+    hammer_section = tmpl[write4_idx:fork_idx]
+    assert hammer_section.count("open('/usr/bin/su', 'rb')") >= 1, (
+        f"Expected at least one re-read of /usr/bin/su between "
+        f"the _write4 patch loop and os.fork() to keep the "
+        f"patched page hot; got: {hammer_section!r}")
+    # And the re-read must be inside a for loop (hammering, not
+    # a single read).
+    assert "for " in hammer_section, (
+        f"Hammer section should be a loop (multiple reads); "
+        f"got: {hammer_section!r}")
+
+
 def test_copyfail_warmup_uses_try_except_to_swallow_read_errors():
     """The warm-up read is wrapped in try/except so a rare
     read-permission failure (e.g. /usr/bin/su unreadable on a
