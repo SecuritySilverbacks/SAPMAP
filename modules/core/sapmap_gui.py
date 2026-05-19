@@ -5383,7 +5383,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
     @app.route("/api/node/<sid>/check_windows_lpe", method="POST")
     def node_check_windows_lpe(sid):
         """Probe Windows LPE prerequisites on the target.  Currently
-        covers two techniques:
+        covers three techniques:
+          * EfsPotato (SeImpersonate -> SYSTEM via MS-EFSRPC coercion)
           * GodPotato (SeImpersonate -> SYSTEM via DCOM unmarshal)
           * MiniPlasma (cldflt.sys race, CVE-2020-17103 un-patched)
         The auto-picker reports which technique is viable + which
@@ -5400,11 +5401,20 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 from sapmap_winlpe_auto import check_windows_lpe
                 res = check_windows_lpe(node)
                 method = res.get("method") or ""
+                ef = res.get("efspotato") or {}
                 gp = res.get("godpotato") or {}
                 mp = res.get("miniplasma") or {}
                 # One headline finding per technique tagged with severity
                 # by viability so the operator sees a complete picture
                 # of what's possible on this host.
+                sapmap_findings.emit_finding(
+                    "HIGH" if ef.get("vulnerable") else "INFO", sid,
+                    f"EfsPotato (MS-EFSRPC -> SYSTEM): "
+                    f"{'VULNERABLE' if ef.get('vulnerable') else 'not vulnerable'}"
+                    f" — Windows {ef.get('os_build', '?')} "
+                    f"SeImpersonate={'held' if ef.get('has_impersonate') else 'NOT held'}. "
+                    f"{ef.get('reason', '')}",
+                    ref="lpe.efspotato.check", meta=ef)
                 sapmap_findings.emit_finding(
                     "HIGH" if gp.get("vulnerable") else "INFO", sid,
                     f"GodPotato (SeImpersonate -> SYSTEM): "

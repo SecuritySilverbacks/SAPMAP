@@ -41,3 +41,9 @@ tools/godpotato/src/upstream/
 tools/godpotato/confuser/
 tools/godpotato/ConfuserEx.crproj
 tools/godpotato/confuser.zip
+
+# EfsPotato build artefacts — same layout as GodPotato.  Shipped
+# binary lives in modules/exploitation/_efspotato_blob.py.
+tools/efspotato/src/upstream/
+tools/efspotato/confuser/
+tools/efspotato/confuser.zip

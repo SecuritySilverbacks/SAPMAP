@@ -708,6 +708,10 @@ def test_force_env_godpotato_overrides_picker():
     viability check says no - operator override for staging tests."""
     from sapmap_winlpe_auto import check_windows_lpe
     with patch.dict(os.environ, {"SAPMAP_WINLPE_FORCE": "godpotato"}), \
+         patch("sapmap_efspotato.check_efspotato", return_value={
+            "vulnerable": False, "os_build": "10.0.7600",
+            "has_impersonate": False, "blob_available": True,
+            "reason": "x", "details": {}}), \
          patch("sapmap_godpotato.check_godpotato", return_value={
             "vulnerable": False, "os_build": "10.0.7600",
             "has_impersonate": False, "blob_available": True,
@@ -718,3 +722,169 @@ def test_force_env_godpotato_overrides_picker():
             "blob_available": True, "reason": "x", "details": {}}):
         out = check_windows_lpe(_node())
     assert out["method"] == "godpotato"
+
+
+# ===========================================================================
+# EfsPotato — MS-EFSRPC -> SYSTEM via lsass coercion
+# ===========================================================================
+
+def test_efspotato_linux_short_circuits_with_reason():
+    """Linux hosts must early-exit without firing SAPXPG."""
+    from sapmap_efspotato import check_efspotato
+    with patch("sapmap_exploit.execute_gw_command") as gw:
+        out = check_efspotato(_node(os_type="Linux"))
+    assert out["vulnerable"] is False
+    assert "Windows" in out["reason"]
+    gw.assert_not_called()
+
+
+def test_efspotato_no_exec_primitive_short_circuits():
+    from sapmap_efspotato import check_efspotato
+    n = _node(gw=False, cve_31324=False)
+    with patch("sapmap_exploit.execute_gw_command") as gw, \
+         patch("sapmap_exploit.execute_cve_2025_31324_via_shell") as jsp:
+        out = check_efspotato(n)
+    assert out["vulnerable"] is False
+    assert "exec primitive" in out["reason"] or "OS-exec" in out["reason"]
+    gw.assert_not_called()
+    jsp.assert_not_called()
+
+
+def test_efspotato_no_se_impersonate_fails():
+    """Missing SeImpersonatePrivilege blocks the whole MS-EFSR chain."""
+    from sapmap_efspotato import check_efspotato
+    fake = _exec_gw_canned({
+        ("cmd.exe", "/C ver"):       ["Microsoft Windows [Version 10.0.14393]"],
+        ("cmd.exe", "whoami /priv"): [
+            "PRIVILEGES INFORMATION",
+            "SeShutdownPrivilege             Shut down...    Disabled",
+        ],
+    })
+    with patch("sapmap_exploit.execute_gw_command", side_effect=fake), \
+         patch("sapmap_efspotato.is_blob_available", return_value=True):
+        out = check_efspotato(_node())
+    assert out["vulnerable"] is False
+    assert out["has_impersonate"] is False
+    assert "SeImpersonatePrivilege" in out["reason"]
+
+
+def test_efspotato_full_viability_with_blob():
+    """Server 2016 + SeImpersonate held + .NET 4.8 + blob -> EfsPotato
+    viable.  This is the exact configuration of the SJJ lab regression
+    that motivated EfsPotato integration."""
+    from sapmap_efspotato import check_efspotato
+    fake = _exec_gw_canned({
+        ("cmd.exe", "/C ver"):       ["Microsoft Windows [Version 10.0.14393]"],
+        ("cmd.exe", "whoami /priv"): [
+            "PRIVILEGES INFORMATION",
+            "SeImpersonatePrivilege          Impersonate a client...    Enabled",
+        ],
+        ("cmd.exe", "Release"): ["    Release    REG_DWORD    0x80ed8"],
+    })
+    with patch("sapmap_exploit.execute_gw_command", side_effect=fake), \
+         patch("sapmap_efspotato.is_blob_available", return_value=True):
+        out = check_efspotato(_node())
+    assert out["vulnerable"] is True
+    assert out["has_impersonate"] is True
+    assert out["os_build"] == "10.0.14393"
+
+
+def test_efspotato_old_dotnet_fails():
+    """Same .NET 4.7.2 threshold as GodPotato (same TFM)."""
+    from sapmap_efspotato import check_efspotato
+    fake = _exec_gw_canned({
+        ("cmd.exe", "/C ver"):       ["Microsoft Windows [Version 10.0.14393]"],
+        ("cmd.exe", "whoami /priv"): [
+            "PRIVILEGES INFORMATION",
+            "SeImpersonatePrivilege          Impersonate a client...    Enabled",
+        ],
+        ("cmd.exe", "Release"): ["    Release    REG_DWORD    0x60632"],  # 4.6.2
+    })
+    with patch("sapmap_exploit.execute_gw_command", side_effect=fake), \
+         patch("sapmap_efspotato.is_blob_available", return_value=True):
+        out = check_efspotato(_node())
+    assert out["vulnerable"] is False
+    assert "4.7.2" in out["reason"]
+
+
+def test_picker_prefers_efspotato_when_all_viable():
+    """All three techniques viable -> picker chooses EfsPotato
+    (broadest service-account coverage; multi-pipe fallback)."""
+    from sapmap_winlpe_auto import check_windows_lpe
+    with patch("sapmap_efspotato.check_efspotato", return_value={
+            "vulnerable": True, "os_build": "10.0.19045",
+            "has_impersonate": True, "blob_available": True,
+            "reason": "OK", "details": {}}), \
+         patch("sapmap_godpotato.check_godpotato", return_value={
+            "vulnerable": True, "os_build": "10.0.19045",
+            "has_impersonate": True, "blob_available": True,
+            "reason": "OK", "details": {}}), \
+         patch("sapmap_miniplasma.check_miniplasma", return_value={
+            "vulnerable": True, "os_build": "10.0.19045",
+            "has_cldflt": True, "net_version": "4.8",
+            "blob_available": True, "reason": "OK", "details": {}}):
+        out = check_windows_lpe(_node())
+    assert out["method"] == "efspotato"
+
+
+def test_picker_falls_back_to_godpotato_when_efspotato_unavailable():
+    """No EfsPotato blob vendored but GodPotato is -> godpotato wins."""
+    from sapmap_winlpe_auto import check_windows_lpe
+    with patch("sapmap_efspotato.check_efspotato", return_value={
+            "vulnerable": False, "os_build": "10.0.19045",
+            "has_impersonate": True, "blob_available": False,
+            "reason": "blob not vendored", "details": {}}), \
+         patch("sapmap_godpotato.check_godpotato", return_value={
+            "vulnerable": True, "os_build": "10.0.19045",
+            "has_impersonate": True, "blob_available": True,
+            "reason": "OK", "details": {}}), \
+         patch("sapmap_miniplasma.check_miniplasma", return_value={
+            "vulnerable": False, "os_build": "10.0.19045",
+            "has_cldflt": True, "net_version": "4.8",
+            "blob_available": True, "reason": "x", "details": {}}):
+        out = check_windows_lpe(_node())
+    assert out["method"] == "godpotato"
+
+
+def test_run_windows_lpe_dispatches_to_efspotato():
+    """Picker selects efspotato -> run_windows_lpe calls efspotato.run_as_system."""
+    from sapmap_winlpe_auto import run_windows_lpe
+    n = _node()
+    with patch("sapmap_efspotato.check_efspotato", return_value={
+            "vulnerable": True, "os_build": "10.0.14393",
+            "has_impersonate": True, "blob_available": True,
+            "reason": "OK", "details": {}}), \
+         patch("sapmap_godpotato.check_godpotato", return_value={
+            "vulnerable": False, "os_build": "10.0.14393",
+            "has_impersonate": True, "blob_available": True,
+            "reason": "x", "details": {}}), \
+         patch("sapmap_miniplasma.check_miniplasma", return_value={
+            "vulnerable": False, "os_build": "10.0.14393",
+            "has_cldflt": False, "net_version": "",
+            "blob_available": True, "reason": "x", "details": {}}), \
+         patch("sapmap_efspotato.run_as_system", return_value={
+            "ok": True, "stdout": "nt authority\\system", "error": ""}):
+        out = run_windows_lpe(n, "whoami")
+    assert out["ok"] is True
+    assert out["method"] == "efspotato"
+    assert n.efspotato_system_obtained is True
+
+
+def test_force_env_efspotato_overrides_picker():
+    """SAPMAP_WINLPE_FORCE=efspotato forces selection."""
+    from sapmap_winlpe_auto import check_windows_lpe
+    with patch.dict(os.environ, {"SAPMAP_WINLPE_FORCE": "efspotato"}), \
+         patch("sapmap_efspotato.check_efspotato", return_value={
+            "vulnerable": False, "os_build": "10.0.7600",
+            "has_impersonate": False, "blob_available": True,
+            "reason": "x", "details": {}}), \
+         patch("sapmap_godpotato.check_godpotato", return_value={
+            "vulnerable": True, "os_build": "10.0.7600",
+            "has_impersonate": True, "blob_available": True,
+            "reason": "x", "details": {}}), \
+         patch("sapmap_miniplasma.check_miniplasma", return_value={
+            "vulnerable": True, "os_build": "10.0.7600",
+            "has_cldflt": False, "net_version": "",
+            "blob_available": True, "reason": "x", "details": {}}):
+        out = check_windows_lpe(_node())
+    assert out["method"] == "efspotato"
