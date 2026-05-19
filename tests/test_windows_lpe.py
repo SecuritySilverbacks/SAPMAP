@@ -503,3 +503,196 @@ def test_run_windows_lpe_no_method_returns_clean_error():
     assert out["method"] == ""
     assert "No working Windows LPE" in out["error"]
     mp_run.assert_not_called()
+
+
+# ===========================================================================
+# GodPotato — SeImpersonate -> SYSTEM via DCOM unmarshal
+# ===========================================================================
+
+def test_has_se_impersonate_parses_whoami_priv_output():
+    """`whoami /priv` lists SeImpersonatePrivilege when held.  Parser
+    must match it regardless of Enabled/Disabled state column value
+    (GodPotato can flip Disabled -> Enabled via AdjustTokenPrivileges
+    at runtime, so presence in the token is what matters)."""
+    from sapmap_godpotato import _has_se_impersonate
+    held_enabled = (
+        "PRIVILEGES INFORMATION\n"
+        "----------------------\n"
+        "\n"
+        "Privilege Name                  Description                State\n"
+        "==============================  ========================== ========\n"
+        "SeAssignPrimaryTokenPrivilege   Replace a process level... Disabled\n"
+        "SeImpersonatePrivilege          Impersonate a client...    Enabled\n"
+        "SeCreateGlobalPrivilege         Create global objects      Enabled\n"
+    )
+    held_disabled = held_enabled.replace("Enabled\n", "Disabled\n", 2)
+    not_held = (
+        "PRIVILEGES INFORMATION\n"
+        "Privilege Name                  Description                State\n"
+        "SeShutdownPrivilege             Shut down the system       Disabled\n"
+    )
+    assert _has_se_impersonate(held_enabled) is True
+    assert _has_se_impersonate(held_disabled) is True
+    assert _has_se_impersonate(not_held) is False
+    assert _has_se_impersonate("") is False
+
+
+def test_godpotato_linux_short_circuits_with_reason():
+    """Linux hosts must early-exit without firing SAPXPG."""
+    from sapmap_godpotato import check_godpotato
+    with patch("sapmap_exploit.execute_gw_command") as gw:
+        out = check_godpotato(_node(os_type="Linux"))
+    assert out["vulnerable"] is False
+    assert "Windows" in out["reason"]
+    gw.assert_not_called()
+
+
+def test_godpotato_no_exec_primitive_short_circuits():
+    """No GW vuln AND no CVE-2025-31324 vuln -> can't dispatch
+    anything; bail cleanly with operator-actionable error."""
+    from sapmap_godpotato import check_godpotato
+    n = _node(gw=False, cve_31324=False)
+    with patch("sapmap_exploit.execute_gw_command") as gw, \
+         patch("sapmap_exploit.execute_cve_2025_31324_via_shell") as jsp:
+        out = check_godpotato(n)
+    assert out["vulnerable"] is False
+    assert "OS-exec primitive" in out["reason"] or "exec primitive" in out["reason"]
+    gw.assert_not_called()
+    jsp.assert_not_called()
+
+
+def test_godpotato_no_se_impersonate_fails():
+    """Even if OS is Windows + blob vendored, missing
+    SeImpersonatePrivilege makes the exploit unviable."""
+    from sapmap_godpotato import check_godpotato
+    fake = _exec_gw_canned({
+        ("cmd.exe", "/C ver"):      ["Microsoft Windows [Version 10.0.14393]"],
+        ("cmd.exe", "whoami /priv"): [
+            "PRIVILEGES INFORMATION",
+            "Privilege Name                  Description     State",
+            "==============================  =============== ========",
+            "SeShutdownPrivilege             Shut down...    Disabled",
+        ],
+    })
+    with patch("sapmap_exploit.execute_gw_command", side_effect=fake), \
+         patch("sapmap_godpotato.is_blob_available", return_value=True):
+        out = check_godpotato(_node())
+    assert out["vulnerable"] is False
+    assert out["has_impersonate"] is False
+    assert "SeImpersonatePrivilege" in out["reason"]
+
+
+def test_godpotato_full_viability_with_se_impersonate_and_blob():
+    """All green: Windows + SeImpersonate held + blob vendored."""
+    from sapmap_godpotato import check_godpotato
+    fake = _exec_gw_canned({
+        ("cmd.exe", "/C ver"):      ["Microsoft Windows [Version 10.0.14393]"],
+        ("cmd.exe", "whoami /priv"): [
+            "PRIVILEGES INFORMATION",
+            "SeImpersonatePrivilege          Impersonate a client...    Enabled",
+        ],
+    })
+    with patch("sapmap_exploit.execute_gw_command", side_effect=fake), \
+         patch("sapmap_godpotato.is_blob_available", return_value=True):
+        out = check_godpotato(_node())
+    assert out["vulnerable"] is True
+    assert out["has_impersonate"] is True
+    assert out["os_build"] == "10.0.14393"   # Server 2016 = below MiniPlasma's cldflt threshold
+
+
+def test_godpotato_works_on_server_2016_where_miniplasma_fails():
+    """The whole point of GodPotato in SAPMAP: cover the gap below
+    MiniPlasma's cldflt.sys threshold (Win10 1709+ / Server 2019+).
+    On Server 2016 (build 14393), MiniPlasma fails but GodPotato
+    works - the picker MUST select GodPotato."""
+    from sapmap_winlpe_auto import check_windows_lpe
+    # Stub miniplasma to "not vulnerable" (Server 2016 below cldflt)
+    # and godpotato to "vulnerable".
+    with patch("sapmap_miniplasma.check_miniplasma", return_value={
+            "vulnerable": False, "os_build": "10.0.14393",
+            "has_cldflt": False, "net_version": "4.6.2",
+            "blob_available": True,
+            "reason": "OS build 10.0.14393 < 16299",
+            "details": {}}), \
+         patch("sapmap_godpotato.check_godpotato", return_value={
+            "vulnerable": True, "os_build": "10.0.14393",
+            "has_impersonate": True, "blob_available": True,
+            "reason": "Windows 10.0.14393 with SeImpersonate held",
+            "details": {}}):
+        out = check_windows_lpe(_node(os_type="Windows Server 2016"))
+    assert out["method"] == "godpotato"
+    assert "GodPotato viable" in out["summary"]
+
+
+def test_picker_prefers_godpotato_when_both_viable():
+    """Both techniques viable -> picker chooses GodPotato (deterministic,
+    no race) over MiniPlasma."""
+    from sapmap_winlpe_auto import check_windows_lpe
+    with patch("sapmap_miniplasma.check_miniplasma", return_value={
+            "vulnerable": True, "os_build": "10.0.19045",
+            "has_cldflt": True, "net_version": "4.8",
+            "blob_available": True, "reason": "OK", "details": {}}), \
+         patch("sapmap_godpotato.check_godpotato", return_value={
+            "vulnerable": True, "os_build": "10.0.19045",
+            "has_impersonate": True, "blob_available": True,
+            "reason": "OK", "details": {}}):
+        out = check_windows_lpe(_node())
+    assert out["method"] == "godpotato"
+
+
+def test_picker_falls_back_to_miniplasma_when_no_se_impersonate():
+    """SAP service account stripped of SeImpersonate (rare but possible
+    on hardened images) -> GodPotato fails, MiniPlasma takes over."""
+    from sapmap_winlpe_auto import check_windows_lpe
+    with patch("sapmap_godpotato.check_godpotato", return_value={
+            "vulnerable": False, "os_build": "10.0.19045",
+            "has_impersonate": False, "blob_available": True,
+            "reason": "SeImpersonatePrivilege NOT held",
+            "details": {}}), \
+         patch("sapmap_miniplasma.check_miniplasma", return_value={
+            "vulnerable": True, "os_build": "10.0.19045",
+            "has_cldflt": True, "net_version": "4.8",
+            "blob_available": True, "reason": "OK", "details": {}}):
+        out = check_windows_lpe(_node())
+    assert out["method"] == "miniplasma"
+
+
+def test_run_windows_lpe_dispatches_to_godpotato():
+    """run_windows_lpe must invoke sapmap_godpotato.run_as_system
+    when the picker selects godpotato + set godpotato_system_obtained
+    on success."""
+    from sapmap_winlpe_auto import run_windows_lpe
+    n = _node()
+    with patch("sapmap_godpotato.check_godpotato", return_value={
+            "vulnerable": True, "os_build": "10.0.14393",
+            "has_impersonate": True, "blob_available": True,
+            "reason": "OK", "details": {}}), \
+         patch("sapmap_miniplasma.check_miniplasma", return_value={
+            "vulnerable": False, "os_build": "10.0.14393",
+            "has_cldflt": False, "net_version": "",
+            "blob_available": True, "reason": "no cldflt",
+            "details": {}}), \
+         patch("sapmap_godpotato.run_as_system", return_value={
+            "ok": True, "stdout": "nt authority\\system", "error": ""}):
+        out = run_windows_lpe(n, "whoami")
+    assert out["ok"] is True
+    assert out["method"] == "godpotato"
+    assert out["stdout"] == "nt authority\\system"
+    assert n.godpotato_system_obtained is True
+
+
+def test_force_env_godpotato_overrides_picker():
+    """SAPMAP_WINLPE_FORCE=godpotato forces selection even when the
+    viability check says no - operator override for staging tests."""
+    from sapmap_winlpe_auto import check_windows_lpe
+    with patch.dict(os.environ, {"SAPMAP_WINLPE_FORCE": "godpotato"}), \
+         patch("sapmap_godpotato.check_godpotato", return_value={
+            "vulnerable": False, "os_build": "10.0.7600",
+            "has_impersonate": False, "blob_available": True,
+            "reason": "too old", "details": {}}), \
+         patch("sapmap_miniplasma.check_miniplasma", return_value={
+            "vulnerable": True, "os_build": "10.0.7600",
+            "has_cldflt": False, "net_version": "",
+            "blob_available": True, "reason": "x", "details": {}}):
+        out = check_windows_lpe(_node())
+    assert out["method"] == "godpotato"

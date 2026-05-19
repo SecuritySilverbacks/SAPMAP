@@ -5383,9 +5383,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
     @app.route("/api/node/<sid>/check_windows_lpe", method="POST")
     def node_check_windows_lpe(sid):
         """Probe Windows LPE prerequisites on the target.  Currently
-        covers MiniPlasma (cldflt.sys race, CVE-2020-17103 silently
-        un-patched).  The auto-picker reports which technique is
-        viable + which it would select."""
+        covers two techniques:
+          * GodPotato (SeImpersonate -> SYSTEM via DCOM unmarshal)
+          * MiniPlasma (cldflt.sys race, CVE-2020-17103 un-patched)
+        The auto-picker reports which technique is viable + which
+        it would select."""
         response.content_type = "application/json"
         node = api.state.get_node(sid)
         if not node:
@@ -5398,8 +5400,19 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 from sapmap_winlpe_auto import check_windows_lpe
                 res = check_windows_lpe(node)
                 method = res.get("method") or ""
+                gp = res.get("godpotato") or {}
                 mp = res.get("miniplasma") or {}
-                # One headline finding tagged with severity by viability.
+                # One headline finding per technique tagged with severity
+                # by viability so the operator sees a complete picture
+                # of what's possible on this host.
+                sapmap_findings.emit_finding(
+                    "HIGH" if gp.get("vulnerable") else "INFO", sid,
+                    f"GodPotato (SeImpersonate -> SYSTEM): "
+                    f"{'VULNERABLE' if gp.get('vulnerable') else 'not vulnerable'}"
+                    f" — Windows {gp.get('os_build', '?')} "
+                    f"SeImpersonate={'held' if gp.get('has_impersonate') else 'NOT held'}. "
+                    f"{gp.get('reason', '')}",
+                    ref="lpe.godpotato.check", meta=gp)
                 sapmap_findings.emit_finding(
                     "HIGH" if mp.get("vulnerable") else "INFO", sid,
                     f"MiniPlasma (CVE-2020-17103 un-patched): "

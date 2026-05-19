@@ -33,3 +33,11 @@ tools/miniplasma/src/bin/
 tools/miniplasma/src/obj/
 tools/miniplasma/confuser/
 tools/miniplasma/nuget.exe
+
+# GodPotato build artefacts — cloned upstream source + MSBuild outputs
+# + ConfuserEx download cache.  The shipped binary lives in
+# modules/exploitation/_godpotato_blob.py.
+tools/godpotato/src/upstream/
+tools/godpotato/confuser/
+tools/godpotato/ConfuserEx.crproj
+tools/godpotato/confuser.zip
