@@ -524,13 +524,31 @@ def test_copyfail_warmup_uses_try_except_to_swallow_read_errors():
     weirdly-hardened image) doesn't crash the entire exploit
     before the _write4 loop even gets a chance to run.  Patch
     failures should surface from the actual exploit pathway, not
-    from the warm-up."""
+    from the warm-up.
+
+    The template is intentionally MINIMAL (no comment blocks
+    inside the string - they bloat the shipped script and worsen
+    the upload-induced page-cache churn).  Look for the try/except
+    construct directly around the warm-up open() call rather than
+    relying on comment markers."""
     import sapmap_copyfail
     tmpl = sapmap_copyfail._EXPLOIT_TEMPLATE
-    # Look for try/except around the warmup
-    warmup_section = tmpl[tmpl.index("Re-warm"):tmpl.index("Load ELF")]
-    assert "try:" in warmup_section
-    assert "except Exception" in warmup_section or "except " in warmup_section
+    # Find the warm-up open() call and verify it's inside a try
+    # block.  Walk back from the open() to the nearest preceding
+    # statement keyword - that should be `try:`.
+    warm_idx = tmpl.index("open('/usr/bin/su', 'rb')")
+    # The warm-up has the shape:
+    #   try:
+    #       with open('/usr/bin/su', 'rb') as _wsu: _wsu.read()
+    #   except Exception: pass
+    # so `try:` must appear within ~50 chars before the open(),
+    # and `except` within ~100 chars after.
+    pre = tmpl[max(0, warm_idx - 50):warm_idx]
+    post = tmpl[warm_idx:warm_idx + 200]
+    assert "try:" in pre, (
+        f"No `try:` before warm-up read; pre-context: {pre!r}")
+    assert "except" in post, (
+        f"No `except` after warm-up read; post-context: {post!r}")
 
 
 def test_dirtyfrag_warms_su_page_cache_before_each_attempt():
