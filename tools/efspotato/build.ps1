@@ -30,7 +30,9 @@
 param(
     [string]$SapmapRoot = "",
     [switch]$SkipObfuscation = $false,
-    [string]$UpstreamRef = "main",
+    # zcgonvh/EfsPotato's default branch is "master" (older repo
+    # pattern; predates the github main-as-default switch).
+    [string]$UpstreamRef = "master",
     [string]$ConfuserExUrl = "https://github.com/mkaring/ConfuserEx/releases/download/v1.6.0/ConfuserEx-CLI.zip",
     [string]$UpstreamRepoUrl = "https://github.com/zcgonvh/EfsPotato.git"
 )
