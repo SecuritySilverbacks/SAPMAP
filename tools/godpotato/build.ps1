@@ -166,7 +166,7 @@ $csprojText = $csprojText -replace '<TargetFrameworkVersion>v2\.0</TargetFramewo
 $csprojText = $csprojText -replace '<AssemblyName>GodPotato</AssemblyName>', '<AssemblyName>gp_bin</AssemblyName>'
 [System.IO.File]::WriteAllText($UpstreamCsproj, $csprojText,
     (New-Object System.Text.UTF8Encoding $false))
-Write-Host "[*] Patched upstream csproj: OutputType=Exe, TargetFramework=v4.0, AssemblyName=gp_bin"
+Write-Host "[*] Patched upstream csproj: OutputType=Exe, TargetFramework=v4.7.2, AssemblyName=gp_bin"
 
 # ---------------------------------------------------------------------------
 # Build
@@ -207,14 +207,18 @@ if (-not $SkipObfuscation) {
     }
     Write-Host "[*] ConfuserEx   : $ConfuserCli"
 
-    # Write a per-build ConfuserEx project that points at the upstream
-    # tree (so paths are not relative to a fixed src/ subtree like
-    # MiniPlasma's).  Same protection set: rename + anti-debug +
-    # constants encryption.  Anti-tamper deliberately omitted.
-    $Crproj = Join-Path $Here "ConfuserEx.crproj"
+    # Write the ConfuserEx project file INSIDE the upstream tree so
+    # baseDir="bin\Release" resolves correctly relative to it.
+    # ConfuserEx interprets baseDir relative to the .crproj location,
+    # not the working directory - so the .crproj MUST sit next to
+    # the bin/ folder.  Same protection set as MiniPlasma: rename
+    # + anti-debug + constants encryption.  Anti-tamper deliberately
+    # omitted (it rewrites PE metadata in ways that can trigger
+    # the "Unsupported 16-Bit Application" PE-loader regression).
+    $Crproj = Join-Path $Upstream "ConfuserEx.crproj"
     $crBody = @'
 <?xml version="1.0" encoding="utf-8"?>
-<project outputDir="bin\Release\confused" baseDir="bin\Release" xmlns="http://confuser.codeplex.com">
+<project outputDir="confused" baseDir="bin\Release" xmlns="http://confuser.codeplex.com">
   <module path="gp_bin.exe">
     <rule pattern="true" preset="none" inherit="false">
       <protection id="rename">
@@ -237,11 +241,14 @@ if (-not $SkipObfuscation) {
     Write-Host "[*] Running ConfuserEx pass (rename + anti-debug + constants) ..."
     Push-Location $Upstream
     try {
-        & $ConfuserCli -n $Crproj
+        & $ConfuserCli -n "ConfuserEx.crproj"
         if ($LASTEXITCODE -ne 0) { throw "ConfuserEx failed" }
     } finally {
         Pop-Location
     }
+    # ConfuserEx output: baseDir + outputDir + module-path =
+    # bin\Release\confused\gp_bin.exe (no per-TFM subdir for legacy
+    # non-SDK csproj since msbuild emits straight into bin\Release\).
     $ConfusedExe = Join-Path $Upstream "bin\Release\confused\gp_bin.exe"
     if (-not (Test-Path $ConfusedExe)) {
         Write-Error "ConfuserEx did not produce $ConfusedExe."
