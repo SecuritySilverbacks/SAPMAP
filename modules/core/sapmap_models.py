@@ -329,7 +329,16 @@ class SAPNode:
     miniplasma_vulnerable: bool = False  # True if Win10 1709+ + cldflt.sys + .NET 4.7.2
     miniplasma_system_obtained: bool = False  # True after successful SYSTEM cmd
     miniplasma_os_build: str = ""        # e.g. "10.0.19045" — from cmd /C ver
-    windows_lpe_method: str = ""         # "miniplasma" / ""
+    # GodPotato — SeImpersonate → SYSTEM via DCOM/RPC unmarshal trick.
+    # Works on Server 2012-2022 + Win10/11; needs the calling user to
+    # hold SeImpersonatePrivilege (SAP service accounts <sid>adm /
+    # SAPService<SID> always do by default).  Covers the gap below the
+    # cldflt.sys threshold where MiniPlasma can't fire.
+    godpotato_vulnerable: bool = False   # True iff SeImpersonate held + .NET 2.0+
+    godpotato_system_obtained: bool = False
+    godpotato_os_build: str = ""
+    godpotato_has_impersonate: bool = False
+    windows_lpe_method: str = ""         # "miniplasma" / "godpotato" / ""
 
     # Discovery provenance.  Set when a node is materialised purely
     # from a BTP destination (no scanner / RFC observation yet) so the
@@ -502,6 +511,10 @@ class SAPNode:
             "miniplasma_vulnerable": self.miniplasma_vulnerable,
             "miniplasma_system_obtained": self.miniplasma_system_obtained,
             "miniplasma_os_build": self.miniplasma_os_build,
+            "godpotato_vulnerable": self.godpotato_vulnerable,
+            "godpotato_system_obtained": self.godpotato_system_obtained,
+            "godpotato_os_build": self.godpotato_os_build,
+            "godpotato_has_impersonate": self.godpotato_has_impersonate,
             "windows_lpe_method": self.windows_lpe_method,
             "discovered_via_btp": self.discovered_via_btp,
             "oauth2_profiles": list(self.oauth2_profiles),
@@ -586,6 +599,12 @@ class SAPNode:
             miniplasma_system_obtained=d.get(
                 "miniplasma_system_obtained", False),
             miniplasma_os_build=d.get("miniplasma_os_build", ""),
+            godpotato_vulnerable=d.get("godpotato_vulnerable", False),
+            godpotato_system_obtained=d.get(
+                "godpotato_system_obtained", False),
+            godpotato_os_build=d.get("godpotato_os_build", ""),
+            godpotato_has_impersonate=d.get(
+                "godpotato_has_impersonate", False),
             windows_lpe_method=d.get("windows_lpe_method", ""),
             discovered_via_btp=d.get("discovered_via_btp", False),
             oauth2_profiles=list(d.get("oauth2_profiles", [])),
