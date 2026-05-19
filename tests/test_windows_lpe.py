@@ -1126,6 +1126,28 @@ def test_long_command_dropped_as_wrapper_batch_via_base64():
         assert "ef_run.bat" in params, (
             f"EfsPotato params don't reference wrapper batch: "
             f"{params[:200]!r}")
+        # CRITICAL: must NOT have nested double quotes (TWT
+        # regression: pre-fix the inner_cmd was `cmd /c "<wrap>"`
+        # which when wrapped in the SAPXPG transport's outer
+        # quotes produced `"cmd /c "<wrap>""` — Windows
+        # CommandLineToArgvW parses that to
+        # `argv[1] = cmd /c <wrap>"` with a TRAILING literal `"`,
+        # so cmd.exe tries to execute a non-existent file
+        # `.ef_run.bat"` and silently dies before the PowerShell
+        # wrapper inside the bat runs.  Net effect: pid spawned,
+        # no listener.
+        #
+        # The fix is to NOT quote the wrap path in inner_cmd (it
+        # has no spaces).  Lock that by asserting the params
+        # contains exactly TWO `"` chars - the SAPXPG transport's
+        # outer pair only.
+        quote_count = params.count('"')
+        assert quote_count == 2, (
+            f"EfsPotato params must contain exactly 2 quote chars "
+            f"(SAPXPG transport's outer pair only); got "
+            f"{quote_count} in {params!r}.  Adjacent `\"\"` pairs "
+            f"break CommandLineToArgvW parsing and the SYSTEM "
+            f"child dies before running the PowerShell wrapper.")
 
 
 def test_short_command_skips_wrapper_batch():
