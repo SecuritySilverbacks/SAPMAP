@@ -2704,6 +2704,28 @@ function updateMap() {
            + ` text-anchor="middle" dominant-baseline="middle"`
            + ` font-weight="bold" pointer-events="none">&#9650;</text>`;
     }
+    // SYSTEM badge — Windows mirror of the Linux root triangle.
+    // Shown when ANY of the three Windows LPE techniques (EfsPotato,
+    // GodPotato, MiniPlasma) has landed an NT AUTHORITY\SYSTEM
+    // command on this host.  Same position as the Linux triangle
+    // (mutually exclusive in practice - a SAPNode is either Linux
+    // or Windows), but a distinct shape (diamond) and colour
+    // (Windows blue) so a glance at the map immediately tells you
+    // which OS the privilege escalation landed on.  Hover tooltip
+    // names the technique that won so the operator doesn't have
+    // to pop the side panel to find out.
+    if (n.efspotato_system_obtained || n.godpotato_system_obtained
+        || n.miniplasma_system_obtained) {
+      const winLpeMethod = n.efspotato_system_obtained ? 'EfsPotato'
+                          : n.godpotato_system_obtained ? 'GodPotato'
+                          : 'MiniPlasma';
+      html += `<text x="${x+BOX_W-30}" y="${y-2}" font-size="22" fill="#58a6ff"`
+           + ` stroke="#0d1117" stroke-width="2.5" paint-order="stroke"`
+           + ` text-anchor="middle" dominant-baseline="middle"`
+           + ` font-weight="bold" pointer-events="none">`
+           + `<title>NT AUTHORITY\\SYSTEM obtained via ${winLpeMethod}</title>`
+           + `&#9670;</text>`;
+    }
 
     // Finding badge — count of unresolved (undismissed) CRITICAL/HIGH
     // for this SID.  Renders as a small numbered dot in the top-left
