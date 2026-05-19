@@ -1435,7 +1435,6 @@ body {
           <option value="sxpg">SXPG (via SAP_ALL user)</option>
           <option value="cve_31324">CVE-2025-31324 (Java unauth)</option>
           <option value="winlpe_system" id="term-method-winlpe">&#128293; NT AUTHORITY\SYSTEM (via Windows LPE)</option>
-          <option value="linuxlpe_root" id="term-method-linuxlpe">&#128293; root (via Linux LPE)</option>
         </select>
       </div>
       <div style="flex:3">
@@ -7229,23 +7228,10 @@ function showTerminalModal(sid) {
   addT('winlpe_system',
        '🔥 NT AUTHORITY\\SYSTEM (via Windows LPE)',
        !hasWinLpe);
-  // root via Linux LPE — Linux mirror of winlpe_system.  Gated on
-  // Copy Fail OR Dirty Frag being viable (operator must have run
-  // Check Linux Root LPE first).  The two LPE families are
-  // mutually exclusive in practice (a host is Linux OR Windows);
-  // both options stay in the dropdown so the dropdown's structure
-  // is OS-independent.
-  const hasLinuxLpe = n && (n.copyfail_vulnerable
-                              || n.dirtyfrag_vulnerable);
-  addT('linuxlpe_root',
-       '🔥 root (via Linux LPE)',
-       !hasLinuxLpe);
-  // Default-select the highest-value method available - SYSTEM /
-  // root outranks everything else; otherwise fall back to
-  // CVE-2025-31324 (best non-SYSTEM Windows path) then gateway /
-  // sxpg.
-  methodSel.value = hasWinLpe   ? 'winlpe_system'
-                  : hasLinuxLpe ? 'linuxlpe_root'
+  // Default-select the highest-value method available - SYSTEM
+  // outranks everything else; otherwise fall back to CVE-2025-31324
+  // (best non-SYSTEM Windows path) then gateway / sxpg.
+  methodSel.value = hasWinLpe ? 'winlpe_system'
                               : (hasCve ? 'cve_31324'
                                         : (hasGw ? 'gateway'
                                                  : (isAbapT ? 'sxpg' : 'gateway')));
@@ -7263,11 +7249,6 @@ function showTerminalModal(sid) {
                        : n.godpotato_vulnerable ? 'GodPotato'
                                                  : 'MiniPlasma';
     info.push('Windows LPE: ' + technique + ' viable (SYSTEM via Win LPE menu)');
-  }
-  if (hasLinuxLpe) {
-    const linuxTech = n.copyfail_vulnerable ? 'Copy Fail'
-                       : 'Dirty Frag';
-    info.push('Linux LPE: ' + linuxTech + ' viable (root via Linux LPE menu)');
   }
   document.getElementById('term-info').textContent = info.join(' | ') || 'No execution method available';
   document.getElementById('term-cmdline').value = 'whoami';
@@ -7346,17 +7327,7 @@ async function showShellModal(sid) {
   addS('winlpe_system',
        '🔥 NT AUTHORITY\\SYSTEM (via Windows LPE)',
        !hasWinLpeS);
-  // root via Linux LPE — Linux mirror of winlpe_system.  Same
-  // gating logic + auto-detach wrapping behaviour as Windows
-  // (server-side: nohup + stdio detach + background subshell so
-  // the python3 socket trick survives the wrapper script exit).
-  const hasLinuxLpeS = n && (n.copyfail_vulnerable
-                               || n.dirtyfrag_vulnerable);
-  addS('linuxlpe_root',
-       '🔥 root (via Linux LPE)',
-       !hasLinuxLpeS);
-  methodSel.value = hasWinLpeS    ? 'winlpe_system'
-                  : hasLinuxLpeS  ? 'linuxlpe_root'
+  methodSel.value = hasWinLpeS ? 'winlpe_system'
                                : (hasCve ? 'cve_31324'
                                          : (hasGw ? 'gateway'
                                                   : (isAbapS ? 'sxpg' : 'gateway')));
@@ -7370,11 +7341,6 @@ async function showShellModal(sid) {
                    : n.godpotato_vulnerable ? 'GodPotato'
                                               : 'MiniPlasma';
     info.push('Windows LPE: ' + techS + ' viable - shell will run as SYSTEM');
-  }
-  if (hasLinuxLpeS) {
-    const linuxTechS = n.copyfail_vulnerable ? 'Copy Fail'
-                        : 'Dirty Frag';
-    info.push('Linux LPE: ' + linuxTechS + ' viable - shell will run as root');
   }
   document.getElementById('shell-info').textContent = info.join(' | ');
 
