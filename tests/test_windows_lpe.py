@@ -583,7 +583,7 @@ def test_godpotato_no_se_impersonate_fails():
 
 
 def test_godpotato_full_viability_with_se_impersonate_and_blob():
-    """All green: Windows + SeImpersonate held + blob vendored."""
+    """All green: Windows + SeImpersonate held + .NET 4.7.2+ + blob vendored."""
     from sapmap_godpotato import check_godpotato
     fake = _exec_gw_canned({
         ("cmd.exe", "/C ver"):      ["Microsoft Windows [Version 10.0.14393]"],
@@ -591,6 +591,7 @@ def test_godpotato_full_viability_with_se_impersonate_and_blob():
             "PRIVILEGES INFORMATION",
             "SeImpersonatePrivilege          Impersonate a client...    Enabled",
         ],
+        ("cmd.exe", "Release"): ["    Release    REG_DWORD    0x80ed8"],  # 4.8
     })
     with patch("sapmap_exploit.execute_gw_command", side_effect=fake), \
          patch("sapmap_godpotato.is_blob_available", return_value=True):
@@ -598,6 +599,27 @@ def test_godpotato_full_viability_with_se_impersonate_and_blob():
     assert out["vulnerable"] is True
     assert out["has_impersonate"] is True
     assert out["os_build"] == "10.0.14393"   # Server 2016 = below MiniPlasma's cldflt threshold
+
+
+def test_godpotato_old_dotnet_fails():
+    """Server 2016 RTM has .NET 4.6.2 (Release 394802).  GodPotato is
+    built against 4.7.2 (Release 461808) so an unpatched RTM box would
+    fail to CLR-load gp_bin.exe.  Catch it in the viability check
+    instead of mid-exploit."""
+    from sapmap_godpotato import check_godpotato
+    fake = _exec_gw_canned({
+        ("cmd.exe", "/C ver"):      ["Microsoft Windows [Version 10.0.14393]"],
+        ("cmd.exe", "whoami /priv"): [
+            "PRIVILEGES INFORMATION",
+            "SeImpersonatePrivilege          Impersonate a client...    Enabled",
+        ],
+        ("cmd.exe", "Release"): ["    Release    REG_DWORD    0x60632"],  # 4.6.2
+    })
+    with patch("sapmap_exploit.execute_gw_command", side_effect=fake), \
+         patch("sapmap_godpotato.is_blob_available", return_value=True):
+        out = check_godpotato(_node())
+    assert out["vulnerable"] is False
+    assert "4.7.2" in out["reason"]
 
 
 def test_godpotato_works_on_server_2016_where_miniplasma_fails():

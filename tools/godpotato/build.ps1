@@ -150,7 +150,19 @@ if (-not (Test-Path $UpstreamCsproj)) {
 }
 $csprojText = Get-Content $UpstreamCsproj -Raw
 $csprojText = $csprojText -replace '<OutputType>Library</OutputType>', '<OutputType>Exe</OutputType>'
-$csprojText = $csprojText -replace '<TargetFrameworkVersion>v2\.0</TargetFrameworkVersion>', '<TargetFrameworkVersion>v4.0</TargetFrameworkVersion>'
+# Target v4.7.2 instead of upstream's v2.0:
+#   * v2.0 dev pack is rarely installed on modern VS Build Tools.
+#   * v4.0 has the same problem (not in default .NET Desktop workload).
+#   * v4.7.2 is what the .NET Desktop workload ships - matches the
+#     MiniPlasma build target, proven on the lab build host.
+#   * Runtime side: v4.7.2 is stock on Win10 1803+ / Server 2019+ and
+#     widely backported to Server 2016 via cumulative updates (any
+#     production box has it).  If a target genuinely runs RTM Server
+#     2016 without updates (only 4.6.2 there), GodPotato will fail
+#     to launch with a clear CLR-version error - operator can patch
+#     the target or build with a lower TFM via the patch override
+#     below.
+$csprojText = $csprojText -replace '<TargetFrameworkVersion>v2\.0</TargetFrameworkVersion>', '<TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>'
 $csprojText = $csprojText -replace '<AssemblyName>GodPotato</AssemblyName>', '<AssemblyName>gp_bin</AssemblyName>'
 [System.IO.File]::WriteAllText($UpstreamCsproj, $csprojText,
     (New-Object System.Text.UTF8Encoding $false))
