@@ -6949,8 +6949,17 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 # naturally) but documents intent at the call site
                 # and gives us the hook if the runners ever gain
                 # pipe-capture mode.
+                #
+                # progress_cb -> _set_progress so the bind-shell
+                # modal's status row updates live during the ~30-90
+                # second chunked binary/script upload + exploit
+                # attempts.  Operator-reported S4D issue: without
+                # this, the modal looked frozen on "Routing payload
+                # through Linux LPE..." for 2 minutes while 104
+                # chunks uploaded silently.
                 lpe_res = run_linux_lpe(node, full_cmd,
-                                          fire_and_forget=True)
+                                          fire_and_forget=True,
+                                          progress_cb=_set_progress)
                 result = {
                     "success": bool(lpe_res.get("ok")),
                     "output": (lpe_res.get("stdout") or "").splitlines() or [

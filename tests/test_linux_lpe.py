@@ -489,6 +489,109 @@ def test_copyfail_uses_unique_result_path_per_run():
         f"of the S4H bug; got: {result_paths!r}")
 
 
+def test_copyfail_progress_cb_fires_during_upload_and_attempts():
+    """copyfail.run_as_root accepts a ``progress_cb`` callback that
+    fires during major steps so the GUI's bind-shell status row can
+    update during the ~30-90s chunked upload + exploit attempts.
+
+    Operator-reported S4D issue: the bind-shell modal showed a
+    single static "Routing payload through Linux LPE..." line for
+    2 minutes while 104 chunks uploaded — looked frozen."""
+    from sapmap_copyfail import run_as_root
+
+    n = _node()
+    n.gw_vulnerable = True
+    n.copyfail_kernel = "6.18.21"
+
+    progress_msgs = []
+    def _capture(msg):
+        progress_msgs.append(msg)
+
+    def _fake_egc(node, prog, params="", long_params=""):
+        if prog == "python3" and params == "/tmp/.cf_s.py":
+            return {"output": [], "success": True}
+        if prog == "base64" and ".cf_result_" in params:
+            import base64 as _b64
+            return {"output": [_b64.b64encode(b"uid=0(root)\n").decode()],
+                    "success": True}
+        return {"output": [], "success": True}
+
+    with patch("sapmap_exploit.execute_gw_command", side_effect=_fake_egc):
+        out = run_as_root(n, "id", progress_cb=_capture)
+
+    assert out["ok"] is True
+    assert any("delivering exploit" in m for m in progress_msgs), (
+        f"No 'delivering exploit' progress msg; got: {progress_msgs!r}")
+    assert any("firing exploit" in m for m in progress_msgs), (
+        f"No 'firing exploit' progress msg; got: {progress_msgs!r}")
+    assert any("%)" in m and "chunk" in m for m in progress_msgs), (
+        f"No '<n>%' chunk-progress msg; got: {progress_msgs!r}")
+
+
+def test_copyfail_progress_cb_optional_default_none():
+    """``progress_cb`` is optional - the OS Terminal `id` flow
+    (which doesn't have a progress bar) calls run_as_root without
+    a callback.  Lock the default-None signature."""
+    from sapmap_copyfail import run_as_root
+    import inspect
+    sig = inspect.signature(run_as_root)
+    assert "progress_cb" in sig.parameters
+    assert sig.parameters["progress_cb"].default is None
+
+
+def test_copyfail_progress_cb_buggy_callback_does_not_break_exploit():
+    """A buggy/raising progress_cb must not propagate an exception
+    that would tear down the exploit run."""
+    from sapmap_copyfail import run_as_root
+
+    n = _node()
+    n.gw_vulnerable = True
+    n.copyfail_kernel = "6.18.21"
+
+    def _bad_cb(msg):
+        raise RuntimeError("intentional test failure")
+
+    def _fake_egc(node, prog, params="", long_params=""):
+        if prog == "python3" and params == "/tmp/.cf_s.py":
+            return {"output": [], "success": True}
+        if prog == "base64" and ".cf_result_" in params:
+            import base64 as _b64
+            return {"output": [_b64.b64encode(b"uid=0(root)\n").decode()],
+                    "success": True}
+        return {"output": [], "success": True}
+
+    with patch("sapmap_exploit.execute_gw_command", side_effect=_fake_egc):
+        out = run_as_root(n, "id", progress_cb=_bad_cb)
+    assert out["ok"] is True
+
+
+def test_run_linux_lpe_forwards_progress_cb_to_copyfail():
+    """run_linux_lpe must forward progress_cb to the chosen
+    technique's run_as_root.  Without this, the shell_start
+    handler's _set_progress wiring would be a no-op."""
+    from sapmap_lpe_auto import run_linux_lpe
+    cf_res = {"vulnerable": True, "kernel": "6.18.21", "reason": "ok"}
+    df_res = {"vulnerable": False, "kernel": "6.18.21", "arch": "x86_64",
+              "reason": "x", "mitigation_applied": False}
+
+    captured_cb = {}
+    def _fake_run_as_root(node, command, timeout=60.0, progress_cb=None):
+        captured_cb["progress_cb"] = progress_cb
+        return {"ok": True, "stdout": "uid=0", "error": ""}
+
+    def _my_cb(msg):
+        pass
+
+    with patch("sapmap_copyfail.check_copyfail", return_value=cf_res), \
+         patch("sapmap_dirtyfrag.check_dirtyfrag", return_value=df_res), \
+         patch("sapmap_copyfail.run_as_root",
+                 side_effect=_fake_run_as_root):
+        out = run_linux_lpe(_node(), "id", progress_cb=_my_cb)
+
+    assert out["ok"] is True
+    assert captured_cb["progress_cb"] is _my_cb
+
+
 def test_copyfail_retries_on_race_loss_and_succeeds():
     """The Copy Fail page-cache patch is race-based.  When the
     kernel evicts the patched pages between our patch loop and
