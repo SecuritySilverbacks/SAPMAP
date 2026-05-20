@@ -7900,22 +7900,36 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
     @app.route("/api/actions/check_all_router_info", method="POST")
     def actions_check_all_router_info():
-        """Probe every non-SAProuter node for the SAProuter info-leak
-        primitive (ROUTER_ADM info request returning routtab + client
-        list).  Mirrors the per-node action's gating: skip nodes whose
-        system_type is SAPROUTER itself (covered by direct router
-        scanning) — operator uses this to sweep every SAP node that
-        might have a /H/router/H/.. path configured and unknowingly
-        expose the router's working dir + connected clients.
+        """Probe every SAProuter node on the map for the ROUTER_ADM
+        NIINFO leak (router responds with routtab + connected
+        clients list when the NIINFO ACL is unset).
+
+        The vulnerability lives in the SAProuter itself - probing
+        non-router nodes on :3299 produces false positives when a
+        SAP node shares a host with the actual router (operator-
+        reported on S4D/S4H/RD1 all on 192.168.2.209).  Eligibility
+        rule: system_type contains SAPROUTER OR any instance port
+        is tagged 'saprouter' (rare double-up case).
         """
         response.content_type = "application/json"
-        nodes = [n for n in api.state.nodes.values()
-                 if "SAPROUTER" not in (n.system_type or "").upper()]
+        nodes = []
+        for n in api.state.nodes.values():
+            if "SAPROUTER" in (n.system_type or "").upper():
+                nodes.append(n)
+                continue
+            # Edge case: a SAP node that also runs an embedded
+            # SAProuter shows up as system_type=ABAP/JAVA but has
+            # a 'saprouter' port in its instances dict.  Include
+            # those too.
+            if any(svc == "saprouter"
+                     for inst in n.instances
+                     for svc in inst.ports.values()):
+                nodes.append(n)
         if not nodes:
-            return json.dumps({"error": "No SAP systems on the map "
-                                         "(SAProuter nodes are skipped — "
-                                         "the check probes SAP nodes for "
-                                         "leaked router config)"})
+            return json.dumps({"error": "No SAProuter nodes on the "
+                                         "map — the info-leak check "
+                                         "probes routers, not SAP "
+                                         "application servers"})
 
         def _run():
             from sap_router_info import saprouter_info_request

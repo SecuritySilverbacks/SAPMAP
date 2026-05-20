@@ -7686,15 +7686,26 @@ async function checkAllCve22536() {
   startPolling();
 }
 async function checkAllRouterInfo() {
+  // SAProuter Info Leak is a router-side vulnerability: we ask the
+  // router for its ROUTER_ADM info packet (routtab + clients).
+  // Iterating non-router nodes and probing them on :3299 produces
+  // false-positive findings when SAP systems share a host with the
+  // actual router (operator-reported on shared-host landscapes).
+  // Eligible: nodes that ARE SAProuters (system_type or a port
+  // tagged 'saprouter' in their instances).
   const nodes = Object.values(mapState.nodes || {});
-  const eligible = nodes.filter(n =>
-    ((n.system_type || '').toUpperCase().indexOf('SAPROUTER') === -1));
+  const eligible = nodes.filter(n => {
+    const st = (n.system_type || '').toUpperCase();
+    if (st.indexOf('SAPROUTER') !== -1) return true;
+    return (n.instances || []).some(i =>
+      Object.entries(i.ports || {}).some(([p, s]) => s === 'saprouter'));
+  });
   if (eligible.length < 1) {
-    alert('No SAP systems on the map - SAProuter info-leak check probes SAP nodes (not the router itself).');
+    alert('No SAProuter nodes on the map - the info-leak check probes routers, not SAP application servers.');
     return;
   }
-  if (confirm(`Check SAProuter Info Leak on ${eligible.length} SAP system(s)?\n\n` +
-              `Probes each node for unauth /sap/admin/public/index.html, niping -t -H, and other info-disclosure endpoints that leak the configured SAProuter path.`))
+  if (confirm(`Check SAProuter Info Leak on ${eligible.length} SAProuter node(s)?\n\n` +
+              `Sends a ROUTER_ADM info request - the router responds with its routtab and connected clients list when the NIINFO ACL is unset.`))
     await api('POST', 'actions/check_all_router_info');
   startPolling();
 }
@@ -8806,18 +8817,34 @@ function showMapCtxMenu(e) {
         || st.indexOf('WEB_DISPATCHER') !== -1
         || !!n.is_web_dispatcher;
   });
-  // Has any non-SAProuter SAP node — needed for SAProuter info leak
-  // check (we probe whether a SAP node leaks the configured router).
-  // The check doesn't apply to the SAProuter itself.
-  const hasAnyNonSaprouter = nodes.some(n =>
-    ((n.system_type || '').toUpperCase().indexOf('SAPROUTER') === -1));
+  // Has any SAProuter node — needed for SAProuter info-leak check.
+  //
+  // The ROUTER_ADM NIINFO leak is a SAProuter-side vulnerability:
+  // we connect to a router's port and ask for its info packet, the
+  // router responds with routtab + connected clients.  Probing
+  // non-SAProuter hosts on port 3299 is meaningless EXCEPT when the
+  // operator's landscape stacks multiple SAP systems on the same
+  // host as the SAProuter — then probing any of them on :3299
+  // hits the SAProuter and reports a false-positive finding
+  // against the wrong node (operator-reported on S4D/S4H/RD1 all
+  // sharing 192.168.2.209).
+  //
+  // Eligible: nodes with system_type containing SAPROUTER OR any
+  // instance with a port tagged 'saprouter' (rare but possible
+  // when a SAP node also runs an embedded router).
+  const hasAnySaprouter = nodes.some(n => {
+    const st = (n.system_type || '').toUpperCase();
+    if (st.indexOf('SAPROUTER') !== -1) return true;
+    return (n.instances || []).some(i =>
+      Object.entries(i.ports || {}).some(([p, s]) => s === 'saprouter'));
+  });
 
   document.getElementById('map-ctx-check-all-gw').style.display          = hasAnyGwPort       ? '' : 'none';
   document.getElementById('map-ctx-check-all-betrusted').style.display   = hasAnyMsPort       ? '' : 'none';
   document.getElementById('map-ctx-check-all-cve-31324').style.display   = hasAnyJava         ? '' : 'none';
   document.getElementById('map-ctx-check-all-cve-6287').style.display    = hasAnyJava         ? '' : 'none';
   document.getElementById('map-ctx-check-all-cve-22536').style.display   = hasAnyHttp         ? '' : 'none';
-  document.getElementById('map-ctx-check-all-router-info').style.display = hasAnyNonSaprouter ? '' : 'none';
+  document.getElementById('map-ctx-check-all-router-info').style.display = hasAnySaprouter    ? '' : 'none';
 
   menu.classList.add('visible');
   let mx = e.clientX, my = e.clientY;
