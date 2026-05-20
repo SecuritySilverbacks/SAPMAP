@@ -8066,6 +8066,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
           - check_ms          — every node (39NN probe)
           - check_cve_31324   — Java / double-stack only
           - check_cve_6287    — Java / double-stack only
+          - check_cve_22536   — every HTTP-serving stack (ABAP/Java/WD)
           - check_router_info — SAProuter nodes only
         Deep scan / default-creds / RFC retrieval are excluded by design
         (deep scan is SAPology; default-creds may lock accounts; RFC
@@ -8147,7 +8148,27 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         print(f"[!] STOP — vuln sweep aborted")
                         return
 
-                # 5. SAProuter info leak — SAProuter nodes only
+                # 5. CVE-2022-22536 (ICMAD HTTP smuggling) — every
+                # HTTP-serving SAP stack: ABAP / Java / dedicated WD /
+                # any node fingerprinted as is_web_dispatcher.  The
+                # ICM Content-Length smuggling primitive lives in
+                # the SAP ICM kernel module shared across these
+                # stacks.  Skipped for SAProuter (no ICM).
+                is_abap = "ABAP" in sys_type
+                is_wd = "WEB_DISPATCHER" in sys_type
+                is_http = (is_abap or is_java or is_wd
+                             or getattr(node, "is_web_dispatcher", False))
+                if not is_router and is_http:
+                    try:
+                        print(f"[*] {node.sid}: check_cve_2022_22536 (ICMAD)")
+                        sapmap_scanner.check_cve_2022_22536(node)
+                    except Exception as e:
+                        print(f"[-] {node.sid}: check_cve_22536 failed: {e}")
+                    if sapmap_stop.is_stop_requested():
+                        print(f"[!] STOP — vuln sweep aborted")
+                        return
+
+                # 6. SAProuter info leak — SAProuter nodes only
                 if is_router:
                     try:
                         from sap_router_info import saprouter_info_request
@@ -8177,6 +8198,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     hits.append("CVE-2025-31324")
                 if getattr(n, "cve_2020_6287_vulnerable", False):
                     hits.append("RECON")
+                if getattr(n, "cve_2022_22536_vulnerable", False):
+                    hits.append("ICMAD")
                 if (getattr(n, "saprouter_info", None)
                         and n.saprouter_info.get("vulnerable")):
                     hits.append("Router-InfoLeak")

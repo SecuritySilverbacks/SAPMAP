@@ -160,6 +160,80 @@ def test_js_function_calls_correct_backend_endpoint(js_fn, endpoint):
 # ===========================================================================
 
 # ===========================================================================
+# Regression: ICMAD is part of "Scan for All Vulnerabilities"
+# ===========================================================================
+
+def _gui_src():
+    with open("modules/core/sapmap_gui.py", encoding="utf-8") as f:
+        return f.read()
+
+
+def test_scan_all_vulns_includes_icmad_check():
+    """Operator-reported: ICMAD (CVE-2022-22536) was missing from the
+    "Scan for All Vulnerabilities" sweep.  The check_all_vulns
+    backend must call sapmap_scanner.check_cve_2022_22536 for any
+    HTTP-serving SAP stack (ABAP / Java / WD / is_web_dispatcher)."""
+    src = _gui_src()
+    # Find the check_all_vulns endpoint body
+    import re
+    m = re.search(
+        r"def actions_check_all_vulns\(\).*?\n        _bg\(",
+        src, re.DOTALL)
+    assert m, "actions_check_all_vulns endpoint not found"
+    body = m.group(0)
+    assert "check_cve_2022_22536" in body, (
+        "Scan for All Vulnerabilities must invoke "
+        "check_cve_2022_22536 (ICMAD) - operator-reported "
+        "regression on a landscape with HTTP-serving stacks")
+    # Must be eligibility-gated to HTTP-serving stacks (not run on
+    # SAProuter which has no ICM).
+    assert "is_router" in body and "WEB_DISPATCHER" in body, (
+        "ICMAD step must skip SAProuter and explicitly include "
+        "web-dispatcher stacks; eligibility wiring missing")
+
+
+def test_scan_all_vulns_summary_collects_icmad_hits():
+    """The post-sweep summary that prints `<sid>: GW, 10KBlaze, ...`
+    must collect cve_2022_22536_vulnerable as 'ICMAD' so the
+    operator sees ICMAD hits in the final tally, not just in
+    per-node logs."""
+    src = _gui_src()
+    import re
+    # Locate the vulns-summary block (between the `vulns = []` and
+    # the `print(f"[+] Vuln sweep complete")` lines).
+    m = re.search(
+        r"vulns = \[\].*?Vuln sweep complete",
+        src, re.DOTALL)
+    assert m, "vuln-summary block not found"
+    body = m.group(0)
+    assert "cve_2022_22536_vulnerable" in body, (
+        "summary block must check cve_2022_22536_vulnerable to "
+        "report ICMAD hits in the final tally")
+    assert '"ICMAD"' in body or "'ICMAD'" in body, (
+        "summary block must label the hit as 'ICMAD' in the tally")
+
+
+def test_scan_all_vulns_confirm_dialog_mentions_icmad():
+    """The Scan for All Vulnerabilities confirm dialog enumerates
+    every check the sweep runs.  ICMAD must appear in that list
+    so the operator knows what they're triggering BEFORE pressing
+    OK - hidden behavioural changes are worse than visible ones."""
+    import sapmap_html
+    html = sapmap_html.get_html()
+    # Look for the scan-all confirm() text.  Locate via the dialog
+    # opening line, then check the list region.
+    import re
+    m = re.search(
+        r"Scan for ALL vulnerabilities on.*?Press STOP to cancel",
+        html, re.DOTALL)
+    assert m, "scanAllVulns confirm() text not found"
+    dialog = m.group(0)
+    assert "ICMAD" in dialog or "22536" in dialog, (
+        "confirm() dialog must list ICMAD / CVE-2022-22536 - "
+        "operator-visible enumeration of every check in the sweep")
+
+
+# ===========================================================================
 # Regression: 10KBlaze gating reads port list, NOT just ms_port
 # ===========================================================================
 
