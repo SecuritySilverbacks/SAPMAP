@@ -159,6 +159,55 @@ def test_js_function_calls_correct_backend_endpoint(js_fn, endpoint):
 # Backend endpoints exist
 # ===========================================================================
 
+# ===========================================================================
+# Regression: 10KBlaze gating reads port list, NOT just ms_port
+# ===========================================================================
+
+def test_betrusted_gating_reads_instance_ports_not_just_ms_port():
+    """Critical chicken-and-egg fix: the 10KBlaze entry's gating
+    must inspect the instance.ports dict for 39XX, NOT rely on
+    n.ms_port being already populated.
+
+    Why this matters: n.ms_port only gets set AFTER the MS
+    betrusted check has run against a node and confirmed the
+    port answers.  Gating the menu on n.ms_port means the menu
+    HIDES the check that would populate ms_port - operator
+    can never run the sweep on a freshly-scanned landscape.
+
+    Operator-reported regression on S4H: node had port 3901
+    in n.instances[0].ports (discovered by standard scan), but
+    "Check All 10KBlaze" was hidden from the empty-map context
+    menu because n.ms_port was still 0.
+
+    The fix mirrors the GW gating pattern: walk instance.ports
+    looking for 3900-3999 OR the explicit 'ms_internal'
+    service tag.  Either signal counts as "this node could
+    be 10KBlaze-vulnerable, show the sweep option"."""
+    import sapmap_html
+    html = sapmap_html.get_html()
+    # The hasAnyMsPort definition must walk n.instances[].ports
+    # rather than checking n.ms_port directly.
+    import re
+    pat = re.compile(
+        r"const\s+hasAnyMsPort\s*=\s*nodes\.some\([^;]*\)",
+        re.DOTALL)
+    m = pat.search(html)
+    assert m, "hasAnyMsPort definition not found in showMapCtxMenu"
+    body = m.group(0)
+    # Must inspect instances + ports - not just n.ms_port.
+    assert "instances" in body, (
+        f"hasAnyMsPort must walk n.instances[].ports to find 39XX "
+        f"ports - relying on n.ms_port alone is the chicken-and-"
+        f"egg bug.  Definition: {body!r}")
+    assert "ports" in body, (
+        f"hasAnyMsPort must inspect instance.ports dict; "
+        f"definition: {body!r}")
+    # Must recognise the 39XX port range.
+    assert "3900" in body and "3999" in body, (
+        f"hasAnyMsPort must match port range 3900-3999; "
+        f"definition: {body!r}")
+
+
 @pytest.mark.parametrize("endpoint_path", [
     "/api/actions/check_all_gw",
     "/api/actions/check_all_betrusted",
