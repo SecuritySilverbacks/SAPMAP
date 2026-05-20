@@ -7614,6 +7614,7 @@ async function scanAllVulns() {
               ` • MS Betrusted / CVE-2020-6207 (every SAP)\n` +
               ` • CVE-2025-31324 VisualComposer (Java only)\n` +
               ` • CVE-2020-6287 RECON (Java only)\n` +
+              ` • CVE-2022-22536 ICMAD smuggle (ABAP/Java/WD)\n` +
               ` • SAProuter Info Leak (SAProuter nodes)\n\n` +
               `Excluded: Deep/SAPology scan, Default Accounts (may lock), RFC retrieval.\n\n` +
               `Press STOP to cancel mid-sweep.`))
