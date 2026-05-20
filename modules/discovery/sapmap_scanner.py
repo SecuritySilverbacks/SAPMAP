@@ -787,7 +787,26 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
                     fp = fut.result()
                 except Exception as e:
                     print(f"[-]   {host}:{p}  WD fingerprint error: {e}")
-                    del result["open_ports"][p]
+                    if p == SCC_DEFAULT_PORT:
+                        # 8443 was registered TWICE on the candidate
+                        # list (once as 'scc_admin' at line ~722 then
+                        # again as 'wd_candidate' inside the
+                        # WELL_KNOWN_WD_PORTS loop, since 8443 is in
+                        # both pools).  Last-write-wins made the WD
+                        # tag take precedence, so the WD fingerprint
+                        # ran.  If it errored on an SCC (very common -
+                        # the SCC admin UI doesn't speak the WD
+                        # /sap/wdisp/admin probe path), KEEP the port
+                        # in open_ports tagged as 'scc_admin' so
+                        # _maybe_build_scc_node downstream can do its
+                        # SCC-specific fingerprint.  Operator-reported
+                        # regression: without this, SCC at
+                        # 192.168.2.209:8443 was never detected
+                        # because WD fingerprint failed → port was
+                        # dropped → SCC fingerprint never ran.
+                        result["open_ports"][p]["service"] = "scc_admin"
+                    else:
+                        del result["open_ports"][p]
                     continue
                 if fp["is_wd"]:
                     # Confirmed SAP WD — rename service to reflect
@@ -850,9 +869,29 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
                     # apache, etc.) — drop it from open_ports so we
                     # don't synthesise a false-positive node.
                     srv = fp["server_header"] or "<no Server header>"
-                    print(f"[-]   {host}:{p:<6} non-SAP service "
-                          f"({srv[:50]})  — dropping")
-                    del result["open_ports"][p]
+                    if p == SCC_DEFAULT_PORT:
+                        # See the WD fingerprint-error branch above
+                        # for the full explanation: 8443 also serves
+                        # as the SAP Cloud Connector admin UI port.
+                        # SCC doesn't return SAP WD or SAP ICM
+                        # headers (it speaks its own admin-shell
+                        # HTTP API), so the WD fingerprint flags it
+                        # as "non-SAP service" — but that's exactly
+                        # what we expect for an SCC.  Keep the port
+                        # tagged as 'scc_admin' so the downstream
+                        # _maybe_build_scc_node check can run its
+                        # SCC-specific fingerprint.  Build-nodes
+                        # filters scc_admin out of the gateway /
+                        # dispatcher loops, so no false-positive
+                        # SAPNode is synthesised here.
+                        print(f"[*]   {host}:{p:<6} not a SAP WD/ICM "
+                              f"(Server: {srv[:50]}); deferring to "
+                              f"SCC fingerprint")
+                        result["open_ports"][p]["service"] = "scc_admin"
+                    else:
+                        print(f"[-]   {host}:{p:<6} non-SAP service "
+                              f"({srv[:50]})  — dropping")
+                        del result["open_ports"][p]
 
     if _cancelled():
         return result

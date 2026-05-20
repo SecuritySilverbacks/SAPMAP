@@ -730,3 +730,102 @@ def test_expand_scc_roots_empty_drive_list():
     """No drives → empty roots list (don't fabricate)."""
     from sapmap_gui import _expand_scc_roots_across_drives
     assert _expand_scc_roots_across_drives([]) == []
+
+
+# ===========================================================================
+# Scanner: SCC port (8443) survives the WD-fingerprint loop
+# ===========================================================================
+# Regression: 8443 was being appended to ports_pass1 twice - once as
+# 'scc_admin' (line ~722), once as 'wd_candidate' inside the
+# WELL_KNOWN_WD_PORTS loop (line ~732).  Last-write-wins meant 8443
+# ended up tagged as wd_candidate.  The WD fingerprint then ran
+# against the SCC admin UI (which doesn't speak /sap/wdisp/admin),
+# fingerprint failed with is_wd=False / is_sap_icm=False, and the
+# port was DELETED from open_ports.  _maybe_build_scc_node then
+# checked `SCC_DEFAULT_PORT not in open_ports` and bailed - the
+# SCC node was never created.
+#
+# Fix: when the WD fingerprint fails on port == SCC_DEFAULT_PORT,
+# re-tag the port as 'scc_admin' instead of deleting it, so the
+# downstream SCC-specific fingerprint can run.
+
+
+def _scanner_src():
+    """Return the sapmap_scanner.py source text for grep-style assertions."""
+    import pathlib
+    return (pathlib.Path(__file__).resolve().parent.parent
+            / "modules" / "discovery" / "sapmap_scanner.py"
+            ).read_text(encoding="utf-8")
+
+
+def test_wd_fingerprint_loop_preserves_scc_port_on_exception_branch():
+    """The fingerprint-exception branch must check
+    p == SCC_DEFAULT_PORT and restore the scc_admin tag rather
+    than deleting the port from open_ports.  Without this, an SCC
+    on 8443 that times out the WD probe gets silently dropped
+    before the SCC fingerprint ever runs."""
+    src = _scanner_src()
+    import re
+    m = re.search(
+        r"WD fingerprint error.*?continue",
+        src, re.DOTALL)
+    assert m, "WD fingerprint exception branch not found"
+    body = m.group(0)
+    assert "SCC_DEFAULT_PORT" in body, (
+        "Exception branch must check p == SCC_DEFAULT_PORT so "
+        "the SCC port isn't dropped when its WD probe errors out")
+    assert '"scc_admin"' in body or "'scc_admin'" in body, (
+        "Exception branch must restore the scc_admin service tag "
+        "(not just skip the delete) so downstream _maybe_build_"
+        "scc_node sees the port and can run the SCC fingerprint")
+
+
+def test_wd_fingerprint_loop_preserves_scc_port_on_non_sap_branch():
+    """The non-SAP-service branch must do the same: when the WD
+    fingerprint says "not WD, not ICM" for 8443, the response
+    probably came from an SCC (not nginx/apache).  Re-tag as
+    scc_admin instead of deleting.
+
+    Match anchor: the comment "Non-SAP service squatting the port"
+    followed shortly by the SCC_DEFAULT_PORT guard + scc_admin
+    re-tag.  The literal del-statement now lives inside an else
+    branch so we can't anchor on it directly."""
+    src = _scanner_src()
+    import re
+    m = re.search(
+        r"Non-SAP service squatting the port.*?(?=\n    if|\n    result\[\"has_sap\"\])",
+        src, re.DOTALL)
+    assert m, "non-SAP-service branch not found"
+    body = m.group(0)
+    assert "SCC_DEFAULT_PORT" in body, (
+        "non-SAP branch must check p == SCC_DEFAULT_PORT")
+    assert '"scc_admin"' in body or "'scc_admin'" in body, (
+        "non-SAP branch must restore scc_admin tag when the failed "
+        "WD fingerprint is on the SCC port")
+    # And the `del result[...][p]` must still exist (wrapped in an
+    # else branch) so genuinely non-SAP ports (nginx etc.) still
+    # get dropped.
+    assert 'del result["open_ports"][p]' in body, (
+        "non-SCC ports squatting WD candidate ports must still be "
+        "dropped from open_ports (else branch missing)")
+
+
+def test_scc_default_port_constant_matches_8443():
+    """Lock the SCC_DEFAULT_PORT constant so a future refactor
+    that changes it doesn't silently break the fingerprint
+    fallback logic above (which hard-codes the comparison to
+    SCC_DEFAULT_PORT but the regression-message references 8443
+    explicitly for operator-readable context)."""
+    import sys, pathlib
+    discovery = (pathlib.Path(__file__).resolve().parent.parent
+                 / "modules" / "discovery")
+    sys.path.insert(0, str(discovery))
+    try:
+        from sapmap_scanner import SCC_DEFAULT_PORT
+    finally:
+        sys.path.remove(str(discovery))
+    assert SCC_DEFAULT_PORT == 8443, (
+        f"SCC_DEFAULT_PORT changed to {SCC_DEFAULT_PORT}; the "
+        f"WD-fingerprint-loop fallback in sapmap_scanner.py "
+        f"specifically guards p == SCC_DEFAULT_PORT - if the "
+        f"constant moves, that guard must too")
