@@ -7835,6 +7835,130 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg("_check_all_cve_31324", "Check All CVE-2025-31324", _run)
         return json.dumps({"status": "started", "systems": len(nodes)})
 
+    @app.route("/api/actions/check_all_cve_6287", method="POST")
+    def actions_check_all_cve_6287():
+        """Probe every Java / double-stack node for CVE-2020-6287 (RECON).
+
+        RECON lives in the AS Java LM Configuration Wizard / CTC
+        ConfigServlet endpoints — Java stack only.  Read-only check;
+        no admin user is created (that's the separate
+        `create_user_java` action).
+        """
+        response.content_type = "application/json"
+        nodes = [n for n in api.state.nodes.values()
+                 if "JAVA" in (n.system_type or "").upper()]
+        if not nodes:
+            return json.dumps({"error": "No Java / double-stack systems on "
+                                         "the map"})
+
+        def _run():
+            for node in nodes:
+                print(f"[*] {node.sid}: check_cve_2020_6287 (RECON) "
+                      f"({node.ip})")
+                try:
+                    sapmap_scanner.check_cve_2020_6287(node)
+                except Exception as e:
+                    print(f"[-] {node.sid}: check_cve_6287 failed: {e}")
+
+        _bg("_check_all_cve_6287", "Check All CVE-2020-6287 (RECON)", _run)
+        return json.dumps({"status": "started", "systems": len(nodes)})
+
+    @app.route("/api/actions/check_all_cve_22536", method="POST")
+    def actions_check_all_cve_22536():
+        """Probe every HTTP-serving SAP node for CVE-2022-22536 (ICMAD).
+
+        The ICM Content-Length smuggling primitive lives in the
+        SAP ICM (used by ABAP web dispatcher, Java, and dedicated
+        Web Dispatcher).  Eligible: any node whose system_type
+        contains ABAP / JAVA / WEB_DISPATCHER, or whose
+        is_web_dispatcher flag is set.
+        """
+        response.content_type = "application/json"
+        nodes = []
+        for n in api.state.nodes.values():
+            st = (n.system_type or "").upper()
+            if ("ABAP" in st or "JAVA" in st
+                    or "WEB_DISPATCHER" in st
+                    or getattr(n, "is_web_dispatcher", False)):
+                nodes.append(n)
+        if not nodes:
+            return json.dumps({"error": "No SAP HTTP-serving systems on "
+                                         "the map (ABAP / Java / Web "
+                                         "Dispatcher)"})
+
+        def _run():
+            for node in nodes:
+                print(f"[*] {node.sid}: check_cve_2022_22536 (ICMAD) "
+                      f"({node.ip})")
+                try:
+                    sapmap_scanner.check_cve_2022_22536(node)
+                except Exception as e:
+                    print(f"[-] {node.sid}: check_cve_22536 failed: {e}")
+
+        _bg("_check_all_cve_22536", "Check All CVE-2022-22536 (ICMAD)", _run)
+        return json.dumps({"status": "started", "systems": len(nodes)})
+
+    @app.route("/api/actions/check_all_router_info", method="POST")
+    def actions_check_all_router_info():
+        """Probe every non-SAProuter node for the SAProuter info-leak
+        primitive (ROUTER_ADM info request returning routtab + client
+        list).  Mirrors the per-node action's gating: skip nodes whose
+        system_type is SAPROUTER itself (covered by direct router
+        scanning) — operator uses this to sweep every SAP node that
+        might have a /H/router/H/.. path configured and unknowingly
+        expose the router's working dir + connected clients.
+        """
+        response.content_type = "application/json"
+        nodes = [n for n in api.state.nodes.values()
+                 if "SAPROUTER" not in (n.system_type or "").upper()]
+        if not nodes:
+            return json.dumps({"error": "No SAP systems on the map "
+                                         "(SAProuter nodes are skipped — "
+                                         "the check probes SAP nodes for "
+                                         "leaked router config)"})
+
+        def _run():
+            from sap_router_info import saprouter_info_request
+            for node in nodes:
+                host = node.ip or node.hostname
+                if not host:
+                    print(f"[-] {node.sid}: No IP/hostname available")
+                    continue
+                # Find SAProuter port (default 3299 if none configured)
+                router_port = 3299
+                for inst in node.instances:
+                    for port, svc in inst.ports.items():
+                        if svc == "saprouter":
+                            router_port = port
+                            break
+                print(f"[*] {node.sid}: check_router_info on "
+                      f"{host}:{router_port}...")
+                try:
+                    result = saprouter_info_request(host, router_port,
+                                                       timeout=10)
+                    node.saprouter_info = result
+                    if result.get("vulnerable"):
+                        print(f"[+] {node.sid}: SAProuter info-leak "
+                              f"VULNERABLE — {result.get('total_clients', 0)} "
+                              f"clients, routtab exposed")
+                        node.has_critical_finding = True
+                        sapmap_findings.emit_finding(
+                            "HIGH", node.sid,
+                            f"SAProuter info-leak succeeded on "
+                            f"{host}:{router_port} — "
+                            f"{result.get('total_clients', 0)} clients, "
+                            f"routtab exposed",
+                            cve="CVE-2022-27668 (similar) / NIINFO leak",
+                        )
+                    else:
+                        print(f"[*] {node.sid}: SAProuter info-leak not "
+                              f"available ({result.get('error', '?')})")
+                except Exception as e:
+                    print(f"[-] {node.sid}: check_router_info failed: {e}")
+
+        _bg("_check_all_router_info", "Check All SAProuter Info Leak", _run)
+        return json.dumps({"status": "started", "systems": len(nodes)})
+
     @app.route("/api/actions/analyze_chains", method="POST")
     def actions_analyze_chains():
         """Discover RFC trust chain escalation paths across the landscape."""

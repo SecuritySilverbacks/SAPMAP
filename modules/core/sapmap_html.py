@@ -838,7 +838,11 @@ body {
   <div class="ctx-item" data-action="map_cleanup_all">&#129529; Cleanup All Users</div>
   <div class="ctx-item" data-action="map_scan_all_vulns" style="color:#f0883e">&#128270; Scan for All Vulnerabilities</div>
   <div class="ctx-item" id="map-ctx-check-all-gw" data-action="map_check_all_gw">&#128272; Check All GW Vulnerabilities</div>
-  <div class="ctx-item" data-action="map_check_all_betrusted">&#128272; Check All 10KBlaze (MS Betrusted)</div>
+  <div class="ctx-item" id="map-ctx-check-all-betrusted" data-action="map_check_all_betrusted">&#128272; Check All 10KBlaze (MS Betrusted)</div>
+  <div class="ctx-item" id="map-ctx-check-all-cve-31324" data-action="map_check_all_cve_31324">&#128272; Check All CVE-2025-31324 (Java VisualComposer)</div>
+  <div class="ctx-item" id="map-ctx-check-all-cve-6287" data-action="map_check_all_cve_6287">&#128272; Check All CVE-2020-6287 (RECON)</div>
+  <div class="ctx-item" id="map-ctx-check-all-cve-22536" data-action="map_check_all_cve_22536">&#128272; Check All CVE-2022-22536 (ICMAD)</div>
+  <div class="ctx-item" id="map-ctx-check-all-router-info" data-action="map_check_all_router_info">&#128272; Check All SAProuter Info Leak</div>
   <div class="ctx-item" data-action="map_analyze_chains">&#128279; Analyze Trust Chains</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="map_fit">&#128208; Fit to Window</div>
@@ -7627,6 +7631,73 @@ async function checkAllBetrusted() {
     await api('POST', 'actions/check_all_betrusted', { attacker_ip: localIp });
   startPolling();
 }
+// Helpers for the new "Check All XX" map-ctx-menu entries.  Each
+// mirrors checkAllGateways' shape: count eligible nodes, confirm
+// with the operator, fire the matching backend endpoint, then start
+// polling for results.
+//
+// Eligibility filter mirrors the per-node menu's gating rule:
+//   * cve_31324 / cve_6287 — Java / double-stack only
+//   * cve_22536           — any ABAP/Java/WD (HTTP-serving)
+//   * router_info         — every non-SAProuter SAP node (the
+//                            check probes whether the node leaks
+//                            its own configured /H/router/H/.. path)
+async function checkAllCve31324() {
+  const nodes = Object.values(mapState.nodes || {});
+  const eligible = nodes.filter(n =>
+    ((n.system_type || '').toUpperCase().indexOf('JAVA') !== -1));
+  if (eligible.length < 1) {
+    alert('No Java / double-stack systems on the map - CVE-2025-31324 only affects AS Java VisualComposer.');
+    return;
+  }
+  if (confirm(`Check CVE-2025-31324 (VisualComposer JSP unauth) on ${eligible.length} Java system(s)?`))
+    await api('POST', 'actions/check_all_cve_31324');
+  startPolling();
+}
+async function checkAllCve6287() {
+  const nodes = Object.values(mapState.nodes || {});
+  const eligible = nodes.filter(n =>
+    ((n.system_type || '').toUpperCase().indexOf('JAVA') !== -1));
+  if (eligible.length < 1) {
+    alert('No Java / double-stack systems on the map - CVE-2020-6287 (RECON) only affects AS Java LM Configuration Wizard.');
+    return;
+  }
+  if (confirm(`Check CVE-2020-6287 (RECON) on ${eligible.length} Java system(s)?\n\n` +
+              `Probes /CTCWebService/CTCWebServiceBean unauth endpoint - read-only check, no admin user is created.`))
+    await api('POST', 'actions/check_all_cve_6287');
+  startPolling();
+}
+async function checkAllCve22536() {
+  const nodes = Object.values(mapState.nodes || {});
+  const eligible = nodes.filter(n => {
+    const st = (n.system_type || '').toUpperCase();
+    return st.indexOf('ABAP') !== -1
+        || st.indexOf('JAVA') !== -1
+        || st.indexOf('WEB_DISPATCHER') !== -1
+        || !!n.is_web_dispatcher;
+  });
+  if (eligible.length < 1) {
+    alert('No SAP HTTP-serving systems on the map - CVE-2022-22536 (ICMAD) affects ABAP / Java / Web Dispatcher.');
+    return;
+  }
+  if (confirm(`Check CVE-2022-22536 (ICMAD HTTP smuggling) on ${eligible.length} system(s)?\n\n` +
+              `Probes for the ICM Content-Length smuggling primitive - passive, no payload sent to internal apps.`))
+    await api('POST', 'actions/check_all_cve_22536');
+  startPolling();
+}
+async function checkAllRouterInfo() {
+  const nodes = Object.values(mapState.nodes || {});
+  const eligible = nodes.filter(n =>
+    ((n.system_type || '').toUpperCase().indexOf('SAPROUTER') === -1));
+  if (eligible.length < 1) {
+    alert('No SAP systems on the map - SAProuter info-leak check probes SAP nodes (not the router itself).');
+    return;
+  }
+  if (confirm(`Check SAProuter Info Leak on ${eligible.length} SAP system(s)?\n\n` +
+              `Probes each node for unauth /sap/admin/public/index.html, niping -t -H, and other info-disclosure endpoints that leak the configured SAProuter path.`))
+    await api('POST', 'actions/check_all_router_info');
+  startPolling();
+}
 async function analyzeChains() {
   const nodeCount = Object.keys(mapState.nodes || {}).length;
   if (nodeCount < 2) { alert('Need at least 2 systems on the map with RFC connections.'); return; }
@@ -8684,9 +8755,50 @@ document.addEventListener('contextmenu', e => {
 
 function showMapCtxMenu(e) {
   const menu = document.getElementById('map-ctx-menu');
-  const nodeCount = Object.keys(mapState.nodes || {}).length;
-  document.getElementById('map-ctx-check-all-gw').style.display =
-    nodeCount >= 2 ? '' : 'none';
+  // Per-vulnerability gating: each "Check All XX" entry only shows
+  // when there's at least one node on the map where the check is
+  // meaningful (matching the per-node menu's gating rules).
+  //
+  // Hiding entries that wouldn't do anything keeps the menu compact
+  // and prevents the operator from triggering no-op scans.
+  const nodes = Object.values(mapState.nodes || {});
+
+  // Has any node with a gateway port (33XX) — needed for GW vuln check.
+  const hasAnyGwPort = nodes.some(n =>
+    (n.instances || []).some(i =>
+      Object.entries(i.ports || {}).some(([p, s]) =>
+        s === 'gateway' || (Number(p) >= 3300 && Number(p) <= 3399))));
+  // Has any node with a known MS internal port (39XX) — needed for
+  // 10KBlaze / MS betrusted (CVE-2020-6207) check.  ms_port is
+  // populated by the scanner when 39XX answers.
+  const hasAnyMsPort = nodes.some(n => n && n.ms_port > 0);
+  // Has any Java / double-stack node — needed for CVE-2025-31324
+  // (VisualComposer JSP unauth) and CVE-2020-6287 (RECON).
+  const hasAnyJava = nodes.some(n =>
+    ((n.system_type || '').toUpperCase().indexOf('JAVA') !== -1));
+  // Has any ABAP/Java/WD node — needed for CVE-2022-22536 (ICMAD).
+  // The check probes HTTP ACL bypass via Content-Length smuggling,
+  // applicable to any SAP HTTP-serving stack.
+  const hasAnyHttp = nodes.some(n => {
+    const st = (n.system_type || '').toUpperCase();
+    return st.indexOf('ABAP') !== -1
+        || st.indexOf('JAVA') !== -1
+        || st.indexOf('WEB_DISPATCHER') !== -1
+        || !!n.is_web_dispatcher;
+  });
+  // Has any non-SAProuter SAP node — needed for SAProuter info leak
+  // check (we probe whether a SAP node leaks the configured router).
+  // The check doesn't apply to the SAProuter itself.
+  const hasAnyNonSaprouter = nodes.some(n =>
+    ((n.system_type || '').toUpperCase().indexOf('SAPROUTER') === -1));
+
+  document.getElementById('map-ctx-check-all-gw').style.display          = hasAnyGwPort       ? '' : 'none';
+  document.getElementById('map-ctx-check-all-betrusted').style.display   = hasAnyMsPort       ? '' : 'none';
+  document.getElementById('map-ctx-check-all-cve-31324').style.display   = hasAnyJava         ? '' : 'none';
+  document.getElementById('map-ctx-check-all-cve-6287').style.display    = hasAnyJava         ? '' : 'none';
+  document.getElementById('map-ctx-check-all-cve-22536').style.display   = hasAnyHttp         ? '' : 'none';
+  document.getElementById('map-ctx-check-all-router-info').style.display = hasAnyNonSaprouter ? '' : 'none';
+
   menu.classList.add('visible');
   let mx = e.clientX, my = e.clientY;
   const rect = menu.getBoundingClientRect();
@@ -8709,6 +8821,10 @@ document.getElementById('map-ctx-menu').addEventListener('click', function(e) {
     case 'map_scan_all_vulns': scanAllVulns(); break;
     case 'map_check_all_gw': checkAllGateways(); break;
     case 'map_check_all_betrusted': checkAllBetrusted(); break;
+    case 'map_check_all_cve_31324': checkAllCve31324(); break;
+    case 'map_check_all_cve_6287': checkAllCve6287(); break;
+    case 'map_check_all_cve_22536': checkAllCve22536(); break;
+    case 'map_check_all_router_info': checkAllRouterInfo(); break;
     case 'map_analyze_chains': analyzeChains(); break;
     case 'map_fit': fitMap(); break;
     case 'map_reset_layout': resetLayout(); break;
