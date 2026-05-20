@@ -8768,10 +8768,30 @@ function showMapCtxMenu(e) {
     (n.instances || []).some(i =>
       Object.entries(i.ports || {}).some(([p, s]) =>
         s === 'gateway' || (Number(p) >= 3300 && Number(p) <= 3399))));
-  // Has any node with a known MS internal port (39XX) — needed for
-  // 10KBlaze / MS betrusted (CVE-2020-6207) check.  ms_port is
-  // populated by the scanner when 39XX answers.
-  const hasAnyMsPort = nodes.some(n => n && n.ms_port > 0);
+  // Has any node with a message-server internal port (39XX) — needed
+  // for 10KBlaze / MS betrusted (CVE-2020-6207) check.
+  //
+  // CRITICAL: gate on the instance ports DICT, not on `n.ms_port`.
+  // `n.ms_port` only gets populated AFTER the MS betrusted check has
+  // ALREADY RUN successfully against the node - so gating on it
+  // creates a chicken-and-egg trap: the menu hides the check that
+  // would populate the field that the menu uses to decide whether
+  // to show the check.
+  //
+  // Operator-reported regression: S4H had port 3901 in
+  // n.instances[0].ports (visible in the node-box and discovered by
+  // standard scan), but "Check All 10KBlaze" was hidden because
+  // `n.ms_port` was 0 (operator hadn't run check_ms_betrusted yet).
+  //
+  // Mirror the GW gating pattern: walk the instance.ports dict for
+  // ports 3900-3999 (or the explicit "ms_internal" service tag).
+  // Either signal means "this node has the kind of port the
+  // 10KBlaze check would probe", which is what the operator needs
+  // to know before running the sweep.
+  const hasAnyMsPort = nodes.some(n =>
+    (n.instances || []).some(i =>
+      Object.entries(i.ports || {}).some(([p, s]) =>
+        s === 'ms_internal' || (Number(p) >= 3900 && Number(p) <= 3999))));
   // Has any Java / double-stack node — needed for CVE-2025-31324
   // (VisualComposer JSP unauth) and CVE-2020-6287 (RECON).
   const hasAnyJava = nodes.some(n =>
