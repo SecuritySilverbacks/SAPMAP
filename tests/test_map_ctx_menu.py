@@ -70,7 +70,7 @@ def test_check_all_entry_present_with_stable_id(entry_id, entry_label_fragment):
     ("map-ctx-check-all-cve-31324",   "hasAnyJava"),
     ("map-ctx-check-all-cve-6287",    "hasAnyJava"),
     ("map-ctx-check-all-cve-22536",   "hasAnyHttp"),
-    ("map-ctx-check-all-router-info", "hasAnyNonSaprouter"),
+    ("map-ctx-check-all-router-info", "hasAnySaprouter"),
 ])
 def test_entry_gating_uses_correct_signal(entry_id, gate_var):
     """showMapCtxMenu must compute each per-vuln eligibility signal
@@ -162,6 +162,44 @@ def test_js_function_calls_correct_backend_endpoint(js_fn, endpoint):
 # ===========================================================================
 # Regression: 10KBlaze gating reads port list, NOT just ms_port
 # ===========================================================================
+
+def test_router_info_gating_targets_saprouter_nodes_not_sap_nodes():
+    """Critical attribution fix: the SAProuter Info Leak sweep
+    must iterate SAProuter nodes (which actually listen on the
+    router port + can respond to ROUTER_ADM info requests), NOT
+    non-SAProuter SAP nodes.
+
+    Operator-reported regression: on a landscape where multiple
+    SAP systems share a host with the SAProuter (S4D, S4H, RD1
+    all on 192.168.2.209), the previous sweep iterated S4D and
+    S4H, probed each on :3299, HIT the actual SAProuter (RD1)
+    every time, and attributed the HIGH finding to S4D / S4H -
+    coloring them red while RD1 (the real culprit) stayed green.
+
+    The gating signal name (hasAnySaprouter) AND the eligibility
+    test (system_type SAPROUTER or 'saprouter'-tagged port) must
+    both be SAProuter-positive, not SAP-positive."""
+    import sapmap_html
+    html = sapmap_html.get_html()
+    # The signal name itself must be the positive form so future
+    # operators reading the code don't double-take.
+    assert "hasAnySaprouter" in html, (
+        "hasAnySaprouter gating signal not found - the SAProuter "
+        "Info Leak sweep would iterate the wrong nodes")
+    assert "hasAnyNonSaprouter" not in html, (
+        "Old hasAnyNonSaprouter signal still present - this was "
+        "the regression that mis-attributed findings on shared-"
+        "host landscapes")
+    # The gating expression must look for SAProuter membership
+    # positively, not negatively.
+    import re
+    pat = re.compile(
+        r"const\s+hasAnySaprouter\s*=\s*nodes\.some\(",
+        re.DOTALL)
+    assert pat.search(html), (
+        "hasAnySaprouter must be defined via nodes.some(...) "
+        "to check at least one SAProuter is on the map")
+
 
 def test_betrusted_gating_reads_instance_ports_not_just_ms_port():
     """Critical chicken-and-egg fix: the 10KBlaze entry's gating
