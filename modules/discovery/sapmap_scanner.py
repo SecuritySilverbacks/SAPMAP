@@ -1133,6 +1133,12 @@ def check_ms_betrusted(node: SAPNode, timeout: float = 8.0) -> bool:
 
     found_any = False
     for inst_nr in sorted(candidate_instances):
+        try:
+            import sapmap_stop
+            if sapmap_stop.is_stop_requested():
+                return found_any
+        except ImportError:
+            pass
         result = sapmap_check_ms(host, inst_nr, timeout)
         ms_p = result["port"]
 
@@ -1251,6 +1257,12 @@ def check_cve_2025_31324(node: SAPNode, timeout: float = 10.0) -> bool:
             candidates.append((base + 1, True))
 
     for port, use_https in candidates:
+        try:
+            import sapmap_stop
+            if sapmap_stop.is_stop_requested():
+                return False
+        except ImportError:
+            pass
         if not _scan_port(host, port, timeout=2.0):
             continue
         logger.info(f"{node.sid}: probing {host}:{port} "
@@ -1344,6 +1356,12 @@ def check_cve_2020_6287(node: SAPNode, timeout: float = 10.0) -> bool:
             candidates.append((base + 1, True))
 
     for port, use_https in candidates:
+        try:
+            import sapmap_stop
+            if sapmap_stop.is_stop_requested():
+                return False
+        except ImportError:
+            pass
         if not _scan_port(host, port, timeout=2.0):
             continue
         r = _probe(host, port, use_https=use_https, timeout=timeout)
