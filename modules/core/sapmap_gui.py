@@ -7759,6 +7759,57 @@ def create_app(api: SAPMAPApi) -> Bottle:
         return json.dumps({"status": "ok"})
 
     # -- Global actions --
+
+    # ── AutoPwn ──────────────────────────────────────────────────
+    @app.route("/api/actions/autopwn", method="POST")
+    def actions_autopwn():
+        """Launch the full AutoPwn convergence loop.
+
+        Accepts JSON body with optional config overrides:
+          max_waves:        int   (default 5)
+          include_lpe:      bool  (default false)
+          include_btp:      bool  (default false)
+          scan_gw:          bool  (default true)
+          scan_10kblaze:    bool  (default true)
+          scan_cve_31324:   bool  (default true)
+          scan_recon:       bool  (default true)
+          include_icmad_detection:       bool (default true)
+          include_router_info_detection: bool (default true)
+        """
+        response.content_type = "application/json"
+        nodes = list(api.state.nodes.values())
+        if not nodes:
+            return json.dumps({"error": "No systems on the map"})
+
+        data = request.json or {}
+        from sapmap_autopwn import AutoPwnConfig, autopwn_run
+        cfg = AutoPwnConfig(
+            max_waves=int(data.get("max_waves", 5)),
+            include_lpe=bool(data.get("include_lpe", False)),
+            include_btp=bool(data.get("include_btp", False)),
+            scan_gw=bool(data.get("scan_gw", True)),
+            scan_10kblaze=bool(data.get("scan_10kblaze", True)),
+            scan_cve_31324=bool(data.get("scan_cve_31324", True)),
+            scan_recon=bool(data.get("scan_recon", True)),
+            include_icmad_detection=bool(
+                data.get("include_icmad_detection", True)),
+            include_router_info_detection=bool(
+                data.get("include_router_info_detection", True)),
+        )
+
+        def _run():
+            autopwn_run(api.state, cfg)
+
+        _bg("_autopwn", "AutoPwn", _run)
+        return json.dumps({"status": "started", "systems": len(nodes)})
+
+    @app.route("/api/actions/autopwn/status")
+    def actions_autopwn_status():
+        """Poll endpoint for AutoPwn progress."""
+        response.content_type = "application/json"
+        from sapmap_autopwn import get_status
+        return json.dumps(get_status())
+
     @app.route("/api/actions/propagate_all", method="POST")
     def actions_propagate_all():
         response.content_type = "application/json"
