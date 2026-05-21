@@ -481,7 +481,11 @@ def test_phase2_gw_calls_track_and_enrich():
     Without this, the exploit succeeds silently but the node stays
     un-pwned on the map (operator-reported bug)."""
     src = _autopwn_src()
-    m = re.search(r"Priority 1.*?Priority 2", src, re.DOTALL)
+    # Constrain search to phase2_exploit body only (avoid phase1 comments)
+    m2 = re.search(r"def phase2_exploit\(.*?\ndef ", src, re.DOTALL)
+    assert m2, "phase2_exploit not found"
+    p2body = m2.group(0)
+    m = re.search(r"Priority 1.*?Priority 2", p2body, re.DOTALL)
     assert m, "Priority 1 (GW) block not found in phase2"
     body = m.group(0)
     assert "track_created_user" in body, (
@@ -575,3 +579,132 @@ def test_phase2_updates_users_stat():
     body = m.group(0)
     assert "users_created" in body, (
         "phase2_exploit must update the 'users_created' stat")
+
+
+# ===========================================================================
+# Phase 1 scan order matches exploit priority + short-circuit
+# ===========================================================================
+
+def test_scan_order_matches_exploit_priority():
+    """Phase 1 scans must be ordered by exploit priority:
+    GW (P1) -> CVE-31324 (P2) -> RECON (P3) -> 10KBlaze (P4).
+
+    The old order had 10KBlaze at position 2 — wasting time on Java
+    systems by scanning for MS betrusted before the higher-priority
+    CVE-2025-31324 and RECON checks."""
+    src = _autopwn_src()
+    m = re.search(r"def phase1_scan\(.*?\ndef ", src, re.DOTALL)
+    assert m, "phase1_scan not found"
+    body = m.group(0)
+
+    # The code marks each scan with a "Priority N:" comment
+    p1 = body.find("Priority 1")
+    p2 = body.find("Priority 2")
+    p3 = body.find("Priority 3")
+    p4 = body.find("Priority 4")
+
+    assert p1 > 0, "Priority 1 (GW) marker not found in phase1"
+    assert p2 > 0, "Priority 2 (CVE-31324) marker not found in phase1"
+    assert p3 > 0, "Priority 3 (RECON) marker not found in phase1"
+    assert p4 > 0, "Priority 4 (10KBlaze) marker not found in phase1"
+
+    assert p1 < p2 < p3 < p4, (
+        "Scan order must match exploit priority: "
+        "GW (1) -> CVE-31324 (2) -> RECON (3) -> 10KBlaze (4)")
+
+
+def test_scan_short_circuits_on_found_vuln():
+    """Phase 1 must short-circuit per node: once a vulnerability is found
+    at priority N, skip all scans at priority > N on that node.
+
+    Without this, finding CVE-31324 on a Java system still wastes time
+    scanning for 10KBlaze (operator-reported bug on SJJ)."""
+    src = _autopwn_src()
+    m = re.search(r"def phase1_scan\(.*?\ndef ", src, re.DOTALL)
+    assert m, "phase1_scan not found"
+    body = m.group(0)
+
+    # Skip the docstring/comment block — find the actual code markers
+    # which use "# Priority N: <name>" (not "#   Priority N:")
+    # The code markers start with "# Priority N:" at indent level 8
+    code_markers = [(m.start(), m.group(0))
+                    for m in re.finditer(r"# Priority (\d)", body)]
+    # Must have at least 4 markers (P1-P4 in comments + P1-P4 in code)
+    # The code markers have 'if' statements nearby; filter by context
+    p2_code = body.find("not node_had_vuln and config.scan_cve_31324")
+    p3_code = body.find("not node_had_vuln and config.scan_recon")
+    p4_code = body.find("not node_had_vuln and config.scan_10kblaze")
+
+    assert p2_code > 0, (
+        "Priority 2 (CVE-31324) scan must be gated by "
+        "'not node_had_vuln and config.scan_cve_31324'")
+    assert p3_code > 0, (
+        "Priority 3 (RECON) scan must be gated by "
+        "'not node_had_vuln and config.scan_recon'")
+    assert p4_code > 0, (
+        "Priority 4 (10KBlaze) scan must be gated by "
+        "'not node_had_vuln and config.scan_10kblaze'")
+
+
+# ===========================================================================
+# Java exploit paths: post-exploit enrichment + Java SecStore
+# ===========================================================================
+
+def test_cve31324_calls_post_exploit_enrichment():
+    """CVE-2025-31324 exploit path must call _post_exploit_enrichment
+    with proven_type='JAVA' so the Finding is added and system_type
+    is confirmed."""
+    src = _autopwn_src()
+    # Constrain to phase2_exploit body to avoid phase1 comment matches
+    m2 = re.search(r"def phase2_exploit\(.*?\ndef ", src, re.DOTALL)
+    assert m2, "phase2_exploit not found"
+    p2body = m2.group(0)
+    m = re.search(r"Priority 2.*?Priority 3", p2body, re.DOTALL)
+    assert m, "Priority 2 (CVE-31324) block not found in phase2"
+    body = m.group(0)
+    assert "_post_exploit_enrichment" in body, (
+        "CVE-31324 path must call _post_exploit_enrichment")
+    assert 'proven_type="JAVA"' in body, (
+        "CVE-31324 path must pass proven_type='JAVA'")
+
+
+def test_recon_calls_post_exploit_enrichment():
+    """RECON exploit path must call _post_exploit_enrichment with
+    proven_type='JAVA'."""
+    src = _autopwn_src()
+    # Constrain to phase2_exploit body to avoid phase1 comment matches
+    m2 = re.search(r"def phase2_exploit\(.*?\ndef ", src, re.DOTALL)
+    assert m2, "phase2_exploit not found"
+    p2body = m2.group(0)
+    m = re.search(r"Priority 3.*?Priority 4", p2body, re.DOTALL)
+    assert m, "Priority 3 (RECON) block not found in phase2"
+    body = m.group(0)
+    assert "_post_exploit_enrichment" in body, (
+        "RECON path must call _post_exploit_enrichment")
+    assert 'proven_type="JAVA"' in body, (
+        "RECON path must pass proven_type='JAVA'")
+
+
+def test_phase3_java_secstore_extraction():
+    """Phase 3 must extract the Java Secure Store on Java/dual-stack
+    nodes — decrypt on-server, import credentials, auto-plot downstream
+    ABAP systems.  This was missing (only Java destinations were read)."""
+    src = _autopwn_src()
+    m = re.search(r"def phase3_enrich.*?(?=\ndef )", src, re.DOTALL)
+    assert m, "phase3_enrich function not found"
+    body = m.group(0)
+    assert "extract_java_secstore" in body, (
+        "phase3_enrich must call extract_java_secstore for Java nodes")
+    assert "Java Secure Store" in body, (
+        "phase3_enrich must log Java Secure Store extraction")
+
+
+def test_phase3_java_destinations():
+    """Phase 3 must read Java JCo/HTTP destinations from J2EE_CONFIGENTRY
+    on Java nodes."""
+    src = _autopwn_src()
+    m = re.search(r"def phase3_enrich.*?(?=\ndef )", src, re.DOTALL)
+    assert m, "phase3_enrich function not found"
+    body = m.group(0)
+    assert "read_java_destinations" in body, (
+        "phase3_enrich must call read_java_destinations for Java nodes")
