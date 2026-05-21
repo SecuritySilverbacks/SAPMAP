@@ -155,6 +155,50 @@ body {
 .cl-dim { color: #484f58; }
 .cl-crit { color: #f85149; font-weight: bold; }
 
+/* === AutoPwn === */
+.autopwn-phases { display: flex; align-items: center; gap: 4px; margin: 12px 0; }
+.autopwn-phase {
+  display: flex; flex-direction: column; align-items: center;
+  padding: 6px 10px; border-radius: 6px; border: 1px solid #30363d;
+  background: #161b22; min-width: 64px; font-size: 10px; color: #8b949e;
+  transition: all .3s;
+}
+.autopwn-phase.active { border-color: #58a6ff; color: #58a6ff; background: #0d1926; }
+.autopwn-phase.done { border-color: #3fb950; color: #3fb950; }
+.autopwn-phase.skipped { opacity: .35; }
+.autopwn-phase-icon { font-size: 16px; margin-bottom: 2px; }
+.autopwn-phase-label { font-weight: 600; white-space: nowrap; }
+.autopwn-phase-sub { font-size: 9px; color: #484f58; margin-top: 1px; }
+.autopwn-arrow { color: #30363d; font-size: 14px; }
+.autopwn-stats {
+  display: flex; gap: 12px; margin: 10px 0; padding: 8px 12px;
+  background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+}
+.autopwn-stat { text-align: center; flex: 1; }
+.autopwn-stat-val { font-size: 18px; font-weight: 700; color: #e6edf3; }
+.autopwn-stat-label { font-size: 9px; color: #8b949e; text-transform: uppercase; }
+.autopwn-bar-track {
+  height: 6px; background: #21262d; border-radius: 3px; margin: 8px 0; overflow: hidden;
+}
+.autopwn-bar-fill {
+  height: 100%; background: linear-gradient(90deg, #f85149, #f0883e); border-radius: 3px;
+  transition: width .5s ease;
+}
+.autopwn-log {
+  background: #010409; border: 1px solid #30363d; border-radius: 6px;
+  padding: 8px; font-family: 'SFMono-Regular',Consolas,monospace;
+  font-size: 11px; line-height: 1.6; overflow-y: auto; max-height: 320px;
+  user-select: text; -webkit-user-select: text; cursor: text;
+  scrollbar-width: thin; scrollbar-color: #484f58 #010409;
+}
+.autopwn-log::-webkit-scrollbar { width: 6px; }
+.autopwn-log::-webkit-scrollbar-track { background: #010409; }
+.autopwn-log::-webkit-scrollbar-thumb { background: #484f58; border-radius: 3px; }
+.autopwn-log .wave-hdr { color: #f0883e; font-weight: bold; margin: 6px 0 2px; }
+.autopwn-log .phase-hdr { color: #58a6ff; font-weight: 600; }
+.autopwn-cb { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #c9d1d9; margin: 3px 0; cursor: pointer; }
+.autopwn-cb input[type=checkbox] { accent-color: #f85149; }
+
 /* === Status Bar === */
 .status-bar {
   display: flex; align-items: center; gap: 16px;
@@ -533,6 +577,7 @@ body {
   <div class="menu-item">Actions
     <div class="menu-dropdown">
       <div class="dd-item" onclick="scanAllVulns()" style="color:#f0883e">&#128270; Scan for All Vulnerabilities</div>
+      <div class="dd-item" onclick="showAutoPwnModal()" style="color:#f85149;font-weight:bold">&#9889; AutoPwn</div>
       <div class="dd-item" onclick="propagateAll()">&#128640; Auto-Propagate All</div>
       <div class="dd-item" onclick="testAllRFCs()">&#129514; Test All RFC Destinations</div>
       <div class="dd-item" onclick="cleanupAll()">&#129529; Cleanup All Users</div>
@@ -834,6 +879,7 @@ body {
 <div class="ctx-menu" id="map-ctx-menu">
   <div class="ctx-item" data-action="map_add_system">&#10133; Add System Manually</div>
   <div class="ctx-sep"></div>
+  <div class="ctx-item" data-action="map_autopwn" style="color:#f85149;font-weight:bold">&#9889; AutoPwn</div>
   <div class="ctx-item" data-action="map_propagate_all">&#128640; Auto-Propagate All</div>
   <div class="ctx-item" data-action="map_cleanup_all">&#129529; Cleanup All Users</div>
   <div class="ctx-item" data-action="map_scan_all_vulns" style="color:#f0883e">&#128270; Scan for All Vulnerabilities</div>
@@ -1569,6 +1615,143 @@ body {
     </div>
     </div>
     <div class="shell-resize-handle" id="shell-resize-handle"></div>
+  </div>
+</div>
+
+<!-- AutoPwn Config Modal -->
+<div class="modal-overlay" id="autopwn-config-modal">
+  <div class="modal" style="max-width:520px;width:95vw">
+    <h3 style="color:#f85149">&#9889; AutoPwn — Full Landscape Exploitation</h3>
+    <div style="font-size:12px;color:#c9d1d9;margin-bottom:12px">
+      Automatically scan, exploit, and propagate across the entire SAP landscape
+      until no further progress is possible.
+    </div>
+    <div style="font-size:11px;color:#8b949e;margin-bottom:6px;font-weight:600">
+      Vulnerability Checks (exploitable):
+    </div>
+    <label class="autopwn-cb"><input type="checkbox" id="apwn-scan-gw" checked> Gateway SAPXPG</label>
+    <label class="autopwn-cb"><input type="checkbox" id="apwn-scan-10k" checked> 10KBlaze (CVE-2020-6207)</label>
+    <label class="autopwn-cb"><input type="checkbox" id="apwn-scan-31324" checked> CVE-2025-31324 (VisualComposer RCE)</label>
+    <label class="autopwn-cb"><input type="checkbox" id="apwn-scan-recon" checked> CVE-2020-6287 (RECON)</label>
+
+    <div style="font-size:11px;color:#8b949e;margin:10px 0 6px;font-weight:600">
+      Post-run detection (non-exploitable, reported only):
+    </div>
+    <label class="autopwn-cb"><input type="checkbox" id="apwn-det-icmad" checked> CVE-2022-22536 (ICMAD)</label>
+    <label class="autopwn-cb"><input type="checkbox" id="apwn-det-router" checked> SAProuter Info Leak</label>
+
+    <div style="font-size:11px;color:#8b949e;margin:10px 0 6px;font-weight:600">
+      Optional phases:
+    </div>
+    <label class="autopwn-cb"><input type="checkbox" id="apwn-lpe"> OS Privilege Escalation (LPE)</label>
+    <label class="autopwn-cb"><input type="checkbox" id="apwn-btp"> BTP / Cloud lateral movement</label>
+
+    <div class="form-row" style="margin-top:12px">
+      <label>Max waves</label>
+      <select id="apwn-max-waves" style="width:80px">
+        <option value="3">3</option>
+        <option value="5" selected>5</option>
+        <option value="10">10</option>
+        <option value="20">20</option>
+      </select>
+    </div>
+
+    <div style="margin-top:12px;padding:8px;background:#1a1208;border:1px solid #5a4a20;border-radius:6px;font-size:11px;color:#d29922">
+      <strong>Warning:</strong> This creates SAPMAP00 users with SAP_ALL on every
+      exploitable system. ICMAD + SAProuter Info Leak are detection-only
+      (no accounts created, no exploitation). Press STOP at any time to halt.
+    </div>
+
+    <div class="form-actions">
+      <button class="btn" onclick="closeModal('autopwn-config-modal')">Cancel</button>
+      <button class="btn btn-primary" onclick="launchAutoPwn()" style="background:#f85149;border-color:#f85149">&#9889; Start AutoPwn</button>
+    </div>
+  </div>
+</div>
+
+<!-- AutoPwn Progress Modal -->
+<div class="modal-overlay" id="autopwn-progress-modal">
+  <div class="modal" style="max-width:680px;width:95vw;max-height:85vh">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+      <h3 style="color:#f85149;margin:0">&#9889; AutoPwn Running</h3>
+      <button class="btn btn-danger" onclick="stopAutoPwn()" id="apwn-stop-btn" style="font-size:11px;padding:3px 12px">&#9724; STOP</button>
+    </div>
+    <div id="apwn-wave-label" style="font-size:12px;color:#e6edf3;font-weight:600;margin-bottom:4px">Wave 0 / 5</div>
+
+    <!-- Phase tracker -->
+    <div class="autopwn-phases" id="apwn-phases">
+      <div class="autopwn-phase" id="apwn-ph-scan">
+        <span class="autopwn-phase-icon">&#128270;</span>
+        <span class="autopwn-phase-label">SCAN</span>
+        <span class="autopwn-phase-sub" id="apwn-ph-scan-sub"></span>
+      </div>
+      <span class="autopwn-arrow">&#9654;</span>
+      <div class="autopwn-phase" id="apwn-ph-exploit">
+        <span class="autopwn-phase-icon">&#128163;</span>
+        <span class="autopwn-phase-label">EXPLOIT</span>
+        <span class="autopwn-phase-sub" id="apwn-ph-exploit-sub"></span>
+      </div>
+      <span class="autopwn-arrow">&#9654;</span>
+      <div class="autopwn-phase" id="apwn-ph-enrich">
+        <span class="autopwn-phase-icon">&#128273;</span>
+        <span class="autopwn-phase-label">ENRICH</span>
+        <span class="autopwn-phase-sub" id="apwn-ph-enrich-sub"></span>
+      </div>
+      <span class="autopwn-arrow">&#9654;</span>
+      <div class="autopwn-phase" id="apwn-ph-propagate">
+        <span class="autopwn-phase-icon">&#128640;</span>
+        <span class="autopwn-phase-label">SPREAD</span>
+        <span class="autopwn-phase-sub" id="apwn-ph-propagate-sub"></span>
+      </div>
+      <span class="autopwn-arrow">&#9654;</span>
+      <div class="autopwn-phase" id="apwn-ph-btp">
+        <span class="autopwn-phase-icon">&#9729;</span>
+        <span class="autopwn-phase-label">BTP</span>
+        <span class="autopwn-phase-sub" id="apwn-ph-btp-sub"></span>
+      </div>
+      <span class="autopwn-arrow">&#9654;</span>
+      <div class="autopwn-phase" id="apwn-ph-lpe">
+        <span class="autopwn-phase-icon">&#9875;</span>
+        <span class="autopwn-phase-label">LPE</span>
+        <span class="autopwn-phase-sub" id="apwn-ph-lpe-sub"></span>
+      </div>
+    </div>
+
+    <!-- Stats tiles -->
+    <div class="autopwn-stats">
+      <div class="autopwn-stat">
+        <div class="autopwn-stat-val" id="apwn-st-scanned">0</div>
+        <div class="autopwn-stat-label">Scanned</div>
+      </div>
+      <div class="autopwn-stat">
+        <div class="autopwn-stat-val" id="apwn-st-vulnerable" style="color:#d29922">0</div>
+        <div class="autopwn-stat-label">Vulnerable</div>
+      </div>
+      <div class="autopwn-stat">
+        <div class="autopwn-stat-val" id="apwn-st-pwned" style="color:#f85149">0</div>
+        <div class="autopwn-stat-label">Pwned</div>
+      </div>
+      <div class="autopwn-stat">
+        <div class="autopwn-stat-val" id="apwn-st-users" style="color:#3fb950">0</div>
+        <div class="autopwn-stat-label">Users</div>
+      </div>
+    </div>
+
+    <!-- Progress bar -->
+    <div style="display:flex;align-items:center;gap:8px">
+      <div class="autopwn-bar-track" style="flex:1">
+        <div class="autopwn-bar-fill" id="apwn-bar" style="width:0%"></div>
+      </div>
+      <span id="apwn-pct" style="font-size:11px;color:#8b949e;min-width:36px;text-align:right">0%</span>
+    </div>
+
+    <!-- Scrollable log -->
+    <div class="autopwn-log" id="apwn-log"></div>
+
+    <!-- Close button (visible when finished) -->
+    <div class="form-actions" id="apwn-done-actions" style="display:none;margin-top:8px">
+      <button class="btn btn-primary" onclick="closeModal('autopwn-progress-modal')">Close</button>
+    </div>
   </div>
 </div>
 
@@ -7710,6 +7893,167 @@ async function checkAllRouterInfo() {
     await api('POST', 'actions/check_all_router_info');
   startPolling();
 }
+// =========================================================================
+// AutoPwn — config modal, launch, progress polling, phase tracker
+// =========================================================================
+let _apwnPollTimer = null;
+
+function showAutoPwnModal() {
+  const nodeCount = Object.keys(mapState.nodes || {}).length;
+  if (nodeCount < 1) { alert('No systems on the map.'); return; }
+  document.getElementById('autopwn-config-modal').classList.add('visible');
+}
+
+async function launchAutoPwn() {
+  closeModal('autopwn-config-modal');
+
+  const cfg = {
+    max_waves:   parseInt(document.getElementById('apwn-max-waves').value, 10),
+    scan_gw:     document.getElementById('apwn-scan-gw').checked,
+    scan_10kblaze: document.getElementById('apwn-scan-10k').checked,
+    scan_cve_31324: document.getElementById('apwn-scan-31324').checked,
+    scan_recon:  document.getElementById('apwn-scan-recon').checked,
+    include_lpe: document.getElementById('apwn-lpe').checked,
+    include_btp: document.getElementById('apwn-btp').checked,
+    include_icmad_detection: document.getElementById('apwn-det-icmad').checked,
+    include_router_info_detection: document.getElementById('apwn-det-router').checked,
+  };
+
+  // Reset progress UI
+  document.getElementById('apwn-log').innerHTML = '';
+  document.getElementById('apwn-bar').style.width = '0%';
+  document.getElementById('apwn-pct').textContent = '0%';
+  document.getElementById('apwn-stop-btn').style.display = '';
+  document.getElementById('apwn-done-actions').style.display = 'none';
+  document.getElementById('apwn-wave-label').textContent = 'Starting...';
+  ['scan','exploit','enrich','propagate','btp','lpe'].forEach(p => {
+    const el = document.getElementById('apwn-ph-' + p);
+    el.className = 'autopwn-phase';
+    el.querySelector('.autopwn-phase-sub').textContent = '';
+  });
+  // Mark optional phases as skipped if not selected
+  if (!cfg.include_btp) document.getElementById('apwn-ph-btp').classList.add('skipped');
+  if (!cfg.include_lpe) document.getElementById('apwn-ph-lpe').classList.add('skipped');
+  ['scanned','vulnerable','pwned','users'].forEach(k =>
+    document.getElementById('apwn-st-' + k).textContent = '0');
+
+  // Show progress modal
+  document.getElementById('autopwn-progress-modal').classList.add('visible');
+
+  // Fire the backend
+  await api('POST', 'actions/autopwn', cfg);
+  startPolling();
+
+  // Start dedicated AutoPwn status polling
+  _apwnLastLogCursor = 0;
+  _apwnPollAutoPwnStatus();
+}
+
+let _apwnLastLogCursor = 0;
+
+async function _apwnPollAutoPwnStatus() {
+  try {
+    const resp = await fetch('/api/actions/autopwn/status');
+    const st = await resp.json();
+
+    // Wave label
+    if (st.running) {
+      document.getElementById('apwn-wave-label').textContent =
+        `Wave ${st.wave} / ${st.max_waves}`;
+    }
+
+    // Phase tracker
+    const phaseOrder = ['scan','exploit','enrich','propagate','btp','lpe','detect','done'];
+    const currentIdx = phaseOrder.indexOf(st.phase);
+    const phaseMap = {scan:'scan', exploit:'exploit', enrich:'enrich',
+                      propagate:'propagate', btp:'btp', lpe:'lpe'};
+    for (const [key, elId] of Object.entries(phaseMap)) {
+      const el = document.getElementById('apwn-ph-' + elId);
+      if (!el) continue;
+      const pIdx = phaseOrder.indexOf(key);
+      if (el.classList.contains('skipped')) continue;
+      el.classList.remove('active', 'done');
+      if (pIdx < currentIdx) el.classList.add('done');
+      else if (pIdx === currentIdx) el.classList.add('active');
+    }
+
+    // Phase sub-progress
+    if (st.phase_progress && st.phase_progress[1] > 0) {
+      const subEl = document.getElementById('apwn-ph-' + (phaseMap[st.phase] || '') + '-sub');
+      if (subEl) subEl.textContent = `${st.phase_progress[0]}/${st.phase_progress[1]}`;
+    }
+
+    // Stats
+    const s = st.stats || {};
+    document.getElementById('apwn-st-scanned').textContent = s.scanned || 0;
+    document.getElementById('apwn-st-vulnerable').textContent = s.vulnerable || 0;
+    document.getElementById('apwn-st-pwned').textContent = s.pwned || 0;
+    document.getElementById('apwn-st-users').textContent = s.users_created || 0;
+
+    // Progress bar (pwned / total)
+    const total = s.total || 1;
+    const pwned = s.pwned || 0;
+    const pct = Math.min(100, Math.round(100 * pwned / total));
+    document.getElementById('apwn-bar').style.width = pct + '%';
+    document.getElementById('apwn-pct').textContent = pct + '%';
+
+    // Finished?
+    if (st.finished || !st.running) {
+      document.getElementById('apwn-wave-label').textContent =
+        st.error ? 'AutoPwn Error' : 'AutoPwn Complete';
+      document.getElementById('apwn-stop-btn').style.display = 'none';
+      document.getElementById('apwn-done-actions').style.display = 'flex';
+      // Mark all non-skipped phases as done
+      for (const elId of Object.values(phaseMap)) {
+        const el = document.getElementById('apwn-ph-' + elId);
+        if (el && !el.classList.contains('skipped')) {
+          el.classList.remove('active');
+          el.classList.add('done');
+        }
+      }
+      return; // stop polling
+    }
+  } catch (e) {
+    // ignore fetch errors, retry on next tick
+  }
+
+  // Also pull console lines into the log pane
+  try {
+    const cr = await fetch('/api/console?cursor=' + _apwnLastLogCursor);
+    const cdata = await cr.json();
+    if (cdata.lines && cdata.lines.length > 0) {
+      const logEl = document.getElementById('apwn-log');
+      for (const ln of cdata.lines) {
+        const div = document.createElement('div');
+        const text = ln.text || '';
+        // Detect wave headers
+        if (text.indexOf('WAVE ') !== -1 && text.indexOf('====') !== -1) {
+          div.className = 'wave-hdr';
+        } else if (text.indexOf('PHASE ') !== -1 || text.indexOf('Phase ') !== -1) {
+          div.className = 'phase-hdr';
+        } else {
+          div.className = ln.cls || 'cl-info';
+        }
+        // Timestamp prefix
+        const ts = ln.ts || '';
+        div.textContent = (ts ? '[' + ts + '] ' : '') + text;
+        logEl.appendChild(div);
+      }
+      _apwnLastLogCursor = cdata.cursor || _apwnLastLogCursor;
+      // Auto-scroll to bottom
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+  } catch (e) { /* ignore */ }
+
+  _apwnPollTimer = setTimeout(_apwnPollAutoPwnStatus, 800);
+}
+
+async function stopAutoPwn() {
+  await api('POST', 'scan/stop');
+  document.getElementById('apwn-stop-btn').textContent = 'Stopping...';
+  document.getElementById('apwn-stop-btn').disabled = true;
+}
+
 async function analyzeChains() {
   const nodeCount = Object.keys(mapState.nodes || {}).length;
   if (nodeCount < 2) { alert('Need at least 2 systems on the map with RFC connections.'); return; }
@@ -8864,6 +9208,7 @@ document.getElementById('map-ctx-menu').addEventListener('click', function(e) {
   hideMapCtxMenu();
   switch (item.getAttribute('data-action')) {
     case 'map_add_system': showAddSystemModal(); break;
+    case 'map_autopwn': showAutoPwnModal(); break;
     case 'map_propagate_all': propagateAll(); break;
     case 'map_cleanup_all': cleanupAll(); break;
     case 'map_scan_all_vulns': scanAllVulns(); break;
