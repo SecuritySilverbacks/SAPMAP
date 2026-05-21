@@ -156,26 +156,42 @@ body {
 .cl-crit { color: #f85149; font-weight: bold; }
 
 /* === AutoPwn === */
-.autopwn-phases { display: flex; align-items: center; gap: 4px; margin: 12px 0; }
+/* Progress panel — docked to right side, map stays visible + interactive */
+.autopwn-panel {
+  display: none; position: fixed; top: 60px; right: 0; bottom: 0;
+  width: 420px; max-width: 45vw; z-index: 2500;
+  background: #1c2128; border-left: 2px solid #f85149;
+  box-shadow: -4px 0 20px rgba(0,0,0,.5);
+  flex-direction: column; overflow: hidden;
+}
+.autopwn-panel.visible { display: flex; }
+.autopwn-panel-body {
+  flex: 1; overflow-y: auto; padding: 16px;
+  scrollbar-width: thin; scrollbar-color: #484f58 #1c2128;
+}
+.autopwn-panel-body::-webkit-scrollbar { width: 8px; }
+.autopwn-panel-body::-webkit-scrollbar-track { background: #1c2128; }
+.autopwn-panel-body::-webkit-scrollbar-thumb { background: #484f58; border-radius: 4px; }
+.autopwn-phases { display: flex; align-items: center; gap: 4px; margin: 12px 0; flex-wrap: wrap; }
 .autopwn-phase {
   display: flex; flex-direction: column; align-items: center;
-  padding: 6px 10px; border-radius: 6px; border: 1px solid #30363d;
-  background: #161b22; min-width: 64px; font-size: 10px; color: #8b949e;
+  padding: 6px 8px; border-radius: 6px; border: 1px solid #30363d;
+  background: #161b22; min-width: 48px; font-size: 10px; color: #8b949e;
   transition: all .3s;
 }
 .autopwn-phase.active { border-color: #58a6ff; color: #58a6ff; background: #0d1926; }
 .autopwn-phase.done { border-color: #3fb950; color: #3fb950; }
 .autopwn-phase.skipped { opacity: .35; }
-.autopwn-phase-icon { font-size: 16px; margin-bottom: 2px; }
-.autopwn-phase-label { font-weight: 600; white-space: nowrap; }
+.autopwn-phase-icon { font-size: 14px; margin-bottom: 2px; }
+.autopwn-phase-label { font-weight: 600; white-space: nowrap; font-size: 9px; }
 .autopwn-phase-sub { font-size: 9px; color: #484f58; margin-top: 1px; }
-.autopwn-arrow { color: #30363d; font-size: 14px; }
+.autopwn-arrow { color: #30363d; font-size: 12px; }
 .autopwn-stats {
-  display: flex; gap: 12px; margin: 10px 0; padding: 8px 12px;
+  display: flex; gap: 8px; margin: 10px 0; padding: 8px 10px;
   background: #161b22; border: 1px solid #30363d; border-radius: 6px;
 }
 .autopwn-stat { text-align: center; flex: 1; }
-.autopwn-stat-val { font-size: 18px; font-weight: 700; color: #e6edf3; }
+.autopwn-stat-val { font-size: 16px; font-weight: 700; color: #e6edf3; }
 .autopwn-stat-label { font-size: 9px; color: #8b949e; text-transform: uppercase; }
 .autopwn-bar-track {
   height: 6px; background: #21262d; border-radius: 3px; margin: 8px 0; overflow: hidden;
@@ -187,7 +203,7 @@ body {
 .autopwn-log {
   background: #010409; border: 1px solid #30363d; border-radius: 6px;
   padding: 8px; font-family: 'SFMono-Regular',Consolas,monospace;
-  font-size: 11px; line-height: 1.6; overflow-y: auto; max-height: 320px;
+  font-size: 11px; line-height: 1.6; overflow-y: auto; flex: 1; min-height: 120px;
   user-select: text; -webkit-user-select: text; cursor: text;
   scrollbar-width: thin; scrollbar-color: #484f58 #010409;
 }
@@ -1669,13 +1685,16 @@ body {
   </div>
 </div>
 
-<!-- AutoPwn Progress Modal -->
-<div class="modal-overlay" id="autopwn-progress-modal">
-  <div class="modal" style="max-width:680px;width:95vw;max-height:85vh">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-      <h3 style="color:#f85149;margin:0">&#9889; AutoPwn Running</h3>
-      <button class="btn btn-danger" onclick="stopAutoPwn()" id="apwn-stop-btn" style="font-size:11px;padding:3px 12px">&#9724; STOP</button>
+<!-- AutoPwn Progress Panel — docked right, map stays visible -->
+<div class="autopwn-panel" id="autopwn-progress-panel">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 16px 0 16px;flex-shrink:0">
+    <h3 style="color:#f85149;margin:0;font-size:13px">&#9889; AutoPwn</h3>
+    <div style="display:flex;gap:6px;align-items:center">
+      <button class="btn btn-danger" onclick="stopAutoPwn()" id="apwn-stop-btn" style="font-size:10px;padding:2px 10px">&#9724; STOP</button>
+      <button class="btn" onclick="closeAutoPwnPanel()" id="apwn-close-btn" style="font-size:10px;padding:2px 10px;display:none">&#10005; Close</button>
     </div>
+  </div>
+  <div class="autopwn-panel-body">
     <div id="apwn-wave-label" style="font-size:12px;color:#e6edf3;font-weight:600;margin-bottom:4px">Wave 0 / 5</div>
 
     <!-- Phase tracker -->
@@ -1747,11 +1766,6 @@ body {
 
     <!-- Scrollable log -->
     <div class="autopwn-log" id="apwn-log"></div>
-
-    <!-- Close button (visible when finished) -->
-    <div class="form-actions" id="apwn-done-actions" style="display:none;margin-top:8px">
-      <button class="btn btn-primary" onclick="closeModal('autopwn-progress-modal')">Close</button>
-    </div>
   </div>
 </div>
 
@@ -7924,7 +7938,9 @@ async function launchAutoPwn() {
   document.getElementById('apwn-bar').style.width = '0%';
   document.getElementById('apwn-pct').textContent = '0%';
   document.getElementById('apwn-stop-btn').style.display = '';
-  document.getElementById('apwn-done-actions').style.display = 'none';
+  document.getElementById('apwn-stop-btn').disabled = false;
+  document.getElementById('apwn-stop-btn').textContent = '◼ STOP';
+  document.getElementById('apwn-close-btn').style.display = 'none';
   document.getElementById('apwn-wave-label').textContent = 'Starting...';
   ['scan','exploit','enrich','propagate','btp','lpe'].forEach(p => {
     const el = document.getElementById('apwn-ph-' + p);
@@ -7937,8 +7953,8 @@ async function launchAutoPwn() {
   ['scanned','vulnerable','pwned','users'].forEach(k =>
     document.getElementById('apwn-st-' + k).textContent = '0');
 
-  // Show progress modal
-  document.getElementById('autopwn-progress-modal').classList.add('visible');
+  // Show progress panel (docked right — map stays visible)
+  document.getElementById('autopwn-progress-panel').classList.add('visible');
 
   // Fire the backend
   await api('POST', 'actions/autopwn', cfg);
@@ -8002,7 +8018,7 @@ async function _apwnPollAutoPwnStatus() {
       document.getElementById('apwn-wave-label').textContent =
         st.error ? 'AutoPwn Error' : 'AutoPwn Complete';
       document.getElementById('apwn-stop-btn').style.display = 'none';
-      document.getElementById('apwn-done-actions').style.display = 'flex';
+      document.getElementById('apwn-close-btn').style.display = '';
       // Mark all non-skipped phases as done
       for (const elId of Object.values(phaseMap)) {
         const el = document.getElementById('apwn-ph-' + elId);
@@ -8052,6 +8068,11 @@ async function stopAutoPwn() {
   await api('POST', 'scan/stop');
   document.getElementById('apwn-stop-btn').textContent = 'Stopping...';
   document.getElementById('apwn-stop-btn').disabled = true;
+}
+
+function closeAutoPwnPanel() {
+  document.getElementById('autopwn-progress-panel').classList.remove('visible');
+  if (_apwnPollTimer) { clearTimeout(_apwnPollTimer); _apwnPollTimer = null; }
 }
 
 async function analyzeChains() {

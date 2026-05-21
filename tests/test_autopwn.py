@@ -94,10 +94,15 @@ def test_autopwn_config_warning_present():
 # HTML — Progress modal
 # ===========================================================================
 
-def test_autopwn_progress_modal_exists():
-    """The AutoPwn progress modal must be present in the HTML."""
+def test_autopwn_progress_panel_exists():
+    """The AutoPwn progress panel must be present in the HTML.
+    It's a docked side panel (not a blocking modal) so the map
+    stays visible and interactive while AutoPwn runs."""
     html = _html()
-    assert 'id="autopwn-progress-modal"' in html
+    assert 'id="autopwn-progress-panel"' in html
+    assert 'autopwn-panel' in html, (
+        "Progress panel must use the autopwn-panel CSS class "
+        "(docked right, not modal-overlay)")
 
 
 @pytest.mark.parametrize("phase_id", [
@@ -180,6 +185,7 @@ def test_autopwn_context_menu_click_handler():
     "showAutoPwnModal",
     "launchAutoPwn",
     "stopAutoPwn",
+    "closeAutoPwnPanel",
     "_apwnPollAutoPwnStatus",
 ])
 def test_autopwn_js_functions_defined(fn_name):
@@ -419,8 +425,9 @@ def test_convergence_check_in_autopwn_run():
 def test_autopwn_css_classes():
     """AutoPwn CSS classes must be defined."""
     html = _html()
-    for cls in [".autopwn-phases", ".autopwn-phase", ".autopwn-stats",
-                ".autopwn-bar-track", ".autopwn-bar-fill", ".autopwn-log"]:
+    for cls in [".autopwn-panel", ".autopwn-phases", ".autopwn-phase",
+                ".autopwn-stats", ".autopwn-bar-track", ".autopwn-bar-fill",
+                ".autopwn-log"]:
         assert cls in html, f"CSS class {cls!r} not defined"
 
 
@@ -430,3 +437,63 @@ def test_autopwn_phase_active_styling():
     assert ".autopwn-phase.active" in html
     assert ".autopwn-phase.done" in html
     assert ".autopwn-phase.skipped" in html
+
+
+def test_autopwn_panel_is_docked_not_modal():
+    """The progress panel must be docked to the side (position: fixed,
+    right: 0) NOT a centered modal-overlay.  This is critical so the
+    operator can see the map update live while AutoPwn runs."""
+    html = _html()
+    assert "autopwn-panel" in html
+    # The PROGRESS panel must NOT be a modal-overlay (the CONFIG
+    # dialog is a modal and that's fine — it's shown once before launch)
+    assert 'class="modal-overlay" id="autopwn-progress' not in html, (
+        "AutoPwn progress must be a docked panel, not a modal-overlay")
+    # CSS must position it as a fixed side panel
+    import re
+    m = re.search(r"\.autopwn-panel\s*\{([^}]*)\}", html)
+    assert m, ".autopwn-panel CSS rule not found"
+    rule = m.group(1)
+    assert "position: fixed" in rule or "position:fixed" in rule, (
+        ".autopwn-panel must be position:fixed")
+    assert "right:" in rule, (
+        ".autopwn-panel must be docked to the right side")
+
+
+def test_autopwn_close_panel_button():
+    """The close button (visible when finished) must call
+    closeAutoPwnPanel to dismiss the panel."""
+    html = _html()
+    assert "closeAutoPwnPanel()" in html
+    assert 'id="apwn-close-btn"' in html
+
+
+# ===========================================================================
+# DB type detection for GW exploit
+# ===========================================================================
+
+def test_db_type_detection_function_exists():
+    """_detect_db_type_via_gw must exist in sapmap_autopwn so that
+    AutoPwn can detect the database type before calling
+    create_user_gw_exploit (which needs node.db_type for SQL)."""
+    import sapmap_autopwn
+    assert hasattr(sapmap_autopwn, "_detect_db_type_via_gw"), (
+        "Missing _detect_db_type_via_gw — without this, the GW exploit "
+        "fails on freshly-scanned nodes with no db_type")
+
+
+def test_phase2_calls_db_detection_before_gw_exploit():
+    """Phase 2 must check node.db_type before calling
+    create_user_gw_exploit, and call _detect_db_type_via_gw
+    if it's missing.  Without this, the GW exploit bails with
+    'Unsupported database type' on freshly-scanned nodes."""
+    src = _autopwn_src()
+    m = re.search(r"Priority 1.*?Priority 2", src, re.DOTALL)
+    assert m, "Priority 1 (GW) block not found in phase2"
+    body = m.group(0)
+    assert "_detect_db_type_via_gw" in body, (
+        "Phase 2 GW exploit block must call _detect_db_type_via_gw "
+        "when node.db_type is missing")
+    assert "not node.db_type" in body, (
+        "Phase 2 must check 'not node.db_type' before calling "
+        "DB detection")
