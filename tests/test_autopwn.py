@@ -469,31 +469,27 @@ def test_autopwn_close_panel_button():
 
 
 # ===========================================================================
-# DB type detection for GW exploit
+# GW exploit post-exploit wiring
 # ===========================================================================
 
-def test_db_type_detection_function_exists():
-    """_detect_db_type_via_gw must exist in sapmap_autopwn so that
-    AutoPwn can detect the database type before calling
-    create_user_gw_exploit (which needs node.db_type for SQL)."""
-    import sapmap_autopwn
-    assert hasattr(sapmap_autopwn, "_detect_db_type_via_gw"), (
-        "Missing _detect_db_type_via_gw — without this, the GW exploit "
-        "fails on freshly-scanned nodes with no db_type")
+def test_phase2_gw_calls_track_and_enrich():
+    """Phase 2 GW exploit must call state.track_created_user AND
+    _post_exploit_enrichment after a successful create_user_gw_exploit.
 
-
-def test_phase2_calls_db_detection_before_gw_exploit():
-    """Phase 2 must check node.db_type before calling
-    create_user_gw_exploit, and call _detect_db_type_via_gw
-    if it's missing.  Without this, the GW exploit bails with
-    'Unsupported database type' on freshly-scanned nodes."""
+    create_user_gw_exploit returns a CreatedUser but does NOT set
+    node.pwned — the caller is responsible for tracking + enrichment.
+    Without this, the exploit succeeds silently but the node stays
+    un-pwned on the map (operator-reported bug)."""
     src = _autopwn_src()
     m = re.search(r"Priority 1.*?Priority 2", src, re.DOTALL)
     assert m, "Priority 1 (GW) block not found in phase2"
     body = m.group(0)
-    assert "_detect_db_type_via_gw" in body, (
-        "Phase 2 GW exploit block must call _detect_db_type_via_gw "
-        "when node.db_type is missing")
-    assert "not node.db_type" in body, (
-        "Phase 2 must check 'not node.db_type' before calling "
-        "DB detection")
+    assert "track_created_user" in body, (
+        "Phase 2 GW block must call state.track_created_user(created)")
+    assert "_post_exploit_enrichment" in body, (
+        "Phase 2 GW block must call _post_exploit_enrichment to set "
+        "node.pwned=True")
+    # Must check the return value, not node.pwned
+    assert "if created:" in body, (
+        "Phase 2 must check 'if created:' (return value), not "
+        "'if node.pwned:' — create_user_gw_exploit does not set pwned")
