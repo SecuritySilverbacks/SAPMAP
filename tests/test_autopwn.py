@@ -493,3 +493,85 @@ def test_phase2_gw_calls_track_and_enrich():
     assert "if created:" in body, (
         "Phase 2 must check 'if created:' (return value), not "
         "'if node.pwned:' — create_user_gw_exploit does not set pwned")
+
+
+# ===========================================================================
+# Phase 3 enrichment: RFC retrieval pipeline
+# ===========================================================================
+
+def test_phase3_uses_add_connection_not_extend():
+    """Phase 3 must use state.add_connection(conn) for each connection,
+    NOT state.connections.extend().
+
+    add_connection does dedup and finding emission; extend bypasses it
+    and leaves connections without proper target_sid resolution, so they
+    don't render as edges on the map (operator-reported bug)."""
+    src = _autopwn_src()
+    m = re.search(r"def phase3_enrich.*?(?=\ndef )", src, re.DOTALL)
+    assert m, "phase3_enrich function not found"
+    body = m.group(0)
+    assert "state.add_connection(conn)" in body, (
+        "phase3_enrich must use state.add_connection(conn) — not "
+        "state.connections.extend()")
+    assert "state.connections.extend" not in body, (
+        "phase3_enrich must NOT use state.connections.extend() — "
+        "use state.add_connection(conn) per connection instead")
+
+
+def test_phase3_pings_non_self_connections():
+    """Phase 3 must ping non-self RFC connections to resolve remote SIDs
+    and test liveness, matching the GUI's 'Retrieve RFC Destinations'
+    handler.  Without pinging, connections lack target_sid and ping_ok,
+    so the map can't draw resolved edges."""
+    src = _autopwn_src()
+    m = re.search(r"def phase3_enrich.*?(?=\ndef )", src, re.DOTALL)
+    assert m, "phase3_enrich function not found"
+    body = m.group(0)
+    assert "ping_rfc_destination" in body, (
+        "phase3_enrich must call sapmap_rfc.ping_rfc_destination() "
+        "to resolve remote SIDs and test liveness")
+    assert "non_self" in body, (
+        "phase3_enrich must separate non-self connections for pinging")
+
+
+def test_phase3_self_detection():
+    """Phase 3 must detect self-referencing RFC connections (where
+    target_host matches the source node) and tag them with the node's
+    own SID, so they don't get pinged or auto-discovered."""
+    src = _autopwn_src()
+    m = re.search(r"def phase3_enrich.*?(?=\ndef )", src, re.DOTALL)
+    assert m, "phase3_enrich function not found"
+    body = m.group(0)
+    assert "is_self" in body, (
+        "phase3_enrich must detect self-referencing connections")
+    assert "all_hostnames" in body, (
+        "Self-detection must check node.all_hostnames()")
+    assert "all_ips" in body, (
+        "Self-detection must check node.all_ips()")
+
+
+def test_phase3_auto_discovers_unknown_targets():
+    """Phase 3 must auto-discover new SAP systems when a pinged RFC
+    destination returns a remote SID that isn't on the map yet.  This
+    mirrors the GUI handler's auto-discovery so the convergence loop
+    picks up the new node in the next wave."""
+    src = _autopwn_src()
+    m = re.search(r"def phase3_enrich.*?(?=\ndef )", src, re.DOTALL)
+    assert m, "phase3_enrich function not found"
+    body = m.group(0)
+    assert "state.add_node(" in body, (
+        "phase3_enrich must call state.add_node() for newly-discovered "
+        "target systems")
+    assert "InstanceInfo(" in body, (
+        "Auto-discovery must create an InstanceInfo for the new node")
+
+
+def test_phase2_updates_users_stat():
+    """Phase 2 must update the 'users_created' stat so the progress
+    panel shows the correct user count after exploitation."""
+    src = _autopwn_src()
+    m = re.search(r"def phase2_exploit.*?(?=\ndef )", src, re.DOTALL)
+    assert m, "phase2_exploit function not found"
+    body = m.group(0)
+    assert "users_created" in body, (
+        "phase2_exploit must update the 'users_created' stat")
