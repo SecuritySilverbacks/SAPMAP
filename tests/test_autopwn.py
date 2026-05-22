@@ -778,3 +778,19 @@ def test_phase4_secstore_targets_unpwned_only():
     body = m.group(0)
     assert "not" in body and "pwned" in body, (
         "phase4 SecStore pass must filter out already-pwned targets")
+
+
+def test_phase4_marks_connection_after_propagation():
+    """After successful propagation via a SecStore connection, phase4
+    must set logon_successful + has_sap_all on the connection so the
+    map edge turns red (same visual as the GUI 'Test RFCs' flow)."""
+    src = _autopwn_src()
+    m = re.search(r"def phase4_propagate.*?(?=\ndef [a-z])", src, re.DOTALL)
+    assert m, "phase4_propagate function not found"
+    body = m.group(0)
+    assert "logon_successful" in body, (
+        "phase4 must set conn.logon_successful after successful "
+        "SecStore propagation so the edge turns green/red on the map")
+    assert "has_sap_all" in body, (
+        "phase4 must set conn.has_sap_all after successful "
+        "SecStore propagation so the edge turns red on the map")
