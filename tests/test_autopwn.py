@@ -365,20 +365,23 @@ def test_exploit_phase_priority_order():
     assert m, "phase2_exploit not found"
     body = m.group(0)
 
-    # The code uses "# Priority N:" comments to mark each exploit
-    p1 = body.find("Priority 1")
-    p2 = body.find("Priority 2")
-    p3 = body.find("Priority 3")
-    p4 = body.find("Priority 4")
+    # The code uses "# Priority N:" comments to mark each exploit.
+    # "Priority 3b" (Java GW fallback) sits between 3 and 4.
+    p1 = body.find("Priority 1:")
+    p2 = body.find("Priority 2:")
+    p3 = body.find("Priority 3:")
+    p3b = body.find("Priority 3b:")
+    p4 = body.find("Priority 4:")
 
-    assert p1 > 0, "Priority 1 (GW) marker not found in phase2"
+    assert p1 > 0, "Priority 1 (GW ABAP) marker not found in phase2"
     assert p2 > 0, "Priority 2 (CVE-31324) marker not found in phase2"
     assert p3 > 0, "Priority 3 (RECON) marker not found in phase2"
+    assert p3b > 0, "Priority 3b (GW Java) marker not found in phase2"
     assert p4 > 0, "Priority 4 (10KBlaze) marker not found in phase2"
 
-    assert p1 < p2 < p3 < p4, (
-        "Exploit priority must be: GW (1) -> CVE-31324 (2) -> "
-        "RECON (3) -> 10KBlaze (4)")
+    assert p1 < p2 < p3 < p3b < p4, (
+        "Exploit priority must be: GW-ABAP (1) -> CVE-31324 (2) -> "
+        "RECON (3) -> GW-Java (3b) -> 10KBlaze (4)")
 
 
 # ===========================================================================
