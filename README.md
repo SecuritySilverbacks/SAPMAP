@@ -42,6 +42,7 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 - [Scanning](#scanning)
 - [Default Account Detection](#default-account-detection)
 - [Exploitation](#exploitation)
+- [AutoPwn — Full-Landscape Convergence Loop](#autopwn--full-landscape-convergence-loop)
 - [Local Privilege Escalation](#local-privilege-escalation)
 - [Propagation](#propagation)
 - [SAProuter Support](#saprouter-support)
@@ -92,6 +93,18 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 - **Destination testing** — Validate logon, ping, and latency via /SDF/RFC_CHECK with automatic fallback to DEST_CHECK_CONNECTION on older systems
 - **Automated propagation** — Iteratively exploit RFC connections to move across the landscape
 - **Attack path visualization** — Color-coded connections showing SAP_ALL access, gateway exploit paths, and risk levels
+
+### ⚡ AutoPwn — Full-Landscape Convergence Loop
+One-click automation that chains scanning → exploitation → enrichment → propagation across the entire landscape until no new systems can be reached.  Replaces the manual right-click-per-system workflow with a self-driving wave loop that picks the right exploit for each node's stack type (ABAP vs Java vs HANA), harvests credentials from Java Secure Stores and ABAP RSECTAB, and feeds those credentials back into the next wave for lateral movement.
+
+- **Convergence loop** — Repeats `SCAN → EXPLOIT → ENRICH → PROPAGATE` until a wave produces zero new pwned nodes (configurable max 3 / 5 / 10 / 20 waves)
+- **Stack-aware exploit priorities** — ABAP nodes try GW SAPXPG first (instant SQL INSERT); Java nodes try CVE-2025-31324 → RECON → GW-Java (UME JSP via SAPXPG); HANA-only nodes skip GW entirely (no ABAP stack behind the gateway)
+- **Java SecStore propagation** — When a Java node is pwned, AutoPwn extracts the Secure Store via the deployed JSP webshell, imports `SAPJSF_<sid>_<client>` credentials for downstream ABAP systems, auto-plots them on the map, and uses those creds to create `SAPMAP00` directly via BAPI_USER_CREATE1 — no ABAP access needed on the Java source
+- **Salvage on partial failure** — If `create_user_java` fails (e.g. UME password policy rejects the password) but the CVE-2025-31324 JSP shell is live, AutoPwn still harvests the Secure Store and Java destinations through the shell
+- **Connection coloring** — Every connection successfully used for lateral movement gets `logon_successful + has_sap_all` set, turning the map edge red (same visual as the GUI "Test RFCs" flow)
+- **Live progress panel** — Docked right-side panel (non-blocking) shows current phase, per-wave stats, per-node detail lines, and full streaming console.  Press **STOP** any time — stop checks fire inside scanner port loops, not just between phases, so it aborts within one timeout window
+- **Post-run detection pass** — Reports CVE-2022-22536 (ICMAD) and SAProuter Info Leak as findings without attempting exploitation (kept separate from the convergence loop because they're noisy / non-credential-yielding)
+- **Optional phases** — Toggle LPE (privilege escalation to root on each pwned node) and BTP (cloud lateral movement) on/off in the launch modal
 
 ### SAP BTP (Cloud) Integration
 Both directions of the on-prem ↔ cloud trust boundary are mapped automatically:
@@ -360,6 +373,7 @@ The web interface is a single-page application with an interactive SVG map.
 
 | Action | Description |
 |--------|-------------|
+| ⚡ **AutoPwn** | One-click full-landscape convergence loop — scan, exploit, enrich, propagate across all systems until no new pwns (see [AutoPwn section](#autopwn--full-landscape-convergence-loop)) |
 | Add System Manually | Add a system by IP/hostname (with optional SAProuter) |
 | Set Default Password | Change SAPMAP00 password for this session |
 | Auto-Propagate All | Propagate from all compromised systems |
@@ -367,6 +381,8 @@ The web interface is a single-page application with an interactive SVG map.
 | Cleanup All Users | Delete all created users across all systems |
 | Fit to Window | Auto-zoom to fit all systems |
 | Reset Layout | Rearrange all systems |
+
+The same **⚡ AutoPwn** entry is also available in the top **Actions** dropdown.
 
 ### Visual Indicators
 
@@ -511,6 +527,167 @@ When credentials are available, SAPMAP creates users via standard BAPI function 
 ### RFC Destination Testing
 
 SAPMAP tests RFC destinations using `/SDF/RFC_CHECK` with automatic fallback to `DEST_CHECK_CONNECTION` on older systems (NW < 7.40) where `/SDF/RFC_CHECK` doesn't exist. The fallback also provides remote system SID, client, and basis release.
+
+---
+
+## AutoPwn — Full-Landscape Convergence Loop
+
+**AutoPwn** automates the entire SAPMAP workflow: scan every node for exploitable CVEs, exploit each one with the right technique for its stack type, harvest credentials from Secure Stores, propagate to downstream systems with those credentials, and repeat until no new ground can be taken.  Launched once and runs hands-off until convergence.
+
+### Launching
+
+Right-click anywhere on the map background (or use the top **Actions** menu) and pick **⚡ AutoPwn**.  A config modal opens:
+
+```
+Vulnerability checks (exploitable):
+  ☑ Gateway SAPXPG
+  ☑ 10KBlaze (CVE-2020-6207)
+  ☑ CVE-2025-31324 (VisualComposer RCE)
+  ☑ CVE-2020-6287 (RECON)
+
+Post-run detection (non-exploitable, reported only):
+  ☑ CVE-2022-22536 (ICMAD)
+  ☑ SAProuter Info Leak
+
+Optional phases:
+  ☐ OS Privilege Escalation (LPE)
+  ☐ BTP / Cloud lateral movement
+
+Max waves: [5 ▾]   (3 / 5 / 10 / 20)
+```
+
+Click **Start AutoPwn**.  A docked right-side progress panel appears with phase tracker, per-wave stats, and a live console.  Press **STOP** any time — stop checks fire inside scanner port-probe loops, not just between phases, so the run aborts within one timeout window (≤ 10 s).
+
+### The Convergence Loop
+
+Each wave runs six phases (the last two are optional):
+
+```
+WAVE N
+├── Phase 1  Scan        — vulnerability checks on unpwned nodes
+├── Phase 2  Exploit     — turn vulnerabilities into SAPMAP00 users
+├── Phase 3  Enrich      — RFC destinations + ABAP/Java Secure Store
+├── Phase 4  Propagate   — use harvested creds to pwn downstream
+├── Phase 3b Enrich      — same enrichment for propagation-pwned nodes
+├── Phase 5  BTP         — (optional) cloud lateral movement
+└── Phase 6  LPE         — (optional) escalate to OS root
+```
+
+The wave loop exits early when a full wave produces zero new pwned nodes.
+
+### Phase 1 — Scan (stack-aware short-circuit)
+
+Vulnerabilities are checked in **exploitation priority order** so the most reliable exploit fires first:
+
+| Priority | Vuln | Eligible nodes | Action when found |
+|----------|------|----------------|--------------------|
+| 1 | Gateway SAPXPG | ABAP / Java (not HANA-only) | Short-circuit on ABAP (instant exploit available).  On Java, **keep scanning** — GW-Java path is slow (~40 RFC chunks), better options may exist |
+| 2 | CVE-2025-31324 | Java HTTP open | Short-circuit if found |
+| 3 | CVE-2020-6287 RECON | Java HTTP open | Short-circuit if found |
+| 4 | 10KBlaze (MS betrusted) | ABAP with MS internal port | No short-circuit (multi-hop, kept as last-resort) |
+
+HANA-only nodes skip the gateway scan entirely — they have no ABAP dispatcher behind the GW, so the SQL-INSERT exploit can't work.
+
+### Phase 2 — Exploit (stack-aware priority)
+
+Each vulnerable node is exploited with the technique that fits its stack:
+
+**ABAP nodes** — Priority order: `GW SAPXPG → 10KBlaze`
+- GW SAPXPG creates `SAPMAP00` via direct SQL INSERT into `USR02 + UST04 + USRBF2`.  Instant, single GW conversation.
+
+**Java nodes** — Priority order: `CVE-2025-31324 → RECON → GW-Java`
+- CVE-2025-31324 drops a JSP webshell via metadatauploader, then deploys the UME user-creation JSP next to it.
+- RECON is a single unauthenticated SOAP POST to `CTCWebService` — cleanest signal, no JSP write needed.
+- GW-Java uses `create_user_java(method="gw")` to deploy the UME JSP via SAPXPG chunked write (~40 RFC calls).  Slower than RECON, kept as fallback.
+
+**Salvage path** — if the CVE-2025-31324 JSP shell drops successfully but `create_user_java` fails (typical cause: SAP Java UME `password.max_length` rejects the password as too long, or the target's UME policy refuses the user create), AutoPwn doesn't waste the live shell.  It still:
+- Extracts the Java Secure Store through the deployed shell
+- Reads Java JCo/HTTP destinations through the deployed shell
+- Imports any downstream credentials it finds — those go into the next wave's propagation phase
+
+### Phase 3 — Enrich
+
+For every newly-pwned node, AutoPwn runs the same pipeline the GUI's manual "Retrieve RFC Destinations" handler uses:
+
+1. Retrieve destinations (SM59 + RFCDES + RFCATTRIB)
+2. Self-detect destinations (loopback / `NONE` / matching SID → mark as self-edge)
+3. SID-map (resolve `target_host:target_sysnr` to an existing node, auto-plot if unknown)
+4. Add each connection through `state.add_connection()` (dedupe + emit Finding)
+5. Ping non-self destinations for liveness + remote SID confirmation
+6. Auto-discover unknown targets — fire a standard scan against any host SAPMAP hasn't seen
+7. Decrypt ABAP `RSECTAB` SecStore (RFC / DB / CTS / SMTP passwords)
+8. Decrypt Java `SecStoreFS` if the node is Java/dual-stack — auto-plot every `SAPJSF_<sid>_<client>` downstream ABAP target and import its credentials
+
+### Phase 4 — Propagate (two-pass design)
+
+**Pass 1 — SecStore credential connections.** Iterates `state.connections` where the source is pwned, the target is not, and the connection carries `secstore_password + rfc_user + target_sid`.  For each, it calls `propagate_from_node()` with the destination name, which routes to the "fast path": skip the source entirely, log in to the TARGET directly with the harvested credential, BAPI_USER_CREATE1 a fresh `SAPMAP00`, mark the edge red on the map.  This is the **only path** that works for Java→ABAP movement — Java nodes have no ABAP RFC stack, so the legacy `propagate_all` (which uses RFC retrieval on the source) returns nothing.
+
+**Pass 2 — Generic ABAP propagation.** `propagate_all` retrieves RFC destinations from each pwned ABAP node and tries BAPI / SXPG / GW / betrusted in order.  Handles ABAP→ABAP via destinations that don't have a SecStore password (e.g. trust connections).
+
+### Phase 3b — Re-enrichment after propagation
+
+Nodes pwned during Phase 4 (e.g. `W74`, `S4H` reached via Java SecStore credentials on `SJJ`) get the **same full enrichment pipeline** as nodes pwned during Phase 2.  Without this step, propagated ABAP systems never have their RFC destinations read, so the next wave's lateral movement starves.
+
+### Phase 5 — BTP (optional)
+
+For each pwned ABAP node, `harvest_btp_credentials` mines OA2C_CONFIG, SM59 destinations, RSECTAB, and Java SecStoreFS for `(client_id, client_secret, uaa_url)` tuples.  Each candidate is exchanged for an access token at XSUAA's `/oauth/token`, then used to enumerate the cloud subaccount.  Synthetic BTP→on-prem RFC edges appear on the map as cloud→on-prem trust paths.
+
+### Phase 6 — LPE (optional)
+
+For each pwned ABAP node, tries registered LPE methods in priority order: BAPI profile assignment → WebGUI RSBDCOS0 SQL → CVE-2026-31431 "Copy Fail" root LPE on Linux.
+
+### Post-Run Detection Pass
+
+After convergence, AutoPwn runs a non-exploit detection sweep:
+
+- **CVE-2022-22536 (ICMAD)** — HTTP request-smuggling probe against ICM ports; reports as Finding but doesn't exploit (smuggle payload depends heavily on cache state and frontend topology).
+- **SAProuter Info Leak** — `NI_INFO` query against `/H/<router>` nodes to leak `saprouttab` lines.
+
+These are detection-only (no accounts created, no exploitation) — kept out of the convergence loop because they're noisy and don't yield credentials.
+
+### Stop Safety
+
+`sapmap_stop.is_stop_requested()` is checked at every level:
+- Between waves
+- Between phases
+- Between nodes within a phase
+- **Inside scanner internal loops** — `check_ms_betrusted`, `check_cve_2025_31324`, `check_cve_2020_6287` each iterate over candidate instances / HTTP ports with 8–10s blocking probes per attempt.  The stop flag is polled at the top of every iteration, so STOP aborts within one timeout (≤ 10 s) instead of waiting for the entire N-iteration sweep to finish.
+
+### Worked Example — SJJ (Java) → W74, S4H (ABAP)
+
+```
+Wave 1
+  Phase 1   SJJ: GW vulnerable (no short-circuit on Java)
+            SJJ: CVE-2025-31324 vulnerable → short-circuit
+  Phase 2   SJJ: CVE-2025-31324 → JSP webshell dropped
+            SJJ: create_user_java → SAPMAP00 created → pwned
+  Phase 3   SJJ: Java SecStore extracted (24 entries)
+            SJJ:   import SAPJSF_W74_001 cred (user=sapadm)
+            SJJ:   import SAPJSF_S4H_001 cred (user=joris)
+            SJJ:   auto-plot W74 (ABAP), S4H (ABAP)
+            SJJ:   add edges SJJ→W74, SJJ→S4H with secstore_password
+  Phase 4   Pass 1: 2 SecStore connections to unpwned targets
+            SJJ→W74: BAPI_USER_CREATE1 with sapadm — SAPMAP00 created on W74
+            SJJ→S4H: SAPMAP00 already exists with SAP_ALL — reused
+            (both edges turn red on map)
+  Phase 3b  W74: retrieve RFC destinations → discover BWP, CRM
+            S4H: retrieve RFC destinations → discover ECC, GRC
+            W74, S4H: extract ABAP RSECTAB → import more downstream creds
+
+Wave 2
+  Phase 1   BWP, CRM, ECC, GRC: scan for vulns
+  Phase 2   …
+  …
+
+Convergence after wave N when no new pwns happen.
+```
+
+### Implementation
+
+- Backend: `modules/exploitation/sapmap_autopwn.py` (`autopwn_run`, `phase1_scan` … `phase6_lpe`, `AutoPwnConfig`, `AutoPwnStatus`)
+- API: `POST /api/actions/autopwn` (config), `GET /api/actions/autopwn/status` (polled at 800 ms)
+- UI: `modules/core/sapmap_html.py` — config modal `#autopwn-config-modal`, docked progress panel `.autopwn-panel`
+- Tests: `tests/test_autopwn.py` (73 tests covering config, phase order, scan short-circuit rules, SecStore-pass-before-generic, connection coloring, re-enrichment after propagation, J75-style GW-on-Java fallback)
 
 ---
 
