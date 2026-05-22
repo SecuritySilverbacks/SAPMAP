@@ -796,6 +796,39 @@ def test_phase4_marks_connection_after_propagation():
         "SecStore propagation so the edge turns red on the map")
 
 
+def test_gw_scan_skips_hana_only_nodes():
+    """GW SAPXPG scan must only run on ABAP/JAVA stacks — HANA-only
+    nodes have no SAP Gateway service."""
+    src = _autopwn_src()
+    m = re.search(r"def phase1_scan.*?(?=\ndef )", src, re.DOTALL)
+    assert m, "phase1_scan not found"
+    body = m.group(0)
+    # Find the GW scan condition line (between Priority 1 marker
+    # and the actual if-block through to Priority 2 marker)
+    gw_start = body.find("# Priority 1:")
+    gw_end = body.find("# Priority 2:")
+    assert gw_start >= 0 and gw_end > gw_start, (
+        "Priority 1 (GW) block not found")
+    gw_block = body[gw_start:gw_end]
+    assert "is_app_stack" in gw_block, (
+        "GW scan must be gated by is_app_stack to skip HANA-only nodes")
+
+
+def test_10kblaze_scan_skips_hana_only_nodes():
+    """10KBlaze (MS betrusted) scan must only run on ABAP/JAVA stacks —
+    HANA-only nodes have no SAP Message Server."""
+    src = _autopwn_src()
+    m = re.search(r"def phase1_scan.*?(?=\ndef )", src, re.DOTALL)
+    assert m, "phase1_scan not found"
+    body = m.group(0)
+    # The 10KBlaze scan block (Priority 4) must check is_app_stack
+    blaze_start = body.find("Priority 4")
+    assert blaze_start > 0, "Priority 4 (10KBlaze) block not found"
+    blaze_block = body[blaze_start:blaze_start+200]
+    assert "is_app_stack" in blaze_block, (
+        "10KBlaze scan must be gated by is_app_stack to skip HANA-only nodes")
+
+
 def test_enrichment_after_propagation():
     """Nodes pwned during phase 4 (propagation) must be enriched with
     RFC destinations + SecStore — the main phase 3 only enriches nodes
