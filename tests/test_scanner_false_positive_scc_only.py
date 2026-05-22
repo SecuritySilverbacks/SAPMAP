@@ -102,3 +102,64 @@ def test_only_other_filtered_port_combinations_still_safe():
     assert nodes == [], (
         "Host with no SAP ports (only orphan scc_admin) must not "
         "produce any SAPNode")
+
+
+def test_saphost_only_with_scc_does_not_synthesise_unk_node():
+    """Co-located SCC + SAP Host Agent: 10.10.1.4 has 1128
+    (saphost_http), 1129 (saphost_https), and 8443 (scc_admin).
+    The SCC fingerprint should plot the SCC node separately; the
+    SAP node builder must NOT synthesise a UNK_10_10_1_4 carrying
+    those metadata-only ports (it duplicates the SCC visually)."""
+    scan_result = {
+        "host": "10.10.1.4",
+        "open_ports": {
+            1128: {"service": "saphost_http",  "instance_nr": "XX"},
+            1129: {"service": "saphost_https", "instance_nr": "XX"},
+            8443: {"service": "scc_admin",     "instance_nr": "WD"},
+        },
+    }
+    nodes = _build_nodes(scan_result)
+    assert nodes == [], (
+        f"Host with only SAP Host Agent + scc_admin (no real SID, "
+        f"no dispatcher / gateway / SAPControl) should not synthesise "
+        f"a UNK_<ip> SAP node — the SCC node alone represents this "
+        f"host.  Got: {[n.sid for n in nodes]}")
+
+
+def test_saphost_only_without_scc_also_skipped():
+    """A host running ONLY the SAP Host Agent (no SCC, no real
+    SAP system) is just a management endpoint — not a SAP system
+    to plot on the landscape map.  Skipping it avoids UNK_* noise."""
+    scan_result = {
+        "host": "10.10.1.50",
+        "open_ports": {
+            1128: {"service": "saphost_http",  "instance_nr": "XX"},
+            1129: {"service": "saphost_https", "instance_nr": "XX"},
+        },
+    }
+    nodes = _build_nodes(scan_result)
+    assert nodes == [], (
+        "Host with ONLY SAP Host Agent ports (no SID, no dispatcher, "
+        "no gateway) must not synthesise a SAP node — no actionable "
+        "SAP system to attack")
+
+
+def test_saphost_alongside_real_sap_ports_keeps_node():
+    """When saphost is open ALONGSIDE legitimate SAP ports (32XX
+    dispatcher, 5XX13 SAPControl), the SAP node MUST still be
+    created — the host agent metadata attaches to the real system."""
+    scan_result = {
+        "host": "10.10.1.100",
+        "open_ports": {
+            3200:  {"service": "dispatcher",     "instance_nr": "00"},
+            3300:  {"service": "gateway",        "instance_nr": "00"},
+            50013: {"service": "sapcontrol",     "instance_nr": "00"},
+            1128:  {"service": "saphost_http",   "instance_nr": "XX"},
+            1129:  {"service": "saphost_https",  "instance_nr": "XX"},
+        },
+    }
+    nodes = _build_nodes(scan_result)
+    # Real SAP system → at least one node, NOT empty
+    assert len(nodes) >= 1, (
+        "Host with real SAP ports + saphost agent must still yield "
+        "a SAP node from the real ports")

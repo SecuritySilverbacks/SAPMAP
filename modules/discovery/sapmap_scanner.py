@@ -2606,12 +2606,34 @@ def fingerprint_web_dispatcher(host: str, port: int,
         # on either path, it means the path is NOT bound — this server
         # isn't a WD (or the WD is hardened past identifying itself
         # via the admin handler).
+        #
+        # CRITICAL: a 401/403 alone is NOT enough — any generic web
+        # service with global basic auth (or that returns 403 for
+        # unknown paths) would otherwise be flagged as a WD.  Require
+        # the auth realm to mention SAP/WEB ADMIN, OR a corroborating
+        # SAP-ICM marker (x-sap-icm-err-id header / SAP server banner).
+        # Operator-reported false positive: non-SAP HTTP service on
+        # port 80 was promoted to W1B WEB_DISPATCHER because it
+        # returned 403 for /sap/wdisp/admin and no ICM error.
         if path in ("/sap/wdisp/admin",
                      "/sap/wdisp/admin/public/default.html"):
             probe_status = int(m_status.group(1)) if m_status else 0
             has_icm_err = (b"ICMENOSERVERFOUND" in resp
                             or b"ICMENOSYSTEMFOUND" in resp)
-            if probe_status in (401, 403) and not has_icm_err:
+            # WD admin uses Basic realm="WEB ADMIN" specifically.
+            # Realms like realm="Restricted" / realm="protected" /
+            # realm="Login" are generic web servers, not WDs.
+            m_wd_realm = re.search(
+                rb'WWW-Authenticate:\s*Basic\s+realm\s*=\s*"?'
+                rb'(?:WEB\s+ADMIN|SAP[^"\r\n]*)',
+                resp, re.I)
+            sap_marker = (m_wd_realm
+                          or out["is_sap_icm"]
+                          or (b"SAP" in (out["server_header"] or "")
+                              .encode("iso-8859-1", "replace")))
+            if (probe_status in (401, 403)
+                    and not has_icm_err
+                    and sap_marker):
                 out["is_wd"] = True
                 out["evidence"] = "wdisp_admin_realm"
                 out["confidence"] = "high"
@@ -3644,6 +3666,26 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
     open_ports = {p: info for p, info in scan_result["open_ports"].items()
                   if info["service"] != "scc_admin"}
     if not open_ports:
+        return []
+
+    # Additional guard: if the only ports left after filtering are
+    # SAP-Host-Agent endpoints (1128/1129), the host is not a SAP
+    # system in the operational sense — it's just running the
+    # management agent.  Without a SID / dispatcher / gateway /
+    # SAPControl signal there is nothing to plot on the landscape
+    # map; the resulting UNK_<ip> node only creates visual clutter
+    # next to a co-located SCC (operator-reported: 10.10.1.4 showed
+    # both an SCC node and a UNK_10_10_1_4 node carrying just
+    # 1128/1129 + 8443).  The SCC fingerprint path is unaffected —
+    # it reads the original scan_result, so an SCCNode still gets
+    # plotted when 8443 is a real SCC.
+    METADATA_ONLY_SERVICES = {"saphost_http", "saphost_https"}
+    remaining_services = {info["service"] for info in open_ports.values()}
+    if remaining_services and remaining_services.issubset(
+            METADATA_ONLY_SERVICES):
+        print(f"[*] {host}: only SAP Host Agent ports open "
+              f"({sorted(remaining_services)}) — no SAP system to "
+              f"plot; skipping UNK_* node synthesis")
         return []
 
     # Collect instance numbers
