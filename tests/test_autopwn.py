@@ -739,3 +739,42 @@ def test_cve31324_shell_ok_user_fail_reads_java_dests():
     assert "read_java_destinations" in body, (
         "CVE-31324 path must call read_java_destinations when user "
         "creation fails but the shell is live")
+
+
+# ===========================================================================
+# Phase 4: Propagation via SecStore credentials
+# ===========================================================================
+
+def test_phase4_secstore_pass_before_generic():
+    """Phase 4 must try SecStore credential connections BEFORE the generic
+    propagate_all — this is the only path for Java→ABAP lateral movement.
+    SecStore connections carry rfc_user + secstore_password so
+    propagate_from_node's fast path can create users directly on the
+    target without ABAP access on the Java source."""
+    src = _autopwn_src()
+    m = re.search(r"def phase4_propagate.*?(?=\ndef [a-z])", src, re.DOTALL)
+    assert m, "phase4_propagate function not found"
+    body = m.group(0)
+    assert "secstore_password" in body, (
+        "phase4 must iterate SecStore connections for targeted propagation")
+    assert "propagate_from_node" in body, (
+        "phase4 must call propagate_from_node with target_sid + "
+        "destination_name for SecStore connections")
+    assert "propagate_all" in body, (
+        "phase4 must still call propagate_all for generic ABAP propagation")
+    # SecStore pass must come before propagate_all
+    idx_secstore = body.index("secstore_password")
+    idx_generic = body.index("propagate_all")
+    assert idx_secstore < idx_generic, (
+        "SecStore targeted propagation must run before generic propagate_all "
+        "— Java nodes have no ABAP RFC stack for the generic path")
+
+
+def test_phase4_secstore_targets_unpwned_only():
+    """Phase 4 SecStore pass must skip already-pwned targets."""
+    src = _autopwn_src()
+    m = re.search(r"def phase4_propagate.*?(?=\ndef [a-z])", src, re.DOTALL)
+    assert m, "phase4_propagate function not found"
+    body = m.group(0)
+    assert "not" in body and "pwned" in body, (
+        "phase4 SecStore pass must filter out already-pwned targets")
