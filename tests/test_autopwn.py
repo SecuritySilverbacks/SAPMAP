@@ -708,3 +708,34 @@ def test_phase3_java_destinations():
     body = m.group(0)
     assert "read_java_destinations" in body, (
         "phase3_enrich must call read_java_destinations for Java nodes")
+
+
+def test_cve31324_shell_ok_user_fail_extracts_secstore():
+    """When CVE-31324 shell drops successfully but user creation fails,
+    phase2 must still extract the Java Secure Store via the live
+    webshell (it does NOT require a Java user)."""
+    src = _autopwn_src()
+    m2 = re.search(r"def phase2_exploit\(.*?\ndef ", src, re.DOTALL)
+    assert m2, "phase2_exploit not found"
+    p2body = m2.group(0)
+    m = re.search(r"Priority 2.*?Priority 3", p2body, re.DOTALL)
+    assert m, "Priority 2 (CVE-31324) block not found in phase2"
+    body = m.group(0)
+    assert "extract_java_secstore" in body, (
+        "CVE-31324 path must call extract_java_secstore when user "
+        "creation fails but the shell is live")
+
+
+def test_cve31324_shell_ok_user_fail_reads_java_dests():
+    """When CVE-31324 shell drops successfully but user creation fails,
+    phase2 must still read Java destinations via the live webshell."""
+    src = _autopwn_src()
+    m2 = re.search(r"def phase2_exploit\(.*?\ndef ", src, re.DOTALL)
+    assert m2, "phase2_exploit not found"
+    p2body = m2.group(0)
+    m = re.search(r"Priority 2.*?Priority 3", p2body, re.DOTALL)
+    assert m, "Priority 2 (CVE-31324) block not found in phase2"
+    body = m.group(0)
+    assert "read_java_destinations" in body, (
+        "CVE-31324 path must call read_java_destinations when user "
+        "creation fails but the shell is live")
