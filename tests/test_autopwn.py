@@ -794,3 +794,27 @@ def test_phase4_marks_connection_after_propagation():
     assert "has_sap_all" in body, (
         "phase4 must set conn.has_sap_all after successful "
         "SecStore propagation so the edge turns red on the map")
+
+
+def test_enrichment_after_propagation():
+    """Nodes pwned during phase 4 (propagation) must be enriched with
+    RFC destinations + SecStore — the main phase 3 only enriches nodes
+    from phase 2 (exploit).  Without this, ABAP systems reached via
+    Java SecStore creds never get their RFC destinations read."""
+    src = _autopwn_src()
+    m = re.search(r"def autopwn_run.*", src, re.DOTALL)
+    assert m, "autopwn_run function not found"
+    body = m.group(0)
+    # Must call phase3_enrich TWICE: once for exploit-pwned, once for
+    # propagation-pwned.  The second call must come after phase4.
+    calls = [m.start() for m in re.finditer(r"phase3_enrich\(", body)]
+    assert len(calls) >= 2, (
+        f"autopwn_run must call phase3_enrich at least twice — once for "
+        f"exploit-pwned nodes and once for propagation-pwned nodes "
+        f"(found {len(calls)} call(s))")
+    # The second call must appear after phase4_propagate
+    phase4_pos = body.find("phase4_propagate(")
+    assert phase4_pos > 0, "phase4_propagate call not found"
+    assert calls[1] > phase4_pos, (
+        "second phase3_enrich call must come AFTER phase4_propagate "
+        "so nodes pwned during propagation get enriched")
