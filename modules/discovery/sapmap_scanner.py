@@ -2640,6 +2640,36 @@ def fingerprint_web_dispatcher(host: str, port: int,
                 # Definitive — no more probes needed
                 return out
 
+    # Belt-and-braces final gate:
+    # A confirmed WD must have emitted at least ONE unambiguous
+    # SAP-ICM signal across its probes — either:
+    #   (a) the `server_banner` pattern matched (literally
+    #       "Server: SAP Web Dispatcher" — that returned early
+    #       above so it doesn't reach this point), or
+    #   (b) an `x-sap-icm-err-id` header appeared in ANY probe's
+    #       response (out["is_sap_icm"] is True).
+    # The bogus-path probe `/sapmap-no-such-path-...` is designed
+    # to elicit `x-sap-icm-err-id: ICMENOSERVERFOUND` from any
+    # real WD/ICM — so real WDs reliably satisfy this gate.
+    #
+    # Why the gate: softer patterns (`wdisp_admin_redirect`,
+    # `error_page_comment`) can theoretically match a non-SAP
+    # server that happens to return a Location header containing
+    # `/sap/wdisp/admin/public/` or a body containing
+    # "SAP Web Dispatcher" (e.g. a documentation proxy, a captured
+    # error page, a honeypot).  Without an x-sap-icm-err-id
+    # somewhere in the session, we can't be sure it's a real WD.
+    # Operator-reported false positive: W1B at 10.10.1.27:80
+    # plotted as WEB_DISPATCHER from a non-SAP service.
+    if out["is_wd"] and out["evidence"] != "server_banner":
+        if not out["is_sap_icm"]:
+            # Demote — pattern matched but no SAP-ICM corroboration
+            # anywhere across all four probes.  This is a non-SAP
+            # service squatting on a WD-candidate port.
+            out["is_wd"] = False
+            out["confidence"] = ""
+            out["evidence"] = ""
+
     if out["is_wd"]:
         return out
 
