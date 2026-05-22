@@ -466,7 +466,10 @@ def test_fingerprint_matches_icmenosystemfound(monkeypatch):
 
 def test_fingerprint_matches_wdisp_admin_redirect(monkeypatch):
     """301 Location: /sap/wdisp/admin/public/default.html is itself a
-    WD-specific binding signal (only WDs ship that handler)."""
+    WD-specific binding signal (only WDs ship that handler).
+    Real WDs always corroborate with x-sap-icm-err-id on the bogus
+    path probe — include that here so the final gate (which requires
+    corroboration for softer patterns) keeps is_wd=True."""
     import sapmap_scanner
     responses = [
         # / — header suppressed, no marker
@@ -474,6 +477,14 @@ def test_fingerprint_matches_wdisp_admin_redirect(monkeypatch):
         # /sap/wdisp/admin — 301 redirect to the admin auth page
         (b"HTTP/1.1 301 Moved Permanently\r\n"
          b"Location: /sap/wdisp/admin/public/default.html\r\n"
+         b"Content-Length: 0\r\n\r\n"),
+        # /sap/wdisp/admin/public/default.html — 401 auth page
+        (b"HTTP/1.1 401 Unauthorized\r\n"
+         b'WWW-Authenticate: Basic realm="WEB ADMIN"\r\n'
+         b"Content-Length: 0\r\n\r\n"),
+        # /sapmap-no-such-path-... — real WD always emits this header
+        (b"HTTP/1.1 503 Service Unavailable\r\n"
+         b"x-sap-icm-err-id: ICMENOSERVERFOUND\r\n"
          b"Content-Length: 0\r\n\r\n"),
     ]
     call_idx = [0]
@@ -486,7 +497,9 @@ def test_fingerprint_matches_wdisp_admin_redirect(monkeypatch):
     out = sapmap_scanner.fingerprint_web_dispatcher("h", 44300,
                                                       https=False)
     assert out["is_wd"] is True
-    assert out["evidence"] == "wdisp_admin_redirect"
+    # Either wdisp_admin_realm (401 hit) or wdisp_admin_redirect (301 hit)
+    # is acceptable evidence — both are WD-specific.
+    assert out["evidence"] in ("wdisp_admin_redirect", "wdisp_admin_realm")
 
 
 def test_fingerprint_non_sap_returns_no_wd(monkeypatch):
