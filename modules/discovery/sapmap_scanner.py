@@ -3632,7 +3632,19 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
     from collections import defaultdict
 
     host = scan_result["host"]
-    open_ports = scan_result["open_ports"]
+    # Filter out ports that belong exclusively to the SCC fingerprint
+    # path.  When 8443 fails the WD fingerprint, it's retagged as
+    # 'scc_admin' (see Pass-1 fingerprinting around line ~870) — that
+    # port is then handed to _maybe_build_scc_node, which decides
+    # whether to plot an SCCNode.  The SAP node builder must NOT
+    # synthesise a UNK_* SAPNode purely from leftover scc_admin ports
+    # — that produces false positives for non-SAP services squatting
+    # on 8443 (Fortinet, custom admin UIs, etc.) when the SCC
+    # fingerprint correctly rejects them.
+    open_ports = {p: info for p, info in scan_result["open_ports"].items()
+                  if info["service"] != "scc_admin"}
+    if not open_ports:
+        return []
 
     # Collect instance numbers
     instance_nrs = sorted(set(
