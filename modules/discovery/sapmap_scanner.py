@@ -4065,6 +4065,20 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
         # secstore, SXPG) automatically route through the tunnel.
         if saprouter:
             node.saprouter = saprouter
+
+        # Tag dpmon virtual SAP* eligibility (kernel >= 790 AND ABAP
+        # stack present).  SAP Note 3303172 — gates a kernel-blessed
+        # path from OS-exec to a SAP* one-time password.  ABAP-only
+        # feature, so pure-Java / HANA / WD / SAProuter nodes never
+        # qualify even on a 790+ kernel.
+        try:
+            from sap_dpmon_sapstar import is_dpmon_sap_star_available
+            node.dpmon_sap_star_available = is_dpmon_sap_star_available(
+                node.kernel, node.system_type)
+        except Exception:
+            # Module not importable yet (test isolation) — leave default
+            node.dpmon_sap_star_available = False
+
         nodes.append(node)
 
     return nodes
@@ -4417,6 +4431,13 @@ def _sapology_system_to_node(sys_obj, target_ip: str) -> SAPNode:
         has_critical_finding=any(f.severity >= Severity.CRITICAL for f in findings),
         gw_vulnerable=gw_vulnerable,
     )
+    # Tag dpmon SAP* eligibility — same logic as the fast-scan path.
+    try:
+        from sap_dpmon_sapstar import is_dpmon_sap_star_available
+        node.dpmon_sap_star_available = is_dpmon_sap_star_available(
+            node.kernel, node.system_type)
+    except Exception:
+        node.dpmon_sap_star_available = False
     return node
 
 
