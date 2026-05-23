@@ -832,6 +832,80 @@ def test_10kblaze_scan_skips_hana_only_nodes():
         "10KBlaze scan must be gated by is_app_stack to skip HANA-only nodes")
 
 
+def test_autopwn_config_includes_dpmon_sap_star():
+    """AutoPwnConfig must expose try_dpmon_sap_star=True default."""
+    import sapmap_autopwn
+    cfg = sapmap_autopwn.AutoPwnConfig()
+    assert hasattr(cfg, "try_dpmon_sap_star")
+    assert cfg.try_dpmon_sap_star is True, (
+        "try_dpmon_sap_star must default True so kernel-790 ABAP nodes "
+        "use the cleaner path unless the operator opts out")
+
+
+def test_phase2_invokes_dpmon_sap_star_between_gw_and_cve31324():
+    """The dpmon SAP* slot (Priority 1b) sits between GW SAPXPG
+    (Priority 1) and CVE-2025-31324 (Priority 2).  Source-level
+    ordering invariant."""
+    src = _autopwn_src()
+    m = re.search(r"def phase2_exploit\(.*?\ndef ", src, re.DOTALL)
+    assert m, "phase2_exploit not found"
+    body = m.group(0)
+    p1 = body.find("Priority 1:")
+    p1b = body.find("Priority 1b:")
+    p2 = body.find("Priority 2:")
+    assert p1 > 0 and p1b > 0 and p2 > 0
+    assert p1 < p1b < p2, (
+        "dpmon SAP* (Priority 1b) must sit between GW SAPXPG "
+        "(Priority 1) and CVE-2025-31324 (Priority 2)")
+
+
+def test_phase2_dpmon_sap_star_calls_exploit_function():
+    """The Priority 1b block must call create_user_via_dpmon_sap_star
+    and respect the config flag + per-node availability flag."""
+    src = _autopwn_src()
+    m = re.search(r"def phase2_exploit\(.*?\ndef ", src, re.DOTALL)
+    assert m
+    body = m.group(0)
+    # Extract the Priority 1b block specifically
+    block = re.search(
+        r"Priority 1b:.*?(?=Priority 2:)",
+        body, re.DOTALL)
+    assert block, "Priority 1b block not found in phase2"
+    block_body = block.group(0)
+    assert "create_user_via_dpmon_sap_star" in block_body, (
+        "Priority 1b must call create_user_via_dpmon_sap_star")
+    assert "config.try_dpmon_sap_star" in block_body, (
+        "Priority 1b must check config.try_dpmon_sap_star")
+    assert "dpmon_sap_star_available" in block_body, (
+        "Priority 1b must check node.dpmon_sap_star_available")
+    assert "_post_exploit_enrichment" in block_body, (
+        "Priority 1b must call _post_exploit_enrichment with ABAP type")
+    assert 'proven_type="ABAP"' in block_body
+
+
+def test_launch_autopwn_js_includes_dpmon_checkbox():
+    """The launchAutoPwn() JS must read the new checkbox and pass
+    try_dpmon_sap_star through to the backend cfg payload."""
+    html = _html()
+    assert "apwn-dpmon-sapstar" in html, (
+        "Modal HTML must include the apwn-dpmon-sapstar checkbox")
+    assert "try_dpmon_sap_star:" in html, (
+        "launchAutoPwn() JS must build try_dpmon_sap_star into the cfg")
+
+
+def test_autopwn_modal_describes_dpmon_kernel_gate():
+    """Modal label text must mention kernel >= 790 + ABAP so the
+    operator understands the eligibility."""
+    html = _html()
+    # The HTML uses &ge; entity for >=, so just check for "790" and
+    # "ABAP" near the checkbox.
+    apwn_idx = html.find("apwn-dpmon-sapstar")
+    assert apwn_idx > 0
+    window = html[apwn_idx:apwn_idx + 200]
+    assert "790" in window
+    assert "ABAP" in window
+
+
 def test_enrichment_after_propagation():
     """Nodes pwned during phase 4 (propagation) must be enriched with
     RFC destinations + SecStore — the main phase 3 only enriches nodes

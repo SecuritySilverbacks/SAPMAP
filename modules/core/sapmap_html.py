@@ -1649,6 +1649,7 @@ body {
     <label class="autopwn-cb"><input type="checkbox" id="apwn-scan-10k" checked> 10KBlaze (CVE-2020-6207)</label>
     <label class="autopwn-cb"><input type="checkbox" id="apwn-scan-31324" checked> CVE-2025-31324 (VisualComposer RCE)</label>
     <label class="autopwn-cb"><input type="checkbox" id="apwn-scan-recon" checked> CVE-2020-6287 (RECON)</label>
+    <label class="autopwn-cb"><input type="checkbox" id="apwn-dpmon-sapstar" checked> dpmon virtual SAP* (kernel &ge; 790, ABAP only)</label>
 
     <div style="font-size:11px;color:#8b949e;margin:10px 0 6px;font-weight:600">
       Post-run detection (non-exploitable, reported only):
@@ -7927,6 +7928,7 @@ async function launchAutoPwn() {
     scan_10kblaze: document.getElementById('apwn-scan-10k').checked,
     scan_cve_31324: document.getElementById('apwn-scan-31324').checked,
     scan_recon:  document.getElementById('apwn-scan-recon').checked,
+    try_dpmon_sap_star: document.getElementById('apwn-dpmon-sapstar').checked,
     include_lpe: document.getElementById('apwn-lpe').checked,
     include_btp: document.getElementById('apwn-btp').checked,
     include_icmad_detection: document.getElementById('apwn-det-icmad').checked,
