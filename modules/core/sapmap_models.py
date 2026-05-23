@@ -350,6 +350,17 @@ class SAPNode:
     efspotato_has_impersonate: bool = False
     windows_lpe_method: str = ""         # "miniplasma" / "godpotato" / "efspotato" / ""
 
+    # dpmon virtual SAP* activation (SAP Note 3303172, kernel >= 790).
+    # OS-exec primitive that lets any process running as <sid>adm
+    # request a 10-30 min one-time password for the virtual super-user
+    # SAP* in a chosen ABAP client.  Used by both the LPE chain
+    # (escalate existing creds via the OTP) and the Phase-2 exploit
+    # chain (create SAPMAP00 via the OTP after BAPI_USER_CREATE1).
+    # ABAP-only feature — pure-Java AS has no ABAP runtime; gate on
+    # is_dpmon_sap_star_available(kernel, system_type).
+    dpmon_sap_star_available: bool = False  # True iff kernel>=790 AND ABAP stack
+    dpmon_sap_star_used: bool = False       # True after a successful OTP-driven create
+
     # Discovery provenance.  Set when a node is materialised purely
     # from a BTP destination (no scanner / RFC observation yet) so the
     # GUI can render it as an unverified placeholder until the
@@ -530,6 +541,8 @@ class SAPNode:
             "efspotato_os_build": self.efspotato_os_build,
             "efspotato_has_impersonate": self.efspotato_has_impersonate,
             "windows_lpe_method": self.windows_lpe_method,
+            "dpmon_sap_star_available": self.dpmon_sap_star_available,
+            "dpmon_sap_star_used": self.dpmon_sap_star_used,
             "discovered_via_btp": self.discovered_via_btp,
             "oauth2_profiles": list(self.oauth2_profiles),
             "usrextid_entries": list(self.usrextid_entries),
@@ -626,6 +639,9 @@ class SAPNode:
             efspotato_has_impersonate=d.get(
                 "efspotato_has_impersonate", False),
             windows_lpe_method=d.get("windows_lpe_method", ""),
+            dpmon_sap_star_available=d.get(
+                "dpmon_sap_star_available", False),
+            dpmon_sap_star_used=d.get("dpmon_sap_star_used", False),
             discovered_via_btp=d.get("discovered_via_btp", False),
             oauth2_profiles=list(d.get("oauth2_profiles", [])),
             capability_results=list(d.get("capability_results", [])),
