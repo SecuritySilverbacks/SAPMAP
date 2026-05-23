@@ -74,6 +74,7 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 
 ### Exploitation
 - **Gateway SAPXPG exploit** — Unauthenticated OS command execution via the 10KBLAZE technique (P1→P2→P3→P4 protocol chain)
+- **dpmon virtual SAP\* user creation (kernel ≥ 790, ABAP)** — Chains GW SAPXPG → `dpmon` → SAP\* one-time password → BAPI_USER_CREATE1 with SAP_ALL.  DB-agnostic alternative to the SQL-INSERT writer chain: single dpmon invocation vs ~40 SAPXPG chunks, kernel-blessed (SAP Note 3303172, won't be patched out), bypasses SCC4 client lock / DBCO routing edge cases.  Available on Phase 2 of AutoPwn and via the right-click context menu
 - **CVE-2025-31324 (VisualComposer metadatauploader)** — Unauth Java JSP webshell deployment with chunked-base64 file write, OS-aware command wrapping (cmd.exe / /bin/sh), session-resilient shell tracking
 - **Message Server betrusted (CVE-2020-6207 / 10KBLAZE)** — Register a fake dispatcher with the MS so the attacker IP is added to the SAP Gateway's trusted-host list, enabling unauthenticated OS command execution via SAPXPG
 - **Direct database injection** — Create SAP users by injecting into USR02/UST04/USRBF2 tables via SQL CLI tools (hdbsql, sqlcli, sqlcmd, sqlplus, db2)
@@ -85,6 +86,7 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 ### Local Privilege Escalation
 - **Extensible LPE framework** — Plugin-style `@lpe_method` decorator: add new methods by writing one function
 - **BAPI profile assignment** — Direct RFC call to assign SAP_ALL via BAPI_USER_PROFILES_ASSIGN (requires S_RFC)
+- **dpmon virtual SAP\* (kernel ≥ 790, ABAP)** — Activate the kernel-blessed virtual super-user SAP\* (SAP Note 3303172) via the dispatcher-monitor tool, capture the one-time password from dpmon's stdout, open a single-shot RFC connection as SAP\*/<OTP>/<client>, BAPI-assign SAP_ALL + SAP_NEW to the original user.  Bypasses S_RFC and the DB-dialect SQL writer chain entirely.  Audit-logged as Security Audit Log event EUP, purpose 2 — operator-visible so the SOC isn't surprised
 - **WebGUI RSBDCOS0 exploit** — Reverse-engineered WebGUI HTTP protocol to execute OS commands via RSBDCOS0, running SQL INSERTs to assign SAP_ALL directly in the database — bypasses S_RFC authorization entirely
 - **CVE-2026-31431 "Copy Fail" (root LPE on Linux)** — One-shot root OS command execution via AF_ALG authencesn page-cache patching of `/usr/bin/su` with a minimal ELF.  Validated live against SUSE Linux 6.4.0 (s4hadm → uid=0) through SAPXPG.  Non-persistent (reverts on reboot or page-cache eviction).  Pre-flight check confirms vulnerable kernel + AF_ALG primitive before the destructive step
 
@@ -592,8 +594,9 @@ HANA-only nodes skip the gateway scan entirely — they have no ABAP dispatcher 
 
 Each vulnerable node is exploited with the technique that fits its stack:
 
-**ABAP nodes** — Priority order: `GW SAPXPG → 10KBlaze`
+**ABAP nodes** — Priority order: `GW SAPXPG → dpmon SAP* → 10KBlaze`
 - GW SAPXPG creates `SAPMAP00` via direct SQL INSERT into `USR02 + UST04 + USRBF2`.  Instant, single GW conversation.
+- **dpmon virtual SAP\*** (Priority 1b, kernel ≥ 790, ABAP only) — when GW SAPXPG is reachable but the SQL writer chain fails (e.g. unknown DB CLI, SCC4 client lock, DBCO routing edge cases), the dpmon path uses the same GW OS-exec primitive to activate the kernel's virtual super-user via `dpmon` (SAP Note 3303172), captures the one-time password from stdout, and uses it for a single-shot BAPI_USER_CREATE1.  DB-agnostic, kernel-blessed.  Audit-logged as Security Audit Log event EUP purpose 2.
 
 **Java nodes** — Priority order: `CVE-2025-31324 → RECON → GW-Java`
 - CVE-2025-31324 drops a JSP webshell via metadatauploader, then deploys the UME user-creation JSP next to it.

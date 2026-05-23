@@ -68,6 +68,7 @@ No build step, no linting config, no pre-commit hooks.
 - **`modules/exploitation/sap_ms_betrusted.py` + `sap_betrusted_chain.py`** — Message Server internal port exploitation (CVE-2020-6207)
 - **`modules/exploitation/sap_cve_2025_31324.py`** — VisualComposer JSP webshell deployment via chunked-base64 file writes
 - **`modules/exploitation/sap_db_sql_writers.py`** — Multi-DB SQL generator (HANA, MSSQL, Oracle, MaxDB, DB2) for user creation via OS command injection
+- **`modules/exploitation/sap_dpmon_sapstar.py`** — dpmon virtual SAP\* activation primitive (SAP Note 3303172, kernel ≥ 790, ABAP-only).  Pure-shell pipeline that walks `dpmon`'s menu via piped stdin, captures the one-time password, returns a parsed dict.  Caller-supplied `exec_fn(cmd) -> str` adapts to any OS-exec channel (GW SAPXPG for unauth Phase-2 exploit, SXPG_STEP_XPG_START for authenticated LPE)
 
 ### Post-Exploitation & Lateral Movement
 
