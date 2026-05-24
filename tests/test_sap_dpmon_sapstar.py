@@ -498,14 +498,28 @@ def test_delete_classifies_not_found():
 
 def _fake_gw_exec_recorder():
     """A fake GwExecFn that records (program, args) calls and replies
-    success with empty output (or a per-program-overrideable result)."""
+    success with empty output (or a per-program-overrideable result).
+
+    Built-in async-friendly behaviour: the /bin/cat call returns the
+    DONE-sentinel output by default so the helper's polling loop
+    exits on the first poll.  Tests that need to simulate a slow
+    worker can override `canned["/bin/cat"]`."""
+    from sap_dpmon_sapstar import _DONE_SENTINEL
     calls = []
     canned = {}  # {program: dict-result}
 
     def gw_exec(program, args):
         calls.append((program, args))
-        return canned.get(program,
-                          {"success": True, "output": [], "error": ""})
+        if program in canned:
+            return canned[program]
+        # Default: every other program returns success+empty.
+        # /bin/cat returns the DONE sentinel so the polling loop
+        # in chunked_drop_and_run exits immediately.
+        if program == "/bin/cat":
+            return {"success": True,
+                    "output": [_DONE_SENTINEL],
+                    "error": ""}
+        return {"success": True, "output": [], "error": ""}
 
     gw_exec.calls = calls
     gw_exec.canned = canned
@@ -555,17 +569,32 @@ def test_chunked_drop_and_run_uses_openssl_to_decode():
 
 def test_chunked_drop_and_run_executes_via_bash_file():
     """The execute step must invoke /bin/bash with a script file path —
-    no shell metacharacters in argv."""
-    from sap_dpmon_sapstar import chunked_drop_and_run
+    no shell metacharacters in argv.  bash's job is to launch the
+    async worker (returns in <1s); the actual command output is
+    captured via subsequent /bin/cat polls of the result file."""
+    from sap_dpmon_sapstar import chunked_drop_and_run, _DONE_SENTINEL
     gw = _fake_gw_exec_recorder()
-    gw.canned["/bin/bash"] = {
+    # Simulate the wrapped script having written its output + sentinel
+    # to the result file before the first cat poll arrives.
+    gw.canned["/bin/cat"] = {
         "success": True,
-        "output": ["script output line"],
+        "output": [
+            "Access unlocked. [client = 000] [validity = 10 min].",
+            "Password:",
+            "----------------------------------------",
+            "ABCDEFGHIJ2345MNOPQRSTUVWXYZ2345MNOPQRST",
+            "----------------------------------------",
+            _DONE_SENTINEL,
+        ],
         "error": "",
     }
-    out = chunked_drop_and_run(gw, "anything")
+    # Speed-poll so the test isn't slowed by the default 2-second
+    # poll interval.
+    out = chunked_drop_and_run(gw, "anything",
+                                poll_seconds=0.0,
+                                max_wait_seconds=5.0)
     bash_calls = [c for c in gw.calls if c[0] == "/bin/bash"]
-    assert len(bash_calls) == 1, "Exactly one bash invocation expected"
+    assert len(bash_calls) == 1, "Exactly one bash launch expected"
     _prog, args = bash_calls[0]
     # args must be just the script path — no flags, no pipes, no quotes
     assert args.startswith("/tmp/sapmap_dp_"), (
@@ -573,8 +602,12 @@ def test_chunked_drop_and_run_executes_via_bash_file():
     assert "|" not in args
     assert "'" not in args
     assert '"' not in args
-    # The returned string must be the bash output
-    assert "script output line" in out
+    # The returned string contains the result file contents minus
+    # the sentinel (which the helper strips).
+    assert "Access unlocked" in out
+    assert "ABCDEFGHIJ2345" in out
+    assert _DONE_SENTINEL not in out, (
+        "The DONE sentinel must be stripped from the returned output")
 
 
 def test_chunked_drop_and_run_cleans_up_tempfiles():
@@ -588,6 +621,64 @@ def test_chunked_drop_and_run_cleans_up_tempfiles():
     final_rm = rm_calls[-1]
     assert ".b64" in final_rm[1]
     assert ".sh" in final_rm[1]
+
+
+def test_chunked_drop_and_run_polls_until_done_sentinel():
+    """The helper polls /bin/cat repeatedly until the DONE sentinel
+    appears.  Earlier polls (before the worker has written anything)
+    must NOT trigger an error — they're just "still running"."""
+    from sap_dpmon_sapstar import chunked_drop_and_run, _DONE_SENTINEL
+
+    # Simulate a worker that hasn't written anything on the first 2
+    # polls, then writes the result + sentinel on the 3rd poll.
+    cat_responses = [
+        {"success": True, "output": [], "error": ""},          # poll 1
+        {"success": True, "output": ["partial"], "error": ""},  # poll 2
+        {"success": True,                                       # poll 3 - done
+         "output": ["Access unlocked. [client = 000] [validity = 10 min].",
+                    "Password:", "----", "ABCDEFGHIJ2345MNOPQRSTUVWXYZ23",
+                    "----", _DONE_SENTINEL],
+         "error": ""},
+    ]
+    cat_idx = [0]
+
+    def gw_exec(program, args):
+        if program == "/bin/cat":
+            i = cat_idx[0]
+            cat_idx[0] += 1
+            return cat_responses[min(i, len(cat_responses) - 1)]
+        return {"success": True, "output": [], "error": ""}
+
+    out = chunked_drop_and_run(gw_exec, "anything",
+                                poll_seconds=0.0,
+                                max_wait_seconds=5.0)
+    assert "Access unlocked" in out
+    assert cat_idx[0] == 3, (
+        f"Expected exactly 3 cat polls (2 empty + 1 done); got "
+        f"{cat_idx[0]}")
+
+
+def test_chunked_drop_and_run_raises_on_timeout():
+    """If the worker never produces the DONE sentinel before
+    max_wait_seconds, the helper must raise RuntimeError with a
+    partial-output diagnostic so the operator can see what dpmon
+    did emit."""
+    from sap_dpmon_sapstar import chunked_drop_and_run
+    gw = _fake_gw_exec_recorder()
+    # Override cat to never return the sentinel — simulate a stuck
+    # worker.
+    gw.canned["/bin/cat"] = {
+        "success": True,
+        "output": ["dpmon is hanging on something"],
+        "error": "",
+    }
+    with pytest.raises(RuntimeError) as excinfo:
+        chunked_drop_and_run(gw, "anything",
+                              poll_seconds=0.01,
+                              max_wait_seconds=0.05)
+    assert "did not finish" in str(excinfo.value).lower()
+    # Partial output must be surfaced in the error
+    assert "dpmon is hanging" in str(excinfo.value)
 
 
 def test_chunked_drop_and_run_raises_on_chunk_failure():
