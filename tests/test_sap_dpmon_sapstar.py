@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 import sys
 
 import pytest
@@ -489,3 +490,117 @@ def test_delete_classifies_not_found():
     r = delete_virtual_sap_star(exec_fn, "S4H", "00", "001")
     assert r["success"] is False
     assert "did not exist" in r["error"]
+
+
+# ===========================================================================
+# chunked_drop_and_run — workaround for sapxpg PARAMS tokenizer
+# ===========================================================================
+
+def _fake_gw_exec_recorder():
+    """A fake GwExecFn that records (program, args) calls and replies
+    success with empty output (or a per-program-overrideable result)."""
+    calls = []
+    canned = {}  # {program: dict-result}
+
+    def gw_exec(program, args):
+        calls.append((program, args))
+        return canned.get(program,
+                          {"success": True, "output": [], "error": ""})
+
+    gw_exec.calls = calls
+    gw_exec.canned = canned
+    return gw_exec
+
+
+def test_chunked_drop_and_run_uses_python3_for_chunks():
+    """Each base64 chunk must be written via python3 -c open(...).write(...)
+    — that's the no-shell-metacharacter pattern."""
+    from sap_dpmon_sapstar import chunked_drop_and_run
+    gw = _fake_gw_exec_recorder()
+    chunked_drop_and_run(gw, "echo hello world | wc -l")
+    python_calls = [c for c in gw.calls if c[0] == "python3"]
+    assert python_calls, (
+        "Helper must call python3 to drop the base64 in chunks")
+    # Each python3 call's args must use the open()/.write() pattern
+    for prog, args in python_calls:
+        assert args.startswith("-c open("), (
+            f"python3 chunk write must use -c open(...): {args!r}")
+        assert ".write(b'" in args
+        # Base64 alphabet only inside the b'...' literal — no spaces,
+        # no shell metacharacters
+        m = re.search(r"\.write\(b'([^']*)'\)", args)
+        assert m, f"chunk literal not parseable: {args}"
+        chunk = m.group(1)
+        # Allow base64 chars + padding
+        assert re.fullmatch(r"[A-Za-z0-9+/=]*", chunk), (
+            f"chunk must contain only base64 chars: {chunk!r}")
+
+
+def test_chunked_drop_and_run_uses_openssl_to_decode():
+    """The decode step must use openssl with the -A flag (single-line
+    base64 acceptance)."""
+    from sap_dpmon_sapstar import chunked_drop_and_run
+    gw = _fake_gw_exec_recorder()
+    chunked_drop_and_run(gw, "test command")
+    openssl_calls = [c for c in gw.calls if c[0] == "/usr/bin/openssl"]
+    assert openssl_calls, "Helper must invoke /usr/bin/openssl"
+    _prog, args = openssl_calls[0]
+    assert "enc" in args
+    assert "-d" in args
+    assert "-base64" in args
+    assert "-A" in args, (
+        "openssl must use -A for single-line base64 input "
+        "(without it, output is silently empty)")
+
+
+def test_chunked_drop_and_run_executes_via_bash_file():
+    """The execute step must invoke /bin/bash with a script file path —
+    no shell metacharacters in argv."""
+    from sap_dpmon_sapstar import chunked_drop_and_run
+    gw = _fake_gw_exec_recorder()
+    gw.canned["/bin/bash"] = {
+        "success": True,
+        "output": ["script output line"],
+        "error": "",
+    }
+    out = chunked_drop_and_run(gw, "anything")
+    bash_calls = [c for c in gw.calls if c[0] == "/bin/bash"]
+    assert len(bash_calls) == 1, "Exactly one bash invocation expected"
+    _prog, args = bash_calls[0]
+    # args must be just the script path — no flags, no pipes, no quotes
+    assert args.startswith("/tmp/sapmap_dp_"), (
+        f"bash arg must be the temp script path: {args!r}")
+    assert "|" not in args
+    assert "'" not in args
+    assert '"' not in args
+    # The returned string must be the bash output
+    assert "script output line" in out
+
+
+def test_chunked_drop_and_run_cleans_up_tempfiles():
+    """The helper must clean up /tmp/sapmap_dp_* files after running."""
+    from sap_dpmon_sapstar import chunked_drop_and_run
+    gw = _fake_gw_exec_recorder()
+    chunked_drop_and_run(gw, "test command")
+    rm_calls = [c for c in gw.calls if c[0] == "/bin/rm"]
+    assert rm_calls, "Helper must invoke /bin/rm for cleanup"
+    # The final rm must remove both .b64 and .sh files
+    final_rm = rm_calls[-1]
+    assert ".b64" in final_rm[1]
+    assert ".sh" in final_rm[1]
+
+
+def test_chunked_drop_and_run_raises_on_chunk_failure():
+    """If any python3 chunk write fails, the helper must raise
+    RuntimeError so the LPE / exploit caller can fall through."""
+    from sap_dpmon_sapstar import chunked_drop_and_run
+    gw = _fake_gw_exec_recorder()
+    gw.canned["python3"] = {
+        "success": False,
+        "output": [],
+        "error": "permission denied",
+    }
+    with pytest.raises(RuntimeError) as excinfo:
+        chunked_drop_and_run(gw, "test command")
+    assert "chunked write failed" in str(excinfo.value)
+    assert "permission denied" in str(excinfo.value)
