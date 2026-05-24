@@ -287,6 +287,28 @@ def test_parse_empty_output_fails_cleanly():
     assert "no output" in r["error"].lower()
 
 
+def test_parse_detects_dpmon_timeout_sentinel():
+    """When the worker's `timeout 60 dpmon` guard fires, the parser
+    must surface a clear "dpmon hung — env probably not loaded"
+    error including the captured env dump."""
+    from sap_dpmon_sapstar import parse_dpmon_activation_output
+    out = (
+        "[12:00:00] invoking dpmon\n"
+        "[12:01:00] dpmon returned exit=124\n"
+        "SAPMAP_DPMON_TIMEOUT\n"
+        "--- last 30 lines of dpmon output before kill ---\n"
+        "Queue Statistics ...\n"
+        "--- env dump (vars dpmon may need) ---\n"
+        "SAPSYSTEMNAME=S4H\n"
+        "HOME=/home/s4hadm\n"
+    )
+    r = parse_dpmon_activation_output(out)
+    assert r["success"] is False
+    assert "dpmon hung" in r["error"].lower()
+    # Diagnostic must be surfaced for the operator
+    assert "SAPSYSTEMNAME" in r["error"] or "env" in r["error"].lower()
+
+
 def test_parse_detects_dpmon_not_found_sentinel():
     """The wrapper's path-resolver emits SAPMAP_DPMON_NOT_FOUND to
     stderr (captured into combined output) when find finds nothing."""
