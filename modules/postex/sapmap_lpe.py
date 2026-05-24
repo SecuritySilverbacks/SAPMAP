@@ -573,7 +573,7 @@ def lpe_dpmon_sap_star(node: SAPNode, creds: Credentials) -> bool:
 
     def exec_fn(cmd: str) -> str:
         try:
-            return chunked_drop_and_run(_gw_exec, cmd)
+            return chunked_drop_and_run(_gw_exec, cmd, label=node.sid)
         except Exception as exc:
             raise RuntimeError(
                 f"SXPG dpmon pipeline failed: {exc}") from exc
