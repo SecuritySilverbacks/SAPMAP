@@ -62,7 +62,9 @@ def test_dpmon_lpe_consults_kernel_gate():
 def test_dpmon_lpe_uses_sxpg_exec_channel():
     """The exec_fn must wrap SXPG_STEP_XPG_START via execute_local_command —
     that's the only ABAP-authenticated channel that runs OS commands
-    via the SAP gateway without S_RFC."""
+    via the SAP gateway without S_RFC.  The shell pipeline is driven
+    via chunked_drop_and_run (workaround for the sapxpg PARAMS
+    tokenizer that mangles `sh -c '<pipeline>'`)."""
     src = _lpe_src()
     m = re.search(
         r"def lpe_dpmon_sap_star\(.*?(?=^def |^@lpe_method|\Z)",
@@ -71,8 +73,9 @@ def test_dpmon_lpe_uses_sxpg_exec_channel():
     body = m.group(0)
     assert "execute_local_command" in body, (
         "exec_fn must use sapmap_rfc.execute_local_command (SXPG path)")
-    assert "/bin/sh" in body, (
-        "exec_fn must invoke /bin/sh -c for shell pipeline support")
+    assert "chunked_drop_and_run" in body, (
+        "exec_fn must use chunked_drop_and_run -- direct sh -c is "
+        "mangled by sapxpg's PARAMS tokenizer")
 
 
 def test_dpmon_lpe_bapi_assign_after_otp():

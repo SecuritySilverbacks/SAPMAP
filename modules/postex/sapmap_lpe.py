@@ -543,6 +543,7 @@ def lpe_dpmon_sap_star(node: SAPNode, creds: Credentials) -> bool:
         from sap_dpmon_sapstar import (
             is_dpmon_sap_star_available,
             activate_virtual_sap_star,
+            chunked_drop_and_run,
         )
     except ImportError as e:
         logger.debug("sap_dpmon_sapstar not importable: %s", e)
@@ -556,34 +557,26 @@ def lpe_dpmon_sap_star(node: SAPNode, creds: Credentials) -> bool:
 
     import sapmap_rfc
 
-    # exec_fn: wrap the dpmon shell pipeline in SXPG_STEP_XPG_START.
-    # The pipeline already pipes its menu input via `echo <b64> |
-    # base64 -d | LANG=C dpmon`.  We give it to /bin/sh -c so the
-    # shell handles the pipe; that's the same pattern SAPMAP uses
-    # for SecStore + JSP deployment.
+    # exec_fn: drive dpmon via SXPG_STEP_XPG_START.
+    # NOTE: invoking `/bin/sh -c '<pipeline>'` via SXPG fails on this
+    # kernel — sapxpg's PARAMS tokenizer mangles quote-protected pipes
+    # (same bug as the Phase-2 GW SAPXPG path).  chunked_drop_and_run
+    # works around it by writing the pipeline as a bash script via
+    # python3 chunked writes and then invoking `bash <script>` directly
+    # (no shell metacharacters in argv).
+    def _gw_exec(program: str, args: str) -> dict:
+        """Adapter from chunked_drop_and_run's GwExecFn shape to
+        sapmap_rfc.execute_local_command's (command, params, creds)
+        signature."""
+        return sapmap_rfc.execute_local_command(
+            node, command=program, params=args, creds=creds)
+
     def exec_fn(cmd: str) -> str:
-        # POSIX-portable single-quote escaping: replace ' with '\''.
-        # _build_dpmon_command was tweaked to avoid single quotes
-        # internally, so the only quote to worry about here is the
-        # outer wrapping pair.
-        escaped = cmd.replace("'", "'\\''")
         try:
-            r = sapmap_rfc.execute_local_command(
-                node,
-                command="/bin/sh",
-                params=f"-c '{escaped}'",
-                creds=creds,
-            )
+            return chunked_drop_and_run(_gw_exec, cmd)
         except Exception as exc:
-            # The framework expects exec_fn to return str on any
-            # outcome -- raising would surface as "exec_fn raised: ..."
-            # in the parser's error, which is what we want.
             raise RuntimeError(
-                f"SXPG_STEP_XPG_START failed: {exc}") from exc
-        if not r.get("success"):
-            err = r.get("error") or "(no error)"
-            raise RuntimeError(f"SXPG returned no output: {err}")
-        return "\n".join(r.get("output", []))
+                f"SXPG dpmon pipeline failed: {exc}") from exc
 
     # Pick the client to target.  Best signal is the creds' own
     # client (we know it exists -- we're logged into it).  Fall back
