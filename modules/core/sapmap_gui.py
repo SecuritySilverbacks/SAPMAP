@@ -5919,6 +5919,12 @@ def create_app(api: SAPMAPApi) -> Bottle:
             if method == "gw_exploit":
                 created = sapmap_exploit.create_user_gw_exploit(node, api.state,
                                                                  client=client)
+            elif method == "dpmon_sap_star":
+                # dpmon virtual SAP* (kernel >= 790, ABAP only).
+                # Eligibility is enforced inside the function — bails
+                # gracefully on kernel < 790 or non-ABAP stacks.
+                created = sapmap_exploit.create_user_via_dpmon_sap_star(
+                    node, api.state, client=client)
             else:
                 created = sapmap_exploit.create_user_via_credentials(node, api.state)
             if created:
