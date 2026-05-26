@@ -807,3 +807,228 @@ class TestPinExtraction:
     def test_empty_plaintext(self):
         from sap_pse_loot import _extract_pin_from_plaintext
         assert _extract_pin_from_plaintext(b"") == ""
+
+
+# ===================================================================
+# PSE signing-key extractor tests (commit 3)
+# ===================================================================
+
+# Helper: generate a self-signed RSA key + cert for testing
+
+def _generate_test_key_and_cert():
+    """Generate a 2048-bit RSA key + self-signed X.509 cert.
+
+    Returns (private_key, cert, key_der, cert_der).
+    """
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+    import datetime
+
+    key = rsa.generate_private_key(
+        public_exponent=65537, key_size=2048)
+    key_der = key.private_bytes(
+        serialization.Encoding.DER,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption())
+
+    subject = issuer = x509.Name([
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME,
+                           "SAP Trust Community"),
+        x509.NameAttribute(NameOID.COMMON_NAME,
+                           "CN=S4H, OU=I0019604999, "
+                           "O=SAP Trust Community, C=DE"),
+    ])
+    now = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
+    cert = (x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(issuer)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now)
+            .not_valid_after(now + datetime.timedelta(days=3650))
+            .sign(key, hashes.SHA256()))
+    cert_der = cert.public_bytes(serialization.Encoding.DER)
+
+    return key, cert, key_der, cert_der
+
+
+# ---------------------------------------------------------------------------
+# OID encoding / decoding
+# ---------------------------------------------------------------------------
+
+class TestOidCodec:
+
+    def test_round_trip_simple_oid(self):
+        from sap_pse_loot import _ber_encode_oid, _ber_decode_oid
+        oid = "1.2.3.4"
+        encoded = _ber_encode_oid(oid)
+        assert _ber_decode_oid(encoded) == oid
+
+    def test_round_trip_pbe1_oid(self):
+        from sap_pse_loot import _ber_encode_oid, _ber_decode_oid
+        oid = "1.2.840.113549.1.12.1.3"
+        encoded = _ber_encode_oid(oid)
+        assert _ber_decode_oid(encoded) == oid
+
+    def test_round_trip_teletrust_oids(self):
+        from sap_pse_loot import _ber_encode_oid, _ber_decode_oid
+        for oid in ["1.3.36.2.3.1", "1.3.36.2.3.4",
+                     "1.3.36.2.1.1", "1.3.36.2.1.3"]:
+            encoded = _ber_encode_oid(oid)
+            assert _ber_decode_oid(encoded) == oid, \
+                f"round-trip failed for {oid}"
+
+    def test_encode_oid_large_component(self):
+        """Components > 127 use base-128 varint encoding."""
+        from sap_pse_loot import _ber_encode_oid, _ber_decode_oid
+        oid = "1.2.840.113549"
+        encoded = _ber_encode_oid(oid)
+        assert _ber_decode_oid(encoded) == oid
+        # 840 and 113549 both require multi-byte encoding
+        assert len(encoded) > 4
+
+
+# ---------------------------------------------------------------------------
+# PKCS#12 PBKDF1
+# ---------------------------------------------------------------------------
+
+class TestPkcs12Pbkdf1:
+
+    def test_password_encoding(self):
+        from sap_pse_loot import _pkcs12_password
+        # Empty → just NUL-NUL
+        assert _pkcs12_password("") == b"\x00\x00"
+        # ASCII → UTF-16BE + NUL-NUL
+        p = _pkcs12_password("abc")
+        assert p == b"\x00a\x00b\x00c\x00\x00"
+
+    def test_pbkdf1_deterministic(self):
+        from sap_pse_loot import _pkcs12_pbkdf1, _pkcs12_password
+        pwd = _pkcs12_password("test")
+        salt = b"\x01" * 8
+        k1 = _pkcs12_pbkdf1(pwd, salt, 2048, 1, 24)
+        k2 = _pkcs12_pbkdf1(pwd, salt, 2048, 1, 24)
+        assert k1 == k2
+        assert len(k1) == 24
+
+    def test_different_passwords_different_keys(self):
+        from sap_pse_loot import _pkcs12_pbkdf1, _pkcs12_password
+        salt = b"\x02" * 8
+        k1 = _pkcs12_pbkdf1(_pkcs12_password("abc"), salt,
+                             2048, 1, 24)
+        k2 = _pkcs12_pbkdf1(_pkcs12_password("xyz"), salt,
+                             2048, 1, 24)
+        assert k1 != k2
+
+    def test_key_vs_iv_derivation_differ(self):
+        from sap_pse_loot import _pkcs12_pbkdf1, _pkcs12_password
+        pwd = _pkcs12_password("test")
+        salt = b"\x03" * 8
+        key = _pkcs12_pbkdf1(pwd, salt, 2048, 1, 24)
+        iv = _pkcs12_pbkdf1(pwd, salt, 2048, 2, 8)
+        # Key (24B) and IV (8B) must not be the same prefix
+        assert key[:8] != iv
+
+
+# ---------------------------------------------------------------------------
+# PSE build → extract round-trip
+# ---------------------------------------------------------------------------
+
+class TestExtractSigningKey:
+
+    def test_round_trip_rsa(self):
+        """Build a synthetic PSE, extract key + cert, verify match."""
+        from sap_pse_loot import (_build_test_pse,
+                                   extract_signing_key)
+        key, cert, key_der, cert_der = _generate_test_key_and_cert()
+
+        pin = "TestPIN123"
+        pse = _build_test_pse(key_der, cert_der, pin)
+        assert len(pse) > 100  # sanity
+
+        r = extract_signing_key(pse, pin)
+        assert r["success"] is True, f"failed: {r['error']}"
+        assert r["key_type"] == "RSA"
+        assert r["key_size"] == 2048
+        assert r["private_key"] is not None
+        assert r["certificate"] is not None
+        # Verify the extracted key matches the original
+        from cryptography.hazmat.primitives import serialization
+        extracted_der = r["private_key"].private_bytes(
+            serialization.Encoding.DER,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption())
+        assert extracted_der == key_der
+        # Verify cert match
+        extracted_cert_der = r["certificate"].public_bytes(
+            serialization.Encoding.DER)
+        assert extracted_cert_der == cert_der
+
+    def test_subject_dn_populated(self):
+        from sap_pse_loot import (_build_test_pse,
+                                   extract_signing_key)
+        _, cert, key_der, cert_der = _generate_test_key_and_cert()
+
+        r = extract_signing_key(
+            _build_test_pse(key_der, cert_der, "pin"), "pin")
+        assert r["success"] is True
+        assert r["subject_dn"]  # non-empty
+        assert r["issuer_dn"]   # non-empty
+        assert r["serial_number"] > 0
+
+    def test_wrong_pin_fails(self):
+        from sap_pse_loot import (_build_test_pse,
+                                   extract_signing_key)
+        _, _, key_der, cert_der = _generate_test_key_and_cert()
+        pse = _build_test_pse(key_der, cert_der, "correct")
+        r = extract_signing_key(pse, "wrong")
+        assert r["success"] is False
+
+    def test_empty_pse_returns_error(self):
+        from sap_pse_loot import extract_signing_key
+        r = extract_signing_key(b"", "pin")
+        assert r["success"] is False
+        assert "empty" in r["error"]
+
+    def test_garbage_pse_returns_error(self):
+        from sap_pse_loot import extract_signing_key
+        r = extract_signing_key(b"\xff\xfe\xfd", "pin")
+        assert r["success"] is False
+
+    def test_objects_list_populated(self):
+        from sap_pse_loot import (_build_test_pse,
+                                   extract_signing_key)
+        _, _, key_der, cert_der = _generate_test_key_and_cert()
+        r = extract_signing_key(
+            _build_test_pse(key_der, cert_der, "pin"), "pin")
+        assert r["success"] is True
+        names = [o["name"] for o in r["objects"]]
+        assert "SKnew" in names
+        assert "SignCert" in names
+
+    def test_different_salt_produces_different_pse(self):
+        from sap_pse_loot import (_build_test_pse,
+                                   extract_signing_key)
+        _, _, key_der, cert_der = _generate_test_key_and_cert()
+        pse1 = _build_test_pse(key_der, cert_der, "pin",
+                                salt=b"\x01" * 8)
+        pse2 = _build_test_pse(key_der, cert_der, "pin",
+                                salt=b"\x02" * 8)
+        assert pse1 != pse2
+        # Both decrypt successfully
+        r1 = extract_signing_key(pse1, "pin")
+        r2 = extract_signing_key(pse2, "pin")
+        assert r1["success"] is True
+        assert r2["success"] is True
+
+    def test_high_iteration_count(self):
+        """Higher iterations slow derivation but must still work."""
+        from sap_pse_loot import (_build_test_pse,
+                                   extract_signing_key)
+        _, _, key_der, cert_der = _generate_test_key_and_cert()
+        pse = _build_test_pse(key_der, cert_der, "pin",
+                               iterations=10000)
+        r = extract_signing_key(pse, "pin")
+        assert r["success"] is True
