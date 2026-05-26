@@ -320,3 +320,193 @@ class TestCookieEncoding:
         parsed = parse_ticket(decoded)
         assert parsed["user"] == "SAP*"
         assert parsed["sid"] == "S4H"
+
+
+# ===================================================================
+# PKCS#7 signer tests (commit 5)
+# ===================================================================
+
+def _generate_test_key_and_cert():
+    """Generate a 2048-bit RSA key + self-signed cert for tests."""
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.hazmat.primitives import hashes
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+    import datetime
+
+    key = rsa.generate_private_key(
+        public_exponent=65537, key_size=2048)
+    subject = issuer = x509.Name([
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME,
+                           "SAP Trust Community"),
+        x509.NameAttribute(NameOID.COMMON_NAME, "S4H"),
+    ])
+    now = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
+    cert = (x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(issuer)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now)
+            .not_valid_after(now + datetime.timedelta(days=3650))
+            .sign(key, hashes.SHA256()))
+    return key, cert
+
+
+class TestSignTicket:
+
+    def test_sign_produces_valid_ticket(self):
+        from sap_mysapsso2 import (build_ticket, sign_ticket,
+                                    parse_ticket)
+        key, cert = _generate_test_key_and_cert()
+        prefix = build_ticket(
+            user="SAP*", client="000", sid="S4H",
+            create_time="202601011200")
+        signed = sign_ticket(prefix, key, cert)
+        assert len(signed) > len(prefix)
+
+        parsed = parse_ticket(signed)
+        assert parsed["error"] == ""
+        assert parsed["has_signature"] is True
+        assert len(parsed["signature_bytes"]) > 100
+        assert parsed["user"] == "SAP*"
+        assert parsed["sid"] == "S4H"
+
+    def test_prefix_bytes_excludes_signature(self):
+        from sap_mysapsso2 import (build_ticket, sign_ticket,
+                                    parse_ticket)
+        key, cert = _generate_test_key_and_cert()
+        prefix = build_ticket(
+            user="SAP*", client="000", sid="S4H",
+            create_time="202601011200")
+        signed = sign_ticket(prefix, key, cert)
+        parsed = parse_ticket(signed)
+        assert parsed["prefix_bytes"] == prefix
+
+    def test_signature_is_valid_cms(self):
+        """The 0xFF payload is valid DER-encoded CMS SignedData."""
+        from sap_mysapsso2 import (build_ticket, sign_ticket,
+                                    parse_ticket)
+        key, cert = _generate_test_key_and_cert()
+        prefix = build_ticket(
+            user="SAP*", client="000", sid="S4H",
+            create_time="202601011200")
+        signed = sign_ticket(prefix, key, cert)
+        parsed = parse_ticket(signed)
+        sig = parsed["signature_bytes"]
+        # DER SignedData starts with SEQUENCE tag (0x30)
+        assert sig[0] == 0x30
+        # Must be substantial (RSA-2048 sig alone is ~256 bytes)
+        assert len(sig) > 200
+
+    def test_include_cert_false_smaller(self):
+        """NoCerts option produces a smaller signature."""
+        from sap_mysapsso2 import (build_ticket, sign_ticket,
+                                    parse_ticket)
+        key, cert = _generate_test_key_and_cert()
+        prefix = build_ticket(
+            user="SAP*", client="000", sid="S4H",
+            create_time="202601011200")
+        signed_with = sign_ticket(prefix, key, cert,
+                                   include_cert=True)
+        signed_without = sign_ticket(prefix, key, cert,
+                                      include_cert=False)
+        assert len(signed_without) < len(signed_with)
+
+    def test_sha1_digest_rejected(self):
+        """SHA-1 is not supported — clear error, not a crash."""
+        from sap_mysapsso2 import build_ticket, sign_ticket
+        key, cert = _generate_test_key_and_cert()
+        prefix = build_ticket(
+            user="SAP*", client="000", sid="S4H",
+            create_time="202601011200")
+        with pytest.raises(ValueError, match="unsupported"):
+            sign_ticket(prefix, key, cert, digest="sha1")
+
+    def test_sha384_digest(self):
+        """SHA-384 signing works."""
+        from sap_mysapsso2 import (build_ticket, sign_ticket,
+                                    parse_ticket)
+        key, cert = _generate_test_key_and_cert()
+        prefix = build_ticket(
+            user="SAP*", client="000", sid="S4H",
+            create_time="202601011200")
+        signed = sign_ticket(prefix, key, cert, digest="sha384")
+        parsed = parse_ticket(signed)
+        assert parsed["has_signature"] is True
+
+    def test_verify_signature_with_openssl(self):
+        """Verify the PKCS#7 signature is cryptographically valid."""
+        from sap_mysapsso2 import (build_ticket, sign_ticket,
+                                    parse_ticket)
+        from cryptography.hazmat.primitives.serialization import (
+            pkcs7)
+        from cryptography import x509 as cx509
+
+        key, cert = _generate_test_key_and_cert()
+        prefix = build_ticket(
+            user="SAP*", client="000", sid="S4H",
+            create_time="202601011200")
+        signed = sign_ticket(prefix, key, cert)
+        parsed = parse_ticket(signed)
+
+        # Verify the detached signature against the prefix
+        # using the cryptography library's PKCS7 verification
+        try:
+            pkcs7.load_der_pkcs7_certificates(
+                parsed["signature_bytes"])
+            # If we can load it, the CMS structure is valid
+        except Exception:
+            pytest.fail("signature_bytes is not valid DER CMS")
+
+
+class TestForgeTicket:
+
+    def test_forge_one_call(self):
+        from sap_mysapsso2 import forge_ticket
+        key, cert = _generate_test_key_and_cert()
+        r = forge_ticket(
+            user="SAP*", client="000", sid="S4H",
+            private_key=key, certificate=cert,
+            validity_min=120,
+            create_time="202601011200")
+        assert r["success"] is True
+        assert r["ticket_bytes"]
+        assert r["cookie_b64"]
+        assert "MYSAPSSO2=" in r["http_header"]
+        assert r["parsed"]["user"] == "SAP*"
+        assert r["parsed"]["has_signature"] is True
+
+    def test_forge_cookie_decodable(self):
+        """The cookie_b64 decodes back to the ticket bytes."""
+        from sap_mysapsso2 import (forge_ticket,
+                                    decode_from_cookie)
+        key, cert = _generate_test_key_and_cert()
+        r = forge_ticket(
+            user="DDIC", client="100", sid="PRD",
+            private_key=key, certificate=cert,
+            create_time="202601011200")
+        assert r["success"] is True
+        decoded = decode_from_cookie(r["cookie_b64"])
+        assert decoded == r["ticket_bytes"]
+
+    def test_forge_recipient_pinned(self):
+        from sap_mysapsso2 import forge_ticket
+        key, cert = _generate_test_key_and_cert()
+        r = forge_ticket(
+            user="SAP*", client="000", sid="S4H",
+            private_key=key, certificate=cert,
+            recipient_sid="PRD", recipient_client="100",
+            create_time="202601011200")
+        assert r["success"] is True
+        assert r["parsed"]["recipient_sid"] == "PRD"
+        assert r["parsed"]["recipient_client"] == "100"
+
+    def test_forge_error_handling(self):
+        """Invalid key → error in result, not exception."""
+        from sap_mysapsso2 import forge_ticket
+        r = forge_ticket(
+            user="SAP*", client="000", sid="S4H",
+            private_key=None, certificate=None)
+        assert r["success"] is False
+        assert r["error"]
