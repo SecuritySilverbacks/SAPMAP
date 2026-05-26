@@ -1508,6 +1508,97 @@ def _parse_pse_objects(decrypted: bytes) -> list:
 
 
 # ---------------------------------------------------------------------------
+# SAP-specific DSA private key decoder
+# ---------------------------------------------------------------------------
+
+_OID_DSA = "1.2.840.10040.4.1"
+
+
+def _parse_sap_dsa_private_key(value_bytes: bytes):
+    """Decode the SAP "SKnew" DSA key wire format.
+
+    Observed in SAPSYS.pse on kernel 793.  Layout::
+
+        SEQUENCE {
+          SEQUENCE {
+            OID 1.2.840.10040.4.1 (DSA),
+            SEQUENCE { INTEGER P, INTEGER Q, INTEGER G }
+          },
+          BIT STRING { INTEGER X }
+        }
+
+    The public value ``Y`` is NOT serialised — it is computed as
+    ``Y = G^X mod P`` and used to build a standard
+    ``cryptography.hazmat.primitives.asymmetric.dsa.DSAPrivateKey``.
+
+    Returns the constructed DSAPrivateKey on success, ``None`` if the
+    layout doesn't match.  Raises only on internal-logic errors.
+    """
+    try:
+        from cryptography.hazmat.primitives.asymmetric.dsa import (
+            DSAParameterNumbers, DSAPublicNumbers, DSAPrivateNumbers,
+        )
+    except ImportError:
+        return None
+
+    # Outer SEQUENCE
+    tag, off, length, _ = _ber_read_tl(value_bytes, 0)
+    if tag != _BER_SEQUENCE:
+        return None
+    children = list(_ber_children(value_bytes, off, off + length))
+    if len(children) != 2:
+        return None
+
+    # Child 0: SEQUENCE { OID DSA, SEQUENCE { P, Q, G } }
+    alg_tag, alg_val = children[0]
+    if alg_tag != _BER_SEQUENCE:
+        return None
+    alg_children = list(_ber_children(alg_val, 0, len(alg_val)))
+    if len(alg_children) != 2:
+        return None
+    oid_tag, oid_val = alg_children[0]
+    params_tag, params_val = alg_children[1]
+    if oid_tag != _BER_OID or params_tag != _BER_SEQUENCE:
+        return None
+    if _ber_decode_oid(oid_val) != _OID_DSA:
+        return None
+
+    # Extract P, Q, G
+    pqg = list(_ber_children(params_val, 0, len(params_val)))
+    if len(pqg) != 3:
+        return None
+    p_tag, p_val = pqg[0]
+    q_tag, q_val = pqg[1]
+    g_tag, g_val = pqg[2]
+    if p_tag != _BER_INTEGER or q_tag != _BER_INTEGER or g_tag != _BER_INTEGER:
+        return None
+    p = int.from_bytes(p_val, "big")
+    q = int.from_bytes(q_val, "big")
+    g = int.from_bytes(g_val, "big")
+
+    # Child 1: BIT STRING { INTEGER X }
+    bs_tag, bs_val = children[1]
+    if bs_tag != _BER_BITSTRING:
+        return None
+    if not bs_val or bs_val[0] != 0:
+        # First byte = unused-bits count, must be 0 for our case
+        return None
+    inner = bs_val[1:]
+    x_tag, x_off, x_len, _ = _ber_read_tl(inner, 0)
+    if x_tag != _BER_INTEGER:
+        return None
+    x = int.from_bytes(inner[x_off:x_off + x_len], "big")
+
+    # Compute Y = G^X mod P (public value, derived not stored)
+    y = pow(g, x, p)
+
+    params = DSAParameterNumbers(p=p, q=q, g=g)
+    pub_nums = DSAPublicNumbers(y=y, parameter_numbers=params)
+    priv_nums = DSAPrivateNumbers(x=x, public_numbers=pub_nums)
+    return priv_nums.private_key()
+
+
+# ---------------------------------------------------------------------------
 # Public API — extract_signing_key
 # ---------------------------------------------------------------------------
 
@@ -1612,6 +1703,28 @@ def extract_signing_key(pse_bytes: bytes, pin: str) -> dict:
                                 pk, ec.EllipticCurvePrivateKey):
                             result["key_type"] = "EC"
                             result["key_size"] = pk.key_size
+                        break
+                except Exception:
+                    pass
+
+                # SAP-specific DSA key format — observed in
+                # SAPSYS.pse on kernel 793.  Layout:
+                #   SEQUENCE {
+                #     SEQUENCE {
+                #       OID 1.2.840.10040.4.1 (DSA),
+                #       SEQUENCE { INTEGER P, INTEGER Q, INTEGER G }
+                #     },
+                #     BIT STRING { INTEGER X }   -- private exp only
+                #   }
+                # The public Y is NOT in the wire format; we compute
+                # it as Y = G^X mod P.
+                try:
+                    pk = _parse_sap_dsa_private_key(
+                        obj["value_bytes"])
+                    if pk is not None:
+                        result["private_key"] = pk
+                        result["key_type"] = "DSA"
+                        result["key_size"] = pk.key_size
                         break
                 except Exception:
                     pass
