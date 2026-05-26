@@ -221,6 +221,155 @@ def _read_file_b64(gw_exec_fn: GwExecFn, path: str,
     return result
 
 
+# ---------------------------------------------------------------------------
+# Chunked binary read adapter (kernel 793+ sapxpg output buffer workaround)
+# ---------------------------------------------------------------------------
+#
+# On SAP kernel 793+, sapxpg truncates command stdout to roughly 128
+# bytes per TLV line — the size of the new-kernel output format block.
+# That means a single `base64 /path/to/SAPSYS.pse` call returns only
+# the first ~96 raw bytes of the 3.6KB PSE file, not the whole thing.
+#
+# Workaround: read the file in small chunks via python3 slicing.  Same
+# pattern as chunked_drop_and_run in sap_dpmon_sapstar.py:
+#   python3 -c print(__import__('base64').b64encode(
+#       open('<path>','rb').read()[O:E]).decode())
+# Each chunk is 72 raw bytes -> 96 chars of base64 + newline = 97 chars,
+# well under sapxpg's 128-byte output ceiling.
+#
+# The adapter wraps any GwExecFn-compatible callable and intercepts
+# `base64 <path>` / `sudo base64 <path>` calls, transparently chunking
+# the read and returning the reassembled bytes as a single base64 line
+# in the standard {success, output, error} shape.
+
+# Conservative chunk size — 96 chars b64 + newline fits in sapxpg's
+# 128-byte ceiling with headroom.  Operators on older kernels (larger
+# buffers) pay a per-chunk round-trip cost but reads are still correct.
+_CHUNKED_RAW_BYTES = 72
+
+
+def make_chunked_read_adapter(raw_exec_fn: GwExecFn,
+                                chunk_raw_bytes: int = _CHUNKED_RAW_BYTES,
+                                verbose: bool = False) -> GwExecFn:
+    """Wrap a GW exec channel with chunked python3 binary reads.
+
+    Args:
+        raw_exec_fn:      The underlying ``GwExecFn`` (e.g. a closure
+                          around ``execute_gw_command``) for everything
+                          that isn't a ``base64 <path>`` request.
+        chunk_raw_bytes:  Raw bytes per chunk.  Default 72 is tuned for
+                          sapxpg kernel 793 (128-byte TLV ceiling).
+        verbose:          Print one progress line per chunk.
+
+    Returns:
+        A new ``GwExecFn`` that intercepts ``base64 <path>`` /
+        ``sudo base64 <path>`` requests, reads the file in
+        ``chunk_raw_bytes`` chunks via python3, and returns the full
+        base64-encoded content as a single output line.  All other
+        program names pass through unchanged.
+    """
+    import base64 as _b64_mod
+
+    def _dedupe(lines):
+        """Collapse consecutive duplicate lines (extract_p4_output
+        artifact — same data picked up under both old and new TLV
+        format markers)."""
+        out = []
+        for ln in lines:
+            if not out or out[-1] != ln:
+                out.append(ln)
+        return out
+
+    def _get_size(file_path: str) -> int:
+        """Get file size on the target via python3 os.path.getsize."""
+        r = raw_exec_fn(
+            "python3",
+            f"-c print(__import__('os').path.getsize('{file_path}'))")
+        if not r.get("success"):
+            return -1
+        for ln in _dedupe(r.get("output", [])):
+            ln = ln.strip()
+            if ln.isdigit():
+                return int(ln)
+        return -1
+
+    def _read_chunked(file_path: str,
+                       use_sudo: bool = False) -> dict:
+        """Read a file in ``chunk_raw_bytes`` chunks via python3.
+
+        Returns the standard {success, output, error} dict with one
+        base64 line in ``output`` holding the full file contents.
+        """
+        size = _get_size(file_path)
+        if size < 0:
+            return {"success": False, "output": [],
+                    "error": f"could not determine size of {file_path}"}
+        if size == 0:
+            return {"success": True, "output": [""], "error": ""}
+
+        n_chunks = (size + chunk_raw_bytes - 1) // chunk_raw_bytes
+        if verbose:
+            print(f"  [chunked] {file_path}: {size}B "
+                  f"-> {n_chunks} chunk(s) of {chunk_raw_bytes}B")
+
+        all_bytes = bytearray()
+        for offset in range(0, size, chunk_raw_bytes):
+            end = min(offset + chunk_raw_bytes, size)
+            code = (f"print(__import__('base64').b64encode("
+                    f"open('{file_path}','rb').read()[{offset}:{end}])"
+                    f".decode())")
+            program = "sudo" if use_sudo else "python3"
+            params = f"python3 -c {code}" if use_sudo else f"-c {code}"
+
+            r = raw_exec_fn(program, params)
+            if not r.get("success"):
+                return {"success": False, "output": [],
+                        "error": (f"chunk {offset}-{end} failed: "
+                                  f"{r.get('error', '?')[:100]}")}
+
+            b64_chunk = "".join(ln.strip()
+                                for ln in _dedupe(r.get("output", [])))
+            if not b64_chunk:
+                return {"success": False, "output": [],
+                        "error": f"chunk {offset}-{end} empty output"}
+            try:
+                raw = _b64_mod.b64decode(b64_chunk, validate=True)
+            except Exception as e:
+                return {"success": False, "output": [],
+                        "error": (f"chunk {offset}-{end} b64decode "
+                                  f"failed: {e}")}
+            all_bytes.extend(raw)
+
+        if len(all_bytes) != size:
+            return {"success": False, "output": [],
+                    "error": (f"size mismatch: got {len(all_bytes)}B "
+                              f"expected {size}B")}
+
+        # Return as one base64 line so _read_file_b64 can decode it
+        full_b64 = _b64_mod.b64encode(bytes(all_bytes)).decode("ascii")
+        return {"success": True, "output": [full_b64], "error": ""}
+
+    def adapted(program: str, args: str) -> dict:
+        is_base64 = program in ("base64", "/usr/bin/base64")
+        is_sudo_base64 = (program == "sudo"
+                          and "base64" in args.split()[0:2])
+
+        # Non-base64 commands pass through unchanged
+        if not is_base64 and not is_sudo_base64:
+            return raw_exec_fn(program, args)
+
+        if is_sudo_base64:
+            # sudo not NOPASSWD on most systems; short-circuit so
+            # callers fall back to the non-sudo first attempt
+            return {"success": False, "output": [],
+                    "error": ("sudo not NOPASSWD; "
+                              "first attempt should succeed")}
+
+        return _read_chunked(args.strip(), use_sudo=False)
+
+    return adapted
+
+
 def _list_dir(gw_exec_fn: GwExecFn, path: str) -> list:
     """Return list of filenames in `path` (empty list on failure).
 
