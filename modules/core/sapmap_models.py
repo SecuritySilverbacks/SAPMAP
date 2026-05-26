@@ -200,6 +200,178 @@ class CreatedUser:
 
 
 # ---------------------------------------------------------------------------
+# ForgedTicket — a forged MYSAPSSO2 logon ticket
+# ---------------------------------------------------------------------------
+#
+# Captures the output of the MYSAPSSO2 ticket-forgery chain
+# (sap_mysapsso2.forge_ticket) plus enough provenance to:
+#   - re-use the ticket against any STRUSTSSO2-trusted receiver
+#   - track which receivers have actually been propagated to
+#   - decide when the ticket has expired and can be discarded
+#   - audit the source PSE that signed it
+#
+# Stored on `SAPNode.forged_tickets` (issuer side) and mirrored
+# into `SAPMAPState.forged_tickets` (global list) so the UI can
+# enumerate all live forgeries irrespective of which node they
+# came from.  Mirrors the `CreatedUser` two-tier pattern.
+
+@dataclass
+class ForgedTicket:
+    """A forged MYSAPSSO2 logon ticket with replay-tracking metadata."""
+
+    # ── Impersonation context (the "logon claim") ─────────────────
+    user: str                       # impersonated user (e.g. "SAP*", "DDIC")
+    client: str                     # MANDT (e.g. "100", "000")
+    sid: str                        # issuing SID (whose SAPSYS.pse signed it)
+
+    # ── The ticket itself ─────────────────────────────────────────
+    cookie_b64: str                 # base64 ticket — drop-in for HTTP /
+                                    # pyrfc / .sap shortcut at= line
+    ticket_size: int = 0            # size in bytes (display only)
+
+    # ── Validity window ───────────────────────────────────────────
+    forged_at: str = ""             # ISO timestamp when forge_ticket ran
+    validity_min: int = 120         # SAP ValidTimeInM from InfoUnit 0x07
+
+    # ── Optional recipient pinning ────────────────────────────────
+    # When set, the ticket carries 0x0A/0x0B InfoUnits restricting
+    # acceptance to a specific receiver.  Empty = open (replays
+    # against any node in the issuer's STRUSTSSO2 trust subgraph).
+    recipient_sid: str = ""
+    recipient_client: str = ""
+
+    # ── Signer provenance (cert details from the SAPSYS that
+    # signed the ticket; useful for forensics + STRUSTSSO2 lookup) ─
+    signer_dn: str = ""             # subject DN of the SAPSYS cert
+    signer_serial: str = ""         # cert serial number (hex)
+
+    # ── Exploitation provenance ───────────────────────────────────
+    source_sid: str = ""            # SID of the system we extracted
+                                    # the signing PSE from (== sid in
+                                    # the simple case, may differ when
+                                    # the signer is in a parent system)
+    source_node_ip: str = ""        # IP of the exploited host
+    method: str = "ticket_forge"    # for parity with CreatedUser.method
+
+    # ── Replay tracking ───────────────────────────────────────────
+    # Each entry: {"sid", "client", "at", "result", "channel"}
+    # channel ∈ {"http", "pyrfc", "sapgui"}
+    # result ∈ {"success", "rejected", "expired", "error"}
+    used_on: list = field(default_factory=list)
+
+    # ── Misc / display ────────────────────────────────────────────
+    loot_path: str = ""             # path to the .sap / curl.sh / pyrfc.json
+                                    # bundle on disk (see sap_ticket_delivery)
+    label: str = ""                 # operator-supplied short label
+
+    def __post_init__(self):
+        if not self.forged_at:
+            self.forged_at = datetime.now().isoformat()
+        if not self.source_sid:
+            self.source_sid = self.sid
+
+    def is_expired(self, now: Optional[datetime] = None) -> bool:
+        """True if the ticket's validity window has passed.
+
+        SAP receivers reject tickets older than the validity window
+        even if the signature is valid.  Operators should not bother
+        replaying expired tickets.
+        """
+        if not self.forged_at:
+            return False
+        if now is None:
+            now = datetime.now()
+        try:
+            t = datetime.fromisoformat(self.forged_at)
+        except ValueError:
+            return False
+        # validity_min is the SAP ValidTimeInM; treat negative as
+        # "no expiry tracked" (legacy tickets without InfoUnit 0x07)
+        if self.validity_min <= 0:
+            return False
+        age_sec = (now - t).total_seconds()
+        return age_sec > self.validity_min * 60
+
+    def remaining_minutes(self,
+                          now: Optional[datetime] = None) -> int:
+        """Whole minutes left in the validity window (negative = past)."""
+        if not self.forged_at or self.validity_min <= 0:
+            return self.validity_min
+        if now is None:
+            now = datetime.now()
+        try:
+            t = datetime.fromisoformat(self.forged_at)
+        except ValueError:
+            return self.validity_min
+        age_sec = (now - t).total_seconds()
+        return int(self.validity_min - age_sec / 60)
+
+    def display_label(self) -> str:
+        """Short one-line label for menu / tooltip use."""
+        rem = self.remaining_minutes()
+        pin = (f" → {self.recipient_sid}/{self.recipient_client}"
+               if self.recipient_sid else "")
+        if self.is_expired():
+            return f"{self.user}@{self.sid}/{self.client}{pin} (expired)"
+        return (f"{self.user}@{self.sid}/{self.client}{pin} "
+                f"({rem} min left)")
+
+    def record_use(self, sid: str, client: str, result: str,
+                    channel: str = "") -> None:
+        """Append a replay attempt to ``used_on`` with a timestamp."""
+        self.used_on.append({
+            "sid": sid,
+            "client": client,
+            "at": datetime.now().isoformat(),
+            "result": result,
+            "channel": channel,
+        })
+
+    def to_dict(self) -> dict:
+        return {
+            "user": self.user,
+            "client": self.client,
+            "sid": self.sid,
+            "cookie_b64": self.cookie_b64,
+            "ticket_size": self.ticket_size,
+            "forged_at": self.forged_at,
+            "validity_min": self.validity_min,
+            "recipient_sid": self.recipient_sid,
+            "recipient_client": self.recipient_client,
+            "signer_dn": self.signer_dn,
+            "signer_serial": self.signer_serial,
+            "source_sid": self.source_sid,
+            "source_node_ip": self.source_node_ip,
+            "method": self.method,
+            "used_on": list(self.used_on),
+            "loot_path": self.loot_path,
+            "label": self.label,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> ForgedTicket:
+        return cls(
+            user=d["user"],
+            client=d["client"],
+            sid=d["sid"],
+            cookie_b64=d["cookie_b64"],
+            ticket_size=d.get("ticket_size", 0),
+            forged_at=d.get("forged_at", ""),
+            validity_min=d.get("validity_min", 120),
+            recipient_sid=d.get("recipient_sid", ""),
+            recipient_client=d.get("recipient_client", ""),
+            signer_dn=d.get("signer_dn", ""),
+            signer_serial=d.get("signer_serial", ""),
+            source_sid=d.get("source_sid", ""),
+            source_node_ip=d.get("source_node_ip", ""),
+            method=d.get("method", "ticket_forge"),
+            used_on=list(d.get("used_on", [])),
+            loot_path=d.get("loot_path", ""),
+            label=d.get("label", ""),
+        )
+
+
+# ---------------------------------------------------------------------------
 # SAPNode — a system on the map
 # ---------------------------------------------------------------------------
 
@@ -223,6 +395,10 @@ class SAPNode:
     pwned: bool = False
     credentials: list = field(default_factory=list) # [Credentials, ...]
     created_users: list = field(default_factory=list)  # [CreatedUser, ...]
+    # Forged MYSAPSSO2 logon tickets — signed by THIS system's
+    # SAPSYS.pse and usable across its STRUSTSSO2 trust subgraph.
+    # See ForgedTicket / sap_mysapsso2.forge_ticket for details.
+    forged_tickets: list = field(default_factory=list)  # [ForgedTicket, ...]
     sapology_data: dict = field(default_factory=dict)
     gw_vulnerable: bool = False         # True if SAPXPG gateway exploit works
     gw_vulnerable_port: int = 0         # The specific gateway port that is vulnerable
@@ -480,6 +656,8 @@ class SAPNode:
             "pwned": self.pwned,
             "credentials": [c.to_dict() for c in self.credentials],
             "created_users": [u.to_dict() for u in self.created_users],
+            "forged_tickets": [t.to_dict()
+                               for t in self.forged_tickets],
             "sapology_data": self.sapology_data,
             "gw_vulnerable": self.gw_vulnerable,
             "gw_vulnerable_port": self.gw_vulnerable_port,
@@ -573,6 +751,8 @@ class SAPNode:
             pwned=d.get("pwned", False),
             credentials=[Credentials.from_dict(c) for c in d.get("credentials", [])],
             created_users=[CreatedUser.from_dict(u) for u in d.get("created_users", [])],
+            forged_tickets=[ForgedTicket.from_dict(t)
+                            for t in d.get("forged_tickets", [])],
             sapology_data=d.get("sapology_data", {}),
             gw_vulnerable=d.get("gw_vulnerable", False),
             gw_vulnerable_port=d.get("gw_vulnerable_port", 0),
@@ -1088,6 +1268,10 @@ class SAPMAPState:
     created_users: list = field(default_factory=list)    # global [CreatedUser, ...]
     created_destinations: list = field(default_factory=list)  # [{dest_name, source_sid, target_sid, ...}]
     rfc_check_cache: dict = field(default_factory=dict)  # {dest_name: result_dict}
+    # Forged MYSAPSSO2 logon tickets — mirror of every issuer's
+    # SAPNode.forged_tickets so the UI can enumerate the full set
+    # without iterating every node.  See ForgedTicket dataclass.
+    forged_tickets: list = field(default_factory=list)   # global [ForgedTicket, ...]
     scc_nodes: dict = field(default_factory=dict)        # host -> SCCNode (Cloud Connectors)
     btp_subaccounts: dict = field(default_factory=dict)  # uuid -> BTPSubaccountNode
     scan_config: dict = field(default_factory=dict)
@@ -1165,6 +1349,12 @@ class SAPMAPState:
         self.connections = [c for c in self.connections
                            if c.source_sid != sid and c.target_sid != sid]
         self.created_users = [u for u in self.created_users if u.sid != sid]
+        # Drop forged tickets issued by the deleted node — they're
+        # tied to that node's signing PSE and become orphans.  Tickets
+        # FROM other systems that target this SID via recipient pinning
+        # are kept (the SID may come back; users can still re-test).
+        self.forged_tickets = [t for t in self.forged_tickets
+                               if t.sid != sid]
         # Detach WD backend links pointing at the now-deleted node so
         # an operator-initiated delete doesn't surface as a phantom
         # reference on the next rediscover.  The corresponding URL
@@ -1326,6 +1516,74 @@ class SAPMAPState:
         if node and "ABAP" in (node.system_type or "").upper():
             self._auto_download_secstore_async(node)
 
+    # -- Forged ticket tracking --
+
+    def track_forged_ticket(self, ticket: ForgedTicket) -> None:
+        """Register a newly forged MYSAPSSO2 ticket.
+
+        Stores the ticket BOTH on the issuing SID's node (so the UI
+        can show "this system has ticket forgeries against it") AND on
+        the global state.forged_tickets list (so we can enumerate the
+        full set without iterating every node).  Mirrors the
+        :meth:`track_created_user` two-tier pattern.
+
+        Emits a CRITICAL finding — ticket forgery gives the operator
+        impersonation across the entire STRUSTSSO2 trust subgraph and
+        is arguably the highest-impact post-exploitation primitive
+        SAPMAP can produce.
+        """
+        self.forged_tickets.append(ticket)
+        node = self.get_node(ticket.sid)
+        if node:
+            node.forged_tickets.append(ticket)
+            node.pwned = True
+        try:
+            from sapmap_findings import emit_finding
+            pin_note = ""
+            if ticket.recipient_sid:
+                pin_note = (f" pinned to {ticket.recipient_sid}/"
+                            f"{ticket.recipient_client}")
+            emit_finding(
+                "CRITICAL", ticket.sid,
+                f"MYSAPSSO2 ticket forged: {ticket.user!r}@"
+                f"{ticket.client}{pin_note}, "
+                f"valid {ticket.validity_min} min — replayable across "
+                f"the {ticket.sid} STRUSTSSO2 trust subgraph",
+            )
+        except Exception:
+            pass
+
+    def get_forged_tickets_for(self, sid: str) -> list:
+        """Return tickets issued BY the given SID (i.e., signed by
+        that system's SAPSYS.pse).  Includes expired ones — callers
+        that want only live tickets must filter via
+        ``ForgedTicket.is_expired()``.
+        """
+        return [t for t in self.forged_tickets if t.sid == sid]
+
+    def get_forged_tickets_targeting(self, sid: str,
+                                       client: str = "") -> list:
+        """Return tickets that could be replayed against the given
+        receiver.  Includes:
+          * tickets explicitly pinned to ``sid`` (and optionally ``client``)
+          * tickets with NO pinning (open scope — every trusted receiver)
+        Excludes expired tickets.
+        """
+        out = []
+        for t in self.forged_tickets:
+            if t.is_expired():
+                continue
+            # Open-scope tickets work against any trusted receiver
+            if not t.recipient_sid:
+                out.append(t)
+                continue
+            if t.recipient_sid != sid:
+                continue
+            if client and t.recipient_client and t.recipient_client != client:
+                continue
+            out.append(t)
+        return out
+
     def _auto_download_secstore_async(self, node) -> None:
         """Trigger an implicit RSECTAB download on a background thread.
 
@@ -1425,6 +1683,8 @@ class SAPMAPState:
             "created_users": [u.to_dict() for u in self.created_users],
             "created_destinations": self.created_destinations,
             "rfc_check_cache": self.rfc_check_cache,
+            "forged_tickets": [t.to_dict()
+                               for t in self.forged_tickets],
             "scc_nodes": {h: n.to_dict() for h, n in self.scc_nodes.items()},
             "btp_subaccounts": {
                 u: n.to_dict() for u, n in self.btp_subaccounts.items()
@@ -1444,6 +1704,8 @@ class SAPMAPState:
         state.connections = [RFCConnection.from_dict(c) for c in d.get("connections", [])]
         state.created_users = [CreatedUser.from_dict(u) for u in d.get("created_users", [])]
         state.created_destinations = d.get("created_destinations", [])
+        state.forged_tickets = [ForgedTicket.from_dict(t)
+                                for t in d.get("forged_tickets", [])]
         for host, scc_d in d.get("scc_nodes", {}).items():
             state.scc_nodes[host] = SCCNode.from_dict(scc_d)
         for uuid, sub_d in d.get("btp_subaccounts", {}).items():
