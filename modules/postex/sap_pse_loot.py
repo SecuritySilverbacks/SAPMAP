@@ -1336,23 +1336,40 @@ def _decrypt_pse(pse_bytes: bytes, pin: str) -> bytes:
         raise ValueError(
             "PSE version 256 (LPS) is not yet supported")
 
-    # Second child: context-specific container
+    # Second child: container.  Three variants observed in the wild:
+    #   - [0] context tag (0xA0) — classic v2 SAPSYS.pse
+    #   - [3] context tag (0xA3) — v4 / newer kernels
+    #   - SEQUENCE (0x30) — observed on some kernel 793 systems where
+    #     the inner SEQUENCE is wrapped directly without a context tag
     cont_tag, cont_val = children[1]
-    if cont_tag not in (_BER_CTX_0, _BER_CTX_3):
+    if cont_tag not in (_BER_CTX_0, _BER_CTX_3, _BER_SEQUENCE):
         raise ValueError(
             f"PSE: unexpected container tag 0x{cont_tag:02X}")
 
-    # Parse inner SEQUENCE
-    inner = list(_ber_children(cont_val, 0, len(cont_val)))
-    if not inner:
-        raise ValueError("PSE: empty encrypted container")
-
-    # The inner content is a SEQUENCE; parse its children
-    inner_tag, inner_val = inner[0]
-    if inner_tag != _BER_SEQUENCE:
-        raise ValueError(
-            f"PSE: expected inner SEQUENCE, got "
-            f"0x{inner_tag:02X}")
+    # Determine the bytes that hold the OCTET/SEQ/OCTET children.
+    # Three observed layouts:
+    #   A) [0] / [3] wrapping a single inner SEQUENCE that contains
+    #      OCTET, SEQ, OCTET — the original v2 format
+    #   B) [0] / [3] containing OCTET, SEQ, OCTET DIRECTLY (no inner
+    #      SEQUENCE) — observed on sap_system_pki_instance.pse
+    #   C) SEQUENCE container (no context tag), already in the
+    #      "decrypted layout" with [SEQ(algo), OCTET(ts), INT, SET]
+    #      — observed on SAPSYS.pse for kernel 793
+    if cont_tag == _BER_SEQUENCE:
+        # Layout C — treat the SEQUENCE itself as the inner
+        inner_val = cont_val
+    else:
+        # Layout A or B — figure out which by peeking at first child
+        inner = list(_ber_children(cont_val, 0, len(cont_val)))
+        if not inner:
+            raise ValueError("PSE: empty encrypted container")
+        first_tag, _ = inner[0]
+        if first_tag == _BER_SEQUENCE and len(inner) == 1:
+            # Layout A — single inner SEQUENCE wrapping the components
+            inner_val = inner[0][1]
+        else:
+            # Layout B — OCTET/SEQ/OCTET directly inside [0]/[3]
+            inner_val = cont_val
 
     enc_children = list(
         _ber_children(inner_val, 0, len(inner_val)))
@@ -1363,7 +1380,12 @@ def _decrypt_pse(pse_bytes: bytes, pin: str) -> bytes:
     cipher_bytes = b""
 
     if version in (2,):
-        # v2: [OCTET(enc_pin), SEQ(alg_id), OCTET(cipher)]
+        # v2 standard: [OCTET(enc_pin), SEQ(alg_id), OCTET(cipher)]
+        # v2 S4H variant: [SEQ(alg_id), OCTET(timestamp), INT,
+        #                  SET(obj1, obj2, ...) ] — already
+        # "decrypted" at the outer level; per-object encryption
+        # may apply to the values inside each SET child.
+        has_set = False
         for ec_tag, ec_val in enc_children:
             if ec_tag == _BER_SEQUENCE and not alg_seq_bytes:
                 alg_seq_bytes = ec_val
@@ -1372,6 +1394,15 @@ def _decrypt_pse(pse_bytes: bytes, pin: str) -> bytes:
                     encrypted_pin_bytes = ec_val
                 else:
                     cipher_bytes = ec_val
+            elif ec_tag == _BER_SET and not cipher_bytes:
+                has_set = True
+
+        # If we found a SET (S4H variant), the inner SEQUENCE is
+        # already in "decrypted-equivalent" form — no whole-blob PBE
+        # decryption needed.  Wrap inner_val as a SEQUENCE so the
+        # caller's _parse_pse_objects() can find the SET.
+        if has_set and not cipher_bytes:
+            return _ber_tlv(_BER_SEQUENCE, inner_val)
     elif version in (4,):
         # v4: [INT(1), SEQ(alg_id), OCTET(cipher), OCTET(enc_pin)]
         octets = []
