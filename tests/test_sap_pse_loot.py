@@ -437,3 +437,373 @@ def test_save_to_loot_creates_meta_file(tmp_path, monkeypatch):
     assert "s4hadm" in meta
     assert "/usr/sap/S4H/D00/sec" in meta
     assert "SAPSSLS.pse" in meta  # other_files surfaced
+
+
+# ===================================================================
+# cred_v2 decryption tests (commit 2)
+# ===================================================================
+
+# ---------------------------------------------------------------------------
+# BER parser / builder
+# ---------------------------------------------------------------------------
+
+class TestBerParser:
+    """Minimal BER encoder / decoder round-trips."""
+
+    def test_ber_tlv_short_length(self):
+        from sap_pse_loot import _ber_tlv, _ber_read_tl
+        # IA5String "hello"
+        data = _ber_tlv(0x16, b"hello")
+        assert data == b"\x16\x05hello"
+        tag, voff, vlen, nxt = _ber_read_tl(data, 0)
+        assert tag == 0x16
+        assert data[voff:voff + vlen] == b"hello"
+        assert nxt == len(data)
+
+    def test_ber_tlv_long_length(self):
+        from sap_pse_loot import _ber_tlv, _ber_read_tl
+        # 200-byte value
+        payload = b"\xAA" * 200
+        data = _ber_tlv(0x04, payload)
+        assert data[0] == 0x04
+        assert data[1] == 0x81  # long-form: 1 length byte
+        assert data[2] == 200
+        tag, voff, vlen, nxt = _ber_read_tl(data, 0)
+        assert tag == 0x04
+        assert vlen == 200
+        assert data[voff:voff + vlen] == payload
+
+    def test_ber_sequence_children(self):
+        from sap_pse_loot import (_ber_tlv, _ber_read_tl,
+                                   _ber_children,
+                                   _BER_SEQUENCE, _BER_IA5STRING)
+        inner = (_ber_tlv(_BER_IA5STRING, b"one") +
+                 _ber_tlv(_BER_IA5STRING, b"two"))
+        seq = _ber_tlv(_BER_SEQUENCE, inner)
+        tag, voff, vlen, nxt = _ber_read_tl(seq, 0)
+        assert tag == _BER_SEQUENCE
+        kids = list(_ber_children(seq, voff, voff + vlen))
+        assert len(kids) == 2
+        assert kids[0] == (_BER_IA5STRING, b"one")
+        assert kids[1] == (_BER_IA5STRING, b"two")
+
+    def test_ber_read_tl_truncated(self):
+        from sap_pse_loot import _ber_read_tl
+        with pytest.raises(ValueError, match="past end"):
+            _ber_read_tl(b"", 0)
+        with pytest.raises(ValueError, match="truncated"):
+            _ber_read_tl(b"\x30", 0)
+
+    def test_ber_read_tl_indefinite_rejected(self):
+        from sap_pse_loot import _ber_read_tl
+        with pytest.raises(ValueError, match="indefinite"):
+            _ber_read_tl(b"\x30\x80", 0)
+
+
+# ---------------------------------------------------------------------------
+# LCG XOR stream
+# ---------------------------------------------------------------------------
+
+class TestLcgXor:
+
+    def test_lcg_xor_deterministic(self):
+        from sap_pse_loot import _lcg_xor
+        data = b"hello"
+        r1 = _lcg_xor(data, 42)
+        r2 = _lcg_xor(data, 42)
+        assert r1 == r2, "same seed must produce same output"
+
+    def test_lcg_xor_different_seeds(self):
+        from sap_pse_loot import _lcg_xor
+        data = b"hello"
+        r1 = _lcg_xor(data, 0)
+        r2 = _lcg_xor(data, 1)
+        assert r1 != r2, "different seeds must differ"
+
+    def test_lcg_xor_round_trip(self):
+        """XOR is involutory with the same seed."""
+        from sap_pse_loot import _lcg_xor
+        data = b"the quick brown fox"
+        seed = 0x12345678
+        encrypted = _lcg_xor(data, seed)
+        assert encrypted != data
+        decrypted = _lcg_xor(encrypted, seed)
+        assert decrypted == data
+
+    def test_lcg_xor_empty(self):
+        from sap_pse_loot import _lcg_xor
+        assert _lcg_xor(b"", 99) == b""
+
+    def test_lcg_xor_known_vector(self):
+        """Verify the LCG constants produce a predictable first byte.
+        LCG: state = (seed * 0x15A4E35 + 1) & 0xFFFFFFFF
+        seed=0: state = 1, output_byte = 1, xor(0x41, 0x01) = 0x40."""
+        from sap_pse_loot import _lcg_xor
+        result = _lcg_xor(b"\x41", 0)
+        assert result == bytes([0x41 ^ 0x01])
+
+
+# ---------------------------------------------------------------------------
+# cred_v2 envelope parsing
+# ---------------------------------------------------------------------------
+
+class TestCredV2Envelope:
+
+    def test_parse_single_nonlps_record(self):
+        from sap_pse_loot import (_ber_tlv, _BER_SEQUENCE,
+                                   _BER_IA5STRING, _BER_BITSTRING,
+                                   _parse_cred_v2_envelope)
+        cipher = b"\xDE\xAD\xBE\xEF"
+        record = _ber_tlv(_BER_SEQUENCE, b"".join([
+            _ber_tlv(_BER_IA5STRING, b"CN=S4H"),
+            _ber_tlv(_BER_IA5STRING, b""),
+            _ber_tlv(_BER_IA5STRING,
+                     b"/usr/sap/S4H/D00/sec/SAPSYS.pse"),
+            _ber_tlv(_BER_IA5STRING, b""),
+            _ber_tlv(_BER_BITSTRING, b"\x00" + cipher),
+        ]))
+        blob = _ber_tlv(_BER_SEQUENCE, record)
+        records = _parse_cred_v2_envelope(blob)
+        assert len(records) == 1
+        assert records[0].pse_path == \
+            "/usr/sap/S4H/D00/sec/SAPSYS.pse"
+        assert records[0].cipher_bytes == cipher
+        assert records[0].is_lps is False
+
+    def test_parse_multiple_records(self):
+        from sap_pse_loot import (_ber_tlv, _BER_SEQUENCE,
+                                   _BER_IA5STRING, _BER_BITSTRING,
+                                   _parse_cred_v2_envelope)
+
+        def _make_rec(path, cipher):
+            return _ber_tlv(_BER_SEQUENCE, b"".join([
+                _ber_tlv(_BER_IA5STRING, b"CN=test"),
+                _ber_tlv(_BER_IA5STRING, b""),
+                _ber_tlv(_BER_IA5STRING, path.encode("ascii")),
+                _ber_tlv(_BER_IA5STRING, b""),
+                _ber_tlv(_BER_BITSTRING, b"\x00" + cipher),
+            ]))
+
+        blob = _ber_tlv(_BER_SEQUENCE,
+                        _make_rec("/pse1", b"\x01") +
+                        _make_rec("/pse2", b"\x02"))
+        records = _parse_cred_v2_envelope(blob)
+        assert len(records) == 2
+        assert records[0].pse_path == "/pse1"
+        assert records[1].pse_path == "/pse2"
+
+    def test_parse_lps_record_detected(self):
+        from sap_pse_loot import (_ber_tlv, _BER_SEQUENCE,
+                                   _BER_INTEGER, _BER_UTF8STRING,
+                                   _BER_BITSTRING,
+                                   _parse_cred_v2_envelope)
+        # LPS: first child is INTEGER(2)
+        record = _ber_tlv(_BER_SEQUENCE, b"".join([
+            _ber_tlv(_BER_INTEGER, b"\x02"),
+            _ber_tlv(_BER_SEQUENCE, b""),  # subject RDN
+            _ber_tlv(_BER_UTF8STRING,
+                     b"/usr/sap/S4H/D00/sec/SAPSYS.pse"),
+            _ber_tlv(_BER_BITSTRING, b"\x00\xFF"),
+        ]))
+        blob = _ber_tlv(_BER_SEQUENCE, record)
+        records = _parse_cred_v2_envelope(blob)
+        assert len(records) == 1
+        assert records[0].is_lps is True
+        assert records[0].pse_path == \
+            "/usr/sap/S4H/D00/sec/SAPSYS.pse"
+
+    def test_parse_empty_sequence(self):
+        from sap_pse_loot import (_ber_tlv, _BER_SEQUENCE,
+                                   _parse_cred_v2_envelope)
+        blob = _ber_tlv(_BER_SEQUENCE, b"")
+        records = _parse_cred_v2_envelope(blob)
+        assert records == []
+
+    def test_parse_invalid_outer_tag(self):
+        from sap_pse_loot import _parse_cred_v2_envelope
+        with pytest.raises(ValueError, match="expected outer SEQUENCE"):
+            _parse_cred_v2_envelope(b"\x16\x03abc")
+
+
+# ---------------------------------------------------------------------------
+# Round-trip decrypt: build → decrypt → verify PIN
+# ---------------------------------------------------------------------------
+
+class TestCredV2Decrypt:
+
+    def test_round_trip_3des(self):
+        """Build a synthetic cred_v2 with 3DES, decrypt it, verify PIN."""
+        from sap_pse_loot import (_build_cred_v2_blob,
+                                   decrypt_cred_v2)
+        pin = "MySecretPIN123"
+        pse_path = "/usr/sap/S4H/D00/sec/SAPSYS.pse"
+        username = "s4hadm"
+        blob = _build_cred_v2_blob(pin, pse_path, username,
+                                    algo=0)
+        r = decrypt_cred_v2(blob, username)
+        assert r["success"] is True, f"decrypt failed: {r['error']}"
+        assert r["pin"] == pin
+        assert r["pse_path"] == pse_path
+
+    def test_round_trip_aes256(self):
+        """Build a synthetic cred_v2 with AES-256, decrypt, verify."""
+        from sap_pse_loot import (_build_cred_v2_blob,
+                                   decrypt_cred_v2)
+        pin = "AES-256-test-pin!"
+        pse_path = "/usr/sap/PRD/DVEBMGS01/sec/SAPSYS.pse"
+        username = "prdadm"
+        blob = _build_cred_v2_blob(pin, pse_path, username,
+                                    algo=1)
+        r = decrypt_cred_v2(blob, username)
+        assert r["success"] is True, f"decrypt failed: {r['error']}"
+        assert r["pin"] == pin
+
+    def test_round_trip_fixed_salt_iv(self):
+        """Deterministic: same salt+IV produce same ciphertext."""
+        from sap_pse_loot import (_build_cred_v2_blob,
+                                   decrypt_cred_v2)
+        salt = b"\x01" * 16
+        iv = b"\x02" * 16
+        blob1 = _build_cred_v2_blob("pin1", "/pse", "user",
+                                     algo=0, salt=salt, iv=iv)
+        blob2 = _build_cred_v2_blob("pin1", "/pse", "user",
+                                     algo=0, salt=salt, iv=iv)
+        assert blob1 == blob2
+
+    def test_different_usernames_produce_different_results(self):
+        """Key derivation depends on the username — wrong user fails."""
+        from sap_pse_loot import (_build_cred_v2_blob,
+                                   decrypt_cred_v2)
+        pin = "RightPin"
+        blob = _build_cred_v2_blob(pin, "/pse", "s4hadm",
+                                    algo=0)
+        # Correct username recovers PIN
+        r = decrypt_cred_v2(blob, "s4hadm")
+        assert r["success"] is True
+        assert r["pin"] == pin
+        # Wrong username: either fails or returns garbage
+        r2 = decrypt_cred_v2(blob, "prdadm")
+        assert not r2["success"] or r2["pin"] != pin
+
+    def test_pse_path_filter(self):
+        """When pse_path is given, only matching record is tried."""
+        from sap_pse_loot import (_build_cred_v2_blob,
+                                   decrypt_cred_v2,
+                                   _ber_tlv, _BER_SEQUENCE,
+                                   _BER_IA5STRING, _BER_BITSTRING)
+        # Build blob with path="/usr/sap/S4H/..."
+        pin = "FilterMe"
+        blob = _build_cred_v2_blob(
+            pin, "/usr/sap/S4H/D00/sec/SAPSYS.pse", "s4hadm")
+        # Matching filter → success
+        r = decrypt_cred_v2(
+            blob, "s4hadm",
+            pse_path="/usr/sap/S4H/D00/sec/SAPSYS.pse")
+        assert r["success"] is True
+        # Non-matching filter → fails
+        r2 = decrypt_cred_v2(
+            blob, "s4hadm",
+            pse_path="/usr/sap/PRD/D00/sec/SAPSYS.pse")
+        assert r2["success"] is False
+        assert "no credential matching path" in r2["error"]
+
+    def test_empty_blob_returns_error(self):
+        from sap_pse_loot import decrypt_cred_v2
+        r = decrypt_cred_v2(b"", "s4hadm")
+        assert r["success"] is False
+        assert "empty" in r["error"]
+
+    def test_garbage_blob_returns_error(self):
+        from sap_pse_loot import decrypt_cred_v2
+        r = decrypt_cred_v2(b"\xff\xff\xff", "s4hadm")
+        assert r["success"] is False
+        assert r["error"]  # some error message present
+
+    def test_lps_only_returns_unsupported_error(self):
+        """File with only LPS credentials → clear error message."""
+        from sap_pse_loot import (_ber_tlv, _BER_SEQUENCE,
+                                   _BER_INTEGER, _BER_UTF8STRING,
+                                   _BER_BITSTRING,
+                                   decrypt_cred_v2)
+        record = _ber_tlv(_BER_SEQUENCE, b"".join([
+            _ber_tlv(_BER_INTEGER, b"\x02"),
+            _ber_tlv(_BER_SEQUENCE, b""),
+            _ber_tlv(_BER_UTF8STRING,
+                     b"/usr/sap/S4H/D00/sec/SAPSYS.pse"),
+            _ber_tlv(_BER_BITSTRING, b"\x00\xFF\xFE"),
+        ]))
+        blob = _ber_tlv(_BER_SEQUENCE, record)
+        r = decrypt_cred_v2(blob, "s4hadm")
+        assert r["success"] is False
+        assert "LPS" in r["error"]
+
+    def test_credentials_list_populated(self):
+        """The credentials list describes all records in the file."""
+        from sap_pse_loot import (_build_cred_v2_blob,
+                                   decrypt_cred_v2)
+        blob = _build_cred_v2_blob(
+            "pin", "/usr/sap/S4H/D00/sec/SAPSYS.pse",
+            "s4hadm")
+        r = decrypt_cred_v2(blob, "s4hadm")
+        assert len(r["credentials"]) == 1
+        cred = r["credentials"][0]
+        assert cred["pse_path"] == \
+            "/usr/sap/S4H/D00/sec/SAPSYS.pse"
+        assert cred["cipher_len"] > 0
+        assert cred["is_lps"] is False
+
+    def test_round_trip_long_pin(self):
+        """PINs can be up to ~128 chars on modern kernels."""
+        from sap_pse_loot import (_build_cred_v2_blob,
+                                   decrypt_cred_v2)
+        pin = "A" * 100
+        blob = _build_cred_v2_blob(pin, "/pse", "s4hadm",
+                                    algo=1)
+        r = decrypt_cred_v2(blob, "s4hadm")
+        assert r["success"] is True
+        assert r["pin"] == pin
+
+    def test_round_trip_special_chars_in_pin(self):
+        """PINs with special ASCII chars survive the round-trip."""
+        from sap_pse_loot import (_build_cred_v2_blob,
+                                   decrypt_cred_v2)
+        pin = "P@$$w0rd!#%^&*()_+-=[]{}|"
+        blob = _build_cred_v2_blob(pin, "/pse", "s4hadm",
+                                    algo=0)
+        r = decrypt_cred_v2(blob, "s4hadm")
+        assert r["success"] is True
+        assert r["pin"] == pin
+
+
+# ---------------------------------------------------------------------------
+# PIN extraction from plaintext
+# ---------------------------------------------------------------------------
+
+class TestPinExtraction:
+
+    def test_ber_wrapped_pin(self):
+        from sap_pse_loot import (_ber_tlv, _BER_SEQUENCE,
+                                   _BER_IA5STRING,
+                                   _extract_pin_from_plaintext)
+        plain = _ber_tlv(_BER_SEQUENCE,
+                         _ber_tlv(_BER_IA5STRING, b"mypin"))
+        assert _extract_pin_from_plaintext(plain) == "mypin"
+
+    def test_ber_wrapped_pin_with_nul_padding(self):
+        from sap_pse_loot import (_ber_tlv, _BER_SEQUENCE,
+                                   _BER_IA5STRING,
+                                   _extract_pin_from_plaintext)
+        plain = _ber_tlv(_BER_SEQUENCE,
+                         _ber_tlv(_BER_IA5STRING,
+                                  b"mypin\x00\x00"))
+        assert _extract_pin_from_plaintext(plain) == "mypin"
+
+    def test_fallback_printable_extraction(self):
+        """Non-BER plaintext: first printable run is returned."""
+        from sap_pse_loot import _extract_pin_from_plaintext
+        plain = b"\x00\x01plainpin\x00\xFF"
+        assert _extract_pin_from_plaintext(plain) == "plainpin"
+
+    def test_empty_plaintext(self):
+        from sap_pse_loot import _extract_pin_from_plaintext
+        assert _extract_pin_from_plaintext(b"") == ""
