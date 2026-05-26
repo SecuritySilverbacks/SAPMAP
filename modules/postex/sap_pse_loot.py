@@ -1092,3 +1092,655 @@ def _encrypt_for_cred_v2(plaintext: bytes, username: str,
         raise ValueError(f"unsupported algo byte: {algo}")
 
     return header + ct
+
+
+# ===================================================================
+# Commit 3 — PSE signing-key extractor
+# ===================================================================
+#
+# Parses the SAP-proprietary SAPSYS.pse binary format, decrypts with
+# the PIN recovered from cred_v2, and extracts the RSA/EC private key
+# + X.509 signer certificate.  These are the inputs to the PKCS#7
+# signer that forges MYSAPSSO2 logon tickets (Phase B).
+#
+# The PSE format is NOT PKCS#12 — it's a SAP-proprietary ASN.1
+# envelope around encrypted PSE objects.  The encryption uses
+# PKCS#12 PBE1 (RFC 7292 Appendix B) as the key derivation, with
+# SHA-1 + 3DES-CBC as the cipher (OID 1.2.840.113549.1.12.1.3).
+#
+# Two version variants: v2 (common on NW 7.x) and v4 (newer kernels).
+# Version 256 (LPS) is not yet supported.
+# ===================================================================
+
+
+# ---------------------------------------------------------------------------
+# BER additions for PSE parsing
+# ---------------------------------------------------------------------------
+
+_BER_PRINTABLESTRING = 0x13
+_BER_GENERALIZEDTIME = 0x18
+_BER_OID = 0x06
+_BER_CTX_0 = 0xA0   # context-specific, constructed, [0]  (v2)
+_BER_CTX_3 = 0xA3   # context-specific, constructed, [3]  (v4)
+
+
+def _ber_decode_oid(data: bytes) -> str:
+    """Decode a BER OID value (tag already stripped) into dotted string."""
+    if not data:
+        return ""
+    components = [str(data[0] // 40), str(data[0] % 40)]
+    value = 0
+    for byte in data[1:]:
+        value = (value << 7) | (byte & 0x7F)
+        if byte & 0x80 == 0:
+            components.append(str(value))
+            value = 0
+    return ".".join(components)
+
+
+def _ber_encode_oid(oid_str: str) -> bytes:
+    """Encode a dotted OID string into BER OID value bytes."""
+    parts = [int(x) for x in oid_str.split(".")]
+    if len(parts) < 2:
+        raise ValueError("OID must have at least 2 components")
+    result = bytearray([40 * parts[0] + parts[1]])
+    for p in parts[2:]:
+        if p == 0:
+            result.append(0)
+        else:
+            chunks = []
+            tmp = p
+            while tmp > 0:
+                chunks.append(tmp & 0x7F)
+                tmp >>= 7
+            chunks.reverse()
+            for i, c in enumerate(chunks):
+                result.append(c | 0x80 if i < len(chunks) - 1
+                              else c)
+    return bytes(result)
+
+
+# ---------------------------------------------------------------------------
+# PKCS#12 PBKDF1 (RFC 7292 Appendix B)
+# ---------------------------------------------------------------------------
+# SAP's PBE1-SHA1-3DES uses this for key + IV derivation.  This is
+# NOT the same as PKCS#5 PBKDF1 — the algorithm is significantly
+# more complex.
+
+def _pkcs12_password(pin: str) -> bytes:
+    """Encode a PIN for PKCS#12 key derivation.
+
+    Per RFC 7292: UTF-16BE + trailing NUL pair (\\x00\\x00).
+    An empty password is just \\x00\\x00.
+    """
+    if not pin:
+        return b"\x00\x00"
+    return pin.encode("utf-16-be") + b"\x00\x00"
+
+
+def _pkcs12_pbkdf1(password: bytes, salt: bytes,
+                    iterations: int, id_byte: int,
+                    key_len: int) -> bytes:
+    """PKCS#12 PBKDF1 (RFC 7292 Appendix B).
+
+    Args:
+        password: UTF-16BE + NUL-NUL from :func:`_pkcs12_password`.
+        salt:     8-byte salt from the PSE algorithm parameters.
+        iterations: Hash iteration count (typically 2048 or 10000).
+        id_byte:  1 = key material, 2 = IV material, 3 = MAC key.
+        key_len:  Desired output length in bytes.
+
+    Returns:
+        Derived key material of exactly *key_len* bytes.
+    """
+    u = 20   # SHA-1 digest length
+    v = 64   # SHA-1 block size
+
+    # Step 1: diversifier D
+    D = bytes([id_byte]) * v
+
+    # Step 2: construct I = S || P (each padded to multiple of v)
+    if salt:
+        s_len = v * ((len(salt) + v - 1) // v)
+        S = (salt * (s_len // len(salt) + 1))[:s_len]
+    else:
+        S = b""
+    if password:
+        p_len = v * ((len(password) + v - 1) // v)
+        P = (password * (p_len // len(password) + 1))[:p_len]
+    else:
+        P = b""
+    I = bytearray(S + P)
+
+    # Step 3: iterate and concatenate
+    c = (key_len + u - 1) // u
+    result = b""
+    for j in range(c):
+        A = hashlib.sha1(D + bytes(I)).digest()
+        for _ in range(iterations - 1):
+            A = hashlib.sha1(A).digest()
+        result += A
+
+        if j < c - 1:
+            # Update I for next round
+            B = (A * (v // len(A) + 1))[:v]
+            B_int = int.from_bytes(B, "big")
+            for k in range(0, len(I), v):
+                I_block = int.from_bytes(I[k:k + v], "big")
+                new_val = (I_block + B_int + 1) % (1 << (v * 8))
+                I[k:k + v] = new_val.to_bytes(v, "big")
+
+    return result[:key_len]
+
+
+# ---------------------------------------------------------------------------
+# PSE decryption
+# ---------------------------------------------------------------------------
+
+_OID_PBE1_SHA1_3DES = "1.2.840.113549.1.12.1.3"
+
+# PSE object OIDs (1.3.36.2.x.x namespace — German TeleTrusT)
+_KEY_OIDS = {
+    "1.3.36.2.3.1",   # SignSK — signing private key
+    "1.3.36.2.3.4",   # SKnew — current private key
+    "1.3.36.2.3.5",   # SKold — previous private key
+}
+_CERT_OIDS = {
+    "1.3.36.2.1.1",   # SignCert — signing certificate
+    "1.3.36.2.1.3",   # Cert — generic certificate
+}
+
+
+def _parse_algorithm_params(alg_seq: bytes):
+    """Parse an AlgorithmIdentifier SEQUENCE value.
+
+    Returns ``(oid_str, salt_bytes, iterations)``.
+    """
+    children = list(_ber_children(alg_seq, 0, len(alg_seq)))
+    if not children:
+        raise ValueError("empty AlgorithmIdentifier")
+
+    oid_str = ""
+    salt = b""
+    iterations = 0
+
+    for tag, val in children:
+        if tag == _BER_OID:
+            oid_str = _ber_decode_oid(val)
+        elif tag == _BER_SEQUENCE:
+            # Parameters sub-SEQUENCE: {OCTET STRING salt, INT iter}
+            for ptag, pval in _ber_children(val, 0, len(val)):
+                if ptag == _BER_OCTETSTRING:
+                    salt = pval
+                elif ptag == _BER_INTEGER:
+                    iterations = int.from_bytes(pval, "big")
+
+    return oid_str, salt, iterations
+
+
+def _pbe1_decrypt(cipher: bytes, pin: str,
+                   salt: bytes, iterations: int) -> bytes:
+    """Decrypt PSE content using PBE1-SHA1-3DES-CBC."""
+    try:
+        from cryptography.hazmat.primitives.ciphers import (
+            Cipher, modes)
+        try:
+            from cryptography.hazmat.decrepit.ciphers.algorithms \
+                import TripleDES
+        except ImportError:
+            from cryptography.hazmat.primitives.ciphers.algorithms \
+                import TripleDES
+    except ImportError as e:
+        raise RuntimeError(
+            f"cryptography library not available: {e}")
+
+    password = _pkcs12_password(pin)
+    key = _pkcs12_pbkdf1(password, salt, iterations,
+                          id_byte=1, key_len=24)
+    iv = _pkcs12_pbkdf1(password, salt, iterations,
+                         id_byte=2, key_len=8)
+
+    # Pad cipher to block size if needed
+    if len(cipher) % 8 != 0:
+        cipher = cipher + b"\x00" * (8 - len(cipher) % 8)
+
+    dec = Cipher(TripleDES(key), modes.CBC(iv)).decryptor()
+    plain = dec.update(cipher) + dec.finalize()
+    return _strip_pkcs5(plain)
+
+
+def _decrypt_pse(pse_bytes: bytes, pin: str) -> bytes:
+    """Parse + decrypt a SAPSYS.pse file.
+
+    Handles v2 (tag 0xA0) and v4 (tag 0xA3) formats.
+    Returns the decrypted PSE content bytes.
+    """
+    # Outer SEQUENCE
+    tag, voff, vlen, _ = _ber_read_tl(pse_bytes, 0)
+    if tag != _BER_SEQUENCE:
+        raise ValueError(
+            f"PSE: expected outer SEQUENCE, got 0x{tag:02X}")
+
+    children = list(_ber_children(pse_bytes, voff, voff + vlen))
+    if len(children) < 2:
+        raise ValueError("PSE: outer SEQUENCE has < 2 children")
+
+    # First child: INTEGER version
+    ver_tag, ver_val = children[0]
+    if ver_tag != _BER_INTEGER:
+        raise ValueError(
+            f"PSE: expected INTEGER version, got 0x{ver_tag:02X}")
+    version = int.from_bytes(ver_val, "big")
+
+    if version == 256:
+        raise ValueError(
+            "PSE version 256 (LPS) is not yet supported")
+
+    # Second child: context-specific container
+    cont_tag, cont_val = children[1]
+    if cont_tag not in (_BER_CTX_0, _BER_CTX_3):
+        raise ValueError(
+            f"PSE: unexpected container tag 0x{cont_tag:02X}")
+
+    # Parse inner SEQUENCE
+    inner = list(_ber_children(cont_val, 0, len(cont_val)))
+    if not inner:
+        raise ValueError("PSE: empty encrypted container")
+
+    # The inner content is a SEQUENCE; parse its children
+    inner_tag, inner_val = inner[0]
+    if inner_tag != _BER_SEQUENCE:
+        raise ValueError(
+            f"PSE: expected inner SEQUENCE, got "
+            f"0x{inner_tag:02X}")
+
+    enc_children = list(
+        _ber_children(inner_val, 0, len(inner_val)))
+
+    # Extract components based on version
+    encrypted_pin_bytes = b""
+    alg_seq_bytes = b""
+    cipher_bytes = b""
+
+    if version in (2,):
+        # v2: [OCTET(enc_pin), SEQ(alg_id), OCTET(cipher)]
+        for ec_tag, ec_val in enc_children:
+            if ec_tag == _BER_SEQUENCE and not alg_seq_bytes:
+                alg_seq_bytes = ec_val
+            elif ec_tag == _BER_OCTETSTRING:
+                if not encrypted_pin_bytes:
+                    encrypted_pin_bytes = ec_val
+                else:
+                    cipher_bytes = ec_val
+    elif version in (4,):
+        # v4: [INT(1), SEQ(alg_id), OCTET(cipher), OCTET(enc_pin)]
+        octets = []
+        for ec_tag, ec_val in enc_children:
+            if ec_tag == _BER_SEQUENCE:
+                alg_seq_bytes = ec_val
+            elif ec_tag == _BER_OCTETSTRING:
+                octets.append(ec_val)
+        if len(octets) >= 2:
+            cipher_bytes = octets[0]
+            encrypted_pin_bytes = octets[1]
+        elif len(octets) == 1:
+            cipher_bytes = octets[0]
+    else:
+        raise ValueError(f"unsupported PSE version {version}")
+
+    if not alg_seq_bytes:
+        raise ValueError("PSE: no algorithm identifier found")
+    if not cipher_bytes:
+        raise ValueError("PSE: no cipher text found")
+
+    oid, salt, iterations = _parse_algorithm_params(
+        alg_seq_bytes)
+    if oid != _OID_PBE1_SHA1_3DES:
+        raise ValueError(
+            f"PSE: unsupported algorithm OID {oid}")
+
+    return _pbe1_decrypt(cipher_bytes, pin, salt, iterations)
+
+
+# ---------------------------------------------------------------------------
+# PSE object extraction
+# ---------------------------------------------------------------------------
+
+def _parse_pse_objects(decrypted: bytes) -> list:
+    """Parse decrypted PSE content into a list of named objects.
+
+    Expected structure:
+        SEQUENCE { alg_id, GeneralizedTime, INT,
+                   SET { obj1, obj2, ... } }
+
+    Each object:
+        SEQUENCE { PrintableString(name), GeneralizedTime(created),
+                   OID(type), <value bytes> }
+
+    Returns list of dicts:
+        ``[{name, oid, value_bytes}, ...]``
+    """
+    objects = []
+
+    # Outer SEQUENCE
+    tag, voff, vlen, _ = _ber_read_tl(decrypted, 0)
+    if tag != _BER_SEQUENCE:
+        raise ValueError("decrypted PSE: expected outer SEQUENCE")
+
+    # Find the SET child (contains the objects)
+    set_val = None
+    for ctag, cval in _ber_children(decrypted, voff, voff + vlen):
+        if ctag == _BER_SET:
+            set_val = cval
+            break
+
+    if set_val is None:
+        raise ValueError("decrypted PSE: no SET of objects found")
+
+    # Each child of the SET is one PSE object SEQUENCE
+    for otag, oval in _ber_children(set_val, 0, len(set_val)):
+        if otag != _BER_SEQUENCE:
+            continue
+
+        name = ""
+        oid = ""
+        value_bytes = b""
+        obj_children = list(
+            _ber_children(oval, 0, len(oval)))
+
+        for i, (ct, cv) in enumerate(obj_children):
+            if ct == _BER_PRINTABLESTRING and not name:
+                name = cv.decode("ascii", errors="replace")
+            elif ct == _BER_OID and not oid:
+                oid = _ber_decode_oid(cv)
+            elif ct in (_BER_OCTETSTRING, _BER_BITSTRING,
+                        _BER_SEQUENCE, _BER_SET) and oid:
+                # First substantial child after the OID = value
+                if ct == _BER_BITSTRING and cv and cv[0] == 0:
+                    value_bytes = cv[1:]
+                elif ct == _BER_OCTETSTRING:
+                    value_bytes = cv
+                else:
+                    # Re-encode as TLV so the consumer gets the
+                    # full DER structure
+                    value_bytes = _ber_tlv(ct, cv)
+                break
+
+        if name:
+            objects.append({
+                "name": name,
+                "oid": oid,
+                "value_bytes": value_bytes,
+            })
+
+    return objects
+
+
+# ---------------------------------------------------------------------------
+# Public API — extract_signing_key
+# ---------------------------------------------------------------------------
+
+def extract_signing_key(pse_bytes: bytes, pin: str) -> dict:
+    """Extract the private key + certificate from a SAPSYS.pse.
+
+    Args:
+        pse_bytes: Raw SAPSYS.pse file content (from
+                   :func:`extract_pse_bundle`).
+        pin:       Cleartext PSE PIN (from :func:`decrypt_cred_v2`).
+
+    Returns:
+        ``{success, private_key, certificate, issuer_dn, subject_dn,
+           serial_number, key_type, key_size, not_before, not_after,
+           objects, error}``
+
+        *private_key* is a ``cryptography`` private key object
+        (RSAPrivateKey / EllipticCurvePrivateKey / DSAPrivateKey).
+        *certificate* is an ``x509.Certificate``.
+    """
+    result = {
+        "success": False,
+        "private_key": None,
+        "certificate": None,
+        "issuer_dn": "",
+        "subject_dn": "",
+        "serial_number": 0,
+        "key_type": "",
+        "key_size": 0,
+        "not_before": None,
+        "not_after": None,
+        "objects": [],
+        "error": "",
+    }
+
+    if not pse_bytes:
+        result["error"] = "empty PSE blob"
+        return result
+
+    # Step 1: decrypt the PSE
+    try:
+        decrypted = _decrypt_pse(pse_bytes, pin)
+    except Exception as e:
+        result["error"] = f"PSE decryption failed: {e}"
+        return result
+
+    # Step 2: parse objects
+    try:
+        objects = _parse_pse_objects(decrypted)
+    except Exception as e:
+        result["error"] = f"PSE object parsing failed: {e}"
+        return result
+
+    result["objects"] = [
+        {"name": o["name"], "oid": o["oid"],
+         "size": len(o["value_bytes"])}
+        for o in objects
+    ]
+
+    # Step 3: find private key
+    try:
+        from cryptography.hazmat.primitives.serialization import (
+            load_der_private_key)
+        from cryptography.x509 import load_der_x509_certificate
+        from cryptography.hazmat.primitives.asymmetric import (
+            rsa, ec, dsa)
+    except ImportError as e:
+        result["error"] = f"cryptography library import failed: {e}"
+        return result
+
+    for obj in objects:
+        if obj["oid"] in _KEY_OIDS and obj["value_bytes"]:
+            try:
+                pk = load_der_private_key(
+                    obj["value_bytes"], password=None)
+                result["private_key"] = pk
+                if isinstance(pk, rsa.RSAPrivateKey):
+                    result["key_type"] = "RSA"
+                    result["key_size"] = pk.key_size
+                elif isinstance(pk, ec.EllipticCurvePrivateKey):
+                    result["key_type"] = "EC"
+                    result["key_size"] = pk.key_size
+                elif isinstance(pk, dsa.DSAPrivateKey):
+                    result["key_type"] = "DSA"
+                    result["key_size"] = pk.key_size
+                break
+            except Exception:
+                # Value might not be a plain DER key — try
+                # unwrapping one level if it starts with SEQUENCE
+                try:
+                    inner_tag, ioff, ilen, _ = _ber_read_tl(
+                        obj["value_bytes"], 0)
+                    if inner_tag == _BER_SEQUENCE:
+                        pk = load_der_private_key(
+                            obj["value_bytes"][ioff:ioff + ilen],
+                            password=None)
+                        result["private_key"] = pk
+                        if isinstance(pk, rsa.RSAPrivateKey):
+                            result["key_type"] = "RSA"
+                            result["key_size"] = pk.key_size
+                        elif isinstance(
+                                pk, ec.EllipticCurvePrivateKey):
+                            result["key_type"] = "EC"
+                            result["key_size"] = pk.key_size
+                        break
+                except Exception:
+                    pass
+
+    # Step 4: find certificate
+    for obj in objects:
+        if obj["oid"] in _CERT_OIDS and obj["value_bytes"]:
+            try:
+                cert = load_der_x509_certificate(
+                    obj["value_bytes"])
+                result["certificate"] = cert
+                result["subject_dn"] = cert.subject.rfc4514_string()
+                result["issuer_dn"] = cert.issuer.rfc4514_string()
+                result["serial_number"] = cert.serial_number
+                result["not_before"] = cert.not_valid_before_utc
+                result["not_after"] = cert.not_valid_after_utc
+                break
+            except Exception:
+                # Try unwrapping OCTET STRING / SEQUENCE
+                try:
+                    inner_tag, ioff, ilen, _ = _ber_read_tl(
+                        obj["value_bytes"], 0)
+                    cert = load_der_x509_certificate(
+                        obj["value_bytes"][ioff:ioff + ilen])
+                    result["certificate"] = cert
+                    result["subject_dn"] = (
+                        cert.subject.rfc4514_string())
+                    result["issuer_dn"] = (
+                        cert.issuer.rfc4514_string())
+                    result["serial_number"] = cert.serial_number
+                    break
+                except Exception:
+                    pass
+
+    if result["private_key"] and result["certificate"]:
+        result["success"] = True
+    elif result["private_key"]:
+        result["error"] = ("private key found but no matching "
+                           "certificate in PSE objects")
+    elif result["certificate"]:
+        result["error"] = ("certificate found but no private "
+                           "key in PSE objects")
+    else:
+        result["error"] = (
+            f"neither private key nor certificate found "
+            f"in {len(objects)} PSE objects: "
+            f"{[o['name'] for o in objects]}")
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Test helper — build a synthetic PSE file
+# ---------------------------------------------------------------------------
+
+def _build_test_pse(key_der: bytes, cert_der: bytes,
+                     pin: str, salt: bytes = None,
+                     iterations: int = 2048) -> bytes:
+    """Build a synthetic SAPSYS.pse file for testing.
+
+    Creates a v2 PSE with PBE1-SHA1-3DES encryption containing:
+      - SKnew (private key) with OID 1.3.36.2.3.4
+      - SignCert (certificate) with OID 1.3.36.2.1.1
+
+    Args:
+        key_der:    DER-encoded private key bytes.
+        cert_der:   DER-encoded X.509 certificate bytes.
+        pin:        PSE PIN for encryption.
+        salt:       8-byte salt (random if None).
+        iterations: PBE iteration count.
+
+    Returns:
+        The complete PSE file as bytes.
+    """
+    try:
+        from cryptography.hazmat.primitives.ciphers import (
+            Cipher, modes)
+        try:
+            from cryptography.hazmat.decrepit.ciphers.algorithms \
+                import TripleDES
+        except ImportError:
+            from cryptography.hazmat.primitives.ciphers.algorithms \
+                import TripleDES
+    except ImportError as e:
+        raise RuntimeError(
+            f"cryptography library not available: {e}")
+
+    if salt is None:
+        salt = os.urandom(8)
+
+    timestamp = b"20260101120000Z"  # GeneralizedTime
+
+    # Build PSE objects
+    obj_key = _ber_tlv(_BER_SEQUENCE, b"".join([
+        _ber_tlv(_BER_PRINTABLESTRING, b"SKnew"),
+        _ber_tlv(_BER_GENERALIZEDTIME, timestamp),
+        _ber_tlv(_BER_OID,
+                 _ber_encode_oid("1.3.36.2.3.4")),
+        _ber_tlv(_BER_OCTETSTRING, key_der),
+    ]))
+    obj_cert = _ber_tlv(_BER_SEQUENCE, b"".join([
+        _ber_tlv(_BER_PRINTABLESTRING, b"SignCert"),
+        _ber_tlv(_BER_GENERALIZEDTIME, timestamp),
+        _ber_tlv(_BER_OID,
+                 _ber_encode_oid("1.3.36.2.1.1")),
+        _ber_tlv(_BER_OCTETSTRING, cert_der),
+    ]))
+
+    # Decrypted PSE content structure:
+    # SEQUENCE { alg_id, GeneralizedTime, INT(1), SET { objects } }
+    alg_id = _ber_tlv(_BER_SEQUENCE, b"".join([
+        _ber_tlv(_BER_OID,
+                 _ber_encode_oid(_OID_PBE1_SHA1_3DES)),
+        _ber_tlv(_BER_SEQUENCE, b"".join([
+            _ber_tlv(_BER_OCTETSTRING, salt),
+            _ber_tlv(_BER_INTEGER,
+                     iterations.to_bytes(
+                         (iterations.bit_length() + 7) // 8,
+                         "big")),
+        ])),
+    ]))
+    content = _ber_tlv(_BER_SEQUENCE, b"".join([
+        alg_id,
+        _ber_tlv(_BER_GENERALIZEDTIME, timestamp),
+        _ber_tlv(_BER_INTEGER, b"\x01"),
+        _ber_tlv(_BER_SET, obj_key + obj_cert),
+    ]))
+
+    # Encrypt the content
+    password = _pkcs12_password(pin)
+    key = _pkcs12_pbkdf1(password, salt, iterations,
+                          id_byte=1, key_len=24)
+    iv = _pkcs12_pbkdf1(password, salt, iterations,
+                         id_byte=2, key_len=8)
+
+    # PKCS5 pad
+    pad_len = 8 - (len(content) % 8)
+    padded = content + bytes([pad_len]) * pad_len
+
+    enc = Cipher(TripleDES(key), modes.CBC(iv)).encryptor()
+    cipher = enc.update(padded) + enc.finalize()
+
+    # Build encrypted PIN (encrypt the PIN bytes for validation)
+    pin_bytes = pin.encode("ascii")
+    pin_pad_len = 8 - (len(pin_bytes) % 8)
+    pin_padded = pin_bytes + bytes([pin_pad_len]) * pin_pad_len
+    pin_enc = Cipher(TripleDES(key), modes.CBC(iv)).encryptor()
+    enc_pin = pin_enc.update(pin_padded) + pin_enc.finalize()
+
+    # v2 outer structure:
+    # SEQUENCE { INT(2), [0xA0] { SEQUENCE {
+    #     OCTET(enc_pin), SEQ(alg_id), OCTET(cipher) } } }
+    inner_seq = _ber_tlv(_BER_SEQUENCE, b"".join([
+        _ber_tlv(_BER_OCTETSTRING, enc_pin),
+        alg_id,
+        _ber_tlv(_BER_OCTETSTRING, cipher),
+    ]))
+    container = _ber_tlv(_BER_CTX_0, inner_seq)
+    pse = _ber_tlv(_BER_SEQUENCE, b"".join([
+        _ber_tlv(_BER_INTEGER, b"\x02"),  # version 2
+        container,
+    ]))
+    return pse
