@@ -424,6 +424,187 @@ class TestFailureModes:
 
 
 # ===================================================================
+# SSO2 pre-flight short-circuits (step 2.5 fast-path / skip behaviour)
+# ===================================================================
+
+class TestSso2PreflightShortCircuits:
+    """Verify the orchestrator's step 2.5 doesn't trigger the slow
+    chunked profile-file read in the common cases:
+
+      1. Node has node.icm_ports already populated (from a prior
+         forge in the same session) → reuse the cached result.
+      2. No credentials available → skip the check entirely.
+      3. RFC available but returns errors (SDK missing, auth
+         failed) → skip the check entirely; do NOT fall back to
+         the 5-10 minute profile-file read.
+
+    All three paths must let the forge continue normally — the
+    SSO2 check is informational, never a hard gate.
+    """
+
+    def test_icm_ports_cache_short_circuits_rfc(
+            self, test_pse_environment, tmp_path, monkeypatch):
+        """When node.icm_ports is already populated, the forge
+        reuses it and skips calling check_sso2_via_rfc entirely
+        — saves an RFC round trip per param + the SDK dependency."""
+        from sapmap_exploit import extract_and_forge_ticket
+        from sapmap_models import SAPMAPState
+        import sapmap_state
+        import sap_profile_check
+
+        monkeypatch.setattr(sapmap_state, "LOOT_DIR",
+                            str(tmp_path / "loot"))
+
+        env = test_pse_environment
+        node = _make_node(env["sid"])
+        # Simulate a prior forge having populated icm_ports
+        node.icm_ports = [
+            {"port": 8000, "protocol": "http", "index": 0,
+             "raw": "PROT=HTTP,PORT=8000"},
+        ]
+        state = SAPMAPState()
+        state.add_node(node)
+
+        # Spy on check_sso2_via_rfc — it MUST NOT be called when
+        # icm_ports are already cached.
+        calls = []
+        original = sap_profile_check.check_sso2_via_rfc
+
+        def spy(*args, **kwargs):
+            calls.append((args, kwargs))
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(sap_profile_check,
+                             "check_sso2_via_rfc", spy)
+
+        r = extract_and_forge_ticket(
+            node=node, state=state,
+            user="SAP*", client="100", digest="sha256",
+            exec_fn=env["exec_fn"])
+        assert r["success"], f"forge failed: {r['error']!r}"
+        assert len(calls) == 0, (
+            f"check_sso2_via_rfc was called {len(calls)} times "
+            f"despite cached icm_ports — the cache short-circuit "
+            f"didn't fire")
+        # The check result still gets surfaced — operator sees a
+        # "cached" notice in the summary instead of fresh data.
+        assert r["sso2_check"]["source"] == "cache:node.icm_ports"
+        assert r["sso2_check"]["icm_ports"] == node.icm_ports
+
+    def test_rfc_failure_skips_check_no_profile_fallback(
+            self, test_pse_environment, tmp_path, monkeypatch):
+        """When RFC returns errors (NW RFC SDK missing, auth
+        failed, ...), the orchestrator logs + skips — it MUST
+        NOT fall back to the 5-10 minute chunked profile-file
+        read.  This was the operator's reported pain: a 7 KB
+        DEFAULT.PFL became 101 sapxpg round trips."""
+        from sapmap_exploit import extract_and_forge_ticket
+        from sapmap_models import SAPMAPState, Credentials
+        import sapmap_state
+        import sap_profile_check
+
+        monkeypatch.setattr(sapmap_state, "LOOT_DIR",
+                            str(tmp_path / "loot"))
+
+        env = test_pse_environment
+        node = _make_node(env["sid"])
+        # Give the node a credential so the RFC path gets tried
+        # (without a credential, RFC is skipped before it errors).
+        node.credentials.append(Credentials(
+            username="JORIS", client="100", instance_nr="00",
+            password="x", verified=True))
+        state = SAPMAPState()
+        state.add_node(node)
+
+        # Force check_sso2_via_rfc to return an error result —
+        # simulates "NW RFC SDK not installed" / similar.
+        def fake_rfc(node, creds=None, conn_factory=None):
+            return {
+                "ok": False,
+                "errors": ["sapmap_rfc unavailable (no SDK)"],
+                "warnings": [],
+                "observed": {},
+                "merged_params": {},
+                "icm_ports": [],
+                "profiles_read": [],
+                "profiles_failed": [],
+                "source": "rfc:PFL_GET_SINGLE_PARAMETER",
+            }
+
+        monkeypatch.setattr(sap_profile_check,
+                             "check_sso2_via_rfc", fake_rfc)
+
+        # Spy on the profile-file read function — MUST NOT be
+        # called.  (Previously the orchestrator fell back to it,
+        # triggering the slow chunked base64 reads.)
+        calls = []
+        original = sap_profile_check.check_sso2_parameters
+
+        def profile_spy(*args, **kwargs):
+            calls.append((args, kwargs))
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(sap_profile_check,
+                             "check_sso2_parameters", profile_spy)
+
+        r = extract_and_forge_ticket(
+            node=node, state=state,
+            user="SAP*", client="100", digest="sha256",
+            exec_fn=env["exec_fn"])
+        # Forge still succeeded — the pre-flight is informational
+        assert r["success"], f"forge failed: {r['error']!r}"
+        # No profile-file read happened
+        assert len(calls) == 0, (
+            f"check_sso2_parameters (profile-file read) was "
+            f"called {len(calls)} times — the fast-skip didn't "
+            f"fire; operator would have eaten the 5-10 minute "
+            f"chunked read penalty")
+
+    def test_no_credentials_skips_check_no_profile_fallback(
+            self, test_pse_environment, tmp_path, monkeypatch):
+        """When the node has no usable credential at all, RFC
+        can't be tried — and the orchestrator must NOT fall
+        through to the slow profile-file read.  Skip cleanly."""
+        from sapmap_exploit import extract_and_forge_ticket
+        from sapmap_models import SAPMAPState
+        import sapmap_state
+        import sap_profile_check
+
+        monkeypatch.setattr(sapmap_state, "LOOT_DIR",
+                            str(tmp_path / "loot"))
+
+        env = test_pse_environment
+        node = _make_node(env["sid"])
+        # No credentials, no created users — best_credentials()
+        # returns None
+        node.credentials = []
+        node.created_users = []
+        state = SAPMAPState()
+        state.add_node(node)
+
+        # Spy on profile-file read — must not fire
+        calls = []
+        original = sap_profile_check.check_sso2_parameters
+
+        def profile_spy(*args, **kwargs):
+            calls.append((args, kwargs))
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(sap_profile_check,
+                             "check_sso2_parameters", profile_spy)
+
+        r = extract_and_forge_ticket(
+            node=node, state=state,
+            user="SAP*", client="100", digest="sha256",
+            exec_fn=env["exec_fn"])
+        assert r["success"]
+        assert len(calls) == 0, (
+            f"check_sso2_parameters was called {len(calls)} "
+            f"times despite no credentials — the operator would "
+            f"have eaten the slow chunked-read penalty")
+
+
+# ===================================================================
 # Chunked-read adapter (sap_pse_loot.make_chunked_read_adapter)
 # ===================================================================
 
