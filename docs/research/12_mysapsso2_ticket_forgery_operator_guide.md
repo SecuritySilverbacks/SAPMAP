@@ -348,6 +348,55 @@ a custom channel, wrap it via
 * `ticket.is_expired()` — the validity window is **wall-clock from
   `forged_at`**, not the receiver's clock.  A 2-minute clock skew
   between issuer and receiver can reject a freshly-forged ticket.
+* **Receiver doesn't accept SSO2 tickets at all** — verify the
+  receiver's `login/accept_sso2_ticket` profile parameter is `1`.
+  When `0`, the kernel rejects every SSO2 cookie before signature
+  validation even runs.  See §7.1 for the pre-flight check that
+  catches this automatically.
+
+### 7.1 SSO2 profile pre-flight check
+
+Three SAP profile parameters gate or fingerprint the forgery flow:
+
+| Param | Required value | Effect when wrong |
+|---|---|---|
+| `login/accept_sso2_ticket` | `1` (on receiver) | Hard gate — kernel rejects all SSO2 cookies if `0` |
+| `login/create_sso2_ticket` | informational | Tells us whether *legit* tickets here embed signing certs (`1`) or not (`2`).  Match this in `forge_ticket(include_cert=...)` for forensic plausibility |
+| `login/sso2_ticket_strict_owner_check` | informational | When `1`, kernel enforces strict Owner-DN match against TWPSSO2ACL.  Our forged ticket's issuer DN (pulled from SAPSYS.pse) must match exactly |
+
+`extract_and_forge_ticket()` runs this check automatically as
+step 2.5 (between PSE extraction and forging).  The check reads
+`DEFAULT.PFL` + each instance profile under
+`/usr/sap/<SID>/SYS/profile/` via the same sapxpg/base64 channel
+we already use for PSE extraction, parses the params, and prints
+a one-line verdict before forging:
+
+```text
+[+] SSO2 profile check: OK
+    [?] login/create_sso2_ticket=2 — legitimate tickets on this AS
+        do NOT embed the signing cert.  Forge with
+        include_cert=False to match.
+    [i] recommended include_cert=False (based on observed
+        login/create_sso2_ticket)
+```
+
+The check is informational — it never blocks the forge.
+Operators sometimes forge against a disabled-acceptance node to
+test the receiver's ACL or to demonstrate a detection bypass.
+
+For ad-hoc verification outside the orchestrator, use the
+standalone CLI:
+
+```bash
+python3 tools/check_sso2_profile.py \
+    --host 192.168.2.209 --port 3300 \
+    --sid S4H --hostname s4hanadev \
+    --instance 00 --client 001
+```
+
+Exit codes: `0` = OK, `2` = hard blocker (e.g. `accept=0`), `1`
+= infrastructure failure (couldn't reach the gateway or read any
+profile).  Safe to use in shell pipelines or CI.
 
 ---
 
