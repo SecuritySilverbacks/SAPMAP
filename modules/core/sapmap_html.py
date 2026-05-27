@@ -3705,12 +3705,23 @@ function showCtxMenu(e, sid) {
                             || hasCve31324
                             || hasCreatedUsers),
     'propagate_ticket':   (n.forged_tickets || []).length > 0,
-    // Harvest is pure introspection over already-captured state
-    // (secstore_entries, java_destinations, JCo creds) — works on
-    // any ABAP/Java node.  Standalone WDs don't have any such state
-    // (a WD only forwards traffic; it doesn't store JCo destinations
-    // or SecStore entries), so hide it on pure-WD nodes.
-    'harvest_btp_creds': isAbapStack || isJavaStack,
+    // Harvest BTP credentials — ABAP-only, needs a working RFC
+    // logon.  The backend handler reads three ABAP-specific state
+    // sources to find BTP-pointing credentials:
+    //   * OA2C OAuth profiles  — backend reads on-the-fly via the
+    //     OA2C_CLIENT[_EXT] RFC tables (ABAP-only feature)
+    //   * RSECTAB secstore entries — backend reads RSECTAB via
+    //     RFC_READ_TABLE; populated by Download SecStore
+    //   * RFC destinations     — node's connection list filtered
+    //     to *.hana.ondemand.com; populated by Retrieve RFC
+    //     Connections
+    // Earlier gate said ``isAbapStack || isJavaStack``, but the
+    // Java path was a red herring: Java SecStore has no native BTP
+    // OAuth client storage equivalent to OA2C, and the harvest
+    // returned zero candidates on every Java node we tested.
+    // Tighten to ABAP + a usable RFC credential to match the
+    // canonical analyse_capabilities / retrieve_rfcs gate.
+    'harvest_btp_creds': hasUsableAbapAccess,
     'cleanup':          hasCreatedUsers,             // need created users to clean up
     'client_roles':     hasUsableAbapAccess,        // ABAP-only RFC reads
     'read_usrextid':    hasUsableAbapAccess,        // ABAP-only RFC reads
@@ -3760,7 +3771,9 @@ function showCtxMenu(e, sid) {
     'wd_admin_probe_defaults': 'Only applicable to confirmed Web Dispatcher nodes',
     'wd_extract_icmauth':    'Only applicable to confirmed Web Dispatcher nodes',
     'check_ms':              'Probes the message server internal port (39NN) — not applicable to standalone Web Dispatchers',
-    'harvest_btp_creds':     'Reads JCo destinations / SecStore entries — standalone Web Dispatchers don\'t store any',
+    'harvest_btp_creds':     (!isAbapStack
+        ? 'Harvest BTP Credentials is ABAP-only — the backend reads OA2C_CLIENT[_EXT] (OAuth profiles) and RSECTAB via RFC, both ABAP DDIC tables.  Java SecStore has no native BTP OAuth client equivalent.'
+        : 'Needs a verified RFC credential or a SAPMAP-created user — RFC_READ_TABLE on OA2C / RSECTAB needs a working ABAP logon.  Run Standard Scan + Provide Credentials, or create a user via the GW / 10KBLAZE / dpmon chains first.'),
     'exploit_cve_31324_drop': 'Run Check CVE-2025-31324 first; vulnerability required',
     'icmad_acl_bypass':       'Run Check CVE-2022-22536 first to discover a vulnerable ICM port',
     'icmad_heapdump_pull':    'Run ICMAD ACL Bypass Sweep first; /heapdump/ must bypass to enable HPROF pull',
@@ -3874,8 +3887,18 @@ function showCtxMenu(e, sid) {
     // outright on pure-WD nodes so the menu stays tidy.
     'check_ms':         !!n.is_web_dispatcher
                           && !isAbapStack && !isJavaStack,
-    'harvest_btp_creds': !!n.is_web_dispatcher
-                            && !isAbapStack && !isJavaStack,
+    // Harvest BTP Credentials — hide whenever the action can't
+    // meaningfully run.  Operator feedback: it was previously
+    // shown on every ABAP+Java node even though the backend
+    // requires an ABAP RFC logon (verified credential or
+    // SAPMAP-created user) to read OA2C_CLIENT[_EXT] + RSECTAB.
+    // Tighten to !hasUsableAbapAccess — this subsumes both:
+    //   (a) Java-only stacks (no OA2C, no native BTP OAuth
+    //       client storage)
+    //   (b) Standalone WDs (no ABAP, can never have a usable
+    //       ABAP credential)
+    // ...so the older pure-WD test is no longer needed.
+    'harvest_btp_creds': !hasUsableAbapAccess,
     // WD-specific management actions — only meaningful on a
     // dedicated Web Dispatcher node.  Hide outright on ABAP /
     // Java / SAProuter / HANA so the menu doesn't carry options
@@ -3942,6 +3965,9 @@ function showCtxMenu(e, sid) {
                               || hasCve31324
                               || hasCreatedUsers)),
     'propagate_ticket':   !((n.forged_tickets || []).length > 0),
+    // Note: harvest_btp_creds is gated above (alongside check_ms)
+    // — moved next to the WD-context block since the gating logic
+    // shares the same "needs a usable RFC logon" requirement.
   };
 
   // Apply visibility + enable/disable state to each menu item
