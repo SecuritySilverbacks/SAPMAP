@@ -260,6 +260,51 @@ class TestRoundTrip:
         assert t.validity_min == 120  # default
         assert t.used_on == []
 
+    def test_to_dict_includes_server_computed_ui_helpers(self):
+        """to_dict() must surface server-computed validity helpers
+        the GUI relies on: ``remaining_minutes``, ``expired``,
+        ``display_label``.  Computing these client-side would require
+        parsing ISO timestamps in JavaScript, which is brittle across
+        browsers and runs into TZ-handling differences."""
+        t = _make_ticket(user="SAP*", client="100", sid="PRD",
+                          validity_min=480)
+        d = t.to_dict()
+        assert "remaining_minutes" in d
+        assert "expired" in d
+        assert "display_label" in d
+        # Fresh ticket: not expired, full TTL roughly available
+        assert d["expired"] is False
+        assert d["remaining_minutes"] > 470  # within a few seconds of 480
+        assert "SAP*@PRD/100" in d["display_label"]
+
+    def test_to_dict_expired_ticket_marks_expired(self):
+        """A ticket past its validity window must serialize with
+        expired=True so the GUI renders it grey/struck-through."""
+        from datetime import datetime, timedelta
+        t = _make_ticket(user="SAP*", client="100", sid="PRD",
+                          validity_min=10)
+        # Backdate the forge time so the ticket is past expiry
+        old = (datetime.now() - timedelta(minutes=30)).isoformat()
+        t.forged_at = old
+        d = t.to_dict()
+        assert d["expired"] is True
+        assert d["remaining_minutes"] < 0
+        assert "expired" in d["display_label"]
+
+    def test_to_dict_extra_keys_do_not_break_roundtrip(self):
+        """from_dict must ignore the computed UI helper keys when
+        loading a dict (legacy state files won't have them, but
+        a state saved with the new code WILL have them, and that
+        round-trip must still produce a valid ForgedTicket)."""
+        t = _make_ticket(user="SAP*", client="100", sid="PRD")
+        d = t.to_dict()
+        # Sanity: the new keys exist
+        assert "remaining_minutes" in d
+        # Round-trip through from_dict — must succeed cleanly
+        t2 = ForgedTicket.from_dict(d)
+        assert t2.user == t.user
+        assert t2.sid == t.sid
+
 
 # ===================================================================
 # SAPNode integration

