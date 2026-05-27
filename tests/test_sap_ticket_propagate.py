@@ -425,6 +425,100 @@ class TestPropagate:
         assert 44300 in ports_tried, (
             f"Expected HTTPS port 44300 to be tried; got {ports_tried}")
 
+    def test_icm_admin_ports_filtered(self):
+        """The scanner sometimes tags ICM admin ports (1128 HTTP,
+        1129 HTTPS) with HTTP-ish service names because they
+        respond to HTTP probes — but they only host /sap/admin/*
+        status pages, never accept MYSAPSSO2 cookies for app auth.
+        Propagation must NOT attempt these ports."""
+        from sap_ticket_propagate import propagate_via_forged_ticket
+        from sapmap_models import SAPMAPState, SAPNode, InstanceInfo
+        ticket = _make_ticket()
+        # The pathological case the operator reported: scanner only
+        # caught the ICM admin ports.  No 8000 / 44300.
+        inst = InstanceInfo(
+            instance_nr="00", ip="h",
+            ports={1128: "ICM_HTTP_ADMIN",
+                   1129: "ICM_HTTPS_ADMIN"})
+        node = SAPNode(sid="PRD", hostname="h", ip="h",
+                        instances=[inst], system_type="ABAP")
+        state = SAPMAPState()
+        state.add_node(node)
+        # Provide enough fake responses for ANY ports that might be
+        # tried — but inspect what actually got probed.
+        with _patch_urlopen([
+                urllib.error.URLError("queue") for _ in range(40)]):
+            r = propagate_via_forged_ticket(
+                ticket, node, state, channels=["http"])
+        # Verify 1128/1129 were skipped
+        ports_tried = {att.get("port") for att in r["attempts"]
+                       if att.get("channel") == "http"}
+        assert 1128 not in ports_tried, \
+            f"ICM admin port 1128 must be filtered; got {ports_tried}"
+        assert 1129 not in ports_tried, \
+            f"ICM admin port 1129 must be filtered; got {ports_tried}"
+        # And the SAP-convention fallback still got tried
+        assert 8000 in ports_tried, \
+            f"Convention HTTP port 8000 missing from {ports_tried}"
+        assert 44300 in ports_tried, \
+            f"Convention HTTPS port 44300 missing from {ports_tried}"
+
+    def test_icm_ports_from_profile_preferred(self):
+        """When node.sso2_check_result.icm_ports lists the
+        canonical ports from SAP's profile (icm/server_port_<N>),
+        those should be tried FIRST — before the scanner-discovered
+        ports and the SAP convention fallback.  This is the
+        authoritative source: comes straight from the profile."""
+        from sap_ticket_propagate import propagate_via_forged_ticket
+        from sapmap_models import SAPMAPState, SAPNode, InstanceInfo
+        ticket = _make_ticket()
+        inst = InstanceInfo(
+            instance_nr="00", ip="h",
+            ports={1128: "ICM_HTTP", 1129: "ICM_HTTPS"})
+        node = SAPNode(sid="PRD", hostname="h", ip="h",
+                        instances=[inst], system_type="ABAP")
+        # Simulate: SSO2 profile check ran and extracted real ICM
+        # ports from icm/server_port_0 = PROT=HTTP,PORT=8081 and
+        # icm/server_port_1 = PROT=HTTPS,PORT=8443.  These are
+        # NON-conventional ports — the only way to know about them
+        # is to read the SAP profile.
+        node.sso2_check_result = {
+            "completed_at": "2026-05-27T15:00:00",
+            "icm_ports": [
+                {"port": 8081, "protocol": "http", "index": 0,
+                 "raw": "PROT=HTTP,PORT=8081"},
+                {"port": 8443, "protocol": "https", "index": 1,
+                 "raw": "PROT=HTTPS,PORT=8443"},
+            ],
+        }
+        state = SAPMAPState()
+        state.add_node(node)
+
+        with _patch_urlopen([
+                urllib.error.URLError("queue") for _ in range(40)]):
+            r = propagate_via_forged_ticket(
+                ticket, node, state, channels=["http"])
+
+        # The first HTTP attempt must be one of the
+        # profile-discovered ports (most reliable info).
+        http_attempts = [a for a in r["attempts"]
+                          if a.get("channel") == "http"]
+        assert http_attempts, "No HTTP attempts at all"
+        first_port = http_attempts[0].get("port")
+        assert first_port in (8081, 8443), \
+            f"First attempt should be a profile-discovered port; got {first_port}"
+        # All profile-discovered ports got tried before the
+        # convention fallback.
+        ports_in_order = [a.get("port") for a in http_attempts]
+        idx_8081 = ports_in_order.index(8081)
+        idx_8443 = ports_in_order.index(8443)
+        # 8000 / 44300 (convention) should come AFTER the profile
+        # ports — they're the fallback.
+        if 8000 in ports_in_order:
+            assert ports_in_order.index(8000) > idx_8081
+        if 44300 in ports_in_order:
+            assert ports_in_order.index(44300) > idx_8443
+
     def test_aggregate_evidence_prefers_rejected_over_network_error(self):
         """When HTTP gets a 401 (rejected) on one port and a
         connection refused on another, the aggregate evidence
@@ -496,8 +590,21 @@ class TestPropagate:
         # Only http attempts in results
         assert all(a["channel"] == "http" for a in r["attempts"])
 
-    def test_breaks_out_on_rejection(self):
-        """A 401 stops further HTTP path probes."""
+    def test_breaks_out_on_rejection_per_port(self):
+        """A 401 on one port stops further PATH probes against that
+        same port (no point exhausting 3 paths if the first already
+        got a definitive auth rejection), but propagation MOVES ON
+        to the next port candidate.  Different ICM listeners on the
+        same node can have different auth ACLs (e.g. 44300 requires
+        client cert SNC; 8000 accepts cookies), so we keep trying.
+
+        Updated from the pre-multi-port "exactly one attempt"
+        assertion — when the SAP convention fallback added 8080+nr
+        and 8443+nr to the candidate list we started getting more
+        than one attempt per rejection.  The new assertion is
+        per-port: each port gets at most ONE path probe when the
+        first path returns a 401, then we advance to the next port.
+        """
         from sap_ticket_propagate import propagate_via_forged_ticket
         from sapmap_models import SAPMAPState
 
@@ -506,14 +613,28 @@ class TestPropagate:
         state = SAPMAPState()
         state.add_node(node)
 
+        # Queue a 401 for every URL the propagation tries.  Without
+        # the per-port break, each port would chew through all 3
+        # paths in _DEFAULT_HTTP_PATHS = 4 ports × 3 paths = 12 calls;
+        # with the break we expect 4 ports × 1 path = 4 calls.
         err = urllib.error.HTTPError(
             "url", 401, "Unauthorized", {}, None)
-        # Queue ONE response — the second path probe should never fire
-        with _patch_urlopen([err]):
+        with _patch_urlopen([err] * 20):
             r = propagate_via_forged_ticket(
                 ticket, node, state, channels=["http"])
-        # Exactly one attempt (the 401), then bailed
-        assert len(r["attempts"]) == 1
+
+        # Group attempts by port + check each port saw at most one
+        # probe (the break-on-rejection-within-a-port behaviour).
+        per_port = {}
+        for att in r["attempts"]:
+            per_port.setdefault(att.get("port"), []).append(att)
+        for port, attempts in per_port.items():
+            assert len(attempts) == 1, (
+                f"Port {port} got {len(attempts)} probes after a "
+                f"401 — break-on-rejection should cap at 1")
+        # And we tried more than one port (multi-port iteration)
+        assert len(per_port) > 1, (
+            f"Expected multiple ports tried; only got {list(per_port)}")
 
     def test_emits_finding_on_success(self):
         from sap_ticket_propagate import propagate_via_forged_ticket

@@ -255,6 +255,97 @@ SSO2_PARAMETERS: dict[str, dict] = {
 }
 
 
+def extract_icm_ports(params: dict[str, str]) -> list[dict]:
+    """Extract HTTP/HTTPS ICM service ports from profile parameters.
+
+    SAP defines its ICM service ports via numbered profile entries:
+
+        icm/server_port_0 = PROT=HTTP,PORT=8000,TIMEOUT=180,PROCTIMEOUT=900
+        icm/server_port_1 = PROT=HTTPS,PORT=44300,TIMEOUT=180,PROCTIMEOUT=900
+        icm/server_port_2 = PROT=SMTP,PORT=25000,TIMEOUT=180
+        icm/server_port_3 = PROT=HTTPS,PORT=8443,SSLCONFIG=...
+
+    Each line is a comma-separated key=value list with no fixed
+    field order.  We only care about ``PROT`` and ``PORT``; everything
+    else (TIMEOUT, PROCTIMEOUT, SSLCONFIG, HOST, EXTBIND, ...) is
+    informational.
+
+    The ``icm/server_port_<N>`` index is sequential — operators
+    typically use 0, 1, 2, ... but gaps are allowed.  We discover
+    every ``icm/server_port_*`` key present in the merged params,
+    not just 0..N.
+
+    This is the authoritative source for "which TCP ports does this
+    AS actually listen on for HTTP/HTTPS?" — much more reliable
+    than guessing 8000+sysnr / 44300+sysnr, because:
+
+      * SAP installations frequently override the default ports
+        (HTTPS on 8443 instead of 44300, multiple HTTP listeners
+        for different virtual hosts, etc.)
+      * The scanner sometimes tags wrong ports as "http" (e.g. the
+        ICM admin endpoint on 1128 responds to HTTP probes but
+        never accepts MYSAPSSO2 cookies for ICF auth)
+
+    Args:
+        params: Merged profile params from
+            :func:`parse_profile_lines` (or the merged dict
+            stored in ``check_sso2_parameters`` result).
+
+    Returns:
+        List of ``{port: int, protocol: str, raw: str, index: int}``
+        dicts, one per HTTP/HTTPS service port discovered.  Empty
+        list when no ICM ports are configured (e.g. when reading a
+        DEFAULT.PFL on a non-ABAP node).  ``protocol`` is normalised
+        to lowercase ("http" or "https"); SMTP/P4/SOLMAN/etc.
+        entries are filtered out.
+    """
+    out: list[dict] = []
+    for key, raw_value in params.items():
+        if not key.startswith("icm/server_port_"):
+            continue
+        # Index is the suffix after the trailing underscore
+        try:
+            index = int(key.rsplit("_", 1)[1])
+        except (ValueError, IndexError):
+            index = -1
+        # Parse comma-separated kv pairs.  SAP uses upper-case keys
+        # in the canonical examples, but we treat key lookup as
+        # case-insensitive to be defensive against operator-edited
+        # profiles.
+        fields = {}
+        for chunk in raw_value.split(","):
+            chunk = chunk.strip()
+            if "=" not in chunk:
+                continue
+            k, _, v = chunk.partition("=")
+            fields[k.strip().upper()] = v.strip()
+        protocol_raw = fields.get("PROT", "").strip().upper()
+        port_raw = fields.get("PORT", "").strip()
+        if not protocol_raw or not port_raw:
+            continue
+        try:
+            port = int(port_raw)
+        except ValueError:
+            continue
+        if port <= 0 or port > 65535:
+            continue
+        protocol = protocol_raw.lower()
+        # Only HTTP/HTTPS are useful for cookie-based propagation.
+        # SMTP/P4/HTTP2/HTTPSCM/etc. either don't accept cookies or
+        # use different auth mechanisms.
+        if protocol not in ("http", "https"):
+            continue
+        out.append({
+            "port": port,
+            "protocol": protocol,
+            "raw": raw_value,
+            "index": index,
+        })
+    # Stable order: by profile index (matches SAP's own ordering)
+    out.sort(key=lambda e: e["index"])
+    return out
+
+
 def evaluate_sso2_config(params: dict[str, str]) -> dict:
     """Evaluate parsed profile params against the forgery flow.
 
@@ -424,12 +515,19 @@ def check_sso2_parameters(gw_exec_fn: Callable,
             "profiles_read": [],
             "profiles_failed": profiles_failed,
             "merged_params": {},
+            "icm_ports": [],
         }
 
     result = evaluate_sso2_config(merged)
     result["profiles_read"] = profiles_read
     result["profiles_failed"] = profiles_failed
     result["merged_params"] = merged
+    # ── ICM HTTP/HTTPS service ports ───────────────────────────────
+    # Same profile files that carry the SSO2 params also carry the
+    # ``icm/server_port_<N>`` entries — extract them here so callers
+    # (notably ticket propagation) have authoritative port info
+    # without a second profile-read round-trip.
+    result["icm_ports"] = extract_icm_ports(merged)
     return result
 
 
