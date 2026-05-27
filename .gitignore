@@ -47,3 +47,39 @@ tools/godpotato/confuser.zip
 tools/efspotato/src/upstream/
 tools/efspotato/confuser/
 tools/efspotato/confuser.zip
+
+# SSFS decrypt — Java build outputs.  Ship the source under
+# tools/ssfs_decrypt/src/; the .jar + Gradle build/ directory
+# are reproducible artefacts.
+tools/ssfs_decrypt/build/
+tools/ssfs_decrypt/*.jar
+
+# Accidentally-captured CLI help output (e.g. `cf ssh --help`
+# redirected into a file by mistake).  Should be re-generated
+# from the CLI when needed.
+tools/btp_ssh_bridge/sapmap-probe-bridge
+
+# Proprietary SAP binaries (SNC libraries, etc).  SAP licenses
+# these to customers under their EULA — must NEVER be pushed to
+# a public repo.  Mirrors the pre-existing `nwrfcsdk/` rule.
+libsapscc*.dylib
+libsapscc*.so
+libsapscc*.dll
+sapcrypto*.dylib
+sapcrypto*.so
+sapcrypto*.dll
+
+# SAP Notes (KBAs) downloaded from SAP for Me — licensed SAP
+# content, customer-only access.  Match the naming pattern
+# SAP's portal uses: <7-digit ID>_<lang>_<YYYYMMDD>.pdf.
+[0-9][0-9][0-9][0-9][0-9][0-9][0-9]_*_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].pdf
+
+# Large media (demo recordings, build pitch decks).  Keep these
+# off git — they bloat the repo permanently and either exceed
+# GitHub's 100 MB hard limit or get rejected with warnings.
+# Host video/slides externally (e.g. company drive) and link
+# from docs/ if reference is needed.
+*.mov
+*.mp4
+*.pptx
+*.key
