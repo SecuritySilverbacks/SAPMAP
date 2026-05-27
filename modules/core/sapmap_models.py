@@ -411,6 +411,13 @@ class SAPNode:
     # SAPSYS.pse and usable across its STRUSTSSO2 trust subgraph.
     # See ForgedTicket / sap_mysapsso2.forge_ticket for details.
     forged_tickets: list = field(default_factory=list)  # [ForgedTicket, ...]
+    # Last result of sap_profile_check.check_sso2_parameters().
+    # Populated by the /api/node/<sid>/sso2_profile_check endpoint
+    # (background job).  Shape matches check_sso2_parameters'
+    # return value plus a ``started_at`` / ``completed_at`` ISO
+    # timestamp so the GUI can tell "still running" from "done".
+    # While the job is running, only ``started_at`` is set.
+    sso2_check_result: dict = field(default_factory=dict)
     sapology_data: dict = field(default_factory=dict)
     gw_vulnerable: bool = False         # True if SAPXPG gateway exploit works
     gw_vulnerable_port: int = 0         # The specific gateway port that is vulnerable
@@ -670,6 +677,7 @@ class SAPNode:
             "created_users": [u.to_dict() for u in self.created_users],
             "forged_tickets": [t.to_dict()
                                for t in self.forged_tickets],
+            "sso2_check_result": dict(self.sso2_check_result),
             "sapology_data": self.sapology_data,
             "gw_vulnerable": self.gw_vulnerable,
             "gw_vulnerable_port": self.gw_vulnerable_port,
@@ -765,6 +773,7 @@ class SAPNode:
             created_users=[CreatedUser.from_dict(u) for u in d.get("created_users", [])],
             forged_tickets=[ForgedTicket.from_dict(t)
                             for t in d.get("forged_tickets", [])],
+            sso2_check_result=dict(d.get("sso2_check_result", {})),
             sapology_data=d.get("sapology_data", {}),
             gw_vulnerable=d.get("gw_vulnerable", False),
             gw_vulnerable_port=d.get("gw_vulnerable_port", 0),

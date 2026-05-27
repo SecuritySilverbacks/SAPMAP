@@ -305,6 +305,69 @@ class TestRoundTrip:
         assert t2.user == t.user
         assert t2.sid == t.sid
 
+    def test_node_sso2_check_result_roundtrips(self):
+        """SAPNode.sso2_check_result is the live wire between the
+        async profile-check background job and the GUI's polling
+        loop.  Must survive to_dict() / from_dict() so /api/state
+        carries it to the browser unchanged.
+
+        Validates the in-progress state (just ``started_at``) AND
+        the completed state (full check output) round-trip.
+        """
+        # ── in-progress state: started_at only ────────────────────
+        node = SAPNode(sid="S4H")
+        node.sso2_check_result = {
+            "started_at": "2026-05-27T15:00:00.000",
+        }
+        d = node.to_dict()
+        assert "sso2_check_result" in d
+        assert d["sso2_check_result"]["started_at"] \
+            == "2026-05-27T15:00:00.000"
+        assert "completed_at" not in d["sso2_check_result"]
+        n2 = SAPNode.from_dict(d)
+        assert n2.sso2_check_result["started_at"] \
+            == "2026-05-27T15:00:00.000"
+
+        # ── completed state: full check_sso2_parameters output ────
+        node.sso2_check_result = {
+            "started_at": "2026-05-27T15:00:00.000",
+            "completed_at": "2026-05-27T15:00:42.123",
+            "ok": True,
+            "errors": [],
+            "warnings": [
+                "login/create_sso2_ticket=2 — forge with include_cert=False"],
+            "recommend_include_cert": False,
+            "observed": {
+                "login/accept_sso2_ticket": "1",
+                "login/create_sso2_ticket": "2",
+            },
+            "profiles_read": ["/usr/sap/S4H/SYS/profile/DEFAULT.PFL"],
+            "profiles_failed": [],
+            "merged_params": {"login/accept_sso2_ticket": "1"},
+            "summary": "[+] SSO2 profile check: OK\n[?] ...",
+        }
+        d = node.to_dict()
+        n2 = SAPNode.from_dict(d)
+        # Every field must come through intact — the GUI polls and
+        # re-renders based on `completed_at` + the structured data.
+        r = n2.sso2_check_result
+        assert r["completed_at"] == "2026-05-27T15:00:42.123"
+        assert r["ok"] is True
+        assert r["recommend_include_cert"] is False
+        assert r["observed"]["login/accept_sso2_ticket"] == "1"
+        assert "DEFAULT.PFL" in r["profiles_read"][0]
+        assert r["summary"].startswith("[+]")
+
+    def test_node_sso2_check_result_default_empty_dict(self):
+        """A freshly-built node carries an empty sso2_check_result
+        dict (not None) so JS can safely read ``.completed_at``
+        without null-checks every time."""
+        node = SAPNode(sid="X")
+        assert node.sso2_check_result == {}
+        # Round-trip also yields an empty dict
+        n2 = SAPNode.from_dict(node.to_dict())
+        assert n2.sso2_check_result == {}
+
 
 # ===================================================================
 # SAPNode integration

@@ -6083,12 +6083,30 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
     @app.route("/api/node/<sid>/sso2_profile_check", method="POST")
     def node_sso2_profile_check(sid):
-        """Run the SSO2 profile-parameter pre-flight check standalone.
+        """Kick off the SSO2 profile pre-flight check as a background job.
 
         Reads ``DEFAULT.PFL`` + instance profiles under
         ``/usr/sap/<SID>/SYS/profile/`` via the existing sapxpg /
         base64 primitive and reports whether the node accepts/creates
         MYSAPSSO2 tickets in the shape our forger emits.
+
+        We run this as a background job rather than a synchronous
+        endpoint because the read pipeline goes through the
+        chunked-base64 adapter (72-byte python3 reads on kernel
+        793+) and a typical profile dir takes 30-60 seconds to
+        fully ingest — well beyond what a UI await can wait on
+        without appearing frozen.
+
+        Flow:
+          1. Endpoint marks the job started by writing
+             ``{"started_at": "<ISO>"}`` to ``node.sso2_check_result``
+             and returns ``{"status": "started"}`` immediately.
+          2. Background thread runs ``check_sso2_parameters`` and
+             on completion stamps ``completed_at`` + the structured
+             check output onto the same field.
+          3. UI polls ``/api/state`` and watches
+             ``mapState.nodes[sid].sso2_check_result.completed_at``
+             — when it appears, the modal renders the result.
 
         Unlike ``forge_ticket`` (which runs the check implicitly as
         step 2.5 of the forge chain), this endpoint runs the check
@@ -6096,10 +6114,6 @@ def create_app(api: SAPMAPApi) -> Bottle:
         target's configuration before committing to forging, or
         when they want to confirm an ACL/profile change after
         re-configuring SAP.
-
-        Returns the structured result from
-        ``check_sso2_parameters`` plus a human-readable ``summary``
-        field rendered via ``format_check_summary``.
         """
         response.content_type = "application/json"
         node = api.state.get_node(sid)
@@ -6122,21 +6136,57 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 f"OS access via 10KBLAZE / sapxpg before the "
                 f"profile check can run"})
 
-        # Synchronous: the check is fast (a few small file reads),
-        # no need for the background-job machinery.
-        try:
-            result = check_sso2_parameters(exec_fn, node.sid)
-        except Exception as e:
-            return json.dumps({"error":
-                f"check raised {type(e).__name__}: {e}"})
+        # Mark the job as started so the GUI's modal can show a
+        # "running" state immediately rather than waiting for the
+        # first profile read to land.  ``started_at`` without a
+        # matching ``completed_at`` is the "still running" signal.
+        import datetime as _dt
+        node.sso2_check_result = {
+            "started_at": _dt.datetime.now().isoformat(),
+        }
 
-        try:
-            result["summary"] = format_check_summary(
-                result, verbose=True)
-        except Exception:
-            result["summary"] = ""
+        def _run():
+            print(f"[*] {sid}: reading "
+                  f"/usr/sap/{sid}/SYS/profile/ for SSO2 params ...")
+            try:
+                result = check_sso2_parameters(exec_fn, node.sid)
+            except Exception as e:
+                err = f"check raised {type(e).__name__}: {e}"
+                print(f"[-] {sid}: {err}")
+                node.sso2_check_result = {
+                    "ok": False,
+                    "errors": [err],
+                    "warnings": [],
+                    "observed": {},
+                    "profiles_read": [],
+                    "profiles_failed": [],
+                    "merged_params": {},
+                    "started_at": node.sso2_check_result.get(
+                        "started_at", ""),
+                    "completed_at": _dt.datetime.now().isoformat(),
+                }
+                return
+            # Render the textual summary so console viewers and the
+            # GUI see the same human-friendly verdict.
+            try:
+                summary = format_check_summary(result, verbose=True)
+            except Exception:
+                summary = ""
+            result["summary"] = summary
+            result["started_at"] = (node.sso2_check_result or {}).get(
+                "started_at", "")
+            result["completed_at"] = _dt.datetime.now().isoformat()
+            node.sso2_check_result = result
+            # Echo the summary into the console panel so the
+            # operator sees the verdict in the log even if the
+            # modal is closed before polling picks it up.
+            if summary:
+                for line in summary.splitlines():
+                    print(line)
 
-        return json.dumps(result, default=str)
+        _bg(f"{sid}:sso2_profile_check",
+            "SSO2 Profile Pre-flight Check", _run)
+        return json.dumps({"status": "started"})
 
     @app.route("/api/node/<sid>/analyse_capabilities", method="POST")
     def node_analyse_capabilities(sid):
