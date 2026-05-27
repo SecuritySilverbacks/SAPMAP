@@ -65,6 +65,25 @@ the system even if `DDIC` hits an unexpected error.
 
 ### 2.2 Web UI / HTTP endpoints
 
+#### Right-click a node on the map
+
+Three context-menu entries drive the entire flow from the map UI
+— no `curl` required:
+
+| Menu entry | What happens |
+|---|---|
+| 📋 **Check SSO2 Profile** | Synchronously reads `DEFAULT.PFL` + instance profiles via sapxpg and pops the **SSO2 Profile Pre-flight Check** modal with: the verdict banner (green/red), errors + warnings (`include_cert=False` recommendation when the source emits cert-less tickets), parameter value table, and the list of profile files read. |
+| 🎟 **Forge MYSAPSSO2 Ticket** | Opens a form for *user* (impersonation target), *client*, *validity (min)*, *signature digest*. Advanced section adds *PIN override* + *recipient SID/client pinning*. On Submit, runs the forge chain as a background job (PSE extract → key extract → SSO2 profile check → forge → save artefacts) with progress in the console panel. |
+| 🚀 **Propagate Forged Ticket** | Only useful after a forge has succeeded.  Pre-populates a dropdown with this node's forged tickets (showing `user@SID/client — XXm left, signer CN=…`), lets the operator pick channels (HTTP + RFC) and target SIDs (comma-separated), and replays the cookie against each receiver.  Verdicts stream to the console; `used_on` log accumulates on the ticket. |
+
+A new "🎟 Forged MYSAPSSO2 Tickets (N)" section appears in the
+node-details sidebar whenever a node has tickets attached, showing
+one row per ticket with live validity countdown, compact signer CN,
+and replay-count badge.  Section disappears automatically once all
+tickets on the node expire.
+
+#### REST endpoints (under the hood)
+
 Two endpoints attached to the map UI's bottle server
 (`modules/core/sapmap_gui.py`, commit 10):
 

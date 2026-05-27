@@ -328,6 +328,15 @@ class ForgedTicket:
         })
 
     def to_dict(self) -> dict:
+        # Server-computed validity helpers — surfaced so the GUI
+        # doesn't have to repeat the date-math in JavaScript (which
+        # is brittle across browsers when parsing ISO timestamps).
+        try:
+            remaining = self.remaining_minutes()
+            expired = self.is_expired()
+        except Exception:
+            remaining = self.validity_min
+            expired = False
         return {
             "user": self.user,
             "client": self.client,
@@ -336,6 +345,9 @@ class ForgedTicket:
             "ticket_size": self.ticket_size,
             "forged_at": self.forged_at,
             "validity_min": self.validity_min,
+            "remaining_minutes": remaining,   # server-computed (UI)
+            "expired": expired,                # server-computed (UI)
+            "display_label": self.display_label(),
             "recipient_sid": self.recipient_sid,
             "recipient_client": self.recipient_client,
             "signer_dn": self.signer_dn,

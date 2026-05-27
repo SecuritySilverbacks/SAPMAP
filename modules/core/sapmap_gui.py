@@ -6081,6 +6081,63 @@ def create_app(api: SAPMAPApi) -> Bottle:
             _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/sso2_profile_check", method="POST")
+    def node_sso2_profile_check(sid):
+        """Run the SSO2 profile-parameter pre-flight check standalone.
+
+        Reads ``DEFAULT.PFL`` + instance profiles under
+        ``/usr/sap/<SID>/SYS/profile/`` via the existing sapxpg /
+        base64 primitive and reports whether the node accepts/creates
+        MYSAPSSO2 tickets in the shape our forger emits.
+
+        Unlike ``forge_ticket`` (which runs the check implicitly as
+        step 2.5 of the forge chain), this endpoint runs the check
+        in isolation — useful when an operator wants to verify a
+        target's configuration before committing to forging, or
+        when they want to confirm an ACL/profile change after
+        re-configuring SAP.
+
+        Returns the structured result from
+        ``check_sso2_parameters`` plus a human-readable ``summary``
+        field rendered via ``format_check_summary``.
+        """
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        # Build the same gw_exec_fn the forge orchestrator uses.
+        try:
+            from sapmap_exploit import _make_node_gw_exec_fn
+            from sap_profile_check import (check_sso2_parameters,
+                                              format_check_summary)
+        except ImportError as e:
+            return json.dumps({"error":
+                f"profile-check module unavailable: {e}"})
+
+        exec_fn = _make_node_gw_exec_fn(node)
+        if exec_fn is None:
+            return json.dumps({"error":
+                f"{sid} has no GW SAPXPG handle — node must have "
+                f"OS access via 10KBLAZE / sapxpg before the "
+                f"profile check can run"})
+
+        # Synchronous: the check is fast (a few small file reads),
+        # no need for the background-job machinery.
+        try:
+            result = check_sso2_parameters(exec_fn, node.sid)
+        except Exception as e:
+            return json.dumps({"error":
+                f"check raised {type(e).__name__}: {e}"})
+
+        try:
+            result["summary"] = format_check_summary(
+                result, verbose=True)
+        except Exception:
+            result["summary"] = ""
+
+        return json.dumps(result, default=str)
+
     @app.route("/api/node/<sid>/analyse_capabilities", method="POST")
     def node_analyse_capabilities(sid):
         """Run the role / profile capability analyser against every
