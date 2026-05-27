@@ -400,30 +400,155 @@ class TestPropagate:
         state = SAPMAPState()
         state.add_node(node)
 
-        # Queue a "rejected" response for the first attempt (44300
-        # HTTPS) and a successful one for the next attempt (8000
-        # HTTP) — only valid if the propagation actually tries both
-        # ports.
-        success_body = (
-            "<html><title>SAP NetWeaver</title>"
-            "<body>logged in</body></html>")
-        headers = {"Set-Cookie": "SAP_SESSIONID_PRD_001=abc123"}
+        # Queue connection-refused for every attempt — that way we
+        # see EVERY candidate the propagation generated, regardless
+        # of break-on-success behaviour.  With dual-scheme port
+        # probing each non-ICM port gets TWO candidates (HTTPS + HTTP)
+        # so a 2-port discovery yields up to 4 attempts × 3 paths.
+        # We don't care which order; we care that both 8000 and 44300
+        # appear in the final candidate set.
         with _patch_urlopen([
-                # 1st attempt: rejected on 44300 HTTPS
-                urllib.error.HTTPError("url", 401, "Unauth", {}, None),
-                # 2nd attempt: success on 8000 HTTP
-                (200, success_body, headers),
-        ]):
+                urllib.error.URLError("queue") for _ in range(40)]):
             r = propagate_via_forged_ticket(
                 ticket, node, state, channels=["http"])
 
-        # At least 2 attempts should have been made: one per port
+        # Both discovered ports must appear in the attempts list
         ports_tried = {att.get("port") for att in r["attempts"]
                        if att.get("channel") == "http"}
         assert 8000 in ports_tried, (
             f"Expected HTTP port 8000 to be tried; got {ports_tried}")
         assert 44300 in ports_tried, (
             f"Expected HTTPS port 44300 to be tried; got {ports_tried}")
+        # And both schemes get probed for each non-ICM port — a
+        # scanner-tagged "http" port might actually be HTTPS in an
+        # operator-customised install (the S4H lab case we hit).
+        schemes_for_8000 = {att.get("use_https")
+                             for att in r["attempts"]
+                             if att.get("port") == 8000}
+        assert schemes_for_8000 == {True, False}, (
+            f"Expected port 8000 probed with BOTH schemes; "
+            f"got {schemes_for_8000}")
+
+    def test_dual_scheme_probe_finds_https_on_conventional_http_port(self):
+        """Operator-customised installs can flip the conventional
+        port/scheme association.  Real-world case (S4H lab):
+        port 8000 served HTTPS, not the conventional HTTP.
+
+        Before the dual-scheme fix, propagation hardcoded
+        (8000, http) and got a TCP reset every time — the SSL
+        handshake never started because we sent plain HTTP to an
+        HTTPS-only listener.  With dual-scheme, each non-ICM port
+        now gets BOTH (port, https) and (port, http) candidates,
+        so port 8000 gets probed as HTTPS too and succeeds.
+        """
+        from sap_ticket_propagate import propagate_via_forged_ticket
+        from sapmap_models import SAPMAPState, SAPNode, InstanceInfo
+        ticket = _make_ticket()
+        # Scanner discovered port 8000 and (incorrectly) tagged it
+        # ICM_HTTP — operator's actual ICM has it on HTTPS.
+        inst = InstanceInfo(
+            instance_nr="00", ip="h",
+            ports={8000: "ICM_HTTP"})
+        node = SAPNode(sid="PRD", hostname="h", ip="h",
+                        instances=[inst], system_type="ABAP")
+        state = SAPMAPState()
+        state.add_node(node)
+
+        # Queue: connection-refused 20 times so we see every
+        # candidate the propagation generates.
+        with _patch_urlopen([
+                urllib.error.URLError("queue") for _ in range(20)]):
+            r = propagate_via_forged_ticket(
+                ticket, node, state, channels=["http"])
+
+        # Verify port 8000 was probed with BOTH schemes — without
+        # the dual-scheme fix only one (the convention-based
+        # http) would appear.
+        candidates_for_8000 = {
+            att.get("use_https") for att in r["attempts"]
+            if att.get("port") == 8000 and att.get("channel") == "http"
+        }
+        assert candidates_for_8000 == {True, False}, (
+            f"port 8000 must be probed with BOTH HTTPS and HTTP "
+            f"(scheme isn't authoritative for non-ICM ports); "
+            f"got {candidates_for_8000}")
+
+    def test_authoritative_icm_port_uses_declared_scheme_only(self):
+        """When ICM port info comes from the SAP profile
+        (icm/server_port_<N>), the protocol is authoritative —
+        don't waste an attempt probing the other scheme.
+        """
+        from sap_ticket_propagate import propagate_via_forged_ticket
+        from sapmap_models import SAPMAPState, SAPNode
+        ticket = _make_ticket()
+        node = SAPNode(sid="PRD", hostname="h", ip="h",
+                        system_type="ABAP")
+        # ICM profile says port 8000 is HTTPS.  Authoritative.
+        node.icm_ports = [
+            {"port": 8000, "protocol": "https", "index": 0,
+             "raw": "PROT=HTTPS,PORT=8000"},
+        ]
+        state = SAPMAPState()
+        state.add_node(node)
+
+        with _patch_urlopen([
+                urllib.error.URLError("queue") for _ in range(20)]):
+            r = propagate_via_forged_ticket(
+                ticket, node, state, channels=["http"])
+
+        # Find probes against port 8000
+        icm_attempts = [att for att in r["attempts"]
+                         if att.get("port") == 8000
+                         and att.get("channel") == "http"]
+        # ICM-declared port must be probed with HTTPS only
+        # (no wasted HTTP probe — authoritative).
+        schemes = {att.get("use_https") for att in icm_attempts}
+        assert schemes == {True}, (
+            f"ICM-declared HTTPS port 8000 must be probed with "
+            f"HTTPS only; got schemes {schemes}")
+
+    def test_network_error_breaks_path_loop(self):
+        """When a (port, scheme) attempt returns a network error
+        (TCP reset, connection refused, SSL handshake failure),
+        the per-path loop must break — all paths to a closed port
+        will fail identically, so probing more is wasted round
+        trips.  Previously the break only fired on auth rejection.
+        """
+        from sap_ticket_propagate import propagate_via_forged_ticket
+        from sapmap_models import SAPMAPState, SAPNode, InstanceInfo
+        ticket = _make_ticket()
+        inst = InstanceInfo(
+            instance_nr="00", ip="h",
+            ports={44300: "ICM_HTTPS"})   # Only one port discovered
+        node = SAPNode(sid="PRD", hostname="h", ip="h",
+                        instances=[inst], system_type="ABAP")
+        state = SAPMAPState()
+        state.add_node(node)
+
+        # 44300 will yield connection-refused for every probe.
+        # Without the network-error break, we'd hit it 3 times
+        # (one per path in _DEFAULT_HTTP_PATHS) per scheme — 6
+        # round trips for one dead port.  With the break, exactly
+        # 1 attempt per (port, scheme) combo.
+        with _patch_urlopen([
+                urllib.error.URLError("Connection refused")
+                for _ in range(40)]):
+            r = propagate_via_forged_ticket(
+                ticket, node, state, channels=["http"])
+
+        # Group by (port, scheme) — each candidate should have
+        # exactly one path probe before breaking.
+        per_candidate = {}
+        for att in r["attempts"]:
+            if att.get("port") != 44300:
+                continue
+            key = att.get("use_https")
+            per_candidate.setdefault(key, []).append(att)
+        for scheme, atts in per_candidate.items():
+            assert len(atts) == 1, (
+                f"Port 44300 scheme={scheme} got {len(atts)} "
+                f"path probes despite connection-refused on the "
+                f"first — break-on-network-error didn't fire")
 
     def test_icm_admin_ports_filtered(self):
         """The scanner sometimes tags ICM admin ports (1128 HTTP,
@@ -598,12 +723,14 @@ class TestPropagate:
         same node can have different auth ACLs (e.g. 44300 requires
         client cert SNC; 8000 accepts cookies), so we keep trying.
 
-        Updated from the pre-multi-port "exactly one attempt"
-        assertion — when the SAP convention fallback added 8080+nr
-        and 8443+nr to the candidate list we started getting more
-        than one attempt per rejection.  The new assertion is
-        per-port: each port gets at most ONE path probe when the
-        first path returns a 401, then we advance to the next port.
+        Updated for dual-scheme port probing — each non-ICM port
+        now generates TWO candidate tuples (HTTPS + HTTP variants)
+        because the scanner's scheme tag isn't authoritative.  The
+        break-on-rejection happens PER CANDIDATE (i.e. per
+        (port, scheme) pair), not per port.  Without the break, a
+        single rejection would chew through every path in
+        _DEFAULT_HTTP_PATHS; with the break, each (port, scheme)
+        gets exactly one path probe before we advance.
         """
         from sap_ticket_propagate import propagate_via_forged_ticket
         from sapmap_models import SAPMAPState
@@ -614,27 +741,34 @@ class TestPropagate:
         state.add_node(node)
 
         # Queue a 401 for every URL the propagation tries.  Without
-        # the per-port break, each port would chew through all 3
-        # paths in _DEFAULT_HTTP_PATHS = 4 ports × 3 paths = 12 calls;
-        # with the break we expect 4 ports × 1 path = 4 calls.
+        # the per-(port, scheme) break, each candidate would chew
+        # through all 3 paths in _DEFAULT_HTTP_PATHS; with the
+        # break we expect exactly 1 path per candidate.
         err = urllib.error.HTTPError(
             "url", 401, "Unauthorized", {}, None)
-        with _patch_urlopen([err] * 20):
+        with _patch_urlopen([err] * 40):
             r = propagate_via_forged_ticket(
                 ticket, node, state, channels=["http"])
 
-        # Group attempts by port + check each port saw at most one
-        # probe (the break-on-rejection-within-a-port behaviour).
-        per_port = {}
+        # Group attempts by (port, scheme) and check each candidate
+        # saw at most ONE probe — the break-on-rejection behaviour
+        # caps each (port, scheme) at 1 attempt, then advances.
+        per_candidate = {}
         for att in r["attempts"]:
-            per_port.setdefault(att.get("port"), []).append(att)
-        for port, attempts in per_port.items():
+            key = (att.get("port"), att.get("use_https"))
+            per_candidate.setdefault(key, []).append(att)
+        for (port, https), attempts in per_candidate.items():
             assert len(attempts) == 1, (
-                f"Port {port} got {len(attempts)} probes after a "
-                f"401 — break-on-rejection should cap at 1")
-        # And we tried more than one port (multi-port iteration)
-        assert len(per_port) > 1, (
-            f"Expected multiple ports tried; only got {list(per_port)}")
+                f"Candidate (port={port}, https={https}) got "
+                f"{len(attempts)} probes after a 401 — "
+                f"break-on-rejection should cap at 1")
+        # Multi-port iteration: more than one distinct port
+        # appeared (dual-scheme variants of the SAME port don't
+        # count as "different ports" for this assertion).
+        distinct_ports = {p for p, _ in per_candidate}
+        assert len(distinct_ports) > 1, (
+            f"Expected multiple ports tried; only got "
+            f"{distinct_ports}")
 
     def test_emits_finding_on_success(self):
         from sap_ticket_propagate import propagate_via_forged_ticket
