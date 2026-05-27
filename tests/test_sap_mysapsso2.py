@@ -165,7 +165,13 @@ class TestBuildAndParse:
         assert parsed["validity_min"] == 150
 
     def test_validity_minutes_only(self):
-        """When validity < 60min, only ValidTimeInM is set."""
+        """When validity < 60min, ValidTimeInH=0 + ValidTimeInM=N.
+
+        Real SAP-issued tickets ALWAYS emit InfoUnit 0x05
+        (ValidTimeInH) even when hours=0 — and emit 0x07
+        (ValidTimeInM) ONLY when minutes != 0.  Confirmed via the
+        captured-from-live-SAP diff in commit 13.
+        """
         from sap_mysapsso2 import build_ticket, parse_ticket
         prefix = build_ticket(
             user="SAP*", client="000", sid="S4H",
@@ -173,10 +179,10 @@ class TestBuildAndParse:
             create_time="202601011200")
         parsed = parse_ticket(prefix)
         assert parsed["validity_min"] == 30
-        # No ValidTimeInH unit
         unit_ids = [u["id"] for u in parsed["units"]]
-        assert 0x05 not in unit_ids  # no VALID_TIME_H
-        assert 0x07 in unit_ids      # VALID_TIME_M present
+        # Both H and M present — H=0 (zero hours), M=30
+        assert 0x05 in unit_ids
+        assert 0x07 in unit_ids
 
     def test_rfc_disabled(self):
         from sap_mysapsso2 import build_ticket, parse_ticket
@@ -219,17 +225,27 @@ class TestBuildAndParse:
         assert parsed["user"] == "ABCDEFGHIJKL"
         assert len(parsed["user"]) == 12
 
-    def test_utf8_mirrors_present(self):
-        """UTF-8 mirror fields (0x0A-0x0E) are included."""
+    def test_utf8_mirrors_absent(self):
+        """UTF-8 mirror fields (0x0A-0x0E) are NOT included.
+
+        We used to emit them on the theory that "modern receivers
+        need them" — but a side-by-side diff against a real SAP-
+        issued MYSAPSSO2 cookie proved otherwise: real SAP tickets
+        do NOT contain InfoUnits 0x0A-0x0E.  Including them caused
+        SAP's strict PKCS#7 verifier to reject our forgeries.
+        See commit 13 / docs for the wire-format diff.
+        """
         from sap_mysapsso2 import build_ticket, parse_ticket
         prefix = build_ticket(
             user="SAP*", client="000", sid="S4H",
             create_time="202601011200")
         parsed = parse_ticket(prefix)
         unit_ids = [u["id"] for u in parsed["units"]]
-        assert 0x0A in unit_ids  # UTF8User
-        assert 0x0B in unit_ids  # UTF8Client
-        assert 0x0C in unit_ids  # UTF8SID
+        assert 0x0A not in unit_ids  # no UTF8User
+        assert 0x0B not in unit_ids  # no UTF8Client
+        assert 0x0C not in unit_ids  # no UTF8SID
+        assert 0x0D not in unit_ids  # no UTF8Time
+        assert 0x0E not in unit_ids  # no UTF8Language
 
     def test_prefix_bytes_is_full_unsigned_ticket(self):
         """prefix_bytes equals the full ticket when unsigned."""
