@@ -513,6 +513,213 @@ def test_module_docstring_lists_all_three_parameters():
 
 
 # ---------------------------------------------------------------------
+# check_sso2_via_rfc — preferred path via PFL_GET_SINGLE_PARAMETER
+# ---------------------------------------------------------------------
+
+class _FakeRfcConn:
+    """Stand-in for ``sap_rfc_ctypes.RFCConnection`` context manager.
+
+    Records every ``call()`` invocation and returns canned responses
+    from a (function_name, kwargs) → dict mapping.  When no mapping
+    matches, raises an exception to mimic SAP's behavior for
+    unknown parameter names (CX_SY_RFC_INVALID_PARAMETER).
+    """
+
+    def __init__(self, responses=None):
+        self.responses = responses or {}
+        self.calls: list = []
+        self.entered = False
+        self.exited = False
+
+    def __enter__(self):
+        self.entered = True
+        return self
+
+    def __exit__(self, *args):
+        self.exited = True
+        return False
+
+    def call(self, fn_name, **kwargs):
+        self.calls.append((fn_name, kwargs))
+        # Key the response by PARAMETER_NAME for PFL_GET_SINGLE_PARAMETER
+        param = kwargs.get("PARAMETER_NAME", "")
+        if fn_name == "PFL_GET_SINGLE_PARAMETER":
+            if param in self.responses:
+                value = self.responses[param]
+                if value is None:
+                    raise Exception("CX_SY_RFC_INVALID_PARAMETER")
+                return {"PARAMETER_VALUE": value}
+            return {"PARAMETER_VALUE": ""}
+        raise Exception(f"unmocked RFC call: {fn_name}")
+
+
+class TestCheckSso2ViaRfc:
+
+    def _make_node_with_creds(self, sid="S4H", host="h",
+                                username="JORIS",
+                                password="secret"):
+        """Build a SAPNode with a verified credential — what the
+        production code expects when handing creds to RFC."""
+        from sapmap_models import SAPNode, Credentials, InstanceInfo
+        creds = Credentials(
+            username=username, client="001", instance_nr="00",
+            password=password, verified=True)
+        return SAPNode(
+            sid=sid, hostname=host, ip="10.0.0.1",
+            instances=[InstanceInfo(instance_nr="00", ip="10.0.0.1")],
+            credentials=[creds], system_type="ABAP")
+
+    def test_happy_path_calls_pfl_per_param(self):
+        from sap_profile_check import check_sso2_via_rfc
+        node = self._make_node_with_creds()
+        fake = _FakeRfcConn(responses={
+            "login/accept_sso2_ticket": "1",
+            "login/create_sso2_ticket": "2",
+            "login/sso2_ticket_strict_owner_check": "0",
+            "icm/server_port_0": "PROT=HTTP,PORT=8000",
+            "icm/server_port_1": "PROT=HTTPS,PORT=44300",
+        })
+        result = check_sso2_via_rfc(
+            node, creds=None, conn_factory=lambda: fake)
+
+        # Provenance
+        assert result["source"] == "rfc:PFL_GET_SINGLE_PARAMETER"
+        assert result["profiles_read"] == []
+        assert result["profiles_failed"] == []
+        # SSO2 params discovered
+        assert result["observed"]["login/accept_sso2_ticket"] == "1"
+        assert result["observed"]["login/create_sso2_ticket"] == "2"
+        # ICM ports extracted from same merged dict
+        assert len(result["icm_ports"]) == 2
+        ports = {e["port"] for e in result["icm_ports"]}
+        assert ports == {8000, 44300}
+        # Each param was queried by name via the function module
+        param_names_queried = [
+            kw["PARAMETER_NAME"] for fn, kw in fake.calls
+            if fn == "PFL_GET_SINGLE_PARAMETER"]
+        assert "login/accept_sso2_ticket" in param_names_queried
+        assert "login/create_sso2_ticket" in param_names_queried
+        # Verdict
+        assert result["ok"] is True
+
+    def test_accept_zero_surfaces_as_blocker(self):
+        from sap_profile_check import check_sso2_via_rfc
+        node = self._make_node_with_creds()
+        fake = _FakeRfcConn(responses={
+            "login/accept_sso2_ticket": "0",
+        })
+        result = check_sso2_via_rfc(
+            node, conn_factory=lambda: fake)
+        assert result["ok"] is False
+        assert any("accept_sso2_ticket=0" in e
+                   for e in result["errors"])
+
+    def test_icm_port_sweep_stops_at_first_gap(self):
+        """Once we hit an empty icm/server_port_<N> the sweep
+        ends — empty contiguous indices are how SAP signals "no
+        more ports".  This caps unnecessary RFC round trips."""
+        from sap_profile_check import check_sso2_via_rfc
+        node = self._make_node_with_creds()
+        fake = _FakeRfcConn(responses={
+            "login/accept_sso2_ticket": "1",
+            "icm/server_port_0": "PROT=HTTP,PORT=8000",
+            "icm/server_port_1": "PROT=HTTPS,PORT=44300",
+            "icm/server_port_2": "",  # gap — sweep ends here
+            "icm/server_port_3": "PROT=HTTPS,PORT=8443",  # should NOT be reached
+        })
+        result = check_sso2_via_rfc(
+            node, conn_factory=lambda: fake)
+        # Only 0 and 1 were collected; 3 was past the gap
+        ports = {e["port"] for e in result["icm_ports"]}
+        assert 8000 in ports
+        assert 44300 in ports
+        assert 8443 not in ports
+        # Confirm the sweep actually stopped — index 3 was never
+        # queried
+        queried = [kw["PARAMETER_NAME"]
+                    for fn, kw in fake.calls
+                    if fn == "PFL_GET_SINGLE_PARAMETER"]
+        assert "icm/server_port_3" not in queried
+
+    def test_missing_params_treated_as_not_set(self):
+        """PFL_GET_SINGLE_PARAMETER raises for unknown params.
+        That must NOT abort the whole check — the param simply
+        isn't in the active config."""
+        from sap_profile_check import check_sso2_via_rfc
+        node = self._make_node_with_creds()
+        fake = _FakeRfcConn(responses={
+            "login/accept_sso2_ticket": "1",
+            "login/create_sso2_ticket": None,  # raises
+            "login/sso2_ticket_strict_owner_check": None,  # raises
+        })
+        result = check_sso2_via_rfc(
+            node, conn_factory=lambda: fake)
+        # accept_sso2_ticket=1 still surfaces
+        assert result["observed"]["login/accept_sso2_ticket"] == "1"
+        # The unknown params are absent from observed (not in errors)
+        assert "login/create_sso2_ticket" not in result["observed"]
+        assert result["ok"] is True
+
+    def test_no_credentials_returns_structured_error(self):
+        """When neither caller nor node has usable creds, the
+        function must NOT raise — it returns an error result so
+        the orchestrator can fall back to the profile-read path."""
+        from sap_profile_check import check_sso2_via_rfc
+        from sapmap_models import SAPNode
+        node = SAPNode(sid="S4H", system_type="ABAP")
+
+        def factory():
+            raise ValueError("No credentials available for S4H")
+
+        result = check_sso2_via_rfc(node, conn_factory=factory)
+        assert result["ok"] is False
+        assert any("no usable abap credentials" in e.lower()
+                   for e in result["errors"])
+        # Result shape is complete (orchestrator can chain on it)
+        assert "icm_ports" in result
+        assert "source" in result
+
+    def test_connection_setup_failure_returns_structured_error(self):
+        from sap_profile_check import check_sso2_via_rfc
+        node = self._make_node_with_creds()
+
+        def factory():
+            raise ConnectionError("network down")
+
+        result = check_sso2_via_rfc(node, conn_factory=factory)
+        assert result["ok"] is False
+        assert any("network down" in e for e in result["errors"])
+
+    def test_context_manager_exits_cleanly_on_success(self):
+        from sap_profile_check import check_sso2_via_rfc
+        node = self._make_node_with_creds()
+        fake = _FakeRfcConn(responses={
+            "login/accept_sso2_ticket": "1",
+        })
+        check_sso2_via_rfc(node, conn_factory=lambda: fake)
+        assert fake.entered
+        assert fake.exited
+
+    def test_pfl_get_uses_uppercase_parameter_name_arg(self):
+        """ABAP RFC param names are conventionally uppercase.  The
+        function module signature is PARAMETER_NAME (caps).  Make
+        sure we pass it correctly so the call doesn't get rejected
+        as an unknown parameter name."""
+        from sap_profile_check import check_sso2_via_rfc
+        node = self._make_node_with_creds()
+        fake = _FakeRfcConn(responses={
+            "login/accept_sso2_ticket": "1",
+        })
+        check_sso2_via_rfc(node, conn_factory=lambda: fake)
+        # All calls used the uppercase keyword
+        for fn, kw in fake.calls:
+            assert "PARAMETER_NAME" in kw, \
+                f"Call {fn} kwargs: {kw} missing PARAMETER_NAME"
+            assert "parameter_name" not in kw, \
+                "ABAP RFC names are uppercase"
+
+
+# ---------------------------------------------------------------------
 # extract_icm_ports — discovers HTTP/HTTPS listeners from profile
 # ---------------------------------------------------------------------
 

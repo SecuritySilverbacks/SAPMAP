@@ -433,6 +433,187 @@ def evaluate_sso2_config(params: dict[str, str]) -> dict:
 
 
 # ---------------------------------------------------------------------
+# RFC-based parameter read via PFL_GET_SINGLE_PARAMETER
+# ---------------------------------------------------------------------
+
+# Parameters to query when running the SSO2 pre-flight check via RFC.
+# Three SSO2 gating/stealth params + a sweep of icm/server_port_<N>
+# entries (0..N) to discover the AS's HTTP/HTTPS listeners.
+#
+# Limit the icm sweep to 0..19 — every SAP installation I've seen
+# keeps the ICM ports in a low contiguous range, and beyond 20 the
+# overhead of RFC round-trips for empty responses outweighs the
+# chance of discovering additional listeners.
+_SSO2_PARAMS_TO_QUERY = (
+    "login/accept_sso2_ticket",
+    "login/create_sso2_ticket",
+    "login/sso2_ticket_strict_owner_check",
+)
+_ICM_PORT_SWEEP_RANGE = range(0, 20)
+
+
+def check_sso2_via_rfc(node,
+                         creds=None,
+                         conn_factory: Optional[Callable] = None
+                         ) -> dict:
+    """Read SSO2 + ICM port params via RFC ``PFL_GET_SINGLE_PARAMETER``.
+
+    Replaces the OS-access-based profile read (which goes through
+    sapxpg + chunked base64 reads — 30-60 s per profile file on
+    kernel 793+) with a much faster RFC path that returns each
+    parameter's *active* runtime value (reflecting both the
+    profile file AND any RZ11 dynamic changes since the AS came
+    up).
+
+    Architectural advantages over the profile-read path:
+
+      * Needs only an ABAP RFC credential, not OS access — easier
+        prereq, available much earlier in the AutoPwn / manual
+        exploitation flow.
+      * Each parameter = one RFC round-trip (~50-200 ms vs. 30 s).
+      * Reads the *active* runtime value — picks up RZ11 changes
+        the profile files don't reflect until the next AS restart.
+      * Function module ``PFL_GET_SINGLE_PARAMETER`` (function
+        group SPFL) is remote-enabled by default and callable by
+        any user with basic RFC auth — no S_SETPARAM or other
+        special privilege required.
+
+    Args:
+        node: :class:`SAPNode` of the target.  Used to derive
+            ``ashost`` / ``saprouter`` and as the default source
+            for ``creds`` via :meth:`SAPNode.best_credentials`.
+        creds: Optional :class:`Credentials` override.  When None
+            (default), uses ``node.best_credentials()``.
+        conn_factory: Callable returning an open RFC connection
+            context manager.  Override for tests — production
+            callers leave this None to get the canonical
+            ``sapmap_rfc._get_connection``.
+
+    Returns:
+        Same dict shape as :func:`check_sso2_via_profile`, with:
+          * ``source = "rfc:PFL_GET_SINGLE_PARAMETER"``
+          * ``profiles_read = []`` (no files were read)
+          * ``profiles_failed = []``
+          * Other fields populated by :func:`evaluate_sso2_config`
+            and :func:`extract_icm_ports` from the merged params.
+    """
+    # Stub structure callers can rely on
+    def _err_result(errors: list) -> dict:
+        return {
+            "ok": False,
+            "errors": errors,
+            "warnings": [],
+            "recommend_include_cert": None,
+            "observed": {},
+            "profiles_read": [],
+            "profiles_failed": [],
+            "merged_params": {},
+            "icm_ports": [],
+            "source": "rfc:PFL_GET_SINGLE_PARAMETER",
+        }
+
+    # ── Resolve a connection factory ──────────────────────────────
+    if conn_factory is None:
+        try:
+            from sapmap_rfc import _get_connection
+        except ImportError as e:
+            return _err_result([
+                f"sapmap_rfc unavailable ({e}); cannot run "
+                f"RFC-based SSO2 check"])
+
+        def conn_factory():
+            return _get_connection(node, creds)
+
+    # ── Open the connection ───────────────────────────────────────
+    try:
+        conn_ctx = conn_factory()
+    except ValueError as e:
+        # _get_connection raises ValueError when no credentials
+        # are available
+        return _err_result([
+            f"no usable ABAP credentials for {node.sid}: {e}"])
+    except ImportError as e:
+        return _err_result([
+            f"NW RFC SDK / ctypes binding unavailable ({e})"])
+    except Exception as e:
+        return _err_result([
+            f"RFC connection setup failed: "
+            f"{type(e).__name__}: {e}"])
+
+    # ── Query each parameter ──────────────────────────────────────
+    merged: dict[str, str] = {}
+    rfc_errors: list = []
+
+    try:
+        with conn_ctx as conn:
+            # SSO2 gating params first — these are the must-haves
+            for name in _SSO2_PARAMS_TO_QUERY:
+                value = _call_pfl_get(conn, name)
+                if value is not None:
+                    merged[name] = value
+
+            # ICM port sweep — empty responses mean "no port at
+            # this index", which is the normal way to know we've
+            # gone past the last configured listener.
+            for idx in _ICM_PORT_SWEEP_RANGE:
+                name = f"icm/server_port_{idx}"
+                value = _call_pfl_get(conn, name)
+                if value is None or not value.strip():
+                    # First empty index ends the sweep — SAP
+                    # always uses contiguous indices in practice,
+                    # so a gap means no more ports.
+                    if idx > 0:
+                        break
+                    continue
+                merged[name] = value
+    except Exception as e:
+        # Any unhandled exception during the parameter-query phase
+        # (connection drop, auth failure mid-stream, ...) — return
+        # what we managed to collect plus the error context.
+        rfc_errors.append(
+            f"RFC query aborted: {type(e).__name__}: {e}")
+
+    # ── Evaluate the collected params ─────────────────────────────
+    if not merged and rfc_errors:
+        result = _err_result(rfc_errors)
+        return result
+
+    result = evaluate_sso2_config(merged)
+    result["profiles_read"] = []   # RFC: no files read
+    result["profiles_failed"] = []
+    result["merged_params"] = merged
+    result["icm_ports"] = extract_icm_ports(merged)
+    result["source"] = "rfc:PFL_GET_SINGLE_PARAMETER"
+    # Append any non-fatal RFC errors as warnings so the operator
+    # sees them but the check still reports successfully on the
+    # params we did manage to read.
+    if rfc_errors:
+        result["warnings"] = list(result.get("warnings", [])) + rfc_errors
+    return result
+
+
+def _call_pfl_get(conn, parameter_name: str) -> Optional[str]:
+    """Call ``PFL_GET_SINGLE_PARAMETER`` and return the value string.
+
+    Returns the trimmed PARAMETER_VALUE on success, ``None`` when
+    the call raises (typically because the parameter isn't set in
+    the active profile — SAP returns CX_SY_RFC for unknown
+    parameter names; we treat that as "not set").
+    """
+    try:
+        r = conn.call("PFL_GET_SINGLE_PARAMETER",
+                       PARAMETER_NAME=parameter_name)
+    except Exception:
+        return None
+    if not isinstance(r, dict):
+        return None
+    val = r.get("PARAMETER_VALUE") or r.get("parameter_value") or ""
+    if not isinstance(val, str):
+        return None
+    return val.strip()
+
+
+# ---------------------------------------------------------------------
 # Top-level entry point — read + parse + evaluate
 # ---------------------------------------------------------------------
 
@@ -516,6 +697,7 @@ def check_sso2_parameters(gw_exec_fn: Callable,
             "profiles_failed": profiles_failed,
             "merged_params": {},
             "icm_ports": [],
+            "source": "profile:DEFAULT.PFL+instance",
         }
 
     result = evaluate_sso2_config(merged)
@@ -528,6 +710,7 @@ def check_sso2_parameters(gw_exec_fn: Callable,
     # (notably ticket propagation) have authoritative port info
     # without a second profile-read round-trip.
     result["icm_ports"] = extract_icm_ports(merged)
+    result["source"] = "profile:DEFAULT.PFL+instance"
     return result
 
 
