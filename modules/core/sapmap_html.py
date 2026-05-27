@@ -825,8 +825,13 @@ body {
       <div class="ctx-item" data-action="os_terminal">&#128187; OS Command Terminal</div>
       <div class="ctx-item" data-action="reverse_shell">&#128279; Reverse Shell</div>
       <div class="ctx-sep"></div>
-      <!-- MYSAPSSO2 ticket-forgery workflow -->
-      <div class="ctx-item" data-action="sso2_profile_check">&#128203; Check SSO2 Profile (accept/create params)</div>
+      <!-- MYSAPSSO2 ticket-forgery workflow.  The SSO2 profile
+           pre-flight check used to be its own menu entry; it now
+           runs implicitly as step 2.5 of Forge (via RFC
+           PFL_GET_SINGLE_PARAMETER when credentials are
+           available, falling back to profile-file read via
+           sapxpg).  Operators wanting an isolated check can use
+           ``python3 tools/check_sso2_profile.py`` from the CLI. -->
       <div class="ctx-item" data-action="forge_ticket">&#127915; Forge MYSAPSSO2 Ticket (impersonate any user)</div>
       <div class="ctx-item" data-action="propagate_ticket">&#128640; Propagate Forged Ticket (HTTP+RFC across trust)</div>
       <div class="ctx-sep"></div>
@@ -1748,27 +1753,7 @@ body {
   </div>
 </div>
 
-<!-- 2. SSO2 Profile Check Result Modal -->
-<div class="modal-overlay" id="sso2-check-modal">
-  <div class="modal" style="max-width:680px;width:95vw">
-    <h3>&#128203; SSO2 Profile Pre-flight Check</h3>
-    <div id="sso2-check-system-info" style="font-size:12px;color:#8b949e;margin-bottom:12px"></div>
-    <div id="sso2-check-status" style="font-size:13px;font-weight:600;margin-bottom:8px"></div>
-    <div id="sso2-check-issues" style="font-size:12px;color:#c9d1d9;margin-bottom:12px;line-height:1.6"></div>
-    <table id="sso2-check-params-table" style="width:100%;font-size:12px;border-collapse:collapse">
-      <thead>
-        <tr style="background:#161b22"><th style="text-align:left;padding:6px;border-bottom:1px solid #30363d">Profile parameter</th><th style="text-align:left;padding:6px;border-bottom:1px solid #30363d">Value</th><th style="text-align:left;padding:6px;border-bottom:1px solid #30363d">Meaning</th></tr>
-      </thead>
-      <tbody id="sso2-check-params-body"></tbody>
-    </table>
-    <div id="sso2-check-profiles" style="font-size:11px;color:#484f58;margin-top:10px;line-height:1.5"></div>
-    <div class="form-actions">
-      <button class="btn" onclick="closeModal('sso2-check-modal')">Close</button>
-    </div>
-  </div>
-</div>
-
-<!-- 3. Propagate Forged Ticket Modal -->
+<!-- 2. Propagate Forged Ticket Modal -->
 <div class="modal-overlay" id="propagate-ticket-modal">
   <div class="modal" style="max-width:580px;width:95vw">
     <h3>&#128640; Propagate Forged MYSAPSSO2 Ticket</h3>
@@ -3682,33 +3667,30 @@ function showCtxMenu(e, sid) {
         (n && (n.credentials || []).some(c => c && c.verified))
         || hasCreatedUsers),
     'propagate':        hasCreds,                   // need access to propagate from
-    // MYSAPSSO2 ticket-forgery workflow.  All three actions are
-    // ABAP-only because they pivot through SAPSYS.pse and ABAP-
-    // specific RFC function modules — Java stacks don't have
-    // SAPSYS.pse and their SSO uses SNC instead of MYSAPSSO2
-    // cookies for the Diag path.
-    //
-    //   * sso2_profile_check — reads three SSO2 profile params +
-    //     icm/server_port_<N> entries.  Two access paths supported:
-    //     - RFC PFL_GET_SINGLE_PARAMETER (preferred) — needs only
-    //       a usable ABAP credential.
-    //     - Profile-file read via sapxpg (fallback) — needs OS
-    //       access (GW SAPXPG vuln / CVE-2025-31324 / SAPMAP user).
-    //     Either path is enough; gate on the union.
+    // MYSAPSSO2 ticket-forgery workflow.  Both actions are
+    // ABAP-only because they pivot through SAPSYS.pse — Java
+    // stacks don't have SAPSYS.pse and their SSO uses SNC instead
+    // of MYSAPSSO2 cookies for the Diag path.
     //
     //   * forge_ticket — needs OS-level read access on the issuing
-    //     AS to reach SAPSYS.pse + cred_v2.  Same three OS-access
-    //     paths as before — RFC alone is NOT enough because no
+    //     AS to reach SAPSYS.pse + cred_v2.  Three orthogonal
+    //     paths qualify: vulnerable RFC Gateway (hasGwVuln),
+    //     CVE-2025-31324 JSP webshell (hasCve31324), or an
+    //     existing SAPMAP-created OS user (isAbapStack &&
+    //     hasCreatedUsers).  RFC alone is NOT enough because no
     //     RFC function returns the raw PSE contents.
     //
     //   * propagate_ticket — needs at least one ForgedTicket
     //     already attached to the node (it replays the cookie,
     //     no extraction step).  Hidden until a forge succeeds.
-    'sso2_profile_check': isAbapStack && (
-                            hasUsableAbapAccess   // RFC path
-                            || hasGwVuln           // profile-read paths
-                            || hasCve31324
-                            || hasCreatedUsers),
+    //
+    // The SSO2 profile pre-flight check used to live here too as
+    // ``sso2_profile_check`` — it now runs implicitly as step 2.5
+    // inside the forge orchestrator (uses RFC
+    // PFL_GET_SINGLE_PARAMETER when creds are available, falls
+    // back to profile-file read via sapxpg).  The standalone
+    // surface was removed as duplicative.  Operators wanting an
+    // isolated check should use ``tools/check_sso2_profile.py``.
     'forge_ticket':       isAbapStack && (hasGwVuln
                             || hasCve31324
                             || hasCreatedUsers),
@@ -3859,9 +3841,6 @@ function showCtxMenu(e, sid) {
     // met, so these hints are mostly defensive — they'll only
     // surface if a future change drops them from the `hidden`
     // dict and falls back to the rules-based disable path.
-    'sso2_profile_check': (!isAbapStack
-        ? 'MYSAPSSO2 ticket forgery is an ABAP-only attack surface — only present on ABAP/dual-stack systems.'
-        : 'Needs either an ABAP RFC credential (fast — RFC PFL_GET_SINGLE_PARAMETER) OR OS-level read access via sapxpg base64 (slow — chunked profile reads).  Provide credentials, or open via a vulnerable RFC Gateway / CVE-2025-31324 / a SAPMAP-created user first.'),
     'forge_ticket': (!isAbapStack
         ? 'MYSAPSSO2 ticket forgery reads SAPSYS.pse — only present on ABAP/dual-stack systems.  Java stacks use SNC for Diag SSO instead.'
         : 'Needs OS-level read access on the issuing AS (sapxpg base64).  Open via a vulnerable RFC Gateway, CVE-2025-31324 JSP webshell, or a SAPMAP-created user first.'),
@@ -3966,11 +3945,6 @@ function showCtxMenu(e, sid) {
     // the menu doesn't show actions that would only fail at the
     // backend.  See the matching ``rules`` entries for the same
     // gating logic in disabled-state form (defensive double-up).
-    'sso2_profile_check': !(isAbapStack && (
-                              hasUsableAbapAccess
-                              || hasGwVuln
-                              || hasCve31324
-                              || hasCreatedUsers)),
     'forge_ticket':       !(isAbapStack && (hasGwVuln
                               || hasCve31324
                               || hasCreatedUsers)),
@@ -5110,11 +5084,12 @@ async function ctxAction(action) {
       }
       break;
     // ── MYSAPSSO2 ticket-forgery workflow ───────────────────────────
+    // Note: the SSO2 profile pre-flight check runs implicitly
+    // inside the forge orchestrator (step 2.5) — no standalone
+    // menu entry.  Operators wanting an isolated check should use
+    // ``python3 tools/check_sso2_profile.py`` from the CLI.
     case 'forge_ticket':
       showForgeTicketModal(sid);
-      break;
-    case 'sso2_profile_check':
-      runSso2ProfileCheck(sid);
       break;
     case 'propagate_ticket':
       showPropagateTicketModal(sid);
@@ -7143,19 +7118,17 @@ function showSaprouterModal(sid) {
 //   1. showForgeTicketModal(sid)     — opens the forge modal, then
 //      POSTs to /api/node/<sid>/forge_ticket on Submit.  The forge
 //      runs as a background job; the new ticket appears on
-//      node.forged_tickets via the regular state poll.
+//      node.forged_tickets via the regular state poll.  The SSO2
+//      profile pre-flight check runs implicitly inside the forge
+//      orchestrator (step 2.5) — no separate handler / modal.
 //
-//   2. runSso2ProfileCheck(sid)      — fires-and-shows: POSTs to
-//      /api/node/<sid>/sso2_profile_check (synchronous), then
-//      renders the structured result in the sso2-check-modal.
-//
-//   3. showPropagateTicketModal(sid) — opens the propagate modal,
+//   2. showPropagateTicketModal(sid) — opens the propagate modal,
 //      pre-populates the ticket selector from node.forged_tickets,
 //      then POSTs to /api/node/<sid>/propagate_ticket on Submit.
 //
-// All three are gated on a node existing in mapState; the forge
-// modal also needs the node to have OS access (sapxpg/10KBLAZE)
-// because the chain reads SAPSYS.pse from disk.
+// Both are gated on a node existing in mapState; the forge modal
+// also needs the node to have OS access (sapxpg/10KBLAZE) because
+// the chain reads SAPSYS.pse from disk.
 // ---------------------------------------------------------------------
 
 function showForgeTicketModal(sid) {
@@ -7221,176 +7194,14 @@ async function submitForgeTicket() {
   startPolling();
 }
 
-// Module-scope handle so the polling loop survives modal close/reopen
-// and we don't end up with multiple concurrent intervals racing each
-// other when the operator clicks "Check SSO2 Profile" twice in a row.
-let _sso2CheckPoller = null;
-
-async function runSso2ProfileCheck(sid) {
-  const n = (mapState.nodes || {})[sid];
-  if (!n) return;
-
-  // Open the modal with a loading state immediately — the actual
-  // check runs as a background job (kernel-793 chunked base64 reads
-  // take 30-60s per profile file), so a sync await would freeze the
-  // UI for minutes.  We POST to kick off the job, then poll
-  // ``node.sso2_check_result`` via the regular /api/state poll and
-  // re-render when ``completed_at`` appears.
-  document.getElementById('sso2-check-system-info').innerHTML =
-    `<strong>${escHtml(n.sid)}</strong> `
-    + `(${escHtml(n.hostname || n.ip)})`;
-  document.getElementById('sso2-check-status').textContent =
-    'Reading /usr/sap/' + n.sid + '/SYS/profile/ — '
-    + 'this can take 30-60s on kernel 793+ (chunked base64). '
-    + 'See console panel for progress ...';
-  document.getElementById('sso2-check-status').style.color = '#8b949e';
-  document.getElementById('sso2-check-issues').innerHTML = '';
-  document.getElementById('sso2-check-params-body').innerHTML = '';
-  document.getElementById('sso2-check-profiles').innerHTML = '';
-  document.getElementById('sso2-check-modal').classList.add('visible');
-
-  // Cancel any previous poll loop before kicking off a new one.
-  if (_sso2CheckPoller) {
-    clearInterval(_sso2CheckPoller);
-    _sso2CheckPoller = null;
-  }
-
-  // POST to start the background job.  Don't await its result; the
-  // response is ``{"status": "started"}`` and the actual data lands
-  // on the node via /api/state polling.
-  let ack;
-  try {
-    ack = await api('POST', `node/${sid}/sso2_profile_check`);
-  } catch (e) {
-    document.getElementById('sso2-check-status').textContent =
-      'FAILED to start: ' + (e && e.message || e);
-    document.getElementById('sso2-check-status').style.color = '#f85149';
-    return;
-  }
-  if (ack && ack.error) {
-    document.getElementById('sso2-check-status').textContent =
-      'FAILED: ' + ack.error;
-    document.getElementById('sso2-check-status').style.color = '#f85149';
-    return;
-  }
-
-  // Make sure the regular /api/state poll is running — that's how
-  // the result reaches us.  startPolling() is idempotent.
-  startPolling();
-
-  // Watch the node's sso2_check_result.completed_at field for the
-  // background job's finish stamp, then render and stop polling.
-  // 90-second hard cap so the modal doesn't pretend to be running
-  // forever on a wedged GW; the background job itself has no
-  // timeout but anything past 90s on a profile-file read means
-  // something is wrong upstream (GW not actually reachable,
-  // sapxpg buffer wedged, etc.).
-  const startedClient = Date.now();
-  _sso2CheckPoller = setInterval(() => {
-    const modalVisible = document.getElementById('sso2-check-modal')
-                            .classList.contains('visible');
-    if (!modalVisible) {
-      // Operator closed the modal — stop the poll but don't cancel
-      // the job (the result is still useful, gets stamped on the
-      // node, and re-opening the action will show the cached
-      // result immediately).
-      clearInterval(_sso2CheckPoller);
-      _sso2CheckPoller = null;
-      return;
-    }
-    const fresh = (mapState.nodes || {})[sid];
-    const res = fresh && fresh.sso2_check_result;
-    if (res && res.completed_at) {
-      clearInterval(_sso2CheckPoller);
-      _sso2CheckPoller = null;
-      _renderSso2CheckResult(res);
-      return;
-    }
-    if (Date.now() - startedClient > 90000) {
-      clearInterval(_sso2CheckPoller);
-      _sso2CheckPoller = null;
-      document.getElementById('sso2-check-status').textContent =
-        'TIMEOUT after 90s — see console panel for backend trace';
-      document.getElementById('sso2-check-status').style.color = '#f85149';
-    }
-  }, 1000);
-}
-
-// Pure rendering — given the completed sso2_check_result dict, paint
-// the modal contents.  Split out so the polling loop above and any
-// future "show cached last check" entry point can share it.
-function _renderSso2CheckResult(res) {
-  // ── Status banner (green OK / red blocker) ─────────────────────
-  const ok = !!res.ok;
-  const status = document.getElementById('sso2-check-status');
-  status.textContent = ok
-    ? '✅ OK — node accepts SSO2 tickets in our forger\'s format'
-    : '❌ BLOCKER — forged tickets will be rejected';
-  status.style.color = ok ? '#3fb950' : '#f85149';
-
-  // ── Issues list (errors first, then warnings) ──────────────────
-  const issues = document.getElementById('sso2-check-issues');
-  let html = '';
-  for (const err of (res.errors || [])) {
-    html += `<div style="color:#f85149">[−] ${escHtml(err)}</div>`;
-  }
-  for (const warn of (res.warnings || [])) {
-    html += `<div style="color:#d29922">[?] ${escHtml(warn)}</div>`;
-  }
-  if (res.recommend_include_cert !== null
-      && res.recommend_include_cert !== undefined) {
-    html += `<div style="color:#58a6ff;margin-top:4px">`
-          + `[i] recommended <code>include_cert=`
-          + `${res.recommend_include_cert ? 'True' : 'False'}</code>`
-          + `</div>`;
-  }
-  issues.innerHTML = html;
-
-  // ── Param value table ──────────────────────────────────────────
-  const meanings = {
-    'login/accept_sso2_ticket': {
-      '0': 'Disabled — kernel rejects all SSO2 cookies',
-      '1': 'Enabled — kernel validates via TWPSSO2ACL',
-    },
-    'login/create_sso2_ticket': {
-      '0': "Don't create",
-      '1': 'Create with embedded cert',
-      '2': 'Create without embedded cert',
-      '3': 'Assertion tickets only',
-    },
-    'login/sso2_ticket_strict_owner_check': {
-      '0': 'Lenient (any TWPSSO2ACL issuer accepted)',
-      '1': 'Strict (Owner DN must match exactly)',
-    },
-  };
-  let rows = '';
-  const observed = res.observed || {};
-  for (const k of Object.keys(meanings)) {
-    const v = observed[k];
-    const m = (meanings[k][v] !== undefined)
-              ? meanings[k][v]
-              : (v === undefined ? '(not in profile)' : '(unknown value)');
-    const valColor = (k === 'login/accept_sso2_ticket' && v !== '1')
-                     ? '#f85149' : '#c9d1d9';
-    rows += `<tr>`
-          + `<td style="padding:6px;border-bottom:1px solid #21262d;font-family:monospace">${escHtml(k)}</td>`
-          + `<td style="padding:6px;border-bottom:1px solid #21262d;color:${valColor};font-family:monospace">${escHtml(v === undefined ? '—' : v)}</td>`
-          + `<td style="padding:6px;border-bottom:1px solid #21262d">${escHtml(m)}</td>`
-          + `</tr>`;
-  }
-  document.getElementById('sso2-check-params-body').innerHTML = rows;
-
-  // ── Profile-file provenance ────────────────────────────────────
-  let prov = '';
-  for (const p of (res.profiles_read || [])) {
-    prov += `<div>[r] ${escHtml(p)}</div>`;
-  }
-  for (const f of (res.profiles_failed || [])) {
-    prov += `<div style="color:#f85149">[−] ${escHtml(f.path)} `
-          + `(${escHtml(f.error || 'failed')})</div>`;
-  }
-  document.getElementById('sso2-check-profiles').innerHTML = prov;
-}
+// The SSO2 profile pre-flight check used to be exposed as a
+// standalone menu action ("Check SSO2 Profile") with its own
+// modal, polling loop, and renderer.  Operator feedback removed
+// it: the same check runs implicitly as step 2.5 of the forge
+// orchestrator (extract_and_forge_ticket in sapmap_exploit.py),
+// so the standalone surface was duplicative.  Operators who want
+// to run the check in isolation can use the CLI tool
+// (``python3 tools/check_sso2_profile.py``).
 
 function showPropagateTicketModal(sid) {
   const n = (mapState.nodes || {})[sid];
