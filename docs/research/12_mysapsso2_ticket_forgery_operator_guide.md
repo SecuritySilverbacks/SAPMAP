@@ -140,14 +140,45 @@ Useful flags:
 
 ### 3.1 SAP GUI (`.sap` shortcut)
 
-Double-click `loot/tickets/<dir>/<user>@<SID>.sap`.  SAP GUI parses
-the `[System]` / `[User]` / `[Function]` INI sections and injects the
-URL-encoded `MYSAPSSO2=<base64>` cookie into the Diag handshake.
-The configured `Command=` field (default `SU01`, user maintenance) is
-opened immediately — the operator lands inside a logged-on session
-as the impersonated user, no password prompt.
+Double-click `loot/tickets/<dir>/<user>@<SID>.sap`.
 
-Works against SAP GUI for Windows + the Java GUI for macOS/Linux.
+**Auto-authentication is SAP-GUI-for-Windows only.**  On the Windows
+GUI, SAP GUI parses the INI sections and injects the URL-encoded
+`MYSAPSSO2=<base64>` cookie (the `at=` line in `[User]`) into the
+Diag handshake.  The configured `Command=` field (default `SU01`,
+user maintenance) opens immediately — the operator lands inside a
+logged-on session as the impersonated user, no password prompt.
+
+**SAP GUI for Java does NOT auto-authenticate with MYSAPSSO2 via
+`.sap` files.**  We still emit a Java-GUI-compatible `.sap`
+(canonical `[Others] SSO2=`, `[System] GuiParm=`, `Name=@01`), and
+Java GUI accepts the file, opens the connection, and pre-fills the
+username field — but it drops the operator at a normal password
+logon screen.  This is by design on SAP's side: chapter 5.6 of the
+SAP GUI for Java reference v7.80 marks the `sso2` connection
+parameter as *"Reserved for the use of single sign-on in the
+mySAP.com workplace"* — a placeholder from the discontinued
+(~2005) mySAP.com Workplace portal that the parser still
+understands but the Diag client never transmits.  Live testing
+against S4H confirmed: dev_w trace shows zero MYSAPSSO2 entries
+when a Java GUI `.sap` is opened, regardless of where the SSO2
+value is placed in the file.
+
+**Java GUI delivery channel matrix:**
+
+| Operator's GUI client     | Auto-login with `.sap`? | Recommended channel        |
+| ---                       | ---                     | ---                        |
+| SAP GUI for Windows       | ✅ yes                  | `.sap` shortcut (this file) |
+| SAP GUI for Java (macOS)  | ❌ no                   | curl/HTTP → §3.2           |
+| SAP GUI for Java (Linux)  | ❌ no                   | curl/HTTP → §3.2           |
+| Browser (WebGUI / Fiori)  | ✅ yes                  | curl/HTTP → §3.2           |
+| `pyrfc` (programmatic)    | ✅ yes                  | RFC kwargs → §3.3          |
+
+For Java GUI operators the practical workflow is: launch the
+generated `curl.sh` to validate the ticket, then either use WebGUI
+in a browser, or — if a desktop session is needed — type the
+impersonated user's password manually after Java GUI opens the
+connection (the username will be pre-filled).
 
 ### 3.2 HTTP cookie (WebGUI / Fiori / ICF)
 
