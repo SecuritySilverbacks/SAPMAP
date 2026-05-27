@@ -7211,41 +7211,105 @@ async function submitForgeTicket() {
   startPolling();
 }
 
+// Module-scope handle so the polling loop survives modal close/reopen
+// and we don't end up with multiple concurrent intervals racing each
+// other when the operator clicks "Check SSO2 Profile" twice in a row.
+let _sso2CheckPoller = null;
+
 async function runSso2ProfileCheck(sid) {
   const n = (mapState.nodes || {})[sid];
   if (!n) return;
 
-  // Show a loading state immediately — the check is fast (a few
-  // small file reads) but the gateway round-trips still take a
-  // second or two, so the operator needs feedback.
+  // Open the modal with a loading state immediately — the actual
+  // check runs as a background job (kernel-793 chunked base64 reads
+  // take 30-60s per profile file), so a sync await would freeze the
+  // UI for minutes.  We POST to kick off the job, then poll
+  // ``node.sso2_check_result`` via the regular /api/state poll and
+  // re-render when ``completed_at`` appears.
   document.getElementById('sso2-check-system-info').innerHTML =
     `<strong>${escHtml(n.sid)}</strong> `
     + `(${escHtml(n.hostname || n.ip)})`;
   document.getElementById('sso2-check-status').textContent =
-    'Reading /usr/sap/' + n.sid + '/SYS/profile/ ...';
+    'Reading /usr/sap/' + n.sid + '/SYS/profile/ — '
+    + 'this can take 30-60s on kernel 793+ (chunked base64). '
+    + 'See console panel for progress ...';
   document.getElementById('sso2-check-status').style.color = '#8b949e';
   document.getElementById('sso2-check-issues').innerHTML = '';
   document.getElementById('sso2-check-params-body').innerHTML = '';
   document.getElementById('sso2-check-profiles').innerHTML = '';
   document.getElementById('sso2-check-modal').classList.add('visible');
 
-  let res;
+  // Cancel any previous poll loop before kicking off a new one.
+  if (_sso2CheckPoller) {
+    clearInterval(_sso2CheckPoller);
+    _sso2CheckPoller = null;
+  }
+
+  // POST to start the background job.  Don't await its result; the
+  // response is ``{"status": "started"}`` and the actual data lands
+  // on the node via /api/state polling.
+  let ack;
   try {
-    res = await api('POST', `node/${sid}/sso2_profile_check`);
+    ack = await api('POST', `node/${sid}/sso2_profile_check`);
   } catch (e) {
     document.getElementById('sso2-check-status').textContent =
-      'FAILED: ' + (e && e.message || e);
+      'FAILED to start: ' + (e && e.message || e);
     document.getElementById('sso2-check-status').style.color = '#f85149';
     return;
   }
-
-  if (res && res.error) {
+  if (ack && ack.error) {
     document.getElementById('sso2-check-status').textContent =
-      'FAILED: ' + res.error;
+      'FAILED: ' + ack.error;
     document.getElementById('sso2-check-status').style.color = '#f85149';
     return;
   }
 
+  // Make sure the regular /api/state poll is running — that's how
+  // the result reaches us.  startPolling() is idempotent.
+  startPolling();
+
+  // Watch the node's sso2_check_result.completed_at field for the
+  // background job's finish stamp, then render and stop polling.
+  // 90-second hard cap so the modal doesn't pretend to be running
+  // forever on a wedged GW; the background job itself has no
+  // timeout but anything past 90s on a profile-file read means
+  // something is wrong upstream (GW not actually reachable,
+  // sapxpg buffer wedged, etc.).
+  const startedClient = Date.now();
+  _sso2CheckPoller = setInterval(() => {
+    const modalVisible = document.getElementById('sso2-check-modal')
+                            .classList.contains('visible');
+    if (!modalVisible) {
+      // Operator closed the modal — stop the poll but don't cancel
+      // the job (the result is still useful, gets stamped on the
+      // node, and re-opening the action will show the cached
+      // result immediately).
+      clearInterval(_sso2CheckPoller);
+      _sso2CheckPoller = null;
+      return;
+    }
+    const fresh = (mapState.nodes || {})[sid];
+    const res = fresh && fresh.sso2_check_result;
+    if (res && res.completed_at) {
+      clearInterval(_sso2CheckPoller);
+      _sso2CheckPoller = null;
+      _renderSso2CheckResult(res);
+      return;
+    }
+    if (Date.now() - startedClient > 90000) {
+      clearInterval(_sso2CheckPoller);
+      _sso2CheckPoller = null;
+      document.getElementById('sso2-check-status').textContent =
+        'TIMEOUT after 90s — see console panel for backend trace';
+      document.getElementById('sso2-check-status').style.color = '#f85149';
+    }
+  }, 1000);
+}
+
+// Pure rendering — given the completed sso2_check_result dict, paint
+// the modal contents.  Split out so the polling loop above and any
+// future "show cached last check" entry point can share it.
+function _renderSso2CheckResult(res) {
   // ── Status banner (green OK / red blocker) ─────────────────────
   const ok = !!res.ok;
   const status = document.getElementById('sso2-check-status');
