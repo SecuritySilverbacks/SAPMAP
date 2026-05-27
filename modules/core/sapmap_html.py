@@ -1746,6 +1746,21 @@ body {
         <input type="text" id="forge-ticket-recipient-client" placeholder="" style="width:80px">
       </div>
     </details>
+    <!-- Delivery-channel compatibility callout.
+         Operators routinely ask "which SAP GUI can I use to launch
+         the .sap shortcut and auto-login as the impersonated user?"
+         The honest answer is Windows-only (see operator guide §3.1
+         + the long comment block above _SAP_SHORTCUT_TEMPLATE in
+         sap_ticket_delivery.py for the Java GUI dead-end).  Surface
+         the matrix here so the operator doesn't get a misleading
+         "logon failed" on a macOS/Linux workstation. -->
+    <div style="margin-top:14px;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px;font-size:11px;color:#8b949e;line-height:1.5">
+      <div style="font-weight:600;color:#c9d1d9;margin-bottom:6px">&#128270; Delivery-channel compatibility</div>
+      <div>&#9989; <strong style="color:#3fb950">SAP GUI for Windows</strong> &mdash; the generated <code>.sap</code> shortcut auto-logs you in as the impersonated user via the <code>at="MYSAPSSO2=..."</code> mechanism.  Double-click and done.</div>
+      <div style="margin-top:4px">&#10060; <strong style="color:#f85149">SAP GUI for Java</strong> (macOS / Linux) &mdash; does NOT auto-login.  The Diag SSO field is "Reserved" per the v7.80 reference (vestigial from the discontinued mySAP.com Workplace); validated against live S4H, the Java GUI parses the <code>.sap</code> but never transmits the ticket.  You'll land at a password prompt.</div>
+      <div style="margin-top:4px">&#9989; <strong style="color:#3fb950">Browser / WebGUI / Fiori</strong> &mdash; use the generated <code>curl.sh</code> or set the <code>MYSAPSSO2</code> cookie manually.  Works on every platform.</div>
+      <div style="margin-top:4px">&#9989; <strong style="color:#3fb950">pyrfc / RFC client</strong> &mdash; use the generated <code>pyrfc.json</code>.  Works on every platform.</div>
+    </div>
     <div class="form-actions">
       <button class="btn" onclick="closeModal('forge-ticket-modal')">Cancel</button>
       <button class="btn btn-primary" onclick="submitForgeTicket()">&#127915; Forge Ticket</button>
