@@ -464,11 +464,12 @@ class TestPropagate:
             f"Convention HTTPS port 44300 missing from {ports_tried}"
 
     def test_icm_ports_from_profile_preferred(self):
-        """When node.sso2_check_result.icm_ports lists the
-        canonical ports from SAP's profile (icm/server_port_<N>),
-        those should be tried FIRST — before the scanner-discovered
-        ports and the SAP convention fallback.  This is the
-        authoritative source: comes straight from the profile."""
+        """When ``node.icm_ports`` lists the canonical ports from
+        SAP's profile (icm/server_port_<N>), those should be tried
+        FIRST — before the scanner-discovered ports and the SAP
+        convention fallback.  This is the authoritative source:
+        comes straight from the profile via the SSO2 pre-flight
+        check that runs as step 2.5 of forge."""
         from sap_ticket_propagate import propagate_via_forged_ticket
         from sapmap_models import SAPMAPState, SAPNode, InstanceInfo
         ticket = _make_ticket()
@@ -477,20 +478,19 @@ class TestPropagate:
             ports={1128: "ICM_HTTP", 1129: "ICM_HTTPS"})
         node = SAPNode(sid="PRD", hostname="h", ip="h",
                         instances=[inst], system_type="ABAP")
-        # Simulate: SSO2 profile check ran and extracted real ICM
-        # ports from icm/server_port_0 = PROT=HTTP,PORT=8081 and
-        # icm/server_port_1 = PROT=HTTPS,PORT=8443.  These are
-        # NON-conventional ports — the only way to know about them
-        # is to read the SAP profile.
-        node.sso2_check_result = {
-            "completed_at": "2026-05-27T15:00:00",
-            "icm_ports": [
-                {"port": 8081, "protocol": "http", "index": 0,
-                 "raw": "PROT=HTTP,PORT=8081"},
-                {"port": 8443, "protocol": "https", "index": 1,
-                 "raw": "PROT=HTTPS,PORT=8443"},
-            ],
-        }
+        # Simulate: SSO2 profile check ran during a previous forge
+        # and extracted real ICM ports from icm/server_port_0 =
+        # PROT=HTTP,PORT=8081 and icm/server_port_1 =
+        # PROT=HTTPS,PORT=8443.  These are NON-conventional ports —
+        # the only way to know about them is to read the SAP
+        # profile (via RFC PFL_GET_SINGLE_PARAMETER or the
+        # sapxpg-based fallback).
+        node.icm_ports = [
+            {"port": 8081, "protocol": "http", "index": 0,
+             "raw": "PROT=HTTP,PORT=8081"},
+            {"port": 8443, "protocol": "https", "index": 1,
+             "raw": "PROT=HTTPS,PORT=8443"},
+        ]
         state = SAPMAPState()
         state.add_node(node)
 
