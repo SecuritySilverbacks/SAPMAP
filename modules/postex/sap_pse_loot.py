@@ -308,12 +308,32 @@ def make_chunked_read_adapter(raw_exec_fn: GwExecFn,
             return {"success": True, "output": [""], "error": ""}
 
         n_chunks = (size + chunk_raw_bytes - 1) // chunk_raw_bytes
-        if verbose:
-            print(f"  [chunked] {file_path}: {size}B "
-                  f"-> {n_chunks} chunk(s) of {chunk_raw_bytes}B")
+        # ── Progress emission rules ────────────────────────────────
+        # Each chunk = one GW SAPXPG round-trip (~2-5 s on kernel
+        # 793).  A 6-10 KB SAPSYS.pse @ 72 B/chunk = 85-140 chunks =
+        # 3-12 min total.  Without progress markers the operator
+        # sees the "reading via base64 ..." line followed by silence
+        # and assumes the chain is hung.  Print:
+        #   * the start banner (always — unconditional, dropped the
+        #     ``if verbose`` gate so the operator sees what file we
+        #     started and how long it'll take)
+        #   * a per-chunk progress line at ~10 evenly-spaced points
+        #     across the read (every ``progress_every`` chunks).
+        #     For small files this still gives 2-3 progress lines
+        #     so the operator knows it's not wedged.
+        #   * a "done" line with the final byte count.
+        # Output goes to stdout — captured by the bg-job console
+        # panel in the GUI.
+        progress_every = max(1, n_chunks // 10)
+        import time as _t
+        chunk_started = _t.time()
+        print(f"  [chunked] {file_path}: {size}B "
+              f"-> {n_chunks} chunk(s) of {chunk_raw_bytes}B "
+              f"(~{n_chunks * 2}-{n_chunks * 5} s on kernel 793)")
 
         all_bytes = bytearray()
-        for offset in range(0, size, chunk_raw_bytes):
+        for chunk_idx, offset in enumerate(
+                range(0, size, chunk_raw_bytes)):
             end = min(offset + chunk_raw_bytes, size)
             code = (f"print(__import__('base64').b64encode("
                     f"open('{file_path}','rb').read()[{offset}:{end}])"
@@ -340,10 +360,32 @@ def make_chunked_read_adapter(raw_exec_fn: GwExecFn,
                                   f"failed: {e}")}
             all_bytes.extend(raw)
 
+            # Emit progress at ~10 evenly-spaced points across the
+            # read, plus the very first chunk (so the operator
+            # sees activity within seconds) and the very last
+            # chunk (so the "done" line lands consistently).
+            n_done = chunk_idx + 1
+            is_marker_chunk = (
+                n_done == 1
+                or n_done == n_chunks
+                or n_done % progress_every == 0)
+            if is_marker_chunk:
+                pct = (n_done * 100) // n_chunks
+                elapsed = _t.time() - chunk_started
+                rate = end / elapsed if elapsed > 0 else 0
+                eta = (size - end) / rate if rate > 0 else 0
+                print(f"  [chunked] chunk {n_done}/{n_chunks} "
+                      f"({pct:3d}%) — {end}B / {size}B "
+                      f"@ {rate:.0f} B/s — ETA {eta:.0f}s")
+
         if len(all_bytes) != size:
             return {"success": False, "output": [],
                     "error": (f"size mismatch: got {len(all_bytes)}B "
                               f"expected {size}B")}
+
+        total_elapsed = _t.time() - chunk_started
+        print(f"  [chunked] done: {size}B in {total_elapsed:.1f}s "
+              f"({size / total_elapsed:.0f} B/s)")
 
         # Return as one base64 line so _read_file_b64 can decode it
         full_b64 = _b64_mod.b64encode(bytes(all_bytes)).decode("ascii")
