@@ -510,3 +510,142 @@ def test_module_docstring_lists_all_three_parameters():
     assert "login/accept_sso2_ticket" in doc
     assert "login/create_sso2_ticket" in doc
     assert "login/sso2_ticket_strict_owner_check" in doc
+
+
+# ---------------------------------------------------------------------
+# extract_icm_ports — discovers HTTP/HTTPS listeners from profile
+# ---------------------------------------------------------------------
+
+class TestExtractIcmPorts:
+
+    def test_basic_http_and_https(self):
+        from sap_profile_check import extract_icm_ports
+        params = {
+            "icm/server_port_0":
+                "PROT=HTTP,PORT=8000,TIMEOUT=180,PROCTIMEOUT=900",
+            "icm/server_port_1":
+                "PROT=HTTPS,PORT=44300,TIMEOUT=180",
+        }
+        out = extract_icm_ports(params)
+        assert len(out) == 2
+        assert out[0] == {"port": 8000, "protocol": "http",
+                           "raw": params["icm/server_port_0"],
+                           "index": 0}
+        assert out[1]["port"] == 44300
+        assert out[1]["protocol"] == "https"
+
+    def test_smtp_and_p4_are_filtered(self):
+        """SMTP, P4, and other non-HTTP protocols are not useful
+        for cookie-based propagation — drop them."""
+        from sap_profile_check import extract_icm_ports
+        params = {
+            "icm/server_port_0": "PROT=HTTP,PORT=8000",
+            "icm/server_port_1": "PROT=SMTP,PORT=25000",
+            "icm/server_port_2": "PROT=P4,PORT=50004",
+            "icm/server_port_3": "PROT=HTTPS,PORT=44300",
+        }
+        out = extract_icm_ports(params)
+        # Only HTTP + HTTPS — SMTP and P4 dropped
+        ports = [e["port"] for e in out]
+        protocols = [e["protocol"] for e in out]
+        assert ports == [8000, 44300]
+        assert protocols == ["http", "https"]
+
+    def test_non_default_https_port(self):
+        """Many installs use 8443 or some custom port instead of
+        the 44300 default — must extract whatever PORT= says."""
+        from sap_profile_check import extract_icm_ports
+        params = {
+            "icm/server_port_0": "PROT=HTTPS,PORT=8443,SSLCONFIG=DEFAULT",
+        }
+        out = extract_icm_ports(params)
+        assert out == [{"port": 8443, "protocol": "https",
+                         "raw": params["icm/server_port_0"],
+                         "index": 0}]
+
+    def test_field_order_does_not_matter(self):
+        """SAP doesn't require PROT before PORT or vice versa."""
+        from sap_profile_check import extract_icm_ports
+        params = {
+            "icm/server_port_0":
+                "TIMEOUT=180,PORT=8000,PROCTIMEOUT=900,PROT=HTTP",
+        }
+        out = extract_icm_ports(params)
+        assert out[0]["port"] == 8000
+        assert out[0]["protocol"] == "http"
+
+    def test_sparse_indices_handled(self):
+        """Profile can have gaps in the icm/server_port_N
+        numbering (e.g. 0, 5, 12) — still works, sorted by index."""
+        from sap_profile_check import extract_icm_ports
+        params = {
+            "icm/server_port_5": "PROT=HTTPS,PORT=44300",
+            "icm/server_port_0": "PROT=HTTP,PORT=8000",
+            "icm/server_port_12": "PROT=HTTPS,PORT=8443",
+        }
+        out = extract_icm_ports(params)
+        # Sorted by index, not insertion order
+        assert [e["index"] for e in out] == [0, 5, 12]
+        assert [e["port"] for e in out] == [8000, 44300, 8443]
+
+    def test_malformed_entries_skipped(self):
+        from sap_profile_check import extract_icm_ports
+        params = {
+            "icm/server_port_0": "PROT=HTTP",        # no PORT
+            "icm/server_port_1": "PROT=HTTP,PORT=",  # empty PORT
+            "icm/server_port_2": "PROT=HTTP,PORT=99999",  # too big
+            "icm/server_port_3": "PROT=HTTP,PORT=-1",     # negative
+            "icm/server_port_4": "PORT=8000",        # no PROT
+            "icm/server_port_5":
+                "PROT=HTTP,PORT=notanumber",  # non-int
+            "icm/server_port_6": "PROT=HTTP,PORT=8000",   # the one valid entry
+        }
+        out = extract_icm_ports(params)
+        assert len(out) == 1
+        assert out[0]["port"] == 8000
+
+    def test_empty_input(self):
+        from sap_profile_check import extract_icm_ports
+        assert extract_icm_ports({}) == []
+
+    def test_other_profile_keys_ignored(self):
+        """Only icm/server_port_* lines matter — everything else
+        is left alone (don't grep the merged dict)."""
+        from sap_profile_check import extract_icm_ports
+        params = {
+            "login/accept_sso2_ticket": "1",
+            "rdisp/wp_no_dia": "10",
+            "icm/server_port_0": "PROT=HTTP,PORT=8000",
+            "icm/host_name_full": "s4hanadev.corp.local",
+        }
+        out = extract_icm_ports(params)
+        assert len(out) == 1
+        assert out[0]["port"] == 8000
+
+    def test_check_sso2_parameters_surfaces_icm_ports(self,
+                                                       monkeypatch):
+        """End-to-end: check_sso2_parameters' result dict carries
+        the icm_ports list so propagation can read it without
+        re-running the profile reads."""
+        import sap_profile_check
+        # Wire a fake gw_exec_fn that returns a profile containing
+        # both SSO2 params and ICM port entries.
+        profile_content = (
+            "login/accept_sso2_ticket = 1\n"
+            "login/create_sso2_ticket = 2\n"
+            "icm/server_port_0 = PROT=HTTP,PORT=8000\n"
+            "icm/server_port_1 = PROT=HTTPS,PORT=44300\n")
+        monkeypatch.setattr(
+            sap_profile_check, "read_profile_file",
+            lambda fn, path: {"success": True,
+                               "text": profile_content,
+                               "error": "", "path": path})
+        monkeypatch.setattr(
+            sap_profile_check, "discover_instance_profiles",
+            lambda fn, sid: [])
+        result = sap_profile_check.check_sso2_parameters(
+            lambda *a, **kw: None, "S4H")
+        assert "icm_ports" in result
+        assert len(result["icm_ports"]) == 2
+        assert result["icm_ports"][0]["port"] == 8000
+        assert result["icm_ports"][1]["port"] == 44300
