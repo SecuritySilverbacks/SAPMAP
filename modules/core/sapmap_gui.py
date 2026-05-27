@@ -6063,19 +6063,57 @@ def create_app(api: SAPMAPApi) -> Bottle:
             print(f"[*] {sid}: propagating ticket "
                   f"{ticket.display_label()} -> "
                   f"{', '.join(target_sids)}")
+            print(f"[*] {sid}: channels requested = "
+                  f"{', '.join(channels)}; "
+                  f"timeout = {timeout}s")
             r = propagate_to_trusted_subgraph(
                 ticket=ticket, state=api.state,
                 candidate_sids=target_sids,
                 channels=channels, timeout=timeout)
             print(f"[*] {sid}: propagation done — "
                   f"{r['succeeded']}/{r['tried']} succeeded")
+
+            # Per-target aggregate verdict + per-channel attempt
+            # detail.  Earlier code only printed the aggregate
+            # ``[mark] sid channel evidence`` line, which on a
+            # multi-channel failure showed only the LAST channel's
+            # error (typically "pyrfc not available" when pyrfc
+            # isn't installed) — masking the real HTTP failure
+            # reason.  Now we drill in.
             for entry in r["results"]:
                 mark = "✓" if entry["success"] else "✗"
                 channel = entry.get("channel") or "—"
                 ev = (entry.get("evidence")
-                      or entry.get("error", ""))[:100]
+                      or entry.get("error", ""))[:120]
                 print(f"      [{mark}] {entry['sid']:6s} "
                       f"{channel:6s} {ev}")
+                # Surface why a channel was skipped entirely
+                # (e.g. pyrfc missing) so the operator
+                # understands whether their environment is
+                # the limit or the target's config is.
+                skipped = entry.get("rfc_skipped_reason") or ""
+                if skipped:
+                    print(f"            [i] rfc channel skipped: "
+                          f"{skipped}")
+                # Per-attempt detail — one line per (port, path)
+                # combo tried.  Compact format so a propagation
+                # against 20 receivers x 3 paths x 2 ports stays
+                # readable, but the operator can still see
+                # exactly which endpoint accepted or rejected.
+                for att in entry.get("attempts", []):
+                    a_mark = "✓" if att.get("success") else "✗"
+                    a_chan = att.get("channel", "—")
+                    if a_chan == "http":
+                        port_str = str(att.get("port", "?"))
+                        scheme = "https" if att.get("use_https") else "http"
+                        endpoint = (f"{scheme}://{port_str}"
+                                     f"{att.get('path', '?')}")
+                    else:
+                        endpoint = a_chan
+                    a_ev = (att.get("evidence")
+                            or att.get("error", ""))[:100]
+                    print(f"            [{a_mark}] {endpoint:50s} "
+                          f"{a_ev}")
 
         _bg(f"{sid}:propagate_ticket", "Propagate MYSAPSSO2 Ticket",
             _run)

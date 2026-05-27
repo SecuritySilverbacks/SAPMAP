@@ -335,6 +335,126 @@ class TestPropagate:
         assert not r["success"]
         assert "no IP/hostname" in r["error"]
 
+    def test_pyrfc_missing_dropped_from_channels_early(self):
+        """When the operator asks for RFC but pyrfc isn't installed,
+        the propagation should drop "rfc" from the channels list
+        BEFORE attempting any replay, and surface a clear
+        ``rfc_skipped_reason`` in the result.  Previously this was
+        counted as a failed attempt whose error ("pyrfc not
+        available") then "won" the last-evidence race when HTTP also
+        failed — masking the real HTTP failure reason."""
+        import sys
+        from sap_ticket_propagate import propagate_via_forged_ticket
+        from sapmap_models import SAPMAPState
+        ticket = _make_ticket()
+        node = _make_node("PRD")
+        state = SAPMAPState()
+        state.add_node(node)
+
+        # Force the ImportError path inside propagate_via_forged_ticket
+        # by removing pyrfc from sys.modules and shadowing it as None.
+        saved = sys.modules.get("pyrfc")
+        sys.modules["pyrfc"] = None
+        try:
+            err = urllib.error.HTTPError(
+                "url", 401, "Unauthorized", {}, None)
+            with _patch_urlopen([err]):
+                r = propagate_via_forged_ticket(
+                    ticket, node, state,
+                    channels=["http", "rfc"])
+        finally:
+            if saved is None:
+                sys.modules.pop("pyrfc", None)
+            else:
+                sys.modules["pyrfc"] = saved
+
+        # RFC was requested but dropped — the evidence should NOT be
+        # "pyrfc not available" alone; it should reflect the HTTP
+        # outcome (with the pyrfc note appended).
+        assert "rfc" in r["channels_requested"]
+        assert "rfc" not in r["channels_tried"]
+        assert "pyrfc" in r["rfc_skipped_reason"].lower()
+        # No RFC attempts logged
+        assert all(att["channel"] != "rfc" for att in r["attempts"])
+
+    def test_discovered_http_port_tried_before_443NN_fallback(self):
+        """When the node has instance.ports listing port 8000 (HTTP),
+        the propagation must try that port — not just the
+        SAP-convention HTTPS 443NN.  Many production systems only
+        expose HTTP, so the old hard-coded HTTPS-only fallback
+        meant propagation failed against those targets even when
+        the cookie was perfectly valid.
+        """
+        from sap_ticket_propagate import propagate_via_forged_ticket
+        from sapmap_models import SAPMAPState, SAPNode, InstanceInfo
+        ticket = _make_ticket()
+        # Node has BOTH 8000 (HTTP) and 44300 (HTTPS) discovered
+        inst = InstanceInfo(
+            instance_nr="00",
+            ip="10.0.0.1",
+            ports={8000: "ICM_HTTP", 44300: "ICM_HTTPS"},
+        )
+        node = SAPNode(
+            sid="PRD", hostname="h", ip="10.0.0.1",
+            instances=[inst], system_type="ABAP")
+        state = SAPMAPState()
+        state.add_node(node)
+
+        # Queue a "rejected" response for the first attempt (44300
+        # HTTPS) and a successful one for the next attempt (8000
+        # HTTP) — only valid if the propagation actually tries both
+        # ports.
+        success_body = (
+            "<html><title>SAP NetWeaver</title>"
+            "<body>logged in</body></html>")
+        headers = {"Set-Cookie": "SAP_SESSIONID_PRD_001=abc123"}
+        with _patch_urlopen([
+                # 1st attempt: rejected on 44300 HTTPS
+                urllib.error.HTTPError("url", 401, "Unauth", {}, None),
+                # 2nd attempt: success on 8000 HTTP
+                (200, success_body, headers),
+        ]):
+            r = propagate_via_forged_ticket(
+                ticket, node, state, channels=["http"])
+
+        # At least 2 attempts should have been made: one per port
+        ports_tried = {att.get("port") for att in r["attempts"]
+                       if att.get("channel") == "http"}
+        assert 8000 in ports_tried, (
+            f"Expected HTTP port 8000 to be tried; got {ports_tried}")
+        assert 44300 in ports_tried, (
+            f"Expected HTTPS port 44300 to be tried; got {ports_tried}")
+
+    def test_aggregate_evidence_prefers_rejected_over_network_error(self):
+        """When HTTP gets a 401 (rejected) on one port and a
+        connection refused on another, the aggregate evidence
+        should be the 401 — "rejected" is more useful diagnostic
+        information than "connection refused" because it tells the
+        operator the target IS reachable but didn't accept the
+        ticket."""
+        from sap_ticket_propagate import propagate_via_forged_ticket
+        from sapmap_models import SAPMAPState, SAPNode, InstanceInfo
+        ticket = _make_ticket()
+        inst = InstanceInfo(
+            instance_nr="00", ip="h",
+            ports={8000: "ICM_HTTP", 44300: "ICM_HTTPS"})
+        node = SAPNode(sid="PRD", hostname="h", ip="h",
+                        instances=[inst], system_type="ABAP")
+        state = SAPMAPState()
+        state.add_node(node)
+
+        with _patch_urlopen([
+                urllib.error.HTTPError("url", 401, "Unauth", {}, None),
+                urllib.error.URLError("Connection refused"),
+        ]):
+            r = propagate_via_forged_ticket(
+                ticket, node, state, channels=["http"])
+
+        assert not r["success"]
+        # Aggregate evidence prefers "rejected" hit
+        assert "rejected" in r["evidence"].lower(), \
+            f"Expected rejected evidence; got {r['evidence']!r}"
+
     def test_pinned_ticket_uses_pin_client(self):
         """Pinned recipient_client overrides the ticket's own client
         for the receiver URL."""
