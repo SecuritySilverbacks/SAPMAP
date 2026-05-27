@@ -45,27 +45,288 @@ class TestSapGuiShortcut:
             server="s4h.corp.local", sysnr="01",
             client="000", sid="S4H",
             cookie_b64=FAKE_COOKIE_B64, user="DDIC")
-        assert "Server=s4h.corp.local" in content
+        # Server= must use the universal direct-AS routing form
+        # /H/<host>/S/<port>.  Validated empirically (variant Q
+        # vs. variant P against live S4H): Java GUI accepts both
+        # direct-AS and msgserver routing equivalently, so we use
+        # direct-AS to avoid any dependency on a reachable
+        # message-server port (3601).
+        # Diag port = 3200 + sysnr → 3201 for sysnr "01".
+        assert "Server=/H/s4h.corp.local/S/3201" in content
         assert "SystemNumber=01" in content
         assert "Client=000" in content
-        assert "Name=S4H" in content
+        # [System] block MUST emit Name=@01 — Java GUI rejects the
+        # file with "Error in connection data document" if Name= is
+        # absent (validated empirically: variant R, which dropped
+        # Name= from [System], failed against live S4H while the
+        # otherwise-identical Q variant with Name=@01 succeeded).
+        # The @01 placeholder is what Java GUI itself writes when
+        # saving a fresh landscape entry.  Windows GUI ignores it.
+        system_block = content.split("[System]", 1)[1]
+        next_section = system_block.index("\n[")
+        system_block = system_block[:next_section]
+        assert "Name=@01" in system_block, \
+            "[System] must emit Name=@01 (Java-GUI canonical form)"
         assert "Command=SU01" in content
 
-    def test_at_value_url_encoded(self):
-        """The at= line contains URL-encoded MYSAPSSO2=<b64>."""
+    def test_server_uses_direct_as_routing_string(self):
+        """Server= line emits /H/<host>/S/<port>, never a bare host."""
+        from sap_ticket_delivery import make_sapgui_shortcut
+        content = make_sapgui_shortcut(
+            server="192.168.2.209", sysnr="00",
+            client="001", sid="S4H",
+            cookie_b64=FAKE_COOKIE_B64)
+        assert "Server=/H/192.168.2.209/S/3200" in content
+        # No bare-host Server= line should ever leak through
+        for line in content.splitlines():
+            if line.startswith("Server="):
+                assert line.startswith("Server=/H/"), \
+                    f"Server line must start with /H/ routing: {line!r}"
+
+    def test_diag_port_derived_from_sysnr(self):
+        """Default Diag port = 3200 + sysnr (unencrypted)."""
+        from sap_ticket_delivery import make_sapgui_shortcut
+        for sysnr, expected_port in [
+                ("00", 3200), ("01", 3201), ("42", 3242), ("99", 3299)]:
+            content = make_sapgui_shortcut(
+                server="h", sysnr=sysnr, client="000",
+                sid="X", cookie_b64=FAKE_COOKIE_B64)
+            assert f"Server=/H/h/S/{expected_port}" in content, \
+                f"sysnr={sysnr} should yield port {expected_port}"
+
+    def test_diag_port_override(self):
+        """Operators can supply a non-default Diag port (e.g. SNC)."""
+        from sap_ticket_delivery import make_sapgui_shortcut
+        # SNC Diag listener convention: 4700 + sysnr
+        content = make_sapgui_shortcut(
+            server="snchost", sysnr="00", client="000",
+            sid="X", cookie_b64=FAKE_COOKIE_B64,
+            diag_port=4700)
+        assert "Server=/H/snchost/S/4700" in content
+        # And an entirely arbitrary port works too
+        content = make_sapgui_shortcut(
+            server="h", sysnr="00", client="000",
+            sid="X", cookie_b64=FAKE_COOKIE_B64,
+            diag_port=32000)
+        assert "Server=/H/h/S/32000" in content
+
+    def test_guiparm_present_in_system_section(self):
+        """SAP note 2630575 mandates GuiParm for SAP GUI for Java.
+
+        Validated against the canonical Java GUI .sap export
+        ("Save Connection Data as Document"): ``GuiParm`` MUST
+        live inside the ``[System]`` block — putting it under
+        ``[Configuration]`` causes Java GUI to fail with
+        "No valid host specification for connection: tmp"
+        because the parser creates a temporary placeholder
+        connection ("tmp") and then can't find a host for it.
+
+        Without GuiParm anywhere, Java GUI emits the different
+        error "Error in connection data document" (per the note).
+        """
+        from sap_ticket_delivery import make_sapgui_shortcut
+        content = make_sapgui_shortcut(
+            server="192.168.2.209", sysnr="00", client="001",
+            sid="S4H", cookie_b64=FAKE_COOKIE_B64)
+        # GuiParm must use the same /H/<host>/S/<port> routing form
+        assert "GuiParm=/H/192.168.2.209/S/3200" in content
+        # And it must live inside [System], BEFORE any [Configuration]
+        # section that may follow.
+        sys_idx = content.index("[System]")
+        guiparm_idx = content.index("GuiParm=")
+        assert guiparm_idx > sys_idx, \
+            "GuiParm must appear after [System] header"
+        # If a [Configuration] section exists, GuiParm must come
+        # before it (i.e. still inside [System]).
+        if "[Configuration]" in content:
+            cfg_idx = content.index("[Configuration]")
+            assert guiparm_idx < cfg_idx, \
+                ("GuiParm must live in [System], not [Configuration] "
+                 "— canonical Java GUI export confirms this.")
+
+    def test_guiparm_matches_server_port(self):
+        """GuiParm and Server must point at the same listener."""
+        from sap_ticket_delivery import make_sapgui_shortcut
+        for sysnr, expected_port in [
+                ("00", 3200), ("01", 3201), ("42", 3242)]:
+            content = make_sapgui_shortcut(
+                server="h", sysnr=sysnr, client="000",
+                sid="X", cookie_b64=FAKE_COOKIE_B64)
+            assert f"Server=/H/h/S/{expected_port}" in content
+            assert f"GuiParm=/H/h/S/{expected_port}" in content
+
+    def test_guiparm_honors_diag_port_override(self):
+        """GuiParm tracks the diag_port override (e.g. SNC port)."""
+        from sap_ticket_delivery import make_sapgui_shortcut
+        content = make_sapgui_shortcut(
+            server="snchost", sysnr="00", client="000",
+            sid="X", cookie_b64=FAKE_COOKIE_B64,
+            diag_port=4700)
+        assert "Server=/H/snchost/S/4700" in content
+        assert "GuiParm=/H/snchost/S/4700" in content
+
+    def test_others_sso2_section_present(self):
+        """SAP GUI for Java reads MYSAPSSO2 from [Others] SSO2=.
+
+        Per chapter 5.6 of the SAP GUI for Java reference v7.80
+        (connection parameters table), ``sso2`` is a documented
+        URL parameter.  Validated by round-tripping a manual
+        ``conn=...&sso2=longstring`` through Java GUI's "Save
+        Connection Data as Document" feature: it lands in the
+        ``[Others]`` section verbatim, no URL-decoding, no prefix.
+
+        Windows GUI ignores ``[Others]`` so the dual emission
+        (``at=`` for Windows, ``SSO2=`` for Java) is safe.
+        """
+        from sap_ticket_delivery import make_sapgui_shortcut
+        content = make_sapgui_shortcut(
+            server="h", sysnr="00", client="001",
+            sid="X", cookie_b64=FAKE_COOKIE_B64)
+        assert "[Others]" in content, \
+            "[Others] section required for SAP GUI for Java"
+        # SSO2 holds the RAW base64 ticket — no MYSAPSSO2= prefix,
+        # no URL encoding.
+        assert f"SSO2={FAKE_COOKIE_B64}" in content
+        # The Java-GUI SSO2 value must NOT be URL-encoded
+        assert "SSO2=MYSAPSSO2" not in content, \
+            "SSO2 takes raw b64, never the MYSAPSSO2= prefix"
+        assert "SSO2=MYSAPSSO2%3D" not in content, \
+            "SSO2 takes raw b64, never URL-encoded"
+
+    def test_others_section_before_user_at(self):
+        """[Others] SSO2 must appear before [User] at= in the file.
+
+        We don't strictly *require* the ordering, but this pins the
+        canonical order matching what Java GUI itself emits, which
+        avoids surprises if some parser cares about section order.
+        """
+        from sap_ticket_delivery import make_sapgui_shortcut
+        content = make_sapgui_shortcut(
+            server="h", sysnr="00", client="001",
+            sid="X", cookie_b64=FAKE_COOKIE_B64)
+        others_idx = content.index("[Others]")
+        user_idx = content.index("[User]")
+        assert others_idx < user_idx, \
+            "[Others] should precede [User] (canonical order)"
+
+    def test_both_ticket_injection_mechanisms_present(self):
+        """One .sap file must carry BOTH ticket-injection forms.
+
+        SAP GUI for Windows reads ``at="MYSAPSSO2=<raw-b64>"``
+        (double-quoted, NOT URL-encoded) from [User]; SAP GUI for
+        Java reads ``SSO2=<raw-b64>`` (raw, no prefix) from [Others].
+        A single shortcut that dual-targets both clients must emit
+        both — otherwise it only works on one.
+
+        Caveat: Java GUI's SSO2 mechanism is "Reserved" (non-functional)
+        per the SAP GUI for Java reference v7.80 chapter 5.6, validated
+        against live S4H — Java GUI parses & stores SSO2 but never
+        transmits it in the Diag handshake.  We emit SSO2 anyway because
+        (a) it's harmless on Windows GUI, (b) future Java GUI versions
+        may wire it up, and (c) operators reading the .sap can see the
+        intent.
+        """
+        from sap_ticket_delivery import make_sapgui_shortcut
+        content = make_sapgui_shortcut(
+            server="h", sysnr="00", client="001",
+            sid="X", cookie_b64=FAKE_COOKIE_B64)
+
+        # Java GUI form: raw b64 in [Others]
+        assert f"SSO2={FAKE_COOKIE_B64}" in content
+
+        # Windows GUI form: at="MYSAPSSO2=<raw-b64>" in [User]
+        at_line = next(l for l in content.splitlines()
+                       if l.startswith("at="))
+        assert at_line == f'at="MYSAPSSO2={FAKE_COOKIE_B64}"', \
+            f"at= must be quoted, raw b64; got: {at_line!r}"
+
+    def test_user_prefilled_in_user_block(self):
+        """[User] Name= pre-fills the username on Java GUI logon.
+
+        Since Java GUI doesn't actually inject MYSAPSSO2 from the
+        SSO2 field, the operator ends up at a normal logon screen.
+        Emitting ``Name=<user>`` in the [User] block makes Java GUI
+        pre-fill the username field so the operator only has to
+        supply a password.  Windows GUI also reads Name= here, but
+        is mostly redundant because at= already auto-authenticates.
+        """
+        from sap_ticket_delivery import make_sapgui_shortcut
+        content = make_sapgui_shortcut(
+            server="h", sysnr="00", client="001",
+            sid="S4H", cookie_b64=FAKE_COOKIE_B64,
+            user="JORIS")
+        user_idx = content.index("[User]")
+        user_block = content[user_idx:]
+        next_section = user_block.index("\n[", 1)
+        user_block = user_block[:next_section]
+        assert "Name=JORIS" in user_block, \
+            "[User] Name= should pre-fill the impersonated user"
+
+    def test_user_prefill_empty_when_no_user_supplied(self):
+        """When user kwarg is empty, [User] Name= is empty."""
+        from sap_ticket_delivery import make_sapgui_shortcut
+        content = make_sapgui_shortcut(
+            server="h", sysnr="00", client="001",
+            sid="S4H", cookie_b64=FAKE_COOKIE_B64)
+        # The [User] block contains an empty Name= line
+        user_block = content.split("[User]", 1)[1].split("\n[", 1)[0]
+        assert "Name=\n" in user_block or "Name=\r\n" in user_block, \
+            "[User] Name= should be empty when user is not supplied"
+
+    def test_module_documents_java_gui_sso2_limitation(self):
+        """The module-level comment must warn that Java GUI SSO2 is dead.
+
+        Regression guard: if a future refactor strips the explanation,
+        operators won't know why their Java GUI .sap files land at a
+        password prompt instead of auto-authenticating.  The dead-end
+        is non-obvious and easy to lose during a docs cleanup.
+        """
+        import inspect
+        import sap_ticket_delivery
+        src = inspect.getsource(sap_ticket_delivery)
+        # The note must mention BOTH that Java GUI doesn't auto-auth
+        # AND that SSO2 is "Reserved" / non-functional.
+        assert "Reserved" in src, \
+            "Module must reference 'Reserved' (the SAP doc term)"
+        assert "Java GUI" in src, "Module must mention 'Java GUI'"
+        # The pivot advice must be there
+        assert "curl" in src.lower() or "HTTP" in src or "http" in src, \
+            "Module must point operators to the curl/HTTP fallback"
+
+    def test_at_value_quoted_not_url_encoded(self):
+        """The at= line is double-quoted, base64 NOT URL-encoded.
+
+        Validated against the canonical SAP shortcut reference impl
+        (Procter & Gamble MYSAPSSO2 SP Token Adapter,
+        ``SpSAPAdapter.java:233``):
+
+            bOutput.append(("at=\\"MYSAPSSO2=" + ticket + "\\""));
+
+        The base64 ticket is passed RAW inside the double quotes —
+        the quotes are how the SAP shortcut parser handles the
+        embedded ``=`` characters from base64 padding.  An earlier
+        URL-encoded form (``at=MYSAPSSO2%3D...%3D%3D``) was silently
+        dropped by SAP GUI for Windows; the GUI then fell through to
+        manual logon with empty credentials and SAP returned
+        "Name or password is incorrect".
+        """
         from sap_ticket_delivery import make_sapgui_shortcut
         content = make_sapgui_shortcut(
             server="host", sysnr="00", client="000",
             sid="S4H", cookie_b64=FAKE_COOKIE_B64)
-        # Find the at= line
         at_line = [l for l in content.splitlines()
                    if l.startswith("at=")][0]
-        at_value = at_line[3:]  # strip "at="
-        # URL-decode and verify
-        import urllib.parse
-        decoded = urllib.parse.unquote(at_value)
-        assert decoded.startswith("MYSAPSSO2=")
-        assert FAKE_COOKIE_B64 in decoded
+        # The literal value MUST be: at="MYSAPSSO2=<raw-b64>"
+        assert at_line == f'at="MYSAPSSO2={FAKE_COOKIE_B64}"', \
+            f"at= line must be quoted with raw b64, got: {at_line!r}"
+        # And explicit checks for the format violations we used to
+        # commit:
+        assert '%3D' not in at_line, \
+            "at= must not contain URL-encoded '=' (use raw base64)"
+        assert '%2F' not in at_line, \
+            "at= must not contain URL-encoded '/' (use raw base64)"
+        assert '%2B' not in at_line, \
+            "at= must not contain URL-encoded '+' (use raw base64)"
 
     def test_custom_tcode(self):
         from sap_ticket_delivery import make_sapgui_shortcut
