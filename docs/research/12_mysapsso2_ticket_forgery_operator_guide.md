@@ -384,11 +384,31 @@ Three SAP profile parameters gate or fingerprint the forgery flow:
 | `login/sso2_ticket_strict_owner_check` | informational | When `1`, kernel enforces strict Owner-DN match against TWPSSO2ACL.  Our forged ticket's issuer DN (pulled from SAPSYS.pse) must match exactly |
 
 `extract_and_forge_ticket()` runs this check automatically as
-step 2.5 (between PSE extraction and forging).  The check reads
-`DEFAULT.PFL` + each instance profile under
-`/usr/sap/<SID>/SYS/profile/` via the same sapxpg/base64 channel
-we already use for PSE extraction, parses the params, and prints
-a one-line verdict before forging:
+step 2.5 (between PSE extraction and forging).  Two access paths,
+tried in priority order:
+
+1. **RFC `PFL_GET_SINGLE_PARAMETER`** (preferred) — needs only an
+   ABAP credential (verified RFC user or SAPMAP-created user).
+   Each parameter = one RFC round trip (~50-200 ms).  Reads the
+   *active runtime* value, so RZ11 dynamic changes show up
+   without waiting for the next AS restart.  Function group SPFL
+   is remote-enabled by default; no S_SETPARAM required.
+
+2. **Profile-file read via sapxpg** (fallback) — needs OS access.
+   Reads `DEFAULT.PFL` + each instance profile under
+   `/usr/sap/<SID>/SYS/profile/` via the chunked-base64 channel
+   we already use for PSE extraction.  Slow on kernel 793+
+   (30-60 s/file due to the 72-byte buffer truncation) but works
+   without an ABAP credential.
+
+The dispatcher tries RFC first whenever credentials are
+available; falls back to profile read if RFC errors (auth denied,
+NW RFC SDK not installed, etc.).  Both paths produce the same
+result-dict shape — callers can't tell which was used except for
+the `source` field (`"rfc:PFL_GET_SINGLE_PARAMETER"` vs
+`"profile:DEFAULT.PFL+instance"`).
+
+The check prints a one-line verdict before forging:
 
 ```text
 [+] SSO2 profile check: OK

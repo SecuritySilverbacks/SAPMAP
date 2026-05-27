@@ -3683,22 +3683,30 @@ function showCtxMenu(e, sid) {
         || hasCreatedUsers),
     'propagate':        hasCreds,                   // need access to propagate from
     // MYSAPSSO2 ticket-forgery workflow.  All three actions are
-    // ABAP-only because they pivot through SAPSYS.pse and the
-    // /usr/sap/<SID>/SYS/profile/ ABAP profile directory — Java
-    // stacks don't have SAPSYS.pse and their SSO uses SNC instead
-    // of MYSAPSSO2 cookies for the Diag path.
+    // ABAP-only because they pivot through SAPSYS.pse and ABAP-
+    // specific RFC function modules — Java stacks don't have
+    // SAPSYS.pse and their SSO uses SNC instead of MYSAPSSO2
+    // cookies for the Diag path.
     //
-    //   * sso2_profile_check + forge_ticket — need OS-level read
-    //     access on the issuing AS (sapxpg base64) to reach the
-    //     PSE and the profile files.  Three orthogonal paths get
-    //     us there: GW SAPXPG vuln (any stack), CVE-2025-31324
-    //     JSP webshell (Java-fronted), or a SAPMAP-created user
-    //     whose ABAP logon can drive RFC_REMOTE_EXEC / SXPG.
+    //   * sso2_profile_check — reads three SSO2 profile params +
+    //     icm/server_port_<N> entries.  Two access paths supported:
+    //     - RFC PFL_GET_SINGLE_PARAMETER (preferred) — needs only
+    //       a usable ABAP credential.
+    //     - Profile-file read via sapxpg (fallback) — needs OS
+    //       access (GW SAPXPG vuln / CVE-2025-31324 / SAPMAP user).
+    //     Either path is enough; gate on the union.
+    //
+    //   * forge_ticket — needs OS-level read access on the issuing
+    //     AS to reach SAPSYS.pse + cred_v2.  Same three OS-access
+    //     paths as before — RFC alone is NOT enough because no
+    //     RFC function returns the raw PSE contents.
     //
     //   * propagate_ticket — needs at least one ForgedTicket
     //     already attached to the node (it replays the cookie,
     //     no extraction step).  Hidden until a forge succeeds.
-    'sso2_profile_check': isAbapStack && (hasGwVuln
+    'sso2_profile_check': isAbapStack && (
+                            hasUsableAbapAccess   // RFC path
+                            || hasGwVuln           // profile-read paths
                             || hasCve31324
                             || hasCreatedUsers),
     'forge_ticket':       isAbapStack && (hasGwVuln
@@ -3852,8 +3860,8 @@ function showCtxMenu(e, sid) {
     // surface if a future change drops them from the `hidden`
     // dict and falls back to the rules-based disable path.
     'sso2_profile_check': (!isAbapStack
-        ? 'MYSAPSSO2 ticket forgery uses /usr/sap/<SID>/SYS/profile/ — only present on ABAP/dual-stack systems.'
-        : 'Needs OS-level read access to the profile dir (sapxpg base64).  Open via a vulnerable RFC Gateway, CVE-2025-31324 JSP webshell, or a SAPMAP-created user first.'),
+        ? 'MYSAPSSO2 ticket forgery is an ABAP-only attack surface — only present on ABAP/dual-stack systems.'
+        : 'Needs either an ABAP RFC credential (fast — RFC PFL_GET_SINGLE_PARAMETER) OR OS-level read access via sapxpg base64 (slow — chunked profile reads).  Provide credentials, or open via a vulnerable RFC Gateway / CVE-2025-31324 / a SAPMAP-created user first.'),
     'forge_ticket': (!isAbapStack
         ? 'MYSAPSSO2 ticket forgery reads SAPSYS.pse — only present on ABAP/dual-stack systems.  Java stacks use SNC for Diag SSO instead.'
         : 'Needs OS-level read access on the issuing AS (sapxpg base64).  Open via a vulnerable RFC Gateway, CVE-2025-31324 JSP webshell, or a SAPMAP-created user first.'),
@@ -3958,7 +3966,9 @@ function showCtxMenu(e, sid) {
     // the menu doesn't show actions that would only fail at the
     // backend.  See the matching ``rules`` entries for the same
     // gating logic in disabled-state form (defensive double-up).
-    'sso2_profile_check': !(isAbapStack && (hasGwVuln
+    'sso2_profile_check': !(isAbapStack && (
+                              hasUsableAbapAccess
+                              || hasGwVuln
                               || hasCve31324
                               || hasCreatedUsers)),
     'forge_ticket':       !(isAbapStack && (hasGwVuln

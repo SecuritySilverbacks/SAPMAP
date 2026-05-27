@@ -6158,52 +6158,109 @@ def create_app(api: SAPMAPApi) -> Bottle:
         if not node:
             return json.dumps({"error": f"Node {sid} not found"})
 
-        # Build the same gw_exec_fn the forge orchestrator uses.
+        # Import the profile-check module.  Two paths supported:
+        #   1. RFC via PFL_GET_SINGLE_PARAMETER (preferred — needs
+        #      only an ABAP credential, fast: ~50-200 ms / param)
+        #   2. Profile-file read via sapxpg (fallback — needs OS
+        #      access, slow: 30-60 s / file on kernel 793+)
         try:
             from sapmap_exploit import _make_node_gw_exec_fn
-            from sap_profile_check import (check_sso2_parameters,
-                                              format_check_summary)
+            from sap_profile_check import (
+                check_sso2_parameters,
+                check_sso2_via_rfc,
+                format_check_summary)
         except ImportError as e:
             return json.dumps({"error":
                 f"profile-check module unavailable: {e}"})
 
-        exec_fn = _make_node_gw_exec_fn(node)
-        if exec_fn is None:
-            return json.dumps({"error":
-                f"{sid} has no GW SAPXPG handle — node must have "
-                f"OS access via 10KBLAZE / sapxpg before the "
-                f"profile check can run"})
-
         # Mark the job as started so the GUI's modal can show a
         # "running" state immediately rather than waiting for the
-        # first profile read to land.  ``started_at`` without a
-        # matching ``completed_at`` is the "still running" signal.
+        # first read to land.  ``started_at`` without a matching
+        # ``completed_at`` is the "still running" signal.
         import datetime as _dt
         node.sso2_check_result = {
             "started_at": _dt.datetime.now().isoformat(),
         }
 
         def _run():
-            print(f"[*] {sid}: reading "
-                  f"/usr/sap/{sid}/SYS/profile/ for SSO2 params ...")
-            try:
-                result = check_sso2_parameters(exec_fn, node.sid)
-            except Exception as e:
-                err = f"check raised {type(e).__name__}: {e}"
-                print(f"[-] {sid}: {err}")
-                node.sso2_check_result = {
-                    "ok": False,
-                    "errors": [err],
-                    "warnings": [],
-                    "observed": {},
-                    "profiles_read": [],
-                    "profiles_failed": [],
-                    "merged_params": {},
-                    "started_at": node.sso2_check_result.get(
-                        "started_at", ""),
-                    "completed_at": _dt.datetime.now().isoformat(),
-                }
-                return
+            # ── Path 1: RFC (preferred) ───────────────────────────
+            # Try the RFC path whenever credentials are available.
+            # PFL_GET_SINGLE_PARAMETER reads the active runtime
+            # value (reflecting RZ11 dynamic changes) and avoids
+            # the 30-60 s/profile chunked-base64 read pipeline.
+            creds = node.best_credentials() if hasattr(
+                node, "best_credentials") else None
+            result = None
+            if creds and getattr(creds, "password", ""):
+                print(f"[*] {sid}: reading SSO2 params via RFC "
+                      f"PFL_GET_SINGLE_PARAMETER as user "
+                      f"{creds.username}/{creds.client} ...")
+                try:
+                    result = check_sso2_via_rfc(node, creds)
+                except Exception as e:
+                    print(f"[-] {sid}: RFC SSO2 check raised "
+                          f"{type(e).__name__}: {e}")
+                    result = None
+                if result and result.get("errors"):
+                    # RFC returned errors — log them, then try
+                    # falling back to the profile-read path.
+                    for err in result["errors"]:
+                        print(f"      [-] RFC: {err}")
+                    print(f"[*] {sid}: RFC failed; "
+                          f"falling back to profile read ...")
+                    result = None
+
+            # ── Path 2: Profile-file read (fallback) ──────────────
+            # Used when (a) no credentials yet, or (b) RFC failed
+            # despite credentials (auth denied, SDK missing, ...).
+            if result is None:
+                exec_fn = _make_node_gw_exec_fn(node)
+                if exec_fn is None:
+                    # Neither path viable
+                    err = (f"{sid}: no usable check path — needs "
+                           f"either ABAP credentials (RFC) or OS "
+                           f"access (sapxpg/10KBLAZE)")
+                    print(f"[-] {err}")
+                    node.sso2_check_result = {
+                        "ok": False,
+                        "errors": [err],
+                        "warnings": [],
+                        "observed": {},
+                        "profiles_read": [],
+                        "profiles_failed": [],
+                        "merged_params": {},
+                        "icm_ports": [],
+                        "started_at": node.sso2_check_result.get(
+                            "started_at", ""),
+                        "completed_at":
+                            _dt.datetime.now().isoformat(),
+                    }
+                    return
+                print(f"[*] {sid}: reading "
+                      f"/usr/sap/{sid}/SYS/profile/ via sapxpg "
+                      f"(30-60 s on kernel 793+) ...")
+                try:
+                    result = check_sso2_parameters(exec_fn,
+                                                     node.sid)
+                except Exception as e:
+                    err = f"check raised {type(e).__name__}: {e}"
+                    print(f"[-] {sid}: {err}")
+                    node.sso2_check_result = {
+                        "ok": False,
+                        "errors": [err],
+                        "warnings": [],
+                        "observed": {},
+                        "profiles_read": [],
+                        "profiles_failed": [],
+                        "merged_params": {},
+                        "icm_ports": [],
+                        "started_at": node.sso2_check_result.get(
+                            "started_at", ""),
+                        "completed_at":
+                            _dt.datetime.now().isoformat(),
+                    }
+                    return
+
             # Render the textual summary so console viewers and the
             # GUI see the same human-friendly verdict.
             try:
