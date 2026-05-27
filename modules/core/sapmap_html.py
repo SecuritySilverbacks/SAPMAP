@@ -3682,6 +3682,29 @@ function showCtxMenu(e, sid) {
         (n && (n.credentials || []).some(c => c && c.verified))
         || hasCreatedUsers),
     'propagate':        hasCreds,                   // need access to propagate from
+    // MYSAPSSO2 ticket-forgery workflow.  All three actions are
+    // ABAP-only because they pivot through SAPSYS.pse and the
+    // /usr/sap/<SID>/SYS/profile/ ABAP profile directory — Java
+    // stacks don't have SAPSYS.pse and their SSO uses SNC instead
+    // of MYSAPSSO2 cookies for the Diag path.
+    //
+    //   * sso2_profile_check + forge_ticket — need OS-level read
+    //     access on the issuing AS (sapxpg base64) to reach the
+    //     PSE and the profile files.  Three orthogonal paths get
+    //     us there: GW SAPXPG vuln (any stack), CVE-2025-31324
+    //     JSP webshell (Java-fronted), or a SAPMAP-created user
+    //     whose ABAP logon can drive RFC_REMOTE_EXEC / SXPG.
+    //
+    //   * propagate_ticket — needs at least one ForgedTicket
+    //     already attached to the node (it replays the cookie,
+    //     no extraction step).  Hidden until a forge succeeds.
+    'sso2_profile_check': isAbapStack && (hasGwVuln
+                            || hasCve31324
+                            || hasCreatedUsers),
+    'forge_ticket':       isAbapStack && (hasGwVuln
+                            || hasCve31324
+                            || hasCreatedUsers),
+    'propagate_ticket':   (n.forged_tickets || []).length > 0,
     // Harvest is pure introspection over already-captured state
     // (secstore_entries, java_destinations, JCo creds) — works on
     // any ABAP/Java node.  Standalone WDs don't have any such state
@@ -3810,6 +3833,18 @@ function showCtxMenu(e, sid) {
         return 'PP analyser verdict is BLOCKED — no impersonation surface to verify.';
       return '';
     })(),
+    // MYSAPSSO2 ticket-forgery workflow.  In current code these
+    // items are HIDDEN (display:none) when prerequisites aren't
+    // met, so these hints are mostly defensive — they'll only
+    // surface if a future change drops them from the `hidden`
+    // dict and falls back to the rules-based disable path.
+    'sso2_profile_check': (!isAbapStack
+        ? 'MYSAPSSO2 ticket forgery uses /usr/sap/<SID>/SYS/profile/ — only present on ABAP/dual-stack systems.'
+        : 'Needs OS-level read access to the profile dir (sapxpg base64).  Open via a vulnerable RFC Gateway, CVE-2025-31324 JSP webshell, or a SAPMAP-created user first.'),
+    'forge_ticket': (!isAbapStack
+        ? 'MYSAPSSO2 ticket forgery reads SAPSYS.pse — only present on ABAP/dual-stack systems.  Java stacks use SNC for Diag SSO instead.'
+        : 'Needs OS-level read access on the issuing AS (sapxpg base64).  Open via a vulnerable RFC Gateway, CVE-2025-31324 JSP webshell, or a SAPMAP-created user first.'),
+    'propagate_ticket': 'No forged ticket on this node yet — run Forge MYSAPSSO2 Ticket first to mint one, then this action replays it against STRUSTSSO2-trusted receivers.',
   };
 
   // Items hidden entirely (not just disabled) when the node type doesn't
@@ -3894,6 +3929,19 @@ function showCtxMenu(e, sid) {
     'scc_via_sap_probe_mappings':    !_hasSccOnSameHost(n),
     'scc_via_sap_extract_keystore':  !_hasSccOnSameHost(n),
     'scc_via_sap_download_hashes':   !_hasSccOnSameHost(n),
+    // MYSAPSSO2 ticket-forgery workflow — hide entirely on nodes
+    // where the prerequisites can never be met.  Operators
+    // explicitly requested invisibility (vs grey + tooltip) so
+    // the menu doesn't show actions that would only fail at the
+    // backend.  See the matching ``rules`` entries for the same
+    // gating logic in disabled-state form (defensive double-up).
+    'sso2_profile_check': !(isAbapStack && (hasGwVuln
+                              || hasCve31324
+                              || hasCreatedUsers)),
+    'forge_ticket':       !(isAbapStack && (hasGwVuln
+                              || hasCve31324
+                              || hasCreatedUsers)),
+    'propagate_ticket':   !((n.forged_tickets || []).length > 0),
   };
 
   // Apply visibility + enable/disable state to each menu item
