@@ -346,6 +346,128 @@ def extract_icm_ports(params: dict[str, str]) -> list[dict]:
     return out
 
 
+# ===================================================================
+# ICM_GET_INFO — authoritative running-config port discovery
+# ===================================================================
+
+# Protocol codes returned in SERVLIST.PROTOCOL by FM ICM_GET_INFO.
+# The kernel uses 1 = HTTP, 2 = HTTPS, 4 = SMTP.  Only HTTP and
+# HTTPS are useful for MYSAPSSO2 cookie propagation.
+_ICM_GET_INFO_PROTO_MAP: dict[int, str] = {
+    1: "http",
+    2: "https",
+    # 4 = SMTP — never accepts MYSAPSSO2 cookies
+}
+
+
+def discover_icm_ports_via_rfc(node, creds=None, conn_factory=None):
+    """Discover active ICM HTTP/HTTPS listeners via RFC FM ICM_GET_INFO.
+
+    This is the *most* authoritative source for port data — it
+    reflects the **running** ICM configuration, not just what was
+    written in the profile file at startup time.  Any listener that
+    has been dynamically reconfigured (e.g. via ``icm/server_port_*``
+    dynamic parameter changes) is visible here.
+
+    The FM ``ICM_GET_INFO`` takes no input parameters and returns
+    a table ``SERVLIST`` with one row per configured listener:
+
+    ========  ==================================================
+    Field     Meaning
+    ========  ==================================================
+    ACTIVE    ``'X'`` when the listener is running.  We only
+              report active rows — an inactive listener can't
+              accept our cookie replay.
+    PROTOCOL  ``1`` = HTTP, ``2`` = HTTPS, ``4`` = SMTP.  We
+              filter to 1 and 2.
+    SERVICE   The TCP port number (stored as string,
+              e.g. ``"8000"``).
+    HOSTNAME  Optional bind hostname (empty = ``0.0.0.0``).
+    ========  ==================================================
+
+    Args:
+        node:         :class:`SAPNode` of the target system.
+        creds:        Optional :class:`Credentials` override.  When
+                      ``None`` (default), falls through to
+                      ``node.best_credentials()``.
+        conn_factory: Callable returning an open RFC connection
+                      context manager.  Override for unit tests —
+                      production callers leave this ``None`` to get
+                      the canonical ``sapmap_rfc._get_connection``.
+
+    Returns:
+        List of ``{port: int, protocol: str, source: str,
+        hostname: str|None}`` dicts, one per active HTTP/HTTPS
+        listener.  Empty list on failure (no credentials, RFC SDK
+        unavailable, FM not remote-enabled, etc.).  The ``source``
+        field is always ``"ICM_GET_INFO"`` so callers can
+        distinguish these from profile-parsed entries.
+    """
+    # ── Resolve a connection factory ─────────────────────────────
+    if conn_factory is None:
+        try:
+            from sapmap_rfc import _get_connection
+        except ImportError:
+            return []
+
+        if creds is None:
+            creds = (node.best_credentials()
+                     if hasattr(node, "best_credentials") else None)
+        if creds is None:
+            return []
+
+        def conn_factory():
+            return _get_connection(node, creds)
+
+    # ── Open the connection and call ICM_GET_INFO ────────────────
+    try:
+        conn_ctx = conn_factory()
+    except Exception:
+        return []
+
+    try:
+        with conn_ctx as conn:
+            result = conn.call("ICM_GET_INFO")
+    except Exception:
+        return []
+
+    # ── Parse SERVLIST ───────────────────────────────────────────
+    servlist = result.get("SERVLIST") or []
+    if not isinstance(servlist, (list, tuple)):
+        return []
+
+    out: list[dict] = []
+    for row in servlist:
+        if not isinstance(row, dict):
+            continue
+        # Only active listeners
+        if str(row.get("ACTIVE", "")).strip().upper() != "X":
+            continue
+        # Map protocol number → "http" / "https"
+        try:
+            proto_num = int(row.get("PROTOCOL", 0))
+        except (TypeError, ValueError):
+            continue
+        protocol = _ICM_GET_INFO_PROTO_MAP.get(proto_num)
+        if protocol is None:
+            continue  # SMTP or unknown — not useful for cookies
+        # Port number
+        try:
+            port = int(row.get("SERVICE", 0))
+        except (TypeError, ValueError):
+            continue
+        if port <= 0 or port > 65535:
+            continue
+        hostname = str(row.get("HOSTNAME", "")).strip() or None
+        out.append({
+            "port": port,
+            "protocol": protocol,
+            "source": "ICM_GET_INFO",
+            "hostname": hostname,
+        })
+    return out
+
+
 def evaluate_sso2_config(params: dict[str, str]) -> dict:
     """Evaluate parsed profile params against the forgery flow.
 

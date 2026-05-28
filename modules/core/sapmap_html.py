@@ -3695,9 +3695,12 @@ function showCtxMenu(e, sid) {
     //     hasCreatedUsers).  RFC alone is NOT enough because no
     //     RFC function returns the raw PSE contents.
     //
-    //   * propagate_ticket — needs at least one ForgedTicket
-    //     already attached to the node (it replays the cookie,
-    //     no extraction step).  Hidden until a forge succeeds.
+    //   * propagate_ticket — needs BOTH a ForgedTicket on the
+    //     node AND a SAPMAP-created user.  The created user
+    //     provides the ABAP credential for RFC FM ICM_GET_INFO,
+    //     which discovers the target's actual ICM HTTP/HTTPS
+    //     ports (replacing all port-guessing).  Hidden until
+    //     both prerequisites are met.
     //
     // The SSO2 profile pre-flight check used to live here too as
     // ``sso2_profile_check`` — it now runs implicitly as step 2.5
@@ -3709,7 +3712,7 @@ function showCtxMenu(e, sid) {
     'forge_ticket':       isAbapStack && (hasGwVuln
                             || hasCve31324
                             || hasCreatedUsers),
-    'propagate_ticket':   (n.forged_tickets || []).length > 0,
+    'propagate_ticket':   (n.forged_tickets || []).length > 0 && hasCreatedUsers,
     // Harvest BTP credentials — ABAP-only, needs a working RFC
     // logon.  The backend handler reads three ABAP-specific state
     // sources to find BTP-pointing credentials:
@@ -3859,7 +3862,7 @@ function showCtxMenu(e, sid) {
     'forge_ticket': (!isAbapStack
         ? 'MYSAPSSO2 ticket forgery reads SAPSYS.pse — only present on ABAP/dual-stack systems.  Java stacks use SNC for Diag SSO instead.'
         : 'Needs OS-level read access on the issuing AS (sapxpg base64).  Open via a vulnerable RFC Gateway, CVE-2025-31324 JSP webshell, or a SAPMAP-created user first.'),
-    'propagate_ticket': 'No forged ticket on this node yet — run Forge MYSAPSSO2 Ticket first to mint one, then this action replays it against STRUSTSSO2-trusted receivers.',
+    'propagate_ticket': 'Requires both a forged MYSAPSSO2 ticket AND a SAPMAP-created user on this node.  The created user provides the RFC credential needed to discover the target’s ICM ports via FM ICM_GET_INFO before replaying the ticket.',
   };
 
   // Items hidden entirely (not just disabled) when the node type doesn't
@@ -3963,7 +3966,7 @@ function showCtxMenu(e, sid) {
     'forge_ticket':       !(isAbapStack && (hasGwVuln
                               || hasCve31324
                               || hasCreatedUsers)),
-    'propagate_ticket':   !((n.forged_tickets || []).length > 0),
+    'propagate_ticket':   !((n.forged_tickets || []).length > 0 && hasCreatedUsers),
     // Note: harvest_btp_creds is gated above (alongside check_ms)
     // — moved next to the WD-context block since the gating logic
     // shares the same "needs a usable RFC logon" requirement.

@@ -6073,6 +6073,18 @@ def create_app(api: SAPMAPApi) -> Bottle:
             print(f"[*] {sid}: propagation done — "
                   f"{r['succeeded']}/{r['tried']} succeeded")
 
+            # Per-target ICM discovery summary
+            for entry in r["results"]:
+                disc = entry.get("icm_discovery") or ""
+                if disc == "ICM_GET_INFO":
+                    print(f"      [i] {entry['sid']}: ICM ports "
+                          f"discovered via RFC FM ICM_GET_INFO "
+                          f"(authoritative)")
+                elif disc == "fallback":
+                    print(f"      [i] {entry['sid']}: ICM_GET_INFO "
+                          f"unavailable — using profile / scanner "
+                          f"/ convention fallback")
+
             # Per-target aggregate verdict + per-channel attempt
             # detail.  Earlier code only printed the aggregate
             # ``[mark] sid channel evidence`` line, which on a
