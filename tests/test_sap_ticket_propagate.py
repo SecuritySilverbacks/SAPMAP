@@ -644,6 +644,152 @@ class TestPropagate:
         if 44300 in ports_in_order:
             assert ports_in_order.index(44300) > idx_8443
 
+    def test_icm_get_info_authoritative_ports(self):
+        """When ICM_GET_INFO returns active HTTP/HTTPS listeners,
+        propagation must use ONLY those ports (authoritative) and
+        skip all scanner/convention guessing."""
+        from sap_ticket_propagate import propagate_via_forged_ticket
+        from sapmap_models import SAPMAPState, SAPNode, InstanceInfo
+
+        ticket = _make_ticket()
+        # Scanner found conventional ports — but ICM_GET_INFO will
+        # override with the ACTUAL running config.
+        inst = InstanceInfo(
+            instance_nr="00", ip="h",
+            ports={8000: "ICM_HTTP", 44300: "ICM_HTTPS"})
+        node = SAPNode(sid="PRD", hostname="h", ip="h",
+                        instances=[inst], system_type="ABAP")
+        state = SAPMAPState()
+        state.add_node(node)
+
+        # Mock ICM_GET_INFO returning non-conventional ports
+        icm_info_result = [
+            {"port": 8081, "protocol": "http",
+             "source": "ICM_GET_INFO", "hostname": None},
+            {"port": 8443, "protocol": "https",
+             "source": "ICM_GET_INFO", "hostname": None},
+        ]
+        with patch(
+                "sap_profile_check.discover_icm_ports_via_rfc",
+                return_value=icm_info_result):
+            with _patch_urlopen([
+                    urllib.error.URLError("queue")
+                    for _ in range(40)]):
+                r = propagate_via_forged_ticket(
+                    ticket, node, state, channels=["http"])
+
+        # Only ICM_GET_INFO ports should have been tried — NOT
+        # the scanner ports or convention ports.
+        ports_tried = {att.get("port") for att in r["attempts"]
+                       if att.get("channel") == "http"}
+        assert 8081 in ports_tried, \
+            f"ICM_GET_INFO port 8081 missing from {ports_tried}"
+        assert 8443 in ports_tried, \
+            f"ICM_GET_INFO port 8443 missing from {ports_tried}"
+        # Convention ports (8000, 44300) should NOT be tried when
+        # ICM_GET_INFO gave authoritative data.
+        assert 8000 not in ports_tried, \
+            f"Convention port 8000 should be skipped when " \
+            f"ICM_GET_INFO succeeds; got {ports_tried}"
+        assert 44300 not in ports_tried, \
+            f"Convention port 44300 should be skipped when " \
+            f"ICM_GET_INFO succeeds; got {ports_tried}"
+        assert r["icm_discovery"] == "ICM_GET_INFO"
+
+    def test_icm_get_info_uses_single_scheme(self):
+        """ICM_GET_INFO ports are authoritative — each port must be
+        probed with its declared scheme ONLY (no dual-scheme fallback)."""
+        from sap_ticket_propagate import propagate_via_forged_ticket
+        from sapmap_models import SAPMAPState, SAPNode
+
+        ticket = _make_ticket()
+        node = SAPNode(sid="PRD", hostname="h", ip="h",
+                        system_type="ABAP")
+        state = SAPMAPState()
+        state.add_node(node)
+
+        icm_info_result = [
+            {"port": 8000, "protocol": "https",
+             "source": "ICM_GET_INFO", "hostname": None},
+        ]
+        with patch(
+                "sap_profile_check.discover_icm_ports_via_rfc",
+                return_value=icm_info_result):
+            with _patch_urlopen([
+                    urllib.error.URLError("queue")
+                    for _ in range(20)]):
+                r = propagate_via_forged_ticket(
+                    ticket, node, state, channels=["http"])
+
+        # Port 8000 declared as HTTPS by ICM_GET_INFO — only HTTPS
+        attempts_8000 = [a for a in r["attempts"]
+                          if a.get("port") == 8000]
+        schemes = {a.get("use_https") for a in attempts_8000}
+        assert schemes == {True}, \
+            f"ICM_GET_INFO said HTTPS for port 8000 but got " \
+            f"schemes {schemes}"
+
+    def test_icm_get_info_failure_falls_back(self):
+        """When ICM_GET_INFO returns empty (no creds, FM not found,
+        etc.), propagation falls back to the profile/scanner/convention
+        tiers — same as before the ICM_GET_INFO feature."""
+        from sap_ticket_propagate import propagate_via_forged_ticket
+        from sapmap_models import SAPMAPState, SAPNode, InstanceInfo
+
+        ticket = _make_ticket()
+        inst = InstanceInfo(
+            instance_nr="00", ip="h",
+            ports={8000: "ICM_HTTP"})
+        node = SAPNode(sid="PRD", hostname="h", ip="h",
+                        instances=[inst], system_type="ABAP")
+        state = SAPMAPState()
+        state.add_node(node)
+
+        # ICM_GET_INFO returns empty — no creds or FM unavailable
+        with patch(
+                "sap_profile_check.discover_icm_ports_via_rfc",
+                return_value=[]):
+            with _patch_urlopen([
+                    urllib.error.URLError("queue")
+                    for _ in range(40)]):
+                r = propagate_via_forged_ticket(
+                    ticket, node, state, channels=["http"])
+
+        # Scanner port 8000 should still be tried (fallback)
+        ports_tried = {att.get("port") for att in r["attempts"]
+                       if att.get("channel") == "http"}
+        assert 8000 in ports_tried, \
+            f"Scanner port 8000 missing from fallback; got {ports_tried}"
+        assert r["icm_discovery"] == "fallback"
+
+    def test_icm_get_info_persists_on_node(self):
+        """Successful ICM_GET_INFO discovery must persist the ports
+        on node.icm_ports for reuse by future propagation runs."""
+        from sap_ticket_propagate import propagate_via_forged_ticket
+        from sapmap_models import SAPMAPState, SAPNode
+
+        ticket = _make_ticket()
+        node = SAPNode(sid="PRD", hostname="h", ip="h",
+                        system_type="ABAP")
+        state = SAPMAPState()
+        state.add_node(node)
+        assert not getattr(node, "icm_ports", [])
+
+        icm_info_result = [
+            {"port": 8081, "protocol": "http",
+             "source": "ICM_GET_INFO", "hostname": None},
+        ]
+        with patch(
+                "sap_profile_check.discover_icm_ports_via_rfc",
+                return_value=icm_info_result):
+            with _patch_urlopen([
+                    urllib.error.URLError("queue")
+                    for _ in range(20)]):
+                propagate_via_forged_ticket(
+                    ticket, node, state, channels=["http"])
+
+        assert node.icm_ports == icm_info_result
+
     def test_aggregate_evidence_prefers_rejected_over_network_error(self):
         """When HTTP gets a 401 (rejected) on one port and a
         connection refused on another, the aggregate evidence

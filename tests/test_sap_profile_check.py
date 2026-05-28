@@ -856,3 +856,180 @@ class TestExtractIcmPorts:
         assert len(result["icm_ports"]) == 2
         assert result["icm_ports"][0]["port"] == 8000
         assert result["icm_ports"][1]["port"] == 44300
+
+
+# ---------------------------------------------------------------------
+# discover_icm_ports_via_rfc — ICM_GET_INFO-based discovery
+# ---------------------------------------------------------------------
+
+class _FakeConn:
+    """Minimal RFC connection stub for discover_icm_ports_via_rfc tests."""
+
+    def __init__(self, servlist):
+        self._servlist = servlist
+
+    def call(self, fm_name, **kwargs):
+        assert fm_name == "ICM_GET_INFO"
+        return {"SERVLIST": self._servlist}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class TestDiscoverIcmPortsViaRfc:
+    """Tests for discover_icm_ports_via_rfc (ICM_GET_INFO path)."""
+
+    def test_basic_http_and_https(self):
+        """Active HTTP (protocol=1) and HTTPS (protocol=2) rows
+        are returned with correct port and protocol mapping."""
+        from sap_profile_check import discover_icm_ports_via_rfc
+        servlist = [
+            {"ACTIVE": "X", "PROTOCOL": 1, "SERVICE": "8000",
+             "HOSTNAME": ""},
+            {"ACTIVE": "X", "PROTOCOL": 2, "SERVICE": "44300",
+             "HOSTNAME": "saphost"},
+        ]
+        result = discover_icm_ports_via_rfc(
+            None, conn_factory=lambda: _FakeConn(servlist))
+        assert len(result) == 2
+        assert result[0] == {"port": 8000, "protocol": "http",
+                              "source": "ICM_GET_INFO",
+                              "hostname": None}
+        assert result[1] == {"port": 44300, "protocol": "https",
+                              "source": "ICM_GET_INFO",
+                              "hostname": "saphost"}
+
+    def test_smtp_filtered(self):
+        """SMTP listeners (protocol=4) are not useful for cookie
+        propagation and must be filtered out."""
+        from sap_profile_check import discover_icm_ports_via_rfc
+        servlist = [
+            {"ACTIVE": "X", "PROTOCOL": 1, "SERVICE": "8000",
+             "HOSTNAME": ""},
+            {"ACTIVE": "X", "PROTOCOL": 4, "SERVICE": "25000",
+             "HOSTNAME": ""},
+        ]
+        result = discover_icm_ports_via_rfc(
+            None, conn_factory=lambda: _FakeConn(servlist))
+        assert len(result) == 1
+        assert result[0]["port"] == 8000
+
+    def test_inactive_listener_filtered(self):
+        """Only rows with ACTIVE='X' are returned — inactive
+        listeners can't accept cookies."""
+        from sap_profile_check import discover_icm_ports_via_rfc
+        servlist = [
+            {"ACTIVE": "X", "PROTOCOL": 1, "SERVICE": "8000",
+             "HOSTNAME": ""},
+            {"ACTIVE": "", "PROTOCOL": 2, "SERVICE": "44300",
+             "HOSTNAME": ""},
+        ]
+        result = discover_icm_ports_via_rfc(
+            None, conn_factory=lambda: _FakeConn(servlist))
+        assert len(result) == 1
+        assert result[0]["port"] == 8000
+
+    def test_empty_servlist(self):
+        """Empty SERVLIST returns empty list (no ports configured)."""
+        from sap_profile_check import discover_icm_ports_via_rfc
+        result = discover_icm_ports_via_rfc(
+            None, conn_factory=lambda: _FakeConn([]))
+        assert result == []
+
+    def test_missing_servlist_key(self):
+        """FM returns a dict without SERVLIST → empty list."""
+        from sap_profile_check import discover_icm_ports_via_rfc
+
+        class FakeNoServlist:
+            def call(self, *a, **kw):
+                return {"SOMETHING_ELSE": []}
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        result = discover_icm_ports_via_rfc(
+            None, conn_factory=lambda: FakeNoServlist())
+        assert result == []
+
+    def test_connection_failure_returns_empty(self):
+        """RFC connection failure → empty list (graceful fallback)."""
+        from sap_profile_check import discover_icm_ports_via_rfc
+        result = discover_icm_ports_via_rfc(
+            None, conn_factory=lambda: (_ for _ in ()).throw(
+                ConnectionError("refused")))
+        assert result == []
+
+    def test_call_raises_returns_empty(self):
+        """FM call raises an exception → empty list."""
+        from sap_profile_check import discover_icm_ports_via_rfc
+
+        class FakeRaises:
+            def call(self, *a, **kw):
+                raise RuntimeError("FM not found")
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        result = discover_icm_ports_via_rfc(
+            None, conn_factory=lambda: FakeRaises())
+        assert result == []
+
+    def test_invalid_port_filtered(self):
+        """Rows with non-numeric or out-of-range SERVICE are skipped."""
+        from sap_profile_check import discover_icm_ports_via_rfc
+        servlist = [
+            {"ACTIVE": "X", "PROTOCOL": 1, "SERVICE": "abc",
+             "HOSTNAME": ""},
+            {"ACTIVE": "X", "PROTOCOL": 2, "SERVICE": "0",
+             "HOSTNAME": ""},
+            {"ACTIVE": "X", "PROTOCOL": 1, "SERVICE": "99999",
+             "HOSTNAME": ""},
+            {"ACTIVE": "X", "PROTOCOL": 2, "SERVICE": "44300",
+             "HOSTNAME": ""},
+        ]
+        result = discover_icm_ports_via_rfc(
+            None, conn_factory=lambda: _FakeConn(servlist))
+        assert len(result) == 1
+        assert result[0]["port"] == 44300
+
+    def test_unknown_protocol_filtered(self):
+        """Unknown protocol numbers (not 1, 2, or 4) are skipped."""
+        from sap_profile_check import discover_icm_ports_via_rfc
+        servlist = [
+            {"ACTIVE": "X", "PROTOCOL": 99, "SERVICE": "9999",
+             "HOSTNAME": ""},
+            {"ACTIVE": "X", "PROTOCOL": 1, "SERVICE": "8000",
+             "HOSTNAME": ""},
+        ]
+        result = discover_icm_ports_via_rfc(
+            None, conn_factory=lambda: _FakeConn(servlist))
+        assert len(result) == 1
+        assert result[0]["port"] == 8000
+
+    def test_integer_protocol_from_string(self):
+        """PROTOCOL stored as string (e.g. '2') still maps correctly."""
+        from sap_profile_check import discover_icm_ports_via_rfc
+        servlist = [
+            {"ACTIVE": "X", "PROTOCOL": "2", "SERVICE": "44300",
+             "HOSTNAME": ""},
+        ]
+        result = discover_icm_ports_via_rfc(
+            None, conn_factory=lambda: _FakeConn(servlist))
+        assert len(result) == 1
+        assert result[0]["protocol"] == "https"
+
+    def test_no_creds_returns_empty(self):
+        """When no credentials and no conn_factory, returns empty."""
+        from sap_profile_check import discover_icm_ports_via_rfc
+
+        class FakeNode:
+            def best_credentials(self):
+                return None
+
+        result = discover_icm_ports_via_rfc(FakeNode())
+        assert result == []
