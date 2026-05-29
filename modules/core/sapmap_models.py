@@ -502,6 +502,12 @@ class SAPNode:
     impact_results: list = field(default_factory=list)   # [ImpactResult.to_dict(), ...]
     saprouter: str = ""                 # SAProuter route string prefix (e.g., "/H/router/S/3299/W/pass")
     saprouter_info: dict = field(default_factory=dict)  # SAProuter info leak results
+    # SNC (Secure Network Communications) posture — info only, no Finding.
+    # Populated by modules.protocols.sap_snc (scan_snc_diag / scan_snc_router).
+    # Shape: {checked, protocol, host, port, enabled, enforced, qop_use,
+    #         qop_max, qop_min, qop_flag, mech_id, mech_label, cryptolib,
+    #         error}.  Empty dict = never probed.
+    snc_info: dict = field(default_factory=dict)
     scc_links: list = field(default_factory=list)       # SCC hosts whose mappings reach this node
     position: Optional[tuple] = None    # (x, y) on map — None = auto-layout
 
@@ -723,6 +729,7 @@ class SAPNode:
             "impact_results": self.impact_results,
             "saprouter": self.saprouter,
             "saprouter_info": self.saprouter_info,
+            "snc_info": dict(self.snc_info or {}),
             "scc_links": list(self.scc_links),
             "position": list(self.position) if self.position else None,
             "copyfail_vulnerable": self.copyfail_vulnerable,
@@ -819,6 +826,7 @@ class SAPNode:
             impact_results=d.get("impact_results", []),
             saprouter=d.get("saprouter", ""),
             saprouter_info=d.get("saprouter_info", {}),
+            snc_info=dict(d.get("snc_info", {})),
             scc_links=list(d.get("scc_links", [])),
             position=tuple(d["position"]) if d.get("position") else None,
             copyfail_vulnerable=d.get("copyfail_vulnerable", False),

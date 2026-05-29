@@ -7643,6 +7643,61 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:check_router_info", "Check SAProuter Info", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/check_snc", method="POST")
+    def node_check_snc(sid):
+        """Probe SNC posture for a single node.  Info only — no Finding."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        def _run():
+            from sap_snc import (
+                scan_snc_diag, scan_snc_router, format_summary,
+            )
+            host = node.ip or node.hostname
+            if not host:
+                print(f"[-] {sid}: No IP/hostname available for SNC probe")
+                return
+
+            is_router = "SAPROUTER" in (node.system_type or "").upper()
+            probe_port = 0
+            if is_router:
+                for inst in node.instances:
+                    for port, svc in inst.ports.items():
+                        if svc == "saprouter":
+                            probe_port = port
+                            break
+                if not probe_port:
+                    probe_port = 3299
+            else:
+                for inst in node.instances:
+                    for port, svc in inst.ports.items():
+                        if svc == "dispatcher" or 3200 <= port <= 3299:
+                            probe_port = port
+                            break
+                    if probe_port:
+                        break
+                if not probe_port:
+                    print(f"[-] {sid}: No dispatcher port found (need 32XX "
+                          f"for DIAG SNC probe)")
+                    return
+
+            print(f"[*] {sid}: Probing SNC posture on "
+                  f"{'router' if is_router else 'diag'}://{host}:{probe_port}...")
+            if is_router:
+                node.snc_info = scan_snc_router(
+                    host, probe_port, timeout=8,
+                    saprouter=node.saprouter)
+            else:
+                node.snc_info = scan_snc_diag(
+                    host, probe_port, timeout=8,
+                    saprouter=node.saprouter)
+            print(f"[+] {sid}: {format_summary(node.snc_info)}")
+
+        _bg(f"{sid}:check_snc", "Check SNC Posture", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/enum_clients", method="POST")
     def node_enum_clients(sid):
         response.content_type = "application/json"
@@ -8217,6 +8272,75 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
         _bg("_check_all_router_info", "Check All SAProuter Info Leak", _run)
         return json.dumps({"status": "started", "systems": len(nodes)})
+
+    @app.route("/api/actions/check_all_snc", method="POST")
+    def actions_check_all_snc():
+        """Probe SNC posture on every applicable node.
+
+        Eligibility: SAProuter (router probe) OR any node with a dispatcher
+        port (DIAG probe).  Result is info-only — recorded on
+        ``node.snc_info`` and rendered in the GUI badge / report.  No
+        Finding is emitted.
+        """
+        response.content_type = "application/json"
+        targets = []
+        for n in api.state.nodes.values():
+            is_router = "SAPROUTER" in (n.system_type or "").upper()
+            if is_router:
+                targets.append((n, "router"))
+                continue
+            for inst in n.instances:
+                if any(svc == "dispatcher" or 3200 <= p <= 3299
+                       for p, svc in inst.ports.items()):
+                    targets.append((n, "diag"))
+                    break
+
+        if not targets:
+            return json.dumps({"error": "No nodes with dispatcher / router "
+                                          "port to probe"})
+
+        def _run():
+            from sap_snc import (
+                scan_snc_diag, scan_snc_router, format_summary,
+            )
+            for node, protocol in targets:
+                host = node.ip or node.hostname
+                if not host:
+                    continue
+                probe_port = 0
+                if protocol == "router":
+                    for inst in node.instances:
+                        for port, svc in inst.ports.items():
+                            if svc == "saprouter":
+                                probe_port = port
+                                break
+                    if not probe_port:
+                        probe_port = 3299
+                else:
+                    for inst in node.instances:
+                        for port, svc in inst.ports.items():
+                            if svc == "dispatcher" or 3200 <= port <= 3299:
+                                probe_port = port
+                                break
+                        if probe_port:
+                            break
+                if not probe_port:
+                    continue
+                try:
+                    if protocol == "router":
+                        node.snc_info = scan_snc_router(
+                            host, probe_port, timeout=8,
+                            saprouter=node.saprouter)
+                    else:
+                        node.snc_info = scan_snc_diag(
+                            host, probe_port, timeout=8,
+                            saprouter=node.saprouter)
+                    print(f"[+] {node.sid}: {format_summary(node.snc_info)}")
+                except Exception as e:
+                    print(f"[-] {node.sid}: check_snc failed: {e}")
+
+        _bg("_check_all_snc", "Check All SNC Posture", _run)
+        return json.dumps({"status": "started", "systems": len(targets)})
 
     @app.route("/api/actions/analyze_chains", method="POST")
     def actions_analyze_chains():
