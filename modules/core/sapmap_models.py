@@ -57,6 +57,12 @@ class Finding:
     description: str = ""
     remediation: str = ""
     detail: str = ""
+    # MITRE ATT&CK Enterprise technique IDs ("T1190", "T1078.001").  Names
+    # and tactics are looked up at render time via modules.core.sapmap_attack
+    # so .sapmap state files stay small and the catalog stays the single
+    # source of truth.  Empty list = capability is explicitly un-mapped or
+    # the finding pre-dates the mapping addition.
+    attack_techniques: list = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -66,6 +72,7 @@ class Finding:
             "description": self.description,
             "remediation": self.remediation,
             "detail": self.detail,
+            "attack_techniques": list(self.attack_techniques or []),
         }
 
     @classmethod
@@ -76,6 +83,7 @@ class Finding:
             description=d.get("description", ""),
             remediation=d.get("remediation", ""),
             detail=d.get("detail", ""),
+            attack_techniques=list(d.get("attack_techniques", [])),
         )
 
 

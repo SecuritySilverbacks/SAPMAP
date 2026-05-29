@@ -137,7 +137,73 @@ def _findings_section(state: SAPMAPState) -> list:
             if f.remediation:
                 out.append("")
                 out.append(f"**Remediation:** {_esc(f.remediation)}")
+            tids = getattr(f, "attack_techniques", None) or []
+            if tids:
+                try:
+                    from sapmap_attack import lookup
+                    parts = []
+                    for tid in tids:
+                        info = lookup(tid)
+                        if info:
+                            parts.append(f"[{tid}]({info['url']}) "
+                                         f"{_esc(info['name'])}")
+                        else:
+                            parts.append(tid)
+                    out.append("")
+                    out.append(f"**ATT&CK:** {' · '.join(parts)}")
+                except Exception:
+                    pass
             out.append("")
+    return out
+
+
+def _attack_coverage_section(state: SAPMAPState) -> list:
+    """Tactic-grouped summary of MITRE ATT&CK techniques exercised."""
+    try:
+        from sapmap_attack import (
+            heatmap_grid, ATTACK_VERSION, TACTICS, lookup,
+        )
+    except Exception:
+        return []
+
+    grid = heatmap_grid(state)
+    totals = grid.get("totals", {})
+    if not totals.get("techniques"):
+        return []   # nothing tagged — skip the section entirely
+
+    out = ["## MITRE ATT&CK coverage", ""]
+    out.append(
+        f"This engagement exercised **{totals['techniques']} techniques** "
+        f"across **{totals['tactics']} tactics** "
+        f"(mapped against ATT&CK Enterprise {ATTACK_VERSION}). "
+        f"Severity per cell reflects the highest-severity finding bearing "
+        f"that technique.")
+    out.append("")
+    out.append("| Tactic | Techniques | SIDs touched |")
+    out.append("| --- | --- | --- |")
+    for col in grid.get("columns", []):
+        observed = [c for c in col["cells"] if c["score"] > 0]
+        if not observed:
+            continue
+        cells_md = []
+        sids = set()
+        for c in observed:
+            info = lookup(c["id"])
+            label = c["id"]
+            if info:
+                label = f"[{c['id']}]({info['url']})"
+            cells_md.append(label)
+            sids.update(c["sids"])
+        out.append(
+            f"| {col['tactic_name']} "
+            f"| {' · '.join(cells_md)} "
+            f"| {', '.join(sorted(sids))} |")
+    out.append("")
+    out.append(
+        f"_Drop the matching `sapmap_attack_layer.json` into "
+        f"[ATT&CK Navigator](https://mitre-attack.github.io/attack-navigator/) "
+        f"for the interactive heatmap._")
+    out.append("")
     return out
 
 
@@ -1041,6 +1107,11 @@ def build_markdown_report(state: SAPMAPState,
     sections.append("---")
     sections.append("")
     sections.extend(_findings_section(state))
+    attack_section = _attack_coverage_section(state)
+    if attack_section:
+        sections.append("---")
+        sections.append("")
+        sections.extend(attack_section)
     sections.append("---")
     sections.append("")
     sections.extend(_trust_chains_section(state))

@@ -448,6 +448,52 @@ body {
   flex-shrink: 0; font-size: 11px; opacity: 0.8;
   padding: 1px 6px; border: 1px solid currentColor; border-radius: 2px;
 }
+/* MITRE ATT&CK technique pills.  Used next to each finding (CVE row
+   in the drawer, finding-item in the per-node panel) and inside the
+   ATT&CK observed section in the node detail panel. */
+.attack-pills { display: inline-flex; gap: 3px; flex-wrap: wrap; vertical-align: middle; }
+.attack-pill {
+  display: inline-block; font-family: monospace; font-size: 10px;
+  padding: 1px 5px; border-radius: 2px;
+  background: #1f2937; color: #93c5fd; border: 1px solid #374151;
+  text-decoration: none; cursor: pointer; line-height: 14px;
+}
+.attack-pill:hover { background: #2563eb; color: #fff; border-color: #2563eb; }
+.attack-pill-more {
+  background: #161b22; color: #8b949e; border-color: #30363d; cursor: help;
+}
+/* Heatmap modal */
+.attack-heatmap-grid {
+  display: grid; gap: 4px;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  font-family: -apple-system, system-ui, sans-serif;
+}
+.attack-heatmap-col {
+  background: #0d1117; border: 1px solid #21262d; border-radius: 4px;
+  padding: 4px; min-width: 110px;
+}
+.attack-heatmap-col h5 {
+  margin: 0 0 4px 0; font-size: 10px; color: #8b949e;
+  text-transform: uppercase; letter-spacing: 0.5px;
+  border-bottom: 1px solid #21262d; padding-bottom: 3px;
+}
+.attack-cell {
+  display: block; padding: 3px 5px; margin: 2px 0;
+  border-radius: 2px; font-family: monospace; font-size: 10px;
+  background: #161b22; color: #6e7681;
+  border: 1px solid #21262d;
+  text-decoration: none; cursor: default;
+}
+.attack-cell.s0 { background: #161b22; color: #484f58; border-color: #21262d; }
+.attack-cell.s1 { background: #3a1a14; color: #fcae91; border-color: #5a2a1f; }
+.attack-cell.s2 { background: #4a1d12; color: #fc8d59; border-color: #6f2b1c; cursor: pointer; }
+.attack-cell.s3 { background: #5e1a0e; color: #fb6a4a; border-color: #872b15; cursor: pointer; }
+.attack-cell.s4 { background: #7a1208; color: #de2d26; border-color: #a82010; cursor: pointer; }
+.attack-cell.s5 { background: #a50f15; color: #fff; border-color: #cf1820; cursor: pointer; font-weight: bold; }
+.attack-cell-sub { padding-left: 12px; font-size: 9.5px; opacity: 0.9; }
+.attack-cell:hover.s2, .attack-cell:hover.s3, .attack-cell:hover.s4, .attack-cell:hover.s5 {
+  filter: brightness(1.25);
+}
 .finding-dismiss {
   cursor: pointer; opacity: 0.6; padding: 2px 6px;
   font-size: 14px; user-select: none;
@@ -917,6 +963,7 @@ body {
   <div class="ctx-item" id="map-ctx-check-all-cve-22536" data-action="map_check_all_cve_22536">&#128272; Check All CVE-2022-22536 (ICMAD)</div>
   <div class="ctx-item" id="map-ctx-check-all-router-info" data-action="map_check_all_router_info">&#128272; Check All SAProuter Info Leak</div>
   <div class="ctx-item" id="map-ctx-check-all-snc" data-action="map_check_all_snc">&#128274; Check All SNC Posture</div>
+  <div class="ctx-item" data-action="map_attack_coverage">&#9876;&#65039; ATT&amp;CK Coverage Matrix</div>
   <div class="ctx-item" data-action="map_analyze_chains">&#128279; Analyze Trust Chains</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="map_fit">&#128208; Fit to Window</div>
@@ -1199,6 +1246,29 @@ body {
     <div class="form-actions">
       <button class="btn btn-primary" onclick="runDiffCompute()">Compare</button>
       <button class="btn" onclick="closeModal('diff-modal')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- MITRE ATT&CK Coverage Modal -->
+<div class="modal-overlay" id="attack-modal">
+  <div class="modal" style="max-width:1100px;width:95vw;max-height:90vh;display:flex;flex-direction:column">
+    <h3 style="margin:0 0 6px 0">&#9876;&#65039; MITRE ATT&amp;CK Coverage
+      <span style="color:#8b949e;font-weight:normal;font-size:11px"
+            id="attack-modal-subtitle"></span>
+    </h3>
+    <div style="font-size:11px;color:#8b949e;margin-bottom:10px">
+      Techniques exercised across this engagement, grouped by tactic.
+      Severity-coloured (INFO → CRITICAL); click a cell to filter the
+      map to the SIDs where the technique was observed.
+      <a href="#" onclick="downloadAttackNavigatorLayer();return false"
+         style="color:#79c0ff;margin-left:6px">Download Navigator layer (JSON)</a>
+    </div>
+    <div id="attack-heatmap-body" style="overflow:auto;flex:1;padding:4px">
+      <div style="color:#8b949e;text-align:center;padding:30px">Loading…</div>
+    </div>
+    <div class="form-actions" style="margin-top:8px">
+      <button class="btn" onclick="closeModal('attack-modal')">Close</button>
     </div>
   </div>
 </div>
@@ -1901,6 +1971,11 @@ body {
 let mapState = { nodes: {}, connections: [], stats: {} };
 let localIp = '';
 fetch('/api/local_ip').then(r => r.json()).then(d => { localIp = d.ip || ''; }).catch(() => {});
+// ATT&CK catalog — fetched once at boot.  Used by renderAttackPills(),
+// the node detail "ATT&CK observed" section, and the heatmap modal.
+fetch('/api/attack/catalog').then(r => r.json()).then(d => {
+  mapState.attack_catalog = d || {};
+}).catch(() => {});
 let consoleCursor = 0;
 let findingsCursor = 0;
 let _activeFindings = [];
@@ -3524,6 +3599,34 @@ function downloadCsv(sid, scenario) {
 function escHtml(s) {
   if (!s) return '';
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// MITRE ATT&CK rendering helpers — pills next to findings, full section
+// in the node detail panel, and cell legends in the heatmap modal.
+// mapState.attack_catalog is populated by /api/attack/catalog (called
+// once at boot) and looks like {techniques: {T1190: {name, tactic,
+// tactic_name, url}, ...}, tactics: {TA0001: "Initial Access", ...},
+// tactic_order: [...]}.
+function _attackInfo(tid) {
+  const cat = (window.mapState && mapState.attack_catalog) || {};
+  return (cat.techniques || {})[tid] || null;
+}
+function renderAttackPills(tids, opts) {
+  if (!tids || !tids.length) return '';
+  const maxVisible = (opts && opts.max) || 3;
+  const visible = tids.slice(0, maxVisible);
+  const extra = tids.length - visible.length;
+  const pills = visible.map(tid => {
+    const info = _attackInfo(tid);
+    const name = info ? info.name : '';
+    const url = info ? info.url : `https://attack.mitre.org/techniques/${tid.replace('.','/')}/`;
+    const tt = name ? `${tid} — ${name}` : tid;
+    return `<a href="${escHtml(url)}" target="_blank" rel="noopener noreferrer" class="attack-pill" title="${escHtml(tt)}">${escHtml(tid)}</a>`;
+  }).join('');
+  const more = extra > 0
+    ? `<span class="attack-pill attack-pill-more" title="${escHtml(tids.slice(maxVisible).join(', '))}">+${extra}</span>`
+    : '';
+  return `<span class="attack-pills">${pills}${more}</span>`;
 }
 
 function showCtxMenu(e, sid) {
@@ -5563,6 +5666,39 @@ function showDetails(sid) {
         'onclick="api(\'POST\',\'node/' + escHtml(sid) + '/check_snc\');showToast(\'SNC probe started for ' + escHtml(sid) + '\',\'info\')">Re-probe SNC</button></div>' +
         '</div>';
     })()}
+    ${(() => {
+      // ATT&CK observed: aggregate technique IDs across this node's
+      // findings and group by tactic.  Renders only when at least one
+      // finding carries an ATT&CK tag.
+      const findings = n.findings || [];
+      const allTids = [];
+      const seen = new Set();
+      findings.forEach(f => (f.attack_techniques || []).forEach(t => {
+        if (!seen.has(t)) { seen.add(t); allTids.push(t); }
+      }));
+      if (!allTids.length) return '';
+      const cat = (mapState.attack_catalog) || {};
+      const techs = cat.techniques || {};
+      const tactics = cat.tactics || {};
+      const order = cat.tactic_order || Object.keys(tactics);
+      // Group by tactic
+      const byTactic = {};
+      allTids.forEach(tid => {
+        const info = techs[tid];
+        const tacId = info ? info.tactic : 'OTHER';
+        (byTactic[tacId] = byTactic[tacId] || []).push(tid);
+      });
+      const rows = order.filter(t => byTactic[t]).map(tacId => {
+        const tname = tactics[tacId] || tacId;
+        const pills = renderAttackPills(byTactic[tacId], {max: 6});
+        return '<div class="detail-row"><span class="detail-key">' + escHtml(tname) + '</span><span class="detail-val">' + pills + '</span></div>';
+      }).join('');
+      return '<div class="detail-section">' +
+        '<h4 style="color:#93c5fd">&#9876;&#65039; ATT&amp;CK observed <span style="color:#8b949e;font-weight:normal;font-size:10px">(' + allTids.length + ' technique' + (allTids.length === 1 ? '' : 's') + ' across ' + Object.keys(byTactic).length + ' tactic' + (Object.keys(byTactic).length === 1 ? '' : 's') + ')</span></h4>' +
+        rows +
+        '<div style="margin-top:6px;font-size:10px;color:#6e7681">Click any pill for the MITRE technique page.</div>' +
+        '</div>';
+    })()}
     <div class="detail-section">
       <h4>Instances</h4>
       ${(n.instances || []).map(i => {
@@ -6993,7 +7129,8 @@ function showFindings(sid) {
     <h3>${escHtml(n.sid)} — Findings (${(n.findings||[]).length})</h3>
     ${(n.findings || []).slice().sort((a,b) => (b.severity||0) - (a.severity||0)).map(f => {
       const cls = 'finding-' + (sevMap[f.severity] || 'info');
-      return `<div class="finding-item ${cls}"><strong>${escHtml(f.severity_label || 'INFO')}</strong> — ${escHtml(f.name)}<br><span style="color:#8b949e;font-size:10px">${escHtml(f.description)}</span></div>`;
+      const pills = renderAttackPills(f.attack_techniques || [], {max: 4});
+      return `<div class="finding-item ${cls}"><strong>${escHtml(f.severity_label || 'INFO')}</strong> — ${escHtml(f.name)} ${pills}<br><span style="color:#8b949e;font-size:10px">${escHtml(f.description)}</span></div>`;
     }).join('') || '<div style="color:#484f58">No findings</div>'}
   `;
   panel.classList.add('visible');
@@ -8434,6 +8571,79 @@ async function checkAllSnc() {
     await api('POST', 'actions/check_all_snc');
   startPolling();
 }
+
+// =========================================================================
+// MITRE ATT&CK coverage modal
+// =========================================================================
+async function showAttackCoverage() {
+  document.getElementById('attack-modal').classList.add('visible');
+  const body = document.getElementById('attack-heatmap-body');
+  body.innerHTML = '<div style="color:#8b949e;text-align:center;padding:30px">Loading…</div>';
+  let grid;
+  try {
+    const r = await fetch('/api/attack/heatmap');
+    grid = await r.json();
+  } catch (e) {
+    body.innerHTML = '<div style="color:#f85149;padding:20px">Failed to load heatmap: ' + escHtml(String(e)) + '</div>';
+    return;
+  }
+  const subtitle = document.getElementById('attack-modal-subtitle');
+  const t = grid.totals || {};
+  subtitle.textContent = ' — ' + (t.techniques || 0) + ' technique' + ((t.techniques === 1) ? '' : 's')
+    + ' across ' + (t.tactics || 0) + ' tactic' + ((t.tactics === 1) ? '' : 's')
+    + ', ' + (t.findings || 0) + ' tagged finding' + ((t.findings === 1) ? '' : 's')
+    + ' · ATT&CK ' + (grid.attack_version || '?');
+  body.innerHTML = renderAttackHeatmap(grid);
+}
+
+function renderAttackHeatmap(grid) {
+  const cols = (grid && grid.columns) || [];
+  if (!cols.length) {
+    return '<div style="color:#8b949e;padding:30px;text-align:center">No ATT&amp;CK-tagged findings yet. Run discovery + exploits to populate the matrix.</div>';
+  }
+  const out = ['<div class="attack-heatmap-grid">'];
+  cols.forEach(col => {
+    const cells = (col.cells || []).map(c => {
+      const score = c.score || 0;
+      const cls = 'attack-cell s' + score + (c.sub_of ? ' attack-cell-sub' : '');
+      const tt = c.id + ' — ' + c.name
+        + (c.sids && c.sids.length ? '\n\nObserved on: ' + c.sids.join(', ') : '')
+        + (c.count ? '\n' + c.count + ' finding' + (c.count === 1 ? '' : 's') : '');
+      const onclick = (c.sids && c.sids.length)
+        ? ` onclick="filterMapToSids(${JSON.stringify(c.sids).replace(/"/g,'&quot;')});closeModal('attack-modal')"` : '';
+      return `<span class="${cls}" title="${escHtml(tt)}"${onclick}>${escHtml(c.id)}</span>`;
+    }).join('');
+    out.push(`<div class="attack-heatmap-col"><h5>${escHtml(col.tactic_name)}</h5>${cells}</div>`);
+  });
+  out.push('</div>');
+  return out.join('');
+}
+
+function filterMapToSids(sids) {
+  // Best-effort: highlight matching nodes by flashing them.  If a
+  // proper map-filter UI gets added later, this hook is where it
+  // would plug in.
+  const sidSet = new Set(sids || []);
+  document.querySelectorAll('[data-sid]').forEach(el => {
+    if (sidSet.has(el.getAttribute('data-sid'))) {
+      el.style.filter = 'drop-shadow(0 0 8px #fdba74)';
+      setTimeout(() => { el.style.filter = ''; }, 3500);
+    }
+  });
+  showToast('Highlighted ' + sids.length + ' node(s)', 'info', {autoCloseMs: 2500});
+}
+
+function downloadAttackNavigatorLayer() {
+  // Triggers a browser download of the Navigator v4.5 JSON layer.
+  // User imports it into https://mitre-attack.github.io/attack-navigator/
+  const a = document.createElement('a');
+  a.href = '/api/attack/navigator_layer';
+  a.download = 'sapmap_attack_layer.json';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
 // =========================================================================
 // AutoPwn — config modal, launch, progress polling, phase tracker
 // =========================================================================
@@ -9419,6 +9629,8 @@ function renderFindings() {
         + `<span class="finding-msg">${_escapeHtml(f.msg)}</span>`
         + (f.cve
             ? `<span class="finding-cve">${_escapeHtml(f.cve)}</span>` : '')
+        + ((f.attack_techniques && f.attack_techniques.length)
+            ? renderAttackPills(f.attack_techniques, {max: 3}) : '')
         + `</div>`
       );
     }
@@ -9775,6 +9987,7 @@ document.getElementById('map-ctx-menu').addEventListener('click', function(e) {
     case 'map_check_all_cve_22536': checkAllCve22536(); break;
     case 'map_check_all_router_info': checkAllRouterInfo(); break;
     case 'map_check_all_snc': checkAllSnc(); break;
+    case 'map_attack_coverage': showAttackCoverage(); break;
     case 'map_analyze_chains': analyzeChains(); break;
     case 'map_fit': fitMap(); break;
     case 'map_reset_layout': resetLayout(); break;
