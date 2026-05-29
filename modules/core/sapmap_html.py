@@ -916,6 +916,7 @@ body {
   <div class="ctx-item" id="map-ctx-check-all-cve-6287" data-action="map_check_all_cve_6287">&#128272; Check All CVE-2020-6287 (RECON)</div>
   <div class="ctx-item" id="map-ctx-check-all-cve-22536" data-action="map_check_all_cve_22536">&#128272; Check All CVE-2022-22536 (ICMAD)</div>
   <div class="ctx-item" id="map-ctx-check-all-router-info" data-action="map_check_all_router_info">&#128272; Check All SAProuter Info Leak</div>
+  <div class="ctx-item" id="map-ctx-check-all-snc" data-action="map_check_all_snc">&#128274; Check All SNC Posture</div>
   <div class="ctx-item" data-action="map_analyze_chains">&#128279; Analyze Trust Chains</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="map_fit">&#128208; Fit to Window</div>
@@ -5020,6 +5021,8 @@ async function ctxAction(action) {
     case 'set_instance_nr': showInstanceNrModal(sid); break;
     case 'check_router_info':
       await api('POST', `node/${sid}/check_router_info`); break;
+    case 'check_snc':
+      await api('POST', `node/${sid}/check_snc`); break;
     case 'router_scan': showRouterScanModal(sid); break;
     case 'enum_clients':
       await api('POST', `node/${sid}/enum_clients`); break;
@@ -5518,6 +5521,45 @@ function showDetails(sid) {
         '<div class="detail-row"><span class="detail-key">Connections</span><span class="detail-val">' + (ri.total_clients || clients.length || 0) + '</span></div>' +
         connTable +
         '<div style="margin-top:8px"><button class="btn btn-primary" style="font-size:11px;padding:3px 10px" onclick="selectedNodeSid=\'' + escHtml(sid) + '\';showRouterScanModal(\'' + escHtml(sid) + '\')">&#128270; Scan Internally via this SAProuter</button></div>' +
+        '</div>';
+    })()}
+    ${(() => {
+      const s = n.snc_info || {};
+      if (!s.checked) return '';
+      const sid = n.sid;
+      let title, color, body;
+      if (s.error && !s.enabled) {
+        title = '&#128274; SNC: probe failed';
+        color = '#8b949e';
+        body = '<div class="detail-row"><span class="detail-key">Error</span><span class="detail-val">' + escHtml(s.error) + '</span></div>';
+      } else if (!s.enabled) {
+        title = '&#128275; SNC: not enabled';
+        color = '#d29922';
+        body = '<div style="color:#8b949e;font-size:11px;margin:4px 0">DIAG/Router traffic is unencrypted on the wire. SAP recommends snc/enabled=1 + snc/data_protection/min=3 for production.</div>';
+      } else {
+        title = '&#128274; SNC: enabled';
+        color = '#3fb950';
+        const qopRow = (label, val) => {
+          const lvl = ['INVALID','OPEN','INTEGRITY','PRIVACY'][val] || '?';
+          const c = val === 3 ? '#3fb950' : '#d29922';
+          return '<div class="detail-row"><span class="detail-key">' + label + '</span><span class="detail-val" style="color:' + c + '">' + val + ' (' + lvl + ')</span></div>';
+        };
+        body =
+          '<div class="detail-row"><span class="detail-key">Protocol</span><span class="detail-val">' + escHtml(s.protocol || '') + '</span></div>' +
+          (s.mech_label ? '<div class="detail-row"><span class="detail-key">Mechanism</span><span class="detail-val">' + escHtml(s.mech_label) + '</span></div>' : '') +
+          (s.cryptolib ? '<div class="detail-row"><span class="detail-key">CryptoLib</span><span class="detail-val" style="font-family:monospace;font-size:11px">' + escHtml(s.cryptolib) + '</span></div>' : '') +
+          qopRow('QoP use', s.qop_use || 0) +
+          qopRow('QoP max', s.qop_max || 0) +
+          qopRow('QoP min', s.qop_min || 0);
+        if (s.protocol === 'diag') {
+          const enfColor = s.enforced ? '#3fb950' : '#d29922';
+          body += '<div class="detail-row"><span class="detail-key">only_encrypted_gui</span><span class="detail-val" style="color:' + enfColor + '">' + (s.enforced ? 'enforced' : 'not enforced') + '</span></div>';
+        }
+      }
+      return '<div class="detail-section">' +
+        '<h4 style="color:' + color + '">' + title + '</h4>' +
+        body +
+        '<div style="margin-top:6px"><button class="btn" style="font-size:11px;padding:3px 10px" onclick="nodeAction(\'' + escHtml(sid) + '\',\'check_snc\')">Re-probe SNC</button></div>' +
         '</div>';
     })()}
     <div class="detail-section">
@@ -8370,6 +8412,27 @@ async function checkAllRouterInfo() {
     await api('POST', 'actions/check_all_router_info');
   startPolling();
 }
+
+async function checkAllSnc() {
+  // Info-only posture probe — sends one SNC INIT_REQ per dispatcher /
+  // router and records whether SNC is enabled, the QoP level, and
+  // (DIAG only) snc/only_encrypted_gui enforcement.  No exploit, no
+  // Finding, no state mutation outside node.snc_info.
+  const nodes = Object.values(mapState.nodes || {});
+  const eligible = nodes.filter(n => {
+    if ((n.system_type || '').toUpperCase().indexOf('SAPROUTER') !== -1) return true;
+    return (n.instances || []).some(i =>
+      Object.entries(i.ports || {}).some(([p, s]) => s === 'dispatcher' || (p >= 3200 && p <= 3299)));
+  });
+  if (eligible.length < 1) {
+    alert('No nodes with a dispatcher or SAProuter port to probe.');
+    return;
+  }
+  if (confirm(`Check SNC posture on ${eligible.length} node(s)?\n\n` +
+              `Sends one SNC INIT_REQ per node. Info only — no Finding is raised.`))
+    await api('POST', 'actions/check_all_snc');
+  startPolling();
+}
 // =========================================================================
 // AutoPwn — config modal, launch, progress polling, phase tracker
 // =========================================================================
@@ -9675,6 +9738,13 @@ function showMapCtxMenu(e) {
   document.getElementById('map-ctx-check-all-cve-6287').style.display    = hasAnyJava         ? '' : 'none';
   document.getElementById('map-ctx-check-all-cve-22536').style.display   = hasAnyHttp         ? '' : 'none';
   document.getElementById('map-ctx-check-all-router-info').style.display = hasAnySaprouter    ? '' : 'none';
+  // SNC posture probe applies to any node with a dispatcher or saprouter port
+  const hasAnySncTarget = nodes.some(n => {
+    if ((n.system_type || '').toUpperCase().indexOf('SAPROUTER') !== -1) return true;
+    return (n.instances || []).some(i =>
+      Object.entries(i.ports || {}).some(([p, s]) => s === 'dispatcher' || (p >= 3200 && p <= 3299)));
+  });
+  document.getElementById('map-ctx-check-all-snc').style.display        = hasAnySncTarget    ? '' : 'none';
 
   menu.classList.add('visible');
   let mx = e.clientX, my = e.clientY;
@@ -9703,6 +9773,7 @@ document.getElementById('map-ctx-menu').addEventListener('click', function(e) {
     case 'map_check_all_cve_6287': checkAllCve6287(); break;
     case 'map_check_all_cve_22536': checkAllCve22536(); break;
     case 'map_check_all_router_info': checkAllRouterInfo(); break;
+    case 'map_check_all_snc': checkAllSnc(); break;
     case 'map_analyze_chains': analyzeChains(); break;
     case 'map_fit': fitMap(); break;
     case 'map_reset_layout': resetLayout(); break;

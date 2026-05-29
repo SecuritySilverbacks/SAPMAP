@@ -4079,6 +4079,46 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
             # Module not importable yet (test isolation) — leave default
             node.dpmon_sap_star_available = False
 
+        # SNC posture probe — info only, no Finding raised.  Pick the right
+        # carrier based on system_type: dispatcher (DIAG) for app servers,
+        # router port for SAProuter nodes.  Failures are silently swallowed
+        # so an offline SNC check never blocks a successful discovery.
+        try:
+            snc_port = 0
+            snc_protocol = ""
+            if system_type == "SAPROUTER":
+                for p, pinfo in open_ports.items():
+                    if pinfo["service"] == "saprouter":
+                        snc_port = p
+                        snc_protocol = "router"
+                        break
+            else:
+                # Prefer this SID's own dispatcher (3200-3299)
+                for p, pinfo in sorted(open_ports.items()):
+                    if (pinfo["service"] == "dispatcher"
+                            and pinfo["instance_nr"] in inst_nrs_for_sid):
+                        snc_port = p
+                        snc_protocol = "diag"
+                        break
+
+            if snc_port and snc_protocol:
+                from sap_snc import (
+                    scan_snc_diag, scan_snc_router, format_summary,
+                )
+                if snc_protocol == "diag":
+                    node.snc_info = scan_snc_diag(
+                        host, snc_port, timeout=min(timeout, 6),
+                        saprouter=saprouter)
+                else:
+                    node.snc_info = scan_snc_router(
+                        host, snc_port, timeout=min(timeout, 6),
+                        saprouter=saprouter)
+                print(f"[+] {sid}: {format_summary(node.snc_info)} "
+                      f"(probed {snc_protocol}://{host}:{snc_port})")
+        except Exception as e:
+            # Probe is best-effort — don't let it block node creation.
+            logger.debug(f"SNC probe failed for {sid} on {host}: {e}")
+
         nodes.append(node)
 
     return nodes
