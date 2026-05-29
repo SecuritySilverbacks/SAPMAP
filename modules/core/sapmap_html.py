@@ -820,7 +820,7 @@ body {
 <div class="ctx-menu" id="ctx-menu">
   <!-- Top-level quick actions -->
   <div class="ctx-item" data-action="details">&#128269; View System Details</div>
-  <div class="ctx-item" data-action="findings">&#128203; View SAPology Findings</div>
+  <div class="ctx-item" data-action="findings">&#128203; View Findings</div>
   <div class="ctx-item" data-action="wd_admin_creds">&#128273; Add WD admin credentials (webadm / pull backend table)</div>
   <div class="ctx-item" data-action="credentials">&#128273; Provide Credentials</div>
   <div class="ctx-sep"></div>
