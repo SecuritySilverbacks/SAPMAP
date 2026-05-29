@@ -5553,7 +5553,7 @@ function showDetails(sid) {
           qopRow('QoP min', s.qop_min || 0);
         if (s.protocol === 'diag') {
           const enfColor = s.enforced ? '#3fb950' : '#d29922';
-          body += '<div class="detail-row"><span class="detail-key">only_encrypted_gui</span><span class="detail-val" style="color:' + enfColor + '">' + (s.enforced ? 'enforced' : 'not enforced') + '</span></div>';
+          body += '<div class="detail-row"><span class="detail-key" title="snc/only_encrypted_gui">Enforced</span><span class="detail-val" style="color:' + enfColor + '">' + (s.enforced ? 'yes (snc/only_encrypted_gui=1)' : 'no (snc/only_encrypted_gui=0)') + '</span></div>';
         }
       }
       return '<div class="detail-section">' +
