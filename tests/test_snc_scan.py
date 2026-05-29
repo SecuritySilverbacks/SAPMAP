@@ -19,8 +19,9 @@ def test_build_snc_frame_diag_layout():
 
     # Eye-catcher first 8 bytes
     assert frame[:8] == b"SNCFRAME"
-    # frame_type INIT_REQ
-    assert frame[8] == sap_snc.SNC_FRAME_INIT_REQ
+    # frame_type INIT (matches what pysap/sncscan put on the wire — server
+    # rejects INIT_REQ=0x01 with "SNC error" on live S/4HANA dispatchers)
+    assert frame[8] == sap_snc.SNC_FRAME_INIT
     # protocol_version 6
     assert frame[9] == 6
     # header_length = 24 fixed + 6 ext-prefix + 34 ext_fields = 64
@@ -46,7 +47,7 @@ def test_parse_snc_frame_round_trip_diag():
         flags=0x2a, ext_fields=sap_snc.SNC_EXT_DIAG)
     parsed = sap_snc._parse_snc_frame(frame)
     assert parsed is not None
-    assert parsed["frame_type"] == sap_snc.SNC_FRAME_INIT_REQ
+    assert parsed["frame_type"] == sap_snc.SNC_FRAME_INIT
     assert parsed["protocol_version"] == 6
     assert parsed["header_length"] == 64
     assert parsed["token_length"] == 101
