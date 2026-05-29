@@ -5559,7 +5559,8 @@ function showDetails(sid) {
       return '<div class="detail-section">' +
         '<h4 style="color:' + color + '">' + title + '</h4>' +
         body +
-        '<div style="margin-top:6px"><button class="btn" style="font-size:11px;padding:3px 10px" onclick="nodeAction(\'' + escHtml(sid) + '\',\'check_snc\')">Re-probe SNC</button></div>' +
+        '<div style="margin-top:6px"><button class="btn" style="font-size:11px;padding:3px 10px" ' +
+        'onclick="api(\'POST\',\'node/' + escHtml(sid) + '/check_snc\');showToast(\'SNC probe started for ' + escHtml(sid) + '\',\'info\')">Re-probe SNC</button></div>' +
         '</div>';
     })()}
     <div class="detail-section">
