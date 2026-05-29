@@ -4274,6 +4274,11 @@ def discover_systems(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RAN
         list of SAPNode objects
     """
     nodes = []
+    # SCC nodes are routed straight to the caller via scc_callback; we
+    # also keep a local list so the discovery summary at the end can
+    # report SAP + SCC counts together (the GUI's caller doesn't share
+    # back its accumulated state from inside this function).
+    scc_nodes_local = []
     total_start = time.time()
 
     print(f"[*] ========================================")
@@ -4326,11 +4331,13 @@ def discover_systems(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RAN
                 result, timeout=min(timeout, 5.0),
                 probe_default_creds=scc_probe_default_creds,
             )
-            if scc_node and scc_callback:
-                try:
-                    scc_callback(scc_node)
-                except Exception as e:
-                    logger.debug("scc_callback failed for %s: %s", host, e)
+            if scc_node:
+                scc_nodes_local.append(scc_node)
+                if scc_callback:
+                    try:
+                        scc_callback(scc_node)
+                    except Exception as e:
+                        logger.debug("scc_callback failed for %s: %s", host, e)
 
             # Summary line per discovered system on this host
             for node in host_nodes:
@@ -4368,7 +4375,9 @@ def discover_systems(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RAN
     elapsed = time.time() - total_start
     print(f"[*] ========================================")
     print(f"[+]  Discovery complete in {elapsed:.1f}s")
-    print(f"[+]  SAP systems found: {len(nodes)}")
+    total_found = len(nodes) + len(scc_nodes_local)
+    print(f"[+]  Systems found: {total_found} "
+          f"(SAP: {len(nodes)}, SCC: {len(scc_nodes_local)})")
     for node in nodes:
         flag = ""
         if node.has_critical_finding:
@@ -4379,6 +4388,12 @@ def discover_systems(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RAN
               f"{node.ip:15s} {node.hostname:20s} "
               f"K:{node.kernel:4s} DB:{node.db_type:4s} "
               f"Clients:{len(node.clients)}{flag}")
+    for scc in scc_nodes_local:
+        host = getattr(scc, "host", "") or getattr(scc, "ip", "")
+        version = getattr(scc, "version", "") or "?"
+        print(f"[+]    {'SCC':8s} {'CLOUD_CONN':12s} "
+              f"{host:15s} {'':20s} "
+              f"V:{version:4s}")
     print(f"[*] ========================================")
 
     # Cross-link WD-to-backend edges across the discovered nodes.
