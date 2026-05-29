@@ -89,9 +89,12 @@ SNC_DATA = b"Internal SNC-Adapter (Rev 1.1) to CommonCryptoLib\x00\x00\x00\x00"
 SNC_EYE_CATCHER = b"SNCFRAME"
 
 # Frame types
-SNC_FRAME_INIT_REQ = 0x01
-SNC_FRAME_ACCEPT   = 0x04
-SNC_FRAME_REJECTED = 0x0c
+SNC_FRAME_REVERSE_REQ = 0x00
+SNC_FRAME_INIT_REQ    = 0x01
+SNC_FRAME_INIT        = 0x02   # what pysap (and sncscan) send for the client INIT
+SNC_FRAME_INIT_ACK    = 0x03
+SNC_FRAME_ACCEPT      = 0x04
+SNC_FRAME_REJECTED    = 0x0c
 
 # Mechanism IDs (server-side identifier of the SNC library in use).
 SNC_MECH_ID = {
@@ -122,7 +125,7 @@ SNC_QOP = {
 # ---------------------------------------------------------------------------
 
 def _build_snc_frame(*, flags: int, ext_fields: bytes,
-                     frame_type: int = SNC_FRAME_INIT_REQ,
+                     frame_type: int = SNC_FRAME_INIT,
                      protocol_version: int = 6,
                      mech_id: int = 3,
                      token: bytes = SNC_TOKEN,
