@@ -27,6 +27,15 @@ from sapmap_config import (
     FAST_SCAN_PORT_PATTERNS, WELL_KNOWN_WD_PORTS,
 )
 
+
+def _attack_for(capability_key: str) -> list:
+    """Resolve a sapmap_attack capability key → list of T-IDs (or [])."""
+    try:
+        from sapmap_attack import techniques_for
+        return techniques_for(capability_key)
+    except Exception:
+        return []
+
 logger = logging.getLogger(__name__)
 
 # Add SAPology (sister project, sits next to SAPMAP root) to path for
@@ -1160,6 +1169,7 @@ def check_ms_betrusted(node: SAPNode, timeout: float = 8.0) -> bool:
                 node.findings.append(Finding(
                     name="MS Internal Port Without ACL (CVE-2020-6207)",
                     severity=Severity.CRITICAL,
+                    attack_techniques=_attack_for("exploit.ms_betrusted"),
                     description=(
                         "SAP Message Server internal port is accessible without "
                         "authentication (no access control list configured). "
@@ -1184,6 +1194,7 @@ def check_ms_betrusted(node: SAPNode, timeout: float = 8.0) -> bool:
                     node.findings.append(Finding(
                         name="MS Internal Port Exposed (ACL Active)",
                         severity=Severity.MEDIUM,
+                        attack_techniques=_attack_for("recon.fast_scan"),
                         description=(
                             "SAP Message Server internal port is reachable from the network "
                             "but has an ACL configured that blocks unauthenticated login. "
@@ -1285,6 +1296,7 @@ def check_cve_2025_31324(node: SAPNode, timeout: float = 10.0) -> bool:
                 node.findings.append(Finding(
                     name="CVE-2025-31324 — VisualComposer Metadatauploader RCE",
                     severity=Severity.CRITICAL,
+                    attack_techniques=_attack_for("exploit.cve_2025_31324"),
                     description=(
                         "SAP NetWeaver Visual Composer exposes "
                         "/developmentserver/metadatauploader without "
@@ -1382,6 +1394,7 @@ def check_cve_2020_6287(node: SAPNode, timeout: float = 10.0) -> bool:
                 node.findings.append(Finding(
                     name="CVE-2020-6287 — RECON (LM Config Wizard unauth)",
                     severity=Severity.CRITICAL,
+                    attack_techniques=_attack_for("exploit.cve_2020_6287"),
                     description=(
                         "SAP NetWeaver AS Java LM Configuration Wizard "
                         "exposes /CTCWebService/CTCWebServiceBean without "
@@ -1542,6 +1555,7 @@ def check_cve_2022_22536(node: SAPNode, timeout: float = 12.0,
                 node.findings.append(Finding(
                     name=finding_name,
                     severity=finding_sev,
+                    attack_techniques=_attack_for("exploit.cve_2022_22536"),
                     description=(
                         "SAP NetWeaver / Web Dispatcher ICM mis-handles "
                         "memory pipe (MPI) buffer boundaries, allowing "
@@ -1639,6 +1653,7 @@ def check_cve_2022_22536(node: SAPNode, timeout: float = 12.0,
                 node.findings.append(Finding(
                     name=("CVE-2022-22536 (ICMAD) — kernel patch hygiene"),
                     severity=Severity.INFO,
+                    attack_techniques=_attack_for("exploit.cve_2022_22536"),
                     description=(
                         f"Kernel {patch.get('release', '?')}"
                         f"{' ' + patch.get('variant', '') if patch.get('variant') else ''} "
@@ -1718,6 +1733,7 @@ def check_cve_2022_22536(node: SAPNode, timeout: float = 12.0,
                     name=("CVE-2022-22536 (ICMAD) — suspect "
                            "(confirmed WD, kernel unverified)"),
                     severity=Severity.INFO,
+                    attack_techniques=_attack_for("exploit.cve_2022_22536"),
                     description=(
                         "This host is a confirmed SAP Web Dispatcher "
                         "(via /sap/wdisp/admin probe or Server banner), "
@@ -5130,6 +5146,7 @@ def scan_network_via_saprouter(
             from sapmap_models import Finding, Severity
             node.findings.append(Finding(
                 name="SAP ports ACL-denied by SAProuter",
+                attack_techniques=_attack_for("recon.saprouter_info"),
                 description=(
                     f"SAProuter blocks access to {len(acl_ports)} SAP port(s) "
                     f"on this host: {', '.join(str(p) for p in sorted(acl_ports)[:20])}. "
@@ -5163,6 +5180,7 @@ def scan_network_via_saprouter(
                 from sapmap_models import Finding, Severity
                 node.findings.append(Finding(
                     name="SAProuter ACL partially blocks this host",
+                    attack_techniques=_attack_for("recon.saprouter_info"),
                     description=(
                         f"SAProuter ACL denies access to {len(acl_ports)} "
                         f"port(s): {', '.join(str(p) for p in sorted(acl_ports)[:20])}. "

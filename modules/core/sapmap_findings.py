@@ -45,9 +45,18 @@ def register_listener(fn: Callable[[Dict], None]) -> None:
 def emit_finding(severity: str, node: str, msg: str,
                  cve: Optional[str] = None,
                  ref: Optional[str] = None,
-                 meta: Optional[Dict] = None) -> Optional[Dict]:
+                 meta: Optional[Dict] = None,
+                 attack_capability: Optional[str] = None,
+                 attack_techniques: Optional[List[str]] = None,
+                 ) -> Optional[Dict]:
     """Publish a finding.  Returns the stored record, or None if dropped
     (e.g. severity rejected, or deduped against a recent identical entry).
+
+    ATT&CK tagging: pass ``attack_capability="exploit.cve_2020_6287"`` (a
+    key from modules.core.sapmap_attack.CAPABILITY_MAP) and the resolved
+    technique IDs are stored on the record under ``attack_techniques``.
+    The kwarg is optional — existing callsites continue to work and
+    their findings carry no ATT&CK tags until updated.
     """
     sev = (severity or "").strip().upper()
     if sev not in SEVERITIES:
@@ -56,6 +65,21 @@ def emit_finding(severity: str, node: str, msg: str,
     msg = (msg or "").strip()
     if not msg:
         return None
+
+    # Resolve ATT&CK technique IDs.  Caller may supply either the
+    # capability key (preferred — keeps mappings centralised) or a
+    # raw list of T-IDs.  We accept both and merge.
+    resolved_techniques: List[str] = []
+    if attack_capability:
+        try:
+            from sapmap_attack import techniques_for
+            resolved_techniques.extend(techniques_for(attack_capability))
+        except Exception:
+            pass
+    if attack_techniques:
+        for tid in attack_techniques:
+            if tid and tid not in resolved_techniques:
+                resolved_techniques.append(tid)
 
     now = time.time()
     global _next_id
@@ -78,6 +102,8 @@ def emit_finding(severity: str, node: str, msg: str,
             "cve": cve or "",
             "ref": ref or "",
             "meta": dict(meta or {}),
+            "attack_capability":  attack_capability or "",
+            "attack_techniques":  resolved_techniques,
         }
         _next_id += 1
         _findings.append(record)

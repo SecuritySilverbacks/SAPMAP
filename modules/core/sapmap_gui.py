@@ -1324,6 +1324,46 @@ def create_app(api: SAPMAPApi) -> Bottle:
         sapmap_findings.clear()
         return json.dumps({"status": "ok"})
 
+    # --- MITRE ATT&CK ---------------------------------------------------
+    @app.route("/api/attack/catalog")
+    def attack_catalog():
+        """Return the pinned ATT&CK catalog used by the GUI to resolve
+        technique IDs into human labels and tactic groupings.  The GUI
+        fetches this once at boot and caches it on mapState."""
+        response.content_type = "application/json"
+        from sapmap_attack import (
+            TACTICS, TECHNIQUES, TACTIC_ORDER, ATTACK_VERSION, lookup,
+        )
+        techs = {tid: lookup(tid) for tid in TECHNIQUES}
+        return json.dumps({
+            "version": ATTACK_VERSION,
+            "tactics": dict(TACTICS),
+            "tactic_order": list(TACTIC_ORDER),
+            "techniques": techs,
+        })
+
+    @app.route("/api/attack/heatmap")
+    def attack_heatmap():
+        """Coverage matrix for the in-GUI heatmap modal."""
+        response.content_type = "application/json"
+        from sapmap_attack import heatmap_grid
+        return json.dumps(heatmap_grid(api.state))
+
+    @app.route("/api/attack/navigator_layer")
+    def attack_navigator_layer():
+        """Emit a MITRE ATT&CK Navigator v4.5 layer JSON file.  The user
+        downloads the file and drags it into https://mitre-attack.github.io/attack-navigator/
+        for the canonical heatmap view of this engagement."""
+        from sapmap_attack import to_navigator_layer
+        nodes_count = len(getattr(api.state, "nodes", {}))
+        name = f"SAPMAP engagement ({nodes_count} SAP node"
+        name += "s)" if nodes_count != 1 else ")"
+        layer = to_navigator_layer(api.state, name=name)
+        response.content_type = "application/json"
+        response.headers["Content-Disposition"] = (
+            f'attachment; filename="sapmap_attack_layer.json"')
+        return json.dumps(layer, indent=2)
+
     # -- UI commands (script → frontend) --
     @app.route("/api/ui/commands")
     def get_ui_commands():
@@ -1376,7 +1416,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     sapmap_findings.emit_finding(
                         "CRITICAL", host,
                         f"SCC default credentials live: {sess.user}/manage",
-                        ref="scc.default.creds.live")
+                        ref="scc.default.creds.live",
+                        attack_capability="creds.default_probe")
                     logout(sess)
                 else:
                     tried = ", ".join(a["user"] for a in attempts) or "none"
@@ -2685,7 +2726,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     meta={"username": u["username"],
                           "algorithm": u.get("algorithm"),
                           "hashcat_mode": u.get("hashcat_mode"),
-                          "roles": u.get("roles")})
+                          "roles": u.get("roles")},
+                    attack_capability="creds.user_password_hash")
             else:
                 sapmap_findings.emit_finding(
                     "INFO", host,
@@ -5162,6 +5204,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     f"(baseline={r['baseline_status']} → "
                     f"smuggled={r['smuggled_status']})",
                     cve="CVE-2022-22536",
+                    attack_capability="exploit.cve_2022_22536",
                 )
                 if not any(f.detail and path in f.detail
                               and f.name.startswith("CVE-2022-22536")
@@ -5292,6 +5335,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     f"ICMAD: HPROF heap dump captured "
                     f"({mb:.0f} MB) via CVE-2022-22536 bypass",
                     cve="CVE-2022-22536",
+                    attack_capability="exploit.cve_2022_22536",
                 )
                 node.findings.append(Finding(
                     name="CVE-2022-22536 — HPROF heap dump captured",
@@ -5421,14 +5465,16 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     f"{'VULNERABLE' if cf.get('vulnerable') else 'not vulnerable'}"
                     f" — kernel {cf.get('kernel', '?')}. "
                     f"{cf.get('reason', '')}",
-                    ref="lpe.copyfail.check", meta=cf)
+                    ref="lpe.copyfail.check", meta=cf,
+                    attack_capability="lpe.copyfail")
                 sapmap_findings.emit_finding(
                     "HIGH" if df.get("vulnerable") else "INFO", sid,
                     f"Dirty Frag: "
                     f"{'VULNERABLE' if df.get('vulnerable') else 'not vulnerable'}"
                     f" — kernel {df.get('kernel', '?')} arch "
                     f"{df.get('arch', '?')}. {df.get('reason', '')}",
-                    ref="lpe.dirtyfrag.check", meta=df)
+                    ref="lpe.dirtyfrag.check", meta=df,
+                    attack_capability="lpe.dirtyfrag")
                 if method:
                     sapmap_findings.emit_finding(
                         "INFO", sid,
@@ -5475,7 +5521,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     f" — Windows {ef.get('os_build', '?')} "
                     f"SeImpersonate={'held' if ef.get('has_impersonate') else 'NOT held'}. "
                     f"{ef.get('reason', '')}",
-                    ref="lpe.efspotato.check", meta=ef)
+                    ref="lpe.efspotato.check", meta=ef,
+                    attack_capability="lpe.efspotato")
                 sapmap_findings.emit_finding(
                     "HIGH" if gp.get("vulnerable") else "INFO", sid,
                     f"GodPotato (SeImpersonate -> SYSTEM): "
@@ -5483,7 +5530,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     f" — Windows {gp.get('os_build', '?')} "
                     f"SeImpersonate={'held' if gp.get('has_impersonate') else 'NOT held'}. "
                     f"{gp.get('reason', '')}",
-                    ref="lpe.godpotato.check", meta=gp)
+                    ref="lpe.godpotato.check", meta=gp,
+                    attack_capability="lpe.godpotato")
                 sapmap_findings.emit_finding(
                     "HIGH" if mp.get("vulnerable") else "INFO", sid,
                     f"MiniPlasma (CVE-2020-17103 un-patched): "
@@ -5491,7 +5539,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     f" — Windows {mp.get('os_build', '?')} "
                     f".NET {mp.get('net_version', '?')}. "
                     f"{mp.get('reason', '')}",
-                    ref="lpe.miniplasma.check", meta=mp)
+                    ref="lpe.miniplasma.check", meta=mp,
+                    attack_capability="lpe.miniplasma")
                 if method:
                     sapmap_findings.emit_finding(
                         "INFO", sid,
@@ -7442,6 +7491,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         "CRITICAL", sid,
                         f"ABAP SecStore decrypted — {len(ok)} RFC "
                         f"destination password(s) recovered",
+                        attack_capability="creds.abap_secstore",
                     )
             except Exception as e:
                 import traceback
@@ -7635,6 +7685,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     f"SAProuter info-leak succeeded on {host}:{router_port} "
                     f"— {result['total_clients']} clients, routtab exposed",
                     cve="CVE-2022-27668 (similar) / NIINFO leak",
+                    attack_capability="recon.saprouter_info",
                 )
             else:
                 print(f"[*] {sid}: SAProuter info leak not available "
@@ -8263,6 +8314,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             f"{result.get('total_clients', 0)} clients, "
                             f"routtab exposed",
                             cve="CVE-2022-27668 (similar) / NIINFO leak",
+                            attack_capability="recon.saprouter_info",
                         )
                     else:
                         print(f"[*] {node.sid}: SAProuter info-leak not "
