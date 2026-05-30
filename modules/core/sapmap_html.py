@@ -3598,6 +3598,12 @@ function updateMap() {
   if (Object.keys(fadingNodes).length > 0) {
     setTimeout(updateMap, 80);
   }
+
+  // Re-apply ATT&CK highlight overlays that the SVG rewrite just wiped.
+  // Without this, every state poll (1-2 Hz during a scan) destroys the
+  // pulsing overlay we attached in filterMapToSids(), shortening the
+  // visible effect to ~0.5s.
+  try { _reapplyAttackHighlights(); } catch (_) {}
 }
 
 // --- Event handlers ---
@@ -8702,64 +8708,114 @@ function renderAttackHeatmap(grid) {
   return out.join('');
 }
 
+// Active ATT&CK highlights — SID set + the wall-clock expiry time.
+// _reapplyAttackHighlights() re-emits the pulsing overlay on every
+// updateMap() rerender while sidExpiresAt is still in the future,
+// so the highlight survives the 1-2 Hz polling that rewrites the SVG.
+const HIGHLIGHT_DURATION_MS = 4500;        // wall-clock visible time (~3.5 pulse cycles)
+let _attackHighlight = { sids: new Set(), expiresAt: 0 };
+
+function _attachAttackHighlight(el) {
+  // Idempotent: skip if our overlay is already attached.
+  if (el.querySelector('rect.attack-hl-overlay')) return;
+  const rect = el.querySelector('rect');
+  if (!rect) return;
+  const x = parseFloat(rect.getAttribute('x')) - 6;
+  const y = parseFloat(rect.getAttribute('y')) - 6;
+  const w = parseFloat(rect.getAttribute('width')) + 12;
+  const h = parseFloat(rect.getAttribute('height')) + 12;
+  // Two overlaid layers so the operator can't miss it:
+  //   * a soft amber fill flash that breathes 0.25 → 0.02 → 0.25
+  //   * a thick bright outer ring that pulses opacity + width
+  // Animation cycle is short (1.3s) and repeats indefinitely; the
+  // expiry timer below controls when the overlays are removed.
+  const fill = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+  fill.setAttribute('class', 'attack-hl-overlay');
+  fill.setAttribute('x', x);
+  fill.setAttribute('y', y);
+  fill.setAttribute('width', w);
+  fill.setAttribute('height', h);
+  fill.setAttribute('rx', '10');
+  fill.setAttribute('fill', '#ff8c00');
+  fill.setAttribute('stroke', 'none');
+  fill.setAttribute('opacity', '0.18');
+  fill.setAttribute('pointer-events', 'none');
+  fill.innerHTML = '<animate attributeName="opacity" values="0.25;0.02;0.25" dur="1.3s" repeatCount="indefinite" />';
+  el.appendChild(fill);
+
+  const ring = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+  ring.setAttribute('class', 'attack-hl-overlay');
+  ring.setAttribute('x', x);
+  ring.setAttribute('y', y);
+  ring.setAttribute('width', w);
+  ring.setAttribute('height', h);
+  ring.setAttribute('rx', '10');
+  ring.setAttribute('fill', 'none');
+  ring.setAttribute('stroke', '#ff8c00');
+  ring.setAttribute('stroke-width', '5');
+  ring.setAttribute('pointer-events', 'none');
+  ring.innerHTML =
+    '<animate attributeName="stroke-opacity" values="1;0.35;1" dur="1.3s" repeatCount="indefinite" />'
+  + '<animate attributeName="stroke-width" values="5;8;5" dur="1.3s" repeatCount="indefinite" />';
+  el.appendChild(ring);
+}
+
+function _reapplyAttackHighlights() {
+  if (!_attackHighlight.sids || !_attackHighlight.sids.size) return;
+  if (Date.now() > _attackHighlight.expiresAt) {
+    _clearAttackHighlights();
+    return;
+  }
+  document.querySelectorAll('g.node-box[data-sid]').forEach(el => {
+    if (_attackHighlight.sids.has(el.getAttribute('data-sid'))) {
+      _attachAttackHighlight(el);
+    }
+  });
+}
+
+function _clearAttackHighlights() {
+  _attackHighlight = { sids: new Set(), expiresAt: 0 };
+  document.querySelectorAll('rect.attack-hl-overlay').forEach(e => {
+    try { e.remove(); } catch (_) {}
+  });
+}
+
 function filterMapToSids(sids) {
   // Highlight matching nodes with a pulsing orange outline so the
   // operator can immediately see which systems a technique was
-  // observed on.  Uses an SVG <rect> overlay because CSS filter
-  // drop-shadow on SVG <g> elements is unreliable across browsers.
-  const sidSet = new Set(sids || []);
+  // observed on.  The overlay is re-applied after every updateMap()
+  // call (via _reapplyAttackHighlights at the end of updateMap),
+  // because the SVG rewrite during a poll wipes the overlay we
+  // attached.  HIGHLIGHT_DURATION_MS governs how long the pulse
+  // stays visible regardless of how many polls happen meanwhile.
+  const sidArr = Array.isArray(sids) ? sids : [];
+  _attackHighlight = {
+    sids: new Set(sidArr),
+    expiresAt: Date.now() + HIGHLIGHT_DURATION_MS,
+  };
+
+  // Apply immediately so the first cycle of the pulse starts before
+  // the next updateMap() tick.
   let highlighted = 0;
   document.querySelectorAll('g.node-box[data-sid]').forEach(el => {
-    if (!sidSet.has(el.getAttribute('data-sid'))) return;
+    if (!_attackHighlight.sids.has(el.getAttribute('data-sid'))) return;
     highlighted++;
-    // Find the main <rect> (first child rect) to get the position
-    const rect = el.querySelector('rect');
-    if (!rect) return;
-    const x = parseFloat(rect.getAttribute('x')) - 6;
-    const y = parseFloat(rect.getAttribute('y')) - 6;
-    const w = parseFloat(rect.getAttribute('width')) + 12;
-    const h = parseFloat(rect.getAttribute('height')) + 12;
-    // Two overlaid layers so the operator can't miss it:
-    //   * a soft amber fill flash that breathes 0.25 → 0 → 0.25
-    //   * a thick bright outer ring that pulses 1 → 0.3 → 1
-    // Total animation: 1.3s × 10 cycles = ~13s, then auto-remove.
-    const fill = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-    fill.setAttribute('x', x);
-    fill.setAttribute('y', y);
-    fill.setAttribute('width', w);
-    fill.setAttribute('height', h);
-    fill.setAttribute('rx', '10');
-    fill.setAttribute('fill', '#ff8c00');
-    fill.setAttribute('stroke', 'none');
-    fill.setAttribute('opacity', '0.18');
-    fill.setAttribute('pointer-events', 'none');
-    fill.innerHTML = '<animate attributeName="opacity" values="0.25;0.02;0.25" dur="1.3s" repeatCount="10" />';
-    el.appendChild(fill);
-
-    const ring = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-    ring.setAttribute('x', x);
-    ring.setAttribute('y', y);
-    ring.setAttribute('width', w);
-    ring.setAttribute('height', h);
-    ring.setAttribute('rx', '10');
-    ring.setAttribute('fill', 'none');
-    ring.setAttribute('stroke', '#ff8c00');
-    ring.setAttribute('stroke-width', '5');
-    ring.setAttribute('pointer-events', 'none');
-    ring.innerHTML =
-      '<animate attributeName="stroke-opacity" values="1;0.35;1" dur="1.3s" repeatCount="10" />'
-    + '<animate attributeName="stroke-width" values="5;8;5" dur="1.3s" repeatCount="10" />';
-    el.appendChild(ring);
-    // Also scroll the node into view
-    try { rect.scrollIntoView({behavior: 'smooth', block: 'center', inline: 'center'}); } catch(_) {}
-    // Clean up just after the animation finishes (~13s).
-    setTimeout(() => {
-      try { fill.remove(); } catch(_) {}
-      try { ring.remove(); } catch(_) {}
-    }, 13500);
+    _attachAttackHighlight(el);
+    try {
+      const rect = el.querySelector('rect');
+      if (rect) rect.scrollIntoView({behavior: 'smooth', block: 'center', inline: 'center'});
+    } catch (_) {}
   });
+
+  // Expire the highlight after the wall-clock window so a long-idle
+  // map doesn't pulse forever waiting for the next render tick.
+  setTimeout(() => {
+    if (Date.now() >= _attackHighlight.expiresAt) _clearAttackHighlights();
+  }, HIGHLIGHT_DURATION_MS + 200);
+
   if (highlighted) {
-    showToast('Highlighted ' + highlighted + ' node(s): ' + sids.join(', '), 'info', {autoCloseMs: 13500});
+    showToast('Highlighted ' + highlighted + ' node(s): ' + sidArr.join(', '),
+              'info', {autoCloseMs: HIGHLIGHT_DURATION_MS});
   }
 }
 
