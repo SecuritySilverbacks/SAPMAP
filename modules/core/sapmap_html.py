@@ -462,15 +462,17 @@ body {
 .attack-pill-more {
   background: #161b22; color: #8b949e; border-color: #30363d; cursor: help;
 }
-/* Heatmap modal */
+/* Heatmap modal — width tuned to fit all 11 ATT&CK tactic columns on
+   one row on a typical 1440-wide laptop screen.  Column min-width
+   dropped to 100px so a 14-tactic future state still fits. */
 .attack-heatmap-grid {
   display: grid; gap: 4px;
-  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
   font-family: -apple-system, system-ui, sans-serif;
 }
 .attack-heatmap-col {
   background: #0d1117; border: 1px solid #21262d; border-radius: 4px;
-  padding: 4px; min-width: 110px;
+  padding: 4px; min-width: 100px;
 }
 .attack-heatmap-col h5 {
   margin: 0 0 4px 0; font-size: 10px; color: #8b949e;
@@ -1270,7 +1272,7 @@ body {
 
 <!-- MITRE ATT&CK Coverage Modal -->
 <div class="modal-overlay" id="attack-modal">
-  <div class="modal" style="max-width:1100px;width:95vw;max-height:90vh;display:flex;flex-direction:column">
+  <div class="modal" style="max-width:1600px;width:97vw;max-height:90vh;display:flex;flex-direction:column">
     <h3 style="margin:0 0 6px 0">&#9876;&#65039; MITRE ATT&amp;CK Coverage
       <span style="color:#8b949e;font-weight:normal;font-size:11px"
             id="attack-modal-subtitle"></span>
