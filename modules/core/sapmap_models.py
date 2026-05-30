@@ -1564,11 +1564,20 @@ class SAPMAPState:
             "direct_bapi_recreate":     "lateral.rfc_propagate",
             "secstore_direct":          "lateral.rfc_propagate",
             "tcpip_sxpg":               "lateral.rfc_propagate",
-            # ---- Not a true creation event ----
-            #      Empty string = no ATT&CK tag (info-only registration).
+            # ``existing`` and ``reused_existing`` are reached only AFTER
+            # a successful RFC connection to the target verified that
+            # our user already lives there.  No fresh BAPI create, but
+            # the lateral-movement primitive (Type-3 RFC + valid
+            # account) WAS exercised — so they still count as T1021 +
+            # T1078 on the heatmap.  Without this the operator runs a
+            # propagate, sees JORIS@SAP_ALL on the remote, then notices
+            # Lateral Movement stays dark on the matrix because the
+            # account was pre-provisioned from a prior run.
+            "existing":                 "lateral.rfc_propagate",
+            "reused_existing":          "lateral.rfc_propagate",
+            # ---- Not a true creation / lateral event ----
+            #      Empty string = no ATT&CK tag.
             "provided":                 "",
-            "existing":                 "",
-            "reused_existing":          "",
             "java_preexisting_cached":  "",
         }
         try:
