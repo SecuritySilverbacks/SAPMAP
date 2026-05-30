@@ -3136,13 +3136,21 @@ function updateMap() {
       // Nudge the badge outside the top-left corner (half above / half
       // left) so it doesn't cover the SID text inside the box.
       const bx = x - 4, by = y - 4;
-      html += `<circle cx="${bx}" cy="${by}" r="8" fill="${fill}"`
-        + ` stroke="#0d1117" stroke-width="1.5">`
-        + `<title>${fCount.count} unresolved finding(s) · worst: `
-        + `${fCount.worst}</title></circle>`
+      const tipTop = `${fCount.count} unresolved finding(s) on the live findings bus`
+                   + ` — worst: ${fCount.worst}.`
+                   + `\n\nAny emit_finding() event (CVE hits, SAProuter info leak,`
+                   + ` SecStore decrypt, default creds, LPE probes, …) that the`
+                   + ` operator has NOT dismissed via the bell icon.`
+                   + ` Colour follows the worst severity in the bucket.`
+                   + `\n\nClick the bell in the toolbar to review / dismiss.`;
+      html += `<g style="cursor:help">`
+        + `<title>${escHtml(tipTop)}</title>`
+        + `<circle cx="${bx}" cy="${by}" r="8" fill="${fill}"`
+        + ` stroke="#0d1117" stroke-width="1.5"></circle>`
         + `<text x="${bx}" y="${by+3}" font-size="10" fill="#fff"`
         + ` text-anchor="middle" font-weight="700" font-family="monospace"`
-        + ` pointer-events="none">${fCount.count}</text>`;
+        + ` pointer-events="none">${fCount.count}</text>`
+        + `</g>`;
     }
 
     // Activity spinner for active background tasks
@@ -3243,17 +3251,27 @@ function updateMap() {
 
     // Finding count badge — matches the vulnerability rows shown in the System Details panel
     const isJava = (n.system_type || '').toUpperCase().indexOf('JAVA') !== -1;
-    let vulnCount = 0;
-    if (n.gw_vulnerable) vulnCount++;
-    if (n.ms_vulnerable) vulnCount++;
-    if (isJava && n.cve_2025_31324_vulnerable) vulnCount++;
-    if (isJava && n.cve_2020_6287_vulnerable) vulnCount++;
-    if (n.cve_2022_22536_vulnerable) vulnCount++;
+    const vulnList = [];
+    if (n.gw_vulnerable) vulnList.push('Gateway SAPXPG (10KBLAZE)');
+    if (n.ms_vulnerable) vulnList.push('MS betrusted (CVE-2020-6207)');
+    if (isJava && n.cve_2025_31324_vulnerable) vulnList.push('CVE-2025-31324 (Java VisualComposer)');
+    if (isJava && n.cve_2020_6287_vulnerable) vulnList.push('CVE-2020-6287 (RECON)');
+    if (n.cve_2022_22536_vulnerable) vulnList.push('CVE-2022-22536 (ICMAD)');
+    const vulnCount = vulnList.length;
     if (vulnCount > 0) {
       // All of these map to critical severity (5)
       const badgeColor = '#da3633';
-      html += `<circle cx="${x+BOX_W-14}" cy="${y+BOX_H-14}" r="11" fill="${badgeColor}" />`;
-      html += `<text x="${x+BOX_W-14}" y="${y+BOX_H-10}" text-anchor="middle" font-size="10" fill="#fff">${vulnCount}</text>`;
+      const tipBot = `${vulnCount} confirmed exploit primitive(s) flipped on this node:`
+                   + `\n  • ` + vulnList.join('\n  • ')
+                   + `\n\nThese are persistent booleans on the SAPNode model`
+                   + ` (gw_vulnerable, ms_vulnerable, cve_…_vulnerable).`
+                   + ` Survive across sessions and are NOT cleared by`
+                   + ` dismissing findings in the bell-icon log.`;
+      html += `<g style="cursor:help">`
+        + `<title>${escHtml(tipBot)}</title>`
+        + `<circle cx="${x+BOX_W-14}" cy="${y+BOX_H-14}" r="11" fill="${badgeColor}" />`
+        + `<text x="${x+BOX_W-14}" y="${y+BOX_H-10}" text-anchor="middle" font-size="10" fill="#fff" pointer-events="none">${vulnCount}</text>`
+        + `</g>`;
     }
 
     // BTP-pivot hint: when SecStore extraction recovered an OAuth
