@@ -1259,10 +1259,20 @@ body {
     </h3>
     <div style="font-size:11px;color:#8b949e;margin-bottom:10px">
       Techniques exercised across this engagement, grouped by tactic.
-      Severity-coloured (INFO → CRITICAL); click a cell to filter the
-      map to the SIDs where the technique was observed.
-      <a href="#" onclick="downloadAttackNavigatorLayer();return false"
-         style="color:#79c0ff;margin-left:6px">Export Navigator layer (JSON → loot/reports/)</a>
+      Severity-coloured (INFO → CRITICAL); click a cell to flash the
+      map nodes where the technique was observed.
+      <div style="margin-top:8px;padding:8px 10px;background:#0d1117;border:1px solid #21262d;border-radius:4px">
+        <a href="#" onclick="downloadAttackNavigatorLayer();return false"
+           style="color:#79c0ff;font-weight:600">&#128190; Export Navigator layer (JSON → loot/reports/)</a>
+        <div style="margin-top:6px;color:#6e7681;line-height:1.5">
+          Then open
+          <a href="https://mitre-attack.github.io/attack-navigator/" target="_blank" rel="noopener noreferrer"
+             style="color:#79c0ff">mitre-attack.github.io/attack-navigator</a>
+          &rarr; <em>Open Existing Layer</em> &rarr; <em>Upload from local</em>
+          &rarr; pick the file from <code style="color:#cfd9df">loot/reports/</code>.
+          You'll get MITRE's canonical interactive heatmap of this engagement.
+        </div>
+      </div>
     </div>
     <div id="attack-heatmap-body" style="overflow:auto;flex:1;padding:4px">
       <div style="color:#8b949e;text-align:center;padding:30px">Loading…</div>
