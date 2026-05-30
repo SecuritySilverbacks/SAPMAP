@@ -1262,7 +1262,7 @@ body {
       Severity-coloured (INFO → CRITICAL); click a cell to filter the
       map to the SIDs where the technique was observed.
       <a href="#" onclick="downloadAttackNavigatorLayer();return false"
-         style="color:#79c0ff;margin-left:6px">Download Navigator layer (JSON)</a>
+         style="color:#79c0ff;margin-left:6px">Export Navigator layer (JSON → loot/reports/)</a>
     </div>
     <div id="attack-heatmap-body" style="overflow:auto;flex:1;padding:4px">
       <div style="color:#8b949e;text-align:center;padding:30px">Loading…</div>
@@ -8753,15 +8753,27 @@ function filterMapToSids(sids) {
   }
 }
 
-function downloadAttackNavigatorLayer() {
-  // Triggers a browser download of the Navigator v4.5 JSON layer.
-  // User imports it into https://mitre-attack.github.io/attack-navigator/
-  const a = document.createElement('a');
-  a.href = '/api/attack/navigator_layer';
-  a.download = 'sapmap_attack_layer.json';
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
+async function downloadAttackNavigatorLayer() {
+  // pywebview renders application/json responses inline regardless of
+  // Content-Disposition: attachment, so the natural anchor-download trick
+  // shows the JSON inside the SAPMAP window instead of saving it.
+  // Server-side write keeps the UX consistent across pywebview AND real
+  // browsers: the file always lands in loot/reports/ and we tell the
+  // operator the exact path so they can drag it into Navigator.
+  try {
+    const r = await fetch('/api/attack/save_navigator_layer', {method: 'POST'});
+    const d = await r.json();
+    if (d.status === 'ok') {
+      showToast(
+        'Navigator layer saved (' + (d.techniques || 0) + ' technique' +
+        ((d.techniques === 1) ? '' : 's') + '):  ' + d.path,
+        'info', {autoCloseMs: 12000});
+    } else {
+      showToast('Save failed: ' + (d.error || '?'), 'error');
+    }
+  } catch (e) {
+    showToast('Save failed: ' + e, 'error');
+  }
 }
 
 // =========================================================================

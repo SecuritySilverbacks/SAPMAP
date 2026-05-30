@@ -1357,9 +1357,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
     @app.route("/api/attack/navigator_layer")
     def attack_navigator_layer():
-        """Emit a MITRE ATT&CK Navigator v4.5 layer JSON file.  The user
-        downloads the file and drags it into https://mitre-attack.github.io/attack-navigator/
-        for the canonical heatmap view of this engagement."""
+        """Return the MITRE ATT&CK Navigator v4.5 layer JSON inline.
+        Used by direct fetch / curl; the GUI uses /save_navigator_layer
+        instead because pywebview renders attachment content inline."""
         from sapmap_attack import to_navigator_layer
         nodes_count = len(getattr(api.state, "nodes", {}))
         name = f"SAPMAP engagement ({nodes_count} SAP node"
@@ -1369,6 +1369,36 @@ def create_app(api: SAPMAPApi) -> Bottle:
         response.headers["Content-Disposition"] = (
             f'attachment; filename="sapmap_attack_layer.json"')
         return json.dumps(layer, indent=2)
+
+    @app.route("/api/attack/save_navigator_layer", method="POST")
+    def attack_save_navigator_layer():
+        """Write the Navigator layer JSON to loot/reports/ and return
+        the absolute path.  Used by the in-GUI 'Download Navigator
+        layer' button because pywebview's webview renders attachment
+        Content-Disposition responses inline instead of triggering a
+        download dialog."""
+        response.content_type = "application/json"
+        try:
+            from sapmap_attack import to_navigator_layer
+            from datetime import datetime
+            nodes_count = len(getattr(api.state, "nodes", {}))
+            name = f"SAPMAP engagement ({nodes_count} SAP node"
+            name += "s)" if nodes_count != 1 else ")"
+            layer = to_navigator_layer(api.state, name=name)
+            reports_dir = state_mgr.ensure_loot_dir("reports")
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"sapmap_attack_layer_{ts}.json"
+            path = os.path.join(reports_dir, filename)
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(layer, fh, indent=2)
+            return json.dumps({
+                "status":   "ok",
+                "path":     path,
+                "filename": filename,
+                "techniques": len(layer.get("techniques", [])),
+            })
+        except Exception as e:
+            return json.dumps({"status": "error", "error": str(e)})
 
     # -- UI commands (script → frontend) --
     @app.route("/api/ui/commands")
