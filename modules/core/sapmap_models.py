@@ -1539,12 +1539,45 @@ class SAPMAPState:
         if node:
             node.created_users.append(user)
             node.pwned = True
+        # Map the creation METHOD to the right ATT&CK capability key so
+        # the heatmap reflects what the operator actually exercised.
+        # Methods that use an established RFC destination from another
+        # SAPNode (BAPI + secstore + TCPIP SXPG) count as Lateral
+        # Movement (T1021 Remote Services + T1078 Valid Accounts).
+        # Methods that use an initial-access exploit on the target
+        # itself (gw_exploit, java_recon) carry the corresponding
+        # exploit capability so we don't double-count.
+        _METHOD_ATTACK_CAP = {
+            # ---- Initial Access (the exploit chain that lands the user) ----
+            "gw_exploit":               "exploit.10kblaze",
+            "java_recon":               "exploit.cve_2020_6287",
+            # ---- Privilege Escalation ----
+            "dpmon_sap_star":           "privesc.dpmon_sap_star",
+            # ---- Lateral Movement via RFC ----
+            #      Anything using a Type-3 RFC destination + BAPI_USER_CREATE1
+            #      or TCP/IP RFC + SXPG_STEP_XPG_START is by definition
+            #      remote-services lateral movement (T1021).
+            "bapi_create":              "lateral.rfc_propagate",
+            "rfc_destination":          "lateral.rfc_propagate",
+            "direct_bapi_via_secstore": "lateral.rfc_propagate",
+            "direct_bapi_pwd_reset":    "lateral.rfc_propagate",
+            "direct_bapi_recreate":     "lateral.rfc_propagate",
+            "secstore_direct":          "lateral.rfc_propagate",
+            "tcpip_sxpg":               "lateral.rfc_propagate",
+            # ---- Not a true creation event ----
+            #      Empty string = no ATT&CK tag (info-only registration).
+            "provided":                 "",
+            "existing":                 "",
+            "reused_existing":          "",
+            "java_preexisting_cached":  "",
+        }
         try:
             from sapmap_findings import emit_finding
             emit_finding(
                 "CRITICAL", user.sid,
                 f"User {user.username!r} created on client {user.client} "
                 f"via {user.method} — system pwned",
+                attack_capability=_METHOD_ATTACK_CAP.get(user.method, ""),
             )
         except Exception:
             pass
