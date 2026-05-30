@@ -209,6 +209,14 @@ CAPABILITY_MAP: Dict[str, List[str]] = {
     "persist.sap_all_assign":    ["T1098"],
     "persist.ssh_key_plant":     ["T1098.004"],
     "persist.web_shell":         ["T1505.003"],
+    # Transport upload + STMS register doesn't yet execute anything on
+    # the target — counts as "stash plus pending persistence" + a write
+    # to the data dictionary's information repository.
+    "persist.transport_addtobuffer": ["T1505", "T1213"],
+    # Full `tp import` runs the embedded ABAP — fresh server-side code,
+    # arbitrary commands, and almost always role / account manipulation
+    # (transports routinely ship AGR_* changes).
+    "persist.transport_import":     ["T1505", "T1059", "T1098"],
 
     # ---- Collection ----
     "data.read_table":           ["T1213"],

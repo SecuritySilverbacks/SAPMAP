@@ -7522,6 +7522,67 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:download_table", "Download Table", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/import_transport", method="POST")
+    def node_import_transport(sid):
+        """Upload a local SAP transport (cofile + datafile inside a zip)
+        to a pwned ABAP target, register it in the STMS buffer, and
+        either dry-run-validate (`tp tst`) or import it (`tp import`
+        with U1268 cross-domain flags).
+
+        Multipart body:
+          zip:           the transport .zip (one K* + one R*)
+          target_client: '001' / '100' / ... (defaults to '001')
+          dry_run:       '1' or '0'   (default '1' — runs `tp tst`)
+        Returns task_id immediately; poll /api/node/<sid>/transport_progress
+        for progress + final result.
+        """
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        upload = request.files.get("zip")
+        if not upload:
+            return json.dumps({"error": "missing zip upload"})
+        zip_bytes = upload.file.read()
+        if not zip_bytes:
+            return json.dumps({"error": "empty zip"})
+
+        target_client = (request.forms.get("target_client") or "001").strip()
+        dry_run = (request.forms.get("dry_run") or "1").strip() != "0"
+
+        # Generate a task_id the GUI polls for progress.
+        import uuid as _uuid
+        task_id = f"{sid}_xport_{_uuid.uuid4().hex[:8]}"
+
+        from sap_transport_import import import_transport
+        def _run():
+            try:
+                import_transport(node, zip_bytes, target_client,
+                                 dry_run, task_id)
+            except Exception as e:
+                from sap_transport_import import _new_progress
+                setp = _new_progress(task_id)   # ensure entry exists
+                setp(phase="error",
+                     message=f"orchestrator crashed: {e}",
+                     result={"ok": False, "error": str(e)})
+
+        _bg(f"{sid}:import_transport:{task_id}",
+             "Import Local Transport", _run)
+        return json.dumps({"status": "started", "task_id": task_id})
+
+    @app.route("/api/node/<sid>/transport_progress")
+    def node_transport_progress(sid):
+        """Polled by the modal — returns the live progress dict for a
+        running import.  When phase=='done' or 'error', the 'result'
+        key carries the orchestrator's full return value."""
+        response.content_type = "application/json"
+        task_id = request.params.get("task_id", "")
+        if not task_id:
+            return json.dumps({"error": "missing task_id"})
+        from sap_transport_import import get_progress
+        return json.dumps(get_progress(task_id))
+
     @app.route("/api/node/<sid>/download_secstore", method="POST")
     def node_download_secstore(sid):
         response.content_type = "application/json"
