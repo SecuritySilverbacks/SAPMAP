@@ -7466,6 +7466,18 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 print(f"    Crack iSSHA: hashcat -m 10300 "
                       f"hashcat_{sid}_issha_m10300_{ts}.txt "
                       f"wordlist.txt")
+            # Tag as Credential Access (T1003 OS Credential Dumping
+            # — the SAP-flavoured analogue, walking off with the
+            # entire user/password store).  Without this the heatmap
+            # stays dark under Credential Access even though the
+            # operator just dumped USR02 + USRPWDHISTORY.
+            sapmap_findings.emit_finding(
+                "CRITICAL", sid,
+                f"Extracted password hashes for {len(hashes)} user(s) "
+                f"— {quality_label} → {json_file}",
+                ref="creds.user_password_hash",
+                attack_capability="creds.user_password_hash",
+            )
 
         _bg(f"{sid}:download_hashes", "Extract Hashes", _run)
         return json.dumps({"status": "started"})
@@ -7495,6 +7507,17 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 with open(outfile, "w") as f:
                     json.dump(rows, f, indent=2)
                 print(f"[+] {len(rows)} rows from {table} saved to {outfile}")
+                # Tag as Collection (T1213 Data from Information
+                # Repositories) — without this the heatmap stays dark
+                # under Collection even when the operator just walked
+                # off with a copy of T000 / BSEG / USR04 / etc.
+                sapmap_findings.emit_finding(
+                    "HIGH", sid,
+                    f"Table {table} extracted via RFC_READ_TABLE — "
+                    f"{len(rows)} row(s) saved to {outfile}",
+                    ref="data.read_table",
+                    attack_capability="data.read_table",
+                )
 
         _bg(f"{sid}:download_table", "Download Table", _run)
         return json.dumps({"status": "started"})
