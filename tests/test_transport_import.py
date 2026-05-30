@@ -185,3 +185,27 @@ def test_transport_addtobuffer_excludes_t1059():
     light up Execution at this stage."""
     tids = set(sapmap_attack.CAPABILITY_MAP["persist.transport_addtobuffer"])
     assert "T1059" not in tids
+
+
+# ---------------------------------------------------------------------------
+# Post-verify regex — recover from SAPXPG P4 output truncation
+# ---------------------------------------------------------------------------
+
+def test_buffer_ok_regex_matches_completed_imports():
+    """tp showbuffer prints 'has already been imported completely' when
+    the transport landed cleanly — the rc=None fallback uses this
+    keyword to recover the actual return code."""
+    line = "| A4HK900111          |                    | |has already been imported completely."
+    assert ti._TP_BUFFER_OK_RE.search(line) is not None
+
+
+def test_buffer_ok_regex_matches_in_progress_imports():
+    """An import that's still running shouldn't be classified as a failure."""
+    line = "| A4HK900112  | is currently being imported"
+    assert ti._TP_BUFFER_OK_RE.search(line) is not None
+
+
+def test_buffer_ok_regex_matches_zero_step_status():
+    """Each tp step prints its rc in *NNNN format — *0000 means OK."""
+    line = "| A4HK900113          |          | |*0000 |*0000 |"
+    assert ti._TP_BUFFER_OK_RE.search(line) is not None
