@@ -3840,6 +3840,11 @@ function showCtxMenu(e, sid) {
     'create_user_betrusted': hasMsVuln || hasGwVuln, // need vulnerable MS or GW
     'create_user_gw':   hasGwVuln,                  // need GW vulnerability
     'create_user_dpmon_sapstar': hasGwVuln && isAbapStack && n.dpmon_sap_star_available,  // kernel>=790 + ABAP + GW
+    // Transport import is Mode-B-only: the chunked binary upload + the
+    // tp invocation both ride the GW SAPXPG primitive, which requires
+    // gw_vulnerable.  Transports themselves are an ABAP-stack construct
+    // — a pure-Java target won't have /usr/sap/trans/ or tp at all.
+    'import_transport':  isAbapStack && hasGwVuln,
     'create_user_creds': hasCreds,                  // need credentials
     'lpe':              isAbapStack && hasCreds,    // ABAP-only (BAPI-driven)
     'check_linux_lpe':   !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
@@ -4013,6 +4018,9 @@ function showCtxMenu(e, sid) {
     'icmad_heapdump_pull':    'Run ICMAD ACL Bypass Sweep first; /heapdump/ must bypass to enable HPROF pull',
     'create_user_java':      'Requires Java / dual-stack system AND a usable CVE-2025-31324, RECON, or GW SAPXPG vuln',
     'create_user_gw':   'Requires a vulnerable RFC Gateway',
+    'import_transport': (!isAbapStack
+        ? 'Transport import requires an ABAP stack — transports are an ABAP-only construct (no /usr/sap/trans/ on pure Java).'
+        : 'Requires a vulnerable RFC Gateway — chunked upload + tp invocation both ride the GW SAPXPG primitive. Run "Check GW Vulnerabilities" first.'),
     'create_user_creds': 'Provide credentials first',
     'lpe':              'Provide credentials first',
     'check_linux_lpe':   'Requires OS-exec on Linux host',
