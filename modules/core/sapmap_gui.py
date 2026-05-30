@@ -8643,6 +8643,22 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                 host, router_port, timeout=10)
                             if node.saprouter_info.get("vulnerable"):
                                 node.has_critical_finding = True
+                                # Emit so the bus mirror writes a Finding
+                                # to node.findings and the ATT&CK heatmap
+                                # lights up T1018 + T1592.  The other two
+                                # router-check paths (per-node + bulk
+                                # "Check All SAProuter Info Leak") already
+                                # do this; the bulk-vuln sweep was the
+                                # only one not emitting.
+                                sapmap_findings.emit_finding(
+                                    "HIGH", node.sid,
+                                    f"SAProuter info-leak succeeded on "
+                                    f"{host}:{router_port} — "
+                                    f"{node.saprouter_info.get('total_clients', 0)} "
+                                    f"clients, routtab exposed",
+                                    cve="CVE-2022-27668 (similar) / NIINFO leak",
+                                    attack_capability="recon.saprouter_info",
+                                )
                     except Exception as e:
                         print(f"[-] {node.sid}: check_router_info failed: {e}")
 
