@@ -7142,13 +7142,68 @@ function showFindings(sid) {
   if (!n) return;
   const panel = document.getElementById('detail-panel');
   const sevMap = { 5:'critical', 4:'high', 3:'medium', 2:'low', 1:'info' };
+  const sevToNum = { CRITICAL: 5, HIGH: 4, MEDIUM: 3, LOW: 2, INFO: 1 };
+
+  // 1. Persistent findings (node.findings — survive across sessions)
+  const persistent = (n.findings || []).slice().map(f => ({
+    name: f.name,
+    severity: f.severity,
+    severity_label: f.severity_label || 'INFO',
+    description: f.description || '',
+    detail: f.detail || '',
+    remediation: f.remediation || '',
+    attack_techniques: f.attack_techniques || [],
+    _source: 'persistent',
+  }));
+  const persistentNames = new Set(persistent.map(p => p.name));
+
+  // 2. Live bus findings for this SID — emit_finding() records that
+  //    track ephemeral exploit events (vulnerable gateway, ICMAD
+  //    bypass, ABAP SecStore decrypt, LPE probe results, …).  Many
+  //    flip a SAPNode boolean (gw_vulnerable, …) without appending to
+  //    node.findings, so they wouldn't otherwise appear here.
+  const liveAll = (_activeFindings || []).filter(f => f.node === sid);
+  // Dedupe: if a persistent finding's exact name appears as a live
+  // message we skip the live copy (the persistent one wins because
+  // it carries description + remediation).
+  const live = liveAll
+    .filter(f => !persistentNames.has(f.msg))
+    .map(f => ({
+      name: f.msg,
+      severity: sevToNum[f.severity] || 1,
+      severity_label: f.severity || 'INFO',
+      description: f.cve ? ('CVE / ref: ' + f.cve) : '',
+      detail: f.ref || '',
+      remediation: '',
+      attack_techniques: f.attack_techniques || [],
+      _source: 'live',
+      _id: f.id,
+      _ts: f.ts,
+    }));
+
+  const all = persistent.concat(live)
+    .sort((a, b) => (b.severity || 0) - (a.severity || 0));
+
+  const liveCountLabel = live.length
+    ? ` <span style="color:#8b949e;font-weight:normal;font-size:11px">(${persistent.length} persistent + ${live.length} live)</span>`
+    : '';
+
   panel.innerHTML = `
     <span class="close-btn" onclick="this.parentElement.classList.remove('visible')">&times;</span>
-    <h3>${escHtml(n.sid)} — Findings (${(n.findings||[]).length})</h3>
-    ${(n.findings || []).slice().sort((a,b) => (b.severity||0) - (a.severity||0)).map(f => {
+    <h3>${escHtml(n.sid)} — Findings (${all.length})${liveCountLabel}</h3>
+    ${all.map(f => {
       const cls = 'finding-' + (sevMap[f.severity] || 'info');
       const pills = renderAttackPills(f.attack_techniques || [], {max: 4});
-      return `<div class="finding-item ${cls}"><strong>${escHtml(f.severity_label || 'INFO')}</strong> — ${escHtml(f.name)} ${pills}<br><span style="color:#8b949e;font-size:10px">${escHtml(f.description)}</span></div>`;
+      const sourceTag = f._source === 'live'
+        ? ` <span style="font-size:9px;color:#8b949e;border:1px solid #30363d;border-radius:2px;padding:0 4px;vertical-align:middle" title="From the live findings bus (emit_finding) — also visible in the bell-icon log.  Click bell to dismiss.">live</span>`
+        : '';
+      const detailLine = f.detail
+        ? `<br><span style="color:#6e7681;font-size:10px;font-family:monospace">${escHtml(f.detail)}</span>`
+        : '';
+      const remediationLine = f.remediation
+        ? `<br><span style="color:#3fb950;font-size:10px">&#10004; ${escHtml(f.remediation)}</span>`
+        : '';
+      return `<div class="finding-item ${cls}"><strong>${escHtml(f.severity_label || 'INFO')}</strong>${sourceTag} — ${escHtml(f.name)} ${pills}<br><span style="color:#8b949e;font-size:10px">${escHtml(f.description)}</span>${detailLine}${remediationLine}</div>`;
     }).join('') || '<div style="color:#484f58">No findings</div>'}
   `;
   panel.classList.add('visible');
