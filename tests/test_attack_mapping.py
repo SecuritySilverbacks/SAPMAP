@@ -267,11 +267,18 @@ def test_track_created_user_tags_rfc_methods_with_t1021_lateral_movement():
     state.add_node(SAPNode(sid="S4D", ip="10.0.0.2"))
     sapmap_findings.attach_state(state)
 
+    # ``existing`` and ``reused_existing`` are deliberately included:
+    # both methods are reached only after a successful Type-3 RFC
+    # connection to the target verified the user already lives there.
+    # The CreatedUser is recorded for tracking but no fresh BAPI create
+    # ran — still, the LM primitive (T1021 remote services + T1078
+    # valid accounts) was exercised, so they get tagged.
     rfc_methods = (
         "bapi_create", "rfc_destination",
         "direct_bapi_via_secstore",
         "direct_bapi_pwd_reset", "direct_bapi_recreate",
         "secstore_direct", "tcpip_sxpg",
+        "existing", "reused_existing",
     )
     for method in rfc_methods:
         sapmap_findings.clear()
