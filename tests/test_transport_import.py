@@ -251,3 +251,56 @@ def test_os_type_detection():
     assert ti._os_type(_MockNode("a", "Linux/Unix")) == "linux"
     assert ti._os_type(_MockNode("a", "AIX")) == "linux"  # not windows
     assert ti._os_type(_MockNode("a", "")) == "linux"     # default
+
+
+def test_resolve_paths_honours_overridden_trans_dir_linux():
+    """Operator's SAP install on a non-/usr/sap mountpoint must be
+    honoured (some Linux setups mount the SAP filesystem on /sapmnt
+    or similar)."""
+    p = ti._resolve_paths(_MockNode("S4H", "Linux"),
+                          trans_dir="/sapmnt/trans")
+    assert p["trans_dir"]   == "/sapmnt/trans"
+    assert p["cofiles_dir"] == "/sapmnt/trans/cofiles"
+    assert p["pfl"]         == "/sapmnt/trans/bin/TP_DOMAIN_S4H.PFL"
+
+
+def test_resolve_paths_honours_overridden_trans_dir_windows():
+    """Operator TWT lives on P: not C: — _discover_trans_dir must hand
+    down P:\\usr\\sap\\trans and _resolve_paths must use it verbatim."""
+    p = ti._resolve_paths(_MockNode("TWT", "Windows"),
+                          trans_dir=r"P:\usr\sap\trans")
+    assert p["trans_dir"]   == r"P:\usr\sap\trans"
+    assert p["cofiles_dir"] == r"P:\usr\sap\trans\cofiles"
+    assert p["pfl"]         == r"P:\usr\sap\trans\bin\TP_DOMAIN_TWT.PFL"
+
+
+def test_resolve_paths_trims_trailing_slashes():
+    """Whatever ``_discover_trans_dir`` returns mustn't double the
+    separator — operator might paste 'P:\\usr\\sap\\trans\\' from
+    somewhere."""
+    p = ti._resolve_paths(_MockNode("TWT", "Windows"),
+                          trans_dir="P:\\usr\\sap\\trans\\")
+    assert p["cofiles_dir"] == r"P:\usr\sap\trans\cofiles"
+
+
+def test_dir_library_regex_parses_windows_env_block():
+    """Live cmd /C set output on TWT contained
+    'DIR_LIBRARY=P:\\usr\\sap\\TWT\\D00\\exe' — the regex must hand
+    back 'P:\\usr\\sap' so the orchestrator can append '\\trans'."""
+    env_block = (
+        "ALLUSERSPROFILE=C:\\ProgramData\n"
+        "APPDATA=C:\\Users\\SAPServiceTWT\\AppData\\Roaming\n"
+        "DIR_LIBRARY=P:\\usr\\sap\\TWT\\D00\\exe\n"
+        "ComSpec=C:\\Windows\\system32\\cmd.exe\n"
+    )
+    m = ti._WIN_DIR_LIBRARY_RE.search(env_block)
+    assert m is not None
+    assert m.group(1) == r"P:\usr\sap"
+
+
+def test_usr_sap_regex_matches_anywhere_in_path():
+    """Fallback used when DIR_LIBRARY isn't named exactly — find any
+    drive:\\…\\usr\\sap token."""
+    m = ti._WIN_USR_SAP_RE.search(r"P:\usr\sap\TWT\D00\work")
+    assert m is not None
+    assert m.group(1).lower() == r"p:\usr\sap"
