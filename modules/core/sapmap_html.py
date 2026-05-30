@@ -8693,17 +8693,43 @@ function renderAttackHeatmap(grid) {
 }
 
 function filterMapToSids(sids) {
-  // Best-effort: highlight matching nodes by flashing them.  If a
-  // proper map-filter UI gets added later, this hook is where it
-  // would plug in.
+  // Highlight matching nodes with a pulsing orange outline so the
+  // operator can immediately see which systems a technique was
+  // observed on.  Uses an SVG <rect> overlay because CSS filter
+  // drop-shadow on SVG <g> elements is unreliable across browsers.
   const sidSet = new Set(sids || []);
-  document.querySelectorAll('[data-sid]').forEach(el => {
-    if (sidSet.has(el.getAttribute('data-sid'))) {
-      el.style.filter = 'drop-shadow(0 0 8px #fdba74)';
-      setTimeout(() => { el.style.filter = ''; }, 3500);
-    }
+  let highlighted = 0;
+  document.querySelectorAll('g.node-box[data-sid]').forEach(el => {
+    if (!sidSet.has(el.getAttribute('data-sid'))) return;
+    highlighted++;
+    // Find the main <rect> (first child rect) to get the position
+    const rect = el.querySelector('rect');
+    if (!rect) return;
+    const x = parseFloat(rect.getAttribute('x')) - 4;
+    const y = parseFloat(rect.getAttribute('y')) - 4;
+    const w = parseFloat(rect.getAttribute('width')) + 8;
+    const h = parseFloat(rect.getAttribute('height')) + 8;
+    // Create a pulsing highlight overlay
+    const hl = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    hl.setAttribute('x', x);
+    hl.setAttribute('y', y);
+    hl.setAttribute('width', w);
+    hl.setAttribute('height', h);
+    hl.setAttribute('rx', '8');
+    hl.setAttribute('fill', 'none');
+    hl.setAttribute('stroke', '#fdba74');
+    hl.setAttribute('stroke-width', '3');
+    hl.setAttribute('pointer-events', 'none');
+    hl.innerHTML = '<animate attributeName="stroke-opacity" values="1;0.3;1" dur="1.2s" repeatCount="4" />';
+    el.appendChild(hl);
+    // Also scroll the node into view
+    try { rect.scrollIntoView({behavior: 'smooth', block: 'center', inline: 'center'}); } catch(_) {}
+    // Remove the overlay after the animation finishes (~5s)
+    setTimeout(() => { try { hl.remove(); } catch(_) {} }, 5000);
   });
-  showToast('Highlighted ' + sids.length + ' node(s)', 'info', {autoCloseMs: 2500});
+  if (highlighted) {
+    showToast('Highlighted ' + highlighted + ' node(s): ' + sids.join(', '), 'info', {autoCloseMs: 3500});
+  }
 }
 
 function downloadAttackNavigatorLayer() {
