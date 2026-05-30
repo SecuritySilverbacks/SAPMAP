@@ -209,3 +209,45 @@ def test_buffer_ok_regex_matches_zero_step_status():
     """Each tp step prints its rc in *NNNN format — *0000 means OK."""
     line = "| A4HK900113          |          | |*0000 |*0000 |"
     assert ti._TP_BUFFER_OK_RE.search(line) is not None
+
+
+# ---------------------------------------------------------------------------
+# OS-aware path resolution
+# ---------------------------------------------------------------------------
+
+class _MockNode:
+    def __init__(self, sid: str, os_type: str = ""):
+        self.sid = sid
+        self.os_type = os_type
+        self.system_type = "ABAP"
+
+
+def test_resolve_paths_linux_default():
+    p = ti._resolve_paths(_MockNode("S4H", "Linux/Unix"))
+    assert p["cofiles_dir"] == "/usr/sap/trans/cofiles"
+    assert p["data_dir"]    == "/usr/sap/trans/data"
+    assert p["pfl"]         == "/usr/sap/trans/bin/TP_DOMAIN_S4H.PFL"
+    assert p["sep"]         == "/"
+
+
+def test_resolve_paths_windows():
+    p = ti._resolve_paths(_MockNode("TWT", "Windows"))
+    assert p["cofiles_dir"] == r"C:\usr\sap\trans\cofiles"
+    assert p["data_dir"]    == r"C:\usr\sap\trans\data"
+    assert p["pfl"]         == r"C:\usr\sap\trans\bin\TP_DOMAIN_TWT.PFL"
+    assert p["sep"]         == "\\"
+
+
+def test_resolve_paths_blank_os_defaults_linux():
+    """Defensive: blank os_type → Linux path layout (most SAP systems
+    in the wild)."""
+    p = ti._resolve_paths(_MockNode("XYZ", ""))
+    assert "/usr/sap/trans" in p["trans_dir"]
+
+
+def test_os_type_detection():
+    assert ti._os_type(_MockNode("a", "Windows NT")) == "windows"
+    assert ti._os_type(_MockNode("a", "Windows Server 2019")) == "windows"
+    assert ti._os_type(_MockNode("a", "Linux/Unix")) == "linux"
+    assert ti._os_type(_MockNode("a", "AIX")) == "linux"  # not windows
+    assert ti._os_type(_MockNode("a", "")) == "linux"     # default
