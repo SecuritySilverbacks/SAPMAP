@@ -1332,16 +1332,18 @@ body {
         <label>Target client</label>
         <input id="import-tr-client" type="text" value="001" maxlength="3" style="width:80px">
       </div>
-      <div class="form-row" style="display:flex;align-items:center;gap:8px;margin-top:4px">
-        <input id="import-tr-dryrun" type="checkbox" checked>
-        <label for="import-tr-dryrun" style="margin:0;cursor:pointer">
-          Dry-run only (<code>tp tst</code> with rollback — recommended)
+      <div style="margin-top:14px;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:4px">
+        <label for="import-tr-dryrun" style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:0;font-size:13px;color:#e6edf3">
+          <input id="import-tr-dryrun" type="checkbox" checked
+                 style="width:18px;height:18px;flex:0 0 18px;margin:0;cursor:pointer;accent-color:#3fb950">
+          <span><strong>Dry-run only</strong> (<code>tp tst</code> with rollback — recommended)</span>
         </label>
-      </div>
-      <div style="color:#8b949e;font-size:11px;margin-top:4px">
-        Real imports always use <code>U1268</code> unconditional flags so
-        the cross-domain (source SID ≠ this target) case works without
-        extra setup.
+        <div style="color:#8b949e;font-size:11px;margin-top:6px;margin-left:28px;line-height:1.4">
+          <strong style="color:#d29922">Uncheck</strong> to perform a real
+          <code>tp import</code>. Real imports always use <code>U1268</code>
+          unconditional flags so the cross-domain (source SID ≠ this
+          target) case works without extra setup.
+        </div>
       </div>
     </div>
 
