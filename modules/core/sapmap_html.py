@@ -890,6 +890,7 @@ body {
       <div class="ctx-item" data-action="create_tcpip">&#128279; Create TCP/IP Dest (sapxpg)</div>
       <div class="ctx-item" data-action="os_terminal">&#128187; OS Command Terminal</div>
       <div class="ctx-item" data-action="reverse_shell">&#128279; Reverse Shell</div>
+      <div class="ctx-item" data-action="import_transport">&#128230; Import Local Transport (zip)</div>
       <div class="ctx-sep"></div>
       <!-- MYSAPSSO2 ticket-forgery workflow.  The SSO2 profile
            pre-flight check used to be its own menu entry; it now
@@ -1299,6 +1300,71 @@ body {
     </div>
     <div class="form-actions" style="margin-top:8px">
       <button class="btn" onclick="closeModal('attack-modal')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Import Local Transport modal -->
+<div class="modal-overlay" id="import-transport-modal">
+  <div class="modal" style="max-width:760px;width:95vw;display:flex;flex-direction:column;max-height:90vh">
+    <h3 style="margin:0 0 6px 0">&#128230; Import Local Transport
+      <span id="import-tr-sid" style="color:#8b949e;font-size:12px"></span>
+    </h3>
+    <div id="import-tr-form" style="overflow:auto">
+      <div style="background:#3a0f10;border:1px solid #8b0000;border-radius:4px;padding:10px 12px;margin-bottom:12px;font-size:12px;color:#ffcccc;line-height:1.5">
+        <strong style="color:#ff6b6b">&#9888;&#65039; Read this BEFORE running:</strong>
+        This writes the cofile + datafile to <code>/usr/sap/trans/</code> on
+        the target and runs <code>tp</code>.  A successful <code>tp import</code>
+        permanently modifies the ABAP data dictionary, can grant SAP_ALL via
+        planted roles, install backdoor programs, or break production.
+        Default mode is <strong>dry-run</strong> (<code>tp tst</code>) which
+        performs the full import logic but rolls back at the end — safe.
+        Only uncheck dry-run after written authorisation.
+      </div>
+      <div class="form-row">
+        <label>Transport zip
+          <span style="color:#8b949e;font-weight:normal">(must contain one
+          <code>K&lt;num&gt;.&lt;SID&gt;</code> + one <code>R&lt;num&gt;.&lt;SID&gt;</code>)</span>
+        </label>
+        <input id="import-tr-zip" type="file" accept=".zip" style="width:100%">
+      </div>
+      <div class="form-row">
+        <label>Target client</label>
+        <input id="import-tr-client" type="text" value="001" maxlength="3" style="width:80px">
+      </div>
+      <div class="form-row" style="display:flex;align-items:center;gap:8px;margin-top:4px">
+        <input id="import-tr-dryrun" type="checkbox" checked>
+        <label for="import-tr-dryrun" style="margin:0;cursor:pointer">
+          Dry-run only (<code>tp tst</code> with rollback — recommended)
+        </label>
+      </div>
+      <div style="color:#8b949e;font-size:11px;margin-top:4px">
+        Real imports always use <code>U1268</code> unconditional flags so
+        the cross-domain (source SID ≠ this target) case works without
+        extra setup.
+      </div>
+    </div>
+
+    <div id="import-tr-progress" style="display:none;margin-top:10px">
+      <div style="font-size:12px;color:#cfd9df;margin-bottom:4px">
+        <span id="import-tr-phase">phase</span> —
+        <span id="import-tr-msg">…</span>
+      </div>
+      <div style="background:#0d1117;border:1px solid #21262d;border-radius:4px;height:14px;overflow:hidden">
+        <div id="import-tr-bar" style="background:linear-gradient(90deg,#3fb950,#79c0ff);height:100%;width:0%;transition:width 200ms"></div>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:10px;color:#8b949e;margin-top:2px">
+        <span id="import-tr-counter">0 / 0</span>
+        <span id="import-tr-eta">—</span>
+      </div>
+      <div id="import-tr-log" style="margin-top:8px;background:#010409;border:1px solid #21262d;border-radius:4px;padding:6px 8px;font-family:monospace;font-size:10.5px;color:#cfd9df;max-height:240px;overflow:auto;white-space:pre-wrap"></div>
+    </div>
+
+    <div id="import-tr-result" style="display:none;margin-top:10px;font-size:12px"></div>
+
+    <div class="form-actions" style="margin-top:12px">
+      <button id="import-tr-go" class="btn btn-primary" onclick="runImportTransport()">Run</button>
+      <button class="btn" onclick="closeModal('import-transport-modal');_stopImportTrPoll()">Close</button>
     </div>
   </div>
 </div>
@@ -5082,6 +5148,7 @@ async function ctxAction(action) {
       await api('POST', `node/${sid}/impact_assess_java`); break;
     case 'os_terminal': showTerminalModal(sid); break;
     case 'reverse_shell': showShellModal(sid); break;
+    case 'import_transport': showImportTransportModal(sid); break;
     case 'create_tcpip': showTcpipModal(sid); break;
     case 'propagate': showPropagateModal(sid); break;
     case 'harvest_btp_creds': await showHarvestBtpCredsModal(sid); break;
@@ -8261,6 +8328,182 @@ async function termExec() {
 // --- Reverse Shell ---
 let _shellPollId = null;
 let _shellSid = '';
+
+// =========================================================================
+// Import Local Transport modal — Mode B (pwned gw_vulnerable ABAP)
+// =========================================================================
+let _importTrSid = null;
+let _importTrTaskId = null;
+let _importTrPollTimer = null;
+
+function showImportTransportModal(sid) {
+  _importTrSid = sid;
+  const n = (mapState.nodes || {})[sid];
+  if (!n) return;
+
+  // Soft pre-flight: warn (don't block) — the backend re-checks.
+  const sysType = (n.system_type || '').toUpperCase();
+  let preflight = '';
+  if (!n.gw_vulnerable) {
+    preflight = '⚠️ This node is NOT flagged as gateway-vulnerable. Run "Check GW Vulnerabilities" first — the import will be refused otherwise.';
+  } else if (sysType.indexOf('ABAP') === -1) {
+    preflight = '⚠️ This node\'s stack is ' + sysType + ' — transport import requires an ABAP stack and will be refused.';
+  }
+  if (preflight) {
+    if (!confirm(preflight + '\n\nOpen the modal anyway?')) return;
+  }
+
+  document.getElementById('import-tr-sid').textContent = '— target: ' + sid;
+  document.getElementById('import-tr-form').style.display = '';
+  document.getElementById('import-tr-progress').style.display = 'none';
+  document.getElementById('import-tr-result').style.display = 'none';
+  document.getElementById('import-tr-go').disabled = false;
+  document.getElementById('import-tr-go').textContent = 'Run';
+  document.getElementById('import-tr-zip').value = '';
+  document.getElementById('import-tr-client').value = (n.clients || []).length
+    ? (n.clients[0].nr || n.clients[0] || '001')
+    : '001';
+  document.getElementById('import-tr-dryrun').checked = true;
+  document.getElementById('import-tr-log').textContent = '';
+  document.getElementById('import-tr-bar').style.width = '0%';
+  document.getElementById('import-tr-counter').textContent = '0 / 0';
+  document.getElementById('import-tr-eta').textContent = '—';
+
+  document.getElementById('import-transport-modal').classList.add('visible');
+}
+
+async function runImportTransport() {
+  const sid = _importTrSid;
+  if (!sid) return;
+  const fileInput = document.getElementById('import-tr-zip');
+  if (!fileInput.files.length) {
+    alert('Pick a transport zip first.');
+    return;
+  }
+  const file = fileInput.files[0];
+  const client = (document.getElementById('import-tr-client').value || '001').trim();
+  const dryRun = document.getElementById('import-tr-dryrun').checked;
+
+  if (!dryRun) {
+    if (!confirm(
+        'Run REAL tp import on ' + sid + ' (client ' + client + ')?\n\n' +
+        'This permanently modifies the target\'s ABAP data dictionary.\n' +
+        'Cross-domain unconditional flags U1268 will be set.\n\n' +
+        'Continue?')) return;
+  }
+
+  const fd = new FormData();
+  fd.append('zip', file);
+  fd.append('target_client', client);
+  fd.append('dry_run', dryRun ? '1' : '0');
+
+  document.getElementById('import-tr-go').disabled = true;
+  document.getElementById('import-tr-go').textContent = 'Running…';
+  document.getElementById('import-tr-progress').style.display = '';
+  document.getElementById('import-tr-log').textContent = '';
+  document.getElementById('import-tr-phase').textContent = 'submitting';
+  document.getElementById('import-tr-msg').textContent = 'Uploading zip to SAPMAP…';
+
+  let resp;
+  try {
+    const r = await fetch('/api/node/' + encodeURIComponent(sid) + '/import_transport',
+      {method: 'POST', body: fd});
+    resp = await r.json();
+  } catch (e) {
+    showToast('Submit failed: ' + e, 'error');
+    document.getElementById('import-tr-go').disabled = false;
+    document.getElementById('import-tr-go').textContent = 'Run';
+    return;
+  }
+
+  if (resp.error || !resp.task_id) {
+    showToast('Submit rejected: ' + (resp.error || 'no task_id'), 'error');
+    document.getElementById('import-tr-go').disabled = false;
+    document.getElementById('import-tr-go').textContent = 'Run';
+    return;
+  }
+  _importTrTaskId = resp.task_id;
+  _startImportTrPoll();
+}
+
+function _startImportTrPoll() {
+  _stopImportTrPoll();
+  _importTrPollTimer = setInterval(_pollImportTrProgress, 700);
+  _pollImportTrProgress();
+}
+
+function _stopImportTrPoll() {
+  if (_importTrPollTimer) {
+    clearInterval(_importTrPollTimer);
+    _importTrPollTimer = null;
+  }
+}
+
+async function _pollImportTrProgress() {
+  if (!_importTrSid || !_importTrTaskId) return;
+  let p;
+  try {
+    const r = await fetch('/api/node/' + encodeURIComponent(_importTrSid)
+      + '/transport_progress?task_id=' + encodeURIComponent(_importTrTaskId));
+    p = await r.json();
+  } catch (e) {
+    return; // transient — keep polling
+  }
+  if (!p || !p.phase) return;
+
+  document.getElementById('import-tr-phase').textContent = p.phase || '';
+  document.getElementById('import-tr-msg').textContent = p.message || '';
+  document.getElementById('import-tr-bar').style.width = (p.percent || 0) + '%';
+  if (p.total) {
+    document.getElementById('import-tr-counter').textContent =
+      (p.current || 0) + ' / ' + p.total;
+  } else {
+    document.getElementById('import-tr-counter').textContent = '';
+  }
+  document.getElementById('import-tr-eta').textContent =
+    (p.eta_s && p.eta_s > 0) ? ('ETA ' + p.eta_s + 's') : '—';
+
+  // Append log lines (preserve scroll position when user has scrolled up)
+  if (Array.isArray(p.log)) {
+    const el = document.getElementById('import-tr-log');
+    const stick = (el.scrollTop + el.clientHeight + 4) >= el.scrollHeight;
+    el.textContent = p.log.join('\n');
+    if (stick) el.scrollTop = el.scrollHeight;
+  }
+
+  if (p.phase === 'done' || p.phase === 'error') {
+    _stopImportTrPoll();
+    document.getElementById('import-tr-go').disabled = false;
+    document.getElementById('import-tr-go').textContent = 'Run again';
+    _renderImportTrResult(p.result || {});
+  }
+}
+
+function _renderImportTrResult(res) {
+  const el = document.getElementById('import-tr-result');
+  el.style.display = '';
+  const ok = !!res.ok;
+  const color = ok ? '#3fb950' : '#f85149';
+  const title = ok ? '✅ Success' : '❌ Failed';
+  let html = '<div style="color:' + color + ';font-weight:600;margin-bottom:6px">' + title + '</div>';
+  if (res.error) {
+    html += '<div style="color:#ffcccc;margin-bottom:6px">' + escHtml(res.error) + '</div>';
+  }
+  if (res.trkorr) {
+    html += '<div><b>Transport:</b> ' + escHtml(res.trkorr) + ' (source ' + escHtml(res.source_sid || '?') + ')</div>';
+  }
+  if (res.target_sid) {
+    html += '<div><b>Target:</b> ' + escHtml(res.target_sid) + ' client ' + escHtml(res.target_client || '?') + '</div>';
+  }
+  if (res.cofile_md5) html += '<div><b>cofile md5:</b> <code>' + escHtml(res.cofile_md5) + '</code></div>';
+  if (res.datafile_md5) html += '<div><b>datafile md5:</b> <code>' + escHtml(res.datafile_md5) + '</code></div>';
+  html += '<div><b>tp addtobuffer rc:</b> ' + (res.addtobuffer_rc != null ? res.addtobuffer_rc : '—') + '</div>';
+  html += '<div><b>tp ' + (res.dry_run ? 'tst' : 'import') + ' rc:</b> ' + (res.import_rc != null ? res.import_rc : '—') + '</div>';
+  if (res.log_path) {
+    html += '<div style="margin-top:6px;color:#8b949e">Full log: <code>' + escHtml(res.log_path) + '</code></div>';
+  }
+  el.innerHTML = html;
+}
 
 async function showShellModal(sid) {
   _shellSid = sid;
