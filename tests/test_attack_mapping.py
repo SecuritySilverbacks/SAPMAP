@@ -256,6 +256,79 @@ def test_attach_state_dedupes_repeat_emits():
     sapmap_findings.attach_state(None)
 
 
+def test_track_created_user_tags_rfc_methods_with_t1021_lateral_movement():
+    """Every CreatedUser method that uses an RFC destination from a
+    different SAPNode (BAPI_USER_CREATE1 over Type-3 RFC + the secstore
+    / pwd-reset variants + TCP/IP SXPG) must trigger T1021 on the
+    ATT&CK heatmap.  Pin all of them so a future contributor adding
+    another RFC-propagation method sees the mapping convention."""
+    from sapmap_models import CreatedUser
+    state = SAPMAPState()
+    state.add_node(SAPNode(sid="S4D", ip="10.0.0.2"))
+    sapmap_findings.attach_state(state)
+
+    rfc_methods = (
+        "bapi_create", "rfc_destination",
+        "direct_bapi_via_secstore",
+        "direct_bapi_pwd_reset", "direct_bapi_recreate",
+        "secstore_direct", "tcpip_sxpg",
+    )
+    for method in rfc_methods:
+        sapmap_findings.clear()
+        # Each new user has to be unique so dedup doesn't suppress it.
+        state.created_users = []
+        node = state.get_node("S4D")
+        node.findings = []
+        node.created_users = []
+
+        user = CreatedUser(
+            username=f"SAPMAP_{method}", sid="S4D", client="100",
+            hostname="h", ip="10.0.0.2", instance_nr="00", method=method)
+        state.track_created_user(user)
+
+        # The mirror writes a Finding onto node.findings (CRITICAL passes
+        # the severity gate); inspect attack_techniques on it.
+        assert node.findings, f"no finding emitted for method={method}"
+        tids = node.findings[-1].attack_techniques
+        assert "T1021" in tids, (
+            f"method={method} should trigger T1021 Remote Services "
+            f"(Lateral Movement); got {tids}")
+        assert "T1078" in tids, (
+            f"method={method} should also trigger T1078 Valid Accounts; "
+            f"got {tids}")
+
+    sapmap_findings.attach_state(None)
+
+
+def test_track_created_user_initial_access_methods_get_their_exploit_tag():
+    """gw_exploit and java_recon are NOT lateral — they create the user
+    via an initial-access exploit chain.  Verify the heatmap reflects
+    the exploit, not lateral movement."""
+    from sapmap_models import CreatedUser
+    state = SAPMAPState()
+    state.add_node(SAPNode(sid="S4H", ip="10.0.0.1"))
+    sapmap_findings.attach_state(state)
+
+    for method, expected_tid in (("gw_exploit", "T1190"),
+                                 ("java_recon", "T1190")):
+        sapmap_findings.clear()
+        state.created_users = []
+        state.get_node("S4H").findings = []
+        state.get_node("S4H").created_users = []
+        user = CreatedUser(
+            username=f"u_{method}", sid="S4H", client="000",
+            hostname="h", ip="10.0.0.1", instance_nr="00", method=method)
+        state.track_created_user(user)
+        tids = state.get_node("S4H").findings[-1].attack_techniques
+        assert expected_tid in tids, \
+            f"method={method} should tag {expected_tid}; got {tids}"
+        assert "T1021" not in tids, \
+            f"method={method} should NOT tag T1021 (it's initial access, " \
+            f"not lateral movement)"
+
+    sapmap_findings.attach_state(None)
+
+
 def test_attach_state_unknown_sid_does_nothing():
     state = SAPMAPState()
     state.add_node(SAPNode(sid="S4H", ip="10.0.0.1"))
