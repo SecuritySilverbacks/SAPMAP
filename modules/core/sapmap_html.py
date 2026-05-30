@@ -8705,30 +8705,51 @@ function filterMapToSids(sids) {
     // Find the main <rect> (first child rect) to get the position
     const rect = el.querySelector('rect');
     if (!rect) return;
-    const x = parseFloat(rect.getAttribute('x')) - 4;
-    const y = parseFloat(rect.getAttribute('y')) - 4;
-    const w = parseFloat(rect.getAttribute('width')) + 8;
-    const h = parseFloat(rect.getAttribute('height')) + 8;
-    // Create a pulsing highlight overlay
-    const hl = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-    hl.setAttribute('x', x);
-    hl.setAttribute('y', y);
-    hl.setAttribute('width', w);
-    hl.setAttribute('height', h);
-    hl.setAttribute('rx', '8');
-    hl.setAttribute('fill', 'none');
-    hl.setAttribute('stroke', '#fdba74');
-    hl.setAttribute('stroke-width', '3');
-    hl.setAttribute('pointer-events', 'none');
-    hl.innerHTML = '<animate attributeName="stroke-opacity" values="1;0.3;1" dur="1.2s" repeatCount="4" />';
-    el.appendChild(hl);
+    const x = parseFloat(rect.getAttribute('x')) - 6;
+    const y = parseFloat(rect.getAttribute('y')) - 6;
+    const w = parseFloat(rect.getAttribute('width')) + 12;
+    const h = parseFloat(rect.getAttribute('height')) + 12;
+    // Two overlaid layers so the operator can't miss it:
+    //   * a soft amber fill flash that breathes 0.25 → 0 → 0.25
+    //   * a thick bright outer ring that pulses 1 → 0.3 → 1
+    // Total animation: 1.3s × 10 cycles = ~13s, then auto-remove.
+    const fill = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    fill.setAttribute('x', x);
+    fill.setAttribute('y', y);
+    fill.setAttribute('width', w);
+    fill.setAttribute('height', h);
+    fill.setAttribute('rx', '10');
+    fill.setAttribute('fill', '#ff8c00');
+    fill.setAttribute('stroke', 'none');
+    fill.setAttribute('opacity', '0.18');
+    fill.setAttribute('pointer-events', 'none');
+    fill.innerHTML = '<animate attributeName="opacity" values="0.25;0.02;0.25" dur="1.3s" repeatCount="10" />';
+    el.appendChild(fill);
+
+    const ring = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    ring.setAttribute('x', x);
+    ring.setAttribute('y', y);
+    ring.setAttribute('width', w);
+    ring.setAttribute('height', h);
+    ring.setAttribute('rx', '10');
+    ring.setAttribute('fill', 'none');
+    ring.setAttribute('stroke', '#ff8c00');
+    ring.setAttribute('stroke-width', '5');
+    ring.setAttribute('pointer-events', 'none');
+    ring.innerHTML =
+      '<animate attributeName="stroke-opacity" values="1;0.35;1" dur="1.3s" repeatCount="10" />'
+    + '<animate attributeName="stroke-width" values="5;8;5" dur="1.3s" repeatCount="10" />';
+    el.appendChild(ring);
     // Also scroll the node into view
     try { rect.scrollIntoView({behavior: 'smooth', block: 'center', inline: 'center'}); } catch(_) {}
-    // Remove the overlay after the animation finishes (~5s)
-    setTimeout(() => { try { hl.remove(); } catch(_) {} }, 5000);
+    // Clean up just after the animation finishes (~13s).
+    setTimeout(() => {
+      try { fill.remove(); } catch(_) {}
+      try { ring.remove(); } catch(_) {}
+    }, 13500);
   });
   if (highlighted) {
-    showToast('Highlighted ' + highlighted + ' node(s): ' + sids.join(', '), 'info', {autoCloseMs: 3500});
+    showToast('Highlighted ' + highlighted + ' node(s): ' + sids.join(', '), 'info', {autoCloseMs: 13500});
   }
 }
 
