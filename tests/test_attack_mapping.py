@@ -62,6 +62,29 @@ def test_pinned_attack_version_set():
     assert sapmap_attack.ATTACK_DOMAIN == "enterprise-attack"
 
 
+def test_v19_migration_ta0005_renamed_to_stealth():
+    """TA0005 was renamed from 'Defense Evasion' to 'Stealth' in ATT&CK v19.
+    A sibling tactic TA0112 'Defense Impairment' was added alongside.
+    Both must be present in the tactics catalog post-migration."""
+    assert sapmap_attack.TACTICS["TA0005"] == "Stealth"
+    assert sapmap_attack.TACTICS.get("TA0112") == "Defense Impairment"
+    assert "TA0112" in sapmap_attack.TACTIC_ORDER
+
+
+def test_v19_migration_t1550_moved_to_lateral_movement():
+    """T1550 Use Alternate Authentication Material (and its sub-techniques)
+    moved from TA0005 Defense Evasion → TA0008 Lateral Movement in v19."""
+    t1550 = sapmap_attack.lookup("T1550")
+    assert t1550 is not None
+    assert t1550["tactic"] == "TA0008"
+    assert t1550["tactic_name"] == "Lateral Movement"
+
+    t1550_004 = sapmap_attack.lookup("T1550.004")
+    assert t1550_004 is not None
+    assert t1550_004["tactic"] == "TA0008"
+    assert t1550_004["sub_of"] == "T1550"
+
+
 # ---------------------------------------------------------------------------
 # Lookup helpers
 # ---------------------------------------------------------------------------

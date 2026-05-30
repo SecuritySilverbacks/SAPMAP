@@ -1,7 +1,7 @@
 """
 sapmap_attack.py — MITRE ATT&CK Enterprise mapping for SAPMAP capabilities.
 
-Pinned against ATT&CK Enterprise v15.1.  Three pieces:
+Pinned against ATT&CK Enterprise v19.1 (released 2026-04-28).  Three pieces:
 
     TACTICS         — the 12 enterprise tactics.
     TECHNIQUES      — only the techniques SAPMAP maps to.  We do NOT
@@ -25,9 +25,27 @@ from __future__ import annotations
 
 from typing import Dict, Iterable, List, Optional
 
-ATTACK_VERSION = "v15.1"
+ATTACK_VERSION = "v19.1"
 ATTACK_DOMAIN = "enterprise-attack"
 NAVIGATOR_VERSION = "4.5"
+
+# v15.1 → v19.1 migration notes (April 2026 release):
+#   * TA0005 was RENAMED from "Defense Evasion" to "Stealth".
+#     A new sibling tactic TA0112 "Defense Impairment" was added
+#     for techniques that intentionally weaken defensive controls
+#     (firewall mods, tool disablement, etc.).  SAPMAP doesn't map
+#     to TA0112 yet but it's listed here for forward compatibility.
+#   * T1550 Use Alternate Authentication Material was MOVED from
+#     TA0005 (Defense Evasion) to TA0008 (Lateral Movement).  Its
+#     sub-techniques (incl. T1550.004 Web Session Cookie) follow.
+#   * T1574 Hijack Execution Flow now lives under both TA0005
+#     (Stealth) and TA0002 (Execution); we keep the primary mapping
+#     to TA0005 for the heatmap grid since that's where it's
+#     historically been catalogued.
+#   * Several v19 additions (T1685 "Disable or Modify Tools" merger,
+#     T1684 "Social Engineering" parent, T1682 "Query Public AI
+#     Services") are not relevant to SAP/landscape attacks and are
+#     intentionally not catalogued here.
 
 
 # ---------------------------------------------------------------------------
@@ -41,7 +59,8 @@ TACTICS: Dict[str, str] = {
     "TA0002": "Execution",
     "TA0003": "Persistence",
     "TA0004": "Privilege Escalation",
-    "TA0005": "Defense Evasion",
+    "TA0005": "Stealth",                # Renamed from "Defense Evasion" in v19
+    "TA0112": "Defense Impairment",     # New in v19 (TA0005 sibling)
     "TA0006": "Credential Access",
     "TA0007": "Discovery",
     "TA0008": "Lateral Movement",
@@ -54,7 +73,7 @@ TACTICS: Dict[str, str] = {
 # Display order used by the heatmap grid (left→right) and report.
 TACTIC_ORDER: List[str] = [
     "TA0043", "TA0042", "TA0001", "TA0002", "TA0003", "TA0004",
-    "TA0005", "TA0006", "TA0007", "TA0008", "TA0009", "TA0011",
+    "TA0005", "TA0112", "TA0006", "TA0007", "TA0008", "TA0009", "TA0011",
     "TA0010", "TA0040",
 ]
 
@@ -93,10 +112,8 @@ TECHNIQUES: Dict[str, Dict] = {
     # Privilege Escalation
     "T1068":     {"name": "Exploitation for Privilege Escalation", "tactic": "TA0004"},
 
-    # Defense Evasion
+    # Stealth (formerly Defense Evasion — renamed in ATT&CK v19)
     "T1574":     {"name": "Hijack Execution Flow",          "tactic": "TA0005"},
-    "T1550":     {"name": "Use Alternate Authentication Material", "tactic": "TA0005"},
-    "T1550.004": {"name": "Web Session Cookie",             "tactic": "TA0005", "sub_of": "T1550"},
 
     # Credential Access
     "T1003":     {"name": "OS Credential Dumping",          "tactic": "TA0006"},
@@ -113,6 +130,9 @@ TECHNIQUES: Dict[str, Dict] = {
 
     # Lateral Movement
     "T1021":     {"name": "Remote Services",                "tactic": "TA0008"},
+    # T1550 and its sub-techniques moved from TA0005 → TA0008 in ATT&CK v19.
+    "T1550":     {"name": "Use Alternate Authentication Material", "tactic": "TA0008"},
+    "T1550.004": {"name": "Web Session Cookie",             "tactic": "TA0008", "sub_of": "T1550"},
     "T1090":     {"name": "Proxy",                          "tactic": "TA0011"},
     "T1090.001": {"name": "Internal Proxy",                 "tactic": "TA0011", "sub_of": "T1090"},
 
