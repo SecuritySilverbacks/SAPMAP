@@ -403,6 +403,86 @@ def _verify_sap_diag(host: str, port: int, timeout: float = 2.0) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# SAP Gateway fingerprint (verifies 33XX / 48XX is really an SAP GW)
+#
+# Based on the nmap-sap project (gelim/nmap-sap, nmap-service-probes
+# lines 24-35) which ships two probes for SAP Gateway detection.  We
+# use probe 2 (the startrfc CPIC handshake), because its match
+# signature is more discriminating than probe 1's "any-NI-frame-with-
+# zero-payload" pattern.
+#
+# Probe payload: 4-byte NI length (0x40 = 64) + 64-byte CPIC connect.
+# Match: response starts with the 10-byte echo
+# ``\x00\x00\x00\x40\x02\x03\xac\x10\x00\x77`` — non-SAP services
+# (RDP on 3389, custom listeners, etc.) won't reply with this prefix.
+#
+# Used for both plain gateway (33XX) and the SNC-enabled gateway port
+# (48XX).  When SNC is enforced, the plain probe will be dropped by
+# the gateway's SNC pre-handshake check; we still record the open
+# port but tag it as ``gateway_snc`` without ``_verified`` suffix —
+# the SNC handshake itself is out of scope for the scanner.
+# ---------------------------------------------------------------------------
+
+_SAPGW_PROBE = (
+    b"\x00\x00\x00\x40"                       # NI length = 64 bytes
+    b"\x02\x03\xac\x10\x00\x77\x00\x00\x00\x00"
+    b"startrfc\x00\x00"
+    b"1100\x00\x00\x00\x00\x00\x00"
+    b"default_startrfc        "
+    b"\x06\xcb\xff\xff\x00\x00\x00\x00\x00\x00"
+)
+assert len(_SAPGW_PROBE) == 68, f"SAPGW probe is {len(_SAPGW_PROBE)} bytes, expected 68"
+
+_SAPGW_MATCH = b"\x00\x00\x00\x40\x02\x03\xac\x10\x00\x77"
+
+
+def _verify_sap_gateway(host: str, port: int, timeout: float = 2.0,
+                        saprouter: str = "") -> bool:
+    """Send the nmap-sap SAPGW probe; True iff the response echoes the
+    expected gateway signature in the first 10 bytes.
+
+    Returns False for:
+      - Non-SAP services on 33XX (e.g. RDP on 3389, custom listeners)
+      - SNC-enforced gateways that drop the plain probe silently
+      - Network errors / timeouts
+
+    A False on a 48XX port does NOT mean "not a gateway" — it usually
+    means "SNC required, can't fingerprint at plain-TCP layer".
+    """
+    sock = None
+    try:
+        if saprouter:
+            from sap_saprouter import connect_through_saprouter
+            sock = connect_through_saprouter(
+                saprouter + f"/H/{host}/S/{port}",
+                timeout=timeout, talk_mode=1,
+            )
+        else:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            sock.connect((host, port))
+        sock.sendall(_SAPGW_PROBE)
+        resp = b""
+        try:
+            while len(resp) < 64:
+                chunk = sock.recv(64 - len(resp))
+                if not chunk:
+                    break
+                resp += chunk
+        except socket.timeout:
+            pass
+        return resp.startswith(_SAPGW_MATCH)
+    except Exception:
+        return False
+    finally:
+        try:
+            if sock is not None:
+                sock.close()
+        except Exception:
+            pass
+
+
 # Canonical DIAG routing string — dispatchers embed "<SID>/<host>_<SID>_<NN>"
 # in the DIAG init response.  Used as a SID fallback when only 32XX is open
 # (no SAPControl on 5XX13, no gateway on 33XX for RFC_SYSTEM_INFO).
@@ -922,6 +1002,11 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
         for inst_str in found_instances:
             inst_nr = int(inst_str)
             pass2_ports.append((3300 + inst_nr, "gateway", inst_str))
+            # SAP Gateway SNC port (gw/snc_port) — 4800+NN.  Opens up when
+            # the operator sets snc/enable=1 on the system.  Fingerprinted
+            # post-scan via the nmap-sap SAPGW probe; SNC-enforced ports
+            # may not echo the signature but stay tagged as gateway_snc.
+            pass2_ports.append((4800 + inst_nr, "gateway_snc", inst_str))
             pass2_ports.append((3900 + inst_nr, "ms_internal", inst_str))  # betrusted
             pass2_ports.append((30000 + inst_nr * 100 + 13, "hana_sql", inst_str))
             pass2_ports.append((30000 + inst_nr * 100 + 15, "hana_sql", inst_str))
@@ -932,14 +1017,50 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
             pass2_ports.append((50000 + inst_nr * 100 + 1, "java_https", inst_str))
 
         print(f"[*] {host}: Pass 2: scanning {len(pass2_ports)} ports "
-              f"(gateway 33XX, HANA 3XX13/3XX15, Java 5NN00/01) for "
-              f"{len(found_instances)} instance(s) ...")
+              f"(gateway 33XX, gateway SNC 48XX, HANA 3XX13/3XX15, "
+              f"Java 5NN00/01) for {len(found_instances)} instance(s) ...")
         t0 = time.time()
         hits2 = _do_scan(pass2_ports, label="Pass 2")
         if not _cancelled():
             result["open_ports"].update(hits2)
             print(f"[*] {host}: Pass 2 done in {time.time() - t0:.1f}s — "
                   f"{len(hits2)} port(s) open")
+
+        # Verify each open gateway / gateway_snc port really speaks the
+        # SAP gateway protocol — avoids false positives like RDP on 3389
+        # (which our 3300+NN formula would have flagged for instance 89).
+        # Behaviour split:
+        #   33XX → fingerprint required, port DROPPED when verify fails
+        #          (false-positive rejection — there is no legitimate
+        #          reason for a SAP gateway listener to drop the probe)
+        #   48XX → fingerprint preferred, port KEPT when verify fails
+        #          (SNC enforcement may silently drop the plain probe;
+        #          we still want to record the open port so the operator
+        #          sees the SNC gateway exists)
+        gw_ports = [(p, info["service"]) for p, info in result["open_ports"].items()
+                    if info["service"] in ("gateway", "gateway_snc")]
+        if gw_ports and not _cancelled():
+            print(f"[*] {host}: Verifying {len(gw_ports)} gateway port(s) "
+                  f"with SAP CPIC startrfc probe ...")
+            for port, svc in gw_ports:
+                if _cancelled():
+                    break
+                verified = _verify_sap_gateway(host, port,
+                                               timeout=min(timeout, 2.0))
+                if verified:
+                    result["open_ports"][port]["service"] = (
+                        "gateway" if svc == "gateway" else "gateway_snc_verified")
+                    print(f"[+]   {host}:{port:<6} SAP gateway fingerprint "
+                          f"confirmed ({svc})")
+                elif svc == "gateway":
+                    # False positive — drop the port
+                    del result["open_ports"][port]
+                    print(f"[-]   {host}:{port:<6} did not respond to SAP "
+                          f"CPIC probe — dropped (likely non-SAP service)")
+                else:
+                    # gateway_snc → keep but note SNC likely enforced
+                    print(f"[*]   {host}:{port:<6} no SAP echo on plain "
+                          f"probe — SNC likely enforced, kept as gateway_snc")
 
     return result
 
