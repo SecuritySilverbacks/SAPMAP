@@ -1982,36 +1982,52 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
         print(f"[*] {tag}: skipping /sap/public/info — SAPControl reports "
               f"Java-only stack (ABAP ICF path not bound)")
     else:
+        # Each candidate: (inst_nr, port, source, use_https).  For every
+        # SAPControl-reported HTTP port we ALSO queue an HTTPS attempt
+        # on the same port — covers the common case where SAPControl
+        # advertises port 80NN as "HTTP" but ICM is actually configured
+        # for TLS-only on that slot.
         pi_targets = []
-        for inst_nr, (http_p, _https_p) in (
+        for inst_nr, (http_p, https_p) in (
                 info.get("http_ports") or {}).items():
             if http_p:
-                pi_targets.append((inst_nr, int(http_p), "sapcontrol"))
+                pi_targets.append((inst_nr, int(http_p), "sapcontrol",       False))
+                pi_targets.append((inst_nr, int(http_p), "sapcontrol-tls",   True))
+            if https_p:
+                pi_targets.append((inst_nr, int(https_p), "sapcontrol-https", True))
         if not pi_targets:
             for inst_nr in ordered_nrs:
-                pi_targets.append((inst_nr, 8000 + inst_nr, "default-80NN"))
-                pi_targets.append((inst_nr, 50080 + inst_nr * 100,
-                                    "default-5XX80"))
+                # ABAP HTTP defaults
+                pi_targets.append((inst_nr, 8000 + inst_nr,         "default-80NN",  False))
+                pi_targets.append((inst_nr, 50080 + inst_nr * 100,  "default-5XX80", False))
+                # ABAP HTTPS defaults (443NN and 5XX01)
+                pi_targets.append((inst_nr, 44300 + inst_nr,        "default-443NN", True))
+                pi_targets.append((inst_nr, 50001 + inst_nr * 100,  "default-5XX01", True))
             print(f"[*] {tag}: SAPControl exposed no ICM HTTP port — "
                   f"falling back to default ICM ports "
-                  f"({', '.join(str(p) for _, p, _ in pi_targets)}) "
+                  f"({', '.join(f'{p}({chr(115) if h else chr(104)})' for _, p, _, h in pi_targets)}) "
                   f"for /sap/public/info")
         else:
+            def _fmt_target(t):
+                _, p, _src, h = t
+                return f"{p}(https)" if h else f"{p}(http)"
             print(f"[*] {tag}: probing /sap/public/info on "
                   f"{len(pi_targets)} ICM port(s) from SAPControl: "
-                  f"{', '.join(str(p) for _, p, _ in pi_targets)}")
+                  f"{', '.join(_fmt_target(t) for t in pi_targets)}")
         pi_to = min(timeout, 5)
         any_success = False
-        for inst_nr, port, port_src in pi_targets:
-            print(f"[*] {tag}: GET http://{host}:{port}/sap/public/info "
+        for inst_nr, port, port_src, use_https in pi_targets:
+            scheme = "https" if use_https else "http"
+            print(f"[*] {tag}: GET {scheme}://{host}:{port}/sap/public/info "
                   f"(inst {inst_nr:02d}, source={port_src}, "
                   f"timeout={pi_to}s)"
                   f"{' via SAProuter' if saprouter else ''}")
             pi = query_public_info(host, port, timeout=pi_to,
-                                    saprouter=saprouter)
+                                    saprouter=saprouter,
+                                    use_https=use_https)
             status = getattr(query_public_info, "_last_status", "?")
             if not pi:
-                print(f"[-] {tag}: /sap/public/info ({host}:{port}): "
+                print(f"[-] {tag}: /sap/public/info ({scheme}://{host}:{port}): "
                       f"{status}")
                 continue
             for k in ("sid", "hostname", "os_type", "db_type",
@@ -2027,9 +2043,9 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
             # /sap/public/info answering is a positive ABAP signal — Java
             # stacks don't bind this ICF path.
             info["_is_abap"] = True
-            info["_public_info_source"] = f"{host}:{port}"
+            info["_public_info_source"] = f"{scheme}://{host}:{port}"
             any_success = True
-            print(f"[+] {tag}: /sap/public/info ({host}:{port}): "
+            print(f"[+] {tag}: /sap/public/info ({scheme}://{host}:{port}): "
                   f"SID={pi.get('sid') or '?'}, "
                   f"Host={pi.get('hostname') or '?'}, "
                   f"OS={pi.get('os_type') or '?'}, "
@@ -2311,7 +2327,8 @@ def _query_sapcontrol_sid(host: str, port: int, timeout: float = 3,
 
 def query_public_info(host: str, http_port: int,
                        timeout: float = 5,
-                       saprouter: str = "") -> dict:
+                       saprouter: str = "",
+                       use_https: bool = False) -> dict:
     """GET /sap/public/info on an ABAP ICM port — returns parsed system info.
 
     `/sap/public/info` is an ICF service on NetWeaver ABAP that returns
@@ -2319,6 +2336,11 @@ def query_public_info(host: str, http_port: int,
     RFC_SYSTEM_INFO), pre-auth on most kernels.  Java stacks do not bind
     this path (404), so a successful parse is also a positive ABAP
     signal.
+
+    Pass ``use_https=True`` to wrap the socket in TLS (with cert
+    verification disabled — SAP ICM self-signs by default).  Useful
+    when SAPControl reports the HTTPS port, or when an operator has
+    swapped a normally-HTTP port to TLS-only.
 
     Returns dict with whichever keys were populated: sid, hostname,
     os_type, db_type, kernel, sap_release, ip, db_host, timezone.
@@ -2344,6 +2366,16 @@ def query_public_info(host: str, http_port: int,
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(timeout)
             sock.connect((host, http_port))
+        if use_https:
+            # SAP ICM almost always uses self-signed certs in non-prod
+            # and even prod systems usually run an internal CA — disable
+            # verification so the probe stays a low-friction info-only
+            # check.  We never send credentials over this connection.
+            import ssl as _ssl
+            ctx = _ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = _ssl.CERT_NONE
+            sock = ctx.wrap_socket(sock, server_hostname=host)
         # Plain GET — ABAP ICF returns the SOAP envelope without auth on
         # most kernels.  Use HTTP/1.0 + Connection: close so the server
         # signals end-of-body by closing the socket (no chunked parsing).
