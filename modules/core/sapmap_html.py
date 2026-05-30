@@ -644,6 +644,24 @@ body {
       <div class="dd-item" onclick="testAllRFCs()">&#129514; Test All RFC Destinations</div>
       <div class="dd-item" onclick="cleanupAll()">&#129529; Cleanup All Users</div>
       <div class="dd-sep"></div>
+      <!-- Bulk vuln checks — mirror of the map's right-click context menu so
+           every "Check All …" entry is reachable without right-clicking the
+           empty canvas (operators on a touchpad / Windows lacking a real
+           right-click button asked for this).  The right-click menu hides
+           items conditionally based on landscape contents; this list does
+           NOT — the per-action JS handlers already alert when there's
+           nothing eligible (e.g. checkAllGateways() with no GW ports). -->
+      <div class="dd-item" onclick="checkAllGateways()">&#128272; Check All GW Vulnerabilities</div>
+      <div class="dd-item" onclick="checkAllBetrusted()">&#128272; Check All 10KBlaze (MS Betrusted)</div>
+      <div class="dd-item" onclick="checkAllCve31324()">&#128272; Check All CVE-2025-31324 (Java VisualComposer)</div>
+      <div class="dd-item" onclick="checkAllCve6287()">&#128272; Check All CVE-2020-6287 (RECON)</div>
+      <div class="dd-item" onclick="checkAllCve22536()">&#128272; Check All CVE-2022-22536 (ICMAD)</div>
+      <div class="dd-item" onclick="checkAllRouterInfo()">&#128272; Check All SAProuter Info Leak</div>
+      <div class="dd-item" onclick="checkAllSnc()">&#128274; Check All SNC Posture</div>
+      <div class="dd-sep"></div>
+      <div class="dd-item" onclick="showAttackCoverage()">&#9876;&#65039; ATT&amp;CK Coverage Matrix</div>
+      <div class="dd-item" onclick="analyzeChains()">&#128279; Analyze Trust Chains</div>
+      <div class="dd-sep"></div>
       <div class="dd-item" onclick="showCreatedUsers()">&#128203; View Created Users</div>
       <div class="dd-item" onclick="showCreatedDestinations()">&#128203; View Created TCP/IP Destinations</div>
       <div class="dd-item" onclick="clearCreatedDestinations()">&#128465; Clear TCP/IP Destinations List</div>
