@@ -178,6 +178,76 @@ def test_emit_finding_without_attack_kwargs_works():
 
 
 # ---------------------------------------------------------------------------
+# Bus → node.findings mirroring (so "View Findings" picks up live events)
+# ---------------------------------------------------------------------------
+
+def test_attach_state_mirrors_high_emit_to_node_findings():
+    state = SAPMAPState()
+    state.add_node(SAPNode(sid="S4H", ip="10.0.0.1"))
+    sapmap_findings.attach_state(state)
+    sapmap_findings.clear()
+
+    sapmap_findings.emit_finding(
+        "HIGH", "S4H", "Gateway SAPXPG accepted P1-P3",
+        attack_capability="exploit.10kblaze")
+
+    node = state.get_node("S4H")
+    assert len(node.findings) == 1
+    f = node.findings[0]
+    assert f.name == "Gateway SAPXPG accepted P1-P3"
+    assert f.severity == Severity.HIGH
+    assert f.attack_techniques == ["T1190", "T1059"]
+
+    sapmap_findings.attach_state(None)   # detach so other tests don't leak
+
+
+def test_attach_state_skips_info_severity():
+    state = SAPMAPState()
+    state.add_node(SAPNode(sid="S4H", ip="10.0.0.1"))
+    sapmap_findings.attach_state(state)
+    sapmap_findings.clear()
+
+    sapmap_findings.emit_finding("INFO", "S4H", "Auto-picker selected: copyfail")
+    sapmap_findings.emit_finding("MEDIUM", "S4H", "Some medium event")
+
+    node = state.get_node("S4H")
+    assert node.findings == []   # neither INFO nor MEDIUM persist
+    sapmap_findings.attach_state(None)
+
+
+def test_attach_state_dedupes_repeat_emits():
+    state = SAPMAPState()
+    state.add_node(SAPNode(sid="S4H", ip="10.0.0.1"))
+    sapmap_findings.attach_state(state)
+    sapmap_findings.clear()
+
+    for _ in range(3):
+        sapmap_findings.emit_finding(
+            "CRITICAL", "S4H", "Same exact message",
+            attack_capability="exploit.cve_2020_6287")
+
+    node = state.get_node("S4H")
+    # One persistent entry even though we emitted 3 times.  Bus
+    # may also dedupe within 60s — but the mirror is independent.
+    assert len(node.findings) == 1
+    sapmap_findings.attach_state(None)
+
+
+def test_attach_state_unknown_sid_does_nothing():
+    state = SAPMAPState()
+    state.add_node(SAPNode(sid="S4H", ip="10.0.0.1"))
+    sapmap_findings.attach_state(state)
+    sapmap_findings.clear()
+
+    sapmap_findings.emit_finding(
+        "HIGH", "UNKNOWN_SID", "no such node",
+        attack_capability="exploit.10kblaze")
+
+    assert state.get_node("S4H").findings == []
+    sapmap_findings.attach_state(None)
+
+
+# ---------------------------------------------------------------------------
 # Navigator JSON layer
 # ---------------------------------------------------------------------------
 
