@@ -1104,6 +1104,12 @@ class SAPMAPApi:
 
     def __init__(self):
         self.state = SAPMAPState()
+        # Mirror CRITICAL / HIGH bus findings onto the matching SAPNode so
+        # the "View Findings" panel + the engagement report carry them.
+        try:
+            sapmap_findings.attach_state(self.state)
+        except Exception:
+            pass
         self.scan_thread = None
         self.scan_running = False
         self.scan_cancelled = False
@@ -8683,6 +8689,10 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
         try:
             api.state = state_mgr.load_state(filepath)
+            try:
+                sapmap_findings.attach_state(api.state)
+            except Exception:
+                pass
             return json.dumps({"status": "ok"})
         except Exception as e:
             return json.dumps({"error": str(e)})
@@ -8696,6 +8706,10 @@ def create_app(api: SAPMAPApi) -> Bottle:
             if not data:
                 return json.dumps({"error": "No data received"})
             api.state = SAPMAPState.from_dict(data)
+            try:
+                sapmap_findings.attach_state(api.state)
+            except Exception:
+                pass
             if isinstance(data, dict) and data.get("_findings"):
                 try:
                     sapmap_findings.load_snapshot(data["_findings"])

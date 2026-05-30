@@ -42,6 +42,71 @@ def register_listener(fn: Callable[[Dict], None]) -> None:
     _listeners.append(fn)
 
 
+# Optional reference to the live SAPMAPState.  When set, every CRITICAL
+# / HIGH bus event with a matching node.sid is also persisted as a
+# Finding dataclass entry on that SAPNode — so the "View Findings"
+# panel and the engagement report pick it up automatically without
+# requiring every emit_finding callsite to thread `state` through.
+_state_ref = None
+
+
+def attach_state(state) -> None:
+    """Tell the findings bus which SAPMAPState to mirror persistent
+    findings into.  Pass None to detach (e.g. when loading a new
+    state file).  Idempotent."""
+    global _state_ref
+    _state_ref = state
+
+
+_PERSIST_SEVERITIES = ("CRITICAL", "HIGH")
+
+
+def _persist_to_node(record: Dict) -> None:
+    """Append a Finding dataclass entry to the matching SAPNode for
+    CRITICAL / HIGH bus events.  Deduped by name (the bus message)."""
+    if _state_ref is None:
+        return
+    sev = record.get("severity", "")
+    if sev not in _PERSIST_SEVERITIES:
+        return
+    sid = record.get("node", "")
+    try:
+        node = _state_ref.get_node(sid)
+    except Exception:
+        node = None
+    if not node:
+        return
+    msg = record.get("msg", "")
+    if not msg:
+        return
+    # Dedup by exact name match — repeated runs of the same probe
+    # shouldn't grow the list every time.
+    if any(getattr(f, "name", "") == msg for f in (node.findings or [])):
+        return
+    try:
+        from sapmap_models import Finding, Severity
+        sev_enum = {
+            "CRITICAL": Severity.CRITICAL,
+            "HIGH":     Severity.HIGH,
+        }.get(sev, Severity.HIGH)
+        desc_parts = []
+        if record.get("cve"):
+            desc_parts.append(f"CVE / ref: {record['cve']}")
+        if record.get("ref"):
+            desc_parts.append(f"Detected via: {record['ref']}")
+        node.findings.append(Finding(
+            name=msg,
+            severity=sev_enum,
+            description=" · ".join(desc_parts),
+            detail=record.get("ref", ""),
+            attack_techniques=list(record.get("attack_techniques", [])),
+        ))
+    except Exception:
+        # Persistence is best-effort.  The bus + console output are
+        # unaffected if this branch errors.
+        pass
+
+
 def emit_finding(severity: str, node: str, msg: str,
                  cve: Optional[str] = None,
                  ref: Optional[str] = None,
@@ -110,6 +175,16 @@ def emit_finding(severity: str, node: str, msg: str,
         if len(_findings) > _max_buffered:
             # Drop the oldest — the API cursor is monotonic on id, not index.
             del _findings[:len(_findings) - _max_buffered]
+
+    # Mirror CRITICAL / HIGH events onto the matching SAPNode so the
+    # "View Findings" panel + the engagement report carry them without
+    # the operator having to hunt through the bell-icon log.  Runs
+    # outside the lock so a slow state mutation doesn't stall further
+    # emits.
+    try:
+        _persist_to_node(record)
+    except Exception:
+        pass
 
     # 1. Visible to operators running the CLI scanner directly.
     emoji = {"CRITICAL": "!!!", "HIGH": "!!", "MEDIUM": "!", "INFO": "*"}[sev]
