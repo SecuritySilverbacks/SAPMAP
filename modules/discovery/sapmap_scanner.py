@@ -1286,6 +1286,7 @@ def check_ms_betrusted(node: SAPNode, timeout: float = 8.0) -> bool:
                     f"MS port {ms_p} accepts unauthenticated login — "
                     f"10KBLAZE betrusted attack path open",
                     cve="CVE-2020-6207",
+                    attack_capability="exploit.ms_betrusted",
                 )
                 node.findings.append(Finding(
                     name="MS Internal Port Without ACL (CVE-2020-6207)",
@@ -1412,6 +1413,7 @@ def check_cve_2025_31324(node: SAPNode, timeout: float = 10.0) -> bool:
                 "CRITICAL", node.sid,
                 f"CVE-2025-31324 metadatauploader unauth RCE on port {port}",
                 cve="CVE-2025-31324",
+                attack_capability="exploit.cve_2025_31324",
             )
             if not any(f.name.startswith("CVE-2025-31324") for f in node.findings):
                 node.findings.append(Finding(
@@ -1509,6 +1511,7 @@ def check_cve_2020_6287(node: SAPNode, timeout: float = 10.0) -> bool:
                 "CRITICAL", node.sid,
                 f"CVE-2020-6287 RECON unauth admin-user creation on port {port}",
                 cve="CVE-2020-6287",
+                attack_capability="exploit.cve_2020_6287",
             )
             if not any(f.name.startswith("CVE-2020-6287")
                         for f in node.findings):
@@ -1659,7 +1662,8 @@ def check_cve_2022_22536(node: SAPNode, timeout: float = 12.0,
                           + (" — cache-poisoning chain reachable "
                              "(wdisp/cache_enabled=1 observed)"
                              if sev_label == "CRITICAL" else ""),
-                          cve="CVE-2022-22536")
+                          cve="CVE-2022-22536",
+                          attack_capability="exploit.cve_2022_22536")
             if not any(f.name.startswith("CVE-2022-22536")
                           for f in node.findings):
                 finding_sev = (Severity.CRITICAL
@@ -1768,7 +1772,8 @@ def check_cve_2022_22536(node: SAPNode, timeout: float = 12.0,
             emit_finding("INFO", node.sid,
                           v.get("summary",
                                  "CVE-2022-22536 (ICMAD) patch hygiene"),
-                          cve="CVE-2022-22536")
+                          cve="CVE-2022-22536",
+                          attack_capability="exploit.cve_2022_22536")
             if not any(f.name.startswith("CVE-2022-22536")
                           for f in node.findings):
                 node.findings.append(Finding(
@@ -1847,6 +1852,7 @@ def check_cve_2022_22536(node: SAPNode, timeout: float = 12.0,
                 "CVE-2022-22536 (ICMAD) suspect — confirmed Web "
                 "Dispatcher, kernel/PL unknown",
                 cve="CVE-2022-22536",
+                attack_capability="exploit.cve_2022_22536",
             )
             if not any(f.name.startswith("CVE-2022-22536")
                           for f in node.findings):
