@@ -94,11 +94,17 @@ def _persist_to_node(record: Dict) -> None:
             desc_parts.append(f"CVE / ref: {record['cve']}")
         if record.get("ref"):
             desc_parts.append(f"Detected via: {record['ref']}")
+        # Carry the structured remediation through from the bus record
+        # so the persistent Finding renders fix-guidance the same way
+        # the live drawer does.  Empty dict => no remediation yet (e.g.
+        # callsite hasn't been wired with attack_capability).
+        rem = record.get("remediation") or ""
         node.findings.append(Finding(
             name=msg,
             severity=sev_enum,
             description=" · ".join(desc_parts),
             detail=record.get("ref", ""),
+            remediation=rem,
             attack_techniques=list(record.get("attack_techniques", [])),
         ))
     except Exception:
@@ -146,6 +152,17 @@ def emit_finding(severity: str, node: str, msg: str,
             if tid and tid not in resolved_techniques:
                 resolved_techniques.append(tid)
 
+    # Resolve structured remediation from the catalog — same capability
+    # key as ATT&CK so we get hardening guidance for free on every emit
+    # that's already been wired with attack_capability=.
+    remediation_dict: Dict = {}
+    if attack_capability:
+        try:
+            from sapmap_remediation import to_dict as _rem_to_dict
+            remediation_dict = _rem_to_dict(attack_capability)
+        except Exception:
+            pass
+
     now = time.time()
     global _next_id
     with _lock:
@@ -169,6 +186,7 @@ def emit_finding(severity: str, node: str, msg: str,
             "meta": dict(meta or {}),
             "attack_capability":  attack_capability or "",
             "attack_techniques":  resolved_techniques,
+            "remediation":        remediation_dict,
         }
         _next_id += 1
         _findings.append(record)

@@ -109,6 +109,102 @@ def _executive_summary(state: SAPMAPState) -> list:
     return out
 
 
+def _render_structured_remediation(rem: dict, indent: str = "") -> str:
+    """Render one structured Remediation block as inline Markdown.
+
+    Used both inside per-finding sections (indented under the finding's
+    own headline) and inside the Hardening checklist section (top level).
+    """
+    parts = []
+    if rem.get("fix_summary"):
+        parts.append(f"{indent}**Remediation — {_esc(rem['fix_summary'])}**")
+    badges = []
+    if rem.get("requires_restart"):
+        badges.append("⚠️ restart needed")
+    else:
+        badges.append("🟢 online fix")
+    if rem.get("effort_minutes"):
+        badges.append(f"⏱ ~{rem['effort_minutes']} min")
+    if rem.get("severity_if_delayed"):
+        badges.append(f"🛑 if delayed: {rem['severity_if_delayed']}")
+    if badges:
+        parts.append(f"{indent}_{' · '.join(badges)}_")
+    if rem.get("fix_steps"):
+        parts.append(f"{indent}**Fix steps:**")
+        for i, step in enumerate(rem["fix_steps"], 1):
+            parts.append(f"{indent}{i}. {_esc(step)}")
+    if rem.get("verification"):
+        parts.append(f"{indent}**Verification:**")
+        for i, step in enumerate(rem["verification"], 1):
+            parts.append(f"{indent}{i}. {_esc(step)}")
+    refs = rem.get("refs") or []
+    if refs:
+        refs_md = []
+        for r in refs:
+            if isinstance(r, (list, tuple)) and len(r) >= 2:
+                refs_md.append(f"[{_esc(r[0])}]({_esc(r[1])})")
+            elif isinstance(r, str):
+                refs_md.append(_esc(r))
+        if refs_md:
+            parts.append(f"{indent}**References:** {' · '.join(refs_md)}")
+    if rem.get("last_reviewed"):
+        parts.append(f"{indent}_Catalog entry last reviewed "
+                     f"{rem['last_reviewed']}._")
+    return "\n".join(parts)
+
+
+def _hardening_checklist_section(state: SAPMAPState) -> list:
+    """Aggregate every structured remediation across the landscape into
+    a deduped action checklist.  Replaces the older
+    _derive_landscape_recommendations function which had hand-maintained
+    text drifting away from the per-finding remediation blocks.
+    """
+    # Capability key → {sids: set, remediation: dict, max_sev: int}
+    bucket = {}
+    for sid, n in sorted(state.nodes.items()):
+        for f in n.findings or []:
+            rem = getattr(f, "remediation", None)
+            if not isinstance(rem, dict) or not rem.get("fix_summary"):
+                continue
+            # We use the fix_summary as a stable de-dup key (a single
+            # capability key contributes one summary; different
+            # capability keys with the same summary collapse cleanly).
+            key = rem["fix_summary"]
+            slot = bucket.setdefault(key, {"sids": set(), "rem": rem,
+                                            "max_sev": 0})
+            slot["sids"].add(sid)
+            sev = int(getattr(f, "severity", 0) or 0)
+            if sev > slot["max_sev"]:
+                slot["max_sev"] = sev
+
+    if not bucket:
+        return []
+
+    out = ["## Hardening checklist", ""]
+    out.append(
+        "Aggregated fix-guidance for every CRITICAL / HIGH finding in "
+        "this engagement.  Each entry deduplicates across systems — the "
+        "scope column lists every SID that currently needs the fix."
+    )
+    out.append("")
+    # Sort by max severity desc, then fix_summary alphabetic
+    ordered = sorted(
+        bucket.items(),
+        key=lambda kv: (-kv[1]["max_sev"], kv[0]))
+    for idx, (summary, slot) in enumerate(ordered, 1):
+        rem = slot["rem"]
+        sids = ", ".join(sorted(slot["sids"]))
+        out.append(f"### {idx}. {_esc(summary)}")
+        out.append("")
+        out.append(f"**Scope:** {sids}")
+        out.append("")
+        out.append(_render_structured_remediation(rem, indent=""))
+        out.append("")
+        out.append("---")
+        out.append("")
+    return out
+
+
 def _findings_section(state: SAPMAPState) -> list:
     """List every CRITICAL + HIGH finding grouped by node."""
     out = ["## Findings", ""]
@@ -135,8 +231,13 @@ def _findings_section(state: SAPMAPState) -> list:
                 out.append("")
                 out.append(f"_Detail:_ {_esc(f.detail)}")
             if f.remediation:
-                out.append("")
-                out.append(f"**Remediation:** {_esc(f.remediation)}")
+                if isinstance(f.remediation, dict) and f.remediation.get("fix_summary"):
+                    out.append("")
+                    out.append(_render_structured_remediation(f.remediation,
+                                                                indent="    "))
+                else:
+                    out.append("")
+                    out.append(f"**Remediation:** {_esc(str(f.remediation))}")
             tids = getattr(f, "attack_techniques", None) or []
             if tids:
                 try:
@@ -1136,9 +1237,21 @@ def build_markdown_report(state: SAPMAPState,
         sections.append("---")
         sections.append("")
         sections.extend(btp_section)
-    sections.append("---")
-    sections.append("")
-    sections.extend(_recommendations_section(state))
+    # Hardening checklist supersedes the older _recommendations_section
+    # — same author voice but driven by the central remediation catalog
+    # (modules.core.sapmap_remediation) so the prose in this section and
+    # the per-finding blocks above can never drift apart.  Falls back to
+    # the legacy section when the catalog returns nothing (no structured
+    # remediation on any finding — older .sapmap state files).
+    hardening_section = _hardening_checklist_section(state)
+    if hardening_section:
+        sections.append("---")
+        sections.append("")
+        sections.extend(hardening_section)
+    else:
+        sections.append("---")
+        sections.append("")
+        sections.extend(_recommendations_section(state))
     sections.append("---")
     sections.append("")
     sections.append("_End of report._")

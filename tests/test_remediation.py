@@ -1,0 +1,167 @@
+"""Tests for the modules.core.sapmap_remediation catalog + Finding /
+emit_finding wiring."""
+import json
+
+import sapmap_attack
+import sapmap_findings
+import sapmap_remediation as rm
+from sapmap_models import Finding, SAPMAPState, SAPNode, Severity
+
+
+# ---------------------------------------------------------------------------
+# Catalog integrity
+# ---------------------------------------------------------------------------
+
+def test_catalog_is_non_empty():
+    assert len(rm.CATALOG) >= 15
+
+
+def test_every_entry_has_summary_and_refs():
+    """Every catalog entry must carry a one-line summary and at least
+    one external reference — otherwise the report just says 'fix it'
+    with no action."""
+    bare = []
+    for key, r in rm.CATALOG.items():
+        if not r.fix_summary:
+            bare.append((key, "no fix_summary"))
+        if not r.refs:
+            bare.append((key, "no refs"))
+    assert not bare, f"catalog entries missing required fields: {bare}"
+
+
+def test_every_capability_in_attack_map_has_remediation_or_explicit_exemption():
+    """Either every capability key in sapmap_attack.CAPABILITY_MAP has a
+    matching catalog entry, OR the key appears on the exemption list
+    (info-only events with no security fix needed).  Keeps the two
+    catalogs from drifting apart silently."""
+    exempt = {
+        # Info-only reconnaissance — observed by SAPMAP, no operator fix
+        "recon.fast_scan", "recon.deep_scan", "recon.system_info",
+        "recon.diag_scrape", "recon.sapcontrol_query",
+        "recon.client_enum", "recon.user_enum",
+        "recon.wd_fingerprint", "recon.wd_backends",
+        "recon.scc_fingerprint", "recon.scc_relay",
+        "recon.btp_subaccount_enum",
+        # Mid-chain post-foothold capabilities; their parent persist/
+        # lateral entry carries the operator fix.
+        "exploit.sapxpg",
+        "privesc.bapi_profiles", "privesc.webgui_rsbdcos0",
+        "lateral.sapmap_user", "lateral.mysapsso2_replay",
+        "lateral.sxpg_exec", "lateral.wd_pivot",
+        "lateral.saprouter_tunnel", "lateral.scc_tunnel_impersonate",
+        "lateral.internal_ip_spoof",
+        # Persistence sub-actions covered by persist.create_user etc.
+        "persist.sap_all_assign", "persist.ssh_key_plant",
+        "persist.web_shell",
+        # Cred-access modes covered by creds.abap_secstore / scc_keystore
+        "creds.java_secstore", "creds.btp_destinations",
+        "creds.scc_users_xml", "creds.oa2c_secrets",
+        # Collection — operator's own loot, not a target finding
+        "data.read_table", "data.capability_analyse",
+        "data.scc_users_dump", "data.loot_stage",
+    }
+    missing = []
+    for cap in sapmap_attack.CAPABILITY_MAP:
+        if cap in rm.CATALOG or cap in exempt:
+            continue
+        missing.append(cap)
+    assert not missing, (
+        f"capability keys missing from BOTH remediation catalog AND "
+        f"exemption list: {missing}.  Either add an entry to "
+        f"sapmap_remediation.CATALOG or extend the exemption list with "
+        f"a comment explaining why it's info-only.")
+
+
+def test_severity_if_delayed_is_a_known_label():
+    for key, r in rm.CATALOG.items():
+        assert r.severity_if_delayed in ("CRITICAL", "HIGH", "MEDIUM", "LOW",
+                                          "INFO"), (
+            f"{key}: severity_if_delayed={r.severity_if_delayed!r}")
+
+
+def test_effort_minutes_is_positive():
+    for key, r in rm.CATALOG.items():
+        assert r.effort_minutes > 0, f"{key} has zero effort_minutes"
+
+
+def test_refs_are_well_formed_pairs():
+    for key, r in rm.CATALOG.items():
+        for ref in r.refs:
+            assert isinstance(ref, tuple) and len(ref) == 2, \
+                f"{key}: malformed ref {ref!r}"
+            label, url = ref
+            assert label and url
+            assert url.startswith(("https://", "http://")), \
+                f"{key}: ref url not http(s): {url}"
+
+
+def test_round_trip_to_dict():
+    r = rm.lookup("exploit.10kblaze")
+    d = r.to_dict()
+    s = json.dumps(d)            # must be JSON-clean
+    revived = rm.Remediation.from_dict(json.loads(s))
+    assert revived.fix_summary == r.fix_summary
+    assert len(revived.fix_steps) == len(r.fix_steps)
+    assert len(revived.refs) == len(r.refs)
+
+
+# ---------------------------------------------------------------------------
+# Wiring through emit_finding + bus mirror
+# ---------------------------------------------------------------------------
+
+def test_emit_finding_attaches_catalog_remediation():
+    sapmap_findings.clear()
+    rec = sapmap_findings.emit_finding(
+        "CRITICAL", "S4H", "GW vuln test",
+        attack_capability="exploit.10kblaze")
+    assert rec is not None
+    assert isinstance(rec["remediation"], dict)
+    assert rec["remediation"]["fix_summary"]
+
+
+def test_emit_finding_no_capability_leaves_remediation_empty():
+    sapmap_findings.clear()
+    rec = sapmap_findings.emit_finding(
+        "CRITICAL", "S4H", "Unrelated event")
+    assert rec is not None
+    assert rec["remediation"] == {}
+
+
+def test_bus_mirror_persists_structured_remediation():
+    state = SAPMAPState()
+    state.add_node(SAPNode(sid="S4H", ip="10.0.0.1"))
+    sapmap_findings.attach_state(state)
+    sapmap_findings.clear()
+
+    sapmap_findings.emit_finding(
+        "CRITICAL", "S4H", "ICMAD smuggle confirmed",
+        attack_capability="exploit.cve_2022_22536")
+
+    node = state.get_node("S4H")
+    assert len(node.findings) == 1
+    rem = node.findings[0].remediation
+    assert isinstance(rem, dict)
+    assert rem.get("fix_summary")
+    assert any("3123396" in r[1] for r in rem.get("refs", []))
+    sapmap_findings.attach_state(None)
+
+
+def test_finding_dataclass_accepts_dict_remediation():
+    rem = rm.lookup("creds.user_password_hash").to_dict()
+    f = Finding(name="x", severity=Severity.CRITICAL, remediation=rem)
+    d = f.to_dict()
+    assert isinstance(d["remediation"], dict)
+    revived = Finding.from_dict(d)
+    assert isinstance(revived.remediation, dict)
+    assert revived.remediation["fix_summary"]
+
+
+def test_finding_dataclass_still_accepts_legacy_string():
+    """Backward compatibility — every .sapmap state file we shipped
+    pre-this-feature has remediation as a plain string."""
+    f = Finding(name="x", severity=Severity.HIGH,
+                 remediation="legacy plain string remediation")
+    d = f.to_dict()
+    assert d["remediation"] == "legacy plain string remediation"
+    revived = Finding.from_dict(d)
+    assert revived.remediation == "legacy plain string remediation"

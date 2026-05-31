@@ -459,6 +459,15 @@ body {
   text-decoration: none; cursor: pointer; line-height: 14px;
 }
 .attack-pill:hover { background: #2563eb; color: #fff; border-color: #2563eb; }
+/* Remediation badges next to the fix summary (restart needed / online,
+   effort estimate, severity if delayed).  Same shape language as the
+   ATT&CK pills but in muted grey so they don't fight the green block. */
+.rem-badge {
+  display: inline-block; font-family: monospace; font-size: 10px;
+  padding: 1px 6px; border-radius: 2px;
+  background: #1c2128; color: #cfd9df; border: 1px solid #30363d;
+  line-height: 14px;
+}
 .attack-pill-more {
   background: #161b22; color: #8b949e; border-color: #30363d; cursor: help;
 }
@@ -3749,6 +3758,47 @@ function renderAttackPills(tids, opts) {
     ? `<span class="attack-pill attack-pill-more" title="${escHtml(tids.slice(maxVisible).join(', '))}">+${extra}</span>`
     : '';
   return `<span class="attack-pills">${pills}${more}</span>`;
+}
+
+// Render a remediation block — accepts either a legacy plain string
+// (old emit_finding callsites) or a structured dict matching
+// sapmap_remediation.Remediation.to_dict().  Returns empty string when
+// there is nothing to show.
+function renderRemediationBlock(rem) {
+  if (!rem) return '';
+  // Legacy plain string — keep the old one-line green check.
+  if (typeof rem === 'string') {
+    return `<br><span style="color:#3fb950;font-size:10px">&#10004; ${escHtml(rem)}</span>`;
+  }
+  if (typeof rem !== 'object' || !rem.fix_summary) return '';
+  // Structured: summary + steps + verification + refs + badges
+  const steps = (rem.fix_steps || []).map(s =>
+    `<li>${escHtml(s)}</li>`).join('');
+  const verify = (rem.verification || []).map(s =>
+    `<li>${escHtml(s)}</li>`).join('');
+  const refs = (rem.refs || []).map(r => {
+    const label = Array.isArray(r) ? r[0] : '';
+    const url   = Array.isArray(r) ? r[1] : '';
+    if (!label || !url) return '';
+    return `<a href="${escHtml(url)}" target="_blank" rel="noopener noreferrer" class="attack-pill" style="text-decoration:none">${escHtml(label)}</a>`;
+  }).join('');
+  const restartBadge = rem.requires_restart
+    ? '<span class="rem-badge" style="background:#3a1f00;color:#d29922;border-color:#5a3000" title="Applying this fix needs an instance restart / downtime">restart needed</span>'
+    : '<span class="rem-badge" style="background:#0d2e1c;color:#3fb950;border-color:#1a4f33" title="No downtime required">online fix</span>';
+  const effortBadge = (rem.effort_minutes && rem.effort_minutes > 0)
+    ? `<span class="rem-badge" title="Rough wall-clock effort estimate (one engineer)">~${rem.effort_minutes} min</span>`
+    : '';
+  const severityIfDelayed = rem.severity_if_delayed
+    ? `<span class="rem-badge" style="background:#3a0f10;color:#ff6b6b;border-color:#8b0000" title="Severity of the EXISTING finding if the fix is delayed">if delayed: ${escHtml(rem.severity_if_delayed)}</span>`
+    : '';
+  return `
+    <div class="rem-block" style="margin-top:8px;padding:8px 10px;background:#0d1f12;border:1px solid #1a4f33;border-radius:4px;color:#cfd9df;font-size:11px;line-height:1.45">
+      <div style="color:#3fb950;font-weight:600;margin-bottom:4px">&#10004; Hardening: ${escHtml(rem.fix_summary)}</div>
+      <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px">${restartBadge}${effortBadge}${severityIfDelayed}</div>
+      ${steps ? `<div style="margin-top:6px"><b style="color:#8b949e">Fix steps:</b><ol style="margin:4px 0 4px 18px;padding:0">${steps}</ol></div>` : ''}
+      ${verify ? `<div style="margin-top:6px"><b style="color:#8b949e">Verification:</b><ol style="margin:4px 0 4px 18px;padding:0">${verify}</ol></div>` : ''}
+      ${refs ? `<div style="margin-top:6px"><b style="color:#8b949e">References:</b><div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:3px">${refs}</div></div>` : ''}
+    </div>`;
 }
 
 function showCtxMenu(e, sid) {
@@ -7313,9 +7363,7 @@ function showFindings(sid) {
       const detailLine = f.detail
         ? `<br><span style="color:#6e7681;font-size:10px;font-family:monospace">${escHtml(f.detail)}</span>`
         : '';
-      const remediationLine = f.remediation
-        ? `<br><span style="color:#3fb950;font-size:10px">&#10004; ${escHtml(f.remediation)}</span>`
-        : '';
+      const remediationLine = renderRemediationBlock(f.remediation);
       return `<div class="finding-item ${cls}"><strong>${escHtml(f.severity_label || 'INFO')}</strong>${sourceTag} — ${escHtml(f.name)} ${pills}<br><span style="color:#8b949e;font-size:10px">${escHtml(f.description)}</span>${detailLine}${remediationLine}</div>`;
     }).join('') || '<div style="color:#484f58">No findings</div>'}
   `;
