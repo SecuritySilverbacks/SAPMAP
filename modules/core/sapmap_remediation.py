@@ -112,8 +112,8 @@ CATALOG: Dict[str, Remediation] = {
 
     "exploit.10kblaze": Remediation(
         fix_summary=(
-            "Lock down the SAP Gateway: enforce reginfo / secinfo ACLs, "
-            "disable sim_mode, and restart the dispatcher"
+            "Lock down the SAP Gateway: enforce reginfo / secinfo ACLs "
+            "and disable sim_mode"
         ),
         fix_steps=[
             "Edit reginfo (path in profile parameter gw/reg_info) and "
