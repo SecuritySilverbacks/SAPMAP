@@ -146,7 +146,6 @@ CATALOG: Dict[str, Remediation] = {
             _note(1408081),
             _note(1425765),
             _note(1444282),
-            _note(1408081),   # canonical 10KBLAZE / SAP Gateway security
             _attack("T1190"),
         ],
         requires_restart=False,    # gwmon Re-read avoids downtime
@@ -183,8 +182,6 @@ CATALOG: Dict[str, Remediation] = {
             "or filtered.",
         ],
         refs=[
-            _note(2841053),
-            _note(2922964),
             _cve("CVE-2020-6207"),
             _attack("T1190"),
         ],
@@ -504,8 +501,9 @@ CATALOG: Dict[str, Remediation] = {
 
     "lateral.rfc_propagate": Remediation(
         fix_summary=(
-            "Delete the SAPMAP-created users on the propagation target "
-            "and tighten the source RFC destination's trust"
+            "Delete the SAPMAP-created users on the propagation target, "
+            "tighten the source RFC destination's trust, and constrain "
+            "the destination's logon user to least privilege"
         ),
         fix_steps=[
             "On every target where SAPMAP propagated, delete the created "
@@ -513,6 +511,16 @@ CATALOG: Dict[str, Remediation] = {
             "chose) via SU01.  Also rotate the password of the source "
             "destination's RFC user if the destination is type-3 with "
             "stored credentials.",
+            "Restrict the privileges of the user the RFC destination "
+            "logs on with.  The destination's user in SM59 should NOT "
+            "have SAP_ALL / SAP_NEW / S_USER_GRP / S_DEVELOP.  Replace "
+            "with a tightly-scoped role that only carries the auth "
+            "objects the destination actually needs (e.g. RFC_FB to a "
+            "specific function group, S_RFC for the named function "
+            "modules).  If the destination performs only BAPI calls, "
+            "the logon user should be a Communications (C) user — not "
+            "a Dialog (A) user — so it can't be reused for SAP GUI "
+            "logon.",
             "Audit each Type-3 RFC destination on the SOURCE that "
             "permitted propagation (SM59) — destinations that store "
             "passwords / use TrustedRFC to a target with weak ACLs are "
@@ -649,7 +657,6 @@ CATALOG: Dict[str, Remediation] = {
             "Analyser; expect no traces of the planted objects.",
         ],
         refs=[
-            _note(7224),       # tp ROLLBACK transport
             _attack("T1505"),
             _attack("T1059"),
             _attack("T1098"),
@@ -909,16 +916,10 @@ CATALOG: Dict[str, Remediation] = {
 
     "recon.saprouter_info": Remediation(
         fix_summary=(
-            "Set the SAProuter NIINFO password and restrict admin queries "
-            "to the management network"
+            "Restrict SAProuter admin queries (ROUTER_ADM) to the "
+            "management network via saprouttab ACL lines"
         ),
         fix_steps=[
-            "Edit saprouttab — add a NIINFO password line so "
-            "ROUTER_ADM info requests require authentication.  Example: "
-            "  KP <pwd>\\n"
-            "  KT <mgmt-net> S<svc> .  The first character must be K "
-            "and password is supplied by the operator on every admin "
-            "query.",
             "Add a deny-by-default line at the bottom of saprouttab "
             "and explicit allow-lines for the legitimate ROUTER_ADM "
             "callers (basis admin workstations).  ROUTER_ADM from "
