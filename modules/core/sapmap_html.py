@@ -8551,10 +8551,24 @@ function _renderImportTrResult(res) {
   const el = document.getElementById('import-tr-result');
   el.style.display = '';
   const ok = !!res.ok;
-  const color = ok ? '#3fb950' : '#f85149';
-  const title = ok ? '✅ Success' : '❌ Failed';
+  // tp rc=4 = "tool produced warnings" — still operationally successful
+  // (the transport committed), just not pristine.  Show in amber rather
+  // than green so the operator sees the nuance, but DO NOT flag it as
+  // failure — that misleads operators into thinking the import didn't
+  // land when it actually did.
+  const warnings = ok && !!res.warnings;
+  const color = warnings ? '#d29922' : (ok ? '#3fb950' : '#f85149');
+  const title = warnings
+    ? '⚠️ Success with warnings (tp rc=4)'
+    : (ok ? '✅ Success' : '❌ Failed');
   let html = '<div style="color:' + color + ';font-weight:600;margin-bottom:6px">' + title + '</div>';
-  if (res.error) {
+  if (warnings) {
+    html += '<div style="color:#d29922;margin-bottom:6px;font-size:11px">' +
+            'The transport committed but tp reported warnings — common ' +
+            'when imported objects rely on a kernel or DDIC feature ' +
+            'newer than the target system. Review the tp log below ' +
+            'before relying on the imported objects.</div>';
+  } else if (res.error) {
     html += '<div style="color:#ffcccc;margin-bottom:6px">' + escHtml(res.error) + '</div>';
   }
   if (res.trkorr) {
