@@ -5875,7 +5875,7 @@ function showDetails(sid) {
         return '<div class="detail-row"><span class="detail-key">' + escHtml(tname) + '</span><span class="detail-val">' + pills + '</span></div>';
       }).join('');
       return '<div class="detail-section">' +
-        '<h4 style="color:#93c5fd">&#9876;&#65039; ATT&amp;CK observed <span style="color:#8b949e;font-weight:normal;font-size:10px">(' + allTids.length + ' technique' + (allTids.length === 1 ? '' : 's') + ' across ' + Object.keys(byTactic).length + ' tactic' + (Object.keys(byTactic).length === 1 ? '' : 's') + ')</span></h4>' +
+        '<h4 style="color:#93c5fd;cursor:pointer" onclick="showAttackCoverage()" title="Open full ATT&amp;CK Coverage Matrix">&#9876;&#65039; ATT&amp;CK observed <span style="color:#8b949e;font-weight:normal;font-size:10px">(' + allTids.length + ' technique' + (allTids.length === 1 ? '' : 's') + ' across ' + Object.keys(byTactic).length + ' tactic' + (Object.keys(byTactic).length === 1 ? '' : 's') + ') &#8594;</span></h4>' +
         rows +
         '<div style="margin-top:6px;font-size:10px;color:#6e7681">Click any pill for the MITRE technique page.</div>' +
         '</div>';
