@@ -3791,13 +3791,17 @@ function renderRemediationBlock(rem) {
   const severityIfDelayed = rem.severity_if_delayed
     ? `<span class="rem-badge" style="background:#3a0f10;color:#ff6b6b;border-color:#8b0000" title="Severity of the EXISTING finding if the fix is delayed">if delayed: ${escHtml(rem.severity_if_delayed)}</span>`
     : '';
+  const hasDetail = steps || verify || refs;
+  const detailId = 'rem-' + Math.random().toString(36).slice(2, 9);
   return `
     <div class="rem-block" style="margin-top:8px;padding:8px 10px;background:#0d1f12;border:1px solid #1a4f33;border-radius:4px;color:#cfd9df;font-size:11px;line-height:1.45">
-      <div style="color:#3fb950;font-weight:600;margin-bottom:4px">&#10004; Hardening: ${escHtml(rem.fix_summary)}</div>
-      <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px">${restartBadge}${effortBadge}${severityIfDelayed}</div>
+      <div style="color:#3fb950;font-weight:600;margin-bottom:4px;${hasDetail ? 'cursor:pointer' : ''}" ${hasDetail ? `onclick="var d=document.getElementById('${detailId}');var a=this.querySelector('.rem-arrow');if(d.style.display==='none'){d.style.display='block';a.textContent='\\u25BC'}else{d.style.display='none';a.textContent='\\u25B6'}"` : ''}>&#10004; Hardening: ${escHtml(rem.fix_summary)}${hasDetail ? ' <span class="rem-arrow" style="font-size:9px;color:#8b949e">&#9654;</span>' : ''}</div>
+      <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:2px">${restartBadge}${effortBadge}${severityIfDelayed}</div>
+      ${hasDetail ? `<div id="${detailId}" style="display:none">` : ''}
       ${steps ? `<div style="margin-top:6px"><b style="color:#8b949e">Fix steps:</b><ol style="margin:4px 0 4px 18px;padding:0">${steps}</ol></div>` : ''}
       ${verify ? `<div style="margin-top:6px"><b style="color:#8b949e">Verification:</b><ol style="margin:4px 0 4px 18px;padding:0">${verify}</ol></div>` : ''}
       ${refs ? `<div style="margin-top:6px"><b style="color:#8b949e">References:</b><div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:3px">${refs}</div></div>` : ''}
+      ${hasDetail ? '</div>' : ''}
     </div>`;
 }
 
