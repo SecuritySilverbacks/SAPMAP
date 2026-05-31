@@ -1415,11 +1415,14 @@ def _hesc(s) -> str:
 
 def _kpi_card(label: str, value: str, sub: str = "", color: str = "") -> str:
     style = f";border-left:4px solid {color}" if color else ""
+    style = f' style="border-left:4px solid {color}"' if color else ""
+    sub_html = (f'<div class="kpi-s">{_hesc(sub)}</div>'
+                 if sub else "")
     return (
-        f'<div class="kpi"{f" style=\"border-left:4px solid {color}\"" if color else ""}>'
+        f'<div class="kpi"{style}>'
         f'<div class="kpi-v">{_hesc(value)}</div>'
         f'<div class="kpi-l">{_hesc(label)}</div>'
-        f'{f"<div class=\"kpi-s\">{_hesc(sub)}</div>" if sub else ""}'
+        f'{sub_html}'
         f'</div>'
     )
 
