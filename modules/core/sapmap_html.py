@@ -9763,64 +9763,100 @@ function layoutHierarchy() {
   const rowWidth = maxRow * xSpacing;
   // BTP cloud tier sits above the on-prem hierarchy.
   const btpTier = _loPlaceBtpTier(_LO_MARGIN, _LO_MARGIN);
+
+  // ── SCC pre-pass: which RFC layers need a sub-row of SCCs? ───────────
+  // The previous "place SCC to the right of its SAP sibling" approach
+  // collides when several host groups share an RFC layer (e.g. RD1/S4D/
+  // S4H + TWT all on layer 0 because none has an incoming RFC edge):
+  // SCC-of-209 lands exactly where TWT was placed.  Drop colocated SCCs
+  // into a SUB-ROW below their host's SAP layer, centred horizontally on
+  // the SAP group, so each host stays in its own column block.
+  const sccHosts = Object.keys(mapState.scc_nodes || {}).sort();
+  const IP_RE_HIER = /^\d{1,3}(\.\d{1,3}){3}$/;
+  const getNodeIP = n => {
+    if (n.ip && IP_RE_HIER.test(n.ip)) return n.ip;
+    if (n.hostname && IP_RE_HIER.test(n.hostname)) return n.hostname;
+    if (n.host && IP_RE_HIER.test(n.host)) return n.host;
+    return null;
+  };
+  const colocatedByIp = {};
+  const standaloneSccs = [];
+  sccHosts.forEach(h => {
+    const sn = (mapState.scc_nodes || {})[h];
+    const ip = getNodeIP(sn);
+    if (!ip) { standaloneSccs.push(h); return; }
+    const hasSibling = sids.some(sid => getNodeIP(nodes[sid]) === ip);
+    if (!hasSibling) { standaloneSccs.push(h); return; }
+    (colocatedByIp[ip] = colocatedByIp[ip] || []).push(h);
+  });
+  const layerHasScc = new Set();
+  Object.keys(colocatedByIp).forEach(ip => {
+    const firstSibling = sids.find(sid => getNodeIP(nodes[sid]) === ip);
+    if (firstSibling != null) layerHasScc.add(layer[firstSibling]);
+  });
+  // Per-layer extra Y offset: each preceding layer that owns a SCC sub-row
+  // pushes subsequent SAP layers one ySpacing further down.
+  const extraOffsetByLayer = {};
+  let _accY = 0;
+  layerKeys.forEach(lk => {
+    extraOffsetByLayer[lk] = _accY;
+    if (layerHasScc.has(lk)) _accY += ySpacing;
+  });
+
+  // Place SAP rows with the reserved sub-row offset.
   layerKeys.forEach((lk, layerIdx) => {
     const row = buckets[lk].sort();
-    const yC = _LO_MARGIN + btpTier + layerIdx * ySpacing + _LO_BOX_H / 2;
+    const yC = _LO_MARGIN + btpTier
+                + layerIdx * ySpacing
+                + extraOffsetByLayer[lk]
+                + _LO_BOX_H / 2;
     const xPad = (rowWidth - row.length * xSpacing) / 2;
     row.forEach((sid, i) => {
       const xC = _LO_MARGIN + xPad + i * xSpacing + _LO_BOX_W / 2;
       _loCenter(nodes[sid], xC, yC);
     });
   });
-  // SCC nodes have no RFC edges, so the layered DAG doesn't position
-  // them.  Colocate each SCC with the SAP nodes that share its IP
-  // (so the dashed host-group zone box wraps the entire physical
-  // machine — RD1/S4D/S4H/SCC all on 192.168.2.209 belongs together).
-  // SCCs with no shared-IP sibling in this landscape fall back to the
-  // standalone far-right column.
-  const sccHosts = Object.keys(mapState.scc_nodes || {}).sort();
-  if (sccHosts.length) {
-    const IP_RE_HIER = /^\d{1,3}(\.\d{1,3}){3}$/;
-    const getNodeIP = n => {
-      if (n.ip && IP_RE_HIER.test(n.ip)) return n.ip;
-      if (n.hostname && IP_RE_HIER.test(n.hostname)) return n.hostname;
-      if (n.host && IP_RE_HIER.test(n.host)) return n.host;
-      return null;
-    };
 
-    const standaloneSccs = [];
-    sccHosts.forEach(h => {
-      const sn = (mapState.scc_nodes || {})[h];
-      const sccIp = getNodeIP(sn);
-      // Find SAP nodes that share this IP
-      const siblings = sccIp
-        ? sids.filter(sid => getNodeIP(nodes[sid]) === sccIp)
-        : [];
-      if (siblings.length === 0) {
-        standaloneSccs.push(h);
-        return;
-      }
-      // Place SCC just to the right of the rightmost SAP sibling, on
-      // the topmost sibling's row so the dashed zone naturally extends
-      // to cover it.
-      let maxX = -Infinity, sharedY = null;
-      siblings.forEach(sid => {
-        const n = nodes[sid];
-        if (n._x != null && n._x > maxX) maxX = n._x;
-        if (n._y != null && (sharedY === null || n._y < sharedY)) {
-          sharedY = n._y;
-        }
-      });
-      if (maxX > -Infinity && sharedY !== null) {
-        const xC = maxX + xSpacing + _LO_BOX_W / 2;
-        const yC = sharedY + _LO_BOX_H / 2;
-        _loCenter(sn, xC, yC);
-      } else {
-        standaloneSccs.push(h);
+  // Place colocated SCCs in the sub-row of their SAP layer, centred
+  // horizontally on the host's SAP group.  This guarantees no collision
+  // with another host's SAP nodes in the same layer because the SCC's Y
+  // is below that layer (reservation above) and the SCC's X stays
+  // anchored to its own SAP siblings.
+  Object.entries(colocatedByIp).forEach(([ip, sccList]) => {
+    const siblings = sids.filter(sid => getNodeIP(nodes[sid]) === ip);
+    if (!siblings.length) {
+      sccList.forEach(h => standaloneSccs.push(h));
+      return;
+    }
+    const sapLayer = layer[siblings[0]];
+    const sapLayerIdx = layerKeys.indexOf(sapLayer);
+    const sapYC = _LO_MARGIN + btpTier
+                   + sapLayerIdx * ySpacing
+                   + extraOffsetByLayer[sapLayer]
+                   + _LO_BOX_H / 2;
+    const sccYC = sapYC + ySpacing;       // sub-row directly below SAP layer
+
+    let minX = Infinity, maxX = -Infinity;
+    siblings.forEach(sid => {
+      const n = nodes[sid];
+      if (n._x != null) {
+        minX = Math.min(minX, n._x);
+        maxX = Math.max(maxX, n._x + _LO_BOX_W);
       }
     });
+    if (minX === Infinity) {
+      sccList.forEach(h => standaloneSccs.push(h));
+      return;
+    }
+    const centerX = (minX + maxX) / 2;
+    sccList.forEach((h, i) => {
+      const totalW = (sccList.length - 1) * xSpacing;
+      const xC = centerX - totalW / 2 + i * xSpacing;
+      _loCenter((mapState.scc_nodes||{})[h], xC, sccYC);
+    });
+  });
 
-    if (standaloneSccs.length) {
+  if (standaloneSccs.length) {
       // Reserve a column to the right of the laid-out SAP nodes, AFTER
       // accounting for any SCC we just colocated above (so we don't
       // collide with a same-IP SCC already placed there).
@@ -9837,7 +9873,6 @@ function layoutHierarchy() {
         _loCenter((mapState.scc_nodes||{})[h], sccX, yC);
       });
     }
-  }
   fitMap();
   updateMap();
 }
