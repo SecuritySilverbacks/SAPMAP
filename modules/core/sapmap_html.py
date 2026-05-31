@@ -9758,14 +9758,71 @@ function layoutHierarchy() {
       _loCenter(nodes[sid], xC, yC);
     });
   });
-  // SCC nodes have no RFC edges — stack them in a column to the right.
+  // SCC nodes have no RFC edges, so the layered DAG doesn't position
+  // them.  Colocate each SCC with the SAP nodes that share its IP
+  // (so the dashed host-group zone box wraps the entire physical
+  // machine — RD1/S4D/S4H/SCC all on 192.168.2.209 belongs together).
+  // SCCs with no shared-IP sibling in this landscape fall back to the
+  // standalone far-right column.
   const sccHosts = Object.keys(mapState.scc_nodes || {}).sort();
   if (sccHosts.length) {
-    const sccX = _LO_MARGIN + rowWidth + _LO_MARGIN + _LO_BOX_W / 2;
-    sccHosts.forEach((h, i) => {
-      const yC = _LO_MARGIN + btpTier + i * (_LO_BOX_H + _LO_MARGIN) + _LO_BOX_H / 2;
-      _loCenter((mapState.scc_nodes||{})[h], sccX, yC);
+    const IP_RE_HIER = /^\d{1,3}(\.\d{1,3}){3}$/;
+    const getNodeIP = n => {
+      if (n.ip && IP_RE_HIER.test(n.ip)) return n.ip;
+      if (n.hostname && IP_RE_HIER.test(n.hostname)) return n.hostname;
+      if (n.host && IP_RE_HIER.test(n.host)) return n.host;
+      return null;
+    };
+
+    const standaloneSccs = [];
+    sccHosts.forEach(h => {
+      const sn = (mapState.scc_nodes || {})[h];
+      const sccIp = getNodeIP(sn);
+      // Find SAP nodes that share this IP
+      const siblings = sccIp
+        ? sids.filter(sid => getNodeIP(nodes[sid]) === sccIp)
+        : [];
+      if (siblings.length === 0) {
+        standaloneSccs.push(h);
+        return;
+      }
+      // Place SCC just to the right of the rightmost SAP sibling, on
+      // the topmost sibling's row so the dashed zone naturally extends
+      // to cover it.
+      let maxX = -Infinity, sharedY = null;
+      siblings.forEach(sid => {
+        const n = nodes[sid];
+        if (n._x != null && n._x > maxX) maxX = n._x;
+        if (n._y != null && (sharedY === null || n._y < sharedY)) {
+          sharedY = n._y;
+        }
+      });
+      if (maxX > -Infinity && sharedY !== null) {
+        const xC = maxX + xSpacing + _LO_BOX_W / 2;
+        const yC = sharedY + _LO_BOX_H / 2;
+        _loCenter(sn, xC, yC);
+      } else {
+        standaloneSccs.push(h);
+      }
     });
+
+    if (standaloneSccs.length) {
+      // Reserve a column to the right of the laid-out SAP nodes, AFTER
+      // accounting for any SCC we just colocated above (so we don't
+      // collide with a same-IP SCC already placed there).
+      let rightmost = _LO_MARGIN + rowWidth;
+      Object.values(nodes).forEach(n => {
+        if (n._x != null) rightmost = Math.max(rightmost, n._x + _LO_BOX_W);
+      });
+      Object.values(mapState.scc_nodes || {}).forEach(sn => {
+        if (sn._x != null) rightmost = Math.max(rightmost, sn._x + _LO_BOX_W);
+      });
+      const sccX = rightmost + _LO_MARGIN + _LO_BOX_W / 2;
+      standaloneSccs.forEach((h, i) => {
+        const yC = _LO_MARGIN + btpTier + i * (_LO_BOX_H + _LO_MARGIN) + _LO_BOX_H / 2;
+        _loCenter((mapState.scc_nodes||{})[h], sccX, yC);
+      });
+    }
   }
   fitMap();
   updateMap();
