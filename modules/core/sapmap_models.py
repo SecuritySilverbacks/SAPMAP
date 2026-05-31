@@ -55,7 +55,11 @@ class Finding:
     name: str
     severity: Severity
     description: str = ""
-    remediation: str = ""
+    # ``remediation`` accepts EITHER a legacy plain string (old Finding
+    # constructors and old .sapmap files) OR a structured dict matching
+    # modules.core.sapmap_remediation.Remediation.to_dict().  Renderers
+    # check the type and route to the right layout.
+    remediation: object = ""
     detail: str = ""
     # MITRE ATT&CK Enterprise technique IDs ("T1190", "T1078.001").  Names
     # and tactics are looked up at render time via modules.core.sapmap_attack
@@ -65,12 +69,19 @@ class Finding:
     attack_techniques: list = field(default_factory=list)
 
     def to_dict(self) -> dict:
+        # Pass dict-shaped remediation through verbatim; coerce anything
+        # else to its string form so legacy callers stay JSON-clean.
+        rem = self.remediation
+        if not isinstance(rem, (dict, str)):
+            rem = str(rem) if rem else ""
+        if isinstance(rem, dict):
+            rem = dict(rem)
         return {
             "name": self.name,
             "severity": int(self.severity),
             "severity_label": SEVERITY_LABELS.get(self.severity, "UNKNOWN"),
             "description": self.description,
-            "remediation": self.remediation,
+            "remediation": rem,
             "detail": self.detail,
             "attack_techniques": list(self.attack_techniques or []),
         }
