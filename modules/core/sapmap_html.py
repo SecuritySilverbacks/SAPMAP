@@ -599,6 +599,12 @@ body {
   color: #c9d1d9; font-weight: 400;
   word-break: break-word;
 }
+.finding-log-row .finding-fix {
+  display: block; margin-top: 2px; margin-left: 4px;
+  font-size: 10px; color: #3fb950; opacity: 0.85;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: 100%;
+}
 .finding-log-row .finding-cve {
   display: inline-block; margin-left: 4px;
   font-size: 10px; padding: 0 4px; border-radius: 2px;
@@ -10154,6 +10160,9 @@ function renderFindings() {
             ? `<span class="finding-cve">${_escapeHtml(f.cve)}</span>` : '')
         + ((f.attack_techniques && f.attack_techniques.length)
             ? renderAttackPills(f.attack_techniques, {max: 3}) : '')
+        + ((f.remediation && typeof f.remediation === 'object' && f.remediation.fix_summary)
+            ? `<span class="finding-fix" title="${_escapeHtml(f.remediation.fix_summary)}">&#10004; ${_escapeHtml(f.remediation.fix_summary)}</span>`
+            : '')
         + `</div>`
       );
     }
