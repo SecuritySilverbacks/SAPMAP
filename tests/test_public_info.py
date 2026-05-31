@@ -201,7 +201,7 @@ def test_enrich_uses_public_info_to_fill_empty_fields(monkeypatch):
     _no_op_diag_ms_os(monkeypatch)
 
     calls = []
-    def fake_pi(host, port, timeout=5, saprouter=""):
+    def fake_pi(host, port, timeout=5, saprouter="", use_https=False):
         calls.append((host, port))
         return {"sid": "S4H", "hostname": "s4hanadev",
                 "os_type": "Linux", "db_type": "HDB",
@@ -267,7 +267,7 @@ def test_enrich_falls_back_to_default_icm_ports_when_sapcontrol_silent(
     _no_op_diag_ms_os(monkeypatch)
 
     tried = []
-    def fake_pi(host, port, timeout=5, saprouter=""):
+    def fake_pi(host, port, timeout=5, saprouter="", use_https=False):
         tried.append(port)
         # First port (8000) succeeds — second default (50080) should
         # NOT be tried because the loop breaks on first hit.
