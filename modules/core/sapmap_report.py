@@ -153,6 +153,147 @@ def _render_structured_remediation(rem: dict, indent: str = "") -> str:
     return "\n".join(parts)
 
 
+def _html_render_structured_remediation(rem: dict) -> str:
+    """HTML equivalent of the GUI renderRemediationBlock — returns one
+    self-contained <div> with fix summary, restart/effort/severity
+    badges, numbered fix + verification lists, and clickable refs.
+
+    Built without f-strings carrying embedded backslashes so the file
+    parses on every Python interpreter the report is shipped on.
+    """
+    if not isinstance(rem, dict) or not rem.get("fix_summary"):
+        return ""
+
+    fix_summary = _hesc(rem["fix_summary"])
+    # Badges
+    badges = []
+    if rem.get("requires_restart"):
+        badges.append(
+            '<span class="rem-badge rem-badge-restart" '
+            'title="Applying this fix needs an instance restart">'
+            'restart needed</span>')
+    else:
+        badges.append(
+            '<span class="rem-badge rem-badge-online" '
+            'title="No downtime required">online fix</span>')
+    if rem.get("effort_minutes"):
+        badges.append(
+            '<span class="rem-badge" '
+            'title="Rough wall-clock effort estimate (one engineer)">'
+            "~" + str(int(rem["effort_minutes"])) + " min</span>")
+    if rem.get("severity_if_delayed"):
+        badges.append(
+            '<span class="rem-badge rem-badge-delayed" '
+            'title="Severity of the existing finding if the fix is '
+            'delayed">if delayed: '
+            + _hesc(rem["severity_if_delayed"]) + "</span>")
+
+    parts = [
+        '<div class="rem-block">',
+        '<div class="rem-head">&#10004; Hardening: ',
+        fix_summary,
+        '</div>',
+        '<div class="rem-badges">', "".join(badges), '</div>',
+    ]
+    steps = rem.get("fix_steps") or []
+    if steps:
+        parts.append('<div class="rem-sub"><b>Fix steps:</b><ol>')
+        parts.extend('<li>' + _hesc(s) + '</li>' for s in steps)
+        parts.append('</ol></div>')
+    verify = rem.get("verification") or []
+    if verify:
+        parts.append('<div class="rem-sub"><b>Verification:</b><ol>')
+        parts.extend('<li>' + _hesc(s) + '</li>' for s in verify)
+        parts.append('</ol></div>')
+    refs = rem.get("refs") or []
+    if refs:
+        ref_html = []
+        for r in refs:
+            if isinstance(r, (list, tuple)) and len(r) >= 2:
+                label, url = r[0], r[1]
+                if label and url:
+                    ref_html.append(
+                        '<a class="rem-ref" target="_blank" '
+                        'rel="noopener noreferrer" href="'
+                        + _hesc(url) + '">' + _hesc(label) + '</a>')
+        if ref_html:
+            parts.append('<div class="rem-sub"><b>References:</b> '
+                          '<div class="rem-refs">'
+                          + "".join(ref_html) + '</div></div>')
+    if rem.get("last_reviewed"):
+        parts.append('<div class="rem-stamp">Catalog entry last reviewed '
+                      + _hesc(str(rem["last_reviewed"])) + '.</div>')
+    parts.append('</div>')
+    return "".join(parts)
+
+
+# CSS for the HTML report — injected once into the <style> block.
+_REM_BLOCK_CSS = """
+.rem-block { margin:8px 0 0 0; padding:8px 12px;
+  background:#ecfdf5; border:1px solid #a7f3d0;
+  border-radius:6px; color:#064e3b; font-size:12px; line-height:1.45 }
+.rem-head { color:#047857; font-weight:600; margin-bottom:4px }
+.rem-badges { display:flex; gap:4px; flex-wrap:wrap; margin-bottom:6px }
+.rem-badge { display:inline-block; font-family:monospace;
+  font-size:10px; padding:1px 6px; border-radius:2px;
+  background:#f3f4f6; color:#374151; border:1px solid #d1d5db;
+  line-height:14px }
+.rem-badge-restart { background:#fef3c7; color:#92400e; border-color:#fde68a }
+.rem-badge-online  { background:#d1fae5; color:#065f46; border-color:#a7f3d0 }
+.rem-badge-delayed { background:#fee2e2; color:#991b1b; border-color:#fecaca }
+.rem-sub { margin-top:6px }
+.rem-sub ol { margin:4px 0 4px 20px; padding:0 }
+.rem-refs { display:flex; gap:4px; flex-wrap:wrap; margin-top:3px }
+.rem-ref { display:inline-block; font-family:monospace; font-size:10px;
+  padding:1px 6px; border-radius:2px;
+  background:#e0e7ff; color:#3730a3; border:1px solid #c7d2fe;
+  text-decoration:none }
+.rem-ref:hover { background:#3730a3; color:#fff }
+.rem-stamp { color:#6b7280; font-size:10px; margin-top:6px }
+.hc-card { margin:10px 0; padding:10px 12px;
+  background:#fff; border:1px solid #e5e7eb; border-radius:6px }
+.hc-title { font-weight:600; color:#111827; margin-bottom:4px }
+.hc-scope { color:#374151; font-size:11px; margin-bottom:6px }
+"""
+
+
+def _build_hardening_html(state: SAPMAPState) -> str:
+    """HTML version of the Hardening checklist — same aggregation logic
+    as the Markdown helper, rendered into bordered cards.  Returns ""
+    when no structured remediation was found anywhere in the state."""
+    bucket = {}   # fix_summary → {sids: set, rem: dict, max_sev: int}
+    for sid, n in sorted(state.nodes.items()):
+        for f in n.findings or []:
+            rem = getattr(f, "remediation", None)
+            if not isinstance(rem, dict) or not rem.get("fix_summary"):
+                continue
+            key = rem["fix_summary"]
+            slot = bucket.setdefault(key, {"sids": set(), "rem": rem,
+                                            "max_sev": 0})
+            slot["sids"].add(sid)
+            sev = int(getattr(f, "severity", 0) or 0)
+            if sev > slot["max_sev"]:
+                slot["max_sev"] = sev
+    if not bucket:
+        return ""
+
+    ordered = sorted(
+        bucket.items(),
+        key=lambda kv: (-kv[1]["max_sev"], kv[0]))
+    cards = []
+    for idx, (summary, slot) in enumerate(ordered, 1):
+        rem = slot["rem"]
+        sids = ", ".join(sorted(slot["sids"]))
+        cards.append(
+            '<div class="hc-card">'
+            + '<div class="hc-title">' + str(idx) + '. '
+            + _hesc(summary) + '</div>'
+            + '<div class="hc-scope"><b>Scope:</b> ' + _hesc(sids) + '</div>'
+            + _html_render_structured_remediation(rem)
+            + '</div>')
+    return "".join(cards)
+
+
 def _hardening_checklist_section(state: SAPMAPState) -> list:
     """Aggregate every structured remediation across the landscape into
     a deduped action checklist.  Replaces the older
@@ -1740,8 +1881,17 @@ def build_html_report(state: SAPMAPState,
                if f.description else '')
             + (f'<div class="finding-detail"><b>Detail:</b> '
                f'{_hesc(f.detail)}</div>' if f.detail else '')
-            + (f'<div class="finding-rem"><b>Remediation:</b> '
-               f'{_hesc(f.remediation)}</div>' if f.remediation else '')
+            + (
+                # Structured remediation dict (catalog-attached) renders
+                # as a full bordered card; legacy plain strings keep the
+                # short single-line layout.
+                _html_render_structured_remediation(f.remediation)
+                if isinstance(f.remediation, dict)
+                   and f.remediation.get("fix_summary")
+                else (f'<div class="finding-rem"><b>Remediation:</b> '
+                      f'{_hesc(str(f.remediation))}</div>'
+                      if f.remediation else '')
+              )
             + '</div>'
         )
 
@@ -1887,19 +2037,38 @@ def build_html_report(state: SAPMAPState,
             f'</div>'
         )
 
+    # Structured Hardening checklist — catalog-driven, supersedes the
+    # older per-finding plain-string roll-up.  Aggregates by fix_summary
+    # and lists every SID needing each fix.
+    hardening_html = _build_hardening_html(state)
+
+    # Legacy per-finding plain-string remediation roll-up — only included
+    # as a fallback when no structured remediation is present (older
+    # .sapmap state files predate the catalog).  Skips dict-shaped
+    # remediations (those already rendered in Hardening checklist).
     seen = set()
     rec_items = []
-    for n in state.nodes.values():
-        for f in n.findings or []:
-            r = (f.remediation or "").strip()
-            if r and r not in seen:
-                seen.add(r)
-                rec_items.append(f'<li><b>{_hesc(n.sid)}</b> — {_hesc(r)}</li>')
+    if not hardening_html:
+        for n in state.nodes.values():
+            for f in n.findings or []:
+                r = f.remediation
+                if isinstance(r, dict) or not isinstance(r, str):
+                    continue
+                r = (r or "").strip()
+                if r and r not in seen:
+                    seen.add(r)
+                    rec_items.append(
+                        '<li><b>' + _hesc(n.sid) + '</b> — '
+                        + _hesc(r) + '</li>')
     finding_html = ("<ol>" + "".join(rec_items) + "</ol>") if rec_items else ""
 
-    if derived_html or finding_html:
+    if hardening_html or derived_html or finding_html:
         rec_html = (
             (('<h3 style="margin:18px 0 10px;color:#374151;font-size:14px">'
+              'Hardening checklist</h3>'
+              + hardening_html)
+             if hardening_html else "")
+            + (('<h3 style="margin:18px 0 10px;color:#374151;font-size:14px">'
               'Landscape-wide structural remediations</h3>'
               + derived_html)
              if derived_html else "")
@@ -2006,6 +2175,10 @@ def build_html_report(state: SAPMAPState,
     else:
         capability_html = ""
 
+    # CSS block injected once into <style> for structured remediation
+    # cards + Hardening-checklist cards.
+    rem_block_css = _REM_BLOCK_CSS
+
     return f"""<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8">
@@ -2079,6 +2252,9 @@ def build_html_report(state: SAPMAPState,
   .finding-rem{{font-size:12px;color:#1a7f37;background:#f0fdf4;
         padding:8px 10px;border-radius:4px;margin-top:8px;
         border-left:3px solid #1a7f37}}
+  /* Structured remediation card (catalog-driven) — overrides the
+     legacy .finding-rem look with a fuller bordered layout. */
+{rem_block_css}
   .muted{{color:#8b949e;font-style:italic;padding:8px}}
   ol{{padding-left:22px;margin:0}} ol li{{margin-bottom:8px;font-size:14px}}
   .reco{{background:#fafbfc;border-radius:8px;padding:14px 18px;margin-bottom:12px}}
