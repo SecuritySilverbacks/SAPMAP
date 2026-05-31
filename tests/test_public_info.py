@@ -223,7 +223,7 @@ def test_enrich_uses_public_info_to_fill_empty_fields(monkeypatch):
     assert info.get("db_host") == "s4hanadev"
     assert info.get("timezone") == "0"
     assert info.get("_is_abap") is True
-    assert info.get("_public_info_source") == "s4hanadev:8000"
+    assert info.get("_public_info_source") == "http://s4hanadev:8000"
 
 
 def test_enrich_skips_public_info_on_java_only_stack(monkeypatch):
