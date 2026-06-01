@@ -1347,28 +1347,31 @@ body {
         <label>Target client</label>
         <input id="import-tr-client" type="text" value="001" maxlength="3" style="width:80px">
       </div>
-      <div class="form-row" id="import-tr-channel-row" style="margin-top:10px">
-        <label>Exec channel
-          <span style="color:#8b949e;font-weight:normal">— which OS-exec primitive carries the upload + <code>tp</code> calls</span>
-        </label>
-        <div id="import-tr-channel-opts" style="display:flex;gap:14px;flex-wrap:wrap;margin-top:4px;font-size:12px;color:#cfd9df">
-          <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+      <div id="import-tr-channel-row" style="margin-top:14px;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:4px">
+        <div style="font-size:11px;color:#8b949e;margin-bottom:6px">
+          Exec channel
+          <span>— which OS-exec primitive carries the upload + <code>tp</code> calls</span>
+        </div>
+        <div id="import-tr-channel-opts" style="display:flex;flex-direction:column;gap:6px;font-size:12px;color:#cfd9df">
+          <label class="channel-opt" style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:0;padding:4px 0">
             <input type="radio" name="import-tr-channel" value="auto" checked
-                   style="accent-color:#79c0ff">
+                   style="width:14px;height:14px;flex:0 0 14px;margin:0;padding:0;accent-color:#79c0ff;appearance:auto;-webkit-appearance:auto;border:none;background:transparent">
             <span><strong>Auto</strong> <span id="import-tr-auto-hint" style="color:#8b949e">(picks best)</span></span>
           </label>
-          <label style="display:flex;align-items:center;gap:6px;cursor:pointer" id="import-tr-channel-gw-lbl">
+          <label class="channel-opt" style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:0;padding:4px 0" id="import-tr-channel-gw-lbl">
             <input type="radio" name="import-tr-channel" value="gw"
-                   id="import-tr-channel-gw" style="accent-color:#f85149">
+                   id="import-tr-channel-gw"
+                   style="width:14px;height:14px;flex:0 0 14px;margin:0;padding:0;accent-color:#f85149;appearance:auto;-webkit-appearance:auto;border:none;background:transparent">
             <span><strong>GW SAPXPG</strong> <span style="color:#8b949e">— unauthenticated (needs <code>gw_vulnerable</code>)</span></span>
           </label>
-          <label style="display:flex;align-items:center;gap:6px;cursor:pointer" id="import-tr-channel-sxpg-lbl">
+          <label class="channel-opt" style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:0;padding:4px 0" id="import-tr-channel-sxpg-lbl">
             <input type="radio" name="import-tr-channel" value="sxpg"
-                   id="import-tr-channel-sxpg" style="accent-color:#d29922">
+                   id="import-tr-channel-sxpg"
+                   style="width:14px;height:14px;flex:0 0 14px;margin:0;padding:0;accent-color:#d29922;appearance:auto;-webkit-appearance:auto;border:none;background:transparent">
             <span><strong>SXPG_STEP_XPG_START</strong> <span style="color:#8b949e">— authenticated RFC (needs SAP_ALL cred)</span></span>
           </label>
         </div>
-        <div id="import-tr-channel-note" style="margin-top:6px;font-size:11px;color:#8b949e;line-height:1.4"></div>
+        <div id="import-tr-channel-note" style="margin-top:8px;font-size:11px;color:#8b949e;line-height:1.4"></div>
       </div>
       <div style="margin-top:14px;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:4px">
         <label for="import-tr-dryrun" style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:0;font-size:13px;color:#e6edf3">
