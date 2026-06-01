@@ -7533,6 +7533,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
           zip:           the transport .zip (one K* + one R*)
           target_client: '001' / '100' / ... (defaults to '001')
           dry_run:       '1' or '0'   (default '1' — runs `tp tst`)
+          channel:       'auto' (default) | 'gw' | 'sxpg'
         Returns task_id immediately; poll /api/node/<sid>/transport_progress
         for progress + final result.
         """
@@ -7550,6 +7551,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
         target_client = (request.forms.get("target_client") or "001").strip()
         dry_run = (request.forms.get("dry_run") or "1").strip() != "0"
+        channel = (request.forms.get("channel") or "auto").strip().lower()
+        if channel not in ("auto", "gw", "sxpg"):
+            channel = "auto"
 
         # Generate a task_id the GUI polls for progress.
         import uuid as _uuid
@@ -7559,7 +7563,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
         def _run():
             try:
                 import_transport(node, zip_bytes, target_client,
-                                 dry_run, task_id)
+                                 dry_run, task_id, channel=channel)
             except Exception as e:
                 from sap_transport_import import _new_progress
                 setp = _new_progress(task_id)   # ensure entry exists
