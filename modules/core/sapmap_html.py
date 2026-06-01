@@ -1347,6 +1347,29 @@ body {
         <label>Target client</label>
         <input id="import-tr-client" type="text" value="001" maxlength="3" style="width:80px">
       </div>
+      <div class="form-row" id="import-tr-channel-row" style="margin-top:10px">
+        <label>Exec channel
+          <span style="color:#8b949e;font-weight:normal">— which OS-exec primitive carries the upload + <code>tp</code> calls</span>
+        </label>
+        <div id="import-tr-channel-opts" style="display:flex;gap:14px;flex-wrap:wrap;margin-top:4px;font-size:12px;color:#cfd9df">
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+            <input type="radio" name="import-tr-channel" value="auto" checked
+                   style="accent-color:#79c0ff">
+            <span><strong>Auto</strong> <span id="import-tr-auto-hint" style="color:#8b949e">(picks best)</span></span>
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer" id="import-tr-channel-gw-lbl">
+            <input type="radio" name="import-tr-channel" value="gw"
+                   id="import-tr-channel-gw" style="accent-color:#f85149">
+            <span><strong>GW SAPXPG</strong> <span style="color:#8b949e">— unauthenticated (needs <code>gw_vulnerable</code>)</span></span>
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer" id="import-tr-channel-sxpg-lbl">
+            <input type="radio" name="import-tr-channel" value="sxpg"
+                   id="import-tr-channel-sxpg" style="accent-color:#d29922">
+            <span><strong>SXPG_STEP_XPG_START</strong> <span style="color:#8b949e">— authenticated RFC (needs SAP_ALL cred)</span></span>
+          </label>
+        </div>
+        <div id="import-tr-channel-note" style="margin-top:6px;font-size:11px;color:#8b949e;line-height:1.4"></div>
+      </div>
       <div style="margin-top:14px;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:4px">
         <label for="import-tr-dryrun" style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:0;font-size:13px;color:#e6edf3">
           <input id="import-tr-dryrun" type="checkbox" checked
@@ -3900,11 +3923,14 @@ function showCtxMenu(e, sid) {
     'create_user_betrusted': hasMsVuln || hasGwVuln, // need vulnerable MS or GW
     'create_user_gw':   hasGwVuln,                  // need GW vulnerability
     'create_user_dpmon_sapstar': hasGwVuln && isAbapStack && n.dpmon_sap_star_available,  // kernel>=790 + ABAP + GW
-    // Transport import is Mode-B-only: the chunked binary upload + the
-    // tp invocation both ride the GW SAPXPG primitive, which requires
-    // gw_vulnerable.  Transports themselves are an ABAP-stack construct
-    // — a pure-Java target won't have /usr/sap/trans/ or tp at all.
-    'import_transport':  isAbapStack && hasGwVuln,
+    // Transport import needs an OS-exec channel on the target.  Two
+    // primitives are wired in:
+    //   * GW SAPXPG (10KBLAZE) — unauthenticated, requires gw_vulnerable
+    //   * SXPG_STEP_XPG_START — authenticated, requires a SAP_ALL cred
+    //     (SAPMAP-created user or operator-supplied verified cred)
+    // Transports themselves are an ABAP-stack construct — a pure-Java
+    // target won't have /usr/sap/trans/ or tp at all.
+    'import_transport':  isAbapStack && (hasGwVuln || hasCreds),
     'create_user_creds': hasCreds,                  // need credentials
     'lpe':              isAbapStack && hasCreds,    // ABAP-only (BAPI-driven)
     'check_linux_lpe':   !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
@@ -4080,7 +4106,7 @@ function showCtxMenu(e, sid) {
     'create_user_gw':   'Requires a vulnerable RFC Gateway',
     'import_transport': (!isAbapStack
         ? 'Transport import requires an ABAP stack — transports are an ABAP-only construct (no /usr/sap/trans/ on pure Java).'
-        : 'Requires a vulnerable RFC Gateway — chunked upload + tp invocation both ride the GW SAPXPG primitive. Run "Check GW Vulnerabilities" first.'),
+        : 'Needs an OS-exec channel: either a vulnerable RFC Gateway (run "Check GW Vulnerabilities") or a SAP_ALL credential (provide a verified RFC user or create one via the GW / 10KBLAZE / dpmon chains first).'),
     'create_user_creds': 'Provide credentials first',
     'lpe':              'Provide credentials first',
     'check_linux_lpe':   'Requires OS-exec on Linux host',
@@ -8409,13 +8435,21 @@ function showImportTransportModal(sid) {
   const n = (mapState.nodes || {})[sid];
   if (!n) return;
 
+  // Channel availability — derive from the node state.  Mirrors
+  // _resolve_channel() in sap_transport_import.py so the modal and
+  // backend agree on which radios are live.
+  const gwAvail = !!n.gw_vulnerable;
+  const credsAvail = ((n.credentials || []).length > 0
+                       || (n.created_users || []).length > 0
+                       || !!n.pwned);
+
   // Soft pre-flight: warn (don't block) — the backend re-checks.
   const sysType = (n.system_type || '').toUpperCase();
   let preflight = '';
-  if (!n.gw_vulnerable) {
-    preflight = '⚠️ This node is NOT flagged as gateway-vulnerable. Run "Check GW Vulnerabilities" first — the import will be refused otherwise.';
-  } else if (sysType.indexOf('ABAP') === -1) {
+  if (sysType.indexOf('ABAP') === -1) {
     preflight = '⚠️ This node\'s stack is ' + sysType + ' — transport import requires an ABAP stack and will be refused.';
+  } else if (!gwAvail && !credsAvail) {
+    preflight = '⚠️ This node has neither a vulnerable RFC Gateway nor SAP_ALL credentials. Provide a working logon (or run "Check GW Vulnerabilities" first) — the import will be refused otherwise.';
   }
   if (preflight) {
     if (!confirm(preflight + '\n\nOpen the modal anyway?')) return;
@@ -8437,6 +8471,35 @@ function showImportTransportModal(sid) {
   document.getElementById('import-tr-counter').textContent = '0 / 0';
   document.getElementById('import-tr-eta').textContent = '—';
 
+  // Wire up channel selector — disable radios whose primitive isn't
+  // available on this target and surface what 'Auto' will resolve to.
+  const gwRadio   = document.getElementById('import-tr-channel-gw');
+  const sxpgRadio = document.getElementById('import-tr-channel-sxpg');
+  const autoRadio = document.querySelector('input[name="import-tr-channel"][value="auto"]');
+  const autoHint  = document.getElementById('import-tr-auto-hint');
+  const note      = document.getElementById('import-tr-channel-note');
+  gwRadio.disabled   = !gwAvail;
+  sxpgRadio.disabled = !credsAvail;
+  document.getElementById('import-tr-channel-gw-lbl').style.opacity   = gwAvail   ? '1' : '0.45';
+  document.getElementById('import-tr-channel-sxpg-lbl').style.opacity = credsAvail ? '1' : '0.45';
+  autoRadio.checked = true;
+  let autoVerdict;
+  if (gwAvail) {
+    autoVerdict = '(GW SAPXPG — unauthenticated, no destination artifact)';
+  } else if (credsAvail) {
+    const u = (n.created_users || []).length
+      ? (n.created_users[0].username || '?')
+      : ((n.credentials || []).find(c => c.verified) || (n.credentials || [])[0] || {}).username || '?';
+    autoVerdict = '(SXPG_STEP_XPG_START as ' + u + ')';
+  } else {
+    autoVerdict = '(no channel available)';
+  }
+  autoHint.textContent = autoVerdict;
+  let notes = [];
+  if (!gwAvail)    notes.push('GW disabled — node is not gw_vulnerable.');
+  if (!credsAvail) notes.push('SXPG disabled — no SAP_ALL credential on this node.');
+  note.textContent = notes.join(' ');
+
   document.getElementById('import-transport-modal').classList.add('visible');
 }
 
@@ -8451,6 +8514,8 @@ async function runImportTransport() {
   const file = fileInput.files[0];
   const client = (document.getElementById('import-tr-client').value || '001').trim();
   const dryRun = document.getElementById('import-tr-dryrun').checked;
+  const channelEl = document.querySelector('input[name="import-tr-channel"]:checked');
+  const channel = channelEl ? channelEl.value : 'auto';
 
   if (!dryRun) {
     if (!confirm(
@@ -8464,6 +8529,7 @@ async function runImportTransport() {
   fd.append('zip', file);
   fd.append('target_client', client);
   fd.append('dry_run', dryRun ? '1' : '0');
+  fd.append('channel', channel);
 
   document.getElementById('import-tr-go').disabled = true;
   document.getElementById('import-tr-go').textContent = 'Running…';
@@ -8576,6 +8642,14 @@ function _renderImportTrResult(res) {
   }
   if (res.target_sid) {
     html += '<div><b>Target:</b> ' + escHtml(res.target_sid) + ' client ' + escHtml(res.target_client || '?') + '</div>';
+  }
+  if (res.channel) {
+    const chLabel = (res.channel === 'gw')
+      ? 'GW SAPXPG (unauthenticated)'
+      : (res.channel === 'sxpg' ? 'SXPG_STEP_XPG_START (authenticated)' : res.channel);
+    const req = res.channel_requested || 'auto';
+    const reqSuffix = (req !== res.channel) ? ' [requested: ' + escHtml(req) + ']' : '';
+    html += '<div><b>Exec channel:</b> ' + escHtml(chLabel) + reqSuffix + '</div>';
   }
   if (res.cofile_md5) html += '<div><b>cofile md5:</b> <code>' + escHtml(res.cofile_md5) + '</code></div>';
   if (res.datafile_md5) html += '<div><b>datafile md5:</b> <code>' + escHtml(res.datafile_md5) + '</code></div>';

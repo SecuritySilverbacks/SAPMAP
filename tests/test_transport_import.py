@@ -329,3 +329,70 @@ def test_usr_sap_regex_matches_anywhere_in_path():
     m = ti._WIN_USR_SAP_RE.search(r"P:\usr\sap\TWT\D00\work")
     assert m is not None
     assert m.group(1).lower() == r"p:\usr\sap"
+
+
+# ---------------------------------------------------------------------------
+# Channel resolver — picks GW / SXPG / errors out cleanly
+# ---------------------------------------------------------------------------
+
+class _ResolveNode:
+    """Just enough surface to satisfy _resolve_channel without booting
+    the full SAPNode dataclass (avoids importing sapmap_models in a
+    unit test that doesn't need it)."""
+    def __init__(self, *, gw_vulnerable=False, best=None):
+        self.gw_vulnerable = gw_vulnerable
+        self._best = best
+
+    def best_credentials(self):
+        return self._best
+
+
+class _Creds:
+    def __init__(self, username="SAPMAP00"):
+        self.username = username
+
+
+def test_resolve_channel_auto_prefers_gw_when_vulnerable():
+    n = _ResolveNode(gw_vulnerable=True, best=_Creds("OPERATOR"))
+    r = ti._resolve_channel(n, "auto")
+    assert r["ok"] is True
+    assert r["channel"] == "gw"
+    assert "Gateway SAPXPG" in r["reason"]
+
+
+def test_resolve_channel_auto_falls_back_to_sxpg_without_gw():
+    n = _ResolveNode(gw_vulnerable=False, best=_Creds("SAPMAP00"))
+    r = ti._resolve_channel(n, "auto")
+    assert r["ok"] is True
+    assert r["channel"] == "sxpg"
+    assert "SAPMAP00" in r["reason"]
+
+
+def test_resolve_channel_auto_errors_when_neither_available():
+    n = _ResolveNode(gw_vulnerable=False, best=None)
+    r = ti._resolve_channel(n, "auto")
+    assert r["ok"] is False
+    assert "no exec channel" in r["reason"].lower()
+
+
+def test_resolve_channel_force_gw_without_vuln_errors():
+    n = _ResolveNode(gw_vulnerable=False, best=_Creds())
+    r = ti._resolve_channel(n, "gw")
+    assert r["ok"] is False
+    assert "gw_vulnerable" in r["reason"]
+
+
+def test_resolve_channel_force_sxpg_without_creds_errors():
+    n = _ResolveNode(gw_vulnerable=True, best=None)
+    r = ti._resolve_channel(n, "sxpg")
+    assert r["ok"] is False
+    assert "no credentials" in r["reason"].lower()
+
+
+def test_resolve_channel_force_gw_with_vuln_uses_gw_even_when_creds():
+    """Operator explicitly pinned the channel — don't second-guess."""
+    n = _ResolveNode(gw_vulnerable=True, best=_Creds())
+    r = ti._resolve_channel(n, "gw")
+    assert r["ok"] is True
+    assert r["channel"] == "gw"
+    assert "forced" in r["reason"]
