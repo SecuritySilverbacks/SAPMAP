@@ -1008,15 +1008,34 @@ body {
 
 <!-- SAP Cloud Connector Context Menu -->
 <div class="ctx-menu" id="scc-ctx-menu">
+  <!-- Top-level quick actions -->
   <div class="ctx-item" data-action="scc_details">&#128269; View SCC Details</div>
-  <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="scc_set_credentials">&#128273; Set Credentials</div>
-  <div class="ctx-item" data-action="scc_probe_creds">&#128273; Probe Default Account (Administrator/manage)</div>
-  <div class="ctx-item" data-action="scc_pull_mappings">&#128194; Pull Mappings</div>
-  <div class="ctx-item" data-action="scc_probe_mappings">&#128225; Probe Mappings (TCP/HTTP smoke test)</div>
-  <div class="ctx-item" data-action="scc_extract_keystore" style="color:#f85149">&#128272; Extract Keystore + Decrypt SSFS (FULL BACKUP — CROWN JEWELS)</div>
-  <div class="ctx-item" data-action="scc_download_hashes">&#128196; Download Password Hashes</div>
-  <div class="ctx-item" data-action="scc_analyse_pp">&#128269; Analyse Principal-Propagation Trust</div>
+  <div class="ctx-sep"></div>
+  <!-- Scanning submenu -->
+  <div class="ctx-group">
+    <div class="ctx-item">&#128225; Scanning</div>
+    <div class="ctx-sub">
+      <div class="ctx-item" data-action="scc_probe_creds">&#128273; Probe Default Account (Administrator/manage)</div>
+      <div class="ctx-item" data-action="scc_probe_mappings">&#128225; Probe Mappings (TCP/HTTP smoke test)</div>
+      <div class="ctx-item" data-action="scc_analyse_pp">&#128269; Analyse Principal-Propagation Trust</div>
+    </div>
+  </div>
+  <!-- Exploitation submenu -->
+  <div class="ctx-group">
+    <div class="ctx-item">&#9876; Exploitation</div>
+    <div class="ctx-sub">
+      <div class="ctx-item" data-action="scc_extract_keystore" style="color:#f85149">&#128272; Extract Keystore + Decrypt SSFS (FULL BACKUP — CROWN JEWELS)</div>
+    </div>
+  </div>
+  <!-- Data Extraction submenu -->
+  <div class="ctx-group">
+    <div class="ctx-item">&#128230; Data Extraction</div>
+    <div class="ctx-sub">
+      <div class="ctx-item" data-action="scc_pull_mappings">&#128194; Pull Mappings</div>
+      <div class="ctx-item" data-action="scc_download_hashes">&#128196; Download Password Hashes</div>
+    </div>
+  </div>
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="scc_delete" style="color:#f85149">&#128465; Remove from Map</div>
 </div>
