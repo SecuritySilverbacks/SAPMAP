@@ -5427,8 +5427,24 @@ async function ctxAction(action) {
                    + 'and runs tar as uid=0. The unprivileged SCC '
                    + 'harvest paths (REST / sudo / group / /proc fd) '
                    + 'will be SKIPPED.\n\nContinue?')) break;
-      await api('POST', `node/${sid}/harvest_scc_hashes_via_lpe`);
-      console.log('[SCC] LPE-escalating hash harvest started');
+      {
+        const startRes = await api('POST', `node/${sid}/harvest_scc_hashes_via_lpe`);
+        const sccHost = startRes && startRes.scc_host;
+        console.log('[SCC] LPE-escalating hash harvest started');
+        if (sccHost) {
+          const taskKey = `${sid}:harvest_scc_hashes_via_lpe`;
+          const _poll = () => new Promise(resolve => {
+            const iv = setInterval(async () => {
+              await pollUpdates();
+              if (!activeTasks[taskKey]) { clearInterval(iv); resolve(); }
+            }, 3000);
+          });
+          _poll().then(() => {
+            console.log('[SCC] LPE harvest done — opening hashes modal for', sccHost);
+            sccDownloadHashes(sccHost);
+          });
+        }
+      }
       break;
     }
     case 'harvest_scc_ssfs': {
