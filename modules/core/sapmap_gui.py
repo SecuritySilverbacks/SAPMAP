@@ -3084,6 +3084,14 @@ def create_app(api: SAPMAPApi) -> Bottle:
         if not node:
             return json.dumps({"error": f"Node {sid} not found"})
 
+        scc_host = None
+        node_ip = node.ip or node.hostname or ""
+        for h, sn in api.state.scc_nodes.items():
+            sn_ip = sn.ip or sn.host or ""
+            if sn_ip and sn_ip == node_ip:
+                scc_host = h
+                break
+
         def _run():
             _task_start(f"{sid}:harvest_scc_hashes_via_lpe",
                         f"{sid}: Harvest SCC hashes via Linux LPE")
@@ -3104,7 +3112,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 _task_end(f"{sid}:harvest_scc_hashes_via_lpe")
 
         threading.Thread(target=_run, daemon=True).start()
-        return json.dumps({"status": "started"})
+        return json.dumps({"status": "started",
+                           "scc_host": scc_host})
 
     @app.route("/api/node/<sid>/harvest_scc_mappings", method="POST")
     def node_harvest_scc_mappings(sid):

