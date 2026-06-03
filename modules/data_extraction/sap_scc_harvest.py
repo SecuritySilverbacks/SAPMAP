@@ -28,19 +28,27 @@ from sapmap_exploit import (
 
 logger = logging.getLogger(__name__)
 
-_B64_RE = re.compile(r"[A-Za-z0-9+/=]+")
+_B64_LINE_RE = re.compile(r"[A-Za-z0-9+/=]+$")
 
 
 def _b64_only(raw_output: str) -> str:
-    """Extract only base64 characters from _run_cmd output.
+    """Keep only pure-base64 lines from _run_cmd output.
 
-    SAPXPG P4 responses on kernel 793+ embed the base64 payload in
-    128-byte space-padded TLV blocks.  extract_p4_output may also
-    return non-base64 lines (command echo, dd record-count, duplicate
-    TLV artifacts).  Keeping only characters in the base64 alphabet
-    ensures the downstream b64decode sees a clean stream.
+    SAPXPG P4 responses include non-payload lines: command echoes,
+    dd record counts, duplicate TLV artifacts.  A per-character filter
+    is insufficient because command text like 'dd', 'tmp', 'base64'
+    contains valid base64 chars.  Instead, filter per-line: a command
+    echo contains spaces/pipes/dots that disqualify the whole line,
+    while a genuine base64 line is purely [A-Za-z0-9+/=].
     """
-    return "".join(_B64_RE.findall(raw_output))
+    parts = []
+    seen = set()
+    for ln in raw_output.splitlines():
+        ln = ln.strip()
+        if ln and _B64_LINE_RE.fullmatch(ln) and ln not in seen:
+            parts.append(ln)
+            seen.add(ln)
+    return "".join(parts)
 
 
 def harvest_scc_from_pwned_node(node: SAPNode, state: SAPMAPState) -> dict:
