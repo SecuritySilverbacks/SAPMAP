@@ -58,7 +58,8 @@ def test_every_capability_in_attack_map_has_remediation_or_explicit_exemption():
         "creds.scc_users_xml", "creds.oa2c_secrets",
         # Collection — operator's own loot, not a target finding
         "data.read_table", "data.capability_analyse",
-        "data.scc_users_dump", "data.loot_stage",
+        "data.scc_users_dump", "data.scc_users_dump_via_lpe",
+        "data.loot_stage",
     }
     missing = []
     for cap in sapmap_attack.CAPABILITY_MAP:
