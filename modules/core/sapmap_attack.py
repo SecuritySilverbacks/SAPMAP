@@ -222,6 +222,15 @@ CAPABILITY_MAP: Dict[str, List[str]] = {
     "data.read_table":           ["T1213"],
     "data.capability_analyse":   ["T1213"],
     "data.scc_users_dump":       ["T1213"],
+    # Reading /opt/sap/scc/config/users.xml via sidadm → root pivot
+    # chains: Privilege Escalation (T1068, the LPE itself) +
+    # OS Credential Dumping (T1003, harvesting the bcrypt hashes) +
+    # Data from Information Repositories (T1213, the SCC config
+    # store itself).  Distinct capability from data.scc_users_dump
+    # (REST backup) because the kill-chain step is different — this
+    # one's gated on a working Linux LPE, the other on SCC admin web
+    # creds.
+    "data.scc_users_dump_via_lpe": ["T1068", "T1003", "T1213"],
     "data.loot_stage":           ["T1074"],
 }
 
