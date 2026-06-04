@@ -4491,25 +4491,35 @@ function _reflowSubmenus(menu, menuX, menuWidth) {
     }
     sub.style.overflowY = 'auto';
 
-    // Belt-and-suspenders: on the next animation frame after the
-    // CSS :hover makes the sub visible, measure its real bounding
-    // rect and clamp it to the viewport.  This catches cases where
-    // the pre-computed maxHeight (set above on a display:none element)
-    // doesn't match the sub's actual rendered position.
+    // Belt-and-suspenders: on hover, force the sub visible briefly to
+    // measure its true bounding rect, then clamp to the viewport.
     if (!group._subME) {
       group._subME = true;
       group.addEventListener('mouseenter', () => {
-        requestAnimationFrame(() => {
-          const s = group.querySelector('.ctx-sub');
-          if (!s) return;
-          const sr = s.getBoundingClientRect();
-          if (sr.height < 1) return;
+        const s = group.querySelector('.ctx-sub');
+        if (!s) return;
+        // Temporarily make visible so getBoundingClientRect works
+        s.style.display = 'block';
+        const sr = s.getBoundingClientRect();
+        if (sr.height > 1) {
           const overflowBottom = sr.bottom - window.innerHeight + SAFE;
           if (overflowBottom > 0) {
             s.style.maxHeight = Math.max(sr.height - overflowBottom, 120) + 'px';
             s.style.overflowY = 'auto';
           }
-        });
+        }
+        // Keep display:block — the CSS :hover rule will hide it on
+        // mouseleave anyway since display is no longer 'none' but
+        // CSS :hover > .ctx-sub still governs visibility.  However,
+        // we need a mouseleave handler to reset display so the CSS
+        // can re-hide the submenu.
+      });
+      group.addEventListener('mouseleave', () => {
+        const s = group.querySelector('.ctx-sub');
+        if (!s) return;
+        s.style.display = '';
+        s.style.maxHeight = '';
+        s.style.overflowY = '';
       });
     }
   });
