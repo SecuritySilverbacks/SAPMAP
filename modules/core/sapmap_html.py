@@ -251,8 +251,9 @@ body {
   min-width: 260px; padding: 4px 0; box-shadow: 0 8px 24px rgba(0,0,0,.5);
   z-index: 2100;
   /* Hard cap so a very tall submenu still fits when both flip-up and
-     the bottom of the viewport are tight; the user scrolls inside. */
-  max-height: 90vh; overflow-y: auto;
+     the bottom of the viewport are tight; the user scrolls inside.
+     70vh keeps room for the parent row's offset from the top. */
+  max-height: 70vh; overflow-y: auto;
 }
 .ctx-group:hover > .ctx-sub { display: block; }
 /* Flip submenu left if it would overflow viewport (set by JS) */
@@ -4490,21 +4491,25 @@ function _reflowSubmenus(menu, menuX, menuWidth) {
     }
     sub.style.overflowY = 'auto';
 
-    // Re-apply constraint on hover — in some browsers the inline
-    // maxHeight set on a display:none element doesn't trigger the
-    // overflow scrollbar when it becomes visible via CSS :hover.
-    if (!group._sshME) {
-      group._sshME = true;
+    // Belt-and-suspenders: on the next animation frame after the
+    // CSS :hover makes the sub visible, measure its real bounding
+    // rect and clamp it to the viewport.  This catches cases where
+    // the pre-computed maxHeight (set above on a display:none element)
+    // doesn't match the sub's actual rendered position.
+    if (!group._subME) {
+      group._subME = true;
       group.addEventListener('mouseenter', () => {
-        const s = group.querySelector('.ctx-sub');
-        if (!s) return;
-        const gr = group.getBoundingClientRect();
-        const sd = window.innerHeight - gr.top - SAFE;
-        const su = gr.bottom - SAFE;
-        const flip = s.classList.contains('flip-up');
-        const cap = flip ? Math.max(su, 120) : Math.max(sd, 120);
-        s.style.maxHeight = cap + 'px';
-        s.style.overflowY = 'auto';
+        requestAnimationFrame(() => {
+          const s = group.querySelector('.ctx-sub');
+          if (!s) return;
+          const sr = s.getBoundingClientRect();
+          if (sr.height < 1) return;
+          const overflowBottom = sr.bottom - window.innerHeight + SAFE;
+          if (overflowBottom > 0) {
+            s.style.maxHeight = Math.max(sr.height - overflowBottom, 120) + 'px';
+            s.style.overflowY = 'auto';
+          }
+        });
       });
     }
   });
