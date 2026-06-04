@@ -250,10 +250,10 @@ body {
   background: #1c2128; border: 1px solid #30363d; border-radius: 8px;
   min-width: 260px; padding: 4px 0; box-shadow: 0 8px 24px rgba(0,0,0,.5);
   z-index: 2100;
-  /* Hard cap so a very tall submenu still fits when both flip-up and
-     the bottom of the viewport are tight; the user scrolls inside.
-     70vh keeps room for the parent row's offset from the top. */
-  max-height: 70vh; overflow-y: auto;
+  /* JS (_reflowSubmenus) sets an inline max-height based on the
+     submenu's actual position — this CSS fallback catches the edge
+     case where JS hasn't run yet (e.g. SCC/BTP menus). */
+  max-height: 80vh; overflow-y: auto;
 }
 .ctx-group:hover > .ctx-sub { display: block; }
 /* Flip submenu left if it would overflow viewport (set by JS) */
@@ -4447,41 +4447,29 @@ function _reflowSubmenus(menu, menuX, menuWidth) {
     if (!sub) return;
     sub.classList.remove('flip-left');
     sub.classList.remove('flip-up');
-    sub.style.maxHeight = '';   // clear any prior inline cap
+    sub.style.maxHeight = '';
+    sub.style.overflowY = '';
 
-    // Horizontal: if the parent menu sits near the right edge, the
-    // submenu would overflow off-screen → flip it to the left.
-    if (menuX + menuWidth + 260 > window.innerWidth) {
-      sub.classList.add('flip-left');
-    }
-
-    // Vertical: pick the flip direction with MORE available space.
-    // The submenu's actual height is bounded by an inline max-height
-    // matching that space, so overflow-y:auto kicks in cleanly and
-    // the user can scroll.  Replaces the previous "estimate from
-    // childCount * 28" heuristic which was both inaccurate AND
-    // didn't bound the upward case at all.
-    const groupRect = group.getBoundingClientRect();
-    // Space available if submenu opens downward (its top aligned
-    // with the parent group's top, per CSS `top: -4px`).
-    const spaceDown = window.innerHeight - groupRect.top - SAFE;
-    // Space available if submenu flips upward (its bottom aligned
-    // with the parent group's bottom, per CSS `bottom: -4px`).
-    const spaceUp = groupRect.bottom - SAFE;
-
-    // Measure natural height by briefly showing the submenu off-
-    // screen (visibility:hidden) and reading scrollHeight.  Cheaper
-    // than counting children for accuracy when the submenu has
-    // grouped subitems / separators / variable-height content.
+    // Measure the submenu's natural dimensions by briefly showing it
     const prevDisplay = sub.style.display;
     const prevVis = sub.style.visibility;
     sub.style.display = 'block';
     sub.style.visibility = 'hidden';
+    const naturalW = sub.offsetWidth;
     const naturalH = sub.scrollHeight;
     sub.style.display = prevDisplay;
     sub.style.visibility = prevVis;
 
-    // Flip up only when down would clip AND up has more space.
+    // Horizontal: flip left if the submenu would overflow the right
+    // edge.  Use measured width instead of hardcoded min-width.
+    if (menuX + menuWidth + naturalW > window.innerWidth) {
+      sub.classList.add('flip-left');
+    }
+
+    // Vertical: cap to available space, flip up if that gives more room
+    const groupRect = group.getBoundingClientRect();
+    const spaceDown = window.innerHeight - groupRect.top - SAFE;
+    const spaceUp = groupRect.bottom - SAFE;
     const wantsFlipUp = (naturalH > spaceDown) && (spaceUp > spaceDown);
     if (wantsFlipUp) {
       sub.classList.add('flip-up');
@@ -4490,38 +4478,6 @@ function _reflowSubmenus(menu, menuX, menuWidth) {
       sub.style.maxHeight = Math.max(spaceDown, 120) + 'px';
     }
     sub.style.overflowY = 'auto';
-
-    // Belt-and-suspenders: on hover, force the sub visible briefly to
-    // measure its true bounding rect, then clamp to the viewport.
-    if (!group._subME) {
-      group._subME = true;
-      group.addEventListener('mouseenter', () => {
-        const s = group.querySelector('.ctx-sub');
-        if (!s) return;
-        // Temporarily make visible so getBoundingClientRect works
-        s.style.display = 'block';
-        const sr = s.getBoundingClientRect();
-        if (sr.height > 1) {
-          const overflowBottom = sr.bottom - window.innerHeight + SAFE;
-          if (overflowBottom > 0) {
-            s.style.maxHeight = Math.max(sr.height - overflowBottom, 120) + 'px';
-            s.style.overflowY = 'auto';
-          }
-        }
-        // Keep display:block — the CSS :hover rule will hide it on
-        // mouseleave anyway since display is no longer 'none' but
-        // CSS :hover > .ctx-sub still governs visibility.  However,
-        // we need a mouseleave handler to reset display so the CSS
-        // can re-hide the submenu.
-      });
-      group.addEventListener('mouseleave', () => {
-        const s = group.querySelector('.ctx-sub');
-        if (!s) return;
-        s.style.display = '';
-        s.style.maxHeight = '';
-        s.style.overflowY = '';
-      });
-    }
   });
 }
 
