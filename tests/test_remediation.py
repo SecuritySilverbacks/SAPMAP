@@ -56,6 +56,9 @@ def test_every_capability_in_attack_map_has_remediation_or_explicit_exemption():
         # Cred-access modes covered by creds.abap_secstore / scc_keystore
         "creds.java_secstore", "creds.btp_destinations",
         "creds.scc_users_xml", "creds.oa2c_secrets",
+        "creds.ssh_private_key",
+        # SSH lateral movement — awareness-only, no vendor fix
+        "lateral.ssh_key_reuse",
         # Collection — operator's own loot, not a target finding
         "data.read_table", "data.capability_analyse",
         "data.scc_users_dump", "data.scc_users_dump_via_lpe",

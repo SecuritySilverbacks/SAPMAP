@@ -544,6 +544,10 @@ class SAPNode:
     dirtyfrag_kernel: str = ""
     linux_lpe_method: str = ""           # "copyfail" / "dirtyfrag" / ""
 
+    # SSH key harvest + lateral movement state
+    ssh_keys_harvested: bool = False     # True after sap_ssh_lateral.ssh_harvest()
+    ssh_keys_planted: bool = False       # True after sap_ssh_lateral.ssh_plant_key()
+
     # Windows LPE state.  Currently one technique:
     #   * MiniPlasma — cldflt.sys race (CVE-2020-17103, silently un-patched
     #     per Nightmare-Eclipse's 2025 reinvestigation).  Vendored .NET
@@ -758,6 +762,8 @@ class SAPNode:
             "dirtyfrag_root_obtained": self.dirtyfrag_root_obtained,
             "dirtyfrag_kernel": self.dirtyfrag_kernel,
             "linux_lpe_method": self.linux_lpe_method,
+            "ssh_keys_harvested": self.ssh_keys_harvested,
+            "ssh_keys_planted": self.ssh_keys_planted,
             "miniplasma_vulnerable": self.miniplasma_vulnerable,
             "miniplasma_system_obtained": self.miniplasma_system_obtained,
             "miniplasma_os_build": self.miniplasma_os_build,
@@ -855,6 +861,8 @@ class SAPNode:
             dirtyfrag_root_obtained=d.get("dirtyfrag_root_obtained", False),
             dirtyfrag_kernel=d.get("dirtyfrag_kernel", ""),
             linux_lpe_method=d.get("linux_lpe_method", ""),
+            ssh_keys_harvested=d.get("ssh_keys_harvested", False),
+            ssh_keys_planted=d.get("ssh_keys_planted", False),
             miniplasma_vulnerable=d.get("miniplasma_vulnerable", False),
             miniplasma_system_obtained=d.get(
                 "miniplasma_system_obtained", False),

@@ -120,6 +120,7 @@ TECHNIQUES: Dict[str, Dict] = {
     "T1552":     {"name": "Unsecured Credentials",          "tactic": "TA0006"},
     "T1552.001": {"name": "Credentials In Files",           "tactic": "TA0006", "sub_of": "T1552"},
     "T1552.004": {"name": "Private Keys",                   "tactic": "TA0006", "sub_of": "T1552"},
+    "T1145":     {"name": "Private Keys (deprecated)",       "tactic": "TA0006"},
     "T1555":     {"name": "Credentials from Password Stores", "tactic": "TA0006"},
     "T1606":     {"name": "Forge Web Credentials",          "tactic": "TA0006"},
 
@@ -130,6 +131,7 @@ TECHNIQUES: Dict[str, Dict] = {
 
     # Lateral Movement
     "T1021":     {"name": "Remote Services",                "tactic": "TA0008"},
+    "T1021.004": {"name": "SSH",                             "tactic": "TA0008", "sub_of": "T1021"},
     # T1550 and its sub-techniques moved from TA0005 → TA0008 in ATT&CK v19.
     "T1550":     {"name": "Use Alternate Authentication Material", "tactic": "TA0008"},
     "T1550.004": {"name": "Web Session Cookie",             "tactic": "TA0008", "sub_of": "T1550"},
@@ -191,6 +193,7 @@ CAPABILITY_MAP: Dict[str, List[str]] = {
     "creds.scc_keystore":        ["T1555", "T1552.004"],
     "creds.scc_users_xml":       ["T1555"],
     "creds.pse_loot":            ["T1552.004"],
+    "creds.ssh_private_key":     ["T1552.004", "T1145"],
     "creds.oa2c_secrets":        ["T1555"],
 
     # ---- Lateral Movement ----
@@ -203,6 +206,7 @@ CAPABILITY_MAP: Dict[str, List[str]] = {
     "lateral.saprouter_tunnel":  ["T1090.001"],
     "lateral.scc_tunnel_impersonate": ["T1078.004", "T1550"],
     "lateral.internal_ip_spoof": ["T1078"],
+    "lateral.ssh_key_reuse":     ["T1021.004", "T1078.001"],
 
     # ---- Persistence ----
     "persist.create_user":       ["T1136.001", "T1098"],
