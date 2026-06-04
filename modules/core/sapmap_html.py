@@ -919,6 +919,7 @@ body {
       <div class="ctx-item" data-action="propagate_ticket">&#128640; Propagate Forged Ticket (HTTP+RFC across trust)</div>
       <div class="ctx-sep"></div>
       <div class="ctx-item" data-action="ssh_harvest">&#128273; SSH Key Harvest (exfiltrate keys + known_hosts)</div>
+      <div class="ctx-item" data-action="ssh_harvest_root">&#128273; SSH Key Harvest as Root (all users via LPE)</div>
       <div class="ctx-item" data-action="ssh_test_keys">&#128640; SSH Lateral Movement (test keys against targets)</div>
       <div class="ctx-item" data-action="ssh_plant_key" style="color:#f85149">&#128274; SSH Plant Key (authorized_keys persistence)</div>
       <div class="ctx-sep"></div>
@@ -4012,6 +4013,9 @@ function showCtxMenu(e, sid) {
     'os_terminal':      hasGwVuln || (isAbapStack && hasCreatedUsers) || hasCve31324,
     'reverse_shell':    hasGwVuln || (isAbapStack && hasCreatedUsers) || hasCve31324,
     'ssh_harvest':      !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
+    'ssh_harvest_root': !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers)
+                          && !!(n && (n.copyfail_root_obtained || n.dirtyfrag_root_obtained
+                                       || n.copyfail_vulnerable || n.dirtyfrag_vulnerable)),
     'ssh_test_keys':    !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
     'ssh_plant_key':    !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
     'harvest_scc':          hasGwVuln || hasCve31324 || hasCreatedUsers,
@@ -4187,6 +4191,7 @@ function showCtxMenu(e, sid) {
     'os_terminal':      'Requires an OS-exec path: vulnerable GW (any stack), ABAP+created-user (SXPG), or CVE-2025-31324 webshell (Java)',
     'reverse_shell':    'Requires an OS-exec path: vulnerable GW (any stack), ABAP+created-user (SXPG), or CVE-2025-31324 webshell (Java)',
     'ssh_harvest':      'Requires OS-exec on a Linux host — reads /etc/passwd + .ssh dirs via GW SAPXPG, CVE-2025-31324, or SXPG_STEP_XPG_START',
+    'ssh_harvest_root': 'Requires a viable Linux LPE (Copy Fail or Dirty Frag) — run "Escalate to Root" first. Reads ALL users\' .ssh directories as root.',
     'ssh_test_keys':    'Requires OS-exec on a Linux host — harvests SSH keys first, then tests them against known targets',
     'ssh_plant_key':    'Requires OS-exec on a Linux host — plants SAPMAP ed25519 pubkey into authorized_keys for persistence',
     'harvest_scc':          'Requires OS-exec on this node AND an SCC on the same host IP',
@@ -4313,6 +4318,7 @@ function showCtxMenu(e, sid) {
     'check_windows_lpe':   !isWindows,
     'exploit_windows_lpe': !isWindows,
     'ssh_harvest':       isWindows,
+    'ssh_harvest_root':  isWindows,
     'ssh_test_keys':     isWindows,
     'ssh_plant_key':     isWindows,
     // SCC harvest items — hidden entirely unless an SCC is on the same host
@@ -5512,6 +5518,10 @@ async function ctxAction(action) {
     case 'ssh_harvest':
       if (confirm(`Harvest SSH keys from ${sid}?\n\nThis reads /etc/passwd, enumerates .ssh directories, and exfiltrates private keys, known_hosts, authorized_keys, and SSH config files.\n\nResults are saved to loot/ssh/.`))
         await api('POST', `node/${sid}/ssh_harvest`);
+      break;
+    case 'ssh_harvest_root':
+      if (confirm(`Harvest SSH keys from ${sid} as ROOT?\n\nThis uses the Linux LPE (Copy Fail / Dirty Frag) to read ALL users' .ssh directories — not just the current sidadm user.\n\nResults are saved to loot/ssh/.`))
+        await api('POST', `node/${sid}/ssh_harvest`, { channel: 'root' });
       break;
     case 'ssh_test_keys': {
       if (!confirm(`SSH Lateral Movement from ${sid}?\n\nThis will:\n1. Harvest SSH keys (if not already done)\n2. Test every key×target×username combination via SSH\n3. Report successful logins as CRITICAL findings\n\nTargets are derived from known_hosts files and the SAPMAP landscape.`))
