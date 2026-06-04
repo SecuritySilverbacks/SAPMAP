@@ -89,13 +89,14 @@ def _make_exec_fn(node: SAPNode, channel: str = "auto"):
             return ""
 
         def _run_py_root(code: str) -> str:
-            return _run_cmd_root(f"python3 -c {code}")
+            safe = code.replace("'", "'\\''")
+            return _run_cmd_root(f"python3 -c '{safe}'")
 
         def _read_b64_chunk_root(path: str, offset: int, end: int) -> str:
             code = (f"print(__import__('base64').b64encode("
                     f"open('{path}','rb').read()[{offset}:{end}])"
                     f".decode())")
-            out = _run_cmd_root(f"python3 -c {code}")
+            out = _run_py_root(code)
             for ln in out.splitlines():
                 ln = ln.strip()
                 if ln and _B64_LINE_RE.fullmatch(ln):
