@@ -4488,6 +4488,25 @@ function _reflowSubmenus(menu, menuX, menuWidth) {
     } else {
       sub.style.maxHeight = Math.max(spaceDown, 120) + 'px';
     }
+    sub.style.overflowY = 'auto';
+
+    // Re-apply constraint on hover — in some browsers the inline
+    // maxHeight set on a display:none element doesn't trigger the
+    // overflow scrollbar when it becomes visible via CSS :hover.
+    if (!group._sshME) {
+      group._sshME = true;
+      group.addEventListener('mouseenter', () => {
+        const s = group.querySelector('.ctx-sub');
+        if (!s) return;
+        const gr = group.getBoundingClientRect();
+        const sd = window.innerHeight - gr.top - SAFE;
+        const su = gr.bottom - SAFE;
+        const flip = s.classList.contains('flip-up');
+        const cap = flip ? Math.max(su, 120) : Math.max(sd, 120);
+        s.style.maxHeight = cap + 'px';
+        s.style.overflowY = 'auto';
+      });
+    }
   });
 }
 

