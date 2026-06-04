@@ -525,6 +525,7 @@ def ssh_harvest(node: SAPNode, state: SAPMAPState,
             if _is_stopped():
                 break
             fpath = f"{ssh_dir}/{fname}"
+            print(f"  [*] {sid}: reading {owner}/{fname} ...")
 
             # Private keys
             if fname in ("id_rsa", "id_ed25519", "id_ecdsa", "id_dsa",
