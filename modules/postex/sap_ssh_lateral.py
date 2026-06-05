@@ -771,6 +771,9 @@ def ssh_test_keys(node: SAPNode, state: SAPMAPState,
     own_host = node.hostname or ""
     targets = [t for t in targets
                if t not in (own_ip, own_host, "localhost", "127.0.0.1")]
+    # Drop bare hostnames (no dots) — they came from known_hosts but
+    # almost never resolve from a different network segment.
+    targets = [t for t in targets if "." in t]
     targets = targets[:max_targets]
 
     os_users = (harvest_result or {}).get("os_users", [])
@@ -787,6 +790,17 @@ def ssh_test_keys(node: SAPNode, state: SAPMAPState,
         uid = u.get("uid", "")
         if uid and int(uid) < 1000 and uname not in ("nobody",):
             sap_usernames.add(uname)
+
+    # Root-owned keys (e.g. /root/.ssh/id_ed25519) are only readable
+    # when exec_fn runs as root.  Drop them for sidadm-level channels
+    # to avoid "Permission denied" noise on every attempt.
+    is_root_channel = "root" in label.lower() or "lpe" in label.lower()
+    if not is_root_channel:
+        before = len(keys)
+        keys = [k for k in keys if k.get("owner") != "root"]
+        if len(keys) < before:
+            print(f"[*] {sid}: skipping {before - len(keys)} root-owned "
+                  f"key(s) — not running as root")
 
     print(f"[*] {sid}: ssh_test_keys — {len(keys)} key(s) × "
           f"{len(targets)} target(s) × {len(sap_usernames)} user(s) "
