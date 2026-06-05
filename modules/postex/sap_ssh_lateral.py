@@ -651,6 +651,23 @@ def ssh_harvest(node: SAPNode, state: SAPMAPState,
             meta={"entries": all_authorized_keys})
 
     node.ssh_keys_harvested = True
+
+    # Write harvest manifest so SSH Lateral Movement can use stored
+    # keys without re-harvesting (critical when harvest ran as root
+    # but lateral movement runs as sidadm).
+    import json as _json
+    manifest = {
+        "keys": [{k: v for k, v in key.items() if k != "local_path"}
+                 for key in all_keys],
+        "os_users": os_users,
+        "known_hosts_targets": sorted(all_known_hosts_targets),
+        "authorized_keys": all_authorized_keys,
+    }
+    manifest_path = os.path.join(loot_dir, "harvest.json")
+    with open(manifest_path, "w") as fh:
+        _json.dump(manifest, fh, indent=2)
+    print(f"  [*] {sid}: harvest manifest → {manifest_path}")
+
     result["ok"] = True
     print(f"[+] {sid}: ssh_harvest — {len(all_keys)} private key(s), "
           f"{len(all_known_hosts_targets)} target(s), "

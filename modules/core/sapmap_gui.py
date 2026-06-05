@@ -3150,28 +3150,75 @@ def create_app(api: SAPMAPApi) -> Bottle:
         threading.Thread(target=_run, daemon=True).start()
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/ssh_loot_keys", method="GET")
+    def node_ssh_loot_keys(sid):
+        """Return previously harvested SSH keys from the loot manifest."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        host_id = (node.ip or node.hostname or sid).replace("/", "_")
+        manifest_path = os.path.join("loot", "ssh", host_id,
+                                     "harvest.json")
+        if not os.path.isfile(manifest_path):
+            return json.dumps({"keys": [], "os_users": [],
+                               "known_hosts_targets": [],
+                               "authorized_keys": []})
+        try:
+            with open(manifest_path, "r") as fh:
+                manifest = json.load(fh)
+            return json.dumps(manifest)
+        except Exception as e:
+            return json.dumps({"error": str(e), "keys": []})
+
     @app.route("/api/node/<sid>/ssh_test_keys", method="POST")
     def node_ssh_test_keys(sid):
-        """Phase 2: test harvested SSH keys against known targets."""
+        """Phase 2: test harvested SSH keys against known targets.
+
+        Accepts optional JSON body:
+          keys:     [{owner, path, type}, ...] — pre-selected keys
+          os_users: [{username, uid, home, shell}, ...] — from harvest
+        Falls back to reading loot/ssh/<host>/harvest.json manifest.
+        """
         response.content_type = "application/json"
         node = api.state.get_node(sid)
         if not node:
             return json.dumps({"error": f"Node {sid} not found"})
         data = request.json or {}
         ch = data.get("channel", "auto")
+        selected_keys = data.get("keys")
+        selected_os_users = data.get("os_users")
 
         def _run():
             _task_start(f"{sid}:ssh_test_keys",
                         f"{sid}: SSH lateral movement test")
             try:
-                from sap_ssh_lateral import ssh_harvest, ssh_test_keys
-                h = ssh_harvest(node, api.state, channel=ch)
-                if not h.get("ok"):
-                    print(f"[-] {sid}: ssh_test_keys — harvest "
-                          f"failed: {h.get('error')}")
+                from sap_ssh_lateral import ssh_test_keys
+
+                harvest_result = None
+                if selected_keys:
+                    harvest_result = {
+                        "keys": selected_keys,
+                        "os_users": selected_os_users or [],
+                        "known_hosts_targets": [],
+                    }
+                else:
+                    host_id = (node.ip or node.hostname
+                               or sid).replace("/", "_")
+                    mp = os.path.join("loot", "ssh", host_id,
+                                      "harvest.json")
+                    if os.path.isfile(mp):
+                        with open(mp, "r") as fh:
+                            harvest_result = json.load(fh)
+
+                if not harvest_result or not harvest_result.get("keys"):
+                    print(f"[-] {sid}: ssh_test_keys — no keys "
+                          f"available (run SSH Harvest first)")
                     return
+
                 r = ssh_test_keys(node, api.state,
-                                  harvest_result=h, channel=ch)
+                                  harvest_result=harvest_result,
+                                  channel=ch)
                 if not r.get("ok"):
                     print(f"[-] {sid}: ssh_test_keys: {r.get('error')}")
                 else:
