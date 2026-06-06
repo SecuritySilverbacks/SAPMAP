@@ -229,8 +229,9 @@ def _make_exec_fn(node: SAPNode, channel: str = "auto"):
 
     def _run_program(prog: str, args: str) -> str:
         """Run a program directly via SAPXPG — no /bin/sh wrapper.
-        SAPXPG splits args on spaces into argv entries, which is
-        correct for programs like ssh that expect separate arguments."""
+        Uses long_params="" to prevent kernels from concatenating
+        PARAMS+LONG_PARAMS (which doubles the argument string and
+        corrupts the remote command for programs like ssh)."""
         try:
             if channel == "sxpg":
                 from sapmap_rfc import execute_local_command
@@ -247,7 +248,9 @@ def _make_exec_fn(node: SAPNode, channel: str = "auto"):
                 else:
                     r = run_os_command(node, prog, args)
             else:
-                r = run_os_command(node, prog, args)
+                from sapmap_exploit import execute_gw_command
+                r = execute_gw_command(node, prog, args,
+                                       long_params="")
 
             if r and r.get("success"):
                 lines = r.get("output") or []
