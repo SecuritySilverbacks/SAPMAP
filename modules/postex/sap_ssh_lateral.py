@@ -911,6 +911,14 @@ def ssh_test_keys(node: SAPNode, state: SAPMAPState,
                     attack_capability="lateral.ssh_key_reuse",
                     meta=entry)
 
+                # Mark the target node as pwned on the map
+                target_node = state.find_node_by_host(
+                    hostname=target, ip=target)
+                if target_node:
+                    target_node.pwned = True
+                    print(f"  [*] {target_node.sid}: marked as "
+                          f"pwned via SSH lateral movement")
+
                 break
 
         if tested % 50 == 0 and tested > 0:
