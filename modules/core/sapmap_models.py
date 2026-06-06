@@ -547,6 +547,7 @@ class SAPNode:
     # SSH key harvest + lateral movement state
     ssh_keys_harvested: bool = False     # True after sap_ssh_lateral.ssh_harvest()
     ssh_keys_planted: bool = False       # True after sap_ssh_lateral.ssh_plant_key()
+    ssh_access: list = None              # SSH lateral movement entries (from_sid, key, user)
 
     # Windows LPE state.  Currently one technique:
     #   * MiniPlasma — cldflt.sys race (CVE-2020-17103, silently un-patched
@@ -764,6 +765,7 @@ class SAPNode:
             "linux_lpe_method": self.linux_lpe_method,
             "ssh_keys_harvested": self.ssh_keys_harvested,
             "ssh_keys_planted": self.ssh_keys_planted,
+            "ssh_access": self.ssh_access or [],
             "miniplasma_vulnerable": self.miniplasma_vulnerable,
             "miniplasma_system_obtained": self.miniplasma_system_obtained,
             "miniplasma_os_build": self.miniplasma_os_build,
@@ -863,6 +865,7 @@ class SAPNode:
             linux_lpe_method=d.get("linux_lpe_method", ""),
             ssh_keys_harvested=d.get("ssh_keys_harvested", False),
             ssh_keys_planted=d.get("ssh_keys_planted", False),
+            ssh_access=d.get("ssh_access") or None,
             miniplasma_vulnerable=d.get("miniplasma_vulnerable", False),
             miniplasma_system_obtained=d.get(
                 "miniplasma_system_obtained", False),

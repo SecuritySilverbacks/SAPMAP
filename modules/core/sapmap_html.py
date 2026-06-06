@@ -3918,6 +3918,7 @@ function showCtxMenu(e, sid) {
   const isWebDispatcher = sysType === 'WEB_DISPATCHER';
   const isWindows = n && (n.os_type || '').toLowerCase().includes('windows');
   const hasCve31324 = n && n.cve_2025_31324_vulnerable;
+  const hasSshAccess = n && (n.ssh_access || []).length > 0;
   const hasCve6287  = n && n.cve_2020_6287_vulnerable;
   const hasGwPort = n && (n.instances || []).some(i => Object.entries(i.ports || {}).some(([p,s]) => s === 'gateway' || (p >= 3300 && p <= 3399)));
   const hasFindings = n && (n.findings || []).length > 0;
@@ -4028,7 +4029,7 @@ function showCtxMenu(e, sid) {
     //     <sid>adm. So hasGwVuln enables terminal regardless of stack.
     //   - ABAP SXPG: requires an ABAP dialog/RFC user with SAP_ALL.
     //   - CVE-2025-31324 webshell: Java only, unauth.
-    'os_terminal':      hasGwVuln || (isAbapStack && hasCreatedUsers) || hasCve31324,
+    'os_terminal':      hasGwVuln || (isAbapStack && hasCreatedUsers) || hasCve31324 || hasSshAccess,
     'reverse_shell':    hasGwVuln || (isAbapStack && hasCreatedUsers) || hasCve31324,
     'ssh_harvest':      !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
     'ssh_harvest_root': !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers)
@@ -4206,7 +4207,7 @@ function showCtxMenu(e, sid) {
     'impact_assess_java': (javaDeployBlocked
         ? 'RECON admin user exists but no JSP-deploy primitive is reachable (CTC ConfigServlet removed, admin telnet firewalled). System is hardened — data extraction not available from here.'
         : 'Requires Java/dual-stack + CVE-2025-31324, GW SAPXPG, or a Java admin user with a reachable CTC / telnet endpoint'),
-    'os_terminal':      'Requires an OS-exec path: vulnerable GW (any stack), ABAP+created-user (SXPG), or CVE-2025-31324 webshell (Java)',
+    'os_terminal':      'Requires an OS-exec path: vulnerable GW (any stack), ABAP+created-user (SXPG), CVE-2025-31324 webshell (Java), or SSH lateral movement',
     'reverse_shell':    'Requires an OS-exec path: vulnerable GW (any stack), ABAP+created-user (SXPG), or CVE-2025-31324 webshell (Java)',
     'ssh_harvest':      'Requires OS-exec on a Linux host — reads /etc/passwd + .ssh dirs via GW SAPXPG, CVE-2025-31324, or SXPG_STEP_XPG_START',
     'ssh_harvest_root': 'Requires a viable Linux LPE (Copy Fail or Dirty Frag) — run "Escalate to Root" first. Reads ALL users\' .ssh directories as root.',
@@ -8571,15 +8572,23 @@ function showTerminalModal(sid) {
   addT('linuxlpe_root',
        '🔥 root (via Linux LPE)',
        !hasLinuxLpe);
+  // SSH lateral movement — run commands via SSH from the source node
+  const hasSsh = n && (n.ssh_access || []).length > 0;
+  const sshAcc = hasSsh ? n.ssh_access[0] : null;
+  addT('ssh',
+       hasSsh ? `SSH (${sshAcc.username}@${sshAcc.target} via ${sshAcc.from_sid})`
+              : 'SSH (no lateral access)',
+       !hasSsh);
   // Default-select the highest-value method available - SYSTEM /
   // root outranks everything else; otherwise fall back to
   // CVE-2025-31324 (best non-SYSTEM Windows path) then gateway /
-  // sxpg.
+  // sxpg / ssh.
   methodSel.value = hasWinLpe   ? 'winlpe_system'
                   : hasLinuxLpe ? 'linuxlpe_root'
                               : (hasCve ? 'cve_31324'
                                         : (hasGw ? 'gateway'
-                                                 : (isAbapT ? 'sxpg' : 'gateway')));
+                                                 : (isAbapT && hasCreated ? 'sxpg'
+                                                   : (hasSsh ? 'ssh' : 'gateway'))));
   // Info text
   let info = [];
   if (hasGw) info.push('Gateway: vulnerable');
@@ -8599,6 +8608,9 @@ function showTerminalModal(sid) {
     const linuxTech = n.copyfail_vulnerable ? 'Copy Fail'
                        : 'Dirty Frag';
     info.push('Linux LPE: ' + linuxTech + ' viable (root via Linux LPE menu)');
+  }
+  if (hasSsh) {
+    info.push(`SSH: ${sshAcc.username}@${sshAcc.target} from ${sshAcc.from_sid}`);
   }
   document.getElementById('term-info').textContent = info.join(' | ') || 'No execution method available';
   document.getElementById('term-cmdline').value = 'whoami';
