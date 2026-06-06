@@ -4030,7 +4030,7 @@ function showCtxMenu(e, sid) {
     //   - ABAP SXPG: requires an ABAP dialog/RFC user with SAP_ALL.
     //   - CVE-2025-31324 webshell: Java only, unauth.
     'os_terminal':      hasGwVuln || (isAbapStack && hasCreatedUsers) || hasCve31324 || hasSshAccess,
-    'reverse_shell':    hasGwVuln || (isAbapStack && hasCreatedUsers) || hasCve31324,
+    'reverse_shell':    hasGwVuln || (isAbapStack && hasCreatedUsers) || hasCve31324 || hasSshAccess,
     'ssh_harvest':      !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
     'ssh_harvest_root': !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers)
                           && !!(n && (n.copyfail_root_obtained || n.dirtyfrag_root_obtained
@@ -8936,11 +8936,19 @@ async function showShellModal(sid) {
   addS('linuxlpe_root',
        '🔥 root (via Linux LPE)',
        !hasLinuxLpeS);
+  // SSH lateral movement
+  const hasSshS = n && (n.ssh_access || []).length > 0;
+  const sshAccS = hasSshS ? n.ssh_access[0] : null;
+  addS('ssh',
+       hasSshS ? `SSH (${sshAccS.username}@${sshAccS.target} via ${sshAccS.from_sid})`
+               : 'SSH (no lateral access)',
+       !hasSshS);
   methodSel.value = hasWinLpeS    ? 'winlpe_system'
                   : hasLinuxLpeS  ? 'linuxlpe_root'
                                : (hasCve ? 'cve_31324'
                                          : (hasGw ? 'gateway'
-                                                  : (isAbapS ? 'sxpg' : 'gateway')));
+                                                  : (isAbapS && hasCreated ? 'sxpg'
+                                                    : (hasSshS ? 'ssh' : 'gateway'))));
 
   let info = [];
   if (hasGw) info.push('Gateway: vulnerable');
@@ -8956,6 +8964,9 @@ async function showShellModal(sid) {
     const linuxTechS = n.copyfail_vulnerable ? 'Copy Fail'
                         : 'Dirty Frag';
     info.push('Linux LPE: ' + linuxTechS + ' viable - shell will run as root');
+  }
+  if (hasSshS) {
+    info.push(`SSH: ${sshAccS.username}@${sshAccS.target} from ${sshAccS.from_sid}`);
   }
   document.getElementById('shell-info').textContent = info.join(' | ');
 
