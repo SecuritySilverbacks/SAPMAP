@@ -918,7 +918,7 @@ def ssh_test_keys(node: SAPNode, state: SAPMAPState,
                     hostname=target, ip=target)
                 if target_node:
                     target_node.pwned = True
-                    if not hasattr(target_node, "ssh_access"):
+                    if not target_node.ssh_access:
                         target_node.ssh_access = []
                     target_node.ssh_access.append({
                         "from_sid": sid,
