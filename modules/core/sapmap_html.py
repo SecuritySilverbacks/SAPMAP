@@ -3185,7 +3185,7 @@ function updateMap() {
     if (n.is_production) fill = '#4a1a1a';
     else if (Object.keys(n.clients || {}).length > 0) fill = '#4a3a1a';
 
-    if (n.has_critical_finding || n.gw_vulnerable || n.ms_vulnerable || n.cve_2025_31324_vulnerable || n.cve_2020_6287_vulnerable || n.cve_2022_22536_vulnerable) { borderColor = '#8b0000'; borderWidth = 6; }
+    if (n.pwned || n.has_critical_finding || n.gw_vulnerable || n.ms_vulnerable || n.cve_2025_31324_vulnerable || n.cve_2020_6287_vulnerable || n.cve_2022_22536_vulnerable) { borderColor = '#8b0000'; borderWidth = 6; }
 
     // Scanning radar pulse + probe lines (behind node)
     if (isScanning) {
