@@ -244,12 +244,20 @@ def _read_file_b64(gw_exec_fn: GwExecFn, path: str,
             result["bytes"] = data
             return result
 
-    # Remember original error before trying sudo — it's usually more
-    # informative ("No such file") than the sudo fallback error
-    # ("a password is required").
+    # Capture the adapter/channel error (e.g. chunked read failure
+    # "could not determine size" when python3 is missing) — this is
+    # lost if we only look at output_text.
+    channel_error = r.get("error", "")
     orig_error = ""
     if _looks_like_error(output_text):
         orig_error = output_text.strip().splitlines()[0][:200]
+    elif channel_error:
+        orig_error = channel_error[:200]
+
+    # Diagnostic: log why the first attempt failed
+    print(f"  [read_b64] base64 {path}: success={r.get('success')}, "
+          f"output={len(output_text)}B, "
+          f"error={channel_error[:100]!r}")
 
     # Plain read failed.  Try sudo if requested.
     if try_sudo:
@@ -334,12 +342,33 @@ def make_chunked_read_adapter(raw_exec_fn: GwExecFn,
                 out.append(ln)
         return out
 
+    # Detect which python interpreter is available on the target.
+    # python3 preferred; fall back to python (covers older systems
+    # like NPL that only have python2.6).
+    _py_cmd = [None]  # mutable cell for closure
+    def _detect_python():
+        if _py_cmd[0] is not None:
+            return _py_cmd[0]
+        for py in ("python3", "python"):
+            r = raw_exec_fn(py, "-c print(1)")
+            out = "\n".join(r.get("output", []))
+            if r.get("success") and "1" in out:
+                _py_cmd[0] = py
+                print(f"  [chunked] python interpreter: {py}")
+                return py
+        print(f"  [chunked] WARNING: no python found on target")
+        _py_cmd[0] = "python3"
+        return "python3"
+
     def _get_size(file_path: str) -> int:
-        """Get file size on the target via python3 os.path.getsize."""
+        """Get file size on the target via python os.path.getsize."""
+        py = _detect_python()
         r = raw_exec_fn(
-            "python3",
+            py,
             f"-c print(__import__('os').path.getsize('{file_path}'))")
         if not r.get("success"):
+            print(f"  [chunked] _get_size({file_path}): "
+                  f"{py} failed — {r.get('error', '?')[:100]}")
             return -1
         for ln in _dedupe(r.get("output", [])):
             ln = ln.strip()
@@ -392,8 +421,9 @@ def make_chunked_read_adapter(raw_exec_fn: GwExecFn,
             code = (f"print(__import__('base64').b64encode("
                     f"open('{file_path}','rb').read()[{offset}:{end}])"
                     f".decode())")
-            program = "sudo" if use_sudo else "python3"
-            params = f"python3 -c {code}" if use_sudo else f"-c {code}"
+            py = _detect_python()
+            program = "sudo" if use_sudo else py
+            params = f"{py} -c {code}" if use_sudo else f"-c {code}"
 
             r = raw_exec_fn(program, params)
             if not r.get("success"):
