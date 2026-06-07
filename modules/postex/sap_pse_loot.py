@@ -350,12 +350,15 @@ def make_chunked_read_adapter(raw_exec_fn: GwExecFn,
         if _py_cmd[0] is not None:
             return _py_cmd[0]
         for py in ("python3", "python"):
-            r = raw_exec_fn(py, "-c print(1)")
-            out = "\n".join(r.get("output", []))
-            if r.get("success") and "1" in out:
+            r = raw_exec_fn(py, "-c print(42777)")
+            lines = _dedupe(r.get("output", []))
+            if r.get("success") and any(
+                    ln.strip() == "42777" for ln in lines):
                 _py_cmd[0] = py
                 print(f"  [chunked] python interpreter: {py}")
                 return py
+            print(f"  [chunked] {py} probe: "
+                  f"{[l[:60] for l in lines[:2]]}")
         print(f"  [chunked] WARNING: no python found on target")
         _py_cmd[0] = "python3"
         return "python3"
