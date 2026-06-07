@@ -921,7 +921,6 @@ body {
       <div class="ctx-item" data-action="ssh_harvest">&#128273; SSH Key Harvest (exfiltrate keys + known_hosts)</div>
       <div class="ctx-item" data-action="ssh_harvest_root">&#128273; SSH Key Harvest as Root (all users via LPE)</div>
       <div class="ctx-item" data-action="ssh_test_keys">&#128640; SSH Lateral Movement (test keys against targets)</div>
-      <div class="ctx-item" data-action="ssh_plant_key" style="color:#f85149">&#128274; SSH Plant Key (authorized_keys persistence)</div>
       <div class="ctx-sep"></div>
       <div class="ctx-item" data-action="propagate">&#128640; Propagate (exploit next hop)</div>
       <div class="ctx-item" data-action="harvest_btp_creds">&#9729; Harvest BTP Credentials (lateral to cloud)</div>
@@ -3978,9 +3977,9 @@ function showCtxMenu(e, sid) {
     //     (SAPMAP-created user or operator-supplied verified cred)
     // Transports themselves are an ABAP-stack construct — a pure-Java
     // target won't have /usr/sap/trans/ or tp at all.
-    'import_transport':  isAbapStack && (hasGwVuln || hasCreds),
-    'create_user_creds': hasCreds,                  // need credentials
-    'lpe':              isAbapStack && hasCreds,    // ABAP-only (BAPI-driven)
+    'import_transport':  isAbapStack && (hasGwVuln || hasCreds) && !hasSshAccess,
+    'create_user_creds': hasCreds && !hasSshAccess,
+    'lpe':              isAbapStack && hasCreds && !hasSshAccess,
     'check_linux_lpe':   !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
     'exploit_linux_lpe': !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
     'check_windows_lpe':   isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
@@ -4036,7 +4035,6 @@ function showCtxMenu(e, sid) {
                           && !!(n && (n.copyfail_root_obtained || n.dirtyfrag_root_obtained
                                        || n.copyfail_vulnerable || n.dirtyfrag_vulnerable)),
     'ssh_test_keys':    !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
-    'ssh_plant_key':    !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
     'harvest_scc':          hasGwVuln || hasCve31324 || hasCreatedUsers,
     // LPE-escalating SCC hash dump — needs OS-exec channel AND a
     // viable Linux LPE (copyfail or dirtyfrag).  Windows targets are
@@ -4166,11 +4164,17 @@ function showCtxMenu(e, sid) {
     'icmad_heapdump_pull':    'Run ICMAD ACL Bypass Sweep first; /heapdump/ must bypass to enable HPROF pull',
     'create_user_java':      'Requires Java / dual-stack system AND a usable CVE-2025-31324, RECON, or GW SAPXPG vuln',
     'create_user_gw':   'Requires a vulnerable RFC Gateway',
-    'import_transport': (!isAbapStack
+    'import_transport': (hasSshAccess
+        ? 'Not available on SSH-only pwned hosts — transport import requires direct ABAP/RFC access.'
+        : !isAbapStack
         ? 'Transport import requires an ABAP stack — transports are an ABAP-only construct (no /usr/sap/trans/ on pure Java).'
         : 'Needs an OS-exec channel: either a vulnerable RFC Gateway (run "Check GW Vulnerabilities") or a SAP_ALL credential (provide a verified RFC user or create one via the GW / 10KBLAZE / dpmon chains first).'),
-    'create_user_creds': 'Provide credentials first',
-    'lpe':              'Provide credentials first',
+    'create_user_creds': (hasSshAccess
+        ? 'Not available on SSH-only pwned hosts — user creation requires direct ABAP/RFC access.'
+        : 'Provide credentials first'),
+    'lpe':              (hasSshAccess
+        ? 'Not available on SSH-only pwned hosts — ABAP LPE requires direct ABAP/RFC access.'
+        : 'Provide credentials first'),
     'check_linux_lpe':   'Requires OS-exec on Linux host',
     'exploit_linux_lpe': 'Requires OS-exec on Linux host — run Check first to confirm at least one technique (Copy Fail or Dirty Frag) is viable',
     'check_windows_lpe':   'Requires OS-exec on a Windows host (GW SAPXPG, CVE-2025-31324 shell, or SAPMAP-created OS-user)',
@@ -4212,7 +4216,7 @@ function showCtxMenu(e, sid) {
     'ssh_harvest':      'Requires OS-exec on a Linux host — reads /etc/passwd + .ssh dirs via GW SAPXPG, CVE-2025-31324, or SXPG_STEP_XPG_START',
     'ssh_harvest_root': 'Requires a viable Linux LPE (Copy Fail or Dirty Frag) — run "Escalate to Root" first. Reads ALL users\' .ssh directories as root.',
     'ssh_test_keys':    'Test previously harvested SSH keys against all map nodes — run SSH Harvest first',
-    'ssh_plant_key':    'Requires OS-exec on a Linux host — plants SAPMAP ed25519 pubkey into authorized_keys for persistence',
+    // ssh_plant_key removed (out of scope)
     'harvest_scc':          'Requires OS-exec on this node AND an SCC on the same host IP',
     'harvest_scc_hashes_via_lpe':
         (isWindows
@@ -4339,7 +4343,7 @@ function showCtxMenu(e, sid) {
     'ssh_harvest':       isWindows,
     'ssh_harvest_root':  isWindows,
     'ssh_test_keys':     isWindows,
-    'ssh_plant_key':     isWindows,
+    // ssh_plant_key removed (out of scope)
     // SCC harvest items — hidden entirely unless an SCC is on the same host
     'harvest_scc':          !_hasSccOnSameHost(n),
     'harvest_scc_hashes_via_lpe': !_hasSccOnSameHost(n),
@@ -5549,14 +5553,7 @@ async function ctxAction(action) {
     case 'ssh_test_keys':
       showSshLateralModal(sid);
       break;
-    case 'ssh_plant_key': {
-      const tu = prompt(`SSH Plant Key on ${sid}\n\nEnter the target OS username to plant the SAPMAP SSH public key into (e.g. sapadm, s4hadm).\n\nThis appends the SAPMAP ed25519 pubkey to ~user/.ssh/authorized_keys for persistent access.`, '');
-      if (!tu) break;
-      if (!confirm(`⚠️ This will modify authorized_keys for user "${tu}" on ${sid}.\n\nThe SAPMAP ed25519 private key will be saved to loot/ for future access.\n\nProceed?`))
-        break;
-      await api('POST', `node/${sid}/ssh_plant_key`, { target_user: tu });
-      break;
-    }
+    // ssh_plant_key removed (out of scope)
     case 'forge_ticket':
       showForgeTicketModal(sid);
       break;
