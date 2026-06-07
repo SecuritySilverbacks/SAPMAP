@@ -366,11 +366,14 @@ def make_chunked_read_adapter(raw_exec_fn: GwExecFn,
         r = raw_exec_fn(
             py,
             f"-c print(__import__('os').path.getsize('{file_path}'))")
+        out_lines = _dedupe(r.get("output", []))
+        print(f"  [chunked] _get_size({file_path}): "
+              f"success={r.get('success')}, "
+              f"output={out_lines[:3]}, "
+              f"error={r.get('error', '')[:80]!r}")
         if not r.get("success"):
-            print(f"  [chunked] _get_size({file_path}): "
-                  f"{py} failed — {r.get('error', '?')[:100]}")
             return -1
-        for ln in _dedupe(r.get("output", [])):
+        for ln in out_lines:
             ln = ln.strip()
             if ln.isdigit():
                 return int(ln)
