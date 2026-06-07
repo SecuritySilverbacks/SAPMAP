@@ -4491,10 +4491,14 @@ function _reflowSubmenus(menu, menuX, menuWidth) {
       sub.classList.add('flip-left');
     }
 
-    // Vertical: cap to available space, flip up if that gives more room
+    // Vertical: cap to available space, flip up if that gives more room.
+    // The submenu is offset by top:-4px, and has padding (8px) + border
+    // (2px) that don't count toward content height — subtract them so
+    // the last item isn't clipped by the viewport edge.
     const groupRect = group.getBoundingClientRect();
-    const spaceDown = window.innerHeight - groupRect.top - SAFE;
-    const spaceUp = groupRect.bottom - SAFE;
+    const PAD = 14;  // 4px top-offset + 8px padding + 2px border
+    const spaceDown = window.innerHeight - groupRect.top - SAFE - PAD;
+    const spaceUp = groupRect.bottom - SAFE - PAD;
     const wantsFlipUp = (naturalH > spaceDown) && (spaceUp > spaceDown);
     if (wantsFlipUp) {
       sub.classList.add('flip-up');
