@@ -559,7 +559,7 @@ def probe_client(host, port, client_nr, timeout=5, saprouter=""):
 
 def enumerate_clients(host, port, timeout=5, max_workers=20,
                       start_client=0, end_client=999, verbose=False,
-                      saprouter=""):
+                      saprouter="", sid_hint=""):
     """Enumerate available SAP clients via DIAG protocol.
 
     Connects to SAP Dispatcher port (32XX) and probes each client number
@@ -633,19 +633,21 @@ def enumerate_clients(host, port, timeout=5, max_workers=20,
             result["probed"] += 1
             try:
                 client_str, available, detail = f.result()
+                tag = f"{sid_hint}: " if sid_hint else ""
                 if available is True:
                     found.append(client_str)
                     if verbose:
-                        print("  [+] Client %s: AVAILABLE (%s)" %
-                              (client_str, detail))
+                        print("  [+] %sClient %s: AVAILABLE (%s)" %
+                              (tag, client_str, detail))
                 elif available is False:
                     if verbose:
-                        print("  [*] Client %s: not available" % client_str)
+                        print("  [*] %sClient %s: not available" %
+                              (tag, client_str))
                 elif available is None:
                     result["errors"] += 1
                     if verbose:
-                        print("  [!] Client %s: error (%s)" %
-                              (client_str, detail))
+                        print("  [!] %sClient %s: error (%s)" %
+                              (tag, client_str, detail))
             except Exception:
                 result["errors"] += 1
 
