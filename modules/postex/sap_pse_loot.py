@@ -106,6 +106,17 @@ def candidate_secudirs(sid: str, instance_dir: str,
     on systems where the instance copy is just a symlink that we'd
     rather skip indirection on).
 
+    The instance directory on disk can follow several SAP naming
+    conventions for the same instance number:
+      D<NN>        — dialog instance
+      DVEBMGS<NN>  — central instance (dialog+enqueue+batch+gw+spool)
+      ASCS<NN>     — ABAP central services
+      SCS<NN>      — standalone central services
+
+    When ``instance_dir`` is a simple ``D<NN>`` guess, we expand to
+    all common patterns so the probe doesn't miss layouts like NPL's
+    ``DVEBMGS42`` when the caller only knew instance number 42.
+
     Args:
         sid:          SAP system ID (case-insensitive)
         instance_dir: Dispatcher's directory name on disk
@@ -122,10 +133,24 @@ def candidate_secudirs(sid: str, instance_dir: str,
     else:
         root = sap_root or "/usr/sap"
         sep = "/"
-    return [
-        _instance_secudir(sid, instance_dir, root, sep),
-        _global_secudir(sid, root, sep),
-    ]
+
+    import re
+    dirs = [instance_dir]
+    m = re.match(r"^D(\d{2,})$", instance_dir)
+    if m:
+        nr = m.group(1)
+        dirs = [
+            f"D{nr}",
+            f"DVEBMGS{nr}",
+            f"ASCS{nr}",
+            f"SCS{nr}",
+        ]
+
+    paths = []
+    for d in dirs:
+        paths.append(_instance_secudir(sid, d, root, sep))
+    paths.append(_global_secudir(sid, root, sep))
+    return paths
 
 
 # ---------------------------------------------------------------------------
