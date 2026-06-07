@@ -3718,7 +3718,8 @@ def enumerate_system_clients(host: str, disp_port: int, timeout: float = 5,
     try:
         result = enumerate_clients(host, disp_port, timeout=timeout,
                                    max_workers=max_workers, verbose=verbose,
-                                   saprouter=saprouter)
+                                   saprouter=saprouter,
+                                   sid_hint=sid_hint)
         clients = result.get("clients", [])
         status = result.get("status", "unknown")
         probed = result.get("probed", 0)
