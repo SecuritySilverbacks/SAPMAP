@@ -42,8 +42,10 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 - [Scanning](#scanning)
 - [Default Account Detection](#default-account-detection)
 - [Exploitation](#exploitation)
+- [MYSAPSSO2 Ticket Forgery](#mysapsso2-ticket-forgery)
 - [AutoPwn — Full-Landscape Convergence Loop](#autopwn--full-landscape-convergence-loop)
 - [Local Privilege Escalation](#local-privilege-escalation)
+- [SSH Lateral Movement](#ssh-lateral-movement)
 - [Propagation](#propagation)
 - [SAProuter Support](#saprouter-support)
 - [SAP Secure Store Decryption](#sap-secure-store-rsectab-decryption)
@@ -82,6 +84,7 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 - **SXPG remote execution** — Create users on remote systems via TCP/IP RFC destinations and SXPG_STEP_XPG_START
 - **Java post-RECON deploy paths** — CTC ConfigServlet and Telnet console deploy of JSPs once a Java UME admin has been created (handles hardened PI/MDM systems where /irj/ is blocked)
 - **Post-creation verification** — Confirm user exists and has SAP_ALL via RFC logon + BAPI_USER_GET_DETAIL
+- **MYSAPSSO2 ticket forgery** — Extract `SAPSYS.pse` + `cred_v2` from a compromised ABAP host, derive the signing key, and forge a MYSAPSSO2 logon ticket impersonating any user (e.g. SAP\*).  Multi-instance SECUDIR probing discovers central-instance layouts (D/DVEBMGS/ASCS/SCS + all known instance numbers).  Chunked binary read adapter with `python3` → `python` fallback for older systems.  Generates `.sap` GUI shortcut, `curl.sh`, and `pyrfc.json` delivery artifacts with correct instance number derived from the SECUDIR path
 
 ### Local Privilege Escalation
 - **Extensible LPE framework** — Plugin-style `@lpe_method` decorator: add new methods by writing one function
@@ -95,6 +98,11 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 - **Destination testing** — Validate logon, ping, and latency via /SDF/RFC_CHECK with automatic fallback to DEST_CHECK_CONNECTION on older systems
 - **Automated propagation** — Iteratively exploit RFC connections to move across the landscape
 - **Attack path visualization** — Color-coded connections showing SAP_ALL access, gateway exploit paths, and risk levels
+- **SSH key harvest** — Exfiltrate SSH private keys from compromised SAP hosts (`~sidadm/.ssh/`).  Content-based detection reads the first 64 bytes of each file for `PRIVATE KEY` headers, catching non-standard key names (e.g. `my_id`).  Filters root-owned keys when running as sidadm, skips bare hostnames without dots from `known_hosts`
+- **SSH key harvest as root** — Harvest keys from all `/home/*/.ssh/` directories using the Linux LPE root channel (Copy Fail / Dirty Frag)
+- **SSH lateral movement** — Test harvested keys against `known_hosts` targets.  On success, marks the target node as pwned (red border + lightning bolt) and stores `ssh_access` metadata for persistent SSH-based command execution
+- **SSH OS Console** — Execute arbitrary OS commands on SSH-pwned targets through the source node's SAPXPG channel.  Commands are base64-encoded and piped through `echo B64|base64 -d|sh` on the remote
+- **SSH reverse/bind shell** — Deliver reverse or bind shell payloads to SSH-pwned targets.  Multi-interpreter wrapper auto-detects `python3` → `python` → `perl` → `bash /dev/tcp` on the remote.  Payload is chunked to fit SAPXPG's 255-byte PARAMS limit using double-b64 encoding through the `echo|base64|sh` pipeline
 
 ### ⚡ AutoPwn — Full-Landscape Convergence Loop
 One-click automation that chains scanning → exploitation → enrichment → propagation across the entire landscape until no new systems can be reached.  Replaces the manual right-click-per-system workflow with a self-driving wave loop that picks the right exploit for each node's stack type (ABAP vs Java vs HANA), harvests credentials from Java Secure Stores and ABAP RSECTAB, and feeds those credentials back into the next wave for lateral movement.
@@ -221,7 +229,9 @@ modules/
 ├── postex/                            Post-exploitation: privesc + lateral movement
 │   ├── sapmap_lpe.py                  ABAP local privilege escalation registry
 │   ├── sap_ume_user_create.py         Java UME admin user creation
-│   └── sapmap_chain.py                Multi-hop RFC trust-chain analysis
+│   ├── sapmap_chain.py                Multi-hop RFC trust-chain analysis
+│   ├── sap_ssh_lateral.py             SSH key harvest, lateral movement, OS Console/shell via SSH
+│   └── sap_pse_loot.py               SAPSYS.pse + cred_v2 extraction with chunked binary reads
 │
 ├── data_extraction/                   Credential / data harvesting
 │   ├── sapmap_secstore.py             ABAP RSECTAB / SSFS decryption + map integration
@@ -751,6 +761,37 @@ def lpe_my_new_method(node: SAPNode, creds: Credentials) -> bool:
     # Return True if SAP_ALL was successfully assigned
     return True
 ```
+
+---
+
+## SSH Lateral Movement
+
+SAPMAP can pivot through SSH to reach systems beyond the SAP RFC trust graph. The three-phase flow (harvest → test → exploit) runs from the right-click Exploitation menu.
+
+### Phase 1 — Key Harvest
+Exfiltrates SSH private keys and `known_hosts` from each `~<sid>adm/.ssh/` directory on a compromised host. Keys are detected by **file content** (first 64 bytes checked for `PRIVATE KEY` header), not filename — catches non-standard names like `my_id`. Root-owned keys are filtered when running as sidadm; bare hostnames without dots are dropped from target lists.
+
+### Phase 2 — Lateral Movement (Test Keys)
+Tests every (key, user, target) combination discovered in Phase 1 via `ssh -o BatchMode=yes ... id`. On success the target node is marked **pwned** (red border + lightning bolt) and `ssh_access` metadata is stored on the node for Phase 3.
+
+### Phase 3 — Exploitation via SSH
+Nodes pwned via SSH gain three new capabilities in the Exploitation menu:
+- **OS Console** — Execute arbitrary commands through the source node's SAPXPG → SSH chain.  Commands are base64-encoded on the source, piped through `echo B64|base64 -d|sh` on the remote
+- **Reverse Shell** — Deliver a reverse-connect shell to the SSH-pwned target
+- **Bind Shell** — Open a listening port on the target and connect to it
+
+Shell payloads use a multi-interpreter wrapper that auto-detects `python3` → `python` → `perl` → `bash /dev/tcp` on the remote, supporting both modern and legacy Linux hosts.
+
+---
+
+## MYSAPSSO2 Ticket Forgery
+
+Forges a MYSAPSSO2 logon ticket signed by the target system's own `SAPSYS.pse`, enabling single-sign-on impersonation of any user (default SAP\*) across the system's STRUSTSSO2 trust subgraph.
+
+1. **PSE extraction** — Reads `SAPSYS.pse` + `cred_v2` from the target's SECUDIR. Multi-instance directory probing expands each known instance number to all SAP naming patterns (D/DVEBMGS/ASCS/SCS). Chunked binary read adapter works around SAPXPG's 128-byte TLV ceiling on kernel 793+ with automatic `python3` → `python` fallback for older hosts
+2. **Key derivation** — Decrypts the PSE using PIN candidates (NULL-PIN, cred_v2-recovered, legacy defaults) and extracts the RSA/DSA signing key
+3. **Ticket signing** — Generates a PKCS#7-signed MYSAPSSO2 cookie with configurable user, client, validity, and digest algorithm
+4. **Artifact delivery** — Saves `.sap` GUI shortcut (correct instance number derived from SECUDIR path), `curl.sh`, `pyrfc.json`, and `ticket.b64` to the loot directory
 
 ---
 
@@ -1322,7 +1363,7 @@ Separate from session state, these persist across sessions:
 
 ## Testing
 
-SAPMAP includes a unit test suite (835 tests across 25 files) that validates core logic without network access:
+SAPMAP includes a unit test suite (1973 tests across 50+ files) that validates core logic without network access:
 
 ```bash
 python3 -m pytest tests/ -v

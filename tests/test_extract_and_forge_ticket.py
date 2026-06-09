@@ -636,15 +636,13 @@ class TestChunkedReadAdapter:
         #     open(p,'rb').read()[O:E])) by returning the right slice.
 
         def raw(program, args):
+            if "print(42777)" in args:
+                return {"success": True, "output": ["42777"], "error": ""}
             assert program == "python3"
-            # args looks like: -c print(__import__('base64').b64encode(
-            #   open('/path/to/somefile','rb').read()[O:E]).decode())
-            # OR: -c print(__import__('os').path.getsize('...'))
             if "getsize" in args:
                 return {"success": True,
                         "output": [str(len(target_bytes))],
                         "error": ""}
-            # Parse the slice indices from the args
             import re
             m = re.search(r"read\(\)\[(\d+):(\d+)\]", args)
             assert m, f"unexpected python3 args: {args}"
@@ -680,6 +678,8 @@ class TestChunkedReadAdapter:
         slices = []
 
         def raw(program, args):
+            if "print(42777)" in args:
+                return {"success": True, "output": ["42777"], "error": ""}
             assert program == "python3"
             if "getsize" in args:
                 return {"success": True,
