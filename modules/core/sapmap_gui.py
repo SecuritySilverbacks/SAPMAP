@@ -6749,6 +6749,14 @@ def create_app(api: SAPMAPApi) -> Bottle:
             print(f"[+] Ping results: {alive} alive systems, "
                   f"{len(non_self) - alive} unreachable")
 
+            # Read RFCSYSACL to discover inbound trusted-RFC callers
+            try:
+                acl = sapmap_rfc.retrieve_rfcsysacl(node, creds)
+                if acl:
+                    node.rfcsysacl_entries = acl
+            except Exception as e:
+                logger.debug(f"RFCSYSACL read failed for {sid}: {e}")
+
         _bg(f"{sid}:retrieve_rfcs", "Retrieve RFCs", _run)
         return json.dumps({"status": "started"})
 

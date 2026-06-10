@@ -1536,6 +1536,74 @@ def retrieve_rfc_connections(node: SAPNode, creds: Credentials = None) -> list:
     return connections
 
 
+# ---------------------------------------------------------------------------
+# Retrieve inbound trusted-RFC ACL (RFCSYSACL)
+# ---------------------------------------------------------------------------
+
+def retrieve_rfcsysacl(node: SAPNode, creds: Credentials = None) -> list:
+    """Read RFCSYSACL to discover which remote systems are trusted as
+    inbound callers on this system.
+
+    Returns list of dicts with keys: rfcsysid, rfcclient, rfcequser,
+    rfcuser, rfcsnc, rfcsameusr.  Each entry means: the remote system
+    (rfcsysid/rfcclient) is allowed to make trusted RFC calls into
+    this system.  If rfcequser='Y', any user from the remote system
+    maps to the same-named user here — the passwordless lateral
+    movement case.
+    """
+    entries = []
+    fields_to_read = [
+        "RFCSYSID", "RFCCLIENT", "RFCEQUSER",
+        "RFCUSER", "RFCSNC", "RFCSAMEUSR",
+    ]
+
+    try:
+        with _get_connection(node, creds) as conn:
+            result = conn.call(
+                RFC_READ_TABLE,
+                QUERY_TABLE="RFCSYSACL",
+                DELIMITER="|",
+                FIELDS=[{"FIELDNAME": f} for f in fields_to_read],
+                ROWCOUNT=200,
+            )
+            data = result.get("DATA", [])
+            for row in data:
+                wa = row.get("WA", "")
+                parts = [p.strip() for p in wa.split("|")]
+                if len(parts) < 3:
+                    continue
+                entry = {
+                    "rfcsysid":  parts[0] if len(parts) > 0 else "",
+                    "rfcclient": parts[1] if len(parts) > 1 else "",
+                    "rfcequser": parts[2] if len(parts) > 2 else "",
+                    "rfcuser":   parts[3] if len(parts) > 3 else "",
+                    "rfcsnc":    parts[4] if len(parts) > 4 else "",
+                    "rfcsameusr":parts[5] if len(parts) > 5 else "",
+                }
+                entries.append(entry)
+
+            if entries:
+                eq_y = sum(1 for e in entries if e["rfcequser"] == "Y")
+                print(f"[+] {node.sid}: RFCSYSACL has {len(entries)} "
+                      f"trusted-caller entries ({eq_y} with RFCEQUSER=Y)")
+            else:
+                print(f"[*] {node.sid}: RFCSYSACL is empty — no inbound "
+                      f"trusted-RFC callers configured")
+
+    except Exception as e:
+        err = format_rfc_exception(e)
+        if "NOT_AUTHORIZED" in err or "TABLE_WITHOUT_DATA" in err:
+            logger.debug(f"RFCSYSACL read on {node.sid}: {err}")
+            print(f"[*] {node.sid}: RFCSYSACL not readable "
+                  f"(auth or empty)")
+        else:
+            logger.debug(f"RFCSYSACL read failed on {node.sid}: {err}")
+            print(f"[-] {node.sid}: Could not read RFCSYSACL: "
+                  f"{err[:80]}")
+
+    return entries
+
+
 def _parse_rsrfcchk_output(spool_lines: list, node: SAPNode) -> list:
     """Parse RSRFCCHK spool output into RFCConn objects."""
     connections = []
@@ -1575,8 +1643,12 @@ def _parse_rsrfcchk_output(spool_lines: list, node: SAPNode) -> list:
 
 
 def _try_rfc_read_table_fallback(conn, node: SAPNode) -> list:
-    """Fallback: read RFCDES for Type-3 / Type-G / Type-H destinations
-    with stored passwords."""
+    """Fallback: read RFCDES for Type-3 / Type-G / Type-H destinations.
+
+    Captures both password-authenticated and trusted (no stored password)
+    Type-3 destinations.  Type-G/H still require %_PWD since trusted RFC
+    is an ABAP-only mechanism.
+    """
     print(f"[*] {node.sid}: Trying RFC_READ_TABLE fallback on RFCDES...")
     connections = []
 
@@ -1603,17 +1675,26 @@ def _try_rfc_read_table_fallback(conn, node: SAPNode) -> list:
                 rfctype = parts[1].strip() if len(parts) > 1 else ""
                 options = parts[2].strip() if len(parts) > 2 else ""
 
-                # Only include connections that have a stored password
-                if "%_PWD" not in options:
+                has_pwd = "%_PWD" in options
+                if not has_pwd and rfctype in ("G", "H"):
                     continue
 
-                connections.append(_build_rfcdes_conn(
-                    node, dest_name, rfctype, options))
+                conn_obj = _build_rfcdes_conn(
+                    node, dest_name, rfctype, options)
+                if not has_pwd and rfctype == "3":
+                    conn_obj.trusted_system = True
+                    conn_obj.trust_type = "trusted_rfc"
+                connections.append(conn_obj)
 
         n3 = sum(1 for c in connections if (c.conn_type or "rfc") == "rfc")
+        n3_trusted = sum(1 for c in connections
+                         if (c.conn_type or "rfc") == "rfc" and c.trusted_system)
         nh = len(connections) - n3
-        print(f"[+] {node.sid}: Found {n3} Type-3 + {nh} Type-G/H "
-              f"connections with stored passwords via RFCDES")
+        parts = [f"{n3} Type-3"]
+        if n3_trusted:
+            parts.append(f"({n3_trusted} trusted)")
+        parts.append(f"+ {nh} Type-G/H connections via RFCDES")
+        print(f"[+] {node.sid}: Found {' '.join(parts)}")
 
     except Exception as e:
         logger.debug(f"RFCDES read failed: {format_rfc_exception(e)}")
@@ -1680,15 +1761,25 @@ def _try_rfcdes_raw_fallback(conn, node: SAPNode) -> list:
                 dest_name = parts[0].strip()
                 rfctype = parts[1].strip() if len(parts) > 1 else ""
                 options = parts[2].strip() if len(parts) > 2 else ""
-                if "%_PWD" not in options:
+                has_pwd = "%_PWD" in options
+                if not has_pwd and rfctype in ("G", "H"):
                     continue
-                connections.append(_build_rfcdes_conn(
-                    node, dest_name, rfctype, options))
+                conn_obj = _build_rfcdes_conn(
+                    node, dest_name, rfctype, options)
+                if not has_pwd and rfctype == "3":
+                    conn_obj.trusted_system = True
+                    conn_obj.trust_type = "trusted_rfc"
+                connections.append(conn_obj)
 
         n3 = sum(1 for c in connections if (c.conn_type or "rfc") == "rfc")
+        n3_trusted = sum(1 for c in connections
+                         if (c.conn_type or "rfc") == "rfc" and c.trusted_system)
         nh = len(connections) - n3
-        print(f"[+] {node.sid}: Found {n3} Type-3 + {nh} Type-G/H "
-              f"connections with stored passwords via call_raw RFCDES")
+        parts = [f"{n3} Type-3"]
+        if n3_trusted:
+            parts.append(f"({n3_trusted} trusted)")
+        parts.append(f"+ {nh} Type-G/H connections via call_raw RFCDES")
+        print(f"[+] {node.sid}: Found {' '.join(parts)}")
 
     except Exception as e:
         logger.debug(f"call_raw RFCDES failed: {format_rfc_exception(e)}")
@@ -1838,17 +1929,27 @@ def _try_tableblock_compressed_fallback(conn, node: SAPNode) -> list:
                                            ).rstrip('\x00').strip()
             if not rfcdest or rfctype not in ('3', 'G', 'H'):
                 continue
-            if '%_PWD' not in rfcoptions:
+            has_pwd = '%_PWD' in rfcoptions
+            if not has_pwd and rfctype in ('G', 'H'):
                 continue
 
-            connections.append(_build_rfcdes_conn(
-                node, rfcdest, rfctype, rfcoptions))
+            conn_obj = _build_rfcdes_conn(
+                node, rfcdest, rfctype, rfcoptions)
+            if not has_pwd and rfctype == '3':
+                conn_obj.trusted_system = True
+                conn_obj.trust_type = "trusted_rfc"
+            connections.append(conn_obj)
 
         n3 = sum(1 for c in connections if (c.conn_type or "rfc") == "rfc")
+        n3_trusted = sum(1 for c in connections
+                         if (c.conn_type or "rfc") == "rfc" and c.trusted_system)
         nh = len(connections) - n3
-        print(f"[+] {node.sid}: Found {n3} Type-3 + {nh} Type-G/H "
-              f"connections with stored passwords via "
-              f"GET_TABLEBLOCK_COMPRESSED_RFC")
+        parts = [f"{n3} Type-3"]
+        if n3_trusted:
+            parts.append(f"({n3_trusted} trusted)")
+        parts.append(f"+ {nh} Type-G/H connections via "
+                     f"GET_TABLEBLOCK_COMPRESSED_RFC")
+        print(f"[+] {node.sid}: Found {' '.join(parts)}")
 
     except Exception as e:
         logger.debug(f"GET_TABLEBLOCK_COMPRESSED_RFC failed: {format_rfc_exception(e)}")
