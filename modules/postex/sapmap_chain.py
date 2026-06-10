@@ -77,11 +77,18 @@ class TrustChain:
         return sids
 
     @property
+    def has_trusted_hop(self) -> bool:
+        return any("Trusted RFC" in (h.method or "") for h in self.hops)
+
+    @property
     def severity(self) -> int:
-        if self.end_is_production and self.sap_all_throughout:
+        if self.end_is_production and (self.sap_all_throughout
+                                       or self.has_trusted_hop):
             return 5  # CRITICAL
         if self.end_is_production:
             return 4  # HIGH
+        if self.has_trusted_hop and self.total_hops >= 1:
+            return 4  # HIGH — passwordless lateral movement
         if self.sap_all_throughout and self.total_hops >= 2:
             return 3  # MEDIUM
         return 2  # LOW
@@ -132,6 +139,7 @@ def _entry_description(method: str) -> str:
         "credentials": "Known credentials",
         "compromised": "Already compromised",
         "rfc_destination": "RFC destination with SAP_ALL",
+        "trusted_rfc": "Trusted RFC (passwordless)",
         "secstore_direct": "SecStore password extraction",
         "btp_destination_leak":
             "BTP destination cleartext capture (cloud → on-prem)",
@@ -154,6 +162,8 @@ def find_all_chains(state: SAPMAPState, max_depth: int = 6,
 
     # Build adjacency: sid → [(target_sid, RFCConnection), ...]
     # Edge inclusion policy:
+    #   trusted_system = True                       → ALWAYS traverse
+    #                                                  (passwordless hop)
     #   tested = True  + logon_successful = True   → traverse (proven)
     #   tested = True  + logon_successful = False  → skip (known-broken)
     #   tested = False                              → traverse (untested,
@@ -164,16 +174,15 @@ def find_all_chains(state: SAPMAPState, max_depth: int = 6,
     #                                                  chain the operator
     #                                                  hasn't validated
     #                                                  yet).
-    # Without the "tested && !ok" carve-out, the analyser silently
-    # ignored every blue "RFC (untested)" edge on the map and produced
-    # an empty chain list even when arrows clearly pointed at PRD.
     adj = {}
     for conn in state.connections:
         src = conn.source_sid
         tgt = conn.target_sid
         if not src or not tgt or src == tgt:
             continue
-        if conn.tested and not conn.logon_successful:
+        if conn.trusted_system:
+            pass  # always include trusted RFC edges
+        elif conn.tested and not conn.logon_successful:
             continue
         if src not in adj:
             adj[src] = []
@@ -233,13 +242,15 @@ def find_all_chains(state: SAPMAPState, max_depth: int = 6,
                     continue
                 visited_from_entry.add(target_sid)
 
-                # If the edge hasn't been logon-tested, flag the hop so
-                # the headline / report reader sees that the link is
-                # configured but not yet validated.  We still include
-                # it in the chain so management sees the topology risk.
                 untested = not conn.tested
-                method = "BAPI (SAP_ALL)" if conn.has_sap_all else "RFC logon"
-                if untested:
+                is_trusted = getattr(conn, "trusted_system", False)
+                if is_trusted:
+                    method = "Trusted RFC (no password)"
+                elif conn.has_sap_all:
+                    method = "BAPI (SAP_ALL)"
+                else:
+                    method = "RFC logon"
+                if untested and not is_trusted:
                     method += " — UNTESTED"
                 hop = ChainHop(
                     source_sid=current_sid,
@@ -250,7 +261,8 @@ def find_all_chains(state: SAPMAPState, max_depth: int = 6,
                     method=method,
                     description=(
                         (f"via {conn.destination_name}" if conn.destination_name else "")
-                        + (" [untested]" if untested else "")
+                        + (" [trusted]" if is_trusted else "")
+                        + (" [untested]" if untested and not is_trusted else "")
                     ).strip(),
                 )
                 new_path = path + [hop]
@@ -275,8 +287,11 @@ def find_all_chains(state: SAPMAPState, max_depth: int = 6,
                     _generate_headline(chain, state)
                     chains.append(chain)
 
-                # Continue BFS if SAP_ALL allows further propagation
-                if conn.has_sap_all:
+                # Continue BFS if SAP_ALL or trusted RFC allows further
+                # propagation.  Trusted RFC lets the caller log in as
+                # any user on the target — equivalent to SAP_ALL for
+                # chain traversal purposes.
+                if conn.has_sap_all or is_trusted:
                     queue.append((target_sid, new_path))
 
     return chains
@@ -320,10 +335,14 @@ def _generate_headline(chain: TrustChain, state: SAPMAPState):
     # Entry description
     entry_desc = _entry_description(chain.entry_method)
 
+    has_trusted_hop = any(
+        "Trusted RFC" in (h.method or "") for h in chain.hops)
+    trusted_tag = " [trusted RFC]" if has_trusted_hop else ""
+
     if chain.end_is_production:
         chain.headline = (f"{path_str} \u2014 "
-                          f"Production reached in {chain.total_hops} hops")
-        # Business impact from impact_results if available
+                          f"Production reached in {chain.total_hops} hops"
+                          f"{trusted_tag}")
         impacts = []
         if end_node and end_node.impact_results:
             for ir in end_node.impact_results:
@@ -331,12 +350,23 @@ def _generate_headline(chain: TrustChain, state: SAPMAPState):
                     impacts.append(ir.get("headline", ""))
         if impacts:
             chain.business_impact = "; ".join(impacts[:3])
+        elif has_trusted_hop:
+            chain.business_impact = ("Passwordless hop via trusted RFC "
+                                     "\u2014 full production data accessible")
         else:
             chain.business_impact = "Full production data accessible"
     elif chain.sap_all_throughout:
         chain.headline = (f"{path_str} \u2014 "
-                          f"Full access chain ({chain.total_hops} hops, SAP_ALL)")
+                          f"Full access chain ({chain.total_hops} hops, SAP_ALL)"
+                          f"{trusted_tag}")
         chain.business_impact = "SAP_ALL on every hop \u2014 unrestricted access"
+    elif has_trusted_hop:
+        chain.headline = (f"{path_str} \u2014 "
+                          f"Trusted RFC chain ({chain.total_hops} "
+                          f"hop{'s' if chain.total_hops > 1 else ''}, "
+                          f"no password)")
+        chain.business_impact = ("Passwordless lateral movement via "
+                                 "trusted RFC assertion ticket")
     else:
         chain.headline = (f"{path_str} \u2014 "
                           f"{chain.total_hops} hop{'s' if chain.total_hops > 1 else ''}")

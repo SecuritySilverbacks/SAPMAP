@@ -528,6 +528,9 @@ class SAPNode:
     #         error}.  Empty dict = never probed.
     snc_info: dict = field(default_factory=dict)
     scc_links: list = field(default_factory=list)       # SCC hosts whose mappings reach this node
+    # Inbound trusted-RFC ACL (from RFCSYSACL table).  Each entry:
+    # {rfcsysid, rfcclient, rfcequser, rfcuser, rfcsnc, rfcsameusr}
+    rfcsysacl_entries: list = field(default_factory=list)
     position: Optional[tuple] = None    # (x, y) on map — None = auto-layout
 
     # Linux LPE state.  Two techniques covered today:
@@ -755,6 +758,7 @@ class SAPNode:
             "saprouter_info": self.saprouter_info,
             "snc_info": dict(self.snc_info or {}),
             "scc_links": list(self.scc_links),
+            "rfcsysacl_entries": list(self.rfcsysacl_entries),
             "position": list(self.position) if self.position else None,
             "copyfail_vulnerable": self.copyfail_vulnerable,
             "copyfail_root_obtained": self.copyfail_root_obtained,
@@ -855,6 +859,7 @@ class SAPNode:
             saprouter_info=d.get("saprouter_info", {}),
             snc_info=dict(d.get("snc_info", {})),
             scc_links=list(d.get("scc_links", [])),
+            rfcsysacl_entries=list(d.get("rfcsysacl_entries", [])),
             position=tuple(d["position"]) if d.get("position") else None,
             copyfail_vulnerable=d.get("copyfail_vulnerable", False),
             copyfail_root_obtained=d.get("copyfail_root_obtained", False),
@@ -930,6 +935,10 @@ class RFCConnection:
     # sapxpg remote test
     sapxpg_remote_works: bool = False
 
+    # Trusted RFC
+    trusted_system: bool = False     # SM59 "Trusted System" flag set on this destination
+    trust_type: str = ""             # "" | "trusted_rfc" | "strustsso2"
+
     # Connection type.  Default "rfc" covers classic Type-3 RFC plus
     # Type-T (where sapxpg_remote_works is the active marker).  "http"
     # is set for AS Java HTTP destinations pulled from J2EE_CONFIGENTRY
@@ -953,6 +962,8 @@ class RFCConnection:
         """Return risk assessment for this connection."""
         if self.has_sap_all and self.logon_successful:
             return "CRITICAL"
+        if self.trusted_system:
+            return "HIGH"
         if self.logon_successful:
             return "MEDIUM"
         if self.tested and not self.logon_successful:
@@ -981,6 +992,8 @@ class RFCConnection:
             "check_error": self.check_error,
             "tested": self.tested,
             "sapxpg_remote_works": self.sapxpg_remote_works,
+            "trusted_system": self.trusted_system,
+            "trust_type": self.trust_type,
             "conn_type": self.conn_type,
             "http_url": self.http_url,
             "http_auth_type": self.http_auth_type,

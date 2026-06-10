@@ -2807,15 +2807,16 @@ function updateMap() {
     let width = 4;
     let dashArray = '';
     const isHttp = (conn.conn_type || '') === 'http';
+    const isTrusted = !!conn.trusted_system;
     if (conn.has_sap_all && conn.logon_successful) {
       color = '#e74c3c'; width = 6;
     } else if (conn.sapxpg_remote_works) {
       color = '#ff6b35'; width = 5.5; dashArray = '8,4';
+    } else if (isTrusted) {
+      color = '#f0883e'; width = 5; dashArray = '12,4';
     } else if (conn.logon_successful) {
       color = '#2ecc71'; width = 5;
     } else if (isHttp) {
-      // HTTP destination — default style before any connectivity test.
-      // Purple-ish; dotted to distinguish from untested RFC edges.
       color = '#a371f7'; width = 4; dashArray = '3,4';
     }
 
@@ -2920,7 +2921,8 @@ function updateMap() {
     }
     let label = conn.destination_name || '';
     if (conn.rfc_user) label += ' / ' + conn.rfc_user;
-    if (conn.has_sap_all) label += ' (SAP_ALL)';
+    if (conn.trusted_system) label += ' (Trusted)';
+    else if (conn.has_sap_all) label += ' (SAP_ALL)';
     html += `<text x="${lx}" y="${ly}" text-anchor="middle" font-size="10" ` +
       `fill="#8b949e" font-family="monospace" pointer-events="none">${escHtml(label)}</text>`;
   });
@@ -5581,6 +5583,7 @@ function _connInfoStateKey(c) {
     roles_len:        (c.roles || []).length,
     user_detail_err:  (c.user_detail_error || '').length,
     sapxpg_remote_works: !!c.sapxpg_remote_works,
+    trusted_system:   !!c.trusted_system,
     ping_ok:          !!c.ping_ok,
   });
 }
@@ -5629,16 +5632,16 @@ function showConnInfo(e, connIdx) {
   const panel = document.getElementById('info-panel');
   const isHttp = (conn.conn_type || '') === 'http';
   const isTypeT = !isHttp && !!conn.sapxpg_remote_works;
-  const connType = isHttp ? 'HTTP' : (isTypeT ? 'T' : '3');
+  const isTrusted = !!conn.trusted_system;
+  const connType = isHttp ? 'HTTP' : (isTypeT ? 'T' : (isTrusted ? '3 Trusted' : '3'));
   let risk;
   if (isHttp) {
-    // HTTP: password+user is high-value if it logs into a Java admin
-    // interface; medium otherwise.  We don't test HTTP automatically
-    // yet — rank by creds availability.
     risk = (conn.rfc_user && conn.secstore_password)
            ? 'MEDIUM' : 'UNKNOWN';
   } else if (isTypeT) {
     risk = conn.ping_ok ? 'CRITICAL' : conn.tested ? 'LOW' : 'UNKNOWN';
+  } else if (isTrusted) {
+    risk = 'HIGH';
   } else {
     risk = conn.has_sap_all && conn.logon_successful ? 'CRITICAL' :
       conn.logon_successful ? 'MEDIUM' : conn.tested ? 'LOW' : 'UNKNOWN';
@@ -5710,7 +5713,9 @@ function showConnInfo(e, connIdx) {
       <div class="info-row"><span class="info-label">Port:</span><span class="info-val">${escHtml(gwPort)}</span></div>
     ` : `
       <div class="info-row"><span class="info-label">Client:</span><span class="info-val">${escHtml(conn.client || '?')}</span></div>
-      <div class="info-row"><span class="info-label">RFC User:</span><span class="info-val">${escHtml(conn.rfc_user || '?')}</span></div>
+      <div class="info-row"><span class="info-label">RFC User:</span><span class="info-val">${escHtml(conn.rfc_user || (isTrusted ? '(current user)' : '?'))}</span></div>
+      ${isTrusted ? `<div class="info-row"><span class="info-label">Trust:</span><span class="info-val" style="color:#f0883e;font-weight:600">Trusted RFC (no stored password)</span></div>
+      <div class="info-section" style="color:#d29922;font-size:11px">This destination uses assertion-ticket authentication. If the source system is compromised, an attacker can call through this destination as any user on the target — no password required. The SAP kernel signs the assertion ticket automatically.</div>` : ''}
       ${conn.secstore_password ? `<div class="info-row"><span class="info-label">SecStore Pwd:</span><span class="info-val ss-reveal" style="color:#3fb950;cursor:pointer"><span class="ss-masked">&#9679;&#9679;&#9679;&#9679; (${conn.secstore_password.length} chars) — click to reveal</span><span class="ss-plain" style="display:none">${escHtml(conn.secstore_password)}</span></span></div>` : ''}
     `}
     ${profilesHtml ? `<div class="info-section"><strong style="font-size:11px;color:#8b949e">Profiles</strong><div class="profile-list">${profilesHtml}</div></div>` : ''}
@@ -6007,6 +6012,32 @@ function showDetails(sid) {
         '<div style="margin-top:6px"><button class="btn" style="font-size:11px;padding:3px 10px" ' +
         'onclick="api(\'POST\',\'node/' + escHtml(sid) + '/check_snc\');showToast(\'SNC probe started for ' + escHtml(sid) + '\',\'info\')">Re-probe SNC</button></div>' +
         '</div>';
+    })()}
+    ${(() => {
+      const acl = n.rfcsysacl_entries || [];
+      if (!acl.length) return '';
+      const eqy = acl.filter(e => e.rfcequser === 'Y');
+      const color = eqy.length ? '#f0883e' : '#8b949e';
+      let rows = '';
+      acl.forEach(e => {
+        const eq = e.rfcequser === 'Y';
+        const eqColor = eq ? '#f0883e' : '#8b949e';
+        rows += '<div class="detail-row">' +
+          '<span class="detail-key">' + escHtml(e.rfcsysid || '?') +
+          ' / ' + escHtml(e.rfcclient || '?') + '</span>' +
+          '<span class="detail-val" style="color:' + eqColor + '">' +
+          'RFCEQUSER=' + escHtml(e.rfcequser || '?') +
+          (e.rfcuser ? ' user=' + escHtml(e.rfcuser) : '') +
+          (eq ? ' &#9888; any user' : '') +
+          '</span></div>';
+      });
+      return '<div class="detail-section">' +
+        '<h4 style="color:' + color + '">&#128279; Inbound Trusted RFC (' +
+        acl.length + ' entries' +
+        (eqy.length ? ', ' + eqy.length + ' RFCEQUSER=Y' : '') +
+        ')</h4>' +
+        (eqy.length ? '<div style="color:#d29922;font-size:11px;margin-bottom:6px">Systems with RFCEQUSER=Y can log in as any same-named user on this system without a password.</div>' : '') +
+        rows + '</div>';
     })()}
     ${(() => {
       // ATT&CK observed: aggregate technique IDs across this node's
