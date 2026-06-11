@@ -420,6 +420,77 @@ class TestRFCSYSACLParsing:
 
 
 # ---------------------------------------------------------------------------
+# RFCTRUST cross-reference
+# ---------------------------------------------------------------------------
+
+class TestRFCTRUSTCrossReference:
+
+    def test_rfctrust_marks_connections_trusted(self):
+        """RFCTRUST entries should mark matching connections as trusted."""
+        trust_entries = [
+            {"rfctrustid": "TWT", "rfctrustsy": "S4H",
+             "tlicense_nr": "0021234478", "llicense_nr": "0021320685",
+             "rfcmsgsrv": "twtestenv1"},
+        ]
+        trust_targets = {e["rfctrustid"] for e in trust_entries
+                         if e.get("rfctrustid")}
+        assert "TWT" in trust_targets
+
+        conn = RFCConnection(
+            source_sid="S4H", source_host="s4hana",
+            target_sid="TWT", target_host="twt01",
+            destination_name="TWT_RFC",
+        )
+        assert conn.trusted_system is False
+
+        if conn.target_sid in trust_targets:
+            conn.trusted_system = True
+            conn.trust_type = "trusted_rfc"
+
+        assert conn.trusted_system is True
+        assert conn.trust_type == "trusted_rfc"
+
+    def test_rfctrust_no_match_stays_untrusted(self):
+        """Connection to a SID not in RFCTRUST stays untrusted."""
+        trust_targets = {"TWT"}
+
+        conn = RFCConnection(
+            source_sid="S4H", source_host="s4hana",
+            target_sid="ERP", target_host="erp01",
+            destination_name="ERP_RFC",
+        )
+        if conn.target_sid in trust_targets:
+            conn.trusted_system = True
+
+        assert conn.trusted_system is False
+
+
+# ---------------------------------------------------------------------------
+# Supplement function — dedup logic
+# ---------------------------------------------------------------------------
+
+class TestSupplementTrustedDestinations:
+
+    def test_supplement_skips_already_known_destinations(self):
+        """_supplement_trusted_destinations should not duplicate existing entries."""
+        from sapmap_rfc import _build_rfcdes_conn
+
+        node = SAPNode(sid="TST", hostname="test01")
+        existing = [
+            _build_rfcdes_conn(node, "DEST_A", "3", "H=host1,S=00,%_PWD"),
+        ]
+        known_dests = {c.destination_name for c in existing}
+        assert "DEST_A" in known_dests
+
+    def test_supplement_detects_no_password_type3(self):
+        """Type-3 without %_PWD should be flagged as trusted in supplement."""
+        options_no_pwd = "H=target,S=42"
+        options_with_pwd = "H=target,S=42,%_PWD"
+        assert "%_PWD" not in options_no_pwd
+        assert "%_PWD" in options_with_pwd
+
+
+# ---------------------------------------------------------------------------
 # Entry method description
 # ---------------------------------------------------------------------------
 

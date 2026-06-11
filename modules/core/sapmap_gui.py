@@ -6749,7 +6749,24 @@ def create_app(api: SAPMAPApi) -> Bottle:
             print(f"[+] Ping results: {alive} alive systems, "
                   f"{len(non_self) - alive} unreachable")
 
-            # Read RFCSYSACL to discover inbound trusted-RFC callers
+            # Read trust tables for intelligence
+            try:
+                trust = sapmap_rfc.retrieve_rfctrust(node, creds)
+                if trust:
+                    # Cross-reference: mark connections whose target SID
+                    # appears in RFCTRUST as trusted_system=True
+                    trust_targets = {e["rfctrustid"] for e in trust
+                                     if e.get("rfctrustid")}
+                    for c in api.state.get_connections_from(sid):
+                        if (c.target_sid in trust_targets
+                                and not c.trusted_system):
+                            c.trusted_system = True
+                            c.trust_type = "trusted_rfc"
+                            print(f"[+] {sid}: Marked {c.destination_name} "
+                                  f"as trusted (target {c.target_sid} in "
+                                  f"RFCTRUST)")
+            except Exception as e:
+                logger.debug(f"RFCTRUST read failed for {sid}: {e}")
             try:
                 acl = sapmap_rfc.retrieve_rfcsysacl(node, creds)
                 if acl:
