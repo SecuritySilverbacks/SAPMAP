@@ -109,13 +109,19 @@ body {
 
 /* === Legend === */
 .legend-bar {
-  display: flex; align-items: center; gap: 16px;
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  row-gap: 4px;
   background: #161b22; border-bottom: 1px solid #30363d;
-  padding: 3px 12px; font-size: 11px; color: #8b949e; flex-shrink: 0;
+  padding: 4px 12px; font-size: 11px; color: #8b949e; flex-shrink: 0;
 }
 .legend-item { display: flex; align-items: center; gap: 4px; }
 .legend-swatch {
   width: 14px; height: 10px; border-radius: 2px; display: inline-block;
+}
+/* Vertical divider between legend groups (Nodes | Edges | SCC tunnel) */
+.legend-sep {
+  width: 1px; height: 14px; background: #30363d;
+  align-self: center;
 }
 
 /* === Console === */
@@ -800,17 +806,21 @@ body {
 
   <!-- Legend -->
   <div class="legend-bar" id="legend-bar" style="display:none">
-    <span style="color:#8b949e">LEGEND:</span>
+    <span style="color:#8b949e;font-weight:600">LEGEND</span>
+    <span class="legend-sep"></span>
     <span class="legend-item"><span class="legend-swatch" style="background:#4a1a1a;border:1px solid #8b0000"></span> PRD</span>
     <span class="legend-item"><span class="legend-swatch" style="background:#4a3a1a;border:1px solid #e67e22"></span> Non-PRD</span>
     <span class="legend-item"><span class="legend-swatch" style="background:transparent;border:2px solid #8b0000"></span> Critical</span>
     <span class="legend-item">&#9889; Pwned</span>
+    <span class="legend-item"><span class="legend-swatch" style="background:#046c7a"></span> SAP Cloud Connector</span>
+    <span class="legend-sep"></span>
     <span class="legend-item"><span class="legend-swatch" style="background:#e74c3c"></span> RFC Logon OK + SAP_ALL</span>
+    <span class="legend-item" title="Trusted RFC: RFCOPTIONS has Q=Y (SM59 Trust Relationship = Yes). Inbound trust means this caller can land authenticated calls without a password."><svg width="22" height="10" style="vertical-align:middle"><line x1="0" y1="5" x2="22" y2="5" stroke="#f0883e" stroke-width="3" stroke-dasharray="6,2"/></svg> Trusted RFC</span>
     <span class="legend-item"><span class="legend-swatch" style="background:#2ecc71"></span> RFC Logon OK</span>
     <span class="legend-item"><span class="legend-swatch" style="background:#5dade2"></span> RFC (untested)</span>
     <span class="legend-item"><span class="legend-swatch" style="background:#a371f7;border:2px dotted #a371f7;background:transparent"></span> HTTP destination</span>
     <span class="legend-item"><span class="legend-swatch" style="background:#ff6b35;border:2px dashed #ff6b35;background:transparent"></span> TCP/IP (sapxpg)</span>
-    <span class="legend-item"><span class="legend-swatch" style="background:#046c7a"></span> SAP Cloud Connector</span>
+    <span class="legend-sep"></span>
     <span class="legend-item" title="All SCC mappings to this ABAP node have been smoke-tested and reach the backend successfully"><span class="legend-swatch" style="background:transparent;border-top:2px dashed #3fb950;border-radius:0;width:18px;height:0"></span> SCC tunnel: reach OK</span>
     <span class="legend-item" title="At least one SCC mapping to this ABAP node failed its smoke test"><span class="legend-swatch" style="background:transparent;border-top:2px dashed #f85149;border-radius:0;width:18px;height:0"></span> SCC tunnel: unreachable</span>
     <span class="legend-item" title="SCC mapping uses principal propagation (KERBEROS / X509_*) — pair with the PP analyser finding"><span class="legend-swatch" style="background:transparent;border-top:2px dashed #f0883e;border-radius:0;width:18px;height:0"></span> SCC tunnel: PP enabled</span>
