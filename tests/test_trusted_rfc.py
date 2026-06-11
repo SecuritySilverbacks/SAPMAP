@@ -388,6 +388,75 @@ class TestRFCDESParsing:
 
 
 # ---------------------------------------------------------------------------
+# _rfcdes_is_trusted — Q=Y in RFCOPTIONS is the canonical trust marker
+# ---------------------------------------------------------------------------
+
+class TestRfcdesIsTrusted:
+    """Verify Q=Y detection — the SM59 'Trust Relationship = Yes' marker.
+
+    Earlier versions wrongly flagged any Type-3 without %_PWD as trusted,
+    producing false-positives on local / no-password destinations like
+    NONE, BACK, or "@local". The canonical SAP marker is Q=Y in RFCOPTIONS.
+    """
+
+    def test_type3_with_q_y_is_trusted(self):
+        from sapmap_rfc import _rfcdes_is_trusted
+        # Typical trusted destination shape:
+        # H=host,S=00,M=client,Q=Y plus optional U=user
+        opts = "H=target01,S=00,M=100,Q=Y,U=CALLER"
+        assert _rfcdes_is_trusted("3", opts) is True
+
+    def test_type3_without_q_y_is_not_trusted(self):
+        """Local Type-3 destinations (NONE/BACK/internal) without Q=Y
+        should NOT be flagged trusted just because %_PWD is absent."""
+        from sapmap_rfc import _rfcdes_is_trusted
+        # No %_PWD and no Q=Y — common for "NONE" and "BACK"
+        # destinations, local internal destinations, etc.
+        for opts in (
+            "",
+            "H=target01,S=00",
+            "H=target01,S=00,M=100,U=USER",
+            "M=100",
+        ):
+            assert _rfcdes_is_trusted("3", opts) is False, (
+                f"options {opts!r} should not be trusted (no Q=Y)")
+
+    def test_type3_with_q_n_is_not_trusted(self):
+        """Q=N is the explicit 'not trusted' marker — must not match."""
+        from sapmap_rfc import _rfcdes_is_trusted
+        opts = "H=target01,S=00,M=100,Q=N"
+        assert _rfcdes_is_trusted("3", opts) is False
+
+    def test_q_y_lowercase_still_trusted(self):
+        """Be lenient on case — kernels may store q=y."""
+        from sapmap_rfc import _rfcdes_is_trusted
+        opts = "H=target01,S=00,q=y"
+        assert _rfcdes_is_trusted("3", opts) is True
+
+    def test_q_y_with_surrounding_spaces(self):
+        """RFCOPTIONS rows can have stray whitespace around tokens."""
+        from sapmap_rfc import _rfcdes_is_trusted
+        opts = "H=target01, S=00 , Q=Y , U=CALLER"
+        assert _rfcdes_is_trusted("3", opts) is True
+
+    def test_type_g_with_q_y_is_not_trusted(self):
+        """For Type-G/H, Q=Y means TLS — NOT a trust marker. Even though
+        Q=Y appears in HTTP destination options, those are not 'trusted
+        RFC' connections in the SM59 sense."""
+        from sapmap_rfc import _rfcdes_is_trusted
+        opts = "H=host,S=443,M=/oauth/token,Q=Y,U=svc"
+        assert _rfcdes_is_trusted("G", opts) is False
+        assert _rfcdes_is_trusted("H", opts) is False
+
+    def test_q_followed_by_other_chars_is_not_match(self):
+        """Q=YES or QZ=Y must not match — only exact Q=Y."""
+        from sapmap_rfc import _rfcdes_is_trusted
+        for opts in ("H=x,QZ=Y", "H=x,Q=YES", "H=x,QC=Y"):
+            assert _rfcdes_is_trusted("3", opts) is False, (
+                f"options {opts!r} should not match Q=Y")
+
+
+# ---------------------------------------------------------------------------
 # RFCSYSACL parsing
 # ---------------------------------------------------------------------------
 

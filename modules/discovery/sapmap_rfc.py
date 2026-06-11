@@ -1588,6 +1588,11 @@ def _supplement_trusted_destinations(
                     continue
                 if "%_PWD" in options:
                     continue
+                # Trust marker: Q=Y in RFCOPTIONS (SM59 "Trust
+                # Relationship = Yes").  Without it, this is just a
+                # local / no-password destination, NOT a trusted RFC.
+                if not _rfcdes_is_trusted(rfctype, options):
+                    continue
                 if dest_name in known_dests:
                     continue
 
@@ -1824,7 +1829,9 @@ def _try_rfc_read_table_fallback(conn, node: SAPNode) -> list:
 
                 conn_obj = _build_rfcdes_conn(
                     node, dest_name, rfctype, options)
-                if not has_pwd and rfctype == "3":
+                # Trusted only if RFCOPTIONS has Q=Y (Type-3), NOT
+                # merely "no stored password" — see _rfcdes_is_trusted.
+                if _rfcdes_is_trusted(rfctype, options):
                     conn_obj.trusted_system = True
                     conn_obj.trust_type = "trusted_rfc"
                 connections.append(conn_obj)
@@ -1909,7 +1916,9 @@ def _try_rfcdes_raw_fallback(conn, node: SAPNode) -> list:
                     continue
                 conn_obj = _build_rfcdes_conn(
                     node, dest_name, rfctype, options)
-                if not has_pwd and rfctype == "3":
+                # Trusted only if RFCOPTIONS has Q=Y (Type-3) — see
+                # _rfcdes_is_trusted for the rationale.
+                if _rfcdes_is_trusted(rfctype, options):
                     conn_obj.trusted_system = True
                     conn_obj.trust_type = "trusted_rfc"
                 connections.append(conn_obj)
@@ -2078,7 +2087,9 @@ def _try_tableblock_compressed_fallback(conn, node: SAPNode) -> list:
 
             conn_obj = _build_rfcdes_conn(
                 node, rfcdest, rfctype, rfcoptions)
-            if not has_pwd and rfctype == '3':
+            # Trusted only if RFCOPTIONS has Q=Y (Type-3) — see
+            # _rfcdes_is_trusted for the rationale.
+            if _rfcdes_is_trusted(rfctype, rfcoptions):
                 conn_obj.trusted_system = True
                 conn_obj.trust_type = "trusted_rfc"
             connections.append(conn_obj)
@@ -2187,6 +2198,26 @@ def _parse_rfcdes_http_options(conn: RFCConn, options_str: str):
 # OpenSQL syntax mismatch on older kernels by OR-chaining instead.
 _RFCDES_TYPE_FILTER = ("RFCTYPE = '3' OR RFCTYPE = 'G' OR "
                         "RFCTYPE = 'H'")
+
+
+def _rfcdes_is_trusted(rfctype: str, options: str) -> bool:
+    """Return True iff this RFCDES row represents a *trusted* RFC.
+
+    The canonical marker SAP writes into RFCOPTIONS when "Trust
+    Relationship = Yes" is set in SM59 is the comma-separated token
+    ``Q=Y`` (Type-3 only — for Type-G/H the ``Q=`` flag means TLS).
+    Absence of ``%_PWD`` is NOT a trust indicator: many local /
+    internal destinations (e.g. NONE, BACK, "@local", file
+    destinations) have no stored password and are not trusted at
+    all.  False-positives in the earlier heuristic were causing the
+    map to label local destinations as inbound trusted RFC.
+    """
+    if rfctype != "3":
+        return False
+    for part in (options or "").split(","):
+        if part.strip().upper() == "Q=Y":
+            return True
+    return False
 
 
 def _build_rfcdes_conn(node: SAPNode, dest_name: str,
