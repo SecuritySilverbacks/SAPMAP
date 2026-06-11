@@ -5583,7 +5583,12 @@ async function ctxAction(action) {
       showToast(`STRUSTSSO2 discovery started on ${sid}`, 'info');
       break;
     case 'forge_and_fanout': {
-      const user = prompt('Forge & Fanout — impersonate user:', 'SAP*');
+      const user = prompt(
+        'Forge & Fanout — impersonate user:\n\n' +
+        'IMPORTANT: this user must EXIST and be UNLOCKED on every fanout target.\n' +
+        'SAP* is often virtual/missing in customer clients (100, etc.) → 403.\n' +
+        'DDIC always exists; a SAPMAP-created user is also safe.',
+        'DDIC');
       if (!user) break;
       const client = prompt('Client (MANDT):', '100');
       if (!client) break;

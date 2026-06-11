@@ -6698,16 +6698,33 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     # Diagnostic hints for common rejection modes
                     err_lower = ev.lower()
                     if "401" in ev or "unauthorized" in err_lower:
-                        print(f"            hint: target may have "
-                              f"login/accept_sso2_ticket=0, OR our "
-                              f"PSE cert isn't registered in target's "
-                              f"STRUSTSSO2 (check STRUST on "
-                              f"{target_sid})")
+                        print(f"            hint: 401 = signature/"
+                              f"recipient validation FAILED. Check: "
+                              f"login/accept_sso2_ticket=1 on "
+                              f"{target_sid}, OR our PSE cert isn't "
+                              f"registered in target's STRUSTSSO2 "
+                              f"(STRUST on {target_sid}, applic "
+                              f"'SYSPSEAPPLSRV', certificate list)")
                     elif "403" in ev or "forbidden" in err_lower:
-                        print(f"            hint: user '{user}' may "
-                              f"be locked or missing on "
-                              f"{target_sid}/{target_client}, or the "
-                              f"target requires HTTPS only")
+                        print(f"            hint: 403 = ticket "
+                              f"VALIDATED, but session start FAILED. "
+                              f"Most likely cause: user '{user}' does "
+                              f"NOT EXIST or is LOCKED on "
+                              f"{target_sid}/{target_client}.")
+                        if user == "SAP*":
+                            print(f"            note: SAP* is a "
+                                  f"virtual super-user typically "
+                                  f"present only in client 000. In "
+                                  f"customer clients (100, etc.) it "
+                                  f"is usually MISSING. Retry with "
+                                  f"DDIC (always exists) or a known "
+                                  f"business / SAPMAP-created user.")
+                        else:
+                            print(f"            check on "
+                                  f"{target_sid}: SU01 / table USR02 "
+                                  f"for user '{user}' in client "
+                                  f"{target_client} — must exist + "
+                                  f"unlocked + UFLAG=0")
 
             print(f"[+] {sid}: fanout complete — "
                   f"{succeeded}/{tried} targets accepted the ticket")
