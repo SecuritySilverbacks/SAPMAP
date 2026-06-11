@@ -1814,65 +1814,100 @@ def retrieve_strustsso2_trust(node: SAPNode,
         entry.update({k: v for k, v in fields.items() if v is not None})
         entries.append(entry)
 
-    # ---- Method 1: TWPSSO2ACL — the actual STRUSTSSO2 ACL ---------
-    try:
-        with _get_connection(node, creds) as conn:
-            result = conn.call(
-                RFC_READ_TABLE,
-                QUERY_TABLE="TWPSSO2ACL",
-                DELIMITER="|",
-                FIELDS=[
-                    {"FIELDNAME": "TRUSTSY"},
-                    {"FIELDNAME": "TRUSTCL"},
-                    {"FIELDNAME": "TRUSTSUBJECT"},
-                    {"FIELDNAME": "TRUSTISSUER"},
-                    {"FIELDNAME": "TRUSTSERNO"},
-                ],
-                ROWCOUNT=500,
-            )
-            for row in result.get("DATA", []):
-                parts = [p.strip() for p in row.get("WA", "").split("|")]
-                if len(parts) < 1:
-                    continue
-                trustsy   = parts[0] if len(parts) > 0 else ""
-                trustcl   = parts[1] if len(parts) > 1 else ""
-                subject   = parts[2] if len(parts) > 2 else ""
-                issuer_dn = parts[3] if len(parts) > 3 else ""
-                serial    = parts[4] if len(parts) > 4 else ""
-                if not trustsy and not subject:
-                    continue
-                _add("system", "TWPSSO2ACL",
-                     issuer_sid=trustsy, issuer_client=trustcl,
-                     subject_dn=subject, issuer_dn=issuer_dn,
-                     serial=serial)
-    except Exception as e:
-        logger.debug(f"TWPSSO2ACL read on {node.sid}: "
-                     f"{format_rfc_exception(e)}")
+    # ---- Methods 1+2: System-trust tables with dynamic columns ----
+    # Field names vary across NW kernel versions, so we discover
+    # the actual column list via DDIF_FIELDINFO_GET and map by
+    # substring match (TRUST*SY -> issuer_sid, *SUBJECT -> subject,
+    # etc.).
+    def _match_field(cols, *patterns):
+        """Return first column matching any of the substring patterns."""
+        cols_u = [c.upper() for c in cols]
+        for pat in patterns:
+            p = pat.upper()
+            for i, c in enumerate(cols_u):
+                if p in c:
+                    return cols[i]
+        return None
 
-    # ---- Method 2: USRSYSACL --------------------------------------
-    for tbl in ("USRSYSACL", "TWPSSOAPLCT"):
+    for tbl in ("TWPSSO2ACL", "USRSYSACL", "TWPSSOAPLCT"):
         try:
-            with _get_connection(node, creds) as conn:
-                result = conn.call(
-                    RFC_READ_TABLE,
-                    QUERY_TABLE=tbl,
-                    DELIMITER="|",
-                    ROWCOUNT=500,
-                )
-                for row in result.get("DATA", []):
-                    parts = [p.strip()
-                             for p in row.get("WA", "").split("|")]
-                    if len(parts) < 2:
-                        continue
-                    sysid = parts[1] if len(parts) > 1 else ""
-                    client = parts[2] if len(parts) > 2 else ""
-                    if not sysid:
-                        continue
-                    _add("system", tbl,
-                         issuer_sid=sysid, issuer_client=client)
+            cols = get_table_columns(node, tbl, creds=creds)
+        except Exception as e:
+            logger.debug(f"{tbl} column discovery on {node.sid}: "
+                         f"{format_rfc_exception(e)}")
+            cols = []
+        if not cols:
+            print(f"[*] {node.sid}: table {tbl} not present "
+                  f"(or no auth for DDIF_FIELDINFO_GET)")
+            continue
+
+        print(f"[*] {node.sid}: {tbl} columns: "
+              f"{', '.join(cols[:20])}"
+              f"{' …' if len(cols) > 20 else ''}")
+
+        col_sysid   = _match_field(cols, "TRUSTSY", "RFCSYSID",
+                                    "SYSID")
+        col_client  = _match_field(cols, "TRUSTCL", "RFCCLIENT",
+                                    "CLIENT", "MANDT")
+        col_subject = _match_field(cols, "SUBJECT", "TRUSTSUBJ",
+                                    "TRUSTPSE", "DN")
+        col_issuer  = _match_field(cols, "ISSUER", "TRUSTISS")
+        col_serial  = _match_field(cols, "SERIAL", "SERNO")
+
+        fields_to_read = [f for f in (col_sysid, col_client,
+                                       col_subject, col_issuer,
+                                       col_serial) if f]
+        if not fields_to_read:
+            # No identifying columns matched our patterns; read ALL
+            # columns (up to a row-width sane limit) so the user can
+            # see what data the table holds.
+            print(f"[*] {node.sid}: {tbl}: column patterns didn't "
+                  f"match — reading ALL columns to expose raw data")
+            fields_to_read = cols[:8]
+
+        print(f"[*] {node.sid}: reading {tbl} with columns "
+              f"{', '.join(fields_to_read)}")
+
+        try:
+            rows = read_table(node, tbl, fields=fields_to_read,
+                              max_rows=500, creds=creds, quiet=True)
         except Exception as e:
             logger.debug(f"{tbl} read on {node.sid}: "
                          f"{format_rfc_exception(e)}")
+            print(f"[-] {node.sid}: {tbl} read failed: "
+                  f"{format_rfc_exception(e)[:80]}")
+            continue
+
+        if not rows:
+            print(f"[*] {node.sid}: {tbl} is empty (0 rows)")
+            continue
+
+        print(f"[+] {node.sid}: {tbl} returned {len(rows)} row(s)")
+
+        for r in rows:
+            sysid   = (r.get(col_sysid)   if col_sysid   else "") or ""
+            client  = (r.get(col_client)  if col_client  else "") or ""
+            subject = (r.get(col_subject) if col_subject else "") or ""
+            issuer  = (r.get(col_issuer)  if col_issuer  else "") or ""
+            serial  = (r.get(col_serial)  if col_serial  else "") or ""
+            sysid = sysid.strip()
+            subject = subject.strip()
+            # If neither identifying column matched but we have data,
+            # surface the FIRST non-empty column value as subject_dn
+            # so the operator can see something rather than silently
+            # dropping the row.
+            if not sysid and not subject:
+                for c in fields_to_read:
+                    v = (r.get(c) or "").strip()
+                    if v and v not in ("000", "100", "001"):
+                        subject = v
+                        break
+            if not sysid and not subject:
+                continue
+            _add("system", tbl,
+                 issuer_sid=sysid, issuer_client=client.strip(),
+                 subject_dn=subject, issuer_dn=issuer.strip(),
+                 serial=serial.strip())
 
     # ---- Method 3: USREXTID — user-level identity mappings --------
     try:
