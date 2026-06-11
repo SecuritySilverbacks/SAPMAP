@@ -603,6 +603,12 @@ class SAPNode:
     sapsys_cert_subject_dn: str = ""
     sapsys_cert_issuer_dn: str = ""
     sapsys_cert_serial: str = ""
+    # USREXTID entries — user-level external identity mappings (X.509
+    # DN, LDAP DN, SAML NameID, email) discovered during STRUSTSSO2
+    # trust scan.  Intelligence only — not used for ticket forgery
+    # (that requires system-level trust via TWPSSO2ACL or PSE trustbox).
+    # Each entry: {extid, bname, trusting_client, source}
+    usrextid_entries: list = field(default_factory=list)
     position: Optional[tuple] = None    # (x, y) on map — None = auto-layout
 
     # Linux LPE state.  Two techniques covered today:
@@ -834,6 +840,7 @@ class SAPNode:
             "sapsys_cert_subject_dn": self.sapsys_cert_subject_dn,
             "sapsys_cert_issuer_dn": self.sapsys_cert_issuer_dn,
             "sapsys_cert_serial": self.sapsys_cert_serial,
+            "usrextid_entries": list(self.usrextid_entries),
             "position": list(self.position) if self.position else None,
             "copyfail_vulnerable": self.copyfail_vulnerable,
             "copyfail_root_obtained": self.copyfail_root_obtained,
@@ -938,6 +945,7 @@ class SAPNode:
             sapsys_cert_subject_dn=d.get("sapsys_cert_subject_dn", ""),
             sapsys_cert_issuer_dn=d.get("sapsys_cert_issuer_dn", ""),
             sapsys_cert_serial=d.get("sapsys_cert_serial", ""),
+            usrextid_entries=list(d.get("usrextid_entries", [])),
             position=tuple(d["position"]) if d.get("position") else None,
             copyfail_vulnerable=d.get("copyfail_vulnerable", False),
             copyfail_root_obtained=d.get("copyfail_root_obtained", False),

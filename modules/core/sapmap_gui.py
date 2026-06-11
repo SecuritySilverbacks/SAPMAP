@@ -6482,20 +6482,41 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     cert_to_sid[dn] = other_sid
 
             existing_keys = {
-                (r.trusting_sid, r.issuer_cert_subject_dn,
-                 r.issuer_cert_serial)
+                (r.trusting_sid, r.issuer_sid,
+                 r.issuer_cert_subject_dn, r.issuer_cert_serial)
                 for r in api.state.trust_relations
             }
 
-            added = 0
+            sys_added = 0
+            usr_added = 0
             resolved = 0
+            user_identities = []  # for the user-kind intelligence dump
             for e in entries:
                 subject = e.get("subject_dn", "") or ""
                 serial = e.get("serial", "") or ""
-                key = (sid, subject, serial)
+                kind = e.get("kind", "system")
+
+                if kind == "user":
+                    # User-level identity mappings: record on node for
+                    # intelligence display, but DON'T treat as
+                    # ticket-forgery trust edges.
+                    user_identities.append({
+                        "extid": subject,
+                        "bname": e.get("issuer_dn", ""),
+                        "trusting_client": e.get(
+                            "trusting_client", ""),
+                        "source": e.get("source", ""),
+                    })
+                    usr_added += 1
+                    continue
+
+                # System-level trust → real TrustRelation
+                issuer_sid_direct = e.get("issuer_sid", "") or ""
+                issuer_sid_lookup = cert_to_sid.get(subject, "")
+                issuer_sid = issuer_sid_direct or issuer_sid_lookup
+                key = (sid, issuer_sid, subject, serial)
                 if key in existing_keys:
                     continue
-                issuer_sid = cert_to_sid.get(subject, "")
                 if issuer_sid:
                     resolved += 1
                 rel = TrustRelation(
@@ -6509,10 +6530,15 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 )
                 api.state.trust_relations.append(rel)
                 existing_keys.add(key)
-                added += 1
+                sys_added += 1
 
-            print(f"[+] {sid}: STRUSTSSO2 discovery added {added} new "
-                  f"trust relations ({resolved} resolved to known SIDs)")
+            if user_identities:
+                node.usrextid_entries = user_identities
+
+            print(f"[+] {sid}: STRUSTSSO2 discovery added "
+                  f"{sys_added} new system-trust relations "
+                  f"({resolved} resolved to known SIDs), "
+                  f"{usr_added} user-identity mappings recorded")
 
         _bg(f"{sid}:discover_strustsso2",
             "Discover STRUSTSSO2 trust", _run)

@@ -350,6 +350,55 @@ class TestCertDnCrossReference:
 
 
 # ---------------------------------------------------------------------------
+# USREXTID intelligence — user-level identity mappings on SAPNode
+# ---------------------------------------------------------------------------
+
+class TestUsrextidEntries:
+
+    def test_usrextid_default_empty(self):
+        node = SAPNode(sid="TST")
+        assert node.usrextid_entries == []
+
+    def test_usrextid_roundtrip(self):
+        entries = [
+            {"extid": "joris@example.com", "bname": "JORIS",
+             "trusting_client": "001", "source": "USREXTID:DN"},
+            {"extid": "CN=admin,O=corp", "bname": "ADMIN",
+             "trusting_client": "100", "source": "USREXTID:LD"},
+        ]
+        node = SAPNode(sid="S4H", usrextid_entries=entries)
+        d = node.to_dict()
+        assert len(d["usrextid_entries"]) == 2
+        restored = SAPNode.from_dict(d)
+        assert len(restored.usrextid_entries) == 2
+        assert restored.usrextid_entries[0]["bname"] == "JORIS"
+
+    def test_user_kind_does_not_become_trust_relation(self):
+        """User-kind STRUSTSSO2 entries should NOT create TrustRelation."""
+        # Simulates the GUI route logic
+        entries = [
+            {"kind": "user", "subject_dn": "joris@example.com",
+             "source": "USREXTID:DN", "trusting_client": "001",
+             "issuer_dn": "DDIC"},
+            {"kind": "system", "issuer_sid": "S4H",
+             "subject_dn": "CN=S4H_SAPSYS", "source": "TWPSSO2ACL",
+             "trusting_client": ""},
+        ]
+        state = SAPMAPState()
+        for e in entries:
+            if e["kind"] == "user":
+                continue  # skip user-kind
+            state.trust_relations.append(TrustRelation(
+                trusting_sid="TWT",
+                trusting_client=e["trusting_client"],
+                issuer_sid=e["issuer_sid"],
+                issuer_cert_subject_dn=e["subject_dn"],
+            ))
+        assert len(state.trust_relations) == 1
+        assert state.trust_relations[0].issuer_sid == "S4H"
+
+
+# ---------------------------------------------------------------------------
 # Entry method description
 # ---------------------------------------------------------------------------
 
