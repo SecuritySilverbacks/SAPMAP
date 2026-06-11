@@ -6070,6 +6070,28 @@ function showDetails(sid) {
         rows + '</div>';
     })()}
     ${(() => {
+      const ux = n.usrextid_entries || [];
+      if (!ux.length) return '';
+      let rows = '';
+      ux.slice(0, 12).forEach(e => {
+        const src = e.source || '';
+        const t = src.includes(':') ? src.split(':')[1] : '?';
+        rows += '<div class="detail-row">' +
+          '<span class="detail-key">' + escHtml(e.bname || '?') +
+          ' &larr; ' + escHtml(t) + '</span>' +
+          '<span class="detail-val" style="font-family:monospace;font-size:11px">' +
+          escHtml(e.extid || '') + '</span></div>';
+      });
+      const more = ux.length > 12 ?
+        '<div style="color:#8b949e;font-size:11px;margin-top:4px">... ' +
+        (ux.length - 12) + ' more</div>' : '';
+      return '<div class="detail-section">' +
+        '<h4 style="color:#8b949e">&#128100; USREXTID Identity Mappings (' +
+        ux.length + ')</h4>' +
+        '<div style="color:#8b949e;font-size:11px;margin-bottom:6px">External user identities (X.509 DN / LDAP DN / SAML / email). Intelligence only — not used for ticket forgery.</div>' +
+        rows + more + '</div>';
+    })()}
+    ${(() => {
       const sid = n.sid;
       const allRels = (mapState.trust_relations || []);
       const outbound = allRels.filter(r => r.issuer_sid === sid);

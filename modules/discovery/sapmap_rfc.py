@@ -1760,26 +1760,121 @@ def retrieve_strustsso2_trust(node: SAPNode,
                               creds: Credentials = None) -> list:
     """Discover STRUSTSSO2 trust entries on this system.
 
-    Each entry is a trusted issuer that this system's SAPSYS PSE
-    accepts MYSAPSSO2 / assertion tickets from.  Multiple discovery
-    paths are tried in order:
+    Two kinds of trust are surfaced — system-level (relevant for
+    MYSAPSSO2 ticket forgery) and user-level (intelligence about
+    external identity mappings).  The caller decides what to do
+    with each by inspecting the ``source`` field.
 
-      1. USREXTID table — external user ID mappings (often populated
-         when STRUSTSSO2 SSO is configured).
-      2. USRACL table — user X.509 cert trust list (overlaps).
-      3. FM ``SSF_C_GET_CERTIFICATE_LIST_OF_PSE`` for the SYSPSEAPPLSRV
-         application — direct trustbox dump (auth-gated).
+    Discovery paths (all attempted; missing/empty/locked tables are
+    skipped silently):
+
+      1. **TWPSSO2ACL** — the actual STRUSTSSO2 SSO2 ACL table.
+         Maps (trusted SYSID, trusted CLIENT) -> trusted cert
+         subject.  This is the **system-level** trust table — the
+         one that matters for ticket forgery.
+      2. **USRSYSACL** — Workplace user→system ACL, populated on
+         some kernels as a mirror of TWPSSO2ACL.
+      3. **TWPSSOAPLCT** — older portal SSO2 ACL variant.
+      4. **USREXTID** — external user identity mappings (X.509 DN,
+         LDAP DN, SAML NameID, email) — **user-level**, useful for
+         enumeration but NOT for ticket forgery.
+      5. **USRACL** — X.509 user cert trust — **user-level**.
+      6. ``SSF_C_GET_CERTIFICATE_LIST_OF_PSE`` FM — dumps the named
+         PSE's trustbox.  Tries common SAPSYS applic names.
 
     Returns list of dicts: {issuer_sid, issuer_client, subject_dn,
-    issuer_dn, serial, source, trusting_client}.
+    issuer_dn, serial, source, trusting_client, kind}.
 
-    Caller is expected to cross-reference subject_dn against known
-    SAPNode.sapsys_cert_subject_dn to resolve the issuer SID.
+    ``kind`` is "system" or "user".  Caller should cross-reference
+    system-kind subject_dn against known SAPNode.sapsys_cert_subject_dn
+    to resolve the issuer SID.
     """
     entries = []
     seen_keys = set()
 
-    # ---- Method 1: USREXTID ---------------------------------------
+    def _add(kind, source, **fields):
+        subject = (fields.get("subject_dn") or "").strip()
+        serial  = (fields.get("serial") or "").strip()
+        client  = (fields.get("trusting_client") or "").strip()
+        sysid   = (fields.get("issuer_sid") or "").strip()
+        key = (source, client, sysid, subject, serial)
+        if key in seen_keys:
+            return
+        seen_keys.add(key)
+        entry = {
+            "issuer_sid": "",
+            "issuer_client": "",
+            "subject_dn": "",
+            "issuer_dn": "",
+            "serial": "",
+            "source": source,
+            "trusting_client": "",
+            "kind": kind,
+        }
+        entry.update({k: v for k, v in fields.items() if v is not None})
+        entries.append(entry)
+
+    # ---- Method 1: TWPSSO2ACL — the actual STRUSTSSO2 ACL ---------
+    try:
+        with _get_connection(node, creds) as conn:
+            result = conn.call(
+                RFC_READ_TABLE,
+                QUERY_TABLE="TWPSSO2ACL",
+                DELIMITER="|",
+                FIELDS=[
+                    {"FIELDNAME": "TRUSTSY"},
+                    {"FIELDNAME": "TRUSTCL"},
+                    {"FIELDNAME": "TRUSTSUBJECT"},
+                    {"FIELDNAME": "TRUSTISSUER"},
+                    {"FIELDNAME": "TRUSTSERNO"},
+                ],
+                ROWCOUNT=500,
+            )
+            for row in result.get("DATA", []):
+                parts = [p.strip() for p in row.get("WA", "").split("|")]
+                if len(parts) < 1:
+                    continue
+                trustsy   = parts[0] if len(parts) > 0 else ""
+                trustcl   = parts[1] if len(parts) > 1 else ""
+                subject   = parts[2] if len(parts) > 2 else ""
+                issuer_dn = parts[3] if len(parts) > 3 else ""
+                serial    = parts[4] if len(parts) > 4 else ""
+                if not trustsy and not subject:
+                    continue
+                _add("system", "TWPSSO2ACL",
+                     issuer_sid=trustsy, issuer_client=trustcl,
+                     subject_dn=subject, issuer_dn=issuer_dn,
+                     serial=serial)
+    except Exception as e:
+        logger.debug(f"TWPSSO2ACL read on {node.sid}: "
+                     f"{format_rfc_exception(e)}")
+
+    # ---- Method 2: USRSYSACL --------------------------------------
+    for tbl in ("USRSYSACL", "TWPSSOAPLCT"):
+        try:
+            with _get_connection(node, creds) as conn:
+                result = conn.call(
+                    RFC_READ_TABLE,
+                    QUERY_TABLE=tbl,
+                    DELIMITER="|",
+                    ROWCOUNT=500,
+                )
+                for row in result.get("DATA", []):
+                    parts = [p.strip()
+                             for p in row.get("WA", "").split("|")]
+                    if len(parts) < 2:
+                        continue
+                    sysid = parts[1] if len(parts) > 1 else ""
+                    client = parts[2] if len(parts) > 2 else ""
+                    if not sysid:
+                        continue
+                    _add("system", tbl,
+                         issuer_sid=sysid, issuer_client=client)
+        except Exception as e:
+            logger.debug(f"{tbl} read on {node.sid}: "
+                         f"{format_rfc_exception(e)}")
+
+    # ---- Method 3: USREXTID — user-level identity mappings --------
     try:
         with _get_connection(node, creds) as conn:
             result = conn.call(
@@ -1788,42 +1883,31 @@ def retrieve_strustsso2_trust(node: SAPNode,
                 DELIMITER="|",
                 FIELDS=[
                     {"FIELDNAME": "MANDT"},
-                    {"FIELDNAME": "BNAME"},
-                    {"FIELDNAME": "EXTID"},
                     {"FIELDNAME": "TYPE"},
-                    {"FIELDNAME": "SEQNO"},
+                    {"FIELDNAME": "EXTID"},
+                    {"FIELDNAME": "BNAME"},
                 ],
-                OPTIONS=[{"TEXT": "TYPE = 'DN'"}],
                 ROWCOUNT=500,
             )
-            data = result.get("DATA", [])
-            for row in data:
-                wa = row.get("WA", "")
-                parts = [p.strip() for p in wa.split("|")]
+            for row in result.get("DATA", []):
+                parts = [p.strip() for p in row.get("WA", "").split("|")]
                 if len(parts) < 3:
                     continue
                 client = parts[0]
-                extid = parts[2]
-                if not extid or not extid.startswith(("CN=", "OU=")):
+                idtype = parts[1]
+                extid  = parts[2]
+                bname  = parts[3] if len(parts) > 3 else ""
+                if not extid:
                     continue
-                key = ("usrextid", client, extid)
-                if key in seen_keys:
-                    continue
-                seen_keys.add(key)
-                entries.append({
-                    "issuer_sid": "",
-                    "issuer_client": "",
-                    "subject_dn": extid,
-                    "issuer_dn": "",
-                    "serial": "",
-                    "source": "USREXTID",
-                    "trusting_client": client,
-                })
+                _add("user", f"USREXTID:{idtype}",
+                     subject_dn=extid,
+                     trusting_client=client,
+                     issuer_dn=bname)
     except Exception as e:
         logger.debug(f"USREXTID read on {node.sid}: "
                      f"{format_rfc_exception(e)}")
 
-    # ---- Method 2: USRACL -----------------------------------------
+    # ---- Method 4: USRACL — X.509 user cert trust -----------------
     try:
         with _get_connection(node, creds) as conn:
             result = conn.call(
@@ -1839,73 +1923,59 @@ def retrieve_strustsso2_trust(node: SAPNode,
                 ],
                 ROWCOUNT=500,
             )
-            data = result.get("DATA", [])
-            for row in data:
-                wa = row.get("WA", "")
-                parts = [p.strip() for p in wa.split("|")]
+            for row in result.get("DATA", []):
+                parts = [p.strip() for p in row.get("WA", "").split("|")]
                 if len(parts) < 4:
                     continue
                 client  = parts[0]
-                subject = parts[2]
-                issuer  = parts[3]
+                subject = parts[2] if len(parts) > 2 else ""
+                issuer  = parts[3] if len(parts) > 3 else ""
                 serial  = parts[4] if len(parts) > 4 else ""
                 if not subject:
                     continue
-                key = ("usracl", client, subject, serial)
-                if key in seen_keys:
-                    continue
-                seen_keys.add(key)
-                entries.append({
-                    "issuer_sid": "",
-                    "issuer_client": "",
-                    "subject_dn": subject,
-                    "issuer_dn": issuer,
-                    "serial": serial,
-                    "source": "USRACL",
-                    "trusting_client": client,
-                })
+                _add("user", "USRACL",
+                     subject_dn=subject, issuer_dn=issuer,
+                     serial=serial, trusting_client=client)
     except Exception as e:
         logger.debug(f"USRACL read on {node.sid}: "
                      f"{format_rfc_exception(e)}")
 
-    # ---- Method 3: SSF FM trustbox dump ---------------------------
-    try:
-        with _get_connection(node, creds) as conn:
-            result = conn.call(
-                "SSF_C_GET_CERTIFICATE_LIST_OF_PSE",
-                STR_APPLIC="SYSPSEAPPLSRV",
-            )
-            cert_list = result.get("CERTIFICATELIST", [])
-            for cert in cert_list:
-                if not isinstance(cert, dict):
-                    continue
-                subject = (cert.get("SUBJECT") or "").strip()
-                issuer  = (cert.get("ISSUER") or "").strip()
-                serial  = (cert.get("SERIALNO") or "").strip()
-                if not subject:
-                    continue
-                key = ("ssf", subject, serial)
-                if key in seen_keys:
-                    continue
-                seen_keys.add(key)
-                entries.append({
-                    "issuer_sid": "",
-                    "issuer_client": "",
-                    "subject_dn": subject,
-                    "issuer_dn": issuer,
-                    "serial": serial,
-                    "source": "SSF_C_GET_CERTIFICATE_LIST_OF_PSE",
-                    "trusting_client": "",
-                })
-    except Exception as e:
-        logger.debug(f"SSF_C_GET_CERTIFICATE_LIST_OF_PSE on "
-                     f"{node.sid}: {format_rfc_exception(e)}")
+    # ---- Method 5: SSF FM trustbox dump ---------------------------
+    # The SAPSYS PSE trustbox is the authoritative source of which
+    # signing certs this system accepts.  Try several common applic
+    # names; auth gating may block some/all.
+    for applic in ("SYSPSEAPPLSRV", "SYS_PSE_DFAULT", "DFAULT",
+                   "SAPSYS"):
+        try:
+            with _get_connection(node, creds) as conn:
+                result = conn.call(
+                    "SSF_C_GET_CERTIFICATE_LIST_OF_PSE",
+                    STR_APPLIC=applic,
+                )
+                for cert in result.get("CERTIFICATELIST", []) or []:
+                    if not isinstance(cert, dict):
+                        continue
+                    subject = (cert.get("SUBJECT") or "").strip()
+                    issuer  = (cert.get("ISSUER") or "").strip()
+                    serial  = (cert.get("SERIALNO") or "").strip()
+                    if not subject:
+                        continue
+                    _add("system",
+                         f"SSF_C_GET_CERTIFICATE_LIST_OF_PSE/{applic}",
+                         subject_dn=subject, issuer_dn=issuer,
+                         serial=serial)
+        except Exception as e:
+            logger.debug(
+                f"SSF_C_GET_CERTIFICATE_LIST_OF_PSE({applic}) "
+                f"on {node.sid}: {format_rfc_exception(e)}")
 
+    sys_count = sum(1 for e in entries if e["kind"] == "system")
+    usr_count = sum(1 for e in entries if e["kind"] == "user")
     if entries:
         sources = sorted({e["source"] for e in entries})
         print(f"[+] {node.sid}: STRUSTSSO2 discovery found "
-              f"{len(entries)} trusted-issuer entries "
-              f"(sources: {', '.join(sources)})")
+              f"{sys_count} system-trust + {usr_count} user-identity "
+              f"entries (sources: {', '.join(sources)})")
     else:
         print(f"[*] {node.sid}: No STRUSTSSO2 trust entries found "
               f"(no SSO2 trust configured or tables not readable)")
