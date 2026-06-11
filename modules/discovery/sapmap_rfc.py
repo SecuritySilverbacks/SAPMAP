@@ -1533,7 +1533,150 @@ def retrieve_rfc_connections(node: SAPNode, creds: Credentials = None) -> list:
         except Exception as e4:
             logger.debug(f"GET_TABLEBLOCK_COMPRESSED_RFC fallback failed: {format_rfc_exception(e4)}")
 
+    # Supplement: RSRFCCHK only reports destinations with stored
+    # passwords.  Trusted RFC destinations (no stored password, Type-3)
+    # are invisible to it.  Always read RFCDES separately for those.
+    connections = _supplement_trusted_destinations(
+        connections, node, creds)
+
     return connections
+
+
+# ---------------------------------------------------------------------------
+# Supplement: discover trusted RFC destinations missed by RSRFCCHK
+# ---------------------------------------------------------------------------
+
+def _supplement_trusted_destinations(
+        existing: list, node: SAPNode, creds: Credentials = None) -> list:
+    """Read RFCDES for Type-3 destinations WITHOUT stored passwords.
+
+    RSRFCCHK (the primary retrieval path) only reports destinations
+    with stored credentials.  Trusted RFC destinations use assertion
+    tickets and have no stored password, so RSRFCCHK misses them.
+    This function reads RFCDES specifically for those and merges them
+    into the existing list.
+    """
+    known_dests = {c.destination_name for c in existing}
+    trusted_conns = []
+
+    try:
+        with _get_connection(node, creds) as conn:
+            result = conn.call(
+                RFC_READ_TABLE,
+                QUERY_TABLE="RFCDES",
+                DELIMITER="|",
+                FIELDS=[
+                    {"FIELDNAME": "RFCDEST"},
+                    {"FIELDNAME": "RFCTYPE"},
+                    {"FIELDNAME": "RFCOPTIONS"},
+                ],
+                OPTIONS=[{"TEXT": "RFCTYPE = '3'"}],
+                ROWCOUNT=500,
+            )
+
+            data = result.get("DATA", [])
+            for row in data:
+                wa = row.get("WA", "")
+                parts = wa.split("|")
+                if len(parts) < 2:
+                    continue
+                dest_name = parts[0].strip()
+                rfctype = parts[1].strip() if len(parts) > 1 else ""
+                options = parts[2].strip() if len(parts) > 2 else ""
+
+                if rfctype != "3":
+                    continue
+                if "%_PWD" in options:
+                    continue
+                if dest_name in known_dests:
+                    continue
+
+                conn_obj = _build_rfcdes_conn(
+                    node, dest_name, rfctype, options)
+                conn_obj.trusted_system = True
+                conn_obj.trust_type = "trusted_rfc"
+                trusted_conns.append(conn_obj)
+                known_dests.add(dest_name)
+
+    except Exception as e:
+        logger.debug(f"Trusted-destination supplement failed for "
+                     f"{node.sid}: {format_rfc_exception(e)}")
+
+    if trusted_conns:
+        print(f"[+] {node.sid}: Found {len(trusted_conns)} additional "
+              f"trusted RFC destination(s) without stored password")
+        existing.extend(trusted_conns)
+
+    return existing
+
+
+# ---------------------------------------------------------------------------
+# Retrieve outbound trust table (RFCTRUST) — caller-side
+# ---------------------------------------------------------------------------
+
+def retrieve_rfctrust(node: SAPNode, creds: Credentials = None) -> list:
+    """Read RFCTRUST to discover outbound trust relationships from this system.
+
+    RFCTRUST stores which remote systems this node has established
+    trusted RFC relationships with.  Each entry means: this system
+    (RFCTRUSTSY) can make trusted RFC calls to the target system
+    (RFCTRUSTID) using assertion tickets.
+
+    Returns list of dicts with keys: rfctrustid, rfctrustsy,
+    tlicense_nr, llicense_nr, rfcmsgsrv.
+    """
+    entries = []
+    fields_to_read = [
+        "RFCTRUSTID", "RFCTRUSTSY", "TLICENSE_NR",
+        "LLICENSE_NR", "RFCMSGSRV",
+    ]
+
+    try:
+        with _get_connection(node, creds) as conn:
+            result = conn.call(
+                RFC_READ_TABLE,
+                QUERY_TABLE="RFCTRUST",
+                DELIMITER="|",
+                FIELDS=[{"FIELDNAME": f} for f in fields_to_read],
+                ROWCOUNT=200,
+            )
+            data = result.get("DATA", [])
+            for row in data:
+                wa = row.get("WA", "")
+                parts = [p.strip() for p in wa.split("|")]
+                if len(parts) < 2:
+                    continue
+                entry = {
+                    "rfctrustid":  parts[0] if len(parts) > 0 else "",
+                    "rfctrustsy":  parts[1] if len(parts) > 1 else "",
+                    "tlicense_nr": parts[2] if len(parts) > 2 else "",
+                    "llicense_nr": parts[3] if len(parts) > 3 else "",
+                    "rfcmsgsrv":   parts[4] if len(parts) > 4 else "",
+                }
+                entries.append(entry)
+
+            if entries:
+                targets = [e["rfctrustid"] for e in entries
+                           if e["rfctrustid"]]
+                print(f"[+] {node.sid}: RFCTRUST has {len(entries)} "
+                      f"outbound trust entries → "
+                      f"{', '.join(targets)}")
+            else:
+                print(f"[*] {node.sid}: RFCTRUST is empty — no "
+                      f"outbound trusted-RFC relationships")
+
+    except Exception as e:
+        err = format_rfc_exception(e)
+        if "NOT_AUTHORIZED" in err or "TABLE_WITHOUT_DATA" in err:
+            logger.debug(f"RFCTRUST read on {node.sid}: {err}")
+            print(f"[*] {node.sid}: RFCTRUST not readable "
+                  f"(auth or empty)")
+        else:
+            logger.debug(f"RFCTRUST read failed on {node.sid}: {err}")
+            print(f"[-] {node.sid}: Could not read RFCTRUST: "
+                  f"{err[:80]}")
+
+    return entries
 
 
 # ---------------------------------------------------------------------------
