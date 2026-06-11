@@ -6535,10 +6535,57 @@ def create_app(api: SAPMAPApi) -> Bottle:
             if user_identities:
                 node.usrextid_entries = user_identities
 
+            # ----------------------------------------------------------
+            # Additional source: RFCTRUST.
+            #
+            # An outbound RFCTRUST entry from system A pointing at
+            # system B means SAP has registered A's SAPSYS cert in B's
+            # STRUSTSSO2 trustbox (the trusted RFC mechanism uses
+            # assertion tickets signed by A's PSE; B validates via
+            # STRUSTSSO2).  So each RFCTRUST row is direct evidence
+            # of an STRUSTSSO2 trust edge in the OPPOSITE direction:
+            #   RFCTRUST row {RFCTRUSTID=B, RFCTRUSTSY=A} on A
+            #   ⇒ TrustRelation(trusting_sid=B, issuer_sid=A)
+            # ----------------------------------------------------------
+            try:
+                rfctrust = sapmap_rfc.retrieve_rfctrust(node, creds)
+            except Exception as e:
+                logger.debug(f"RFCTRUST read failed during STRUSTSSO2 "
+                             f"discovery for {sid}: {e}")
+                rfctrust = []
+
+            rfctrust_added = 0
+            for t in rfctrust:
+                partner = (t.get("rfctrustid") or "").strip()
+                issuer = (t.get("rfctrustsy") or sid).strip()
+                if not partner or partner == issuer:
+                    continue
+                key = (partner, issuer, "", "")
+                if key in existing_keys:
+                    continue
+                rel = TrustRelation(
+                    trusting_sid=partner,
+                    trusting_client="",
+                    issuer_sid=issuer,
+                    issuer_cert_subject_dn="",
+                    issuer_cert_serial="",
+                    trust_method="strustsso2",
+                    discovered_via="RFCTRUST",
+                )
+                api.state.trust_relations.append(rel)
+                existing_keys.add(key)
+                rfctrust_added += 1
+                if partner in api.state.nodes:
+                    resolved += 1
+
+            sys_added += rfctrust_added
+
             print(f"[+] {sid}: STRUSTSSO2 discovery added "
                   f"{sys_added} new system-trust relations "
                   f"({resolved} resolved to known SIDs), "
-                  f"{usr_added} user-identity mappings recorded")
+                  f"{usr_added} user-identity mappings recorded"
+                  + (f"; {rfctrust_added} from RFCTRUST"
+                     if rfctrust_added else ""))
 
         _bg(f"{sid}:discover_strustsso2",
             "Discover STRUSTSSO2 trust", _run)
