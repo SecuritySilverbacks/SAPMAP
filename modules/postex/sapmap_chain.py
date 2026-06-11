@@ -81,13 +81,18 @@ class TrustChain:
         return any("Trusted RFC" in (h.method or "") for h in self.hops)
 
     @property
+    def has_sso2_hop(self) -> bool:
+        return any("STRUSTSSO2" in (h.method or "") for h in self.hops)
+
+    @property
     def severity(self) -> int:
         if self.end_is_production and (self.sap_all_throughout
-                                       or self.has_trusted_hop):
+                                       or self.has_trusted_hop
+                                       or self.has_sso2_hop):
             return 5  # CRITICAL
         if self.end_is_production:
             return 4  # HIGH
-        if self.has_trusted_hop and self.total_hops >= 1:
+        if (self.has_trusted_hop or self.has_sso2_hop) and self.total_hops >= 1:
             return 4  # HIGH — passwordless lateral movement
         if self.sap_all_throughout and self.total_hops >= 2:
             return 3  # MEDIUM
@@ -129,6 +134,10 @@ def _entry_method(node: SAPNode) -> str:
         return "betrusted_10kblaze"
     if any(c.verified for c in node.credentials):
         return "credentials"
+    # A node we hold a stolen SAPSYS PSE for is an entry point for
+    # STRUSTSSO2-trusted receivers (we can forge tickets to them).
+    if getattr(node, "forged_tickets", None):
+        return "pse_stolen"
     return "unknown"
 
 
@@ -140,6 +149,7 @@ def _entry_description(method: str) -> str:
         "compromised": "Already compromised",
         "rfc_destination": "RFC destination with SAP_ALL",
         "trusted_rfc": "Trusted RFC (passwordless)",
+        "pse_stolen": "Stolen SAPSYS PSE — forge MYSAPSSO2 tickets",
         "secstore_direct": "SecStore password extraction",
         "btp_destination_leak":
             "BTP destination cleartext capture (cloud → on-prem)",
@@ -188,6 +198,35 @@ def find_all_chains(state: SAPMAPState, max_depth: int = 6,
             adj[src] = []
         adj[src].append((tgt, conn))
 
+    # STRUSTSSO2 trust edges: when system T trusts issuer I, an attacker
+    # holding I's SAPSYS PSE private key can forge tickets accepted by
+    # T.  These are reverse edges (I → T) in the lateral-movement graph
+    # because the direction of attack is I-as-attacker reaches T.
+    # We model them as synthetic RFCConnection-shaped edges with
+    # trust_type='strustsso2' so the hop builder can label them.
+    for rel in (state.trust_relations or []):
+        issuer = (rel.issuer_sid or "").strip()
+        trusting = (rel.trusting_sid or "").strip()
+        if not issuer or not trusting or issuer == trusting:
+            continue
+        # Synthetic edge marker — uses a lightweight namespace object
+        # so the BFS doesn't have to special-case None
+        synthetic = type("StrustSso2Edge", (), {
+            "source_sid": issuer,
+            "target_sid": trusting,
+            "destination_name": f"STRUSTSSO2 ({rel.discovered_via or 'trust'})",
+            "rfc_user": rel.trusting_client or "*",
+            "has_sap_all": False,
+            "trusted_system": False,
+            "trust_type": "strustsso2",
+            "tested": False,
+            "logon_successful": False,
+            "client": rel.trusting_client or "",
+        })()
+        if issuer not in adj:
+            adj[issuer] = []
+        adj[issuer].append((trusting, synthetic))
+
     # Find entry points.  Each entry is a (sid, entry_method) pair so
     # we can mix on-prem SAPNode entries with BTP-subaccount entries
     # without forcing a fake SAPNode shim through the rest of the
@@ -201,6 +240,9 @@ def find_all_chains(state: SAPMAPState, max_depth: int = 6,
             entries.append((sid, _entry_method(node)))
         elif any(c.verified for c in node.credentials):
             entries.append((sid, _entry_method(node)))
+        elif getattr(node, "forged_tickets", None):
+            # PSE-stolen nodes are entry points for STRUSTSSO2 trust
+            entries.append((sid, "pse_stolen"))
 
     # BTP subaccounts with at least one cleartext destination captured
     # are entry points: anyone with the right BTP token (or the
@@ -244,13 +286,16 @@ def find_all_chains(state: SAPMAPState, max_depth: int = 6,
 
                 untested = not conn.tested
                 is_trusted = getattr(conn, "trusted_system", False)
-                if is_trusted:
+                is_sso2 = (getattr(conn, "trust_type", "") == "strustsso2")
+                if is_sso2:
+                    method = "Forged MYSAPSSO2 ticket (STRUSTSSO2)"
+                elif is_trusted:
                     method = "Trusted RFC (no password)"
                 elif conn.has_sap_all:
                     method = "BAPI (SAP_ALL)"
                 else:
                     method = "RFC logon"
-                if untested and not is_trusted:
+                if untested and not is_trusted and not is_sso2:
                     method += " — UNTESTED"
                 hop = ChainHop(
                     source_sid=current_sid,
@@ -261,8 +306,9 @@ def find_all_chains(state: SAPMAPState, max_depth: int = 6,
                     method=method,
                     description=(
                         (f"via {conn.destination_name}" if conn.destination_name else "")
+                        + (" [strustsso2]" if is_sso2 else "")
                         + (" [trusted]" if is_trusted else "")
-                        + (" [untested]" if untested and not is_trusted else "")
+                        + (" [untested]" if untested and not is_trusted and not is_sso2 else "")
                     ).strip(),
                 )
                 new_path = path + [hop]
@@ -287,11 +333,13 @@ def find_all_chains(state: SAPMAPState, max_depth: int = 6,
                     _generate_headline(chain, state)
                     chains.append(chain)
 
-                # Continue BFS if SAP_ALL or trusted RFC allows further
-                # propagation.  Trusted RFC lets the caller log in as
-                # any user on the target — equivalent to SAP_ALL for
+                # Continue BFS if SAP_ALL, trusted RFC, or STRUSTSSO2
+                # allows further propagation.  Trusted RFC lets the
+                # caller log in as any user on the target; a forged
+                # MYSAPSSO2 ticket can impersonate SAP* or any high-
+                # privilege user — both are equivalent to SAP_ALL for
                 # chain traversal purposes.
-                if conn.has_sap_all or is_trusted:
+                if conn.has_sap_all or is_trusted or is_sso2:
                     queue.append((target_sid, new_path))
 
     return chains
@@ -337,7 +385,14 @@ def _generate_headline(chain: TrustChain, state: SAPMAPState):
 
     has_trusted_hop = any(
         "Trusted RFC" in (h.method or "") for h in chain.hops)
-    trusted_tag = " [trusted RFC]" if has_trusted_hop else ""
+    has_sso2_hop = any(
+        "STRUSTSSO2" in (h.method or "") for h in chain.hops)
+    if has_sso2_hop:
+        trusted_tag = " [STRUSTSSO2 ticket]"
+    elif has_trusted_hop:
+        trusted_tag = " [trusted RFC]"
+    else:
+        trusted_tag = ""
 
     if chain.end_is_production:
         chain.headline = (f"{path_str} \u2014 "
@@ -360,6 +415,14 @@ def _generate_headline(chain: TrustChain, state: SAPMAPState):
                           f"Full access chain ({chain.total_hops} hops, SAP_ALL)"
                           f"{trusted_tag}")
         chain.business_impact = "SAP_ALL on every hop \u2014 unrestricted access"
+    elif has_sso2_hop:
+        chain.headline = (f"{path_str} \u2014 "
+                          f"Forged ticket chain ({chain.total_hops} "
+                          f"hop{'s' if chain.total_hops > 1 else ''}, "
+                          f"STRUSTSSO2)")
+        chain.business_impact = ("Cross-network lateral movement via "
+                                 "forged MYSAPSSO2 ticket signed by "
+                                 "stolen SAPSYS PSE")
     elif has_trusted_hop:
         chain.headline = (f"{path_str} \u2014 "
                           f"Trusted RFC chain ({chain.total_hops} "
