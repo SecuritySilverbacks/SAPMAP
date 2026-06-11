@@ -403,6 +403,71 @@ class ForgedTicket:
 
 
 # ---------------------------------------------------------------------------
+# TrustRelation — STRUSTSSO2 trust edge between two SAP systems
+# ---------------------------------------------------------------------------
+#
+# A trust edge from system T (trusting/receiver) to system I (issuer):
+# "T trusts MYSAPSSO2/assertion tickets signed by I's SAPSYS.pse."
+#
+# Discovered by reading T's STRUSTSSO2-related tables (USRACL, USREXTID)
+# or by parsing T's SAPSYS.pse trustbox.  Cross-referenced against
+# known SAPNode.sapsys_cert_subject_dn to identify the issuer system.
+#
+# Enables Tier 2 lateral movement: if we steal I's SAPSYS.pse private
+# key, we can forge tickets accepted by every T that trusts I.
+
+@dataclass
+class TrustRelation:
+    """An STRUSTSSO2 trust edge: trusting_sid accepts tickets from issuer_sid."""
+
+    trusting_sid: str               # Receiver — who accepts the ticket
+    trusting_client: str = ""       # MANDT scope on the receiver (empty = any)
+
+    # Issuer identification — at least one of issuer_sid OR
+    # issuer_cert_subject_dn must be populated.  When the SID can be
+    # resolved by cross-referencing SAPNode.sapsys_cert_subject_dn,
+    # issuer_sid is filled in; otherwise we keep the raw cert DN so
+    # the operator can still see what's trusted.
+    issuer_sid: str = ""
+    issuer_cert_subject_dn: str = ""
+    issuer_cert_serial: str = ""
+
+    # How we found this trust edge
+    trust_method: str = "strustsso2"  # "strustsso2" | "usracl" | "pse_trustbox"
+    discovered_via: str = ""           # FM/table name used
+    discovered_at: str = ""
+
+    def __post_init__(self):
+        if not self.discovered_at:
+            self.discovered_at = datetime.now().isoformat()
+
+    def to_dict(self) -> dict:
+        return {
+            "trusting_sid": self.trusting_sid,
+            "trusting_client": self.trusting_client,
+            "issuer_sid": self.issuer_sid,
+            "issuer_cert_subject_dn": self.issuer_cert_subject_dn,
+            "issuer_cert_serial": self.issuer_cert_serial,
+            "trust_method": self.trust_method,
+            "discovered_via": self.discovered_via,
+            "discovered_at": self.discovered_at,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> TrustRelation:
+        return cls(
+            trusting_sid=d["trusting_sid"],
+            trusting_client=d.get("trusting_client", ""),
+            issuer_sid=d.get("issuer_sid", ""),
+            issuer_cert_subject_dn=d.get("issuer_cert_subject_dn", ""),
+            issuer_cert_serial=d.get("issuer_cert_serial", ""),
+            trust_method=d.get("trust_method", "strustsso2"),
+            discovered_via=d.get("discovered_via", ""),
+            discovered_at=d.get("discovered_at", ""),
+        )
+
+
+# ---------------------------------------------------------------------------
 # SAPNode — a system on the map
 # ---------------------------------------------------------------------------
 
@@ -531,6 +596,13 @@ class SAPNode:
     # Inbound trusted-RFC ACL (from RFCSYSACL table).  Each entry:
     # {rfcsysid, rfcclient, rfcequser, rfcuser, rfcsnc, rfcsameusr}
     rfcsysacl_entries: list = field(default_factory=list)
+    # SAPSYS PSE certificate provenance — populated when the PSE is
+    # extracted (extract_and_forge_ticket).  Used to cross-reference
+    # STRUSTSSO2 trust entries on OTHER systems so we can identify
+    # them as "trust THIS system's signer key" → forgery targets.
+    sapsys_cert_subject_dn: str = ""
+    sapsys_cert_issuer_dn: str = ""
+    sapsys_cert_serial: str = ""
     position: Optional[tuple] = None    # (x, y) on map — None = auto-layout
 
     # Linux LPE state.  Two techniques covered today:
@@ -759,6 +831,9 @@ class SAPNode:
             "snc_info": dict(self.snc_info or {}),
             "scc_links": list(self.scc_links),
             "rfcsysacl_entries": list(self.rfcsysacl_entries),
+            "sapsys_cert_subject_dn": self.sapsys_cert_subject_dn,
+            "sapsys_cert_issuer_dn": self.sapsys_cert_issuer_dn,
+            "sapsys_cert_serial": self.sapsys_cert_serial,
             "position": list(self.position) if self.position else None,
             "copyfail_vulnerable": self.copyfail_vulnerable,
             "copyfail_root_obtained": self.copyfail_root_obtained,
@@ -860,6 +935,9 @@ class SAPNode:
             snc_info=dict(d.get("snc_info", {})),
             scc_links=list(d.get("scc_links", [])),
             rfcsysacl_entries=list(d.get("rfcsysacl_entries", [])),
+            sapsys_cert_subject_dn=d.get("sapsys_cert_subject_dn", ""),
+            sapsys_cert_issuer_dn=d.get("sapsys_cert_issuer_dn", ""),
+            sapsys_cert_serial=d.get("sapsys_cert_serial", ""),
             position=tuple(d["position"]) if d.get("position") else None,
             copyfail_vulnerable=d.get("copyfail_vulnerable", False),
             copyfail_root_obtained=d.get("copyfail_root_obtained", False),
@@ -1349,6 +1427,11 @@ class SAPMAPState:
     # SAPNode.forged_tickets so the UI can enumerate the full set
     # without iterating every node.  See ForgedTicket dataclass.
     forged_tickets: list = field(default_factory=list)   # global [ForgedTicket, ...]
+    # STRUSTSSO2 trust edges discovered across the landscape.
+    # Each entry: TrustRelation(trusting_sid → issuer_sid).
+    # Drives the TRUSTS_ISSUER edges in chain analysis and the
+    # auto-fanout target list when a PSE is stolen.
+    trust_relations: list = field(default_factory=list)  # [TrustRelation, ...]
     scc_nodes: dict = field(default_factory=dict)        # host -> SCCNode (Cloud Connectors)
     btp_subaccounts: dict = field(default_factory=dict)  # uuid -> BTPSubaccountNode
     scan_config: dict = field(default_factory=dict)
@@ -1804,6 +1887,8 @@ class SAPMAPState:
             "rfc_check_cache": self.rfc_check_cache,
             "forged_tickets": [t.to_dict()
                                for t in self.forged_tickets],
+            "trust_relations": [r.to_dict()
+                                for r in self.trust_relations],
             "scc_nodes": {h: n.to_dict() for h, n in self.scc_nodes.items()},
             "btp_subaccounts": {
                 u: n.to_dict() for u, n in self.btp_subaccounts.items()
@@ -1825,6 +1910,8 @@ class SAPMAPState:
         state.created_destinations = d.get("created_destinations", [])
         state.forged_tickets = [ForgedTicket.from_dict(t)
                                 for t in d.get("forged_tickets", [])]
+        state.trust_relations = [TrustRelation.from_dict(r)
+                                 for r in d.get("trust_relations", [])]
         for host, scc_d in d.get("scc_nodes", {}).items():
             state.scc_nodes[host] = SCCNode.from_dict(scc_d)
         for uuid, sub_d in d.get("btp_subaccounts", {}).items():

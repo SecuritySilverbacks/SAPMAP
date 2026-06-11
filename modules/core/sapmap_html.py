@@ -927,6 +927,8 @@ body {
            ``python3 tools/check_sso2_profile.py`` from the CLI. -->
       <div class="ctx-item" data-action="forge_ticket">&#127915; Forge MYSAPSSO2 Ticket (impersonate any user)</div>
       <div class="ctx-item" data-action="propagate_ticket">&#128640; Propagate Forged Ticket (HTTP+RFC across trust)</div>
+      <div class="ctx-item" data-action="discover_strustsso2">&#128279; Discover STRUSTSSO2 Trust (who trusts whom)</div>
+      <div class="ctx-item" data-action="forge_and_fanout">&#128293; Forge &amp; Fanout (auto-replay across trust subgraph)</div>
       <div class="ctx-sep"></div>
       <div class="ctx-item" data-action="ssh_harvest">&#128273; SSH Key Harvest (exfiltrate keys + known_hosts)</div>
       <div class="ctx-item" data-action="ssh_harvest_root">&#128273; SSH Key Harvest as Root (all users via LPE)</div>
@@ -4102,6 +4104,10 @@ function showCtxMenu(e, sid) {
                             || hasCve31324
                             || hasCreatedUsers),
     'propagate_ticket':   (n.forged_tickets || []).length > 0 && hasCreatedUsers,
+    'discover_strustsso2': isAbapStack && hasCreatedUsers,
+    'forge_and_fanout':   isAbapStack && (hasGwVuln
+                            || hasCve31324
+                            || hasCreatedUsers),
     // Harvest BTP credentials — ABAP-only, needs a working RFC
     // logon.  The backend handler reads three ABAP-specific state
     // sources to find BTP-pointing credentials:
@@ -5572,6 +5578,20 @@ async function ctxAction(action) {
     case 'propagate_ticket':
       showPropagateTicketModal(sid);
       break;
+    case 'discover_strustsso2':
+      await api('POST', `node/${sid}/discover_strustsso2`);
+      showToast(`STRUSTSSO2 discovery started on ${sid}`, 'info');
+      break;
+    case 'forge_and_fanout': {
+      const user = prompt('Forge & Fanout — impersonate user:', 'SAP*');
+      if (!user) break;
+      const client = prompt('Client (MANDT):', '100');
+      if (!client) break;
+      await api('POST', `node/${sid}/forge_and_fanout`,
+                { user: user, client: client });
+      showToast(`Forge & Fanout started on ${sid}`, 'info');
+      break;
+    }
   }
   startPolling();
 }
@@ -6048,6 +6068,40 @@ function showDetails(sid) {
         ')</h4>' +
         (eqy.length ? '<div style="color:#d29922;font-size:11px;margin-bottom:6px">Systems with RFCEQUSER=Y can log in as any same-named user on this system without a password.</div>' : '') +
         rows + '</div>';
+    })()}
+    ${(() => {
+      const sid = n.sid;
+      const allRels = (mapState.trust_relations || []);
+      const outbound = allRels.filter(r => r.issuer_sid === sid);
+      const inbound = allRels.filter(r => r.trusting_sid === sid);
+      if (!outbound.length && !inbound.length) return '';
+      const color = '#f0883e';
+      let body = '';
+      if (outbound.length) {
+        body += '<div style="color:#3fb950;font-size:11px;margin-bottom:4px;font-weight:600">Outbound (systems trusting this node):</div>';
+        outbound.forEach(r => {
+          const tgt = r.trusting_sid + (r.trusting_client ? '/' + r.trusting_client : '');
+          body += '<div class="detail-row">' +
+            '<span class="detail-key">' + escHtml(tgt) + '</span>' +
+            '<span class="detail-val">' + escHtml(r.discovered_via || r.trust_method || 'trust') + '</span></div>';
+        });
+      }
+      if (inbound.length) {
+        body += '<div style="color:#d29922;font-size:11px;margin:6px 0 4px 0;font-weight:600">Inbound (issuers this node trusts):</div>';
+        inbound.forEach(r => {
+          const src = r.issuer_sid || ('?(' + (r.issuer_cert_subject_dn || '').substring(0, 40) + '...)');
+          body += '<div class="detail-row">' +
+            '<span class="detail-key">' + escHtml(src) + '</span>' +
+            '<span class="detail-val">' + escHtml(r.discovered_via || r.trust_method || 'trust') + '</span></div>';
+        });
+      }
+      return '<div class="detail-section">' +
+        '<h4 style="color:' + color + '">&#128293; STRUSTSSO2 Trust (' +
+        outbound.length + ' out, ' + inbound.length + ' in)</h4>' +
+        body +
+        (outbound.length ? '<div style="margin-top:6px"><button class="btn" style="font-size:11px;padding:3px 10px" ' +
+          'onclick="contextAction(\'forge_and_fanout\', \'' + escHtml(sid) + '\')">&#128293; Forge &amp; Fanout</button></div>' : '') +
+        '</div>';
     })()}
     ${(() => {
       // ATT&CK observed: aggregate technique IDs across this node's

@@ -1752,6 +1752,167 @@ def retrieve_rfcsysacl(node: SAPNode, creds: Credentials = None) -> list:
     return entries
 
 
+# ---------------------------------------------------------------------------
+# Retrieve STRUSTSSO2 trust list — which issuer PSEs this system trusts
+# ---------------------------------------------------------------------------
+
+def retrieve_strustsso2_trust(node: SAPNode,
+                              creds: Credentials = None) -> list:
+    """Discover STRUSTSSO2 trust entries on this system.
+
+    Each entry is a trusted issuer that this system's SAPSYS PSE
+    accepts MYSAPSSO2 / assertion tickets from.  Multiple discovery
+    paths are tried in order:
+
+      1. USREXTID table — external user ID mappings (often populated
+         when STRUSTSSO2 SSO is configured).
+      2. USRACL table — user X.509 cert trust list (overlaps).
+      3. FM ``SSF_C_GET_CERTIFICATE_LIST_OF_PSE`` for the SYSPSEAPPLSRV
+         application — direct trustbox dump (auth-gated).
+
+    Returns list of dicts: {issuer_sid, issuer_client, subject_dn,
+    issuer_dn, serial, source, trusting_client}.
+
+    Caller is expected to cross-reference subject_dn against known
+    SAPNode.sapsys_cert_subject_dn to resolve the issuer SID.
+    """
+    entries = []
+    seen_keys = set()
+
+    # ---- Method 1: USREXTID ---------------------------------------
+    try:
+        with _get_connection(node, creds) as conn:
+            result = conn.call(
+                RFC_READ_TABLE,
+                QUERY_TABLE="USREXTID",
+                DELIMITER="|",
+                FIELDS=[
+                    {"FIELDNAME": "MANDT"},
+                    {"FIELDNAME": "BNAME"},
+                    {"FIELDNAME": "EXTID"},
+                    {"FIELDNAME": "TYPE"},
+                    {"FIELDNAME": "SEQNO"},
+                ],
+                OPTIONS=[{"TEXT": "TYPE = 'DN'"}],
+                ROWCOUNT=500,
+            )
+            data = result.get("DATA", [])
+            for row in data:
+                wa = row.get("WA", "")
+                parts = [p.strip() for p in wa.split("|")]
+                if len(parts) < 3:
+                    continue
+                client = parts[0]
+                extid = parts[2]
+                if not extid or not extid.startswith(("CN=", "OU=")):
+                    continue
+                key = ("usrextid", client, extid)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                entries.append({
+                    "issuer_sid": "",
+                    "issuer_client": "",
+                    "subject_dn": extid,
+                    "issuer_dn": "",
+                    "serial": "",
+                    "source": "USREXTID",
+                    "trusting_client": client,
+                })
+    except Exception as e:
+        logger.debug(f"USREXTID read on {node.sid}: "
+                     f"{format_rfc_exception(e)}")
+
+    # ---- Method 2: USRACL -----------------------------------------
+    try:
+        with _get_connection(node, creds) as conn:
+            result = conn.call(
+                RFC_READ_TABLE,
+                QUERY_TABLE="USRACL",
+                DELIMITER="|",
+                FIELDS=[
+                    {"FIELDNAME": "MANDT"},
+                    {"FIELDNAME": "BNAME"},
+                    {"FIELDNAME": "SUBJECT"},
+                    {"FIELDNAME": "ISSUER"},
+                    {"FIELDNAME": "SERIALNO"},
+                ],
+                ROWCOUNT=500,
+            )
+            data = result.get("DATA", [])
+            for row in data:
+                wa = row.get("WA", "")
+                parts = [p.strip() for p in wa.split("|")]
+                if len(parts) < 4:
+                    continue
+                client  = parts[0]
+                subject = parts[2]
+                issuer  = parts[3]
+                serial  = parts[4] if len(parts) > 4 else ""
+                if not subject:
+                    continue
+                key = ("usracl", client, subject, serial)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                entries.append({
+                    "issuer_sid": "",
+                    "issuer_client": "",
+                    "subject_dn": subject,
+                    "issuer_dn": issuer,
+                    "serial": serial,
+                    "source": "USRACL",
+                    "trusting_client": client,
+                })
+    except Exception as e:
+        logger.debug(f"USRACL read on {node.sid}: "
+                     f"{format_rfc_exception(e)}")
+
+    # ---- Method 3: SSF FM trustbox dump ---------------------------
+    try:
+        with _get_connection(node, creds) as conn:
+            result = conn.call(
+                "SSF_C_GET_CERTIFICATE_LIST_OF_PSE",
+                STR_APPLIC="SYSPSEAPPLSRV",
+            )
+            cert_list = result.get("CERTIFICATELIST", [])
+            for cert in cert_list:
+                if not isinstance(cert, dict):
+                    continue
+                subject = (cert.get("SUBJECT") or "").strip()
+                issuer  = (cert.get("ISSUER") or "").strip()
+                serial  = (cert.get("SERIALNO") or "").strip()
+                if not subject:
+                    continue
+                key = ("ssf", subject, serial)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                entries.append({
+                    "issuer_sid": "",
+                    "issuer_client": "",
+                    "subject_dn": subject,
+                    "issuer_dn": issuer,
+                    "serial": serial,
+                    "source": "SSF_C_GET_CERTIFICATE_LIST_OF_PSE",
+                    "trusting_client": "",
+                })
+    except Exception as e:
+        logger.debug(f"SSF_C_GET_CERTIFICATE_LIST_OF_PSE on "
+                     f"{node.sid}: {format_rfc_exception(e)}")
+
+    if entries:
+        sources = sorted({e["source"] for e in entries})
+        print(f"[+] {node.sid}: STRUSTSSO2 discovery found "
+              f"{len(entries)} trusted-issuer entries "
+              f"(sources: {', '.join(sources)})")
+    else:
+        print(f"[*] {node.sid}: No STRUSTSSO2 trust entries found "
+              f"(no SSO2 trust configured or tables not readable)")
+
+    return entries
+
+
 def _parse_rsrfcchk_output(spool_lines: list, node: SAPNode) -> list:
     """Parse RSRFCCHK spool output into RFCConn objects."""
     connections = []
