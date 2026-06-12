@@ -105,8 +105,10 @@ class TestMakeExecSXPGFallback:
             call_args = mock_exec.call_args
             assert call_args[0][3] is cred
 
-    def test_sxpg_rewrites_cmd_echo_append_to_powershell(self):
-        """cmd.exe echo X>>"path" should be rewritten to powershell -EncodedCommand."""
+    def test_sxpg_buffers_cmd_echo_appends(self):
+        """cmd.exe echo X>>"path" should be BUFFERED, not immediately
+        shipped — the chunks accumulate and only flush via blob-stage
+        when the next non-echo command arrives."""
         from sapmap_miniplasma import _make_exec
         cred = Credentials(
             username="SAPMAP00", password="x",
@@ -116,29 +118,24 @@ class TestMakeExecSXPGFallback:
         exec_fn, _, _ = _make_exec(node, "TWT", verbose=False)
         assert exec_fn is not None
 
-        captured = {}
+        call_count = {"n": 0}
         def fake_exec(node_arg, prog, params, creds_arg):
-            captured["prog"] = prog
-            captured["params"] = params
+            call_count["n"] += 1
             return {"success": True, "output": [], "error": ""}
 
+        # Series of chunk writes -- should buffer, not invoke SXPG
         with patch("sapmap_rfc.execute_local_command",
                     side_effect=fake_exec):
             exec_fn("cmd.exe",
-                    '/C echo SGVsbG8=>>"C:\\Windows\\Temp\\f.txt"', "")
-        assert captured["prog"] == "powershell.exe"
-        assert "-EncodedCommand" in captured["params"]
-        # Decode the base64 and check it's an AppendAllText call
-        import base64, re
-        m = re.search(r"-EncodedCommand\s+(\S+)", captured["params"])
-        assert m, captured["params"]
-        decoded = base64.b64decode(m.group(1)).decode("utf-16-le")
-        assert "AppendAllText" in decoded
-        assert "Windows\\Temp\\f.txt" in decoded
-        assert "SGVsbG8=" in decoded
+                    '/C echo SGVsbG8=>"C:\\Windows\\Temp\\f.b64"', "")
+            exec_fn("cmd.exe",
+                    '/C echo V29ybGQ=>>"C:\\Windows\\Temp\\f.b64"', "")
+        # No execute_local_command call should have happened yet
+        assert call_count["n"] == 0
 
-    def test_sxpg_rewrites_cmd_echo_truncate_to_powershell(self):
-        """cmd.exe echo X>"path" should rewrite to WriteAllText (truncate)."""
+    def test_sxpg_wraps_non_echo_via_powershell_cmd_c(self):
+        """Non-echo cmd.exe calls go through PowerShell with the
+        original cmd line preserved via & cmd /c '...'."""
         from sapmap_miniplasma import _make_exec
         cred = Credentials(
             username="SAPMAP00", password="x",
@@ -154,12 +151,14 @@ class TestMakeExecSXPGFallback:
         with patch("sapmap_rfc.execute_local_command",
                     side_effect=fake_exec):
             exec_fn("cmd.exe",
-                    '/C echo SGVsbG8=>"C:\\Windows\\Temp\\f.txt"', "")
+                    '/C dir "C:\\Windows\\Temp\\f.b64"', "")
         assert captured["prog"] == "powershell.exe"
-        import base64, re
-        m = re.search(r"-EncodedCommand\s+(\S+)", captured["params"])
-        decoded = base64.b64decode(m.group(1)).decode("utf-16-le")
-        assert "WriteAllText" in decoded
+        assert "-EncodedCommand" in captured["params"]
+        import base64
+        b64 = captured["params"].split("-EncodedCommand ")[-1]
+        decoded = base64.b64decode(b64).decode("utf-16-le")
+        assert "cmd /c" in decoded
+        assert 'dir "C:\\Windows\\Temp\\f.b64"' in decoded
 
     def test_sxpg_wraps_non_echo_cmd_in_powershell_cmd_c(self):
         """Non-echo cmd.exe calls wrap inner command via PowerShell
