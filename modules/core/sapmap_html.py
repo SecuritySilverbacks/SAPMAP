@@ -3994,10 +3994,10 @@ function showCtxMenu(e, sid) {
     'import_transport':  isAbapStack && (hasGwVuln || hasCreds) && !hasSshAccess,
     'create_user_creds': hasCreds && !hasSshAccess,
     'lpe':              isAbapStack && hasCreds && !hasSshAccess,
-    'check_linux_lpe':   !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
-    'exploit_linux_lpe': !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
-    'check_windows_lpe':   isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
-    'exploit_windows_lpe': isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
+    'check_linux_lpe':   !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers || hasCreds),
+    'exploit_linux_lpe': !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers || hasCreds),
+    'check_windows_lpe':   isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers || hasCreds),
+    'exploit_windows_lpe': isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers || hasCreds),
     'deep_scan':        true,                       // always available
     // BTP-discovered placeholders OR WD-discovered placeholders that
     // carry a MSHOST.  Both lack a real port-scan footprint until the
