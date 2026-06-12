@@ -3936,6 +3936,13 @@ function showCtxMenu(e, sid) {
   const hasGwPort = n && (n.instances || []).some(i => Object.entries(i.ports || {}).some(([p,s]) => s === 'gateway' || (p >= 3300 && p <= 3399)));
   const hasFindings = n && (n.findings || []).length > 0;
   const hasCreatedUsers = n && (n.created_users || []).length > 0;
+  // Verified RFC credential — covers SAPMAP-created users AND
+  // operator-supplied / discovered credentials that test_connection
+  // confirmed work.  Used by gates that need RFC-level OS-exec
+  // (SXPG_STEP_XPG_START) but don't strictly need a SAPMAP-created
+  // user — e.g. Windows LPE with SXPG fallback.
+  const hasVerifiedCred = n && (n.credentials || []).some(c => c.verified);
+  const hasRfcExec = hasCreatedUsers || hasVerifiedCred;
   // A Java admin user (from RECON or CVE-31324) unlocks the CTC / telnet
   // deploy paths for Java data extraction — but ONLY if at least one of
   // those primitives is reachable on the target.  java_deploy_blocked
@@ -3994,10 +4001,10 @@ function showCtxMenu(e, sid) {
     'import_transport':  isAbapStack && (hasGwVuln || hasCreds) && !hasSshAccess,
     'create_user_creds': hasCreds && !hasSshAccess,
     'lpe':              isAbapStack && hasCreds && !hasSshAccess,
-    'check_linux_lpe':   !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
-    'exploit_linux_lpe': !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
-    'check_windows_lpe':   isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
-    'exploit_windows_lpe': isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
+    'check_linux_lpe':   !isWindows && (hasGwVuln || hasCve31324 || hasRfcExec),
+    'exploit_linux_lpe': !isWindows && (hasGwVuln || hasCve31324 || hasRfcExec),
+    'check_windows_lpe':   isWindows && (hasGwVuln || hasCve31324 || hasRfcExec),
+    'exploit_windows_lpe': isWindows && (hasGwVuln || hasCve31324 || hasRfcExec),
     'deep_scan':        true,                       // always available
     // BTP-discovered placeholders OR WD-discovered placeholders that
     // carry a MSHOST.  Both lack a real port-scan footprint until the
@@ -4195,8 +4202,8 @@ function showCtxMenu(e, sid) {
         : 'Provide credentials first'),
     'check_linux_lpe':   'Requires OS-exec on Linux host',
     'exploit_linux_lpe': 'Requires OS-exec on Linux host — run Check first to confirm at least one technique (Copy Fail or Dirty Frag) is viable',
-    'check_windows_lpe':   'Requires OS-exec on a Windows host (GW SAPXPG, CVE-2025-31324 shell, or SAPMAP-created OS-user)',
-    'exploit_windows_lpe': 'Requires OS-exec on Windows host — run Check first to confirm MiniPlasma is viable (Win10 1709+ / Server 2019+ with cldflt.sys + .NET 4.7.2+)',
+    'check_windows_lpe':   'Requires OS-exec on a Windows host: GW SAPXPG (gw_vulnerable), CVE-2025-31324 shell, or ANY verified RFC credential (SAPMAP-created user, STRUSTSSO2-ticket-derived user, or operator-supplied) for SXPG_STEP_XPG_START.',
+    'exploit_windows_lpe': 'Requires OS-exec on Windows host — run Check first to confirm MiniPlasma is viable (Win10 1709+ / Server 2019+ with cldflt.sys + .NET 4.7.2+). Also works with EfsPotato/GodPotato via GW SAPXPG, CVE-2025-31324 shell, or SXPG via verified RFC credential.',
     'retrieve_rfcs':    'Needs a verified RFC credential or a SAPMAP-created user — RSRFCCHK and the RFCDES read both require a working logon.',
     'test_rfcs':        (!hasRFCs
         ? 'Retrieve RFC connections first.'
