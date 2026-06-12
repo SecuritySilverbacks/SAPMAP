@@ -161,8 +161,9 @@ class TestMakeExecSXPGFallback:
         decoded = base64.b64decode(m.group(1)).decode("utf-16-le")
         assert "WriteAllText" in decoded
 
-    def test_sxpg_passes_through_non_echo_cmd(self):
-        """Non-echo cmd.exe calls (ver, whoami) should NOT get rewritten."""
+    def test_sxpg_wraps_non_echo_cmd_in_powershell_cmd_c(self):
+        """Non-echo cmd.exe calls wrap inner command via PowerShell
+        & cmd /c '<inner>' to defeat SXPG kernel filtering."""
         from sapmap_miniplasma import _make_exec
         cred = Credentials(
             username="SAPMAP00", password="x",
@@ -178,8 +179,33 @@ class TestMakeExecSXPGFallback:
         with patch("sapmap_rfc.execute_local_command",
                     side_effect=fake_exec):
             exec_fn("cmd.exe", "/C ver", "")
-        assert captured["prog"] == "cmd.exe"
-        assert captured["params"] == "/C ver"
+        assert captured["prog"] == "powershell.exe"
+        assert "-EncodedCommand" in captured["params"]
+        import base64, re
+        m = re.search(r"-EncodedCommand\s+(\S+)", captured["params"])
+        decoded = base64.b64decode(m.group(1)).decode("utf-16-le")
+        assert "cmd /c 'ver'" in decoded
+
+    def test_sxpg_non_cmd_program_passes_through(self):
+        """Non-cmd programs (e.g. operator passes powershell.exe
+        directly) should NOT be rewritten."""
+        from sapmap_miniplasma import _make_exec
+        cred = Credentials(
+            username="SAPMAP00", password="x",
+            client="001", instance_nr="00", verified=True,
+        )
+        node = self._make_node(creds=[cred])
+        exec_fn, _, _ = _make_exec(node, "TWT", verbose=False)
+        captured = {}
+        def fake_exec(node_arg, prog, params, creds_arg):
+            captured["prog"] = prog
+            captured["params"] = params
+            return {"success": True, "output": [], "error": ""}
+        with patch("sapmap_rfc.execute_local_command",
+                    side_effect=fake_exec):
+            exec_fn("whoami.exe", "/priv", "")
+        assert captured["prog"] == "whoami.exe"
+        assert captured["params"] == "/priv"
 
     def test_sxpg_uses_first_verified_cred(self):
         """When multiple creds present, picks first verified one."""
