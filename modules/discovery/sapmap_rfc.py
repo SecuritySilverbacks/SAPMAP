@@ -3270,6 +3270,24 @@ def execute_local_command(node: SAPNode, command: str, params: str,
     """
     result = {"success": False, "output": [], "error": ""}
 
+    # Per-node cache: once we discover a usable self-referencing
+    # TCP/IP destination, reuse it directly on subsequent calls so
+    # bulk operations (LPE binary chunk upload, etc.) don't repeat
+    # the RFCDES scan + log line on every chunk.
+    cached_dest = getattr(node, "_sxpg_dest_cache", None)
+    if cached_dest:
+        dest_name = cached_dest
+        try:
+            return execute_remote_command(
+                node, dest_name, command, params, creds)
+        except Exception:
+            # Cache could be stale (operator deleted dest, etc.);
+            # fall through to full discovery.
+            try:
+                delattr(node, "_sxpg_dest_cache")
+            except Exception:
+                pass
+
     # Look for an existing self-referencing TCP/IP destination.  This
     # is critical when the connecting user lacks S_RFC_ADM (FL046 on
     # DEST_RFC_TCPIP_CREATE): if any sapxpg dest pointing at this host
@@ -3368,6 +3386,14 @@ def execute_local_command(node: SAPNode, command: str, params: str,
             result["error"] = f"Could not create TCP/IP dest: {create_result['message']}"
             return result
         dest_name = create_result["dest_name"]
+
+    # Remember the dest for subsequent calls on this node.  Setting
+    # an attribute on a dataclass instance is allowed (it doesn't
+    # affect to_dict() because to_dict explicitly lists fields).
+    try:
+        node._sxpg_dest_cache = dest_name
+    except Exception:
+        pass
 
     # Execute command via the destination
     return execute_remote_command(node, dest_name, command, params, creds)
