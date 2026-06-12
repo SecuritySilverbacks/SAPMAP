@@ -5590,7 +5590,7 @@ async function ctxAction(action) {
         'DDIC always exists; a SAPMAP-created user is also safe.',
         'DDIC');
       if (!user) break;
-      const client = prompt('Client (MANDT):', '100');
+      const client = prompt('Client (MANDT):', '001');
       if (!client) break;
       await api('POST', `node/${sid}/forge_and_fanout`,
                 { user: user, client: client });
