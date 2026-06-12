@@ -42,9 +42,10 @@ class TestMakeExecSXPGFallback:
         exec_fn, chunk, label = _make_exec(node, "TWT", verbose=False)
         assert exec_fn is not None
         assert label == "sxpg_rfc"
-        # Chunk size 180 keeps each `cmd /C echo CHUNK>>"path"`
-        # invocation inside SXPG's PARAMS (CHAR255) field.
-        assert chunk == 180
+        # Chunk size 2000: cmd.exe echo+redirect gets rewritten to
+        # PowerShell -EncodedCommand at call time, so the param body
+        # is opaque base64 and survives LONG_PARAMS kernel filtering.
+        assert chunk == 2000
 
     def test_gw_preferred_over_sxpg(self):
         """Gateway SAPXPG is preferred over SXPG when both available."""
@@ -103,6 +104,82 @@ class TestMakeExecSXPGFallback:
             # Verify creds were passed through
             call_args = mock_exec.call_args
             assert call_args[0][3] is cred
+
+    def test_sxpg_rewrites_cmd_echo_append_to_powershell(self):
+        """cmd.exe echo X>>"path" should be rewritten to powershell -EncodedCommand."""
+        from sapmap_miniplasma import _make_exec
+        cred = Credentials(
+            username="SAPMAP00", password="x",
+            client="001", instance_nr="00", verified=True,
+        )
+        node = self._make_node(creds=[cred])
+        exec_fn, _, _ = _make_exec(node, "TWT", verbose=False)
+        assert exec_fn is not None
+
+        captured = {}
+        def fake_exec(node_arg, prog, params, creds_arg):
+            captured["prog"] = prog
+            captured["params"] = params
+            return {"success": True, "output": [], "error": ""}
+
+        with patch("sapmap_rfc.execute_local_command",
+                    side_effect=fake_exec):
+            exec_fn("cmd.exe",
+                    '/C echo SGVsbG8=>>"C:\\Windows\\Temp\\f.txt"', "")
+        assert captured["prog"] == "powershell.exe"
+        assert "-EncodedCommand" in captured["params"]
+        # Decode the base64 and check it's an AppendAllText call
+        import base64, re
+        m = re.search(r"-EncodedCommand\s+(\S+)", captured["params"])
+        assert m, captured["params"]
+        decoded = base64.b64decode(m.group(1)).decode("utf-16-le")
+        assert "AppendAllText" in decoded
+        assert "Windows\\Temp\\f.txt" in decoded
+        assert "SGVsbG8=" in decoded
+
+    def test_sxpg_rewrites_cmd_echo_truncate_to_powershell(self):
+        """cmd.exe echo X>"path" should rewrite to WriteAllText (truncate)."""
+        from sapmap_miniplasma import _make_exec
+        cred = Credentials(
+            username="SAPMAP00", password="x",
+            client="001", instance_nr="00", verified=True,
+        )
+        node = self._make_node(creds=[cred])
+        exec_fn, _, _ = _make_exec(node, "TWT", verbose=False)
+        captured = {}
+        def fake_exec(node_arg, prog, params, creds_arg):
+            captured["prog"] = prog
+            captured["params"] = params
+            return {"success": True, "output": [], "error": ""}
+        with patch("sapmap_rfc.execute_local_command",
+                    side_effect=fake_exec):
+            exec_fn("cmd.exe",
+                    '/C echo SGVsbG8=>"C:\\Windows\\Temp\\f.txt"', "")
+        assert captured["prog"] == "powershell.exe"
+        import base64, re
+        m = re.search(r"-EncodedCommand\s+(\S+)", captured["params"])
+        decoded = base64.b64decode(m.group(1)).decode("utf-16-le")
+        assert "WriteAllText" in decoded
+
+    def test_sxpg_passes_through_non_echo_cmd(self):
+        """Non-echo cmd.exe calls (ver, whoami) should NOT get rewritten."""
+        from sapmap_miniplasma import _make_exec
+        cred = Credentials(
+            username="SAPMAP00", password="x",
+            client="001", instance_nr="00", verified=True,
+        )
+        node = self._make_node(creds=[cred])
+        exec_fn, _, _ = _make_exec(node, "TWT", verbose=False)
+        captured = {}
+        def fake_exec(node_arg, prog, params, creds_arg):
+            captured["prog"] = prog
+            captured["params"] = params
+            return {"success": True, "output": ["x"], "error": ""}
+        with patch("sapmap_rfc.execute_local_command",
+                    side_effect=fake_exec):
+            exec_fn("cmd.exe", "/C ver", "")
+        assert captured["prog"] == "cmd.exe"
+        assert captured["params"] == "/C ver"
 
     def test_sxpg_uses_first_verified_cred(self):
         """When multiple creds present, picks first verified one."""
