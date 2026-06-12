@@ -42,7 +42,9 @@ class TestMakeExecSXPGFallback:
         exec_fn, chunk, label = _make_exec(node, "TWT", verbose=False)
         assert exec_fn is not None
         assert label == "sxpg_rfc"
-        assert chunk == 1000
+        # Chunk size 180 keeps each `cmd /C echo CHUNK>>"path"`
+        # invocation inside SXPG's PARAMS (CHAR255) field.
+        assert chunk == 180
 
     def test_gw_preferred_over_sxpg(self):
         """Gateway SAPXPG is preferred over SXPG when both available."""
