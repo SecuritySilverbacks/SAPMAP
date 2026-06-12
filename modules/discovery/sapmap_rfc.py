@@ -1976,10 +1976,11 @@ def retrieve_strustsso2_trust(node: SAPNode,
                      f"{format_rfc_exception(e)}")
 
     # ---- Method 5: SSF FM trustbox dump ---------------------------
-    # The SAPSYS PSE trustbox is the authoritative source of which
-    # signing certs this system accepts.  Try several common applic
-    # names; auth gating may block some/all.
-    for applic in ("SYSPSEAPPLSRV", "SYS_PSE_DFAULT", "DFAULT",
+    # The System PSE trustbox is the authoritative source of which
+    # signing certs this system accepts for SSO2 tickets.  On modern
+    # S/4HANA the System PSE applic is "DFAULT"; older NW kernels
+    # used "SYSPSEAPPLSRV".  Try a few; auth-gated on some systems.
+    for applic in ("DFAULT", "SYS_PSE_DFAULT", "SYSPSEAPPLSRV",
                    "SAPSYS"):
         try:
             with _get_connection(node, creds) as conn:

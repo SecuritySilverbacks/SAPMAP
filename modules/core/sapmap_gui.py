@@ -6758,19 +6758,24 @@ def create_app(api: SAPMAPApi) -> Bottle:
                               f"recipient validation FAILED.")
                         print(f"            MOST LIKELY: {sid}'s "
                               f"SAPSYS cert is NOT in {target_sid}'s "
-                              f"STRUSTSSO2 trustbox.")
-                        print(f"            Check STRUSTSSO2 on "
-                              f"{target_sid} -> System PSE -> "
-                              f"Certificate List. If empty, the "
-                              f"target accepts NO MYSAPSSO2 tickets.")
+                              f"System PSE trustbox.")
+                        print(f"            Check on {target_sid}: "
+                              f"open STRUSTSSO2 -> click 'System PSE' "
+                              f"in the left tree -> 'Certificate "
+                              f"List' section in the right pane.")
+                        print(f"            If empty, the target "
+                              f"accepts NO MYSAPSSO2 tickets at all. "
+                              f"Need to import {sid}'s SAPSYS cert "
+                              f"there (PSE -> Import Certificate).")
                         print(f"            Note: legacy "
                               f"license-number based Trusted RFC "
-                              f"(RFCTRUST) works WITHOUT STRUSTSSO2 "
-                              f"certs — that's why Trusted RFC may "
-                              f"succeed while ticket forgery fails. "
-                              f"Cert-based trust must be set up "
-                              f"separately (SM59 'Current User' + "
-                              f"trust button, or manual cert import).")
+                              f"(RFCTRUST.TLICENSE_NR/LLICENSE_NR) "
+                              f"works WITHOUT any STRUSTSSO2 certs — "
+                              f"that's why Trusted RFC succeeds while "
+                              f"ticket forgery fails. Cert-based "
+                              f"trust must be set up separately "
+                              f"(SM59 'Current User' + trust button, "
+                              f"OR manual cert import in STRUSTSSO2).")
                     elif "403" in ev or "forbidden" in err_lower:
                         print(f"            hint: 403 = ticket "
                               f"VALIDATED, but session start FAILED. "
