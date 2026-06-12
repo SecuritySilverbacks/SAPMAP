@@ -1333,6 +1333,23 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                  "..", "..", "icons")
         return static_file("sapmap.ico", root=icons_dir)
 
+    # -- LPE blob serve --
+    # In-memory staging for binary blobs that the LPE techniques need
+    # to land on a Windows target.  When the SXPG primitive can't
+    # carry the binary through LONG_PARAMS (kernel filtering), it
+    # stages the blob here and runs Invoke-WebRequest on the target
+    # to pull it down via this route.
+    @app.route("/api/_lpe_blob/<token>")
+    def serve_lpe_blob(token):
+        from sap_lpe_blob_stage import get_blob
+        blob = get_blob(token)
+        if blob is None:
+            response.status = 404
+            return ""
+        response.content_type = "application/octet-stream"
+        response.set_header("Content-Length", str(len(blob)))
+        return blob
+
     # -- Console polling --
     @app.route("/api/console")
     def get_console():
