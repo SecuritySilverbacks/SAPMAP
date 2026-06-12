@@ -6653,33 +6653,118 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     return [recipient_client]
                 return ["001", "000"]
 
+            def _build_fanout_targets():
+                """Walk state.trust_relations and return list of
+                (target_sid, target_client) tuples this node can
+                forge tickets for."""
+                targets = []
+                seen = set()
+                for rel in api.state.trust_relations:
+                    if rel.issuer_sid != sid:
+                        continue
+                    if rel.trusting_sid == sid:
+                        continue
+                    tnode = api.state.nodes.get(rel.trusting_sid)
+                    if not tnode:
+                        continue
+                    for tgt_c in _target_clients(
+                            tnode, rel.trusting_client):
+                        k = (rel.trusting_sid, tgt_c)
+                        if k in seen:
+                            continue
+                        seen.add(k)
+                        targets.append((rel.trusting_sid, tgt_c))
+                return targets
+
             # Derive fanout targets from state.trust_relations FIRST
             # so we can forge per-target pinned tickets.
-            fanout_targets = []  # list of (target_sid, target_client)
-            seen_targets = set()
-            for rel in api.state.trust_relations:
-                if rel.issuer_sid != sid:
-                    continue
-                if rel.trusting_sid == sid:
-                    continue
-                # Skip if target SID not on the map (we need a node
-                # to replay against)
-                target_node = api.state.nodes.get(rel.trusting_sid)
-                if not target_node:
-                    continue
-                for tgt_client in _target_clients(
-                        target_node, rel.trusting_client):
-                    key = (rel.trusting_sid, tgt_client)
-                    if key in seen_targets:
+            fanout_targets = _build_fanout_targets()
+
+            if not fanout_targets:
+                # No trust relations for this node yet — implicitly run
+                # STRUSTSSO2 discovery now so the operator doesn't have
+                # to do a separate manual step first.
+                print(f"[*] {sid}: no STRUSTSSO2-trusted receivers "
+                      f"known yet — running 'Discover STRUSTSSO2 "
+                      f"trust' implicitly first...")
+                creds = node.best_credentials()
+                if not creds:
+                    print(f"[-] {sid}: no credentials available for "
+                          f"implicit STRUSTSSO2 discovery — abort")
+                    return
+                from sapmap_models import TrustRelation
+                try:
+                    entries = sapmap_rfc.retrieve_strustsso2_trust(
+                        node, creds)
+                except Exception as e:
+                    print(f"[-] {sid}: STRUSTSSO2 read failed: {e}")
+                    entries = []
+                try:
+                    rfctrust = sapmap_rfc.retrieve_rfctrust(
+                        node, creds)
+                except Exception as e:
+                    print(f"[-] {sid}: RFCTRUST read failed: {e}")
+                    rfctrust = []
+
+                cert_to_sid = {}
+                for other_sid, other_node in api.state.nodes.items():
+                    dn = (other_node.sapsys_cert_subject_dn
+                          or "").strip()
+                    if dn:
+                        cert_to_sid[dn] = other_sid
+
+                existing_keys = {
+                    (r.trusting_sid, r.issuer_sid,
+                     r.issuer_cert_subject_dn, r.issuer_cert_serial)
+                    for r in api.state.trust_relations
+                }
+
+                for e in entries:
+                    if e.get("kind", "system") != "system":
                         continue
-                    seen_targets.add(key)
-                    fanout_targets.append(
-                        (rel.trusting_sid, tgt_client))
+                    subject = e.get("subject_dn", "") or ""
+                    serial = e.get("serial", "") or ""
+                    issuer_sid = (e.get("issuer_sid", "") or "")
+                    issuer_sid = issuer_sid or cert_to_sid.get(
+                        subject, "")
+                    key = (sid, issuer_sid, subject, serial)
+                    if key in existing_keys:
+                        continue
+                    api.state.trust_relations.append(TrustRelation(
+                        trusting_sid=sid,
+                        trusting_client=e.get(
+                            "trusting_client", ""),
+                        issuer_sid=issuer_sid,
+                        issuer_cert_subject_dn=subject,
+                        issuer_cert_serial=serial,
+                        trust_method="strustsso2",
+                        discovered_via=e.get("source", ""),
+                    ))
+                    existing_keys.add(key)
+                for t in rfctrust:
+                    partner = (t.get("rfctrustid") or "").strip()
+                    issuer = (t.get("rfctrustsy") or sid).strip()
+                    if not partner or partner == issuer:
+                        continue
+                    key = (partner, issuer, "", "")
+                    if key in existing_keys:
+                        continue
+                    api.state.trust_relations.append(TrustRelation(
+                        trusting_sid=partner,
+                        issuer_sid=issuer,
+                        trust_method="strustsso2",
+                        discovered_via="RFCTRUST",
+                    ))
+                    existing_keys.add(key)
+
+                # Try again now that trust_relations has been populated
+                fanout_targets = _build_fanout_targets()
 
             if not fanout_targets:
                 print(f"[*] {sid}: no STRUSTSSO2-trusted receivers "
-                      f"known (or no map nodes for them); run "
-                      f"'Discover STRUSTSSO2 trust' first")
+                      f"found after discovery (no RFCTRUST entries "
+                      f"and no readable STRUSTSSO2 trust on this "
+                      f"node)")
                 return
 
             print(f"[*] {sid}: Forge & Fanout — {len(fanout_targets)} "
