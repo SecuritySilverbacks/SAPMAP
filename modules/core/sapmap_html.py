@@ -4275,6 +4275,10 @@ function showCtxMenu(e, sid) {
         ? 'MYSAPSSO2 ticket forgery reads SAPSYS.pse — only present on ABAP/dual-stack systems.  Java stacks use SNC for Diag SSO instead.'
         : 'Needs OS-level read access on the issuing AS (sapxpg base64).  Open via a vulnerable RFC Gateway, CVE-2025-31324 JSP webshell, or a SAPMAP-created user first.'),
     'propagate_ticket': 'Requires both a forged MYSAPSSO2 ticket AND a SAPMAP-created user on this node.  The created user provides the RFC credential needed to discover the target’s ICM ports via FM ICM_GET_INFO before replaying the ticket.',
+    'discover_strustsso2': 'Reads RFCTRUST, TWPSSO2ACL and USREXTID via RFC_READ_TABLE — needs a real RFC credential on this node.  Run Forge & Fanout (which discovers implicitly), or create a user first via GW exploit / 10KBLAZE / RECON, then come back.',
+    'forge_and_fanout': (!isAbapStack
+        ? 'Forge & Fanout reads SAPSYS.pse — only present on ABAP/dual-stack systems.'
+        : 'Needs OS-level read access on the issuer (sapxpg base64) AND a RFC credential for STRUSTSSO2 discovery.  Open via a vulnerable RFC Gateway, CVE-2025-31324 JSP webshell, or a SAPMAP-created user first.'),
   };
 
   // Items hidden entirely (not just disabled) when the node type doesn't
@@ -5590,7 +5594,12 @@ async function ctxAction(action) {
         'DDIC always exists; a SAPMAP-created user is also safe.',
         'DDIC');
       if (!user) break;
-      const client = prompt('Client (MANDT):', '001');
+      const client = prompt(
+        'Target client (MANDT) — fallback only:\n\n' +
+        'This is the TARGET system\'s client, not the source.\n' +
+        'Used only when the target\'s actual client list is unknown.\n' +
+        'When the target has enumerated clients (from prior scan), those win.',
+        '001');
       if (!client) break;
       await api('POST', `node/${sid}/forge_and_fanout`,
                 { user: user, client: client });

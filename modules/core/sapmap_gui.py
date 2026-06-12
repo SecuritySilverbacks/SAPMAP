@@ -6624,10 +6624,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
             def _target_clients(target_node, rel_client):
                 """Return list of client numbers to try on the target.
 
-                Priority: rel.trusting_client (if specifically set in
+                Priority: rel.trusting_client (specifically set in
                 the trust relation) → target_node.clients (enumerated
                 during discovery) → operator-supplied recipient_client
-                → SAP defaults [000, 001].
+                → operator-supplied client (from the prompt fallback)
+                → SAP defaults [001, 000].
 
                 NEVER falls back to the source-system's client (which
                 may not exist on the target — e.g. issuer has 100 but
@@ -6640,17 +6641,17 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     nr = (c.get("nr") if isinstance(c, dict)
                           else str(c)) or ""
                     nr = nr.strip().zfill(3)
-                    # Skip 000 unless it's the only one — usually
-                    # not a useful logon target
                     if nr and nr not in enumerated:
                         enumerated.append(nr)
                 if enumerated:
-                    # Move 000 to the end (least useful)
                     enumerated = ([c for c in enumerated if c != "000"]
                                   + [c for c in enumerated if c == "000"])
                     return enumerated
                 if recipient_client:
                     return [recipient_client]
+                # Use the operator's prompt value as the named fallback
+                if client:
+                    return [client.strip().zfill(3)]
                 return ["001", "000"]
 
             def _build_fanout_targets():
