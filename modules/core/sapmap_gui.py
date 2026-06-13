@@ -5852,13 +5852,16 @@ def create_app(api: SAPMAPApi) -> Bottle:
             return json.dumps({"error": f"Node {sid} not found"})
         data = request.json or {}
         command = data.get("command", "whoami")
+        av_evasion = bool(data.get("av_evasion", False))
 
         def _run():
             _task_start(f"{sid}:exploit_windows_lpe",
-                        f"{sid}: Windows LPE — running: {command}")
+                        f"{sid}: Windows LPE — running: {command}"
+                        + (" (AV evasion)" if av_evasion else ""))
             try:
                 from sapmap_winlpe_auto import run_windows_lpe
-                res = run_windows_lpe(node, command)
+                res = run_windows_lpe(node, command,
+                                      av_evasion=av_evasion)
                 method = res.get("method") or "?"
                 if res.get("ok"):
                     sapmap_findings.emit_finding(
