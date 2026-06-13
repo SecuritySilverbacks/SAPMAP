@@ -133,6 +133,28 @@ class TestBuildLoader:
         # Specifically, the pattern is .Invoke($null,(,(...
         assert ".Invoke($null,(,(" in loader
 
+    def test_if_blocks_end_with_semicolon(self):
+        """`}[IO.File]::AppendAllText(...)` is a parse trap in PowerShell:
+        the `[...]` becomes an indexer applied to the if-block's null
+        return. Without an explicit semicolon between `}` and the
+        next statement, the script crashes before any diag write."""
+        loader = build_in_memory_loader_ps(
+            encrypted_path=r"C:\x.dat",
+            key_b64="QQ==",
+            entry_args=["a"],
+            result_path=r"C:\r.txt",
+            diag_path=r"C:\d.txt",
+        )
+        # No closing brace can be directly followed by `[` (next statement)
+        # without a semicolon separator.
+        import re
+        bad = re.search(r"\}\s*\[", loader)
+        assert bad is None, (
+            f"loader has `}}[` without `;` -- PowerShell will parse "
+            f"this as array indexing on the block's null result and "
+            f"crash. Context: {loader[max(0, bad.start()-50):bad.end()+50]!r}"
+            if bad else "")
+
     def test_loader_dollar_args_mode(self):
         """When use_dollar_args=True, the script reads args from
         PowerShell's $args (populated when invoked via -File)."""
