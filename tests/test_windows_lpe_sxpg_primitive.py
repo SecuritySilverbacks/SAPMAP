@@ -11,6 +11,79 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from sapmap_models import SAPNode, Credentials
 
 
+class TestRobustPreCleanup:
+    """The per-path cleanup helper must delete each artifact and verify."""
+
+    def test_clean_path_only_runs_del_and_probe(self):
+        """When the artifact is already gone, no Remove-Item fallback runs."""
+        from sapmap_miniplasma import _robust_pre_cleanup
+        calls = []
+        def fake_gw(prog, args, lp=""):
+            calls.append((prog, args))
+            if "if exist" in args:
+                return ("GONE\n", True)
+            return ("", True)
+        ok = _robust_pre_cleanup(
+            fake_gw, "TST", [r"C:\Windows\Temp\foo.txt"],
+            technique="Test")
+        assert ok is True
+        # First call: del, second: probe. No PS fallback.
+        assert len(calls) == 2
+        assert calls[0][1].startswith("/C del")
+        assert "/C if exist" in calls[1][1]
+
+    def test_stuck_path_triggers_powershell_fallback(self):
+        """If cmd del fails to remove the file, fallback to Remove-Item."""
+        from sapmap_miniplasma import _robust_pre_cleanup
+        calls = []
+        # First probe says STILL (cmd del failed); after PS removal,
+        # second probe says GONE.
+        probe_results = iter(["STILL\n", "GONE\n"])
+        def fake_gw(prog, args, lp=""):
+            calls.append((prog, args))
+            if "if exist" in args:
+                return (next(probe_results), True)
+            return ("", True)
+        ok = _robust_pre_cleanup(
+            fake_gw, "TST", [r"C:\Windows\Temp\foo.txt"],
+            technique="Test")
+        assert ok is True
+        # Sequence: del, probe(STILL), powershell remove, probe(GONE)
+        assert len(calls) == 4
+        assert calls[2][0] == "powershell.exe"
+        assert "Remove-Item" in calls[2][1]
+
+    def test_all_attempts_fail_returns_false(self):
+        from sapmap_miniplasma import _robust_pre_cleanup
+        def fake_gw(prog, args, lp=""):
+            if "if exist" in args:
+                return ("STILL\n", True)
+            return ("", True)
+        ok = _robust_pre_cleanup(
+            fake_gw, "TST", [r"C:\Windows\Temp\stuck.txt"],
+            technique="Test")
+        assert ok is False
+
+    def test_multiple_paths_each_handled_independently(self):
+        from sapmap_miniplasma import _robust_pre_cleanup
+        seen_paths = []
+        def fake_gw(prog, args, lp=""):
+            if "/C del" in args:
+                # Extract the quoted path from the args
+                import re
+                m = re.search(r'"([^"]+)"', args)
+                if m:
+                    seen_paths.append(m.group(1))
+            if "if exist" in args:
+                return ("GONE\n", True)
+            return ("", True)
+        paths = [r"C:\Windows\Temp\a.txt",
+                 r"C:\Windows\Temp\b.exe",
+                 r"C:\Windows\Temp\c.bat"]
+        _robust_pre_cleanup(fake_gw, "TST", paths, technique="Test")
+        assert seen_paths == paths
+
+
 class TestMakeExecSXPGFallback:
 
     def _make_node(self, sid="TWT", gw_vuln=False, cve_vuln=False,
