@@ -269,6 +269,35 @@ body {
    showCtxMenu / showSCCCtxMenu / showBTPCtxMenu). */
 .ctx-sub.flip-up { top: auto; bottom: -4px; }
 
+/* Scroll affordance — shown by _reflowSubmenus when the submenu's
+   content exceeds the viewport-capped max-height.  Two sticky
+   indicators (▲ at top, ▼ at bottom) sit on top of the scroll
+   viewport and fade out based on scroll position.  Without these
+   the operator has no visual cue that there are more items below. */
+.ctx-sub .ctx-scroll-hint {
+  position: sticky;
+  left: 0; right: 0;
+  height: 16px;
+  pointer-events: none;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 10px; color: #c9d1d9;
+  z-index: 2200;
+  transition: opacity .15s;
+}
+.ctx-sub .ctx-scroll-hint.top {
+  top: 0; margin-bottom: -16px;
+  background: linear-gradient(180deg, #1c2128 30%, rgba(28,33,40,0) 100%);
+}
+.ctx-sub .ctx-scroll-hint.bottom {
+  bottom: 0; margin-top: -16px;
+  background: linear-gradient(0deg, #1c2128 30%, rgba(28,33,40,0) 100%);
+}
+/* When at the corresponding edge, hide the matching hint. */
+.ctx-sub.at-top    .ctx-scroll-hint.top    { opacity: 0; }
+.ctx-sub.at-bottom .ctx-scroll-hint.bottom { opacity: 0; }
+/* When content fits without scrolling, hide both. */
+.ctx-sub:not(.has-overflow) .ctx-scroll-hint { display: none; }
+
 /* === Info Panel (connection details) === */
 .info-panel {
   display: none; position: fixed; z-index: 1500;
@@ -4533,7 +4562,50 @@ function _reflowSubmenus(menu, menuX, menuWidth) {
       sub.style.maxHeight = Math.max(spaceDown, 120) + 'px';
     }
     sub.style.overflowY = 'auto';
+    _attachScrollHints(sub);
   });
+}
+
+// Inject ▲ / ▼ scroll-affordance chevrons into a scrollable submenu
+// and wire a scroll listener that toggles `at-top` / `at-bottom`
+// classes so the hints fade out when the operator scrolls to the
+// matching edge. Idempotent — safe to call multiple times.
+function _attachScrollHints(sub) {
+  // Decide whether this submenu has overflowing content.
+  const overflows = sub.scrollHeight > sub.clientHeight + 1;
+  sub.classList.toggle('has-overflow', overflows);
+  if (!overflows) {
+    // Content fits — drop any leftover hint nodes so they don't
+    // sit dormant in the DOM.
+    sub.querySelectorAll(':scope > .ctx-scroll-hint').forEach(
+      n => n.remove());
+    sub.classList.remove('at-top', 'at-bottom');
+    return;
+  }
+  // Inject hints once
+  if (!sub.querySelector(':scope > .ctx-scroll-hint.top')) {
+    const top = document.createElement('div');
+    top.className = 'ctx-scroll-hint top';
+    top.textContent = '▲';
+    sub.insertBefore(top, sub.firstChild);
+    const bot = document.createElement('div');
+    bot.className = 'ctx-scroll-hint bottom';
+    bot.textContent = '▼ more';
+    sub.appendChild(bot);
+  }
+  // Initial scroll state
+  const update = () => {
+    sub.classList.toggle('at-top', sub.scrollTop <= 1);
+    sub.classList.toggle(
+      'at-bottom',
+      sub.scrollTop + sub.clientHeight >= sub.scrollHeight - 1);
+  };
+  update();
+  // Wire scroll listener once
+  if (!sub.dataset.scrollHintWired) {
+    sub.addEventListener('scroll', update, { passive: true });
+    sub.dataset.scrollHintWired = '1';
+  }
 }
 
 function hideCtxMenu() {
