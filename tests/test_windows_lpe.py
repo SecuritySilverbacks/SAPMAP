@@ -1397,7 +1397,8 @@ def test_run_windows_lpe_forwards_fire_and_forget_to_efspotato():
     captured_kwargs = {}
 
     def _fake_run_as_system(node, command, timeout=90.0,
-                              fire_and_forget=False):
+                              fire_and_forget=False,
+                              av_evasion=False):
         captured_kwargs["fire_and_forget"] = fire_and_forget
         captured_kwargs["command"] = command
         return {"ok": True, "stdout": "[fire-and-forget] pid=9872",
@@ -1496,7 +1497,8 @@ def test_run_windows_lpe_default_fire_and_forget_is_false():
     captured_kwargs = {}
 
     def _fake_run_as_system(node, command, timeout=90.0,
-                              fire_and_forget=False):
+                              fire_and_forget=False,
+                              av_evasion=False):
         captured_kwargs["fire_and_forget"] = fire_and_forget
         return {"ok": True, "stdout": "nt authority\\system", "error": ""}
 

