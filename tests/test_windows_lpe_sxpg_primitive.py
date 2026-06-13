@@ -279,6 +279,49 @@ class TestMakeExecSXPGFallback:
         assert captured["prog"] == "whoami.exe"
         assert captured["params"] == "/priv"
 
+    def test_sxpg_quoted_args_wrapped_in_powershell(self):
+        """Non-cmd prog whose args contain double-quotes must be
+        wrapped in PowerShell -EncodedCommand.  The SXPG kernel
+        filter rejects/mangles quoted PARAMS via authenticated RFC,
+        so passing through `efs_bin.exe "cmd /c x.bat" lsarpc` would
+        reach the target with an empty argv (EfsPotato prints its
+        usage banner — operator-reported TWT regression)."""
+        from sapmap_miniplasma import _make_exec
+        cred = Credentials(
+            username="SAPMAP00", password="x",
+            client="001", instance_nr="00", verified=True,
+        )
+        node = self._make_node(creds=[cred])
+        exec_fn, _, _ = _make_exec(node, "TWT", verbose=False)
+        captured = {}
+        def fake_exec(node_arg, prog, params, creds_arg):
+            captured["prog"] = prog
+            captured["params"] = params
+            return {"success": True, "output": [], "error": ""}
+        with patch("sapmap_rfc.execute_local_command",
+                    side_effect=fake_exec):
+            exec_fn(
+                r"C:\Windows\Temp\.ef\efs_bin.exe",
+                r'"cmd /c C:\Windows\Temp\.ef\.ef_run.bat" lsarpc',
+                "")
+        # Wrapped in PowerShell because args have quotes.
+        assert captured["prog"] == "powershell.exe"
+        assert "-EncodedCommand" in captured["params"]
+        # PARAMS now contains only base64 alphabet — no quotes,
+        # nothing the SXPG filter would strip.
+        import base64, re
+        m = re.search(r"-EncodedCommand\s+(\S+)", captured["params"])
+        decoded = base64.b64decode(m.group(1)).decode("utf-16-le")
+        # Decoded PowerShell should invoke the original prog with
+        # the original tokens preserved.
+        assert "efs_bin.exe" in decoded
+        assert "cmd /c" in decoded
+        assert ".ef_run.bat" in decoded
+        assert "lsarpc" in decoded
+        # The PARAMS that reaches SXPG must NOT contain any quotes
+        # (those are what the kernel filter strips).
+        assert '"' not in captured["params"]
+
     def test_sxpg_uses_first_verified_cred(self):
         """When multiple creds present, picks first verified one."""
         from sapmap_miniplasma import _make_exec
