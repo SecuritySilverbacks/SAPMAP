@@ -1521,3 +1521,116 @@ def test_run_windows_lpe_default_fire_and_forget_is_false():
 
     assert out["ok"] is True
     assert captured_kwargs["fire_and_forget"] is False
+
+
+# ===========================================================================
+# Auto-fallback from AV-evasion to plain path
+# ===========================================================================
+# Operator-reported SJJ regression (Server 2016 14393): with av_evasion=True
+# the encrypted-blob + PowerShell reflective-load path failed on all 4 pipes
+# twice (AMSI catches the reflection pattern), while the plain certutil +
+# direct-exec path succeeded in 8 seconds on the same target.  Evasion is
+# opt-in for cases where Defender quarantines the plaintext PE — when the
+# target *doesn't* quarantine but evasion still trips AMSI, the legacy
+# path is the right fallback.
+
+
+def test_av_evasion_fallback_to_plain_on_failure():
+    """When av_evasion=True is requested and _run_as_system_evasion
+    fails, run_as_system must automatically retry via the plain path."""
+    from sapmap_efspotato import run_as_system, _TARGET_EXE
+
+    ev_call_count = {"n": 0}
+    plain_called = {"n": 0}
+
+    def _fake_evasion(node, command, timeout=90.0, fire_and_forget=False):
+        ev_call_count["n"] += 1
+        return {
+            "ok": False, "stdout": "",
+            "error": "None of the EFSRPC pipes succeeded via evasion loader",
+            "av_evasion": True,
+        }
+
+    def _fake_make_exec(node, sid, verbose=True):
+        def _gw(prog, params="", lp=""):
+            plain_called["n"] += 1
+            if prog == _TARGET_EXE:
+                return _EFSPOTATO_BANNER_SPAWNED, True
+            return "", True
+        return (_gw, 3000, "jsp_shell")
+
+    with patch("sapmap_efspotato._run_as_system_evasion",
+                 side_effect=_fake_evasion), \
+         patch("sapmap_efspotato._make_exec",
+                 side_effect=_fake_make_exec), \
+         patch("sapmap_efspotato._load_blob", return_value={
+            "hex": "00", "size": 1, "sha256": "a" * 64}), \
+         patch("time.sleep"):
+        out = run_as_system(_node(), "whoami",
+                              fire_and_forget=True,
+                              av_evasion=True)
+
+    assert ev_call_count["n"] == 1
+    assert plain_called["n"] >= 1
+    assert out["ok"] is True
+
+
+def test_av_evasion_success_skips_plain_fallback():
+    """When the evasion path succeeds, the plain path must NOT run."""
+    from sapmap_efspotato import run_as_system
+
+    plain_made_exec = {"n": 0}
+
+    def _fake_evasion(node, command, timeout=90.0, fire_and_forget=False):
+        return {
+            "ok": True, "stdout": "nt authority\\system",
+            "error": "", "av_evasion": True,
+        }
+
+    def _fake_make_exec(node, sid, verbose=True):
+        plain_made_exec["n"] += 1
+        return (lambda *a, **kw: ("", True), 3000, "jsp_shell")
+
+    with patch("sapmap_efspotato._run_as_system_evasion",
+                 side_effect=_fake_evasion), \
+         patch("sapmap_efspotato._make_exec",
+                 side_effect=_fake_make_exec):
+        out = run_as_system(_node(), "whoami", av_evasion=True)
+
+    assert out["ok"] is True
+    assert "system" in out["stdout"].lower()
+    # _make_exec is the plain path's first step — must NOT have been
+    # touched when evasion succeeded.
+    assert plain_made_exec["n"] == 0
+
+
+def test_av_evasion_both_paths_fail_includes_both_errors():
+    """When evasion AND plain fallback both fail, the final error
+    must surface both failure modes so the operator can tell what
+    was tried."""
+    from sapmap_efspotato import run_as_system
+
+    def _fake_evasion(node, command, timeout=90.0, fire_and_forget=False):
+        return {
+            "ok": False, "stdout": "",
+            "error": "AMSI blocked reflective load",
+            "av_evasion": True,
+        }
+
+    # No exec primitive available → plain path fails too.
+    def _fake_make_exec(node, sid, verbose=True):
+        return (None, 0, "")
+
+    with patch("sapmap_efspotato._run_as_system_evasion",
+                 side_effect=_fake_evasion), \
+         patch("sapmap_efspotato._make_exec",
+                 side_effect=_fake_make_exec), \
+         patch("sapmap_efspotato._load_blob", return_value={
+            "hex": "00", "size": 1, "sha256": "a" * 64}):
+        out = run_as_system(_node(), "whoami", av_evasion=True)
+
+    assert out["ok"] is False
+    err = out["error"]
+    assert "AMSI" in err, f"evasion error missing: {err!r}"
+    assert "plain fallback also failed" in err, (
+        f"plain-failure annotation missing: {err!r}")
