@@ -2473,16 +2473,23 @@ def _rfcdes_is_trusted(rfctype: str, options: str) -> bool:
     The canonical marker SAP writes into RFCOPTIONS when "Trust
     Relationship = Yes" is set in SM59 is the comma-separated token
     ``Q=Y`` (Type-3 only — for Type-G/H the ``Q=`` flag means TLS).
+    The match is **case-sensitive**: lowercase ``q=`` is a different
+    RFCOPTIONS parameter entirely and must NOT be treated as a trust
+    marker. Operator-reported false positives where local /
+    no-password destinations were getting flagged as trusted RFC
+    were traced to a previous ``.upper()`` normalisation that
+    collapsed both spellings into the same bucket.
+
     Absence of ``%_PWD`` is NOT a trust indicator: many local /
     internal destinations (e.g. NONE, BACK, "@local", file
     destinations) have no stored password and are not trusted at
-    all.  False-positives in the earlier heuristic were causing the
-    map to label local destinations as inbound trusted RFC.
+    all.
     """
     if rfctype != "3":
         return False
     for part in (options or "").split(","):
-        if part.strip().upper() == "Q=Y":
+        # Strict case-sensitive match — capital Q only.
+        if part.strip() == "Q=Y":
             return True
     return False
 
