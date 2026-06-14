@@ -4467,7 +4467,12 @@ function showCtxMenu(e, sid) {
   menu.querySelectorAll('.ctx-group').forEach(group => {
     const sub = group.querySelector('.ctx-sub');
     if (!sub) return;   // not a submenu — leave alone
-    const all = sub.querySelectorAll(':scope > .ctx-item[data-action]');
+    // Items may live as DIRECT children of .ctx-sub (initial state)
+    // OR inside a .ctx-sub-scroll wrapper that _attachScrollHints
+    // injects when the menu overflows. Search both -- the descendant
+    // selector below covers either case without false positives,
+    // since .ctx-sub never contains nested .ctx-group structures.
+    const all = sub.querySelectorAll('.ctx-item[data-action]');
     let actionable = 0;
     all.forEach(it => {
       if (it.style.display === 'none') return;
