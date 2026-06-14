@@ -4618,11 +4618,21 @@ function _attachScrollHints(sub) {
   // clientHeight both read 0 in that state, so without forcing layout
   // here, overflows would always be false and the chevrons would never
   // be added.
+  // Both the overflow check AND the initial at-top/at-bottom state
+  // must be measured inside this force-layout block. Outside it,
+  // scrollHeight=clientHeight=0, which would (a) fail overflow
+  // detection and (b) compute at-bottom = (0+0 >= 0-1) = true, hiding
+  // the bottom chevron until the operator scrolls the live menu and
+  // the scroll listener fires with real values.
   const prevDisplay = sub.style.display;
   const prevVis = sub.style.visibility;
   sub.style.display = 'block';
   sub.style.visibility = 'hidden';
   const overflows = scroller.scrollHeight > scroller.clientHeight + 1;
+  const initialAtTop = scroller.scrollTop <= 1;
+  const initialAtBottom = (
+    scroller.scrollTop + scroller.clientHeight
+      >= scroller.scrollHeight - 1);
   sub.style.display = prevDisplay;
   sub.style.visibility = prevVis;
   sub.classList.toggle('has-overflow', overflows);
@@ -4643,6 +4653,13 @@ function _attachScrollHints(sub) {
     bot.textContent = '▼  more  ▼';
     sub.appendChild(bot);
   }
+  // Apply the initial state captured in the force-layout block above.
+  // Don't re-measure here -- sub is back to display:none and every
+  // metric reads zero.
+  sub.classList.toggle('at-top', initialAtTop);
+  sub.classList.toggle('at-bottom', initialAtBottom);
+  // Subsequent updates from scroll events run while sub is :hover
+  // visible, so direct measurement works there.
   const update = () => {
     sub.classList.toggle('at-top', scroller.scrollTop <= 1);
     sub.classList.toggle(
@@ -4650,7 +4667,6 @@ function _attachScrollHints(sub) {
       scroller.scrollTop + scroller.clientHeight
         >= scroller.scrollHeight - 1);
   };
-  update();
   if (!scroller.dataset.scrollHintWired) {
     scroller.addEventListener('scroll', update, { passive: true });
     scroller.dataset.scrollHintWired = '1';
