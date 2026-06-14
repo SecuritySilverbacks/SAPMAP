@@ -4613,7 +4613,18 @@ function _attachScrollHints(sub) {
   scroller.style.overflowY = 'auto';
   sub.style.overflowY = 'visible';
 
+  // Overflow detection needs the elements LAID OUT -- sub is normally
+  // display:none (CSS hides flyouts until :hover). scrollHeight and
+  // clientHeight both read 0 in that state, so without forcing layout
+  // here, overflows would always be false and the chevrons would never
+  // be added.
+  const prevDisplay = sub.style.display;
+  const prevVis = sub.style.visibility;
+  sub.style.display = 'block';
+  sub.style.visibility = 'hidden';
   const overflows = scroller.scrollHeight > scroller.clientHeight + 1;
+  sub.style.display = prevDisplay;
+  sub.style.visibility = prevVis;
   sub.classList.toggle('has-overflow', overflows);
   if (!overflows) {
     sub.querySelectorAll(':scope > .ctx-scroll-hint').forEach(
