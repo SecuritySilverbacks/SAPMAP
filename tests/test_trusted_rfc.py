@@ -427,11 +427,22 @@ class TestRfcdesIsTrusted:
         opts = "H=target01,S=00,M=100,Q=N"
         assert _rfcdes_is_trusted("3", opts) is False
 
-    def test_q_y_lowercase_still_trusted(self):
-        """Be lenient on case — kernels may store q=y."""
+    def test_q_y_lowercase_is_NOT_trusted(self):
+        """Case-sensitive: lowercase ``q=`` is a DIFFERENT RFCOPTIONS
+        parameter, not the trust marker. Operator-reported false
+        positives on local destinations traced to a previous
+        ``.upper()`` normalisation that conflated both spellings."""
         from sapmap_rfc import _rfcdes_is_trusted
-        opts = "H=target01,S=00,q=y"
-        assert _rfcdes_is_trusted("3", opts) is True
+        # All non-uppercase spellings must be rejected
+        for opts in (
+            "H=target01,S=00,q=y",
+            "H=target01,S=00,q=Y",
+            "H=target01,S=00,Q=y",
+        ):
+            assert _rfcdes_is_trusted("3", opts) is False, (
+                f"options {opts!r} must NOT match -- lowercase q= "
+                f"is a different parameter and Q=y / q=Y are not the "
+                f"canonical trusted marker (which is exactly Q=Y).")
 
     def test_q_y_with_surrounding_spaces(self):
         """RFCOPTIONS rows can have stray whitespace around tokens."""
