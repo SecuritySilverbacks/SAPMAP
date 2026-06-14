@@ -7249,19 +7249,26 @@ def create_app(api: SAPMAPApi) -> Bottle:
             # Read trust tables for intelligence
             try:
                 trust = sapmap_rfc.retrieve_rfctrust(node, creds)
+                # NOTE: we deliberately do NOT cross-reference RFCTRUST
+                # entries onto individual RFCConnection objects to mark
+                # them trusted_system=True.  RFCTRUST registers that a
+                # trust relationship EXISTS between two systems, but
+                # the per-destination trust flag is set per-row in
+                # RFCDES via Q=Y -- and only destinations with Q=Y
+                # actually use the assertion-ticket path.  Operators
+                # commonly have multiple RFC destinations from system
+                # A to system B where only a subset have "Trust
+                # Relationship: Yes" in SM59; blanket-marking everything
+                # pointing at a trusted target produced false positives
+                # (e.g. TEST_MARC_H on S4D->AED showed up as trusted
+                # despite Q=Y being absent from its RFCOPTIONS).
+                # _rfcdes_is_trusted in sapmap_rfc is the authoritative
+                # per-destination check.
                 if trust:
-                    # Cross-reference: mark connections whose target SID
-                    # appears in RFCTRUST as trusted_system=True
-                    trust_targets = {e["rfctrustid"] for e in trust
-                                     if e.get("rfctrustid")}
-                    for c in api.state.get_connections_from(sid):
-                        if (c.target_sid in trust_targets
-                                and not c.trusted_system):
-                            c.trusted_system = True
-                            c.trust_type = "trusted_rfc"
-                            print(f"[+] {sid}: Marked {c.destination_name} "
-                                  f"as trusted (target {c.target_sid} in "
-                                  f"RFCTRUST)")
+                    print(f"[*] {sid}: RFCTRUST has {len(trust)} "
+                          f"system-level trust entries (intelligence "
+                          f"only; per-destination trust is determined "
+                          f"by RFCDES Q=Y)")
             except Exception as e:
                 logger.debug(f"RFCTRUST read failed for {sid}: {e}")
             try:
