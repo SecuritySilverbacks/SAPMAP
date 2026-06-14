@@ -269,30 +269,37 @@ body {
    showCtxMenu / showSCCCtxMenu / showBTPCtxMenu). */
 .ctx-sub.flip-up { top: auto; bottom: -4px; }
 
-/* Scroll affordance — shown by _reflowSubmenus when the submenu's
+/* Scroll affordance — shown by _attachScrollHints when the submenu's
    content exceeds the viewport-capped max-height.  Two indicators
    (▲ at top, ▼ at bottom) overlay the visible scroll viewport and
    fade out based on scroll position.
-   .ctx-sub itself is position:absolute, so an absolute child is
-   positioned relative to its box (= visible viewport-clipped area)
-   regardless of how far the user has scrolled the inner content. */
+
+   When overflow is detected the JS wraps items in an inner
+   .ctx-sub-scroll (which IS the scroll container) and turns
+   .ctx-sub itself into a pure positioning context (overflow:visible).
+   That way the absolute chevrons are positioned relative to the
+   visible viewport-clipped box, not the scrollable content area. */
+.ctx-sub-scroll { overflow-y: auto; }
 .ctx-sub .ctx-scroll-hint {
   position: absolute;
   left: 0; right: 0;
-  height: 20px;
+  height: 22px;
   pointer-events: none;
   display: flex; align-items: center; justify-content: center;
-  font-size: 11px; font-weight: 600; color: #f0883e;
+  font-size: 11px; font-weight: 700; color: #f0883e;
+  letter-spacing: 1px;
   z-index: 2200;
   transition: opacity .15s;
 }
 .ctx-sub .ctx-scroll-hint.top {
   top: 0;
-  background: linear-gradient(180deg, #1c2128 60%, rgba(28,33,40,0) 100%);
+  background: linear-gradient(180deg, #1c2128 65%, rgba(28,33,40,0) 100%);
+  border-radius: 8px 8px 0 0;
 }
 .ctx-sub .ctx-scroll-hint.bottom {
   bottom: 0;
-  background: linear-gradient(0deg, #1c2128 60%, rgba(28,33,40,0) 100%);
+  background: linear-gradient(0deg, #1c2128 65%, rgba(28,33,40,0) 100%);
+  border-radius: 0 0 8px 8px;
 }
 /* When at the corresponding edge, hide the matching hint. */
 .ctx-sub.at-top    .ctx-scroll-hint.top    { opacity: 0; }
@@ -4568,45 +4575,69 @@ function _reflowSubmenus(menu, menuX, menuWidth) {
   });
 }
 
-// Inject ▲ / ▼ scroll-affordance chevrons into a scrollable submenu
-// and wire a scroll listener that toggles `at-top` / `at-bottom`
-// classes so the hints fade out when the operator scrolls to the
-// matching edge. Idempotent — safe to call multiple times.
+// Inject ▲ / ▼ scroll-affordance chevrons into a scrollable submenu.
+//
+// To make the chevrons stay pinned to the VISIBLE viewport (not scroll
+// with content), the items have to be wrapped in an inner scroller --
+// .ctx-sub becomes a fixed-size positioning context with overflow:visible,
+// the inner .ctx-sub-scroll handles the actual scrolling, and the
+// chevrons are absolute-positioned direct children of .ctx-sub layered
+// on top of the scroller.
+//
+// Idempotent: re-running on the same .ctx-sub reuses the wrapper, just
+// re-measures and updates the hint state.
 function _attachScrollHints(sub) {
-  // Decide whether this submenu has overflowing content.
-  const overflows = sub.scrollHeight > sub.clientHeight + 1;
+  // Lazy-create the inner scroller and move all existing items into it.
+  let scroller = sub.querySelector(':scope > .ctx-sub-scroll');
+  if (!scroller) {
+    scroller = document.createElement('div');
+    scroller.className = 'ctx-sub-scroll';
+    // Move every existing child (the menu items) into the scroller.
+    // The chevron nodes don't exist yet at this point.
+    const kids = Array.from(sub.childNodes);
+    kids.forEach(k => scroller.appendChild(k));
+    sub.appendChild(scroller);
+  }
+  // Transfer the just-computed scroll/maxHeight from sub to scroller,
+  // then let sub itself stop being a scroll container so its absolute
+  // children (the chevrons) overlay the visible viewport.
+  if (sub.style.maxHeight) {
+    scroller.style.maxHeight = sub.style.maxHeight;
+    sub.style.maxHeight = '';
+  }
+  scroller.style.overflowY = 'auto';
+  sub.style.overflowY = 'visible';
+
+  const overflows = scroller.scrollHeight > scroller.clientHeight + 1;
   sub.classList.toggle('has-overflow', overflows);
   if (!overflows) {
-    // Content fits — drop any leftover hint nodes so they don't
-    // sit dormant in the DOM.
     sub.querySelectorAll(':scope > .ctx-scroll-hint').forEach(
       n => n.remove());
     sub.classList.remove('at-top', 'at-bottom');
     return;
   }
-  // Inject hints once
+  // Inject hints once, as direct children of .ctx-sub (NOT scroller)
   if (!sub.querySelector(':scope > .ctx-scroll-hint.top')) {
     const top = document.createElement('div');
     top.className = 'ctx-scroll-hint top';
     top.textContent = '▲';
-    sub.insertBefore(top, sub.firstChild);
+    sub.appendChild(top);
     const bot = document.createElement('div');
     bot.className = 'ctx-scroll-hint bottom';
-    bot.textContent = '▼ more';
+    bot.textContent = '▼  more  ▼';
     sub.appendChild(bot);
   }
-  // Initial scroll state
   const update = () => {
-    sub.classList.toggle('at-top', sub.scrollTop <= 1);
+    sub.classList.toggle('at-top', scroller.scrollTop <= 1);
     sub.classList.toggle(
       'at-bottom',
-      sub.scrollTop + sub.clientHeight >= sub.scrollHeight - 1);
+      scroller.scrollTop + scroller.clientHeight
+        >= scroller.scrollHeight - 1);
   };
   update();
-  // Wire scroll listener once
-  if (!sub.dataset.scrollHintWired) {
-    sub.addEventListener('scroll', update, { passive: true });
-    sub.dataset.scrollHintWired = '1';
+  if (!scroller.dataset.scrollHintWired) {
+    scroller.addEventListener('scroll', update, { passive: true });
+    scroller.dataset.scrollHintWired = '1';
   }
 }
 
