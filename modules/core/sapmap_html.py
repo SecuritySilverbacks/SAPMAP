@@ -5975,6 +5975,9 @@ async function createUserViaRfc(sourceSid, destName, targetSid) {
 // everything else to the existing per-node endpoints.  Same payload either
 // way so the modal poller doesn't need to know which path was taken.
 async function testConnection(sid, destName, connIdx) {
+  // Immediate visual feedback in the top activity bar; the server-side
+  // _bg task will take over once polling catches up.
+  flashActivity(`${sid}: testing destination ${destName}`, 10000);
   if ((sid || '').startsWith('BTP:')) {
     await api('POST', 'btp/test_destination', {
       source_sid: sid, destination_name: destName });
@@ -5987,6 +5990,9 @@ async function testConnection(sid, destName, connIdx) {
 
 async function createUserOnTarget(sourceSid, destName, targetSid) {
   document.getElementById('info-panel').classList.remove('visible');
+  flashActivity(
+    `${sourceSid} → ${targetSid}: creating remote user via ${destName}`,
+    15000);
   if ((sourceSid || '').startsWith('BTP:')) {
     await api('POST', 'btp/create_user_on_target', {
       source_sid: sourceSid, destination_name: destName, target_sid: targetSid });
