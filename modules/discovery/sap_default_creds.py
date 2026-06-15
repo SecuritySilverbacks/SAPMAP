@@ -147,11 +147,14 @@ def classify_login_response(resp_bytes):
 # Single Login Attempt
 # ============================================================================
 
-def try_login(host, port, client, user, password, timeout=5, saprouter=""):
+def try_login(host, port, client, user, password, timeout=5, saprouter="",
+              terminal="sapscanner"):
     """Attempt a single DIAG login. One TCP connection per attempt.
 
     Args:
         saprouter: Optional SAProuter route string prefix for tunneled access.
+        terminal: DIAG terminal-name string the server records in SAL
+            Source/Terminal fields when rsau/ip_only=0 on the target.
 
     Returns (result_code, detail_string).
     """
@@ -167,7 +170,7 @@ def try_login(host, port, client, user, password, timeout=5, saprouter=""):
             sock.connect((host, port))
 
         # DIAG init handshake
-        ni_send(sock, build_diag_init())
+        ni_send(sock, build_diag_init(terminal))
         resp = ni_recv(sock, timeout)
         if not resp or len(resp) < 100:
             return (ERROR, "DIAG init failed")
@@ -200,7 +203,8 @@ def try_login(host, port, client, user, password, timeout=5, saprouter=""):
 # ============================================================================
 
 def check_default_credentials(host, port, clients, timeout=5, verbose=False,
-                               cancel_check=None, saprouter=""):
+                               cancel_check=None, saprouter="",
+                               terminal="sapscanner"):
     """Check all default credentials against the given host/port/clients.
 
     Iterates credentials sequentially (no threading — avoids flooding/lockout).
@@ -250,7 +254,7 @@ def check_default_credentials(host, port, clients, timeout=5, verbose=False,
                 break
 
             result, detail = try_login(host, port, client, user, password, timeout,
-                                      saprouter=saprouter)
+                                      saprouter=saprouter, terminal=terminal)
 
             if result == USER_LOCKED:
                 skip_users.add(user)

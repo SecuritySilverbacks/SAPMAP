@@ -3704,12 +3704,14 @@ def _query_sapcontrol_os(host: str, port: int, timeout: float = 3,
 
 def enumerate_system_clients(host: str, disp_port: int, timeout: float = 5,
                              max_workers: int = 20, verbose: bool = False,
-                             sid_hint: str = "", saprouter: str = "") -> list:
+                             sid_hint: str = "", saprouter: str = "",
+                             terminal: str = "sapscanner") -> list:
     """Enumerate SAP clients via DIAG protocol.
 
     Args:
         sid_hint: Optional SID to use as log prefix (for already-known systems).
         saprouter: Optional SAProuter route string prefix.
+        terminal: DIAG terminal-name string (Tier 2 T2.1 spoof support).
     Returns list of client number strings, e.g. ["000", "001", "100"].
     """
     tag = sid_hint or host
@@ -3719,7 +3721,7 @@ def enumerate_system_clients(host: str, disp_port: int, timeout: float = 5,
         result = enumerate_clients(host, disp_port, timeout=timeout,
                                    max_workers=max_workers, verbose=verbose,
                                    saprouter=saprouter,
-                                   sid_hint=sid_hint)
+                                   sid_hint=sid_hint, terminal=terminal)
         clients = result.get("clients", [])
         status = result.get("status", "unknown")
         probed = result.get("probed", 0)
