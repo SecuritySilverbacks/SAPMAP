@@ -468,6 +468,79 @@ class TrustRelation:
 
 
 # ---------------------------------------------------------------------------
+# AbapTelemetryProfile — read-only audit/trace posture snapshot
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AbapTelemetryProfile:
+    """ABAP-side telemetry posture, captured read-only over RFC.
+
+    Tier 1 OPSEC enrichment (see docs/research/13_detection_evasion_plan.md
+    §6.1 Tier 1).  Tells the operator what audit/trace surfaces are on or
+    off **before** any decision to act.  Populated by
+    ``sapmap_telemetry.read_abap_telemetry``; no writes, no tampering.
+    """
+
+    # SAL (Security Audit Log)
+    sal_state: str = "unknown"           # on / off / unknown / unknown_legacy / unauth
+    sal_filter_slots: int = 0            # number of populated RSAUPROF / RSAU_PERS rows
+    sal_filter_scope: str = ""           # "narrow" | "broad" | "" (any slot covers all users + all classes → broad)
+    sal_integrity: str = "unknown"       # on / off / unknown — value of rsau/integrity
+    sal_source_ip_only: str = "unknown"  # on / off / unknown — value of rsau/ip_only
+
+    # Other audit / trace control parameters
+    rec_client: str = "unknown"          # rec/client (DBTABLOG scope) — "OFF" / "ALL" / "<n>" / "unknown"
+    stat_level: str = "unknown"          # stat/level (STAD workload statistics)
+    gw_log_level: str = "unknown"        # gw/log_level (gateway trace verbosity)
+    rdisp_trace: str = "unknown"         # rdisp/TRACE (work-process trace verbosity)
+
+    # Provenance
+    probed_at: str = ""
+    error: str = ""                      # populated when probe failed; profile otherwise empty
+
+    # Raw parameter values keyed by parname for downstream consumers that
+    # want the unparsed source.  Empty when probe failed.
+    raw_params: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        if not self.probed_at:
+            self.probed_at = datetime.now().isoformat()
+
+    def to_dict(self) -> dict:
+        return {
+            "sal_state": self.sal_state,
+            "sal_filter_slots": self.sal_filter_slots,
+            "sal_filter_scope": self.sal_filter_scope,
+            "sal_integrity": self.sal_integrity,
+            "sal_source_ip_only": self.sal_source_ip_only,
+            "rec_client": self.rec_client,
+            "stat_level": self.stat_level,
+            "gw_log_level": self.gw_log_level,
+            "rdisp_trace": self.rdisp_trace,
+            "probed_at": self.probed_at,
+            "error": self.error,
+            "raw_params": dict(self.raw_params or {}),
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> AbapTelemetryProfile:
+        return cls(
+            sal_state=d.get("sal_state", "unknown"),
+            sal_filter_slots=int(d.get("sal_filter_slots", 0) or 0),
+            sal_filter_scope=d.get("sal_filter_scope", ""),
+            sal_integrity=d.get("sal_integrity", "unknown"),
+            sal_source_ip_only=d.get("sal_source_ip_only", "unknown"),
+            rec_client=d.get("rec_client", "unknown"),
+            stat_level=d.get("stat_level", "unknown"),
+            gw_log_level=d.get("gw_log_level", "unknown"),
+            rdisp_trace=d.get("rdisp_trace", "unknown"),
+            probed_at=d.get("probed_at", ""),
+            error=d.get("error", ""),
+            raw_params=dict(d.get("raw_params") or {}),
+        )
+
+
+# ---------------------------------------------------------------------------
 # SAPNode — a system on the map
 # ---------------------------------------------------------------------------
 
@@ -609,6 +682,10 @@ class SAPNode:
     # (that requires system-level trust via TWPSSO2ACL or PSE trustbox).
     # Each entry: {extid, bname, trusting_client, source}
     usrextid_entries: list = field(default_factory=list)
+    # Read-only OPSEC posture: SAL on/off, integrity, source-IP enforcement,
+    # rec/client, stat/level, gw/log_level, rdisp/TRACE.  Populated by
+    # ``sapmap_telemetry.read_abap_telemetry`` after SAP_ALL acquisition.
+    telemetry_profile: Optional[AbapTelemetryProfile] = None
     position: Optional[tuple] = None    # (x, y) on map — None = auto-layout
 
     # Linux LPE state.  Two techniques covered today:
@@ -841,6 +918,8 @@ class SAPNode:
             "sapsys_cert_issuer_dn": self.sapsys_cert_issuer_dn,
             "sapsys_cert_serial": self.sapsys_cert_serial,
             "usrextid_entries": list(self.usrextid_entries),
+            "telemetry_profile": (self.telemetry_profile.to_dict()
+                                   if self.telemetry_profile else None),
             "position": list(self.position) if self.position else None,
             "copyfail_vulnerable": self.copyfail_vulnerable,
             "copyfail_root_obtained": self.copyfail_root_obtained,
@@ -946,6 +1025,9 @@ class SAPNode:
             sapsys_cert_issuer_dn=d.get("sapsys_cert_issuer_dn", ""),
             sapsys_cert_serial=d.get("sapsys_cert_serial", ""),
             usrextid_entries=list(d.get("usrextid_entries", [])),
+            telemetry_profile=(
+                AbapTelemetryProfile.from_dict(d["telemetry_profile"])
+                if d.get("telemetry_profile") else None),
             position=tuple(d["position"]) if d.get("position") else None,
             copyfail_vulnerable=d.get("copyfail_vulnerable", False),
             copyfail_root_obtained=d.get("copyfail_root_obtained", False),
