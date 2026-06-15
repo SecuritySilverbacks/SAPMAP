@@ -104,10 +104,22 @@ def _uc_to_str(buf, char_count=None):
     """
     if buf is None:
         return ''
+    # Windows ctypes auto-decodes `c_wchar * N` Structure fields on attribute
+    # access — `getattr(struct, field)` already returns a Python str up to the
+    # first null. Pass it through unchanged. Without this, the fall-through
+    # below `cast(str, c_wchar_p).value` reinterprets the Python string
+    # object header as a wchar pointer and dereferences random memory,
+    # yielding identical-looking garbage for every Structure field.
+    if isinstance(buf, str):
+        return buf[:char_count] if char_count is not None else buf
+    # Likewise for bytes / bytearray (c_char * N auto-decode path).
+    if isinstance(buf, (bytes, bytearray)):
+        decoded = buf.decode('utf-8', errors='replace')
+        return decoded[:char_count] if char_count is not None else decoded
     if _UC_NATIVE:
         # c_wchar array or c_wchar_p — .value gives Python str directly
         if hasattr(buf, 'value'):
-            v = buf.value
+            v = buf.value or ''
             return v[:char_count] if char_count is not None else v
         # It's a raw pointer; unlikely path but handle it
         return ctypes.cast(buf, ctypes.c_wchar_p).value or ''
