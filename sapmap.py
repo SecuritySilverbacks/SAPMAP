@@ -317,7 +317,11 @@ def _try_pywebview(url: str, debug: bool = False) -> bool:
 
     try:
         print("[*] Launching pywebview window...")
-        icon_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "icons", "sapmap_256x256.png"))
+        icons_dir = os.path.join(os.path.dirname(__file__), "icons")
+        # Windows pywebview routes icon= through System.Drawing.Icon, which
+        # only accepts .ico — a PNG here throws ArgumentException at startup.
+        icon_name = "sapmap.ico" if sys.platform == "win32" else "sapmap_256x256.png"
+        icon_path = os.path.abspath(os.path.join(icons_dir, icon_name))
         if not os.path.exists(icon_path):
             print(f"[!] Icon not found: {icon_path}")
             icon_path = None
