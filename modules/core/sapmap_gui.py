@@ -8988,9 +8988,21 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 print(f"[-] {sid}: No dispatcher port found (need 32XX for DIAG)")
                 return
 
+            # T2.1 — DIAG terminal-name spoof when Tier 1 detected
+            # rsau/ip_only=0 on this node.
+            from sapmap_evasion import (effective_diag_terminal,
+                                         EvasionConfig)
+            evasion = EvasionConfig.from_dict(api.state.evasion or {})
+            term, spoofed = effective_diag_terminal(node, evasion)
+            if spoofed:
+                print(f"[*] {sid}: DIAG terminal spoof active — "
+                      f"'{term}' (rsau/ip_only=0 detected)")
+                emit_finding("INFO", sid,
+                             f"DIAG terminal spoof: '{term}' "
+                             f"(rsau/ip_only=0)")
             clients = sapmap_scanner.enumerate_system_clients(
                 host, disp_port, sid_hint=node.sid,
-                saprouter=node.saprouter)
+                saprouter=node.saprouter, terminal=term)
             if clients:
                 # Merge with existing clients (avoid duplicates)
                 existing_nrs = set()
@@ -9052,9 +9064,22 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
             if node.saprouter:
                 print(f"[*] {sid}: Routing DIAG via SAProuter: {node.saprouter}")
+            # T2.1 — when Tier 1 detected rsau/ip_only=0 on this node,
+            # spoof the DIAG terminal-name field so SAL Source records
+            # a blender value instead of "sapscanner".
+            from sapmap_evasion import (effective_diag_terminal,
+                                         EvasionConfig)
+            evasion = EvasionConfig.from_dict(api.state.evasion or {})
+            term, spoofed = effective_diag_terminal(node, evasion)
+            if spoofed:
+                print(f"[*] {sid}: DIAG terminal spoof active — "
+                      f"'{term}' (rsau/ip_only=0 detected)")
+                emit_finding("INFO", sid,
+                             f"DIAG terminal spoof: '{term}' "
+                             f"(rsau/ip_only=0)")
             findings = check_default_credentials(
                 host, disp_port, clients, timeout=10, verbose=True,
-                saprouter=node.saprouter)
+                saprouter=node.saprouter, terminal=term)
 
             if findings:
                 print(f"[+] {sid}: Found {len(findings)} default credential(s)!")

@@ -479,13 +479,19 @@ def _check_client_redirection(host, port, timeout=5, saprouter=""):
 # Client Probing
 # ============================================================================
 
-def probe_client(host, port, client_nr, timeout=5, saprouter=""):
+def probe_client(host, port, client_nr, timeout=5, saprouter="",
+                 terminal="sapscanner"):
     """Probe a single SAP client via DIAG login attempt.
 
     For each client:
       1. TCP connect + DIAG init handshake
       2. Send DIAG login with random credentials + target client number
       3. Parse response for "client not available" error messages
+
+    ``terminal`` is the DIAG terminal-name string the server records in
+    SAL Source / Terminal fields when ``rsau/ip_only=0`` is configured
+    on the target.  Callers should pass the operator's preferred
+    blender name when Tier 1 detection has flagged the target.
 
     Returns: (client_str, available, detail)
         client_str: "000"-"999"
@@ -498,7 +504,7 @@ def probe_client(host, port, client_nr, timeout=5, saprouter=""):
         sock = _diag_connect(host, port, timeout, saprouter)
 
         # Step 1: DIAG init (TERM_INI) — includes DP header
-        ni_send(sock, build_diag_init())
+        ni_send(sock, build_diag_init(terminal))
         resp = ni_recv(sock, timeout)
         if not resp or len(resp) < 100:
             return (client_str, None, "no_init_response")
@@ -559,7 +565,7 @@ def probe_client(host, port, client_nr, timeout=5, saprouter=""):
 
 def enumerate_clients(host, port, timeout=5, max_workers=20,
                       start_client=0, end_client=999, verbose=False,
-                      saprouter="", sid_hint=""):
+                      saprouter="", sid_hint="", terminal="sapscanner"):
     """Enumerate available SAP clients via DIAG protocol.
 
     Connects to SAP Dispatcher port (32XX) and probes each client number
@@ -587,7 +593,7 @@ def enumerate_clients(host, port, timeout=5, max_workers=20,
     # Quick init to verify the port is a DIAG dispatcher
     try:
         sock = _diag_connect(host, port, timeout, saprouter)
-        ni_send(sock, build_diag_init())
+        ni_send(sock, build_diag_init(terminal))
         resp = ni_recv(sock, timeout)
         sock.close()
         if not resp or len(resp) < 50:
@@ -626,7 +632,8 @@ def enumerate_clients(host, port, timeout=5, max_workers=20,
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {}
         for c in clients_range:
-            f = executor.submit(probe_client, host, port, c, timeout, saprouter)
+            f = executor.submit(probe_client, host, port, c, timeout,
+                                saprouter, terminal)
             futures[f] = c
 
         for f in as_completed(futures):
@@ -663,7 +670,7 @@ def enumerate_clients(host, port, timeout=5, max_workers=20,
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(timeout)
             sock.connect((host, port))
-            ni_send(sock, build_diag_init())
+            ni_send(sock, build_diag_init(terminal))
             resp = ni_recv(sock, timeout)
             sock.close()
             if resp:

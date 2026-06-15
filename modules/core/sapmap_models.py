@@ -1532,6 +1532,11 @@ class SAPMAPState:
     scc_nodes: dict = field(default_factory=dict)        # host -> SCCNode (Cloud Connectors)
     btp_subaccounts: dict = field(default_factory=dict)  # uuid -> BTPSubaccountNode
     scan_config: dict = field(default_factory=dict)
+    # Tier 2 OPSEC settings (terminal-name spoof, etc.).  Stored as a
+    # plain dict on the SAPMAPState boundary to keep import order light
+    # — the postex module that owns EvasionConfig already depends on
+    # sapmap_models; reversing it would create a cycle.
+    evasion: dict = field(default_factory=dict)
     timestamp: str = ""
     version: str = "1.0"
 
@@ -1977,6 +1982,7 @@ class SAPMAPState:
             "version": self.version,
             "timestamp": self.timestamp,
             "scan_config": self.scan_config,
+            "evasion": dict(self.evasion or {}),
             "nodes": {sid: node.to_dict() for sid, node in self.nodes.items()},
             "connections": [c.to_dict() for c in self.connections],
             "created_users": [u.to_dict() for u in self.created_users],
@@ -1998,6 +2004,7 @@ class SAPMAPState:
             version=d.get("version", "1.0"),
             timestamp=d.get("timestamp", ""),
             scan_config=d.get("scan_config", {}),
+            evasion=dict(d.get("evasion") or {}),
             rfc_check_cache=d.get("rfc_check_cache", {}),
         )
         for sid, node_d in d.get("nodes", {}).items():
