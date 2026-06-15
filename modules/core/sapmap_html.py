@@ -924,6 +924,7 @@ body {
       <div class="ctx-item" data-action="check_linux_lpe">&#128275; Check Linux Root LPE (Copy Fail / Dirty Frag)</div>
       <div class="ctx-item" data-action="check_windows_lpe">&#128274; Check Windows SYSTEM LPE (auto: EfsPotato / GodPotato / MiniPlasma)</div>
       <div class="ctx-item" data-action="deep_scan">&#128260; Deep Scan (full SAPology)</div>
+      <div class="ctx-item" data-action="probe_telemetry">&#128270; Probe Audit Telemetry (SAL / integrity / params)</div>
       <div class="ctx-item" data-action="retrieve_rfcs">&#128225; Retrieve RFC Connections</div>
       <div class="ctx-item" data-action="read_java_destinations">&#128225; Read Java JCo Destinations</div>
       <div class="ctx-item" data-action="test_rfcs">&#129514; Test RFC Connections</div>
@@ -4051,6 +4052,7 @@ function showCtxMenu(e, sid) {
     'analyse_capabilities': isAbapStack && (
         (n && (n.credentials || []).some(c => c && c.verified))
         || hasCreatedUsers),
+    'probe_telemetry':  hasUsableAbapAccess,        // ABAP RFC reads only
     'retrieve_rfcs':    hasUsableAbapAccess,        // ABAP-only RFC + BAPI
     'test_rfcs':        hasUsableAbapAccess && hasRFCs,
     'read_java_destinations': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy),
@@ -4235,6 +4237,7 @@ function showCtxMenu(e, sid) {
     'exploit_linux_lpe': 'Requires OS-exec on Linux host — run Check first to confirm at least one technique (Copy Fail or Dirty Frag) is viable',
     'check_windows_lpe':   'Requires OS-exec on a Windows host (GW SAPXPG, CVE-2025-31324 shell, or SAPMAP-created OS-user)',
     'exploit_windows_lpe': 'Requires OS-exec on Windows host — run Check first to confirm MiniPlasma is viable (Win10 1709+ / Server 2019+ with cldflt.sys + .NET 4.7.2+)',
+    'probe_telemetry':  'Needs a verified RFC credential or a SAPMAP-created user — reads TPFYPROPTY and RSAU_PERS over RFC.',
     'retrieve_rfcs':    'Needs a verified RFC credential or a SAPMAP-created user — RSRFCCHK and the RFCDES read both require a working logon.',
     'test_rfcs':        (!hasRFCs
         ? 'Retrieve RFC connections first.'
@@ -4329,6 +4332,7 @@ function showCtxMenu(e, sid) {
     'client_roles':     !isAbapStack,
     'read_usrextid':    !isAbapStack,
     'default_creds':    !isAbapStack,
+    'probe_telemetry':  !isAbapStack,
     'retrieve_rfcs':    !isAbapStack,
     'test_rfcs':        !isAbapStack,
     'create_tcpip':          !isAbapStack,
@@ -5404,6 +5408,9 @@ async function ctxAction(action) {
                 { probe_row_counts: probe });
       break;
     }
+    case 'probe_telemetry':
+      flashActivity(`${sid}: probing telemetry posture`, 3500);
+      await api('POST', `node/${sid}/probe_telemetry`); break;
     case 'retrieve_rfcs':
       await api('POST', `node/${sid}/retrieve_rfcs`); break;
     case 'test_rfcs':
@@ -6260,6 +6267,52 @@ function showDetails(sid) {
         ux.length + ')</h4>' +
         '<div style="color:#8b949e;font-size:11px;margin-bottom:6px">External user identities (X.509 DN / LDAP DN / SAML / email). Intelligence only — not used for ticket forgery.</div>' +
         rows + more + '</div>';
+    })()}
+    ${(() => {
+      // OPSEC audit-posture badges from the read-only telemetry probe.
+      // Doesn't render when the operator hasn't run it; encourages a
+      // probe via the right-click context menu.
+      const tp = n.telemetry_profile;
+      if (!tp) return '';
+      const badge = (label, value, risky) => {
+        const dot = risky ? '#f85149' : '#3fb950';
+        return '<span style="display:inline-flex;align-items:center;gap:4px;' +
+          'background:#0d1117;border:1px solid #30363d;border-radius:4px;' +
+          'padding:2px 8px;font-size:11px;margin:2px 4px 2px 0">' +
+          '<span style="width:6px;height:6px;background:' + dot + ';border-radius:50%"></span>' +
+          '<span style="color:#8b949e">' + escHtml(label) + '</span>' +
+          '<span style="color:#e6edf3">' + escHtml(value) + '</span></span>';
+      };
+      const slotsVal = tp.sal_filter_slots + (tp.sal_filter_scope
+        ? ' / ' + tp.sal_filter_scope : '');
+      const html = [
+        badge('SAL', tp.sal_state, tp.sal_state.startsWith('off')),
+        badge('slots', slotsVal, tp.sal_filter_scope === 'broad'),
+        badge('integrity', tp.sal_integrity,
+              tp.sal_integrity.startsWith('off')),
+        badge('ip_only', tp.sal_source_ip_only,
+              tp.sal_source_ip_only.startsWith('off')),
+        badge('rec/client', tp.rec_client,
+              (tp.rec_client || '').toUpperCase().startsWith('OFF')),
+        badge('stat/level', tp.stat_level,
+              (tp.stat_level || '').startsWith('0')),
+        badge('gw/log_level', tp.gw_log_level,
+              (tp.gw_log_level || '').startsWith('0')),
+        badge('rdisp/TRACE', tp.rdisp_trace,
+              (tp.rdisp_trace || '').startsWith('0')),
+      ].join('');
+      const errLine = tp.error
+        ? '<div style="color:#d29922;font-size:11px;margin-top:6px">' +
+          escHtml(tp.error) + '</div>' : '';
+      const probedLine = tp.probed_at
+        ? '<div style="color:#484f58;font-size:10px;margin-top:4px">probed ' +
+          escHtml(tp.probed_at) + '</div>' : '';
+      return '<div class="detail-section">' +
+        '<h4 style="color:#8b949e">&#128270; OPSEC Telemetry Posture</h4>' +
+        '<div style="color:#8b949e;font-size:11px;margin-bottom:6px">' +
+        'Red dot = surface that favours evasion (audit off, integrity off, ' +
+        'broad filter slot, ip_only spoofable, trace disabled).</div>' +
+        '<div>' + html + '</div>' + errLine + probedLine + '</div>';
     })()}
     ${(() => {
       const sid = n.sid;

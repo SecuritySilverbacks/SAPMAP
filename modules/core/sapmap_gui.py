@@ -7009,6 +7009,68 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:lpe", "Local Privilege Escalation", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/probe_telemetry", method="POST")
+    def node_probe_telemetry(sid):
+        """Tier 1 OPSEC enrichment — read-only ABAP audit posture probe."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        def _run():
+            import sapmap_telemetry
+            creds = node.best_credentials()
+            if creds is None or not creds.verified:
+                print(f"[!] {sid}: telemetry probe needs verified RFC creds — "
+                      f"complete user creation first")
+                emit_finding(
+                    "WARNING", sid,
+                    "Telemetry probe skipped — no verified RFC credentials")
+                return
+            print(f"[*] {sid}: probing ABAP telemetry posture "
+                  f"(SAL, integrity, ip_only, rec/client, stat/level, "
+                  f"gw/log_level, rdisp/TRACE)")
+            profile = sapmap_telemetry.read_abap_telemetry(node, creds)
+            node.telemetry_profile = profile
+            if profile.error:
+                print(f"[!] {sid}: telemetry probe partial — {profile.error}")
+            # Build a one-liner summary for the console + structured
+            # finding the operator can drill into via the panel.
+            badges = (
+                f"SAL={profile.sal_state}",
+                f"slots={profile.sal_filter_slots}"
+                + (f"/{profile.sal_filter_scope}" if profile.sal_filter_scope
+                   else ""),
+                f"integrity={profile.sal_integrity}",
+                f"ip_only={profile.sal_source_ip_only}",
+                f"rec/client={profile.rec_client}",
+                f"stat/level={profile.stat_level}",
+                f"gw/log_level={profile.gw_log_level}",
+                f"rdisp/TRACE={profile.rdisp_trace}",
+            )
+            msg = (f"OPSEC posture — " + ", ".join(badges))
+            # Severity: bump to WARNING when something obviously
+            # evasion-favourable is present (SAL off, integrity off,
+            # ip_only off).  Otherwise INFO.
+            sev = "INFO"
+            risky = []
+            if profile.sal_state.startswith("off"):
+                risky.append("SAL disabled")
+            if profile.sal_integrity.startswith("off"):
+                risky.append("SAL integrity off — file rewrite viable")
+            if profile.sal_source_ip_only.startswith("off"):
+                risky.append("rsau/ip_only=0 — terminal-name spoofable")
+            if profile.sal_filter_scope == "broad":
+                risky.append("broad filter slot present")
+            if risky:
+                sev = "WARNING"
+                msg += " | " + "; ".join(risky)
+            emit_finding(sev, sid, msg)
+            print(f"[+] {sid}: telemetry probe complete")
+
+        _bg(f"{sid}:probe_telemetry", "Probe Telemetry", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/retrieve_rfcs", method="POST")
     def node_retrieve_rfcs(sid):
         response.content_type = "application/json"
