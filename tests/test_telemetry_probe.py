@@ -14,18 +14,26 @@ def test_profile_to_dict_from_dict_roundtrip():
     p = AbapTelemetryProfile(
         sal_state="on",
         sal_filter_slots=4,
+        sal_filter_slots_configured="10",
         sal_filter_scope="narrow",
         sal_integrity="on",
         sal_source_ip_only="off",
         rec_client="OFF",
         stat_level="1",
-        gw_log_level="2",
+        gw_logging="ACTION=...",
         rdisp_trace="1",
         raw_params={"rsau/integrity": "1", "rsau/ip_only": "0"},
     )
     d = p.to_dict()
     p2 = AbapTelemetryProfile.from_dict(d)
     assert p2.to_dict() == d
+
+
+def test_profile_accepts_legacy_gw_log_level_key():
+    """Old state files used the gw_log_level field name — load shouldn't
+    break, value is treated as unknown."""
+    p = AbapTelemetryProfile.from_dict({"gw_log_level": "leftover"})
+    assert p.gw_logging == "leftover"
 
 
 def test_profile_default_state_is_unknown():
@@ -160,13 +168,14 @@ def test_read_abap_telemetry_full_path_on_modern_kernel():
                 and kw.get("QUERY_TABLE") == "RSAU_PERS")
 
     param_values = {
-        "rsau/enable":    "1",
-        "rsau/integrity": "1",
-        "rsau/ip_only":   "0",
-        "rec/client":     "ALL",
-        "stat/level":     "1",
-        "gw/log_level":   "2",
-        "rdisp/TRACE":    "1",
+        "rsau/enable":          "1",
+        "rsau/selection_slots": "10",
+        "rsau/integrity":       "1",
+        "rsau/ip_only":         "0",
+        "rec/client":           "ALL",
+        "stat/level":           "1",
+        "gw/logging":           "",
+        "rdisp/TRACE":          "1",
     }
     handlers = [
         _th_handler(param_values),
@@ -186,6 +195,9 @@ def test_read_abap_telemetry_full_path_on_modern_kernel():
     assert p.sal_source_ip_only == "off"
     assert p.rec_client == "ALL"
     assert p.stat_level == "1"
+    assert p.sal_filter_slots_configured == "10"
+    # gw/logging unset → falls back to OFF marker for the badge
+    assert p.gw_logging == "OFF"
 
 
 def test_read_abap_telemetry_falls_back_to_rsauprof_on_older_kernel():
@@ -266,8 +278,8 @@ def test_read_abap_telemetry_tolerates_individual_unknown_param():
         return (fm == "RFC_READ_TABLE"
                 and kw.get("QUERY_TABLE") == "RSAU_PERS")
 
-    # 'gw/log_level' is the unknown one — kernel raises PARAMETER_UNKNOWN
-    raises_for = {"gw/log_level"}
+    # 'gw/logging' is the unknown one — kernel raises PARAMETER_UNKNOWN
+    raises_for = {"gw/logging"}
 
     def th_match(fm, kw):
         return fm == "TH_GET_PARAMETER"
@@ -278,6 +290,7 @@ def test_read_abap_telemetry_tolerates_individual_unknown_param():
             raise Exception("PARAMETER_UNKNOWN: " + name)
         return {"PARAMETER_VALUE": {
             "rsau/enable": "1",
+            "rsau/selection_slots": "10",
             "rsau/integrity": "1",
             "rsau/ip_only": "1",
             "rec/client": "ALL",
@@ -293,10 +306,11 @@ def test_read_abap_telemetry_tolerates_individual_unknown_param():
     with _patch_get_connection(conn):
         p = sapmap_telemetry.read_abap_telemetry(node, creds=None)
 
-    # Unknown one falls back to default-marker; others come through
-    assert p.gw_log_level == "1 (default)"
+    # Unknown one falls back to OFF marker; others come through
+    assert p.gw_logging == "OFF"
     assert p.rec_client == "ALL"
     assert p.sal_integrity == "on"
+    assert p.sal_filter_slots_configured == "10"
 
 
 def test_read_abap_telemetry_records_error_when_connection_raises():

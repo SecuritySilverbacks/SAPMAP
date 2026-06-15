@@ -7036,16 +7036,19 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 print(f"[!] {sid}: telemetry probe partial — {profile.error}")
             # Build a one-liner summary for the console + structured
             # finding the operator can drill into via the panel.
+            slots_used = (f"{profile.sal_filter_slots}"
+                           if profile.sal_filter_slots else "0")
+            slots_conf = profile.sal_filter_slots_configured or "?"
             badges = (
-                f"SAL={profile.sal_state}",
-                f"slots={profile.sal_filter_slots}"
-                + (f"/{profile.sal_filter_scope}" if profile.sal_filter_scope
-                   else ""),
-                f"integrity={profile.sal_integrity}",
-                f"ip_only={profile.sal_source_ip_only}",
+                f"rsau/enable={profile.sal_state}",
+                f"slots={slots_used}/{slots_conf}"
+                + (f" [{profile.sal_filter_scope}]"
+                   if profile.sal_filter_scope else ""),
+                f"rsau/integrity={profile.sal_integrity}",
+                f"rsau/ip_only={profile.sal_source_ip_only}",
                 f"rec/client={profile.rec_client}",
                 f"stat/level={profile.stat_level}",
-                f"gw/log_level={profile.gw_log_level}",
+                f"gw/logging={profile.gw_logging}",
                 f"rdisp/TRACE={profile.rdisp_trace}",
             )
             msg = (f"OPSEC posture — " + ", ".join(badges))

@@ -6274,30 +6274,89 @@ function showDetails(sid) {
       // probe via the right-click context menu.
       const tp = n.telemetry_profile;
       if (!tp) return '';
-      const badge = (label, value, risky) => {
-        const dot = risky ? '#f85149' : '#3fb950';
-        return '<span style="display:inline-flex;align-items:center;gap:4px;' +
-          'background:#0d1117;border:1px solid #30363d;border-radius:4px;' +
-          'padding:2px 8px;font-size:11px;margin:2px 4px 2px 0">' +
-          '<span style="width:6px;height:6px;background:' + dot + ';border-radius:50%"></span>' +
-          '<span style="color:#8b949e">' + escHtml(label) + '</span>' +
-          '<span style="color:#e6edf3">' + escHtml(value) + '</span></span>';
+      // Tooltip text per parameter — hover any badge to see what the
+      // value means and why it matters for evasion / detection.
+      const DOCS = {
+        'rsau/enable':
+          'Security Audit Log master switch. 0/blank = SAL off (no audit '
+          + 'records written at all). 1 = SAL on. Kernel default is 0; '
+          + 'production systems should run with 1.',
+        'slots':
+          'Populated filter slots (left) / kernel-allocated filter slots '
+          + 'right). Configured slots = value of rsau/selection_slots — '
+          + 'how many (user, client, audit-class) tuples the kernel '
+          + 'will accept. Populated comes from RSAU_PERS / RSAUPROF and '
+          + 'is often 0 even when SAL is on, because runtime slots live '
+          + 'in kernel memory rather than these persistence tables. '
+          + '[broad] = at least one slot matches all users AND all '
+          + 'clients (USERSEL=\'*\', CLISEL=\'*\') — high-noise audit '
+          + 'profile, easy to fill via decoy events.',
+        'rsau/integrity':
+          'HMAC signing of .AUD files. 1 = kernel signs each record so '
+          + 'offline tampering is detectable. 0 = an operator with file '
+          + 'access can rewrite SAL records without leaving an integrity '
+          + 'breadcrumb. Detection-evasion plan §4.A.10 — file rewrite '
+          + 'viable only when this is OFF.',
+        'rsau/ip_only':
+          'Source-field hardening in SAL. 1 = kernel uses the TCP source '
+          + 'IP in the Source field, ignoring the client-supplied '
+          + 'terminal name. 0 = kernel trusts the terminal-name string '
+          + 'the client sent in the DIAG/RFC handshake; an attacker can '
+          + 'inject any value (Troopers14 §4.A.18, SAP Note 1497445). '
+          + 'OFF makes attribution unreliable.',
+        'rec/client':
+          'DBTABLOG (table-change logging) scope. OFF = no table change '
+          + 'logs. ALL = every client logged. <n> = specific client. '
+          + 'Required to log CDHDR/CDPOS changes for tables marked '
+          + 'log-relevant in DD09L.',
+        'stat/level':
+          'STAD workload statistics level. 0 = STAD disabled (no per-'
+          + 'transaction stats). 1+ = STAD on. STAD is one of the few '
+          + 'channels that captures *what an operator did* — turning it '
+          + 'off mid-op blinds workload monitoring.',
+        'gw/logging':
+          'Gateway access-log configuration string (multi-value). Empty '
+          + '/ OFF = no gateway logging (registered programs and RFC '
+          + 'callbacks are not audited). The real parameter — gw/log_level '
+          + 'does not exist on standard kernels.',
+        'rdisp/TRACE':
+          'Work-process trace verbosity (0–3). 0 = trace off (no dev_w* '
+          + 'output). 1 = errors only. 2 = full. 3 = debug. Operators '
+          + 'often lower this during an op to suppress dev_rfc / dev_w* '
+          + 'file growth (Detection-evasion plan §4.C.4).',
       };
-      const slotsVal = tp.sal_filter_slots + (tp.sal_filter_scope
-        ? ' / ' + tp.sal_filter_scope : '');
+      const badge = (paramName, displayValue, risky) => {
+        const dot = risky ? '#f85149' : '#3fb950';
+        const doc = DOCS[paramName] || '';
+        return '<span title="' + escHtml(doc) + '" '
+          + 'style="display:inline-flex;align-items:center;gap:4px;'
+          + 'background:#0d1117;border:1px solid #30363d;border-radius:4px;'
+          + 'padding:2px 8px;font-size:11px;margin:2px 4px 2px 0;'
+          + 'cursor:help">'
+          + '<span style="width:6px;height:6px;background:' + dot
+          + ';border-radius:50%"></span>'
+          + '<span style="color:#8b949e">' + escHtml(paramName) + '</span>'
+          + '<span style="color:#e6edf3">' + escHtml(displayValue) + '</span>'
+          + '</span>';
+      };
+      const slotsUsed = tp.sal_filter_slots == null ? 0 : tp.sal_filter_slots;
+      const slotsConf = tp.sal_filter_slots_configured || '?';
+      const slotsVal = slotsUsed + ' / ' + slotsConf
+        + (tp.sal_filter_scope ? ' [' + tp.sal_filter_scope + ']' : '');
       const html = [
-        badge('SAL', tp.sal_state, tp.sal_state.startsWith('off')),
+        badge('rsau/enable', tp.sal_state, tp.sal_state.startsWith('off')),
         badge('slots', slotsVal, tp.sal_filter_scope === 'broad'),
-        badge('integrity', tp.sal_integrity,
+        badge('rsau/integrity', tp.sal_integrity,
               tp.sal_integrity.startsWith('off')),
-        badge('ip_only', tp.sal_source_ip_only,
+        badge('rsau/ip_only', tp.sal_source_ip_only,
               tp.sal_source_ip_only.startsWith('off')),
         badge('rec/client', tp.rec_client,
               (tp.rec_client || '').toUpperCase().startsWith('OFF')),
         badge('stat/level', tp.stat_level,
               (tp.stat_level || '').startsWith('0')),
-        badge('gw/log_level', tp.gw_log_level,
-              (tp.gw_log_level || '').startsWith('0')),
+        badge('gw/logging', tp.gw_logging || 'unknown',
+              (tp.gw_logging || '').toUpperCase().startsWith('OFF')
+              || (tp.gw_logging || '') === ''),
         badge('rdisp/TRACE', tp.rdisp_trace,
               (tp.rdisp_trace || '').startsWith('0')),
       ].join('');
@@ -6311,7 +6370,9 @@ function showDetails(sid) {
         '<h4 style="color:#8b949e">&#128270; OPSEC Telemetry Posture</h4>' +
         '<div style="color:#8b949e;font-size:11px;margin-bottom:6px">' +
         'Red dot = surface that favours evasion (audit off, integrity off, ' +
-        'broad filter slot, ip_only spoofable, trace disabled).</div>' +
+        'broad filter slot, ip_only spoofable, trace disabled). ' +
+        '<span style="color:#484f58">Hover any badge for parameter docs.</span>' +
+        '</div>' +
         '<div>' + html + '</div>' + errLine + probedLine + '</div>';
     })()}
     ${(() => {

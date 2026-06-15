@@ -52,19 +52,23 @@ logger = logging.getLogger(__name__)
 # the rendered finding when the parameter is unset (kernel default
 # applies).  Sourced from SAP Notes referenced in the research plan.
 _KERNEL_DEFAULTS = {
-    "rsau/enable":      "0",   # OFF by default on stock kernels
-    "rsau/integrity":   "1",   # ≥ 7.5: HMAC on by default
-    "rsau/ip_only":     "1",   # ≥ 7.5x: client-supplied terminal name ignored
-    "rec/client":       "OFF",
-    "stat/level":       "1",
-    "gw/log_level":     "1",
-    "rdisp/TRACE":      "1",
+    "rsau/enable":          "0",   # OFF by default on stock kernels
+    "rsau/selection_slots": "2",   # kernel default; production usually raises to 10+
+    "rsau/integrity":       "1",   # ≥ 7.5: HMAC on by default
+    "rsau/ip_only":         "1",   # ≥ 7.5x: client-supplied terminal name ignored
+    "rec/client":           "OFF",
+    "stat/level":           "1",
+    "gw/logging":           "",    # empty means gateway access logging disabled
+    "rdisp/TRACE":          "1",
 }
 
-# Params probed via C_SAPGPARAM (one ABAP report, one round-trip)
+# Parameter names are case-sensitive at the kernel boundary —
+# TH_GET_PARAMETER('rec/client') and TH_GET_PARAMETER('REC/CLIENT')
+# resolve to different keys.  These are the canonical lowercase forms
+# the kernel actually publishes.
 _PROBED_PARAMS = [
-    "rsau/enable", "rsau/integrity", "rsau/ip_only",
-    "rec/client", "stat/level", "gw/log_level", "rdisp/TRACE",
+    "rsau/enable", "rsau/selection_slots", "rsau/integrity", "rsau/ip_only",
+    "rec/client", "stat/level", "gw/logging", "rdisp/TRACE",
 ]
 
 
@@ -94,15 +98,22 @@ def read_abap_telemetry(node: SAPNode,
             profile.rec_client = (
                 _str_param(raw, "rec/client").upper() or "OFF")
             profile.stat_level = _str_param(raw, "stat/level")
-            profile.gw_log_level = _str_param(raw, "gw/log_level")
+            # gw/logging is empty-by-default — render an empty/unset value
+            # as the explicit OFF rather than "unset", so the badge means
+            # what an operator expects (gateway logging is not active).
+            gw_log_val = raw.get("gw/logging", "").strip()
+            profile.gw_logging = gw_log_val if gw_log_val else "OFF"
             profile.rdisp_trace = _str_param(raw, "rdisp/TRACE")
+            profile.sal_filter_slots_configured = _str_param(
+                raw, "rsau/selection_slots")
         except Exception as e:
             msg = format_rfc_exception(e).split("\n")[0][:200]
             logger.debug(f"{node.sid}: C_SAPGPARAM read failed: {msg}")
             errors.append(f"params blocked ({msg})")
             profile.raw_params = {}
             for k in ("sal_integrity", "sal_source_ip_only", "rec_client",
-                      "stat_level", "gw_log_level", "rdisp_trace"):
+                      "stat_level", "gw_logging", "rdisp_trace",
+                      "sal_filter_slots_configured"):
                 setattr(profile, k, "blocked")
 
         # ---- D1: SAL state + filter slots ----
