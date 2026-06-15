@@ -2,8 +2,6 @@
 
 from unittest.mock import patch, MagicMock
 
-import pytest
-
 from sapmap_models import AbapTelemetryProfile, Credentials, SAPNode
 import sapmap_telemetry
 
@@ -96,11 +94,8 @@ def _make_rfc_table_response(rows):
 
 
 def _build_mock_conn(handlers):
-    """handlers: list of (matcher_fn, response_dict).
-
-    Each ``conn.call(...)`` invocation walks the list, returns the first
-    response whose matcher returns True for the kwargs.  Falling off the
-    end raises so tests catch unexpected calls.
+    """handlers: list of (matcher_fn, response) where response is either
+    a dict, an Exception (raised), or a callable taking kwargs.
     """
     conn = MagicMock()
 
@@ -109,6 +104,8 @@ def _build_mock_conn(handlers):
             if matcher(fm_name, kwargs):
                 if isinstance(response, Exception):
                     raise response
+                if callable(response):
+                    return response(kwargs)
                 return response
         raise AssertionError(
             f"Unexpected RFC call: {fm_name}({kwargs!r})")
@@ -125,49 +122,63 @@ def _patch_get_connection(conn):
                         "_get_connection", return_value=cm)
 
 
+def _stub_run_abap_program(values):
+    """Build a stand-in for sapmap_rfc._run_abap_program.
+
+    ``values`` maps probed param name → reported value.  The stub emits
+    the same '#sapmap# <param> | <value>' lines the real ABAP report
+    writes, so the parser is exercised end-to-end.
+    """
+    def _stub(conn, abap_lines, program_name="ZSAPMAP"):
+        out = []
+        for p, v in values.items():
+            out.append(f"#sapmap# {p} | {v}")
+        return {"success": True, "output": out, "fm_name": "RFC_ABAP_INSTALL_AND_RUN",
+                "error": ""}
+    return _stub
+
+
+def _stub_run_abap_program_blocked():
+    def _stub(conn, abap_lines, program_name="ZSAPMAP"):
+        return {"success": False, "output": [], "fm_name": None,
+                "error": "RFC_ABAP_INSTALL_AND_RUN not permitted in this client"}
+    return _stub
+
+
 def test_read_abap_telemetry_full_path_on_modern_kernel():
     node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
     creds = Credentials(username="SAPMAP00", password="x",
                         client="001", instance_nr="00")
-
-    def match_param_batch(fm, kw):
-        return (fm == "RFC_READ_TABLE"
-                and kw.get("QUERY_TABLE") == "TPFYPROPTY"
-                and "rsau/integrity" in (kw.get("OPTIONS") or [{}])[0]
-                                                .get("TEXT", ""))
-
-    def match_rsau_enable(fm, kw):
-        return (fm == "RFC_READ_TABLE"
-                and kw.get("QUERY_TABLE") == "TPFYPROPTY"
-                and "rsau/enable" in (kw.get("OPTIONS") or [{}])[0]
-                                              .get("TEXT", ""))
 
     def match_rsau_pers(fm, kw):
         return (fm == "RFC_READ_TABLE"
                 and kw.get("QUERY_TABLE") == "RSAU_PERS")
 
     handlers = [
-        (match_param_batch, _make_rfc_table_response([
-            "rsau/integrity|1",
-            "rsau/ip_only|0",      # ← spoofable
-            "rec/client|ALL",
-            "stat/level|1",
-            "gw/log_level|2",
-            "rdisp/TRACE|1",
-        ])),
-        (match_rsau_enable, _make_rfc_table_response(["1"])),
         (match_rsau_pers, _make_rfc_table_response([
             "BCUSER|001", "SAP*|001", "*|*",   # third row = broad slot
         ])),
     ]
     conn = _build_mock_conn(handlers)
-    with _patch_get_connection(conn):
+    param_values = {
+        "rsau/enable":    "1",
+        "rsau/integrity": "1",
+        "rsau/ip_only":   "0",
+        "rec/client":     "ALL",
+        "stat/level":     "1",
+        "gw/log_level":   "2",
+        "rdisp/TRACE":    "1",
+    }
+    with _patch_get_connection(conn), \
+         patch.object(sapmap_telemetry.sapmap_rfc,
+                      "_run_abap_program",
+                      side_effect=_stub_run_abap_program(param_values)):
         p = sapmap_telemetry.read_abap_telemetry(node, creds)
 
     assert p.error == ""
     assert p.sal_state == "on"
     assert p.sal_filter_slots == 3
-    assert p.sal_filter_scope == "broad"  # the *|* row trips broad
+    assert p.sal_filter_scope == "broad"
     assert p.sal_integrity == "on"
     assert p.sal_source_ip_only == "off"
     assert p.rec_client == "ALL"
@@ -176,18 +187,6 @@ def test_read_abap_telemetry_full_path_on_modern_kernel():
 
 def test_read_abap_telemetry_falls_back_to_rsauprof_on_older_kernel():
     node = SAPNode(sid="OLD", hostname="old", ip="10.0.0.2")
-
-    def match_param(fm, kw):
-        return (fm == "RFC_READ_TABLE"
-                and kw.get("QUERY_TABLE") == "TPFYPROPTY"
-                and "rsau/integrity" in (kw.get("OPTIONS") or [{}])[0]
-                                                .get("TEXT", ""))
-
-    def match_rsau_enable(fm, kw):
-        return (fm == "RFC_READ_TABLE"
-                and kw.get("QUERY_TABLE") == "TPFYPROPTY"
-                and "rsau/enable" in (kw.get("OPTIONS") or [{}])[0]
-                                              .get("TEXT", ""))
 
     def match_rsau_pers(fm, kw):
         return (fm == "RFC_READ_TABLE"
@@ -198,13 +197,14 @@ def test_read_abap_telemetry_falls_back_to_rsauprof_on_older_kernel():
                 and kw.get("QUERY_TABLE") == "RSAUPROF")
 
     handlers = [
-        (match_param, _make_rfc_table_response(["rsau/integrity|1"])),
-        (match_rsau_enable, _make_rfc_table_response(["1"])),
         (match_rsau_pers, Exception("TABLE_NOT_AVAILABLE")),
         (match_rsauprof, _make_rfc_table_response(["BCUSER|000"])),
     ]
     conn = _build_mock_conn(handlers)
-    with _patch_get_connection(conn):
+    with _patch_get_connection(conn), \
+         patch.object(sapmap_telemetry.sapmap_rfc,
+                      "_run_abap_program",
+                      side_effect=_stub_run_abap_program({"rsau/enable": "1"})):
         p = sapmap_telemetry.read_abap_telemetry(node, creds=None)
 
     assert p.sal_state == "on"
@@ -212,54 +212,65 @@ def test_read_abap_telemetry_falls_back_to_rsauprof_on_older_kernel():
     assert p.sal_filter_scope == "narrow"
 
 
-def test_read_abap_telemetry_no_sal_slots_marked_unknown_legacy():
+def test_read_abap_telemetry_no_sal_slots_uses_param_for_state():
     node = SAPNode(sid="X", hostname="x", ip="10.0.0.3")
-
-    def match_param(fm, kw):
-        return (fm == "RFC_READ_TABLE"
-                and kw.get("QUERY_TABLE") == "TPFYPROPTY"
-                and "rsau/integrity" in (kw.get("OPTIONS") or [{}])[0]
-                                                .get("TEXT", ""))
-
-    def match_rsau_enable(fm, kw):
-        return (fm == "RFC_READ_TABLE"
-                and kw.get("QUERY_TABLE") == "TPFYPROPTY"
-                and "rsau/enable" in (kw.get("OPTIONS") or [{}])[0]
-                                              .get("TEXT", ""))
 
     def match_either_table(fm, kw):
         return (fm == "RFC_READ_TABLE"
                 and kw.get("QUERY_TABLE") in ("RSAU_PERS", "RSAUPROF"))
 
     handlers = [
-        (match_param, _make_rfc_table_response([])),
-        # rsau/enable also missing → "off (default)" branch
-        (match_rsau_enable, _make_rfc_table_response([])),
         (match_either_table, _make_rfc_table_response([])),
         (match_either_table, _make_rfc_table_response([])),
     ]
     conn = _build_mock_conn(handlers)
-    with _patch_get_connection(conn):
+    with _patch_get_connection(conn), \
+         patch.object(sapmap_telemetry.sapmap_rfc,
+                      "_run_abap_program",
+                      side_effect=_stub_run_abap_program({"rsau/enable": "0"})):
         p = sapmap_telemetry.read_abap_telemetry(node, creds=None)
 
     assert p.sal_filter_slots == 0
     assert p.sal_filter_scope == ""
-    # off (default) is preserved — we don't downgrade a known-default
-    # state to "unknown_legacy" when rsau/enable was actually probed
-    assert p.sal_state == "off (default)"
+    assert p.sal_state == "off"   # C_SAPGPARAM said so explicitly
 
 
-def test_read_abap_telemetry_records_error_when_first_call_raises():
-    node = SAPNode(sid="X", hostname="x", ip="10.0.0.4")
+def test_read_abap_telemetry_continues_when_param_read_blocked():
+    """Critical regression: a blocked C_SAPGPARAM must not stop the SAL
+    slot read from running."""
+    node = SAPNode(sid="P", hostname="p", ip="10.0.0.5")
 
-    def always_raise(fm, kw):
-        return fm == "RFC_READ_TABLE"
+    def match_rsau_pers(fm, kw):
+        return (fm == "RFC_READ_TABLE"
+                and kw.get("QUERY_TABLE") == "RSAU_PERS")
 
-    conn = _build_mock_conn([
-        (always_raise, Exception("RFC_LOGON_FAILURE")),
-    ])
-    with _patch_get_connection(conn):
+    handlers = [
+        (match_rsau_pers, _make_rfc_table_response(["BCUSER|001"])),
+    ]
+    conn = _build_mock_conn(handlers)
+    with _patch_get_connection(conn), \
+         patch.object(sapmap_telemetry.sapmap_rfc,
+                      "_run_abap_program",
+                      side_effect=_stub_run_abap_program_blocked()):
         p = sapmap_telemetry.read_abap_telemetry(node, creds=None)
 
-    assert "TPFYPROPTY read failed" in p.error
+    # Params are marked blocked but SAL slots came through fine
+    assert p.sal_integrity == "blocked"
+    assert p.rec_client == "blocked"
+    assert p.sal_filter_slots == 1
+    assert p.sal_filter_scope == "narrow"
+    assert "params blocked" in p.error
+
+
+def test_read_abap_telemetry_records_error_when_connection_raises():
+    node = SAPNode(sid="X", hostname="x", ip="10.0.0.4")
+
+    cm = MagicMock()
+    cm.__enter__ = MagicMock(side_effect=Exception("RFC_LOGON_FAILURE"))
+    cm.__exit__ = MagicMock(return_value=False)
+    with patch.object(sapmap_telemetry.sapmap_rfc,
+                      "_get_connection", return_value=cm):
+        p = sapmap_telemetry.read_abap_telemetry(node, creds=None)
+
+    assert "RFC connect failed" in p.error
     assert p.sal_state == "unknown"
