@@ -4237,7 +4237,7 @@ function showCtxMenu(e, sid) {
     'exploit_linux_lpe': 'Requires OS-exec on Linux host — run Check first to confirm at least one technique (Copy Fail or Dirty Frag) is viable',
     'check_windows_lpe':   'Requires OS-exec on a Windows host (GW SAPXPG, CVE-2025-31324 shell, or SAPMAP-created OS-user)',
     'exploit_windows_lpe': 'Requires OS-exec on Windows host — run Check first to confirm MiniPlasma is viable (Win10 1709+ / Server 2019+ with cldflt.sys + .NET 4.7.2+)',
-    'probe_telemetry':  'Needs a verified RFC credential or a SAPMAP-created user — reads runtime profile parameters via C_SAPGPARAM (RFC_ABAP_INSTALL_AND_RUN) plus RSAU_PERS for SAL slots. ABAP install emits AUM/AUW SAL events.',
+    'probe_telemetry':  'Needs a verified RFC credential or a SAPMAP-created user — reads runtime profile parameters via TH_GET_PARAMETER (lightweight kernel FM) plus RSAU_PERS for SAL slots. No ABAP install, no AUM/AUW events.',
     'retrieve_rfcs':    'Needs a verified RFC credential or a SAPMAP-created user — RSRFCCHK and the RFCDES read both require a working logon.',
     'test_rfcs':        (!hasRFCs
         ? 'Retrieve RFC connections first.'

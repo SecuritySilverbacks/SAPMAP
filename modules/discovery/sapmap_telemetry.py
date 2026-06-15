@@ -19,23 +19,21 @@ How profile parameter values are read:
   runtime values live in kernel shared memory, not in any DDIC view.
   RFC_READ_TABLE on it raises ``AD 718 TABLE_WITHOUT_DATA``.
 
-  The canonical retrieval is the C kernel call ``C_SAPGPARAM`` driven
-  via ``RFC_ABAP_INSTALL_AND_RUN`` — that's what ``RZ11`` and
-  ``RSPARAM`` internally use.  We accept the SAL/AU audit-event cost
-  here (one ABAP install + run, classes AUM/AUW) because Tier 1 is
-  OPSEC *awareness*, not OPSEC silence — the whole point of the probe
-  is so the operator can decide what to do next with full information.
-
-  When ``RFC_ABAP_INSTALL_AND_RUN`` isn't available we still emit a
-  best-effort profile from the SAL slot read alone.
+  Retrieval uses the RFC-enabled kernel FM ``TH_GET_PARAMETER`` (one
+  round-trip per parameter, parameter name is **case-sensitive** —
+  ``rec/client`` and ``REC/CLIENT`` are not the same key).  This is
+  much lighter than ``RFC_ABAP_INSTALL_AND_RUN`` (no ABAP install,
+  no AUM/AUW SAL events) and works on every modern kernel.
 
 Failure modes:
   - No SAP_ALL  → ``AbapTelemetryProfile.error="unauth"``
   - Older kernel without ``RSAU_PERS`` → fall through to ``RSAUPROF``;
     when both are empty → ``sal_state`` falls back to the global
     ``rsau/enable`` value we got from C_SAPGPARAM
-  - C_SAPGPARAM blocked (RFC_ABAP_INSTALL_AND_RUN denied) → params
-    reported as "blocked"; SAL slot read still runs
+  - TH_GET_PARAMETER blocked / not exposed → params reported as
+    "blocked"; SAL slot read still runs
+  - Individual parameter raises → that one param is marked "unknown",
+    the others continue
   - RFC call raises → cache the short error on the profile, do not crash
 """
 
@@ -161,48 +159,56 @@ def _open_or_record_error(node, creds, errors):
 
 
 # ---------------------------------------------------------------------------
-# D2/D3/D4 — profile parameter values via C_SAPGPARAM
+# D2/D3/D4 — profile parameter values via TH_GET_PARAMETER
 # ---------------------------------------------------------------------------
 
 def _read_profile_params(conn) -> dict:
     """Return ``{parname: parvalue}`` for every probed parameter.
 
-    Builds an ABAP report that calls the C kernel function
-    ``C_SAPGPARAM`` for each parameter, writes the value, then ships
-    it through ``RFC_ABAP_INSTALL_AND_RUN``.  We tag each WRITE with a
-    fixed prefix (``# param=...|value=...#``) so the output parser
-    survives interleaved kernel messages.
+    Calls the RFC-enabled kernel FM ``TH_GET_PARAMETER`` once per name.
+    Parameter names are **case-sensitive** — ``rec/client`` is *not*
+    the same key as ``REC/CLIENT``; that's why ``_PROBED_PARAMS`` is
+    hand-written in canonical form.
 
-    Raises on outright failure (caller catches and continues).
+    Per-parameter failures are tolerated: if one name raises (e.g.
+    kernel doesn't recognise it) the rest still complete.  An outright
+    failure (FM missing entirely, or first call raises with a non-
+    "parameter not found" reason) propagates so the caller can mark
+    the whole D2/D3/D4 slice as blocked.
+
+    Different kernel releases return the value under one of:
+    ``PARAMETER_VALUE``, ``VALUE`` or ``RETURN_VALUE``.  We accept all
+    three.
     """
-    abap = [
-        "REPORT zsapmap_telemetry.",
-        "DATA: lv_val(256) TYPE c.",
-    ]
-    for p in _PROBED_PARAMS:
-        abap.extend([
-            "CLEAR lv_val.",
-            f"  CALL 'C_SAPGPARAM' ID 'NAME'  FIELD '{p}'",
-            "                   ID 'VALUE' FIELD lv_val.",
-            f"  WRITE: / '#sapmap#', '{p}', '|', lv_val.",
-        ])
-    run = sapmap_rfc._run_abap_program(conn, abap, "ZSAPMAP_TM")
-    if not run["success"]:
-        raise RuntimeError(run.get("error") or "C_SAPGPARAM run failed")
-
     out = {}
-    for line in run.get("output", []) or []:
-        if "#sapmap#" not in line:
-            continue
-        # Layout: "#sapmap# <parname> | <value>" with arbitrary spacing
-        after = line.split("#sapmap#", 1)[1].strip()
-        if "|" not in after:
-            continue
-        parname, _, value = after.partition("|")
-        parname = parname.strip()
-        value = value.strip()
-        if parname:
-            out[parname] = value
+    fm_failed_hard = False
+    fm_error = ""
+    for parname in _PROBED_PARAMS:
+        try:
+            r = conn.call("TH_GET_PARAMETER", PARAMETER_NAME=parname)
+            value = (r.get("PARAMETER_VALUE")
+                     or r.get("VALUE")
+                     or r.get("RETURN_VALUE")
+                     or "")
+            if isinstance(value, bytes):
+                value = value.decode("utf-8", errors="replace")
+            out[parname] = value.strip() if isinstance(value, str) else value
+        except Exception as e:
+            msg = format_rfc_exception(e).split("\n")[0][:160]
+            # A genuine "parameter not found" is fine — record empty,
+            # let the default-aware renderer decide what to display.
+            # A "function module not exposed" / "no auth" kills the
+            # whole slice; remember it for the caller.
+            low = msg.lower()
+            if ("not found" in low or "does not exist" in low
+                    or "parameter_unknown" in low):
+                out[parname] = ""
+                continue
+            fm_failed_hard = True
+            fm_error = msg
+            break
+    if fm_failed_hard and not out:
+        raise RuntimeError(fm_error or "TH_GET_PARAMETER failed")
     return out
 
 
