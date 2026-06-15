@@ -483,7 +483,8 @@ class AbapTelemetryProfile:
 
     # SAL (Security Audit Log)
     sal_state: str = "unknown"           # on / off / unknown / unknown_legacy / unauth
-    sal_filter_slots: int = 0            # number of populated RSAUPROF / RSAU_PERS rows
+    sal_filter_slots: int = 0            # populated RSAU_PERS / RSAUPROF rows (often 0 — runtime filter slots aren't always exposed there)
+    sal_filter_slots_configured: str = "unknown"  # rsau/selection_slots — slots allocated in kernel memory
     sal_filter_scope: str = ""           # "narrow" | "broad" | "" (any slot covers all users + all classes → broad)
     sal_integrity: str = "unknown"       # on / off / unknown — value of rsau/integrity
     sal_source_ip_only: str = "unknown"  # on / off / unknown — value of rsau/ip_only
@@ -491,7 +492,7 @@ class AbapTelemetryProfile:
     # Other audit / trace control parameters
     rec_client: str = "unknown"          # rec/client (DBTABLOG scope) — "OFF" / "ALL" / "<n>" / "unknown"
     stat_level: str = "unknown"          # stat/level (STAD workload statistics)
-    gw_log_level: str = "unknown"        # gw/log_level (gateway trace verbosity)
+    gw_logging: str = "unknown"          # gw/logging (gateway access log spec)
     rdisp_trace: str = "unknown"         # rdisp/TRACE (work-process trace verbosity)
 
     # Provenance
@@ -510,12 +511,13 @@ class AbapTelemetryProfile:
         return {
             "sal_state": self.sal_state,
             "sal_filter_slots": self.sal_filter_slots,
+            "sal_filter_slots_configured": self.sal_filter_slots_configured,
             "sal_filter_scope": self.sal_filter_scope,
             "sal_integrity": self.sal_integrity,
             "sal_source_ip_only": self.sal_source_ip_only,
             "rec_client": self.rec_client,
             "stat_level": self.stat_level,
-            "gw_log_level": self.gw_log_level,
+            "gw_logging": self.gw_logging,
             "rdisp_trace": self.rdisp_trace,
             "probed_at": self.probed_at,
             "error": self.error,
@@ -527,12 +529,17 @@ class AbapTelemetryProfile:
         return cls(
             sal_state=d.get("sal_state", "unknown"),
             sal_filter_slots=int(d.get("sal_filter_slots", 0) or 0),
+            sal_filter_slots_configured=d.get(
+                "sal_filter_slots_configured", "unknown"),
             sal_filter_scope=d.get("sal_filter_scope", ""),
             sal_integrity=d.get("sal_integrity", "unknown"),
             sal_source_ip_only=d.get("sal_source_ip_only", "unknown"),
             rec_client=d.get("rec_client", "unknown"),
             stat_level=d.get("stat_level", "unknown"),
-            gw_log_level=d.get("gw_log_level", "unknown"),
+            # Accept the prior `gw_log_level` key for state files written
+            # by an older snapshot of this code — value is meaningless
+            # (it was the wrong parameter) but won't blow up loading.
+            gw_logging=d.get("gw_logging", d.get("gw_log_level", "unknown")),
             rdisp_trace=d.get("rdisp_trace", "unknown"),
             probed_at=d.get("probed_at", ""),
             error=d.get("error", ""),
