@@ -6283,26 +6283,24 @@ function showDetails(sid) {
           + 'production systems should run with 1.',
         'slots':
           'Populated filter slots (left) / kernel-allocated filter slots '
-          + 'right). Configured slots = value of rsau/selection_slots — '
-          + 'how many (user, client, audit-class) tuples the kernel '
-          + 'will accept. Populated comes from RSAU_PERS / RSAUPROF and '
-          + 'is often 0 even when SAL is on, because runtime slots live '
-          + 'in kernel memory rather than these persistence tables. '
-          + '[broad] = at least one slot matches all users AND all '
-          + 'clients (USERSEL=\'*\', CLISEL=\'*\') — high-noise audit '
-          + 'profile, easy to fill via decoy events.',
+          + '(right). Configured count comes from rsau/selection_slots — '
+          + 'how many (user, client, audit-class) tuples the kernel will '
+          + 'accept. Populated comes from RSAU_PERS / RSAUPROF and is '
+          + 'often 0 even when SAL is on, because runtime slots live in '
+          + 'kernel memory rather than these persistence tables. [broad] '
+          + '= at least one slot matches all users AND all clients '
+          + '(USERSEL=\'*\', CLISEL=\'*\') — very high-volume audit '
+          + 'profile.',
         'rsau/integrity':
           'HMAC signing of .AUD files. 1 = kernel signs each record so '
           + 'offline tampering is detectable. 0 = an operator with file '
           + 'access can rewrite SAL records without leaving an integrity '
-          + 'breadcrumb. Detection-evasion plan §4.A.10 — file rewrite '
-          + 'viable only when this is OFF.',
+          + 'breadcrumb.',
         'rsau/ip_only':
           'Source-field hardening in SAL. 1 = kernel uses the TCP source '
           + 'IP in the Source field, ignoring the client-supplied '
           + 'terminal name. 0 = kernel trusts the terminal-name string '
-          + 'the client sent in the DIAG/RFC handshake; an attacker can '
-          + 'inject any value (Troopers14 §4.A.18, SAP Note 1497445). '
+          + 'the client sent in the DIAG/RFC handshake (SAP Note 1497445); '
           + 'OFF makes attribution unreliable.',
         'rec/client':
           'DBTABLOG (table-change logging) scope. OFF = no table change '
@@ -6312,18 +6310,19 @@ function showDetails(sid) {
         'stat/level':
           'STAD workload statistics level. 0 = STAD disabled (no per-'
           + 'transaction stats). 1+ = STAD on. STAD is one of the few '
-          + 'channels that captures *what an operator did* — turning it '
+          + 'channels that captures what an operator did — turning it '
           + 'off mid-op blinds workload monitoring.',
         'gw/logging':
-          'Gateway access-log configuration string (multi-value). Empty '
-          + '/ OFF = no gateway logging (registered programs and RFC '
-          + 'callbacks are not audited). The real parameter — gw/log_level '
-          + 'does not exist on standard kernels.',
+          'Gateway access-log configuration string (multi-value: ACTION=, '
+          + 'LOGFILE=, SWITCHTF=, MAXSIZEKB=, ...). Empty / OFF = no '
+          + 'gateway logging (registered programs and RFC callbacks are '
+          + 'not audited). The often-quoted gw/log_level parameter does '
+          + 'not exist on standard kernels.',
         'rdisp/TRACE':
-          'Work-process trace verbosity (0–3). 0 = trace off (no dev_w* '
+          'Work-process trace verbosity (0-3). 0 = trace off (no dev_w* '
           + 'output). 1 = errors only. 2 = full. 3 = debug. Operators '
           + 'often lower this during an op to suppress dev_rfc / dev_w* '
-          + 'file growth (Detection-evasion plan §4.C.4).',
+          + 'file growth.',
       };
       const badge = (paramName, displayValue, risky) => {
         const dot = risky ? '#f85149' : '#3fb950';
@@ -6332,11 +6331,14 @@ function showDetails(sid) {
           + 'style="display:inline-flex;align-items:center;gap:4px;'
           + 'background:#0d1117;border:1px solid #30363d;border-radius:4px;'
           + 'padding:2px 8px;font-size:11px;margin:2px 4px 2px 0;'
-          + 'cursor:help">'
-          + '<span style="width:6px;height:6px;background:' + dot
-          + ';border-radius:50%"></span>'
+          + 'cursor:help;max-width:100%">'
+          // flex:0 0 6px keeps the dot a perfect 6x6 circle when the
+          // badge wraps over multiple lines (gw/logging value is long).
+          + '<span style="flex:0 0 6px;width:6px;height:6px;background:'
+          + dot + ';border-radius:50%;align-self:center"></span>'
           + '<span style="color:#8b949e">' + escHtml(paramName) + '</span>'
-          + '<span style="color:#e6edf3">' + escHtml(displayValue) + '</span>'
+          + '<span style="color:#e6edf3;word-break:break-all">'
+          + escHtml(displayValue) + '</span>'
           + '</span>';
       };
       const slotsUsed = tp.sal_filter_slots == null ? 0 : tp.sal_filter_slots;
