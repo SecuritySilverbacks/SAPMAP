@@ -5976,8 +5976,10 @@ async function createUserViaRfc(sourceSid, destName, targetSid) {
 // way so the modal poller doesn't need to know which path was taken.
 async function testConnection(sid, destName, connIdx) {
   // Immediate visual feedback in the top activity bar; the server-side
-  // _bg task will take over once polling catches up.
-  flashActivity(`${sid}: testing destination ${destName}`, 10000);
+  // _bg task will take over once polling catches up. Short hold — the
+  // test itself usually completes in well under 5 s and the operator
+  // doesn't want stale "testing…" lingering after success.
+  flashActivity(`${sid}: testing destination ${destName}`, 3500);
   if ((sid || '').startsWith('BTP:')) {
     await api('POST', 'btp/test_destination', {
       source_sid: sid, destination_name: destName });
@@ -5992,7 +5994,7 @@ async function createUserOnTarget(sourceSid, destName, targetSid) {
   document.getElementById('info-panel').classList.remove('visible');
   flashActivity(
     `${sourceSid} → ${targetSid}: creating remote user via ${destName}`,
-    15000);
+    6000);
   if ((sourceSid || '').startsWith('BTP:')) {
     await api('POST', 'btp/create_user_on_target', {
       source_sid: sourceSid, destination_name: destName, target_sid: targetSid });
@@ -10689,13 +10691,17 @@ function flashActivity(label, holdMs) {
 
 function _collectFlashLabels() {
   const now = Date.now();
+  const seen = new Set();
   const out = [];
   for (const id in _flashActivities) {
     if (_flashActivities[id].expiresAt <= now) {
       delete _flashActivities[id];
-    } else {
-      out.push(_flashActivities[id].label);
+      continue;
     }
+    const label = _flashActivities[id].label;
+    if (seen.has(label)) continue;
+    seen.add(label);
+    out.push(label);
   }
   return out;
 }
