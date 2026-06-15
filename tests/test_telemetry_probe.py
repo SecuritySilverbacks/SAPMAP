@@ -122,27 +122,32 @@ def _patch_get_connection(conn):
                         "_get_connection", return_value=cm)
 
 
-def _stub_run_abap_program(values):
-    """Build a stand-in for sapmap_rfc._run_abap_program.
+def _th_handler(values, fail_with: Exception = None,
+                fail_first_with: Exception = None):
+    """Return a handler tuple that matches TH_GET_PARAMETER calls.
 
-    ``values`` maps probed param name → reported value.  The stub emits
-    the same '#sapmap# <param> | <value>' lines the real ABAP report
-    writes, so the parser is exercised end-to-end.
+    ``values`` maps probed param name → returned PARAMETER_VALUE.
+    Missing entries respond with ``{"PARAMETER_VALUE": ""}``.
+
+    ``fail_with`` raises that exception on every TH_GET_PARAMETER call.
+    ``fail_first_with`` raises only on the first call (used to model an
+    auth-denied first hit that should abort the whole slice).
     """
-    def _stub(conn, abap_lines, program_name="ZSAPMAP"):
-        out = []
-        for p, v in values.items():
-            out.append(f"#sapmap# {p} | {v}")
-        return {"success": True, "output": out, "fm_name": "RFC_ABAP_INSTALL_AND_RUN",
-                "error": ""}
-    return _stub
+    state = {"calls": 0}
 
+    def match(fm, kw):
+        return fm == "TH_GET_PARAMETER"
 
-def _stub_run_abap_program_blocked():
-    def _stub(conn, abap_lines, program_name="ZSAPMAP"):
-        return {"success": False, "output": [], "fm_name": None,
-                "error": "RFC_ABAP_INSTALL_AND_RUN not permitted in this client"}
-    return _stub
+    def respond(kw):
+        state["calls"] += 1
+        if fail_with is not None:
+            raise fail_with
+        if fail_first_with is not None and state["calls"] == 1:
+            raise fail_first_with
+        name = kw.get("PARAMETER_NAME", "")
+        return {"PARAMETER_VALUE": values.get(name, "")}
+
+    return (match, respond)
 
 
 def test_read_abap_telemetry_full_path_on_modern_kernel():
@@ -154,12 +159,6 @@ def test_read_abap_telemetry_full_path_on_modern_kernel():
         return (fm == "RFC_READ_TABLE"
                 and kw.get("QUERY_TABLE") == "RSAU_PERS")
 
-    handlers = [
-        (match_rsau_pers, _make_rfc_table_response([
-            "BCUSER|001", "SAP*|001", "*|*",   # third row = broad slot
-        ])),
-    ]
-    conn = _build_mock_conn(handlers)
     param_values = {
         "rsau/enable":    "1",
         "rsau/integrity": "1",
@@ -169,10 +168,14 @@ def test_read_abap_telemetry_full_path_on_modern_kernel():
         "gw/log_level":   "2",
         "rdisp/TRACE":    "1",
     }
-    with _patch_get_connection(conn), \
-         patch.object(sapmap_telemetry.sapmap_rfc,
-                      "_run_abap_program",
-                      side_effect=_stub_run_abap_program(param_values)):
+    handlers = [
+        _th_handler(param_values),
+        (match_rsau_pers, _make_rfc_table_response([
+            "BCUSER|001", "SAP*|001", "*|*",   # third row = broad slot
+        ])),
+    ]
+    conn = _build_mock_conn(handlers)
+    with _patch_get_connection(conn):
         p = sapmap_telemetry.read_abap_telemetry(node, creds)
 
     assert p.error == ""
@@ -197,14 +200,12 @@ def test_read_abap_telemetry_falls_back_to_rsauprof_on_older_kernel():
                 and kw.get("QUERY_TABLE") == "RSAUPROF")
 
     handlers = [
+        _th_handler({"rsau/enable": "1"}),
         (match_rsau_pers, Exception("TABLE_NOT_AVAILABLE")),
         (match_rsauprof, _make_rfc_table_response(["BCUSER|000"])),
     ]
     conn = _build_mock_conn(handlers)
-    with _patch_get_connection(conn), \
-         patch.object(sapmap_telemetry.sapmap_rfc,
-                      "_run_abap_program",
-                      side_effect=_stub_run_abap_program({"rsau/enable": "1"})):
+    with _patch_get_connection(conn):
         p = sapmap_telemetry.read_abap_telemetry(node, creds=None)
 
     assert p.sal_state == "on"
@@ -220,24 +221,21 @@ def test_read_abap_telemetry_no_sal_slots_uses_param_for_state():
                 and kw.get("QUERY_TABLE") in ("RSAU_PERS", "RSAUPROF"))
 
     handlers = [
+        _th_handler({"rsau/enable": "0"}),
         (match_either_table, _make_rfc_table_response([])),
         (match_either_table, _make_rfc_table_response([])),
     ]
     conn = _build_mock_conn(handlers)
-    with _patch_get_connection(conn), \
-         patch.object(sapmap_telemetry.sapmap_rfc,
-                      "_run_abap_program",
-                      side_effect=_stub_run_abap_program({"rsau/enable": "0"})):
+    with _patch_get_connection(conn):
         p = sapmap_telemetry.read_abap_telemetry(node, creds=None)
 
     assert p.sal_filter_slots == 0
     assert p.sal_filter_scope == ""
-    assert p.sal_state == "off"   # C_SAPGPARAM said so explicitly
+    assert p.sal_state == "off"   # TH_GET_PARAMETER said so explicitly
 
 
 def test_read_abap_telemetry_continues_when_param_read_blocked():
-    """Critical regression: a blocked C_SAPGPARAM must not stop the SAL
-    slot read from running."""
+    """A blocked TH_GET_PARAMETER must not stop the SAL slot read."""
     node = SAPNode(sid="P", hostname="p", ip="10.0.0.5")
 
     def match_rsau_pers(fm, kw):
@@ -245,21 +243,60 @@ def test_read_abap_telemetry_continues_when_param_read_blocked():
                 and kw.get("QUERY_TABLE") == "RSAU_PERS")
 
     handlers = [
+        _th_handler({}, fail_first_with=Exception(
+            "NOT_AUTHORIZED: TH_GET_PARAMETER")),
         (match_rsau_pers, _make_rfc_table_response(["BCUSER|001"])),
     ]
     conn = _build_mock_conn(handlers)
-    with _patch_get_connection(conn), \
-         patch.object(sapmap_telemetry.sapmap_rfc,
-                      "_run_abap_program",
-                      side_effect=_stub_run_abap_program_blocked()):
+    with _patch_get_connection(conn):
         p = sapmap_telemetry.read_abap_telemetry(node, creds=None)
 
-    # Params are marked blocked but SAL slots came through fine
     assert p.sal_integrity == "blocked"
     assert p.rec_client == "blocked"
     assert p.sal_filter_slots == 1
     assert p.sal_filter_scope == "narrow"
     assert "params blocked" in p.error
+
+
+def test_read_abap_telemetry_tolerates_individual_unknown_param():
+    """One missing parameter must not blank the rest."""
+    node = SAPNode(sid="Q", hostname="q", ip="10.0.0.6")
+
+    def match_rsau_pers(fm, kw):
+        return (fm == "RFC_READ_TABLE"
+                and kw.get("QUERY_TABLE") == "RSAU_PERS")
+
+    # 'gw/log_level' is the unknown one — kernel raises PARAMETER_UNKNOWN
+    raises_for = {"gw/log_level"}
+
+    def th_match(fm, kw):
+        return fm == "TH_GET_PARAMETER"
+
+    def th_respond(kw):
+        name = kw.get("PARAMETER_NAME", "")
+        if name in raises_for:
+            raise Exception("PARAMETER_UNKNOWN: " + name)
+        return {"PARAMETER_VALUE": {
+            "rsau/enable": "1",
+            "rsau/integrity": "1",
+            "rsau/ip_only": "1",
+            "rec/client": "ALL",
+            "stat/level": "1",
+            "rdisp/TRACE": "1",
+        }.get(name, "")}
+
+    handlers = [
+        (th_match, th_respond),
+        (match_rsau_pers, _make_rfc_table_response([])),
+    ]
+    conn = _build_mock_conn(handlers)
+    with _patch_get_connection(conn):
+        p = sapmap_telemetry.read_abap_telemetry(node, creds=None)
+
+    # Unknown one falls back to default-marker; others come through
+    assert p.gw_log_level == "1 (default)"
+    assert p.rec_client == "ALL"
+    assert p.sal_integrity == "on"
 
 
 def test_read_abap_telemetry_records_error_when_connection_raises():
