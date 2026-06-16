@@ -256,6 +256,86 @@ def test_run_linux_lpe_no_method_returns_clean_error():
 
 
 # ===========================================================================
+# Explicit operator method-choice (bypasses cache and auto-pick)
+# ===========================================================================
+
+
+def test_explicit_copyfail_bypasses_dirtyfrag_cache():
+    """Operator picks Copy Fail explicitly even though Dirty Frag had
+    previously won root and was the cached method — bug repro for the
+    'sticky Dirty Frag' regression where the picker kept reusing the
+    slow path on hosts where Copy Fail was viable."""
+    from sapmap_lpe_auto import run_linux_lpe
+    n = _node()
+    n.linux_lpe_method = "dirtyfrag"
+    n.dirtyfrag_root_obtained = True
+    with patch("sapmap_copyfail.run_as_root",
+               return_value={"ok": True, "stdout": "uid=0",
+                              "error": ""}) as cf_run, \
+         patch("sapmap_dirtyfrag.run_as_root",
+               return_value={"ok": True, "stdout": "should-not-run",
+                              "error": ""}) as df_run:
+        out = run_linux_lpe(n, "id", method="copyfail")
+    assert out["ok"] is True
+    assert out["method"] == "copyfail"
+    cf_run.assert_called_once()
+    df_run.assert_not_called()
+
+
+def test_explicit_dirtyfrag_chosen_runs_dirtyfrag():
+    """Operator can still force Dirty Frag when they want it."""
+    from sapmap_lpe_auto import run_linux_lpe
+    n = _node()
+    with patch("sapmap_copyfail.run_as_root",
+               return_value={"ok": True, "stdout": "should-not-run",
+                              "error": ""}) as cf_run, \
+         patch("sapmap_dirtyfrag.run_as_root",
+               return_value={"ok": True, "stdout": "uid=0",
+                              "error": ""}) as df_run:
+        out = run_linux_lpe(n, "id", method="dirtyfrag")
+    assert out["ok"] is True
+    assert out["method"] == "dirtyfrag"
+    df_run.assert_called_once()
+    cf_run.assert_not_called()
+
+
+def test_explicit_method_ignores_env_force():
+    """When the operator passes method= explicitly, SAPMAP_LPE_FORCE is
+    ignored — explicit GUI choice trumps environment-level overrides."""
+    from sapmap_lpe_auto import run_linux_lpe
+    n = _node()
+    with patch("sapmap_copyfail.run_as_root",
+               return_value={"ok": True, "stdout": "uid=0",
+                              "error": ""}) as cf_run, \
+         patch("sapmap_dirtyfrag.run_as_root") as df_run, \
+         patch.dict(os.environ, {"SAPMAP_LPE_FORCE": "dirtyfrag"}):
+        out = run_linux_lpe(n, "id", method="copyfail")
+    assert out["method"] == "copyfail"
+    cf_run.assert_called_once()
+    df_run.assert_not_called()
+
+
+def test_no_method_passed_uses_autopicker_preferring_copyfail():
+    """Backwards-compat: method=None falls back to auto-pick which
+    prefers Copy Fail when both are viable."""
+    from sapmap_lpe_auto import run_linux_lpe
+    cf_res = {"vulnerable": True, "kernel": "6.4.0", "reason": "ok"}
+    df_res = {"vulnerable": True, "kernel": "6.4.0", "arch": "x86_64",
+              "reason": "ok", "mitigation_applied": False}
+    n = _node()
+    with patch("sapmap_copyfail.check_copyfail", return_value=cf_res), \
+         patch("sapmap_dirtyfrag.check_dirtyfrag", return_value=df_res), \
+         patch("sapmap_copyfail.run_as_root",
+               return_value={"ok": True, "stdout": "uid=0",
+                              "error": ""}) as cf_run, \
+         patch("sapmap_dirtyfrag.run_as_root") as df_run:
+        out = run_linux_lpe(n, "id")
+    assert out["method"] == "copyfail"
+    cf_run.assert_called_once()
+    df_run.assert_not_called()
+
+
+# ===========================================================================
 # Copy Fail exploit-script generator — Python template safety
 # ===========================================================================
 # The exploit dropped to /tmp/.cf_s.py runs as the foothold user.  It

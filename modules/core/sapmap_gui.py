@@ -5888,23 +5888,32 @@ def create_app(api: SAPMAPApi) -> Bottle:
     @app.route("/api/node/<sid>/exploit_linux_lpe", method="POST")
     @app.route("/api/node/<sid>/exploit_copyfail",  method="POST")  # legacy alias
     def node_exploit_linux_lpe(sid):
-        """Run a shell command as root using the best available Linux
-        LPE technique.  Auto-picker prefers Copy Fail when both viable;
-        falls back to Dirty Frag.  Legacy ``/exploit_copyfail`` path
-        still works."""
+        """Run a shell command as root using a Linux LPE technique.
+
+        Accepts an optional ``method`` field in the POST body
+        (``"copyfail"`` or ``"dirtyfrag"``).  When set, that technique
+        is used verbatim — no auto-pick, no cached-method reuse.  When
+        omitted, the auto-picker decides (prefers Copy Fail).
+        """
         response.content_type = "application/json"
         node = api.state.get_node(sid)
         if not node:
             return json.dumps({"error": f"Node {sid} not found"})
         data = request.json or {}
         command = data.get("command", "id")
+        chosen_method = (data.get("method") or "").strip().lower() or None
+        if chosen_method and chosen_method not in ("copyfail", "dirtyfrag"):
+            return json.dumps({"error": f"Unknown LPE method "
+                                          f"{chosen_method!r}"})
 
         def _run():
-            _task_start(f"{sid}:exploit_linux_lpe",
-                        f"{sid}: Linux LPE — running: {command}")
+            label = (f"{sid}: Linux LPE ({chosen_method}) — running: "
+                     f"{command}") if chosen_method else (
+                     f"{sid}: Linux LPE — running: {command}")
+            _task_start(f"{sid}:exploit_linux_lpe", label)
             try:
                 from sapmap_lpe_auto import run_linux_lpe
-                res = run_linux_lpe(node, command)
+                res = run_linux_lpe(node, command, method=chosen_method)
                 method = res.get("method") or "?"
                 if res.get("ok"):
                     sapmap_findings.emit_finding(

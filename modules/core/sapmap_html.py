@@ -940,7 +940,7 @@ body {
     <div class="ctx-item">&#9876; Exploitation</div>
     <div class="ctx-sub">
       <div class="ctx-item" data-action="lpe">&#128274; ABAP Local Privilege Escalation</div>
-      <div class="ctx-item" data-action="exploit_linux_lpe">&#9889; Escalate to Root (auto: Copy Fail / Dirty Frag)</div>
+      <div class="ctx-item" data-action="exploit_linux_lpe">&#9889; Escalate to Root (pick: Copy Fail [default] / Dirty Frag)</div>
       <div class="ctx-item" data-action="exploit_windows_lpe">&#9889; Escalate to SYSTEM (auto: EfsPotato / GodPotato / MiniPlasma)</div>
       <div class="ctx-item" data-action="betrusted">&#128272; Betrusted — Inject Trusted IP (10KBLAZE)</div>
       <div class="ctx-item" data-action="create_user_betrusted">&#128272; Create User (10KBLAZE Full Chain)</div>
@@ -5141,18 +5141,32 @@ async function ctxAction(action) {
       showToast('Linux LPE check started — probing both Copy Fail and Dirty Frag', 'info');
       break;
     case 'exploit_linux_lpe': {
-      const cmd = prompt('Command to run as root on ' + sid + ':', 'id');
+      // Operator picks technique explicitly. Default is Copy Fail —
+      // it's pure Python (no on-disk binary), fast (~1 RFC call), and
+      // covers most modern kernels. Dirty Frag is the fallback for
+      // kernels where Copy Fail isn't viable; it's a ~7,000-chunk
+      // vendored binary upload over SAPXPG, which is slow and sometimes
+      // hits exec issues on hardened hosts.
+      const usesCopyfail = confirm(
+            'Pick the Linux LPE technique for ' + sid + ':\n\n'
+            + 'OK = Copy Fail (CVE-2026-31431) — pure Python, fast, '
+            + 'no binary on disk. Recommended default.\n\n'
+            + 'Cancel = Dirty Frag (no CVE) — vendored ~7,000-chunk '
+            + 'static binary upload. Use only when Copy Fail is not '
+            + 'viable on this kernel.');
+      const method = usesCopyfail ? 'copyfail' : 'dirtyfrag';
+      const cmd = prompt(
+            'Command to run as root on ' + sid
+            + ' (via ' + method + '):', 'id');
       if (!cmd) break;
       if (!confirm(
-            'Run Linux LPE on ' + sid + '?\n\n' +
-            'SAPMAP picks the best technique automatically: Copy Fail '
-            + '(CVE-2026-31431) when viable, otherwise Dirty Frag (no '
-            + 'CVE — embargo broke).\n\n'
-            + 'Both temporarily patch /usr/bin/su in the kernel page '
+            'Run Linux LPE (' + method + ') on ' + sid + '?\n\n'
+            + 'Temporarily patches /usr/bin/su in the kernel page '
             + 'cache to execute:\n  ' + cmd + '\n\n'
             + 'Non-persistent (page cache only, lost on reboot or '
             + '`echo 3 > /proc/sys/vm/drop_caches`).')) break;
-      await api('POST', `node/${sid}/exploit_linux_lpe`, {command: cmd});
+      await api('POST', `node/${sid}/exploit_linux_lpe`,
+                {command: cmd, method: method});
       break;
     }
     case 'check_windows_lpe':
