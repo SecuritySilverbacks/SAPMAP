@@ -100,6 +100,17 @@ def main():
                         help="Verbose output")
     parser.add_argument("--debug", action="store_true",
                         help="Enable debug logging")
+    parser.add_argument("--allow-evasion", action="store_true",
+                        help="Arm Tier 3 active-evasion techniques "
+                             "(SAL filter narrow, kernel-param dynamic-set, "
+                             "STAD silencing, DBTABLOG suppression, NWA "
+                             "log-config flip, ICM trace flip).  Without "
+                             "this flag, every Tier 3 entry point refuses "
+                             "with EvasionGateError.  Prints a banner at "
+                             "startup detailing what's now available.  "
+                             "Requires explicit written authorization for "
+                             "active-evasion testing against in-scope "
+                             "targets.")
 
     args = parser.parse_args()
 
@@ -132,6 +143,19 @@ def main():
         # Load persistent RFC cache and created destinations
         load_rfc_cache_into(api.state)
         load_created_destinations_into(api.state)
+
+    # Persist the --allow-evasion CLI choice onto the session state so
+    # every Tier 3 gate check sees it.  We OR with whatever the loaded
+    # .sapmap session already had, so loading a state file that was
+    # saved with the flag on keeps it on across restarts; passing
+    # --allow-evasion can only raise the arm level, never lower it.
+    if getattr(args, "allow_evasion", False):
+        try:
+            evasion = dict(api.state.evasion or {})
+            evasion["allow_evasion"] = True
+            api.state.evasion = evasion
+        except Exception as e:
+            print(f"[!] Could not persist --allow-evasion: {e}")
 
     # CLI-only scan mode
     if args.targets:
@@ -174,6 +198,17 @@ def main():
         "================================================================\n"
     )
     print(banner)
+
+    # Tier 3 evasion banner — only when the operator armed it.  We
+    # print it AFTER the disclaimer so the two warnings stack, and
+    # set the persistent flag on the API's state object below.
+    if getattr(args, "allow_evasion", False):
+        try:
+            from sapmap_evasion_gate import print_evasion_banner
+            print_evasion_banner()
+        except Exception as e:
+            print(f"[!] Could not print evasion banner: {e}")
+
     print(f"[*] Starting SAPMAP server on {url}")
 
     # Start Bottle server in background thread (threaded so stop/poll don't block)

@@ -75,6 +75,20 @@ class EvasionConfig:
     # identities are used verbatim in the order given.
     mysapsso2_users: str = ""
 
+    # T3 master arm switch.  Tier 3 techniques (active SAL/STAD/DBTABLOG
+    # manipulation, kernel parameter dynamic-set, NWA log-config flip,
+    # ICM trace flip, evasion-window context managers) refuse to run
+    # unless this is True.  Set via the ``--allow-evasion`` CLI flag
+    # or the GUI settings panel.  Persisted in the .sapmap session
+    # file so re-loads keep the operator's intent.
+    allow_evasion: bool = False
+
+    # ISO-timestamp of the last successful evasion-baseline capture.
+    # Tier 3 techniques additionally refuse to run when this is empty
+    # (no baseline → no safe restore path).  Cleared explicitly when
+    # the operator commits a permanent change.
+    baseline_captured_at: str = ""
+
     # Recorded so the GUI can show "last edited at".
     updated_at: str = ""
 
@@ -87,6 +101,8 @@ class EvasionConfig:
             "diag_terminal_name": self.diag_terminal_name,
             "os_exec_channel": self.os_exec_channel,
             "mysapsso2_users": self.mysapsso2_users,
+            "allow_evasion": self.allow_evasion,
+            "baseline_captured_at": self.baseline_captured_at,
             "updated_at": self.updated_at,
         }
 
@@ -96,6 +112,8 @@ class EvasionConfig:
             diag_terminal_name=d.get("diag_terminal_name", ""),
             os_exec_channel=d.get("os_exec_channel", ""),
             mysapsso2_users=d.get("mysapsso2_users", ""),
+            allow_evasion=bool(d.get("allow_evasion", False)),
+            baseline_captured_at=d.get("baseline_captured_at", ""),
             updated_at=d.get("updated_at", ""),
         )
 

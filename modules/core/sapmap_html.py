@@ -796,6 +796,10 @@ body {
 
 <!-- Activity Bar -->
 <div id="activity-bar"><span class="activity-dot"></span><span id="activity-prefix">Working</span><span id="activity-text">...</span></div>
+<div id="evasion-armed-bar" style="display:none;align-items:center;gap:8px;background:linear-gradient(90deg,#3a0808 0%,#1a0e0e 100%);border-bottom:2px solid #f85149;padding:6px 16px;font-size:13px;font-weight:600;color:#ff9b9b;text-shadow:0 0 6px #f8514980" title="Tier 3 active-evasion techniques are armed for this session.  SAL filter narrow, kernel-param dynamic-set, STAD/DBTABLOG suppression, NWA log-config flip etc. will RUN when invoked.  Toggle off in Settings to re-arm gate.">
+  <span style="font-weight:700;color:#f85149;text-transform:uppercase;font-size:11px;letter-spacing:1px;padding:2px 8px;border:1px solid #f8514980;border-radius:3px;background:#f8514915">⚡ Tier 3 Armed</span>
+  <span id="evasion-armed-text">Active-evasion techniques unlocked for this session.  Every Tier 3 entry point snapshots a baseline and restores on exit.</span>
+</div>
 
 <!-- Critical-finding banner (rendered by renderFindings()) -->
 <div id="findings-bar"></div>
@@ -2446,6 +2450,14 @@ async function pollUpdates() {
       updateMap();
       updateStatusBar();
       updateActivityBar();
+      // Tier 3 armed-mode bar — visible while state.evasion.allow_evasion
+      // is true.  Driven entirely from server-side state so a stale
+      // browser tab can't fake the armed visual.
+      try {
+        const armed = !!(state.evasion && state.evasion.allow_evasion);
+        const bar = document.getElementById('evasion-armed-bar');
+        if (bar) bar.style.display = armed ? 'flex' : 'none';
+      } catch (_) {}
       if (state.scan_state === 'complete' || state.scan_state === 'error' ||
           state.scan_state === 'cancelled') {
         document.getElementById('st-status').textContent =
