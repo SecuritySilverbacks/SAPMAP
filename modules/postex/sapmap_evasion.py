@@ -43,6 +43,11 @@ class EvasionConfig:
     # warranted.  Empty → use ``DEFAULT_SPOOF_TERMINAL``.  Per session.
     diag_terminal_name: str = ""
 
+    # Forced OS-exec channel — "" (auto), "sxpg", or "gw_sapxpg".  Auto
+    # means ``effective_os_exec_channel`` chooses based on what creds
+    # and primitives are available on the target.
+    os_exec_channel: str = ""
+
     # Recorded so the GUI can show "last edited at".
     updated_at: str = ""
 
@@ -53,6 +58,7 @@ class EvasionConfig:
     def to_dict(self) -> dict:
         return {
             "diag_terminal_name": self.diag_terminal_name,
+            "os_exec_channel": self.os_exec_channel,
             "updated_at": self.updated_at,
         }
 
@@ -60,8 +66,48 @@ class EvasionConfig:
     def from_dict(cls, d: dict) -> "EvasionConfig":
         return cls(
             diag_terminal_name=d.get("diag_terminal_name", ""),
+            os_exec_channel=d.get("os_exec_channel", ""),
             updated_at=d.get("updated_at", ""),
         )
+
+
+def effective_os_exec_channel(node, creds, evasion: EvasionConfig | None
+                                ) -> tuple[str, str]:
+    """T2.3 — pick the quieter OS-exec channel.
+
+    Returns ``(channel, reason)`` where channel is ``"sxpg"`` (one SAL
+    event, no gateway log entries) or ``"gw_sapxpg"`` (3-5 events
+    across SAL + gateway log).  ``reason`` is a short human-readable
+    decision summary suitable for an INFO finding.
+
+    Decision matrix:
+      - No verified credential          → gw_sapxpg (only option)
+      - No gateway-vulnerable node      → sxpg (gw path won't work)
+      - Verified credential present     → sxpg (best-case 1 SAL event;
+                                           caller's transparent
+                                           fallback handles auth denials)
+      - Operator override via evasion   → respected verbatim
+    """
+    override = (evasion.os_exec_channel if evasion else "") or ""
+    if override in ("sxpg", "gw_sapxpg"):
+        return override, f"operator override: {override}"
+
+    has_creds = bool(creds and getattr(creds, "verified", False))
+    gw_vulnerable = bool(getattr(node, "gw_vulnerable", False))
+
+    if has_creds and gw_vulnerable:
+        return "sxpg", (
+            "verified credential held; SXPG writes ~1 SAL event vs "
+            "~3-5 for GW SAPXPG (P1/P2/P3 plus gateway log entries)")
+    if has_creds and not gw_vulnerable:
+        return "sxpg", "verified credential held; GW SAPXPG path unavailable"
+    if not has_creds and gw_vulnerable:
+        return "gw_sapxpg", (
+            "no verified credential; GW SAPXPG is the only OS-exec "
+            "primitive available")
+    return "gw_sapxpg", (
+        "no verified credential and no detected gateway vuln; "
+        "GW SAPXPG attempt is the last fallback")
 
 
 def effective_diag_terminal(node, evasion: EvasionConfig | None
