@@ -22,7 +22,10 @@ from sapmap_models import SAPNode, SAPMAPState
 from sapmap_errors import format_rfc_exception
 from sapmap_exploit import (
     _build_java_os_exec,
-    execute_gw_command,
+    # T2.3 — channel-aware dispatcher; auto-resolves creds from node so
+    # SCC harvest ops run via SXPG (~1 SAL event) when SAPMAP-created
+    # creds are verified, GW SAPXPG otherwise.
+    execute_os_command as execute_gw_command,
     run_os_command,
 )
 

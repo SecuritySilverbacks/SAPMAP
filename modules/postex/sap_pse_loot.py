@@ -702,7 +702,8 @@ def _read_file_b64_windows(gw_exec_fn: GwExecFn, path: str,
     # Lazy import — avoid touching sapmap_exploit at module load time
     # (this module is also pulled into tests where the GW machinery
     # isn't desired).
-    from sapmap_exploit import execute_gw_command
+    # T2.3 — channel-aware dispatcher; auto-resolves creds from node.
+    from sapmap_exploit import execute_os_command as execute_gw_command
 
     def _ps_enc(script: str) -> str:
         return _b64_mod.b64encode(

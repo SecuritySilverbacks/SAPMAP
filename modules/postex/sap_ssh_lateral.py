@@ -248,9 +248,9 @@ def _make_exec_fn(node: SAPNode, channel: str = "auto"):
                 else:
                     r = run_os_command(node, prog, args)
             else:
-                from sapmap_exploit import execute_gw_command
-                r = execute_gw_command(node, prog, args,
-                                       long_params="")
+                from sapmap_exploit import execute_os_command
+                r = execute_os_command(node, prog, args,
+                                        long_params="")
 
             if r and r.get("success"):
                 lines = r.get("output") or []
