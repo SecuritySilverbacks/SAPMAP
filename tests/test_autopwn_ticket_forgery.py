@@ -200,7 +200,7 @@ class TestForgeDefaultTickets:
 
         def fake_stop_requested():
             stop_calls["n"] += 1
-            # First two checks: before SAP* (False), before DDIC (True)
+            # First two checks: before user[0] (False), before user[1] (True)
             return stop_calls["n"] >= 2
 
         with patch("sapmap_exploit.extract_and_forge_ticket",
@@ -209,8 +209,12 @@ class TestForgeDefaultTickets:
                    side_effect=fake_stop_requested):
             _forge_default_tickets(node, state)
 
-        # Only SAP* attempted; DDIC blocked by stop
-        assert seen == ["SAP*"]
+        # T2.4 — first identity is now resolved by
+        # effective_mysapsso2_users (blender-first ordering), not the
+        # hardcoded ("SAP*", "DDIC") tuple.  The behaviour under test
+        # is "STOP aborts remaining identities", not "SAP* is first".
+        assert seen == [_AUTOPWN_TICKET_USERS[0]]
+        assert len(seen) == 1
 
     def test_orchestrator_import_failure_logged(self, capsys):
         """When sapmap_exploit can't be imported, log + return."""
