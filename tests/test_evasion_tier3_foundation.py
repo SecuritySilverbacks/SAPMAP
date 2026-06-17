@@ -207,33 +207,119 @@ def test_baseline_capture_marks_uncapturable_params():
 
 
 # ---------------------------------------------------------------------------
-# Restore — log-only dry-run for now
+# change_param — TH_CHANGE_PARAMETER writer
 # ---------------------------------------------------------------------------
 
-def test_restore_dry_runs_each_captured_param(capsys):
+def test_change_param_invokes_th_change_parameter_with_correct_args():
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    seen_args = {}
+
+    def _call(fm, **kw):
+        seen_args["fm"] = fm
+        seen_args["kw"] = kw
+        return {"RC": "0"}
+
+    conn = MagicMock()
+    conn.call.side_effect = _call
+    with _patch_connection(conn):
+        r = sapmap_evasion_baseline.change_param(
+            node, None, "stat/level", "0")
+
+    assert r["ok"] is True
+    assert seen_args["fm"] == "TH_CHANGE_PARAMETER"
+    assert seen_args["kw"]["PARAMETER_NAME"] == "stat/level"
+    assert seen_args["kw"]["PARAMETER_VALUE"] == "0"
+
+
+def test_change_param_reports_non_zero_rc_as_failure():
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    conn = MagicMock()
+    conn.call.return_value = {"RC": "4", "MESSAGE": "Read-only param"}
+    with _patch_connection(conn):
+        r = sapmap_evasion_baseline.change_param(
+            node, None, "rsau/integrity", "0")
+    assert r["ok"] is False
+    assert "Read-only" in r["error"]
+
+
+def test_change_param_captures_rfc_exception_without_raising():
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    conn = MagicMock()
+    conn.call.side_effect = Exception("AUTHORIZATION_FAILURE: S_ADMI_FCD")
+    with _patch_connection(conn):
+        r = sapmap_evasion_baseline.change_param(
+            node, None, "rsau/enable", "0")
+    assert r["ok"] is False
+    assert "S_ADMI_FCD" in r["error"]
+
+
+# ---------------------------------------------------------------------------
+# Restore — real TH_CHANGE_PARAMETER writes
+# ---------------------------------------------------------------------------
+
+def test_restore_writes_each_captured_param_via_change_param():
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
     snap = sapmap_evasion_baseline.BaselineSnapshot(
         sid="S4H", captured_at="2026-06-16T20:00:00",
         params={"rsau/enable": "1", "stat/level": "1",
                 "gw/logging": "__UNCAPTURED__:auth denied"},
         loot_path="loot/baseline/S4H/test.json")
-    out = sapmap_evasion_baseline.restore_baseline(
-        node=None, creds=None, snapshot=snap)
-    captured = capsys.readouterr().out
-    assert "rsau/enable" in captured
-    assert "dry-run" in captured.lower()
+
+    writes = []
+    def fake_change(node_arg, creds, name, value):
+        writes.append((name, value))
+        return {"ok": True, "name": name, "value": value, "error": ""}
+
+    with patch.object(sapmap_evasion_baseline, "change_param",
+                       side_effect=fake_change):
+        out = sapmap_evasion_baseline.restore_baseline(
+            node, None, snap)
+
+    # Both capturable params written, uncapturable one skipped
+    assert ("rsau/enable", "1") in writes
+    assert ("stat/level", "1") in writes
+    assert ("gw/logging", "__UNCAPTURED__:auth denied") not in writes
     assert "rsau/enable" in out["restored"]
-    # Uncapturable params aren't restored
+    assert "stat/level" in out["restored"]
     assert ("gw/logging", "param was uncapturable") in out["skipped"]
 
 
+def test_restore_records_failed_writes_in_skipped():
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    snap = sapmap_evasion_baseline.BaselineSnapshot(
+        sid="S4H", captured_at="2026-06-16T20:00:00",
+        params={"rsau/enable": "1", "stat/level": "1"})
+
+    def fake_change(node_arg, creds, name, value):
+        if name == "rsau/enable":
+            return {"ok": False, "name": name, "value": value,
+                    "error": "Read-only param"}
+        return {"ok": True, "name": name, "value": value, "error": ""}
+
+    with patch.object(sapmap_evasion_baseline, "change_param",
+                       side_effect=fake_change):
+        out = sapmap_evasion_baseline.restore_baseline(
+            node, None, snap)
+
+    assert "stat/level" in out["restored"]
+    assert ("rsau/enable", "Read-only param") in out["skipped"]
+
+
 def test_restore_only_writes_touched_subset():
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
     snap = sapmap_evasion_baseline.BaselineSnapshot(
         sid="S4H", captured_at="2026-06-16T20:00:00",
         params={"rsau/enable": "1", "stat/level": "1",
                 "rdisp/TRACE": "1"})
-    out = sapmap_evasion_baseline.restore_baseline(
-        node=None, creds=None, snapshot=snap,
-        only=["stat/level"])
+    writes = []
+    def fake_change(node_arg, creds, name, value):
+        writes.append(name)
+        return {"ok": True, "name": name, "value": value, "error": ""}
+    with patch.object(sapmap_evasion_baseline, "change_param",
+                       side_effect=fake_change):
+        out = sapmap_evasion_baseline.restore_baseline(
+            node, None, snap, only=["stat/level"])
+    assert writes == ["stat/level"]
     assert out["restored"] == ["stat/level"]
 
 
@@ -322,24 +408,82 @@ def test_tier3_set_param_refuses_when_flag_disarmed():
     assert "--allow-evasion" in out["error"]
 
 
-def test_tier3_set_param_dry_run_when_armed(capsys):
+def test_tier3_set_param_writes_then_restores_via_th_change_parameter():
+    """End-to-end: armed gate, baseline captured, parameter written
+    via TH_CHANGE_PARAMETER, baseline value rewritten on window exit."""
     state = SAPMAPState()
     state.evasion = {"allow_evasion": True}
     node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
 
-    conn = MagicMock()
-    conn.call.return_value = {"PARAMETER_VALUE": "1"}
+    # Sequence: TH_GET_PARAMETER reads during capture, then
+    # TH_CHANGE_PARAMETER for the mutation, then more
+    # TH_CHANGE_PARAMETER calls for restore.
+    th_change_calls = []
+    def _call(fm, **kw):
+        if fm == "TH_GET_PARAMETER":
+            return {"PARAMETER_VALUE": "1"}
+        if fm == "TH_CHANGE_PARAMETER":
+            th_change_calls.append((kw["PARAMETER_NAME"],
+                                     kw["PARAMETER_VALUE"]))
+            return {"RC": "0"}
+        if fm == "RFC_READ_TABLE":
+            return {"DATA": []}
+        return {}
 
+    conn = MagicMock()
+    conn.call.side_effect = _call
     with _patch_connection(conn):
         out = sapmap_evasion_tier3.tier3_set_param(
             state, node, "stat/level", "0")
 
     assert out["ok"] is True
-    assert out["technique"] == "rz11_dynamic_set"
+    assert out["applied"] is True
     assert out["param"] == "stat/level"
     assert out["requested_value"] == "0"
     assert out["baseline_value"] == "1"
-    assert "dry-run" in out["would_write"]
+
+    # Mutation should have happened (stat/level=0)
+    assert ("stat/level", "0") in th_change_calls
+    # Restore should have rewritten the baseline value back (stat/level=1)
+    assert ("stat/level", "1") in th_change_calls
+    # And ordering: mutation first, restore after
+    mut_idx = th_change_calls.index(("stat/level", "0"))
+    restore_idx = th_change_calls.index(("stat/level", "1"))
+    assert mut_idx < restore_idx
+
+
+def test_tier3_set_param_propagates_write_failure_and_still_restores():
+    """If TH_CHANGE_PARAMETER fails during the mutation, the window
+    still attempts to restore (no-op since we never changed anything,
+    but the contract is "restore always runs on exit")."""
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+
+    th_change_calls = []
+    def _call(fm, **kw):
+        if fm == "TH_GET_PARAMETER":
+            return {"PARAMETER_VALUE": "1"}
+        if fm == "TH_CHANGE_PARAMETER":
+            th_change_calls.append((kw["PARAMETER_NAME"],
+                                     kw["PARAMETER_VALUE"]))
+            # The mutation fails; restore is allowed to succeed
+            if kw["PARAMETER_VALUE"] == "0":
+                return {"RC": "4", "MESSAGE": "Read-only param"}
+            return {"RC": "0"}
+        return {"DATA": []}
+
+    conn = MagicMock()
+    conn.call.side_effect = _call
+    with _patch_connection(conn):
+        out = sapmap_evasion_tier3.tier3_set_param(
+            state, node, "stat/level", "0")
+
+    assert out["ok"] is False
+    assert out["applied"] is False
+    assert "Read-only" in out["error"]
+    # Restore still ran (window contract)
+    assert ("stat/level", "1") in th_change_calls
 
 
 def test_tier3_capture_baseline_only_records_timestamp_on_state():
