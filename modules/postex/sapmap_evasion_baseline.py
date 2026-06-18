@@ -28,6 +28,16 @@ The window is implemented in three layers:
    enabled kernel FM ``TH_CHANGE_PARAMETER``.  Dynamic, in-memory only
    — no profile file rewrite, no kernel restart, no AUM/AUW.
 
+   Important: ``TH_CHANGE_PARAMETER`` only works for parameters the
+   kernel marks **dynamic** (e.g. ``rdisp/TRACE``, ``icm/trace_level``).
+   Static parameters (most of ``rsau/*``, ``stat/level``, ``rec/client``)
+   either return a non-zero RC or silently no-op — the parameter
+   value in shared memory may update, but the kernel keeps using the
+   startup-cached value.  Per-technique writers for the static
+   parameter families use purpose-built FMs (``RSAU_UPD_AUDIT_CONFIG``
+   for SAL, table-row writes for DBTABLOG, etc.) and don't go through
+   ``change_param``.
+
 This file only defines the data carriers + capture / write / restore
 primitives; each Tier 3 technique imports and wraps itself in the
 window.
@@ -152,22 +162,30 @@ def capture_baseline(node, creds=None,
                     # restore() recognises and refuses to act on.
                     snap.params[pname] = f"__UNCAPTURED__:{format_rfc_exception(e)[:80]}"
 
-            # SAL filter slots — same modern→legacy fallback as Tier 1.
-            for tab in ("RSAU_PERS", "RSAUPROF"):
-                try:
-                    r = conn.call(
-                        "RFC_READ_TABLE",
-                        QUERY_TABLE=tab,
-                        DELIMITER="|",
-                        ROWCOUNT=200,
-                    )
-                    rows = r.get("DATA", []) or []
-                    if rows:
-                        snap.sal_filter_rows = [
-                            (row.get("WA") or "") for row in rows]
-                        break
-                except Exception:
-                    continue
+            # SAL filter rows — legacy RSAUPROF on older NetWeaver
+            # kernels.  Modern S/4 keeps the active filter config in
+            # kernel-managed storage and exposes it via the
+            # RSAU_*_AUDIT_CONFIG FM family rather than a transparent
+            # table.  Capturing that side is a separate primitive that
+            # lands when we wire the SAL filter-narrow technique
+            # against the kernel's real read/write FM (currently
+            # ``RSAU_UPD_AUDIT_CONFIG`` on the write side).
+            try:
+                r = conn.call(
+                    "RFC_READ_TABLE",
+                    QUERY_TABLE="RSAUPROF",
+                    DELIMITER="|",
+                    ROWCOUNT=200,
+                )
+                rows = r.get("DATA", []) or []
+                if rows:
+                    snap.sal_filter_rows = [
+                        (row.get("WA") or "") for row in rows]
+            except Exception:
+                # RSAUPROF absent on modern S/4 — leave filter capture
+                # empty and let the per-technique writer handle the
+                # kernel-managed path when it lands.
+                pass
     except Exception as e:
         # Connect failed — don't return a half-baked snapshot.  The
         # gate check will refuse to run any Tier 3 technique because
