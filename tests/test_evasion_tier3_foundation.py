@@ -140,15 +140,169 @@ def _patch_connection(mock_conn):
     return patch.object(sapmap_rfc, "_get_connection", return_value=cm)
 
 
-def test_baseline_capture_records_all_params_and_persists_loot(tmp_path):
-    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+def _lab_sal_response():
+    """RSAU_API_GET_AUDIT_CONFIG response shape matching the live S4H
+    output from the operator's lab (ED_VERSION=16, 3 active slots)."""
+    return {
+        "ED_VERSION": 16,
+        "ED_ENABLE": "X",
+        "ED_SLOTCNT": 3,
+        "ED_USER_SELECTION": 1,
+        "ED_DATE": "16.06.2026",
+        "ED_MAXFILESIZE": 2146304,
+        "ED_SIZEOFFILE": 395264,
+        "ED_CURFILESIZE": 0,
+        "ED_CURFILENUM": 2,
+        "ED_POSITION": 2287,
+        "ED_FILESTATUS": 1,
+        "ET_SLOT_INFO": [
+            {"PROFNAME": "$DYN$", "SLOTNO": "0001", "STATUS": "X",
+             "MANDT": "*", "UNAME": "SAP#*", "SEVERITY": 2,
+             "SEVERITY_LOW": "X", "CLASSES": 255,
+             "CLASS_OTHER": "X", "CLASS_LOGIN": "X", "CLASS_TCD": "X",
+             "CLASS_REP": "X", "CLASS_RFC_LOGIN": "X", "CLASS_USER": "X",
+             "CLASS_SYST": "X", "CLASS_RFC": "X"},
+            {"PROFNAME": "$DYN$", "SLOTNO": "0002", "STATUS": "X",
+             "MANDT": "066", "UNAME": "*", "SEVERITY": 2,
+             "SEVERITY_LOW": "X", "CLASSES": 255,
+             "CLASS_OTHER": "X", "CLASS_LOGIN": "X", "CLASS_TCD": "X",
+             "CLASS_REP": "X", "CLASS_RFC_LOGIN": "X", "CLASS_USER": "X",
+             "CLASS_SYST": "X", "CLASS_RFC": "X"},
+            {"PROFNAME": "$DYN$", "SLOTNO": "0011", "STATUS": "X",
+             "MANDT": "*", "UNAME": "*", "SEVERITY": 0, "CLASSES": 0,
+             "MSGVECT": "fcfefefcfc7cf8f8f4f4fcfcfcfcf4fcfcfcfcfc7cfcfcfcfcfcce8f8f8f8d878f8f8f800000000000000000000"},
+        ],
+    }
 
-    captured = {}
+
+# ---------------------------------------------------------------------------
+# RSAU_S_SLOT_INFO / SalConfig dataclass plumbing
+# ---------------------------------------------------------------------------
+
+def test_sal_slot_info_from_rfc_row_decodes_lab_first_slot():
+    row = _lab_sal_response()["ET_SLOT_INFO"][0]
+    s = sapmap_evasion_baseline.SalSlotInfo.from_rfc_row(row)
+    assert s.profname == "$DYN$"
+    assert s.slotno == "0001"
+    assert s.status == "X"
+    assert s.mandt == "*"
+    assert s.uname == "SAP#*"
+    assert s.severity == 2
+    assert s.classes == 255
+    assert s.class_login == "X"
+    assert s.class_rfc == "X"
+
+
+def test_sal_slot_info_handles_missing_fields():
+    s = sapmap_evasion_baseline.SalSlotInfo.from_rfc_row({})
+    assert s.status == ""
+    assert s.severity == 0
+    assert s.classes == 0
+
+
+def test_sal_slot_info_bytes_msgvect_hex_encoded():
+    row = {"PROFNAME": "$DYN$", "SLOTNO": "0011",
+            "MSGVECT": bytes.fromhex("abcd1234")}
+    s = sapmap_evasion_baseline.SalSlotInfo.from_rfc_row(row)
+    assert s.msgvect == "abcd1234"
+
+
+def test_sal_slot_info_roundtrip_to_dict_from_dict():
+    row = _lab_sal_response()["ET_SLOT_INFO"][0]
+    s = sapmap_evasion_baseline.SalSlotInfo.from_rfc_row(row)
+    s2 = sapmap_evasion_baseline.SalSlotInfo.from_dict(s.to_dict())
+    assert s2.to_dict() == s.to_dict()
+
+
+def test_sal_config_decodes_all_ed_fields_and_slots():
+    conn = MagicMock()
+    conn.call.return_value = _lab_sal_response()
+    cfg = sapmap_evasion_baseline._read_sal_config(conn)
+    assert cfg is not None
+    assert cfg.version == 16
+    assert cfg.enable == "X"
+    assert cfg.slot_count == 3
+    assert cfg.max_file_size == 2146304
+    assert cfg.position == 2287
+    assert len(cfg.slots) == 3
+    assert cfg.slots[0].uname == "SAP#*"
+    assert cfg.slots[1].mandt == "066"
+    # slot 0011's MSGVECT-only configuration
+    assert cfg.slots[2].classes == 0
+
+
+def test_sal_config_returns_none_when_fm_missing():
+    conn = MagicMock()
+    conn.call.side_effect = Exception("FU_NOT_FOUND: RSAU_API_GET_AUDIT_CONFIG")
+    cfg = sapmap_evasion_baseline._read_sal_config(conn)
+    assert cfg is None
+
+
+def test_sal_config_roundtrip_through_baseline_snapshot():
+    cfg = sapmap_evasion_baseline.SalConfig(
+        version=16, enable="X", slot_count=2,
+        slots=[sapmap_evasion_baseline.SalSlotInfo(
+            profname="$DYN$", slotno="0001", status="X", uname="SAP#*",
+            severity=2, classes=255)])
+    snap = sapmap_evasion_baseline.BaselineSnapshot(
+        sid="S4H", sal_config=cfg)
+    d = snap.to_dict()
+    snap2 = sapmap_evasion_baseline.BaselineSnapshot.from_dict(d)
+    assert snap2.sal_config is not None
+    assert snap2.sal_config.version == 16
+    assert snap2.sal_config.slots[0].uname == "SAP#*"
+
+
+# ---------------------------------------------------------------------------
+# Baseline capture — combined param + SAL paths
+# ---------------------------------------------------------------------------
+
+def test_baseline_capture_records_params_sal_config_and_loot(tmp_path):
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
 
     def _call(fm, **kw):
         if fm == "TH_GET_PARAMETER":
-            captured[kw["PARAMETER_NAME"]] = True
             return {"PARAMETER_VALUE": "captured-" + kw["PARAMETER_NAME"]}
+        if fm == "RSAU_API_GET_AUDIT_CONFIG":
+            return _lab_sal_response()
+        if fm == "RFC_READ_TABLE":
+            # Should NOT be called: API succeeded so RSAUPROF fallback
+            # is skipped.  Failing loudly makes the regression visible.
+            raise AssertionError("RFC_READ_TABLE called despite API success")
+        return {}
+
+    conn = MagicMock()
+    conn.call.side_effect = _call
+    with _patch_connection(conn):
+        snap = sapmap_evasion_baseline.capture_baseline(
+            node, loot_root=str(tmp_path))
+
+    assert snap.sid == "S4H"
+    for p in sapmap_evasion_baseline._BASELINE_PARAMS:
+        assert snap.params[p] == "captured-" + p
+    # SAL captured via the modern API
+    assert snap.sal_config is not None
+    assert snap.sal_config.version == 16
+    assert snap.sal_config.slot_count == 3
+    assert len(snap.sal_config.slots) == 3
+    # Legacy fallback NOT populated when the API succeeded
+    assert snap.sal_filter_rows == []
+    assert snap.loot_path
+    assert os.path.exists(snap.loot_path)
+    assert node._evasion_baseline is snap
+
+
+def test_baseline_capture_falls_back_to_rsauprof_when_api_missing(tmp_path):
+    """Older NetWeaver kernel: RSAU_API_GET_AUDIT_CONFIG returns
+    FU_NOT_FOUND, so the capture falls through to the legacy
+    RSAUPROF table-read path."""
+    node = SAPNode(sid="OLD", hostname="o", ip="10.0.0.2")
+
+    def _call(fm, **kw):
+        if fm == "TH_GET_PARAMETER":
+            return {"PARAMETER_VALUE": "1"}
+        if fm == "RSAU_API_GET_AUDIT_CONFIG":
+            raise Exception("FU_NOT_FOUND")
         if fm == "RFC_READ_TABLE":
             return {"DATA": [{"WA": "BCUSER|001"}, {"WA": "*|*"}]}
         return {}
@@ -159,16 +313,8 @@ def test_baseline_capture_records_all_params_and_persists_loot(tmp_path):
         snap = sapmap_evasion_baseline.capture_baseline(
             node, loot_root=str(tmp_path))
 
-    assert snap.sid == "S4H"
-    # Every probed parameter ended up in the snapshot
-    for p in sapmap_evasion_baseline._BASELINE_PARAMS:
-        assert snap.params[p] == "captured-" + p
+    assert snap.sal_config is None
     assert snap.sal_filter_rows == ["BCUSER|001", "*|*"]
-    # Loot JSON written and path recorded
-    assert snap.loot_path
-    assert os.path.exists(snap.loot_path)
-    # In-memory cached on node so re-invocation is idempotent
-    assert node._evasion_baseline is snap
 
 
 def test_baseline_capture_idempotent_on_second_call():

@@ -74,6 +74,166 @@ _BASELINE_PARAMS = (
 
 
 @dataclass
+class SalSlotInfo:
+    """One row of ``ET_SLOT_INFO`` from ``RSAU_API_GET_AUDIT_CONFIG``.
+
+    Mirror of structure ``RSAU_S_SLOT_INFO`` (26 components) as
+    confirmed in the SAP Dictionary on S/4 HANA 793.  Stores Python-
+    snake_case attribute names; the SAP boundary translation lives in
+    ``from_rfc_row``.
+
+    Field semantics relevant to Tier 3 evasion:
+      * ``status='X'`` — slot is active and emitting events.
+        Flipping all slots to ``' '`` is the basic "silence" primitive.
+      * ``uname`` + ``mandt`` — slot scope.  Narrowing these excludes
+        an operator's session from the audit trail.
+      * ``severity_low/med/hgh`` — severity bitmap.  Clearing them
+        makes the slot record nothing without changing scope.
+      * ``class_*`` — event-class bitmap (login, transaction start,
+        report start, RFC login/start, system events, user master).
+      * ``msgvect`` — RAWSTRING per-message-ID mask.
+    """
+
+    profname: str = ""        # PROFNAME    CHAR(8)   audit profile name
+    slotno: str = ""          # SLOTNO      NUMC(4)   slot number (e.g. "0001")
+    status: str = ""          # STATUS      CHAR(1)   'X' = active
+    selvar: str = ""          # SELVAR      RAW(1)    selection variant (hex)
+    sel_user: str = ""        # SEL_USER    CHAR(1)
+    sel_user_gen: str = ""    # SEL_USER_GEN CHAR(1)
+    sel_ugrp_pos: str = ""    # SEL_UGRP_POS CHAR(1)
+    sel_ugrp_neg: str = ""    # SEL_UGRP_NEG CHAR(1)
+    db_filter: str = ""       # DB_FILTER   CHAR(1)
+    mandt: str = ""           # MANDT       CLNT(3)
+    uname: str = ""           # UNAME       CHAR(12)
+    severity: int = 0         # SEVERITY    INT4
+    severity_low: str = ""    # SEVERITY_LOW CHAR(1)
+    severity_med: str = ""    # SEVERITY_MED CHAR(1)
+    severity_hgh: str = ""    # SEVERITY_HGH CHAR(1)
+    classes: int = 0          # CLASSES     INT4
+    class_other: str = ""     # CLASS_OTHER     CHAR(1)
+    class_login: str = ""     # CLASS_LOGIN     CHAR(1)
+    class_tcd: str = ""       # CLASS_TCD       CHAR(1)
+    class_rep: str = ""       # CLASS_REP       CHAR(1)
+    class_rfc_login: str = "" # CLASS_RFC_LOGIN CHAR(1)
+    class_user: str = ""      # CLASS_USER      CHAR(1)
+    class_syst: str = ""      # CLASS_SYST      CHAR(1)
+    class_rfc: str = ""       # CLASS_RFC       CHAR(1)
+    msgvect: str = ""         # MSGVECT     RAWSTRING (hex)
+    msg_list: str = ""        # MSG_LIST    STRING
+
+    # Mapping from SAP field name → dataclass attribute.  Single source
+    # of truth so to_dict / from_rfc_row stay aligned automatically.
+    _SAP_TO_PY = {
+        "PROFNAME": "profname", "SLOTNO": "slotno", "STATUS": "status",
+        "SELVAR": "selvar",
+        "SEL_USER": "sel_user", "SEL_USER_GEN": "sel_user_gen",
+        "SEL_UGRP_POS": "sel_ugrp_pos", "SEL_UGRP_NEG": "sel_ugrp_neg",
+        "DB_FILTER": "db_filter",
+        "MANDT": "mandt", "UNAME": "uname",
+        "SEVERITY": "severity",
+        "SEVERITY_LOW": "severity_low", "SEVERITY_MED": "severity_med",
+        "SEVERITY_HGH": "severity_hgh",
+        "CLASSES": "classes",
+        "CLASS_OTHER": "class_other", "CLASS_LOGIN": "class_login",
+        "CLASS_TCD": "class_tcd", "CLASS_REP": "class_rep",
+        "CLASS_RFC_LOGIN": "class_rfc_login", "CLASS_USER": "class_user",
+        "CLASS_SYST": "class_syst", "CLASS_RFC": "class_rfc",
+        "MSGVECT": "msgvect", "MSG_LIST": "msg_list",
+    }
+    _INT_FIELDS = ("severity", "classes")
+
+    @classmethod
+    def from_rfc_row(cls, row: dict) -> "SalSlotInfo":
+        """Build from a single ``ET_SLOT_INFO`` row as returned by the
+        NW RFC SDK.  Keys are SAP-style UPPERCASE; values come back as
+        Python strings/ints/bytes depending on the ABAP type."""
+        kwargs = {}
+        for sap_key, py_key in cls._SAP_TO_PY.items():
+            v = row.get(sap_key, "")
+            if py_key in cls._INT_FIELDS:
+                try:
+                    kwargs[py_key] = int(v) if v not in (None, "", b"") else 0
+                except (TypeError, ValueError):
+                    kwargs[py_key] = 0
+            elif isinstance(v, bytes):
+                kwargs[py_key] = v.hex()
+            else:
+                kwargs[py_key] = (str(v) if v is not None else "").rstrip()
+        return cls(**kwargs)
+
+    def to_dict(self) -> dict:
+        return {py: getattr(self, py)
+                for py in self._SAP_TO_PY.values()}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "SalSlotInfo":
+        kwargs = {}
+        for py in cls._SAP_TO_PY.values():
+            v = d.get(py, 0 if py in cls._INT_FIELDS else "")
+            kwargs[py] = v
+        return cls(**kwargs)
+
+
+@dataclass
+class SalConfig:
+    """Full ``RSAU_API_GET_AUDIT_CONFIG`` response.
+
+    Carries the global ED_* fields (master enable flag, version token,
+    file-size cap, file pointer state) plus the list of populated
+    filter slots.  Persisted into the baseline JSON so a Tier 3
+    technique that mutates SAL state can be rolled back even after a
+    crash-restart of SAPMAP itself.
+    """
+
+    version: int = 0          # ED_VERSION       — optimistic-concurrency token
+    enable: str = ""          # ED_ENABLE        — 'X' / ' '
+    slot_count: int = 0       # ED_SLOTCNT
+    user_selection: int = 0   # ED_USER_SELECTION
+    date: str = ""            # ED_DATE          — DD.MM.YYYY
+    max_file_size: int = 0    # ED_MAXFILESIZE   — bytes/day cap
+    size_of_file: int = 0     # ED_SIZEOFFILE
+    cur_file_size: int = 0    # ED_CURFILESIZE
+    cur_file_num: int = 0     # ED_CURFILENUM
+    position: int = 0         # ED_POSITION
+    file_status: int = 0      # ED_FILESTATUS
+    slots: list = field(default_factory=list)   # [SalSlotInfo, ...]
+
+    def to_dict(self) -> dict:
+        return {
+            "version": self.version,
+            "enable": self.enable,
+            "slot_count": self.slot_count,
+            "user_selection": self.user_selection,
+            "date": self.date,
+            "max_file_size": self.max_file_size,
+            "size_of_file": self.size_of_file,
+            "cur_file_size": self.cur_file_size,
+            "cur_file_num": self.cur_file_num,
+            "position": self.position,
+            "file_status": self.file_status,
+            "slots": [s.to_dict() for s in self.slots],
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "SalConfig":
+        return cls(
+            version=int(d.get("version", 0) or 0),
+            enable=str(d.get("enable", "") or ""),
+            slot_count=int(d.get("slot_count", 0) or 0),
+            user_selection=int(d.get("user_selection", 0) or 0),
+            date=str(d.get("date", "") or ""),
+            max_file_size=int(d.get("max_file_size", 0) or 0),
+            size_of_file=int(d.get("size_of_file", 0) or 0),
+            cur_file_size=int(d.get("cur_file_size", 0) or 0),
+            cur_file_num=int(d.get("cur_file_num", 0) or 0),
+            position=int(d.get("position", 0) or 0),
+            file_status=int(d.get("file_status", 0) or 0),
+            slots=[SalSlotInfo.from_dict(s)
+                   for s in d.get("slots", []) or []],
+        )
+
+
+@dataclass
 class BaselineSnapshot:
     """Captured state of a target node prior to Tier 3 mutation.
 
@@ -84,6 +244,13 @@ class BaselineSnapshot:
     sid: str = ""
     captured_at: str = ""
     params: dict = field(default_factory=dict)
+    # Modern S/4 SAL config captured via RSAU_API_GET_AUDIT_CONFIG.
+    # Primary source of truth for SAL filter restore.
+    sal_config: Optional[SalConfig] = None
+    # Legacy RSAUPROF rows — only populated on older NetWeaver kernels
+    # where the modern API doesn't exist.  Kept for compatibility with
+    # any tooling that still inspects it; new code should read
+    # ``sal_config.slots`` instead.
     sal_filter_rows: list = field(default_factory=list)
     # Free-form bag for technique-specific snapshot data
     # (e.g. NWA log-config XML before flip).  Keyed by technique id.
@@ -95,6 +262,8 @@ class BaselineSnapshot:
             "sid": self.sid,
             "captured_at": self.captured_at,
             "params": dict(self.params),
+            "sal_config": (self.sal_config.to_dict()
+                            if self.sal_config else None),
             "sal_filter_rows": list(self.sal_filter_rows),
             "technique_state": dict(self.technique_state),
             "loot_path": self.loot_path,
@@ -102,10 +271,12 @@ class BaselineSnapshot:
 
     @classmethod
     def from_dict(cls, d: dict) -> "BaselineSnapshot":
+        sal = d.get("sal_config")
         return cls(
             sid=d.get("sid", ""),
             captured_at=d.get("captured_at", ""),
             params=dict(d.get("params") or {}),
+            sal_config=(SalConfig.from_dict(sal) if sal else None),
             sal_filter_rows=list(d.get("sal_filter_rows") or []),
             technique_state=dict(d.get("technique_state") or {}),
             loot_path=d.get("loot_path", ""),
@@ -116,14 +287,55 @@ class BaselineSnapshot:
 # Capture
 # ---------------------------------------------------------------------------
 
+def _read_sal_config(conn) -> Optional[SalConfig]:
+    """Call ``RSAU_API_GET_AUDIT_CONFIG`` and decode the response.
+
+    Returns ``None`` when the FM doesn't exist on this kernel (older
+    NetWeaver) so the caller can fall back to the legacy ``RSAUPROF``
+    table read.  Any other RFC error is logged and treated as "no
+    SAL config captured" — Tier 3 SAL techniques refuse to run when
+    sal_config is None, but param-only techniques (rdisp/TRACE,
+    icm/trace_level) are unaffected.
+    """
+    try:
+        r = conn.call("RSAU_API_GET_AUDIT_CONFIG")
+    except Exception as e:
+        msg = str(e)
+        if ("FUNCTION_NOT_FOUND" in msg or "FU_NOT_FOUND" in msg
+                or "not implemented" in msg.lower()):
+            return None
+        logger.warning(f"RSAU_API_GET_AUDIT_CONFIG raised: {msg[:200]}")
+        return None
+
+    return SalConfig(
+        version=int(r.get("ED_VERSION", 0) or 0),
+        enable=str(r.get("ED_ENABLE", "") or "").strip(),
+        slot_count=int(r.get("ED_SLOTCNT", 0) or 0),
+        user_selection=int(r.get("ED_USER_SELECTION", 0) or 0),
+        date=str(r.get("ED_DATE", "") or "").strip(),
+        max_file_size=int(r.get("ED_MAXFILESIZE", 0) or 0),
+        size_of_file=int(r.get("ED_SIZEOFFILE", 0) or 0),
+        cur_file_size=int(r.get("ED_CURFILESIZE", 0) or 0),
+        cur_file_num=int(r.get("ED_CURFILENUM", 0) or 0),
+        position=int(r.get("ED_POSITION", 0) or 0),
+        file_status=int(r.get("ED_FILESTATUS", 0) or 0),
+        slots=[SalSlotInfo.from_rfc_row(row)
+                for row in (r.get("ET_SLOT_INFO", []) or [])],
+    )
+
+
 def capture_baseline(node, creds=None,
                       loot_root: str = "loot") -> BaselineSnapshot:
     """Snapshot the audit/trace config on ``node`` for restore-on-exit.
 
-    Reads the same parameters Tier 1 probes (via ``TH_GET_PARAMETER``)
-    plus the populated ``RSAU_PERS`` / ``RSAUPROF`` rows.  Stores the
-    snapshot in-memory on ``node._evasion_baseline`` and writes a JSON
-    copy under ``loot/baseline/<sid>/<timestamp>.json``.
+    Reads:
+      - Profile parameters via ``TH_GET_PARAMETER`` (same as Tier 1)
+      - SAL config via ``RSAU_API_GET_AUDIT_CONFIG`` (modern S/4)
+      - Legacy ``RSAUPROF`` rows only when the API didn't return a
+        config (older NetWeaver kernels)
+
+    Stores the snapshot in-memory on ``node._evasion_baseline`` and
+    writes a JSON copy under ``loot/baseline/<sid>/<timestamp>.json``.
 
     Idempotent: re-invoking on a node that already has a snapshot
     returns the existing one (we never want to overwrite a baseline
@@ -162,30 +374,39 @@ def capture_baseline(node, creds=None,
                     # restore() recognises and refuses to act on.
                     snap.params[pname] = f"__UNCAPTURED__:{format_rfc_exception(e)[:80]}"
 
-            # SAL filter rows — legacy RSAUPROF on older NetWeaver
-            # kernels.  Modern S/4 keeps the active filter config in
-            # kernel-managed storage and exposes it via the
-            # RSAU_*_AUDIT_CONFIG FM family rather than a transparent
-            # table.  Capturing that side is a separate primitive that
-            # lands when we wire the SAL filter-narrow technique
-            # against the kernel's real read/write FM (currently
-            # ``RSAU_UPD_AUDIT_CONFIG`` on the write side).
+            # SAL config — modern S/4 path via RSAU_API_GET_AUDIT_CONFIG.
+            # Returns the full ED_* state + ET_SLOT_INFO rows.  We
+            # decode into a typed SalConfig so downstream technique
+            # writers can reason about specific slots / event-class
+            # bits rather than re-parsing field positions.
             try:
-                r = conn.call(
-                    "RFC_READ_TABLE",
-                    QUERY_TABLE="RSAUPROF",
-                    DELIMITER="|",
-                    ROWCOUNT=200,
-                )
-                rows = r.get("DATA", []) or []
-                if rows:
-                    snap.sal_filter_rows = [
-                        (row.get("WA") or "") for row in rows]
-            except Exception:
-                # RSAUPROF absent on modern S/4 — leave filter capture
-                # empty and let the per-technique writer handle the
-                # kernel-managed path when it lands.
-                pass
+                snap.sal_config = _read_sal_config(conn)
+            except Exception as e:
+                logger.warning(f"{snap.sid}: SAL config read raised: "
+                                f"{format_rfc_exception(e)}")
+
+            # Legacy RSAUPROF fallback — only if the modern API wasn't
+            # available (older NetWeaver kernels).  Modern S/4 returns
+            # an empty result from RFC_READ_TABLE on RSAUPROF too, but
+            # the API path already populated sal_config above so we
+            # don't need this branch.
+            if snap.sal_config is None:
+                try:
+                    r = conn.call(
+                        "RFC_READ_TABLE",
+                        QUERY_TABLE="RSAUPROF",
+                        DELIMITER="|",
+                        ROWCOUNT=200,
+                    )
+                    rows = r.get("DATA", []) or []
+                    if rows:
+                        snap.sal_filter_rows = [
+                            (row.get("WA") or "") for row in rows]
+                except Exception:
+                    # RSAUPROF absent — leave both signals empty; the
+                    # SAL-related Tier 3 techniques will refuse to run
+                    # without a captured config.
+                    pass
     except Exception as e:
         # Connect failed — don't return a half-baked snapshot.  The
         # gate check will refuse to run any Tier 3 technique because
