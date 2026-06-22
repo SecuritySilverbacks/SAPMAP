@@ -7018,6 +7018,46 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:lpe", "Local Privilege Escalation", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/probe_rsau_api", method="POST")
+    def node_probe_rsau_api(sid):
+        """Phase 2 of Tier 3 — discovery probe for the RSAU API
+        surface.  Pure metadata read (FUNCTION_EXISTS +
+        RFC_GET_FUNCTION_INTERFACE for each candidate).  Refuses
+        unless --allow-evasion is armed."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        def _run():
+            try:
+                from sapmap_evasion_tier3 import probe_rsau_api_surface
+            except Exception as e:
+                print(f"[-] {sid}: tier3 probe module unavailable: {e}")
+                return
+            creds = node.best_credentials()
+            if creds is None or not creds.verified:
+                print(f"[!] {sid}: RSAU API probe needs verified RFC "
+                      f"credentials — complete user creation first")
+                emit_finding("WARNING", sid,
+                              "RSAU API probe skipped — no verified "
+                              "RFC credentials")
+                return
+            print(f"[*] {sid}: Tier 3 Phase 2 — probing RSAU API "
+                  f"surface (FUNCTION_EXISTS + "
+                  f"RFC_GET_FUNCTION_INTERFACE)...")
+            out = probe_rsau_api_surface(api.state, node, creds=creds)
+            if not out.get("ok"):
+                print(f"[-] {sid}: RSAU API probe failed — "
+                      f"{out.get('error')}")
+                return
+            print(f"[+] {sid}: RSAU API probe — "
+                  f"{out['found_count']}/{out['total_checked']} FMs "
+                  f"exist; loot {out['loot_path']!r}")
+
+        _bg(f"{sid}:probe_rsau_api", "Probe RSAU API Surface", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/capture_evasion_baseline", method="POST")
     def node_capture_evasion_baseline(sid):
         """Tier 3 pre-flight — capture a baseline snapshot for restore-
