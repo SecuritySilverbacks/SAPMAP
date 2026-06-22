@@ -290,6 +290,12 @@ def test_baseline_capture_records_params_sal_config_and_loot(tmp_path):
     assert snap.loot_path
     assert os.path.exists(snap.loot_path)
     assert node._evasion_baseline is snap
+    # JSON on disk must record its own path — provenance for any
+    # tooling that consumes the loot later (regression: prior version
+    # set loot_path AFTER writing the file, so on-disk JSON had "").
+    import json as _json
+    on_disk = _json.loads(open(snap.loot_path).read())
+    assert on_disk["loot_path"] == snap.loot_path
 
 
 def test_baseline_capture_falls_back_to_rsauprof_when_api_missing(tmp_path):

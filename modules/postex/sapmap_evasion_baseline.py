@@ -415,14 +415,16 @@ def capture_baseline(node, creds=None,
                         f"{format_rfc_exception(e)}")
         return snap  # empty params; gate will refuse downstream
 
-    # Persist to disk
+    # Persist to disk.  Stamp loot_path BEFORE serialising so the
+    # JSON on disk records its own location — useful for forensic
+    # provenance and for any tooling that consumes the file later.
     loot_dir = Path(loot_root) / "baseline" / snap.sid
     try:
         loot_dir.mkdir(parents=True, exist_ok=True)
         fname = f"baseline_{snap.captured_at.replace(':', '').replace('.', '_')}.json"
         path = loot_dir / fname
-        path.write_text(json.dumps(snap.to_dict(), indent=2))
         snap.loot_path = str(path)
+        path.write_text(json.dumps(snap.to_dict(), indent=2))
     except Exception as e:
         logger.warning(f"{snap.sid}: baseline loot write failed: {e}")
 
