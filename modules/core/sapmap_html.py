@@ -930,6 +930,7 @@ body {
       <div class="ctx-item" data-action="deep_scan">&#128260; Deep Scan (full SAPology)</div>
       <div class="ctx-item" data-action="probe_telemetry">&#128270; Probe Audit Telemetry (SAL / integrity / params)</div>
       <div class="ctx-item" data-action="capture_evasion_baseline">&#128190; Capture Evasion Baseline (Tier 3 pre-flight)</div>
+      <div class="ctx-item" data-action="probe_rsau_api">&#128270; Probe RSAU API Surface (Tier 3 discovery)</div>
       <div class="ctx-item" data-action="retrieve_rfcs">&#128225; Retrieve RFC Connections</div>
       <div class="ctx-item" data-action="read_java_destinations">&#128225; Read Java JCo Destinations</div>
       <div class="ctx-item" data-action="test_rfcs">&#129514; Test RFC Connections</div>
@@ -4068,6 +4069,8 @@ function showCtxMenu(e, sid) {
     'probe_telemetry':  hasUsableAbapAccess,        // ABAP RFC reads only
     'capture_evasion_baseline': hasUsableAbapAccess
         && !!(mapState.evasion && mapState.evasion.allow_evasion),
+    'probe_rsau_api': hasUsableAbapAccess
+        && !!(mapState.evasion && mapState.evasion.allow_evasion),
     'retrieve_rfcs':    hasUsableAbapAccess,        // ABAP-only RFC + BAPI
     'test_rfcs':        hasUsableAbapAccess && hasRFCs,
     'read_java_destinations': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy),
@@ -4257,6 +4260,10 @@ function showCtxMenu(e, sid) {
         ((mapState.evasion && mapState.evasion.allow_evasion)
          ? 'Needs a verified RFC credential — calls TH_GET_PARAMETER + RSAU_API_GET_AUDIT_CONFIG and writes loot/baseline/<SID>/baseline_<ts>.json. Pure read; no mutation. Unblocks the require_baseline gate on every Tier 3 technique for this node.'
          : 'Tier 3 not armed — restart SAPMAP with --allow-evasion (see disclaimer banner).'),
+    'probe_rsau_api':
+        ((mapState.evasion && mapState.evasion.allow_evasion)
+         ? 'Needs a verified RFC credential — calls FUNCTION_EXISTS + RFC_GET_FUNCTION_INTERFACE for the RSAU_API_* family. Pure metadata read; no SAL config touched. Emits one finding per FM with its IMPORT/EXPORT/TABLES signature so we have ground truth before any Tier 3 write code runs.'
+         : 'Tier 3 not armed — restart SAPMAP with --allow-evasion (see disclaimer banner).'),
     'retrieve_rfcs':    'Needs a verified RFC credential or a SAPMAP-created user — RSRFCCHK and the RFCDES read both require a working logon.',
     'test_rfcs':        (!hasRFCs
         ? 'Retrieve RFC connections first.'
@@ -4353,6 +4360,7 @@ function showCtxMenu(e, sid) {
     'default_creds':    !isAbapStack,
     'probe_telemetry':  !isAbapStack,
     'capture_evasion_baseline': !isAbapStack,
+    'probe_rsau_api': !isAbapStack,
     'retrieve_rfcs':    !isAbapStack,
     'test_rfcs':        !isAbapStack,
     'create_tcpip':          !isAbapStack,
@@ -5448,6 +5456,9 @@ async function ctxAction(action) {
     case 'capture_evasion_baseline':
       flashActivity(`${sid}: capturing Tier 3 evasion baseline`, 5000);
       await api('POST', `node/${sid}/capture_evasion_baseline`); break;
+    case 'probe_rsau_api':
+      flashActivity(`${sid}: probing RSAU API surface`, 6000);
+      await api('POST', `node/${sid}/probe_rsau_api`); break;
     case 'retrieve_rfcs':
       await api('POST', `node/${sid}/retrieve_rfcs`); break;
     case 'test_rfcs':

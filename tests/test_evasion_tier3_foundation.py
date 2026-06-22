@@ -638,6 +638,157 @@ def test_tier3_set_param_propagates_write_failure_and_still_restores():
     assert ("stat/level", "1") in th_change_calls
 
 
+# ---------------------------------------------------------------------------
+# Phase 2 — RSAU API surface discovery probe
+# ---------------------------------------------------------------------------
+
+def _interface_response(import_params, export_params,
+                        tables_params=(), exception_params=()):
+    """Build an RFC_GET_FUNCTION_INTERFACE response shape with the
+    given parameter lists."""
+    rows = []
+    for p in import_params:
+        rows.append({"PARAMETER": p, "PARAMTYPE": "I", "STRUCTURE": "",
+                     "FUNCTYPE": "C", "OPTIONAL": ""})
+    for p in export_params:
+        rows.append({"PARAMETER": p, "PARAMTYPE": "E", "STRUCTURE": "",
+                     "FUNCTYPE": "C", "OPTIONAL": ""})
+    for p in tables_params:
+        rows.append({"PARAMETER": p, "PARAMTYPE": "T",
+                     "STRUCTURE": "RSAUINFO",
+                     "FUNCTYPE": "X", "OPTIONAL": ""})
+    for p in exception_params:
+        rows.append({"PARAMETER": p, "PARAMTYPE": "X",
+                     "STRUCTURE": "", "FUNCTYPE": "", "OPTIONAL": ""})
+    return {"PARAMS": rows}
+
+
+def test_probe_refuses_when_flag_disarmed():
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": False}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    out = sapmap_evasion_tier3.probe_rsau_api_surface(state, node)
+    assert out["ok"] is False
+    assert "--allow-evasion" in out["error"]
+    assert out["functions"] == []
+
+
+def test_probe_dumps_signatures_for_existing_fms(tmp_path):
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+
+    # Simulate kernel where:
+    #   - RSAU_API_GET_AUDIT_CONFIG exists (the one we confirmed live)
+    #   - RSAU_API_SET_PROFILE exists with its 8-param signature
+    #   - RSAU_API_SET_PARAM exists
+    #   - everything else returns FU_NOT_FOUND
+    existing = {
+        "RSAU_API_GET_AUDIT_CONFIG": _interface_response(
+            import_params=[],
+            export_params=["ED_VERSION", "ED_ENABLE", "ED_SLOTCNT",
+                            "ED_MAXFILESIZE"],
+            tables_params=["ET_SLOT_INFO"]),
+        "RSAU_API_SET_PROFILE": _interface_response(
+            import_params=["ID_NAME", "ID_SET_ACTIV",
+                            "ID_UPD_DYN_CNF", "ID_DELETE_PROF"],
+            export_params=[],
+            tables_params=["IT_FILT", "IT_FILTX", "IT_FILT_TX"]),
+        "RSAU_API_SET_PARAM": _interface_response(
+            import_params=["ID_ACTIV", "ID_INTEGRITY", "ID_PEER_ADR",
+                            "ID_MBYTE_DAY", "ID_SLOTS"],
+            export_params=[]),
+    }
+
+    def _call(fm, **kw):
+        if fm == "FUNCTION_EXISTS":
+            name = kw.get("FUNCNAME", "")
+            if name in existing:
+                return {"FUNCNAME": name}
+            raise Exception("FU_NOT_FOUND")
+        if fm == "RFC_GET_FUNCTION_INTERFACE":
+            name = kw.get("FUNCNAME", "")
+            return existing[name]
+        return {}
+
+    conn = MagicMock()
+    conn.call.side_effect = _call
+    with _patch_connection(conn):
+        out = sapmap_evasion_tier3.probe_rsau_api_surface(
+            state, node, loot_root=str(tmp_path))
+
+    assert out["ok"] is True
+    assert out["found_count"] == 3
+    assert out["total_checked"] > 3
+
+    found = {r["name"]: r for r in out["functions"]}
+    assert found["RSAU_API_GET_AUDIT_CONFIG"]["exists"]
+    assert found["RSAU_API_SET_PROFILE"]["exists"]
+    assert found["RSAU_API_SET_PARAM"]["exists"]
+    # The SET_PROFILE signature lands in the result correctly
+    sp = found["RSAU_API_SET_PROFILE"]["params"]
+    sp_imports = [p["parameter"] for p in sp
+                   if p["direction"] == "IMPORT"]
+    sp_tables = [p["parameter"] for p in sp
+                  if p["direction"] == "TABLES"]
+    assert "ID_UPD_DYN_CNF" in sp_imports
+    assert "ID_SET_ACTIV" in sp_imports
+    assert "IT_FILT" in sp_tables
+
+    # Missing FMs marked correctly
+    missing = found["RSAU_UPD_AUDIT_CONFIG"]
+    assert missing["exists"] is False
+    assert "FU_NOT_FOUND" in missing["error"]
+
+    # Loot file written and self-records its path
+    import json as _json
+    on_disk = _json.loads(open(out["loot_path"]).read())
+    assert on_disk["loot_path"] == out["loot_path"]
+    assert on_disk["sid"] == "S4H"
+    assert any(f["name"] == "RSAU_API_SET_PROFILE"
+                for f in on_disk["functions"])
+
+
+def test_probe_handles_signature_read_failure_gracefully():
+    """FUNCTION_EXISTS says yes but RFC_GET_FUNCTION_INTERFACE blows
+    up (auth denial, kernel quirk) — record exists=True + error in
+    the params-failed slot, don't crash."""
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+
+    def _call(fm, **kw):
+        if fm == "FUNCTION_EXISTS":
+            if kw["FUNCNAME"] == "RSAU_API_GET_AUDIT_CONFIG":
+                return {"FUNCNAME": kw["FUNCNAME"]}
+            raise Exception("FU_NOT_FOUND")
+        if fm == "RFC_GET_FUNCTION_INTERFACE":
+            raise Exception("AUTHORIZATION_FAILURE: S_RFC")
+        return {}
+
+    conn = MagicMock()
+    conn.call.side_effect = _call
+    with _patch_connection(conn):
+        out = sapmap_evasion_tier3.probe_rsau_api_surface(
+            state, node, loot_root="/tmp/sapmap-test-probe")
+
+    found = {r["name"]: r for r in out["functions"]}
+    f = found["RSAU_API_GET_AUDIT_CONFIG"]
+    assert f["exists"] is True
+    assert "signature read failed" in f["error"]
+    assert f["params"] == []
+
+
+def test_probe_helper_summarises_params_by_direction():
+    s = sapmap_evasion_tier3._summarise_params([
+        {"parameter": "ID_NAME", "direction": "IMPORT"},
+        {"parameter": "ID_SET_ACTIV", "direction": "IMPORT"},
+        {"parameter": "IT_FILT", "direction": "TABLES"},
+    ])
+    assert "I=[ID_NAME,ID_SET_ACTIV]" in s
+    assert "T=[IT_FILT]" in s
+
+
 def test_tier3_capture_baseline_only_records_timestamp_on_state():
     state = SAPMAPState()
     state.evasion = {"allow_evasion": True}
