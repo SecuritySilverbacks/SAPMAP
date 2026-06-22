@@ -7018,6 +7018,68 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:lpe", "Local Privilege Escalation", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/capture_evasion_baseline", method="POST")
+    def node_capture_evasion_baseline(sid):
+        """Tier 3 pre-flight — capture a baseline snapshot for restore-
+        on-exit.  Refuses unless --allow-evasion is armed."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        def _run():
+            try:
+                from sapmap_evasion_tier3 import (
+                    tier3_capture_baseline_only)
+            except Exception as e:
+                print(f"[-] {sid}: tier3 module unavailable: {e}")
+                return
+            creds = node.best_credentials()
+            if creds is None or not creds.verified:
+                print(f"[!] {sid}: evasion baseline needs verified RFC "
+                      f"credentials — complete user creation first")
+                emit_finding(
+                    "WARNING", sid,
+                    "Evasion baseline skipped — no verified RFC "
+                    "credentials")
+                return
+            print(f"[*] {sid}: Tier 3 pre-flight — capturing evasion "
+                  f"baseline (params + RSAU_API_GET_AUDIT_CONFIG)...")
+            out = tier3_capture_baseline_only(api.state, node,
+                                                creds=creds)
+            if not out.get("ok"):
+                print(f"[-] {sid}: baseline capture failed — "
+                      f"{out.get('error')}")
+                emit_finding("WARNING", sid,
+                              f"Evasion baseline failed: "
+                              f"{out.get('error')}")
+                return
+            loot = out.get("snapshot_loot", "")
+            pc = out.get("param_count", 0)
+            fc = out.get("filter_row_count", 0)
+            sal = getattr(node, "_evasion_baseline", None)
+            sal_summary = ""
+            if sal and sal.sal_config:
+                slots = len(sal.sal_config.slots)
+                sal_summary = (
+                    f"; SAL v{sal.sal_config.version}, "
+                    f"enable={sal.sal_config.enable!r}, "
+                    f"{slots} slot(s)")
+            elif fc:
+                sal_summary = (
+                    f"; legacy RSAUPROF {fc} row(s) (API absent)")
+            print(f"[+] {sid}: Tier 3 baseline captured — "
+                  f"{pc} param(s){sal_summary} → {loot}")
+            emit_finding(
+                "INFO", sid,
+                f"Tier 3 evasion baseline captured: "
+                f"{pc} params{sal_summary}",
+                meta={"snapshot_loot": loot})
+
+        _bg(f"{sid}:capture_evasion_baseline",
+             "Capture Evasion Baseline", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/probe_telemetry", method="POST")
     def node_probe_telemetry(sid):
         """Tier 1 OPSEC enrichment — read-only ABAP audit posture probe."""

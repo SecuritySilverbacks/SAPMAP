@@ -929,6 +929,7 @@ body {
       <div class="ctx-item" data-action="check_windows_lpe">&#128274; Check Windows SYSTEM LPE (auto: EfsPotato / GodPotato / MiniPlasma)</div>
       <div class="ctx-item" data-action="deep_scan">&#128260; Deep Scan (full SAPology)</div>
       <div class="ctx-item" data-action="probe_telemetry">&#128270; Probe Audit Telemetry (SAL / integrity / params)</div>
+      <div class="ctx-item" data-action="capture_evasion_baseline">&#128190; Capture Evasion Baseline (Tier 3 pre-flight)</div>
       <div class="ctx-item" data-action="retrieve_rfcs">&#128225; Retrieve RFC Connections</div>
       <div class="ctx-item" data-action="read_java_destinations">&#128225; Read Java JCo Destinations</div>
       <div class="ctx-item" data-action="test_rfcs">&#129514; Test RFC Connections</div>
@@ -4065,6 +4066,8 @@ function showCtxMenu(e, sid) {
         (n && (n.credentials || []).some(c => c && c.verified))
         || hasCreatedUsers),
     'probe_telemetry':  hasUsableAbapAccess,        // ABAP RFC reads only
+    'capture_evasion_baseline': hasUsableAbapAccess
+        && !!(mapState.evasion && mapState.evasion.allow_evasion),
     'retrieve_rfcs':    hasUsableAbapAccess,        // ABAP-only RFC + BAPI
     'test_rfcs':        hasUsableAbapAccess && hasRFCs,
     'read_java_destinations': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy),
@@ -4250,6 +4253,10 @@ function showCtxMenu(e, sid) {
     'check_windows_lpe':   'Requires OS-exec on a Windows host (GW SAPXPG, CVE-2025-31324 shell, or SAPMAP-created OS-user)',
     'exploit_windows_lpe': 'Requires OS-exec on Windows host — run Check first to confirm MiniPlasma is viable (Win10 1709+ / Server 2019+ with cldflt.sys + .NET 4.7.2+)',
     'probe_telemetry':  'Needs a verified RFC credential or a SAPMAP-created user — reads runtime profile parameters via TH_GET_PARAMETER (lightweight kernel FM) plus RSAU_PERS for SAL slots. No ABAP install, no AUM/AUW events.',
+    'capture_evasion_baseline':
+        ((mapState.evasion && mapState.evasion.allow_evasion)
+         ? 'Needs a verified RFC credential — calls TH_GET_PARAMETER + RSAU_API_GET_AUDIT_CONFIG and writes loot/baseline/<SID>/baseline_<ts>.json. Pure read; no mutation. Unblocks the require_baseline gate on every Tier 3 technique for this node.'
+         : 'Tier 3 not armed — restart SAPMAP with --allow-evasion (see disclaimer banner).'),
     'retrieve_rfcs':    'Needs a verified RFC credential or a SAPMAP-created user — RSRFCCHK and the RFCDES read both require a working logon.',
     'test_rfcs':        (!hasRFCs
         ? 'Retrieve RFC connections first.'
@@ -4345,6 +4352,7 @@ function showCtxMenu(e, sid) {
     'read_usrextid':    !isAbapStack,
     'default_creds':    !isAbapStack,
     'probe_telemetry':  !isAbapStack,
+    'capture_evasion_baseline': !isAbapStack,
     'retrieve_rfcs':    !isAbapStack,
     'test_rfcs':        !isAbapStack,
     'create_tcpip':          !isAbapStack,
@@ -5437,6 +5445,9 @@ async function ctxAction(action) {
     case 'probe_telemetry':
       flashActivity(`${sid}: probing telemetry posture`, 3500);
       await api('POST', `node/${sid}/probe_telemetry`); break;
+    case 'capture_evasion_baseline':
+      flashActivity(`${sid}: capturing Tier 3 evasion baseline`, 5000);
+      await api('POST', `node/${sid}/capture_evasion_baseline`); break;
     case 'retrieve_rfcs':
       await api('POST', `node/${sid}/retrieve_rfcs`); break;
     case 'test_rfcs':
