@@ -285,7 +285,7 @@ def _summarise_params(params: list) -> str:
 
 
 def read_dyn_profile(node, creds=None,
-                       profile_name: str = "$DYN$") -> dict:
+                       profile_name: str = "") -> dict:
     """Phase 3 step 1 — call ``RSAU_API_GET_PROFILE`` and return the
     verbatim response.
 
@@ -298,26 +298,42 @@ def read_dyn_profile(node, creds=None,
     kernel's internal slot layout.
 
     Args:
-        profile_name: ABAP profile name.  Default ``"$DYN$"`` is the
-            dynamic / in-memory profile (the one we want to mutate
-            without touching the persisted profile that survives a
-            restart).
+        profile_name: ABAP profile name.  Empty (default) → read the
+            *dynamic* in-memory profile (``ID_DYN_CONF='X'``, no
+            ``ID_NAME``).  Non-empty → read that specific profile by
+            name (``ID_NAME=<name>``, no ``ID_DYN_CONF``).
+
+    The kernel treats ``ID_NAME``, ``ID_DYN_CONF`` and ``ID_CURR_PROF``
+    as **mutually exclusive actions** (passing more than one raises
+    SECAUDIT 058 "Only one action is permitted" via ET_LOG).  This
+    helper picks one based on whether ``profile_name`` was supplied.
 
     Returns the response dict verbatim (keys ``ED_DATA_STR``,
-    ``ET_FILT``, ``ET_FILTEX``, ``ET_TEXT``, ``ET_LOG``).  Caller
-    decides what to do with it.  Raises on RFC error.
+    ``ET_FILT``, ``ET_FILTEX``, ``ET_TEXT``, ``ET_LOG``).  Raises on
+    RFC error; the caller checks ``ET_LOG`` for SECAUDIT errors the
+    kernel surfaces in-band rather than as exceptions.
     """
     import sapmap_rfc
+    kwargs = ({"ID_NAME": profile_name} if profile_name
+              else {"ID_DYN_CONF": "X"})
     with sapmap_rfc._get_connection(node, creds) as conn:
-        return conn.call(
-            "RSAU_API_GET_PROFILE",
-            ID_NAME=profile_name,
-            ID_DYN_CONF="X",
-        )
+        return conn.call("RSAU_API_GET_PROFILE", **kwargs)
+
+
+def _et_log_errors(et_log) -> list:
+    """Return the subset of ET_LOG rows the kernel marked as errors.
+
+    RSAU_* FMs surface failures in-band: the RFC call returns RC=0
+    but ET_LOG contains BAPIRET2 rows with TYPE='E' (or 'A' for
+    abort).  Callers should treat any non-empty error list as a
+    failed call even when no Python exception was raised.
+    """
+    return [row for row in (et_log or [])
+            if (row.get("TYPE") or "").upper() in ("E", "A", "X")]
 
 
 def tier3_probe_dyn_profile(state, node, creds=None,
-                              profile_name: str = "$DYN$",
+                              profile_name: str = "",
                               loot_root: str = "loot") -> dict:
     """Phase 3 step 1 entry point — read-only probe of the dynamic
     audit profile.
@@ -372,6 +388,12 @@ def tier3_probe_dyn_profile(state, node, creds=None,
     et_text = normalised.get("ET_TEXT") or []
     et_log = normalised.get("ET_LOG") or []
 
+    # In-band error check.  RSAU_* FMs return RC=0 even on auth or
+    # parameter failures; the real status lives in ET_LOG.  An
+    # earlier lab probe (with both ID_NAME and ID_DYN_CONF supplied)
+    # surfaced SECAUDIT 058 "Only one action is permitted" here.
+    log_errors = _et_log_errors(et_log)
+
     loot_path = ""
     try:
         loot_dir = _Path(loot_root) / "baseline" / sid
@@ -395,26 +417,41 @@ def tier3_probe_dyn_profile(state, node, creds=None,
     # field names; we list them so we know what RSAUPROF actually
     # contains on this kernel before the writer is built.
     first_row_keys = sorted((et_filt[0] or {}).keys()) if et_filt else []
+    err_summary = ""
+    if log_errors:
+        msgs = "; ".join(
+            f"{r.get('ID','')} {r.get('NUMBER','')} "
+            f"{r.get('MESSAGE','')[:80]}"
+            for r in log_errors[:3])
+        err_summary = f" — KERNEL ERRORS: {msgs}"
     try:
         from sapmap_findings import emit_finding
+        sev = "WARNING" if log_errors else "INFO"
         emit_finding(
-            "INFO", sid,
-            f"RSAU dyn-profile probe: ET_FILT={len(et_filt)} row(s), "
+            sev, sid,
+            f"RSAU dyn-profile probe ({profile_name or 'dyn'}): "
+            f"ET_FILT={len(et_filt)} row(s), "
             f"ET_FILTEX={len(et_filtex)}, ET_TEXT={len(et_text)}, "
             f"ET_LOG={len(et_log)}; RSAUPROF row fields: "
-            f"{','.join(first_row_keys) if first_row_keys else '(empty)'}")
+            f"{','.join(first_row_keys) if first_row_keys else '(empty)'}"
+            f"{err_summary}")
     except Exception:
         pass
 
-    return {"ok": True, "technique": "probe_dyn_profile",
+    return {"ok": not log_errors,
+            "technique": "probe_dyn_profile",
             "sid": sid,
             "probed_at": probed_at,
-            "profile_name": profile_name,
+            "profile_name": profile_name or "(dyn)",
             "et_filt_count": len(et_filt),
             "et_filtex_count": len(et_filtex),
             "et_text_count": len(et_text),
             "et_log_count": len(et_log),
+            "et_log_errors": log_errors,
             "rsauprof_row_fields": first_row_keys,
+            "error": (f"kernel returned {len(log_errors)} error(s) "
+                       f"in ET_LOG: {log_errors[0].get('MESSAGE','')}"
+                       if log_errors else ""),
             "loot_path": loot_path}
 
 

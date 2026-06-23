@@ -781,10 +781,10 @@ def test_probe_handles_signature_read_failure_gracefully():
     assert f["params"] == []
 
 
-def test_read_dyn_profile_calls_get_profile_with_dyn_conf_flag():
-    """read_dyn_profile must pass ID_NAME='$DYN$' and ID_DYN_CONF='X'
-    so the kernel returns the in-memory dynamic config, not the
-    persisted profile that survives a restart."""
+def test_read_dyn_profile_dyn_default_passes_only_dyn_conf():
+    """Default call (no profile_name) must pass ID_DYN_CONF='X' alone.
+    The kernel rejects multi-action calls with SECAUDIT 058
+    'Only one action is permitted' surfaced via ET_LOG."""
     node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
     seen = {}
 
@@ -798,9 +798,7 @@ def test_read_dyn_profile_calls_get_profile_with_dyn_conf_flag():
                     {"PROFNAME": "$DYN$", "SLOTNO": "0001",
                      "STATUS": "X", "UNAME": "SAP#*"},
                 ],
-                "ET_FILTEX": [],
-                "ET_TEXT": [],
-                "ET_LOG": [],
+                "ET_FILTEX": [], "ET_TEXT": [], "ET_LOG": [],
             }
         return {}
 
@@ -809,10 +807,45 @@ def test_read_dyn_profile_calls_get_profile_with_dyn_conf_flag():
     with _patch_connection(conn):
         resp = sapmap_evasion_tier3.read_dyn_profile(node)
 
-    assert seen["fm"] == "RSAU_API_GET_PROFILE"
-    assert seen["kw"]["ID_NAME"] == "$DYN$"
-    assert seen["kw"]["ID_DYN_CONF"] == "X"
+    # Only ID_DYN_CONF must be supplied; ID_NAME absent.
+    assert seen["kw"] == {"ID_DYN_CONF": "X"}
     assert resp["ET_FILT"][0]["UNAME"] == "SAP#*"
+
+
+def test_read_dyn_profile_named_profile_passes_only_id_name():
+    """When a profile_name is given, ID_NAME alone — no ID_DYN_CONF
+    — so the call doesn't trip the mutual-exclusion check."""
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    seen = {}
+
+    def _call(fm, **kw):
+        if fm == "RSAU_API_GET_PROFILE":
+            seen["kw"] = kw
+            return {"ED_DATA_STR": "", "ET_FILT": [],
+                    "ET_FILTEX": [], "ET_TEXT": [], "ET_LOG": []}
+        return {}
+
+    conn = MagicMock()
+    conn.call.side_effect = _call
+    with _patch_connection(conn):
+        sapmap_evasion_tier3.read_dyn_profile(
+            node, profile_name="SAP_NORMAL")
+
+    assert seen["kw"] == {"ID_NAME": "SAP_NORMAL"}
+
+
+def test_et_log_errors_extracts_type_e_rows():
+    rows = [
+        {"TYPE": "I", "MESSAGE": "info"},
+        {"TYPE": "E", "ID": "SECAUDIT", "NUMBER": "058",
+         "MESSAGE": "Only one action is permitted"},
+        {"TYPE": "A", "MESSAGE": "abort"},
+        {"TYPE": "S", "MESSAGE": "success"},
+    ]
+    errs = sapmap_evasion_tier3._et_log_errors(rows)
+    assert len(errs) == 2
+    assert errs[0]["ID"] == "SECAUDIT"
+    assert errs[1]["TYPE"] == "A"
 
 
 def test_probe_dyn_profile_refuses_when_flag_disarmed():
@@ -822,6 +855,38 @@ def test_probe_dyn_profile_refuses_when_flag_disarmed():
     out = sapmap_evasion_tier3.tier3_probe_dyn_profile(state, node)
     assert out["ok"] is False
     assert "--allow-evasion" in out["error"]
+
+
+def test_probe_dyn_profile_marks_failure_when_et_log_carries_error():
+    """The lab repro: kernel returned RC=0 + empty ET_FILT + an
+    ET_LOG error row.  The probe must surface that as ok=False with
+    the error message threaded into the response, not pretend the
+    empty result was a success."""
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+
+    def _call(fm, **kw):
+        if fm == "RSAU_API_GET_PROFILE":
+            return {
+                "ED_DATA_STR": "",
+                "ET_FILT": [], "ET_FILTEX": [], "ET_TEXT": [],
+                "ET_LOG": [{
+                    "TYPE": "E", "ID": "SECAUDIT", "NUMBER": "058",
+                    "MESSAGE": "Only one action is permitted",
+                }],
+            }
+        return {}
+
+    conn = MagicMock()
+    conn.call.side_effect = _call
+    with _patch_connection(conn):
+        out = sapmap_evasion_tier3.tier3_probe_dyn_profile(
+            state, node, loot_root="/tmp/sapmap-test-probe-elog")
+
+    assert out["ok"] is False
+    assert len(out["et_log_errors"]) == 1
+    assert "Only one action is permitted" in out["error"]
 
 
 def test_probe_dyn_profile_dumps_verbatim_response(tmp_path):
@@ -853,7 +918,9 @@ def test_probe_dyn_profile_dumps_verbatim_response(tmp_path):
             state, node, loot_root=str(tmp_path))
 
     assert out["ok"] is True
-    assert out["profile_name"] == "$DYN$"
+    # Default call has no profile_name → response uses "(dyn)" marker
+    # so the operator sees the call mode in the finding line.
+    assert out["profile_name"] == "(dyn)"
     assert out["et_filt_count"] == 2
     assert out["et_filtex_count"] == 0
     assert out["et_text_count"] == 1
