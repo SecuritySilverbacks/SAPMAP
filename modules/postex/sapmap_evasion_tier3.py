@@ -284,6 +284,140 @@ def _summarise_params(params: list) -> str:
     return " ".join(parts) if parts else "no params"
 
 
+def read_dyn_profile(node, creds=None,
+                       profile_name: str = "$DYN$") -> dict:
+    """Phase 3 step 1 — call ``RSAU_API_GET_PROFILE`` and return the
+    verbatim response.
+
+    Symmetric read counterpart to ``RSAU_API_SET_PROFILE``:
+    ``ET_FILT`` rows we read here have the exact same ``RSAUPROF_T``
+    row type as the ``IT_FILT`` parameter we'll later send back for
+    restore.  So caching this response + sending it back unchanged
+    is the cleanest possible baseline restore primitive — no
+    interpretation, no field reshaping, no risk of mis-reading the
+    kernel's internal slot layout.
+
+    Args:
+        profile_name: ABAP profile name.  Default ``"$DYN$"`` is the
+            dynamic / in-memory profile (the one we want to mutate
+            without touching the persisted profile that survives a
+            restart).
+
+    Returns the response dict verbatim (keys ``ED_DATA_STR``,
+    ``ET_FILT``, ``ET_FILTEX``, ``ET_TEXT``, ``ET_LOG``).  Caller
+    decides what to do with it.  Raises on RFC error.
+    """
+    import sapmap_rfc
+    with sapmap_rfc._get_connection(node, creds) as conn:
+        return conn.call(
+            "RSAU_API_GET_PROFILE",
+            ID_NAME=profile_name,
+            ID_DYN_CONF="X",
+        )
+
+
+def tier3_probe_dyn_profile(state, node, creds=None,
+                              profile_name: str = "$DYN$",
+                              loot_root: str = "loot") -> dict:
+    """Phase 3 step 1 entry point — read-only probe of the dynamic
+    audit profile.
+
+    Calls ``RSAU_API_GET_PROFILE(ID_NAME='$DYN$', ID_DYN_CONF='X')``
+    and dumps the verbatim response to
+    ``loot/baseline/<sid>/dyn_profile_<ts>.json``.  Pure read; no
+    mutation.  Gated behind ``--allow-evasion`` because the response
+    shape is only useful when Tier 3 is armed and we're about to
+    plan a write against it.
+    """
+    technique = "rz11_dynamic_set"   # gate-only — no kernel mutation
+    try:
+        assert_evasion_allowed(state, node, technique,
+                                require_baseline=False)
+    except EvasionGateError as e:
+        return {"ok": False, "technique": "probe_dyn_profile",
+                "error": str(e), "profile_name": profile_name}
+
+    import json as _json
+    from pathlib import Path as _Path
+    from datetime import datetime as _dt
+    from sapmap_errors import format_rfc_exception
+
+    sid = getattr(node, "sid", "?")
+    probed_at = _dt.now().isoformat()
+
+    try:
+        resp = read_dyn_profile(node, creds=creds,
+                                 profile_name=profile_name)
+    except Exception as e:
+        msg = format_rfc_exception(e).split("\n")[0][:200]
+        return {"ok": False, "technique": "probe_dyn_profile",
+                "error": f"RSAU_API_GET_PROFILE raised: {msg}",
+                "profile_name": profile_name}
+
+    # ABAP byte / RAWSTRING values may come back as Python bytes —
+    # JSON can't carry them.  Hex-encode anything that looks binary
+    # so the loot file is plain UTF-8.
+    def _norm(v):
+        if isinstance(v, bytes):
+            return v.hex()
+        if isinstance(v, dict):
+            return {k: _norm(x) for k, x in v.items()}
+        if isinstance(v, list):
+            return [_norm(x) for x in v]
+        return v
+    normalised = {k: _norm(v) for k, v in resp.items()}
+
+    et_filt = normalised.get("ET_FILT") or []
+    et_filtex = normalised.get("ET_FILTEX") or []
+    et_text = normalised.get("ET_TEXT") or []
+    et_log = normalised.get("ET_LOG") or []
+
+    loot_path = ""
+    try:
+        loot_dir = _Path(loot_root) / "baseline" / sid
+        loot_dir.mkdir(parents=True, exist_ok=True)
+        fname = ("dyn_profile_"
+                 + probed_at.replace(":", "").replace(".", "_")
+                 + ".json")
+        loot_path = str(loot_dir / fname)
+        _Path(loot_path).write_text(_json.dumps({
+            "sid": sid,
+            "probed_at": probed_at,
+            "profile_name": profile_name,
+            "response": normalised,
+            "loot_path": loot_path,
+        }, indent=2))
+    except Exception as e:
+        logger.warning(f"{sid}: dyn profile loot write failed: {e}")
+
+    # Surface a finding so the operator sees the shape summary in the
+    # panel without having to open the JSON.  First-row keys are the
+    # field names; we list them so we know what RSAUPROF actually
+    # contains on this kernel before the writer is built.
+    first_row_keys = sorted((et_filt[0] or {}).keys()) if et_filt else []
+    try:
+        from sapmap_findings import emit_finding
+        emit_finding(
+            "INFO", sid,
+            f"RSAU dyn-profile probe: ET_FILT={len(et_filt)} row(s), "
+            f"ET_FILTEX={len(et_filtex)}, ET_TEXT={len(et_text)}, "
+            f"ET_LOG={len(et_log)}; RSAUPROF row fields: "
+            f"{','.join(first_row_keys) if first_row_keys else '(empty)'}")
+    except Exception:
+        pass
+
+    return {"ok": True, "technique": "probe_dyn_profile",
+            "sid": sid,
+            "probed_at": probed_at,
+            "profile_name": profile_name,
+            "et_filt_count": len(et_filt),
+            "et_filtex_count": len(et_filtex),
+            "et_text_count": len(et_text),
+            "et_log_count": len(et_log),
+            "rsauprof_row_fields": first_row_keys,
+            "loot_path": loot_path}
+
+
 def tier3_capture_baseline_only(state, node, creds=None) -> dict:
     """Standalone baseline capture without invoking any mutation.
 
