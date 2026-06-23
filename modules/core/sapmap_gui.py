@@ -7018,6 +7018,48 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:lpe", "Local Privilege Escalation", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/probe_rsau_dyn_profile", method="POST")
+    def node_probe_rsau_dyn_profile(sid):
+        """Phase 3 step 1 — read RSAU_API_GET_PROFILE for ID_NAME='$DYN$'
+        and dump the response shape so we have ground truth on the
+        RSAUPROF row format before the writer is built.  Refuses
+        unless --allow-evasion is armed."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        def _run():
+            try:
+                from sapmap_evasion_tier3 import tier3_probe_dyn_profile
+            except Exception as e:
+                print(f"[-] {sid}: tier3 probe module unavailable: {e}")
+                return
+            creds = node.best_credentials()
+            if creds is None or not creds.verified:
+                print(f"[!] {sid}: dyn profile probe needs verified RFC "
+                      f"credentials — complete user creation first")
+                emit_finding("WARNING", sid,
+                              "Dyn profile probe skipped — no verified "
+                              "RFC credentials")
+                return
+            print(f"[*] {sid}: Tier 3 Phase 3 step 1 — probing dynamic "
+                  f"audit profile via RSAU_API_GET_PROFILE...")
+            out = tier3_probe_dyn_profile(api.state, node, creds=creds)
+            if not out.get("ok"):
+                print(f"[-] {sid}: dyn profile probe failed — "
+                      f"{out.get('error')}")
+                return
+            print(f"[+] {sid}: dyn profile probe — "
+                  f"ET_FILT {out['et_filt_count']} row(s); "
+                  f"RSAUPROF fields: "
+                  f"{','.join(out['rsauprof_row_fields']) or '(empty)'}; "
+                  f"loot {out['loot_path']!r}")
+
+        _bg(f"{sid}:probe_rsau_dyn_profile",
+             "Probe RSAU Dynamic Profile", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/probe_rsau_api", method="POST")
     def node_probe_rsau_api(sid):
         """Phase 2 of Tier 3 — discovery probe for the RSAU API

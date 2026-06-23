@@ -781,6 +781,115 @@ def test_probe_handles_signature_read_failure_gracefully():
     assert f["params"] == []
 
 
+def test_read_dyn_profile_calls_get_profile_with_dyn_conf_flag():
+    """read_dyn_profile must pass ID_NAME='$DYN$' and ID_DYN_CONF='X'
+    so the kernel returns the in-memory dynamic config, not the
+    persisted profile that survives a restart."""
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    seen = {}
+
+    def _call(fm, **kw):
+        if fm == "RSAU_API_GET_PROFILE":
+            seen["fm"] = fm
+            seen["kw"] = kw
+            return {
+                "ED_DATA_STR": "",
+                "ET_FILT": [
+                    {"PROFNAME": "$DYN$", "SLOTNO": "0001",
+                     "STATUS": "X", "UNAME": "SAP#*"},
+                ],
+                "ET_FILTEX": [],
+                "ET_TEXT": [],
+                "ET_LOG": [],
+            }
+        return {}
+
+    conn = MagicMock()
+    conn.call.side_effect = _call
+    with _patch_connection(conn):
+        resp = sapmap_evasion_tier3.read_dyn_profile(node)
+
+    assert seen["fm"] == "RSAU_API_GET_PROFILE"
+    assert seen["kw"]["ID_NAME"] == "$DYN$"
+    assert seen["kw"]["ID_DYN_CONF"] == "X"
+    assert resp["ET_FILT"][0]["UNAME"] == "SAP#*"
+
+
+def test_probe_dyn_profile_refuses_when_flag_disarmed():
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": False}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    out = sapmap_evasion_tier3.tier3_probe_dyn_profile(state, node)
+    assert out["ok"] is False
+    assert "--allow-evasion" in out["error"]
+
+
+def test_probe_dyn_profile_dumps_verbatim_response(tmp_path):
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+
+    def _call(fm, **kw):
+        if fm == "RSAU_API_GET_PROFILE":
+            return {
+                "ED_DATA_STR": "header-text",
+                "ET_FILT": [
+                    {"PROFNAME": "$DYN$", "SLOTNO": "0001",
+                     "STATUS": "X", "UNAME": "SAP#*",
+                     "MSGVECT": bytes.fromhex("abcd")},
+                    {"PROFNAME": "$DYN$", "SLOTNO": "0002",
+                     "STATUS": "X", "UNAME": "*"},
+                ],
+                "ET_FILTEX": [],
+                "ET_TEXT": [{"PROFNAME": "$DYN$", "DESCRIPTION": "Dyn"}],
+                "ET_LOG": [],
+            }
+        return {}
+
+    conn = MagicMock()
+    conn.call.side_effect = _call
+    with _patch_connection(conn):
+        out = sapmap_evasion_tier3.tier3_probe_dyn_profile(
+            state, node, loot_root=str(tmp_path))
+
+    assert out["ok"] is True
+    assert out["profile_name"] == "$DYN$"
+    assert out["et_filt_count"] == 2
+    assert out["et_filtex_count"] == 0
+    assert out["et_text_count"] == 1
+    # Field names of the first ET_FILT row land in the finding summary
+    assert "PROFNAME" in out["rsauprof_row_fields"]
+    assert "SLOTNO" in out["rsauprof_row_fields"]
+    assert "STATUS" in out["rsauprof_row_fields"]
+    assert "UNAME" in out["rsauprof_row_fields"]
+
+    # JSON loot file written; bytes hex-encoded; self-records its path
+    import json as _json
+    on_disk = _json.loads(open(out["loot_path"]).read())
+    assert on_disk["loot_path"] == out["loot_path"]
+    assert on_disk["response"]["ET_FILT"][0]["MSGVECT"] == "abcd"
+
+
+def test_probe_dyn_profile_captures_rfc_exception_cleanly():
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+
+    def _call(fm, **kw):
+        if fm == "RSAU_API_GET_PROFILE":
+            raise Exception("NOT_FOUND: profile $DYN$")
+        return {}
+
+    conn = MagicMock()
+    conn.call.side_effect = _call
+    with _patch_connection(conn):
+        out = sapmap_evasion_tier3.tier3_probe_dyn_profile(state, node)
+
+    assert out["ok"] is False
+    assert "RSAU_API_GET_PROFILE raised" in out["error"]
+    assert "NOT_FOUND" in out["error"]
+
+
 def test_probe_helper_summarises_params_by_direction():
     s = sapmap_evasion_tier3._summarise_params([
         {"parameter": "ID_NAME", "direction": "IMPORT"},
