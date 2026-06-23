@@ -7018,6 +7018,61 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:lpe", "Local Privilege Escalation", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/tier3_sal_slot_disable", method="POST")
+    def node_tier3_sal_slot_disable(sid):
+        """Phase 3 step 2 — disable one SAL filter slot for a hold
+        window, then auto-restore via the evasion_window context.
+        First real Tier 3 mutation entry point.  Refuses unless
+        --allow-evasion is armed AND a baseline has been captured."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        data = request.json or {}
+        slotno = str(data.get("slotno") or "").strip()
+        if not slotno:
+            return json.dumps({"error": "slotno required"})
+        try:
+            hold_seconds = float(data.get("hold_seconds") or 5.0)
+        except (TypeError, ValueError):
+            hold_seconds = 5.0
+
+        def _run():
+            try:
+                from sapmap_evasion_tier3 import tier3_sal_slot_disable
+            except Exception as e:
+                print(f"[-] {sid}: tier3 module unavailable: {e}")
+                return
+            creds = node.best_credentials()
+            if creds is None or not creds.verified:
+                print(f"[!] {sid}: SAL slot disable needs verified RFC "
+                      f"credentials — complete user creation first")
+                emit_finding("WARNING", sid,
+                              "SAL slot disable skipped — no verified "
+                              "RFC credentials")
+                return
+            print(f"[*] {sid}: Tier 3 SAL slot disable — slot "
+                  f"{slotno}, hold {hold_seconds}s")
+            out = tier3_sal_slot_disable(api.state, node, slotno,
+                                            hold_seconds=hold_seconds,
+                                            creds=creds)
+            if not out.get("ok"):
+                print(f"[-] {sid}: SAL slot disable failed — "
+                      f"{out.get('error')}")
+                emit_finding("WARNING", sid,
+                              f"Tier 3 SAL slot disable failed: "
+                              f"{out.get('error')}")
+                return
+            print(f"[+] {sid}: SAL slot {out['slotno']} round-trip "
+                  f"complete (baseline STATUS="
+                  f"{out['baseline_status']!r}, "
+                  f"active slot count before mutate: "
+                  f"{out['before_active_count']})")
+
+        _bg(f"{sid}:tier3_sal_slot_disable",
+             f"Tier 3: disable SAL slot {slotno}", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/probe_rsau_dyn_profile", method="POST")
     def node_probe_rsau_dyn_profile(sid):
         """Phase 3 step 1 — read RSAU_API_GET_PROFILE for ID_NAME='$DYN$'

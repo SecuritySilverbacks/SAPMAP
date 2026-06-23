@@ -639,6 +639,316 @@ def test_tier3_set_param_propagates_write_failure_and_still_restores():
 
 
 # ---------------------------------------------------------------------------
+# Phase 3 step 2 — write_dyn_profile + tier3_sal_slot_disable
+# ---------------------------------------------------------------------------
+
+def _live_dyn_profile_rows(active_status=("X", "X", "X")):
+    """Three-slot ET_FILT shaped exactly like the lab response."""
+    return [
+        {"PROFNAME": "$DYN$", "SLOTNO": "0001",
+         "CURRPROF": "", "CLASSES": 255, "SEVERITY": 2,
+         "CLIENT": "*", "UNAME": "SAP#*", "STATUS": active_status[0],
+         "CUNAME": "", "CDATE": "00000000", "SELVAR": "00",
+         "MSGVECT": b"\x00" * 64},
+        {"PROFNAME": "$DYN$", "SLOTNO": "0002",
+         "CURRPROF": "", "CLASSES": 255, "SEVERITY": 2,
+         "CLIENT": "066", "UNAME": "*", "STATUS": active_status[1],
+         "CUNAME": "", "CDATE": "00000000", "SELVAR": "00",
+         "MSGVECT": b"\x00" * 64},
+        {"PROFNAME": "$DYN$", "SLOTNO": "0003",
+         "CURRPROF": "", "CLASSES": 0, "SEVERITY": 0,
+         "CLIENT": "*", "UNAME": "*", "STATUS": active_status[2],
+         "CUNAME": "", "CDATE": "00000000", "SELVAR": "11",
+         "MSGVECT": b"\x00" * 64},
+    ]
+
+
+def _live_dyn_filtex_rows():
+    return [{"PROFNAME": "$DYN$", "SLOTNO": s, "MSGVECT": b"\x00" * 160}
+            for s in ("0001", "0002", "0003")]
+
+
+def test_write_dyn_profile_calls_set_profile_with_dyn_only_flags():
+    """The writer MUST pass ID_UPD_DYN_CNF='X' AND ID_SET_ACTIV=' '
+    so the change is in-memory only and does NOT promote the dyn
+    profile to the persisted active profile."""
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    seen = {}
+
+    def _call(fm, **kw):
+        if fm == "RSAU_API_SET_PROFILE":
+            seen["fm"] = fm
+            seen["kw"] = kw
+            return {"ET_RESULT": []}
+        return {}
+
+    conn = MagicMock()
+    conn.call.side_effect = _call
+    with _patch_connection(conn):
+        r = sapmap_evasion_baseline.write_dyn_profile(
+            node, None, _live_dyn_profile_rows(),
+            _live_dyn_filtex_rows(), [])
+
+    assert r["ok"] is True
+    assert seen["kw"]["ID_NAME"] == "$DYN$"
+    assert seen["kw"]["ID_UPD_DYN_CNF"] == "X"
+    assert seen["kw"]["ID_SET_ACTIV"] == " "
+    assert len(seen["kw"]["IT_FILT"]) == 3
+    assert len(seen["kw"]["IT_FILTX"]) == 3
+
+
+def test_write_dyn_profile_hex_string_msgvect_decoded_to_bytes():
+    """When the rows came from a deserialised JSON loot file the
+    MSGVECT will be a hex string.  The writer must convert it back
+    to bytes for the RAWSTRING parameter."""
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    seen = {}
+
+    def _call(fm, **kw):
+        if fm == "RSAU_API_SET_PROFILE":
+            seen["kw"] = kw
+            return {"ET_RESULT": []}
+        return {}
+
+    conn = MagicMock()
+    conn.call.side_effect = _call
+    rows = [{"PROFNAME": "$DYN$", "SLOTNO": "0001",
+              "STATUS": "X", "MSGVECT": "deadbeef"}]
+    with _patch_connection(conn):
+        sapmap_evasion_baseline.write_dyn_profile(
+            node, None, rows, None, None)
+
+    assert seen["kw"]["IT_FILT"][0]["MSGVECT"] == bytes.fromhex("deadbeef")
+
+
+def test_write_dyn_profile_surfaces_et_result_errors():
+    """Kernel reports failures via ET_RESULT (BAPIRET2 rows), not via
+    exceptions.  The writer must mark such calls as ok=False."""
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    conn = MagicMock()
+    conn.call.return_value = {"ET_RESULT": [
+        {"TYPE": "E", "ID": "SECAUDIT", "NUMBER": "045",
+         "MESSAGE": "No authority for SAL config change"},
+    ]}
+    with _patch_connection(conn):
+        r = sapmap_evasion_baseline.write_dyn_profile(
+            node, None, _live_dyn_profile_rows(),
+            _live_dyn_filtex_rows(), [])
+    assert r["ok"] is False
+    assert "No authority" in r["error"]
+    assert len(r["errors"]) == 1
+
+
+def test_capture_baseline_records_dyn_profile_rows():
+    """capture_baseline must also call RSAU_API_GET_PROFILE and
+    cache the ET_FILT/ET_FILTEX/ET_TEXT rows alongside sal_config."""
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+
+    def _call(fm, **kw):
+        if fm == "TH_GET_PARAMETER":
+            return {"PARAMETER_VALUE": "1"}
+        if fm == "RSAU_API_GET_AUDIT_CONFIG":
+            return _lab_sal_response()
+        if fm == "RSAU_API_GET_PROFILE":
+            return {"ED_DATA_STR": "",
+                    "ET_FILT": _live_dyn_profile_rows(),
+                    "ET_FILTEX": _live_dyn_filtex_rows(),
+                    "ET_TEXT": [], "ET_LOG": []}
+        return {}
+
+    conn = MagicMock()
+    conn.call.side_effect = _call
+    import tempfile
+    with _patch_connection(conn), tempfile.TemporaryDirectory() as td:
+        snap = sapmap_evasion_baseline.capture_baseline(
+            node, loot_root=td)
+
+    assert len(snap.dyn_filt) == 3
+    assert snap.dyn_filt[0]["UNAME"] == "SAP#*"
+    assert len(snap.dyn_filtex) == 3
+
+
+def test_baseline_snapshot_roundtrip_hex_encodes_bytes_msgvect():
+    """to_dict / from_dict must hex-encode bytes MSGVECT for JSON
+    survival; the round-trip leaves them as hex strings which
+    write_dyn_profile then re-decodes on the next write."""
+    snap = sapmap_evasion_baseline.BaselineSnapshot(
+        sid="S4H", dyn_filt=_live_dyn_profile_rows(),
+        dyn_filtex=_live_dyn_filtex_rows())
+    d = snap.to_dict()
+    # Bytes round-tripped as hex
+    assert isinstance(d["dyn_filt"][0]["MSGVECT"], str)
+    assert d["dyn_filt"][0]["MSGVECT"] == "00" * 64
+    snap2 = sapmap_evasion_baseline.BaselineSnapshot.from_dict(d)
+    assert len(snap2.dyn_filt) == 3
+    assert snap2.dyn_filt[0]["UNAME"] == "SAP#*"
+
+
+def test_window_restore_dyn_profile_when_touched_flag_set():
+    """When the technique signals touched_dyn_profile=True, the
+    window exit must call write_dyn_profile with the BASELINE rows
+    (not the mutated rows)."""
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+
+    set_profile_calls = []
+
+    def _call(fm, **kw):
+        if fm == "TH_GET_PARAMETER":
+            return {"PARAMETER_VALUE": "1"}
+        if fm == "RSAU_API_GET_AUDIT_CONFIG":
+            return _lab_sal_response()
+        if fm == "RSAU_API_GET_PROFILE":
+            return {"ED_DATA_STR": "",
+                    "ET_FILT": _live_dyn_profile_rows(),
+                    "ET_FILTEX": _live_dyn_filtex_rows(),
+                    "ET_TEXT": [], "ET_LOG": []}
+        if fm == "RSAU_API_SET_PROFILE":
+            set_profile_calls.append(kw)
+            return {"ET_RESULT": []}
+        return {}
+
+    conn = MagicMock()
+    conn.call.side_effect = _call
+    with _patch_connection(conn):
+        with sapmap_evasion_baseline.evasion_window(
+                node, state, "sal_filter_narrow",
+                touched_dyn_profile=True):
+            pass
+
+    assert len(set_profile_calls) == 1   # restore-on-exit fired once
+    restored_rows = set_profile_calls[0]["IT_FILT"]
+    statuses = sorted(str(r.get("STATUS", "")).strip()
+                       for r in restored_rows)
+    assert statuses == ["X", "X", "X"]   # baseline had all 3 active
+
+
+def test_window_restore_skips_dyn_profile_when_flag_not_set():
+    """Default touched_dyn_profile=False means the window exit does
+    NOT touch RSAU_API_SET_PROFILE — keeps non-SAL techniques
+    cheap."""
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+
+    set_profile_calls = []
+
+    def _call(fm, **kw):
+        if fm == "TH_GET_PARAMETER":
+            return {"PARAMETER_VALUE": "1"}
+        if fm == "RSAU_API_GET_AUDIT_CONFIG":
+            return _lab_sal_response()
+        if fm == "RSAU_API_GET_PROFILE":
+            return {"ED_DATA_STR": "",
+                    "ET_FILT": _live_dyn_profile_rows(),
+                    "ET_FILTEX": _live_dyn_filtex_rows(),
+                    "ET_TEXT": [], "ET_LOG": []}
+        if fm == "RSAU_API_SET_PROFILE":
+            set_profile_calls.append(kw)
+            return {"ET_RESULT": []}
+        return {}
+
+    conn = MagicMock()
+    conn.call.side_effect = _call
+    with _patch_connection(conn):
+        with sapmap_evasion_baseline.evasion_window(
+                node, state, "sal_filter_narrow"):
+            pass
+
+    assert set_profile_calls == []
+
+
+# ---------------------------------------------------------------------------
+# tier3_sal_slot_disable — first concrete Tier 3 technique
+# ---------------------------------------------------------------------------
+
+def test_tier3_sal_slot_disable_full_roundtrip():
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True,
+                     "baseline_captured_at": "2026-06-23T20:00:00"}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+
+    set_profile_calls = []
+
+    def _call(fm, **kw):
+        if fm == "TH_GET_PARAMETER":
+            return {"PARAMETER_VALUE": "1"}
+        if fm == "RSAU_API_GET_AUDIT_CONFIG":
+            return _lab_sal_response()
+        if fm == "RSAU_API_GET_PROFILE":
+            return {"ED_DATA_STR": "",
+                    "ET_FILT": _live_dyn_profile_rows(),
+                    "ET_FILTEX": _live_dyn_filtex_rows(),
+                    "ET_TEXT": [], "ET_LOG": []}
+        if fm == "RSAU_API_SET_PROFILE":
+            set_profile_calls.append(kw)
+            return {"ET_RESULT": []}
+        return {}
+
+    conn = MagicMock()
+    conn.call.side_effect = _call
+    with _patch_connection(conn):
+        out = sapmap_evasion_tier3.tier3_sal_slot_disable(
+            state, node, "0001", hold_seconds=0)
+
+    assert out["ok"] is True
+    assert out["slotno"] == "0001"
+    assert out["baseline_status"] == "X"
+    assert out["before_active_count"] == 3
+
+    # Two SET_PROFILE calls: mutation (slot 0001 inactive) +
+    # window-exit restore (slot 0001 back to active).
+    assert len(set_profile_calls) == 2
+
+    mut_rows = set_profile_calls[0]["IT_FILT"]
+    slot1 = next(r for r in mut_rows if r["SLOTNO"] == "0001")
+    assert slot1["STATUS"] == " "      # mutation flipped it off
+
+    restore_rows = set_profile_calls[1]["IT_FILT"]
+    slot1_r = next(r for r in restore_rows if r["SLOTNO"] == "0001")
+    assert slot1_r["STATUS"] == "X"    # restored to baseline
+
+
+def test_tier3_sal_slot_disable_refuses_when_gate_closed():
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": False}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    out = sapmap_evasion_tier3.tier3_sal_slot_disable(
+        state, node, "0001", hold_seconds=0)
+    assert out["ok"] is False
+    assert "--allow-evasion" in out["error"]
+
+
+def test_tier3_sal_slot_disable_rejects_unknown_slotno():
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True,
+                     "baseline_captured_at": "2026-06-23T20:00:00"}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+
+    def _call(fm, **kw):
+        if fm == "TH_GET_PARAMETER":
+            return {"PARAMETER_VALUE": "1"}
+        if fm == "RSAU_API_GET_AUDIT_CONFIG":
+            return _lab_sal_response()
+        if fm == "RSAU_API_GET_PROFILE":
+            return {"ED_DATA_STR": "",
+                    "ET_FILT": _live_dyn_profile_rows(),
+                    "ET_FILTEX": _live_dyn_filtex_rows(),
+                    "ET_TEXT": [], "ET_LOG": []}
+        return {}
+
+    conn = MagicMock()
+    conn.call.side_effect = _call
+    with _patch_connection(conn):
+        out = sapmap_evasion_tier3.tier3_sal_slot_disable(
+            state, node, "9999", hold_seconds=0)
+
+    assert out["ok"] is False
+    assert "not present" in out["error"]
+
+
+# ---------------------------------------------------------------------------
 # Phase 2 — RSAU API surface discovery probe
 # ---------------------------------------------------------------------------
 

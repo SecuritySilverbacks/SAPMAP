@@ -233,6 +233,42 @@ class SalConfig:
         )
 
 
+def _rows_to_jsonable(rows) -> list:
+    """Hex-encode any bytes-typed RAWSTRING fields (MSGVECT, SELVAR)
+    in a list of RFC response rows so the dict can survive json.dumps.
+    The reverse conversion is handled by ``_rows_to_rfc``."""
+    out = []
+    for row in rows or []:
+        r = {}
+        for k, v in row.items():
+            if isinstance(v, bytes):
+                r[k] = v.hex()
+            else:
+                r[k] = v
+        out.append(r)
+    return out
+
+
+def _rows_to_rfc(rows, byte_fields=("MSGVECT",)) -> list:
+    """Reverse of ``_rows_to_jsonable`` — hex-decode the named byte
+    fields back to ``bytes`` for the RAWSTRING parameter slots in
+    ``RSAU_API_SET_PROFILE.IT_FILT*``.  Accepts both bytes and hex-
+    string inputs so the helper is safe to call on fresh-from-RFC
+    rows too."""
+    out = []
+    for row in rows or []:
+        r = dict(row)
+        for f in byte_fields:
+            v = r.get(f)
+            if isinstance(v, str):
+                try:
+                    r[f] = bytes.fromhex(v)
+                except ValueError:
+                    pass  # leave as-is; kernel rejection is informative
+        out.append(r)
+    return out
+
+
 @dataclass
 class BaselineSnapshot:
     """Captured state of a target node prior to Tier 3 mutation.
@@ -252,6 +288,14 @@ class BaselineSnapshot:
     # any tooling that still inspects it; new code should read
     # ``sal_config.slots`` instead.
     sal_filter_rows: list = field(default_factory=list)
+    # Phase 3 — verbatim RSAU_API_GET_PROFILE response rows so the
+    # window restore can re-write them via RSAU_API_SET_PROFILE
+    # without any field re-shaping.  Stored as the kernel returned
+    # them (bytes for RAWSTRING fields); to_dict / from_dict hex-
+    # encode for JSON.
+    dyn_filt: list = field(default_factory=list)
+    dyn_filtex: list = field(default_factory=list)
+    dyn_text: list = field(default_factory=list)
     # Free-form bag for technique-specific snapshot data
     # (e.g. NWA log-config XML before flip).  Keyed by technique id.
     technique_state: dict = field(default_factory=dict)
@@ -265,6 +309,9 @@ class BaselineSnapshot:
             "sal_config": (self.sal_config.to_dict()
                             if self.sal_config else None),
             "sal_filter_rows": list(self.sal_filter_rows),
+            "dyn_filt": _rows_to_jsonable(self.dyn_filt),
+            "dyn_filtex": _rows_to_jsonable(self.dyn_filtex),
+            "dyn_text": _rows_to_jsonable(self.dyn_text),
             "technique_state": dict(self.technique_state),
             "loot_path": self.loot_path,
         }
@@ -278,6 +325,9 @@ class BaselineSnapshot:
             params=dict(d.get("params") or {}),
             sal_config=(SalConfig.from_dict(sal) if sal else None),
             sal_filter_rows=list(d.get("sal_filter_rows") or []),
+            dyn_filt=list(d.get("dyn_filt") or []),
+            dyn_filtex=list(d.get("dyn_filtex") or []),
+            dyn_text=list(d.get("dyn_text") or []),
             technique_state=dict(d.get("technique_state") or {}),
             loot_path=d.get("loot_path", ""),
         )
@@ -385,6 +435,20 @@ def capture_baseline(node, creds=None,
                 logger.warning(f"{snap.sid}: SAL config read raised: "
                                 f"{format_rfc_exception(e)}")
 
+            # Dynamic profile — verbatim ET_FILT / ET_FILTEX / ET_TEXT
+            # via RSAU_API_GET_PROFILE(ID_DYN_CONF='X').  Cached so the
+            # window restore can rewrite the same rows back via
+            # RSAU_API_SET_PROFILE without any field re-shaping.
+            try:
+                dyn_resp = conn.call("RSAU_API_GET_PROFILE",
+                                      ID_DYN_CONF="X")
+                snap.dyn_filt = list(dyn_resp.get("ET_FILT") or [])
+                snap.dyn_filtex = list(dyn_resp.get("ET_FILTEX") or [])
+                snap.dyn_text = list(dyn_resp.get("ET_TEXT") or [])
+            except Exception as e:
+                logger.warning(f"{snap.sid}: RSAU_API_GET_PROFILE "
+                                f"failed: {format_rfc_exception(e)}")
+
             # Legacy RSAUPROF fallback — only if the modern API wasn't
             # available (older NetWeaver kernels).  Modern S/4 returns
             # an empty result from RFC_READ_TABLE on RSAUPROF too, but
@@ -481,11 +545,70 @@ def change_param(node, creds, name: str, value: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Writer — RSAU_API_SET_PROFILE (dynamic in-memory profile only)
+# ---------------------------------------------------------------------------
+
+def _et_log_errors(rows) -> list:
+    """Return BAPIRET2 rows with TYPE in (E, A, X) — kernel-side
+    errors surfaced in-band rather than via RFC exceptions."""
+    return [row for row in (rows or [])
+            if (row.get("TYPE") or "").upper() in ("E", "A", "X")]
+
+
+def write_dyn_profile(node, creds, et_filt, et_filtex=None,
+                       et_text=None) -> dict:
+    """Symmetric write counterpart to ``read_dyn_profile``.
+
+    Calls ``RSAU_API_SET_PROFILE`` with ``ID_NAME='$DYN$'``,
+    ``ID_UPD_DYN_CNF='X'`` and ``ID_SET_ACTIV=' '`` so the change
+    lands in the in-memory dynamic config only — no profile file
+    rewrite, no AUM/AUW, lost on instance restart.
+
+    Accepts both fresh-from-RFC rows (with bytes-typed MSGVECT) and
+    rows that came from a deserialised baseline JSON (hex-string
+    MSGVECT).  Both shapes round-trip cleanly via ``_rows_to_rfc``.
+
+    Returns ``{"ok": bool, "et_result": [...], "errors": [...],
+    "error": str}``.  ``ok=False`` whenever ``ET_RESULT`` carries any
+    TYPE E/A/X rows; the first kernel message lands in ``error``.
+    Never raises — caller can decide whether to abort or continue.
+    """
+    import sapmap_rfc
+    from sapmap_errors import format_rfc_exception
+
+    try:
+        with sapmap_rfc._get_connection(node, creds) as conn:
+            r = conn.call(
+                "RSAU_API_SET_PROFILE",
+                ID_NAME="$DYN$",
+                ID_UPD_DYN_CNF="X",
+                ID_SET_ACTIV=" ",
+                IT_FILT=_rows_to_rfc(et_filt),
+                IT_FILTX=_rows_to_rfc(et_filtex),
+                IT_FILT_TX=list(et_text or []),
+            )
+    except Exception as e:
+        msg = format_rfc_exception(e).split("\n")[0][:200]
+        return {"ok": False, "et_result": [], "errors": [],
+                "error": f"RSAU_API_SET_PROFILE raised: {msg}"}
+
+    et_result = r.get("ET_RESULT") or []
+    errs = _et_log_errors(et_result)
+    return {
+        "ok": not errs,
+        "et_result": et_result,
+        "errors": errs,
+        "error": (errs[0].get("MESSAGE", "") if errs else ""),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Restore
 # ---------------------------------------------------------------------------
 
 def restore_baseline(node, creds, snapshot: BaselineSnapshot,
-                      only: Optional[list] = None) -> dict:
+                      only: Optional[list] = None,
+                      restore_dyn_profile: bool = False) -> dict:
     """Write the captured parameter values back to the target.
 
     Args:
@@ -531,6 +654,24 @@ def restore_baseline(node, creds, snapshot: BaselineSnapshot,
                   f"{pname}={original!r} — {r['error']}")
             out["skipped"].append((pname, r["error"]))
 
+    # Phase 3 — dyn profile restore.  When the technique signalled it
+    # mutated the SAL filter table (via the touched_dyn_profile flag
+    # on the evasion_window), we rewrite the baseline ET_FILT /
+    # ET_FILTEX / ET_TEXT rows via RSAU_API_SET_PROFILE.
+    if restore_dyn_profile and snapshot.dyn_filt:
+        r = write_dyn_profile(node, creds, snapshot.dyn_filt,
+                                snapshot.dyn_filtex,
+                                snapshot.dyn_text)
+        if r["ok"]:
+            print(f"[+] {snapshot.sid}: dyn profile restored "
+                  f"({len(snapshot.dyn_filt)} slot rows)")
+            out["dyn_profile_restored"] = True
+        else:
+            print(f"[!] {snapshot.sid}: dyn profile restore FAILED — "
+                  f"{r['error']}")
+            out["dyn_profile_restored"] = False
+            out["dyn_profile_error"] = r["error"]
+
     return out
 
 
@@ -554,7 +695,9 @@ def _stack() -> list:
 @contextmanager
 def evasion_window(node, state, technique: str,
                     creds=None,
-                    touched_params: Optional[list] = None) -> Iterator[dict]:
+                    touched_params: Optional[list] = None,
+                    touched_dyn_profile: bool = False
+                    ) -> Iterator[dict]:
     """Run a Tier 3 mutation under a captured baseline.
 
     Usage::
@@ -591,6 +734,7 @@ def evasion_window(node, state, technique: str,
         "node": node, "technique": technique,
         "snapshot": snap,
         "touched_params": list(touched_params or []),
+        "touched_dyn_profile": bool(touched_dyn_profile),
         "started_at": datetime.now().isoformat(),
     }
     _stack().append(frame)
@@ -603,8 +747,10 @@ def evasion_window(node, state, technique: str,
         _stack().pop()
         if is_outermost:
             try:
-                restore_baseline(node, creds, snap,
-                                  only=frame["touched_params"] or None)
+                restore_baseline(
+                    node, creds, snap,
+                    only=frame["touched_params"] or None,
+                    restore_dyn_profile=frame["touched_dyn_profile"])
             except Exception as e:
                 logger.error(f"{snap.sid}: evasion-window restore "
                               f"failed for {technique}: {e}")

