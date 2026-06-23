@@ -645,21 +645,23 @@ def test_tier3_set_param_propagates_write_failure_and_still_restores():
 def _interface_response(import_params, export_params,
                         tables_params=(), exception_params=()):
     """Build an RFC_GET_FUNCTION_INTERFACE response shape with the
-    given parameter lists."""
+    given parameter lists.  Uses the *real* RFC_FUNC_DESC field
+    names (PARAMCLASS / EXID / TABNAME), verified against the live
+    S/4 793 probe output."""
     rows = []
     for p in import_params:
-        rows.append({"PARAMETER": p, "PARAMTYPE": "I", "STRUCTURE": "",
-                     "FUNCTYPE": "C", "OPTIONAL": ""})
+        rows.append({"PARAMETER": p, "PARAMCLASS": "I",
+                     "EXID": "C", "TABNAME": "", "OPTIONAL": ""})
     for p in export_params:
-        rows.append({"PARAMETER": p, "PARAMTYPE": "E", "STRUCTURE": "",
-                     "FUNCTYPE": "C", "OPTIONAL": ""})
+        rows.append({"PARAMETER": p, "PARAMCLASS": "E",
+                     "EXID": "C", "TABNAME": "", "OPTIONAL": ""})
     for p in tables_params:
-        rows.append({"PARAMETER": p, "PARAMTYPE": "T",
-                     "STRUCTURE": "RSAUINFO",
-                     "FUNCTYPE": "X", "OPTIONAL": ""})
+        rows.append({"PARAMETER": p, "PARAMCLASS": "T",
+                     "EXID": "h", "TABNAME": "RSAUPROF_T",
+                     "OPTIONAL": "X"})
     for p in exception_params:
-        rows.append({"PARAMETER": p, "PARAMTYPE": "X",
-                     "STRUCTURE": "", "FUNCTYPE": "", "OPTIONAL": ""})
+        rows.append({"PARAMETER": p, "PARAMCLASS": "X",
+                     "EXID": "", "TABNAME": "", "OPTIONAL": ""})
     return {"PARAMS": rows}
 
 
