@@ -240,17 +240,28 @@ def _probe_one_fm(conn, fm: str, format_exc) -> dict:
                          + format_exc(e).split("\n")[0][:160])
         return out
 
+    # PARAMS table is RFC_FUNC_DESC.  Field names (verified on
+    # S/4 793 — earlier guesses at PARAMTYPE / FUNCTYPE / STRUCTURE
+    # came back empty because those are not the real field names):
+    #   PARAMCLASS — I=Import, E=Export, C=Changing, T=Tables, X=Exception
+    #   EXID       — external type letter (C, N, X, I, F, D, T, g, h, u, ...)
+    #   TABNAME    — type or structure reference name
+    #   FIELDNAME  — field name when a single field is referenced
     direction_map = {"I": "IMPORT", "E": "EXPORT", "C": "CHANGING",
                       "T": "TABLES", "X": "EXCEPTION"}
     for row in r.get("PARAMS", []) or []:
-        ptype = (row.get("PARAMTYPE") or "").strip()
+        pclass = (row.get("PARAMCLASS")
+                  or row.get("PARAMTYPE") or "").strip()
         out["params"].append({
             "parameter": (row.get("PARAMETER") or "").strip(),
-            "direction": direction_map.get(ptype, ptype or "?"),
-            "datatype": (row.get("FUNCTYPE")
+            "direction": direction_map.get(pclass, pclass or "?"),
+            "datatype": (row.get("EXID")
+                          or row.get("FUNCTYPE")
                           or row.get("EXTYP") or "").strip(),
-            "structure": (row.get("STRUCTURE")
+            "structure": (row.get("TABNAME")
+                           or row.get("STRUCTURE")
                            or row.get("REFERENCE") or "").strip(),
+            "fieldname": (row.get("FIELDNAME") or "").strip(),
             "optional": (row.get("OPTIONAL") or "").strip() == "X",
             "default": (row.get("DEFAULT") or "").strip(),
             "text": (row.get("PARAMTEXT") or "").strip(),
