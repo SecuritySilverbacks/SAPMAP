@@ -5482,6 +5482,17 @@ async function ctxAction(action) {
       flashActivity(`${sid}: probing RSAU dynamic profile`, 5000);
       await api('POST', `node/${sid}/probe_rsau_dyn_profile`); break;
     case 'tier3_sal_slot_disable': {
+      // 1/3: profile name.  RSAU_API_SET_PROFILE rejects '$DYN$' as
+      // ID_NAME — the operator must supply the actual static profile
+      // name visible in RSAU_CONFIG as "Current Profile/Filter:
+      // <NAME>/NN".  SAPSEC is the stock name on standard S/4.
+      const profile = prompt(
+        'Tier 3: which SAL static profile holds the slot to disable?'
+        + '\n\nLook at RSAU_CONFIG on ' + sid + ' — the header'
+        + ' "Current Profile/Filter: <NAME>/NN" shows the name.'
+        + ' Default for stock S/4 installs is SAPSEC.',
+        'SAPSEC');
+      if (!profile) break;
       const slotno = prompt(
         'Tier 3: disable which SAL filter slot on ' + sid + '?\n\n'
         + 'Enter slot number (e.g. 1 or 0001). '
@@ -5501,6 +5512,7 @@ async function ctxAction(action) {
       }
       if (!confirm(
         'RUN Tier 3 SAL slot disable on ' + sid + '?\n\n'
+        + 'Profile: ' + profile + '\n'
         + 'Slot: ' + slotno + '\n'
         + 'Hold: ' + hold + 's\n\n'
         + 'This MUTATES kernel state — a baseline must already be '
@@ -5514,7 +5526,8 @@ async function ctxAction(action) {
         `${sid}: Tier 3 — disabling SAL slot ${slotno} for ${hold}s`,
         Math.max(10000, (hold + 5) * 1000));
       await api('POST', `node/${sid}/tier3_sal_slot_disable`,
-                 {slotno: slotno, hold_seconds: hold});
+                 {slotno: slotno, profile_name: profile,
+                  hold_seconds: hold});
       break;
     }
     case 'retrieve_rfcs':

