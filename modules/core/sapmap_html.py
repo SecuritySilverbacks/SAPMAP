@@ -1002,15 +1002,30 @@ body {
        pre-flight + discovery + active mutations.  Tier 3 items only
        become interactive when SAPMAP was launched with
        --allow-evasion (and, for the actual writers, after a
-       baseline has been captured for the node). -->
+       baseline has been captured for the node).
+
+       Submenu icon: ninja (U+1F977).  Each item carries a `title`
+       attribute the browser renders as a hover tooltip so the
+       operator can read a one-line summary of what the action does
+       without clicking. -->
   <div class="ctx-group">
-    <div class="ctx-item">&#9889; Evasion</div>
+    <div class="ctx-item">&#129399; Evasion</div>
     <div class="ctx-sub">
-      <div class="ctx-item" data-action="probe_telemetry">&#128270; Probe Audit Telemetry (SAL / integrity / params)</div>
-      <div class="ctx-item" data-action="capture_evasion_baseline">&#128190; Capture Evasion Baseline (Tier 3 pre-flight)</div>
-      <div class="ctx-item" data-action="probe_rsau_api">&#128270; Probe RSAU API Surface (Tier 3 discovery)</div>
-      <div class="ctx-item" data-action="probe_rsau_dyn_profile">&#128270; Probe RSAU Dynamic Profile (Tier 3 discovery)</div>
-      <div class="ctx-item" data-action="tier3_sal_slot_disable">&#9889; Disable SAL Slot... (Tier 3 mutation)</div>
+      <div class="ctx-item" data-action="probe_telemetry"
+           title="Tier 1 OPSEC enrichment. Reads runtime profile parameters (rsau/enable, rsau/integrity, rsau/ip_only, rec/client, stat/level, gw/logging, rdisp/TRACE) via TH_GET_PARAMETER plus the SAL filter slots via RSAU_API_GET_AUDIT_CONFIG. Pure read; no SAL config touched, no AUM/AUW events. Tells the operator what audit/trace surfaces are on or off BEFORE any mutation decision."
+           >&#128270; Probe Audit Telemetry (SAL / integrity / params)</div>
+      <div class="ctx-item" data-action="capture_evasion_baseline"
+           title="Tier 3 pre-flight snapshot. Calls TH_GET_PARAMETER + RSAU_API_GET_AUDIT_CONFIG + RSAU_API_GET_PROFILE(ID_DYN_CONF='X') and writes loot/baseline/<SID>/baseline_<ts>.json with the full param + slot + filter-row state. Required before any Tier 3 mutation can run — restore-on-exit replays this exact snapshot. Pure read; nothing on the target changes."
+           >&#128190; Capture Evasion Baseline (Tier 3 pre-flight)</div>
+      <div class="ctx-item" data-action="probe_rsau_api"
+           title="Tier 3 discovery. Calls FUNCTION_EXISTS + RFC_GET_FUNCTION_INTERFACE for the RSAU_API_* family (GET_AUDIT_CONFIG, SET_PROFILE, GET_PROFILE, SET_PARAM, GET_PARAM, UPD_AUDIT_CONFIG) and dumps each existing FM's IMPORT/EXPORT/TABLES signature to loot/baseline/<SID>/rsau_api_probe_<ts>.json. Pure metadata read; no SAL config touched."
+           >&#128270; Probe RSAU API Surface (Tier 3 discovery)</div>
+      <div class="ctx-item" data-action="probe_rsau_dyn_profile"
+           title="Tier 3 discovery. Calls RSAU_API_GET_PROFILE(ID_DYN_CONF='X') and dumps the verbatim ET_FILT / ET_FILTEX / ET_TEXT / ET_LOG rows to loot/baseline/<SID>/dyn_profile_<ts>.json. Reveals the exact 12-field RSAUPROF row shape the writer needs to construct. Pure read; no mutation."
+           >&#128270; Probe RSAU Dynamic Profile (Tier 3 discovery)</div>
+      <div class="ctx-item" data-action="tier3_sal_slot_disable"
+           title="Tier 3 MUTATION. Disables one or more SAL filter slots in the dynamic config for a hold window, then auto-restores from baseline. Accepts a single slot ('1'), comma list ('1,2,3'), or 'ALL' for every currently-active slot. CAVEAT on S/4 793: the writer goes through RSAU_API_SET_PROFILE which also updates the static profile on disk — SM19 header will show 'Last changed by SAPMAP00' afterwards. Live behaviour is correct (events stop reaching SAL for the window); in-memory-only stealth is not achieved on this kernel."
+           >&#128263; Disable SAL Slot(s)... (Tier 3 mutation)</div>
     </div>
   </div>
   <!-- Data Extraction submenu -->
@@ -5497,22 +5512,26 @@ async function ctxAction(action) {
       // name visible in RSAU_CONFIG as "Current Profile/Filter:
       // <NAME>/NN".  SAPSEC is the stock name on standard S/4.
       const profile = prompt(
-        'Tier 3: which SAL static profile holds the slot to disable?'
+        'Tier 3: which SAL static profile holds the slot(s) to disable?'
         + '\n\nLook at RSAU_CONFIG on ' + sid + ' — the header'
         + ' "Current Profile/Filter: <NAME>/NN" shows the name.'
         + ' Default for stock S/4 installs is SAPSEC.',
         'SAPSEC');
       if (!profile) break;
       const slotno = prompt(
-        'Tier 3: disable which SAL filter slot on ' + sid + '?\n\n'
-        + 'Enter slot number (e.g. 1 or 0001). '
-        + 'The slot will be flipped to STATUS=\' \' for the hold '
-        + 'window, then auto-restored.', '1');
+        'Tier 3: disable which SAL filter slot(s) on ' + sid + '?'
+        + '\n\nAccepted forms:'
+        + '\n  • single slot:    1   (or 0001)'
+        + '\n  • multiple slots: 1,2,3'
+        + '\n  • everything currently active: ALL'
+        + '\n\nThe targeted slots flip to STATUS=\' \' for the hold'
+        + ' window, then auto-restore.',
+        '1');
       if (!slotno) break;
       const holdRaw = prompt(
         'Hold disabled for how many seconds before auto-restore?\n\n'
         + 'Watch SM19 / RSAU_CONFIG on the server during this '
-        + 'window — the slot should show inactive.', '5');
+        + 'window — the targeted slots should show inactive.', '5');
       if (!holdRaw) break;
       const hold = parseFloat(holdRaw);
       if (isNaN(hold) || hold < 0 || hold > 600) {
@@ -5523,17 +5542,18 @@ async function ctxAction(action) {
       if (!confirm(
         'RUN Tier 3 SAL slot disable on ' + sid + '?\n\n'
         + 'Profile: ' + profile + '\n'
-        + 'Slot: ' + slotno + '\n'
+        + 'Slot(s): ' + slotno + '\n'
         + 'Hold: ' + hold + 's\n\n'
         + 'This MUTATES kernel state — a baseline must already be '
         + 'captured for restore-on-exit to work.\n\n'
-        + 'After the hold window expires, SAPMAP will automatically '
-        + 'restore the baseline ET_FILT/ET_FILTEX/ET_TEXT rows via '
-        + 'RSAU_API_SET_PROFILE. The kernel may still record the '
-        + 'mutation in its own change tracking — verify on the '
-        + 'server before relying on this for live ops.')) break;
+        + 'STEALTH CAVEAT (lab-confirmed on S/4 793): the current '
+        + 'writer goes through RSAU_API_SET_PROFILE which ALSO '
+        + 'updates the static profile on disk.  After the run, '
+        + 'SM19 will show "Last changed by SAPMAP00 on <today>" '
+        + 'on the static profile header.  Live mutation works '
+        + 'correctly; in-memory-only stealth does not.')) break;
       flashActivity(
-        `${sid}: Tier 3 — disabling SAL slot ${slotno} for ${hold}s`,
+        `${sid}: Tier 3 — disabling SAL slot(s) ${slotno} for ${hold}s`,
         Math.max(10000, (hold + 5) * 1000));
       await api('POST', `node/${sid}/tier3_sal_slot_disable`,
                  {slotno: slotno, profile_name: profile,

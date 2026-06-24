@@ -1065,6 +1065,135 @@ def test_window_restore_skips_dyn_profile_when_flag_not_set():
 # tier3_sal_slot_disable — first concrete Tier 3 technique
 # ---------------------------------------------------------------------------
 
+def test_normalize_slotnos_single_value_padded():
+    assert sapmap_evasion_tier3._normalize_slotnos("1", []) == ["0001"]
+    assert sapmap_evasion_tier3._normalize_slotnos(3, []) == ["0003"]
+    assert sapmap_evasion_tier3._normalize_slotnos(
+        "0007", []) == ["0007"]
+
+
+def test_normalize_slotnos_comma_separated():
+    out = sapmap_evasion_tier3._normalize_slotnos("1,2,3", [])
+    assert out == ["0001", "0002", "0003"]
+    # tolerates whitespace + already-padded entries
+    out = sapmap_evasion_tier3._normalize_slotnos(" 0001 , 02 ", [])
+    assert out == ["0001", "0002"]
+
+
+def test_normalize_slotnos_list_input():
+    out = sapmap_evasion_tier3._normalize_slotnos([1, "2", "0003"], [])
+    assert out == ["0001", "0002", "0003"]
+
+
+def test_normalize_slotnos_all_picks_active_only():
+    """ALL must NOT target inactive placeholder slots — those are
+    already empty and writing STATUS=' ' on them is a wasted write
+    that also looks suspicious in the kernel's change tracking."""
+    rows = [
+        {"SLOTNO": "0001", "STATUS": "X"},
+        {"SLOTNO": "0002", "STATUS": "X"},
+        {"SLOTNO": "0003", "STATUS": "X"},
+        {"SLOTNO": "0004", "STATUS": ""},   # placeholder
+        {"SLOTNO": "0005", "STATUS": ""},
+    ]
+    out = sapmap_evasion_tier3._normalize_slotnos("ALL", rows)
+    assert out == ["0001", "0002", "0003"]
+    # case-insensitive
+    assert sapmap_evasion_tier3._normalize_slotnos("all", rows) == [
+        "0001", "0002", "0003"]
+
+
+def test_normalize_slotnos_blank_returns_empty():
+    assert sapmap_evasion_tier3._normalize_slotnos("", []) == []
+    assert sapmap_evasion_tier3._normalize_slotnos(None, []) == []
+    assert sapmap_evasion_tier3._normalize_slotnos("   ", []) == []
+
+
+def test_tier3_sal_slot_disable_multi_slot_flips_all_requested():
+    """Multi-slot input flips STATUS on every requested row and
+    leaves the others untouched."""
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True,
+                     "baseline_captured_at": "2026-06-24T10:00:00"}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+
+    set_profile_calls = []
+
+    def _call(fm, **kw):
+        if fm == "TH_GET_PARAMETER":
+            return {"PARAMETER_VALUE": "1"}
+        if fm == "RSAU_API_GET_AUDIT_CONFIG":
+            return _lab_sal_response()
+        if fm == "RSAU_API_GET_PROFILE":
+            return {"ED_DATA_STR": "",
+                    "ET_FILT": _live_dyn_profile_rows(),
+                    "ET_FILTEX": _live_dyn_filtex_rows(),
+                    "ET_TEXT": [], "ET_LOG": []}
+        if fm == "RSAU_API_SET_PROFILE":
+            set_profile_calls.append(kw)
+            return {"ET_RESULT": []}
+        return {}
+
+    conn = MagicMock()
+    conn.call.side_effect = _call
+    with _patch_connection(conn):
+        out = sapmap_evasion_tier3.tier3_sal_slot_disable(
+            state, node, "1,2", profile_name="SAPSEC",
+            hold_seconds=0)
+
+    assert out["ok"] is True
+    assert out["slotno"] == "0001,0002"
+
+    # Mutation write — slots 1 + 2 inactive, slot 3 still active
+    mut_rows = set_profile_calls[0]["IT_FILT"]
+    by_slot = {r["SLOTNO"]: r["STATUS"] for r in mut_rows}
+    assert by_slot["0001"] == " "
+    assert by_slot["0002"] == " "
+    assert by_slot["0003"] == "X"
+
+
+def test_tier3_sal_slot_disable_all_targets_only_active_slots():
+    """slotno='ALL' must pick every STATUS='X' slot and skip the
+    inactive placeholders."""
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True,
+                     "baseline_captured_at": "2026-06-24T10:00:00"}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+
+    set_profile_calls = []
+
+    def _call(fm, **kw):
+        if fm == "TH_GET_PARAMETER":
+            return {"PARAMETER_VALUE": "1"}
+        if fm == "RSAU_API_GET_AUDIT_CONFIG":
+            return _lab_sal_response()
+        if fm == "RSAU_API_GET_PROFILE":
+            return {"ED_DATA_STR": "",
+                    "ET_FILT": _live_dyn_profile_rows(),
+                    "ET_FILTEX": _live_dyn_filtex_rows(),
+                    "ET_TEXT": [], "ET_LOG": []}
+        if fm == "RSAU_API_SET_PROFILE":
+            set_profile_calls.append(kw)
+            return {"ET_RESULT": []}
+        return {}
+
+    conn = MagicMock()
+    conn.call.side_effect = _call
+    with _patch_connection(conn):
+        out = sapmap_evasion_tier3.tier3_sal_slot_disable(
+            state, node, "ALL", profile_name="SAPSEC",
+            hold_seconds=0)
+
+    assert out["ok"] is True
+    assert out["slotno"] == "0001,0002,0003"
+    mut_rows = set_profile_calls[0]["IT_FILT"]
+    by_slot = {r["SLOTNO"]: r["STATUS"] for r in mut_rows}
+    # All three active slots now off
+    assert by_slot["0001"] == " "
+    assert by_slot["0002"] == " "
+    assert by_slot["0003"] == " "
+
+
 def test_tier3_sal_slot_disable_full_roundtrip():
     state = SAPMAPState()
     state.evasion = {"allow_evasion": True,
@@ -1097,7 +1226,7 @@ def test_tier3_sal_slot_disable_full_roundtrip():
 
     assert out["ok"] is True
     assert out["slotno"] == "0001"
-    assert out["baseline_status"] == "X"
+    assert out["baseline_statuses"] == {"0001": "X"}
     assert out["before_active_count"] == 3
 
     # Two SET_PROFILE calls: mutation (slot 0001 inactive) +
