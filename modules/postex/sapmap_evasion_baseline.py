@@ -283,6 +283,33 @@ def _rows_to_rfc(rows, byte_fields=("MSGVECT",)) -> list:
     return out
 
 
+def _rows_retag_profname(rows, profile_name: str) -> list:
+    """Rewrite each row's ``PROFNAME`` to match the parent profile name.
+
+    The kernel matches IT_FILT / IT_FILTX / IT_FILT_TX rows to slots
+    by the composite key ``(PROFNAME, SLOTNO)``.  When the rows came
+    from ``RSAU_API_GET_PROFILE(ID_DYN_CONF='X')`` they all carry
+    ``PROFNAME='$DYN$'`` — the kernel's runtime label for the in-
+    memory dynamic profile.  If we leave that label in place and
+    send them to ``RSAU_API_SET_PROFILE(ID_NAME='SAPSEC')`` the
+    kernel can't match any row to a SAPSEC slot, silently applies
+    nothing, and returns RC=0 with an empty ET_RESULT.  Lab-confirmed
+    silent-failure mode on S/4 793.
+
+    Caller passes the parent profile name (same value as the FM's
+    ``ID_NAME`` parameter); this helper rewrites every row so the
+    kernel's key match succeeds."""
+    if not profile_name:
+        return list(rows or [])
+    out = []
+    for row in rows or []:
+        r = dict(row)
+        if "PROFNAME" in r:
+            r["PROFNAME"] = profile_name
+        out.append(r)
+    return out
+
+
 @dataclass
 class BaselineSnapshot:
     """Captured state of a target node prior to Tier 3 mutation.
@@ -612,16 +639,23 @@ def write_dyn_profile(node, creds, profile_name: str,
                          "SAL profile name (RSAU_CONFIG → Current "
                          "Profile)"}
 
+    profile_name_clean = profile_name.strip()
+    # Retag PROFNAME on every row to match ID_NAME — without this
+    # the kernel silently fails to match any slot (lab-confirmed
+    # silent-failure on S/4 793).
     try:
         with sapmap_rfc._get_connection(node, creds) as conn:
             r = conn.call(
                 "RSAU_API_SET_PROFILE",
-                ID_NAME=profile_name.strip(),
+                ID_NAME=profile_name_clean,
                 ID_UPD_DYN_CNF="X",
                 ID_SET_ACTIV=" ",
-                IT_FILT=_rows_to_rfc(et_filt),
-                IT_FILTX=_rows_to_rfc(et_filtex),
-                IT_FILT_TX=list(et_text or []),
+                IT_FILT=_rows_to_rfc(
+                    _rows_retag_profname(et_filt, profile_name_clean)),
+                IT_FILTX=_rows_to_rfc(
+                    _rows_retag_profname(et_filtex, profile_name_clean)),
+                IT_FILT_TX=_rows_retag_profname(
+                    et_text or [], profile_name_clean),
             )
     except Exception as e:
         msg = format_rfc_exception(e).split("\n")[0][:200]

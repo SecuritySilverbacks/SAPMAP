@@ -817,6 +817,59 @@ def test_write_dyn_profile_requires_profile_name():
     assert "profile_name required" in r["error"]
 
 
+def test_write_dyn_profile_retags_profname_to_match_id_name():
+    """Lab-confirmed silent-failure regression: rows came back from
+    GET_PROFILE with PROFNAME='$DYN$' (the kernel's runtime label),
+    but SET_PROFILE matches rows to slots by (PROFNAME, SLOTNO).
+    If the rows still say '$DYN$' while we pass ID_NAME='SAPSEC',
+    the kernel matches nothing and applies nothing — RC=0, empty
+    ET_RESULT, kernel state unchanged.  Writer MUST retag every
+    row's PROFNAME to match ID_NAME before sending."""
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    seen = {}
+
+    def _call(fm, **kw):
+        if fm == "RSAU_API_SET_PROFILE":
+            seen["kw"] = kw
+            return {"ET_RESULT": []}
+        return {}
+
+    # GET-shaped rows still labelled '$DYN$' as PROFNAME.
+    rows = _live_dyn_profile_rows()
+    assert all(r["PROFNAME"] == "$DYN$" for r in rows)
+
+    conn = MagicMock()
+    conn.call.side_effect = _call
+    with _patch_connection(conn):
+        sapmap_evasion_baseline.write_dyn_profile(
+            node, None, "SAPSEC", rows,
+            _live_dyn_filtex_rows(), [])
+
+    # Every row sent must now identify as SAPSEC, not $DYN$.
+    sent_rows = seen["kw"]["IT_FILT"]
+    assert all(r["PROFNAME"] == "SAPSEC" for r in sent_rows)
+    sent_filtex = seen["kw"]["IT_FILTX"]
+    assert all(r["PROFNAME"] == "SAPSEC" for r in sent_filtex)
+    # And the SLOTNO values should be untouched
+    assert [r["SLOTNO"] for r in sent_rows] == ["0001", "0002", "0003"]
+
+
+def test_rows_retag_profname_helper_handles_missing_field():
+    rows = [{"SLOTNO": "0001", "STATUS": "X"}]   # no PROFNAME column
+    out = sapmap_evasion_baseline._rows_retag_profname(rows, "SAPSEC")
+    # Helper only rewrites when the column exists; missing column
+    # stays missing (kernel will fall back to its own default).
+    assert "PROFNAME" not in out[0]
+
+
+def test_rows_retag_profname_helper_with_empty_name_passes_through():
+    rows = [{"PROFNAME": "$DYN$", "SLOTNO": "0001"}]
+    out = sapmap_evasion_baseline._rows_retag_profname(rows, "")
+    # Empty profile name = nothing to retag with; rows pass through
+    # unchanged so the writer's own profile_name validation fires.
+    assert out[0]["PROFNAME"] == "$DYN$"
+
+
 def test_write_dyn_profile_calls_set_profile_with_dyn_only_flags():
     """The writer MUST pass ID_UPD_DYN_CNF='X' AND ID_SET_ACTIV=' '
     so the change is in-memory only and does NOT promote the dyn
