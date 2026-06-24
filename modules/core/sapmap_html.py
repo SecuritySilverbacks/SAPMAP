@@ -928,11 +928,6 @@ body {
       <div class="ctx-item" data-action="check_linux_lpe">&#128275; Check Linux Root LPE (Copy Fail / Dirty Frag)</div>
       <div class="ctx-item" data-action="check_windows_lpe">&#128274; Check Windows SYSTEM LPE (auto: EfsPotato / GodPotato / MiniPlasma)</div>
       <div class="ctx-item" data-action="deep_scan">&#128260; Deep Scan (full SAPology)</div>
-      <div class="ctx-item" data-action="probe_telemetry">&#128270; Probe Audit Telemetry (SAL / integrity / params)</div>
-      <div class="ctx-item" data-action="capture_evasion_baseline">&#128190; Capture Evasion Baseline (Tier 3 pre-flight)</div>
-      <div class="ctx-item" data-action="probe_rsau_api">&#128270; Probe RSAU API Surface (Tier 3 discovery)</div>
-      <div class="ctx-item" data-action="probe_rsau_dyn_profile">&#128270; Probe RSAU Dynamic Profile (Tier 3 discovery)</div>
-      <div class="ctx-item" data-action="tier3_sal_slot_disable">&#9889; Disable SAL Slot... (Tier 3 mutation)</div>
       <div class="ctx-item" data-action="retrieve_rfcs">&#128225; Retrieve RFC Connections</div>
       <div class="ctx-item" data-action="read_java_destinations">&#128225; Read Java JCo Destinations</div>
       <div class="ctx-item" data-action="test_rfcs">&#129514; Test RFC Connections</div>
@@ -1001,6 +996,21 @@ body {
       <div class="ctx-item" data-action="harvest_scc_hashes_via_lpe" style="color:#f0883e">&#128274; Harvest SCC Hashes (escalate via Linux LPE)</div>
       <div class="ctx-item" data-action="harvest_scc_mappings">&#128194; Harvest SCC Mappings (OS-exec)</div>
       <div class="ctx-item" data-action="harvest_scc_ssfs">&#128273; Decrypt On-Host SSFS (Recover Secrets)</div>
+    </div>
+  </div>
+  <!-- Evasion submenu — Tier 1 telemetry posture probe, Tier 3
+       pre-flight + discovery + active mutations.  Tier 3 items only
+       become interactive when SAPMAP was launched with
+       --allow-evasion (and, for the actual writers, after a
+       baseline has been captured for the node). -->
+  <div class="ctx-group">
+    <div class="ctx-item">&#9889; Evasion</div>
+    <div class="ctx-sub">
+      <div class="ctx-item" data-action="probe_telemetry">&#128270; Probe Audit Telemetry (SAL / integrity / params)</div>
+      <div class="ctx-item" data-action="capture_evasion_baseline">&#128190; Capture Evasion Baseline (Tier 3 pre-flight)</div>
+      <div class="ctx-item" data-action="probe_rsau_api">&#128270; Probe RSAU API Surface (Tier 3 discovery)</div>
+      <div class="ctx-item" data-action="probe_rsau_dyn_profile">&#128270; Probe RSAU Dynamic Profile (Tier 3 discovery)</div>
+      <div class="ctx-item" data-action="tier3_sal_slot_disable">&#9889; Disable SAL Slot... (Tier 3 mutation)</div>
     </div>
   </div>
   <!-- Data Extraction submenu -->
