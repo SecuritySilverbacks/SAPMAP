@@ -409,12 +409,15 @@ def test_change_param_captures_rfc_exception_without_raising():
 # Restore — real TH_CHANGE_PARAMETER writes
 # ---------------------------------------------------------------------------
 
-def test_restore_writes_each_captured_param_via_change_param():
+def test_restore_writes_each_capturable_dynamic_param():
     node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    # Use ONLY dynamic params here.  Static rsau/* / stat/level
+    # are exercised in test_restore_skips_known_static_params_silently.
     snap = sapmap_evasion_baseline.BaselineSnapshot(
         sid="S4H", captured_at="2026-06-16T20:00:00",
-        params={"rsau/enable": "1", "stat/level": "1",
-                "gw/logging": "__UNCAPTURED__:auth denied"},
+        params={"rdisp/TRACE": "1",
+                "gw/logging": "ACTION=SsMPXZ",
+                "icm/trace_level": "__UNCAPTURED__:auth denied"},
         loot_path="loot/baseline/S4H/test.json")
 
     writes = []
@@ -427,23 +430,27 @@ def test_restore_writes_each_captured_param_via_change_param():
         out = sapmap_evasion_baseline.restore_baseline(
             node, None, snap)
 
-    # Both capturable params written, uncapturable one skipped
-    assert ("rsau/enable", "1") in writes
-    assert ("stat/level", "1") in writes
-    assert ("gw/logging", "__UNCAPTURED__:auth denied") not in writes
-    assert "rsau/enable" in out["restored"]
-    assert "stat/level" in out["restored"]
-    assert ("gw/logging", "param was uncapturable") in out["skipped"]
+    assert ("rdisp/TRACE", "1") in writes
+    assert ("gw/logging", "ACTION=SsMPXZ") in writes
+    assert ("icm/trace_level",
+             "__UNCAPTURED__:auth denied") not in writes
+    assert "rdisp/TRACE" in out["restored"]
+    assert "gw/logging" in out["restored"]
+    assert ("icm/trace_level",
+             "param was uncapturable") in out["skipped"]
 
 
 def test_restore_records_failed_writes_in_skipped():
+    """Dynamic-param write failure from TH_CHANGE_PARAMETER lands in
+    skipped[] with the kernel error.  Static params get filtered
+    before that loop, so use rdisp/TRACE + gw/logging here."""
     node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
     snap = sapmap_evasion_baseline.BaselineSnapshot(
         sid="S4H", captured_at="2026-06-16T20:00:00",
-        params={"rsau/enable": "1", "stat/level": "1"})
+        params={"rdisp/TRACE": "1", "gw/logging": "ACTION=Ss"})
 
     def fake_change(node_arg, creds, name, value):
-        if name == "rsau/enable":
+        if name == "rdisp/TRACE":
             return {"ok": False, "name": name, "value": value,
                     "error": "Read-only param"}
         return {"ok": True, "name": name, "value": value, "error": ""}
@@ -453,16 +460,141 @@ def test_restore_records_failed_writes_in_skipped():
         out = sapmap_evasion_baseline.restore_baseline(
             node, None, snap)
 
-    assert "stat/level" in out["restored"]
-    assert ("rsau/enable", "Read-only param") in out["skipped"]
+    assert "gw/logging" in out["restored"]
+    assert ("rdisp/TRACE", "Read-only param") in out["skipped"]
+
+
+def test_restore_skips_known_static_params_silently():
+    """rsau/* / rec/client / stat/level are confirmed NOT runtime-
+    changeable on S/4 793; restore must skip them quietly instead of
+    spamming the operator with NOT_CHANGEABLE errors."""
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    snap = sapmap_evasion_baseline.BaselineSnapshot(
+        sid="S4H", captured_at="2026-06-24T08:40:00",
+        params={
+            "rsau/enable": "1", "rsau/integrity": "1",
+            "rec/client": "ALL", "stat/level": "1",
+            "rdisp/TRACE": "1",
+        })
+
+    writes = []
+    def fake_change(node_arg, creds, name, value):
+        writes.append(name)
+        return {"ok": True, "name": name, "value": value, "error": ""}
+
+    with patch.object(sapmap_evasion_baseline, "change_param",
+                       side_effect=fake_change):
+        out = sapmap_evasion_baseline.restore_baseline(
+            node, None, snap)
+
+    # The static params went to skipped[] with a clear reason
+    skipped_names = [n for n, _reason in out["skipped"]]
+    for static in ("rsau/enable", "rsau/integrity",
+                    "rec/client", "stat/level"):
+        assert static in skipped_names
+        reason = next(r for n, r in out["skipped"] if n == static)
+        assert "static" in reason or "restart-only" in reason
+    # change_param was NOT called for static params
+    for static in ("rsau/enable", "rsau/integrity",
+                    "rec/client", "stat/level"):
+        assert static not in writes
+    # rdisp/TRACE (dynamic) DID get attempted
+    assert "rdisp/TRACE" in writes
+    assert "rdisp/TRACE" in out["restored"]
+
+
+def test_window_with_empty_touched_params_restores_nothing():
+    """touched_params=[] means 'I touched no params' — restore must
+    NOT iterate every captured param.  Regression for the lab bug
+    where tier3_sal_slot_disable triggered a full param restore."""
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+
+    change_param_calls = []
+
+    def _call(fm, **kw):
+        if fm == "TH_GET_PARAMETER":
+            return {"PARAMETER_VALUE": "1"}
+        if fm == "RSAU_API_GET_AUDIT_CONFIG":
+            return _lab_sal_response()
+        if fm == "RSAU_API_GET_PROFILE":
+            return {"ED_DATA_STR": "",
+                    "ET_FILT": _live_dyn_profile_rows(),
+                    "ET_FILTEX": _live_dyn_filtex_rows(),
+                    "ET_TEXT": [], "ET_LOG": []}
+        if fm == "TH_CHANGE_PARAMETER":
+            change_param_calls.append(kw)
+            return {"RC": "0"}
+        return {}
+
+    conn = MagicMock()
+    conn.call.side_effect = _call
+    with _patch_connection(conn):
+        with sapmap_evasion_baseline.evasion_window(
+                node, state, "sal_filter_narrow",
+                touched_params=[]):
+            pass
+
+    # No params were touched → no param restore should fire
+    assert change_param_calls == []
+
+
+def test_window_with_none_touched_params_restores_everything():
+    """touched_params=None (the default) preserves the legacy
+    'restore every captured param' behaviour for techniques like
+    tier3_set_param that don't track the touched set."""
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+
+    change_param_calls = []
+
+    def _call(fm, **kw):
+        if fm == "TH_GET_PARAMETER":
+            return {"PARAMETER_VALUE": "1"}
+        if fm == "RSAU_API_GET_AUDIT_CONFIG":
+            return _lab_sal_response()
+        if fm == "RSAU_API_GET_PROFILE":
+            return {"ED_DATA_STR": "",
+                    "ET_FILT": _live_dyn_profile_rows(),
+                    "ET_FILTEX": _live_dyn_filtex_rows(),
+                    "ET_TEXT": [], "ET_LOG": []}
+        if fm == "TH_CHANGE_PARAMETER":
+            change_param_calls.append(kw)
+            return {"RC": "0"}
+        return {}
+
+    conn = MagicMock()
+    conn.call.side_effect = _call
+    with _patch_connection(conn):
+        with sapmap_evasion_baseline.evasion_window(
+                node, state, "rz11_dynamic_set",
+                touched_params=None):
+            pass
+
+    # Restoring "everything" still skips known-static params, so
+    # only the dynamic ones (rdisp/TRACE, gw/logging) get rewritten.
+    changed_names = [c["PARAMETER_NAME"] for c in change_param_calls]
+    assert "rdisp/TRACE" in changed_names
+    assert "gw/logging" in changed_names
+    # Static ones get filtered before TH_CHANGE_PARAMETER is even
+    # attempted
+    for static in ("rsau/enable", "rsau/integrity",
+                    "rec/client", "stat/level"):
+        assert static not in changed_names
 
 
 def test_restore_only_writes_touched_subset():
+    """only=[<list>] limits the param restore to those names.  Use
+    only dynamic params here — static ones get filtered before
+    change_param is called."""
     node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
     snap = sapmap_evasion_baseline.BaselineSnapshot(
         sid="S4H", captured_at="2026-06-16T20:00:00",
-        params={"rsau/enable": "1", "stat/level": "1",
-                "rdisp/TRACE": "1"})
+        params={"gw/logging": "ACTION=Ss",
+                "rdisp/TRACE": "1",
+                "icm/trace_level": "1"})
     writes = []
     def fake_change(node_arg, creds, name, value):
         writes.append(name)
@@ -470,9 +602,9 @@ def test_restore_only_writes_touched_subset():
     with patch.object(sapmap_evasion_baseline, "change_param",
                        side_effect=fake_change):
         out = sapmap_evasion_baseline.restore_baseline(
-            node, None, snap, only=["stat/level"])
-    assert writes == ["stat/level"]
-    assert out["restored"] == ["stat/level"]
+            node, None, snap, only=["rdisp/TRACE"])
+    assert writes == ["rdisp/TRACE"]
+    assert out["restored"] == ["rdisp/TRACE"]
 
 
 # ---------------------------------------------------------------------------
@@ -585,22 +717,24 @@ def test_tier3_set_param_writes_then_restores_via_th_change_parameter():
     conn = MagicMock()
     conn.call.side_effect = _call
     with _patch_connection(conn):
+        # rdisp/TRACE is one of the dynamic params (not in
+        # _STATIC_PARAMS), so the restore loop actually fires for it.
         out = sapmap_evasion_tier3.tier3_set_param(
-            state, node, "stat/level", "0")
+            state, node, "rdisp/TRACE", "3")
 
     assert out["ok"] is True
     assert out["applied"] is True
-    assert out["param"] == "stat/level"
-    assert out["requested_value"] == "0"
+    assert out["param"] == "rdisp/TRACE"
+    assert out["requested_value"] == "3"
     assert out["baseline_value"] == "1"
 
-    # Mutation should have happened (stat/level=0)
-    assert ("stat/level", "0") in th_change_calls
-    # Restore should have rewritten the baseline value back (stat/level=1)
-    assert ("stat/level", "1") in th_change_calls
+    # Mutation should have happened (rdisp/TRACE=3)
+    assert ("rdisp/TRACE", "3") in th_change_calls
+    # Restore should have rewritten the baseline value back (=1)
+    assert ("rdisp/TRACE", "1") in th_change_calls
     # And ordering: mutation first, restore after
-    mut_idx = th_change_calls.index(("stat/level", "0"))
-    restore_idx = th_change_calls.index(("stat/level", "1"))
+    mut_idx = th_change_calls.index(("rdisp/TRACE", "3"))
+    restore_idx = th_change_calls.index(("rdisp/TRACE", "1"))
     assert mut_idx < restore_idx
 
 
@@ -620,7 +754,7 @@ def test_tier3_set_param_propagates_write_failure_and_still_restores():
             th_change_calls.append((kw["PARAMETER_NAME"],
                                      kw["PARAMETER_VALUE"]))
             # The mutation fails; restore is allowed to succeed
-            if kw["PARAMETER_VALUE"] == "0":
+            if kw["PARAMETER_VALUE"] == "3":
                 return {"RC": "4", "MESSAGE": "Read-only param"}
             return {"RC": "0"}
         return {"DATA": []}
@@ -628,14 +762,16 @@ def test_tier3_set_param_propagates_write_failure_and_still_restores():
     conn = MagicMock()
     conn.call.side_effect = _call
     with _patch_connection(conn):
+        # Dynamic param so the restore loop actually invokes
+        # TH_CHANGE_PARAMETER (static params get filtered now).
         out = sapmap_evasion_tier3.tier3_set_param(
-            state, node, "stat/level", "0")
+            state, node, "rdisp/TRACE", "3")
 
     assert out["ok"] is False
     assert out["applied"] is False
     assert "Read-only" in out["error"]
     # Restore still ran (window contract)
-    assert ("stat/level", "1") in th_change_calls
+    assert ("rdisp/TRACE", "1") in th_change_calls
 
 
 # ---------------------------------------------------------------------------
@@ -668,6 +804,19 @@ def _live_dyn_filtex_rows():
             for s in ("0001", "0002", "0003")]
 
 
+def test_write_dyn_profile_requires_profile_name():
+    """The writer must refuse a blank profile_name cleanly — the
+    kernel rejects '$DYN$' and empty as 'not a valid audit profile
+    name', and an unconfirmed default would just silently fail
+    against every real S/4 system."""
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    r = sapmap_evasion_baseline.write_dyn_profile(
+        node, None, "", _live_dyn_profile_rows(),
+        _live_dyn_filtex_rows(), [])
+    assert r["ok"] is False
+    assert "profile_name required" in r["error"]
+
+
 def test_write_dyn_profile_calls_set_profile_with_dyn_only_flags():
     """The writer MUST pass ID_UPD_DYN_CNF='X' AND ID_SET_ACTIV=' '
     so the change is in-memory only and does NOT promote the dyn
@@ -686,11 +835,11 @@ def test_write_dyn_profile_calls_set_profile_with_dyn_only_flags():
     conn.call.side_effect = _call
     with _patch_connection(conn):
         r = sapmap_evasion_baseline.write_dyn_profile(
-            node, None, _live_dyn_profile_rows(),
+            node, None, "SAPSEC", _live_dyn_profile_rows(),
             _live_dyn_filtex_rows(), [])
 
     assert r["ok"] is True
-    assert seen["kw"]["ID_NAME"] == "$DYN$"
+    assert seen["kw"]["ID_NAME"] == "SAPSEC"
     assert seen["kw"]["ID_UPD_DYN_CNF"] == "X"
     assert seen["kw"]["ID_SET_ACTIV"] == " "
     assert len(seen["kw"]["IT_FILT"]) == 3
@@ -716,7 +865,7 @@ def test_write_dyn_profile_hex_string_msgvect_decoded_to_bytes():
               "STATUS": "X", "MSGVECT": "deadbeef"}]
     with _patch_connection(conn):
         sapmap_evasion_baseline.write_dyn_profile(
-            node, None, rows, None, None)
+            node, None, "SAPSEC", rows, None, None)
 
     assert seen["kw"]["IT_FILT"][0]["MSGVECT"] == bytes.fromhex("deadbeef")
 
@@ -732,7 +881,7 @@ def test_write_dyn_profile_surfaces_et_result_errors():
     ]}
     with _patch_connection(conn):
         r = sapmap_evasion_baseline.write_dyn_profile(
-            node, None, _live_dyn_profile_rows(),
+            node, None, "SAPSEC", _live_dyn_profile_rows(),
             _live_dyn_filtex_rows(), [])
     assert r["ok"] is False
     assert "No authority" in r["error"]
@@ -791,19 +940,17 @@ def test_window_restore_dyn_profile_when_touched_flag_set():
     state = SAPMAPState()
     state.evasion = {"allow_evasion": True}
     node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    # Pre-seed an in-memory baseline so the window doesn't have to
+    # re-capture, and so sal_profile_name is set for restore.
+    node._evasion_baseline = sapmap_evasion_baseline.BaselineSnapshot(
+        sid="S4H", sal_profile_name="SAPSEC",
+        params={"rdisp/TRACE": "1"},
+        dyn_filt=_live_dyn_profile_rows(),
+        dyn_filtex=_live_dyn_filtex_rows())
 
     set_profile_calls = []
 
     def _call(fm, **kw):
-        if fm == "TH_GET_PARAMETER":
-            return {"PARAMETER_VALUE": "1"}
-        if fm == "RSAU_API_GET_AUDIT_CONFIG":
-            return _lab_sal_response()
-        if fm == "RSAU_API_GET_PROFILE":
-            return {"ED_DATA_STR": "",
-                    "ET_FILT": _live_dyn_profile_rows(),
-                    "ET_FILTEX": _live_dyn_filtex_rows(),
-                    "ET_TEXT": [], "ET_LOG": []}
         if fm == "RSAU_API_SET_PROFILE":
             set_profile_calls.append(kw)
             return {"ET_RESULT": []}
@@ -814,10 +961,12 @@ def test_window_restore_dyn_profile_when_touched_flag_set():
     with _patch_connection(conn):
         with sapmap_evasion_baseline.evasion_window(
                 node, state, "sal_filter_narrow",
+                touched_params=[],
                 touched_dyn_profile=True):
             pass
 
     assert len(set_profile_calls) == 1   # restore-on-exit fired once
+    assert set_profile_calls[0]["ID_NAME"] == "SAPSEC"
     restored_rows = set_profile_calls[0]["IT_FILT"]
     statuses = sorted(str(r.get("STATUS", "")).strip()
                        for r in restored_rows)
@@ -890,7 +1039,8 @@ def test_tier3_sal_slot_disable_full_roundtrip():
     conn.call.side_effect = _call
     with _patch_connection(conn):
         out = sapmap_evasion_tier3.tier3_sal_slot_disable(
-            state, node, "0001", hold_seconds=0)
+            state, node, "0001", profile_name="SAPSEC",
+            hold_seconds=0)
 
     assert out["ok"] is True
     assert out["slotno"] == "0001"
@@ -900,6 +1050,9 @@ def test_tier3_sal_slot_disable_full_roundtrip():
     # Two SET_PROFILE calls: mutation (slot 0001 inactive) +
     # window-exit restore (slot 0001 back to active).
     assert len(set_profile_calls) == 2
+    # Both must use the operator-supplied profile name as ID_NAME.
+    assert set_profile_calls[0]["ID_NAME"] == "SAPSEC"
+    assert set_profile_calls[1]["ID_NAME"] == "SAPSEC"
 
     mut_rows = set_profile_calls[0]["IT_FILT"]
     slot1 = next(r for r in mut_rows if r["SLOTNO"] == "0001")
@@ -908,6 +1061,35 @@ def test_tier3_sal_slot_disable_full_roundtrip():
     restore_rows = set_profile_calls[1]["IT_FILT"]
     slot1_r = next(r for r in restore_rows if r["SLOTNO"] == "0001")
     assert slot1_r["STATUS"] == "X"    # restored to baseline
+
+
+def test_tier3_sal_slot_disable_refuses_blank_profile_name():
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True,
+                     "baseline_captured_at": "2026-06-23T20:00:00"}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+
+    def _call(fm, **kw):
+        if fm == "TH_GET_PARAMETER":
+            return {"PARAMETER_VALUE": "1"}
+        if fm == "RSAU_API_GET_AUDIT_CONFIG":
+            return _lab_sal_response()
+        if fm == "RSAU_API_GET_PROFILE":
+            return {"ED_DATA_STR": "",
+                    "ET_FILT": _live_dyn_profile_rows(),
+                    "ET_FILTEX": _live_dyn_filtex_rows(),
+                    "ET_TEXT": [], "ET_LOG": []}
+        return {}
+
+    conn = MagicMock()
+    conn.call.side_effect = _call
+    with _patch_connection(conn):
+        out = sapmap_evasion_tier3.tier3_sal_slot_disable(
+            state, node, "0001", profile_name="",
+            hold_seconds=0)
+
+    assert out["ok"] is False
+    assert "profile name required" in out["error"].lower()
 
 
 def test_tier3_sal_slot_disable_refuses_when_gate_closed():
@@ -942,7 +1124,8 @@ def test_tier3_sal_slot_disable_rejects_unknown_slotno():
     conn.call.side_effect = _call
     with _patch_connection(conn):
         out = sapmap_evasion_tier3.tier3_sal_slot_disable(
-            state, node, "9999", hold_seconds=0)
+            state, node, "9999", profile_name="SAPSEC",
+            hold_seconds=0)
 
     assert out["ok"] is False
     assert "not present" in out["error"]

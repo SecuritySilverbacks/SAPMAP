@@ -7032,6 +7032,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
         slotno = str(data.get("slotno") or "").strip()
         if not slotno:
             return json.dumps({"error": "slotno required"})
+        profile_name = str(data.get("profile_name") or "").strip()
+        if not profile_name:
+            return json.dumps({"error": "profile_name required — "
+                                "see RSAU_CONFIG 'Current Profile/"
+                                "Filter' header (e.g. SAPSEC)"})
         try:
             hold_seconds = float(data.get("hold_seconds") or 5.0)
         except (TypeError, ValueError):
@@ -7051,9 +7056,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
                               "SAL slot disable skipped — no verified "
                               "RFC credentials")
                 return
-            print(f"[*] {sid}: Tier 3 SAL slot disable — slot "
-                  f"{slotno}, hold {hold_seconds}s")
+            print(f"[*] {sid}: Tier 3 SAL slot disable — profile "
+                  f"{profile_name!r}, slot {slotno}, hold "
+                  f"{hold_seconds}s")
             out = tier3_sal_slot_disable(api.state, node, slotno,
+                                            profile_name=profile_name,
                                             hold_seconds=hold_seconds,
                                             creds=creds)
             if not out.get("ok"):

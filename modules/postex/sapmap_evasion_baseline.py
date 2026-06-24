@@ -72,6 +72,20 @@ _BASELINE_PARAMS = (
     "rdisp/TRACE",
 )
 
+# Parameters confirmed NOT runtime-changeable via TH_CHANGE_PARAMETER
+# on S/4 793 lab (kernel returns FL 000 NOT_CHANGEABLE / NOT_FOUND).
+# Captured for diagnostic value but excluded from the restore loop —
+# attempting to write them just spams the operator console with
+# refusal errors and confuses the picture when the actual mutation
+# also failed.  The corresponding "narrow this slot" / "disable
+# audit" semantics for these are handled by the SAL-API technique
+# family (RSAU_API_SET_PROFILE / RSAU_API_SET_PARAM), not via
+# TH_CHANGE_PARAMETER.
+_STATIC_PARAMS = frozenset((
+    "rsau/enable", "rsau/selection_slots", "rsau/integrity",
+    "rsau/ip_only", "rec/client", "stat/level",
+))
+
 
 @dataclass
 class SalSlotInfo:
@@ -280,6 +294,12 @@ class BaselineSnapshot:
     sid: str = ""
     captured_at: str = ""
     params: dict = field(default_factory=dict)
+    # Name of the currently active static SAL profile (shown as
+    # "Current Profile/Filter: <name>/<NN>" in RSAU_CONFIG).
+    # RSAU_API_SET_PROFILE requires this as ID_NAME — the '$DYN$'
+    # marker we see on the GET side is the kernel's runtime label,
+    # not a valid SET input.  Lab-verified on S/4 793 / SAPSEC.
+    sal_profile_name: str = ""
     # Modern S/4 SAL config captured via RSAU_API_GET_AUDIT_CONFIG.
     # Primary source of truth for SAL filter restore.
     sal_config: Optional[SalConfig] = None
@@ -306,6 +326,7 @@ class BaselineSnapshot:
             "sid": self.sid,
             "captured_at": self.captured_at,
             "params": dict(self.params),
+            "sal_profile_name": self.sal_profile_name,
             "sal_config": (self.sal_config.to_dict()
                             if self.sal_config else None),
             "sal_filter_rows": list(self.sal_filter_rows),
@@ -323,6 +344,7 @@ class BaselineSnapshot:
             sid=d.get("sid", ""),
             captured_at=d.get("captured_at", ""),
             params=dict(d.get("params") or {}),
+            sal_profile_name=d.get("sal_profile_name", ""),
             sal_config=(SalConfig.from_dict(sal) if sal else None),
             sal_filter_rows=list(d.get("sal_filter_rows") or []),
             dyn_filt=list(d.get("dyn_filt") or []),
@@ -555,14 +577,22 @@ def _et_log_errors(rows) -> list:
             if (row.get("TYPE") or "").upper() in ("E", "A", "X")]
 
 
-def write_dyn_profile(node, creds, et_filt, et_filtex=None,
+def write_dyn_profile(node, creds, profile_name: str,
+                       et_filt, et_filtex=None,
                        et_text=None) -> dict:
     """Symmetric write counterpart to ``read_dyn_profile``.
 
-    Calls ``RSAU_API_SET_PROFILE`` with ``ID_NAME='$DYN$'``,
+    Calls ``RSAU_API_SET_PROFILE`` with the operator-supplied static
+    profile name (typically the value shown as "Current Profile/
+    Filter" in RSAU_CONFIG — e.g. ``SAPSEC``), plus
     ``ID_UPD_DYN_CNF='X'`` and ``ID_SET_ACTIV=' '`` so the change
     lands in the in-memory dynamic config only — no profile file
     rewrite, no AUM/AUW, lost on instance restart.
+
+    The kernel rejects the ``'$DYN$'`` marker that appears on the
+    GET side as a SET-side ``ID_NAME`` ("You have not specified a
+    (valid) audit profile name").  Pass the *static* parent profile
+    name here.
 
     Accepts both fresh-from-RFC rows (with bytes-typed MSGVECT) and
     rows that came from a deserialised baseline JSON (hex-string
@@ -576,11 +606,17 @@ def write_dyn_profile(node, creds, et_filt, et_filtex=None,
     import sapmap_rfc
     from sapmap_errors import format_rfc_exception
 
+    if not profile_name or not profile_name.strip():
+        return {"ok": False, "et_result": [], "errors": [],
+                "error": "profile_name required — pass the static "
+                         "SAL profile name (RSAU_CONFIG → Current "
+                         "Profile)"}
+
     try:
         with sapmap_rfc._get_connection(node, creds) as conn:
             r = conn.call(
                 "RSAU_API_SET_PROFILE",
-                ID_NAME="$DYN$",
+                ID_NAME=profile_name.strip(),
                 ID_UPD_DYN_CNF="X",
                 ID_SET_ACTIV=" ",
                 IT_FILT=_rows_to_rfc(et_filt),
@@ -643,6 +679,12 @@ def restore_baseline(node, creds, snapshot: BaselineSnapshot,
         if isinstance(original, str) and original.startswith("__UNCAPTURED__"):
             out["skipped"].append((pname, "param was uncapturable"))
             continue
+        if pname in _STATIC_PARAMS:
+            # Known static — TH_CHANGE_PARAMETER would just return
+            # NOT_CHANGEABLE.  Skip silently; per-technique writers
+            # (RSAU_API_SET_PROFILE etc.) handle these out-of-band.
+            out["skipped"].append((pname, "static — restart-only"))
+            continue
         # Real write — TH_CHANGE_PARAMETER, dynamic, no profile rewrite.
         r = change_param(node, creds, pname, str(original))
         if r["ok"]:
@@ -659,18 +701,28 @@ def restore_baseline(node, creds, snapshot: BaselineSnapshot,
     # on the evasion_window), we rewrite the baseline ET_FILT /
     # ET_FILTEX / ET_TEXT rows via RSAU_API_SET_PROFILE.
     if restore_dyn_profile and snapshot.dyn_filt:
-        r = write_dyn_profile(node, creds, snapshot.dyn_filt,
-                                snapshot.dyn_filtex,
-                                snapshot.dyn_text)
-        if r["ok"]:
-            print(f"[+] {snapshot.sid}: dyn profile restored "
-                  f"({len(snapshot.dyn_filt)} slot rows)")
-            out["dyn_profile_restored"] = True
-        else:
-            print(f"[!] {snapshot.sid}: dyn profile restore FAILED — "
-                  f"{r['error']}")
+        if not snapshot.sal_profile_name:
             out["dyn_profile_restored"] = False
-            out["dyn_profile_error"] = r["error"]
+            out["dyn_profile_error"] = (
+                "sal_profile_name missing on snapshot — cannot "
+                "call RSAU_API_SET_PROFILE without ID_NAME")
+            print(f"[!] {snapshot.sid}: dyn profile restore SKIPPED — "
+                  f"{out['dyn_profile_error']}")
+        else:
+            r = write_dyn_profile(
+                node, creds, snapshot.sal_profile_name,
+                snapshot.dyn_filt, snapshot.dyn_filtex,
+                snapshot.dyn_text)
+            if r["ok"]:
+                print(f"[+] {snapshot.sid}: dyn profile restored "
+                      f"({len(snapshot.dyn_filt)} slot rows, "
+                      f"ID_NAME={snapshot.sal_profile_name!r})")
+                out["dyn_profile_restored"] = True
+            else:
+                print(f"[!] {snapshot.sid}: dyn profile restore "
+                      f"FAILED — {r['error']}")
+                out["dyn_profile_restored"] = False
+                out["dyn_profile_error"] = r["error"]
 
     return out
 
@@ -730,10 +782,18 @@ def evasion_window(node, state, technique: str,
             "Baseline capture returned empty; refusing to mutate state "
             "without a restore path.")
 
+    # Preserve the None vs [] distinction so the restore loop can
+    # tell "restore everything" (None) apart from "restore nothing"
+    # (empty list).  Conflating them was the cause of the spurious
+    # full-param-restore spam observed on the first lab run.
+    if touched_params is None:
+        frame_touched_params = None
+    else:
+        frame_touched_params = list(touched_params)
     frame = {
         "node": node, "technique": technique,
         "snapshot": snap,
-        "touched_params": list(touched_params or []),
+        "touched_params": frame_touched_params,
         "touched_dyn_profile": bool(touched_dyn_profile),
         "started_at": datetime.now().isoformat(),
     }
@@ -747,9 +807,14 @@ def evasion_window(node, state, technique: str,
         _stack().pop()
         if is_outermost:
             try:
+                # Pass touched_params straight through.  None → restore
+                # everything (legacy behaviour for tier3_set_param);
+                # [] → restore nothing (techniques that touch only the
+                # dyn profile, like tier3_sal_slot_disable, opt into
+                # this).
                 restore_baseline(
                     node, creds, snap,
-                    only=frame["touched_params"] or None,
+                    only=frame["touched_params"],
                     restore_dyn_profile=frame["touched_dyn_profile"])
             except Exception as e:
                 logger.error(f"{snap.sid}: evasion-window restore "
