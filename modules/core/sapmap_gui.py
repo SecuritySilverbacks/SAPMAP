@@ -7057,7 +7057,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                               "RFC credentials")
                 return
             print(f"[*] {sid}: Tier 3 SAL slot disable — profile "
-                  f"{profile_name!r}, slot {slotno}, hold "
+                  f"{profile_name!r}, slot(s) {slotno!r}, hold "
                   f"{hold_seconds}s")
             out = tier3_sal_slot_disable(api.state, node, slotno,
                                             profile_name=profile_name,
@@ -7070,11 +7070,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
                               f"Tier 3 SAL slot disable failed: "
                               f"{out.get('error')}")
                 return
-            print(f"[+] {sid}: SAL slot {out['slotno']} round-trip "
-                  f"complete (baseline STATUS="
-                  f"{out['baseline_status']!r}, "
-                  f"active slot count before mutate: "
-                  f"{out['before_active_count']})")
+            print(f"[+] {sid}: SAL slot(s) {out['slotno']} "
+                  f"round-trip complete (baseline statuses "
+                  f"{out['baseline_statuses']}, active slot count "
+                  f"before mutate: {out['before_active_count']}).  "
+                  f"STEALTH NOTE: {out.get('stealth_warning','')}")
 
         _bg(f"{sid}:tier3_sal_slot_disable",
              f"Tier 3: disable SAL slot {slotno}", _run)
