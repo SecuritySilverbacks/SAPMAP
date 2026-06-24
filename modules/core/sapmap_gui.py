@@ -7033,10 +7033,6 @@ def create_app(api: SAPMAPApi) -> Bottle:
         if not slotno:
             return json.dumps({"error": "slotno required"})
         profile_name = str(data.get("profile_name") or "").strip()
-        if not profile_name:
-            return json.dumps({"error": "profile_name required — "
-                                "see RSAU_CONFIG 'Current Profile/"
-                                "Filter' header (e.g. SAPSEC)"})
         try:
             hold_seconds = float(data.get("hold_seconds") or 5.0)
         except (TypeError, ValueError):
@@ -7070,11 +7066,13 @@ def create_app(api: SAPMAPApi) -> Bottle:
                               f"Tier 3 SAL slot disable failed: "
                               f"{out.get('error')}")
                 return
+            mode = ("STEALTH/SHM-only" if out.get("stealth_mode")
+                    else f"API (disk persist: "
+                         f"{out.get('stealth_warning', 'n/a')})")
             print(f"[+] {sid}: SAL slot(s) {out['slotno']} "
-                  f"round-trip complete (baseline statuses "
-                  f"{out['baseline_statuses']}, active slot count "
-                  f"before mutate: {out['before_active_count']}).  "
-                  f"STEALTH NOTE: {out.get('stealth_warning','')}")
+                  f"round-trip complete [{mode}] (baseline statuses "
+                  f"{out.get('baseline_statuses')}, active before: "
+                  f"{out.get('before_active_count')})")
 
         _bg(f"{sid}:tier3_sal_slot_disable",
              f"Tier 3: disable SAL slot {slotno}", _run)

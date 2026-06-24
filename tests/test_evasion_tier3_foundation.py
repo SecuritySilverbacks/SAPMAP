@@ -1657,3 +1657,301 @@ def test_tier3_capture_baseline_only_records_timestamp_on_state():
     assert out["param_count"] > 0
     cfg = sapmap_evasion.EvasionConfig.from_dict(state.evasion)
     assert cfg.baseline_captured_at == out["captured_at"]
+
+
+# ---------------------------------------------------------------------------
+# Legacy SAL config — RSAU_GET/UPD_AUDIT_CONFIG (stealth writer)
+# ---------------------------------------------------------------------------
+
+def _legacy_slotinfo_rows(active_status=("X", "X", "X")):
+    """Three positional RSAUINFO rows — no SLOTNO field."""
+    return [
+        {"ENABLE": "X", "SLOTCOUNT": 3, "STATUS": active_status[0],
+         "LOW_BUTTON": "X", "MED_BUTTON": "X", "HGH_BUTTON": "",
+         "POS": 2287, "VERSION": 16, "SHMDATE": "2026-06-24",
+         "MAXFILESIZ": 2146304,
+         "LOGIN": "X", "RFCLOGIN": "X", "TASTART": "X",
+         "REPOSTART": "X", "USERSTAMM": "X", "RFCSTART": "X",
+         "SONST": "X", "SYSTEM": "X",
+         "UNAME": "SAP#*", "MANDT": "*",
+         "SELVAR": b"\x00", "MSGVECT": b"\x00" * 64,
+         "LIFETIME": 0, "DELETED": 0, "FILEMAX": 2146304,
+         "FILENUMBER": 2, "CURFILSIZE": 0, "FILESTATUS": 1},
+        {"ENABLE": "X", "SLOTCOUNT": 3, "STATUS": active_status[1],
+         "LOW_BUTTON": "X", "MED_BUTTON": "X", "HGH_BUTTON": "",
+         "POS": 0, "VERSION": 0, "SHMDATE": "",
+         "MAXFILESIZ": 0,
+         "LOGIN": "X", "RFCLOGIN": "X", "TASTART": "X",
+         "REPOSTART": "X", "USERSTAMM": "X", "RFCSTART": "X",
+         "SONST": "X", "SYSTEM": "X",
+         "UNAME": "*", "MANDT": "066",
+         "SELVAR": b"\x00", "MSGVECT": b"\x00" * 64,
+         "LIFETIME": 0, "DELETED": 0, "FILEMAX": 0,
+         "FILENUMBER": 0, "CURFILSIZE": 0, "FILESTATUS": 0},
+        {"ENABLE": "X", "SLOTCOUNT": 3, "STATUS": active_status[2],
+         "LOW_BUTTON": "", "MED_BUTTON": "", "HGH_BUTTON": "",
+         "POS": 0, "VERSION": 0, "SHMDATE": "",
+         "MAXFILESIZ": 0,
+         "LOGIN": "", "RFCLOGIN": "", "TASTART": "",
+         "REPOSTART": "", "USERSTAMM": "", "RFCSTART": "",
+         "SONST": "", "SYSTEM": "",
+         "UNAME": "*", "MANDT": "*",
+         "SELVAR": b"\x11", "MSGVECT": b"\xfc" * 64,
+         "LIFETIME": 0, "DELETED": 0, "FILEMAX": 0,
+         "FILENUMBER": 0, "CURFILSIZE": 0, "FILESTATUS": 0},
+    ]
+
+
+def test_read_legacy_sal_config_returns_slotinfo():
+    conn = MagicMock()
+    rows = _legacy_slotinfo_rows()
+    conn.call.return_value = {
+        "ENABLE": "X", "SLOTCOUNT": 3, "SLOTINFO": rows,
+        "VERSION": 16, "POSITION": 2287}
+    r = sapmap_evasion_baseline.read_legacy_sal_config(conn)
+    assert r["ok"] is True
+    assert r["enable"] == "X"
+    assert r["slotcount"] == 3
+    assert len(r["slotinfo"]) == 3
+
+
+def test_read_legacy_sal_config_handles_fm_not_found():
+    conn = MagicMock()
+    conn.call.side_effect = Exception("FU_NOT_FOUND blah")
+    r = sapmap_evasion_baseline.read_legacy_sal_config(conn)
+    assert r["ok"] is False
+    assert "not found" in r["error"]
+
+
+def test_write_legacy_sal_config_calls_upd_with_correct_params():
+    conn = MagicMock()
+    conn.call.return_value = {"E_EXCP_TEXT": ""}
+    rows = _legacy_slotinfo_rows()
+    r = sapmap_evasion_baseline.write_legacy_sal_config(
+        conn, rows, enable="-")
+    assert r["ok"] is True
+    conn.call.assert_called_once()
+    args = conn.call.call_args
+    assert args[0][0] == "RSAU_UPD_AUDIT_CONFIG"
+    assert args[1]["ENABLE"] == "-"
+    assert len(args[1]["SLOTINFO"]) == 3
+
+
+def test_write_legacy_sal_config_surfaces_exception_text():
+    conn = MagicMock()
+    conn.call.return_value = {"E_EXCP_TEXT": "Keine Berechtigung"}
+    r = sapmap_evasion_baseline.write_legacy_sal_config(
+        conn, [], enable="-")
+    assert r["ok"] is False
+    assert "Keine Berechtigung" in r["error"]
+
+
+def test_write_legacy_sal_config_handles_shm_access_error():
+    conn = MagicMock()
+    conn.call.side_effect = Exception("SHM_ACCESS_ERROR raised")
+    r = sapmap_evasion_baseline.write_legacy_sal_config(
+        conn, [], enable="-")
+    assert r["ok"] is False
+    assert "SHM_ACCESS_ERROR" in r["error"]
+
+
+def test_baseline_snapshot_roundtrip_preserves_legacy_slotinfo():
+    rows = _legacy_slotinfo_rows()
+    snap = sapmap_evasion_baseline.BaselineSnapshot(
+        sid="S4H", captured_at="2026-06-24T16:00:00",
+        params={"rsau/enable": "1"},
+        legacy_slotinfo=rows)
+    d = snap.to_dict()
+    assert len(d["legacy_slotinfo"]) == 3
+    # Bytes should be hex-encoded in the JSON-safe dict
+    assert isinstance(d["legacy_slotinfo"][0]["SELVAR"], str)
+    snap2 = sapmap_evasion_baseline.BaselineSnapshot.from_dict(d)
+    assert len(snap2.legacy_slotinfo) == 3
+
+
+def test_capture_baseline_reads_legacy_slotinfo():
+    """capture_baseline should call RSAU_GET_AUDIT_CONFIG and store
+    the positional SLOTINFO rows for the stealth writer."""
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    legacy_rows = _legacy_slotinfo_rows()
+
+    def _call(fm, **kw):
+        if fm == "TH_GET_PARAMETER":
+            return {"PARAMETER_VALUE": "1"}
+        if fm == "RSAU_API_GET_AUDIT_CONFIG":
+            return _lab_sal_response()
+        if fm == "RSAU_API_GET_PROFILE":
+            return {"ET_FILT": [], "ET_FILTEX": [], "ET_TEXT": [],
+                    "ET_LOG": []}
+        if fm == "RSAU_GET_AUDIT_CONFIG":
+            return {"ENABLE": "X", "SLOTCOUNT": 3,
+                    "SLOTINFO": legacy_rows}
+        return {}
+
+    conn = MagicMock()
+    conn.call.side_effect = _call
+    with _patch_connection(conn):
+        snap = sapmap_evasion_baseline.capture_baseline(node)
+
+    assert len(snap.legacy_slotinfo) == 3
+
+
+def test_stealth_slot_disable_uses_legacy_writer():
+    """When RSAU_GET/UPD_AUDIT_CONFIG are available, tier3_sal_slot_disable
+    should use the SHM-only stealth path and return stealth_mode=True."""
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True,
+                     "baseline_captured_at": "2026-06-24T10:00:00"}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+
+    upd_calls = []
+
+    def _call(fm, **kw):
+        if fm == "TH_GET_PARAMETER":
+            return {"PARAMETER_VALUE": "1"}
+        if fm == "RSAU_API_GET_AUDIT_CONFIG":
+            return _lab_sal_response()
+        if fm == "RSAU_API_GET_PROFILE":
+            return {"ET_FILT": _live_dyn_profile_rows(),
+                    "ET_FILTEX": _live_dyn_filtex_rows(),
+                    "ET_TEXT": [], "ET_LOG": []}
+        if fm == "RSAU_GET_AUDIT_CONFIG":
+            return {"ENABLE": "X", "SLOTCOUNT": 3,
+                    "SLOTINFO": _legacy_slotinfo_rows()}
+        if fm == "RSAU_UPD_AUDIT_CONFIG":
+            upd_calls.append(kw)
+            return {"E_EXCP_TEXT": ""}
+        return {}
+
+    conn = MagicMock()
+    conn.call.side_effect = _call
+    with _patch_connection(conn):
+        out = sapmap_evasion_tier3.tier3_sal_slot_disable(
+            state, node, "1", hold_seconds=0)
+
+    assert out["ok"] is True
+    assert out.get("stealth_mode") is True
+    # Should have called UPD twice: once to mutate, once to restore
+    assert len(upd_calls) == 2
+    # First call: slot 1 disabled
+    mut_rows = upd_calls[0]["SLOTINFO"]
+    assert mut_rows[0]["STATUS"] == " "
+    assert mut_rows[1]["STATUS"] == "X"
+    # Second call: restore (all original statuses back)
+    rest_rows = upd_calls[1]["SLOTINFO"]
+    assert rest_rows[0]["STATUS"] == "X"
+    assert rest_rows[1]["STATUS"] == "X"
+
+
+def test_stealth_slot_disable_all_flips_active_only():
+    """ALL should disable every active slot via positional indexing."""
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True,
+                     "baseline_captured_at": "2026-06-24T10:00:00"}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+
+    upd_calls = []
+
+    def _call(fm, **kw):
+        if fm == "TH_GET_PARAMETER":
+            return {"PARAMETER_VALUE": "1"}
+        if fm == "RSAU_API_GET_AUDIT_CONFIG":
+            return _lab_sal_response()
+        if fm == "RSAU_API_GET_PROFILE":
+            return {"ET_FILT": _live_dyn_profile_rows(),
+                    "ET_FILTEX": [], "ET_TEXT": [], "ET_LOG": []}
+        if fm == "RSAU_GET_AUDIT_CONFIG":
+            return {"ENABLE": "X", "SLOTCOUNT": 3,
+                    "SLOTINFO": _legacy_slotinfo_rows()}
+        if fm == "RSAU_UPD_AUDIT_CONFIG":
+            upd_calls.append(kw)
+            return {"E_EXCP_TEXT": ""}
+        return {}
+
+    conn = MagicMock()
+    conn.call.side_effect = _call
+    with _patch_connection(conn):
+        out = sapmap_evasion_tier3.tier3_sal_slot_disable(
+            state, node, "ALL", hold_seconds=0)
+
+    assert out["ok"] is True
+    assert out.get("stealth_mode") is True
+    assert out["slotno"] == "0001,0002,0003"
+    mut_rows = upd_calls[0]["SLOTINFO"]
+    assert all(r["STATUS"] == " " for r in mut_rows)
+
+
+def test_stealth_falls_back_to_api_when_legacy_fm_missing():
+    """When RSAU_GET_AUDIT_CONFIG raises FU_NOT_FOUND, the function
+    should fall back to the RSAU_API_SET_PROFILE path."""
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True,
+                     "baseline_captured_at": "2026-06-24T10:00:00"}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+
+    set_profile_calls = []
+
+    def _call(fm, **kw):
+        if fm == "TH_GET_PARAMETER":
+            return {"PARAMETER_VALUE": "1"}
+        if fm == "RSAU_API_GET_AUDIT_CONFIG":
+            return _lab_sal_response()
+        if fm == "RSAU_API_GET_PROFILE":
+            return {"ET_FILT": _live_dyn_profile_rows(),
+                    "ET_FILTEX": _live_dyn_filtex_rows(),
+                    "ET_TEXT": [], "ET_LOG": []}
+        if fm == "RSAU_GET_AUDIT_CONFIG":
+            raise Exception("FU_NOT_FOUND RSAU_GET_AUDIT_CONFIG")
+        if fm == "RSAU_API_SET_PROFILE":
+            set_profile_calls.append(kw)
+            return {"ET_RESULT": []}
+        return {}
+
+    conn = MagicMock()
+    conn.call.side_effect = _call
+    with _patch_connection(conn):
+        out = sapmap_evasion_tier3.tier3_sal_slot_disable(
+            state, node, "1", profile_name="SAPSEC",
+            hold_seconds=0)
+
+    assert out["ok"] is True
+    assert out.get("stealth_mode") is not True
+    # Fallback used RSAU_API_SET_PROFILE
+    assert len(set_profile_calls) >= 1
+
+
+def test_stealth_slot_disable_no_profile_name_needed():
+    """Stealth path should work without profile_name — the legacy
+    writer doesn't reference any named profile."""
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True,
+                     "baseline_captured_at": "2026-06-24T10:00:00"}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+
+    def _call(fm, **kw):
+        if fm == "TH_GET_PARAMETER":
+            return {"PARAMETER_VALUE": "1"}
+        if fm == "RSAU_API_GET_AUDIT_CONFIG":
+            return _lab_sal_response()
+        if fm == "RSAU_API_GET_PROFILE":
+            return {"ET_FILT": _live_dyn_profile_rows(),
+                    "ET_FILTEX": [], "ET_TEXT": [], "ET_LOG": []}
+        if fm == "RSAU_GET_AUDIT_CONFIG":
+            return {"ENABLE": "X", "SLOTCOUNT": 3,
+                    "SLOTINFO": _legacy_slotinfo_rows()}
+        if fm == "RSAU_UPD_AUDIT_CONFIG":
+            return {"E_EXCP_TEXT": ""}
+        return {}
+
+    conn = MagicMock()
+    conn.call.side_effect = _call
+    with _patch_connection(conn):
+        # No profile_name at all — stealth path shouldn't need it
+        out = sapmap_evasion_tier3.tier3_sal_slot_disable(
+            state, node, "1", profile_name="",
+            hold_seconds=0)
+
+    assert out["ok"] is True
+    assert out.get("stealth_mode") is True

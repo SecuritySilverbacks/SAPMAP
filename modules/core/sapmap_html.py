@@ -1024,7 +1024,7 @@ body {
            title="Tier 3 discovery. Calls RSAU_API_GET_PROFILE(ID_DYN_CONF='X') and dumps the verbatim ET_FILT / ET_FILTEX / ET_TEXT / ET_LOG rows to loot/baseline/<SID>/dyn_profile_<ts>.json. Reveals the exact 12-field RSAUPROF row shape the writer needs to construct. Pure read; no mutation."
            >&#128270; Probe RSAU Dynamic Profile (Tier 3 discovery)</div>
       <div class="ctx-item" data-action="tier3_sal_slot_disable"
-           title="Tier 3 MUTATION. Disables one or more SAL filter slots in the dynamic config for a hold window, then auto-restores from baseline. Accepts a single slot ('1'), comma list ('1,2,3'), or 'ALL' for every currently-active slot. CAVEAT on S/4 793: the writer goes through RSAU_API_SET_PROFILE which also updates the static profile on disk — SM19 header will show 'Last changed by SAPMAP00' afterwards. Live behaviour is correct (events stop reaching SAL for the window); in-memory-only stealth is not achieved on this kernel."
+           title="Tier 3 MUTATION. Disables one or more SAL filter slots for a hold window, then auto-restores. Accepts a single slot ('1'), comma list ('1,2,3'), or 'ALL'. Primary path: RSAU_UPD_AUDIT_CONFIG (shared-memory only — no disk persistence, no SM19 header change). Fallback: RSAU_API_SET_PROFILE (persists to disk if legacy FMs unavailable)."
            >&#128263; Disable SAL Slot(s)... (Tier 3 mutation)</div>
     </div>
   </div>
@@ -5507,17 +5507,6 @@ async function ctxAction(action) {
       flashActivity(`${sid}: probing RSAU dynamic profile`, 5000);
       await api('POST', `node/${sid}/probe_rsau_dyn_profile`); break;
     case 'tier3_sal_slot_disable': {
-      // 1/3: profile name.  RSAU_API_SET_PROFILE rejects '$DYN$' as
-      // ID_NAME — the operator must supply the actual static profile
-      // name visible in RSAU_CONFIG as "Current Profile/Filter:
-      // <NAME>/NN".  SAPSEC is the stock name on standard S/4.
-      const profile = prompt(
-        'Tier 3: which SAL static profile holds the slot(s) to disable?'
-        + '\n\nLook at RSAU_CONFIG on ' + sid + ' — the header'
-        + ' "Current Profile/Filter: <NAME>/NN" shows the name.'
-        + ' Default for stock S/4 installs is SAPSEC.',
-        'SAPSEC');
-      if (!profile) break;
       const slotno = prompt(
         'Tier 3: disable which SAL filter slot(s) on ' + sid + '?'
         + '\n\nAccepted forms:'
@@ -5539,24 +5528,34 @@ async function ctxAction(action) {
                    'warning');
         break;
       }
+      // Profile name — only needed if the stealth path
+      // (RSAU_UPD_AUDIT_CONFIG) isn't available and the fallback
+      // (RSAU_API_SET_PROFILE) kicks in.  Optional; leave blank
+      // to skip (stealth path doesn't need it).
+      const profile = prompt(
+        'SAL profile name (only needed if stealth writer is '
+        + 'unavailable on this kernel).\n\n'
+        + 'Leave as SAPSEC (stock S/4 default) or blank to skip.\n'
+        + 'The primary stealth path (RSAU_UPD_AUDIT_CONFIG) does '
+        + 'NOT use a profile name.',
+        'SAPSEC');
+      if (profile === null) break;
       if (!confirm(
         'RUN Tier 3 SAL slot disable on ' + sid + '?\n\n'
-        + 'Profile: ' + profile + '\n'
         + 'Slot(s): ' + slotno + '\n'
-        + 'Hold: ' + hold + 's\n\n'
-        + 'This MUTATES kernel state — a baseline must already be '
-        + 'captured for restore-on-exit to work.\n\n'
-        + 'STEALTH CAVEAT (lab-confirmed on S/4 793): the current '
-        + 'writer goes through RSAU_API_SET_PROFILE which ALSO '
-        + 'updates the static profile on disk.  After the run, '
-        + 'SM19 will show "Last changed by SAPMAP00 on <today>" '
-        + 'on the static profile header.  Live mutation works '
-        + 'correctly; in-memory-only stealth does not.')) break;
+        + 'Hold: ' + hold + 's\n'
+        + (profile ? 'Profile (fallback): ' + profile + '\n' : '')
+        + '\nPrimary path: RSAU_UPD_AUDIT_CONFIG (shared-memory '
+        + 'only — no disk persistence, no SM19 header change).\n'
+        + 'Fallback: RSAU_API_SET_PROFILE (persists to disk if '
+        + 'legacy FMs unavailable).\n\n'
+        + 'This MUTATES kernel state — a baseline must already '
+        + 'be captured for restore-on-exit to work.')) break;
       flashActivity(
         `${sid}: Tier 3 — disabling SAL slot(s) ${slotno} for ${hold}s`,
         Math.max(10000, (hold + 5) * 1000));
       await api('POST', `node/${sid}/tier3_sal_slot_disable`,
-                 {slotno: slotno, profile_name: profile,
+                 {slotno: slotno, profile_name: profile || '',
                   hold_seconds: hold});
       break;
     }
