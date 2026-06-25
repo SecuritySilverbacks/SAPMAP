@@ -1955,3 +1955,161 @@ def test_stealth_slot_disable_no_profile_name_needed():
 
     assert out["ok"] is True
     assert out.get("stealth_mode") is True
+
+
+# ---------------------------------------------------------------------------
+# Tier 3 — SAL UNAME narrow (slot-filter user swap, stealth path)
+# ---------------------------------------------------------------------------
+
+def test_sal_uname_narrow_swaps_uname_and_restores():
+    """tier3_sal_uname_narrow should replace UNAME on the target slot,
+    sleep, then restore the original baseline UNAME — all via the
+    legacy stealth writer."""
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True,
+                     "baseline_captured_at": "2026-06-24T10:00:00"}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+
+    upd_calls = []
+
+    def _call(fm, **kw):
+        if fm == "TH_GET_PARAMETER":
+            return {"PARAMETER_VALUE": "1"}
+        if fm == "RSAU_API_GET_AUDIT_CONFIG":
+            return _lab_sal_response()
+        if fm == "RSAU_API_GET_PROFILE":
+            return {"ET_FILT": _live_dyn_profile_rows(),
+                    "ET_FILTEX": _live_dyn_filtex_rows(),
+                    "ET_TEXT": [], "ET_LOG": []}
+        if fm == "RSAU_GET_AUDIT_CONFIG":
+            return {"ENABLE": "X", "SLOTCOUNT": 3,
+                    "SLOTINFO": _legacy_slotinfo_rows()}
+        if fm == "RSAU_UPD_AUDIT_CONFIG":
+            upd_calls.append(kw)
+            return {"E_EXCP_TEXT": ""}
+        return {}
+
+    conn = MagicMock()
+    conn.call.side_effect = _call
+    with _patch_connection(conn):
+        out = sapmap_evasion_tier3.tier3_sal_uname_narrow(
+            state, node, "1",
+            replacement_uname="JORIS", hold_seconds=0)
+
+    assert out["ok"] is True
+    assert out.get("stealth_mode") is True
+    # Two UPD calls: mutate then restore
+    assert len(upd_calls) == 2
+    mut_rows = upd_calls[0]["SLOTINFO"]
+    assert mut_rows[0]["UNAME"] == "JORIS"
+    # Other slots untouched in mutation pass
+    assert mut_rows[1]["UNAME"] == "*"
+    # Restore puts the original UNAME back
+    rest_rows = upd_calls[1]["SLOTINFO"]
+    assert rest_rows[0]["UNAME"] == "SAP#*"
+    # Baseline reported in result
+    assert out.get("baseline_unames", {}).get("0001") == "SAP#*"
+    assert out.get("replacement_uname") == "JORIS"
+
+
+def test_sal_uname_narrow_requires_replacement_uname():
+    """An empty replacement_uname should be rejected before any RFC
+    call is made."""
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True,
+                     "baseline_captured_at": "2026-06-24T10:00:00"}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+
+    out = sapmap_evasion_tier3.tier3_sal_uname_narrow(
+        state, node, "1", replacement_uname="", hold_seconds=0)
+
+    assert out["ok"] is False
+    assert "replacement_uname required" in out.get("error", "")
+
+
+def test_sal_uname_narrow_refuses_when_gate_disarmed():
+    """Without --allow-evasion the technique must refuse before
+    touching any state."""
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": False}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+
+    out = sapmap_evasion_tier3.tier3_sal_uname_narrow(
+        state, node, "1", replacement_uname="JORIS", hold_seconds=0)
+
+    assert out["ok"] is False
+
+
+def test_sal_uname_narrow_all_targets_active_slots():
+    """ALL should swap UNAME on every active slot, leaving inactive
+    placeholder slots untouched."""
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True,
+                     "baseline_captured_at": "2026-06-24T10:00:00"}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+
+    upd_calls = []
+
+    def _call(fm, **kw):
+        if fm == "TH_GET_PARAMETER":
+            return {"PARAMETER_VALUE": "1"}
+        if fm == "RSAU_API_GET_AUDIT_CONFIG":
+            return _lab_sal_response()
+        if fm == "RSAU_API_GET_PROFILE":
+            return {"ET_FILT": _live_dyn_profile_rows(),
+                    "ET_FILTEX": [], "ET_TEXT": [], "ET_LOG": []}
+        if fm == "RSAU_GET_AUDIT_CONFIG":
+            return {"ENABLE": "X", "SLOTCOUNT": 3,
+                    "SLOTINFO": _legacy_slotinfo_rows()}
+        if fm == "RSAU_UPD_AUDIT_CONFIG":
+            upd_calls.append(kw)
+            return {"E_EXCP_TEXT": ""}
+        return {}
+
+    conn = MagicMock()
+    conn.call.side_effect = _call
+    with _patch_connection(conn):
+        out = sapmap_evasion_tier3.tier3_sal_uname_narrow(
+            state, node, "ALL",
+            replacement_uname="A*", hold_seconds=0)
+
+    assert out["ok"] is True
+    assert out["slotno"] == "0001,0002,0003"
+    mut_rows = upd_calls[0]["SLOTINFO"]
+    # All three slots should have UNAME swapped
+    assert all(r["UNAME"] == "A*" for r in mut_rows)
+    # Restore returns originals
+    rest_rows = upd_calls[1]["SLOTINFO"]
+    assert rest_rows[0]["UNAME"] == "SAP#*"
+    assert rest_rows[1]["UNAME"] == "*"
+
+
+def test_sal_uname_narrow_returns_error_when_legacy_fm_missing():
+    """Unlike slot-disable, the UNAME narrow path has no API fallback —
+    it should return ok=False when the legacy reader is unavailable."""
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True,
+                     "baseline_captured_at": "2026-06-24T10:00:00"}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+
+    def _call(fm, **kw):
+        if fm == "TH_GET_PARAMETER":
+            return {"PARAMETER_VALUE": "1"}
+        if fm == "RSAU_API_GET_AUDIT_CONFIG":
+            return _lab_sal_response()
+        if fm == "RSAU_API_GET_PROFILE":
+            return {"ET_FILT": _live_dyn_profile_rows(),
+                    "ET_FILTEX": [], "ET_TEXT": [], "ET_LOG": []}
+        if fm == "RSAU_GET_AUDIT_CONFIG":
+            raise Exception("FU_NOT_FOUND RSAU_GET_AUDIT_CONFIG")
+        return {}
+
+    conn = MagicMock()
+    conn.call.side_effect = _call
+    with _patch_connection(conn):
+        out = sapmap_evasion_tier3.tier3_sal_uname_narrow(
+            state, node, "1",
+            replacement_uname="JORIS", hold_seconds=0)
+
+    assert out["ok"] is False
+    assert "stealth writer unavailable" in out.get("error", "")

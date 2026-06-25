@@ -7131,6 +7131,64 @@ def create_app(api: SAPMAPApi) -> Bottle:
              f"Tier 3: set {param}={value}", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/tier3_sal_uname_narrow", method="POST")
+    def node_tier3_sal_uname_narrow(sid):
+        """Tier 3 mutation — swap one or more SAL slots' UNAME filter
+        to ``replacement_uname`` for a hold window, then auto-restore.
+        Stealth writer only (RSAU_UPD_AUDIT_CONFIG, SHM-only).  Refuses
+        unless --allow-evasion is armed AND a baseline has been
+        captured."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        data = request.json or {}
+        slotno = str(data.get("slotno") or "").strip()
+        if not slotno:
+            return json.dumps({"error": "slotno required"})
+        replacement = str(data.get("replacement_uname") or "").strip()
+        if not replacement:
+            return json.dumps({"error": "replacement_uname required"})
+        try:
+            hold_seconds = float(data.get("hold_seconds") or 5.0)
+        except (TypeError, ValueError):
+            hold_seconds = 5.0
+
+        def _run():
+            try:
+                from sapmap_evasion_tier3 import tier3_sal_uname_narrow
+            except Exception as e:
+                print(f"[-] {sid}: tier3 module unavailable: {e}")
+                return
+            creds = node.best_credentials()
+            if creds is None or not creds.verified:
+                print(f"[!] {sid}: SAL UNAME narrow needs verified RFC "
+                      f"credentials — complete user creation first")
+                emit_finding("WARNING", sid,
+                              "SAL UNAME narrow skipped — no verified "
+                              "RFC credentials")
+                return
+            print(f"[*] {sid}: Tier 3 SAL UNAME narrow — slot(s) "
+                  f"{slotno!r} → {replacement!r}, hold {hold_seconds}s")
+            out = tier3_sal_uname_narrow(api.state, node, slotno,
+                                           replacement_uname=replacement,
+                                           hold_seconds=hold_seconds,
+                                           creds=creds)
+            if not out.get("ok"):
+                print(f"[-] {sid}: SAL UNAME narrow failed — "
+                      f"{out.get('error')}")
+                emit_finding("WARNING", sid,
+                              f"Tier 3 SAL UNAME narrow failed: "
+                              f"{out.get('error')}")
+                return
+            print(f"[+] {sid}: SAL slot(s) {out['slotno']} UNAME swap "
+                  f"round-trip complete (baseline UNAMEs "
+                  f"{out.get('baseline_unames')})")
+
+        _bg(f"{sid}:tier3_sal_uname_narrow",
+             f"Tier 3: narrow SAL UNAME slot {slotno}", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/probe_rsau_dyn_profile", method="POST")
     def node_probe_rsau_dyn_profile(sid):
         """Phase 3 step 1 — read RSAU_API_GET_PROFILE for ID_NAME='$DYN$'

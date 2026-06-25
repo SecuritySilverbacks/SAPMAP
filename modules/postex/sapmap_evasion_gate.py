@@ -68,6 +68,9 @@ TIER3_TECHNIQUES: dict = {
         # 4.A.1 — SM19 filter narrowing during op
         Tier3Technique("sal_filter_narrow",
                         "SAL filter slot narrowing"),
+        # 4.A.1b — UNAME swap on active SAL slot
+        Tier3Technique("sal_uname_narrow",
+                        "SAL slot UNAME swap (exclude operator user)"),
         # 4.A.2 — kernel param disable (rsau/enable, rsau/integrity)
         Tier3Technique("sal_kernel_param_disable",
                         "SAL kernel parameter disable"),
