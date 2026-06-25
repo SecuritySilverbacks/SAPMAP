@@ -2158,3 +2158,312 @@ def test_sal_uname_narrow_returns_error_when_legacy_fm_missing():
 
     assert out["ok"] is False
     assert "stealth writer unavailable" in out.get("error", "")
+
+
+# ---------------------------------------------------------------------------
+# Java SAL suppress — sap_java_logctl helpers
+# ---------------------------------------------------------------------------
+
+import sap_java_logctl
+
+
+def test_logctl_jsp_contains_all_target_categories():
+    for cat in sap_java_logctl.JAVA_SAL_CATEGORIES:
+        assert cat in sap_java_logctl.LOGCTL_JSP
+
+
+def test_logctl_jsp_has_all_three_actions():
+    jsp = sap_java_logctl.LOGCTL_JSP
+    assert '"read"' in jsp
+    assert '"suppress"' in jsp
+    assert '"restore"' in jsp
+    assert "LOGCTL_READY" in jsp
+
+
+def test_logctl_jsp_imports_logging_api():
+    assert "com.sap.tc.logging.*" in sap_java_logctl.LOGCTL_JSP
+
+
+def test_baselines_to_wire_encodes_pipe_separated():
+    cats = {"/System/Security/Audit": 4,
+            "/System/Security/Audit/ACLs": 6}
+    wire = sap_java_logctl.baselines_to_wire(cats)
+    assert "/System/Security/Audit=4" in wire
+    assert "/System/Security/Audit/ACLs=6" in wire
+    assert "|" in wire
+
+
+def test_baselines_to_wire_empty_dict():
+    assert sap_java_logctl.baselines_to_wire({}) == ""
+
+
+# ---------------------------------------------------------------------------
+# invoke_logctl — response parsing
+# ---------------------------------------------------------------------------
+
+def _mock_urlopen(body, status=200):
+    """Return a patch that makes urllib.request.urlopen return ``body``."""
+    resp = MagicMock()
+    resp.read.return_value = body.encode("utf-8")
+    resp.__enter__ = MagicMock(return_value=resp)
+    resp.__exit__ = MagicMock(return_value=False)
+    return patch("sap_java_logctl.urllib.request.urlopen", return_value=resp)
+
+
+def test_invoke_logctl_read_parses_categories():
+    body = ("/System/Security/Audit=4|"
+            "/System/Security/Audit/ACLs=6|"
+            "/System/Security/Audit/Configuration=4|"
+            "/System/Security/Audit/PermissionCheck=4|"
+            "/System/Security/Audit/PrincipalModification=4|"
+            "/System/Security/Audit/UserMapping=4")
+    with _mock_urlopen(body):
+        r = sap_java_logctl.invoke_logctl("http://x:50000/irj/lc.jsp",
+                                           "read")
+    assert r["ok"] is True
+    assert len(r["categories"]) == 6
+    assert r["categories"]["/System/Security/Audit"] == 4
+    assert r["categories"]["/System/Security/Audit/ACLs"] == 6
+
+
+def test_invoke_logctl_read_error_category():
+    body = "/System/Security/Audit=ERR:NullPointerException"
+    with _mock_urlopen(body):
+        r = sap_java_logctl.invoke_logctl("http://x:50000/irj/lc.jsp",
+                                           "read")
+    assert r["ok"] is False
+    assert "ERR:" in r["error"]
+
+
+def test_invoke_logctl_suppress_parses_ok_fail():
+    body = "OK=6|FAIL=0"
+    with _mock_urlopen(body):
+        r = sap_java_logctl.invoke_logctl("http://x:50000/irj/lc.jsp",
+                                           "suppress")
+    assert r["ok"] is True
+    assert r["suppress_ok"] == 6
+    assert r["suppress_fail"] == 0
+
+
+def test_invoke_logctl_suppress_with_failures():
+    body = "OK=4|FAIL=2|ERR:/System/Security/Audit/ACLs:ClassNotFound"
+    with _mock_urlopen(body):
+        r = sap_java_logctl.invoke_logctl("http://x:50000/irj/lc.jsp",
+                                           "suppress")
+    assert r["ok"] is False
+    assert r["suppress_ok"] == 4
+    assert r["suppress_fail"] == 2
+    assert "ERR:" in r["error"]
+
+
+def test_invoke_logctl_restore_parses_ok_fail():
+    body = "OK=6|FAIL=0"
+    with _mock_urlopen(body):
+        r = sap_java_logctl.invoke_logctl("http://x:50000/irj/lc.jsp",
+                                           "restore",
+                                           baselines="/a=4|/b=6")
+    assert r["ok"] is True
+    assert r["suppress_ok"] == 6
+
+
+def test_invoke_logctl_status_checks_ready_marker():
+    with _mock_urlopen("LOGCTL_READY"):
+        r = sap_java_logctl.invoke_logctl("http://x:50000/irj/lc.jsp",
+                                           "status")
+    assert r["ok"] is True
+
+
+def test_invoke_logctl_status_fails_on_unexpected_body():
+    with _mock_urlopen("500 Internal Server Error"):
+        r = sap_java_logctl.invoke_logctl("http://x:50000/irj/lc.jsp",
+                                           "status")
+    assert r["ok"] is False
+
+
+def test_invoke_logctl_http_error():
+    import urllib.error
+    err = urllib.error.HTTPError("http://x", 404, "Not Found", {}, None)
+    with patch("sap_java_logctl.urllib.request.urlopen", side_effect=err):
+        r = sap_java_logctl.invoke_logctl("http://x:50000/irj/lc.jsp",
+                                           "read")
+    assert r["ok"] is False
+    assert "HTTP 404" in r["error"]
+
+
+def test_invoke_logctl_connection_error():
+    with patch("sap_java_logctl.urllib.request.urlopen",
+               side_effect=ConnectionRefusedError("refused")):
+        r = sap_java_logctl.invoke_logctl("http://x:50000/irj/lc.jsp",
+                                           "read")
+    assert r["ok"] is False
+    assert r["error"]
+
+
+def test_invoke_logctl_unknown_action():
+    with _mock_urlopen("something"):
+        r = sap_java_logctl.invoke_logctl("http://x:50000/irj/lc.jsp",
+                                           "bogus")
+    assert r["ok"] is False
+    assert "unknown action" in r["error"]
+
+
+# ---------------------------------------------------------------------------
+# tier3_java_sal_suppress — gate + flow
+# ---------------------------------------------------------------------------
+
+def test_java_sal_suppress_refuses_non_java_node():
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    node.system_type = "ABAP"
+    out = sapmap_evasion_tier3.tier3_java_sal_suppress(state, node)
+    assert out["ok"] is False
+    assert "not a Java" in out["error"]
+
+
+def test_java_sal_suppress_refuses_when_evasion_disarmed():
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": False}
+    node = SAPNode(sid="J75", hostname="j75", ip="10.0.0.2")
+    node.system_type = "JAVA"
+    out = sapmap_evasion_tier3.tier3_java_sal_suppress(state, node)
+    assert out["ok"] is False
+
+
+def test_java_sal_suppress_refuses_when_deploy_fails():
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True}
+    node = SAPNode(sid="J75", hostname="j75", ip="10.0.0.2")
+    node.system_type = "JAVA"
+
+    with patch("sap_java_logctl.deploy_logctl_jsp",
+               return_value="") as mock_dep, \
+         patch("sap_java_logctl.invoke_logctl") as mock_inv, \
+         patch("sap_java_logctl.baselines_to_wire"):
+        out = sapmap_evasion_tier3.tier3_java_sal_suppress(state, node)
+
+    assert out["ok"] is False
+    assert "deployment failed" in out["error"]
+    mock_inv.assert_not_called()
+
+
+def _baseline_read_response():
+    return {
+        "ok": True, "action": "read", "raw": "",
+        "categories": {
+            "/System/Security/Audit": 4,
+            "/System/Security/Audit/ACLs": 6,
+            "/System/Security/Audit/Configuration": 4,
+            "/System/Security/Audit/PermissionCheck": 4,
+            "/System/Security/Audit/PrincipalModification": 4,
+            "/System/Security/Audit/UserMapping": 4,
+        },
+        "suppress_ok": 0, "suppress_fail": 0, "error": "",
+    }
+
+
+def _suppress_response():
+    return {
+        "ok": True, "action": "suppress", "raw": "OK=6|FAIL=0",
+        "categories": {}, "suppress_ok": 6, "suppress_fail": 0,
+        "error": "",
+    }
+
+
+def _restore_response():
+    return {
+        "ok": True, "action": "restore", "raw": "OK=6|FAIL=0",
+        "categories": {}, "suppress_ok": 6, "suppress_fail": 0,
+        "error": "",
+    }
+
+
+def test_java_sal_suppress_full_flow():
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True}
+    node = SAPNode(sid="J75", hostname="j75", ip="10.0.0.2")
+    node.system_type = "JAVA"
+
+    call_log = []
+
+    def _mock_invoke(url, action, **kw):
+        call_log.append(action)
+        if action == "read":
+            return _baseline_read_response()
+        elif action == "suppress":
+            return _suppress_response()
+        elif action == "restore":
+            return _restore_response()
+        return {"ok": True, "action": action, "raw": "", "categories": {},
+                "suppress_ok": 0, "suppress_fail": 0, "error": ""}
+
+    with patch("sap_java_logctl.deploy_logctl_jsp",
+               return_value="http://10.0.0.2:50000/irj/lc.jsp"), \
+         patch("sap_java_logctl.invoke_logctl",
+               side_effect=_mock_invoke), \
+         patch("sap_java_logctl.baselines_to_wire",
+               return_value="/System/Security/Audit=4|/System/Security/Audit/ACLs=6"):
+        out = sapmap_evasion_tier3.tier3_java_sal_suppress(
+            state, node, hold_seconds=0)
+
+    assert out["ok"] is True
+    assert out["technique"] == "java_nwa_severity"
+    assert out["suppress_ok"] == 6
+    assert out["suppress_fail"] == 0
+    assert out["jsp_url"] == "http://10.0.0.2:50000/irj/lc.jsp"
+    assert "/System/Security/Audit" in out["baseline"]
+    # Flow: read (baseline) → suppress → read (verify) → restore → read (post-verify)
+    assert call_log == ["read", "suppress", "read", "restore", "read"]
+
+
+def test_java_sal_suppress_returns_error_on_baseline_read_failure():
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True}
+    node = SAPNode(sid="J75", hostname="j75", ip="10.0.0.2")
+    node.system_type = "JAVA"
+
+    fail_read = {"ok": False, "action": "read", "raw": "",
+                 "categories": {}, "suppress_ok": 0, "suppress_fail": 0,
+                 "error": "connection timeout"}
+
+    with patch("sap_java_logctl.deploy_logctl_jsp",
+               return_value="http://10.0.0.2:50000/irj/lc.jsp"), \
+         patch("sap_java_logctl.invoke_logctl",
+               return_value=fail_read), \
+         patch("sap_java_logctl.baselines_to_wire"):
+        out = sapmap_evasion_tier3.tier3_java_sal_suppress(
+            state, node, hold_seconds=0)
+
+    assert out["ok"] is False
+    assert "baseline read failed" in out["error"]
+
+
+def test_java_sal_suppress_returns_error_on_suppress_failure():
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True}
+    node = SAPNode(sid="J75", hostname="j75", ip="10.0.0.2")
+    node.system_type = "JAVA"
+
+    call_count = [0]
+
+    def _mock_invoke(url, action, **kw):
+        call_count[0] += 1
+        if action == "read":
+            return _baseline_read_response()
+        if action == "suppress":
+            return {"ok": False, "action": "suppress", "raw": "OK=0|FAIL=6",
+                    "categories": {}, "suppress_ok": 0, "suppress_fail": 6,
+                    "error": "all categories failed"}
+        return {"ok": True, "action": action, "raw": "", "categories": {},
+                "suppress_ok": 0, "suppress_fail": 0, "error": ""}
+
+    with patch("sap_java_logctl.deploy_logctl_jsp",
+               return_value="http://10.0.0.2:50000/irj/lc.jsp"), \
+         patch("sap_java_logctl.invoke_logctl",
+               side_effect=_mock_invoke), \
+         patch("sap_java_logctl.baselines_to_wire"):
+        out = sapmap_evasion_tier3.tier3_java_sal_suppress(
+            state, node, hold_seconds=0)
+
+    assert out["ok"] is False
+    assert "suppress failed" in out["error"]
