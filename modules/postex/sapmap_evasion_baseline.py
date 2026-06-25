@@ -666,9 +666,16 @@ def change_param(node, creds, name: str, value: str) -> dict:
 
     try:
         with sapmap_rfc._get_connection(node, creds) as conn:
+            # CHECK_PARAMETER='1' tells the kernel to validate the
+            # value before committing.  Without it (default ' ') the
+            # kernel accepts the call but silently doesn't apply the
+            # change on rdisp/TRACE and gw/logging — confirmed by
+            # SE37 manual test where CHECK_PARAMETER=1 was required
+            # to actually flip the runtime value.
             r = conn.call("TH_CHANGE_PARAMETER",
                            PARAMETER_NAME=name,
-                           PARAMETER_VALUE=value)
+                           PARAMETER_VALUE=value,
+                           CHECK_PARAMETER="1")
             # TH_CHANGE_PARAMETER returns RC=0 on success.  Some
             # kernels also surface RETURN_CODE; treat any non-empty
             # non-zero rc as a failure.

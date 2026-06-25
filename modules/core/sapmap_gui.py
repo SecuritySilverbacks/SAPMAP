@@ -7078,6 +7078,29 @@ def create_app(api: SAPMAPApi) -> Bottle:
              f"Tier 3: disable SAL slot {slotno}", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/evasion_baseline_param", method="GET")
+    def node_evasion_baseline_param(sid):
+        """Return the captured baseline value for one param.  Used by
+        the GUI prompts so compound parameters (gw/logging etc.) can
+        be pre-populated with their current structured value rather
+        than forcing the operator to type the whole ACTION=... blob."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        param = request.query.get("param") or ""
+        snap = getattr(node, "_evasion_baseline", None)
+        if snap is None:
+            return json.dumps({"error": "no baseline captured",
+                                "value": ""})
+        val = snap.params.get(param) if param else None
+        if val is None:
+            return json.dumps({"error": "param not in baseline",
+                                "value": ""})
+        if isinstance(val, str) and val.startswith("__UNCAPTURED__"):
+            return json.dumps({"error": val, "value": ""})
+        return json.dumps({"error": "", "value": str(val)})
+
     @app.route("/api/node/<sid>/tier3_set_param", method="POST")
     def node_tier3_set_param(sid):
         """Tier 3 mutation — flip an SAP profile parameter at runtime
