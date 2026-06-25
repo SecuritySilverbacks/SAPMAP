@@ -51,6 +51,7 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 - [SAP Secure Store Decryption](#sap-secure-store-rsectab-decryption)
 - [SAP Cloud Connector (SCC)](#sap-cloud-connector-scc)
 - [Engagement Reports & Diffs](#engagement-reports--diffs)
+- [Evasion & Detection Avoidance (Tier 3)](#evasion--detection-avoidance-tier-3)
 - [Standalone Tools](#standalone-tools)
 - [State Management](#state-management)
 - [Testing](#testing)
@@ -170,6 +171,14 @@ The OA2C reader uses a three-tier resilience chain: `DDIF_FIELDINFO_GET` for col
 - **Diff between two .sapmap snapshots** — File → Diff Two Runs picks any two saved states (or one against the live in-memory state) and writes a self-contained HTML diff to `loot/reports/`. Hero strip is colour-banded ("MAJOR REGRESSION" / "New exposure" / "Remediation progress" / "No major change"), 9 signed-delta KPI cards, sections for new vs. remediated findings, new vs. disappeared trust chains, added/removed/changed nodes with before-after tables, and SCC + RFC connection deltas
 - **Trust-chain analysis** — BFS from every entry-point system across the RFC adjacency graph, ranks paths by severity (CRITICAL/HIGH/MEDIUM/LOW based on production endpoints + SAP_ALL throughout); includes **untested RFC edges** with an explicit `UNTESTED` flag (only proven-broken edges are dropped, so chains landing on PRD aren't silently hidden)
 
+### Evasion & Detection Avoidance (Tier 3)
+- **SAL slot disable** — Temporarily disable Security Audit Log recording slots via shared-memory-only writes (RSAU_UPD_AUDIT_CONFIG), then auto-restore after a configurable hold window.  No disk persistence, no SM19 "Last changed by" header update — stealth path confirmed on kernel 793
+- **Kernel parameter dynamic-set** — Flip SAP profile parameters at runtime via TH_SET_PARAM (shared memory only); auto-restores original values on exit
+- **RSAU API surface probe** — Discovery-only read of every RSAU_API_* function module's signature (IMPORT/EXPORT/TABLES) — reveals the exact interface the writer needs without touching any config
+- **Dynamic SAL profile dump** — Read the active dynamic filter profile (RSAU_API_GET_PROFILE with ID_DYN_CONF='X') to inspect live slot/filter state before any mutation
+- **Evasion baseline snapshot** — Pre-flight capture of all mutable state (kernel params + SAL slot config + filter rows) into a JSON file; every Tier 3 mutation auto-restores from this baseline on exit
+- **Arm gate** — All Tier 3 entry points refuse to run unless `--allow-evasion` was passed at startup and (for mutation writers) a baseline has been captured.  Visual "⚡ Tier 3 Armed" bar in the GUI confirms the session state
+
 ### Cleanup
 - **User deletion** — Remove all created SAPMAP users via BAPI_USER_DELETE
 - **Destination removal** — Clean up created TCP/IP RFC destinations
@@ -226,12 +235,14 @@ modules/
 │   ├── sap_java_telnet.py             Java telnet console deploy
 │   └── sapmap_copyfail.py             CVE-2026-31431 root LPE on Linux (page-cache patch) — validated on SLES 11 + 15 + 6.4.0
 │
-├── postex/                            Post-exploitation: privesc + lateral movement
+├── postex/                            Post-exploitation: privesc + lateral movement + evasion
 │   ├── sapmap_lpe.py                  ABAP local privilege escalation registry
 │   ├── sap_ume_user_create.py         Java UME admin user creation
 │   ├── sapmap_chain.py                Multi-hop RFC trust-chain analysis
 │   ├── sap_ssh_lateral.py             SSH key harvest, lateral movement, OS Console/shell via SSH
-│   └── sap_pse_loot.py               SAPSYS.pse + cred_v2 extraction with chunked binary reads
+│   ├── sap_pse_loot.py               SAPSYS.pse + cred_v2 extraction with chunked binary reads
+│   ├── sapmap_evasion_baseline.py     Tier 3 baseline capture + SAL config readers/writers
+│   └── sapmap_evasion_tier3.py        Tier 3 technique entry points (SAL slot disable, param set, RSAU probe)
 │
 ├── data_extraction/                   Credential / data harvesting
 │   ├── sapmap_secstore.py             ABAP RSECTAB / SSFS decryption + map integration
@@ -1054,6 +1065,72 @@ The diff is a pure structural delta over JSON — **no live data is queried at d
 
 ---
 
+## Evasion & Detection Avoidance (Tier 3)
+
+Tier 3 techniques temporarily suppress SAP-native monitoring controls during an engagement window, then auto-restore the original configuration on exit.  Designed for **authorized red-team exercises** where the scope explicitly includes detection-evasion testing against SAP SOC / SIEM pipelines.
+
+### Arming
+
+All Tier 3 entry points are gated behind a CLI flag and a per-node baseline:
+
+```bash
+python3 sapmap.py --allow-evasion          # arm gate for the session
+```
+
+Once armed, a red **⚡ Tier 3 Armed** banner appears in the GUI.  Before any mutation can run, the operator must right-click the target node → Evasion → **Capture Evasion Baseline** to snapshot the current state (kernel params + SAL slot config + filter rows).  The baseline is saved to `loot/baseline/<SID>/baseline_<ts>.json` and serves as the restore target.
+
+### Techniques
+
+#### SAL Slot Disable
+
+Right-click → Evasion → **Disable SAL Slot(s)**
+
+Temporarily disables one or more Security Audit Log recording slots for a configurable hold window (default 60 s), then auto-restores.
+
+**Dual-path writer:**
+
+| Path | FM | Persistence | SM19 header changed? |
+|------|-----|------------|----------------------|
+| Stealth (primary) | `RSAU_UPD_AUDIT_CONFIG` | Shared memory only | No — "Last changed by" stays at previous date |
+| Fallback | `RSAU_API_SET_PROFILE` | Disk + shared memory | Yes — updates "Last changed by" to SAPMAP00 |
+
+The stealth path is attempted first.  If the legacy `RSAU_GET_AUDIT_CONFIG` / `RSAU_UPD_AUDIT_CONFIG` function modules are not available on the target kernel, the code falls back to the API path transparently.
+
+**Slot selection:** Single slot (`1`), comma-separated (`1,2,3`), or `ALL` (flips every slot whose STATUS is currently active).
+
+**Live countdown timer:** While slots are disabled, a pulsing activity-bar entry shows the remaining hold time (e.g. "🚨 SAL slot(s) 1,2 DISABLED — 42s").
+
+**Connection management:** The stealth path opens/closes RFC connections per operation (read → write → sleep → restore) rather than holding a single connection open during the hold window, preventing timeouts on long holds.
+
+#### Kernel Parameter Dynamic-Set
+
+`tier3_set_param(state, node, param, value, ...)` — sets an SAP profile parameter at runtime via `TH_SET_PARAM` (shared memory only, no profile file change).  The original value is read first and restored automatically when the evasion window closes.
+
+#### RSAU API Surface Probe
+
+Right-click → Evasion → **Probe RSAU API Surface**
+
+Discovery-only read that calls `FUNCTION_EXISTS` + `RFC_GET_FUNCTION_INTERFACE` for each FM in the `RSAU_API_*` family (`GET_AUDIT_CONFIG`, `SET_PROFILE`, `GET_PROFILE`, `SET_PARAM`, `GET_PARAM`, `UPD_AUDIT_CONFIG`).  Dumps each existing FM's IMPORT/EXPORT/TABLES signature to `loot/baseline/<SID>/rsau_api_probe_<ts>.json`.  Pure metadata — no SAL config is touched.
+
+#### Dynamic SAL Profile Dump
+
+Right-click → Evasion → **Dump Dynamic Profile**
+
+Calls `RSAU_API_GET_PROFILE(ID_DYN_CONF='X')` and dumps the verbatim `ET_FILT` / `ET_FILTEX` / `ET_TEXT` / `ET_LOG` rows to `loot/baseline/<SID>/dyn_profile_<ts>.json`.  Reveals the exact 12-field RSAUPROF row shape the writer needs to construct.  Pure read — no mutation.
+
+### Architecture
+
+- **`modules/postex/sapmap_evasion_baseline.py`** — Baseline snapshot capture, SAL config readers/writers (`read_legacy_sal_config`, `write_legacy_sal_config`, `capture_baseline`)
+- **`modules/postex/sapmap_evasion_tier3.py`** — Technique entry points (`tier3_sal_slot_disable`, `tier3_set_param`, `probe_rsau_api_surface`, `tier3_probe_dyn_profile`, `tier3_capture_baseline_only`)
+- **`modules/core/sapmap_gui.py`** — REST API routes for each technique (POST `/api/node/<sid>/tier3_sal_slot_disable`, etc.)
+- **`modules/core/sapmap_html.py`** — Evasion submenu in the right-click context menu, armed-bar, countdown timer
+
+### Restore Guarantees
+
+Every Tier 3 mutation is wrapped in a try/finally block.  The original state (from the baseline snapshot) is replayed via the same writer FM on exit — even if the hold window is interrupted by an exception or process kill.  The stealth SAL slot writer opens a fresh RFC connection for the restore call, so a stale connection doesn't block rollback.
+
+---
+
 ## Standalone Tools
 
 Each standalone tool works independently with no external dependencies (Python 3 stdlib only).  After the modules reorg they live under `modules/<group>/`, but you can run them by path or import them as a module.
@@ -1363,7 +1440,7 @@ Separate from session state, these persist across sessions:
 
 ## Testing
 
-SAPMAP includes a unit test suite (1973 tests across 50+ files) that validates core logic without network access:
+SAPMAP includes a unit test suite (2220 tests across 50+ files) that validates core logic without network access:
 
 ```bash
 python3 -m pytest tests/ -v
@@ -1387,6 +1464,7 @@ python3 -m pytest tests/ -v
 | `test_rsec_cipher.py` | 11 | RSECCipher encode/decode roundtrip, rsec_decrypt, rsec_decrypt_key |
 | `test_models.py` | 9 | Data model serialization, risk_level, best_credentials, state management |
 | `test_config.py` | 8 | Username generation, DB type normalization, SQL generators |
+| `test_evasion_tier3_foundation.py` | 83 | Tier 3 evasion: baseline capture/restore, legacy SAL read/write, stealth slot disable, RSAU API probe, dynamic profile dump, arm-gate enforcement |
 | `test_chain.py`, `test_impact.py`, `test_java_*.py`, `test_router_*.py`, `test_saprouter.py`, `test_shell.py`, `test_cve_2020_6287.py`, `test_additions_today.py`, `test_java_secstore_offline.py` | ~380 | RFC trust chains, business impact engine, Java CTC/Telnet deploy helpers, SAProuter NI tunnel, router info, SAP shell builders, CVE-2020-6287 user creation, miscellaneous additions |
 
 ---
