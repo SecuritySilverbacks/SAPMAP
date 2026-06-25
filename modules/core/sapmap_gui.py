@@ -7078,6 +7078,59 @@ def create_app(api: SAPMAPApi) -> Bottle:
              f"Tier 3: disable SAL slot {slotno}", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/tier3_set_param", method="POST")
+    def node_tier3_set_param(sid):
+        """Tier 3 mutation — flip an SAP profile parameter at runtime
+        via TH_CHANGE_PARAMETER (shared memory only).  Auto-restores
+        the baseline value on exit.  Caller passes ``param`` + ``value``
+        in the POST body.  Refuses unless --allow-evasion is armed AND
+        a baseline has been captured."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        data = request.json or {}
+        param = str(data.get("param") or "").strip()
+        value = str(data.get("value") or "").strip()
+        if not param:
+            return json.dumps({"error": "param required"})
+
+        def _run():
+            try:
+                from sapmap_evasion_tier3 import tier3_set_param
+            except Exception as e:
+                print(f"[-] {sid}: tier3 module unavailable: {e}")
+                return
+            creds = node.best_credentials()
+            if creds is None or not creds.verified:
+                print(f"[!] {sid}: param set needs verified RFC "
+                      f"credentials — complete user creation first")
+                emit_finding("WARNING", sid,
+                              "Tier 3 param set skipped — no verified "
+                              "RFC credentials")
+                return
+            print(f"[*] {sid}: Tier 3 dynamic param set — "
+                  f"{param}={value!r}")
+            out = tier3_set_param(api.state, node, param, value,
+                                    creds=creds)
+            if not out.get("ok"):
+                print(f"[-] {sid}: param set failed — {out.get('error')}")
+                emit_finding("WARNING", sid,
+                              f"Tier 3 param set failed: "
+                              f"{out.get('error')}")
+                return
+            print(f"[+] {sid}: {param}={value!r} applied "
+                  f"(baseline {param}={out.get('baseline_value')!r}) — "
+                  f"auto-restore on session exit")
+            emit_finding(
+                "INFO", sid,
+                f"Tier 3 param set: {param}={value} "
+                f"(baseline {out.get('baseline_value')!r})")
+
+        _bg(f"{sid}:tier3_set_param:{param}",
+             f"Tier 3: set {param}={value}", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/probe_rsau_dyn_profile", method="POST")
     def node_probe_rsau_dyn_profile(sid):
         """Phase 3 step 1 — read RSAU_API_GET_PROFILE for ID_NAME='$DYN$'
