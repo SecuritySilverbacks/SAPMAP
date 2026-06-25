@@ -5669,19 +5669,60 @@ async function ctxAction(action) {
     }
     case 'tier3_gw_logging_off':
     case 'tier3_rdisp_trace_off': {
-      const param = (action === 'tier3_gw_logging_off')
-        ? 'gw/logging' : 'rdisp/TRACE';
-      const human = (action === 'tier3_gw_logging_off')
-        ? 'Gateway logging' : 'Dispatcher trace';
-      const valRaw = prompt(
-        'Tier 3: set ' + param + ' on ' + sid + ' to which value?\n\n'
-        + 'Common choices:\n'
-        + '  • 0   — silence the channel (typical evasion target)\n'
-        + '  • 1   — minimum logging\n'
-        + '  • 2   — default on most installs\n'
-        + '  • 3   — verbose\n\n'
-        + 'The baseline value will be captured first and auto-'
-        + 'restored when the SAPMAP session exits.', '0');
+      const isCompound = (action === 'tier3_gw_logging_off');
+      const param = isCompound ? 'gw/logging' : 'rdisp/TRACE';
+      const human = isCompound ? 'Gateway logging' : 'Dispatcher trace';
+      // Fetch the baseline value so the operator can edit a known-
+      // valid structured string (gw/logging) or see what they're
+      // overriding (rdisp/TRACE).
+      let baseline = '';
+      try {
+        const r = await api('GET',
+          'node/' + sid + '/evasion_baseline_param?param='
+          + encodeURIComponent(param));
+        baseline = (r && r.value) || '';
+      } catch (e) { /* fall through with empty baseline */ }
+      let promptText, defaultVal;
+      if (isCompound) {
+        // gw/logging is a structured compound: ACTION=<flags>
+        // LOGFILE=<name> SWITCHTF=<rotate> MAXSIZEKB=<size>.  Sending
+        // bare '0' returns SHMPRF_ERROR.  Suggest the baseline with
+        // ACTION cleared as the silence default; let operator edit.
+        const silenced = baseline
+          ? baseline.replace(/ACTION=\S*/, 'ACTION=')
+          : 'ACTION= LOGFILE=gw_log-%y-%m-%d SWITCHTF=day MAXSIZEKB=300';
+        promptText =
+          'Tier 3: set ' + param + ' on ' + sid + ' to which value?\n\n'
+          + 'gw/logging is a COMPOUND parameter — the kernel rejects '
+          + 'bare integers (SHMPRF_ERROR).\n\n'
+          + 'Format: ACTION=<flags> LOGFILE=<name> SWITCHTF=<rotate> '
+          + 'MAXSIZEKB=<size>\n\n'
+          + 'To silence: clear ACTION= (the suggested default below '
+          + 'already does this).\n\n'
+          + (baseline
+              ? 'Baseline (current value, will auto-restore on exit):\n  '
+                  + baseline + '\n\n'
+              : '⚠  No baseline value captured — verify the structure '
+                + 'before submitting.\n\n')
+          + 'Suggested silence value:';
+        defaultVal = silenced;
+      } else {
+        // rdisp/TRACE is a simple integer (0-3).
+        promptText =
+          'Tier 3: set ' + param + ' on ' + sid + ' to which value?\n\n'
+          + 'Common choices:\n'
+          + '  • 0   — silence dispatcher trace (typical evasion target)\n'
+          + '  • 1   — minimum logging\n'
+          + '  • 2   — default on most installs\n'
+          + '  • 3   — verbose\n\n'
+          + (baseline
+              ? 'Baseline (current value, will auto-restore on exit): '
+                  + baseline + '\n\n'
+              : '')
+          + 'New value:';
+        defaultVal = '0';
+      }
+      const valRaw = prompt(promptText, defaultVal);
       if (valRaw === null) break;
       const val = valRaw.trim();
       if (!val) {

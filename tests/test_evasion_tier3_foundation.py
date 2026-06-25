@@ -381,6 +381,11 @@ def test_change_param_invokes_th_change_parameter_with_correct_args():
     assert seen_args["fm"] == "TH_CHANGE_PARAMETER"
     assert seen_args["kw"]["PARAMETER_NAME"] == "stat/level"
     assert seen_args["kw"]["PARAMETER_VALUE"] == "0"
+    # CHECK_PARAMETER='1' is required for the kernel to actually
+    # commit the runtime change (without it the call succeeds at the
+    # RFC layer but the value is silently not applied — confirmed via
+    # SE37 test on S/4 793).
+    assert seen_args["kw"]["CHECK_PARAMETER"] == "1"
 
 
 def test_change_param_reports_non_zero_rc_as_failure():
