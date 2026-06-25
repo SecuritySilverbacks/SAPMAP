@@ -704,16 +704,20 @@ def test_tier3_set_param_writes_then_restores_via_th_change_parameter():
     state.evasion = {"allow_evasion": True}
     node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
 
-    # Sequence: TH_GET_PARAMETER reads during capture, then
-    # TH_CHANGE_PARAMETER for the mutation, then more
-    # TH_CHANGE_PARAMETER calls for restore.
+    # Stateful mock: TH_GET_PARAMETER returns whatever TH_CHANGE_PARAMETER
+    # last wrote, so the verify-read after every change reflects the
+    # mutation.  Initial value '1' matches what the real kernel would
+    # have on a default S/4 install.
     th_change_calls = []
+    state_vals = {"rdisp/TRACE": "1"}
     def _call(fm, **kw):
         if fm == "TH_GET_PARAMETER":
-            return {"PARAMETER_VALUE": "1"}
+            return {"PARAMETER_VALUE":
+                     state_vals.get(kw["PARAMETER_NAME"], "1")}
         if fm == "TH_CHANGE_PARAMETER":
             th_change_calls.append((kw["PARAMETER_NAME"],
                                      kw["PARAMETER_VALUE"]))
+            state_vals[kw["PARAMETER_NAME"]] = kw["PARAMETER_VALUE"]
             return {"RC": "0"}
         if fm == "RFC_READ_TABLE":
             return {"DATA": []}
@@ -732,6 +736,10 @@ def test_tier3_set_param_writes_then_restores_via_th_change_parameter():
     assert out["param"] == "rdisp/TRACE"
     assert out["requested_value"] == "3"
     assert out["baseline_value"] == "1"
+    # Verify-read after write confirmed the value committed
+    assert out["live_after_write"] == "3"
+    # Post-restore verify confirmed rollback
+    assert out["live_after_restore"] == "1"
 
     # Mutation should have happened (rdisp/TRACE=3)
     assert ("rdisp/TRACE", "3") in th_change_calls
@@ -741,6 +749,38 @@ def test_tier3_set_param_writes_then_restores_via_th_change_parameter():
     mut_idx = th_change_calls.index(("rdisp/TRACE", "3"))
     restore_idx = th_change_calls.index(("rdisp/TRACE", "1"))
     assert mut_idx < restore_idx
+
+
+def test_tier3_set_param_flags_silent_no_op_when_verify_read_disagrees():
+    """If TH_CHANGE_PARAMETER returns RC=0 but the verify-read shows
+    the baseline value (kernel silently rejected the change), the
+    result should be applied=False with a clear error message."""
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+
+    def _call(fm, **kw):
+        if fm == "TH_GET_PARAMETER":
+            # Live value never changes — simulates a silent-no-op
+            # kernel rejection where RC=0 is returned but the value
+            # doesn't actually commit.
+            return {"PARAMETER_VALUE": "1"}
+        if fm == "TH_CHANGE_PARAMETER":
+            return {"RC": "0"}
+        return {"DATA": []}
+
+    conn = MagicMock()
+    conn.call.side_effect = _call
+    with _patch_connection(conn):
+        out = sapmap_evasion_tier3.tier3_set_param(
+            state, node, "rdisp/TRACE", "3")
+
+    # Writer returned RC=0 → ok=True, but applied=False because the
+    # live value didn't reflect the mutation.
+    assert out["ok"] is True
+    assert out["applied"] is False
+    assert "verify-read shows" in out["error"]
+    assert out["live_after_write"] == "1"
 
 
 def test_tier3_set_param_propagates_write_failure_and_still_restores():

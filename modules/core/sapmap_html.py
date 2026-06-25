@@ -5729,19 +5729,59 @@ async function ctxAction(action) {
         showToast('Value required', 'warning');
         break;
       }
+      const holdRaw = prompt(
+        'Hold ' + param + '=' + val + ' for how many seconds?\n\n'
+        + 'During the hold the runtime value stays mutated so you '
+        + 'can verify it in RZ11 / SM50.  After the hold expires '
+        + 'the baseline value is restored.\n\n'
+        + '0 = no hold (restore fires within milliseconds — useful '
+        + 'only for scripted runs)',
+        '30');
+      if (holdRaw === null) break;
+      const hold = parseFloat(holdRaw);
+      if (isNaN(hold) || hold < 0 || hold > 600) {
+        showToast('Hold seconds must be a number between 0 and 600',
+                   'warning');
+        break;
+      }
       if (!confirm(
         'RUN Tier 3 ' + human + ' suppress on ' + sid + '?\n\n'
-        + 'Writer: TH_CHANGE_PARAMETER\n'
+        + 'Writer: TH_CHANGE_PARAMETER (CHECK_PARAMETER=1)\n'
         + 'Param:  ' + param + '\n'
-        + 'Value:  ' + val + '\n\n'
+        + 'Value:  ' + val + '\n'
+        + 'Hold:   ' + hold + 's\n\n'
         + 'Shared-memory only — no profile-file rewrite, no '
-        + 'kernel restart.  Auto-restores baseline on session '
-        + 'exit.\n\n'
-        + 'Requires --allow-evasion AND a captured baseline.')) break;
+        + 'kernel restart.  Baseline auto-restored after the hold '
+        + '(or on exception).\n\n'
+        + 'A verify-read fires immediately after the writer call so '
+        + 'silent-no-op kernel rejections are surfaced.')) break;
       flashActivity(
-        `${sid}: Tier 3 — setting ${param}=${val}...`, 3000);
+        `${sid}: Tier 3 — setting ${param}=${val} (hold ${hold}s)...`,
+        5000);
       await api('POST', `node/${sid}/tier3_set_param`,
-                 {param: param, value: val});
+                 {param: param, value: val, hold_seconds: hold});
+      // Live countdown so the operator knows when restore will fire
+      if (hold > 0) {
+        let pRemaining = Math.ceil(hold);
+        const pKey = '_param_cd_' + sid + ':' + param;
+        activeTasks[pKey] =
+          '\u{1F6A8} ' + param + '=' + val + ' — ' + pRemaining + 's';
+        updateActivityBar();
+        const pTimer = setInterval(() => {
+          pRemaining--;
+          if (pRemaining > 0) {
+            activeTasks[pKey] =
+              '\u{1F6A8} ' + param + '=' + val + ' — ' + pRemaining + 's';
+          } else if (pRemaining === 0) {
+            activeTasks[pKey] =
+              '\u{2705} ' + param + ' — restoring baseline...';
+          } else {
+            delete activeTasks[pKey];
+            clearInterval(pTimer);
+          }
+          updateActivityBar();
+        }, 1000);
+      }
       break;
     }
     case 'tier3_sal_uname_narrow': {
