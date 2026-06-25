@@ -307,6 +307,18 @@ body {
 /* When content fits without scrolling, hide both. */
 .ctx-sub:not(.has-overflow) .ctx-scroll-hint { display: none; }
 
+/* Custom fast tooltip for context menu items — native title= has ~1s
+   delay which is too slow for flyout submenus that close on mouseout. */
+.ctx-tooltip {
+  position: fixed; z-index: 9999; pointer-events: none;
+  background: #0d1117; border: 1px solid #58a6ff; border-radius: 6px;
+  padding: 8px 12px; max-width: 380px; font-size: 11.5px;
+  color: #c9d1d9; line-height: 1.45; white-space: normal;
+  box-shadow: 0 4px 16px rgba(0,0,0,.6);
+  opacity: 0; transition: opacity .12s;
+}
+.ctx-tooltip.visible { opacity: 1; }
+
 /* === Info Panel (connection details) === */
 .info-panel {
   display: none; position: fixed; z-index: 1500;
@@ -796,6 +808,7 @@ body {
 
 <!-- Activity Bar -->
 <div id="activity-bar"><span class="activity-dot"></span><span id="activity-prefix">Working</span><span id="activity-text">...</span></div>
+<div class="ctx-tooltip" id="ctx-tooltip"></div>
 <div id="evasion-armed-bar" style="display:none;align-items:center;gap:8px;background:linear-gradient(90deg,#3a0808 0%,#1a0e0e 100%);border-bottom:2px solid #f85149;padding:6px 16px;font-size:13px;font-weight:600;color:#ff9b9b;text-shadow:0 0 6px #f8514980" title="Tier 3 active-evasion techniques are armed for this session.  SAL filter narrow, kernel-param dynamic-set, STAD/DBTABLOG suppression, NWA log-config flip etc. will RUN when invoked.  Toggle off in Settings to re-arm gate.">
   <span style="font-weight:700;color:#f85149;text-transform:uppercase;font-size:11px;letter-spacing:1px;padding:2px 8px;border:1px solid #f8514980;border-radius:3px;background:#f8514915">⚡ Tier 3 Armed</span>
   <span id="evasion-armed-text">Active-evasion techniques unlocked for this session.  Every Tier 3 entry point snapshots a baseline and restores on exit.</span>
@@ -4751,7 +4764,42 @@ function _attachScrollHints(sub) {
 
 function hideCtxMenu() {
   document.getElementById('ctx-menu').classList.remove('visible');
+  if (window._hideCtxTooltip) _hideCtxTooltip();
 }
+
+(function() {
+  const tip = document.getElementById('ctx-tooltip');
+  function show(e) {
+    const item = e.target.closest('.ctx-item');
+    if (!item) { hide(); return; }
+    // On first hover, migrate title → data-tip to suppress native tooltip
+    if (item.hasAttribute('title')) {
+      item.setAttribute('data-tip', item.getAttribute('title'));
+      item.removeAttribute('title');
+    }
+    const text = item.getAttribute('data-tip');
+    if (!text) { hide(); return; }
+    tip.textContent = text;
+    const r = item.getBoundingClientRect();
+    let left = r.right + 8;
+    let top = r.top;
+    if (left + 390 > window.innerWidth) left = Math.max(8, r.left - 390);
+    if (top + 120 > window.innerHeight) top = Math.max(8, window.innerHeight - 160);
+    tip.style.left = left + 'px';
+    tip.style.top = top + 'px';
+    tip.classList.add('visible');
+  }
+  function hide() { tip.classList.remove('visible'); }
+  window._hideCtxTooltip = hide;
+  ['ctx-menu', 'scc-ctx-menu', 'btp-ctx-menu'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('mouseover', show);
+    el.addEventListener('mouseout', function(e) {
+      if (!e.relatedTarget || !el.contains(e.relatedTarget)) hide();
+    });
+  });
+})();
 
 // Delegate clicks from context menu items
 document.getElementById('ctx-menu').addEventListener('click', function(e) {
