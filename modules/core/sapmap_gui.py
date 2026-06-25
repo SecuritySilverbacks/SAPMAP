@@ -7104,10 +7104,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
     @app.route("/api/node/<sid>/tier3_set_param", method="POST")
     def node_tier3_set_param(sid):
         """Tier 3 mutation — flip an SAP profile parameter at runtime
-        via TH_CHANGE_PARAMETER (shared memory only).  Auto-restores
-        the baseline value on exit.  Caller passes ``param`` + ``value``
-        in the POST body.  Refuses unless --allow-evasion is armed AND
-        a baseline has been captured."""
+        via TH_CHANGE_PARAMETER (shared memory only).  Holds the value
+        for ``hold_seconds`` so the operator can verify in RZ11, then
+        restores baseline.  Caller passes ``param`` + ``value`` + optional
+        ``hold_seconds`` in the POST body.  Refuses unless --allow-
+        evasion is armed AND a baseline has been captured."""
         response.content_type = "application/json"
         node = api.state.get_node(sid)
         if not node:
@@ -7115,6 +7116,10 @@ def create_app(api: SAPMAPApi) -> Bottle:
         data = request.json or {}
         param = str(data.get("param") or "").strip()
         value = str(data.get("value") or "").strip()
+        try:
+            hold_seconds = float(data.get("hold_seconds") or 0.0)
+        except (TypeError, ValueError):
+            hold_seconds = 0.0
         if not param:
             return json.dumps({"error": "param required"})
 
@@ -7133,8 +7138,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
                               "RFC credentials")
                 return
             print(f"[*] {sid}: Tier 3 dynamic param set — "
-                  f"{param}={value!r}")
+                  f"{param}={value!r}, hold {hold_seconds}s")
             out = tier3_set_param(api.state, node, param, value,
+                                    hold_seconds=hold_seconds,
                                     creds=creds)
             if not out.get("ok"):
                 print(f"[-] {sid}: param set failed — {out.get('error')}")
@@ -7142,13 +7148,26 @@ def create_app(api: SAPMAPApi) -> Bottle:
                               f"Tier 3 param set failed: "
                               f"{out.get('error')}")
                 return
-            print(f"[+] {sid}: {param}={value!r} applied "
-                  f"(baseline {param}={out.get('baseline_value')!r}) — "
-                  f"auto-restore on session exit")
-            emit_finding(
-                "INFO", sid,
-                f"Tier 3 param set: {param}={value} "
-                f"(baseline {out.get('baseline_value')!r})")
+            applied = out.get("applied", False)
+            after_write = out.get("live_after_write", "")
+            after_restore = out.get("live_after_restore", "")
+            if applied:
+                print(f"[+] {sid}: {param}={value!r} applied & verified "
+                      f"(baseline {param}={out.get('baseline_value')!r}, "
+                      f"post-restore now {after_restore!r})")
+                emit_finding(
+                    "INFO", sid,
+                    f"Tier 3 param set: {param}={value} verified "
+                    f"(restored to {after_restore!r})")
+            else:
+                print(f"[!] {sid}: {param} writer returned RC=0 but "
+                      f"verify-read shows {after_write!r} — kernel "
+                      f"silently rejected the change")
+                emit_finding(
+                    "WARNING", sid,
+                    f"Tier 3 param set: {param}={value} "
+                    f"writer-ok but kernel did not commit "
+                    f"(live={after_write!r})")
 
         _bg(f"{sid}:tier3_set_param:{param}",
              f"Tier 3: set {param}={value}", _run)
