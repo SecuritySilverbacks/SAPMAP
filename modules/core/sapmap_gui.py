@@ -7231,6 +7231,50 @@ def create_app(api: SAPMAPApi) -> Bottle:
              f"Tier 3: narrow SAL UNAME slot {slotno}", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/tier3_java_sal_suppress", method="POST")
+    def node_tier3_java_sal_suppress(sid):
+        """Tier 3 mutation — suppress Java Security Audit Log via deployed
+        LogController JSP.  Sets all 6 SAL categories to Severity.NONE
+        for a hold window, then auto-restores.  Runtime-only (JVM heap),
+        no disk persistence."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        if "JAVA" not in (node.system_type or "").upper():
+            return json.dumps({"error": f"{sid} is not a Java system"})
+        data = request.json or {}
+        try:
+            hold_seconds = float(data.get("hold_seconds") or 30.0)
+        except (TypeError, ValueError):
+            hold_seconds = 30.0
+
+        def _run():
+            try:
+                from sapmap_evasion_tier3 import tier3_java_sal_suppress
+            except Exception as e:
+                print(f"[-] {sid}: tier3 java module unavailable: {e}")
+                return
+            print(f"[*] {sid}: Tier 3 Java SAL suppress — "
+                  f"hold {hold_seconds}s")
+            out = tier3_java_sal_suppress(api.state, node,
+                                           hold_seconds=hold_seconds)
+            if not out.get("ok"):
+                print(f"[-] {sid}: Java SAL suppress failed — "
+                      f"{out.get('error')}")
+                emit_finding("WARNING", sid,
+                              f"Tier 3 Java SAL suppress failed: "
+                              f"{out.get('error')}")
+                return
+            print(f"[+] {sid}: Java SAL suppress round-trip complete — "
+                  f"suppressed {out.get('suppress_ok', 0)} categories, "
+                  f"restored {out.get('restored_count', 0)}/"
+                  f"{out.get('baseline_count', 0)}")
+
+        _bg(f"{sid}:tier3_java_sal_suppress",
+             f"Tier 3: Java SAL suppress ({hold_seconds}s)", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/probe_rsau_dyn_profile", method="POST")
     def node_probe_rsau_dyn_profile(sid):
         """Phase 3 step 1 — read RSAU_API_GET_PROFILE for ID_NAME='$DYN$'

@@ -1048,6 +1048,9 @@ body {
       <div class="ctx-item" data-action="tier3_sal_uname_narrow"
            title="Tier 3 MUTATION. Swaps one or more SAL slots' UNAME filter to a replacement value (e.g. operator's real user) for a hold window. Slot stays STATUS='X' (looks active in SM19) but no longer matches SAPMAP00. Stealth path only (RSAU_UPD_AUDIT_CONFIG, SHM-only — no disk persistence, no SM19 header change). Baseline UNAMEs auto-restored on exit."
            >&#129399; Narrow SAL Slot UNAME... (Tier 3 mutation)</div>
+      <div class="ctx-item" data-action="tier3_java_sal_suppress"
+           title="Tier 3 MUTATION (Java). Deploys a LogController JSP and sets the 6 Java Security Audit Log categories (/System/Security/Audit + 5 subcategories) to Severity.NONE via Category.setEffectiveSeverity(). Runtime-only (JVM heap — no config file change, no NWA change-log entry). Auto-restores baseline severity on exit. Requires a Java deployment path (CVE-2025-31324, CTC, telnet, or GW)."
+           >&#128683; Suppress Java SAL... (Tier 3 mutation)</div>
     </div>
   </div>
   <!-- Data Extraction submenu -->
@@ -4134,6 +4137,9 @@ function showCtxMenu(e, sid) {
     'tier3_sal_uname_narrow': hasUsableAbapAccess
         && !!(mapState.evasion && mapState.evasion.allow_evasion)
         && !!(mapState.evasion && mapState.evasion.baseline_captured_at),
+    'tier3_java_sal_suppress': isJavaStack
+        && (hasCve31324 || hasGwVuln || hasJavaDeploy)
+        && !!(mapState.evasion && mapState.evasion.allow_evasion),
     'retrieve_rfcs':    hasUsableAbapAccess,        // ABAP-only RFC + BAPI
     'test_rfcs':        hasUsableAbapAccess && hasRFCs,
     'read_java_destinations': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy),
@@ -4355,6 +4361,10 @@ function showCtxMenu(e, sid) {
          : ((mapState.evasion && mapState.evasion.allow_evasion)
             ? 'Tier 3 armed but no baseline captured yet — run "Capture Evasion Baseline" on this node first.'
             : 'Tier 3 not armed — restart SAPMAP with --allow-evasion (see disclaimer banner).')),
+    'tier3_java_sal_suppress':
+        ((mapState.evasion && mapState.evasion.allow_evasion)
+         ? 'MUTATES Java runtime. Deploys a LogController JSP and calls Category.setEffectiveSeverity(Severity.NONE) on the 6 Java Security Audit Log categories (/System/Security/Audit + ACLs, Configuration, PermissionCheck, PrincipalModification, UserMapping). Runtime-only — JVM heap, no config file, no NWA change-log. Auto-restores baseline severity after hold window. Requires a JSP deployment path.'
+         : 'Tier 3 not armed — restart SAPMAP with --allow-evasion (see disclaimer banner).'),
     'retrieve_rfcs':    'Needs a verified RFC credential or a SAPMAP-created user — RSRFCCHK and the RFCDES read both require a working logon.',
     'test_rfcs':        (!hasRFCs
         ? 'Retrieve RFC connections first.'
@@ -4457,6 +4467,7 @@ function showCtxMenu(e, sid) {
     'tier3_gw_logging_off': !isAbapStack,
     'tier3_rdisp_trace_off': !isAbapStack,
     'tier3_sal_uname_narrow': !isAbapStack,
+    'tier3_java_sal_suppress': !isJavaStack,
     'retrieve_rfcs':    !isAbapStack,
     'test_rfcs':        !isAbapStack,
     'create_tcpip':          !isAbapStack,
@@ -5848,6 +5859,62 @@ async function ctxAction(action) {
         } else {
           delete activeTasks[ukey];
           clearInterval(ucdTimer);
+        }
+        updateActivityBar();
+      }, 1000);
+      break;
+    }
+    case 'tier3_java_sal_suppress': {
+      const jHoldRaw = prompt(
+        'Tier 3: Suppress Java Security Audit Log on ' + sid + '\n\n'
+        + 'This deploys a LogController JSP that sets all 6 Java SAL\n'
+        + 'categories to Severity.NONE via Category.setEffectiveSeverity().\n\n'
+        + 'Categories suppressed:\n'
+        + '  • /System/Security/Audit (parent)\n'
+        + '  • /System/Security/Audit/ACLs\n'
+        + '  • /System/Security/Audit/Configuration\n'
+        + '  • /System/Security/Audit/PermissionCheck\n'
+        + '  • /System/Security/Audit/PrincipalModification\n'
+        + '  • /System/Security/Audit/UserMapping\n\n'
+        + 'Changes are runtime-only (JVM heap — no config file, no NWA\n'
+        + 'change-log entry). Auto-restores after the hold window.\n\n'
+        + 'Hold for how many seconds before auto-restore?',
+        '30');
+      if (!jHoldRaw) break;
+      const jHold = parseFloat(jHoldRaw);
+      if (isNaN(jHold) || jHold < 0 || jHold > 600) {
+        showToast('Hold seconds must be 0–600', 'warning');
+        break;
+      }
+      if (!confirm(
+        'RUN Tier 3 Java SAL suppress on ' + sid + '?\n\n'
+        + 'Hold:     ' + jHold + 's\n'
+        + 'Writer:   Category.setEffectiveSeverity(Severity.NONE)\n'
+        + 'Scope:    6 Java SAL categories\n'
+        + 'Persist:  runtime-only (JVM heap)\n'
+        + 'Restore:  automatic after hold window\n\n'
+        + 'A LogController JSP will be deployed via the available\n'
+        + 'deployment path (CVE-2025-31324, CTC, telnet, or GW).')) break;
+      flashActivity(
+        `${sid}: Tier 3 — suppressing Java SAL...`, 5000);
+      await api('POST', `node/${sid}/tier3_java_sal_suppress`,
+                 {hold_seconds: jHold});
+      let jRemaining = Math.ceil(jHold);
+      const jKey = '_java_sal_cd_' + sid;
+      activeTasks[jKey] =
+        '\u{1F6AB} Java SAL suppressed — ' + jRemaining + 's';
+      updateActivityBar();
+      const jcdTimer = setInterval(() => {
+        jRemaining--;
+        if (jRemaining > 0) {
+          activeTasks[jKey] =
+            '\u{1F6AB} Java SAL suppressed — ' + jRemaining + 's';
+        } else if (jRemaining === 0) {
+          activeTasks[jKey] =
+            '\u{2705} Java SAL — restoring baseline...';
+        } else {
+          delete activeTasks[jKey];
+          clearInterval(jcdTimer);
         }
         updateActivityBar();
       }, 1000);
