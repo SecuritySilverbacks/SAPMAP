@@ -5552,11 +5552,32 @@ async function ctxAction(action) {
         + 'This MUTATES kernel state — a baseline must already '
         + 'be captured for restore-on-exit to work.')) break;
       flashActivity(
-        `${sid}: Tier 3 — disabling SAL slot(s) ${slotno} for ${hold}s`,
-        Math.max(10000, (hold + 5) * 1000));
+        `${sid}: Tier 3 — setting up SAL slot disable...`, 5000);
       await api('POST', `node/${sid}/tier3_sal_slot_disable`,
                  {slotno: slotno, profile_name: profile || '',
                   hold_seconds: hold});
+      // Client-side countdown (visual only — backend sleeps in bg thread)
+      let salRemaining = Math.ceil(hold);
+      const cdKey = '_sal_cd_' + sid;
+      activeTasks[cdKey] =
+        '\u{1F6A8} SAL slot(s) ' + slotno + ' DISABLED — '
+        + salRemaining + 's';
+      updateActivityBar();
+      const cdTimer = setInterval(() => {
+        salRemaining--;
+        if (salRemaining > 0) {
+          activeTasks[cdKey] =
+            '\u{1F6A8} SAL slot(s) ' + slotno + ' DISABLED — '
+            + salRemaining + 's';
+        } else if (salRemaining === 0) {
+          activeTasks[cdKey] =
+            '\u{2705} SAL slot(s) ' + slotno + ' — restoring...';
+        } else {
+          delete activeTasks[cdKey];
+          clearInterval(cdTimer);
+        }
+        updateActivityBar();
+      }, 1000);
       break;
     }
     case 'retrieve_rfcs':
