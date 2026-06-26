@@ -9779,7 +9779,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
         Accepts JSON body with optional config overrides:
           max_waves:        int   (default 5)
           include_lpe:      bool  (default false)
-          include_btp:      bool  (default false)
+          include_btp:      bool  (default true — harvest BTP creds from
+                                  every pwned node so cloud nodes get
+                                  discovered automatically)
           scan_gw:          bool  (default true)
           scan_10kblaze:    bool  (default true)
           scan_cve_31324:   bool  (default true)
@@ -9797,7 +9799,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
         cfg = AutoPwnConfig(
             max_waves=int(data.get("max_waves", 5)),
             include_lpe=bool(data.get("include_lpe", False)),
-            include_btp=bool(data.get("include_btp", False)),
+            include_btp=bool(data.get("include_btp", True)),
             scan_gw=bool(data.get("scan_gw", True)),
             scan_10kblaze=bool(data.get("scan_10kblaze", True)),
             scan_cve_31324=bool(data.get("scan_cve_31324", True)),

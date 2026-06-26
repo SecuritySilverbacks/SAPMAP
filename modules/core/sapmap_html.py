@@ -2019,7 +2019,7 @@ body {
       Optional phases:
     </div>
     <label class="autopwn-cb"><input type="checkbox" id="apwn-lpe"> OS Privilege Escalation (LPE)</label>
-    <label class="autopwn-cb"><input type="checkbox" id="apwn-btp"> BTP / Cloud lateral movement</label>
+    <label class="autopwn-cb"><input type="checkbox" id="apwn-btp" checked> BTP / Cloud lateral movement</label>
 
     <div class="form-row" style="margin-top:12px">
       <label>Max waves</label>

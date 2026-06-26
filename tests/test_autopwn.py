@@ -264,7 +264,10 @@ def test_autopwn_config_defaults():
     cfg = AutoPwnConfig()
     assert cfg.max_waves == 5
     assert cfg.include_lpe is False
-    assert cfg.include_btp is False
+    # BTP harvest is on by default — so operator's single "Run AutoPwn"
+    # click picks up cloud-pivot creds (SM59 to *.hana.ondemand.com,
+    # OA2C profiles, etc.) without a separate per-node click.
+    assert cfg.include_btp is True
     assert cfg.scan_gw is True
     assert cfg.scan_10kblaze is True
     assert cfg.scan_cve_31324 is True
