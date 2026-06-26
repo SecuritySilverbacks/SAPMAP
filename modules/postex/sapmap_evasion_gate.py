@@ -87,8 +87,12 @@ TIER3_TECHNIQUES: dict = {
         Tier3Technique("rz11_dynamic_set",
                         "RZ11 dynamic kernel-parameter set"),
         # 4.A.17 — TSL1D template row delete (legacy)
+        # WONTFIX: TSL1D/TSL1T are read only at SM20 render time; the .AUD
+        # file on disk and RSAU_API_GET_LOG_DATA (SIEM feed) carry raw
+        # (AREA, SUBID, params) and are unaffected by template mutation.
+        # Pure security theater — see docs/research/13_detection_evasion_plan.md.
         Tier3Technique("tsl1d_template_delete",
-                        "TSL1D SAL message-template delete"),
+                        "TSL1D SAL message-template delete (WONTFIX — security theater)"),
         # 4.B.1 / 4.B.5 — Java NWA severity / defaultTrace flip
         Tier3Technique("java_nwa_severity",
                         "Java NWA log severity flip"),
