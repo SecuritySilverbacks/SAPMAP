@@ -269,7 +269,9 @@ def test_autopwn_config_defaults():
     # OA2C profiles, etc.) without a separate per-node click.
     assert cfg.include_btp is True
     assert cfg.scan_gw is True
-    assert cfg.scan_10kblaze is True
+    # 10KBlaze off by default — MS-betrusted multi-hop chain is slow
+    # enough that operators don't want to wait for it on every AutoPwn.
+    assert cfg.scan_10kblaze is False
     assert cfg.scan_cve_31324 is True
     assert cfg.scan_recon is True
     assert cfg.include_icmad_detection is True

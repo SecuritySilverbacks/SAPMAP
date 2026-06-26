@@ -2004,7 +2004,7 @@ body {
       Vulnerability Checks (exploitable):
     </div>
     <label class="autopwn-cb"><input type="checkbox" id="apwn-scan-gw" checked> Gateway SAPXPG</label>
-    <label class="autopwn-cb"><input type="checkbox" id="apwn-scan-10k" checked> 10KBlaze (CVE-2020-6207)</label>
+    <label class="autopwn-cb"><input type="checkbox" id="apwn-scan-10k"> 10KBlaze (CVE-2020-6207) — slow, off by default</label>
     <label class="autopwn-cb"><input type="checkbox" id="apwn-scan-31324" checked> CVE-2025-31324 (VisualComposer RCE)</label>
     <label class="autopwn-cb"><input type="checkbox" id="apwn-scan-recon" checked> CVE-2020-6287 (RECON)</label>
     <label class="autopwn-cb"><input type="checkbox" id="apwn-dpmon-sapstar" checked> dpmon virtual SAP* (kernel &ge; 790, ABAP only)</label>
