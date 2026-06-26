@@ -239,20 +239,24 @@ def read_baseline_timestamp(node, creds=None) -> dict:
 
 
 def _build_hana_delete_sql(base_date: str, base_time: str,
-                            tabname_filter: Optional[Iterable[str]] = None,
-                            schema: str = "SAPHANADB") -> str:
+                            tabname_filter: Optional[Iterable[str]] = None
+                            ) -> str:
     """Build a single-statement HANA DELETE for DBTABLOG.
 
-    Schema defaults to ``SAPHANADB`` (typical ABAP-on-HANA install).
-    Mirrors the ABAP WHERE clause exactly so the two delivery paths
-    are semantically equivalent.
+    No schema prefix on purpose — hdbsql -U DEFAULT authenticates as
+    the ABAP DB user (e.g. SAPABAP1), whose CURRENT_SCHEMA already
+    points at the ABAP tables.  Mirrors ``sql_hana()`` in
+    ``sapmap_config`` which does the same for INSERT INTO USR02 / UST04
+    / USRBF2 — qualifying the table breaks on lab kernels because the
+    schema name varies (SAPHANADB, SAPABAP1, SAPSR3, SAP<SID>).
+
+    Same WHERE shape as the ABAP DELETE path so the two delivery
+    channels are semantically equivalent.
     """
     if not _DATE_RE.match(base_date):
         raise ValueError(f"invalid base_date: {base_date!r}")
     if not _TIME_RE.match(base_time):
         raise ValueError(f"invalid base_time: {base_time!r}")
-    if not re.match(r"^[A-Z0-9_]{1,64}$", schema):
-        raise ValueError(f"invalid schema: {schema!r}")
 
     where = (f"(LOGDATE > '{base_date}' OR "
              f"(LOGDATE = '{base_date}' AND LOGTIME > '{base_time}'))")
@@ -272,12 +276,12 @@ def _build_hana_delete_sql(base_date: str, base_time: str,
         in_list = ", ".join(f"'{t}'" for t in cleaned)
         where += f" AND TABNAME IN ({in_list})"
 
-    return f"DELETE FROM {schema}.DBTABLOG WHERE {where}"
+    return f"DELETE FROM DBTABLOG WHERE {where}"
 
 
 def purge_dbtablog_via_gw_hdbsql(node, base_date: str, base_time: str,
-                                   tabname_filter: Optional[Iterable[str]] = None,
-                                   schema: str = "SAPHANADB") -> dict:
+                                   tabname_filter: Optional[Iterable[str]] = None
+                                   ) -> dict:
     """Execute DBTABLOG DELETE via GW SAPXPG → hdbsql (HANA only).
 
     Reuses the existing ``_execute_sql_via_gateway`` pipeline that
@@ -307,7 +311,7 @@ def purge_dbtablog_via_gw_hdbsql(node, base_date: str, base_time: str,
 
     try:
         sql = _build_hana_delete_sql(base_date, base_time,
-                                       tabname_filter, schema=schema)
+                                       tabname_filter)
     except ValueError as e:
         result["error"] = str(e)
         return result
