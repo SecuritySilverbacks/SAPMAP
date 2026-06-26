@@ -10,13 +10,16 @@ Why this is safe:
   * DBTABLOG is delivery class ``L`` (log table) and is itself NOT
     registered for change logging — deletes do not recurse (see SAP
     error message DT 755).
-  * Comparison field ``LOGID`` is a CHAR-like string whose lexical
-    ordering equals temporal ordering, so ``WHERE LOGID > '<baseline>'``
-    catches exactly the rows written after the baseline read, on every
-    DB backend.
+  * Comparison uses ``LOGDATE + LOGTIME`` (DATS + TIMS) — the natively
+    temporal columns on DBTABLOG — so ``(logdate > d) OR
+    (logdate = d AND logtime > t)`` is correct on every DB backend.
+    NOTE: LOGID is NOT temporally sortable (the leading 6-char prefix
+    is a sequence counter that rolls over, not a timestamp).  An
+    earlier version of this module compared LOGID lexically and
+    silently deleted zero rows — confirmed on S4H lab kernel 793.
   * No DDIC mutation, no DD09L touch, no transport object created.
 
-Delivery: ``RFC_ABAP_INSTALL_AND_RUN`` with a throwaway 5-line program.
+Delivery: ``RFC_ABAP_INSTALL_AND_RUN`` with a throwaway program.
 Goes through the ABAP DB interface — same layer that wrote the entries
 in the first place.  No TADIR entry (the generated program is executed
 and discarded).
@@ -36,25 +39,37 @@ logger = logging.getLogger(__name__)
 _MAX_TABNAMES = 32
 
 
-def _build_purge_abap(baseline_logid: str,
+_DATE_RE = re.compile(r"^[0-9]{8}$")
+_TIME_RE = re.compile(r"^[0-9]{6}$")
+
+
+def _build_purge_abap(base_date: str, base_time: str,
                        tabname_filter: Optional[Iterable[str]] = None
                        ) -> list:
     """Return ABAP source lines for the DELETE program.
 
+    ``base_date`` is YYYYMMDD, ``base_time`` is HHMMSS — both as
+    captured from ``sy-datum`` / ``sy-uzeit`` at baseline time.
+
     The program:
-      1. DELETEs DBTABLOG rows with LOGID > baseline (optionally
-         narrowed by a tabname IN range).
+      1. DELETEs DBTABLOG rows whose ``LOGDATE+LOGTIME`` is strictly
+         after the baseline (optionally narrowed by a tabname IN range).
       2. WRITEs ``DELETED|<sy-dbcnt>`` and ``REMAINING|<count>``
          for caller-side parsing.
     """
-    # Single-quote escape — LOGID values from the DB are alnum (no
-    # quotes), but a paranoid escape costs nothing and guards against
-    # a future LOGID format shift.
-    safe_base = baseline_logid.replace("'", "''")
+    if not _DATE_RE.match(base_date):
+        raise ValueError(f"invalid base_date: {base_date!r}")
+    if not _TIME_RE.match(base_time):
+        raise ValueError(f"invalid base_time: {base_time!r}")
+
+    where_clause = (
+        "WHERE logdate > lv_d "
+        "OR ( logdate = lv_d AND logtime > lv_t )")
 
     lines = [
         "REPORT zsapmap_dbpurge LINE-SIZE 1023.",
-        f"DATA: lv_base TYPE dbtablog-logid VALUE '{safe_base}'.",
+        f"DATA: lv_d TYPE sy-datum VALUE '{base_date}'.",
+        f"DATA: lv_t TYPE sy-uzeit VALUE '{base_time}'.",
         "DATA: lv_rem TYPE i.",
     ]
 
@@ -78,34 +93,39 @@ def _build_purge_abap(baseline_logid: str,
             lines.append(
                 f"ls_tab-low = '{safe_tab}'. APPEND ls_tab TO lr_tabs.")
         lines.append(
-            "DELETE FROM dbtablog "
-            "WHERE logid > lv_base AND tabname IN lr_tabs.")
+            f"DELETE FROM dbtablog {where_clause} "
+            f"AND tabname IN lr_tabs.")
         lines.append("WRITE: / 'DELETED|', sy-dbcnt.")
         lines.append("COMMIT WORK.")
         lines.append(
-            "SELECT COUNT(*) FROM dbtablog "
-            "INTO lv_rem "
-            "WHERE logid > lv_base AND tabname IN lr_tabs.")
+            f"SELECT COUNT(*) FROM dbtablog INTO lv_rem "
+            f"{where_clause} AND tabname IN lr_tabs.")
     else:
-        lines.append(
-            "DELETE FROM dbtablog WHERE logid > lv_base.")
+        lines.append(f"DELETE FROM dbtablog {where_clause}.")
         lines.append("WRITE: / 'DELETED|', sy-dbcnt.")
         lines.append("COMMIT WORK.")
         lines.append(
-            "SELECT COUNT(*) FROM dbtablog "
-            "INTO lv_rem WHERE logid > lv_base.")
+            f"SELECT COUNT(*) FROM dbtablog INTO lv_rem {where_clause}.")
 
     lines.append("WRITE: / 'REMAINING|', lv_rem.")
     return lines
 
 
-def _build_max_logid_abap() -> list:
-    """ABAP that emits ``MAXLOGID|<value>`` or ``MAXLOGID|`` (empty)."""
+def _build_baseline_abap() -> list:
+    """ABAP that emits ``BASE_DATE|YYYYMMDD`` and ``BASE_TIME|HHMMSS``.
+
+    Assigns sy-datum / sy-uzeit to fixed-length CHAR fields before
+    WRITE so the output format is independent of the SAPMAP user's
+    date/time-format settings.
+    """
     return [
-        "REPORT zsapmap_dbmaxid LINE-SIZE 1023.",
-        "DATA: lv_max TYPE dbtablog-logid.",
-        "SELECT MAX( logid ) FROM dbtablog INTO lv_max.",
-        "WRITE: / 'MAXLOGID|', lv_max.",
+        "REPORT zsapmap_dbbase LINE-SIZE 1023.",
+        "DATA: lv_d(8) TYPE c.",
+        "DATA: lv_t(6) TYPE c.",
+        "lv_d = sy-datum.",
+        "lv_t = sy-uzeit.",
+        "WRITE: / 'BASE_DATE|', lv_d.",
+        "WRITE: / 'BASE_TIME|', lv_t.",
     ]
 
 
@@ -128,19 +148,23 @@ def _parse_kv_line(lines: list, key: str) -> Optional[str]:
 # Public API
 # ---------------------------------------------------------------------------
 
-def read_max_logid(node, creds=None) -> dict:
-    """Read ``MAX(LOGID) FROM DBTABLOG`` via RFC_ABAP_INSTALL_AND_RUN.
+def read_baseline_timestamp(node, creds=None) -> dict:
+    """Capture ``sy-datum`` and ``sy-uzeit`` via RFC_ABAP_INSTALL_AND_RUN.
 
-    Returns ``{ok, baseline, raw, error}`` — ``baseline`` is the
-    string LOGID (may be empty if DBTABLOG is empty).
+    The SAP server's clock is authoritative — never use the SAPMAP
+    client's clock (drift would corrupt the WHERE comparison).
+
+    Returns ``{ok, base_date, base_time, raw, error}`` — both
+    timestamps as fixed-width strings (YYYYMMDD / HHMMSS).
     """
     import sapmap_rfc
-    result = {"ok": False, "baseline": "", "raw": [], "error": ""}
-    abap = _build_max_logid_abap()
+    result = {"ok": False, "base_date": "", "base_time": "",
+              "raw": [], "error": ""}
+    abap = _build_baseline_abap()
     try:
         with sapmap_rfc._get_connection(node, creds) as conn:
             run = sapmap_rfc._run_abap_program(conn, abap,
-                                                 "ZSAPMAP_DBMAXID")
+                                                 "ZSAPMAP_DBBASE")
     except Exception as e:
         from sapmap_errors import format_rfc_exception
         result["error"] = format_rfc_exception(e)[:200]
@@ -151,21 +175,33 @@ def read_max_logid(node, creds=None) -> dict:
         result["error"] = (run.get("error") or "RFC_ABAP_INSTALL_AND_RUN failed")[:200]
         return result
 
-    val = _parse_kv_line(result["raw"], "MAXLOGID")
-    if val is None:
+    date_val = _parse_kv_line(result["raw"], "BASE_DATE")
+    time_val = _parse_kv_line(result["raw"], "BASE_TIME")
+    if date_val is None or time_val is None:
         result["error"] = (
-            f"MAXLOGID marker missing from output: "
-            f"{result['raw'][:3]}")
+            f"BASE_DATE/BASE_TIME marker missing from output: "
+            f"{result['raw'][:4]}")
         return result
-    result["baseline"] = val
+    if not _DATE_RE.match(date_val):
+        result["error"] = f"unexpected BASE_DATE format: {date_val!r}"
+        return result
+    if not _TIME_RE.match(time_val):
+        result["error"] = f"unexpected BASE_TIME format: {time_val!r}"
+        return result
+    result["base_date"] = date_val
+    result["base_time"] = time_val
     result["ok"] = True
     return result
 
 
-def purge_dbtablog(node, baseline_logid: str,
+def purge_dbtablog(node, base_date: str, base_time: str,
                     tabname_filter: Optional[Iterable[str]] = None,
                     creds=None) -> dict:
-    """Delete DBTABLOG entries with ``LOGID > baseline_logid``.
+    """Delete DBTABLOG entries written after ``(base_date, base_time)``.
+
+    Comparison: ``logdate > base_date OR (logdate = base_date AND
+    logtime > base_time)`` — strict ``>`` on the same-date case so
+    rows from earlier seconds on the baseline date stay untouched.
 
     Returns ``{ok, deleted_count, remaining_count, raw, error}``.
     ``remaining_count`` should be 0 on success — non-zero means the
@@ -176,7 +212,7 @@ def purge_dbtablog(node, baseline_logid: str,
               "raw": [], "error": ""}
 
     try:
-        abap = _build_purge_abap(baseline_logid, tabname_filter)
+        abap = _build_purge_abap(base_date, base_time, tabname_filter)
     except ValueError as e:
         result["error"] = str(e)
         return result

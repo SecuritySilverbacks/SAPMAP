@@ -2476,35 +2476,49 @@ def test_java_sal_suppress_returns_error_on_suppress_failure():
 import sap_dbtablog_purge
 
 
-def test_max_logid_abap_contains_select_max():
-    abap = sap_dbtablog_purge._build_max_logid_abap()
-    assert any("SELECT MAX( logid )" in line for line in abap)
-    assert any("MAXLOGID|" in line for line in abap)
+def test_baseline_abap_emits_sy_datum_and_sy_uzeit():
+    abap = sap_dbtablog_purge._build_baseline_abap()
+    src = "\n".join(abap)
+    assert "lv_d = sy-datum" in src
+    assert "lv_t = sy-uzeit" in src
+    assert "BASE_DATE|" in src
+    assert "BASE_TIME|" in src
+
+
+def test_purge_abap_uses_logdate_logtime_not_logid():
+    abap = sap_dbtablog_purge._build_purge_abap("20260626", "100537")
+    src = "\n".join(abap)
+    # LOGID comparison was the V1 bug — must NOT appear anywhere.
+    assert "logid" not in src.lower()
+    # WHERE clause uses LOGDATE/LOGTIME comparison.
+    assert "logdate > lv_d" in src
+    assert "logdate = lv_d AND logtime > lv_t" in src
 
 
 def test_purge_abap_scope_all_tables_omits_range():
-    abap = sap_dbtablog_purge._build_purge_abap("999999s4hanade0011")
+    abap = sap_dbtablog_purge._build_purge_abap("20260626", "100537")
     src = "\n".join(abap)
-    assert "DELETE FROM dbtablog WHERE logid > lv_base" in src
+    assert "DELETE FROM dbtablog WHERE" in src
     assert "RANGE OF" not in src
-    assert "999999s4hanade0011" in src
+    assert "VALUE '20260626'" in src
+    assert "VALUE '100537'" in src
     assert "DELETED|" in src
     assert "REMAINING|" in src
 
 
 def test_purge_abap_scope_tabname_filter_emits_range():
     abap = sap_dbtablog_purge._build_purge_abap(
-        "999999s4hanade0011", tabname_filter=["USR02", "USR04"])
+        "20260626", "100537", tabname_filter=["USR02", "USR04"])
     src = "\n".join(abap)
     assert "RANGE OF dbtablog-tabname" in src
     assert "ls_tab-low = 'USR02'" in src
     assert "ls_tab-low = 'USR04'" in src
-    assert "WHERE logid > lv_base AND tabname IN lr_tabs" in src
+    assert "AND tabname IN lr_tabs" in src
 
 
 def test_purge_abap_uppercases_and_strips_tabnames():
     abap = sap_dbtablog_purge._build_purge_abap(
-        "x", tabname_filter=["  usr02  ", "T000"])
+        "20260626", "100537", tabname_filter=["  usr02  ", "T000"])
     src = "\n".join(abap)
     assert "'USR02'" in src
     assert "'T000'" in src
@@ -2513,37 +2527,41 @@ def test_purge_abap_uppercases_and_strips_tabnames():
 def test_purge_abap_rejects_invalid_tabname():
     with pytest.raises(ValueError):
         sap_dbtablog_purge._build_purge_abap(
-            "x", tabname_filter=["USR02; DROP TABLE x"])
+            "20260626", "100537",
+            tabname_filter=["USR02; DROP TABLE x"])
 
 
 def test_purge_abap_rejects_oversized_filter_list():
     with pytest.raises(ValueError):
         sap_dbtablog_purge._build_purge_abap(
-            "x", tabname_filter=[f"T{i:03d}" for i in range(50)])
+            "20260626", "100537",
+            tabname_filter=[f"T{i:03d}" for i in range(50)])
 
 
-def test_purge_abap_escapes_single_quote_in_baseline():
-    abap = sap_dbtablog_purge._build_purge_abap("a'b")
-    src = "\n".join(abap)
-    # Single-quote doubled per ABAP literal escape.
-    assert "VALUE 'a''b'" in src
+def test_purge_abap_rejects_malformed_base_date():
+    with pytest.raises(ValueError):
+        sap_dbtablog_purge._build_purge_abap("2026-06-26", "100537")
+
+
+def test_purge_abap_rejects_malformed_base_time():
+    with pytest.raises(ValueError):
+        sap_dbtablog_purge._build_purge_abap("20260626", "10:05:37")
 
 
 def test_parse_kv_line_finds_marker_with_gap():
-    lines = ["MAXLOGID|        999999s4hanade0011"]
-    assert sap_dbtablog_purge._parse_kv_line(lines, "MAXLOGID") == \
-        "999999s4hanade0011"
+    lines = ["BASE_DATE|        20260626"]
+    assert sap_dbtablog_purge._parse_kv_line(lines, "BASE_DATE") == \
+        "20260626"
 
 
 def test_parse_kv_line_returns_none_when_missing():
     assert sap_dbtablog_purge._parse_kv_line(["other line"],
-                                                "MAXLOGID") is None
+                                                "BASE_DATE") is None
 
 
 def test_parse_kv_line_handles_empty_value():
-    # MAXLOGID|<empty> means DBTABLOG was empty
-    lines = ["MAXLOGID|"]
-    assert sap_dbtablog_purge._parse_kv_line(lines, "MAXLOGID") == ""
+    lines = ["BASE_DATE|"]
+    assert sap_dbtablog_purge._parse_kv_line(lines, "BASE_DATE") == ""
 
 
 # ---------------------------------------------------------------------------
@@ -2561,32 +2579,36 @@ def _patch_run_abap_program(side_effect):
                          side_effect=side_effect))
 
 
-def test_read_max_logid_parses_lab_value():
+def test_read_baseline_timestamp_parses_lab_values():
     node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
     def _run(conn, abap, name):
         return {"success": True,
-                "output": ["MAXLOGID|        999999s4hanade0011"],
+                "output": ["BASE_DATE|        20260626",
+                           "BASE_TIME|        100537"],
                 "fm_name": "RFC_ABAP_INSTALL_AND_RUN", "error": ""}
     cm_patch, run_patch = _patch_run_abap_program(_run)
     with cm_patch, run_patch:
-        r = sap_dbtablog_purge.read_max_logid(node)
+        r = sap_dbtablog_purge.read_baseline_timestamp(node)
     assert r["ok"] is True
-    assert r["baseline"] == "999999s4hanade0011"
+    assert r["base_date"] == "20260626"
+    assert r["base_time"] == "100537"
 
 
-def test_read_max_logid_handles_empty_table():
+def test_read_baseline_timestamp_rejects_malformed_date():
     node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
     def _run(conn, abap, name):
-        return {"success": True, "output": ["MAXLOGID|"],
+        return {"success": True,
+                "output": ["BASE_DATE|        26.06.2026",
+                           "BASE_TIME|        100537"],
                 "fm_name": "RFC_ABAP_INSTALL_AND_RUN", "error": ""}
     cm_patch, run_patch = _patch_run_abap_program(_run)
     with cm_patch, run_patch:
-        r = sap_dbtablog_purge.read_max_logid(node)
-    assert r["ok"] is True
-    assert r["baseline"] == ""
+        r = sap_dbtablog_purge.read_baseline_timestamp(node)
+    assert r["ok"] is False
+    assert "BASE_DATE" in r["error"]
 
 
-def test_read_max_logid_surfaces_program_failure():
+def test_read_baseline_timestamp_surfaces_program_failure():
     node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
     def _run(conn, abap, name):
         return {"success": False, "output": [],
@@ -2594,7 +2616,7 @@ def test_read_max_logid_surfaces_program_failure():
                 "error": "SYNTAX_ERROR_IN_PROGRAM"}
     cm_patch, run_patch = _patch_run_abap_program(_run)
     with cm_patch, run_patch:
-        r = sap_dbtablog_purge.read_max_logid(node)
+        r = sap_dbtablog_purge.read_baseline_timestamp(node)
     assert r["ok"] is False
     assert "SYNTAX_ERROR" in r["error"]
 
@@ -2607,7 +2629,7 @@ def test_purge_dbtablog_parses_counts():
                 "fm_name": "RFC_ABAP_INSTALL_AND_RUN", "error": ""}
     cm_patch, run_patch = _patch_run_abap_program(_run)
     with cm_patch, run_patch:
-        r = sap_dbtablog_purge.purge_dbtablog(node, "999999s4hanade0011")
+        r = sap_dbtablog_purge.purge_dbtablog(node, "20260626", "100537")
     assert r["ok"] is True
     assert r["deleted_count"] == 42
     assert r["remaining_count"] == 0
@@ -2621,7 +2643,7 @@ def test_purge_dbtablog_flags_incomplete_delete():
                 "fm_name": "RFC_ABAP_INSTALL_AND_RUN", "error": ""}
     cm_patch, run_patch = _patch_run_abap_program(_run)
     with cm_patch, run_patch:
-        r = sap_dbtablog_purge.purge_dbtablog(node, "x")
+        r = sap_dbtablog_purge.purge_dbtablog(node, "20260626", "100537")
     assert r["ok"] is False
     assert "incomplete" in r["error"]
     assert r["remaining_count"] == 7
@@ -2634,7 +2656,7 @@ def test_purge_dbtablog_rejects_bad_filter_before_rfc():
         lambda *a, **kw: pytest.fail("RFC should not have been called"))
     with cm_patch, run_patch:
         r = sap_dbtablog_purge.purge_dbtablog(
-            node, "x", tabname_filter=["BAD; DROP"])
+            node, "20260626", "100537", tabname_filter=["BAD; DROP"])
     assert r["ok"] is False
     assert "invalid tabname" in r["error"]
 
@@ -2668,12 +2690,12 @@ def test_dbtablog_purge_full_flow():
     node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
     node.system_type = "ABAP"
 
-    base_resp = {"ok": True, "baseline": "999999s4hanade0011",
-                 "raw": [], "error": ""}
+    base_resp = {"ok": True, "base_date": "20260626",
+                 "base_time": "100537", "raw": [], "error": ""}
     purge_resp = {"ok": True, "deleted_count": 12, "remaining_count": 0,
                   "raw": [], "error": ""}
 
-    with patch("sap_dbtablog_purge.read_max_logid",
+    with patch("sap_dbtablog_purge.read_baseline_timestamp",
                return_value=base_resp) as mock_read, \
          patch("sap_dbtablog_purge.purge_dbtablog",
                return_value=purge_resp) as mock_purge:
@@ -2682,7 +2704,8 @@ def test_dbtablog_purge_full_flow():
 
     assert out["ok"] is True
     assert out["technique"] == "dbtablog_purge"
-    assert out["baseline_logid"] == "999999s4hanade0011"
+    assert out["base_date"] == "20260626"
+    assert out["base_time"] == "100537"
     assert out["deleted_count"] == 12
     assert out["remaining_count"] == 0
     assert out["tabname_filter"] == []
@@ -2696,11 +2719,12 @@ def test_dbtablog_purge_passes_tabname_filter_through():
     node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
     node.system_type = "ABAP"
 
-    base_resp = {"ok": True, "baseline": "x", "raw": [], "error": ""}
+    base_resp = {"ok": True, "base_date": "20260626",
+                 "base_time": "100537", "raw": [], "error": ""}
     purge_resp = {"ok": True, "deleted_count": 3, "remaining_count": 0,
                   "raw": [], "error": ""}
 
-    with patch("sap_dbtablog_purge.read_max_logid",
+    with patch("sap_dbtablog_purge.read_baseline_timestamp",
                return_value=base_resp), \
          patch("sap_dbtablog_purge.purge_dbtablog",
                return_value=purge_resp) as mock_purge:
@@ -2720,9 +2744,9 @@ def test_dbtablog_purge_returns_error_on_baseline_failure():
     node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
     node.system_type = "ABAP"
 
-    fail_resp = {"ok": False, "baseline": "", "raw": [],
-                 "error": "NO_AUTH"}
-    with patch("sap_dbtablog_purge.read_max_logid",
+    fail_resp = {"ok": False, "base_date": "", "base_time": "",
+                 "raw": [], "error": "NO_AUTH"}
+    with patch("sap_dbtablog_purge.read_baseline_timestamp",
                return_value=fail_resp), \
          patch("sap_dbtablog_purge.purge_dbtablog") as mock_purge:
         out = sapmap_evasion_tier3.tier3_dbtablog_purge(
@@ -2739,11 +2763,12 @@ def test_dbtablog_purge_returns_error_on_purge_failure():
     node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
     node.system_type = "ABAP"
 
-    base_resp = {"ok": True, "baseline": "x", "raw": [], "error": ""}
+    base_resp = {"ok": True, "base_date": "20260626",
+                 "base_time": "100537", "raw": [], "error": ""}
     fail_purge = {"ok": False, "deleted_count": 0, "remaining_count": -1,
                   "raw": [], "error": "DELETE blocked by S_TABU_DIS"}
 
-    with patch("sap_dbtablog_purge.read_max_logid",
+    with patch("sap_dbtablog_purge.read_baseline_timestamp",
                return_value=base_resp), \
          patch("sap_dbtablog_purge.purge_dbtablog",
                return_value=fail_purge):
@@ -2752,4 +2777,5 @@ def test_dbtablog_purge_returns_error_on_purge_failure():
 
     assert out["ok"] is False
     assert "purge failed" in out["error"]
-    assert out.get("baseline_logid") == "x"
+    assert out.get("base_date") == "20260626"
+    assert out.get("base_time") == "100537"
