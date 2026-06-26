@@ -2926,11 +2926,14 @@ def test_dbtablog_purge_dispatches_gw_first_on_hana_gw_vuln():
                  "base_time": "102632", "raw": [], "error": ""}
     gw_resp = {"ok": True, "deleted_count": -1, "remaining_count": -1,
                "raw": [], "error": "", "via": "gw_hdbsql"}
+    verify_ok = {"ok": True, "count": 0, "raw": [], "error": ""}
 
     with patch("sap_dbtablog_purge.read_baseline_timestamp",
                 return_value=base_resp), \
          patch("sap_dbtablog_purge.purge_dbtablog_via_gw_hdbsql",
                 return_value=gw_resp) as mock_gw, \
+         patch("sap_dbtablog_purge.count_dbtablog_since",
+                return_value=verify_ok), \
          patch("sap_dbtablog_purge.purge_dbtablog") as mock_rfc:
         out = sapmap_evasion_tier3.tier3_dbtablog_purge(
             state, node, hold_seconds=0)
@@ -3026,3 +3029,180 @@ def test_dbtablog_purge_skips_gw_when_not_gw_vulnerable():
     assert out["ok"] is True
     assert out["via"] == "rfc_install_and_run"
     mock_gw.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# count_dbtablog_since — RFC verifier used after GW DELETE
+# ---------------------------------------------------------------------------
+
+def test_count_abap_uses_same_where_shape_as_purge():
+    abap = sap_dbtablog_purge._build_count_abap("20260626", "102632")
+    src = "\n".join(abap)
+    assert "SELECT COUNT(*) FROM dbtablog INTO lv_c" in src
+    assert "logdate > lv_d" in src
+    assert "logdate = lv_d AND logtime > lv_t" in src
+    assert "COUNT|" in src
+
+
+def test_count_abap_with_tabname_filter():
+    abap = sap_dbtablog_purge._build_count_abap(
+        "20260626", "102632", tabname_filter=["RFCDES"])
+    src = "\n".join(abap)
+    assert "RANGE OF dbtablog-tabname" in src
+    assert "ls_tab-low = 'RFCDES'" in src
+    assert "AND tabname IN lr_tabs" in src
+
+
+def test_count_abap_rejects_bad_inputs():
+    with pytest.raises(ValueError):
+        sap_dbtablog_purge._build_count_abap("bad", "102632")
+    with pytest.raises(ValueError):
+        sap_dbtablog_purge._build_count_abap("20260626", "bad")
+    with pytest.raises(ValueError):
+        sap_dbtablog_purge._build_count_abap(
+            "20260626", "102632", tabname_filter=["X; DROP"])
+
+
+def test_count_dbtablog_since_parses_zero():
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    def _run(conn, abap, name):
+        return {"success": True, "output": ["COUNT|         0"],
+                "fm_name": "RFC_ABAP_INSTALL_AND_RUN", "error": ""}
+    cm_patch, run_patch = _patch_run_abap_program(_run)
+    with cm_patch, run_patch:
+        r = sap_dbtablog_purge.count_dbtablog_since(
+            node, "20260626", "102632")
+    assert r["ok"] is True
+    assert r["count"] == 0
+
+
+def test_count_dbtablog_since_parses_nonzero():
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    def _run(conn, abap, name):
+        return {"success": True, "output": ["COUNT|         4"],
+                "fm_name": "RFC_ABAP_INSTALL_AND_RUN", "error": ""}
+    cm_patch, run_patch = _patch_run_abap_program(_run)
+    with cm_patch, run_patch:
+        r = sap_dbtablog_purge.count_dbtablog_since(
+            node, "20260626", "102632")
+    assert r["ok"] is True
+    assert r["count"] == 4
+
+
+def test_count_dbtablog_since_surfaces_program_failure():
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    def _run(conn, abap, name):
+        return {"success": False, "output": [],
+                "fm_name": "RFC_ABAP_INSTALL_AND_RUN",
+                "error": "NO_AUTH"}
+    cm_patch, run_patch = _patch_run_abap_program(_run)
+    with cm_patch, run_patch:
+        r = sap_dbtablog_purge.count_dbtablog_since(
+            node, "20260626", "102632")
+    assert r["ok"] is False
+    assert "NO_AUTH" in r["error"]
+
+
+# ---------------------------------------------------------------------------
+# Verify-after-GW: trust GW only when RFC count confirms 0 remaining
+# ---------------------------------------------------------------------------
+
+def _hana_gw_node():
+    n = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    n.system_type = "ABAP"
+    n.db_type = "HDB"
+    n.gw_vulnerable = True
+    n.gw_vulnerable_port = 3300
+    return n
+
+
+def test_dbtablog_purge_gw_success_verified_zero_skips_rfc():
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True}
+    node = _hana_gw_node()
+
+    base_resp = {"ok": True, "base_date": "20260626",
+                 "base_time": "102632", "raw": [], "error": ""}
+    gw_ok = {"ok": True, "deleted_count": -1, "remaining_count": -1,
+             "raw": [], "error": "", "via": "gw_hdbsql"}
+    verify_ok = {"ok": True, "count": 0, "raw": [], "error": ""}
+
+    with patch("sap_dbtablog_purge.read_baseline_timestamp",
+                return_value=base_resp), \
+         patch("sap_dbtablog_purge.purge_dbtablog_via_gw_hdbsql",
+                return_value=gw_ok) as mock_gw, \
+         patch("sap_dbtablog_purge.count_dbtablog_since",
+                return_value=verify_ok) as mock_verify, \
+         patch("sap_dbtablog_purge.purge_dbtablog") as mock_rfc:
+        out = sapmap_evasion_tier3.tier3_dbtablog_purge(
+            state, node, hold_seconds=0)
+
+    assert out["ok"] is True
+    assert out["via"] == "gw_hdbsql"
+    assert out["remaining_count"] == 0
+    mock_gw.assert_called_once()
+    mock_verify.assert_called_once()
+    mock_rfc.assert_not_called()
+
+
+def test_dbtablog_purge_gw_success_verified_nonzero_falls_back_to_rfc():
+    """The S4H lab case: GW reports success but rows still present."""
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True}
+    node = _hana_gw_node()
+
+    base_resp = {"ok": True, "base_date": "20260626",
+                 "base_time": "121346", "raw": [], "error": ""}
+    gw_ok = {"ok": True, "deleted_count": -1, "remaining_count": -1,
+             "raw": [], "error": "", "via": "gw_hdbsql"}
+    verify_nonzero = {"ok": True, "count": 4, "raw": [], "error": ""}
+    rfc_ok = {"ok": True, "deleted_count": 4, "remaining_count": 0,
+              "raw": [], "error": "", "via": "rfc_install_and_run"}
+
+    with patch("sap_dbtablog_purge.read_baseline_timestamp",
+                return_value=base_resp), \
+         patch("sap_dbtablog_purge.purge_dbtablog_via_gw_hdbsql",
+                return_value=gw_ok) as mock_gw, \
+         patch("sap_dbtablog_purge.count_dbtablog_since",
+                return_value=verify_nonzero) as mock_verify, \
+         patch("sap_dbtablog_purge.purge_dbtablog",
+                return_value=rfc_ok) as mock_rfc:
+        out = sapmap_evasion_tier3.tier3_dbtablog_purge(
+            state, node, hold_seconds=0, tabname_filter=["RFCDES"])
+
+    assert out["ok"] is True
+    assert out["via"] == "rfc_install_and_run"
+    assert out["deleted_count"] == 4
+    mock_gw.assert_called_once()
+    mock_verify.assert_called_once()
+    mock_rfc.assert_called_once()
+
+
+def test_dbtablog_purge_falls_back_to_rfc_when_verify_errors():
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True}
+    node = _hana_gw_node()
+
+    base_resp = {"ok": True, "base_date": "20260626",
+                 "base_time": "121346", "raw": [], "error": ""}
+    gw_ok = {"ok": True, "deleted_count": -1, "remaining_count": -1,
+             "raw": [], "error": "", "via": "gw_hdbsql"}
+    verify_err = {"ok": False, "count": -1, "raw": [],
+                  "error": "RFC down"}
+    rfc_ok = {"ok": True, "deleted_count": 2, "remaining_count": 0,
+              "raw": [], "error": "", "via": "rfc_install_and_run"}
+
+    with patch("sap_dbtablog_purge.read_baseline_timestamp",
+                return_value=base_resp), \
+         patch("sap_dbtablog_purge.purge_dbtablog_via_gw_hdbsql",
+                return_value=gw_ok), \
+         patch("sap_dbtablog_purge.count_dbtablog_since",
+                return_value=verify_err), \
+         patch("sap_dbtablog_purge.purge_dbtablog",
+                return_value=rfc_ok) as mock_rfc:
+        out = sapmap_evasion_tier3.tier3_dbtablog_purge(
+            state, node, hold_seconds=0)
+
+    assert out["ok"] is True
+    assert out["via"] == "rfc_install_and_run"
+    mock_rfc.assert_called_once()

