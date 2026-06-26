@@ -2785,10 +2785,18 @@ def test_dbtablog_purge_returns_error_on_purge_failure():
 # GW SAPXPG → hdbsql delivery (HANA-only primary path)
 # ---------------------------------------------------------------------------
 
-def test_build_hana_delete_sql_all_tables():
+def test_build_hana_delete_sql_unqualified_table_name():
+    """No schema prefix on purpose — matches sql_hana() in sapmap_config
+    so hdbsql -U DEFAULT can resolve via CURRENT_SCHEMA regardless of
+    whether the ABAP user is SAPABAP1 / SAPHANADB / SAPSR3 / SAP<SID>."""
     sql = sap_dbtablog_purge._build_hana_delete_sql(
         "20260626", "102632")
-    assert sql.startswith("DELETE FROM SAPHANADB.DBTABLOG WHERE ")
+    assert sql.startswith("DELETE FROM DBTABLOG WHERE ")
+    # Must NOT include any schema prefix — that would break on the lab
+    # kernel where the actual schema name varies.
+    assert "SAPHANADB." not in sql
+    assert "SAPABAP1." not in sql
+    assert "SAPSR3." not in sql
     assert "LOGDATE > '20260626'" in sql
     assert "LOGDATE = '20260626' AND LOGTIME > '102632'" in sql
     assert "TABNAME IN" not in sql
@@ -2805,18 +2813,6 @@ def test_build_hana_delete_sql_uppercases_tabnames():
         "20260626", "102632", tabname_filter=["  rfcdes  "])
     assert "'RFCDES'" in sql
     assert "rfcdes" not in sql
-
-
-def test_build_hana_delete_sql_custom_schema():
-    sql = sap_dbtablog_purge._build_hana_delete_sql(
-        "20260626", "102632", schema="SAPSR3")
-    assert "DELETE FROM SAPSR3.DBTABLOG" in sql
-
-
-def test_build_hana_delete_sql_rejects_bad_schema():
-    with pytest.raises(ValueError):
-        sap_dbtablog_purge._build_hana_delete_sql(
-            "20260626", "102632", schema="bad; DROP")
 
 
 def test_build_hana_delete_sql_rejects_bad_date():
