@@ -35,6 +35,7 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 ## Table of Contents
 
 - [Features](#features)
+- [Detection & Defense](#detection--defense)
 - [Architecture](#architecture)
 - [Installation](#installation)
 - [Usage](#usage)
@@ -185,6 +186,83 @@ The OA2C reader uses a three-tier resilience chain: `DDIF_FIELDINFO_GET` for col
 ### Cleanup
 - **User deletion** — Remove all created SAPMAP users via BAPI_USER_DELETE
 - **Destination removal** — Clean up created TCP/IP RFC destinations
+
+---
+
+## Detection & Defense
+
+> **For blue teams.** SAPMAP's Tier 3 evasion is designed to be silent on the SAP side, so detection lives mostly outside SAP (network + OS) and inside SAP relies on signals the tool doesn't suppress. Patch first; detect second.
+
+### Patch — SAP Notes that close SAPMAP's main exploit primitives
+
+| Capability | SAP Note(s) | What it closes |
+|---|---|---|
+| 10KBlaze Gateway SAPXPG OS exec | **1408081** (also 1421005, 821875) | Unauth gateway-registered server abuse (`gw/sec_info`, `gw/reg_info`) |
+| Message Server betrusted (CVE-2020-6207) | **2890213** | Unauth internal MS port abuse / ACL bypass |
+| VisualComposer JSP webshell (CVE-2025-31324) | **3594142** | Unauth file upload via `/developmentserver/metadatauploader` |
+| RECON Java LM Wizard (CVE-2020-6287) | **2934135** (FAQ 2948106) | Unauth Java admin user creation via `/CTCWebService/CTCWebServiceBean` |
+| SAProuter info leak (CVE-2022-22536) | **3123396** | Unauth landscape discovery via SAProuter response |
+| ICMAD (CVE-2022-22536) | **3123396** | ICM HTTP smuggling / response splitting |
+
+Beyond the named CVEs, the highest-leverage configuration changes:
+
+- **`secinfo` and `reginfo` deny-by-default** on the Gateway. The 10KBlaze path dies if `gw/sec_info` and `gw/reg_info` are properly populated. Empty or `P TP=* USER=* HOST=* USER-HOST=*` is fatal.
+- **`gw/sim_mode = 0`** (not 1). Simulation mode logs but allows — the same path SAPMAP exploits.
+- **`ms/acl_info` populated and enforced**. SAPMAP's MS betrusted path needs an open internal port (`39NN`).
+- **Restrict `RFC_ABAP_INSTALL_AND_RUN`** via auth check (`S_DEVELOP RFC_ABAP_INSTALL_AND_RUN`) for non-developer service users. SAPMAP uses it for OA2C reading, RSECTAB decryption, DBTABLOG purge, and several LPE paths.
+- **Avoid `SAP_ALL` on RFC destinations.** RFC destinations stored with hardcoded credentials granting `SAP_ALL` are the single most common pivot SAPMAP exploits during lateral movement. Use a least-privilege technical user per destination with only the profiles required for the documented interface — not a blanket `SAP_ALL`.
+- **Change every default credential** before the system touches a non-isolated network. SAPMAP tries 16 of them via DIAG with sub-second latency.
+- **Disable VisualComposer** if you don't use it. The CVE-2025-31324 endpoint is SAPMAP's primary JSP-deploy channel.
+
+### Detect — signals SAPMAP can't (or doesn't) suppress
+
+**Network-level** (out-of-band, invisible to SAP-side evasion):
+
+- High-volume short connections to SAP ports (`32NN`, `33NN`, `36NN`, `50NNN`, `30NNN`, `39NN`) from a single source within seconds — SAPMAP's `--fast` mode probes a whole landscape in under a minute.
+- NI-protocol packets to port `33NN` from non-app-server IPs — 10KBlaze SAPXPG.
+- HTTP POST to `/developmentserver/metadatauploader` (CVE-2025-31324) or `/CTCWebService/CTCWebServiceBean` (RECON).
+- User-agent `SAPMAP/1.0` in ICM HTTP logs (most modules), or default Python `urllib` UAs.
+- Repeated SAProuter `NI_ROUTE` requests to internal hosts from a single source.
+
+**OS-level** (survives SAP-side audit suppression):
+
+- New JSPs in IRJ webapp root: `/usr/sap/<SID>/J<NN>/j2ee/cluster/apps/sap.com/irj/servlet_jsp/irj/root/<random>.jsp` owned by `<sid>adm` with recent `ctime`. SAPMAP names them `db<6chars>.jsp`, `lc<6chars>.jsp`, `pse<6chars>.jsp`, etc. Inotify-watch this directory.
+- Unexpected `<sid>adm` child processes of `gwrd`, `disp+work`, or `ms.sap*`.
+- `/tmp/sapmap_*` files — staged SQL written by GW SAPXPG → hdbsql.
+- `auditd` rule for `ptrace_attach` (`-a always,exit -F arch=b64 -S ptrace`) — catches kernel-binary tampering invisible to SAP.
+- File integrity monitoring on `/usr/sap/<SID>/SYS/global/security/` (SecStore extraction reads SAPSYS.pse, cred_v2, SSFS_*.DAT).
+
+**SAP-level** (USR02 / SM20 / DBTABLOG / SM59):
+
+- New `USR02` entries immediately followed by a successful logon as the new user. Names like `SAPMAP00` are placeholders; alert on *any* fresh USR02 INSERT that succeeds a login within minutes.
+- `USR04` with `PROFILE = 'SAP_ALL'` or `'SAP_NEW'` added to non-admin users.
+- New SM59 destinations (TCP/IP or HTTP) pointing to unusual targets — SAPMAP creates `SAPMAP_BACK_*` during lateral movement.
+- DBTABLOG entries for `USR02`, `USR04`, `USRBF2`, `UST04`, `RFCDES`, `RFCTRUST`, `USREFUS`. SAPMAP's DBTABLOG purge only deletes entries written *during* its hold window — events before evasion is armed remain.
+- `RFC_ABAP_INSTALL_AND_RUN` calls with program names matching `ZSAPMAP_*` / `ZSAP_OA2C` / `ZSAPMAP_DBPURGE`.
+- ST22 short dumps referencing `SDIFRUNTIME` with `ZSAPMAP_*` programs.
+- Authorization Trace on `S_USER_PRO ACTVT=06` — catches `bapi_profiles_assign` LPE.
+- SAL events `EU2` / `EU3` / `DU9` on system tables — catches RFC_READ_TABLE on `RSECTAB`, `RFCDES`, `OA2C_*`.
+
+### Spotting Tier 3 evasion — gaps in each technique
+
+SAPMAP's Tier 3 techniques are designed to leave no SAP-side trace. Each one still leaks somewhere:
+
+- **SAL slot disable / UNAME narrow** — `RSAU_UPD_AUDIT_CONFIG` shared-memory write, no `SM19` "Last changed by" header update. **Gap**: poll `RSAU_API_GET_CONFIG` via RFC every 5 min and alert on any slot whose `STATUS`/`UNAME` differs from the persisted profile in `RSAUPROF`. Push SAL to SIEM via `RSAU_API_GET_LOG_DATA` so on-disk gaps don't matter.
+- **Dynamic kernel parameter flip** (`gw/logging`, `rdisp/TRACE`) — `TH_CHANGE_PARAMETER`. **Gap**: `RSPFL_HISTORY_DISPLAY` records every dynamic change. Alert on any change to `gw/logging`, `rdisp/TRACE`, `rec/client`, `rsau/*`.
+- **Java SAL severity flip** — `Category.setEffectiveSeverity(Severity.NONE)`. **Gap**: NWA Log Configuration shows **"Severity Origin: Runtime Override"** for any category whose runtime severity differs from the persisted value. Export Log Config periodically and diff. The CCDB push (if enabled) carries the same field.
+- **DBTABLOG post-hoc purge** — DELETEs DBTABLOG rows from the hold window. DBTABLOG is delivery class `L`, so the DELETE leaves no DBTABLOG row about itself. **Gaps**:
+  - HANA SQL audit on `DBTABLOG` with action `DELETE`: `ALTER AUDIT POLICY ... AUDIT ACTION ON DBTABLOG (DELETE) SUCCESS`.
+  - LOGID gap analysis — DBTABLOG LOGID is sequential per work-process; unexplained gaps on a single hostname/instance combination indicate a DELETE.
+  - GW SAPXPG → `hdbsql` path: OS-level shell history under `<sid>adm` and `/tmp/sapmap_gw.sql` remain unless the operator cleans them up.
+
+### Centralized SIEM should ingest
+
+1. **SAL push** via `rsau/local/alerter` or `RSAU_API_GET_LOG_DATA` polling — so on-disk audit-file mutation doesn't help an attacker.
+2. **OS file integrity** on `/usr/sap/<SID>/J<NN>/j2ee/cluster/apps/sap.com/irj/servlet_jsp/irj/root/` and `/usr/sap/<SID>/SYS/global/security/`.
+3. **DDIC / USR02 / USR04 change events** via CDHDR/CDPOS or DBTABLOG.
+4. **Web Dispatcher / ICM access logs** for the unauth endpoints listed above.
+5. **`RSPFL_HISTORY_DISPLAY` daily snapshot** — diff for parameter flips.
+6. **NWA Java Log Configuration export** — diff for `Runtime Override` entries.
 
 ---
 
