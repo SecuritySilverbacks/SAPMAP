@@ -111,6 +111,50 @@ def _build_purge_abap(base_date: str, base_time: str,
     return lines
 
 
+def _build_count_abap(base_date: str, base_time: str,
+                       tabname_filter: Optional[Iterable[str]] = None
+                       ) -> list:
+    """ABAP that emits ``COUNT|<int>`` for rows whose timestamp is
+    strictly after ``(base_date, base_time)`` — same WHERE shape as
+    the DELETE program."""
+    if not _DATE_RE.match(base_date):
+        raise ValueError(f"invalid base_date: {base_date!r}")
+    if not _TIME_RE.match(base_time):
+        raise ValueError(f"invalid base_time: {base_time!r}")
+
+    where = ("WHERE logdate > lv_d "
+             "OR ( logdate = lv_d AND logtime > lv_t )")
+    lines = [
+        "REPORT zsapmap_dbcount LINE-SIZE 1023.",
+        f"DATA: lv_d TYPE sy-datum VALUE '{base_date}'.",
+        f"DATA: lv_t TYPE sy-uzeit VALUE '{base_time}'.",
+        "DATA: lv_c TYPE i.",
+    ]
+    tabs = list(tabname_filter or [])
+    if tabs:
+        if len(tabs) > _MAX_TABNAMES:
+            raise ValueError(
+                f"tabname_filter has {len(tabs)} entries; "
+                f"max is {_MAX_TABNAMES}")
+        lines.append("DATA: lr_tabs TYPE RANGE OF dbtablog-tabname,")
+        lines.append("      ls_tab LIKE LINE OF lr_tabs.")
+        lines.append("ls_tab-sign = 'I'. ls_tab-option = 'EQ'.")
+        for tab in tabs:
+            safe_tab = tab.strip().upper().replace("'", "''")
+            if not re.match(r"^[A-Z0-9_/]{1,30}$", safe_tab):
+                raise ValueError(f"invalid tabname: {tab!r}")
+            lines.append(
+                f"ls_tab-low = '{safe_tab}'. APPEND ls_tab TO lr_tabs.")
+        lines.append(
+            f"SELECT COUNT(*) FROM dbtablog INTO lv_c "
+            f"{where} AND tabname IN lr_tabs.")
+    else:
+        lines.append(
+            f"SELECT COUNT(*) FROM dbtablog INTO lv_c {where}.")
+    lines.append("WRITE: / 'COUNT|', lv_c.")
+    return lines
+
+
 def _build_baseline_abap() -> list:
     """ABAP that emits ``BASE_DATE|YYYYMMDD`` and ``BASE_TIME|HHMMSS``.
 
@@ -292,6 +336,54 @@ def purge_dbtablog_via_gw_hdbsql(node, base_date: str, base_time: str,
         result["error"] = "GW SAPXPG hdbsql DELETE reported failure"
         return result
 
+    result["ok"] = True
+    return result
+
+
+def count_dbtablog_since(node, base_date: str, base_time: str,
+                           tabname_filter: Optional[Iterable[str]] = None,
+                           creds=None) -> dict:
+    """Count DBTABLOG rows strictly after ``(base_date, base_time)``.
+
+    Lightweight RFC verifier — used to confirm whether the GW SAPXPG
+    DELETE actually purged the rows (the SAPXPG response doesn't
+    expose hdbsql stdout, so we can't trust its success code alone).
+
+    Returns ``{ok, count, raw, error}``.
+    """
+    import sapmap_rfc
+    result = {"ok": False, "count": -1, "raw": [], "error": ""}
+    try:
+        abap = _build_count_abap(base_date, base_time, tabname_filter)
+    except ValueError as e:
+        result["error"] = str(e)
+        return result
+
+    try:
+        with sapmap_rfc._get_connection(node, creds) as conn:
+            run = sapmap_rfc._run_abap_program(conn, abap,
+                                                 "ZSAPMAP_DBCOUNT")
+    except Exception as e:
+        from sapmap_errors import format_rfc_exception
+        result["error"] = format_rfc_exception(e)[:200]
+        return result
+
+    result["raw"] = run.get("output") or []
+    if not run.get("success"):
+        result["error"] = (run.get("error") or "RFC_ABAP_INSTALL_AND_RUN failed")[:200]
+        return result
+
+    val = _parse_kv_line(result["raw"], "COUNT")
+    if val is None:
+        result["error"] = (
+            f"COUNT marker missing from output: "
+            f"{result['raw'][:3]}")
+        return result
+    try:
+        result["count"] = int(val)
+    except ValueError:
+        result["error"] = f"non-int COUNT value: {val!r}"
+        return result
     result["ok"] = True
     return result
 
