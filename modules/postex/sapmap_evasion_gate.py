@@ -78,8 +78,8 @@ TIER3_TECHNIQUES: dict = {
         Tier3Technique("stad_silence",
                         "STAD workload-statistics silencing"),
         # 4.A.4 — rec/client OFF for specific tables
-        Tier3Technique("dbtablog_suppress",
-                        "DBTABLOG table-logging suppression"),
+        Tier3Technique("dbtablog_purge",
+                        "DBTABLOG post-hoc purge"),
         # 4.C.3 — rdisp/TRACE / ICM trace level dynamic flip
         Tier3Technique("icm_trace_flip",
                         "ICM / work-process trace-level flip"),

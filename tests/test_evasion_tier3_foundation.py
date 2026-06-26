@@ -43,7 +43,7 @@ def test_evasion_config_roundtrip_preserves_tier3_fields():
 def test_registry_contains_expected_techniques():
     expected = {
         "sal_filter_narrow", "sal_kernel_param_disable", "stad_silence",
-        "dbtablog_suppress", "icm_trace_flip", "rz11_dynamic_set",
+        "dbtablog_purge", "icm_trace_flip", "rz11_dynamic_set",
         "tsl1d_template_delete", "java_nwa_severity",
     }
     assert expected <= set(TIER3_TECHNIQUES.keys())
@@ -2467,3 +2467,289 @@ def test_java_sal_suppress_returns_error_on_suppress_failure():
 
     assert out["ok"] is False
     assert "suppress failed" in out["error"]
+
+
+# ---------------------------------------------------------------------------
+# DBTABLOG purge — sap_dbtablog_purge helpers
+# ---------------------------------------------------------------------------
+
+import sap_dbtablog_purge
+
+
+def test_max_logid_abap_contains_select_max():
+    abap = sap_dbtablog_purge._build_max_logid_abap()
+    assert any("SELECT MAX( logid )" in line for line in abap)
+    assert any("MAXLOGID|" in line for line in abap)
+
+
+def test_purge_abap_scope_all_tables_omits_range():
+    abap = sap_dbtablog_purge._build_purge_abap("999999s4hanade0011")
+    src = "\n".join(abap)
+    assert "DELETE FROM dbtablog WHERE logid > lv_base" in src
+    assert "RANGE OF" not in src
+    assert "999999s4hanade0011" in src
+    assert "DELETED|" in src
+    assert "REMAINING|" in src
+
+
+def test_purge_abap_scope_tabname_filter_emits_range():
+    abap = sap_dbtablog_purge._build_purge_abap(
+        "999999s4hanade0011", tabname_filter=["USR02", "USR04"])
+    src = "\n".join(abap)
+    assert "RANGE OF dbtablog-tabname" in src
+    assert "ls_tab-low = 'USR02'" in src
+    assert "ls_tab-low = 'USR04'" in src
+    assert "WHERE logid > lv_base AND tabname IN lr_tabs" in src
+
+
+def test_purge_abap_uppercases_and_strips_tabnames():
+    abap = sap_dbtablog_purge._build_purge_abap(
+        "x", tabname_filter=["  usr02  ", "T000"])
+    src = "\n".join(abap)
+    assert "'USR02'" in src
+    assert "'T000'" in src
+
+
+def test_purge_abap_rejects_invalid_tabname():
+    with pytest.raises(ValueError):
+        sap_dbtablog_purge._build_purge_abap(
+            "x", tabname_filter=["USR02; DROP TABLE x"])
+
+
+def test_purge_abap_rejects_oversized_filter_list():
+    with pytest.raises(ValueError):
+        sap_dbtablog_purge._build_purge_abap(
+            "x", tabname_filter=[f"T{i:03d}" for i in range(50)])
+
+
+def test_purge_abap_escapes_single_quote_in_baseline():
+    abap = sap_dbtablog_purge._build_purge_abap("a'b")
+    src = "\n".join(abap)
+    # Single-quote doubled per ABAP literal escape.
+    assert "VALUE 'a''b'" in src
+
+
+def test_parse_kv_line_finds_marker_with_gap():
+    lines = ["MAXLOGID|        999999s4hanade0011"]
+    assert sap_dbtablog_purge._parse_kv_line(lines, "MAXLOGID") == \
+        "999999s4hanade0011"
+
+
+def test_parse_kv_line_returns_none_when_missing():
+    assert sap_dbtablog_purge._parse_kv_line(["other line"],
+                                                "MAXLOGID") is None
+
+
+def test_parse_kv_line_handles_empty_value():
+    # MAXLOGID|<empty> means DBTABLOG was empty
+    lines = ["MAXLOGID|"]
+    assert sap_dbtablog_purge._parse_kv_line(lines, "MAXLOGID") == ""
+
+
+# ---------------------------------------------------------------------------
+# read_max_logid / purge_dbtablog — RFC wrapper helpers
+# ---------------------------------------------------------------------------
+
+def _patch_run_abap_program(side_effect):
+    """Patch sapmap_rfc._run_abap_program AND the connection context."""
+    import sapmap_rfc
+    cm = MagicMock()
+    cm.__enter__ = MagicMock(return_value=MagicMock())
+    cm.__exit__ = MagicMock(return_value=False)
+    return (patch.object(sapmap_rfc, "_get_connection", return_value=cm),
+            patch.object(sapmap_rfc, "_run_abap_program",
+                         side_effect=side_effect))
+
+
+def test_read_max_logid_parses_lab_value():
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    def _run(conn, abap, name):
+        return {"success": True,
+                "output": ["MAXLOGID|        999999s4hanade0011"],
+                "fm_name": "RFC_ABAP_INSTALL_AND_RUN", "error": ""}
+    cm_patch, run_patch = _patch_run_abap_program(_run)
+    with cm_patch, run_patch:
+        r = sap_dbtablog_purge.read_max_logid(node)
+    assert r["ok"] is True
+    assert r["baseline"] == "999999s4hanade0011"
+
+
+def test_read_max_logid_handles_empty_table():
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    def _run(conn, abap, name):
+        return {"success": True, "output": ["MAXLOGID|"],
+                "fm_name": "RFC_ABAP_INSTALL_AND_RUN", "error": ""}
+    cm_patch, run_patch = _patch_run_abap_program(_run)
+    with cm_patch, run_patch:
+        r = sap_dbtablog_purge.read_max_logid(node)
+    assert r["ok"] is True
+    assert r["baseline"] == ""
+
+
+def test_read_max_logid_surfaces_program_failure():
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    def _run(conn, abap, name):
+        return {"success": False, "output": [],
+                "fm_name": "RFC_ABAP_INSTALL_AND_RUN",
+                "error": "SYNTAX_ERROR_IN_PROGRAM"}
+    cm_patch, run_patch = _patch_run_abap_program(_run)
+    with cm_patch, run_patch:
+        r = sap_dbtablog_purge.read_max_logid(node)
+    assert r["ok"] is False
+    assert "SYNTAX_ERROR" in r["error"]
+
+
+def test_purge_dbtablog_parses_counts():
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    def _run(conn, abap, name):
+        return {"success": True,
+                "output": ["DELETED|        42", "REMAINING|         0"],
+                "fm_name": "RFC_ABAP_INSTALL_AND_RUN", "error": ""}
+    cm_patch, run_patch = _patch_run_abap_program(_run)
+    with cm_patch, run_patch:
+        r = sap_dbtablog_purge.purge_dbtablog(node, "999999s4hanade0011")
+    assert r["ok"] is True
+    assert r["deleted_count"] == 42
+    assert r["remaining_count"] == 0
+
+
+def test_purge_dbtablog_flags_incomplete_delete():
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    def _run(conn, abap, name):
+        return {"success": True,
+                "output": ["DELETED|         0", "REMAINING|         7"],
+                "fm_name": "RFC_ABAP_INSTALL_AND_RUN", "error": ""}
+    cm_patch, run_patch = _patch_run_abap_program(_run)
+    with cm_patch, run_patch:
+        r = sap_dbtablog_purge.purge_dbtablog(node, "x")
+    assert r["ok"] is False
+    assert "incomplete" in r["error"]
+    assert r["remaining_count"] == 7
+
+
+def test_purge_dbtablog_rejects_bad_filter_before_rfc():
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    # Bad filter should fail at ABAP-build time without touching RFC.
+    cm_patch, run_patch = _patch_run_abap_program(
+        lambda *a, **kw: pytest.fail("RFC should not have been called"))
+    with cm_patch, run_patch:
+        r = sap_dbtablog_purge.purge_dbtablog(
+            node, "x", tabname_filter=["BAD; DROP"])
+    assert r["ok"] is False
+    assert "invalid tabname" in r["error"]
+
+
+# ---------------------------------------------------------------------------
+# tier3_dbtablog_purge — gate + flow
+# ---------------------------------------------------------------------------
+
+def test_dbtablog_purge_refuses_non_abap_node():
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True}
+    node = SAPNode(sid="J75", hostname="j75", ip="10.0.0.2")
+    node.system_type = "JAVA"
+    out = sapmap_evasion_tier3.tier3_dbtablog_purge(state, node)
+    assert out["ok"] is False
+    assert "not an ABAP" in out["error"]
+
+
+def test_dbtablog_purge_refuses_when_evasion_disarmed():
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": False}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    node.system_type = "ABAP"
+    out = sapmap_evasion_tier3.tier3_dbtablog_purge(state, node)
+    assert out["ok"] is False
+
+
+def test_dbtablog_purge_full_flow():
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    node.system_type = "ABAP"
+
+    base_resp = {"ok": True, "baseline": "999999s4hanade0011",
+                 "raw": [], "error": ""}
+    purge_resp = {"ok": True, "deleted_count": 12, "remaining_count": 0,
+                  "raw": [], "error": ""}
+
+    with patch("sap_dbtablog_purge.read_max_logid",
+               return_value=base_resp) as mock_read, \
+         patch("sap_dbtablog_purge.purge_dbtablog",
+               return_value=purge_resp) as mock_purge:
+        out = sapmap_evasion_tier3.tier3_dbtablog_purge(
+            state, node, hold_seconds=0)
+
+    assert out["ok"] is True
+    assert out["technique"] == "dbtablog_purge"
+    assert out["baseline_logid"] == "999999s4hanade0011"
+    assert out["deleted_count"] == 12
+    assert out["remaining_count"] == 0
+    assert out["tabname_filter"] == []
+    mock_read.assert_called_once()
+    mock_purge.assert_called_once()
+
+
+def test_dbtablog_purge_passes_tabname_filter_through():
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    node.system_type = "ABAP"
+
+    base_resp = {"ok": True, "baseline": "x", "raw": [], "error": ""}
+    purge_resp = {"ok": True, "deleted_count": 3, "remaining_count": 0,
+                  "raw": [], "error": ""}
+
+    with patch("sap_dbtablog_purge.read_max_logid",
+               return_value=base_resp), \
+         patch("sap_dbtablog_purge.purge_dbtablog",
+               return_value=purge_resp) as mock_purge:
+        out = sapmap_evasion_tier3.tier3_dbtablog_purge(
+            state, node, hold_seconds=0,
+            tabname_filter=["USR02", "USR04"])
+
+    assert out["ok"] is True
+    assert out["tabname_filter"] == ["USR02", "USR04"]
+    _args, kwargs = mock_purge.call_args
+    assert kwargs.get("tabname_filter") == ["USR02", "USR04"]
+
+
+def test_dbtablog_purge_returns_error_on_baseline_failure():
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    node.system_type = "ABAP"
+
+    fail_resp = {"ok": False, "baseline": "", "raw": [],
+                 "error": "NO_AUTH"}
+    with patch("sap_dbtablog_purge.read_max_logid",
+               return_value=fail_resp), \
+         patch("sap_dbtablog_purge.purge_dbtablog") as mock_purge:
+        out = sapmap_evasion_tier3.tier3_dbtablog_purge(
+            state, node, hold_seconds=0)
+
+    assert out["ok"] is False
+    assert "baseline read failed" in out["error"]
+    mock_purge.assert_not_called()
+
+
+def test_dbtablog_purge_returns_error_on_purge_failure():
+    state = SAPMAPState()
+    state.evasion = {"allow_evasion": True}
+    node = SAPNode(sid="S4H", hostname="s4h", ip="10.0.0.1")
+    node.system_type = "ABAP"
+
+    base_resp = {"ok": True, "baseline": "x", "raw": [], "error": ""}
+    fail_purge = {"ok": False, "deleted_count": 0, "remaining_count": -1,
+                  "raw": [], "error": "DELETE blocked by S_TABU_DIS"}
+
+    with patch("sap_dbtablog_purge.read_max_logid",
+               return_value=base_resp), \
+         patch("sap_dbtablog_purge.purge_dbtablog",
+               return_value=fail_purge):
+        out = sapmap_evasion_tier3.tier3_dbtablog_purge(
+            state, node, hold_seconds=0)
+
+    assert out["ok"] is False
+    assert "purge failed" in out["error"]
+    assert out.get("baseline_logid") == "x"
