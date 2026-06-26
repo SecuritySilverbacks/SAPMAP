@@ -1414,13 +1414,17 @@ def tier3_dbtablog_purge(state, node, hold_seconds: float = 30.0,
 
     deleted = purge["deleted_count"]
     via = purge.get("via", "?")
+    remaining = purge["remaining_count"]
     if deleted >= 0:
         print(f"[+] {sid}: DBTABLOG purged via {via} — "
               f"{deleted} row(s) deleted, "
-              f"{purge['remaining_count']} remaining post-baseline")
+              f"{remaining} remaining post-baseline")
     else:
-        print(f"[+] {sid}: DBTABLOG purged via {via} — "
-              f"row count not measured (GW SAPXPG path)")
+        # GW SAPXPG path — hdbsql row count not exposed in P3 response.
+        # Verifier already confirmed remaining_count==0 if we got here.
+        print(f"[+] {sid}: DBTABLOG purged via {via} — DELETE "
+              f"executed; {remaining} row(s) remain post-baseline "
+              f"(hdbsql row count not exposed by SAPXPG)")
 
     try:
         from sapmap_findings import emit_finding
