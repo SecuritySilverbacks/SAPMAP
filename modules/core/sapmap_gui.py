@@ -7320,8 +7320,16 @@ def create_app(api: SAPMAPApi) -> Bottle:
                               f"Tier 3 DBTABLOG purge failed: "
                               f"{out.get('error')}")
                 return
-            print(f"[+] {sid}: DBTABLOG purge complete — "
-                  f"deleted {out.get('deleted_count', 0)} row(s) "
+            dc = out.get("deleted_count", 0)
+            via = out.get("via", "?")
+            rc = out.get("remaining_count", -1)
+            count_phrase = (
+                f"DELETE executed; {rc} row(s) remain post-baseline "
+                f"(hdbsql row count not exposed by SAPXPG)"
+                if dc < 0 else
+                f"deleted {dc} row(s)")
+            print(f"[+] {sid}: DBTABLOG purge complete via {via} — "
+                  f"{count_phrase} "
                   f"(baseline="
                   f"{out.get('base_date', '?')} "
                   f"{out.get('base_time', '?')})")
