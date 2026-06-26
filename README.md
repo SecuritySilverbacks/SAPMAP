@@ -178,6 +178,7 @@ The OA2C reader uses a three-tier resilience chain: `DDIF_FIELDINFO_GET` for col
 - **Dynamic SAL profile dump** — Read the active dynamic filter profile (RSAU_API_GET_PROFILE with ID_DYN_CONF='X') to inspect live slot/filter state before any mutation
 - **SAL UNAME narrow** — Swap the user filter on active SAL recording slots to exclude the SAPMAP00 user (e.g. `*` → `A*`), then auto-restore after a configurable hold window.  Uses the legacy RSAU_UPD_AUDIT_CONFIG shared-memory writer — no disk persistence
 - **Java SAL suppress** — Deploy a LogController JSP onto AS Java that calls `Category.setEffectiveSeverity(Severity.NONE)` on the 6 Security Audit Log categories.  Runtime-only (JVM heap), no NWA change-log entry, auto-restored on JVM restart.  Full baseline → suppress → hold → restore cycle with HTTP-based baseline management
+- **DBTABLOG post-hoc purge** — Capture `MAX(LOGID)` baseline on DBTABLOG, wait for a hold window (operator runs actions whose table-change log entries should be erased), then `DELETE FROM DBTABLOG WHERE LOGID > baseline` with optional `TABNAME` whitelist.  DBTABLOG is delivery class `L` (not itself logged) so the DELETE does not recurse.  No DD09L touch, no DDIC reactivation, no transport object
 - **Evasion baseline snapshot** — Pre-flight capture of all mutable state (kernel params + SAL slot config + filter rows) into a JSON file; every Tier 3 mutation auto-restores from this baseline on exit
 - **Arm gate** — All Tier 3 entry points refuse to run unless `--allow-evasion` was passed at startup and (for mutation writers) a baseline has been captured.  Visual "⚡ Tier 3 Armed" bar in the GUI confirms the session state
 
@@ -244,8 +245,9 @@ modules/
 │   ├── sap_ssh_lateral.py             SSH key harvest, lateral movement, OS Console/shell via SSH
 │   ├── sap_pse_loot.py               SAPSYS.pse + cred_v2 extraction with chunked binary reads
 │   ├── sapmap_evasion_baseline.py     Tier 3 baseline capture + SAL config readers/writers
-│   ├── sapmap_evasion_tier3.py        Tier 3 technique entry points (SAL slot disable, param set, Java SAL suppress)
-│   └── sap_java_logctl.py            Java SAL LogController JSP — deploy, invoke, baseline/restore via HTTP
+│   ├── sapmap_evasion_tier3.py        Tier 3 technique entry points (SAL slot disable, param set, Java SAL suppress, DBTABLOG purge)
+│   ├── sap_java_logctl.py            Java SAL LogController JSP — deploy, invoke, baseline/restore via HTTP
+│   └── sap_dbtablog_purge.py         DBTABLOG MAX(LOGID) baseline + DELETE via RFC_ABAP_INSTALL_AND_RUN
 │
 ├── data_extraction/                   Credential / data harvesting
 │   ├── sapmap_secstore.py             ABAP RSECTAB / SSFS decryption + map integration
