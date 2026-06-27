@@ -1,0 +1,1694 @@
+{
+  "nodes": [
+    {
+      "id": "file:modules/data_extraction/sapmap_secstore.py",
+      "type": "file",
+      "name": "sapmap_secstore.py",
+      "filePath": "modules/data_extraction/sapmap_secstore.py",
+      "summary": "Implements ABAP RSECTAB and SSFS SecStore decryption using SAP's proprietary RSECCipher (8-round Feistel over 3DES) with 5-method fallback chain for reading and parsing secret stores remotely.",
+      "tags": [
+        "secret-extraction",
+        "cryptography",
+        "data-extraction",
+        "abap",
+        "rfc"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/data_extraction/sapmap_secstore.py:_des3_manual",
+      "type": "function",
+      "name": "_des3_manual",
+      "filePath": "modules/data_extraction/sapmap_secstore.py",
+      "lineRange": [
+        81,
+        97
+      ],
+      "summary": "Manual 3DES encrypt primitive used inside SAP RSECCipher.",
+      "tags": [
+        "cryptography",
+        "des3",
+        "primitive"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/data_extraction/sapmap_secstore.py:_derive_keyprime",
+      "type": "function",
+      "name": "_derive_keyprime",
+      "filePath": "modules/data_extraction/sapmap_secstore.py",
+      "lineRange": [
+        100,
+        122
+      ],
+      "summary": "Derives the secondary key prime in the RSECCipher Feistel scheme.",
+      "tags": [
+        "cryptography",
+        "key-derivation",
+        "python"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/data_extraction/sapmap_secstore.py:extract_ssfs_key",
+      "type": "function",
+      "name": "extract_ssfs_key",
+      "filePath": "modules/data_extraction/sapmap_secstore.py",
+      "lineRange": [
+        129,
+        166
+      ],
+      "summary": "Extracts the SSFS master key from server-side key file.",
+      "tags": [
+        "secret-extraction",
+        "ssfs",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/data_extraction/sapmap_secstore.py:_decrypt_ssfs_key_enc",
+      "type": "function",
+      "name": "_decrypt_ssfs_key_enc",
+      "filePath": "modules/data_extraction/sapmap_secstore.py",
+      "lineRange": [
+        169,
+        188
+      ],
+      "summary": "Decrypts the SSFS .KEY container to obtain raw key material.",
+      "tags": [
+        "cryptography",
+        "ssfs",
+        "python"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/data_extraction/sapmap_secstore.py:parse_ssfs_dat",
+      "type": "function",
+      "name": "parse_ssfs_dat",
+      "filePath": "modules/data_extraction/sapmap_secstore.py",
+      "lineRange": [
+        195,
+        281
+      ],
+      "summary": "Parses the SSFS .DAT binary format extracting encrypted entries.",
+      "tags": [
+        "parser",
+        "ssfs",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/data_extraction/sapmap_secstore.py:_read_ssfs_files_via_abap",
+      "type": "function",
+      "name": "_read_ssfs_files_via_abap",
+      "filePath": "modules/data_extraction/sapmap_secstore.py",
+      "lineRange": [
+        381,
+        440
+      ],
+      "summary": "Reads SSFS files via authenticated ABAP RFC channel.",
+      "tags": [
+        "rfc",
+        "ssfs",
+        "extraction"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/data_extraction/sapmap_secstore.py:_read_ssfs_files_via_sxpg",
+      "type": "function",
+      "name": "_read_ssfs_files_via_sxpg",
+      "filePath": "modules/data_extraction/sapmap_secstore.py",
+      "lineRange": [
+        443,
+        542
+      ],
+      "summary": "Reads SSFS files via SXPG_CALL_SYSTEM OS-command channel.",
+      "tags": [
+        "sxpg",
+        "ssfs",
+        "extraction"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/data_extraction/sapmap_secstore.py:_read_rsectab_via_sxpg",
+      "type": "function",
+      "name": "_read_rsectab_via_sxpg",
+      "filePath": "modules/data_extraction/sapmap_secstore.py",
+      "lineRange": [
+        545,
+        722
+      ],
+      "summary": "Reads RSECTAB via SXPG OS-command execution.",
+      "tags": [
+        "sxpg",
+        "rsectab",
+        "extraction"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/data_extraction/sapmap_secstore.py:decrypt_entry",
+      "type": "function",
+      "name": "decrypt_entry",
+      "filePath": "modules/data_extraction/sapmap_secstore.py",
+      "lineRange": [
+        729,
+        797
+      ],
+      "summary": "Decrypts a single RSECTAB entry using SAP RSECCipher.",
+      "tags": [
+        "cryptography",
+        "rsectab",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/data_extraction/sapmap_secstore.py:_find_open_clients",
+      "type": "function",
+      "name": "_find_open_clients",
+      "filePath": "modules/data_extraction/sapmap_secstore.py",
+      "lineRange": [
+        849,
+        870
+      ],
+      "summary": "Locates SAP clients that permit user logon for extraction operations.",
+      "tags": [
+        "discovery",
+        "sap-client",
+        "python"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/data_extraction/sapmap_secstore.py:_ensure_user_in_client",
+      "type": "function",
+      "name": "_ensure_user_in_client",
+      "filePath": "modules/data_extraction/sapmap_secstore.py",
+      "lineRange": [
+        873,
+        961
+      ],
+      "summary": "Ensures SAPMAP user exists in the target client for ABAP execution.",
+      "tags": [
+        "user-management",
+        "rfc",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/data_extraction/sapmap_secstore.py:download_and_decrypt",
+      "type": "function",
+      "name": "download_and_decrypt",
+      "filePath": "modules/data_extraction/sapmap_secstore.py",
+      "lineRange": [
+        968,
+        1127
+      ],
+      "summary": "Orchestrates the full SecStore download-and-decrypt chain with 5-method fallback.",
+      "tags": [
+        "orchestrator",
+        "extraction",
+        "cryptography"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/data_extraction/sapmap_secstore.py:_read_rsectab_via_abap",
+      "type": "function",
+      "name": "_read_rsectab_via_abap",
+      "filePath": "modules/data_extraction/sapmap_secstore.py",
+      "lineRange": [
+        1130,
+        1181
+      ],
+      "summary": "Reads RSECTAB rows via direct ABAP RFC_READ_TABLE.",
+      "tags": [
+        "rfc",
+        "rsectab",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/data_extraction/sapmap_secstore.py:_read_rsectab_via_rfc",
+      "type": "function",
+      "name": "_read_rsectab_via_rfc",
+      "filePath": "modules/data_extraction/sapmap_secstore.py",
+      "lineRange": [
+        1184,
+        1200
+      ],
+      "summary": "Reads RSECTAB via authenticated RFC fallback.",
+      "tags": [
+        "rfc",
+        "rsectab",
+        "python"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/data_extraction/sapmap_secstore.py:categorise_entry",
+      "type": "function",
+      "name": "categorise_entry",
+      "filePath": "modules/data_extraction/sapmap_secstore.py",
+      "lineRange": [
+        1223,
+        1302
+      ],
+      "summary": "Categorises decrypted RSECTAB entries by type (HTTP/DB/RFC/LDAP).",
+      "tags": [
+        "classification",
+        "rsectab",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/data_extraction/sapmap_secstore.py:integrate_results",
+      "type": "function",
+      "name": "integrate_results",
+      "filePath": "modules/data_extraction/sapmap_secstore.py",
+      "lineRange": [
+        1305,
+        1385
+      ],
+      "summary": "Integrates decrypted secrets back into SAPMAP state and loot files.",
+      "tags": [
+        "integration",
+        "state",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:modules/discovery/__init__.py",
+      "type": "file",
+      "name": "__init__.py",
+      "filePath": "modules/discovery/__init__.py",
+      "summary": "Marks the discovery subpackage which exposes SAP system scanning, RFC introspection, default-credential testing, and SCC fingerprinting modules.",
+      "tags": [
+        "package-marker",
+        "discovery"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:modules/discovery/sap_client_enum.py",
+      "type": "file",
+      "name": "sap_client_enum.py",
+      "filePath": "modules/discovery/sap_client_enum.py",
+      "summary": "Enumerates valid SAP client numbers via DIAG-protocol login probes that classify responses by SAP message codes to detect client existence and default-client redirection.",
+      "tags": [
+        "discovery",
+        "diag-protocol",
+        "enumeration",
+        "sap-client"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/discovery/sap_client_enum.py:ni_recv",
+      "type": "function",
+      "name": "ni_recv",
+      "filePath": "modules/discovery/sap_client_enum.py",
+      "lineRange": [
+        138,
+        165
+      ],
+      "summary": "Receives an NI-framed packet from a SAP socket.",
+      "tags": [
+        "protocol",
+        "ni-framing",
+        "python"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/discovery/sap_client_enum.py:build_dp_header",
+      "type": "function",
+      "name": "build_dp_header",
+      "filePath": "modules/discovery/sap_client_enum.py",
+      "lineRange": [
+        172,
+        194
+      ],
+      "summary": "Builds the SAP DIAG dispatcher header.",
+      "tags": [
+        "protocol",
+        "diag",
+        "builder"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/discovery/sap_client_enum.py:build_diag_init",
+      "type": "function",
+      "name": "build_diag_init",
+      "filePath": "modules/discovery/sap_client_enum.py",
+      "lineRange": [
+        197,
+        228
+      ],
+      "summary": "Builds the DIAG initialization request.",
+      "tags": [
+        "protocol",
+        "diag",
+        "builder"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sap_client_enum.py:build_efield2_atom",
+      "type": "function",
+      "name": "build_efield2_atom",
+      "filePath": "modules/discovery/sap_client_enum.py",
+      "lineRange": [
+        231,
+        278
+      ],
+      "summary": "Builds an EFIELD2 atom for DIAG packet construction.",
+      "tags": [
+        "protocol",
+        "diag",
+        "builder"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sap_client_enum.py:build_diag_login_packet",
+      "type": "function",
+      "name": "build_diag_login_packet",
+      "filePath": "modules/discovery/sap_client_enum.py",
+      "lineRange": [
+        281,
+        365
+      ],
+      "summary": "Constructs a full DIAG login packet with credentials for client probing.",
+      "tags": [
+        "protocol",
+        "diag",
+        "login"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sap_client_enum.py:_extract_default_client",
+      "type": "function",
+      "name": "_extract_default_client",
+      "filePath": "modules/discovery/sap_client_enum.py",
+      "lineRange": [
+        382,
+        402
+      ],
+      "summary": "Extracts the system default client from DIAG handshake response.",
+      "tags": [
+        "parser",
+        "diag",
+        "python"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/discovery/sap_client_enum.py:_check_client_redirection",
+      "type": "function",
+      "name": "_check_client_redirection",
+      "filePath": "modules/discovery/sap_client_enum.py",
+      "lineRange": [
+        405,
+        475
+      ],
+      "summary": "Detects client-redirection from response classification.",
+      "tags": [
+        "classifier",
+        "diag",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sap_client_enum.py:probe_client",
+      "type": "function",
+      "name": "probe_client",
+      "filePath": "modules/discovery/sap_client_enum.py",
+      "lineRange": [
+        482,
+        557
+      ],
+      "summary": "Probes a single SAP client number for existence via DIAG login.",
+      "tags": [
+        "enumeration",
+        "sap-client",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sap_client_enum.py:enumerate_clients",
+      "type": "function",
+      "name": "enumerate_clients",
+      "filePath": "modules/discovery/sap_client_enum.py",
+      "lineRange": [
+        560,
+        684
+      ],
+      "summary": "Enumerates valid SAP client numbers across a range with rate limiting.",
+      "tags": [
+        "enumeration",
+        "sap-client",
+        "python"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/discovery/sap_client_enum.py:main",
+      "type": "function",
+      "name": "main",
+      "filePath": "modules/discovery/sap_client_enum.py",
+      "lineRange": [
+        691,
+        761
+      ],
+      "summary": "CLI entry point.",
+      "tags": [
+        "cli",
+        "entry-point",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:modules/discovery/sap_default_creds.py",
+      "type": "file",
+      "name": "sap_default_creds.py",
+      "filePath": "modules/discovery/sap_default_creds.py",
+      "summary": "Sequentially tests 16 known default SAP credentials per client via DIAG login to discover weakly secured systems while minimizing lockout risk.",
+      "tags": [
+        "discovery",
+        "credential-testing",
+        "diag-protocol",
+        "security-research"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/discovery/sap_default_creds.py:classify_login_response",
+      "type": "function",
+      "name": "classify_login_response",
+      "filePath": "modules/discovery/sap_default_creds.py",
+      "lineRange": [
+        113,
+        143
+      ],
+      "summary": "Classifies a DIAG login response into outcome categories (ok/blocked/wrong/etc).",
+      "tags": [
+        "classifier",
+        "diag",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sap_default_creds.py:try_login",
+      "type": "function",
+      "name": "try_login",
+      "filePath": "modules/discovery/sap_default_creds.py",
+      "lineRange": [
+        150,
+        195
+      ],
+      "summary": "Attempts a single DIAG login with given username/password.",
+      "tags": [
+        "credential-testing",
+        "diag",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sap_default_creds.py:check_default_credentials",
+      "type": "function",
+      "name": "check_default_credentials",
+      "filePath": "modules/discovery/sap_default_creds.py",
+      "lineRange": [
+        202,
+        284
+      ],
+      "summary": "Tests the default credential matrix sequentially against a client.",
+      "tags": [
+        "credential-testing",
+        "discovery",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sap_default_creds.py:main",
+      "type": "function",
+      "name": "main",
+      "filePath": "modules/discovery/sap_default_creds.py",
+      "lineRange": [
+        291,
+        356
+      ],
+      "summary": "CLI entry point.",
+      "tags": [
+        "cli",
+        "entry-point",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:modules/discovery/sapmap_scc_cve_buckets.py",
+      "type": "file",
+      "name": "sapmap_scc_cve_buckets.py",
+      "filePath": "modules/discovery/sapmap_scc_cve_buckets.py",
+      "summary": "Maps SAP Cloud Connector versions to known CVE buckets and assigns severity scores for vulnerability classification.",
+      "tags": [
+        "scc",
+        "cve-mapping",
+        "discovery",
+        "security-research"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_scc_cve_buckets.py:cves_for_version",
+      "type": "function",
+      "name": "cves_for_version",
+      "filePath": "modules/discovery/sapmap_scc_cve_buckets.py",
+      "lineRange": [
+        50,
+        72
+      ],
+      "summary": "Maps SCC version string to applicable CVE buckets.",
+      "tags": [
+        "scc",
+        "cve-mapping",
+        "python"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_scc_cve_buckets.py:score",
+      "type": "function",
+      "name": "score",
+      "filePath": "modules/discovery/sapmap_scc_cve_buckets.py",
+      "lineRange": [
+        75,
+        116
+      ],
+      "summary": "Scores severity for an SCC version based on CVE buckets.",
+      "tags": [
+        "scc",
+        "scoring",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:modules/discovery/sapmap_scc_fingerprint.py",
+      "type": "file",
+      "name": "sapmap_scc_fingerprint.py",
+      "filePath": "modules/discovery/sapmap_scc_fingerprint.py",
+      "summary": "Fingerprints SAP Cloud Connector instances via TLS handshake analysis, HTTP banner probing, and favicon hash matching to determine versions and detect the management endpoint.",
+      "tags": [
+        "scc",
+        "fingerprinting",
+        "tls",
+        "discovery"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_scc_fingerprint.py:_tls_fingerprint",
+      "type": "function",
+      "name": "_tls_fingerprint",
+      "filePath": "modules/discovery/sapmap_scc_fingerprint.py",
+      "lineRange": [
+        61,
+        92
+      ],
+      "summary": "Captures TLS fingerprint from an SCC endpoint.",
+      "tags": [
+        "scc",
+        "tls",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_scc_fingerprint.py:_http_get",
+      "type": "function",
+      "name": "_http_get",
+      "filePath": "modules/discovery/sapmap_scc_fingerprint.py",
+      "lineRange": [
+        95,
+        116
+      ],
+      "summary": "HTTP GET helper used in fingerprinting.",
+      "tags": [
+        "http",
+        "utility",
+        "python"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_scc_fingerprint.py:_favicon_hashes",
+      "type": "function",
+      "name": "_favicon_hashes",
+      "filePath": "modules/discovery/sapmap_scc_fingerprint.py",
+      "lineRange": [
+        119,
+        137
+      ],
+      "summary": "Computes favicon hashes for SCC identification.",
+      "tags": [
+        "scc",
+        "fingerprint",
+        "python"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_scc_fingerprint.py:scc_fingerprint",
+      "type": "function",
+      "name": "scc_fingerprint",
+      "filePath": "modules/discovery/sapmap_scc_fingerprint.py",
+      "lineRange": [
+        140,
+        231
+      ],
+      "summary": "Full SCC fingerprint orchestrator combining TLS, HTTP, and favicon signals.",
+      "tags": [
+        "scc",
+        "fingerprint",
+        "orchestrator"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:modules/discovery/sapmap_scc_pp_analyzer.py",
+      "type": "file",
+      "name": "sapmap_scc_pp_analyzer.py",
+      "filePath": "modules/discovery/sapmap_scc_pp_analyzer.py",
+      "summary": "Analyzes SAP Cloud Connector Principal Propagation configuration: DN subject patterns, mapping configs, trust certificates, and impersonation attack surface from SCC backup XML.",
+      "tags": [
+        "scc",
+        "principal-propagation",
+        "trust-analysis",
+        "security-research",
+        "analysis"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_scc_pp_analyzer.py:_placeholders_in",
+      "type": "function",
+      "name": "_placeholders_in",
+      "filePath": "modules/discovery/sapmap_scc_pp_analyzer.py",
+      "lineRange": [
+        107,
+        120
+      ],
+      "summary": "Extracts placeholder tokens from an SCC config string.",
+      "tags": [
+        "scc",
+        "parser",
+        "python"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_scc_pp_analyzer.py:_classify_dn_entry",
+      "type": "function",
+      "name": "_classify_dn_entry",
+      "filePath": "modules/discovery/sapmap_scc_pp_analyzer.py",
+      "lineRange": [
+        123,
+        146
+      ],
+      "summary": "Classifies a Distinguished Name entry by sensitivity.",
+      "tags": [
+        "scc",
+        "classifier",
+        "python"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_scc_pp_analyzer.py:_has_pp_enabled_mapping",
+      "type": "function",
+      "name": "_has_pp_enabled_mapping",
+      "filePath": "modules/discovery/sapmap_scc_pp_analyzer.py",
+      "lineRange": [
+        149,
+        170
+      ],
+      "summary": "Tests whether a mapping has Principal Propagation enabled.",
+      "tags": [
+        "scc",
+        "principal-propagation",
+        "python"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_scc_pp_analyzer.py:_count_pp_enabled_mappings",
+      "type": "function",
+      "name": "_count_pp_enabled_mappings",
+      "filePath": "modules/discovery/sapmap_scc_pp_analyzer.py",
+      "lineRange": [
+        173,
+        184
+      ],
+      "summary": "Counts PP-enabled mappings in SCC config.",
+      "tags": [
+        "scc",
+        "principal-propagation",
+        "python"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_scc_pp_analyzer.py:analyze_subject_pattern",
+      "type": "function",
+      "name": "analyze_subject_pattern",
+      "filePath": "modules/discovery/sapmap_scc_pp_analyzer.py",
+      "lineRange": [
+        191,
+        331
+      ],
+      "summary": "Analyzes the certificate subject pattern for impersonation risk.",
+      "tags": [
+        "scc",
+        "analysis",
+        "principal-propagation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_scc_pp_analyzer.py:analyze_pp_config",
+      "type": "function",
+      "name": "analyze_pp_config",
+      "filePath": "modules/discovery/sapmap_scc_pp_analyzer.py",
+      "lineRange": [
+        334,
+        432
+      ],
+      "summary": "Analyzes SCC Principal Propagation configuration for risky settings.",
+      "tags": [
+        "scc",
+        "analysis",
+        "principal-propagation"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_scc_pp_analyzer.py:analyze_pp_trust",
+      "type": "function",
+      "name": "analyze_pp_trust",
+      "filePath": "modules/discovery/sapmap_scc_pp_analyzer.py",
+      "lineRange": [
+        435,
+        497
+      ],
+      "summary": "Analyzes PP trust certificates for known-weak keys.",
+      "tags": [
+        "scc",
+        "analysis",
+        "trust"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_scc_pp_analyzer.py:_extract_cn",
+      "type": "function",
+      "name": "_extract_cn",
+      "filePath": "modules/discovery/sapmap_scc_pp_analyzer.py",
+      "lineRange": [
+        500,
+        530
+      ],
+      "summary": "Extracts CN field from a DN string.",
+      "tags": [
+        "parser",
+        "utility",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_scc_pp_analyzer.py:analyze_pp_impersonation",
+      "type": "function",
+      "name": "analyze_pp_impersonation",
+      "filePath": "modules/discovery/sapmap_scc_pp_analyzer.py",
+      "lineRange": [
+        533,
+        742
+      ],
+      "summary": "Comprehensive analysis of PP impersonation attack surface.",
+      "tags": [
+        "scc",
+        "analysis",
+        "impersonation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_scc_pp_analyzer.py:analyze_backup",
+      "type": "function",
+      "name": "analyze_backup",
+      "filePath": "modules/discovery/sapmap_scc_pp_analyzer.py",
+      "lineRange": [
+        745,
+        779
+      ],
+      "summary": "Analyzes an SCC backup file for misconfigurations and secrets.",
+      "tags": [
+        "scc",
+        "analysis",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:modules/discovery/sapmap_scc_relay.py",
+      "type": "file",
+      "name": "sapmap_scc_relay.py",
+      "filePath": "modules/discovery/sapmap_scc_relay.py",
+      "summary": "Probes SCC subaccount mappings to test reachability of backend hosts through the relay including HTTP HEAD validation and TCP connect tests.",
+      "tags": [
+        "scc",
+        "relay",
+        "reachability",
+        "discovery"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_scc_relay.py:_tcp_connect",
+      "type": "function",
+      "name": "_tcp_connect",
+      "filePath": "modules/discovery/sapmap_scc_relay.py",
+      "lineRange": [
+        57,
+        71
+      ],
+      "summary": "Lightweight TCP connect test through SCC relay.",
+      "tags": [
+        "scc",
+        "tcp",
+        "python"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_scc_relay.py:_http_head",
+      "type": "function",
+      "name": "_http_head",
+      "filePath": "modules/discovery/sapmap_scc_relay.py",
+      "lineRange": [
+        74,
+        130
+      ],
+      "summary": "HTTP HEAD probe through SCC relay.",
+      "tags": [
+        "scc",
+        "http",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_scc_relay.py:probe_mapping",
+      "type": "function",
+      "name": "probe_mapping",
+      "filePath": "modules/discovery/sapmap_scc_relay.py",
+      "lineRange": [
+        133,
+        181
+      ],
+      "summary": "Probes a single SCC mapping for backend reachability.",
+      "tags": [
+        "scc",
+        "reachability",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_scc_relay.py:probe_all",
+      "type": "function",
+      "name": "probe_all",
+      "filePath": "modules/discovery/sapmap_scc_relay.py",
+      "lineRange": [
+        184,
+        195
+      ],
+      "summary": "Probes all SCC mappings in parallel.",
+      "tags": [
+        "scc",
+        "reachability",
+        "python"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:modules/exploitation/__init__.py",
+      "type": "file",
+      "name": "__init__.py",
+      "filePath": "modules/exploitation/__init__.py",
+      "summary": "Marks the exploitation subpackage which exposes SAP exploit modules for various CVEs and post-exploitation primitives.",
+      "tags": [
+        "package-marker",
+        "exploitation"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:modules/exploitation/_dirtyfrag_blob.py",
+      "type": "file",
+      "name": "_dirtyfrag_blob.py",
+      "filePath": "modules/exploitation/_dirtyfrag_blob.py",
+      "summary": "Embedded base64-encoded DirtyFrag Linux kernel privilege escalation PoC binary blob for staging in LPE chains.",
+      "tags": [
+        "exploit-payload",
+        "lpe",
+        "binary-blob",
+        "linux-kernel"
+      ],
+      "complexity": "complex"
+    }
+  ],
+  "edges": [
+    {
+      "source": "file:modules/data_extraction/sapmap_secstore.py",
+      "target": "function:modules/data_extraction/sapmap_secstore.py:_des3_manual",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/data_extraction/sapmap_secstore.py",
+      "target": "function:modules/data_extraction/sapmap_secstore.py:_des3_manual",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/data_extraction/sapmap_secstore.py",
+      "target": "function:modules/data_extraction/sapmap_secstore.py:_derive_keyprime",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/data_extraction/sapmap_secstore.py",
+      "target": "function:modules/data_extraction/sapmap_secstore.py:_derive_keyprime",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/data_extraction/sapmap_secstore.py",
+      "target": "function:modules/data_extraction/sapmap_secstore.py:extract_ssfs_key",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/data_extraction/sapmap_secstore.py",
+      "target": "function:modules/data_extraction/sapmap_secstore.py:extract_ssfs_key",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/data_extraction/sapmap_secstore.py",
+      "target": "function:modules/data_extraction/sapmap_secstore.py:_decrypt_ssfs_key_enc",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/data_extraction/sapmap_secstore.py",
+      "target": "function:modules/data_extraction/sapmap_secstore.py:_decrypt_ssfs_key_enc",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/data_extraction/sapmap_secstore.py",
+      "target": "function:modules/data_extraction/sapmap_secstore.py:parse_ssfs_dat",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/data_extraction/sapmap_secstore.py",
+      "target": "function:modules/data_extraction/sapmap_secstore.py:parse_ssfs_dat",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/data_extraction/sapmap_secstore.py",
+      "target": "function:modules/data_extraction/sapmap_secstore.py:_read_ssfs_files_via_abap",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/data_extraction/sapmap_secstore.py",
+      "target": "function:modules/data_extraction/sapmap_secstore.py:_read_ssfs_files_via_abap",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/data_extraction/sapmap_secstore.py",
+      "target": "function:modules/data_extraction/sapmap_secstore.py:_read_ssfs_files_via_sxpg",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/data_extraction/sapmap_secstore.py",
+      "target": "function:modules/data_extraction/sapmap_secstore.py:_read_ssfs_files_via_sxpg",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/data_extraction/sapmap_secstore.py",
+      "target": "function:modules/data_extraction/sapmap_secstore.py:_read_rsectab_via_sxpg",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/data_extraction/sapmap_secstore.py",
+      "target": "function:modules/data_extraction/sapmap_secstore.py:_read_rsectab_via_sxpg",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/data_extraction/sapmap_secstore.py",
+      "target": "function:modules/data_extraction/sapmap_secstore.py:decrypt_entry",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/data_extraction/sapmap_secstore.py",
+      "target": "function:modules/data_extraction/sapmap_secstore.py:decrypt_entry",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/data_extraction/sapmap_secstore.py",
+      "target": "function:modules/data_extraction/sapmap_secstore.py:_find_open_clients",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/data_extraction/sapmap_secstore.py",
+      "target": "function:modules/data_extraction/sapmap_secstore.py:_find_open_clients",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/data_extraction/sapmap_secstore.py",
+      "target": "function:modules/data_extraction/sapmap_secstore.py:_ensure_user_in_client",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/data_extraction/sapmap_secstore.py",
+      "target": "function:modules/data_extraction/sapmap_secstore.py:_ensure_user_in_client",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/data_extraction/sapmap_secstore.py",
+      "target": "function:modules/data_extraction/sapmap_secstore.py:download_and_decrypt",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/data_extraction/sapmap_secstore.py",
+      "target": "function:modules/data_extraction/sapmap_secstore.py:download_and_decrypt",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/data_extraction/sapmap_secstore.py",
+      "target": "function:modules/data_extraction/sapmap_secstore.py:_read_rsectab_via_abap",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/data_extraction/sapmap_secstore.py",
+      "target": "function:modules/data_extraction/sapmap_secstore.py:_read_rsectab_via_abap",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/data_extraction/sapmap_secstore.py",
+      "target": "function:modules/data_extraction/sapmap_secstore.py:_read_rsectab_via_rfc",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/data_extraction/sapmap_secstore.py",
+      "target": "function:modules/data_extraction/sapmap_secstore.py:_read_rsectab_via_rfc",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/data_extraction/sapmap_secstore.py",
+      "target": "function:modules/data_extraction/sapmap_secstore.py:categorise_entry",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/data_extraction/sapmap_secstore.py",
+      "target": "function:modules/data_extraction/sapmap_secstore.py:categorise_entry",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/data_extraction/sapmap_secstore.py",
+      "target": "function:modules/data_extraction/sapmap_secstore.py:integrate_results",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/data_extraction/sapmap_secstore.py",
+      "target": "function:modules/data_extraction/sapmap_secstore.py:integrate_results",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sap_client_enum.py",
+      "target": "function:modules/discovery/sap_client_enum.py:ni_recv",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sap_client_enum.py",
+      "target": "function:modules/discovery/sap_client_enum.py:ni_recv",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sap_client_enum.py",
+      "target": "function:modules/discovery/sap_client_enum.py:build_dp_header",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sap_client_enum.py",
+      "target": "function:modules/discovery/sap_client_enum.py:build_dp_header",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sap_client_enum.py",
+      "target": "function:modules/discovery/sap_client_enum.py:build_diag_init",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sap_client_enum.py",
+      "target": "function:modules/discovery/sap_client_enum.py:build_diag_init",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sap_client_enum.py",
+      "target": "function:modules/discovery/sap_client_enum.py:build_efield2_atom",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sap_client_enum.py",
+      "target": "function:modules/discovery/sap_client_enum.py:build_efield2_atom",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sap_client_enum.py",
+      "target": "function:modules/discovery/sap_client_enum.py:build_diag_login_packet",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sap_client_enum.py",
+      "target": "function:modules/discovery/sap_client_enum.py:build_diag_login_packet",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sap_client_enum.py",
+      "target": "function:modules/discovery/sap_client_enum.py:_extract_default_client",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sap_client_enum.py",
+      "target": "function:modules/discovery/sap_client_enum.py:_extract_default_client",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sap_client_enum.py",
+      "target": "function:modules/discovery/sap_client_enum.py:_check_client_redirection",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sap_client_enum.py",
+      "target": "function:modules/discovery/sap_client_enum.py:_check_client_redirection",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sap_client_enum.py",
+      "target": "function:modules/discovery/sap_client_enum.py:probe_client",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sap_client_enum.py",
+      "target": "function:modules/discovery/sap_client_enum.py:probe_client",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sap_client_enum.py",
+      "target": "function:modules/discovery/sap_client_enum.py:enumerate_clients",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sap_client_enum.py",
+      "target": "function:modules/discovery/sap_client_enum.py:enumerate_clients",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sap_client_enum.py",
+      "target": "function:modules/discovery/sap_client_enum.py:main",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sap_client_enum.py",
+      "target": "function:modules/discovery/sap_client_enum.py:main",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sap_default_creds.py",
+      "target": "function:modules/discovery/sap_default_creds.py:classify_login_response",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sap_default_creds.py",
+      "target": "function:modules/discovery/sap_default_creds.py:classify_login_response",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sap_default_creds.py",
+      "target": "function:modules/discovery/sap_default_creds.py:try_login",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sap_default_creds.py",
+      "target": "function:modules/discovery/sap_default_creds.py:try_login",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sap_default_creds.py",
+      "target": "function:modules/discovery/sap_default_creds.py:check_default_credentials",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sap_default_creds.py",
+      "target": "function:modules/discovery/sap_default_creds.py:check_default_credentials",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sap_default_creds.py",
+      "target": "function:modules/discovery/sap_default_creds.py:main",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sap_default_creds.py",
+      "target": "function:modules/discovery/sap_default_creds.py:main",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_cve_buckets.py",
+      "target": "function:modules/discovery/sapmap_scc_cve_buckets.py:cves_for_version",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_cve_buckets.py",
+      "target": "function:modules/discovery/sapmap_scc_cve_buckets.py:cves_for_version",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_cve_buckets.py",
+      "target": "function:modules/discovery/sapmap_scc_cve_buckets.py:score",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_cve_buckets.py",
+      "target": "function:modules/discovery/sapmap_scc_cve_buckets.py:score",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_fingerprint.py",
+      "target": "function:modules/discovery/sapmap_scc_fingerprint.py:_tls_fingerprint",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_fingerprint.py",
+      "target": "function:modules/discovery/sapmap_scc_fingerprint.py:_tls_fingerprint",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_fingerprint.py",
+      "target": "function:modules/discovery/sapmap_scc_fingerprint.py:_http_get",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_fingerprint.py",
+      "target": "function:modules/discovery/sapmap_scc_fingerprint.py:_http_get",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_fingerprint.py",
+      "target": "function:modules/discovery/sapmap_scc_fingerprint.py:_favicon_hashes",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_fingerprint.py",
+      "target": "function:modules/discovery/sapmap_scc_fingerprint.py:_favicon_hashes",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_fingerprint.py",
+      "target": "function:modules/discovery/sapmap_scc_fingerprint.py:scc_fingerprint",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_fingerprint.py",
+      "target": "function:modules/discovery/sapmap_scc_fingerprint.py:scc_fingerprint",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_pp_analyzer.py",
+      "target": "function:modules/discovery/sapmap_scc_pp_analyzer.py:_placeholders_in",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_pp_analyzer.py",
+      "target": "function:modules/discovery/sapmap_scc_pp_analyzer.py:_placeholders_in",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_pp_analyzer.py",
+      "target": "function:modules/discovery/sapmap_scc_pp_analyzer.py:_classify_dn_entry",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_pp_analyzer.py",
+      "target": "function:modules/discovery/sapmap_scc_pp_analyzer.py:_classify_dn_entry",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_pp_analyzer.py",
+      "target": "function:modules/discovery/sapmap_scc_pp_analyzer.py:_has_pp_enabled_mapping",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_pp_analyzer.py",
+      "target": "function:modules/discovery/sapmap_scc_pp_analyzer.py:_has_pp_enabled_mapping",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_pp_analyzer.py",
+      "target": "function:modules/discovery/sapmap_scc_pp_analyzer.py:_count_pp_enabled_mappings",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_pp_analyzer.py",
+      "target": "function:modules/discovery/sapmap_scc_pp_analyzer.py:_count_pp_enabled_mappings",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_pp_analyzer.py",
+      "target": "function:modules/discovery/sapmap_scc_pp_analyzer.py:analyze_subject_pattern",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_pp_analyzer.py",
+      "target": "function:modules/discovery/sapmap_scc_pp_analyzer.py:analyze_subject_pattern",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_pp_analyzer.py",
+      "target": "function:modules/discovery/sapmap_scc_pp_analyzer.py:analyze_pp_config",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_pp_analyzer.py",
+      "target": "function:modules/discovery/sapmap_scc_pp_analyzer.py:analyze_pp_config",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_pp_analyzer.py",
+      "target": "function:modules/discovery/sapmap_scc_pp_analyzer.py:analyze_pp_trust",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_pp_analyzer.py",
+      "target": "function:modules/discovery/sapmap_scc_pp_analyzer.py:analyze_pp_trust",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_pp_analyzer.py",
+      "target": "function:modules/discovery/sapmap_scc_pp_analyzer.py:_extract_cn",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_pp_analyzer.py",
+      "target": "function:modules/discovery/sapmap_scc_pp_analyzer.py:_extract_cn",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_pp_analyzer.py",
+      "target": "function:modules/discovery/sapmap_scc_pp_analyzer.py:analyze_pp_impersonation",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_pp_analyzer.py",
+      "target": "function:modules/discovery/sapmap_scc_pp_analyzer.py:analyze_pp_impersonation",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_pp_analyzer.py",
+      "target": "function:modules/discovery/sapmap_scc_pp_analyzer.py:analyze_backup",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_pp_analyzer.py",
+      "target": "function:modules/discovery/sapmap_scc_pp_analyzer.py:analyze_backup",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_relay.py",
+      "target": "function:modules/discovery/sapmap_scc_relay.py:_tcp_connect",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_relay.py",
+      "target": "function:modules/discovery/sapmap_scc_relay.py:_tcp_connect",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_relay.py",
+      "target": "function:modules/discovery/sapmap_scc_relay.py:_http_head",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_relay.py",
+      "target": "function:modules/discovery/sapmap_scc_relay.py:_http_head",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_relay.py",
+      "target": "function:modules/discovery/sapmap_scc_relay.py:probe_mapping",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_relay.py",
+      "target": "function:modules/discovery/sapmap_scc_relay.py:probe_mapping",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_relay.py",
+      "target": "function:modules/discovery/sapmap_scc_relay.py:probe_all",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_scc_relay.py",
+      "target": "function:modules/discovery/sapmap_scc_relay.py:probe_all",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    }
+  ]
+}

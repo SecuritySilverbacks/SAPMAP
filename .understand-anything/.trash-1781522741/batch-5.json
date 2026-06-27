@@ -1,0 +1,300 @@
+{
+  "nodes": [
+    {
+      "id": "document:docs/research/00_priority_summary.md",
+      "type": "document",
+      "name": "00_priority_summary.md",
+      "filePath": "docs/research/00_priority_summary.md",
+      "summary": "Priority summary across research topics — internal research note used to guide SAPMAP module design and detection work.",
+      "tags": [
+        "research",
+        "notes",
+        "sap",
+        "docs"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "document:docs/research/01_new_cves.md",
+      "type": "document",
+      "name": "01_new_cves.md",
+      "filePath": "docs/research/01_new_cves.md",
+      "summary": "Recent SAP CVE survey — internal research note used to guide SAPMAP module design and detection work.",
+      "tags": [
+        "research",
+        "notes",
+        "sap",
+        "docs"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "document:docs/research/02_java_to_abap_pivots.md",
+      "type": "document",
+      "name": "02_java_to_abap_pivots.md",
+      "filePath": "docs/research/02_java_to_abap_pivots.md",
+      "summary": "Java-to-ABAP pivot research — internal research note used to guide SAPMAP module design and detection work.",
+      "tags": [
+        "research",
+        "notes",
+        "sap",
+        "docs"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "document:docs/research/03_cloud_connector_btp.md",
+      "type": "document",
+      "name": "03_cloud_connector_btp.md",
+      "filePath": "docs/research/03_cloud_connector_btp.md",
+      "summary": "SAP Cloud Connector and BTP research — internal research note used to guide SAPMAP module design and detection work.",
+      "tags": [
+        "research",
+        "notes",
+        "sap",
+        "docs"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "document:docs/research/04_sso_trust_lateral_movement.md",
+      "type": "document",
+      "name": "04_sso_trust_lateral_movement.md",
+      "filePath": "docs/research/04_sso_trust_lateral_movement.md",
+      "summary": "SSO trust lateral-movement research — internal research note used to guide SAPMAP module design and detection work.",
+      "tags": [
+        "research",
+        "notes",
+        "sap",
+        "docs"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "document:docs/research/05_post_exploitation.md",
+      "type": "document",
+      "name": "05_post_exploitation.md",
+      "filePath": "docs/research/05_post_exploitation.md",
+      "summary": "Post-exploitation research — internal research note used to guide SAPMAP module design and detection work.",
+      "tags": [
+        "research",
+        "notes",
+        "sap",
+        "docs"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "document:docs/research/06_initial_access.md",
+      "type": "document",
+      "name": "06_initial_access.md",
+      "filePath": "docs/research/06_initial_access.md",
+      "summary": "Initial-access research — internal research note used to guide SAPMAP module design and detection work.",
+      "tags": [
+        "research",
+        "notes",
+        "sap",
+        "docs"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "document:docs/research/07_java_secstore_recovery.md",
+      "type": "document",
+      "name": "07_java_secstore_recovery.md",
+      "filePath": "docs/research/07_java_secstore_recovery.md",
+      "summary": "Java SecStore recovery research — internal research note used to guide SAPMAP module design and detection work.",
+      "tags": [
+        "research",
+        "notes",
+        "sap",
+        "docs"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "document:docs/research/08_cloud_connector_implementation_plan.md",
+      "type": "document",
+      "name": "08_cloud_connector_implementation_plan.md",
+      "filePath": "docs/research/08_cloud_connector_implementation_plan.md",
+      "summary": "SCC module implementation plan — internal research note used to guide SAPMAP module design and detection work.",
+      "tags": [
+        "research",
+        "notes",
+        "sap",
+        "docs"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "document:docs/research/09_principal_propagation_schema.md",
+      "type": "document",
+      "name": "09_principal_propagation_schema.md",
+      "filePath": "docs/research/09_principal_propagation_schema.md",
+      "summary": "Principal-propagation schema notes — internal research note used to guide SAPMAP module design and detection work.",
+      "tags": [
+        "research",
+        "notes",
+        "sap",
+        "docs"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "document:docs/research/10_icmad_implementation_plan.md",
+      "type": "document",
+      "name": "10_icmad_implementation_plan.md",
+      "filePath": "docs/research/10_icmad_implementation_plan.md",
+      "summary": "ICMAD module implementation plan — internal research note used to guide SAPMAP module design and detection work.",
+      "tags": [
+        "research",
+        "notes",
+        "sap",
+        "docs"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "document:docs/research/11_dpmon_virtual_sapstar_plan.md",
+      "type": "document",
+      "name": "11_dpmon_virtual_sapstar_plan.md",
+      "filePath": "docs/research/11_dpmon_virtual_sapstar_plan.md",
+      "summary": "dpmon virtual SAP* implementation plan — internal research note used to guide SAPMAP module design and detection work.",
+      "tags": [
+        "research",
+        "notes",
+        "sap",
+        "docs"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "document:docs/research/12_mysapsso2_ticket_forgery_operator_guide.md",
+      "type": "document",
+      "name": "12_mysapsso2_ticket_forgery_operator_guide.md",
+      "filePath": "docs/research/12_mysapsso2_ticket_forgery_operator_guide.md",
+      "summary": "MYSAPSSO2 ticket forgery operator guide — internal research note used to guide SAPMAP module design and detection work.",
+      "tags": [
+        "research",
+        "notes",
+        "sap",
+        "docs"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "document:docs/research/12_mysapsso2_ticket_forgery_plan.md",
+      "type": "document",
+      "name": "12_mysapsso2_ticket_forgery_plan.md",
+      "filePath": "docs/research/12_mysapsso2_ticket_forgery_plan.md",
+      "summary": "MYSAPSSO2 ticket forgery implementation plan — internal research note used to guide SAPMAP module design and detection work.",
+      "tags": [
+        "research",
+        "notes",
+        "sap",
+        "docs"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "document:docs/research/README.md",
+      "type": "document",
+      "name": "README.md",
+      "filePath": "docs/research/README.md",
+      "summary": "Research notes index — internal research note used to guide SAPMAP module design and detection work.",
+      "tags": [
+        "research",
+        "notes",
+        "sap",
+        "docs"
+      ],
+      "complexity": "simple"
+    }
+  ],
+  "edges": [
+    {
+      "source": "document:docs/research/README.md",
+      "target": "document:docs/research/00_priority_summary.md",
+      "type": "documents",
+      "weight": 0.5
+    },
+    {
+      "source": "document:docs/research/README.md",
+      "target": "document:docs/research/01_new_cves.md",
+      "type": "documents",
+      "weight": 0.5
+    },
+    {
+      "source": "document:docs/research/README.md",
+      "target": "document:docs/research/02_java_to_abap_pivots.md",
+      "type": "documents",
+      "weight": 0.5
+    },
+    {
+      "source": "document:docs/research/README.md",
+      "target": "document:docs/research/03_cloud_connector_btp.md",
+      "type": "documents",
+      "weight": 0.5
+    },
+    {
+      "source": "document:docs/research/README.md",
+      "target": "document:docs/research/04_sso_trust_lateral_movement.md",
+      "type": "documents",
+      "weight": 0.5
+    },
+    {
+      "source": "document:docs/research/README.md",
+      "target": "document:docs/research/05_post_exploitation.md",
+      "type": "documents",
+      "weight": 0.5
+    },
+    {
+      "source": "document:docs/research/README.md",
+      "target": "document:docs/research/06_initial_access.md",
+      "type": "documents",
+      "weight": 0.5
+    },
+    {
+      "source": "document:docs/research/README.md",
+      "target": "document:docs/research/07_java_secstore_recovery.md",
+      "type": "documents",
+      "weight": 0.5
+    },
+    {
+      "source": "document:docs/research/README.md",
+      "target": "document:docs/research/08_cloud_connector_implementation_plan.md",
+      "type": "documents",
+      "weight": 0.5
+    },
+    {
+      "source": "document:docs/research/README.md",
+      "target": "document:docs/research/09_principal_propagation_schema.md",
+      "type": "documents",
+      "weight": 0.5
+    },
+    {
+      "source": "document:docs/research/README.md",
+      "target": "document:docs/research/10_icmad_implementation_plan.md",
+      "type": "documents",
+      "weight": 0.5
+    },
+    {
+      "source": "document:docs/research/README.md",
+      "target": "document:docs/research/11_dpmon_virtual_sapstar_plan.md",
+      "type": "documents",
+      "weight": 0.5
+    },
+    {
+      "source": "document:docs/research/README.md",
+      "target": "document:docs/research/12_mysapsso2_ticket_forgery_operator_guide.md",
+      "type": "documents",
+      "weight": 0.5
+    },
+    {
+      "source": "document:docs/research/README.md",
+      "target": "document:docs/research/12_mysapsso2_ticket_forgery_plan.md",
+      "type": "documents",
+      "weight": 0.5
+    }
+  ]
+}

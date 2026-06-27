@@ -1,0 +1,51 @@
+{
+  "issues": [],
+  "warnings": [
+    "Node 'config:tests/fixtures/scc_pp/scc_config_clean_scoped.ini' has no edges (orphan)",
+    "Node 'config:tests/fixtures/scc_pp/scc_config_critical_empty.ini' has no edges (orphan)",
+    "Node 'config:tests/fixtures/scc_pp/scc_config_critical_name.ini' has no edges (orphan)",
+    "Node 'config:tests/fixtures/scc_pp/scc_config_high_email.ini' has no edges (orphan)",
+    "Node 'config:tests/fixtures/scc_pp/scc_config_high_hardcoded_ddic.ini' has no edges (orphan)",
+    "Node 'config:tests/fixtures/scc_pp/scc_config_medium_long_validity.ini' has no edges (orphan)",
+    "Node 'config:tests/fixtures/scc_pp/trustcfg_single_xsuaa.xml' has no edges (orphan)",
+    "Node 'config:tests/fixtures/scc_pp/trustcfg_xsuaa_plus_ias.xml' has no edges (orphan)",
+    "Node 'config:.understand-anything/.understandignore' has no edges (orphan)",
+    "Node 'file:modules/automation/__init__.py' has no edges (orphan)",
+    "Node 'file:modules/business_impact/__init__.py' has no edges (orphan)",
+    "Node 'file:modules/core/__init__.py' has no edges (orphan)",
+    "Node 'file:modules/core/sapmap_stop.py' has no edges (orphan)",
+    "Node 'file:modules/data_extraction/__init__.py' has no edges (orphan)",
+    "Node 'file:modules/discovery/__init__.py' has no edges (orphan)",
+    "Node 'file:modules/exploitation/__init__.py' has no edges (orphan)",
+    "Node 'file:modules/postex/__init__.py' has no edges (orphan)",
+    "Node 'file:modules/ops/__init__.py' has no edges (orphan)",
+    "Node 'file:modules/protocols/__init__.py' has no edges (orphan)",
+    "Node 'file:tests/__init__.py' has no edges (orphan)",
+    "Node 'file:tools/btp_ssh_bridge/Staticfile' has no edges (orphan)"
+  ],
+  "stats": {
+    "totalNodes": 877,
+    "totalEdges": 1398,
+    "totalLayers": 10,
+    "tourSteps": 13,
+    "nodeTypes": {
+      "file": 112,
+      "class": 32,
+      "function": 686,
+      "document": 22,
+      "config": 24,
+      "resource": 1
+    },
+    "edgeTypes": {
+      "contains": 718,
+      "exports": 511,
+      "imports": 21,
+      "calls": 55,
+      "documents": 25,
+      "configures": 25,
+      "related": 10,
+      "deploys": 1,
+      "depends_on": 32
+    }
+  }
+}

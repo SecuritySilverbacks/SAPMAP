@@ -1,0 +1,35 @@
+{
+  "batchIndex": 3,
+  "totalBatches": 14,
+  "files": [
+    {
+      "path": "modules/exploitation/sapmap_efspotato.py",
+      "language": "python",
+      "sizeLines": 1064,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/exploitation/sapmap_godpotato.py",
+      "language": "python",
+      "sizeLines": 531,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/exploitation/sapmap_miniplasma.py",
+      "language": "python",
+      "sizeLines": 1099,
+      "fileCategory": "code"
+    }
+  ],
+  "batchImportData": {
+    "modules/exploitation/sapmap_efspotato.py": [
+      "modules/exploitation/sapmap_godpotato.py",
+      "modules/exploitation/sapmap_miniplasma.py"
+    ],
+    "modules/exploitation/sapmap_godpotato.py": [
+      "modules/exploitation/sapmap_miniplasma.py"
+    ],
+    "modules/exploitation/sapmap_miniplasma.py": []
+  },
+  "neighborMap": {}
+}

@@ -1,0 +1,30 @@
+{
+  "batchIndex": 8,
+  "totalBatches": 14,
+  "files": [
+    {
+      "path": "tools/btp_ssh_bridge/README.md",
+      "language": "markdown",
+      "sizeLines": 168,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "tools/btp_ssh_bridge/index.html",
+      "language": "html",
+      "sizeLines": 8,
+      "fileCategory": "markup"
+    },
+    {
+      "path": "tools/btp_ssh_bridge/manifest.yml",
+      "language": "yaml",
+      "sizeLines": 19,
+      "fileCategory": "config"
+    }
+  ],
+  "batchImportData": {
+    "tools/btp_ssh_bridge/README.md": [],
+    "tools/btp_ssh_bridge/index.html": [],
+    "tools/btp_ssh_bridge/manifest.yml": []
+  },
+  "neighborMap": {}
+}

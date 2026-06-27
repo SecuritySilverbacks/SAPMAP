@@ -1,0 +1,17 @@
+{
+  "projectRoot": "/home/joris/Desktop/CLAUDE/SAPMAP",
+  "batchFiles": [
+    {"path": "modules/__init__.py", "language": "python", "sizeLines": 19, "fileCategory": "code"},
+    {"path": "sapmap.py", "language": "python", "sizeLines": 437, "fileCategory": "code"},
+    {"path": "tests/conftest.py", "language": "python", "sizeLines": 17, "fileCategory": "code"},
+    {"path": "tools/capture_real_ticket.py", "language": "python", "sizeLines": 293, "fileCategory": "code"},
+    {"path": "tools/compare_with_sap_ticket.py", "language": "python", "sizeLines": 307, "fileCategory": "code"}
+  ],
+  "batchImportData": {
+    "modules/__init__.py": [],
+    "sapmap.py": ["modules/__init__.py"],
+    "tests/conftest.py": ["modules/__init__.py"],
+    "tools/capture_real_ticket.py": ["modules/__init__.py"],
+    "tools/compare_with_sap_ticket.py": ["modules/__init__.py"]
+  }
+}

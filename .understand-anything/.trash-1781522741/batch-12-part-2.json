@@ -1,0 +1,1048 @@
+{
+  "nodes": [
+    {
+      "id": "file:modules/exploitation/sap_wdisp_admin.py",
+      "type": "file",
+      "name": "sap_wdisp_admin.py",
+      "filePath": "modules/exploitation/sap_wdisp_admin.py",
+      "summary": "Exploits the SAP Web Dispatcher admin interface: probes default credentials, scrapes the admin XHR endpoints, enumerates wdisp routing systems, and downloads icmauth user files for credential cracking.",
+      "tags": [
+        "exploitation",
+        "web-dispatcher",
+        "admin-interface",
+        "credential-attack",
+        "icmauth"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sap_wdisp_admin.py:probe_wd_admin_credentials",
+      "type": "function",
+      "name": "probe_wd_admin_credentials",
+      "filePath": "modules/exploitation/sap_wdisp_admin.py",
+      "lineRange": [
+        199,
+        384
+      ],
+      "summary": "Performs a controlled credential probe against the Web Dispatcher /sap/admin endpoint trying default and common combinations.",
+      "tags": [
+        "credential-attack",
+        "admin-interface",
+        "probe"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sap_wdisp_admin.py:_scrape_admin_xhr_urls",
+      "type": "function",
+      "name": "_scrape_admin_xhr_urls",
+      "filePath": "modules/exploitation/sap_wdisp_admin.py",
+      "lineRange": [
+        571,
+        678
+      ],
+      "summary": "Scrapes the Web Dispatcher admin interface HTML/JS to enumerate XHR endpoints exposing configuration and routing tables.",
+      "tags": [
+        "scraping",
+        "admin-interface",
+        "enumeration"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sap_wdisp_admin.py:fetch_wd_systems",
+      "type": "function",
+      "name": "fetch_wd_systems",
+      "filePath": "modules/exploitation/sap_wdisp_admin.py",
+      "lineRange": [
+        788,
+        1052
+      ],
+      "summary": "Enumerates all backend SAP systems registered behind the Web Dispatcher by parsing admin-interface responses into structured rows.",
+      "tags": [
+        "enumeration",
+        "web-dispatcher",
+        "discovery"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sap_wdisp_admin.py:parse_icmauth",
+      "type": "function",
+      "name": "parse_icmauth",
+      "filePath": "modules/exploitation/sap_wdisp_admin.py",
+      "lineRange": [
+        1114,
+        1171
+      ],
+      "summary": "Parses the SAP icmauth.txt user/hash file format extracting usernames, password hash material, and metadata.",
+      "tags": [
+        "icmauth",
+        "parsing",
+        "credentials"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sap_wdisp_admin.py:download_icmauth",
+      "type": "function",
+      "name": "download_icmauth",
+      "filePath": "modules/exploitation/sap_wdisp_admin.py",
+      "lineRange": [
+        1202,
+        1284
+      ],
+      "summary": "Downloads the icmauth.txt user file from the Web Dispatcher admin interface and persists it to loot.",
+      "tags": [
+        "download",
+        "icmauth",
+        "loot"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sap_wdisp_admin.py:_html_to_text",
+      "type": "function",
+      "name": "_html_to_text",
+      "filePath": "modules/exploitation/sap_wdisp_admin.py",
+      "lineRange": [
+        700,
+        732
+      ],
+      "summary": "Converts admin-interface HTML responses to plain text for downstream parsing.",
+      "tags": [
+        "html",
+        "utility",
+        "text"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/exploitation/sap_wdisp_admin.py:_parse_wdisp_systems",
+      "type": "function",
+      "name": "_parse_wdisp_systems",
+      "filePath": "modules/exploitation/sap_wdisp_admin.py",
+      "lineRange": [
+        735,
+        785
+      ],
+      "summary": "Parses the wdisp_systems table format into a list of backend system records.",
+      "tags": [
+        "parsing",
+        "wdisp",
+        "table"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/exploitation/sap_wdisp_admin.py:_http_get",
+      "type": "function",
+      "name": "_http_get",
+      "filePath": "modules/exploitation/sap_wdisp_admin.py",
+      "lineRange": [
+        145,
+        196
+      ],
+      "summary": "Performs an HTTP GET to the Web Dispatcher admin endpoint with basic auth and TLS support.",
+      "tags": [
+        "http",
+        "client",
+        "utility"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:modules/exploitation/sapmap_autopwn.py",
+      "type": "file",
+      "name": "sapmap_autopwn.py",
+      "filePath": "modules/exploitation/sapmap_autopwn.py",
+      "summary": "End-to-end SAP attack orchestrator that chains six phases (scan, exploit, enrich, propagate, BTP pivot, LPE) into a single auto-pwn workflow producing findings, loot, and final status reports.",
+      "tags": [
+        "entry-point",
+        "orchestrator",
+        "autopwn",
+        "attack-chain",
+        "exploitation"
+      ],
+      "complexity": "complex",
+      "languageNotes": "Long phase-structured pipeline; each phaseN_xxx routine emits findings and feeds the next phase."
+    },
+    {
+      "id": "class:modules/exploitation/sapmap_autopwn.py:AutoPwnStatus",
+      "type": "class",
+      "name": "AutoPwnStatus",
+      "filePath": "modules/exploitation/sapmap_autopwn.py",
+      "lineRange": [
+        62,
+        87
+      ],
+      "summary": "Tracks live progress (phase index, current step, counters) of an auto-pwn run for GUI display and final summary.",
+      "tags": [
+        "status",
+        "progress",
+        "tracking"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/exploitation/sapmap_autopwn.py:phase1_scan",
+      "type": "function",
+      "name": "phase1_scan",
+      "filePath": "modules/exploitation/sapmap_autopwn.py",
+      "lineRange": [
+        250,
+        373
+      ],
+      "summary": "Phase 1: scans the supplied target range, identifies SAP services, default credentials, and seeds the state with discovered nodes.",
+      "tags": [
+        "phase",
+        "scanning",
+        "discovery"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sapmap_autopwn.py:phase2_exploit",
+      "type": "function",
+      "name": "phase2_exploit",
+      "filePath": "modules/exploitation/sapmap_autopwn.py",
+      "lineRange": [
+        376,
+        643
+      ],
+      "summary": "Phase 2: triggers exploit chains (10KBLAZE, MS betrusted, CVE-2025-31324, etc.) against discovered SAP systems and records successful entries.",
+      "tags": [
+        "phase",
+        "exploitation",
+        "rce"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sapmap_autopwn.py:phase3_enrich",
+      "type": "function",
+      "name": "phase3_enrich",
+      "filePath": "modules/exploitation/sapmap_autopwn.py",
+      "lineRange": [
+        679,
+        950
+      ],
+      "summary": "Phase 3: enriches compromised systems with SecStore decryption, RFC destination harvest, BTP credentials, and OAuth profiles.",
+      "tags": [
+        "phase",
+        "enrichment",
+        "secstore",
+        "loot"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sapmap_autopwn.py:phase4_propagate",
+      "type": "function",
+      "name": "phase4_propagate",
+      "filePath": "modules/exploitation/sapmap_autopwn.py",
+      "lineRange": [
+        953,
+        1046
+      ],
+      "summary": "Phase 4: walks RFC trust edges and forged-ticket trust to propagate compromise across the SAP landscape.",
+      "tags": [
+        "phase",
+        "propagation",
+        "lateral-movement"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sapmap_autopwn.py:phase5_btp",
+      "type": "function",
+      "name": "phase5_btp",
+      "filePath": "modules/exploitation/sapmap_autopwn.py",
+      "lineRange": [
+        1064,
+        1122
+      ],
+      "summary": "Phase 5: mints BTP tokens, enumerates destination service, and pivots from on-prem compromise into BTP cloud control plane.",
+      "tags": [
+        "phase",
+        "btp",
+        "cloud-pivot"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sapmap_autopwn.py:phase6_lpe",
+      "type": "function",
+      "name": "phase6_lpe",
+      "filePath": "modules/exploitation/sapmap_autopwn.py",
+      "lineRange": [
+        1125,
+        1189
+      ],
+      "summary": "Phase 6: runs Linux/Windows local privilege escalation exploits against the OS hosting compromised SAP instances.",
+      "tags": [
+        "phase",
+        "lpe",
+        "privilege-escalation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sapmap_autopwn.py:detection_pass",
+      "type": "function",
+      "name": "detection_pass",
+      "filePath": "modules/exploitation/sapmap_autopwn.py",
+      "lineRange": [
+        1192,
+        1272
+      ],
+      "summary": "Optional post-run detection pass that emits IOC and telemetry pointers for blue-team validation of the autopwn footprint.",
+      "tags": [
+        "detection",
+        "ioc",
+        "telemetry"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sapmap_autopwn.py:autopwn_run",
+      "type": "function",
+      "name": "autopwn_run",
+      "filePath": "modules/exploitation/sapmap_autopwn.py",
+      "lineRange": [
+        1343,
+        1507
+      ],
+      "summary": "Top-level entry that wires the six phases together, drives a status object, persists state, and writes the final engagement report.",
+      "tags": [
+        "entry-point",
+        "orchestrator",
+        "autopwn"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sapmap_autopwn.py:_forge_default_tickets",
+      "type": "function",
+      "name": "_forge_default_tickets",
+      "filePath": "modules/exploitation/sapmap_autopwn.py",
+      "lineRange": [
+        195,
+        247
+      ],
+      "summary": "Helper that forges and stages MYSAPSSO2 tickets for default identities when eligible recipients are detected.",
+      "tags": [
+        "ticket-forgery",
+        "default",
+        "helper"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sapmap_autopwn.py:_print_summary",
+      "type": "function",
+      "name": "_print_summary",
+      "filePath": "modules/exploitation/sapmap_autopwn.py",
+      "lineRange": [
+        1279,
+        1336
+      ],
+      "summary": "Prints a final CLI summary of autopwn results: nodes, edges, exploits, loot, and recommended follow-ups.",
+      "tags": [
+        "reporting",
+        "cli",
+        "summary"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:modules/exploitation/sapmap_copyfail.py",
+      "type": "file",
+      "name": "sapmap_copyfail.py",
+      "filePath": "modules/exploitation/sapmap_copyfail.py",
+      "summary": "Linux CVE-2023-0461 (CopyFail) kernel-LPE module: assembles a payload ELF, verifies kernel vulnerability via uname/banners, and runs the exploit to obtain root.",
+      "tags": [
+        "exploitation",
+        "lpe",
+        "linux-kernel",
+        "cve-2023-0461",
+        "elf"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sapmap_copyfail.py:_build_elf",
+      "type": "function",
+      "name": "_build_elf",
+      "filePath": "modules/exploitation/sapmap_copyfail.py",
+      "lineRange": [
+        36,
+        87
+      ],
+      "summary": "Composes the ELF payload from embedded shellcode for staging on the target as the LPE exploit binary.",
+      "tags": [
+        "elf",
+        "shellcode",
+        "payload"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sapmap_copyfail.py:is_kernel_vulnerable",
+      "type": "function",
+      "name": "is_kernel_vulnerable",
+      "filePath": "modules/exploitation/sapmap_copyfail.py",
+      "lineRange": [
+        202,
+        214
+      ],
+      "summary": "Lightweight version check that gates the CopyFail exploit by kernel range.",
+      "tags": [
+        "lpe",
+        "version-check",
+        "gate"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/exploitation/sapmap_copyfail.py:check_copyfail",
+      "type": "function",
+      "name": "check_copyfail",
+      "filePath": "modules/exploitation/sapmap_copyfail.py",
+      "lineRange": [
+        217,
+        319
+      ],
+      "summary": "Pre-flight check that probes kernel version, distro, and write permissions to confirm CopyFail exploitability without launching.",
+      "tags": [
+        "lpe",
+        "pre-flight",
+        "linux-kernel"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sapmap_copyfail.py:run_as_root",
+      "type": "function",
+      "name": "run_as_root",
+      "filePath": "modules/exploitation/sapmap_copyfail.py",
+      "lineRange": [
+        326,
+        721
+      ],
+      "summary": "Stages the ELF, executes the CopyFail kernel-LPE chain, and runs caller-supplied root commands once UID 0 is obtained.",
+      "tags": [
+        "lpe",
+        "linux-kernel",
+        "exploitation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:modules/exploitation/sapmap_dirtyfrag.py",
+      "type": "file",
+      "name": "sapmap_dirtyfrag.py",
+      "filePath": "modules/exploitation/sapmap_dirtyfrag.py",
+      "summary": "Linux DirtyFragment (CVE-2024-1086) kernel-LPE module: pre-checks kernel vulnerability and runs the embedded exploit binary to obtain root on supported kernels.",
+      "tags": [
+        "exploitation",
+        "lpe",
+        "linux-kernel",
+        "cve-2024-1086",
+        "dirtyfragment"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sapmap_dirtyfrag.py:check_dirtyfrag",
+      "type": "function",
+      "name": "check_dirtyfrag",
+      "filePath": "modules/exploitation/sapmap_dirtyfrag.py",
+      "lineRange": [
+        64,
+        174
+      ],
+      "summary": "Probes kernel version, nftables availability, and userns/sysctl state to determine DirtyFragment exploitability.",
+      "tags": [
+        "lpe",
+        "pre-flight",
+        "linux-kernel"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sapmap_dirtyfrag.py:run_as_root",
+      "type": "function",
+      "name": "run_as_root",
+      "filePath": "modules/exploitation/sapmap_dirtyfrag.py",
+      "lineRange": [
+        181,
+        494
+      ],
+      "summary": "Stages and runs the DirtyFragment exploit, then executes caller-supplied commands as root upon success.",
+      "tags": [
+        "lpe",
+        "linux-kernel",
+        "exploitation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sapmap_dirtyfrag.py:_load_blob",
+      "type": "function",
+      "name": "_load_blob",
+      "filePath": "modules/exploitation/sapmap_dirtyfrag.py",
+      "lineRange": [
+        35,
+        53
+      ],
+      "summary": "Loads the embedded base64-encoded exploit binary blob from a local resource.",
+      "tags": [
+        "blob",
+        "loader",
+        "utility"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:modules/exploitation/sapmap_lpe_auto.py",
+      "type": "file",
+      "name": "sapmap_lpe_auto.py",
+      "filePath": "modules/exploitation/sapmap_lpe_auto.py",
+      "summary": "Auto-selects the appropriate Linux LPE module (CopyFail vs DirtyFragment) for a target by probing kernel and userland properties, then runs it as root.",
+      "tags": [
+        "exploitation",
+        "lpe",
+        "linux",
+        "auto-select",
+        "orchestrator"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/exploitation/sapmap_lpe_auto.py:check_linux_lpe",
+      "type": "function",
+      "name": "check_linux_lpe",
+      "filePath": "modules/exploitation/sapmap_lpe_auto.py",
+      "lineRange": [
+        27,
+        91
+      ],
+      "summary": "Runs all available Linux-LPE pre-checks and returns the strongest candidate exploit for the target.",
+      "tags": [
+        "lpe",
+        "pre-flight",
+        "selection"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sapmap_lpe_auto.py:run_linux_lpe",
+      "type": "function",
+      "name": "run_linux_lpe",
+      "filePath": "modules/exploitation/sapmap_lpe_auto.py",
+      "lineRange": [
+        94,
+        185
+      ],
+      "summary": "Dispatches to the chosen Linux LPE module's run_as_root and returns structured outcome.",
+      "tags": [
+        "lpe",
+        "dispatch",
+        "linux"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:modules/exploitation/sapmap_winlpe_auto.py",
+      "type": "file",
+      "name": "sapmap_winlpe_auto.py",
+      "filePath": "modules/exploitation/sapmap_winlpe_auto.py",
+      "summary": "Auto-selects the appropriate Windows LPE module for an SAP-host target based on OS version and patch level, then runs it as SYSTEM/Administrator.",
+      "tags": [
+        "exploitation",
+        "lpe",
+        "windows",
+        "auto-select",
+        "orchestrator"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/exploitation/sapmap_winlpe_auto.py:check_windows_lpe",
+      "type": "function",
+      "name": "check_windows_lpe",
+      "filePath": "modules/exploitation/sapmap_winlpe_auto.py",
+      "lineRange": [
+        43,
+        120
+      ],
+      "summary": "Runs Windows-LPE pre-checks via the OS-exec channel and returns the strongest candidate exploit.",
+      "tags": [
+        "lpe",
+        "pre-flight",
+        "windows"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sapmap_winlpe_auto.py:run_windows_lpe",
+      "type": "function",
+      "name": "run_windows_lpe",
+      "filePath": "modules/exploitation/sapmap_winlpe_auto.py",
+      "lineRange": [
+        123,
+        193
+      ],
+      "summary": "Dispatches to the chosen Windows LPE module and returns structured outcome.",
+      "tags": [
+        "lpe",
+        "dispatch",
+        "windows"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:modules/ops/__init__.py",
+      "type": "file",
+      "name": "__init__.py",
+      "filePath": "modules/ops/__init__.py",
+      "summary": "Empty package init that marks modules/ops as a Python package containing cleanup operations.",
+      "tags": [
+        "package",
+        "init",
+        "barrel"
+      ],
+      "complexity": "simple"
+    }
+  ],
+  "edges": [
+    {
+      "source": "file:modules/exploitation/sap_wdisp_admin.py",
+      "target": "function:modules/exploitation/sap_wdisp_admin.py:probe_wd_admin_credentials",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_wdisp_admin.py",
+      "target": "function:modules/exploitation/sap_wdisp_admin.py:_scrape_admin_xhr_urls",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_wdisp_admin.py",
+      "target": "function:modules/exploitation/sap_wdisp_admin.py:fetch_wd_systems",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_wdisp_admin.py",
+      "target": "function:modules/exploitation/sap_wdisp_admin.py:parse_icmauth",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_wdisp_admin.py",
+      "target": "function:modules/exploitation/sap_wdisp_admin.py:download_icmauth",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_wdisp_admin.py",
+      "target": "function:modules/exploitation/sap_wdisp_admin.py:_html_to_text",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_wdisp_admin.py",
+      "target": "function:modules/exploitation/sap_wdisp_admin.py:_parse_wdisp_systems",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_wdisp_admin.py",
+      "target": "function:modules/exploitation/sap_wdisp_admin.py:_http_get",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_wdisp_admin.py",
+      "target": "function:modules/exploitation/sap_wdisp_admin.py:probe_wd_admin_credentials",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sap_wdisp_admin.py",
+      "target": "function:modules/exploitation/sap_wdisp_admin.py:fetch_wd_systems",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sap_wdisp_admin.py",
+      "target": "function:modules/exploitation/sap_wdisp_admin.py:download_icmauth",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_autopwn.py",
+      "target": "class:modules/exploitation/sapmap_autopwn.py:AutoPwnStatus",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_autopwn.py",
+      "target": "function:modules/exploitation/sapmap_autopwn.py:phase1_scan",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_autopwn.py",
+      "target": "function:modules/exploitation/sapmap_autopwn.py:phase2_exploit",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_autopwn.py",
+      "target": "function:modules/exploitation/sapmap_autopwn.py:phase3_enrich",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_autopwn.py",
+      "target": "function:modules/exploitation/sapmap_autopwn.py:phase4_propagate",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_autopwn.py",
+      "target": "function:modules/exploitation/sapmap_autopwn.py:phase5_btp",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_autopwn.py",
+      "target": "function:modules/exploitation/sapmap_autopwn.py:phase6_lpe",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_autopwn.py",
+      "target": "function:modules/exploitation/sapmap_autopwn.py:detection_pass",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_autopwn.py",
+      "target": "function:modules/exploitation/sapmap_autopwn.py:autopwn_run",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_autopwn.py",
+      "target": "function:modules/exploitation/sapmap_autopwn.py:_forge_default_tickets",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_autopwn.py",
+      "target": "function:modules/exploitation/sapmap_autopwn.py:_print_summary",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_autopwn.py",
+      "target": "function:modules/exploitation/sapmap_autopwn.py:autopwn_run",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_autopwn.py",
+      "target": "class:modules/exploitation/sapmap_autopwn.py:AutoPwnStatus",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_autopwn.py",
+      "target": "file:modules/exploitation/sap_mysapsso2.py",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_autopwn.py",
+      "target": "file:modules/exploitation/sap_ticket_propagate.py",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_autopwn.py",
+      "target": "file:modules/exploitation/sap_ticket_delivery.py",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_autopwn.py",
+      "target": "file:modules/exploitation/sap_onprem_to_btp.py",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_autopwn.py",
+      "target": "file:modules/exploitation/sap_pp_probe.py",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_autopwn.py",
+      "target": "file:modules/exploitation/sapmap_lpe_auto.py",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_autopwn.py",
+      "target": "file:modules/exploitation/sapmap_winlpe_auto.py",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_autopwn.py",
+      "target": "file:modules/postex/sap_pse_loot.py",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_autopwn.py",
+      "target": "file:modules/postex/sap_profile_check.py",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_autopwn.py",
+      "target": "file:modules/postex/sapmap_chain.py",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_autopwn.py",
+      "target": "file:modules/postex/sapmap_lpe.py",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_autopwn.py",
+      "target": "file:modules/postex/sap_ssh_lateral.py",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_autopwn.py",
+      "target": "file:modules/postex/sap_ume_user_create.py",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_autopwn.py",
+      "target": "file:modules/postex/sapmap_capability_analyser.py",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_autopwn.py",
+      "target": "file:modules/exploitation/sap_transport_import.py",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_autopwn.py",
+      "target": "file:modules/exploitation/sap_wdisp_admin.py",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_copyfail.py",
+      "target": "function:modules/exploitation/sapmap_copyfail.py:_build_elf",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_copyfail.py",
+      "target": "function:modules/exploitation/sapmap_copyfail.py:is_kernel_vulnerable",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_copyfail.py",
+      "target": "function:modules/exploitation/sapmap_copyfail.py:check_copyfail",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_copyfail.py",
+      "target": "function:modules/exploitation/sapmap_copyfail.py:run_as_root",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_copyfail.py",
+      "target": "function:modules/exploitation/sapmap_copyfail.py:check_copyfail",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_copyfail.py",
+      "target": "function:modules/exploitation/sapmap_copyfail.py:run_as_root",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_dirtyfrag.py",
+      "target": "function:modules/exploitation/sapmap_dirtyfrag.py:check_dirtyfrag",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_dirtyfrag.py",
+      "target": "function:modules/exploitation/sapmap_dirtyfrag.py:run_as_root",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_dirtyfrag.py",
+      "target": "function:modules/exploitation/sapmap_dirtyfrag.py:_load_blob",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_dirtyfrag.py",
+      "target": "function:modules/exploitation/sapmap_dirtyfrag.py:check_dirtyfrag",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_dirtyfrag.py",
+      "target": "function:modules/exploitation/sapmap_dirtyfrag.py:run_as_root",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_lpe_auto.py",
+      "target": "function:modules/exploitation/sapmap_lpe_auto.py:check_linux_lpe",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_lpe_auto.py",
+      "target": "function:modules/exploitation/sapmap_lpe_auto.py:run_linux_lpe",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_lpe_auto.py",
+      "target": "function:modules/exploitation/sapmap_lpe_auto.py:check_linux_lpe",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_lpe_auto.py",
+      "target": "function:modules/exploitation/sapmap_lpe_auto.py:run_linux_lpe",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_lpe_auto.py",
+      "target": "file:modules/exploitation/sapmap_copyfail.py",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_lpe_auto.py",
+      "target": "file:modules/exploitation/sapmap_dirtyfrag.py",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_winlpe_auto.py",
+      "target": "function:modules/exploitation/sapmap_winlpe_auto.py:check_windows_lpe",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_winlpe_auto.py",
+      "target": "function:modules/exploitation/sapmap_winlpe_auto.py:run_windows_lpe",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_winlpe_auto.py",
+      "target": "function:modules/exploitation/sapmap_winlpe_auto.py:check_windows_lpe",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_winlpe_auto.py",
+      "target": "function:modules/exploitation/sapmap_winlpe_auto.py:run_windows_lpe",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    }
+  ]
+}

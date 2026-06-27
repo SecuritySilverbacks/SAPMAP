@@ -1,0 +1,49 @@
+{
+  "nodes": [
+    {
+      "id": "resource:tools/ssfs_decrypt/Makefile",
+      "type": "resource",
+      "name": "Makefile",
+      "filePath": "tools/ssfs_decrypt/Makefile",
+      "summary": "GNU Make recipe that compiles SecStoreAccess.java and SecStoreAccessException.java into decrypt-ssfs.jar, the JNI helper used by SAPMAP to decrypt SAP Cloud Connector SSFS secret stores via libsapscc20jni at runtime.",
+      "tags": ["build-system", "infrastructure", "jni", "scc-ssfs", "java"],
+      "complexity": "simple",
+      "languageNotes": "Makefile uses ?= for tool overrides (JAVAC, JAR) and links against SAP's native lib only at runtime — no SAP code is compiled or redistributed."
+    },
+    {
+      "id": "file:tools/ssfs_decrypt/build.bat",
+      "type": "file",
+      "name": "build.bat",
+      "filePath": "tools/ssfs_decrypt/build.bat",
+      "summary": "Windows batch build script equivalent to the Makefile — compiles the SecStoreAccess JNI helper sources into decrypt-ssfs.jar using a system JDK with explicit errorlevel checks after javac and jar.",
+      "tags": ["build-system", "windows", "jni", "scc-ssfs", "script"],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:tools/ssfs_decrypt/build.sh",
+      "type": "file",
+      "name": "build.sh",
+      "filePath": "tools/ssfs_decrypt/build.sh",
+      "summary": "Portable POSIX shell build script (Linux + macOS, arm64 + x86_64) that compiles the SecStoreAccess JNI helper sources into decrypt-ssfs.jar using only a JDK on PATH, no make required.",
+      "tags": ["build-system", "shell", "jni", "scc-ssfs", "script"],
+      "complexity": "simple",
+      "languageNotes": "Uses set -euo pipefail and cd \"$(dirname \"$0\")\" so the script works from any invocation directory."
+    }
+  ],
+  "edges": [
+    {
+      "source": "resource:tools/ssfs_decrypt/Makefile",
+      "target": "file:tools/ssfs_decrypt/build.sh",
+      "type": "related",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "resource:tools/ssfs_decrypt/Makefile",
+      "target": "file:tools/ssfs_decrypt/build.bat",
+      "type": "related",
+      "direction": "forward",
+      "weight": 0.5
+    }
+  ]
+}

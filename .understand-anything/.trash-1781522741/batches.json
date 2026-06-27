@@ -1,0 +1,2450 @@
+{
+  "schemaVersion": 1,
+  "algorithm": "louvain",
+  "totalFiles": 159,
+  "totalBatches": 14,
+  "exportsByPath": {
+    ".understand-anything/.understandignore": [],
+    "modules/__init__.py": [],
+    "modules/automation/__init__.py": [],
+    "modules/automation/sapmap_script.py": [
+      "_local_ip",
+      "_map_step",
+      "_read_token",
+      "_expand_macros",
+      "_script_flash_label",
+      "ScriptRunner"
+    ],
+    "modules/business_impact/__init__.py": [],
+    "modules/business_impact/sap_java_impact.py": [
+      "_register",
+      "list_scenarios",
+      "_matches",
+      "_short",
+      "_pi_po_tampering",
+      "_nwdi_cts_plus",
+      "_hr_ess_mss",
+      "_kmc_documents",
+      "_availability_outage",
+      "_audit_tampering",
+      "assess"
+    ],
+    "modules/business_impact/sapmap_impact.py": [
+      "ImpactResult",
+      "impact_scenario",
+      "list_scenarios",
+      "_read_table",
+      "_format_eur",
+      "_client_landscape",
+      "_salary_exfiltration",
+      "_vendor_bank_fraud",
+      "_purchase_order_exposure",
+      "_user_account_takeover",
+      "_customer_data_breach",
+      "_supply_chain_intel",
+      "_sales_revenue",
+      "_production_sabotage",
+      "_rfc_landscape_exposure",
+      "assess_one",
+      "assess_all"
+    ],
+    "modules/core/__init__.py": [],
+    "modules/core/sapmap_attack.py": [
+      "lookup",
+      "techniques_for",
+      "technique_details",
+      "aggregate_by_tactic",
+      "collect_from_findings",
+      "_score_for",
+      "to_navigator_layer",
+      "heatmap_grid"
+    ],
+    "modules/core/sapmap_config.py": [
+      "sapmap_username",
+      "_cleanup_sql",
+      "sql_mssql_abap",
+      "sql_mssql_java",
+      "sql_maxdb",
+      "sql_hana",
+      "sql_oracle",
+      "sql_db2",
+      "normalize_db_type"
+    ],
+    "modules/core/sapmap_diff.py": [
+      "_conn_key",
+      "_finding_key",
+      "_node_summary",
+      "_conn_summary",
+      "_scc_summary",
+      "_finding_summary",
+      "_changed_node_fields",
+      "_changed_conn_fields",
+      "_changed_scc_fields",
+      "compute_state_diff",
+      "_md_esc",
+      "build_diff_markdown",
+      "_hesc",
+      "_delta_kpi",
+      "build_diff_html"
+    ],
+    "modules/core/sapmap_errors.py": [
+      "format_rfc_exception"
+    ],
+    "modules/core/sapmap_findings.py": [
+      "register_listener",
+      "attach_state",
+      "_persist_to_node",
+      "emit_finding",
+      "get_since",
+      "clear",
+      "snapshot",
+      "load_snapshot"
+    ],
+    "modules/core/sapmap_gui.py": [
+      "_derive_sid",
+      "_resolve_host",
+      "ui_command",
+      "_add_console_line",
+      "_console_push_finding",
+      "OutputCapture",
+      "_task_start",
+      "_task_end",
+      "_get_active_tasks",
+      "_register_betrusted_stop",
+      "_unregister_betrusted_stop",
+      "_signal_all_betrusted_stops",
+      "_bg",
+      "_set_wd_port_protocol",
+      "_enrich_wd_backends_from_admin_table",
+      "ShellSession",
+      "_detect_local_ip",
+      "_enumerate_windows_drives",
+      "_expand_scc_roots_across_drives",
+      "_win_multistep_payload",
+      "_detect_is_windows",
+      "_detect_python_cmd",
+      "_perl_reverse_shell",
+      "_perl_bind_shell",
+      "_generate_payload",
+      "_generate_bind_payload",
+      "_build_linuxlpe_shell_dispatch",
+      "SAPMAPApi",
+      "create_app"
+    ],
+    "modules/core/sapmap_html.py": [
+      "get_html"
+    ],
+    "modules/core/sapmap_models.py": [
+      "Severity",
+      "Finding",
+      "InstanceInfo",
+      "Credentials",
+      "CreatedUser",
+      "ForgedTicket",
+      "TrustRelation",
+      "SAPNode",
+      "RFCConnection",
+      "SCCMapping",
+      "SCCNode",
+      "BTPDestination",
+      "BTPSubaccountNode",
+      "SAPMAPState"
+    ],
+    "modules/core/sapmap_remediation.py": [
+      "_note",
+      "_cve",
+      "_attack",
+      "Remediation",
+      "lookup",
+      "all_capabilities",
+      "to_dict"
+    ],
+    "modules/core/sapmap_report.py": [
+      "_stat_table",
+      "_esc",
+      "_executive_summary",
+      "_render_structured_remediation",
+      "_html_render_structured_remediation",
+      "_build_hardening_html",
+      "_hardening_checklist_section",
+      "_findings_section",
+      "_attack_coverage_section",
+      "_trust_chains_section",
+      "_per_system_table",
+      "_credentials_section",
+      "_scc_section",
+      "_capability_section",
+      "_btp_section",
+      "_derive_landscape_recommendations",
+      "_recommendations_section",
+      "build_markdown_report",
+      "_hesc",
+      "_kpi_card",
+      "_build_landscape_svg",
+      "build_html_report"
+    ],
+    "modules/core/sapmap_state.py": [
+      "_ensure_state_dir",
+      "ensure_loot_dir",
+      "save_state",
+      "load_state",
+      "_save_rfc_cache",
+      "_load_rfc_cache",
+      "load_rfc_cache_into",
+      "reset_rfc_cache",
+      "save_created_destination",
+      "_load_dest_log",
+      "load_created_destinations_into",
+      "clear_created_destinations",
+      "auto_save_path",
+      "list_saved_states"
+    ],
+    "modules/core/sapmap_stop.py": [
+      "is_stop_requested",
+      "request_stop",
+      "reset_stop",
+      "stop_event"
+    ],
+    "modules/data_extraction/__init__.py": [],
+    "modules/data_extraction/poc_remote_abap_exec.py": [
+      "connect",
+      "xmi_logon",
+      "xmi_logoff",
+      "job_open",
+      "job_add_step",
+      "job_close",
+      "job_start",
+      "job_wait",
+      "job_read_log",
+      "job_read_spool",
+      "main"
+    ],
+    "modules/data_extraction/sap_btp.py": [
+      "_rate_limit_check",
+      "_token_fingerprint",
+      "decode_token_claims",
+      "extract_region_from_token",
+      "_btp_get",
+      "_json_or_none",
+      "_api_root",
+      "_destinations_root",
+      "detect_token_kind",
+      "extract_subaccount_id_from_destination_token",
+      "extract_subdomain_from_token",
+      "validate_token",
+      "enumerate_subaccounts",
+      "pull_cf_topology",
+      "pull_scc_mappings",
+      "pull_destinations",
+      "pull_destinations_via_destination_token",
+      "_hostname_in_url",
+      "_materialise_btp_target",
+      "link_destinations_to_onprem"
+    ],
+    "modules/data_extraction/sap_java_db.py": [
+      "invoke_jdbc_query",
+      "group_destinations",
+      "parse_password_hashes",
+      "hashes_to_text"
+    ],
+    "modules/data_extraction/sap_java_runner.py": [
+      "_wait_for_jsp_ready",
+      "_ensure_java_db_jsp",
+      "download_java_table",
+      "extract_java_password_hashes",
+      "assess_java_impact",
+      "read_java_destinations"
+    ],
+    "modules/data_extraction/sap_java_secstore_offline.py": [
+      "_strip_alphabet_and_length",
+      "_pkcs12_kdf",
+      "_pwd_to_bmp",
+      "_pbe_decrypt_3des_cbc",
+      "deobfuscate_seckey",
+      "decrypt_vbytes",
+      "decrypt_secstore_properties"
+    ],
+    "modules/data_extraction/sap_java_secstore_runner.py": [
+      "extract_java_secstore"
+    ],
+    "modules/data_extraction/sap_java_secstore.py": [
+      "invoke_secstore_jsp",
+      "classify_entry",
+      "extract_keyphrase",
+      "detect_algorithm",
+      "decrypt_files_offline",
+      "parse_jdbc_entry"
+    ],
+    "modules/data_extraction/sap_oa2c.py": [
+      "_normalise_uuid",
+      "_pick",
+      "_read_table_all_columns",
+      "_try_read_first_populated",
+      "_columns_matching_hints",
+      "_reread_with_explicit_columns",
+      "_read_via_abap_fallback",
+      "read_oa2c_profiles",
+      "find_secret_for_profile"
+    ],
+    "modules/data_extraction/sap_scc_harvest.py": [
+      "_b64_only",
+      "harvest_scc_from_pwned_node",
+      "harvest_scc_hashes_via_lpe",
+      "harvest_scc_mappings_from_pwned_node"
+    ],
+    "modules/data_extraction/sapmap_scc_admin.py": [
+      "SCCAdminSession",
+      "_NoRedirect",
+      "_build_session",
+      "_request",
+      "login",
+      "_basic_headers",
+      "_get_v1_subaccounts_raw",
+      "_get_backends_raw",
+      "_get_versions_raw",
+      "pull_versions",
+      "pull_subaccounts",
+      "_safe_int",
+      "_is_pp_auth_mode",
+      "_normalize_mapping",
+      "_path_for_link",
+      "_fetch_resources",
+      "pull_mappings",
+      "pull_ha_state",
+      "logout",
+      "probe_default_creds"
+    ],
+    "modules/data_extraction/sapmap_scc_keystore.py": [
+      "_slug",
+      "_ssl_ctx",
+      "_basic_header",
+      "fetch_backup",
+      "_sha256",
+      "parse_backup",
+      "_xml_text",
+      "_safe_int",
+      "_parse_resources_xml",
+      "parse_mappings_from_backends_xml",
+      "parse_mappings_from_zip",
+      "parse_pp_config_from_zip",
+      "parse_pp_trust_from_zip",
+      "parse_ha_state_from_zip",
+      "parse_user_hashes_from_xml",
+      "try_decrypt_users_xml",
+      "extract_keystore"
+    ],
+    "modules/data_extraction/sapmap_scc_ssfs_decrypt.py": [
+      "_slug",
+      "_sha256",
+      "find_helper_jar",
+      "find_native_lib",
+      "_detect_ssfs_sid",
+      "_extract_ssfs_to_tmp",
+      "_parse_ssfs_records",
+      "decrypt_ssfs_pure",
+      "decrypt_ssfs_from_raw_bytes",
+      "decrypt_ssfs",
+      "unlock_keystores",
+      "decrypt_and_unlock"
+    ],
+    "modules/data_extraction/sapmap_secstore.py": [
+      "_require_crypto",
+      "_des_ecb_encrypt",
+      "_des3_manual",
+      "_derive_keyprime",
+      "extract_ssfs_key",
+      "_decrypt_ssfs_key_enc",
+      "parse_ssfs_dat",
+      "_read_ssfs_files_via_abap",
+      "_read_ssfs_files_via_sxpg",
+      "_read_rsectab_via_sxpg",
+      "decrypt_entry",
+      "_find_open_clients",
+      "_ensure_user_in_client",
+      "download_and_decrypt",
+      "_read_rsectab_via_abap",
+      "_read_rsectab_via_rfc",
+      "categorise_entry",
+      "integrate_results",
+      "save_loot"
+    ],
+    "modules/discovery/__init__.py": [],
+    "modules/discovery/sap_client_enum.py": [
+      "_diag_connect",
+      "ni_send",
+      "ni_recv",
+      "build_dp_header",
+      "build_diag_init",
+      "build_efield2_atom",
+      "build_diag_login_packet",
+      "get_random_string",
+      "_extract_default_client",
+      "_check_client_redirection",
+      "probe_client",
+      "enumerate_clients",
+      "main"
+    ],
+    "modules/discovery/sap_default_creds.py": [
+      "classify_login_response",
+      "try_login",
+      "check_default_credentials",
+      "main"
+    ],
+    "modules/discovery/sapmap_rfc.py": [
+      "_run_with_timeout",
+      "_detach_if_timed_out",
+      "set_sdk_path",
+      "_get_connection",
+      "test_connection",
+      "check_user_exists",
+      "next_sapmap_username",
+      "get_user_details",
+      "_abap_install_and_run",
+      "_susr_suim_sap_all_check",
+      "get_direct_user_profiles",
+      "get_remote_user_profiles",
+      "reset_user_password_via_bapi",
+      "delete_user_via_bapi",
+      "is_sapmap_owned_user",
+      "create_user_via_bapi",
+      "_run_abap_program",
+      "create_user_via_destination",
+      "delete_user",
+      "_test_via_sdf_rfc_check",
+      "_test_via_dest_check",
+      "_test_via_dest_check_raw",
+      "test_rfc_destination",
+      "ping_rfc_destination",
+      "_ping_via_iwb_check",
+      "_ping_via_direct_connect",
+      "get_remote_sysinfo",
+      "retrieve_rfc_connections",
+      "_supplement_trusted_destinations",
+      "retrieve_rfctrust",
+      "retrieve_rfcsysacl",
+      "retrieve_strustsso2_trust",
+      "_parse_rsrfcchk_output",
+      "_try_rfc_read_table_fallback",
+      "_try_rfcdes_raw_fallback",
+      "_try_tableblock_compressed_fallback",
+      "_parse_rfcdes_options",
+      "_parse_rfcdes_http_options",
+      "_rfcdes_is_trusted",
+      "_build_rfcdes_conn",
+      "get_table_columns",
+      "read_table",
+      "download_password_hashes",
+      "_download_hashes_via_sxpg",
+      "download_usrextid",
+      "get_client_roles",
+      "update_node_production_status",
+      "create_tcpip_destination",
+      "execute_remote_command",
+      "execute_local_command"
+    ],
+    "modules/discovery/sapmap_scanner.py": [
+      "_attack_for",
+      "_derive_instance_from_wd_port",
+      "parse_targets",
+      "_is_host_alive",
+      "alive_sweep",
+      "_scan_port",
+      "_verify_sap_diag",
+      "_verify_sap_gateway",
+      "_query_diag_dispatcher_info",
+      "_query_ms_http_info",
+      "_build_port_list",
+      "fast_scan_host",
+      "fast_scan_network",
+      "check_ms_betrusted",
+      "check_cve_2025_31324",
+      "check_cve_2020_6287",
+      "check_cve_2022_22536",
+      "enrich_system_info",
+      "_query_sapcontrol_sid",
+      "query_public_info",
+      "fingerprint_web_dispatcher",
+      "detect_wd_cache",
+      "_open_socket_for_wd",
+      "discover_wd_backends",
+      "_query_sapstart_banner",
+      "_query_msghttp_banner",
+      "quick_probe_sid",
+      "_query_host_agent_systems",
+      "_query_sapcontrol_os",
+      "enumerate_system_clients",
+      "_maybe_build_scc_node",
+      "_build_nodes_from_fast_scan",
+      "match_wd_backends_to_nodes",
+      "discover_systems",
+      "_sapology_system_to_node",
+      "_deep_scan_with_sapology",
+      "deep_scan_single",
+      "extract_targets_from_router_info",
+      "_sap_ports_for_instance_range",
+      "scan_host_via_saprouter",
+      "scan_network_via_saprouter"
+    ],
+    "modules/discovery/sapmap_scc_cve_buckets.py": [
+      "_parse",
+      "_ge",
+      "_lt",
+      "cves_for_version",
+      "score",
+      "all_known_cves"
+    ],
+    "modules/discovery/sapmap_scc_fingerprint.py": [
+      "_build_unverified_ctx",
+      "_tls_fingerprint",
+      "_http_get",
+      "_favicon_hashes",
+      "scc_fingerprint"
+    ],
+    "modules/discovery/sapmap_scc_pp_analyzer.py": [
+      "_placeholders_in",
+      "_classify_dn_entry",
+      "_has_pp_enabled_mapping",
+      "_count_pp_enabled_mappings",
+      "analyze_subject_pattern",
+      "analyze_pp_config",
+      "analyze_pp_trust",
+      "_extract_cn",
+      "analyze_pp_impersonation",
+      "analyze_backup"
+    ],
+    "modules/discovery/sapmap_scc_relay.py": [
+      "_now_iso",
+      "_tcp_connect",
+      "_http_head",
+      "probe_mapping",
+      "probe_all"
+    ],
+    "modules/exploitation/__init__.py": [],
+    "modules/exploitation/_dirtyfrag_blob.py": [],
+    "modules/exploitation/_efspotato_blob.py": [],
+    "modules/exploitation/_godpotato_blob.py": [],
+    "modules/exploitation/_miniplasma_blob.py": [],
+    "modules/exploitation/sap_betrusted_chain.py": [
+      "_get_local_ip_towards",
+      "try_betrusted_chain",
+      "create_user_betrusted_chain"
+    ],
+    "modules/exploitation/sap_cve_2020_6287.py": [
+      "_build_url",
+      "_head",
+      "_get",
+      "_post_soap",
+      "check_cve_2020_6287",
+      "exploit_create_user",
+      "exploit_create_admin",
+      "verify_login",
+      "download_file_via_traversal"
+    ],
+    "modules/exploitation/sap_cve_2022_22536.py": [
+      "_parse_kernel",
+      "lookup_patch_status",
+      "_throttle_check",
+      "clear_throttle",
+      "_build_detect_payload",
+      "_validate_resource_and_cache",
+      "_count_response_lines",
+      "_open_socket",
+      "probe_icmad",
+      "assess_icmad",
+      "_build_bypass_payload",
+      "_split_responses",
+      "_baseline_response",
+      "_bypass_succeeded",
+      "run_acl_bypass",
+      "list_heap_dumps",
+      "download_heap_dump",
+      "_main"
+    ],
+    "modules/exploitation/sap_cve_2025_31324.py": [
+      "_build_url",
+      "_post_octet_stream",
+      "_zip_properties",
+      "_random_filename",
+      "check_cve_2025_31324",
+      "_build_cmd_payload",
+      "_classify_exploit_response",
+      "exploit_cve_2025_31324_command",
+      "_build_drop_payload",
+      "exploit_cve_2025_31324_dropshell",
+      "write_file_via_shell",
+      "run_dropshell_command"
+    ],
+    "modules/exploitation/sap_db_sql_writers.py": [
+      "_get_local_ip_towards",
+      "_cmd_caret_escape",
+      "_oracle_write_and_exec_win",
+      "_mssql_write_and_exec_win",
+      "_hana_write_and_exec",
+      "_maxdb_write_and_exec",
+      "_execute_sql_via_gateway"
+    ],
+    "modules/exploitation/sap_dpmon_sapstar.py": [
+      "_kernel_ge",
+      "is_dpmon_sap_star_available",
+      "_build_activation_input",
+      "_build_list_input",
+      "_build_delete_input",
+      "_build_dpmon_command",
+      "parse_dpmon_activation_output",
+      "parse_dpmon_list_output",
+      "parse_dpmon_delete_output",
+      "chunked_drop_and_run",
+      "activate_virtual_sap_star",
+      "list_virtual_sap_stars",
+      "delete_virtual_sap_star"
+    ],
+    "modules/exploitation/sap_gw_xpg_standalone.py": [
+      "ni_send",
+      "ni_drain",
+      "ni_recv",
+      "build_tlv",
+      "pad_right",
+      "pad_right_null",
+      "ip_to_bytes",
+      "build_p1",
+      "build_saprfc_header_v6",
+      "build_saprfcextend",
+      "build_saprf_dt_struct",
+      "build_p2",
+      "build_sapcpic_suffix",
+      "build_saprfc_th_struct",
+      "build_saprfxpg",
+      "build_sapcpicparam",
+      "build_sapcpicparam2",
+      "build_sapcpic",
+      "build_p3",
+      "build_saprfxpg_end",
+      "build_sapcpic_end",
+      "build_p4",
+      "extract_p4_output",
+      "extract_ascii_strings",
+      "extract_utf16_strings",
+      "parse_response",
+      "hexdump",
+      "main"
+    ],
+    "modules/exploitation/sap_java_ctc.py": [
+      "_build_url",
+      "_auth_header",
+      "_http_get",
+      "discover_ctc_path",
+      "probe_admin_endpoints",
+      "probe",
+      "execute_cmd",
+      "_osexec_wrapper",
+      "_strip_html",
+      "deploy_jsp_via_ctc"
+    ],
+    "modules/exploitation/sap_java_telnet.py": [
+      "probe_port",
+      "SAPTelnetClient",
+      "_chunked_b64",
+      "_rand_suffix",
+      "deploy_jsp_via_telnet",
+      "_write_jsp_via_exec",
+      "default_port_for_instance",
+      "find_java_admin_user"
+    ],
+    "modules/exploitation/sap_lpe_av_evasion.py": [
+      "encrypt_blob",
+      "decrypt_blob",
+      "_amsi_bypass_ps",
+      "_etw_disable_ps",
+      "build_in_memory_loader_ps",
+      "encode_powershell",
+      "deliver_encrypted_pe"
+    ],
+    "modules/exploitation/sap_lpe_blob_stage.py": [
+      "stage_blob",
+      "get_blob",
+      "unstage_blob",
+      "list_tokens"
+    ],
+    "modules/exploitation/sap_ms_betrusted.py": [
+      "ms_port",
+      "ni_send",
+      "ni_recv",
+      "ni_try_recv",
+      "_pad_name",
+      "ms_build_header",
+      "pkt_change_ip",
+      "pkt_set_logon",
+      "ms_parse_header",
+      "ms_parse_opcode",
+      "pkt_login_2",
+      "pkt_logout",
+      "pkt_mod_state",
+      "_adm_record",
+      "pkt_adm",
+      "adm_change_ip_record",
+      "_nilist_ip_body",
+      "adm_nilist_record",
+      "adm_server_long_list_record",
+      "build_dp_info",
+      "build_nilist_reply",
+      "build_nilist_port_reply",
+      "build_nilist_ip_reply",
+      "build_gwmon_nilist_reply",
+      "_old_nilist_body",
+      "_push_nilist_to_dispatcher",
+      "_start_nilist_listener",
+      "_wait_and_reply_nilist",
+      "_derive_appserver_name",
+      "check_ms_accessible",
+      "check_ms_acl",
+      "betrusted",
+      "sapmap_check_ms",
+      "_build_parser",
+      "main"
+    ],
+    "modules/exploitation/sap_mysapsso2.py": [
+      "_encode_text",
+      "_decode_text",
+      "_encode_infounit",
+      "_parse_infounits",
+      "build_ticket",
+      "parse_ticket",
+      "encode_for_cookie",
+      "encode_for_http_header",
+      "decode_from_cookie",
+      "_asn1_encode_length",
+      "_asn1_tlv",
+      "_asn1_oid",
+      "_asn1_int",
+      "_asn1_octet_string",
+      "_asn1_sequence",
+      "_asn1_set",
+      "_asn1_context",
+      "_dsa_sig_to_octet_string",
+      "_build_pkcs7_signeddata_dsa",
+      "sign_ticket",
+      "forge_ticket"
+    ],
+    "modules/exploitation/sap_onprem_to_btp.py": [
+      "_is_btp_host",
+      "_is_auth_host",
+      "_hostname",
+      "_candidate",
+      "_region_from_host",
+      "_normalise_uaa_url",
+      "harvest_btp_candidates",
+      "mint_btp_token"
+    ],
+    "modules/exploitation/sap_pp_probe.py": [
+      "find_pp_destination",
+      "find_scc_mapping_for_target",
+      "create_temp_pp_destination",
+      "delete_destination",
+      "fetch_destination_config",
+      "_resolve_proxy_endpoint",
+      "_resolve_proxy_auth_token",
+      "http_probe_via_connectivity_proxy",
+      "detect_user_in_response",
+      "verify_pp",
+      "_host_in_url",
+      "_scc_location_id_from_node",
+      "_recv_until_double_crlf",
+      "_read_http_response",
+      "_parse_status_line",
+      "_parse_headers",
+      "_json_post",
+      "_json_delete"
+    ],
+    "modules/exploitation/sap_soap_rfc.py": [
+      "_build_envelope",
+      "_parse_response",
+      "SOAPRFCClient"
+    ],
+    "modules/exploitation/sap_ticket_delivery.py": [
+      "make_sapgui_shortcut",
+      "make_curl_command",
+      "make_pyrfc_kwargs",
+      "save_ticket_artifacts"
+    ],
+    "modules/exploitation/sap_ticket_propagate.py": [
+      "_looks_like_login_page",
+      "_looks_like_sap_authenticated",
+      "http_replay_ticket",
+      "rfc_replay_ticket",
+      "propagate_via_forged_ticket",
+      "_emit_propagation_finding",
+      "propagate_to_trusted_subgraph"
+    ],
+    "modules/exploitation/sap_transport_import.py": [
+      "_new_progress",
+      "get_progress",
+      "clear_progress",
+      "parse_transport_zip",
+      "_os_type",
+      "_make_gw_exec_fn",
+      "_make_sxpg_exec_fn",
+      "_resolve_channel",
+      "_resolve_paths",
+      "_discover_trans_dir",
+      "_upload_binary",
+      "_verify_via_showbuffer",
+      "_run_tp",
+      "import_transport",
+      "_write_log"
+    ],
+    "modules/exploitation/sap_wdisp_admin.py": [
+      "_open_tls_socket",
+      "_http_get",
+      "probe_wd_admin_credentials",
+      "_extract_param_urls_from_nav_data",
+      "_scrape_admin_xhr_urls",
+      "_html_to_text",
+      "_parse_wdisp_systems",
+      "fetch_wd_systems",
+      "parse_icmauth",
+      "download_icmauth"
+    ],
+    "modules/exploitation/sapmap_autopwn.py": [
+      "AutoPwnConfig",
+      "AutoPwnStatus",
+      "get_status",
+      "_set_status",
+      "_set_phase",
+      "_set_phase_progress",
+      "_update_stat",
+      "_is_router",
+      "_is_java",
+      "_is_http_stack",
+      "_count_pwned",
+      "_stop_requested",
+      "_ticket_forgery_eligible",
+      "_forge_default_tickets",
+      "phase1_scan",
+      "phase2_exploit",
+      "_derive_sid_from_dest",
+      "phase3_enrich",
+      "phase4_propagate",
+      "_finish_phase4",
+      "phase5_btp",
+      "phase6_lpe",
+      "detection_pass",
+      "_print_summary",
+      "autopwn_run"
+    ],
+    "modules/exploitation/sapmap_copyfail.py": [
+      "_build_elf",
+      "is_kernel_vulnerable",
+      "check_copyfail",
+      "run_as_root"
+    ],
+    "modules/exploitation/sapmap_dirtyfrag.py": [
+      "_load_blob",
+      "is_blob_available",
+      "check_dirtyfrag",
+      "run_as_root"
+    ],
+    "modules/exploitation/sapmap_efspotato.py": [
+      "_load_blob",
+      "is_blob_available",
+      "check_efspotato",
+      "_run_as_system_evasion",
+      "run_as_system"
+    ],
+    "modules/exploitation/sapmap_exploit.py": [
+      "_gw_connect",
+      "_find_gw_port",
+      "_find_gw_ports_all",
+      "_is_snc_required_error",
+      "check_gw_vulnerable",
+      "_probe_gw_port_for_xpg",
+      "execute_gw_command",
+      "_make_node_gw_exec_fn",
+      "extract_and_forge_ticket",
+      "create_user_via_ticket",
+      "_cve_31324_available",
+      "execute_cve_2025_31324_command",
+      "execute_cve_2025_31324_via_shell",
+      "_cve_31324_verify_shell",
+      "_cve_31324_command_write_shell",
+      "drop_cve_2025_31324_shell",
+      "_resolve_java_admin_creds",
+      "_telnet_deploy_available",
+      "_ctc_deploy_available",
+      "_deploy_jsp_via_ctc",
+      "_parse_telnet_override",
+      "_candidate_telnet_endpoints",
+      "_candidate_telnet_ports",
+      "_deploy_jsp_via_telnet",
+      "create_user_java",
+      "_is_ipv4",
+      "_hostname_matches",
+      "_find_node_by_host_flex",
+      "_probe_and_add_host",
+      "_build_java_os_exec",
+      "offline_decrypt_secstore",
+      "run_os_command",
+      "create_user_gw_exploit",
+      "create_user_via_dpmon_sap_star",
+      "create_user_via_tcpip",
+      "_java_os_type",
+      "_java_jsp_target_path",
+      "_deploy_jsp_via_gw",
+      "_check_sapmap_user_reusable",
+      "create_user_via_credentials",
+      "_try_secstore_direct_login",
+      "propagate_from_node",
+      "propagate_all",
+      "_resolve_target_node",
+      "_post_exploit_enrichment",
+      "_detect_and_set_system_type",
+      "check_copyfail_vulnerability",
+      "run_command_as_root",
+      "check_linux_lpe",
+      "run_linux_lpe"
+    ],
+    "modules/exploitation/sapmap_godpotato.py": [
+      "_load_blob",
+      "is_blob_available",
+      "_has_se_impersonate",
+      "check_godpotato",
+      "run_as_system"
+    ],
+    "modules/exploitation/sapmap_lpe_auto.py": [
+      "check_linux_lpe",
+      "run_linux_lpe"
+    ],
+    "modules/exploitation/sapmap_miniplasma.py": [
+      "_load_blob",
+      "is_blob_available",
+      "_parse_ver_output",
+      "_parse_net_release",
+      "_make_exec",
+      "check_miniplasma",
+      "_robust_pre_cleanup",
+      "_chunk_b64",
+      "run_as_system",
+      "_decode_certutil_b64"
+    ],
+    "modules/exploitation/sapmap_winlpe_auto.py": [
+      "check_windows_lpe",
+      "run_windows_lpe"
+    ],
+    "modules/ops/__init__.py": [],
+    "modules/ops/sapmap_cleanup.py": [
+      "cleanup_node_users",
+      "cleanup_all_users",
+      "cleanup_destinations",
+      "list_created_users"
+    ],
+    "modules/postex/__init__.py": [],
+    "modules/postex/sap_profile_check.py": [
+      "parse_profile_lines",
+      "profile_dir",
+      "default_profile_path",
+      "discover_instance_profiles",
+      "read_profile_file",
+      "extract_icm_ports",
+      "discover_icm_ports_via_rfc",
+      "evaluate_sso2_config",
+      "check_sso2_via_rfc",
+      "_call_pfl_get",
+      "check_sso2_parameters",
+      "format_check_summary"
+    ],
+    "modules/postex/sap_pse_loot.py": [
+      "_instance_secudir",
+      "_global_secudir",
+      "_expand_instance_nr",
+      "candidate_secudirs",
+      "_looks_like_error",
+      "_decode_b64_lines",
+      "_read_file_b64",
+      "make_chunked_read_adapter",
+      "_list_dir",
+      "_detect_os",
+      "_discover_sap_root_windows",
+      "_read_file_b64_windows",
+      "_save_to_loot",
+      "extract_pse_bundle",
+      "_ber_read_tl",
+      "_ber_children",
+      "_ber_encode_tl",
+      "_ber_tlv",
+      "_lcg_xor",
+      "_CredRecord",
+      "_parse_cred_v2_envelope",
+      "_derive_and_decrypt_v0",
+      "_derive_and_decrypt_v1",
+      "_strip_pkcs5",
+      "_decrypt_cipher_blob",
+      "_extract_pin_from_plaintext",
+      "decrypt_cred_v2",
+      "_build_cred_v2_blob",
+      "_encrypt_for_cred_v2",
+      "_ber_decode_oid",
+      "_ber_encode_oid",
+      "_pkcs12_password",
+      "_pkcs12_pbkdf1",
+      "_parse_algorithm_params",
+      "_pbe1_decrypt",
+      "_decrypt_pse",
+      "_parse_pse_objects",
+      "_parse_sap_dsa_private_key",
+      "extract_signing_key",
+      "_build_test_pse"
+    ],
+    "modules/postex/sap_ssh_lateral.py": [
+      "_make_exec_fn",
+      "_exfil_file",
+      "_is_stopped",
+      "ssh_harvest",
+      "ssh_test_keys",
+      "ssh_plant_key",
+      "ssh_full_chain"
+    ],
+    "modules/postex/sap_ume_user_create.py": [
+      "ume_password_hash",
+      "ume_password_check",
+      "_random_jsp_name",
+      "_java_root_path",
+      "_is_linux_target",
+      "verify_user_logon",
+      "invoke_create_user_jsp",
+      "deploy_create_user_jsp_via_cve_31324",
+      "deploy_create_user_jsp_via_gw"
+    ],
+    "modules/postex/sapmap_capability_analyser.py": [
+      "_match_predicate",
+      "_resolve_user_capabilities",
+      "_blast_radius",
+      "_english_summary",
+      "_read_user_profiles",
+      "_capabilities_from_super_profile",
+      "_read_user_grants",
+      "_candidate_users",
+      "_row_count_for_table",
+      "analyse",
+      "export_rules_yaml"
+    ],
+    "modules/postex/sapmap_chain.py": [
+      "ChainHop",
+      "TrustChain",
+      "_entry_method",
+      "_entry_description",
+      "find_all_chains",
+      "rank_chains",
+      "filter_critical",
+      "_generate_headline",
+      "analyze_chains"
+    ],
+    "modules/postex/sapmap_lpe.py": [
+      "LPEMethod",
+      "lpe_method",
+      "get_lpe_methods",
+      "try_lpe",
+      "_find_webgui_port",
+      "_webgui_session",
+      "_webgui_batch",
+      "_webgui_okcode",
+      "_webgui_vkey",
+      "_sql_assign_sap_all",
+      "_build_os_command_for_sql",
+      "lpe_webgui_sm49",
+      "lpe_bapi_profiles_assign",
+      "lpe_dpmon_sap_star"
+    ],
+    "modules/protocols/__init__.py": [],
+    "modules/protocols/sap_rfc_ctypes.py": [
+      "_str_to_uc",
+      "_uc_set",
+      "_uc_to_str",
+      "_create_uc_buffer",
+      "RFC_ERROR_INFO",
+      "RFC_CONNECTION_PARAMETER",
+      "RFC_PARAMETER_DESC",
+      "RFC_FIELD_DESC",
+      "RFC_ATTRIBUTES",
+      "RFCError",
+      "CommunicationError",
+      "LogonError",
+      "ABAPApplicationError",
+      "ABAPRuntimeError",
+      "ExternalError",
+      "_raise_on_error",
+      "_SDKLibrary",
+      "RFCConnection",
+      "get_sdk_version"
+    ],
+    "modules/protocols/sap_rfc_system_info.py": [
+      "ni_frame",
+      "connect_via_saprouter",
+      "pad_bytes",
+      "get_local_ip",
+      "iptohex",
+      "ni_recv",
+      "build_rfc_system_info_request",
+      "build_gw_normal_client_v2",
+      "build_f_sap_init_v2",
+      "build_chipik_p2",
+      "build_f_sap_send_rfc",
+      "build_f_sap_init_reinit",
+      "build_diag_term_ini",
+      "parse_diag_response",
+      "_parse_diag_error_text",
+      "_parse_diag_items",
+      "_parse_dynt_atoms",
+      "_scan_diag_raw",
+      "probe_diag_login",
+      "parse_rfcsi_response",
+      "parse_appc_rc",
+      "parse_gateway_error",
+      "_enrich_kernel_release",
+      "_detect_port_type",
+      "probe_sap_system",
+      "print_results",
+      "main"
+    ],
+    "modules/protocols/sap_router_info.py": [
+      "saprouter_info_request",
+      "_fixed_str",
+      "_parse_conn_table",
+      "_looks_like_ip",
+      "_looks_printable"
+    ],
+    "modules/protocols/sap_rsec_cipher.py": [
+      "RSECCipher",
+      "rsec_decrypt",
+      "rsec_decrypt_key"
+    ],
+    "modules/protocols/sap_saprouter.py": [
+      "parse_route_string",
+      "build_ni_route_packet",
+      "connect_through_saprouter",
+      "build_route_for_port",
+      "probe_port_via_saprouter"
+    ],
+    "modules/protocols/sap_snc.py": [
+      "_build_snc_frame",
+      "_parse_snc_frame",
+      "_build_diag_dp_header",
+      "_build_diag_snc_init",
+      "_build_diag_plain_term_ini",
+      "_build_router_snc_init",
+      "_open_socket",
+      "_send_recv",
+      "_empty_result",
+      "_result_from_frame",
+      "scan_snc_diag",
+      "scan_snc_router",
+      "format_summary"
+    ],
+    "sapmap.py": [
+      "find_free_port",
+      "main",
+      "_patch_pywebview_gtk",
+      "_try_pywebview",
+      "_wait_for_exit",
+      "_auto_save_on_exit",
+      "_cli_scan"
+    ],
+    "tests/__init__.py": [],
+    "tests/conftest.py": [],
+    "tools/btp_ssh_bridge/Staticfile": [],
+    "tools/capture_real_ticket.py": [
+      "_hex_dump",
+      "main"
+    ],
+    "tools/check_sso2_profile.py": [
+      "main"
+    ],
+    "tools/compare_with_sap_ticket.py": [
+      "_hex_dump",
+      "_ber_read_tl",
+      "_summarize_pkcs7",
+      "main"
+    ],
+    "tools/dirtyfrag/exp.c": [
+      "su_lpe_main",
+      "rxrpc_wire_header",
+      "rxkad_challenge",
+      "rxrpc_lpe_main",
+      "main"
+    ],
+    "tools/miniplasma/src/ConfuserEx.crproj": [],
+    "tools/miniplasma/src/Program.cs": [
+      "GetNamedPipeServerSessionId"
+    ],
+    "tools/ssfs_decrypt/SecStoreAccess.java": [
+      "main",
+      "SecStoreAccess"
+    ],
+    "tools/ssfs_decrypt/SecStoreAccessException.java": [
+      "SecStoreAccessException",
+      "SecStoreAccessException"
+    ]
+  },
+  "batches": [
+    {
+      "batchIndex": 1,
+      "files": [
+        {
+          "path": "modules/core/sapmap_diff.py",
+          "language": "python",
+          "sizeLines": 803,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/core/sapmap_findings.py",
+          "language": "python",
+          "sizeLines": 267,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/core/sapmap_gui.py",
+          "language": "python",
+          "sizeLines": 10936,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/core/sapmap_html.py",
+          "language": "python",
+          "sizeLines": 11343,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/core/sapmap_models.py",
+          "language": "python",
+          "sizeLines": 1934,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/core/sapmap_report.py",
+          "language": "python",
+          "sizeLines": 2382,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/core/sapmap_state.py",
+          "language": "python",
+          "sizeLines": 276,
+          "fileCategory": "code"
+        }
+      ],
+      "batchImportData": {
+        "modules/core/sapmap_diff.py": [
+          "modules/core/sapmap_models.py"
+        ],
+        "modules/core/sapmap_findings.py": [],
+        "modules/core/sapmap_gui.py": [
+          "modules/core/sapmap_findings.py",
+          "modules/core/sapmap_html.py",
+          "modules/core/sapmap_models.py",
+          "modules/core/sapmap_state.py"
+        ],
+        "modules/core/sapmap_html.py": [],
+        "modules/core/sapmap_models.py": [],
+        "modules/core/sapmap_report.py": [
+          "modules/core/sapmap_models.py"
+        ],
+        "modules/core/sapmap_state.py": [
+          "modules/core/sapmap_models.py"
+        ]
+      },
+      "neighborMap": {}
+    },
+    {
+      "batchIndex": 2,
+      "files": [
+        {
+          "path": "modules/__init__.py",
+          "language": "python",
+          "sizeLines": 19,
+          "fileCategory": "code"
+        },
+        {
+          "path": "sapmap.py",
+          "language": "python",
+          "sizeLines": 437,
+          "fileCategory": "code"
+        },
+        {
+          "path": "tests/conftest.py",
+          "language": "python",
+          "sizeLines": 17,
+          "fileCategory": "code"
+        },
+        {
+          "path": "tools/capture_real_ticket.py",
+          "language": "python",
+          "sizeLines": 293,
+          "fileCategory": "code"
+        },
+        {
+          "path": "tools/compare_with_sap_ticket.py",
+          "language": "python",
+          "sizeLines": 307,
+          "fileCategory": "code"
+        }
+      ],
+      "batchImportData": {
+        "modules/__init__.py": [],
+        "sapmap.py": [
+          "modules/__init__.py"
+        ],
+        "tests/conftest.py": [
+          "modules/__init__.py"
+        ],
+        "tools/capture_real_ticket.py": [
+          "modules/__init__.py"
+        ],
+        "tools/compare_with_sap_ticket.py": [
+          "modules/__init__.py"
+        ]
+      },
+      "neighborMap": {}
+    },
+    {
+      "batchIndex": 3,
+      "files": [
+        {
+          "path": "modules/exploitation/sap_betrusted_chain.py",
+          "language": "python",
+          "sizeLines": 284,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/exploitation/sap_db_sql_writers.py",
+          "language": "python",
+          "sizeLines": 727,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/exploitation/sapmap_exploit.py",
+          "language": "python",
+          "sizeLines": 4867,
+          "fileCategory": "code"
+        }
+      ],
+      "batchImportData": {
+        "modules/exploitation/sap_betrusted_chain.py": [
+          "modules/exploitation/sapmap_exploit.py"
+        ],
+        "modules/exploitation/sap_db_sql_writers.py": [
+          "modules/exploitation/sapmap_exploit.py"
+        ],
+        "modules/exploitation/sapmap_exploit.py": [
+          "modules/exploitation/sap_betrusted_chain.py",
+          "modules/exploitation/sap_db_sql_writers.py"
+        ]
+      },
+      "neighborMap": {}
+    },
+    {
+      "batchIndex": 4,
+      "files": [
+        {
+          "path": "modules/exploitation/sapmap_efspotato.py",
+          "language": "python",
+          "sizeLines": 1064,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/exploitation/sapmap_godpotato.py",
+          "language": "python",
+          "sizeLines": 531,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/exploitation/sapmap_miniplasma.py",
+          "language": "python",
+          "sizeLines": 1099,
+          "fileCategory": "code"
+        }
+      ],
+      "batchImportData": {
+        "modules/exploitation/sapmap_efspotato.py": [
+          "modules/exploitation/sapmap_godpotato.py",
+          "modules/exploitation/sapmap_miniplasma.py"
+        ],
+        "modules/exploitation/sapmap_godpotato.py": [
+          "modules/exploitation/sapmap_miniplasma.py"
+        ],
+        "modules/exploitation/sapmap_miniplasma.py": []
+      },
+      "neighborMap": {}
+    },
+    {
+      "batchIndex": 5,
+      "files": [
+        {
+          "path": "DISCLAIMER.md",
+          "language": "markdown",
+          "sizeLines": 75,
+          "fileCategory": "docs"
+        },
+        {
+          "path": "README.md",
+          "language": "markdown",
+          "sizeLines": 1433,
+          "fileCategory": "docs"
+        },
+        {
+          "path": "requirements.txt",
+          "language": "txt",
+          "sizeLines": 18,
+          "fileCategory": "docs"
+        }
+      ],
+      "batchImportData": {
+        "DISCLAIMER.md": [],
+        "README.md": [],
+        "requirements.txt": []
+      },
+      "neighborMap": {}
+    },
+    {
+      "batchIndex": 6,
+      "files": [
+        {
+          "path": "docs/research/00_priority_summary.md",
+          "language": "markdown",
+          "sizeLines": 189,
+          "fileCategory": "docs"
+        },
+        {
+          "path": "docs/research/01_new_cves.md",
+          "language": "markdown",
+          "sizeLines": 218,
+          "fileCategory": "docs"
+        },
+        {
+          "path": "docs/research/02_java_to_abap_pivots.md",
+          "language": "markdown",
+          "sizeLines": 270,
+          "fileCategory": "docs"
+        },
+        {
+          "path": "docs/research/03_cloud_connector_btp.md",
+          "language": "markdown",
+          "sizeLines": 494,
+          "fileCategory": "docs"
+        },
+        {
+          "path": "docs/research/04_sso_trust_lateral_movement.md",
+          "language": "markdown",
+          "sizeLines": 275,
+          "fileCategory": "docs"
+        },
+        {
+          "path": "docs/research/05_post_exploitation.md",
+          "language": "markdown",
+          "sizeLines": 426,
+          "fileCategory": "docs"
+        },
+        {
+          "path": "docs/research/06_initial_access.md",
+          "language": "markdown",
+          "sizeLines": 702,
+          "fileCategory": "docs"
+        },
+        {
+          "path": "docs/research/07_java_secstore_recovery.md",
+          "language": "markdown",
+          "sizeLines": 237,
+          "fileCategory": "docs"
+        },
+        {
+          "path": "docs/research/08_cloud_connector_implementation_plan.md",
+          "language": "markdown",
+          "sizeLines": 1397,
+          "fileCategory": "docs"
+        },
+        {
+          "path": "docs/research/09_principal_propagation_schema.md",
+          "language": "markdown",
+          "sizeLines": 225,
+          "fileCategory": "docs"
+        },
+        {
+          "path": "docs/research/10_icmad_implementation_plan.md",
+          "language": "markdown",
+          "sizeLines": 708,
+          "fileCategory": "docs"
+        },
+        {
+          "path": "docs/research/11_dpmon_virtual_sapstar_plan.md",
+          "language": "markdown",
+          "sizeLines": 463,
+          "fileCategory": "docs"
+        },
+        {
+          "path": "docs/research/12_mysapsso2_ticket_forgery_operator_guide.md",
+          "language": "markdown",
+          "sizeLines": 468,
+          "fileCategory": "docs"
+        },
+        {
+          "path": "docs/research/12_mysapsso2_ticket_forgery_plan.md",
+          "language": "markdown",
+          "sizeLines": 461,
+          "fileCategory": "docs"
+        },
+        {
+          "path": "docs/research/README.md",
+          "language": "markdown",
+          "sizeLines": 38,
+          "fileCategory": "docs"
+        }
+      ],
+      "batchImportData": {
+        "docs/research/00_priority_summary.md": [],
+        "docs/research/01_new_cves.md": [],
+        "docs/research/02_java_to_abap_pivots.md": [],
+        "docs/research/03_cloud_connector_btp.md": [],
+        "docs/research/04_sso_trust_lateral_movement.md": [],
+        "docs/research/05_post_exploitation.md": [],
+        "docs/research/06_initial_access.md": [],
+        "docs/research/07_java_secstore_recovery.md": [],
+        "docs/research/08_cloud_connector_implementation_plan.md": [],
+        "docs/research/09_principal_propagation_schema.md": [],
+        "docs/research/10_icmad_implementation_plan.md": [],
+        "docs/research/11_dpmon_virtual_sapstar_plan.md": [],
+        "docs/research/12_mysapsso2_ticket_forgery_operator_guide.md": [],
+        "docs/research/12_mysapsso2_ticket_forgery_plan.md": [],
+        "docs/research/README.md": []
+      },
+      "neighborMap": {}
+    },
+    {
+      "batchIndex": 7,
+      "files": [
+        {
+          "path": "scripts/demo_10kblaze.yaml",
+          "language": "yaml",
+          "sizeLines": 52,
+          "fileCategory": "config"
+        },
+        {
+          "path": "scripts/demo_10kblaze_and_RFChopping.yaml",
+          "language": "yaml",
+          "sizeLines": 73,
+          "fileCategory": "config"
+        },
+        {
+          "path": "scripts/demo_cve-2025-31324_java_to_abap.yaml",
+          "language": "yaml",
+          "sizeLines": 99,
+          "fileCategory": "config"
+        },
+        {
+          "path": "scripts/demo_landscape.yaml",
+          "language": "yaml",
+          "sizeLines": 53,
+          "fileCategory": "config"
+        },
+        {
+          "path": "scripts/demo_onprem_to_btp.yaml",
+          "language": "yaml",
+          "sizeLines": 108,
+          "fileCategory": "config"
+        },
+        {
+          "path": "scripts/demo_saprouter.yaml",
+          "language": "yaml",
+          "sizeLines": 71,
+          "fileCategory": "config"
+        },
+        {
+          "path": "scripts/demo_scan.yaml",
+          "language": "yaml",
+          "sizeLines": 24,
+          "fileCategory": "config"
+        },
+        {
+          "path": "scripts/demo_simple.json",
+          "language": "json",
+          "sizeLines": 22,
+          "fileCategory": "config"
+        },
+        {
+          "path": "scripts/java_full_chain.yaml",
+          "language": "yaml",
+          "sizeLines": 59,
+          "fileCategory": "config"
+        },
+        {
+          "path": "scripts/java_full_chain_to_ABAP.yaml",
+          "language": "yaml",
+          "sizeLines": 109,
+          "fileCategory": "config"
+        },
+        {
+          "path": "scripts/scc_full_chain.yaml",
+          "language": "yaml",
+          "sizeLines": 60,
+          "fileCategory": "config"
+        }
+      ],
+      "batchImportData": {
+        "scripts/demo_10kblaze.yaml": [],
+        "scripts/demo_10kblaze_and_RFChopping.yaml": [],
+        "scripts/demo_cve-2025-31324_java_to_abap.yaml": [],
+        "scripts/demo_landscape.yaml": [],
+        "scripts/demo_onprem_to_btp.yaml": [],
+        "scripts/demo_saprouter.yaml": [],
+        "scripts/demo_scan.yaml": [],
+        "scripts/demo_simple.json": [],
+        "scripts/java_full_chain.yaml": [],
+        "scripts/java_full_chain_to_ABAP.yaml": [],
+        "scripts/scc_full_chain.yaml": []
+      },
+      "neighborMap": {}
+    },
+    {
+      "batchIndex": 8,
+      "files": [
+        {
+          "path": "tests/fixtures/scc_pp/scc_config_clean_scoped.ini",
+          "language": "config",
+          "sizeLines": 28,
+          "fileCategory": "config"
+        },
+        {
+          "path": "tests/fixtures/scc_pp/scc_config_critical_empty.ini",
+          "language": "config",
+          "sizeLines": 9,
+          "fileCategory": "config"
+        },
+        {
+          "path": "tests/fixtures/scc_pp/scc_config_critical_name.ini",
+          "language": "config",
+          "sizeLines": 20,
+          "fileCategory": "config"
+        },
+        {
+          "path": "tests/fixtures/scc_pp/scc_config_high_email.ini",
+          "language": "config",
+          "sizeLines": 21,
+          "fileCategory": "config"
+        },
+        {
+          "path": "tests/fixtures/scc_pp/scc_config_high_hardcoded_ddic.ini",
+          "language": "config",
+          "sizeLines": 19,
+          "fileCategory": "config"
+        },
+        {
+          "path": "tests/fixtures/scc_pp/scc_config_medium_long_validity.ini",
+          "language": "config",
+          "sizeLines": 23,
+          "fileCategory": "config"
+        },
+        {
+          "path": "tests/fixtures/scc_pp/trustcfg_single_xsuaa.xml",
+          "language": "xml",
+          "sizeLines": 15,
+          "fileCategory": "config"
+        },
+        {
+          "path": "tests/fixtures/scc_pp/trustcfg_xsuaa_plus_ias.xml",
+          "language": "xml",
+          "sizeLines": 24,
+          "fileCategory": "config"
+        }
+      ],
+      "batchImportData": {
+        "tests/fixtures/scc_pp/scc_config_clean_scoped.ini": [],
+        "tests/fixtures/scc_pp/scc_config_critical_empty.ini": [],
+        "tests/fixtures/scc_pp/scc_config_critical_name.ini": [],
+        "tests/fixtures/scc_pp/scc_config_high_email.ini": [],
+        "tests/fixtures/scc_pp/scc_config_high_hardcoded_ddic.ini": [],
+        "tests/fixtures/scc_pp/scc_config_medium_long_validity.ini": [],
+        "tests/fixtures/scc_pp/trustcfg_single_xsuaa.xml": [],
+        "tests/fixtures/scc_pp/trustcfg_xsuaa_plus_ias.xml": []
+      },
+      "neighborMap": {}
+    },
+    {
+      "batchIndex": 9,
+      "files": [
+        {
+          "path": "tools/btp_ssh_bridge/README.md",
+          "language": "markdown",
+          "sizeLines": 168,
+          "fileCategory": "docs"
+        },
+        {
+          "path": "tools/btp_ssh_bridge/index.html",
+          "language": "html",
+          "sizeLines": 8,
+          "fileCategory": "markup"
+        },
+        {
+          "path": "tools/btp_ssh_bridge/manifest.yml",
+          "language": "yaml",
+          "sizeLines": 19,
+          "fileCategory": "config"
+        }
+      ],
+      "batchImportData": {
+        "tools/btp_ssh_bridge/README.md": [],
+        "tools/btp_ssh_bridge/index.html": [],
+        "tools/btp_ssh_bridge/manifest.yml": []
+      },
+      "neighborMap": {}
+    },
+    {
+      "batchIndex": 10,
+      "files": [
+        {
+          "path": "tools/ssfs_decrypt/Makefile",
+          "language": "makefile",
+          "sizeLines": 26,
+          "fileCategory": "infra"
+        },
+        {
+          "path": "tools/ssfs_decrypt/build.bat",
+          "language": "batch",
+          "sizeLines": 22,
+          "fileCategory": "script"
+        },
+        {
+          "path": "tools/ssfs_decrypt/build.sh",
+          "language": "shell",
+          "sizeLines": 25,
+          "fileCategory": "script"
+        }
+      ],
+      "batchImportData": {
+        "tools/ssfs_decrypt/Makefile": [],
+        "tools/ssfs_decrypt/build.bat": [],
+        "tools/ssfs_decrypt/build.sh": []
+      },
+      "neighborMap": {}
+    },
+    {
+      "batchIndex": 11,
+      "files": [
+        {
+          "path": ".understand-anything/.understandignore",
+          "language": "unknown",
+          "sizeLines": 80,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/automation/__init__.py",
+          "language": "python",
+          "sizeLines": 1,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/automation/sapmap_script.py",
+          "language": "python",
+          "sizeLines": 955,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/business_impact/__init__.py",
+          "language": "python",
+          "sizeLines": 1,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/business_impact/sap_java_impact.py",
+          "language": "python",
+          "sizeLines": 413,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/business_impact/sapmap_impact.py",
+          "language": "python",
+          "sizeLines": 790,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/core/__init__.py",
+          "language": "python",
+          "sizeLines": 1,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/core/sapmap_attack.py",
+          "language": "python",
+          "sizeLines": 487,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/core/sapmap_config.py",
+          "language": "python",
+          "sizeLines": 470,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/core/sapmap_errors.py",
+          "language": "python",
+          "sizeLines": 39,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/core/sapmap_remediation.py",
+          "language": "python",
+          "sizeLines": 1009,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/core/sapmap_stop.py",
+          "language": "python",
+          "sizeLines": 69,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/data_extraction/__init__.py",
+          "language": "python",
+          "sizeLines": 1,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/data_extraction/poc_remote_abap_exec.py",
+          "language": "python",
+          "sizeLines": 272,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/data_extraction/sap_btp.py",
+          "language": "python",
+          "sizeLines": 878,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/data_extraction/sap_java_db.py",
+          "language": "python",
+          "sizeLines": 477,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/data_extraction/sap_java_runner.py",
+          "language": "python",
+          "sizeLines": 779,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/data_extraction/sap_java_secstore_offline.py",
+          "language": "python",
+          "sizeLines": 350,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/data_extraction/sap_java_secstore_runner.py",
+          "language": "python",
+          "sizeLines": 1180,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/data_extraction/sap_java_secstore.py",
+          "language": "python",
+          "sizeLines": 803,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/data_extraction/sap_oa2c.py",
+          "language": "python",
+          "sizeLines": 499,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/data_extraction/sap_scc_harvest.py",
+          "language": "python",
+          "sizeLines": 1187,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/data_extraction/sapmap_scc_admin.py",
+          "language": "python",
+          "sizeLines": 662,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/data_extraction/sapmap_scc_keystore.py",
+          "language": "python",
+          "sizeLines": 1007,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/data_extraction/sapmap_scc_ssfs_decrypt.py",
+          "language": "python",
+          "sizeLines": 588,
+          "fileCategory": "code"
+        }
+      ],
+      "batchImportData": {
+        ".understand-anything/.understandignore": [],
+        "modules/automation/__init__.py": [],
+        "modules/automation/sapmap_script.py": [],
+        "modules/business_impact/__init__.py": [],
+        "modules/business_impact/sap_java_impact.py": [
+          "modules/business_impact/sapmap_impact.py"
+        ],
+        "modules/business_impact/sapmap_impact.py": [],
+        "modules/core/__init__.py": [],
+        "modules/core/sapmap_attack.py": [],
+        "modules/core/sapmap_config.py": [],
+        "modules/core/sapmap_errors.py": [],
+        "modules/core/sapmap_remediation.py": [],
+        "modules/core/sapmap_stop.py": [],
+        "modules/data_extraction/__init__.py": [],
+        "modules/data_extraction/poc_remote_abap_exec.py": [],
+        "modules/data_extraction/sap_btp.py": [],
+        "modules/data_extraction/sap_java_db.py": [],
+        "modules/data_extraction/sap_java_runner.py": [],
+        "modules/data_extraction/sap_java_secstore_offline.py": [],
+        "modules/data_extraction/sap_java_secstore_runner.py": [],
+        "modules/data_extraction/sap_java_secstore.py": [],
+        "modules/data_extraction/sap_oa2c.py": [],
+        "modules/data_extraction/sap_scc_harvest.py": [],
+        "modules/data_extraction/sapmap_scc_admin.py": [],
+        "modules/data_extraction/sapmap_scc_keystore.py": [
+          "modules/data_extraction/sapmap_scc_admin.py"
+        ],
+        "modules/data_extraction/sapmap_scc_ssfs_decrypt.py": []
+      },
+      "neighborMap": {}
+    },
+    {
+      "batchIndex": 12,
+      "files": [
+        {
+          "path": "modules/data_extraction/sapmap_secstore.py",
+          "language": "python",
+          "sizeLines": 1399,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/discovery/__init__.py",
+          "language": "python",
+          "sizeLines": 1,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/discovery/sap_client_enum.py",
+          "language": "python",
+          "sizeLines": 765,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/discovery/sap_default_creds.py",
+          "language": "python",
+          "sizeLines": 360,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/discovery/sapmap_rfc.py",
+          "language": "python",
+          "sizeLines": 3406,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/discovery/sapmap_scanner.py",
+          "language": "python",
+          "sizeLines": 5383,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/discovery/sapmap_scc_cve_buckets.py",
+          "language": "python",
+          "sizeLines": 120,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/discovery/sapmap_scc_fingerprint.py",
+          "language": "python",
+          "sizeLines": 231,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/discovery/sapmap_scc_pp_analyzer.py",
+          "language": "python",
+          "sizeLines": 779,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/discovery/sapmap_scc_relay.py",
+          "language": "python",
+          "sizeLines": 195,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/exploitation/__init__.py",
+          "language": "python",
+          "sizeLines": 1,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/exploitation/_dirtyfrag_blob.py",
+          "language": "python",
+          "sizeLines": 21630,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/exploitation/_efspotato_blob.py",
+          "language": "python",
+          "sizeLines": 1422,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/exploitation/_godpotato_blob.py",
+          "language": "python",
+          "sizeLines": 3829,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/exploitation/_miniplasma_blob.py",
+          "language": "python",
+          "sizeLines": 30823,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/exploitation/sap_cve_2020_6287.py",
+          "language": "python",
+          "sizeLines": 647,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/exploitation/sap_cve_2022_22536.py",
+          "language": "python",
+          "sizeLines": 1360,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/exploitation/sap_cve_2025_31324.py",
+          "language": "python",
+          "sizeLines": 732,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/exploitation/sap_dpmon_sapstar.py",
+          "language": "python",
+          "sizeLines": 1017,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/exploitation/sap_gw_xpg_standalone.py",
+          "language": "python",
+          "sizeLines": 1248,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/exploitation/sap_java_ctc.py",
+          "language": "python",
+          "sizeLines": 404,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/exploitation/sap_java_telnet.py",
+          "language": "python",
+          "sizeLines": 414,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/exploitation/sap_lpe_av_evasion.py",
+          "language": "python",
+          "sizeLines": 425,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/exploitation/sap_lpe_blob_stage.py",
+          "language": "python",
+          "sizeLines": 53,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/exploitation/sap_ms_betrusted.py",
+          "language": "python",
+          "sizeLines": 1713,
+          "fileCategory": "code"
+        }
+      ],
+      "batchImportData": {
+        "modules/data_extraction/sapmap_secstore.py": [],
+        "modules/discovery/__init__.py": [],
+        "modules/discovery/sap_client_enum.py": [],
+        "modules/discovery/sap_default_creds.py": [],
+        "modules/discovery/sapmap_rfc.py": [],
+        "modules/discovery/sapmap_scanner.py": [
+          "modules/discovery/sap_client_enum.py"
+        ],
+        "modules/discovery/sapmap_scc_cve_buckets.py": [],
+        "modules/discovery/sapmap_scc_fingerprint.py": [],
+        "modules/discovery/sapmap_scc_pp_analyzer.py": [],
+        "modules/discovery/sapmap_scc_relay.py": [],
+        "modules/exploitation/__init__.py": [],
+        "modules/exploitation/_dirtyfrag_blob.py": [],
+        "modules/exploitation/_efspotato_blob.py": [],
+        "modules/exploitation/_godpotato_blob.py": [],
+        "modules/exploitation/_miniplasma_blob.py": [],
+        "modules/exploitation/sap_cve_2020_6287.py": [],
+        "modules/exploitation/sap_cve_2022_22536.py": [],
+        "modules/exploitation/sap_cve_2025_31324.py": [],
+        "modules/exploitation/sap_dpmon_sapstar.py": [],
+        "modules/exploitation/sap_gw_xpg_standalone.py": [],
+        "modules/exploitation/sap_java_ctc.py": [],
+        "modules/exploitation/sap_java_telnet.py": [],
+        "modules/exploitation/sap_lpe_av_evasion.py": [],
+        "modules/exploitation/sap_lpe_blob_stage.py": [],
+        "modules/exploitation/sap_ms_betrusted.py": []
+      },
+      "neighborMap": {}
+    },
+    {
+      "batchIndex": 13,
+      "files": [
+        {
+          "path": "modules/exploitation/sap_mysapsso2.py",
+          "language": "python",
+          "sizeLines": 872,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/exploitation/sap_onprem_to_btp.py",
+          "language": "python",
+          "sizeLines": 444,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/exploitation/sap_pp_probe.py",
+          "language": "python",
+          "sizeLines": 949,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/exploitation/sap_soap_rfc.py",
+          "language": "python",
+          "sizeLines": 220,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/exploitation/sap_ticket_delivery.py",
+          "language": "python",
+          "sizeLines": 434,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/exploitation/sap_ticket_propagate.py",
+          "language": "python",
+          "sizeLines": 724,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/exploitation/sap_transport_import.py",
+          "language": "python",
+          "sizeLines": 913,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/exploitation/sap_wdisp_admin.py",
+          "language": "python",
+          "sizeLines": 1284,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/exploitation/sapmap_autopwn.py",
+          "language": "python",
+          "sizeLines": 1507,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/exploitation/sapmap_copyfail.py",
+          "language": "python",
+          "sizeLines": 721,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/exploitation/sapmap_dirtyfrag.py",
+          "language": "python",
+          "sizeLines": 494,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/exploitation/sapmap_lpe_auto.py",
+          "language": "python",
+          "sizeLines": 185,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/exploitation/sapmap_winlpe_auto.py",
+          "language": "python",
+          "sizeLines": 193,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/ops/__init__.py",
+          "language": "python",
+          "sizeLines": 1,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/ops/sapmap_cleanup.py",
+          "language": "python",
+          "sizeLines": 151,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/postex/__init__.py",
+          "language": "python",
+          "sizeLines": 1,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/postex/sap_profile_check.py",
+          "language": "python",
+          "sizeLines": 883,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/postex/sap_pse_loot.py",
+          "language": "python",
+          "sizeLines": 2498,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/postex/sap_ssh_lateral.py",
+          "language": "python",
+          "sizeLines": 1083,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/postex/sap_ume_user_create.py",
+          "language": "python",
+          "sizeLines": 914,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/postex/sapmap_capability_analyser.py",
+          "language": "python",
+          "sizeLines": 742,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/postex/sapmap_chain.py",
+          "language": "python",
+          "sizeLines": 485,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/postex/sapmap_lpe.py",
+          "language": "python",
+          "sizeLines": 649,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/protocols/__init__.py",
+          "language": "python",
+          "sizeLines": 1,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/protocols/sap_rfc_ctypes.py",
+          "language": "python",
+          "sizeLines": 1557,
+          "fileCategory": "code"
+        }
+      ],
+      "batchImportData": {
+        "modules/exploitation/sap_mysapsso2.py": [],
+        "modules/exploitation/sap_onprem_to_btp.py": [],
+        "modules/exploitation/sap_pp_probe.py": [],
+        "modules/exploitation/sap_soap_rfc.py": [],
+        "modules/exploitation/sap_ticket_delivery.py": [],
+        "modules/exploitation/sap_ticket_propagate.py": [],
+        "modules/exploitation/sap_transport_import.py": [],
+        "modules/exploitation/sap_wdisp_admin.py": [],
+        "modules/exploitation/sapmap_autopwn.py": [],
+        "modules/exploitation/sapmap_copyfail.py": [],
+        "modules/exploitation/sapmap_dirtyfrag.py": [],
+        "modules/exploitation/sapmap_lpe_auto.py": [],
+        "modules/exploitation/sapmap_winlpe_auto.py": [],
+        "modules/ops/__init__.py": [],
+        "modules/ops/sapmap_cleanup.py": [],
+        "modules/postex/__init__.py": [],
+        "modules/postex/sap_profile_check.py": [],
+        "modules/postex/sap_pse_loot.py": [],
+        "modules/postex/sap_ssh_lateral.py": [],
+        "modules/postex/sap_ume_user_create.py": [],
+        "modules/postex/sapmap_capability_analyser.py": [],
+        "modules/postex/sapmap_chain.py": [],
+        "modules/postex/sapmap_lpe.py": [],
+        "modules/protocols/__init__.py": [],
+        "modules/protocols/sap_rfc_ctypes.py": []
+      },
+      "neighborMap": {}
+    },
+    {
+      "batchIndex": 14,
+      "files": [
+        {
+          "path": "modules/protocols/sap_rfc_system_info.py",
+          "language": "python",
+          "sizeLines": 2241,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/protocols/sap_router_info.py",
+          "language": "python",
+          "sizeLines": 286,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/protocols/sap_rsec_cipher.py",
+          "language": "python",
+          "sizeLines": 321,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/protocols/sap_saprouter.py",
+          "language": "python",
+          "sizeLines": 407,
+          "fileCategory": "code"
+        },
+        {
+          "path": "modules/protocols/sap_snc.py",
+          "language": "python",
+          "sizeLines": 575,
+          "fileCategory": "code"
+        },
+        {
+          "path": "tests/__init__.py",
+          "language": "python",
+          "sizeLines": 0,
+          "fileCategory": "code"
+        },
+        {
+          "path": "tools/btp_ssh_bridge/Staticfile",
+          "language": "unknown",
+          "sizeLines": 6,
+          "fileCategory": "code"
+        },
+        {
+          "path": "tools/check_sso2_profile.py",
+          "language": "python",
+          "sizeLines": 144,
+          "fileCategory": "code"
+        },
+        {
+          "path": "tools/dirtyfrag/build.sh",
+          "language": "shell",
+          "sizeLines": 145,
+          "fileCategory": "script"
+        },
+        {
+          "path": "tools/dirtyfrag/exp.c",
+          "language": "c",
+          "sizeLines": 1991,
+          "fileCategory": "code"
+        },
+        {
+          "path": "tools/dirtyfrag/README.md",
+          "language": "markdown",
+          "sizeLines": 51,
+          "fileCategory": "docs"
+        },
+        {
+          "path": "tools/efspotato/build.ps1",
+          "language": "powershell",
+          "sizeLines": 319,
+          "fileCategory": "script"
+        },
+        {
+          "path": "tools/efspotato/README.md",
+          "language": "markdown",
+          "sizeLines": 92,
+          "fileCategory": "docs"
+        },
+        {
+          "path": "tools/godpotato/build.ps1",
+          "language": "powershell",
+          "sizeLines": 315,
+          "fileCategory": "script"
+        },
+        {
+          "path": "tools/godpotato/README.md",
+          "language": "markdown",
+          "sizeLines": 103,
+          "fileCategory": "docs"
+        },
+        {
+          "path": "tools/miniplasma/build.ps1",
+          "language": "powershell",
+          "sizeLines": 294,
+          "fileCategory": "script"
+        },
+        {
+          "path": "tools/miniplasma/README.md",
+          "language": "markdown",
+          "sizeLines": 112,
+          "fileCategory": "docs"
+        },
+        {
+          "path": "tools/miniplasma/src/ConfuserEx.crproj",
+          "language": "crproj",
+          "sizeLines": 79,
+          "fileCategory": "code"
+        },
+        {
+          "path": "tools/miniplasma/src/FodyWeavers.xml",
+          "language": "xml",
+          "sizeLines": 20,
+          "fileCategory": "config"
+        },
+        {
+          "path": "tools/miniplasma/src/Program.cs",
+          "language": "csharp",
+          "sizeLines": 417,
+          "fileCategory": "code"
+        },
+        {
+          "path": "tools/miniplasma/src/SAPMAP_MiniPlasma.csproj",
+          "language": "csproj",
+          "sizeLines": 48,
+          "fileCategory": "config"
+        },
+        {
+          "path": "tools/ssfs_decrypt/SecStoreAccess.java",
+          "language": "java",
+          "sizeLines": 134,
+          "fileCategory": "code"
+        },
+        {
+          "path": "tools/ssfs_decrypt/SecStoreAccessException.java",
+          "language": "java",
+          "sizeLines": 7,
+          "fileCategory": "code"
+        }
+      ],
+      "batchImportData": {
+        "modules/protocols/sap_rfc_system_info.py": [],
+        "modules/protocols/sap_router_info.py": [],
+        "modules/protocols/sap_rsec_cipher.py": [],
+        "modules/protocols/sap_saprouter.py": [],
+        "modules/protocols/sap_snc.py": [],
+        "tests/__init__.py": [],
+        "tools/btp_ssh_bridge/Staticfile": [],
+        "tools/check_sso2_profile.py": [],
+        "tools/dirtyfrag/build.sh": [],
+        "tools/dirtyfrag/exp.c": [],
+        "tools/dirtyfrag/README.md": [],
+        "tools/efspotato/build.ps1": [],
+        "tools/efspotato/README.md": [],
+        "tools/godpotato/build.ps1": [],
+        "tools/godpotato/README.md": [],
+        "tools/miniplasma/build.ps1": [],
+        "tools/miniplasma/README.md": [],
+        "tools/miniplasma/src/ConfuserEx.crproj": [],
+        "tools/miniplasma/src/FodyWeavers.xml": [],
+        "tools/miniplasma/src/Program.cs": [],
+        "tools/miniplasma/src/SAPMAP_MiniPlasma.csproj": [],
+        "tools/ssfs_decrypt/SecStoreAccess.java": [],
+        "tools/ssfs_decrypt/SecStoreAccessException.java": []
+      },
+      "neighborMap": {}
+    }
+  ]
+}

@@ -1,0 +1,1076 @@
+{
+  "nodes": [
+    {
+      "id": "file:modules/exploitation/sap_mysapsso2.py",
+      "type": "file",
+      "name": "sap_mysapsso2.py",
+      "filePath": "modules/exploitation/sap_mysapsso2.py",
+      "summary": "Builds, parses, and forges SAP MYSAPSSO2 logon tickets, including ASN.1 PKCS#7 SignedData wrapping with DSA signatures, enabling cross-system ticket-based authentication and impersonation attacks.",
+      "tags": [
+        "exploitation",
+        "sso",
+        "ticket-forgery",
+        "asn1",
+        "cryptography"
+      ],
+      "complexity": "complex",
+      "languageNotes": "Implements low-level ASN.1/DER encoding and PKCS#7 SignedData by hand for portability without OpenSSL bindings."
+    },
+    {
+      "id": "function:modules/exploitation/sap_mysapsso2.py:build_ticket",
+      "type": "function",
+      "name": "build_ticket",
+      "filePath": "modules/exploitation/sap_mysapsso2.py",
+      "lineRange": [
+        149,
+        268
+      ],
+      "summary": "Constructs a raw MYSAPSSO2 ticket info-unit blob from user, system, validity, and recipient identity fields.",
+      "tags": [
+        "ticket-forgery",
+        "sso",
+        "serialization"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sap_mysapsso2.py:parse_ticket",
+      "type": "function",
+      "name": "parse_ticket",
+      "filePath": "modules/exploitation/sap_mysapsso2.py",
+      "lineRange": [
+        275,
+        406
+      ],
+      "summary": "Parses a MYSAPSSO2 ticket back into structured fields including user, validity, issuing system, and embedded PKCS#7 signature blob.",
+      "tags": [
+        "ticket-parsing",
+        "sso",
+        "deserialization"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sap_mysapsso2.py:_build_pkcs7_signeddata_dsa",
+      "type": "function",
+      "name": "_build_pkcs7_signeddata_dsa",
+      "filePath": "modules/exploitation/sap_mysapsso2.py",
+      "lineRange": [
+        580,
+        733
+      ],
+      "summary": "Hand-rolled ASN.1 builder that wraps signed ticket content in a PKCS#7 SignedData envelope using DSA signatures matching the SAP signing flow.",
+      "tags": [
+        "asn1",
+        "pkcs7",
+        "cryptography",
+        "signing"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sap_mysapsso2.py:sign_ticket",
+      "type": "function",
+      "name": "sign_ticket",
+      "filePath": "modules/exploitation/sap_mysapsso2.py",
+      "lineRange": [
+        736,
+        818
+      ],
+      "summary": "Signs a previously built ticket payload using a recovered DSA signing key, producing a fully valid MYSAPSSO2 ticket.",
+      "tags": [
+        "ticket-forgery",
+        "signing",
+        "dsa"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sap_mysapsso2.py:forge_ticket",
+      "type": "function",
+      "name": "forge_ticket",
+      "filePath": "modules/exploitation/sap_mysapsso2.py",
+      "lineRange": [
+        821,
+        872
+      ],
+      "summary": "High-level orchestrator that forges a MYSAPSSO2 ticket from caller-supplied identity, target, and PSE/signing key parameters.",
+      "tags": [
+        "ticket-forgery",
+        "exploitation",
+        "orchestrator"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/exploitation/sap_mysapsso2.py:_parse_infounits",
+      "type": "function",
+      "name": "_parse_infounits",
+      "filePath": "modules/exploitation/sap_mysapsso2.py",
+      "lineRange": [
+        123,
+        142
+      ],
+      "summary": "Decodes the variable-length info-unit (TLV) records that make up a MYSAPSSO2 ticket body.",
+      "tags": [
+        "parsing",
+        "tlv",
+        "utility"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:modules/exploitation/sap_onprem_to_btp.py",
+      "type": "file",
+      "name": "sap_onprem_to_btp.py",
+      "filePath": "modules/exploitation/sap_onprem_to_btp.py",
+      "summary": "Harvests BTP UAA/destination-service candidates from on-premise SAP systems and mints BTP OAuth tokens from looted credentials, bridging on-prem compromise to SAP BTP cloud access.",
+      "tags": [
+        "exploitation",
+        "btp",
+        "cloud-pivot",
+        "oauth",
+        "credential-abuse"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sap_onprem_to_btp.py:harvest_btp_candidates",
+      "type": "function",
+      "name": "harvest_btp_candidates",
+      "filePath": "modules/exploitation/sap_onprem_to_btp.py",
+      "lineRange": [
+        134,
+        397
+      ],
+      "summary": "Walks on-prem state to collect BTP destination-service candidates with UAA endpoints, client IDs, and secrets recovered from SecStore loot.",
+      "tags": [
+        "btp",
+        "credential-harvesting",
+        "destination-service"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sap_onprem_to_btp.py:mint_btp_token",
+      "type": "function",
+      "name": "mint_btp_token",
+      "filePath": "modules/exploitation/sap_onprem_to_btp.py",
+      "lineRange": [
+        400,
+        444
+      ],
+      "summary": "Performs OAuth2 client_credentials flow against a BTP UAA endpoint with harvested credentials and returns the minted bearer token.",
+      "tags": [
+        "oauth",
+        "btp",
+        "token-mint"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:modules/exploitation/sap_pp_probe.py",
+      "type": "file",
+      "name": "sap_pp_probe.py",
+      "filePath": "modules/exploitation/sap_pp_probe.py",
+      "summary": "Principal-propagation probe that creates temporary PP destinations through BTP Connectivity service and validates Cloud Connector trust by triggering authenticated calls back to on-prem systems.",
+      "tags": [
+        "exploitation",
+        "principal-propagation",
+        "btp",
+        "scc",
+        "destination"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sap_pp_probe.py:find_pp_destination",
+      "type": "function",
+      "name": "find_pp_destination",
+      "filePath": "modules/exploitation/sap_pp_probe.py",
+      "lineRange": [
+        67,
+        94
+      ],
+      "summary": "Locates an existing principal-propagation-capable destination in a BTP subaccount that can be used as a pivot.",
+      "tags": [
+        "btp",
+        "destination",
+        "discovery"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/exploitation/sap_pp_probe.py:find_scc_mapping_for_target",
+      "type": "function",
+      "name": "find_scc_mapping_for_target",
+      "filePath": "modules/exploitation/sap_pp_probe.py",
+      "lineRange": [
+        97,
+        137
+      ],
+      "summary": "Resolves the Cloud Connector virtual-host mapping for a given on-prem target so PP traffic can be routed correctly.",
+      "tags": [
+        "scc",
+        "mapping",
+        "discovery"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/exploitation/sap_pp_probe.py:create_temp_pp_destination",
+      "type": "function",
+      "name": "create_temp_pp_destination",
+      "filePath": "modules/exploitation/sap_pp_probe.py",
+      "lineRange": [
+        140,
+        214
+      ],
+      "summary": "Creates a transient PrincipalPropagation destination in the BTP destination service used to probe trust to an on-prem backend.",
+      "tags": [
+        "btp",
+        "destination",
+        "ephemeral"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sap_pp_probe.py:http_probe_via_connectivity_proxy",
+      "type": "function",
+      "name": "http_probe_via_connectivity_proxy",
+      "filePath": "modules/exploitation/sap_pp_probe.py",
+      "lineRange": [
+        320,
+        454
+      ],
+      "summary": "Issues an HTTP probe through the BTP Connectivity proxy to the on-prem target using the temporary PP destination and reports authentication outcome.",
+      "tags": [
+        "btp",
+        "probe",
+        "connectivity-proxy",
+        "http"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sap_pp_probe.py:verify_pp",
+      "type": "function",
+      "name": "verify_pp",
+      "filePath": "modules/exploitation/sap_pp_probe.py",
+      "lineRange": [
+        502,
+        832
+      ],
+      "summary": "End-to-end principal-propagation verification: builds a temp destination, probes the backend, and emits actionable findings about PP trust posture.",
+      "tags": [
+        "pp",
+        "verification",
+        "orchestrator",
+        "findings"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sap_pp_probe.py:fetch_destination_config",
+      "type": "function",
+      "name": "fetch_destination_config",
+      "filePath": "modules/exploitation/sap_pp_probe.py",
+      "lineRange": [
+        227,
+        250
+      ],
+      "summary": "Retrieves the JSON destination configuration for a given destination name from the BTP destination service.",
+      "tags": [
+        "btp",
+        "destination",
+        "http"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/exploitation/sap_pp_probe.py:detect_user_in_response",
+      "type": "function",
+      "name": "detect_user_in_response",
+      "filePath": "modules/exploitation/sap_pp_probe.py",
+      "lineRange": [
+        461,
+        495
+      ],
+      "summary": "Heuristics that scrape SAP backend responses to detect which authenticated user was propagated through the connectivity proxy.",
+      "tags": [
+        "heuristic",
+        "detection",
+        "user-identity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:modules/exploitation/sap_soap_rfc.py",
+      "type": "file",
+      "name": "sap_soap_rfc.py",
+      "filePath": "modules/exploitation/sap_soap_rfc.py",
+      "summary": "Lightweight SOAP-RFC client that talks to ICM /sap/bc/soap/rfc endpoints without requiring the NW RFC SDK, enabling RFC calls over HTTPS for authenticated probes and exploits.",
+      "tags": [
+        "protocol",
+        "soap",
+        "rfc",
+        "icm"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:modules/exploitation/sap_soap_rfc.py:SOAPRFCClient",
+      "type": "class",
+      "name": "SOAPRFCClient",
+      "filePath": "modules/exploitation/sap_soap_rfc.py",
+      "lineRange": [
+        117,
+        220
+      ],
+      "summary": "HTTP-based RFC client that wraps SOAP envelope construction and response parsing for SAP ICM RFC endpoints.",
+      "tags": [
+        "rfc",
+        "soap",
+        "client"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/exploitation/sap_soap_rfc.py:_build_envelope",
+      "type": "function",
+      "name": "_build_envelope",
+      "filePath": "modules/exploitation/sap_soap_rfc.py",
+      "lineRange": [
+        35,
+        66
+      ],
+      "summary": "Constructs the SOAP envelope XML payload for an RFC function call with import parameters.",
+      "tags": [
+        "xml",
+        "soap",
+        "serialization"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/exploitation/sap_soap_rfc.py:_parse_response",
+      "type": "function",
+      "name": "_parse_response",
+      "filePath": "modules/exploitation/sap_soap_rfc.py",
+      "lineRange": [
+        69,
+        114
+      ],
+      "summary": "Parses the SOAP RFC response XML, extracting export parameter values and surfaces SOAP faults as Python exceptions.",
+      "tags": [
+        "xml",
+        "soap",
+        "parsing"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:modules/exploitation/sap_ticket_delivery.py",
+      "type": "file",
+      "name": "sap_ticket_delivery.py",
+      "filePath": "modules/exploitation/sap_ticket_delivery.py",
+      "summary": "Generates ready-to-use ticket delivery artifacts (SAPGUI shortcuts, curl scripts, pyrfc invocation snippets) so forged SSO tickets can be replayed by operators or downstream tooling.",
+      "tags": [
+        "exploitation",
+        "ticket-replay",
+        "artifact-generation",
+        "tooling"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sap_ticket_delivery.py:make_sapgui_shortcut",
+      "type": "function",
+      "name": "make_sapgui_shortcut",
+      "filePath": "modules/exploitation/sap_ticket_delivery.py",
+      "lineRange": [
+        148,
+        243
+      ],
+      "summary": "Generates a .sap shortcut file that opens SAPGUI prefilled with the forged MYSAPSSO2 ticket for immediate authenticated logon.",
+      "tags": [
+        "sapgui",
+        "shortcut",
+        "delivery"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sap_ticket_delivery.py:make_curl_command",
+      "type": "function",
+      "name": "make_curl_command",
+      "filePath": "modules/exploitation/sap_ticket_delivery.py",
+      "lineRange": [
+        250,
+        277
+      ],
+      "summary": "Emits a curl command line that replays the forged ticket as a cookie against an HTTP-facing SAP endpoint.",
+      "tags": [
+        "curl",
+        "http",
+        "delivery"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/exploitation/sap_ticket_delivery.py:make_pyrfc_kwargs",
+      "type": "function",
+      "name": "make_pyrfc_kwargs",
+      "filePath": "modules/exploitation/sap_ticket_delivery.py",
+      "lineRange": [
+        284,
+        309
+      ],
+      "summary": "Generates the pyrfc Connection kwargs dict that uses the forged ticket as the MYSAPSSO2 authentication token.",
+      "tags": [
+        "pyrfc",
+        "rfc",
+        "delivery"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/exploitation/sap_ticket_delivery.py:save_ticket_artifacts",
+      "type": "function",
+      "name": "save_ticket_artifacts",
+      "filePath": "modules/exploitation/sap_ticket_delivery.py",
+      "lineRange": [
+        316,
+        434
+      ],
+      "summary": "Persists all generated artifacts (SAPGUI shortcut, curl script, pyrfc snippet, raw ticket) into the loot directory with consistent naming.",
+      "tags": [
+        "loot",
+        "artifact",
+        "filesystem"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:modules/exploitation/sap_ticket_propagate.py",
+      "type": "file",
+      "name": "sap_ticket_propagate.py",
+      "filePath": "modules/exploitation/sap_ticket_propagate.py",
+      "summary": "Replays forged MYSAPSSO2 tickets across the trusted SAP subgraph via HTTP and RFC channels to demonstrate lateral movement through the SSO trust mesh.",
+      "tags": [
+        "exploitation",
+        "lateral-movement",
+        "ticket-replay",
+        "sso",
+        "propagation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sap_ticket_propagate.py:http_replay_ticket",
+      "type": "function",
+      "name": "http_replay_ticket",
+      "filePath": "modules/exploitation/sap_ticket_propagate.py",
+      "lineRange": [
+        112,
+        230
+      ],
+      "summary": "Replays a forged MYSAPSSO2 ticket as a cookie against an SAP HTTP endpoint and detects whether authentication succeeded.",
+      "tags": [
+        "http",
+        "ticket-replay",
+        "propagation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sap_ticket_propagate.py:rfc_replay_ticket",
+      "type": "function",
+      "name": "rfc_replay_ticket",
+      "filePath": "modules/exploitation/sap_ticket_propagate.py",
+      "lineRange": [
+        237,
+        300
+      ],
+      "summary": "Replays a forged MYSAPSSO2 ticket through an RFC channel (pyrfc) to obtain authenticated access on the target system.",
+      "tags": [
+        "rfc",
+        "ticket-replay",
+        "propagation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sap_ticket_propagate.py:propagate_via_forged_ticket",
+      "type": "function",
+      "name": "propagate_via_forged_ticket",
+      "filePath": "modules/exploitation/sap_ticket_propagate.py",
+      "lineRange": [
+        307,
+        657
+      ],
+      "summary": "Top-level propagation routine that walks trusted edges from a compromised system and replays forged tickets across the connected landscape.",
+      "tags": [
+        "propagation",
+        "orchestrator",
+        "lateral-movement"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sap_ticket_propagate.py:propagate_to_trusted_subgraph",
+      "type": "function",
+      "name": "propagate_to_trusted_subgraph",
+      "filePath": "modules/exploitation/sap_ticket_propagate.py",
+      "lineRange": [
+        679,
+        724
+      ],
+      "summary": "Enumerates the trusted subgraph reachable from an entry node and dispatches ticket replay attempts to each member.",
+      "tags": [
+        "propagation",
+        "graph-walk",
+        "lateral-movement"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/exploitation/sap_ticket_propagate.py:_looks_like_sap_authenticated",
+      "type": "function",
+      "name": "_looks_like_sap_authenticated",
+      "filePath": "modules/exploitation/sap_ticket_propagate.py",
+      "lineRange": [
+        87,
+        109
+      ],
+      "summary": "Heuristic detector that classifies an HTTP response as authenticated SAP content versus a login page.",
+      "tags": [
+        "heuristic",
+        "detection",
+        "http"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:modules/exploitation/sap_transport_import.py",
+      "type": "file",
+      "name": "sap_transport_import.py",
+      "filePath": "modules/exploitation/sap_transport_import.py",
+      "summary": "Uploads and imports SAP transport requests as a post-exploitation payload delivery channel: uses GW SAPXPG or SXPG_STEP_XPG_START to drop transport binaries, then drives the tp command-line tool to import them.",
+      "tags": [
+        "exploitation",
+        "transport",
+        "post-exploit",
+        "payload-delivery",
+        "tp"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sap_transport_import.py:parse_transport_zip",
+      "type": "function",
+      "name": "parse_transport_zip",
+      "filePath": "modules/exploitation/sap_transport_import.py",
+      "lineRange": [
+        127,
+        174
+      ],
+      "summary": "Validates and inspects a transport ZIP archive, extracting cofile/data file pairs and the transport request name.",
+      "tags": [
+        "transport",
+        "zip",
+        "parsing"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/exploitation/sap_transport_import.py:_discover_trans_dir",
+      "type": "function",
+      "name": "_discover_trans_dir",
+      "filePath": "modules/exploitation/sap_transport_import.py",
+      "lineRange": [
+        323,
+        390
+      ],
+      "summary": "Discovers the SAP /usr/sap/trans directory on the target by inspecting common locations and probing via the OS-exec channel.",
+      "tags": [
+        "filesystem",
+        "discovery",
+        "trans-dir"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sap_transport_import.py:_upload_binary",
+      "type": "function",
+      "name": "_upload_binary",
+      "filePath": "modules/exploitation/sap_transport_import.py",
+      "lineRange": [
+        393,
+        547
+      ],
+      "summary": "Chunks and uploads a binary file (transport cofile/data) into the target trans directory using the OS-exec channel.",
+      "tags": [
+        "upload",
+        "chunking",
+        "binary"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sap_transport_import.py:_run_tp",
+      "type": "function",
+      "name": "_run_tp",
+      "filePath": "modules/exploitation/sap_transport_import.py",
+      "lineRange": [
+        586,
+        651
+      ],
+      "summary": "Invokes the tp transport tool with import commands and parses tp return codes and log output.",
+      "tags": [
+        "tp",
+        "transport",
+        "exec"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sap_transport_import.py:import_transport",
+      "type": "function",
+      "name": "import_transport",
+      "filePath": "modules/exploitation/sap_transport_import.py",
+      "lineRange": [
+        669,
+        873
+      ],
+      "summary": "End-to-end transport import: validates ZIP, resolves channel, uploads binaries, runs tp addtobuffer + import, and verifies via showbuffer.",
+      "tags": [
+        "transport",
+        "orchestrator",
+        "import"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sap_transport_import.py:_resolve_channel",
+      "type": "function",
+      "name": "_resolve_channel",
+      "filePath": "modules/exploitation/sap_transport_import.py",
+      "lineRange": [
+        244,
+        283
+      ],
+      "summary": "Picks between the GW SAPXPG and SXPG_STEP_XPG_START OS-exec channels based on caller preference and target capability.",
+      "tags": [
+        "channel",
+        "exec",
+        "selection"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/exploitation/sap_transport_import.py:_new_progress",
+      "type": "function",
+      "name": "_new_progress",
+      "filePath": "modules/exploitation/sap_transport_import.py",
+      "lineRange": [
+        60,
+        100
+      ],
+      "summary": "Creates a progress-reporting context for long-running transport upload and import operations.",
+      "tags": [
+        "progress",
+        "ui",
+        "utility"
+      ],
+      "complexity": "moderate"
+    }
+  ],
+  "edges": [
+    {
+      "source": "file:modules/exploitation/sap_mysapsso2.py",
+      "target": "function:modules/exploitation/sap_mysapsso2.py:build_ticket",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_mysapsso2.py",
+      "target": "function:modules/exploitation/sap_mysapsso2.py:parse_ticket",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_mysapsso2.py",
+      "target": "function:modules/exploitation/sap_mysapsso2.py:_build_pkcs7_signeddata_dsa",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_mysapsso2.py",
+      "target": "function:modules/exploitation/sap_mysapsso2.py:sign_ticket",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_mysapsso2.py",
+      "target": "function:modules/exploitation/sap_mysapsso2.py:forge_ticket",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_mysapsso2.py",
+      "target": "function:modules/exploitation/sap_mysapsso2.py:_parse_infounits",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_mysapsso2.py",
+      "target": "function:modules/exploitation/sap_mysapsso2.py:build_ticket",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sap_mysapsso2.py",
+      "target": "function:modules/exploitation/sap_mysapsso2.py:parse_ticket",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sap_mysapsso2.py",
+      "target": "function:modules/exploitation/sap_mysapsso2.py:sign_ticket",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sap_mysapsso2.py",
+      "target": "function:modules/exploitation/sap_mysapsso2.py:forge_ticket",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sap_onprem_to_btp.py",
+      "target": "function:modules/exploitation/sap_onprem_to_btp.py:harvest_btp_candidates",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_onprem_to_btp.py",
+      "target": "function:modules/exploitation/sap_onprem_to_btp.py:mint_btp_token",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_onprem_to_btp.py",
+      "target": "function:modules/exploitation/sap_onprem_to_btp.py:harvest_btp_candidates",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sap_onprem_to_btp.py",
+      "target": "function:modules/exploitation/sap_onprem_to_btp.py:mint_btp_token",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sap_pp_probe.py",
+      "target": "function:modules/exploitation/sap_pp_probe.py:find_pp_destination",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_pp_probe.py",
+      "target": "function:modules/exploitation/sap_pp_probe.py:find_scc_mapping_for_target",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_pp_probe.py",
+      "target": "function:modules/exploitation/sap_pp_probe.py:create_temp_pp_destination",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_pp_probe.py",
+      "target": "function:modules/exploitation/sap_pp_probe.py:http_probe_via_connectivity_proxy",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_pp_probe.py",
+      "target": "function:modules/exploitation/sap_pp_probe.py:verify_pp",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_pp_probe.py",
+      "target": "function:modules/exploitation/sap_pp_probe.py:fetch_destination_config",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_pp_probe.py",
+      "target": "function:modules/exploitation/sap_pp_probe.py:detect_user_in_response",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_pp_probe.py",
+      "target": "function:modules/exploitation/sap_pp_probe.py:verify_pp",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sap_pp_probe.py",
+      "target": "function:modules/exploitation/sap_pp_probe.py:create_temp_pp_destination",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sap_pp_probe.py",
+      "target": "function:modules/exploitation/sap_pp_probe.py:find_pp_destination",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sap_soap_rfc.py",
+      "target": "class:modules/exploitation/sap_soap_rfc.py:SOAPRFCClient",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_soap_rfc.py",
+      "target": "function:modules/exploitation/sap_soap_rfc.py:_build_envelope",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_soap_rfc.py",
+      "target": "function:modules/exploitation/sap_soap_rfc.py:_parse_response",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_soap_rfc.py",
+      "target": "class:modules/exploitation/sap_soap_rfc.py:SOAPRFCClient",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sap_ticket_delivery.py",
+      "target": "function:modules/exploitation/sap_ticket_delivery.py:make_sapgui_shortcut",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_ticket_delivery.py",
+      "target": "function:modules/exploitation/sap_ticket_delivery.py:make_curl_command",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_ticket_delivery.py",
+      "target": "function:modules/exploitation/sap_ticket_delivery.py:make_pyrfc_kwargs",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_ticket_delivery.py",
+      "target": "function:modules/exploitation/sap_ticket_delivery.py:save_ticket_artifacts",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_ticket_delivery.py",
+      "target": "function:modules/exploitation/sap_ticket_delivery.py:save_ticket_artifacts",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sap_ticket_delivery.py",
+      "target": "function:modules/exploitation/sap_ticket_delivery.py:make_sapgui_shortcut",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sap_ticket_propagate.py",
+      "target": "function:modules/exploitation/sap_ticket_propagate.py:http_replay_ticket",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_ticket_propagate.py",
+      "target": "function:modules/exploitation/sap_ticket_propagate.py:rfc_replay_ticket",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_ticket_propagate.py",
+      "target": "function:modules/exploitation/sap_ticket_propagate.py:propagate_via_forged_ticket",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_ticket_propagate.py",
+      "target": "function:modules/exploitation/sap_ticket_propagate.py:propagate_to_trusted_subgraph",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_ticket_propagate.py",
+      "target": "function:modules/exploitation/sap_ticket_propagate.py:_looks_like_sap_authenticated",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_ticket_propagate.py",
+      "target": "function:modules/exploitation/sap_ticket_propagate.py:propagate_via_forged_ticket",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sap_ticket_propagate.py",
+      "target": "function:modules/exploitation/sap_ticket_propagate.py:propagate_to_trusted_subgraph",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sap_transport_import.py",
+      "target": "function:modules/exploitation/sap_transport_import.py:parse_transport_zip",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_transport_import.py",
+      "target": "function:modules/exploitation/sap_transport_import.py:_discover_trans_dir",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_transport_import.py",
+      "target": "function:modules/exploitation/sap_transport_import.py:_upload_binary",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_transport_import.py",
+      "target": "function:modules/exploitation/sap_transport_import.py:_run_tp",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_transport_import.py",
+      "target": "function:modules/exploitation/sap_transport_import.py:import_transport",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_transport_import.py",
+      "target": "function:modules/exploitation/sap_transport_import.py:_resolve_channel",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_transport_import.py",
+      "target": "function:modules/exploitation/sap_transport_import.py:_new_progress",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_transport_import.py",
+      "target": "function:modules/exploitation/sap_transport_import.py:import_transport",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sap_transport_import.py",
+      "target": "function:modules/exploitation/sap_transport_import.py:parse_transport_zip",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sap_ticket_propagate.py",
+      "target": "file:modules/exploitation/sap_mysapsso2.py",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:modules/exploitation/sap_ticket_delivery.py",
+      "target": "file:modules/exploitation/sap_mysapsso2.py",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:modules/exploitation/sap_ticket_propagate.py",
+      "target": "file:modules/postex/sapmap_chain.py",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:modules/exploitation/sap_onprem_to_btp.py",
+      "target": "file:modules/exploitation/sap_pp_probe.py",
+      "type": "related",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "file:modules/exploitation/sap_pp_probe.py",
+      "target": "file:modules/exploitation/sap_onprem_to_btp.py",
+      "type": "related",
+      "direction": "forward",
+      "weight": 0.5
+    }
+  ]
+}

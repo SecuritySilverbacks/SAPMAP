@@ -1,0 +1,170 @@
+{
+  "batchIndex": 13,
+  "totalBatches": 14,
+  "files": [
+    {
+      "path": "modules/protocols/sap_rfc_system_info.py",
+      "language": "python",
+      "sizeLines": 2241,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/protocols/sap_router_info.py",
+      "language": "python",
+      "sizeLines": 286,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/protocols/sap_rsec_cipher.py",
+      "language": "python",
+      "sizeLines": 321,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/protocols/sap_saprouter.py",
+      "language": "python",
+      "sizeLines": 407,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/protocols/sap_snc.py",
+      "language": "python",
+      "sizeLines": 575,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/__init__.py",
+      "language": "python",
+      "sizeLines": 0,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tools/btp_ssh_bridge/Staticfile",
+      "language": "unknown",
+      "sizeLines": 6,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tools/check_sso2_profile.py",
+      "language": "python",
+      "sizeLines": 144,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tools/dirtyfrag/build.sh",
+      "language": "shell",
+      "sizeLines": 145,
+      "fileCategory": "script"
+    },
+    {
+      "path": "tools/dirtyfrag/exp.c",
+      "language": "c",
+      "sizeLines": 1991,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tools/dirtyfrag/README.md",
+      "language": "markdown",
+      "sizeLines": 51,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "tools/efspotato/build.ps1",
+      "language": "powershell",
+      "sizeLines": 319,
+      "fileCategory": "script"
+    },
+    {
+      "path": "tools/efspotato/README.md",
+      "language": "markdown",
+      "sizeLines": 92,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "tools/godpotato/build.ps1",
+      "language": "powershell",
+      "sizeLines": 315,
+      "fileCategory": "script"
+    },
+    {
+      "path": "tools/godpotato/README.md",
+      "language": "markdown",
+      "sizeLines": 103,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "tools/miniplasma/build.ps1",
+      "language": "powershell",
+      "sizeLines": 294,
+      "fileCategory": "script"
+    },
+    {
+      "path": "tools/miniplasma/README.md",
+      "language": "markdown",
+      "sizeLines": 112,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "tools/miniplasma/src/ConfuserEx.crproj",
+      "language": "crproj",
+      "sizeLines": 79,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tools/miniplasma/src/FodyWeavers.xml",
+      "language": "xml",
+      "sizeLines": 20,
+      "fileCategory": "config"
+    },
+    {
+      "path": "tools/miniplasma/src/Program.cs",
+      "language": "csharp",
+      "sizeLines": 417,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tools/miniplasma/src/SAPMAP_MiniPlasma.csproj",
+      "language": "csproj",
+      "sizeLines": 48,
+      "fileCategory": "config"
+    },
+    {
+      "path": "tools/ssfs_decrypt/SecStoreAccess.java",
+      "language": "java",
+      "sizeLines": 134,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tools/ssfs_decrypt/SecStoreAccessException.java",
+      "language": "java",
+      "sizeLines": 7,
+      "fileCategory": "code"
+    }
+  ],
+  "batchImportData": {
+    "modules/protocols/sap_rfc_system_info.py": [],
+    "modules/protocols/sap_router_info.py": [],
+    "modules/protocols/sap_rsec_cipher.py": [],
+    "modules/protocols/sap_saprouter.py": [],
+    "modules/protocols/sap_snc.py": [],
+    "tests/__init__.py": [],
+    "tools/btp_ssh_bridge/Staticfile": [],
+    "tools/check_sso2_profile.py": [],
+    "tools/dirtyfrag/build.sh": [],
+    "tools/dirtyfrag/exp.c": [],
+    "tools/dirtyfrag/README.md": [],
+    "tools/efspotato/build.ps1": [],
+    "tools/efspotato/README.md": [],
+    "tools/godpotato/build.ps1": [],
+    "tools/godpotato/README.md": [],
+    "tools/miniplasma/build.ps1": [],
+    "tools/miniplasma/README.md": [],
+    "tools/miniplasma/src/ConfuserEx.crproj": [],
+    "tools/miniplasma/src/FodyWeavers.xml": [],
+    "tools/miniplasma/src/Program.cs": [],
+    "tools/miniplasma/src/SAPMAP_MiniPlasma.csproj": [],
+    "tools/ssfs_decrypt/SecStoreAccess.java": [],
+    "tools/ssfs_decrypt/SecStoreAccessException.java": []
+  },
+  "neighborMap": {}
+}

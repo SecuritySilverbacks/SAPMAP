@@ -1,0 +1,71 @@
+{
+  "scriptCompleted": true,
+  "filesAnalyzed": 8,
+  "filesSkipped": [],
+  "results": [
+    {
+      "path": "tests/fixtures/scc_pp/scc_config_clean_scoped.ini",
+      "language": "config",
+      "fileCategory": "config",
+      "totalLines": 28,
+      "nonEmptyLines": 28,
+      "metrics": {}
+    },
+    {
+      "path": "tests/fixtures/scc_pp/scc_config_critical_empty.ini",
+      "language": "config",
+      "fileCategory": "config",
+      "totalLines": 9,
+      "nonEmptyLines": 9,
+      "metrics": {}
+    },
+    {
+      "path": "tests/fixtures/scc_pp/scc_config_critical_name.ini",
+      "language": "config",
+      "fileCategory": "config",
+      "totalLines": 20,
+      "nonEmptyLines": 20,
+      "metrics": {}
+    },
+    {
+      "path": "tests/fixtures/scc_pp/scc_config_high_email.ini",
+      "language": "config",
+      "fileCategory": "config",
+      "totalLines": 21,
+      "nonEmptyLines": 21,
+      "metrics": {}
+    },
+    {
+      "path": "tests/fixtures/scc_pp/scc_config_high_hardcoded_ddic.ini",
+      "language": "config",
+      "fileCategory": "config",
+      "totalLines": 19,
+      "nonEmptyLines": 19,
+      "metrics": {}
+    },
+    {
+      "path": "tests/fixtures/scc_pp/scc_config_medium_long_validity.ini",
+      "language": "config",
+      "fileCategory": "config",
+      "totalLines": 23,
+      "nonEmptyLines": 23,
+      "metrics": {}
+    },
+    {
+      "path": "tests/fixtures/scc_pp/trustcfg_single_xsuaa.xml",
+      "language": "xml",
+      "fileCategory": "config",
+      "totalLines": 15,
+      "nonEmptyLines": 15,
+      "metrics": {}
+    },
+    {
+      "path": "tests/fixtures/scc_pp/trustcfg_xsuaa_plus_ias.xml",
+      "language": "xml",
+      "fileCategory": "config",
+      "totalLines": 24,
+      "nonEmptyLines": 24,
+      "metrics": {}
+    }
+  ]
+}

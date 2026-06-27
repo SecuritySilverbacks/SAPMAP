@@ -1,0 +1,186 @@
+{
+  "projectRoot": "/home/joris/Desktop/CLAUDE/SAPMAP",
+  "batchFiles": [
+    {
+      "path": ".understand-anything/.understandignore",
+      "language": "unknown",
+      "sizeLines": 80,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/automation/__init__.py",
+      "language": "python",
+      "sizeLines": 1,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/automation/sapmap_script.py",
+      "language": "python",
+      "sizeLines": 955,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/business_impact/__init__.py",
+      "language": "python",
+      "sizeLines": 1,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/business_impact/sap_java_impact.py",
+      "language": "python",
+      "sizeLines": 413,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/business_impact/sapmap_impact.py",
+      "language": "python",
+      "sizeLines": 790,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/core/__init__.py",
+      "language": "python",
+      "sizeLines": 1,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/core/sapmap_attack.py",
+      "language": "python",
+      "sizeLines": 487,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/core/sapmap_config.py",
+      "language": "python",
+      "sizeLines": 470,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/core/sapmap_errors.py",
+      "language": "python",
+      "sizeLines": 39,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/core/sapmap_remediation.py",
+      "language": "python",
+      "sizeLines": 1009,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/core/sapmap_stop.py",
+      "language": "python",
+      "sizeLines": 69,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/data_extraction/__init__.py",
+      "language": "python",
+      "sizeLines": 1,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/data_extraction/poc_remote_abap_exec.py",
+      "language": "python",
+      "sizeLines": 272,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/data_extraction/sap_btp.py",
+      "language": "python",
+      "sizeLines": 878,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/data_extraction/sap_java_db.py",
+      "language": "python",
+      "sizeLines": 477,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/data_extraction/sap_java_runner.py",
+      "language": "python",
+      "sizeLines": 779,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/data_extraction/sap_java_secstore_offline.py",
+      "language": "python",
+      "sizeLines": 350,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/data_extraction/sap_java_secstore_runner.py",
+      "language": "python",
+      "sizeLines": 1180,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/data_extraction/sap_java_secstore.py",
+      "language": "python",
+      "sizeLines": 803,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/data_extraction/sap_oa2c.py",
+      "language": "python",
+      "sizeLines": 499,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/data_extraction/sap_scc_harvest.py",
+      "language": "python",
+      "sizeLines": 1187,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/data_extraction/sapmap_scc_admin.py",
+      "language": "python",
+      "sizeLines": 662,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/data_extraction/sapmap_scc_keystore.py",
+      "language": "python",
+      "sizeLines": 1007,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/data_extraction/sapmap_scc_ssfs_decrypt.py",
+      "language": "python",
+      "sizeLines": 588,
+      "fileCategory": "code"
+    }
+  ],
+  "batchImportData": {
+    ".understand-anything/.understandignore": [],
+    "modules/automation/__init__.py": [],
+    "modules/automation/sapmap_script.py": [],
+    "modules/business_impact/__init__.py": [],
+    "modules/business_impact/sap_java_impact.py": [
+      "modules/business_impact/sapmap_impact.py"
+    ],
+    "modules/business_impact/sapmap_impact.py": [],
+    "modules/core/__init__.py": [],
+    "modules/core/sapmap_attack.py": [],
+    "modules/core/sapmap_config.py": [],
+    "modules/core/sapmap_errors.py": [],
+    "modules/core/sapmap_remediation.py": [],
+    "modules/core/sapmap_stop.py": [],
+    "modules/data_extraction/__init__.py": [],
+    "modules/data_extraction/poc_remote_abap_exec.py": [],
+    "modules/data_extraction/sap_btp.py": [],
+    "modules/data_extraction/sap_java_db.py": [],
+    "modules/data_extraction/sap_java_runner.py": [],
+    "modules/data_extraction/sap_java_secstore_offline.py": [],
+    "modules/data_extraction/sap_java_secstore_runner.py": [],
+    "modules/data_extraction/sap_java_secstore.py": [],
+    "modules/data_extraction/sap_oa2c.py": [],
+    "modules/data_extraction/sap_scc_harvest.py": [],
+    "modules/data_extraction/sapmap_scc_admin.py": [],
+    "modules/data_extraction/sapmap_scc_keystore.py": [
+      "modules/data_extraction/sapmap_scc_admin.py"
+    ],
+    "modules/data_extraction/sapmap_scc_ssfs_decrypt.py": []
+  }
+}

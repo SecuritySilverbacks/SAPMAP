@@ -1,0 +1,86 @@
+[
+  {
+    "order": 1,
+    "title": "What SAPMAP Is",
+    "description": "Begin with the README to understand the project's premise: \"like BloodHound for Active Directory, but for SAP.\" SAPMAP discovers SAP systems, maps RFC trust between them, fires known exploits (10KBLAZE, MS betrusted, CVE-2025-31324, MYSAPSSO2 forge, Windows LPE), and renders the resulting attack surface as an interactive web map. The DISCLAIMER alongside is non-negotiable context: this is a research/red-team tool that requires written authorization before use.",
+    "nodeIds": ["document:README.md", "document:DISCLAIMER.md"]
+  },
+  {
+    "order": 2,
+    "title": "The Entry Point — What `python3 sapmap.py` Actually Does",
+    "description": "`sapmap.py` is the single entry the user runs. It parses CLI flags, optionally registers the SAP NW RFC SDK path, then either launches a Bottle HTTP server with a pywebview GUI window, runs a scripted scenario, or executes a headless CLI scan. Note the inbound edges from many config and doc files: every demo playbook and the README all reference this file — it really is the front door. `requirements.txt` lists the minimal pinned deps (bottle, requests, urllib3, pycryptodome) and the optional lazy extras (pywebview, pyyaml, pyjks, SAPology) that are only imported when a specific feature is invoked.",
+    "nodeIds": ["file:sapmap.py", "config:requirements.txt"],
+    "languageLesson": "Python's lazy-import idiom: top-level imports stay minimal, and heavy/optional dependencies are imported *inside* the function that needs them. SAPMAP uses this so unauthenticated features work even when the NW RFC SDK, pyrfc, pyjks, etc. are not installed — ImportErrors surface at use time, not startup."
+  },
+  {
+    "order": 3,
+    "title": "The Flat-Import Trick — How `modules/*` Glues Together",
+    "description": "Before any module can `from sapmap_models import ...`, somebody has to make that work. `modules/__init__.py` walks every subpackage directory and appends it to `sys.path` at import time. This is the *only* import the entry point directly makes, which is why most cross-module dependencies don't show up as edges in the graph — they resolve through the flat namespace created here. `tests/conftest.py` mirrors the same trick so pytest can use identical import paths.",
+    "nodeIds": ["file:modules/__init__.py", "file:tests/conftest.py"],
+    "languageLesson": "Mutating `sys.path` at package init is a deliberate ergonomics tradeoff: it lets every file write short flat imports regardless of nesting depth, at the cost of opaque dependency relationships and harder static analysis. SAPMAP accepts that tradeoff so it can keep the module tree shallow and the imports readable."
+  },
+  {
+    "order": 4,
+    "title": "The Domain Model — What SAPMAP Is Mapping",
+    "description": "Every node, edge, and finding the tool collects is a dataclass defined here. `SAPNode`, `RFCConnection`, `Credentials`, `TrustRelation`, `Finding`, `SCCNode`, `BTPDestination`, and the top-level `SAPMAPState` container give the project its vocabulary. Each model is JSON-roundtrippable via `to_dict`/`from_dict`, which is the contract that makes `.sapmap` session files plain inspectable JSON. Understand these dataclasses and you understand what every later step is producing.",
+    "nodeIds": ["file:modules/core/sapmap_models.py"]
+  },
+  {
+    "order": 5,
+    "title": "Session State, Persistence, and the Findings Bus",
+    "description": "`sapmap_state.py` is the persistence layer — it saves and loads `.sapmap` JSON files in `states/`, maintains an RFC test cache, and provisions the `loot/` directory tree (secstore, hashes, tables, bia) where extracted secrets land. `sapmap_findings.py` is a module-global pub/sub bus that decouples discovery and exploit code from the GUI: anything can `emit_finding(severity, node, msg)` and registered listeners receive a structured dict in real time, with a 60-second dedupe window and a 500-entry ring buffer. This is the loose-coupling backbone that lets background threads stream events to the SVG map without callbacks.",
+    "nodeIds": ["file:modules/core/sapmap_state.py", "file:modules/core/sapmap_findings.py"]
+  },
+  {
+    "order": 6,
+    "title": "The Web GUI — Bottle Server + Single-File Frontend",
+    "description": "The user-visible map is built from two files. `sapmap_gui.py` is a Bottle HTTP backend exposing 60+ REST routes for discovery, RFC operations, exploitation, payload generation, SCC enumeration, and session save/load; every long-running operation runs in a background thread while the frontend polls for state updates. `sapmap_html.py` is an 11k-line self-contained HTML/CSS/JavaScript bundle (no external JS deps) returning the entire single-page app from one `get_html()` function — interactive SVG landscape with pan/zoom/drag, RFC connection rendering, right-click menus, and a real-time console. Together they replace what BloodHound's neo4j-backed UI does, but with zero third-party runtime dependencies.",
+    "nodeIds": ["file:modules/core/sapmap_gui.py", "file:modules/core/sapmap_html.py"],
+    "languageLesson": "Polling vs. callbacks: SAPMAP's frontend polls REST endpoints for state instead of using WebSockets or server-sent events. This is a deliberate simplicity choice — Bottle stays a plain WSGI app, background threads never have to know about clients, and the JS side just refreshes the SVG when a poll returns new data."
+  },
+  {
+    "order": 7,
+    "title": "Discovery — Finding SAP Systems on the Wire",
+    "description": "Discovery is where the landscape gets populated. `sapmap_scanner.py` runs in two modes: fast (dispatcher 32XX + gateway 33XX ports only) and deep (via SAPology integration). For every reachable system it materializes a `SAPNode` (from Step 4) into the `SAPMAPState`. `sap_default_creds.py` then probes each system with 16 well-known credential pairs via the DIAG protocol, sequentially to minimize lockout risk. Every hit emits a finding (Step 5's bus) that the GUI map renders as a red badge on the node.",
+    "nodeIds": ["file:modules/discovery/sapmap_scanner.py", "file:modules/discovery/sap_default_creds.py"]
+  },
+  {
+    "order": 8,
+    "title": "RFC Trust Mapping — How the Edges Get Drawn",
+    "description": "This is the BloodHound analogy made literal. `sapmap_rfc.py` performs authenticated RFC operations against each discovered ABAP system: BAPI calls, `RFC_READ_TABLE` against RFCDES/RFCSYSACL, destination management, user creation. By reading the RFC destinations table from one system, SAPMAP learns which other systems it trusts — those become `RFCConnection` and `TrustRelation` edges between the `SAPNode`s on the map. The trust graph that emerges is what later powers the attack-chain ranking.",
+    "nodeIds": ["file:modules/discovery/sapmap_rfc.py"]
+  },
+  {
+    "order": 9,
+    "title": "The Protocol Layer — RFC over the Wire, Through SAProuter",
+    "description": "Underneath the RFC operations sits a tier of low-level protocol code. `sap_rfc_ctypes.py` is a lazy-loaded ctypes wrapper around the proprietary SAP NW RFC SDK (so the rest of the codebase keeps working when the SDK is absent). `sap_rfc_system_info.py` performs *unauthenticated* probing through three fallback methods (V6 single-packet, V2 error-leak, Chipik-style) to extract SID/kernel/hostname without credentials. `sap_saprouter.py` transparently wraps every scan/RFC/exploit call so traffic can tunnel through a target's SAProuter — this is what lets a single SAPMAP run map an internal landscape from the outside.",
+    "nodeIds": ["file:modules/protocols/sap_rfc_ctypes.py", "file:modules/protocols/sap_rfc_system_info.py", "file:modules/protocols/sap_saprouter.py"],
+    "languageLesson": "ctypes lazy-loading: by importing the SDK only when an authenticated RFC feature is first called, the entire unauthenticated discovery + exploit surface remains usable without installing the proprietary NW RFC SDK. The ImportError becomes a runtime error you can show in the GUI, not a hard startup failure."
+  },
+  {
+    "order": 10,
+    "title": "Unauthenticated Exploitation — 10KBLAZE and Message Server Trust",
+    "description": "Now the offensive payload modules. `sapmap_exploit.py` is the central orchestrator: it probes Gateway vulnerability, runs the 10KBLAZE chain, deploys CVE-2025-31324 webshells, creates SAPMAP users on ABAP and Java stacks, and propagates the foothold across the trust graph from Step 8. `sap_gw_xpg_standalone.py` is the pure-Python 10KBLAZE Gateway SAPXPG primitive (unauthenticated OS command execution via misconfigured `secinfo`/`reginfo`). `sap_ms_betrusted.py` exploits the Message Server internal port (CVE-2020-6207) to register a fake application server, and `sap_betrusted_chain.py` glues the two together: register-fake-server-then-call-SAPXPG yields unauthenticated RCE on hardened gateways.",
+    "nodeIds": ["file:modules/exploitation/sapmap_exploit.py", "file:modules/exploitation/sap_gw_xpg_standalone.py", "file:modules/exploitation/sap_ms_betrusted.py", "file:modules/exploitation/sap_betrusted_chain.py"]
+  },
+  {
+    "order": 11,
+    "title": "Modern CVEs and SSO Forgery — CVE-2025-31324 and MYSAPSSO2",
+    "description": "`sap_cve_2025_31324.py` exploits a recent VisualComposer flaw by chunked-base64-writing a JSP webshell into a Java NetWeaver install, giving you OS-level code on the Java stack. `sap_mysapsso2.py` goes the other direction: it forges MYSAPSSO2 logon tickets (SAP's portal SSO format) so a compromise of one trusted system buys instant authenticated access to every other system that accepts those tickets. Together they extend the 10KBLAZE-era attack surface from Step 10 into 2025-era SAP landscapes.",
+    "nodeIds": ["file:modules/exploitation/sap_cve_2025_31324.py", "file:modules/exploitation/sap_mysapsso2.py"]
+  },
+  {
+    "order": 12,
+    "title": "Post-Exploitation — LPE, SecStore Looting, Attack-Chain BFS",
+    "description": "Once a foothold exists, three things happen. `sapmap_lpe.py` runs decorator-registered privilege-escalation methods — `bapi_profiles_assign` grants SAP_ALL via direct RFC; `webgui_rsbdcos0` injects SQL through the WebGUI to bypass `S_RFC`. `sapmap_secstore.py` decrypts the ABAP RSECTAB SecStore using SAP's proprietary RSECCipher (an 8-round Feistel over 3DES) through a 5-method fallback chain, surfacing cleartext credentials into the `loot/` tree from Step 5. Finally, `sapmap_chain.py` does the BloodHound moment: BFS over the RFC adjacency graph from every entry point, ranking paths by severity (CRITICAL/HIGH/MEDIUM/LOW) — this is the algorithm that turns the discovered graph into ranked lateral-movement chains.",
+    "nodeIds": ["file:modules/postex/sapmap_lpe.py", "file:modules/data_extraction/sapmap_secstore.py", "file:modules/postex/sapmap_chain.py"],
+    "languageLesson": "Decorator-registered method dispatch: `sapmap_lpe.py` uses a Python decorator (e.g. `@lpe_method(...)`) to auto-register escalation techniques into a central registry at import time. Adding a new LPE is just defining a function with the decorator — no central if/elif chain to edit, no plugin manifest. This is the same pattern Flask/pytest use for routes and fixtures."
+  },
+  {
+    "order": 13,
+    "title": "Reporting and Scripted Scenarios — Closing the Loop",
+    "description": "An engagement isn't done until there's a deliverable. `sapmap_report.py` walks the final `SAPMAPState` and emits both portable Markdown and a self-contained HTML report with KPI cards, an SVG snapshot of the landscape, attack coverage, trust chains, credentials, SCC/BTP sections, and structured remediation. `demo_10kblaze.yaml` shows the other half of automation: a scripted playbook that drives the whole pipeline (MS betrusted IP injection → Gateway SAPXPG user creation → RFC harvesting → SecStore download → business-impact assessment) without ever opening the GUI — exactly the chain you just walked through, expressed as data. Run this file via `python3 sapmap.py --script scripts/demo_10kblaze.yaml` and you've executed the full README story end-to-end.",
+    "nodeIds": ["file:modules/core/sapmap_report.py", "config:scripts/demo_10kblaze.yaml"],
+    "languageLesson": "YAML as a DSL for scenarios: the playbook format is plain YAML mapping step names to module/function calls with kwargs. There's no custom parser — `pyyaml.safe_load` returns a dict, and the scenario runner dispatches each step against the same module functions the GUI calls. Demo files double as integration tests and as reproducible engagement evidence."
+  }
+]

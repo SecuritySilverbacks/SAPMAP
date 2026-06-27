@@ -1,0 +1,1781 @@
+{
+  "nodes": [
+    {
+      "id": "file:modules/discovery/sapmap_rfc.py",
+      "type": "file",
+      "name": "sapmap_rfc.py",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "summary": "Core RFC operation module providing authenticated BAPI/RFC primitives: user management, RFC destination testing, RFCTRUST/RFCSYSACL retrieval, STRUSTSSO2 trust analysis, and ABAP program execution.",
+      "tags": [
+        "rfc",
+        "discovery",
+        "sap-bapi",
+        "trust-analysis",
+        "user-management"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:_run_with_timeout",
+      "type": "function",
+      "name": "_run_with_timeout",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        22,
+        50
+      ],
+      "summary": "Runs an RFC function with a watchdog timeout to prevent hangs.",
+      "tags": [
+        "rfc",
+        "timeout",
+        "python"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:_detach_if_timed_out",
+      "type": "function",
+      "name": "_detach_if_timed_out",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        53,
+        68
+      ],
+      "summary": "Detaches lingering threads if an RFC call exceeded timeout.",
+      "tags": [
+        "rfc",
+        "cleanup",
+        "python"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:_get_connection",
+      "type": "function",
+      "name": "_get_connection",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        105,
+        131
+      ],
+      "summary": "Opens or reuses an authenticated RFC connection.",
+      "tags": [
+        "rfc",
+        "connection",
+        "python"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:test_connection",
+      "type": "function",
+      "name": "test_connection",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        138,
+        158
+      ],
+      "summary": "Verifies an authenticated RFC connection works.",
+      "tags": [
+        "rfc",
+        "validation",
+        "python"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:check_user_exists",
+      "type": "function",
+      "name": "check_user_exists",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        165,
+        188
+      ],
+      "summary": "Checks whether a target user exists in the SAP system via BAPI.",
+      "tags": [
+        "rfc",
+        "user-management",
+        "python"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:get_user_details",
+      "type": "function",
+      "name": "get_user_details",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        204,
+        254
+      ],
+      "summary": "Retrieves full user details (locks, profiles, role assignments) via BAPI.",
+      "tags": [
+        "rfc",
+        "user-management",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:_abap_install_and_run",
+      "type": "function",
+      "name": "_abap_install_and_run",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        257,
+        299
+      ],
+      "summary": "Runs ABAP source via RFC_ABAP_INSTALL_AND_RUN for arbitrary code execution.",
+      "tags": [
+        "rfc",
+        "abap-execution",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:_susr_suim_sap_all_check",
+      "type": "function",
+      "name": "_susr_suim_sap_all_check",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        302,
+        360
+      ],
+      "summary": "Checks for SAP_ALL profile assignment via SUSR_SUIM_API_RSUSR002.",
+      "tags": [
+        "rfc",
+        "authorization",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:get_direct_user_profiles",
+      "type": "function",
+      "name": "get_direct_user_profiles",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        363,
+        408
+      ],
+      "summary": "Reads profiles assigned directly to a user via BAPI.",
+      "tags": [
+        "rfc",
+        "user-management",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:get_remote_user_profiles",
+      "type": "function",
+      "name": "get_remote_user_profiles",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        411,
+        454
+      ],
+      "summary": "Reads profiles assigned to a user on a remote destination via BAPI.",
+      "tags": [
+        "rfc",
+        "user-management",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:reset_user_password_via_bapi",
+      "type": "function",
+      "name": "reset_user_password_via_bapi",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        461,
+        561
+      ],
+      "summary": "Resets a target user's password via BAPI_USER_CHANGE.",
+      "tags": [
+        "rfc",
+        "user-management",
+        "python"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:delete_user_via_bapi",
+      "type": "function",
+      "name": "delete_user_via_bapi",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        564,
+        586
+      ],
+      "summary": "Deletes a user via BAPI_USER_DELETE.",
+      "tags": [
+        "rfc",
+        "user-management",
+        "python"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:is_sapmap_owned_user",
+      "type": "function",
+      "name": "is_sapmap_owned_user",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        589,
+        605
+      ],
+      "summary": "Checks whether a user was created by SAPMAP.",
+      "tags": [
+        "rfc",
+        "user-management",
+        "python"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:create_user_via_bapi",
+      "type": "function",
+      "name": "create_user_via_bapi",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        608,
+        675
+      ],
+      "summary": "Creates a SAPMAP user via BAPI_USER_CREATE1 with SAP_ALL.",
+      "tags": [
+        "rfc",
+        "user-management",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:_run_abap_program",
+      "type": "function",
+      "name": "_run_abap_program",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        682,
+        737
+      ],
+      "summary": "Executes a generated ABAP program via RFC.",
+      "tags": [
+        "rfc",
+        "abap-execution",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:create_user_via_destination",
+      "type": "function",
+      "name": "create_user_via_destination",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        740,
+        860
+      ],
+      "summary": "Creates a user on a remote destination via trust relationship.",
+      "tags": [
+        "rfc",
+        "user-management",
+        "lateral-movement"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:delete_user",
+      "type": "function",
+      "name": "delete_user",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        867,
+        887
+      ],
+      "summary": "Deletes a user via BAPI cleanup.",
+      "tags": [
+        "rfc",
+        "user-management",
+        "python"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:_test_via_sdf_rfc_check",
+      "type": "function",
+      "name": "_test_via_sdf_rfc_check",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        894,
+        943
+      ],
+      "summary": "Tests RFC destination via SDF_RFC_DESTINATIONS_CHECK.",
+      "tags": [
+        "rfc",
+        "destination-testing",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:_test_via_dest_check",
+      "type": "function",
+      "name": "_test_via_dest_check",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        946,
+        971
+      ],
+      "summary": "Tests RFC destination via DEST_GET_DETAILS.",
+      "tags": [
+        "rfc",
+        "destination-testing",
+        "python"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:_test_via_dest_check_raw",
+      "type": "function",
+      "name": "_test_via_dest_check_raw",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        974,
+        1017
+      ],
+      "summary": "Raw destination check using low-level RFC primitives.",
+      "tags": [
+        "rfc",
+        "destination-testing",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:test_rfc_destination",
+      "type": "function",
+      "name": "test_rfc_destination",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        1020,
+        1068
+      ],
+      "summary": "Tests whether an RFC destination is reachable and usable.",
+      "tags": [
+        "rfc",
+        "destination-testing",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:ping_rfc_destination",
+      "type": "function",
+      "name": "ping_rfc_destination",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        1071,
+        1240
+      ],
+      "summary": "Pings an RFC destination with full handshake verification.",
+      "tags": [
+        "rfc",
+        "destination-testing",
+        "python"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:_ping_via_iwb_check",
+      "type": "function",
+      "name": "_ping_via_iwb_check",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        1243,
+        1278
+      ],
+      "summary": "Pings RFC destination via IWB_CONFIG_CHECK fallback.",
+      "tags": [
+        "rfc",
+        "destination-testing",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:_ping_via_direct_connect",
+      "type": "function",
+      "name": "_ping_via_direct_connect",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        1281,
+        1348
+      ],
+      "summary": "Pings RFC destination via direct connection.",
+      "tags": [
+        "rfc",
+        "destination-testing",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:get_remote_sysinfo",
+      "type": "function",
+      "name": "get_remote_sysinfo",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        1351,
+        1376
+      ],
+      "summary": "Retrieves system info from remote destination via BAPI.",
+      "tags": [
+        "rfc",
+        "discovery",
+        "python"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:retrieve_rfc_connections",
+      "type": "function",
+      "name": "retrieve_rfc_connections",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        1383,
+        1542
+      ],
+      "summary": "Retrieves all RFC destinations from RFCDES table with classification.",
+      "tags": [
+        "rfc",
+        "destination-discovery",
+        "python"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:_supplement_trusted_destinations",
+      "type": "function",
+      "name": "_supplement_trusted_destinations",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        1549,
+        1615
+      ],
+      "summary": "Supplements destination metadata with trust info.",
+      "tags": [
+        "rfc",
+        "trust-analysis",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:retrieve_rfctrust",
+      "type": "function",
+      "name": "retrieve_rfctrust",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        1622,
+        1684
+      ],
+      "summary": "Retrieves the RFCTRUST table mapping trusted incoming systems.",
+      "tags": [
+        "rfc",
+        "trust-analysis",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:retrieve_rfcsysacl",
+      "type": "function",
+      "name": "retrieve_rfcsysacl",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        1691,
+        1752
+      ],
+      "summary": "Retrieves the RFCSYSACL table mapping inbound system ACL.",
+      "tags": [
+        "rfc",
+        "trust-analysis",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:retrieve_strustsso2_trust",
+      "type": "function",
+      "name": "retrieve_strustsso2_trust",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        1759,
+        2019
+      ],
+      "summary": "Retrieves STRUSTSSO2 trust manager certificates with classification.",
+      "tags": [
+        "rfc",
+        "trust-analysis",
+        "sso2"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:_parse_rsrfcchk_output",
+      "type": "function",
+      "name": "_parse_rsrfcchk_output",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        2022,
+        2057
+      ],
+      "summary": "Function _parse_rsrfcchk_output.",
+      "tags": [
+        "function",
+        "python",
+        "utility"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:_try_rfc_read_table_fallback",
+      "type": "function",
+      "name": "_try_rfc_read_table_fallback",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        2060,
+        2120
+      ],
+      "summary": "Function _try_rfc_read_table_fallback.",
+      "tags": [
+        "function",
+        "python",
+        "utility"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:_try_rfcdes_raw_fallback",
+      "type": "function",
+      "name": "_try_rfcdes_raw_fallback",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        2123,
+        2207
+      ],
+      "summary": "Function _try_rfcdes_raw_fallback.",
+      "tags": [
+        "function",
+        "python",
+        "utility"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:_try_tableblock_compressed_fallback",
+      "type": "function",
+      "name": "_try_tableblock_compressed_fallback",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        2210,
+        2379
+      ],
+      "summary": "Function _try_tableblock_compressed_fallback.",
+      "tags": [
+        "function",
+        "python",
+        "utility"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:_parse_rfcdes_options",
+      "type": "function",
+      "name": "_parse_rfcdes_options",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        2382,
+        2393
+      ],
+      "summary": "Function _parse_rfcdes_options.",
+      "tags": [
+        "function",
+        "python",
+        "utility"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:_parse_rfcdes_http_options",
+      "type": "function",
+      "name": "_parse_rfcdes_http_options",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        2396,
+        2460
+      ],
+      "summary": "Function _parse_rfcdes_http_options.",
+      "tags": [
+        "function",
+        "python",
+        "utility"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:_rfcdes_is_trusted",
+      "type": "function",
+      "name": "_rfcdes_is_trusted",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        2470,
+        2494
+      ],
+      "summary": "Function _rfcdes_is_trusted.",
+      "tags": [
+        "function",
+        "python",
+        "utility"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:_build_rfcdes_conn",
+      "type": "function",
+      "name": "_build_rfcdes_conn",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        2497,
+        2510
+      ],
+      "summary": "Function _build_rfcdes_conn.",
+      "tags": [
+        "function",
+        "python",
+        "utility"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:get_table_columns",
+      "type": "function",
+      "name": "get_table_columns",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        2517,
+        2542
+      ],
+      "summary": "Function get_table_columns.",
+      "tags": [
+        "function",
+        "python",
+        "utility"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:read_table",
+      "type": "function",
+      "name": "read_table",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        2545,
+        2706
+      ],
+      "summary": "Function read_table.",
+      "tags": [
+        "function",
+        "python",
+        "utility"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:download_password_hashes",
+      "type": "function",
+      "name": "download_password_hashes",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        2713,
+        2813
+      ],
+      "summary": "Function download_password_hashes.",
+      "tags": [
+        "function",
+        "python",
+        "utility"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:_download_hashes_via_sxpg",
+      "type": "function",
+      "name": "_download_hashes_via_sxpg",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        2816,
+        2948
+      ],
+      "summary": "Function _download_hashes_via_sxpg.",
+      "tags": [
+        "function",
+        "python",
+        "utility"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:download_usrextid",
+      "type": "function",
+      "name": "download_usrextid",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        2955,
+        3044
+      ],
+      "summary": "Function download_usrextid.",
+      "tags": [
+        "function",
+        "python",
+        "utility"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:get_client_roles",
+      "type": "function",
+      "name": "get_client_roles",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        3051,
+        3100
+      ],
+      "summary": "Function get_client_roles.",
+      "tags": [
+        "function",
+        "python",
+        "utility"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:update_node_production_status",
+      "type": "function",
+      "name": "update_node_production_status",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        3103,
+        3117
+      ],
+      "summary": "Function update_node_production_status.",
+      "tags": [
+        "function",
+        "python",
+        "utility"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:create_tcpip_destination",
+      "type": "function",
+      "name": "create_tcpip_destination",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        3124,
+        3172
+      ],
+      "summary": "Function create_tcpip_destination.",
+      "tags": [
+        "function",
+        "python",
+        "utility"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:execute_remote_command",
+      "type": "function",
+      "name": "execute_remote_command",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        3179,
+        3260
+      ],
+      "summary": "Function execute_remote_command.",
+      "tags": [
+        "function",
+        "python",
+        "utility"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/discovery/sapmap_rfc.py:execute_local_command",
+      "type": "function",
+      "name": "execute_local_command",
+      "filePath": "modules/discovery/sapmap_rfc.py",
+      "lineRange": [
+        3263,
+        3406
+      ],
+      "summary": "Function execute_local_command.",
+      "tags": [
+        "function",
+        "python",
+        "utility"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:modules/exploitation/_efspotato_blob.py",
+      "type": "file",
+      "name": "_efspotato_blob.py",
+      "filePath": "modules/exploitation/_efspotato_blob.py",
+      "summary": "Embedded base64-encoded EFSPotato Windows token-impersonation LPE binary blob delivered through LPE chains.",
+      "tags": [
+        "exploit-payload",
+        "lpe",
+        "binary-blob",
+        "windows-token"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:modules/exploitation/_godpotato_blob.py",
+      "type": "file",
+      "name": "_godpotato_blob.py",
+      "filePath": "modules/exploitation/_godpotato_blob.py",
+      "summary": "Embedded base64-encoded GodPotato Windows service-account LPE binary blob delivered through LPE chains.",
+      "tags": [
+        "exploit-payload",
+        "lpe",
+        "binary-blob",
+        "windows-service"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:modules/exploitation/_miniplasma_blob.py",
+      "type": "file",
+      "name": "_miniplasma_blob.py",
+      "filePath": "modules/exploitation/_miniplasma_blob.py",
+      "summary": "Embedded base64-encoded MiniPlasma payload blob \u2014 the largest staged binary in the LPE arsenal \u2014 for post-exploitation use.",
+      "tags": [
+        "exploit-payload",
+        "lpe",
+        "binary-blob"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:modules/exploitation/sap_cve_2020_6287.py",
+      "type": "file",
+      "name": "sap_cve_2020_6287.py",
+      "filePath": "modules/exploitation/sap_cve_2020_6287.py",
+      "summary": "Implements CVE-2020-6287 (RECON) exploit against SAP Java LM Configuration Wizard: SOAP-based unauthenticated admin user creation and zip-traversal arbitrary file download.",
+      "tags": [
+        "exploitation",
+        "cve",
+        "sap-java",
+        "recon"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sap_cve_2020_6287.py:_head",
+      "type": "function",
+      "name": "_head",
+      "filePath": "modules/exploitation/sap_cve_2020_6287.py",
+      "lineRange": [
+        132,
+        143
+      ],
+      "summary": "HTTP HEAD helper for CVE-2020-6287 probing.",
+      "tags": [
+        "exploitation",
+        "http",
+        "python"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/exploitation/sap_cve_2020_6287.py:_post_soap",
+      "type": "function",
+      "name": "_post_soap",
+      "filePath": "modules/exploitation/sap_cve_2020_6287.py",
+      "lineRange": [
+        158,
+        186
+      ],
+      "summary": "Sends a SOAP envelope to LM Configuration Wizard.",
+      "tags": [
+        "exploitation",
+        "soap",
+        "python"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/exploitation/sap_cve_2020_6287.py:check_cve_2020_6287",
+      "type": "function",
+      "name": "check_cve_2020_6287",
+      "filePath": "modules/exploitation/sap_cve_2020_6287.py",
+      "lineRange": [
+        193,
+        252
+      ],
+      "summary": "Checks if target is vulnerable to RECON.",
+      "tags": [
+        "exploitation",
+        "cve-check",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/exploitation/sap_cve_2020_6287.py:exploit_create_user",
+      "type": "function",
+      "name": "exploit_create_user",
+      "filePath": "modules/exploitation/sap_cve_2020_6287.py",
+      "lineRange": [
+        259,
+        330
+      ],
+      "summary": "Creates a Java user via unauthenticated SOAP request.",
+      "tags": [
+        "exploitation",
+        "user-creation",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/exploitation/sap_cve_2020_6287.py:exploit_create_admin",
+      "type": "function",
+      "name": "exploit_create_admin",
+      "filePath": "modules/exploitation/sap_cve_2020_6287.py",
+      "lineRange": [
+        333,
+        350
+      ],
+      "summary": "Promotes the created user to Admin role.",
+      "tags": [
+        "exploitation",
+        "privilege-escalation",
+        "python"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/exploitation/sap_cve_2020_6287.py:verify_login",
+      "type": "function",
+      "name": "verify_login",
+      "filePath": "modules/exploitation/sap_cve_2020_6287.py",
+      "lineRange": [
+        369,
+        545
+      ],
+      "summary": "Verifies the created admin user can log in.",
+      "tags": [
+        "exploitation",
+        "verification",
+        "python"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sap_cve_2020_6287.py:download_file_via_traversal",
+      "type": "function",
+      "name": "download_file_via_traversal",
+      "filePath": "modules/exploitation/sap_cve_2020_6287.py",
+      "lineRange": [
+        572,
+        646
+      ],
+      "summary": "Exploits zip-traversal to read arbitrary files.",
+      "tags": [
+        "exploitation",
+        "file-read",
+        "python"
+      ],
+      "complexity": "moderate"
+    }
+  ],
+  "edges": [
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_run_with_timeout",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_run_with_timeout",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_detach_if_timed_out",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_detach_if_timed_out",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_get_connection",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_get_connection",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:test_connection",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:test_connection",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:check_user_exists",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:check_user_exists",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:get_user_details",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:get_user_details",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_abap_install_and_run",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_abap_install_and_run",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_susr_suim_sap_all_check",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_susr_suim_sap_all_check",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:get_direct_user_profiles",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:get_direct_user_profiles",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:get_remote_user_profiles",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:get_remote_user_profiles",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:reset_user_password_via_bapi",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:reset_user_password_via_bapi",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:delete_user_via_bapi",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:delete_user_via_bapi",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:is_sapmap_owned_user",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:is_sapmap_owned_user",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:create_user_via_bapi",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:create_user_via_bapi",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_run_abap_program",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_run_abap_program",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:create_user_via_destination",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:create_user_via_destination",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:delete_user",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:delete_user",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_test_via_sdf_rfc_check",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_test_via_sdf_rfc_check",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_test_via_dest_check",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_test_via_dest_check",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_test_via_dest_check_raw",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_test_via_dest_check_raw",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:test_rfc_destination",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:test_rfc_destination",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:ping_rfc_destination",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:ping_rfc_destination",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_ping_via_iwb_check",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_ping_via_iwb_check",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_ping_via_direct_connect",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_ping_via_direct_connect",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:get_remote_sysinfo",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:get_remote_sysinfo",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:retrieve_rfc_connections",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:retrieve_rfc_connections",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_supplement_trusted_destinations",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_supplement_trusted_destinations",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:retrieve_rfctrust",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:retrieve_rfctrust",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:retrieve_rfcsysacl",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:retrieve_rfcsysacl",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:retrieve_strustsso2_trust",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:retrieve_strustsso2_trust",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_parse_rsrfcchk_output",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_parse_rsrfcchk_output",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_try_rfc_read_table_fallback",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_try_rfc_read_table_fallback",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_try_rfcdes_raw_fallback",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_try_rfcdes_raw_fallback",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_try_tableblock_compressed_fallback",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_try_tableblock_compressed_fallback",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_parse_rfcdes_options",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_parse_rfcdes_options",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_parse_rfcdes_http_options",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_parse_rfcdes_http_options",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_rfcdes_is_trusted",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_rfcdes_is_trusted",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_build_rfcdes_conn",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_build_rfcdes_conn",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:get_table_columns",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:get_table_columns",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:read_table",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:read_table",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:download_password_hashes",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:download_password_hashes",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_download_hashes_via_sxpg",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:_download_hashes_via_sxpg",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:download_usrextid",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:download_usrextid",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:get_client_roles",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:get_client_roles",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:update_node_production_status",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:update_node_production_status",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:create_tcpip_destination",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:create_tcpip_destination",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:execute_remote_command",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:execute_remote_command",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:execute_local_command",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/discovery/sapmap_rfc.py",
+      "target": "function:modules/discovery/sapmap_rfc.py:execute_local_command",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sap_cve_2020_6287.py",
+      "target": "function:modules/exploitation/sap_cve_2020_6287.py:_head",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_cve_2020_6287.py",
+      "target": "function:modules/exploitation/sap_cve_2020_6287.py:_head",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sap_cve_2020_6287.py",
+      "target": "function:modules/exploitation/sap_cve_2020_6287.py:_post_soap",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_cve_2020_6287.py",
+      "target": "function:modules/exploitation/sap_cve_2020_6287.py:_post_soap",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sap_cve_2020_6287.py",
+      "target": "function:modules/exploitation/sap_cve_2020_6287.py:check_cve_2020_6287",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_cve_2020_6287.py",
+      "target": "function:modules/exploitation/sap_cve_2020_6287.py:check_cve_2020_6287",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sap_cve_2020_6287.py",
+      "target": "function:modules/exploitation/sap_cve_2020_6287.py:exploit_create_user",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_cve_2020_6287.py",
+      "target": "function:modules/exploitation/sap_cve_2020_6287.py:exploit_create_user",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sap_cve_2020_6287.py",
+      "target": "function:modules/exploitation/sap_cve_2020_6287.py:exploit_create_admin",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_cve_2020_6287.py",
+      "target": "function:modules/exploitation/sap_cve_2020_6287.py:exploit_create_admin",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sap_cve_2020_6287.py",
+      "target": "function:modules/exploitation/sap_cve_2020_6287.py:verify_login",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_cve_2020_6287.py",
+      "target": "function:modules/exploitation/sap_cve_2020_6287.py:verify_login",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sap_cve_2020_6287.py",
+      "target": "function:modules/exploitation/sap_cve_2020_6287.py:download_file_via_traversal",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sap_cve_2020_6287.py",
+      "target": "function:modules/exploitation/sap_cve_2020_6287.py:download_file_via_traversal",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    }
+  ]
+}

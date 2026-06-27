@@ -1,0 +1,54 @@
+{
+  "scriptCompleted": true,
+  "filesAnalyzed": 3,
+  "filesSkipped": [],
+  "results": [
+    {
+      "path": "tools/ssfs_decrypt/Makefile",
+      "language": "makefile",
+      "fileCategory": "infra",
+      "totalLines": 26,
+      "nonEmptyLines": 21,
+      "steps": [
+        {
+          "name": "all",
+          "startLine": 15,
+          "endLine": 16
+        },
+        {
+          "name": "clean",
+          "startLine": 23,
+          "endLine": 25
+        }
+      ],
+      "metrics": {
+        "importCount": 0,
+        "exportCount": 0,
+        "functionCount": 0,
+        "classCount": 0,
+        "stepCount": 2
+      }
+    },
+    {
+      "path": "tools/ssfs_decrypt/build.bat",
+      "language": "batch",
+      "fileCategory": "script",
+      "totalLines": 22,
+      "nonEmptyLines": 21,
+      "metrics": {}
+    },
+    {
+      "path": "tools/ssfs_decrypt/build.sh",
+      "language": "shell",
+      "fileCategory": "script",
+      "totalLines": 25,
+      "nonEmptyLines": 20,
+      "metrics": {
+        "importCount": 0,
+        "exportCount": 0,
+        "functionCount": 0,
+        "classCount": 0
+      }
+    }
+  ]
+}

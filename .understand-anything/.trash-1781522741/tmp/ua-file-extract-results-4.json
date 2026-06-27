@@ -1,0 +1,662 @@
+{
+  "scriptCompleted": true,
+  "filesAnalyzed": 3,
+  "filesSkipped": [],
+  "results": [
+    {
+      "path": "DISCLAIMER.md",
+      "language": "markdown",
+      "fileCategory": "docs",
+      "totalLines": 75,
+      "nonEmptyLines": 58,
+      "sections": [
+        {
+          "heading": "SAPMAP — Disclaimer",
+          "level": 1,
+          "line": 1
+        },
+        {
+          "heading": "Intended uses",
+          "level": 2,
+          "line": 30
+        },
+        {
+          "heading": "Your responsibilities",
+          "level": 2,
+          "line": 44
+        },
+        {
+          "heading": "No warranty",
+          "level": 2,
+          "line": 57
+        },
+        {
+          "heading": "Reporting responsibly",
+          "level": 2,
+          "line": 66
+        },
+        {
+          "heading": "License",
+          "level": 2,
+          "line": 73
+        }
+      ],
+      "metrics": {
+        "importCount": 0,
+        "exportCount": 0,
+        "functionCount": 0,
+        "classCount": 0,
+        "sectionCount": 6
+      }
+    },
+    {
+      "path": "README.md",
+      "language": "markdown",
+      "fileCategory": "docs",
+      "totalLines": 1433,
+      "nonEmptyLines": 1082,
+      "sections": [
+        {
+          "heading": "SAPMAP — SAP Landscape Attack Path Mapper",
+          "level": 1,
+          "line": 1
+        },
+        {
+          "heading": "Table of Contents",
+          "level": 2,
+          "line": 35
+        },
+        {
+          "heading": "Features",
+          "level": 2,
+          "line": 61
+        },
+        {
+          "heading": "Discovery & Enumeration",
+          "level": 3,
+          "line": 63
+        },
+        {
+          "heading": "Default Account Detection",
+          "level": 3,
+          "line": 71
+        },
+        {
+          "heading": "Exploitation",
+          "level": 3,
+          "line": 77
+        },
+        {
+          "heading": "Local Privilege Escalation",
+          "level": 3,
+          "line": 89
+        },
+        {
+          "heading": "Lateral Movement",
+          "level": 3,
+          "line": 96
+        },
+        {
+          "heading": "⚡ AutoPwn — Full-Landscape Convergence Loop",
+          "level": 3,
+          "line": 107
+        },
+        {
+          "heading": "SAP BTP (Cloud) Integration",
+          "level": 3,
+          "line": 119
+        },
+        {
+          "heading": "Interactive Map",
+          "level": 3,
+          "line": 134
+        },
+        {
+          "heading": "SAP Secure Store Decryption (RSECTAB)",
+          "level": 3,
+          "line": 141
+        },
+        {
+          "heading": "SAProuter Support",
+          "level": 3,
+          "line": 151
+        },
+        {
+          "heading": "Data Extraction",
+          "level": 3,
+          "line": 158
+        },
+        {
+          "heading": "Engagement Reports & Diffs",
+          "level": 3,
+          "line": 168
+        },
+        {
+          "heading": "Cleanup",
+          "level": 3,
+          "line": 173
+        },
+        {
+          "heading": "Architecture",
+          "level": 2,
+          "line": 179
+        },
+        {
+          "heading": "Loot vs State directories",
+          "level": 3,
+          "line": 259
+        },
+        {
+          "heading": "Key Data Models",
+          "level": 3,
+          "line": 269
+        },
+        {
+          "heading": "Installation",
+          "level": 2,
+          "line": 280
+        },
+        {
+          "heading": "Requirements",
+          "level": 3,
+          "line": 282
+        },
+        {
+          "heading": "Setup",
+          "level": 3,
+          "line": 288
+        },
+        {
+          "heading": "SAP NW RFC SDK (optional, for authenticated operations)",
+          "level": 3,
+          "line": 298
+        },
+        {
+          "heading": "Usage",
+          "level": 2,
+          "line": 314
+        },
+        {
+          "heading": "Launch the GUI",
+          "level": 3,
+          "line": 316
+        },
+        {
+          "heading": "CLI Options",
+          "level": 3,
+          "line": 327
+        },
+        {
+          "heading": "Web GUI",
+          "level": 2,
+          "line": 345
+        },
+        {
+          "heading": "Map Interaction",
+          "level": 3,
+          "line": 349
+        },
+        {
+          "heading": "System Context Menu",
+          "level": 3,
+          "line": 361
+        },
+        {
+          "heading": "Map Background Menu",
+          "level": 3,
+          "line": 384
+        },
+        {
+          "heading": "Visual Indicators",
+          "level": 3,
+          "line": 399
+        },
+        {
+          "heading": "Scanning",
+          "level": 2,
+          "line": 419
+        },
+        {
+          "heading": "Fast Scan (default)",
+          "level": 3,
+          "line": 421
+        },
+        {
+          "heading": "Deep Scan",
+          "level": 3,
+          "line": 437
+        },
+        {
+          "heading": "Default Account Detection",
+          "level": 2,
+          "line": 443
+        },
+        {
+          "heading": "Exploitation",
+          "level": 2,
+          "line": 477
+        },
+        {
+          "heading": "Gateway SAPXPG Exploit (Unauthenticated) — 10KBlaze / CVE-2020-6207",
+          "level": 3,
+          "line": 479
+        },
+        {
+          "heading": "BAPI User Creation (Authenticated)",
+          "level": 3,
+          "line": 531
+        },
+        {
+          "heading": "RFC Destination Testing",
+          "level": 3,
+          "line": 539
+        },
+        {
+          "heading": "AutoPwn — Full-Landscape Convergence Loop",
+          "level": 2,
+          "line": 545
+        },
+        {
+          "heading": "Launching",
+          "level": 3,
+          "line": 549
+        },
+        {
+          "heading": "The Convergence Loop",
+          "level": 3,
+          "line": 573
+        },
+        {
+          "heading": "Phase 1 — Scan (stack-aware short-circuit)",
+          "level": 3,
+          "line": 590
+        },
+        {
+          "heading": "Phase 2 — Exploit (stack-aware priority)",
+          "level": 3,
+          "line": 603
+        },
+        {
+          "heading": "Phase 3 — Enrich",
+          "level": 3,
+          "line": 621
+        },
+        {
+          "heading": "Phase 4 — Propagate (two-pass design)",
+          "level": 3,
+          "line": 634
+        },
+        {
+          "heading": "Phase 3b — Re-enrichment after propagation",
+          "level": 3,
+          "line": 640
+        },
+        {
+          "heading": "Phase 5 — BTP (optional)",
+          "level": 3,
+          "line": 644
+        },
+        {
+          "heading": "Phase 6 — LPE (optional)",
+          "level": 3,
+          "line": 648
+        },
+        {
+          "heading": "Post-Run Detection Pass",
+          "level": 3,
+          "line": 652
+        },
+        {
+          "heading": "Stop Safety",
+          "level": 3,
+          "line": 661
+        },
+        {
+          "heading": "Worked Example — SJJ (Java) → W74, S4H (ABAP)",
+          "level": 3,
+          "line": 669
+        },
+        {
+          "heading": "Implementation",
+          "level": 3,
+          "line": 698
+        },
+        {
+          "heading": "Local Privilege Escalation",
+          "level": 2,
+          "line": 707
+        },
+        {
+          "heading": "How It Works",
+          "level": 3,
+          "line": 711
+        },
+        {
+          "heading": "WebGUI RSBDCOS0 Method (Detail)",
+          "level": 3,
+          "line": 720
+        },
+        {
+          "heading": "Adding New LPE Methods",
+          "level": 3,
+          "line": 753
+        },
+        {
+          "heading": "SSH Lateral Movement",
+          "level": 2,
+          "line": 767
+        },
+        {
+          "heading": "Phase 1 — Key Harvest",
+          "level": 3,
+          "line": 771
+        },
+        {
+          "heading": "Phase 2 — Lateral Movement (Test Keys)",
+          "level": 3,
+          "line": 774
+        },
+        {
+          "heading": "Phase 3 — Exploitation via SSH",
+          "level": 3,
+          "line": 777
+        },
+        {
+          "heading": "MYSAPSSO2 Ticket Forgery",
+          "level": 2,
+          "line": 787
+        },
+        {
+          "heading": "Propagation",
+          "level": 2,
+          "line": 798
+        },
+        {
+          "heading": "SAProuter Support",
+          "level": 2,
+          "line": 814
+        },
+        {
+          "heading": "Configuration",
+          "level": 3,
+          "line": 818
+        },
+        {
+          "heading": "What Routes Through SAProuter",
+          "level": 3,
+          "line": 828
+        },
+        {
+          "heading": "SAProuter Inheritance",
+          "level": 3,
+          "line": 841
+        },
+        {
+          "heading": "SAP Secure Store (RSECTAB) Decryption",
+          "level": 2,
+          "line": 847
+        },
+        {
+          "heading": "Decryption Chain",
+          "level": 3,
+          "line": 851
+        },
+        {
+          "heading": "Fallback Strategy",
+          "level": 3,
+          "line": 860
+        },
+        {
+          "heading": "Entry Categories",
+          "level": 3,
+          "line": 870
+        },
+        {
+          "heading": "SAP Cloud Connector (SCC)",
+          "level": 2,
+          "line": 885
+        },
+        {
+          "heading": "Discovery & Detection",
+          "level": 3,
+          "line": 889
+        },
+        {
+          "heading": "Right-Click Menu (SCC Node)",
+          "level": 3,
+          "line": 893
+        },
+        {
+          "heading": "Cloud Connector Submenu (on co-located SAP/ABAP node)",
+          "level": 3,
+          "line": 905
+        },
+        {
+          "heading": "hashes.com API Integration",
+          "level": 3,
+          "line": 921
+        },
+        {
+          "heading": "High Availability (HA) Detection",
+          "level": 3,
+          "line": 927
+        },
+        {
+          "heading": "Scripted Scenarios",
+          "level": 3,
+          "line": 931
+        },
+        {
+          "heading": "SCC Script Actions",
+          "level": 4,
+          "line": 935
+        },
+        {
+          "heading": "Example: Full SCC Compromise Chain",
+          "level": 4,
+          "line": 951
+        },
+        {
+          "heading": "Example: No-Creds SCC Compromise (via co-located pwned SAP node)",
+          "level": 4,
+          "line": 989
+        },
+        {
+          "heading": "CVE Bucket Detection",
+          "level": 3,
+          "line": 1013
+        },
+        {
+          "heading": "Engagement Reports & Diffs",
+          "level": 2,
+          "line": 1025
+        },
+        {
+          "heading": "Export Engagement Report (HTML + Markdown)",
+          "level": 3,
+          "line": 1029
+        },
+        {
+          "heading": "Diff Two Runs",
+          "level": 3,
+          "line": 1044
+        },
+        {
+          "heading": "Standalone Tools",
+          "level": 2,
+          "line": 1057
+        },
+        {
+          "heading": "sap_ms_betrusted.py — 10KBLAZE betrusted (`modules/exploitation/`)",
+          "level": 3,
+          "line": 1061
+        },
+        {
+          "heading": "sap_gw_xpg_standalone.py — Gateway SAPXPG (`modules/exploitation/`)",
+          "level": 3,
+          "line": 1084
+        },
+        {
+          "heading": "sap_rfc_system_info.py — Unauthenticated system info (`modules/protocols/`)",
+          "level": 3,
+          "line": 1096
+        },
+        {
+          "heading": "sap_client_enum.py — DIAG client enumeration (`modules/discovery/`)",
+          "level": 3,
+          "line": 1107
+        },
+        {
+          "heading": "sapmap_copyfail.py — CVE-2026-31431 root LPE (`modules/exploitation/`)",
+          "level": 3,
+          "line": 1115
+        },
+        {
+          "heading": "Scripted Scenarios",
+          "level": 2,
+          "line": 1121
+        },
+        {
+          "heading": "Usage",
+          "level": 3,
+          "line": 1125
+        },
+        {
+          "heading": "Script Format (YAML)",
+          "level": 3,
+          "line": 1132
+        },
+        {
+          "heading": "Script Format (JSON)",
+          "level": 3,
+          "line": 1153
+        },
+        {
+          "heading": "Available Actions",
+          "level": 3,
+          "line": 1166
+        },
+        {
+          "heading": "System Management",
+          "level": 4,
+          "line": 1168
+        },
+        {
+          "heading": "Scanning & Detection",
+          "level": 4,
+          "line": 1176
+        },
+        {
+          "heading": "Exploitation",
+          "level": 4,
+          "line": 1187
+        },
+        {
+          "heading": "Data Extraction",
+          "level": 4,
+          "line": 1198
+        },
+        {
+          "heading": "Landscape Analysis",
+          "level": 4,
+          "line": 1211
+        },
+        {
+          "heading": "BTP — Cloud-Side (with a stored token)",
+          "level": 4,
+          "line": 1218
+        },
+        {
+          "heading": "BTP — On-Prem → Cloud Lateral Pivot",
+          "level": 4,
+          "line": 1228
+        },
+        {
+          "heading": "Per-Step Options",
+          "level": 3,
+          "line": 1235
+        },
+        {
+          "heading": "Example: Full 10KBlaze Chain",
+          "level": 3,
+          "line": 1245
+        },
+        {
+          "heading": "Example: Multi-System Landscape",
+          "level": 3,
+          "line": 1283
+        },
+        {
+          "heading": "Console Output",
+          "level": 3,
+          "line": 1325
+        },
+        {
+          "heading": "State Management",
+          "level": 2,
+          "line": 1344
+        },
+        {
+          "heading": "Saving & Loading",
+          "level": 3,
+          "line": 1346
+        },
+        {
+          "heading": "Persistent Caches",
+          "level": 3,
+          "line": 1356
+        },
+        {
+          "heading": "Testing",
+          "level": 2,
+          "line": 1364
+        },
+        {
+          "heading": "Configuration",
+          "level": 2,
+          "line": 1394
+        },
+        {
+          "heading": "User Creation",
+          "level": 3,
+          "line": 1398
+        },
+        {
+          "heading": "Scanning",
+          "level": 3,
+          "line": 1407
+        },
+        {
+          "heading": "Supported Database Types",
+          "level": 3,
+          "line": 1415
+        },
+        {
+          "heading": "Supported OS Types",
+          "level": 3,
+          "line": 1425
+        },
+        {
+          "heading": "License",
+          "level": 2,
+          "line": 1431
+        }
+      ],
+      "metrics": {
+        "importCount": 0,
+        "exportCount": 0,
+        "functionCount": 0,
+        "classCount": 0,
+        "sectionCount": 117
+      }
+    },
+    {
+      "path": "requirements.txt",
+      "language": "txt",
+      "fileCategory": "docs",
+      "totalLines": 18,
+      "nonEmptyLines": 16,
+      "metrics": {}
+    }
+  ]
+}

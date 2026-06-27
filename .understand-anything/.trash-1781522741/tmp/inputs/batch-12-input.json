@@ -1,0 +1,184 @@
+{
+  "batchIndex": 12,
+  "totalBatches": 14,
+  "files": [
+    {
+      "path": "modules/exploitation/sap_mysapsso2.py",
+      "language": "python",
+      "sizeLines": 872,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/exploitation/sap_onprem_to_btp.py",
+      "language": "python",
+      "sizeLines": 444,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/exploitation/sap_pp_probe.py",
+      "language": "python",
+      "sizeLines": 949,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/exploitation/sap_soap_rfc.py",
+      "language": "python",
+      "sizeLines": 220,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/exploitation/sap_ticket_delivery.py",
+      "language": "python",
+      "sizeLines": 434,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/exploitation/sap_ticket_propagate.py",
+      "language": "python",
+      "sizeLines": 724,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/exploitation/sap_transport_import.py",
+      "language": "python",
+      "sizeLines": 913,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/exploitation/sap_wdisp_admin.py",
+      "language": "python",
+      "sizeLines": 1284,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/exploitation/sapmap_autopwn.py",
+      "language": "python",
+      "sizeLines": 1507,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/exploitation/sapmap_copyfail.py",
+      "language": "python",
+      "sizeLines": 721,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/exploitation/sapmap_dirtyfrag.py",
+      "language": "python",
+      "sizeLines": 494,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/exploitation/sapmap_lpe_auto.py",
+      "language": "python",
+      "sizeLines": 185,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/exploitation/sapmap_winlpe_auto.py",
+      "language": "python",
+      "sizeLines": 193,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/ops/__init__.py",
+      "language": "python",
+      "sizeLines": 1,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/ops/sapmap_cleanup.py",
+      "language": "python",
+      "sizeLines": 151,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/postex/__init__.py",
+      "language": "python",
+      "sizeLines": 1,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/postex/sap_profile_check.py",
+      "language": "python",
+      "sizeLines": 883,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/postex/sap_pse_loot.py",
+      "language": "python",
+      "sizeLines": 2498,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/postex/sap_ssh_lateral.py",
+      "language": "python",
+      "sizeLines": 1083,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/postex/sap_ume_user_create.py",
+      "language": "python",
+      "sizeLines": 914,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/postex/sapmap_capability_analyser.py",
+      "language": "python",
+      "sizeLines": 742,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/postex/sapmap_chain.py",
+      "language": "python",
+      "sizeLines": 485,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/postex/sapmap_lpe.py",
+      "language": "python",
+      "sizeLines": 649,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/protocols/__init__.py",
+      "language": "python",
+      "sizeLines": 1,
+      "fileCategory": "code"
+    },
+    {
+      "path": "modules/protocols/sap_rfc_ctypes.py",
+      "language": "python",
+      "sizeLines": 1557,
+      "fileCategory": "code"
+    }
+  ],
+  "batchImportData": {
+    "modules/exploitation/sap_mysapsso2.py": [],
+    "modules/exploitation/sap_onprem_to_btp.py": [],
+    "modules/exploitation/sap_pp_probe.py": [],
+    "modules/exploitation/sap_soap_rfc.py": [],
+    "modules/exploitation/sap_ticket_delivery.py": [],
+    "modules/exploitation/sap_ticket_propagate.py": [],
+    "modules/exploitation/sap_transport_import.py": [],
+    "modules/exploitation/sap_wdisp_admin.py": [],
+    "modules/exploitation/sapmap_autopwn.py": [],
+    "modules/exploitation/sapmap_copyfail.py": [],
+    "modules/exploitation/sapmap_dirtyfrag.py": [],
+    "modules/exploitation/sapmap_lpe_auto.py": [],
+    "modules/exploitation/sapmap_winlpe_auto.py": [],
+    "modules/ops/__init__.py": [],
+    "modules/ops/sapmap_cleanup.py": [],
+    "modules/postex/__init__.py": [],
+    "modules/postex/sap_profile_check.py": [],
+    "modules/postex/sap_pse_loot.py": [],
+    "modules/postex/sap_ssh_lateral.py": [],
+    "modules/postex/sap_ume_user_create.py": [],
+    "modules/postex/sapmap_capability_analyser.py": [],
+    "modules/postex/sapmap_chain.py": [],
+    "modules/postex/sapmap_lpe.py": [],
+    "modules/protocols/__init__.py": [],
+    "modules/protocols/sap_rfc_ctypes.py": []
+  },
+  "neighborMap": {}
+}

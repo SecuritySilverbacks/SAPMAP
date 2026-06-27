@@ -1,0 +1,13 @@
+{
+  "projectRoot": "/home/joris/Desktop/CLAUDE/SAPMAP",
+  "batchFiles": [
+    {"path": "tools/ssfs_decrypt/Makefile", "language": "makefile", "sizeLines": 26, "fileCategory": "infra"},
+    {"path": "tools/ssfs_decrypt/build.bat", "language": "batch", "sizeLines": 22, "fileCategory": "script"},
+    {"path": "tools/ssfs_decrypt/build.sh", "language": "shell", "sizeLines": 25, "fileCategory": "script"}
+  ],
+  "batchImportData": {
+    "tools/ssfs_decrypt/Makefile": [],
+    "tools/ssfs_decrypt/build.bat": [],
+    "tools/ssfs_decrypt/build.sh": []
+  }
+}

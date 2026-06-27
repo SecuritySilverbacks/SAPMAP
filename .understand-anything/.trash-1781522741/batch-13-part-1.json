@@ -1,0 +1,1454 @@
+{
+  "nodes": [
+    {
+      "id": "file:modules/protocols/sap_rfc_system_info.py",
+      "type": "file",
+      "name": "sap_rfc_system_info.py",
+      "filePath": "modules/protocols/sap_rfc_system_info.py",
+      "summary": "Unauthenticated SAP NetWeaver fingerprinting library that probes RFC, Gateway, and DIAG ports using three techniques (V6 single-packet, V2 error-leak, Chipik-style) to harvest SID, kernel release, host, and system numbers without credentials.",
+      "tags": [
+        "protocol",
+        "rfc",
+        "diag",
+        "fingerprinting",
+        "unauthenticated"
+      ],
+      "complexity": "complex",
+      "languageNotes": "Implements raw SAP NI/RFC packet construction at the byte level; mirrors the wire format observed from the proprietary kernel."
+    },
+    {
+      "id": "function:modules/protocols/sap_rfc_system_info.py:connect_via_saprouter",
+      "type": "function",
+      "name": "connect_via_saprouter",
+      "filePath": "modules/protocols/sap_rfc_system_info.py",
+      "lineRange": [
+        157,
+        270
+      ],
+      "summary": "Establishes a TCP connection through an optional SAProuter, sending an NI_ROUTE preamble and validating the routing response before yielding the tunneled socket.",
+      "tags": [
+        "network",
+        "saprouter",
+        "tunneling"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/protocols/sap_rfc_system_info.py:ni_recv",
+      "type": "function",
+      "name": "ni_recv",
+      "filePath": "modules/protocols/sap_rfc_system_info.py",
+      "lineRange": [
+        295,
+        333
+      ],
+      "summary": "Reads a length-prefixed SAP NI frame from a socket and returns the payload bytes with timeout handling.",
+      "tags": [
+        "network",
+        "protocol",
+        "framing"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/protocols/sap_rfc_system_info.py:build_rfc_system_info_request",
+      "type": "function",
+      "name": "build_rfc_system_info_request",
+      "filePath": "modules/protocols/sap_rfc_system_info.py",
+      "lineRange": [
+        340,
+        409
+      ],
+      "summary": "Constructs the V6 single-packet RFC SYSTEM_INFO request used to harvest SID, hostname, and kernel release from a vanilla NetWeaver Gateway.",
+      "tags": [
+        "protocol",
+        "rfc",
+        "request-builder"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/protocols/sap_rfc_system_info.py:build_chipik_p2",
+      "type": "function",
+      "name": "build_chipik_p2",
+      "filePath": "modules/protocols/sap_rfc_system_info.py",
+      "lineRange": [
+        472,
+        568
+      ],
+      "summary": "Builds the Chipik-style phase-2 RFC packet that triggers a verbose error response leaking system identification details on hardened targets.",
+      "tags": [
+        "protocol",
+        "rfc",
+        "exploit-technique"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/protocols/sap_rfc_system_info.py:build_f_sap_send_rfc",
+      "type": "function",
+      "name": "build_f_sap_send_rfc",
+      "filePath": "modules/protocols/sap_rfc_system_info.py",
+      "lineRange": [
+        571,
+        629
+      ],
+      "summary": "Assembles the F_SAP send/RFC frame payload combining APPC headers and RFC item lists for protocol probing.",
+      "tags": [
+        "protocol",
+        "rfc",
+        "request-builder"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/protocols/sap_rfc_system_info.py:build_f_sap_init_reinit",
+      "type": "function",
+      "name": "build_f_sap_init_reinit",
+      "filePath": "modules/protocols/sap_rfc_system_info.py",
+      "lineRange": [
+        632,
+        696
+      ],
+      "summary": "Constructs the F_SAP init / re-init handshake frames used by the V2 error-leak probing strategy.",
+      "tags": [
+        "protocol",
+        "rfc",
+        "handshake"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/protocols/sap_rfc_system_info.py:build_diag_term_ini",
+      "type": "function",
+      "name": "build_diag_term_ini",
+      "filePath": "modules/protocols/sap_rfc_system_info.py",
+      "lineRange": [
+        754,
+        842
+      ],
+      "summary": "Builds the DIAG TERM_INI packet that triggers the SAPGUI welcome screen used to fingerprint dispatcher ports.",
+      "tags": [
+        "protocol",
+        "diag",
+        "request-builder"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/protocols/sap_rfc_system_info.py:parse_diag_response",
+      "type": "function",
+      "name": "parse_diag_response",
+      "filePath": "modules/protocols/sap_rfc_system_info.py",
+      "lineRange": [
+        845,
+        910
+      ],
+      "summary": "Parses a DIAG dispatcher response, extracting system info, error text, and component metadata.",
+      "tags": [
+        "protocol",
+        "diag",
+        "parser"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/protocols/sap_rfc_system_info.py:_parse_diag_error_text",
+      "type": "function",
+      "name": "_parse_diag_error_text",
+      "filePath": "modules/protocols/sap_rfc_system_info.py",
+      "lineRange": [
+        913,
+        963
+      ],
+      "summary": "Extracts human-readable error strings embedded inside DIAG protocol responses for diagnostics.",
+      "tags": [
+        "protocol",
+        "diag",
+        "parser"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/protocols/sap_rfc_system_info.py:_parse_diag_items",
+      "type": "function",
+      "name": "_parse_diag_items",
+      "filePath": "modules/protocols/sap_rfc_system_info.py",
+      "lineRange": [
+        966,
+        1070
+      ],
+      "summary": "Walks the DIAG TLV item stream, decoding each typed record into a structured dictionary.",
+      "tags": [
+        "protocol",
+        "diag",
+        "parser"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/protocols/sap_rfc_system_info.py:probe_diag_login",
+      "type": "function",
+      "name": "probe_diag_login",
+      "filePath": "modules/protocols/sap_rfc_system_info.py",
+      "lineRange": [
+        1148,
+        1242
+      ],
+      "summary": "Sends a DIAG login probe to harvest the system's welcome banner and identification fields without requiring credentials.",
+      "tags": [
+        "protocol",
+        "diag",
+        "fingerprinting",
+        "unauthenticated"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/protocols/sap_rfc_system_info.py:parse_rfcsi_response",
+      "type": "function",
+      "name": "parse_rfcsi_response",
+      "filePath": "modules/protocols/sap_rfc_system_info.py",
+      "lineRange": [
+        1249,
+        1296
+      ],
+      "summary": "Parses the RFC_SYSTEM_INFO response into a structured dict containing SID, hostname, kernel, and database version.",
+      "tags": [
+        "protocol",
+        "rfc",
+        "parser"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/protocols/sap_rfc_system_info.py:parse_appc_rc",
+      "type": "function",
+      "name": "parse_appc_rc",
+      "filePath": "modules/protocols/sap_rfc_system_info.py",
+      "lineRange": [
+        1299,
+        1340
+      ],
+      "summary": "Decodes APPC return-code fields from RFC error frames into named error categories.",
+      "tags": [
+        "protocol",
+        "rfc",
+        "error-handling"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/protocols/sap_rfc_system_info.py:parse_gateway_error",
+      "type": "function",
+      "name": "parse_gateway_error",
+      "filePath": "modules/protocols/sap_rfc_system_info.py",
+      "lineRange": [
+        1343,
+        1496
+      ],
+      "summary": "Parses verbose SAP Gateway error messages leaking hostname, work-process IDs, and kernel patch level on misconfigured hardened systems.",
+      "tags": [
+        "protocol",
+        "rfc",
+        "parser",
+        "error-leak"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/protocols/sap_rfc_system_info.py:probe_sap_system",
+      "type": "function",
+      "name": "probe_sap_system",
+      "filePath": "modules/protocols/sap_rfc_system_info.py",
+      "lineRange": [
+        1558,
+        1992
+      ],
+      "summary": "Top-level orchestrator that sequentially tries V6, V2, Chipik, and DIAG probes against a target, returning the best-quality fingerprint.",
+      "tags": [
+        "protocol",
+        "fingerprinting",
+        "orchestrator",
+        "unauthenticated"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/protocols/sap_rfc_system_info.py:print_results",
+      "type": "function",
+      "name": "print_results",
+      "filePath": "modules/protocols/sap_rfc_system_info.py",
+      "lineRange": [
+        1999,
+        2162
+      ],
+      "summary": "Pretty-prints discovered system identification results to the terminal for CLI consumers.",
+      "tags": [
+        "cli",
+        "output",
+        "formatting"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/protocols/sap_rfc_system_info.py:main",
+      "type": "function",
+      "name": "main",
+      "filePath": "modules/protocols/sap_rfc_system_info.py",
+      "lineRange": [
+        2169,
+        2237
+      ],
+      "summary": "Standalone CLI entry point: parses argv, dispatches probe_sap_system, and renders results.",
+      "tags": [
+        "cli",
+        "entry-point"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:modules/protocols/sap_router_info.py",
+      "type": "file",
+      "name": "sap_router_info.py",
+      "filePath": "modules/protocols/sap_router_info.py",
+      "summary": "Issues the NI_INFO request to a SAProuter to retrieve its current connection table and parses each row into a structured record.",
+      "tags": [
+        "protocol",
+        "saprouter",
+        "enumeration"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/protocols/sap_router_info.py:saprouter_info_request",
+      "type": "function",
+      "name": "saprouter_info_request",
+      "filePath": "modules/protocols/sap_router_info.py",
+      "lineRange": [
+        52,
+        185
+      ],
+      "summary": "Sends a SAProuter NI_INFO admin request and returns the parsed connection table plus router version metadata.",
+      "tags": [
+        "protocol",
+        "saprouter",
+        "enumeration"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/protocols/sap_router_info.py:_parse_conn_table",
+      "type": "function",
+      "name": "_parse_conn_table",
+      "filePath": "modules/protocols/sap_router_info.py",
+      "lineRange": [
+        202,
+        270
+      ],
+      "summary": "Parses the fixed-width connection-table response from SAProuter into structured rows containing client IP, target host, and state.",
+      "tags": [
+        "protocol",
+        "saprouter",
+        "parser"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:modules/protocols/sap_rsec_cipher.py",
+      "type": "file",
+      "name": "sap_rsec_cipher.py",
+      "filePath": "modules/protocols/sap_rsec_cipher.py",
+      "summary": "Pure-Python implementation of SAP's proprietary RSECCipher (8-round Feistel over 3DES with custom S-boxes) used to decrypt ABAP RSECTAB entries.",
+      "tags": [
+        "protocol",
+        "cryptography",
+        "rsec",
+        "secret-extraction"
+      ],
+      "complexity": "complex",
+      "languageNotes": "Reimplements an undocumented SAP block cipher entirely in Python without ctypes; required for offline RSECTAB recovery."
+    },
+    {
+      "id": "class:modules/protocols/sap_rsec_cipher.py:RSECCipher",
+      "type": "class",
+      "name": "RSECCipher",
+      "filePath": "modules/protocols/sap_rsec_cipher.py",
+      "lineRange": [
+        18,
+        267
+      ],
+      "summary": "Implements the SAP RSECCipher proprietary Feistel cipher with its bespoke S-boxes and permutation tables for encrypt/decrypt operations.",
+      "tags": [
+        "cryptography",
+        "cipher",
+        "feistel"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/protocols/sap_rsec_cipher.py:rsec_decrypt",
+      "type": "function",
+      "name": "rsec_decrypt",
+      "filePath": "modules/protocols/sap_rsec_cipher.py",
+      "lineRange": [
+        278,
+        300
+      ],
+      "summary": "Convenience wrapper that decrypts an RSECTAB blob using a derived key, returning the plaintext payload.",
+      "tags": [
+        "cryptography",
+        "utility",
+        "decryption"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/protocols/sap_rsec_cipher.py:rsec_decrypt_key",
+      "type": "function",
+      "name": "rsec_decrypt_key",
+      "filePath": "modules/protocols/sap_rsec_cipher.py",
+      "lineRange": [
+        303,
+        321
+      ],
+      "summary": "Derives the wrapping key for an RSEC entry from the operator-supplied SID and account identifier.",
+      "tags": [
+        "cryptography",
+        "key-derivation"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:modules/protocols/sap_saprouter.py",
+      "type": "file",
+      "name": "sap_saprouter.py",
+      "filePath": "modules/protocols/sap_saprouter.py",
+      "summary": "SAProuter NI_ROUTE tunneling primitives that transparently wrap RFC/scan/exploit sockets, allowing SAPMAP to traverse perimeter routers to internal SAP systems.",
+      "tags": [
+        "protocol",
+        "saprouter",
+        "tunneling",
+        "network"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/protocols/sap_saprouter.py:parse_route_string",
+      "type": "function",
+      "name": "parse_route_string",
+      "filePath": "modules/protocols/sap_saprouter.py",
+      "lineRange": [
+        24,
+        71
+      ],
+      "summary": "Parses a /H/host/S/port/-style SAProuter route specifier into an ordered list of hop dictionaries.",
+      "tags": [
+        "saprouter",
+        "parser",
+        "utility"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/protocols/sap_saprouter.py:build_ni_route_packet",
+      "type": "function",
+      "name": "build_ni_route_packet",
+      "filePath": "modules/protocols/sap_saprouter.py",
+      "lineRange": [
+        74,
+        126
+      ],
+      "summary": "Builds an NI_ROUTE setup packet from a list of hops, used to negotiate the SAProuter tunnel before payload traffic begins.",
+      "tags": [
+        "protocol",
+        "saprouter",
+        "request-builder"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/protocols/sap_saprouter.py:connect_through_saprouter",
+      "type": "function",
+      "name": "connect_through_saprouter",
+      "filePath": "modules/protocols/sap_saprouter.py",
+      "lineRange": [
+        129,
+        228
+      ],
+      "summary": "Opens a TCP connection through a SAProuter, validates the NI_ROUTE negotiation, and returns a transparent socket for downstream RFC/DIAG/scanner code.",
+      "tags": [
+        "protocol",
+        "saprouter",
+        "tunneling"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/protocols/sap_saprouter.py:probe_port_via_saprouter",
+      "type": "function",
+      "name": "probe_port_via_saprouter",
+      "filePath": "modules/protocols/sap_saprouter.py",
+      "lineRange": [
+        276,
+        407
+      ],
+      "summary": "Performs a tunneled TCP/SAP probe of an internal host:port through a SAProuter, distinguishing reachable vs filtered targets.",
+      "tags": [
+        "network",
+        "saprouter",
+        "port-scanning"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:modules/protocols/sap_snc.py",
+      "type": "file",
+      "name": "sap_snc.py",
+      "filePath": "modules/protocols/sap_snc.py",
+      "summary": "Detects and probes SAP SNC (Secure Network Communications) endpoints on DIAG and router ports, reporting cipher mode and SNC-required policy from the negotiation response.",
+      "tags": [
+        "protocol",
+        "snc",
+        "tls",
+        "fingerprinting"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/protocols/sap_snc.py:_build_snc_frame",
+      "type": "function",
+      "name": "_build_snc_frame",
+      "filePath": "modules/protocols/sap_snc.py",
+      "lineRange": [
+        127,
+        155
+      ],
+      "summary": "Constructs an SNC framing header for outgoing handshake messages.",
+      "tags": [
+        "protocol",
+        "snc",
+        "request-builder"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/protocols/sap_snc.py:_parse_snc_frame",
+      "type": "function",
+      "name": "_parse_snc_frame",
+      "filePath": "modules/protocols/sap_snc.py",
+      "lineRange": [
+        158,
+        241
+      ],
+      "summary": "Parses an SNC response frame, decoding cipher suite, partner name, and negotiation state.",
+      "tags": [
+        "protocol",
+        "snc",
+        "parser"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/protocols/sap_snc.py:_build_diag_snc_init",
+      "type": "function",
+      "name": "_build_diag_snc_init",
+      "filePath": "modules/protocols/sap_snc.py",
+      "lineRange": [
+        281,
+        297
+      ],
+      "summary": "Builds the DIAG-level SNC init packet sent against dispatcher ports during SNC fingerprinting.",
+      "tags": [
+        "protocol",
+        "diag",
+        "snc"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/protocols/sap_snc.py:_build_diag_plain_term_ini",
+      "type": "function",
+      "name": "_build_diag_plain_term_ini",
+      "filePath": "modules/protocols/sap_snc.py",
+      "lineRange": [
+        300,
+        324
+      ],
+      "summary": "Builds a plain (non-SNC) DIAG TERM_INI used as a control comparison in SNC detection.",
+      "tags": [
+        "protocol",
+        "diag"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/protocols/sap_snc.py:scan_snc_diag",
+      "type": "function",
+      "name": "scan_snc_diag",
+      "filePath": "modules/protocols/sap_snc.py",
+      "lineRange": [
+        442,
+        517
+      ],
+      "summary": "Scans a SAP dispatcher port for SNC support by comparing the responses to SNC-init and plain TERM_INI probes.",
+      "tags": [
+        "protocol",
+        "snc",
+        "scanner"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/protocols/sap_snc.py:scan_snc_router",
+      "type": "function",
+      "name": "scan_snc_router",
+      "filePath": "modules/protocols/sap_snc.py",
+      "lineRange": [
+        520,
+        551
+      ],
+      "summary": "Probes a SAProuter port for SNC negotiation behavior, distinguishing SNC-required routers from plain ones.",
+      "tags": [
+        "protocol",
+        "snc",
+        "saprouter",
+        "scanner"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/protocols/sap_snc.py:format_summary",
+      "type": "function",
+      "name": "format_summary",
+      "filePath": "modules/protocols/sap_snc.py",
+      "lineRange": [
+        558,
+        575
+      ],
+      "summary": "Formats SNC scan results into a single human-readable status string for the GUI and CLI.",
+      "tags": [
+        "utility",
+        "formatting"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:tests/__init__.py",
+      "type": "file",
+      "name": "__init__.py",
+      "filePath": "tests/__init__.py",
+      "summary": "Empty package marker for the tests directory.",
+      "tags": [
+        "test",
+        "package-marker",
+        "barrel"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:tools/btp_ssh_bridge/Staticfile",
+      "type": "file",
+      "name": "Staticfile",
+      "filePath": "tools/btp_ssh_bridge/Staticfile",
+      "summary": "Minimal Cloud Foundry staticfile_buildpack config used solely as a vehicle for cf-ssh entry into a tenant subaccount; the served content is irrelevant.",
+      "tags": [
+        "cloud-foundry",
+        "configuration",
+        "btp",
+        "ssh-bridge"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:tools/check_sso2_profile.py",
+      "type": "file",
+      "name": "check_sso2_profile.py",
+      "filePath": "tools/check_sso2_profile.py",
+      "summary": "Standalone CLI that reads SAP profile files through the GW SAPXPG channel and reports whether the target accepts MYSAPSSO2 tickets in the shape SAPMAP's forger emits.",
+      "tags": [
+        "cli",
+        "tool",
+        "sso",
+        "preflight"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:tools/check_sso2_profile.py:main",
+      "type": "function",
+      "name": "main",
+      "filePath": "tools/check_sso2_profile.py",
+      "lineRange": [
+        69,
+        140
+      ],
+      "summary": "CLI entry point: connects to the target, reads DEFAULT.PFL + instance profile via SAPXPG, and prints SSO2 ticket compatibility verdicts.",
+      "tags": [
+        "cli",
+        "entry-point",
+        "sso"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:tools/dirtyfrag/build.sh",
+      "type": "file",
+      "name": "build.sh",
+      "filePath": "tools/dirtyfrag/build.sh",
+      "summary": "Bash build script that compiles the SAPMAP-modified Dirty Frag Linux LPE binary and injects the hex-encoded bytes into modules/exploitation/_dirtyfrag_blob.py.",
+      "tags": [
+        "build-script",
+        "shell",
+        "exploit-vendor",
+        "linux-lpe"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:tools/dirtyfrag/exp.c",
+      "type": "file",
+      "name": "exp.c",
+      "filePath": "tools/dirtyfrag/exp.c",
+      "summary": "SAPMAP-modified Dirty Frag universal Linux LPE chaining xfrm-ESP and RxRPC page-cache writes to root, patched to launch a non-TTY wrapper script instead of dropping a shell.",
+      "tags": [
+        "exploit",
+        "linux-lpe",
+        "kernel",
+        "c"
+      ],
+      "complexity": "complex",
+      "languageNotes": "Pure C with raw netlink, AF_ALG, AF_RXRPC, and direct procfs writes; targets kernels from 2017 onward."
+    },
+    {
+      "id": "function:tools/dirtyfrag/exp.c:su_lpe_main",
+      "type": "function",
+      "name": "su_lpe_main",
+      "filePath": "tools/dirtyfrag/exp.c",
+      "lineRange": [
+        349,
+        383
+      ],
+      "summary": "Driver for the xfrm-ESP /usr/bin/su patching primitive that turns su into a launcher for the SAPMAP wrapper script.",
+      "tags": [
+        "exploit",
+        "linux-lpe",
+        "primitive"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:tools/dirtyfrag/exp.c:add_xfrm_sa",
+      "type": "function",
+      "name": "add_xfrm_sa",
+      "filePath": "tools/dirtyfrag/exp.c",
+      "lineRange": [
+        163,
+        250
+      ],
+      "summary": "Issues the crafted netlink XFRM_NEWSA message that triggers the heap fragmentation primitive underlying Dirty Frag.",
+      "tags": [
+        "exploit",
+        "netlink",
+        "xfrm"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:tools/dirtyfrag/exp.c:do_one_write",
+      "type": "function",
+      "name": "do_one_write",
+      "filePath": "tools/dirtyfrag/exp.c",
+      "lineRange": [
+        252,
+        303
+      ],
+      "summary": "Performs a single page-cache overwrite cycle of the target file using the obtained physically-mapped fragment.",
+      "tags": [
+        "exploit",
+        "page-cache",
+        "primitive"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:tools/dirtyfrag/exp.c:corrupt_su",
+      "type": "function",
+      "name": "corrupt_su",
+      "filePath": "tools/dirtyfrag/exp.c",
+      "lineRange": [
+        315,
+        347
+      ],
+      "summary": "Coordinates the byte-by-byte corruption of /usr/bin/su, swapping shell-spawning instructions for an execve of the SAPMAP wrapper.",
+      "tags": [
+        "exploit",
+        "binary-patching"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:tools/dirtyfrag/exp.c:do_unshare_userns_netns",
+      "type": "function",
+      "name": "do_unshare_userns_netns",
+      "filePath": "tools/dirtyfrag/exp.c",
+      "lineRange": [
+        494,
+        528
+      ],
+      "summary": "Unshares user and network namespaces so the exploit can reach privileged XFRM/RxRPC APIs as an unprivileged caller.",
+      "tags": [
+        "exploit",
+        "namespaces",
+        "privilege"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:tools/dirtyfrag/exp.c:build_rxrpc_v1_token",
+      "type": "function",
+      "name": "build_rxrpc_v1_token",
+      "filePath": "tools/dirtyfrag/exp.c",
+      "lineRange": [
+        540,
+        569
+      ],
+      "summary": "Constructs an RxRPC v1 rxkad token used to seed the kernel keyring with attacker-controlled data for the second exploit chain.",
+      "tags": [
+        "exploit",
+        "rxrpc",
+        "primitive"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:tools/dirtyfrag/exp.c:alg_op",
+      "type": "function",
+      "name": "alg_op",
+      "filePath": "tools/dirtyfrag/exp.c",
+      "lineRange": [
+        602,
+        643
+      ],
+      "summary": "Wraps an AF_ALG socket operation used to drive fcrypt PCBC operations for the RxRPC key-derivation primitive.",
+      "tags": [
+        "crypto",
+        "af-alg",
+        "primitive"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:tools/dirtyfrag/exp.c:setup_rxrpc_client",
+      "type": "function",
+      "name": "setup_rxrpc_client",
+      "filePath": "tools/dirtyfrag/exp.c",
+      "lineRange": [
+        694,
+        722
+      ],
+      "summary": "Configures an AF_RXRPC client socket and binds the previously-added kernel key for the upcoming call.",
+      "tags": [
+        "exploit",
+        "rxrpc",
+        "socket"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:tools/dirtyfrag/exp.c:rxrpc_client_initiate_call",
+      "type": "function",
+      "name": "rxrpc_client_initiate_call",
+      "filePath": "tools/dirtyfrag/exp.c",
+      "lineRange": [
+        724,
+        768
+      ],
+      "summary": "Initiates the RxRPC client-side call that triggers the kernel-side page-cache write primitive.",
+      "tags": [
+        "exploit",
+        "rxrpc",
+        "primitive"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:tools/dirtyfrag/exp.c:do_one_trigger",
+      "type": "function",
+      "name": "do_one_trigger",
+      "filePath": "tools/dirtyfrag/exp.c",
+      "lineRange": [
+        808,
+        960
+      ],
+      "summary": "Runs a single RxRPC trigger iteration combining keyring, AF_ALG, and UDP responder coordination to land a write.",
+      "tags": [
+        "exploit",
+        "rxrpc",
+        "orchestration"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:tools/dirtyfrag/exp.c:fcrypt_user_decrypt",
+      "type": "function",
+      "name": "fcrypt_user_decrypt",
+      "filePath": "tools/dirtyfrag/exp.c",
+      "lineRange": [
+        1108,
+        1132
+      ],
+      "summary": "User-mode reference implementation of the fcrypt cipher used to brute-force the RxRPC session key offline.",
+      "tags": [
+        "crypto",
+        "fcrypt",
+        "user-mode"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:tools/dirtyfrag/exp.c:find_K_offline_generic",
+      "type": "function",
+      "name": "find_K_offline_generic",
+      "filePath": "tools/dirtyfrag/exp.c",
+      "lineRange": [
+        1201,
+        1250
+      ],
+      "summary": "Performs offline brute-force recovery of the RxRPC session key K given observed ciphertext fragments.",
+      "tags": [
+        "crypto",
+        "brute-force",
+        "key-recovery"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:tools/dirtyfrag/exp.c:rxrpc_lpe_main",
+      "type": "function",
+      "name": "rxrpc_lpe_main",
+      "filePath": "tools/dirtyfrag/exp.c",
+      "lineRange": [
+        1253,
+        1662
+      ],
+      "summary": "Driver for the RxRPC-chain LPE variant: orchestrates triggering, key recovery, and page-cache writes to escalate to root.",
+      "tags": [
+        "exploit",
+        "linux-lpe",
+        "orchestration"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:tools/dirtyfrag/exp.c:run_root_pty",
+      "type": "function",
+      "name": "run_root_pty",
+      "filePath": "tools/dirtyfrag/exp.c",
+      "lineRange": [
+        1795,
+        1917
+      ],
+      "summary": "Spawns an interactive root PTY (unused in SAPMAP build but retained from upstream for parity).",
+      "tags": [
+        "exploit",
+        "pty",
+        "post-exploitation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:tools/dirtyfrag/exp.c:main",
+      "type": "function",
+      "name": "main",
+      "filePath": "tools/dirtyfrag/exp.c",
+      "lineRange": [
+        1919,
+        1991
+      ],
+      "summary": "Top-level entry: dispatches between the su-patch chain and the RxRPC chain based on argv, returning success once root is achieved.",
+      "tags": [
+        "entry-point",
+        "exploit"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "document:tools/dirtyfrag/README.md",
+      "type": "document",
+      "name": "README.md",
+      "filePath": "tools/dirtyfrag/README.md",
+      "summary": "Documents the vendored Dirty Frag Linux LPE: upstream origin, two SAPMAP-specific modifications, and the build flow that produces the shipped blob.",
+      "tags": [
+        "documentation",
+        "exploit-vendor",
+        "linux-lpe"
+      ],
+      "complexity": "simple"
+    }
+  ],
+  "edges": [
+    {
+      "source": "file:modules/protocols/sap_rfc_system_info.py",
+      "target": "function:modules/protocols/sap_rfc_system_info.py:connect_via_saprouter",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_rfc_system_info.py",
+      "target": "function:modules/protocols/sap_rfc_system_info.py:ni_recv",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_rfc_system_info.py",
+      "target": "function:modules/protocols/sap_rfc_system_info.py:build_rfc_system_info_request",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_rfc_system_info.py",
+      "target": "function:modules/protocols/sap_rfc_system_info.py:build_chipik_p2",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_rfc_system_info.py",
+      "target": "function:modules/protocols/sap_rfc_system_info.py:build_f_sap_send_rfc",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_rfc_system_info.py",
+      "target": "function:modules/protocols/sap_rfc_system_info.py:build_f_sap_init_reinit",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_rfc_system_info.py",
+      "target": "function:modules/protocols/sap_rfc_system_info.py:build_diag_term_ini",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_rfc_system_info.py",
+      "target": "function:modules/protocols/sap_rfc_system_info.py:parse_diag_response",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_rfc_system_info.py",
+      "target": "function:modules/protocols/sap_rfc_system_info.py:_parse_diag_error_text",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_rfc_system_info.py",
+      "target": "function:modules/protocols/sap_rfc_system_info.py:_parse_diag_items",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_rfc_system_info.py",
+      "target": "function:modules/protocols/sap_rfc_system_info.py:probe_diag_login",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_rfc_system_info.py",
+      "target": "function:modules/protocols/sap_rfc_system_info.py:parse_rfcsi_response",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_rfc_system_info.py",
+      "target": "function:modules/protocols/sap_rfc_system_info.py:parse_appc_rc",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_rfc_system_info.py",
+      "target": "function:modules/protocols/sap_rfc_system_info.py:parse_gateway_error",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_rfc_system_info.py",
+      "target": "function:modules/protocols/sap_rfc_system_info.py:probe_sap_system",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_rfc_system_info.py",
+      "target": "function:modules/protocols/sap_rfc_system_info.py:print_results",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_rfc_system_info.py",
+      "target": "function:modules/protocols/sap_rfc_system_info.py:main",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_rfc_system_info.py",
+      "target": "function:modules/protocols/sap_rfc_system_info.py:probe_sap_system",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/protocols/sap_rfc_system_info.py",
+      "target": "function:modules/protocols/sap_rfc_system_info.py:main",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/protocols/sap_router_info.py",
+      "target": "function:modules/protocols/sap_router_info.py:saprouter_info_request",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_router_info.py",
+      "target": "function:modules/protocols/sap_router_info.py:_parse_conn_table",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_router_info.py",
+      "target": "function:modules/protocols/sap_router_info.py:saprouter_info_request",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/protocols/sap_rsec_cipher.py",
+      "target": "class:modules/protocols/sap_rsec_cipher.py:RSECCipher",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_rsec_cipher.py",
+      "target": "function:modules/protocols/sap_rsec_cipher.py:rsec_decrypt",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_rsec_cipher.py",
+      "target": "function:modules/protocols/sap_rsec_cipher.py:rsec_decrypt_key",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_rsec_cipher.py",
+      "target": "class:modules/protocols/sap_rsec_cipher.py:RSECCipher",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/protocols/sap_rsec_cipher.py",
+      "target": "function:modules/protocols/sap_rsec_cipher.py:rsec_decrypt",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/protocols/sap_rsec_cipher.py",
+      "target": "function:modules/protocols/sap_rsec_cipher.py:rsec_decrypt_key",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/protocols/sap_saprouter.py",
+      "target": "function:modules/protocols/sap_saprouter.py:parse_route_string",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_saprouter.py",
+      "target": "function:modules/protocols/sap_saprouter.py:build_ni_route_packet",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_saprouter.py",
+      "target": "function:modules/protocols/sap_saprouter.py:connect_through_saprouter",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_saprouter.py",
+      "target": "function:modules/protocols/sap_saprouter.py:probe_port_via_saprouter",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_saprouter.py",
+      "target": "function:modules/protocols/sap_saprouter.py:connect_through_saprouter",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/protocols/sap_saprouter.py",
+      "target": "function:modules/protocols/sap_saprouter.py:probe_port_via_saprouter",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/protocols/sap_snc.py",
+      "target": "function:modules/protocols/sap_snc.py:_build_snc_frame",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_snc.py",
+      "target": "function:modules/protocols/sap_snc.py:_parse_snc_frame",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_snc.py",
+      "target": "function:modules/protocols/sap_snc.py:_build_diag_snc_init",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_snc.py",
+      "target": "function:modules/protocols/sap_snc.py:_build_diag_plain_term_ini",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_snc.py",
+      "target": "function:modules/protocols/sap_snc.py:scan_snc_diag",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_snc.py",
+      "target": "function:modules/protocols/sap_snc.py:scan_snc_router",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_snc.py",
+      "target": "function:modules/protocols/sap_snc.py:format_summary",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_snc.py",
+      "target": "function:modules/protocols/sap_snc.py:scan_snc_diag",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/protocols/sap_snc.py",
+      "target": "function:modules/protocols/sap_snc.py:scan_snc_router",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:tools/check_sso2_profile.py",
+      "target": "function:tools/check_sso2_profile.py:main",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:tools/check_sso2_profile.py",
+      "target": "function:tools/check_sso2_profile.py:main",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:tools/dirtyfrag/exp.c",
+      "target": "function:tools/dirtyfrag/exp.c:su_lpe_main",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:tools/dirtyfrag/exp.c",
+      "target": "function:tools/dirtyfrag/exp.c:add_xfrm_sa",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:tools/dirtyfrag/exp.c",
+      "target": "function:tools/dirtyfrag/exp.c:do_one_write",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:tools/dirtyfrag/exp.c",
+      "target": "function:tools/dirtyfrag/exp.c:corrupt_su",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:tools/dirtyfrag/exp.c",
+      "target": "function:tools/dirtyfrag/exp.c:do_unshare_userns_netns",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:tools/dirtyfrag/exp.c",
+      "target": "function:tools/dirtyfrag/exp.c:build_rxrpc_v1_token",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:tools/dirtyfrag/exp.c",
+      "target": "function:tools/dirtyfrag/exp.c:alg_op",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:tools/dirtyfrag/exp.c",
+      "target": "function:tools/dirtyfrag/exp.c:setup_rxrpc_client",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:tools/dirtyfrag/exp.c",
+      "target": "function:tools/dirtyfrag/exp.c:rxrpc_client_initiate_call",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:tools/dirtyfrag/exp.c",
+      "target": "function:tools/dirtyfrag/exp.c:do_one_trigger",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:tools/dirtyfrag/exp.c",
+      "target": "function:tools/dirtyfrag/exp.c:fcrypt_user_decrypt",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:tools/dirtyfrag/exp.c",
+      "target": "function:tools/dirtyfrag/exp.c:find_K_offline_generic",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:tools/dirtyfrag/exp.c",
+      "target": "function:tools/dirtyfrag/exp.c:rxrpc_lpe_main",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:tools/dirtyfrag/exp.c",
+      "target": "function:tools/dirtyfrag/exp.c:run_root_pty",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:tools/dirtyfrag/exp.c",
+      "target": "function:tools/dirtyfrag/exp.c:main",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:tools/dirtyfrag/exp.c",
+      "target": "function:tools/dirtyfrag/exp.c:su_lpe_main",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:tools/dirtyfrag/exp.c",
+      "target": "function:tools/dirtyfrag/exp.c:rxrpc_lpe_main",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:tools/dirtyfrag/exp.c",
+      "target": "function:tools/dirtyfrag/exp.c:main",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:tools/dirtyfrag/build.sh",
+      "target": "file:tools/dirtyfrag/exp.c",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "document:tools/dirtyfrag/README.md",
+      "target": "file:tools/dirtyfrag/exp.c",
+      "type": "documents",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "document:tools/dirtyfrag/README.md",
+      "target": "file:tools/dirtyfrag/build.sh",
+      "type": "documents",
+      "direction": "forward",
+      "weight": 0.5
+    }
+  ]
+}
