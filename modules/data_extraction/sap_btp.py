@@ -710,9 +710,22 @@ def _materialise_btp_target(state: SAPMAPState,
         inst.append(InstanceInfo(
             instance_nr=str(sysnr).zfill(2),
             ip=host if is_ip else ""))
+    # System-type inference:
+    #   * BTP destination `type=RFC` is always ABAP (Type 3 / JCo —
+    #     the SAP RFC protocol only exists on the AS ABAP stack).
+    #   * `sap-platform` property, when present, wins.
+    #   * Everything else (HTTP destinations to unknown backends)
+    #     stays UNKNOWN so the GUI keeps the dashed outline as a
+    #     hint that the operator should probe it.
+    if platform in ("ABAP", "JAVA"):
+        inferred_type = platform
+    elif (d.type or "").upper() == "RFC":
+        inferred_type = "ABAP"
+    else:
+        inferred_type = "UNKNOWN"
     placeholder = SAPNode(
         sid=sid,
-        system_type=platform or "UNKNOWN",
+        system_type=inferred_type,
         hostname="" if is_ip else host,
         ip=host if is_ip else "",
         instances=inst,
