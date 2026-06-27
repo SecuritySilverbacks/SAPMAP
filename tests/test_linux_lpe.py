@@ -1708,3 +1708,16 @@ def test_force_env_var_accepts_peditcow():
                 return_value={"vulnerable": True, "kernel": "6.0", "reason": ""}):
         state = check_linux_lpe(n)
     assert state["method"] == "peditcow"
+
+
+def test_peditcow_run_as_root_no_blob_returns_clean_error():
+    """When the vendored blob is missing, run_as_root must return a
+    clean ok=False without making any SAPXPG calls — so the picker
+    can fall through to dirtyfrag cleanly."""
+    from sapmap_peditcow import run_as_root
+    with patch("sapmap_peditcow._load_blob", return_value=None), \
+         patch("sapmap_exploit.execute_gw_command") as gw:
+        out = run_as_root(_node(), "id")
+    assert out["ok"] is False
+    assert "build.sh" in out["error"]
+    gw.assert_not_called()
