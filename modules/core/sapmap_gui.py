@@ -5742,9 +5742,10 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 res = check_linux_lpe(node)
                 method = res.get("method") or ""
                 cf = res.get("copyfail") or {}
+                pc = res.get("peditcow") or {}
                 df = res.get("dirtyfrag") or {}
                 # One headline finding per method, tagged with severity
-                # by viability so the operator sees both lines clearly.
+                # by viability so the operator sees all three lines.
                 sapmap_findings.emit_finding(
                     "HIGH" if cf.get("vulnerable") else "INFO", sid,
                     f"Copy Fail (CVE-2026-31431): "
@@ -5753,6 +5754,14 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     f"{cf.get('reason', '')}",
                     ref="lpe.copyfail.check", meta=cf,
                     attack_capability="lpe.copyfail")
+                sapmap_findings.emit_finding(
+                    "HIGH" if pc.get("vulnerable") else "INFO", sid,
+                    f"pedit-COW (CVE-2026-46331): "
+                    f"{'VULNERABLE' if pc.get('vulnerable') else 'not vulnerable'}"
+                    f" — kernel {pc.get('kernel', '?')} arch "
+                    f"{pc.get('arch', '?')}. {pc.get('reason', '')}",
+                    ref="lpe.peditcow.check", meta=pc,
+                    attack_capability="lpe.peditcow")
                 sapmap_findings.emit_finding(
                     "HIGH" if df.get("vulnerable") else "INFO", sid,
                     f"Dirty Frag: "
