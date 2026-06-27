@@ -48,6 +48,12 @@ tools/efspotato/src/upstream/
 tools/efspotato/confuser/
 tools/efspotato/confuser.zip
 
+# pedit-COW build artefacts — upstream PoC clone, kept per-build-host
+# transient.  Shipped binary lives in modules/exploitation/_peditcow_blob.py.
+tools/peditcow/src/upstream/
+tools/peditcow/pc_static
+tools/peditcow/_peditcow_blob.py
+
 # SSFS decrypt — Java build outputs.  Ship the source under
 # tools/ssfs_decrypt/src/; the .jar + Gradle build/ directory
 # are reproducible artefacts.
