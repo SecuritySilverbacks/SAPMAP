@@ -5900,9 +5900,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
         """Run a shell command as root using a Linux LPE technique.
 
         Accepts an optional ``method`` field in the POST body
-        (``"copyfail"`` or ``"dirtyfrag"``).  When set, that technique
-        is used verbatim — no auto-pick, no cached-method reuse.  When
-        omitted, the auto-picker decides (prefers Copy Fail).
+        (``"copyfail"`` / ``"peditcow"`` / ``"dirtyfrag"``).  When set,
+        that technique is used verbatim — no auto-pick, no cached-method
+        reuse.  When omitted, the auto-picker decides (prefers Copy Fail).
         """
         response.content_type = "application/json"
         node = api.state.get_node(sid)
@@ -5911,7 +5911,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
         data = request.json or {}
         command = data.get("command", "id")
         chosen_method = (data.get("method") or "").strip().lower() or None
-        if chosen_method and chosen_method not in ("copyfail", "dirtyfrag"):
+        if chosen_method and chosen_method not in ("copyfail", "peditcow", "dirtyfrag"):
             return json.dumps({"error": f"Unknown LPE method "
                                           f"{chosen_method!r}"})
 
