@@ -1,0 +1,92 @@
+{
+  "scriptCompleted": true,
+  "filesAnalyzed": 3,
+  "filesSkipped": [],
+  "results": [
+    {
+      "path": "tools/btp_ssh_bridge/README.md",
+      "language": "markdown",
+      "fileCategory": "docs",
+      "totalLines": 168,
+      "nonEmptyLines": 130,
+      "sections": [
+        {
+          "heading": "BTP probe bridge — minimal CF app for `cf ssh` tunnelling",
+          "level": 1,
+          "line": 1
+        },
+        {
+          "heading": "One-time setup",
+          "level": 2,
+          "line": 17
+        },
+        {
+          "heading": "Open the tunnel",
+          "level": 2,
+          "line": 53
+        },
+        {
+          "heading": "Get a connectivity-service token (HTTP 407 path)",
+          "level": 2,
+          "line": 65
+        },
+        {
+          "heading": "Run the probe",
+          "level": 2,
+          "line": 119
+        },
+        {
+          "heading": "Cleanup",
+          "level": 2,
+          "line": 141
+        },
+        {
+          "heading": "Troubleshooting",
+          "level": 2,
+          "line": 151
+        },
+        {
+          "heading": "Cost",
+          "level": 2,
+          "line": 164
+        }
+      ],
+      "metrics": {
+        "importCount": 0,
+        "exportCount": 0,
+        "functionCount": 0,
+        "classCount": 0,
+        "sectionCount": 8
+      }
+    },
+    {
+      "path": "tools/btp_ssh_bridge/index.html",
+      "language": "html",
+      "fileCategory": "markup",
+      "totalLines": 8,
+      "nonEmptyLines": 8,
+      "metrics": {}
+    },
+    {
+      "path": "tools/btp_ssh_bridge/manifest.yml",
+      "language": "yaml",
+      "fileCategory": "config",
+      "totalLines": 19,
+      "nonEmptyLines": 19,
+      "sections": [
+        {
+          "heading": "applications",
+          "level": 1,
+          "line": 9
+        }
+      ],
+      "metrics": {
+        "importCount": 0,
+        "exportCount": 0,
+        "functionCount": 0,
+        "classCount": 0,
+        "sectionCount": 1
+      }
+    }
+  ]
+}

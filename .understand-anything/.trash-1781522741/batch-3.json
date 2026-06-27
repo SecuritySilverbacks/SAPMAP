@@ -1,0 +1,453 @@
+{
+  "nodes": [
+    {
+      "id": "file:modules/exploitation/sapmap_efspotato.py",
+      "type": "file",
+      "name": "sapmap_efspotato.py",
+      "filePath": "modules/exploitation/sapmap_efspotato.py",
+      "summary": "Windows LPE module that escalates to NT AUTHORITY\\SYSTEM by coercing lsass.exe via MS-EFSRPC named-pipe authentication, complementing GodPotato on hardened hosts where DCOM unmarshalling yields only Identification-level tokens.",
+      "tags": ["exploit", "privilege-escalation", "windows", "lpe", "post-exploitation"],
+      "complexity": "complex",
+      "languageNotes": "Reuses MiniPlasma helpers for blob delivery and result decoding; multi-pipe fallback chain (lsarpc/efsrpc/samr/netlogon) for hardened images."
+    },
+    {
+      "id": "function:modules/exploitation/sapmap_efspotato.py:check_efspotato",
+      "type": "function",
+      "name": "check_efspotato",
+      "filePath": "modules/exploitation/sapmap_efspotato.py",
+      "lineRange": [96, 227],
+      "summary": "Pre-flight check determining whether the target node is exploitable by EfsPotato — verifies Windows OS, SeImpersonatePrivilege, and a compatible .NET runtime release.",
+      "tags": ["exploit-check", "preflight", "windows", "validation"],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sapmap_efspotato.py:_run_as_system_evasion",
+      "type": "function",
+      "name": "_run_as_system_evasion",
+      "filePath": "modules/exploitation/sapmap_efspotato.py",
+      "lineRange": [257, 446],
+      "summary": "AV-evasion variant that encrypts the EfsPotato blob, chunk-uploads it via certutil base64, loads in-memory via PowerShell, and runs an operator command as SYSTEM.",
+      "tags": ["exploit", "av-evasion", "in-memory", "windows", "lpe"],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sapmap_efspotato.py:run_as_system",
+      "type": "function",
+      "name": "run_as_system",
+      "filePath": "modules/exploitation/sapmap_efspotato.py",
+      "lineRange": [449, 1064],
+      "summary": "Primary entry point that delivers the EfsPotato exe to disk, verifies its SHA-256, executes it to coerce lsass into authenticating, and captures SYSTEM-context command output via certutil-encoded result file.",
+      "tags": ["exploit", "entry-point", "windows", "lpe", "system"],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:modules/exploitation/sapmap_godpotato.py",
+      "type": "file",
+      "name": "sapmap_godpotato.py",
+      "filePath": "modules/exploitation/sapmap_godpotato.py",
+      "summary": "Windows LPE module implementing BeichenDream's GodPotato chain — abuses SeImpersonatePrivilege via DCOM/RPCSS unmarshalling to spawn arbitrary commands as NT AUTHORITY\\SYSTEM on Server 2012-2022 and Win10-11.",
+      "tags": ["exploit", "privilege-escalation", "windows", "lpe", "post-exploitation"],
+      "complexity": "complex",
+      "languageNotes": "Mirrors MiniPlasma's architecture; uses vendored .NET 4.7.2 single-file exe; SHA-256 verified before execution."
+    },
+    {
+      "id": "function:modules/exploitation/sapmap_godpotato.py:check_godpotato",
+      "type": "function",
+      "name": "check_godpotato",
+      "filePath": "modules/exploitation/sapmap_godpotato.py",
+      "lineRange": [131, 284],
+      "summary": "Pre-flight check verifying Windows target has SeImpersonatePrivilege and .NET 4.7.2+ runtime so the vendored GodPotato exe can load.",
+      "tags": ["exploit-check", "preflight", "windows", "validation"],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sapmap_godpotato.py:run_as_system",
+      "type": "function",
+      "name": "run_as_system",
+      "filePath": "modules/exploitation/sapmap_godpotato.py",
+      "lineRange": [301, 531],
+      "summary": "Main exploit driver — uploads the GodPotato exe, verifies SHA-256, triggers DCOM unmarshalling coercion of RPCSS, and runs an operator-supplied command as SYSTEM, returning certutil-decoded output.",
+      "tags": ["exploit", "entry-point", "windows", "lpe", "system"],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:modules/exploitation/sapmap_miniplasma.py",
+      "type": "file",
+      "name": "sapmap_miniplasma.py",
+      "filePath": "modules/exploitation/sapmap_miniplasma.py",
+      "summary": "Windows LPE module exploiting CVE-2020-17103 (cldflt.sys race) on Win10 1709+/Server 2019+ to escalate from SAP service account to SYSTEM; also exports the shared OS-exec picker and helper primitives used by GodPotato and EfsPotato.",
+      "tags": ["exploit", "privilege-escalation", "windows", "lpe", "shared-helpers"],
+      "complexity": "complex",
+      "languageNotes": "Provides _make_exec picker that routes through CVE-2025-31324 JSP shell or Gateway SAPXPG; one-shot HTTP server for binary staging; chunked certutil base64 delivery."
+    },
+    {
+      "id": "function:modules/exploitation/sapmap_miniplasma.py:_make_exec",
+      "type": "function",
+      "name": "_make_exec",
+      "filePath": "modules/exploitation/sapmap_miniplasma.py",
+      "lineRange": [188, 552],
+      "summary": "Picker factory that returns an exec_fn(command) callable routing through the best available OS-exec primitive (JSP shell, GW SAPXPG, or SXPG) for the target node; handles binary upload staging and shell wrapping.",
+      "tags": ["exec-picker", "factory", "shared-helpers", "exploit"],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sapmap_miniplasma.py:check_miniplasma",
+      "type": "function",
+      "name": "check_miniplasma",
+      "filePath": "modules/exploitation/sapmap_miniplasma.py",
+      "lineRange": [559, 698],
+      "summary": "Pre-flight check confirming Windows build is in the cldflt.sys vulnerable range (1709+/2019+) and required .NET runtime is present before attempting MiniPlasma exploitation.",
+      "tags": ["exploit-check", "preflight", "windows", "validation"],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sapmap_miniplasma.py:_robust_pre_cleanup",
+      "type": "function",
+      "name": "_robust_pre_cleanup",
+      "filePath": "modules/exploitation/sapmap_miniplasma.py",
+      "lineRange": [716, 763],
+      "summary": "Best-effort cleanup of stale staging files (binary, wrapper batch, result file) before a fresh exploit run to prevent collisions from prior attempts.",
+      "tags": ["cleanup", "utility", "shared-helpers"],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/exploitation/sapmap_miniplasma.py:_chunk_b64",
+      "type": "function",
+      "name": "_chunk_b64",
+      "filePath": "modules/exploitation/sapmap_miniplasma.py",
+      "lineRange": [766, 796],
+      "summary": "Splits a byte payload into base64 chunks sized for certutil -decode upload, used by all three Windows LPE modules to deliver vendored exes.",
+      "tags": ["utility", "encoding", "shared-helpers", "payload-delivery"],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/exploitation/sapmap_miniplasma.py:run_as_system",
+      "type": "function",
+      "name": "run_as_system",
+      "filePath": "modules/exploitation/sapmap_miniplasma.py",
+      "lineRange": [799, 1063],
+      "summary": "Primary MiniPlasma exploit entry — uploads the cldflt PoC exe, triggers the WER scheduled-task hijack to acquire SYSTEM via wermgr.exe, runs the operator command, and decodes the result file.",
+      "tags": ["exploit", "entry-point", "windows", "lpe", "system"],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/exploitation/sapmap_miniplasma.py:_decode_certutil_b64",
+      "type": "function",
+      "name": "_decode_certutil_b64",
+      "filePath": "modules/exploitation/sapmap_miniplasma.py",
+      "lineRange": [1066, 1099],
+      "summary": "Decodes the certutil-encoded base64 result blob retrieved from the target back into the SYSTEM command's stdout.",
+      "tags": ["utility", "decoding", "shared-helpers", "result-parsing"],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/exploitation/sapmap_miniplasma.py:_parse_ver_output",
+      "type": "function",
+      "name": "_parse_ver_output",
+      "filePath": "modules/exploitation/sapmap_miniplasma.py",
+      "lineRange": [90, 109],
+      "summary": "Parses the output of the Windows `ver` command into a (major, minor, build) tuple used to gate exploit applicability.",
+      "tags": ["utility", "parser", "shared-helpers", "windows"],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:modules/exploitation/sapmap_miniplasma.py:_parse_net_release",
+      "type": "function",
+      "name": "_parse_net_release",
+      "filePath": "modules/exploitation/sapmap_miniplasma.py",
+      "lineRange": [134, 160],
+      "summary": "Parses .NET Framework Release-number registry output (e.g. 461808 = 4.7.2) so callers can confirm the runtime is recent enough to load the vendored exe.",
+      "tags": ["utility", "parser", "shared-helpers", "dotnet"],
+      "complexity": "moderate"
+    }
+  ],
+  "edges": [
+    {
+      "source": "file:modules/exploitation/sapmap_efspotato.py",
+      "target": "file:modules/exploitation/sapmap_godpotato.py",
+      "type": "imports",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_efspotato.py",
+      "target": "file:modules/exploitation/sapmap_miniplasma.py",
+      "type": "imports",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_godpotato.py",
+      "target": "file:modules/exploitation/sapmap_miniplasma.py",
+      "type": "imports",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_efspotato.py",
+      "target": "function:modules/exploitation/sapmap_efspotato.py:check_efspotato",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_efspotato.py",
+      "target": "function:modules/exploitation/sapmap_efspotato.py:_run_as_system_evasion",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_efspotato.py",
+      "target": "function:modules/exploitation/sapmap_efspotato.py:run_as_system",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_efspotato.py",
+      "target": "function:modules/exploitation/sapmap_efspotato.py:check_efspotato",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_efspotato.py",
+      "target": "function:modules/exploitation/sapmap_efspotato.py:run_as_system",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_godpotato.py",
+      "target": "function:modules/exploitation/sapmap_godpotato.py:check_godpotato",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_godpotato.py",
+      "target": "function:modules/exploitation/sapmap_godpotato.py:run_as_system",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_godpotato.py",
+      "target": "function:modules/exploitation/sapmap_godpotato.py:check_godpotato",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_godpotato.py",
+      "target": "function:modules/exploitation/sapmap_godpotato.py:run_as_system",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_miniplasma.py",
+      "target": "function:modules/exploitation/sapmap_miniplasma.py:_make_exec",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_miniplasma.py",
+      "target": "function:modules/exploitation/sapmap_miniplasma.py:check_miniplasma",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_miniplasma.py",
+      "target": "function:modules/exploitation/sapmap_miniplasma.py:_robust_pre_cleanup",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_miniplasma.py",
+      "target": "function:modules/exploitation/sapmap_miniplasma.py:_chunk_b64",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_miniplasma.py",
+      "target": "function:modules/exploitation/sapmap_miniplasma.py:run_as_system",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_miniplasma.py",
+      "target": "function:modules/exploitation/sapmap_miniplasma.py:_decode_certutil_b64",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_miniplasma.py",
+      "target": "function:modules/exploitation/sapmap_miniplasma.py:_parse_ver_output",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_miniplasma.py",
+      "target": "function:modules/exploitation/sapmap_miniplasma.py:_parse_net_release",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_miniplasma.py",
+      "target": "function:modules/exploitation/sapmap_miniplasma.py:check_miniplasma",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_miniplasma.py",
+      "target": "function:modules/exploitation/sapmap_miniplasma.py:run_as_system",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/exploitation/sapmap_miniplasma.py",
+      "target": "function:modules/exploitation/sapmap_miniplasma.py:_make_exec",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:modules/exploitation/sapmap_efspotato.py:_run_as_system_evasion",
+      "target": "function:modules/exploitation/sapmap_miniplasma.py:_make_exec",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:modules/exploitation/sapmap_efspotato.py:_run_as_system_evasion",
+      "target": "function:modules/exploitation/sapmap_miniplasma.py:_chunk_b64",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:modules/exploitation/sapmap_efspotato.py:_run_as_system_evasion",
+      "target": "function:modules/exploitation/sapmap_miniplasma.py:_robust_pre_cleanup",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:modules/exploitation/sapmap_efspotato.py:check_efspotato",
+      "target": "function:modules/exploitation/sapmap_miniplasma.py:_make_exec",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:modules/exploitation/sapmap_efspotato.py:check_efspotato",
+      "target": "function:modules/exploitation/sapmap_miniplasma.py:_parse_ver_output",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:modules/exploitation/sapmap_efspotato.py:check_efspotato",
+      "target": "function:modules/exploitation/sapmap_miniplasma.py:_parse_net_release",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:modules/exploitation/sapmap_efspotato.py:run_as_system",
+      "target": "function:modules/exploitation/sapmap_miniplasma.py:_make_exec",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:modules/exploitation/sapmap_efspotato.py:run_as_system",
+      "target": "function:modules/exploitation/sapmap_miniplasma.py:_chunk_b64",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:modules/exploitation/sapmap_efspotato.py:run_as_system",
+      "target": "function:modules/exploitation/sapmap_miniplasma.py:_robust_pre_cleanup",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:modules/exploitation/sapmap_efspotato.py:check_efspotato",
+      "target": "function:modules/exploitation/sapmap_godpotato.py:_has_se_impersonate",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:modules/exploitation/sapmap_godpotato.py:check_godpotato",
+      "target": "function:modules/exploitation/sapmap_miniplasma.py:_make_exec",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:modules/exploitation/sapmap_godpotato.py:check_godpotato",
+      "target": "function:modules/exploitation/sapmap_miniplasma.py:_parse_ver_output",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:modules/exploitation/sapmap_godpotato.py:check_godpotato",
+      "target": "function:modules/exploitation/sapmap_miniplasma.py:_parse_net_release",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:modules/exploitation/sapmap_godpotato.py:run_as_system",
+      "target": "function:modules/exploitation/sapmap_miniplasma.py:_make_exec",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:modules/exploitation/sapmap_godpotato.py:run_as_system",
+      "target": "function:modules/exploitation/sapmap_miniplasma.py:_chunk_b64",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:modules/exploitation/sapmap_godpotato.py:run_as_system",
+      "target": "function:modules/exploitation/sapmap_miniplasma.py:_robust_pre_cleanup",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:modules/exploitation/sapmap_godpotato.py:run_as_system",
+      "target": "function:modules/exploitation/sapmap_miniplasma.py:_decode_certutil_b64",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:modules/exploitation/sapmap_efspotato.py:run_as_system",
+      "target": "function:modules/exploitation/sapmap_efspotato.py:_run_as_system_evasion",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    }
+  ]
+}

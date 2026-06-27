@@ -707,7 +707,15 @@ class SAPNode:
     dirtyfrag_vulnerable: bool = False   # True if esp_path_ok || rxrpc_path_ok
     dirtyfrag_root_obtained: bool = False
     dirtyfrag_kernel: str = ""
-    linux_lpe_method: str = ""           # "copyfail" / "dirtyfrag" / ""
+    # pedit-COW (CVE-2026-46331) — partial-COW write in net/sched/
+    # act_pedit.c.  Vulnerable kernel range 5.18 → 7.1-rc6.  Needs
+    # user.max_user_namespaces > 0 to get CAP_NET_ADMIN inside the
+    # new netns.  Deterministic (single-shot, not a race) which is
+    # the operator-visible advantage over the other two.
+    peditcow_vulnerable: bool = False
+    peditcow_root_obtained: bool = False
+    peditcow_kernel: str = ""
+    linux_lpe_method: str = ""           # "copyfail" / "dirtyfrag" / "peditcow" / ""
 
     # SSH key harvest + lateral movement state
     ssh_keys_harvested: bool = False     # True after sap_ssh_lateral.ssh_harvest()
@@ -934,6 +942,9 @@ class SAPNode:
             "dirtyfrag_vulnerable": self.dirtyfrag_vulnerable,
             "dirtyfrag_root_obtained": self.dirtyfrag_root_obtained,
             "dirtyfrag_kernel": self.dirtyfrag_kernel,
+            "peditcow_vulnerable": self.peditcow_vulnerable,
+            "peditcow_root_obtained": self.peditcow_root_obtained,
+            "peditcow_kernel": self.peditcow_kernel,
             "linux_lpe_method": self.linux_lpe_method,
             "ssh_keys_harvested": self.ssh_keys_harvested,
             "ssh_keys_planted": self.ssh_keys_planted,
@@ -1042,6 +1053,9 @@ class SAPNode:
             dirtyfrag_vulnerable=d.get("dirtyfrag_vulnerable", False),
             dirtyfrag_root_obtained=d.get("dirtyfrag_root_obtained", False),
             dirtyfrag_kernel=d.get("dirtyfrag_kernel", ""),
+            peditcow_vulnerable=d.get("peditcow_vulnerable", False),
+            peditcow_root_obtained=d.get("peditcow_root_obtained", False),
+            peditcow_kernel=d.get("peditcow_kernel", ""),
             linux_lpe_method=d.get("linux_lpe_method", ""),
             ssh_keys_harvested=d.get("ssh_keys_harvested", False),
             ssh_keys_planted=d.get("ssh_keys_planted", False),

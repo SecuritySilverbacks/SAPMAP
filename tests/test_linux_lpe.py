@@ -1462,3 +1462,249 @@ def test_root_dropdown_default_select_prefers_linuxlpe_when_available():
         "Linux LPE auto-select branch missing from OS Terminal ternary")
     assert "hasLinuxLpeS" in html, (
         "Linux LPE auto-select branch missing from Shell modal ternary")
+
+
+# ===========================================================================
+# pedit-COW prereq probe (CVE-2026-46331)
+# ===========================================================================
+
+def test_peditcow_windows_short_circuits():
+    """Windows hosts must early-exit with reason set, no SAPXPG calls."""
+    from sapmap_peditcow import check_peditcow
+    with patch("sapmap_exploit.execute_gw_command") as gw:
+        out = check_peditcow(_node(os_type="Windows Server 2019"))
+    assert out["vulnerable"] is False
+    assert "Windows" in out["reason"]
+    gw.assert_not_called()
+
+
+def test_peditcow_non_x86_arch_fails():
+    """ARM64 / aarch64 hosts can't run the vendored x86_64 blob."""
+    from sapmap_peditcow import check_peditcow
+    fake = _exec_gw_canned({
+        ("uname", "-r"): ["6.4.0-150600-default"],
+        ("uname", "-m"): ["aarch64"],
+    })
+    with patch("sapmap_exploit.execute_gw_command", side_effect=fake):
+        out = check_peditcow(_node())
+    assert out["vulnerable"] is False
+    assert "x86_64" in out["reason"]
+
+
+def test_peditcow_kernel_below_window_rejected():
+    """RHEL 7 / CentOS 7 (3.10) is below the 5.18 floor — must reject."""
+    from sapmap_peditcow import check_peditcow
+    fake = _exec_gw_canned({
+        ("uname", "-r"): ["3.10.0-1160.el7.x86_64"],
+        ("uname", "-m"): ["x86_64"],
+    })
+    with patch("sapmap_exploit.execute_gw_command", side_effect=fake):
+        out = check_peditcow(_node())
+    assert out["vulnerable"] is False
+    assert out["kernel_in_window"] is False
+    assert "outside the pedit-COW window" in out["reason"]
+
+
+def test_peditcow_kernel_above_window_rejected():
+    """v7.1-rc7+ has the upstream fix — must reject."""
+    from sapmap_peditcow import check_peditcow
+    fake = _exec_gw_canned({
+        ("uname", "-r"): ["7.2.0-fresh"],
+        ("uname", "-m"): ["x86_64"],
+    })
+    with patch("sapmap_exploit.execute_gw_command", side_effect=fake):
+        out = check_peditcow(_node())
+    assert out["vulnerable"] is False
+    assert out["kernel_in_window"] is False
+
+
+def test_peditcow_userns_disabled_short_circuits():
+    """When max_user_namespaces=0 (hardened host) — exploit can't get
+    CAP_NET_ADMIN, must report not-viable with the reason."""
+    from sapmap_peditcow import check_peditcow
+    # SLES 15 SP6 ships 6.4 which IS in the 5.18-7.1 window — picks
+    # up the upstream-backported bug.  Using 5.14 would short-circuit
+    # at the kernel-window check before reaching the userns probe.
+    fake = _exec_gw_canned({
+        ("uname", "-r"): ["6.4.0-150600.21-default"],
+        ("uname", "-m"): ["x86_64"],
+        ("ls",    "/etc/modprobe.d/"): [""],
+        ("cat",   "/proc/sys/user/max_user_namespaces"): ["0"],
+        ("cat",   "/proc/sys/kernel/unprivileged_userns_clone"): [""],
+    })
+    with patch("sapmap_exploit.execute_gw_command", side_effect=fake):
+        out = check_peditcow(_node())
+    assert out["vulnerable"] is False
+    assert out["userns_ok"] is False
+    assert "user namespaces disabled" in out["reason"]
+
+
+def test_peditcow_unshare_blocked_by_apparmor():
+    """sysctls allow but unshare(-U) is denied by AppArmor — must
+    report not-viable with the policy-denial reason."""
+    from sapmap_peditcow import check_peditcow
+    fake = _exec_gw_canned({
+        ("uname", "-r"): ["6.4.0-150600-default"],
+        ("uname", "-m"): ["x86_64"],
+        ("ls",    "/etc/modprobe.d/"): [""],
+        ("cat",   "/proc/sys/user/max_user_namespaces"): ["28633"],
+        ("cat",   "/proc/sys/kernel/unprivileged_userns_clone"): [""],
+        ("unshare", None): ["unshare: namespace creation failed"],
+    })
+    with patch("sapmap_exploit.execute_gw_command", side_effect=fake):
+        out = check_peditcow(_node())
+    assert out["vulnerable"] is False
+    assert out["userns_ok"] is False
+    assert "AppArmor" in out["reason"] or "policy" in out["reason"]
+
+
+def test_peditcow_modprobe_blacklist_short_circuits():
+    """Operator-applied /etc/modprobe.d/disable-act_pedit.conf mitigation
+    must be detected and reported before bothering with userns checks."""
+    from sapmap_peditcow import check_peditcow
+    fake = _exec_gw_canned({
+        ("uname", "-r"): ["6.4.0-150600.21-default"],
+        ("uname", "-m"): ["x86_64"],
+        ("ls",    "/etc/modprobe.d/"): ["disable-act_pedit.conf"],
+        ("cat",   "/etc/modprobe.d/disable-act_pedit.conf"): [
+            "blacklist act_pedit",
+        ],
+    })
+    with patch("sapmap_exploit.execute_gw_command", side_effect=fake):
+        out = check_peditcow(_node())
+    assert out["vulnerable"] is False
+    assert out["mitigation_applied"] is True
+    assert "blacklist" in out["reason"].lower() or "mitigation" in out["reason"].lower()
+
+
+def test_peditcow_blob_missing_makes_vulnerable_false():
+    """When everything else aligns but the vendored binary isn't built
+    yet, must report not-vulnerable + tell operator about build.sh."""
+    from sapmap_peditcow import check_peditcow
+    fake = _exec_gw_canned({
+        ("uname", "-r"): ["6.4.0-150600-default"],
+        ("uname", "-m"): ["x86_64"],
+        ("ls",    "/etc/modprobe.d/"): [""],
+        ("cat",   "/proc/sys/user/max_user_namespaces"): ["28633"],
+        ("cat",   "/proc/sys/kernel/unprivileged_userns_clone"): [""],
+        ("unshare", None): ["PC_NS_OK_42"],
+    })
+    with patch("sapmap_exploit.execute_gw_command", side_effect=fake), \
+         patch("sapmap_peditcow._load_blob", return_value=None):
+        out = check_peditcow(_node())
+    assert out["vulnerable"] is False
+    assert out["blob_available"] is False
+    assert "build.sh" in out["reason"]
+
+
+def test_peditcow_full_viability_with_blob():
+    """All boxes ticked — vulnerable=True."""
+    from sapmap_peditcow import check_peditcow
+    fake = _exec_gw_canned({
+        ("uname", "-r"): ["6.4.0-150600-default"],
+        ("uname", "-m"): ["x86_64"],
+        ("ls",    "/etc/modprobe.d/"): [""],
+        ("cat",   "/proc/sys/user/max_user_namespaces"): ["28633"],
+        ("cat",   "/proc/sys/kernel/unprivileged_userns_clone"): [""],
+        ("unshare", None): ["PC_NS_OK_42"],
+    })
+    fake_blob = {"hex": "deadbeef", "size": 700000, "sha256": "abc"}
+    with patch("sapmap_exploit.execute_gw_command", side_effect=fake), \
+         patch("sapmap_peditcow._load_blob", return_value=fake_blob):
+        out = check_peditcow(_node())
+    assert out["vulnerable"] is True
+    assert out["kernel_in_window"] is True
+    assert out["userns_ok"] is True
+    assert "deterministic" in out["reason"]
+
+
+def test_peditcow_kernel_parser_boundary_5_18():
+    """5.18 is the inclusive lower bound — must accept."""
+    from sapmap_peditcow import _parse_kernel, _kernel_in_window
+    assert _parse_kernel("5.18.0-generic") == (5, 18)
+    assert _kernel_in_window("5.18.0-generic") is True
+
+
+def test_peditcow_kernel_parser_boundary_7_1_excluded():
+    """7.1 is the exclusive upper bound (fix lands in 7.1-rc7) —
+    must reject any 7.1+ release."""
+    from sapmap_peditcow import _kernel_in_window
+    assert _kernel_in_window("7.1.0-rc7") is False
+    assert _kernel_in_window("7.1.5-stable") is False
+
+
+def test_peditcow_kernel_parser_unparseable_string():
+    """Garbage kernel strings — out-of-window, not a crash."""
+    from sapmap_peditcow import _parse_kernel, _kernel_in_window
+    assert _parse_kernel("") is None
+    assert _parse_kernel("not-a-version") is None
+    assert _kernel_in_window("") is False
+
+
+# ===========================================================================
+# Auto-picker — peditcow preference order
+# ===========================================================================
+
+def test_auto_picker_prefers_copyfail_over_peditcow():
+    """When both copyfail and peditcow are viable, copyfail wins —
+    purer delivery (pure Python, no on-disk binary)."""
+    from sapmap_lpe_auto import check_linux_lpe
+    n = _node()
+    with patch("sapmap_copyfail.check_copyfail",
+                return_value={"vulnerable": True, "kernel": "6.0", "reason": "all green"}), \
+         patch("sapmap_dirtyfrag.check_dirtyfrag",
+                return_value={"vulnerable": True, "kernel": "6.0", "reason": "all green"}), \
+         patch("sapmap_peditcow.check_peditcow",
+                return_value={"vulnerable": True, "kernel": "6.0", "reason": "all green"}):
+        state = check_linux_lpe(n)
+    assert state["method"] == "copyfail"
+    assert n.linux_lpe_method == "copyfail"
+
+
+def test_auto_picker_prefers_peditcow_over_dirtyfrag_when_copyfail_fails():
+    """copyfail not viable + peditcow viable + dirtyfrag viable →
+    peditcow wins (deterministic single-shot beats race retry)."""
+    from sapmap_lpe_auto import check_linux_lpe
+    n = _node()
+    with patch("sapmap_copyfail.check_copyfail",
+                return_value={"vulnerable": False, "kernel": "6.0", "reason": "patched"}), \
+         patch("sapmap_dirtyfrag.check_dirtyfrag",
+                return_value={"vulnerable": True, "kernel": "6.0", "reason": "rxrpc ok"}), \
+         patch("sapmap_peditcow.check_peditcow",
+                return_value={"vulnerable": True, "kernel": "6.0", "reason": "userns ok"}):
+        state = check_linux_lpe(n)
+    assert state["method"] == "peditcow"
+    assert n.peditcow_vulnerable is True
+
+
+def test_auto_picker_falls_through_to_dirtyfrag_when_userns_disabled():
+    """copyfail patched + peditcow blocked by userns sysctl +
+    dirtyfrag viable → dirtyfrag wins."""
+    from sapmap_lpe_auto import check_linux_lpe
+    n = _node()
+    with patch("sapmap_copyfail.check_copyfail",
+                return_value={"vulnerable": False, "kernel": "6.0", "reason": "patched"}), \
+         patch("sapmap_peditcow.check_peditcow",
+                return_value={"vulnerable": False, "kernel": "6.0",
+                              "reason": "user namespaces disabled"}), \
+         patch("sapmap_dirtyfrag.check_dirtyfrag",
+                return_value={"vulnerable": True, "kernel": "6.0", "reason": "rxrpc ok"}):
+        state = check_linux_lpe(n)
+    assert state["method"] == "dirtyfrag"
+    assert n.peditcow_vulnerable is False
+
+
+def test_force_env_var_accepts_peditcow():
+    """SAPMAP_LPE_FORCE=peditcow must override the preference order
+    even when copyfail would have won."""
+    from sapmap_lpe_auto import check_linux_lpe
+    n = _node()
+    with patch.dict(os.environ, {"SAPMAP_LPE_FORCE": "peditcow"}), \
+         patch("sapmap_copyfail.check_copyfail",
+                return_value={"vulnerable": True, "kernel": "6.0", "reason": ""}), \
+         patch("sapmap_dirtyfrag.check_dirtyfrag",
+                return_value={"vulnerable": True, "kernel": "6.0", "reason": ""}), \
+         patch("sapmap_peditcow.check_peditcow",
+                return_value={"vulnerable": True, "kernel": "6.0", "reason": ""}):
+        state = check_linux_lpe(n)
+    assert state["method"] == "peditcow"

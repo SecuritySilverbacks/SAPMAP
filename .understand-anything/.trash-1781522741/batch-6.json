@@ -1,0 +1,276 @@
+{
+  "nodes": [
+    {
+      "id": "config:scripts/demo_10kblaze.yaml",
+      "type": "config",
+      "name": "demo_10kblaze.yaml",
+      "filePath": "scripts/demo_10kblaze.yaml",
+      "summary": "Scripted SAPMAP playbook that compromises SAP S4H end-to-end via the 10KBlaze chain: MS betrusted IP injection, Gateway SAPXPG user creation, RFC harvesting, SecStore download, and business impact assessment.",
+      "tags": ["scripted-scenario", "exploit-chain", "10kblaze", "gateway", "demo"],
+      "complexity": "simple",
+      "languageNotes": "SAPMAP YAML playbook format with top-level name/description and a steps[] list of action verbs consumed by modules/core/sapmap_gui.py."
+    },
+    {
+      "id": "config:scripts/demo_10kblaze_and_RFChopping.yaml",
+      "type": "config",
+      "name": "demo_10kblaze_and_RFChopping.yaml",
+      "filePath": "scripts/demo_10kblaze_and_RFChopping.yaml",
+      "summary": "Extended 10KBlaze playbook that pivots from initial W74 compromise across an RFC trust hop into S4H, then runs landscape-wide chain analysis and impact assessment.",
+      "tags": ["scripted-scenario", "exploit-chain", "rfc-pivot", "lateral-movement", "demo"],
+      "complexity": "moderate"
+    },
+    {
+      "id": "config:scripts/demo_cve-2025-31324_java_to_abap.yaml",
+      "type": "config",
+      "name": "demo_cve-2025-31324_java_to_abap.yaml",
+      "filePath": "scripts/demo_cve-2025-31324_java_to_abap.yaml",
+      "summary": "End-to-end playbook that exploits CVE-2025-31324 on a Java stack (SJJ), creates a UME admin, then pivots through an RFC destination into ABAP target S4H for impact assessment.",
+      "tags": ["scripted-scenario", "cve-2025-31324", "java-to-abap", "lateral-movement", "demo"],
+      "complexity": "moderate",
+      "languageNotes": "Contains two YAML name/description blocks (parser fell back to regex) — second block is the active scenario."
+    },
+    {
+      "id": "config:scripts/demo_landscape.yaml",
+      "type": "config",
+      "name": "demo_landscape.yaml",
+      "filePath": "scripts/demo_landscape.yaml",
+      "summary": "Multi-system landscape demo that pre-registers S4H/TWT/ORA nodes, sweeps every gateway and Message Server for vulnerabilities, then exploits S4H and runs trust-chain analysis.",
+      "tags": ["scripted-scenario", "landscape-scan", "multi-system", "demo"],
+      "complexity": "simple"
+    },
+    {
+      "id": "config:scripts/demo_onprem_to_btp.yaml",
+      "type": "config",
+      "name": "demo_onprem_to_btp.yaml",
+      "filePath": "scripts/demo_onprem_to_btp.yaml",
+      "summary": "On-prem to BTP cloud pivot playbook: roots S4H via gateway, decrypts the ABAP SecStore for OAuth client_secrets, harvests BTP-bound credentials, and mints a BTP access token to enumerate destinations.",
+      "tags": ["scripted-scenario", "btp-pivot", "cloud-lateral", "oauth-harvest", "demo"],
+      "complexity": "moderate"
+    },
+    {
+      "id": "config:scripts/demo_saprouter.yaml",
+      "type": "config",
+      "name": "demo_saprouter.yaml",
+      "filePath": "scripts/demo_saprouter.yaml",
+      "summary": "SAProuter discovery playbook that registers an external router (R15), probes CVE-2017-12636 ROUTER_ADM info leak, then tunnels an internal scan and follow-on GW exploit of W74 through the router.",
+      "tags": ["scripted-scenario", "saprouter", "tunnel", "cve-2017-12636", "demo"],
+      "complexity": "moderate"
+    },
+    {
+      "id": "config:scripts/demo_scan.yaml",
+      "type": "config",
+      "name": "demo_scan.yaml",
+      "filePath": "scripts/demo_scan.yaml",
+      "summary": "Minimal discovery playbook: fast-scan 192.168.2.0/24 for SAP systems, sweep all gateways and Message Servers for vulnerabilities, then analyze trust chains across the landscape.",
+      "tags": ["scripted-scenario", "network-scan", "discovery", "demo"],
+      "complexity": "simple"
+    },
+    {
+      "id": "config:scripts/demo_simple.json",
+      "type": "config",
+      "name": "demo_simple.json",
+      "filePath": "scripts/demo_simple.json",
+      "summary": "Minimal three-step JSON playbook demonstrating the simplest SAPMAP scripted scenario: add S4H, check gateway vulnerability, and create a user via the gateway exploit.",
+      "tags": ["scripted-scenario", "minimal", "json-format", "demo"],
+      "complexity": "simple",
+      "languageNotes": "Equivalent to the YAML scripts but in JSON; SAPMAP's script loader auto-detects format by extension."
+    },
+    {
+      "id": "config:scripts/java_full_chain.yaml",
+      "type": "config",
+      "name": "java_full_chain.yaml",
+      "filePath": "scripts/java_full_chain.yaml",
+      "summary": "Full Java attack chain playbook: discovers Java/double-stack systems, runs the read-only java_pipeline macro (SecStore decrypt, UME hash dump, JCo destinations, impact assess), then optionally exploits CVE-2025-31324 and creates a UME admin under --confirm.",
+      "tags": ["scripted-scenario", "java-stack", "cve-2025-31324", "post-exploitation", "demo"],
+      "complexity": "moderate"
+    },
+    {
+      "id": "config:scripts/java_full_chain_to_ABAP.yaml",
+      "type": "config",
+      "name": "java_full_chain_to_ABAP.yaml",
+      "filePath": "scripts/java_full_chain_to_ABAP.yaml",
+      "summary": "Java-to-ABAP cross-stack pivot playbook: roots Java SJJ via CVE-2025-31324, hops RFC into Windows ABAP W74, then double-hops into S4H for landscape-wide impact assessment and chain analysis.",
+      "tags": ["scripted-scenario", "cross-stack-pivot", "java-to-abap", "multi-hop-rfc", "demo"],
+      "complexity": "complex"
+    },
+    {
+      "id": "config:scripts/scc_full_chain.yaml",
+      "type": "config",
+      "name": "scc_full_chain.yaml",
+      "filePath": "scripts/scc_full_chain.yaml",
+      "summary": "SAP Cloud Connector compromise playbook: roots co-located S4H, downloads SCC password hashes, harvests on-host SSFS and backend mappings, probes connectivity, then extracts the full SCC backup keystore.",
+      "tags": ["scripted-scenario", "scc", "cloud-connector", "keystore-extraction", "demo"],
+      "complexity": "moderate"
+    }
+  ],
+  "edges": [
+    {
+      "source": "config:scripts/demo_10kblaze.yaml",
+      "target": "file:sapmap.py",
+      "type": "configures",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "config:scripts/demo_10kblaze.yaml",
+      "target": "file:modules/core/sapmap_gui.py",
+      "type": "configures",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "config:scripts/demo_10kblaze_and_RFChopping.yaml",
+      "target": "file:sapmap.py",
+      "type": "configures",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "config:scripts/demo_10kblaze_and_RFChopping.yaml",
+      "target": "file:modules/core/sapmap_gui.py",
+      "type": "configures",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "config:scripts/demo_cve-2025-31324_java_to_abap.yaml",
+      "target": "file:sapmap.py",
+      "type": "configures",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "config:scripts/demo_cve-2025-31324_java_to_abap.yaml",
+      "target": "file:modules/exploitation/sap_cve_2025_31324.py",
+      "type": "configures",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "config:scripts/demo_landscape.yaml",
+      "target": "file:sapmap.py",
+      "type": "configures",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "config:scripts/demo_landscape.yaml",
+      "target": "file:modules/postex/sapmap_chain.py",
+      "type": "configures",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "config:scripts/demo_onprem_to_btp.yaml",
+      "target": "file:sapmap.py",
+      "type": "configures",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "config:scripts/demo_onprem_to_btp.yaml",
+      "target": "file:modules/data_extraction/sap_btp.py",
+      "type": "configures",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "config:scripts/demo_onprem_to_btp.yaml",
+      "target": "file:modules/data_extraction/sapmap_secstore.py",
+      "type": "configures",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "config:scripts/demo_saprouter.yaml",
+      "target": "file:sapmap.py",
+      "type": "configures",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "config:scripts/demo_saprouter.yaml",
+      "target": "file:modules/protocols/sap_saprouter.py",
+      "type": "configures",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "config:scripts/demo_scan.yaml",
+      "target": "file:sapmap.py",
+      "type": "configures",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "config:scripts/demo_scan.yaml",
+      "target": "file:modules/discovery/sapmap_scanner.py",
+      "type": "configures",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "config:scripts/demo_simple.json",
+      "target": "file:sapmap.py",
+      "type": "configures",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "config:scripts/java_full_chain.yaml",
+      "target": "file:sapmap.py",
+      "type": "configures",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "config:scripts/java_full_chain.yaml",
+      "target": "file:modules/exploitation/sap_cve_2025_31324.py",
+      "type": "configures",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "config:scripts/java_full_chain_to_ABAP.yaml",
+      "target": "file:sapmap.py",
+      "type": "configures",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "config:scripts/java_full_chain_to_ABAP.yaml",
+      "target": "file:modules/exploitation/sap_cve_2025_31324.py",
+      "type": "configures",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "config:scripts/scc_full_chain.yaml",
+      "target": "file:sapmap.py",
+      "type": "configures",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "config:scripts/demo_10kblaze.yaml",
+      "target": "config:scripts/demo_10kblaze_and_RFChopping.yaml",
+      "type": "related",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "config:scripts/java_full_chain.yaml",
+      "target": "config:scripts/java_full_chain_to_ABAP.yaml",
+      "type": "related",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "config:scripts/demo_simple.json",
+      "target": "config:scripts/demo_10kblaze.yaml",
+      "type": "related",
+      "direction": "forward",
+      "weight": 0.5
+    }
+  ]
+}

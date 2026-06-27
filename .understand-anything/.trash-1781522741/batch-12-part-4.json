@@ -1,0 +1,689 @@
+{
+  "nodes": [
+    {
+      "id": "file:modules/postex/sapmap_chain.py",
+      "type": "file",
+      "name": "sapmap_chain.py",
+      "filePath": "modules/postex/sapmap_chain.py",
+      "summary": "Performs BFS over the SAP RFC trust graph from compromise entry points to enumerate complete attack chains, ranks them by severity, and generates human-readable headlines for reports.",
+      "tags": [
+        "postex",
+        "graph",
+        "chain-analysis",
+        "trust",
+        "attack-path"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "class:modules/postex/sapmap_chain.py:TrustChain",
+      "type": "class",
+      "name": "TrustChain",
+      "filePath": "modules/postex/sapmap_chain.py",
+      "lineRange": [
+        54,
+        115
+      ],
+      "summary": "Dataclass representing a discovered attack chain: entry node, ordered hops, traversed RFC connections, severity, and rationale.",
+      "tags": [
+        "data-model",
+        "chain",
+        "trust"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/postex/sapmap_chain.py:find_all_chains",
+      "type": "function",
+      "name": "find_all_chains",
+      "filePath": "modules/postex/sapmap_chain.py",
+      "lineRange": [
+        164,
+        345
+      ],
+      "summary": "BFS over the RFC adjacency graph to enumerate every reachable trust chain from each entry node.",
+      "tags": [
+        "graph",
+        "bfs",
+        "chain-discovery"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/postex/sapmap_chain.py:_generate_headline",
+      "type": "function",
+      "name": "_generate_headline",
+      "filePath": "modules/postex/sapmap_chain.py",
+      "lineRange": [
+        375,
+        436
+      ],
+      "summary": "Generates a punchy single-line headline summarising a chain's severity, hop count, and target asset.",
+      "tags": [
+        "headline",
+        "formatting",
+        "reporting"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/postex/sapmap_chain.py:analyze_chains",
+      "type": "function",
+      "name": "analyze_chains",
+      "filePath": "modules/postex/sapmap_chain.py",
+      "lineRange": [
+        443,
+        485
+      ],
+      "summary": "Top-level analyser that runs chain discovery, applies severity ranking, and returns the ordered chain list.",
+      "tags": [
+        "analysis",
+        "orchestrator",
+        "chain"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/postex/sapmap_chain.py:_entry_method",
+      "type": "function",
+      "name": "_entry_method",
+      "filePath": "modules/postex/sapmap_chain.py",
+      "lineRange": [
+        122,
+        141
+      ],
+      "summary": "Classifies how an entry node was compromised (default cred, 10KBLAZE, CVE-2025-31324, etc.).",
+      "tags": [
+        "classification",
+        "entry-method",
+        "metadata"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/postex/sapmap_chain.py:_entry_description",
+      "type": "function",
+      "name": "_entry_description",
+      "filePath": "modules/postex/sapmap_chain.py",
+      "lineRange": [
+        144,
+        157
+      ],
+      "summary": "Produces a sentence describing how the entry node was compromised for the chain narrative.",
+      "tags": [
+        "description",
+        "narrative",
+        "reporting"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:modules/postex/sapmap_lpe.py",
+      "type": "file",
+      "name": "sapmap_lpe.py",
+      "filePath": "modules/postex/sapmap_lpe.py",
+      "summary": "SAP-internal LPE framework: provides decorator-registered methods (WebGUI SQL injection, BAPI profile assignment, dpmon SAP* activation) to escalate an authenticated low-priv RFC user to SAP_ALL on an ABAP system.",
+      "tags": [
+        "postex",
+        "lpe",
+        "privilege-escalation",
+        "abap",
+        "framework"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/postex/sapmap_lpe.py:try_lpe",
+      "type": "function",
+      "name": "try_lpe",
+      "filePath": "modules/postex/sapmap_lpe.py",
+      "lineRange": [
+        66,
+        96
+      ],
+      "summary": "Tries registered LPE methods in priority order until one succeeds, returning the winning method and outcome.",
+      "tags": [
+        "lpe",
+        "dispatcher",
+        "orchestrator"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/postex/sapmap_lpe.py:lpe_webgui_sm49",
+      "type": "function",
+      "name": "lpe_webgui_sm49",
+      "filePath": "modules/postex/sapmap_lpe.py",
+      "lineRange": [
+        292,
+        443
+      ],
+      "summary": "WebGUI dialog-mode LPE: drives SM49/RSBDCOS0 by simulated browser session to bypass S_RFC and run OS-level SQL granting SAP_ALL.",
+      "tags": [
+        "lpe",
+        "webgui",
+        "sm49",
+        "abap"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/postex/sapmap_lpe.py:lpe_bapi_profiles_assign",
+      "type": "function",
+      "name": "lpe_bapi_profiles_assign",
+      "filePath": "modules/postex/sapmap_lpe.py",
+      "lineRange": [
+        455,
+        499
+      ],
+      "summary": "Direct LPE via BAPI_USER_PROFILES_ASSIGN to grant SAP_ALL to the connected user when authorization allows.",
+      "tags": [
+        "lpe",
+        "bapi",
+        "abap"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/postex/sapmap_lpe.py:lpe_dpmon_sap_star",
+      "type": "function",
+      "name": "lpe_dpmon_sap_star",
+      "filePath": "modules/postex/sapmap_lpe.py",
+      "lineRange": [
+        512,
+        649
+      ],
+      "summary": "Drives dpmon to activate the virtual SAP* user (SAP Note 3303172) over an OS-exec channel, parses the one-time password, returns logon material.",
+      "tags": [
+        "lpe",
+        "dpmon",
+        "sap-star",
+        "abap"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/postex/sapmap_lpe.py:_webgui_session",
+      "type": "function",
+      "name": "_webgui_session",
+      "filePath": "modules/postex/sapmap_lpe.py",
+      "lineRange": [
+        130,
+        182
+      ],
+      "summary": "Establishes an authenticated WebGUI HTTP session including CSRF token and stateful navigation cookies.",
+      "tags": [
+        "webgui",
+        "session",
+        "http"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/postex/sapmap_lpe.py:_sql_assign_sap_all",
+      "type": "function",
+      "name": "_sql_assign_sap_all",
+      "filePath": "modules/postex/sapmap_lpe.py",
+      "lineRange": [
+        230,
+        257
+      ],
+      "summary": "Builds the SQL statement that grants SAP_ALL to the SAPMAP user across supported SAP databases.",
+      "tags": [
+        "sql",
+        "lpe",
+        "sap-all"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/postex/sapmap_lpe.py:_build_os_command_for_sql",
+      "type": "function",
+      "name": "_build_os_command_for_sql",
+      "filePath": "modules/postex/sapmap_lpe.py",
+      "lineRange": [
+        260,
+        280
+      ],
+      "summary": "Wraps the SQL grant statement into an OS-level command for execution under the SIDADM context.",
+      "tags": [
+        "sql",
+        "os-exec",
+        "wrapping"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/postex/sapmap_lpe.py:_find_webgui_port",
+      "type": "function",
+      "name": "_find_webgui_port",
+      "filePath": "modules/postex/sapmap_lpe.py",
+      "lineRange": [
+        106,
+        127
+      ],
+      "summary": "Locates the WebGUI ICM port for the target node by inspecting profile-discovered ICM ports.",
+      "tags": [
+        "webgui",
+        "port",
+        "discovery"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/postex/sapmap_lpe.py:_webgui_batch",
+      "type": "function",
+      "name": "_webgui_batch",
+      "filePath": "modules/postex/sapmap_lpe.py",
+      "lineRange": [
+        185,
+        206
+      ],
+      "summary": "Posts a batched WebGUI transaction step with token/cookie state for SM49/RSBDCOS0 driving.",
+      "tags": [
+        "webgui",
+        "transaction",
+        "http"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:modules/protocols/__init__.py",
+      "type": "file",
+      "name": "__init__.py",
+      "filePath": "modules/protocols/__init__.py",
+      "summary": "Empty package init that marks modules/protocols as a Python package containing low-level SAP protocol implementations.",
+      "tags": [
+        "package",
+        "init",
+        "barrel"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:modules/protocols/sap_rfc_ctypes.py",
+      "type": "file",
+      "name": "sap_rfc_ctypes.py",
+      "filePath": "modules/protocols/sap_rfc_ctypes.py",
+      "summary": "Pure-ctypes wrapper around the SAP NW RFC SDK shared library that lazily loads libsapnwrfc, exposes typed RFC structures, and provides a high-level RFCConnection class supporting BAPI calls and RFC_READ_TABLE without requiring pyrfc.",
+      "tags": [
+        "protocol",
+        "rfc",
+        "ctypes",
+        "sdk",
+        "nwrfc"
+      ],
+      "complexity": "complex",
+      "languageNotes": "ctypes binding mirrors the C SDK ABI; lazy loading lets unauthenticated features run without the SDK present."
+    },
+    {
+      "id": "class:modules/protocols/sap_rfc_ctypes.py:_SDKLibrary",
+      "type": "class",
+      "name": "_SDKLibrary",
+      "filePath": "modules/protocols/sap_rfc_ctypes.py",
+      "lineRange": [
+        431,
+        707
+      ],
+      "summary": "Lazy-loading wrapper around the libsapnwrfc shared library that resolves symbols, configures function prototypes, and caches the loaded handle.",
+      "tags": [
+        "sdk",
+        "ctypes",
+        "lazy-load"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "class:modules/protocols/sap_rfc_ctypes.py:RFCConnection",
+      "type": "class",
+      "name": "RFCConnection",
+      "filePath": "modules/protocols/sap_rfc_ctypes.py",
+      "lineRange": [
+        714,
+        1435
+      ],
+      "summary": "High-level RFC connection that opens an authenticated channel to an ABAP system and exposes call/read-table primitives that mirror pyrfc semantics.",
+      "tags": [
+        "rfc",
+        "connection",
+        "client"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "class:modules/protocols/sap_rfc_ctypes.py:RFC_ERROR_INFO",
+      "type": "class",
+      "name": "RFC_ERROR_INFO",
+      "filePath": "modules/protocols/sap_rfc_ctypes.py",
+      "lineRange": [
+        255,
+        275
+      ],
+      "summary": "ctypes Structure matching the NW RFC SDK error-info layout used for surfacing detailed RFC failures.",
+      "tags": [
+        "ctypes",
+        "struct",
+        "error"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:modules/protocols/sap_rfc_ctypes.py:RFC_ATTRIBUTES",
+      "type": "class",
+      "name": "RFC_ATTRIBUTES",
+      "filePath": "modules/protocols/sap_rfc_ctypes.py",
+      "lineRange": [
+        318,
+        346
+      ],
+      "summary": "ctypes Structure mirroring the NW RFC SDK connection attributes used for system-info introspection.",
+      "tags": [
+        "ctypes",
+        "struct",
+        "attributes"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/protocols/sap_rfc_ctypes.py:get_sdk_version",
+      "type": "function",
+      "name": "get_sdk_version",
+      "filePath": "modules/protocols/sap_rfc_ctypes.py",
+      "lineRange": [
+        1442,
+        1463
+      ],
+      "summary": "Returns the loaded NW RFC SDK version string for diagnostics and compatibility checks.",
+      "tags": [
+        "sdk",
+        "version",
+        "diagnostic"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/protocols/sap_rfc_ctypes.py:_uc_to_str",
+      "type": "function",
+      "name": "_uc_to_str",
+      "filePath": "modules/protocols/sap_rfc_ctypes.py",
+      "lineRange": [
+        95,
+        129
+      ],
+      "summary": "Converts SAP UC (UTF-16/UCS-2) buffers returned by the SDK into Python str values.",
+      "tags": [
+        "encoding",
+        "ctypes",
+        "utility"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:modules/protocols/sap_rfc_ctypes.py:_str_to_uc",
+      "type": "function",
+      "name": "_str_to_uc",
+      "filePath": "modules/protocols/sap_rfc_ctypes.py",
+      "lineRange": [
+        67,
+        85
+      ],
+      "summary": "Converts Python str values to SAP UC (UTF-16/UCS-2) buffers for SDK calls.",
+      "tags": [
+        "encoding",
+        "ctypes",
+        "utility"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:modules/protocols/sap_rfc_ctypes.py:_raise_on_error",
+      "type": "function",
+      "name": "_raise_on_error",
+      "filePath": "modules/protocols/sap_rfc_ctypes.py",
+      "lineRange": [
+        408,
+        424
+      ],
+      "summary": "Translates non-zero RFC return codes into RFCException with the SDK-reported error message and key.",
+      "tags": [
+        "error",
+        "exception",
+        "utility"
+      ],
+      "complexity": "moderate"
+    }
+  ],
+  "edges": [
+    {
+      "source": "file:modules/postex/sapmap_chain.py",
+      "target": "class:modules/postex/sapmap_chain.py:TrustChain",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/postex/sapmap_chain.py",
+      "target": "function:modules/postex/sapmap_chain.py:find_all_chains",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/postex/sapmap_chain.py",
+      "target": "function:modules/postex/sapmap_chain.py:_generate_headline",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/postex/sapmap_chain.py",
+      "target": "function:modules/postex/sapmap_chain.py:analyze_chains",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/postex/sapmap_chain.py",
+      "target": "function:modules/postex/sapmap_chain.py:_entry_method",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/postex/sapmap_chain.py",
+      "target": "function:modules/postex/sapmap_chain.py:_entry_description",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/postex/sapmap_chain.py",
+      "target": "class:modules/postex/sapmap_chain.py:TrustChain",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/postex/sapmap_chain.py",
+      "target": "function:modules/postex/sapmap_chain.py:analyze_chains",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/postex/sapmap_chain.py",
+      "target": "function:modules/postex/sapmap_chain.py:find_all_chains",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/postex/sapmap_lpe.py",
+      "target": "function:modules/postex/sapmap_lpe.py:try_lpe",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/postex/sapmap_lpe.py",
+      "target": "function:modules/postex/sapmap_lpe.py:lpe_webgui_sm49",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/postex/sapmap_lpe.py",
+      "target": "function:modules/postex/sapmap_lpe.py:lpe_bapi_profiles_assign",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/postex/sapmap_lpe.py",
+      "target": "function:modules/postex/sapmap_lpe.py:lpe_dpmon_sap_star",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/postex/sapmap_lpe.py",
+      "target": "function:modules/postex/sapmap_lpe.py:_webgui_session",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/postex/sapmap_lpe.py",
+      "target": "function:modules/postex/sapmap_lpe.py:_sql_assign_sap_all",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/postex/sapmap_lpe.py",
+      "target": "function:modules/postex/sapmap_lpe.py:_build_os_command_for_sql",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/postex/sapmap_lpe.py",
+      "target": "function:modules/postex/sapmap_lpe.py:_find_webgui_port",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/postex/sapmap_lpe.py",
+      "target": "function:modules/postex/sapmap_lpe.py:_webgui_batch",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/postex/sapmap_lpe.py",
+      "target": "function:modules/postex/sapmap_lpe.py:try_lpe",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/postex/sapmap_lpe.py",
+      "target": "function:modules/postex/sapmap_lpe.py:lpe_webgui_sm49",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/postex/sapmap_lpe.py",
+      "target": "function:modules/postex/sapmap_lpe.py:lpe_bapi_profiles_assign",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/postex/sapmap_lpe.py",
+      "target": "function:modules/postex/sapmap_lpe.py:lpe_dpmon_sap_star",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/postex/sapmap_lpe.py",
+      "target": "file:modules/postex/sap_profile_check.py",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:modules/protocols/sap_rfc_ctypes.py",
+      "target": "class:modules/protocols/sap_rfc_ctypes.py:_SDKLibrary",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_rfc_ctypes.py",
+      "target": "class:modules/protocols/sap_rfc_ctypes.py:RFCConnection",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_rfc_ctypes.py",
+      "target": "class:modules/protocols/sap_rfc_ctypes.py:RFC_ERROR_INFO",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_rfc_ctypes.py",
+      "target": "class:modules/protocols/sap_rfc_ctypes.py:RFC_ATTRIBUTES",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_rfc_ctypes.py",
+      "target": "function:modules/protocols/sap_rfc_ctypes.py:get_sdk_version",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_rfc_ctypes.py",
+      "target": "function:modules/protocols/sap_rfc_ctypes.py:_uc_to_str",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_rfc_ctypes.py",
+      "target": "function:modules/protocols/sap_rfc_ctypes.py:_str_to_uc",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_rfc_ctypes.py",
+      "target": "function:modules/protocols/sap_rfc_ctypes.py:_raise_on_error",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:modules/protocols/sap_rfc_ctypes.py",
+      "target": "class:modules/protocols/sap_rfc_ctypes.py:RFCConnection",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:modules/protocols/sap_rfc_ctypes.py",
+      "target": "function:modules/protocols/sap_rfc_ctypes.py:get_sdk_version",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    }
+  ]
+}

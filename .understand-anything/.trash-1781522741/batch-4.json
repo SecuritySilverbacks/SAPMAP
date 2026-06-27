@@ -1,0 +1,62 @@
+{
+  "nodes": [
+    {
+      "id": "document:DISCLAIMER.md",
+      "type": "document",
+      "name": "DISCLAIMER.md",
+      "filePath": "DISCLAIMER.md",
+      "summary": "Legal disclaimer outlining intended uses, user responsibilities, no-warranty terms, responsible disclosure expectations, and licensing for the SAPMAP security research tool. Requires written authorization before use.",
+      "tags": ["documentation", "legal", "disclaimer", "security", "license"],
+      "complexity": "simple"
+    },
+    {
+      "id": "document:README.md",
+      "type": "document",
+      "name": "README.md",
+      "filePath": "README.md",
+      "summary": "Comprehensive project documentation covering SAPMAP's architecture, installation, CLI/GUI usage, exploitation modules (10KBlaze, BAPI, AutoPwn), LPE, SAProuter, SecStore decryption, SCC integration, scripted scenarios, and reporting. Acts as the primary entry point for users and contributors.",
+      "tags": ["documentation", "entry-point", "overview", "user-guide", "architecture"],
+      "complexity": "complex",
+      "languageNotes": "Extensive 1433-line guide with 117 sections including TOC, architecture diagrams, worked exploitation examples, YAML/JSON script formats, and CVE references."
+    },
+    {
+      "id": "config:requirements.txt",
+      "type": "config",
+      "name": "requirements.txt",
+      "filePath": "requirements.txt",
+      "summary": "Python runtime dependency manifest pinning required packages (bottle, requests, urllib3, pycryptodome) and documenting optional lazy-imported extras (pywebview, pyyaml, pyjks, SAPology) for feature-specific functionality.",
+      "tags": ["configuration", "dependencies", "python", "build-system", "package-manifest"],
+      "complexity": "simple"
+    }
+  ],
+  "edges": [
+    {
+      "source": "document:README.md",
+      "target": "document:DISCLAIMER.md",
+      "type": "documents",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "document:README.md",
+      "target": "file:sapmap.py",
+      "type": "documents",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "config:requirements.txt",
+      "target": "file:sapmap.py",
+      "type": "configures",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "document:README.md",
+      "target": "config:requirements.txt",
+      "type": "documents",
+      "direction": "forward",
+      "weight": 0.5
+    }
+  ]
+}
