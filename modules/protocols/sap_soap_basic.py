@@ -245,3 +245,39 @@ class SOAPRFCSession:
 
         return {"ok": True, "step": "done", "error": "",
                 "details": details}
+
+
+def create_user_via_soap(host: str, port: int, client: str,
+                         user: str, password: str,
+                         new_username: str, new_password: str,
+                         https: bool = False) -> dict:
+    """Create new_username/new_password with SAP_ALL via SOAP-RFC.
+
+    Returns a dict shaped like sapmap_rfc.create_user_via_bapi so the
+    propagate_from_node fast path can call either implementation
+    interchangeably:
+
+        {"success": bool, "message": str, "username": str}
+
+    `success=True` means the user exists with SAP_ALL after this call —
+    whether we created them fresh or hit "already exists" + SAP_ALL was
+    successfully (re-)assigned.
+    """
+    sess = SOAPRFCSession(
+        host=host, port=int(port), client=client or "000",
+        user=user, password=password, https=bool(https),
+    )
+    outcome = sess.create_user_with_sap_all(new_username, new_password)
+    if outcome["ok"]:
+        return {
+            "success": True,
+            "message": (f"User {new_username} created with SAP_ALL "
+                        f"via SOAP-RFC"),
+            "username": new_username,
+        }
+    return {
+        "success": False,
+        "message": (f"SOAP-RFC failed at step={outcome['step']}: "
+                    f"{outcome['error']}"),
+        "username": new_username,
+    }
