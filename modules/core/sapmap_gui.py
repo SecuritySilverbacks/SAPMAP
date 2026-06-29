@@ -7970,6 +7970,41 @@ def create_app(api: SAPMAPApi) -> Bottle:
             api.state.rfc_check_cache.pop(dest_name, None)
             is_type_t = conn.sapxpg_remote_works or dest_name.startswith("SAPMAP_")
 
+            # ---- HTTP destination (Type G/H) ----
+            # DEST_CHECK_CONNECTION works for HTTP dests but returns
+            # AUTHORIZATION_TEST_RESULT='E' (no RFC logon applies),
+            # so ping_ok is the correct success indicator.
+            if (conn.conn_type or "").lower() == "http":
+                print(f"[*] Testing HTTP destination: {dest_name}...")
+                result = sapmap_rfc.test_rfc_destination(
+                    node, dest_name, creds, api.state.rfc_check_cache
+                )
+                conn.latency_ms = result.get("latency_ms", 0)
+                conn.tested = True
+                conn.ping_ok = result.get("ping_ok", False)
+                conn.logon_tested = True
+                if conn.ping_ok:
+                    conn.logon_successful = True
+                    msg = result.get("logon_message", "").strip()
+                    if not msg:
+                        msg = "OK"
+                    print(f"[+] {dest_name}: HTTP connection OK ({msg})")
+                    if conn.target_sid:
+                        target = api.state.get_node(conn.target_sid)
+                        if target:
+                            target.has_critical_finding = True
+                else:
+                    conn.logon_successful = False
+                    err = result.get("error", "")
+                    err_short = (err.split("\n")[0][:120]) if err else ""
+                    if err_short:
+                        print(f"[-] {dest_name}: HTTP connection "
+                              f"failed ({err_short})")
+                    else:
+                        print(f"[-] {dest_name}: HTTP connection failed")
+                print(f"[+] Single test done for {dest_name}")
+                return
+
             # If we have a SecStore password, try direct connection to the
             # target first — this bypasses the source system entirely and
             # works even when the source client is locked (SCC4).
