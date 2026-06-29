@@ -7848,6 +7848,36 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             print(f"[*] Could not get remote SID, "
                                   f"using derived: {dest_sid}")
 
+                    # If the HTTP probe returned a correct instance_nr,
+                    # update any existing node that has a stale one.
+                    if _http_info.get("instance_nr"):
+                        _existing = api.state.get_node(dest_sid)
+                        if _existing and _existing.instances:
+                            cur = _existing.instance_nrs()
+                            probed = _http_info["instance_nr"]
+                            if cur and cur[0] != probed:
+                                old_i = cur[0]
+                                _existing.instances[0].instance_nr = probed
+                                old_p = dict(_existing.instances[0].ports)
+                                new_p = {}
+                                for p, lbl in old_p.items():
+                                    if lbl == "dispatcher":
+                                        new_p[int(f"32{probed}")] = lbl
+                                    elif lbl == "gateway":
+                                        new_p[int(f"33{probed}")] = lbl
+                                    else:
+                                        new_p[p] = lbl
+                                _existing.instances[0].ports = new_p
+                                print(f"[*] {dest_sid}: corrected "
+                                      f"instance {old_i}→{probed}")
+                            if (_http_info.get("ip")
+                                    and not _existing.ip):
+                                _existing.ip = _http_info["ip"]
+                            if (_http_info.get("hostname")
+                                    and not _existing.hostname):
+                                _existing.hostname = (
+                                    _http_info["hostname"])
+
                     # Check if SID already on map but different host
                     existing_sid_node = api.state.get_node(dest_sid)
                     if existing_sid_node:
