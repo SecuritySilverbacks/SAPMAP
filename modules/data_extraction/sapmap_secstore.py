@@ -1415,7 +1415,7 @@ def integrate_results(node, state, results: list):
         if not _host:
             continue
         target_node = state.find_node_by_host(hostname=_host, ip=_host)
-        if not target_node:
+        if not target_node or target_node.sid == node.sid:
             continue
         conn.target_sid = target_node.sid
         conn.target_host = target_node.hostname or target_node.ip
