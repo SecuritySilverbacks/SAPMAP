@@ -7795,11 +7795,27 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                   f"with different IP, "
                                   f"using {dest_sid}")
 
-                    # Add new system to map
-                    ports = {
-                        int(f"32{inst}"): "dispatcher",
-                        int(f"33{inst}"): "gateway",
-                    }
+                    # Add new system to map.  For HTTP connections the
+                    # port comes from the URL, not from SAP inst math.
+                    if conn.conn_type == "http" and conn.http_url:
+                        try:
+                            from urllib.parse import urlparse as _up3
+                            _purl = _up3(conn.http_url)
+                            url_port = _purl.port
+                        except Exception:
+                            url_port = None
+                        # SAP ICM HTTP ports follow 8NNN convention
+                        # (8000=inst 00, 8100=01, 8410=41…).  Fall back
+                        # to the raw port number if no match.
+                        if url_port and 8000 <= url_port <= 8999:
+                            inst = f"{(url_port - 8000) // 100:02d}"
+                        ports = ({int(url_port): "http"}
+                                 if url_port else {})
+                    else:
+                        ports = {
+                            int(f"32{inst}"): "dispatcher",
+                            int(f"33{inst}"): "gateway",
+                        }
                     new_inst = InstanceInfo(
                         instance_nr=inst, ip=host,
                         ports=ports)
@@ -7812,7 +7828,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     discovered[key]["remote_sid"] = dest_sid
                     api.state.add_connection(conn)
                     time.sleep(1.2)  # longer pause for new system discovery
-                    print(f"[+] Discovered {dest_sid} "
+                    label = ("HTTP" if conn.conn_type == "http"
+                             else "RFC")
+                    print(f"[+] Discovered {dest_sid} via {label} dest "
                           f"({remote_host}/{host}, "
                           f"inst {inst}) — added to map")
                 else:
