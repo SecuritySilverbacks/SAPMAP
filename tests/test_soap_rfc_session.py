@@ -13,7 +13,9 @@ import threading
 import time
 
 import modules  # noqa: F401  registers package paths
-from sap_soap_basic import SOAPRFCError, SOAPRFCSession
+from sap_soap_basic import (
+    SOAPRFCError, SOAPRFCSession, create_user_via_soap,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -332,5 +334,53 @@ def test_create_user_with_sap_all_aborts_on_profile_failure():
         # Commit should NOT have been called after a failed assign
         steps = [s for s, _ in r["details"]]
         assert "commit" not in steps
+    finally:
+        mock.stop()
+
+
+# ---------------------------------------------------------------------------
+# create_user_via_soap — drop-in for sapmap_rfc.create_user_via_bapi
+# ---------------------------------------------------------------------------
+
+def test_create_user_via_soap_returns_bapi_compatible_shape_on_success():
+    """propagate_from_node already speaks the {success, message,
+    username} dict from create_user_via_bapi.  create_user_via_soap
+    must return the exact same shape so the call sites can swap the
+    two transports without other changes."""
+    mock = _MockSAP(_make_responder({
+        "RFC_PING":                 (200, _PING_OK),
+        "BAPI_USER_CREATE1":        (200, _USER_CREATE_OK),
+        "BAPI_USER_PROFILES_ASSIGN": (200, _PROFILES_OK),
+        "BAPI_TRANSACTION_COMMIT":  (200, _COMMIT_OK),
+    }))
+    try:
+        r = create_user_via_soap(
+            host="127.0.0.1", port=mock.port, client="000",
+            user="SAPADM", password="TestPass123",
+            new_username="SAPMAP00", new_password="Andinyougo123!",
+        )
+        assert r == {
+            "success": True,
+            "message": ("User SAPMAP00 created with SAP_ALL "
+                        "via SOAP-RFC"),
+            "username": "SAPMAP00",
+        }
+    finally:
+        mock.stop()
+
+
+def test_create_user_via_soap_returns_bapi_compatible_shape_on_failure():
+    """Same dict shape, success=False, message names the failing step."""
+    mock = _MockSAP(_make_responder({"RFC_PING": (500, _AUTH_FAULT)}))
+    try:
+        r = create_user_via_soap(
+            host="127.0.0.1", port=mock.port, client="000",
+            user="SAPADM", password="WRONG",
+            new_username="SAPMAP00", new_password="x",
+        )
+        assert r["success"] is False
+        assert r["username"] == "SAPMAP00"
+        assert "step=ping" in r["message"]
+        assert "RFC_AUTHORIZATION_FAILURE" in r["message"]
     finally:
         mock.stop()

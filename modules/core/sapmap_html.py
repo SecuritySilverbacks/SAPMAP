@@ -6533,6 +6533,7 @@ function showConnInfo(e, connIdx) {
       ${conn.tested ? `
         <div class="info-row"><span class="info-label">HTTP Ping:</span><span class="info-val">${conn.ping_ok ? 'OK' : 'Failed'}${conn.latency_ms ? ' ('+conn.latency_ms+'ms)' : ''}</span></div>
         ${conn.secstore_password ? `<div class="info-row"><span class="info-label">Direct RFC:</span><span class="info-val">${conn.has_sap_all ? '&#9989; Logon OK — SAP_ALL' : (conn.profiles && conn.profiles.length ? '&#9989; Logon OK' : (conn.logon_successful ? '&#9898; HTTP only' : '&#10060; Failed'))}</span></div>` : ''}
+        ${conn.soap_rfc_verified ? `<div class="info-row"><span class="info-label">SOAP-RFC:</span><span class="info-val" style="color:#3fb950">&#9989; RFC_PING OK — credentials verified over HTTP</span></div>` : ''}
       ` : '<div style="color:#484f58;font-size:11px;margin-top:4px">Not tested yet</div>'}
     </div>` : `<div class="info-section">
       <strong style="font-size:11px;color:#8b949e">/SDF/RFC_CHECK</strong>
@@ -6544,7 +6545,7 @@ function showConnInfo(e, connIdx) {
     <div class="info-section">
       <div class="info-row"><span class="info-label">Risk:</span><span class="info-val"><span class="risk-badge ${riskClass}">${risk}</span></span></div>
     </div>
-    ${(isHttp && conn.tested && conn.ping_ok && !conn.has_sap_all) ? (() => {
+    ${(isHttp && conn.tested && conn.ping_ok && !conn.has_sap_all && !conn.soap_rfc_verified) ? (() => {
       const reasons = [];
       if (!conn.rfc_user) reasons.push('no RFC user on destination');
       if (!conn.target_sid) reasons.push('target SID unresolved');
@@ -6552,8 +6553,9 @@ function showConnInfo(e, connIdx) {
         reasons.push(`no password for <strong>${escHtml(conn.rfc_user)}</strong> — run SecStore extraction, or add ${escHtml(conn.rfc_user)} credentials on ${escHtml(conn.target_sid)}`);
       return reasons.length ? `<div class="info-section" style="color:#d29922;font-size:11px"><strong>Create Remote User unavailable:</strong> ${reasons.join('; ')}</div>` : '';
     })() : ''}
+    ${(isHttp && conn.soap_rfc_verified && !conn.has_sap_all) ? `<div class="info-section" style="color:#8b949e;font-size:11px">Create Remote User will attempt BAPI_USER_CREATE1 + SAP_ALL via SOAP-RFC. The user's authorization for these BAPIs (S_USER_GRP, S_USER_PRO) is checked at click time.</div>` : ''}
     <div style="text-align:right;margin-top:8px;display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">
-      ${(!isTypeT && conn.logon_successful && conn.has_sap_all && conn.target_sid) ?
+      ${(!isTypeT && conn.logon_successful && (conn.has_sap_all || conn.soap_rfc_verified) && conn.target_sid) ?
         `<button class="btn" style="background:#b33;color:#fff" onclick="createUserOnTarget('${escHtml(conn.source_sid)}','${escHtml(conn.destination_name)}','${escHtml(conn.target_sid)}')">Create Remote User</button>` : ''}
       ${isTypeT ? '' :
         `<button class="btn" onclick="testConnection('${escHtml(conn.source_sid)}','${escHtml(conn.destination_name)}',${connIdx})">Test Connection</button>`}

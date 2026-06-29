@@ -234,9 +234,26 @@ def _discover_sid_http(base_url: str,
                     info["hostname"] = (
                         sub.get("hostname", "") or info["hostname"])
                     info["ip"] = sub.get("ip", "") or info["ip"]
+                    # Remember the working ICM port — callers (SOAP-RFC
+                    # session, _correct_node_from_http) use it to skip
+                    # repeating the sweep.
+                    info["icm_port"] = pp
+                    info["icm_scheme"] = scheme
                     print(f"[+] HTTP probe: SAP ICM on "
                           f"{host}:{pp}")
                     break
+
+    # If the URL's own port already worked, also surface it so callers
+    # can persist it on the node.
+    if not info.get("icm_port") and (
+            info.get("sid") or info.get("instance_nr")):
+        try:
+            p = _up(base)
+            info["icm_port"] = p.port or (
+                443 if (p.scheme or "http") == "https" else 80)
+            info["icm_scheme"] = p.scheme or "http"
+        except Exception:
+            pass
 
     errs = info.pop("_errs", {})
     if not info["sid"] and not info["instance_nr"] and errs:
@@ -299,7 +316,12 @@ def _resolve_host(host: str) -> str:
 
 
 def _correct_node_from_http(target_node, http_info: dict):
-    """Apply HTTP-probed instance_nr / ip / hostname to an existing node."""
+    """Apply HTTP-probed instance_nr / ip / hostname to an existing node.
+
+    Also records the discovered ICM port (and scheme) on the node's
+    ports map so SOAP-RFC callers can find it later without re-running
+    the port sweep.
+    """
     if not http_info:
         return
     probed = http_info.get("instance_nr", "")
@@ -324,6 +346,94 @@ def _correct_node_from_http(target_node, http_info: dict):
         target_node.ip = http_info["ip"]
     if http_info.get("hostname") and not target_node.hostname:
         target_node.hostname = http_info["hostname"]
+    icm_port = http_info.get("icm_port")
+    if icm_port and target_node.instances:
+        scheme = http_info.get("icm_scheme", "http")
+        label = "icm-https" if scheme == "https" else "icm-http"
+        ports = target_node.instances[0].ports
+        # Only add if no other port already has this label
+        if not any(v == label for v in ports.values()):
+            ports[int(icm_port)] = label
+            print(f"[*] {target_node.sid}: recorded "
+                  f"{label}={icm_port}")
+
+
+def _resolve_soap_endpoint(conn, target_node) -> dict:
+    """Pick a host/port/scheme tuple for SOAP-RFC against `target_node`.
+
+    Priority (best signal first):
+      1. target_node.instances[0].ports — if any port is labelled
+         'icm-http' / 'icm-https', use that (set by a prior probe).
+      2. conn.http_url — host + port from the destination's stored URL,
+         when the port is not a stripped default (80 / 443).
+      3. Probe target via _discover_sid_http to find a working port,
+         caching the result on the node for the next call.
+
+    Returns:
+      {"host": str, "port": int, "https": bool, "ok": bool, "error": str}
+      `ok` is False when none of the steps yielded a port.
+    """
+    out = {"host": "", "port": 0, "https": False,
+           "ok": False, "error": ""}
+
+    # Step 1: existing node ports labelled icm-http(s)
+    if target_node and target_node.instances:
+        for p, lbl in target_node.instances[0].ports.items():
+            if lbl == "icm-http":
+                out["host"] = (target_node.ip
+                               or target_node.hostname or "")
+                out["port"] = int(p)
+                out["https"] = False
+                out["ok"] = bool(out["host"])
+                if out["ok"]:
+                    return out
+            if lbl == "icm-https":
+                out["host"] = (target_node.ip
+                               or target_node.hostname or "")
+                out["port"] = int(p)
+                out["https"] = True
+                out["ok"] = bool(out["host"])
+                if out["ok"]:
+                    return out
+
+    # Step 2: conn.http_url with non-default port
+    http_url = getattr(conn, "http_url", "") or ""
+    if http_url:
+        try:
+            from urllib.parse import urlparse as _up
+            p = _up(http_url)
+            host = p.hostname or ""
+            scheme = p.scheme or "http"
+            port = p.port
+            if port and port not in (80, 443) and host:
+                return {"host": host, "port": int(port),
+                        "https": scheme == "https",
+                        "ok": True, "error": ""}
+        except Exception:
+            pass
+
+    # Step 3: probe (which TCP-scans candidate ports and caches result)
+    if http_url:
+        try:
+            from urllib.parse import urlparse as _up
+            p = _up(http_url)
+            base = f"{p.scheme or 'http'}://{p.netloc}"
+            info = _discover_sid_http(base)
+            if info.get("icm_port"):
+                # Persist on the node for next time
+                if target_node:
+                    _correct_node_from_http(target_node, info)
+                return {"host": p.hostname or "",
+                        "port": int(info["icm_port"]),
+                        "https": (info.get("icm_scheme", "http")
+                                  == "https"),
+                        "ok": True, "error": ""}
+        except Exception as e:
+            out["error"] = f"probe failed: {e}"
+
+    out["error"] = out["error"] or (
+        "no ICM port resolvable from node ports or destination URL")
+    return out
 
 
 # ===========================================================================
@@ -8414,44 +8524,123 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             client=target_client,
                             instance_nr=target_inst,
                         )
-                        print(f"[*] {dest_name}: trying direct RFC "
-                              f"logon to {conn.target_sid} as "
-                              f"{rfc_user} (inst {target_inst})...")
-                        try:
-                            if sapmap_rfc.test_connection(
-                                    target_node, direct_creds):
-                                conn.logon_successful = True
-                                print(f"[+] {dest_name}: RFC logon OK "
-                                      f"on {conn.target_sid}")
-                                info = sapmap_rfc.get_direct_user_profiles(
-                                    target_node, rfc_user,
-                                    direct_creds)
-                                conn.profiles = info.get("profiles", [])
-                                conn.roles = info.get("roles", [])
-                                conn.has_sap_all = info.get(
-                                    "has_sap_all", False)
-                                conn.user_detail_error = info.get(
-                                    "error", "")
-                                if conn.has_sap_all:
-                                    print(f"[!] {rfc_user}@"
-                                          f"{conn.target_sid} has "
-                                          f"SAP_ALL — 'Create Remote "
-                                          f"User' now available")
-                                    target_node.has_critical_finding = True
-                                    api.state.notify_sap_all_if_elevated(
-                                        conn)
-                                elif conn.profiles or conn.roles:
-                                    p_str = ", ".join(
-                                        conn.profiles[:5]) or "<none>"
-                                    print(f"[*] {rfc_user}@"
-                                          f"{conn.target_sid}: "
-                                          f"profiles=[{p_str}]")
-                            else:
+
+                        # Phase 3a: skip direct RFC entirely if the
+                        # dispatcher port is unreachable from this host
+                        # (firewalled landscape — exactly the case Type-H
+                        # HTTP destinations exist to solve).  Saves a
+                        # 60-90s pyrfc TCP retry storm.
+                        dispatcher_port = int(f"32{target_inst}")
+                        dispatcher_host = (
+                            target_node.ip or target_node.hostname
+                            or "")
+                        skip_direct = False
+                        if dispatcher_host:
+                            import socket as _sck
+                            sk = _sck.socket(
+                                _sck.AF_INET, _sck.SOCK_STREAM)
+                            sk.settimeout(2.0)
+                            try:
+                                sk.connect((dispatcher_host,
+                                            dispatcher_port))
+                                sk.close()
+                            except Exception:
+                                skip_direct = True
+                                print(f"[*] {dest_name}: dispatcher "
+                                      f"{dispatcher_host}:"
+                                      f"{dispatcher_port} unreachable "
+                                      f"— skipping direct RFC, will "
+                                      f"use SOAP-RFC")
+
+                        direct_ok = False
+                        if not skip_direct:
+                            print(f"[*] {dest_name}: trying direct RFC "
+                                  f"logon to {conn.target_sid} as "
+                                  f"{rfc_user} (inst {target_inst})...")
+                            try:
+                                if sapmap_rfc.test_connection(
+                                        target_node, direct_creds):
+                                    direct_ok = True
+                                    conn.logon_successful = True
+                                    print(f"[+] {dest_name}: RFC logon "
+                                          f"OK on {conn.target_sid}")
+                                    info = (
+                                        sapmap_rfc.
+                                        get_direct_user_profiles(
+                                            target_node, rfc_user,
+                                            direct_creds))
+                                    conn.profiles = info.get(
+                                        "profiles", [])
+                                    conn.roles = info.get("roles", [])
+                                    conn.has_sap_all = info.get(
+                                        "has_sap_all", False)
+                                    conn.user_detail_error = info.get(
+                                        "error", "")
+                                    if conn.has_sap_all:
+                                        print(f"[!] {rfc_user}@"
+                                              f"{conn.target_sid} has "
+                                              f"SAP_ALL — 'Create "
+                                              f"Remote User' now "
+                                              f"available")
+                                        target_node.has_critical_finding = True
+                                        api.state.notify_sap_all_if_elevated(
+                                            conn)
+                                    elif conn.profiles or conn.roles:
+                                        p_str = ", ".join(
+                                            conn.profiles[:5]) or "<none>"
+                                        print(f"[*] {rfc_user}@"
+                                              f"{conn.target_sid}: "
+                                              f"profiles=[{p_str}]")
+                                else:
+                                    print(f"[-] {dest_name}: RFC "
+                                          f"logon rejected on "
+                                          f"{conn.target_sid}")
+                            except Exception as e:
                                 print(f"[-] {dest_name}: RFC logon "
-                                      f"rejected on {conn.target_sid}")
-                        except Exception as e:
-                            print(f"[-] {dest_name}: RFC logon failed "
-                                  f"— {str(e)[:120]}")
+                                      f"failed — {str(e)[:120]}")
+
+                        # Phase 3a SOAP-RFC fallback — runs when direct
+                        # RFC was skipped or failed.  Verifies the
+                        # credentials via RFC_PING over HTTP.  Doesn't
+                        # check SAP_ALL (that's Phase 3b); instead it
+                        # sets soap_rfc_verified so the Create Remote
+                        # User button is offered with a "will attempt
+                        # at click time" caveat.
+                        if not direct_ok:
+                            endpoint = _resolve_soap_endpoint(
+                                conn, target_node)
+                            if endpoint["ok"]:
+                                print(f"[*] {dest_name}: trying "
+                                      f"SOAP-RFC RFC_PING on "
+                                      f"{endpoint['host']}:"
+                                      f"{endpoint['port']} as "
+                                      f"{rfc_user}...")
+                                from sap_soap_basic import (
+                                    SOAPRFCSession)
+                                soap_sess = SOAPRFCSession(
+                                    host=endpoint["host"],
+                                    port=endpoint["port"],
+                                    client=target_client,
+                                    user=rfc_user,
+                                    password=rfc_pwd,
+                                    https=endpoint["https"],
+                                )
+                                ping = soap_sess.test_connection()
+                                if ping["ok"]:
+                                    conn.logon_successful = True
+                                    conn.soap_rfc_verified = True
+                                    print(f"[+] {dest_name}: SOAP-RFC "
+                                          f"RFC_PING OK — password "
+                                          f"verified over HTTP")
+                                    target_node.has_critical_finding = True
+                                else:
+                                    err = ping.get("error", "")[:120]
+                                    print(f"[-] {dest_name}: "
+                                          f"SOAP-RFC RFC_PING failed "
+                                          f"— {err}")
+                            else:
+                                print(f"[-] {dest_name}: no SOAP-RFC "
+                                      f"endpoint — {endpoint['error']}")
 
                 print(f"[+] Single test done for {dest_name}")
                 return

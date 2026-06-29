@@ -1147,6 +1147,13 @@ class RFCConnection:
     # SecStore
     secstore_password: str = ""  # Decrypted password from RSECTAB (if matched)
 
+    # Phase 3a: True when SOAP-RFC RFC_PING with conn.rfc_user +
+    # secstore_password succeeded against the target's ICM HTTP port.
+    # Distinguishes the "credentials work over HTTP" state from the
+    # stronger has_sap_all (which requires a profile read we don't yet
+    # have an HTTP equivalent for — that's Phase 3b).
+    soap_rfc_verified: bool = False
+
     def risk_level(self) -> str:
         """Return risk assessment for this connection."""
         if self.has_sap_all and self.logon_successful:
@@ -1189,6 +1196,7 @@ class RFCConnection:
             "http_proxy": self.http_proxy,
             "http_target_platform": self.http_target_platform,
             "secstore_password": self.secstore_password,
+            "soap_rfc_verified": self.soap_rfc_verified,
         }
 
     @classmethod
@@ -1718,7 +1726,7 @@ class SAPMAPState:
                     "logon_successful", "logon_tested",
                     "ping_ok", "tested", "latency_ms",
                     "sapxpg_remote_works", "remote_user_created",
-                    "remote_user_name",
+                    "remote_user_name", "soap_rfc_verified",
                 )
                 for attr in preserve_if_empty:
                     old_val = getattr(existing, attr, None)
