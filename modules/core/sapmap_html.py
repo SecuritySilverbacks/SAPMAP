@@ -2937,7 +2937,7 @@ function updateMap() {
     } else if (conn.logon_successful) {
       color = '#2ecc71'; width = 5;
     } else if (isHttp) {
-      color = '#a371f7'; width = 4; dashArray = '3,4';
+      color = '#a371f7'; width = 4; dashArray = '2,2';
     }
 
     // Arrow marker
@@ -3006,6 +3006,12 @@ function updateMap() {
     const idx = pairIdx[ci] || 0;
 
     if (total === 1) {
+      // Invisible wider hit area for dashed/dotted lines
+      if (dashArray) {
+        html += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" ` +
+          `stroke="transparent" stroke-width="${width + 10}" ` +
+          `data-conn-idx="${ci}" onclick="showConnInfo(event, ${ci})" />`;
+      }
       html += `<line class="edge-line" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" ` +
         `stroke="${color}" stroke-width="${width}" fill="none"${dashAttr}${newAttr} data-orig-dash="${dashArray}" ` +
         `marker-end="url(#arrow-${ci})" data-conn-idx="${ci}" ` +
@@ -3020,6 +3026,12 @@ function updateMap() {
       const px = -cdy / len, py = cdx / len;
       const offset = (idx - (total - 1) / 2) * 40;
       const qx = mx + px * offset, qy = my + py * offset;
+      // Invisible wider hit area for dashed/dotted lines
+      if (dashArray) {
+        html += `<path d="M${x1},${y1} Q${qx},${qy} ${x2},${y2}" ` +
+          `stroke="transparent" stroke-width="${width + 10}" fill="none" ` +
+          `data-conn-idx="${ci}" onclick="showConnInfo(event, ${ci})" />`;
+      }
       html += `<path class="edge-line" d="M${x1},${y1} Q${qx},${qy} ${x2},${y2}" ` +
         `stroke="${color}" stroke-width="${width}" fill="none"${dashAttr}${newAttr} data-orig-dash="${dashArray}" ` +
         `marker-end="url(#arrow-${ci})" data-conn-idx="${ci}" ` +
