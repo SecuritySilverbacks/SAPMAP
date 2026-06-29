@@ -8342,6 +8342,20 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         _correct_node_from_http(target_node, _hi)
                         target_node.has_critical_finding = True
 
+                # Backfill secstore_password from source node's
+                # decrypted SecStore entries — covers connections that
+                # were created before the SecStore extraction ran.
+                if not conn.secstore_password and getattr(
+                        node, "secstore_entries", None):
+                    for _entry in node.secstore_entries:
+                        if (_entry.get("dest_name", "") == dest_name
+                                and _entry.get("password")):
+                            conn.secstore_password = _entry["password"]
+                            print(f"[+] {dest_name}: backfilled "
+                                  f"SecStore password from "
+                                  f"{node.sid}.secstore_entries")
+                            break
+
                 # Phase 3: direct RFC logon to check profiles + SAP_ALL.
                 # Password source priority:
                 #   1. conn.secstore_password (decrypted from RSECTAB)

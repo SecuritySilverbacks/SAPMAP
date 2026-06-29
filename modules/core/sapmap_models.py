@@ -1707,11 +1707,41 @@ class SAPMAPState:
                 if (existing.has_sap_all and existing.logon_successful
                         and conn.has_sap_all and conn.logon_successful):
                     was_new_or_elevated = False
+                # Preserve enrichment fields from the existing
+                # connection when the incoming one doesn't carry them.
+                # Retrieve RFCs rebuilds connections from RFCDES with
+                # empty secstore_password / profiles / etc.; without
+                # this merge we'd lose the SecStore-decrypted password.
+                preserve_if_empty = (
+                    "secstore_password", "profiles", "roles",
+                    "has_sap_all", "user_detail_error",
+                    "logon_successful", "logon_tested",
+                    "ping_ok", "tested", "latency_ms",
+                    "sapxpg_remote_works", "remote_user_created",
+                    "remote_user_name",
+                )
+                for attr in preserve_if_empty:
+                    old_val = getattr(existing, attr, None)
+                    new_val = getattr(conn, attr, None)
+                    if old_val and not new_val:
+                        setattr(conn, attr, old_val)
                 idx = self.connections.index(existing)
                 self.connections[idx] = conn
                 break
         else:
             self.connections.append(conn)
+        # If the source node already has decrypted SecStore entries,
+        # look up the password for this destination now.  Covers the
+        # SecStore-first-then-Retrieve-RFCs order, where the conn is
+        # brand new and the preserve-on-replace logic above doesn't fire.
+        if not conn.secstore_password and conn.source_sid:
+            src = self.get_node(conn.source_sid)
+            if src and getattr(src, "secstore_entries", None):
+                for entry in src.secstore_entries:
+                    if (entry.get("dest_name", "") == conn.destination_name
+                            and entry.get("password")):
+                        conn.secstore_password = entry["password"]
+                        break
         if (was_new_or_elevated and getattr(conn, 'logon_successful', False)
                 and getattr(conn, 'has_sap_all', False)
                 and conn.source_sid and conn.target_sid):
