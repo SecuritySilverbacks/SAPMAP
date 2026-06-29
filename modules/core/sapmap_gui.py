@@ -7603,19 +7603,35 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     conn.target_host = node.hostname or node.ip
                     conn.target_sid = node.sid
                 else:
+                    # For HTTP connections, target_host/target_ip are
+                    # empty — the host lives in http_url.  Extract it
+                    # so find_node_by_host can resolve the target.
+                    _th = conn.target_host or ""
+                    _ti = conn.target_ip or ""
+                    if not _th and not _ti and conn.conn_type == "http" and conn.http_url:
+                        try:
+                            from urllib.parse import urlparse as _up
+                            _url_host = (_up(conn.http_url).hostname or "").strip()
+                            _th = _url_host
+                            _ti = _url_host
+                        except Exception:
+                            pass
                     target = api.state.find_node_by_host(
-                        hostname=conn.target_host, ip=conn.target_ip,
+                        hostname=_th, ip=_ti,
                         instance_nr=conn.target_instance_nr or "",
                     )
                     if target:
                         conn.target_sid = target.sid
                 api.state.add_connection(conn)
 
-            # Ping each non-self connection and auto-discover systems
+            # Ping each non-self connection and auto-discover systems.
             # DEST_CHECK_CONNECTION returns the remote SID so we can
             # do SID-first mapping instead of host-first.
+            # HTTP connections carry the host in http_url, not
+            # target_host — accept either field.
             non_self = [c for c in conns
-                        if c.target_sid != sid and c.target_host]
+                        if c.target_sid != sid
+                        and (c.target_host or c.http_url)]
 
             if non_self:
                 print(f"[*] Pinging {len(non_self)} remote RFC destinations...")
@@ -7630,6 +7646,13 @@ def create_app(api: SAPMAPApi) -> Bottle:
                           f"aborted ({len(discovered)} probed)")
                     return
                 host = conn.target_ip or conn.target_host or ""
+                # HTTP connections carry the host in http_url only.
+                if not host and conn.conn_type == "http" and conn.http_url:
+                    try:
+                        from urllib.parse import urlparse as _up2
+                        host = (_up2(conn.http_url).hostname or "").strip()
+                    except Exception:
+                        pass
                 inst = conn.target_instance_nr or "00"
                 key = (host.lower(), inst)
 
