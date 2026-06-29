@@ -172,6 +172,34 @@ def _resolve_host(host: str) -> str:
         return ""
 
 
+def _correct_node_from_http(target_node, http_info: dict):
+    """Apply HTTP-probed instance_nr / ip / hostname to an existing node."""
+    if not http_info:
+        return
+    probed = http_info.get("instance_nr", "")
+    if probed and target_node.instances:
+        cur = target_node.instance_nrs()
+        if cur and cur[0] != probed:
+            old_i = cur[0]
+            target_node.instances[0].instance_nr = probed
+            old_p = dict(target_node.instances[0].ports)
+            new_p = {}
+            for p, lbl in old_p.items():
+                if lbl == "dispatcher":
+                    new_p[int(f"32{probed}")] = lbl
+                elif lbl == "gateway":
+                    new_p[int(f"33{probed}")] = lbl
+                else:
+                    new_p[p] = lbl
+            target_node.instances[0].ports = new_p
+            print(f"[*] {target_node.sid}: corrected "
+                  f"instance {old_i}→{probed}")
+    if http_info.get("ip") and not target_node.ip:
+        target_node.ip = http_info["ip"]
+    if http_info.get("hostname") and not target_node.hostname:
+        target_node.hostname = http_info["hostname"]
+
+
 # ===========================================================================
 # Console line buffer (same pattern as SAPology GUI)
 # ===========================================================================
@@ -7780,6 +7808,44 @@ def create_app(api: SAPMAPApi) -> Bottle:
                           f" ({ping['ping_message'][:60]})")
                     conn.ping_ok = True
                     conn.tested = True
+
+                    # HTTP connections: probe target for SID + instance
+                    # BEFORE any node matching, so we have correct values.
+                    _http_info = {}
+                    if (conn.conn_type == "http"
+                            and conn.http_url):
+                        try:
+                            from urllib.parse import (
+                                urlparse as _up_early)
+                            _pe = _up_early(conn.http_url)
+                            _base_e = (f"{_pe.scheme}://"
+                                       f"{_pe.netloc}")
+                            print(f"[*] Probing {_pe.netloc} for "
+                                  f"SID via HTTP...")
+                            _http_info = _discover_sid_http(_base_e)
+                            if _http_info.get("sid"):
+                                if not dest_sid:
+                                    dest_sid = _http_info["sid"]
+                                extra = ""
+                                if _http_info.get("instance_nr"):
+                                    extra += (f" inst="
+                                              f"{_http_info['instance_nr']}")
+                                print(f"[+] Discovered SID via HTTP "
+                                      f"probe: {_http_info['sid']}"
+                                      f"{extra}")
+                            if _http_info.get("instance_nr"):
+                                inst = _http_info["instance_nr"]
+                                key = (host.lower(), inst)
+                            if _http_info.get("ip"):
+                                if not remote_ip:
+                                    host = _http_info["ip"]
+                                    conn.target_ip = host
+                                    key = (host.lower(), inst)
+                            if _http_info.get("hostname"):
+                                remote_host = _http_info["hostname"]
+                        except Exception:
+                            pass
+
                     discovered[key] = {
                         "dest_name": conn.destination_name,
                         "remote_sid": "",  # set below once resolved
@@ -7791,6 +7857,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     if dest_sid:
                         existing_sid_node = api.state.get_node(dest_sid)
                         if existing_sid_node:
+                            _correct_node_from_http(
+                                existing_sid_node, _http_info)
                             conn.target_sid = dest_sid
                             discovered[key]["remote_sid"] = dest_sid
                             api.state.add_connection(conn)
@@ -7807,6 +7875,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     existing = api.state.find_node_by_host(
                         hostname=host, ip=host, instance_nr=inst)
                     if existing:
+                        _correct_node_from_http(existing, _http_info)
                         conn.target_sid = existing.sid
                         discovered[key]["remote_sid"] = existing.sid
                         api.state.add_connection(conn)
@@ -7819,64 +7888,12 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                   f"maps to existing {existing.sid}")
                         continue
 
-                    # 3. No existing node — use SID from ping or derive
-                    # _http_info: filled by HTTP probe, used later
-                    # for correct instance_nr / hostname / ip.
-                    _http_info = {}
+                    # 3. No existing node — derive SID if not yet known
                     if not dest_sid:
-                        if conn.conn_type == "http" and conn.http_url:
-                            from urllib.parse import urlparse as _up_sid
-                            _ps = _up_sid(conn.http_url)
-                            _base = f"{_ps.scheme}://{_ps.netloc}"
-                            print(f"[*] Probing {_ps.netloc} for SID "
-                                  f"via HTTP...")
-                            _http_info = _discover_sid_http(_base)
-                            dest_sid = _http_info.get("sid", "")
-                            if dest_sid:
-                                extra = ""
-                                if _http_info.get("instance_nr"):
-                                    extra += (f" inst="
-                                              f"{_http_info['instance_nr']}")
-                                if _http_info.get("hostname"):
-                                    extra += (f" host="
-                                              f"{_http_info['hostname']}")
-                                print(f"[+] Discovered SID via HTTP "
-                                      f"probe: {dest_sid}{extra}")
-                        if not dest_sid:
-                            dest_sid = _derive_sid(
-                                conn.destination_name, host)
-                            print(f"[*] Could not get remote SID, "
-                                  f"using derived: {dest_sid}")
-
-                    # If the HTTP probe returned a correct instance_nr,
-                    # update any existing node that has a stale one.
-                    if _http_info.get("instance_nr"):
-                        _existing = api.state.get_node(dest_sid)
-                        if _existing and _existing.instances:
-                            cur = _existing.instance_nrs()
-                            probed = _http_info["instance_nr"]
-                            if cur and cur[0] != probed:
-                                old_i = cur[0]
-                                _existing.instances[0].instance_nr = probed
-                                old_p = dict(_existing.instances[0].ports)
-                                new_p = {}
-                                for p, lbl in old_p.items():
-                                    if lbl == "dispatcher":
-                                        new_p[int(f"32{probed}")] = lbl
-                                    elif lbl == "gateway":
-                                        new_p[int(f"33{probed}")] = lbl
-                                    else:
-                                        new_p[p] = lbl
-                                _existing.instances[0].ports = new_p
-                                print(f"[*] {dest_sid}: corrected "
-                                      f"instance {old_i}→{probed}")
-                            if (_http_info.get("ip")
-                                    and not _existing.ip):
-                                _existing.ip = _http_info["ip"]
-                            if (_http_info.get("hostname")
-                                    and not _existing.hostname):
-                                _existing.hostname = (
-                                    _http_info["hostname"])
+                        dest_sid = _derive_sid(
+                            conn.destination_name, host)
+                        print(f"[*] Could not get remote SID, "
+                              f"using derived: {dest_sid}")
 
                     # Check if SID already on map but different host
                     existing_sid_node = api.state.get_node(dest_sid)
@@ -7917,6 +7934,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                 is_same = False
 
                         if is_same:
+                            _correct_node_from_http(
+                                existing_sid_node, _http_info)
                             conn.target_sid = dest_sid
                             discovered[key]["remote_sid"] = dest_sid
                             api.state.add_connection(conn)
@@ -8153,48 +8172,32 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     else:
                         print(f"[-] {dest_name}: HTTP connection failed")
 
-                # Phase 2: probe target via HTTP for correct instance_nr
-                # and update the node if it was created with wrong info.
+                # Phase 2: probe target via HTTP for SID + instance_nr.
+                # Also discovers target_sid when Retrieve RFCs didn't.
                 _probed_inst = ""
-                if conn.http_url and conn.target_sid:
+                _hi = {}
+                if conn.http_url:
+                    try:
+                        from urllib.parse import urlparse as _up_tc
+                        _p_tc = _up_tc(conn.http_url)
+                        _base_tc = (f"{_p_tc.scheme}://"
+                                    f"{_p_tc.netloc}")
+                        _hi = _discover_sid_http(_base_tc)
+                        if _hi.get("instance_nr"):
+                            _probed_inst = _hi["instance_nr"]
+                        if not conn.target_sid and _hi.get("sid"):
+                            tgt = api.state.get_node(_hi["sid"])
+                            if tgt:
+                                conn.target_sid = _hi["sid"]
+                                print(f"[*] {dest_name}: resolved "
+                                      f"target → {conn.target_sid}")
+                    except Exception:
+                        pass
+                if conn.target_sid:
                     target_node = api.state.get_node(conn.target_sid)
                     if target_node:
-                        try:
-                            from urllib.parse import urlparse as _up_tc
-                            _p_tc = _up_tc(conn.http_url)
-                            _base_tc = (f"{_p_tc.scheme}://"
-                                        f"{_p_tc.netloc}")
-                            _hi = _discover_sid_http(_base_tc)
-                            if _hi.get("instance_nr"):
-                                _probed_inst = _hi["instance_nr"]
-                                cur_insts = target_node.instance_nrs()
-                                if (cur_insts
-                                        and cur_insts[0] != _probed_inst):
-                                    old = cur_insts[0]
-                                    target_node.instances[0].instance_nr = (
-                                        _probed_inst)
-                                    old_ports = dict(
-                                        target_node.instances[0].ports)
-                                    new_ports = {}
-                                    for p, lbl in old_ports.items():
-                                        if lbl == "dispatcher":
-                                            new_ports[int(f"32{_probed_inst}")] = lbl
-                                        elif lbl == "gateway":
-                                            new_ports[int(f"33{_probed_inst}")] = lbl
-                                        else:
-                                            new_ports[p] = lbl
-                                    target_node.instances[0].ports = (
-                                        new_ports)
-                                    print(f"[*] {conn.target_sid}: "
-                                          f"corrected instance "
-                                          f"{old}→{_probed_inst}")
-                            if _hi.get("ip") and not target_node.ip:
-                                target_node.ip = _hi["ip"]
-                            if (_hi.get("hostname")
-                                    and not target_node.hostname):
-                                target_node.hostname = _hi["hostname"]
-                        except Exception:
-                            pass
+                        _correct_node_from_http(target_node, _hi)
+                        target_node.has_critical_finding = True
 
                 # Phase 3: direct RFC logon to check profiles + SAP_ALL.
                 # Use secstore_password if available, otherwise try
