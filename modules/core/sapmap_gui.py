@@ -30,19 +30,23 @@ import sapmap_secstore
 import sapmap_state as state_mgr
 import sapmap_findings
 
-def _discover_sid_http(base_url: str) -> str:
-    """Discover SAP SID via unauthenticated HTTP probes.
+def _discover_sid_http(base_url: str) -> dict:
+    """Discover SAP system info via unauthenticated HTTP probes.
+
+    Returns dict with keys: sid, instance_nr, hostname, ip.
+    All values default to "" when not discovered.
 
     Tries three ICM endpoints in order:
-    1. /sap/public/info  — SOAP RFC_SYSTEM_INFO (contains RFCSYSID)
-    2. /sap/             — ICF 404 error page mentions SID in text
-    3. /sap/bc/gui/sap/its/webgui — logon form has read-only sysid field
+    1. /sap/public/info  — SOAP RFC_SYSTEM_INFO (richest: SID, inst, host, IP)
+    2. /sap/             — ICF 404 error page (SID + instance from error code)
+    3. /sap/bc/gui/sap/its/webgui — logon form (SID only)
     """
     import re
     import ssl
     import urllib.request
     import urllib.error
 
+    info = {"sid": "", "instance_nr": "", "hostname": "", "ip": ""}
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
@@ -57,7 +61,7 @@ def _discover_sid_http(base_url: str) -> str:
         except urllib.error.HTTPError as he:
             return he.read(max_bytes).decode("utf-8", errors="replace")
 
-    # Method 1: /sap/public/info
+    # Method 1: /sap/public/info — SOAP RFC_SYSTEM_INFO
     try:
         body = _get("/sap/public/info")
         if body:
@@ -65,7 +69,23 @@ def _discover_sid_http(base_url: str) -> str:
             if not m:
                 m = re.search(r'<SAPSID>(\w{3})</SAPSID>', body)
             if m:
-                return m.group(1)
+                info["sid"] = m.group(1)
+            # RFCDEST = HOSTNAME_SID_NN → instance number
+            m = re.search(r'<RFCDEST>[^<]*_(\d{2})</RFCDEST>', body)
+            if m:
+                info["instance_nr"] = m.group(1)
+            m = re.search(r'<RFCHOST2?>([^<]+)</RFCHOST2?>', body)
+            if m:
+                info["hostname"] = m.group(1).strip()
+            m = re.search(
+                r'<RFCIPV6ADDR>([^<]+)</RFCIPV6ADDR>', body)
+            if not m:
+                m = re.search(
+                    r'<RFCIPADDR>([^<]+)</RFCIPADDR>', body)
+            if m:
+                info["ip"] = m.group(1).strip()
+            if info["sid"]:
+                return info
     except Exception:
         pass
 
@@ -75,24 +95,31 @@ def _discover_sid_http(base_url: str) -> str:
         if body:
             m = re.search(r'in system\s+(\w{3})\s', body)
             if m:
-                return m.group(1).strip()
-            m = re.search(r'Error Code:.*?-i\w+_(\w{3})_\d{2}', body)
+                info["sid"] = m.group(1).strip()
+            # Error code: iHOSTNAME_SID_NN
+            m = re.search(
+                r'Error Code:.*?-i\w+_(\w{3})_(\d{2})', body)
             if m:
-                return m.group(1)
+                if not info["sid"]:
+                    info["sid"] = m.group(1)
+                info["instance_nr"] = m.group(2)
+            if info["sid"]:
+                return info
     except Exception:
         pass
 
-    # Method 3: webgui logon page
+    # Method 3: webgui logon page (SID only)
     try:
         body = _get("/sap/bc/gui/sap/its/webgui", max_bytes=65536)
         if body:
             m = re.search(r'id="sysid"[^>]*value="(\w{3})"', body)
             if m:
-                return m.group(1)
+                info["sid"] = m.group(1)
+                return info
     except Exception:
         pass
 
-    return ""
+    return info
 
 
 def _derive_sid(destination_name: str, host: str) -> str:
@@ -7793,6 +7820,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         continue
 
                     # 3. No existing node — use SID from ping or derive
+                    # _http_info: filled by HTTP probe, used later
+                    # for correct instance_nr / hostname / ip.
+                    _http_info = {}
                     if not dest_sid:
                         if conn.conn_type == "http" and conn.http_url:
                             from urllib.parse import urlparse as _up_sid
@@ -7800,10 +7830,18 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             _base = f"{_ps.scheme}://{_ps.netloc}"
                             print(f"[*] Probing {_ps.netloc} for SID "
                                   f"via HTTP...")
-                            dest_sid = _discover_sid_http(_base)
+                            _http_info = _discover_sid_http(_base)
+                            dest_sid = _http_info.get("sid", "")
                             if dest_sid:
+                                extra = ""
+                                if _http_info.get("instance_nr"):
+                                    extra += (f" inst="
+                                              f"{_http_info['instance_nr']}")
+                                if _http_info.get("hostname"):
+                                    extra += (f" host="
+                                              f"{_http_info['hostname']}")
                                 print(f"[+] Discovered SID via HTTP "
-                                      f"probe: {dest_sid}")
+                                      f"probe: {dest_sid}{extra}")
                         if not dest_sid:
                             dest_sid = _derive_sid(
                                 conn.destination_name, host)
@@ -7867,8 +7905,10 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                   f"with different IP, "
                                   f"using {dest_sid}")
 
-                    # Add new system to map.  For HTTP connections the
-                    # port comes from the URL, not from SAP inst math.
+                    # Add new system to map.  For HTTP connections
+                    # prefer the instance_nr from the HTTP probe
+                    # (RFC_SYSTEM_INFO / error page) over guessing
+                    # from the port number.
                     if conn.conn_type == "http" and conn.http_url:
                         try:
                             from urllib.parse import urlparse as _up3
@@ -7876,13 +7916,20 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             url_port = _purl.port
                         except Exception:
                             url_port = None
-                        # SAP ICM HTTP ports follow 8NNN convention
-                        # (8000=inst 00, 8100=01, 8410=41…).  Fall back
-                        # to the raw port number if no match.
-                        if url_port and 8000 <= url_port <= 8999:
+                        if _http_info.get("instance_nr"):
+                            inst = _http_info["instance_nr"]
+                        elif url_port and 8000 <= url_port <= 8999:
                             inst = f"{(url_port - 8000) // 100:02d}"
-                        ports = ({int(url_port): "http"}
-                                 if url_port else {})
+                        if _http_info.get("ip"):
+                            host = _http_info["ip"]
+                            key = (host.lower(), inst)
+                        if _http_info.get("hostname"):
+                            remote_host = _http_info["hostname"]
+                        ports = {}
+                        if url_port:
+                            ports[int(url_port)] = "http"
+                        ports[int(f"32{inst}")] = "dispatcher"
+                        ports[int(f"33{inst}")] = "gateway"
                     else:
                         ports = {
                             int(f"32{inst}"): "dispatcher",
@@ -8043,9 +8090,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
             is_type_t = conn.sapxpg_remote_works or dest_name.startswith("SAPMAP_")
 
             # ---- HTTP destination (Type G/H) ----
-            # DEST_CHECK_CONNECTION works for HTTP dests but returns
-            # AUTHORIZATION_TEST_RESULT='E' (no RFC logon applies),
-            # so ping_ok is the correct success indicator.
+            # Phase 1: DEST_CHECK_CONNECTION (ping_ok = HTTP works).
+            # Phase 2: direct RFC logon to ABAP target → profiles/SAP_ALL
+            #          → enables "Create Remote User".
             if (conn.conn_type or "").lower() == "http":
                 print(f"[*] Testing HTTP destination: {dest_name}...")
                 result = sapmap_rfc.test_rfc_destination(
@@ -8074,6 +8121,64 @@ def create_app(api: SAPMAPApi) -> Bottle:
                               f"failed ({err_short})")
                     else:
                         print(f"[-] {dest_name}: HTTP connection failed")
+
+                # Phase 2: if we have SecStore creds and the target is
+                # ABAP, try direct RFC logon to check profiles + SAP_ALL.
+                if (conn.secstore_password and conn.rfc_user
+                        and conn.target_sid):
+                    target_node = api.state.get_node(conn.target_sid)
+                    if target_node and "ABAP" in (
+                            target_node.system_type or "ABAP").upper():
+                        target_inst = (
+                            (conn.target_instance_nr or "").strip()
+                            or (target_node.instance_nrs()[0]
+                                if target_node.instance_nrs() else "00"))
+                        target_client = conn.client or "000"
+                        direct_creds = Credentials(
+                            username=conn.rfc_user,
+                            password=conn.secstore_password,
+                            client=target_client,
+                            instance_nr=target_inst,
+                        )
+                        print(f"[*] {dest_name}: trying direct RFC "
+                              f"logon to {conn.target_sid} as "
+                              f"{conn.rfc_user}...")
+                        try:
+                            if sapmap_rfc.test_connection(
+                                    target_node, direct_creds):
+                                conn.logon_successful = True
+                                print(f"[+] {dest_name}: RFC logon OK "
+                                      f"on {conn.target_sid}")
+                                info = sapmap_rfc.get_direct_user_profiles(
+                                    target_node, conn.rfc_user,
+                                    direct_creds)
+                                conn.profiles = info.get("profiles", [])
+                                conn.roles = info.get("roles", [])
+                                conn.has_sap_all = info.get(
+                                    "has_sap_all", False)
+                                conn.user_detail_error = info.get(
+                                    "error", "")
+                                if conn.has_sap_all:
+                                    print(f"[!] {conn.rfc_user}@"
+                                          f"{conn.target_sid} has "
+                                          f"SAP_ALL — 'Create Remote "
+                                          f"User' now available")
+                                    target_node.has_critical_finding = True
+                                    api.state.notify_sap_all_if_elevated(
+                                        conn)
+                                elif conn.profiles or conn.roles:
+                                    p_str = ", ".join(
+                                        conn.profiles[:5]) or "<none>"
+                                    print(f"[*] {conn.rfc_user}@"
+                                          f"{conn.target_sid}: "
+                                          f"profiles=[{p_str}]")
+                            else:
+                                print(f"[-] {dest_name}: RFC logon "
+                                      f"rejected on {conn.target_sid}")
+                        except Exception as e:
+                            print(f"[-] {dest_name}: RFC logon failed "
+                                  f"— {str(e)[:120]}")
+
                 print(f"[+] Single test done for {dest_name}")
                 return
 

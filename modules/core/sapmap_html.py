@@ -6515,8 +6515,14 @@ function showConnInfo(e, connIdx) {
     `}
     ${profilesHtml ? `<div class="info-section"><strong style="font-size:11px;color:#8b949e">Profiles</strong><div class="profile-list">${profilesHtml}</div></div>` : ''}
     ${rolesHtml ? `<div class="info-section"><strong style="font-size:11px;color:#8b949e">Roles</strong><div class="profile-list">${rolesHtml}</div></div>` : ''}
-    ${(!isHttp && conn.user_detail_error) ? `<div class="info-section" style="color:#d29922;font-size:11px">${escHtml(conn.user_detail_error)}</div>` : ''}
-    ${isHttp ? '' : `<div class="info-section">
+    ${conn.user_detail_error ? `<div class="info-section" style="color:#d29922;font-size:11px">${escHtml(conn.user_detail_error)}</div>` : ''}
+    ${isHttp ? `<div class="info-section">
+      <strong style="font-size:11px;color:#8b949e">DEST_CHECK_CONNECTION</strong>
+      ${conn.tested ? `
+        <div class="info-row"><span class="info-label">HTTP Ping:</span><span class="info-val">${conn.ping_ok ? 'OK' : 'Failed'}${conn.latency_ms ? ' ('+conn.latency_ms+'ms)' : ''}</span></div>
+        ${conn.secstore_password ? `<div class="info-row"><span class="info-label">Direct RFC:</span><span class="info-val">${conn.has_sap_all ? '&#9989; Logon OK — SAP_ALL' : (conn.profiles && conn.profiles.length ? '&#9989; Logon OK' : (conn.logon_successful ? '&#9898; HTTP only' : '&#10060; Failed'))}</span></div>` : ''}
+      ` : '<div style="color:#484f58;font-size:11px;margin-top:4px">Not tested yet</div>'}
+    </div>` : `<div class="info-section">
       <strong style="font-size:11px;color:#8b949e">/SDF/RFC_CHECK</strong>
       ${conn.tested ? `
         <div class="info-row"><span class="info-label">Ping:</span><span class="info-val">${conn.ping_ok ? 'OK' : 'Failed'}${conn.latency_ms ? ' ('+conn.latency_ms+'ms)' : ''}</span></div>
