@@ -33,20 +33,13 @@ import sapmap_findings
 _http_sid_cache: dict = {}
 
 
-def _discover_sid_http(base_url: str) -> dict:
-    """Discover SAP system info via unauthenticated HTTP probes.
+def _probe_sap_base(base_url: str) -> dict:
+    """Probe a single base URL (host:port) for SAP system info.
 
-    Returns dict with keys: sid, instance_nr, hostname, ip.
-    All values default to "" when not discovered.
-
-    Probes three ICM endpoints concurrently (each with a short 3s
-    timeout) and merges what each returned:
+    Hits three ICM endpoints in parallel with short timeouts:
     1. /sap/public/info          — SOAP RFC_SYSTEM_INFO (richest)
     2. /sap/                     — ICF 404 error page
     3. /sap/bc/gui/sap/its/webgui — logon form (SID only)
-
-    Results are cached per (host, port) so sibling destinations to the
-    same target don't re-probe.
     """
     import re
     import ssl
@@ -55,11 +48,6 @@ def _discover_sid_http(base_url: str) -> dict:
     import urllib.error
 
     base = base_url.rstrip("/")
-    cache_key = base.lower()
-    cached = _http_sid_cache.get(cache_key)
-    if cached is not None:
-        return dict(cached)
-
     info = {"sid": "", "instance_nr": "", "hostname": "", "ip": ""}
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
@@ -148,11 +136,113 @@ def _discover_sid_http(base_url: str) -> dict:
             if m:
                 info["sid"] = m.group(1)
 
-    if not info["sid"] and not info["instance_nr"]:
-        errs = [f"{k}: {v[1]}" for k, v in results.items() if v[1]]
-        if errs:
-            print(f"[!] HTTP probe of {base} failed: "
-                  f"{'; '.join(errs[:2])}")
+    info["_errs"] = {k: v[1] for k, v in results.items() if v[1]}
+    return info
+
+
+def _discover_sid_http(base_url: str,
+                       extra_hint_ports: list = None) -> dict:
+    """Discover SAP system info via unauthenticated HTTP probes.
+
+    Returns dict with keys: sid, instance_nr, hostname, ip.
+    All values default to "" when not discovered.
+
+    First probes the URL as given.  If that doesn't yield results
+    (e.g. because the RFCDES parser stripped a default :80 / :443
+    port, but ICM actually listens on 8xxx), retries against common
+    SAP ICM ports (8000-8050, 8400-8450, 50000-50020).
+
+    Results are cached per base URL so sibling destinations don't
+    re-probe.
+    """
+    from urllib.parse import urlparse as _up
+
+    base = base_url.rstrip("/")
+    cache_key = base.lower()
+    cached = _http_sid_cache.get(cache_key)
+    if cached is not None:
+        return dict(cached)
+
+    info = _probe_sap_base(base)
+
+    if not info.get("sid") and not info.get("instance_nr"):
+        try:
+            p = _up(base)
+            host = p.hostname or ""
+            scheme = p.scheme or "http"
+            tried_port = p.port or (443 if scheme == "https" else 80)
+        except Exception:
+            host, scheme, tried_port = "", "http", 0
+
+        candidate_ports = list(range(8000, 8051)) + \
+            list(range(8400, 8451)) + \
+            list(range(50000, 50021))
+        candidate_ports = [
+            pp for pp in candidate_ports if pp != tried_port]
+        if extra_hint_ports:
+            candidate_ports = [
+                pp for pp in extra_hint_ports
+                if pp != tried_port] + candidate_ports
+
+        if host:
+            import socket as _sock
+            import threading as _t2
+
+            open_ports = []
+            open_lock = _t2.Lock()
+
+            def _tcp_probe(pp):
+                s = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+                s.settimeout(0.8)
+                try:
+                    s.connect((host, pp))
+                    s.close()
+                    with open_lock:
+                        open_ports.append(pp)
+                except Exception:
+                    pass
+
+            print(f"[*] HTTP probe: TCP-scanning {host} for "
+                  f"ICM port (URL port {tried_port} silent)...")
+            tcp_threads = []
+            for pp in candidate_ports:
+                th = _t2.Thread(
+                    target=_tcp_probe, args=(pp,), daemon=True)
+                th.start()
+                tcp_threads.append(th)
+                if len(tcp_threads) >= 32:
+                    for t in tcp_threads:
+                        t.join(timeout=1.2)
+                    tcp_threads = []
+            for t in tcp_threads:
+                t.join(timeout=1.2)
+
+            if open_ports:
+                print(f"[*] HTTP probe: {len(open_ports)} open "
+                      f"port(s) on {host}: {open_ports[:6]}"
+                      f"{'...' if len(open_ports) > 6 else ''}")
+
+            for pp in sorted(open_ports):
+                sub_base = f"{scheme}://{host}:{pp}"
+                sub = _probe_sap_base(sub_base)
+                sub.pop("_errs", None)
+                if sub.get("sid") or sub.get("instance_nr"):
+                    info["sid"] = sub.get("sid", "") or info["sid"]
+                    info["instance_nr"] = (
+                        sub.get("instance_nr", "")
+                        or info["instance_nr"])
+                    info["hostname"] = (
+                        sub.get("hostname", "") or info["hostname"])
+                    info["ip"] = sub.get("ip", "") or info["ip"]
+                    print(f"[+] HTTP probe: SAP ICM on "
+                          f"{host}:{pp}")
+                    break
+
+    errs = info.pop("_errs", {})
+    if not info["sid"] and not info["instance_nr"] and errs:
+        first_two = list(errs.items())[:2]
+        print(f"[!] HTTP probe of {base} failed: "
+              f"{'; '.join(f'{k}: {v}' for k, v in first_two)}")
 
     _http_sid_cache[cache_key] = dict(info)
     return info
