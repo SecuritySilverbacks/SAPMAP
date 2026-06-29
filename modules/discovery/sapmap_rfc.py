@@ -1080,7 +1080,7 @@ def ping_rfc_destination(node: SAPNode, destination_name: str,
     result = {
         "ping_ok": False, "ping_message": "", "logon_ok": False,
         "remote_sid": "", "remote_hostname": "", "remote_ip": "",
-        "error": "",
+        "remote_instance_nr": "", "error": "",
     }
 
     try:
@@ -1121,6 +1121,12 @@ def ping_rfc_destination(node: SAPNode, destination_name: str,
                         "SYSID", "").strip()
                     result["remote_hostname"] = props.get(
                         "RFCHOST", "").strip()
+                    rfcdest = props.get("RFCDEST", "").strip()
+                    if rfcdest:
+                        import re as _re_rfcdest
+                        _md = _re_rfcdest.search(r'_(\d{2})$', rfcdest)
+                        if _md:
+                            result["remote_instance_nr"] = _md.group(1)
 
                 # Get IP via RFC_GET_SYSTEM_INFO with DESTINATION
                 # (RFCSI_EXPORT contains RFCIPADDR; CONNECTION_PROPERTIES does not).
@@ -1155,6 +1161,16 @@ def ping_rfc_destination(node: SAPNode, destination_name: str,
                                 result["remote_hostname"] = (
                                     export.get("RFCHOST", "")
                                     or "").strip()
+                            if not result["remote_instance_nr"]:
+                                _rd = (export.get("RFCDEST", "")
+                                       or "").strip()
+                                if _rd:
+                                    import re as _re_rd
+                                    _mi = _re_rd.search(
+                                        r'_(\d{2})$', _rd)
+                                    if _mi:
+                                        result["remote_instance_nr"] = (
+                                            _mi.group(1))
                     except Exception:
                         pass
             except ABAPApplicationError as e:
@@ -1209,6 +1225,17 @@ def ping_rfc_destination(node: SAPNode, destination_name: str,
                                     export.get("RFCIPV6ADDR", "")
                                     or export.get("RFCIPADDR", "")
                                     or "").strip()
+                                if not result["remote_instance_nr"]:
+                                    _rd2 = (export.get(
+                                        "RFCDEST", "") or "").strip()
+                                    if _rd2:
+                                        import re as _re2
+                                        _m2 = _re2.search(
+                                            r'_(\d{2})$', _rd2)
+                                        if _m2:
+                                            result[
+                                                "remote_instance_nr"
+                                            ] = _m2.group(1)
                         except Exception:
                             pass
                 else:
