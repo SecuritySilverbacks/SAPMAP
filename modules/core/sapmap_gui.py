@@ -8091,7 +8091,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
             # ---- HTTP destination (Type G/H) ----
             # Phase 1: DEST_CHECK_CONNECTION (ping_ok = HTTP works).
-            # Phase 2: direct RFC logon to ABAP target → profiles/SAP_ALL
+            # Phase 2: HTTP probe target for correct instance_nr.
+            # Phase 3: direct RFC logon → profiles/SAP_ALL
             #          → enables "Create Remote User".
             if (conn.conn_type or "").lower() == "http":
                 print(f"[*] Testing HTTP destination: {dest_name}...")
@@ -8122,27 +8123,81 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     else:
                         print(f"[-] {dest_name}: HTTP connection failed")
 
-                # Phase 2: if we have SecStore creds and the target is
-                # ABAP, try direct RFC logon to check profiles + SAP_ALL.
-                if (conn.secstore_password and conn.rfc_user
-                        and conn.target_sid):
+                # Phase 2: probe target via HTTP for correct instance_nr
+                # and update the node if it was created with wrong info.
+                _probed_inst = ""
+                if conn.http_url and conn.target_sid:
+                    target_node = api.state.get_node(conn.target_sid)
+                    if target_node:
+                        try:
+                            from urllib.parse import urlparse as _up_tc
+                            _p_tc = _up_tc(conn.http_url)
+                            _base_tc = (f"{_p_tc.scheme}://"
+                                        f"{_p_tc.netloc}")
+                            _hi = _discover_sid_http(_base_tc)
+                            if _hi.get("instance_nr"):
+                                _probed_inst = _hi["instance_nr"]
+                                cur_insts = target_node.instance_nrs()
+                                if (cur_insts
+                                        and cur_insts[0] != _probed_inst):
+                                    old = cur_insts[0]
+                                    target_node.instances[0].instance_nr = (
+                                        _probed_inst)
+                                    old_ports = dict(
+                                        target_node.instances[0].ports)
+                                    new_ports = {}
+                                    for p, lbl in old_ports.items():
+                                        if lbl == "dispatcher":
+                                            new_ports[int(f"32{_probed_inst}")] = lbl
+                                        elif lbl == "gateway":
+                                            new_ports[int(f"33{_probed_inst}")] = lbl
+                                        else:
+                                            new_ports[p] = lbl
+                                    target_node.instances[0].ports = (
+                                        new_ports)
+                                    print(f"[*] {conn.target_sid}: "
+                                          f"corrected instance "
+                                          f"{old}→{_probed_inst}")
+                            if _hi.get("ip") and not target_node.ip:
+                                target_node.ip = _hi["ip"]
+                            if (_hi.get("hostname")
+                                    and not target_node.hostname):
+                                target_node.hostname = _hi["hostname"]
+                        except Exception:
+                            pass
+
+                # Phase 3: direct RFC logon to check profiles + SAP_ALL.
+                # Use secstore_password if available, otherwise try
+                # password from target node credentials.
+                rfc_user = conn.rfc_user or ""
+                rfc_pwd = conn.secstore_password or ""
+                if not rfc_pwd and rfc_user and conn.target_sid:
+                    tn = api.state.get_node(conn.target_sid)
+                    if tn:
+                        for tc in tn.credentials:
+                            if (tc.username == rfc_user
+                                    and tc.password):
+                                rfc_pwd = tc.password
+                                break
+                if (rfc_user and rfc_pwd and conn.target_sid):
                     target_node = api.state.get_node(conn.target_sid)
                     if target_node and "ABAP" in (
                             target_node.system_type or "ABAP").upper():
-                        target_inst = (
+                        target_inst = _probed_inst or (
                             (conn.target_instance_nr or "").strip()
                             or (target_node.instance_nrs()[0]
-                                if target_node.instance_nrs() else "00"))
+                                if target_node.instance_nrs()
+                                else "00"))
                         target_client = conn.client or "000"
                         direct_creds = Credentials(
-                            username=conn.rfc_user,
-                            password=conn.secstore_password,
+                            username=rfc_user,
+                            password=rfc_pwd,
                             client=target_client,
                             instance_nr=target_inst,
                         )
                         print(f"[*] {dest_name}: trying direct RFC "
                               f"logon to {conn.target_sid} as "
-                              f"{conn.rfc_user}...")
+                              f"{rfc_user} (inst {target_inst})...")
                         try:
                             if sapmap_rfc.test_connection(
                                     target_node, direct_creds):
@@ -8150,7 +8205,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                 print(f"[+] {dest_name}: RFC logon OK "
                                       f"on {conn.target_sid}")
                                 info = sapmap_rfc.get_direct_user_profiles(
-                                    target_node, conn.rfc_user,
+                                    target_node, rfc_user,
                                     direct_creds)
                                 conn.profiles = info.get("profiles", [])
                                 conn.roles = info.get("roles", [])
@@ -8159,7 +8214,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                 conn.user_detail_error = info.get(
                                     "error", "")
                                 if conn.has_sap_all:
-                                    print(f"[!] {conn.rfc_user}@"
+                                    print(f"[!] {rfc_user}@"
                                           f"{conn.target_sid} has "
                                           f"SAP_ALL — 'Create Remote "
                                           f"User' now available")
@@ -8169,7 +8224,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                 elif conn.profiles or conn.roles:
                                     p_str = ", ".join(
                                         conn.profiles[:5]) or "<none>"
-                                    print(f"[*] {conn.rfc_user}@"
+                                    print(f"[*] {rfc_user}@"
                                           f"{conn.target_sid}: "
                                           f"profiles=[{p_str}]")
                             else:
