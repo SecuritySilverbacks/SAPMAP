@@ -1204,6 +1204,15 @@ def _read_rsectab_via_rfc(node, creds) -> list | None:
 # Categorisation and map integration
 # ---------------------------------------------------------------------------
 
+def _http_url_host(url: str) -> str:
+    """Extract the hostname from an http(s) URL.  Returns '' on failure."""
+    try:
+        from urllib.parse import urlparse
+        return urlparse(url).hostname or ""
+    except Exception:
+        return ""
+
+
 # Regex patterns for parsing IDENT strings
 _RE_RFC_WITH_USER = re.compile(
     r"^/RFC/([A-Za-z0-9_]+)@([A-Z0-9]{3})(?:CLNT(\d{3}))?(?:\.|$)"
@@ -1319,7 +1328,7 @@ def integrate_results(node, state, results: list):
     rfc_entries = [e for e in results
                    if e.get("category") == "rfc" and e.get("password")]
 
-    # --- Enrich existing connections ---
+    # --- Enrich existing connections (Type 3, G and H) ---
     for entry in rfc_entries:
         dest = entry.get("dest_name", "")
         if not dest:
@@ -1327,10 +1336,13 @@ def integrate_results(node, state, results: list):
         for conn in state.get_connections_from(node.sid):
             if conn.destination_name == dest:
                 conn.secstore_password = entry["password"]
-                print(f"[+] SecStore: enriched RFC dest {dest} with password")
+                label = ("HTTP" if conn.conn_type == "http"
+                         else "RFC")
+                print(f"[+] SecStore: enriched {label} dest {dest} "
+                      f"with password")
                 break
 
-    # --- Add credentials to target nodes ---
+    # --- Add credentials to target nodes (Type-3 RFC) ---
     for entry in rfc_entries:
         target_sid = entry.get("target_sid", "")
         target_node = state.get_node(target_sid) if target_sid else None
@@ -1342,8 +1354,6 @@ def integrate_results(node, state, results: list):
         client    = entry.get("rfc_client", "") or "000"
 
         if not rfc_user:
-            # Try to derive user from dest_name for simple /RFC/<dest> patterns
-            # e.g., /RFC/TMSADM@... → user TMSADM
             continue
 
         # Avoid duplicates
@@ -1383,6 +1393,60 @@ def integrate_results(node, state, results: list):
             state.add_connection(conn)
             print(f"[+] SecStore: created RFC connection {node.sid} → "
                   f"{target_sid} via {entry.get('dest_name', '')}")
+
+    # --- Enrich HTTP destinations (Type G / Type H) ---
+    # Type H/G RSECTAB rows have ident /RFC/<DESTNAME> — same cipher, same
+    # decrypt path — but the RSECTAB ident rarely contains the username or
+    # target SID.  Those come from RFCOPTIONS (U= field) parsed earlier
+    # into conn.rfc_user.  Now that secstore_password is set (loop above),
+    # resolve the HTTP connection's target to a known node by hostname
+    # and — for Type H — create credentials there so the RFC-based
+    # exploitation chain can pivot through.
+    for conn in state.get_connections_from(node.sid):
+        if conn.conn_type != "http":
+            continue
+        if not conn.secstore_password or not conn.rfc_user:
+            continue
+        # Already resolved?
+        if conn.target_sid:
+            continue
+        # Extract hostname from http_url
+        _host = _http_url_host(conn.http_url)
+        if not _host:
+            continue
+        target_node = state.find_node_by_host(hostname=_host, ip=_host)
+        if not target_node:
+            continue
+        conn.target_sid = target_node.sid
+        conn.target_host = target_node.hostname or target_node.ip
+        conn.target_ip = target_node.ip
+        print(f"[+] SecStore: resolved HTTP dest {conn.destination_name} "
+              f"→ {target_node.sid} ({_host})")
+
+        # For HTTP destinations with recovered creds, add the user+pw
+        # as an unverified credential on the target node.  This lets
+        # the main exploit chain try RFC logon (especially for Type H
+        # where the HTTP user is often a valid ABAP dialog/service
+        # user).
+        client = conn.client or "000"
+        already = any(
+            c.username.upper() == conn.rfc_user.upper()
+            and c.client == client
+            for c in target_node.credentials
+        )
+        if not already:
+            cred = Credentials(
+                username=conn.rfc_user,
+                password=conn.secstore_password,
+                client=client,
+                instance_nr=(target_node.instance_nrs()[0]
+                             if target_node.instance_nrs() else "00"),
+                verified=False,
+            )
+            target_node.credentials.append(cred)
+            print(f"[+] SecStore: added HTTP-derived credentials "
+                  f"{conn.rfc_user}@{target_node.sid} client {client} "
+                  f"(from {conn.destination_name})")
 
 
 # ---------------------------------------------------------------------------
