@@ -171,3 +171,82 @@ def test_harvester_picks_up_type_g_btp_destination_after_capture():
     assert c["client_secret"] == "theSecret"
     assert "/oauth/token" in c["uaa_url"]
     assert c["region_hint"] == "eu10-004"
+
+
+# ---- secstore integrate_results for HTTP dests ---------------------------
+
+def test_integrate_results_enriches_http_connection():
+    """integrate_results must set secstore_password on Type-G/H
+    connections, not just Type-3."""
+    from sapmap_secstore import integrate_results
+    from sapmap_models import SAPMAPState
+
+    node = SAPNode(sid="S4P", system_type="ABAP",
+                    hostname="s4p", ip="10.0.0.1")
+    state = SAPMAPState()
+    state.add_node(node)
+    conn = _build_rfcdes_conn(
+        node, "MY_HTTP_DEST", "G",
+        "H=java.corp,S=50001,M=/nwa,Q=Y,U=Administrator,T=%_PWD")
+    state.connections.append(conn)
+
+    results = [{"ident": "000 /RFC/MY_HTTP_DEST", "password": "Hunter2!"}]
+    integrate_results(node, state, results)
+
+    assert conn.secstore_password == "Hunter2!"
+
+
+def test_integrate_results_resolves_type_h_target():
+    """For a Type-H HTTP connection pointing at a known ABAP node,
+    integrate_results should resolve target_sid and add credentials
+    on the target node so the RFC chain can pivot through."""
+    from sapmap_secstore import integrate_results
+    from sapmap_models import SAPMAPState
+
+    src = SAPNode(sid="DEV", system_type="ABAP",
+                   hostname="devhost", ip="10.0.0.1")
+    tgt = SAPNode(sid="PRD", system_type="ABAP",
+                   hostname="prdhost", ip="10.0.0.2")
+    state = SAPMAPState()
+    state.add_node(src)
+    state.add_node(tgt)
+
+    conn = _build_rfcdes_conn(
+        src, "PRD_ICF", "H",
+        "H=prdhost,S=8000,M=/sap/bc/srt/rfc,Q=Y,U=RFC_USER,T=%_PWD")
+    state.connections.append(conn)
+
+    results = [{"ident": "000 /RFC/PRD_ICF", "password": "Secret123"}]
+    integrate_results(src, state, results)
+
+    # Connection should be enriched + resolved
+    assert conn.secstore_password == "Secret123"
+    assert conn.target_sid == "PRD"
+    assert conn.target_host == "prdhost"
+
+    # Credentials should be added to the target node
+    assert any(c.username == "RFC_USER" and c.password == "Secret123"
+               for c in tgt.credentials)
+
+
+def test_integrate_results_skips_unresolvable_http_target():
+    """Type-G destination pointing at an unknown host should NOT create
+    spurious credentials or crash — just leave target_sid empty."""
+    from sapmap_secstore import integrate_results
+    from sapmap_models import SAPMAPState
+
+    node = SAPNode(sid="S4P", system_type="ABAP",
+                    hostname="s4p", ip="10.0.0.1")
+    state = SAPMAPState()
+    state.add_node(node)
+
+    conn = _build_rfcdes_conn(
+        node, "UNKNOWN_EXT", "G",
+        "H=mystery.example.com,S=443,M=/api,Q=Y,U=svc_user,T=%_PWD")
+    state.connections.append(conn)
+
+    results = [{"ident": "000 /RFC/UNKNOWN_EXT", "password": "pw123"}]
+    integrate_results(node, state, results)
+
+    assert conn.secstore_password == "pw123"
+    assert conn.target_sid == ""  # not resolved — no node matches
