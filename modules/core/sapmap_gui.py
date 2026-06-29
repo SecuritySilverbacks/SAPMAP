@@ -8343,10 +8343,14 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         target_node.has_critical_finding = True
 
                 # Phase 3: direct RFC logon to check profiles + SAP_ALL.
-                # Use secstore_password if available, otherwise try
-                # password from target node credentials.
+                # Password source priority:
+                #   1. conn.secstore_password (decrypted from RSECTAB)
+                #   2. target node's stored credentials for rfc_user
+                #   3. source node's stored credentials for rfc_user
+                #      (same user often shared across landscape)
                 rfc_user = conn.rfc_user or ""
                 rfc_pwd = conn.secstore_password or ""
+                pwd_source = "secstore" if rfc_pwd else ""
                 if not rfc_pwd and rfc_user and conn.target_sid:
                     tn = api.state.get_node(conn.target_sid)
                     if tn:
@@ -8354,7 +8358,32 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             if (tc.username == rfc_user
                                     and tc.password):
                                 rfc_pwd = tc.password
+                                pwd_source = f"{conn.target_sid} creds"
                                 break
+                if not rfc_pwd and rfc_user:
+                    for tc in node.credentials:
+                        if (tc.username == rfc_user
+                                and tc.password):
+                            rfc_pwd = tc.password
+                            pwd_source = f"{node.sid} creds"
+                            break
+                if not rfc_user:
+                    print(f"[!] {dest_name}: no rfc_user on "
+                          f"connection — 'Create Remote User' "
+                          f"button needs a username")
+                elif not conn.target_sid:
+                    print(f"[!] {dest_name}: target SID unresolved "
+                          f"— 'Create Remote User' button needs a "
+                          f"target node")
+                elif not rfc_pwd:
+                    print(f"[!] {dest_name}: no password for "
+                          f"{rfc_user} — 'Create Remote User' "
+                          f"button needs a password (run SecStore "
+                          f"extraction or add {rfc_user} to "
+                          f"{conn.target_sid} credentials)")
+                else:
+                    print(f"[*] {dest_name}: password sourced from "
+                          f"{pwd_source}")
                 if (rfc_user and rfc_pwd and conn.target_sid):
                     target_node = api.state.get_node(conn.target_sid)
                     if target_node and "ABAP" in (
