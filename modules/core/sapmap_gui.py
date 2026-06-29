@@ -7576,6 +7576,17 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 # Detect self-referencing RFC destinations
                 th = (conn.target_host or '').strip().lower()
                 ti = (conn.target_ip or '').strip()
+                # Type H/G connections don't populate target_host/target_ip —
+                # the host lives inside http_url.  Extract it so the self-
+                # check doesn't default to is_self=True on empty strings.
+                if not th and not ti and conn.conn_type == "http" and conn.http_url:
+                    try:
+                        from urllib.parse import urlparse as _urlparse
+                        _parsed_host = (_urlparse(conn.http_url).hostname or "").strip()
+                        th = _parsed_host.lower()
+                        ti = _parsed_host
+                    except Exception:
+                        pass
                 own_names = {s.lower() for s in [
                     node.hostname, node.ip, 'localhost', '127.0.0.1',
                 ] if s}
