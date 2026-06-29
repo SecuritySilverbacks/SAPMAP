@@ -30,21 +30,84 @@ import sapmap_secstore
 import sapmap_state as state_mgr
 import sapmap_findings
 
+def _discover_sid_http(base_url: str) -> str:
+    """Discover SAP SID via unauthenticated HTTP probes.
+
+    Tries three ICM endpoints in order:
+    1. /sap/public/info  — SOAP RFC_SYSTEM_INFO (contains RFCSYSID)
+    2. /sap/             — ICF 404 error page mentions SID in text
+    3. /sap/bc/gui/sap/its/webgui — logon form has read-only sysid field
+    """
+    import re
+    import ssl
+    import urllib.request
+    import urllib.error
+
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    base = base_url.rstrip("/")
+
+    def _get(path, max_bytes=16384):
+        req = urllib.request.Request(f"{base}{path}", method="GET")
+        req.add_header("User-Agent", "SAPMAP/1.0")
+        try:
+            with urllib.request.urlopen(req, timeout=5, context=ctx) as r:
+                return r.read(max_bytes).decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as he:
+            return he.read(max_bytes).decode("utf-8", errors="replace")
+
+    # Method 1: /sap/public/info
+    try:
+        body = _get("/sap/public/info")
+        if body:
+            m = re.search(r'<RFCSYSID>(\w{3})</RFCSYSID>', body)
+            if not m:
+                m = re.search(r'<SAPSID>(\w{3})</SAPSID>', body)
+            if m:
+                return m.group(1)
+    except Exception:
+        pass
+
+    # Method 2: /sap/ error page
+    try:
+        body = _get("/sap/")
+        if body:
+            m = re.search(r'in system\s+(\w{3})\s', body)
+            if m:
+                return m.group(1).strip()
+            m = re.search(r'Error Code:.*?-i\w+_(\w{3})_\d{2}', body)
+            if m:
+                return m.group(1)
+    except Exception:
+        pass
+
+    # Method 3: webgui logon page
+    try:
+        body = _get("/sap/bc/gui/sap/its/webgui", max_bytes=65536)
+        if body:
+            m = re.search(r'id="sysid"[^>]*value="(\w{3})"', body)
+            if m:
+                return m.group(1)
+    except Exception:
+        pass
+
+    return ""
+
+
 def _derive_sid(destination_name: str, host: str) -> str:
     """Derive a SID from an RFC destination name or hostname.
 
-    Common patterns: DEST_SID, SID_DEST, PREFIX_SID_SUFFIX.
-    Falls back to first 3 chars of hostname uppercased.
+    Unreliable heuristic — only used as a last resort for Type-3 RFC
+    destinations when DEST_CHECK_CONNECTION didn't return a SID.
+    HTTP destinations should use _discover_sid_http() instead.
     """
     import re
     name = destination_name.upper().strip()
-    # Try to extract a 3-char alphanumeric segment that looks like a SID
-    # Skip common prefixes: SAP, RFC, SM_, SAPMAP_, SAPHOUND_
     cleaned = re.sub(r'^(SAPMAP_|SAPHOUND_|SAP_|RFC_|SM_)', '', name)
     parts = re.split(r'[_\-]', cleaned)
     skip = {'TO', 'IN', 'OF', 'ON', 'AT', 'BY', 'CLNT', 'DEST',
             'CONN', 'TEST', 'PROD', 'DEV', 'QAS'}
-    # Prefer 3-char segments first
     for p in parts:
         p = p.strip()
         if len(p) == 3 and p.isalnum() and not p.isdigit() and p not in skip:
@@ -53,14 +116,12 @@ def _derive_sid(destination_name: str, host: str) -> str:
         p = p.strip()
         if 2 <= len(p) <= 4 and p.isalnum() and not p.isdigit() and p not in skip:
             return p[:3]
-    # Try to extract a 3-char SID from longer segments (e.g. S4HCLNT001)
     for p in parts:
         p = p.strip()
         if len(p) > 4:
             candidate = p[:3]
             if candidate.isalnum() and not candidate.isdigit():
                 return candidate
-    # Fallback: use host
     h = host.upper().replace('.', '_').replace('-', '_')
     parts = h.split('_')
     for p in parts:
@@ -7733,10 +7794,21 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
                     # 3. No existing node — use SID from ping or derive
                     if not dest_sid:
-                        dest_sid = _derive_sid(
-                            conn.destination_name, host)
-                        print(f"[*] Could not get remote SID, "
-                              f"using derived: {dest_sid}")
+                        if conn.conn_type == "http" and conn.http_url:
+                            from urllib.parse import urlparse as _up_sid
+                            _ps = _up_sid(conn.http_url)
+                            _base = f"{_ps.scheme}://{_ps.netloc}"
+                            print(f"[*] Probing {_ps.netloc} for SID "
+                                  f"via HTTP...")
+                            dest_sid = _discover_sid_http(_base)
+                            if dest_sid:
+                                print(f"[+] Discovered SID via HTTP "
+                                      f"probe: {dest_sid}")
+                        if not dest_sid:
+                            dest_sid = _derive_sid(
+                                conn.destination_name, host)
+                            print(f"[*] Could not get remote SID, "
+                                  f"using derived: {dest_sid}")
 
                     # Check if SID already on map but different host
                     existing_sid_node = api.state.get_node(dest_sid)
