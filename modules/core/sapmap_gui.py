@@ -7809,11 +7809,29 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     conn.ping_ok = True
                     conn.tested = True
 
-                    # HTTP connections: probe target for SID + instance
-                    # BEFORE any node matching, so we have correct values.
+                    # Use instance_nr from ping (RFCDEST field) when
+                    # available — more reliable than the "00" default.
+                    ping_inst = ping.get(
+                        "remote_instance_nr", "").strip()
+                    if ping_inst:
+                        inst = ping_inst
+                        key = (host.lower(), inst)
+
+                    # Build _http_info from ping results so
+                    # _correct_node_from_http works on existing nodes.
                     _http_info = {}
+                    if ping_inst:
+                        _http_info["instance_nr"] = ping_inst
+                    if remote_ip:
+                        _http_info["ip"] = remote_ip
+                    if remote_host:
+                        _http_info["hostname"] = remote_host
+
+                    # For HTTP connections without instance from ping,
+                    # fall back to direct HTTP probe.
                     if (conn.conn_type == "http"
-                            and conn.http_url):
+                            and conn.http_url
+                            and not ping_inst):
                         try:
                             from urllib.parse import (
                                 urlparse as _up_early)
@@ -7821,28 +7839,22 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             _base_e = (f"{_pe.scheme}://"
                                        f"{_pe.netloc}")
                             print(f"[*] Probing {_pe.netloc} for "
-                                  f"SID via HTTP...")
-                            _http_info = _discover_sid_http(_base_e)
-                            if _http_info.get("sid"):
-                                if not dest_sid:
-                                    dest_sid = _http_info["sid"]
-                                extra = ""
-                                if _http_info.get("instance_nr"):
-                                    extra += (f" inst="
-                                              f"{_http_info['instance_nr']}")
-                                print(f"[+] Discovered SID via HTTP "
-                                      f"probe: {_http_info['sid']}"
-                                      f"{extra}")
-                            if _http_info.get("instance_nr"):
-                                inst = _http_info["instance_nr"]
+                                  f"instance via HTTP...")
+                            _hi = _discover_sid_http(_base_e)
+                            if _hi.get("sid") and not dest_sid:
+                                dest_sid = _hi["sid"]
+                            if _hi.get("instance_nr"):
+                                inst = _hi["instance_nr"]
                                 key = (host.lower(), inst)
-                            if _http_info.get("ip"):
-                                if not remote_ip:
-                                    host = _http_info["ip"]
-                                    conn.target_ip = host
-                                    key = (host.lower(), inst)
-                            if _http_info.get("hostname"):
-                                remote_host = _http_info["hostname"]
+                                _http_info["instance_nr"] = inst
+                            if _hi.get("ip") and not remote_ip:
+                                host = _hi["ip"]
+                                conn.target_ip = host
+                                key = (host.lower(), inst)
+                                _http_info["ip"] = host
+                            if _hi.get("hostname"):
+                                remote_host = _hi["hostname"]
+                                _http_info["hostname"] = remote_host
                         except Exception:
                             pass
 
@@ -8172,27 +8184,32 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     else:
                         print(f"[-] {dest_name}: HTTP connection failed")
 
-                # Phase 2: probe target via HTTP for SID + instance_nr.
-                # Also discovers target_sid when Retrieve RFCs didn't.
+                # Phase 2: discover target SID + instance via RFC ping
+                # (DEST_CHECK_CONNECTION returns RFCDEST with instance).
                 _probed_inst = ""
                 _hi = {}
-                if conn.http_url:
-                    try:
-                        from urllib.parse import urlparse as _up_tc
-                        _p_tc = _up_tc(conn.http_url)
-                        _base_tc = (f"{_p_tc.scheme}://"
-                                    f"{_p_tc.netloc}")
-                        _hi = _discover_sid_http(_base_tc)
-                        if _hi.get("instance_nr"):
-                            _probed_inst = _hi["instance_nr"]
-                        if not conn.target_sid and _hi.get("sid"):
-                            tgt = api.state.get_node(_hi["sid"])
-                            if tgt:
-                                conn.target_sid = _hi["sid"]
-                                print(f"[*] {dest_name}: resolved "
-                                      f"target → {conn.target_sid}")
-                    except Exception:
-                        pass
+                try:
+                    _ping2 = sapmap_rfc.ping_rfc_destination(
+                        node, dest_name, creds)
+                    _pi = _ping2.get(
+                        "remote_instance_nr", "").strip()
+                    if _pi:
+                        _probed_inst = _pi
+                        _hi["instance_nr"] = _pi
+                    if _ping2.get("remote_ip"):
+                        _hi["ip"] = _ping2["remote_ip"].strip()
+                    if _ping2.get("remote_hostname"):
+                        _hi["hostname"] = (
+                            _ping2["remote_hostname"].strip())
+                    _ps = _ping2.get("remote_sid", "").strip()
+                    if _ps and not conn.target_sid:
+                        tgt = api.state.get_node(_ps)
+                        if tgt:
+                            conn.target_sid = _ps
+                            print(f"[*] {dest_name}: resolved "
+                                  f"target → {conn.target_sid}")
+                except Exception:
+                    pass
                 if conn.target_sid:
                     target_node = api.state.get_node(conn.target_sid)
                     if target_node:
