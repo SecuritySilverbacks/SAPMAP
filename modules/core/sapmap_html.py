@@ -6544,6 +6544,14 @@ function showConnInfo(e, connIdx) {
     <div class="info-section">
       <div class="info-row"><span class="info-label">Risk:</span><span class="info-val"><span class="risk-badge ${riskClass}">${risk}</span></span></div>
     </div>
+    ${(isHttp && conn.tested && conn.ping_ok && !conn.has_sap_all) ? (() => {
+      const reasons = [];
+      if (!conn.rfc_user) reasons.push('no RFC user on destination');
+      if (!conn.target_sid) reasons.push('target SID unresolved');
+      if (conn.rfc_user && conn.target_sid && !conn.secstore_password)
+        reasons.push(`no password for <strong>${escHtml(conn.rfc_user)}</strong> — run SecStore extraction, or add ${escHtml(conn.rfc_user)} credentials on ${escHtml(conn.target_sid)}`);
+      return reasons.length ? `<div class="info-section" style="color:#d29922;font-size:11px"><strong>Create Remote User unavailable:</strong> ${reasons.join('; ')}</div>` : '';
+    })() : ''}
     <div style="text-align:right;margin-top:8px;display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">
       ${(!isTypeT && conn.logon_successful && conn.has_sap_all && conn.target_sid) ?
         `<button class="btn" style="background:#b33;color:#fff" onclick="createUserOnTarget('${escHtml(conn.source_sid)}','${escHtml(conn.destination_name)}','${escHtml(conn.target_sid)}')">Create Remote User</button>` : ''}
