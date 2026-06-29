@@ -30,95 +30,131 @@ import sapmap_secstore
 import sapmap_state as state_mgr
 import sapmap_findings
 
+_http_sid_cache: dict = {}
+
+
 def _discover_sid_http(base_url: str) -> dict:
     """Discover SAP system info via unauthenticated HTTP probes.
 
     Returns dict with keys: sid, instance_nr, hostname, ip.
     All values default to "" when not discovered.
 
-    Tries three ICM endpoints in order:
-    1. /sap/public/info  — SOAP RFC_SYSTEM_INFO (richest: SID, inst, host, IP)
-    2. /sap/             — ICF 404 error page (SID + instance from error code)
+    Probes three ICM endpoints concurrently (each with a short 3s
+    timeout) and merges what each returned:
+    1. /sap/public/info          — SOAP RFC_SYSTEM_INFO (richest)
+    2. /sap/                     — ICF 404 error page
     3. /sap/bc/gui/sap/its/webgui — logon form (SID only)
+
+    Results are cached per (host, port) so sibling destinations to the
+    same target don't re-probe.
     """
     import re
     import ssl
+    import threading as _t
     import urllib.request
     import urllib.error
+
+    base = base_url.rstrip("/")
+    cache_key = base.lower()
+    cached = _http_sid_cache.get(cache_key)
+    if cached is not None:
+        return dict(cached)
 
     info = {"sid": "", "instance_nr": "", "hostname": "", "ip": ""}
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
-    base = base_url.rstrip("/")
 
-    def _get(path, max_bytes=16384):
+    def _get(path, max_bytes=16384, timeout=3):
         req = urllib.request.Request(f"{base}{path}", method="GET")
         req.add_header("User-Agent", "SAPMAP/1.0")
         try:
-            with urllib.request.urlopen(req, timeout=5, context=ctx) as r:
-                return r.read(max_bytes).decode("utf-8", errors="replace")
+            with urllib.request.urlopen(
+                    req, timeout=timeout, context=ctx) as r:
+                return r.read(max_bytes).decode(
+                    "utf-8", errors="replace"), ""
         except urllib.error.HTTPError as he:
-            return he.read(max_bytes).decode("utf-8", errors="replace")
+            try:
+                return he.read(max_bytes).decode(
+                    "utf-8", errors="replace"), ""
+            except Exception as e:
+                return "", f"{type(e).__name__}: {e}"
+        except Exception as e:
+            return "", f"{type(e).__name__}: {e}"
 
-    # Method 1: /sap/public/info — SOAP RFC_SYSTEM_INFO
-    try:
-        body = _get("/sap/public/info")
-        if body:
-            m = re.search(r'<RFCSYSID>(\w{3})</RFCSYSID>', body)
-            if not m:
-                m = re.search(r'<SAPSID>(\w{3})</SAPSID>', body)
-            if m:
-                info["sid"] = m.group(1)
-            # RFCDEST = HOSTNAME_SID_NN → instance number
-            m = re.search(r'<RFCDEST>[^<]*_(\d{2})</RFCDEST>', body)
-            if m:
-                info["instance_nr"] = m.group(1)
-            m = re.search(r'<RFCHOST2?>([^<]+)</RFCHOST2?>', body)
-            if m:
-                info["hostname"] = m.group(1).strip()
-            m = re.search(
-                r'<RFCIPV6ADDR>([^<]+)</RFCIPV6ADDR>', body)
-            if not m:
-                m = re.search(
-                    r'<RFCIPADDR>([^<]+)</RFCIPADDR>', body)
-            if m:
-                info["ip"] = m.group(1).strip()
-            if info["sid"]:
-                return info
-    except Exception:
-        pass
+    results = {}
 
-    # Method 2: /sap/ error page
-    try:
-        body = _get("/sap/")
+    def _probe_public_info():
+        body, err = _get("/sap/public/info")
+        results["public_info"] = (body, err)
+
+    def _probe_root():
+        body, err = _get("/sap/")
+        results["root"] = (body, err)
+
+    def _probe_webgui():
+        body, err = _get(
+            "/sap/bc/gui/sap/its/webgui", max_bytes=65536)
+        results["webgui"] = (body, err)
+
+    threads = [
+        _t.Thread(target=_probe_public_info, daemon=True),
+        _t.Thread(target=_probe_root, daemon=True),
+        _t.Thread(target=_probe_webgui, daemon=True),
+    ]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join(timeout=4)
+
+    body, err = results.get("public_info", ("", "no result"))
+    if body:
+        m = re.search(r'<RFCSYSID>(\w{3})</RFCSYSID>', body)
+        if not m:
+            m = re.search(r'<SAPSID>(\w{3})</SAPSID>', body)
+        if m:
+            info["sid"] = m.group(1)
+        m = re.search(r'<RFCDEST>[^<]*_(\d{2})</RFCDEST>', body)
+        if m:
+            info["instance_nr"] = m.group(1)
+        m = re.search(r'<RFCHOST2?>([^<]+)</RFCHOST2?>', body)
+        if m:
+            info["hostname"] = m.group(1).strip()
+        m = re.search(r'<RFCIPV6ADDR>([^<]+)</RFCIPV6ADDR>', body)
+        if not m:
+            m = re.search(r'<RFCIPADDR>([^<]+)</RFCIPADDR>', body)
+        if m:
+            info["ip"] = m.group(1).strip()
+
+    if not info["sid"] or not info["instance_nr"]:
+        body, _ = results.get("root", ("", ""))
         if body:
-            m = re.search(r'in system\s+(\w{3})\s', body)
-            if m:
-                info["sid"] = m.group(1).strip()
-            # Error code: iHOSTNAME_SID_NN
+            if not info["sid"]:
+                m = re.search(r'in system\s+(\w{3})\s', body)
+                if m:
+                    info["sid"] = m.group(1).strip()
             m = re.search(
                 r'Error Code:.*?-i\w+_(\w{3})_(\d{2})', body)
             if m:
                 if not info["sid"]:
                     info["sid"] = m.group(1)
-                info["instance_nr"] = m.group(2)
-            if info["sid"]:
-                return info
-    except Exception:
-        pass
+                if not info["instance_nr"]:
+                    info["instance_nr"] = m.group(2)
 
-    # Method 3: webgui logon page (SID only)
-    try:
-        body = _get("/sap/bc/gui/sap/its/webgui", max_bytes=65536)
+    if not info["sid"]:
+        body, _ = results.get("webgui", ("", ""))
         if body:
             m = re.search(r'id="sysid"[^>]*value="(\w{3})"', body)
             if m:
                 info["sid"] = m.group(1)
-                return info
-    except Exception:
-        pass
 
+    if not info["sid"] and not info["instance_nr"]:
+        errs = [f"{k}: {v[1]}" for k, v in results.items() if v[1]]
+        if errs:
+            print(f"[!] HTTP probe of {base} failed: "
+                  f"{'; '.join(errs[:2])}")
+
+    _http_sid_cache[cache_key] = dict(info)
     return info
 
 

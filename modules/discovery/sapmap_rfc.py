@@ -1121,12 +1121,9 @@ def ping_rfc_destination(node: SAPNode, destination_name: str,
                         "SYSID", "").strip()
                     result["remote_hostname"] = props.get(
                         "RFCHOST", "").strip()
-                    rfcdest = props.get("RFCDEST", "").strip()
-                    if rfcdest:
-                        import re as _re_rfcdest
-                        _md = _re_rfcdest.search(r'_(\d{2})$', rfcdest)
-                        if _md:
-                            result["remote_instance_nr"] = _md.group(1)
+                    # CONNECTION_PROPERTIES doesn't carry RFCDEST —
+                    # instance_nr comes from RFCSI_EXPORT below (Type-3
+                    # RFC only) or from the direct HTTP probe (HTTP).
 
                 # Get IP via RFC_GET_SYSTEM_INFO with DESTINATION
                 # (RFCSI_EXPORT contains RFCIPADDR; CONNECTION_PROPERTIES does not).
