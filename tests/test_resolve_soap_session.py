@@ -109,6 +109,52 @@ def test_resolve_returns_none_when_gateway_reachable(monkeypatch):
     assert route is None
 
 
+def test_route_accepts_has_sap_all_without_soap_rfc_verified(monkeypatch):
+    """Connections proven via successful BAPI user creation (has_sap_all
+    + logon_successful) must also count as a viable SOAP route, even
+    when soap_rfc_verified is False — that's the shape of state saved
+    in an earlier session that pre-dates the _mark_connection_pwned
+    soap_rfc_verified bump.  Without this fallback, AutoPwn Phase 3
+    against an HTTP-only target whose connection was created in an
+    older SAPMAP version falls back to pyrfc and hangs on 3340.
+
+    Reproduced live with W74: Test Connection succeeded against
+    to_ABAP, Create Remote User minted SAPMAP00, soap_rfc_verified
+    stayed False on the saved conn, AutoPwn enrichment phase hung
+    60s on RFC_COMMUNICATION_FAILURE before erroring."""
+    from sapmap_models import (
+        InstanceInfo, RFCConnection, SAPMAPState, SAPNode)
+    state = SAPMAPState()
+    state.add_node(SAPNode(
+        sid="S4H", system_type="ABAP",
+        hostname="s4hanadev", ip="10.0.0.1"))
+    target = SAPNode(
+        sid="W74", system_type="ABAP",
+        hostname="WINWAS74", ip="192.168.2.29",
+        instances=[InstanceInfo(
+            instance_nr="40", ip="192.168.2.29",
+            ports={8410: "icm-http"})])
+    state.add_node(target)
+    state.connections.append(RFCConnection(
+        source_sid="S4H", source_host="s4hanadev",
+        destination_name="to_ABAP", conn_type="http",
+        http_url="http://192.168.2.29:8410",
+        target_sid="W74", rfc_user="SAPADM",
+        secstore_password="siroj1978",
+        has_sap_all=True, logon_successful=True,
+        soap_rfc_verified=False,
+    ))
+    monkeypatch.setattr(
+        "sapmap_exploit._gateway_port_reachable",
+        lambda node, timeout=2.0: False)
+
+    sess, route = resolve_soap_session_for_node(state, target)
+    assert sess is not None, (
+        "broadened resolver must accept has_sap_all + logon_successful "
+        "as proof of SOAP route, even without the soap_rfc_verified flag")
+    assert route["via_destination"] == "to_ABAP"
+
+
 def test_resolve_returns_none_when_no_verified_destination():
     """No HTTP destination targets this node (or destinations exist
     but Test Connection hasn't verified them yet, or no SecStore

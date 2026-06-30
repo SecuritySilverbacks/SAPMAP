@@ -386,7 +386,21 @@ def find_soap_rfc_route_for_node(state, target_node) -> dict:
             continue
         if (conn.conn_type or "").lower() != "http":
             continue
-        if not getattr(conn, "soap_rfc_verified", False):
+        # Accept the connection as a viable SOAP route if EITHER
+        # Test Connection has explicitly verified SOAP-RFC works
+        # (soap_rfc_verified) OR we've already exercised the chain
+        # via successful user creation through it (has_sap_all +
+        # logon_successful).  Without the second branch, state
+        # saved from an older session that pre-dates the
+        # _mark_connection_pwned soap_rfc_verified bump is invisible
+        # to the route resolver — AutoPwn would then fall through
+        # to pyrfc and hang on the firewalled gateway.
+        proven_soap = (
+            getattr(conn, "soap_rfc_verified", False)
+            or (getattr(conn, "has_sap_all", False)
+                and getattr(conn, "logon_successful", False))
+        )
+        if not proven_soap:
             continue
         if not (conn.rfc_user and conn.secstore_password):
             continue
@@ -4513,8 +4527,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
             return json.dumps({"error": f"Node {sid} not found"})
 
         def _run():
+            _oa_sess, _ = resolve_soap_session_for_node(
+                api.state, node)
             try:
-                profiles = read_oa2c_profiles(node)
+                profiles = read_oa2c_profiles(
+                    node, soap_session=_oa_sess)
             except Exception as e:
                 print(f"[-] {sid}: OA2C read failed — {e!s}")
                 return
@@ -4556,7 +4573,10 @@ def create_app(api: SAPMAPApi) -> Bottle:
         is_abap = "ABAP" in (node.system_type or "").upper()
         if is_abap:
             try:
-                profiles = read_oa2c_profiles(node)
+                _oa_sess, _ = resolve_soap_session_for_node(
+                    api.state, node)
+                profiles = read_oa2c_profiles(
+                    node, soap_session=_oa_sess)
                 node.oauth2_profiles = profiles
             except Exception as e:
                 print(f"[-] {sid}: implicit OA2C read failed — {e!s}.  "
