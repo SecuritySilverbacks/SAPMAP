@@ -1091,6 +1091,7 @@ body {
     <div class="ctx-item">&#9881; Settings</div>
     <div class="ctx-sub">
       <div class="ctx-item" data-action="set_type">&#9881; Set System Type</div>
+      <div class="ctx-item" data-action="set_sid">&#9881; Set SID</div>
       <div class="ctx-item" data-action="set_db_type">&#9881; Set DB Type</div>
       <div class="ctx-item" data-action="set_os_type">&#9881; Set OS Type</div>
       <div class="ctx-item" data-action="set_instance_nr">&#9881; Set Instance Number</div>
@@ -1665,6 +1666,28 @@ body {
     <div class="form-actions">
       <button class="btn btn-primary" onclick="saveOsType()">Save</button>
       <button class="btn" onclick="closeModal('os-type-modal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Set SID Modal -->
+<div class="modal-overlay" id="sid-modal">
+  <div class="modal" onkeydown="if(event.key==='Enter'){event.preventDefault();saveSid();}">
+    <h3>&#9881; Set SAP System ID (SID)</h3>
+    <div id="sid-system-info" style="font-size:12px;color:#8b949e;margin-bottom:12px"></div>
+    <div class="form-row">
+      <label>SID (3 alphanumeric characters, uppercase)</label>
+      <input type="text" id="sid-input" maxlength="3" placeholder="PRD" style="width:100px;text-align:center;font-family:monospace;text-transform:uppercase"
+             oninput="this.value=this.value.toUpperCase().replace(/[^A-Z0-9]/g,'')">
+      <span style="font-size:10px;color:#484f58;margin-top:2px;display:block">
+        Used to identify the system across all RFC destinations, connections, credentials, forged
+        tickets and created users.  Renaming a placeholder Wxx / UNK_&lt;ip&gt; SID to the real one
+        rewires every reference automatically.
+      </span>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-primary" onclick="saveSid()">Save</button>
+      <button class="btn" onclick="closeModal('sid-modal')">Cancel</button>
     </div>
   </div>
 </div>
@@ -4298,6 +4321,7 @@ function showCtxMenu(e, sid) {
       return hasViableRule && hasToken && exp !== 'blocked';
     })(),
     'set_type':         true,                       // always available
+    'set_sid':          true,                       // always available
     'set_db_type':      true,                       // always available
     'set_os_type':      true,                       // always available
     'set_instance_nr':  true,                       // always available
@@ -6192,6 +6216,7 @@ async function ctxAction(action) {
       break;
     }
     case 'set_type': showTypeModal(sid); break;
+    case 'set_sid': showSidModal(sid); break;
     case 'set_db_type': showDbTypeModal(sid); break;
     case 'set_os_type': showOsTypeModal(sid); break;
     case 'set_instance_nr': showInstanceNrModal(sid); break;
@@ -8713,6 +8738,35 @@ async function saveOsType() {
   closeModal('os-type-modal');
   startPolling();
 }
+function showSidModal(sid) {
+  document.getElementById('sid-system-info').textContent =
+    'Current: ' + sid;
+  document.getElementById('sid-input').value = sid;
+  document.getElementById('sid-modal').classList.add('visible');
+  const input = document.getElementById('sid-input');
+  input.focus();
+  input.select();
+}
+async function saveSid() {
+  const oldSid = selectedNodeSid;
+  if (!oldSid) return;
+  const raw = (document.getElementById('sid-input').value || '').trim().toUpperCase();
+  if (!/^[A-Z0-9]{3}$/.test(raw)) {
+    alert('SID must be exactly three alphanumeric characters (uppercase), e.g. PRD.');
+    return;
+  }
+  if (raw === oldSid) { closeModal('sid-modal'); return; }
+  if ((mapState.nodes || {})[raw]) {
+    alert('A system with SID ' + raw + ' already exists on the map. Choose a different SID or delete the existing one first.');
+    return;
+  }
+  const r = await api('POST', `node/${oldSid}/set_sid`, { new_sid: raw });
+  if (r && r.error) { alert('Set SID failed: ' + r.error); return; }
+  selectedNodeSid = raw;
+  closeModal('sid-modal');
+  startPolling();
+}
+
 function showInstanceNrModal(sid) {
   const n = (mapState.nodes || {})[sid];
   const cur = (n && n.instances && n.instances.length) ? n.instances[0].instance_nr : '';
