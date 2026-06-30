@@ -8526,29 +8526,32 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         )
 
                         # Phase 3a: skip direct RFC entirely if the
-                        # dispatcher port is unreachable from this host
-                        # (firewalled landscape — exactly the case Type-H
-                        # HTTP destinations exist to solve).  Saves a
-                        # 60-90s pyrfc TCP retry storm.
-                        dispatcher_port = int(f"32{target_inst}")
-                        dispatcher_host = (
+                        # gateway port (sapgw<NN> = 33NN) is unreachable
+                        # from this host.  External RFC clients connect
+                        # to the GATEWAY, not the dispatcher (32NN —
+                        # that's the SAPGUI/DIAG port).  Saves a 60-90s
+                        # pyrfc TCP retry storm on firewalled landscapes
+                        # — the exact case Type-G/H HTTP destinations
+                        # exist to solve.
+                        gateway_port = int(f"33{target_inst}")
+                        gateway_host = (
                             target_node.ip or target_node.hostname
                             or "")
                         skip_direct = False
-                        if dispatcher_host:
+                        if gateway_host:
                             import socket as _sck
                             sk = _sck.socket(
                                 _sck.AF_INET, _sck.SOCK_STREAM)
                             sk.settimeout(2.0)
                             try:
-                                sk.connect((dispatcher_host,
-                                            dispatcher_port))
+                                sk.connect((gateway_host,
+                                            gateway_port))
                                 sk.close()
                             except Exception:
                                 skip_direct = True
-                                print(f"[*] {dest_name}: dispatcher "
-                                      f"{dispatcher_host}:"
-                                      f"{dispatcher_port} unreachable "
+                                print(f"[*] {dest_name}: gateway "
+                                      f"{gateway_host}:"
+                                      f"{gateway_port} unreachable "
                                       f"— skipping direct RFC, will "
                                       f"use SOAP-RFC")
 
