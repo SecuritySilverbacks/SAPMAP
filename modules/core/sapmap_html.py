@@ -1857,6 +1857,7 @@ body {
         <select id="term-method" style="width:100%">
           <option value="gateway">Gateway (unauthenticated)</option>
           <option value="sxpg">SXPG (via SAP_ALL user)</option>
+          <option value="soap_rfc" id="term-method-soap-rfc">SXPG over SOAP-RFC (HTTP only — for firewalled gateway)</option>
           <option value="cve_31324">CVE-2025-31324 (Java unauth)</option>
           <option value="winlpe_system" id="term-method-winlpe">&#128293; NT AUTHORITY\SYSTEM (via Windows LPE)</option>
           <option value="linuxlpe_root" id="term-method-linuxlpe">&#128293; root (via Linux LPE)</option>
