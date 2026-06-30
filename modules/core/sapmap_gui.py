@@ -7064,7 +7064,15 @@ def create_app(api: SAPMAPApi) -> Bottle:
                       f"STRUSTSSO2 discovery")
                 return
             from sapmap_models import TrustRelation
-            entries = sapmap_rfc.retrieve_strustsso2_trust(node, creds)
+            _strust_sess2, _ = resolve_soap_session_for_node(
+                api.state, node)
+            if _strust_sess2 is not None:
+                entries = (
+                    sapmap_rfc.retrieve_strustsso2_trust_via_soap(
+                        node, _strust_sess2))
+            else:
+                entries = sapmap_rfc.retrieve_strustsso2_trust(
+                    node, creds)
 
             # Build lookup of known SAPSYS cert DNs across the
             # landscape so we can resolve issuer_sid where possible.
@@ -7295,8 +7303,17 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     return
                 from sapmap_models import TrustRelation
                 try:
-                    entries = sapmap_rfc.retrieve_strustsso2_trust(
-                        node, creds)
+                    _strust_sess, _ = resolve_soap_session_for_node(
+                        api.state, node)
+                    if _strust_sess is not None:
+                        entries = (
+                            sapmap_rfc.
+                            retrieve_strustsso2_trust_via_soap(
+                                node, _strust_sess))
+                    else:
+                        entries = (
+                            sapmap_rfc.retrieve_strustsso2_trust(
+                                node, creds))
                 except Exception as e:
                     print(f"[-] {sid}: STRUSTSSO2 read failed: {e}")
                     entries = []

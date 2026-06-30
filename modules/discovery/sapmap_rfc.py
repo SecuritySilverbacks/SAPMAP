@@ -1780,6 +1780,79 @@ def retrieve_rfcsysacl(node: SAPNode, creds: Credentials = None) -> list:
 # Retrieve STRUSTSSO2 trust list — which issuer PSEs this system trusts
 # ---------------------------------------------------------------------------
 
+def retrieve_strustsso2_trust_via_soap(node: SAPNode,
+                                        soap_session) -> list:
+    """SOAP-RFC variant of retrieve_strustsso2_trust for HTTP-only
+    targets.
+
+    Covers just the system-level trust tables (TWPSSO2ACL, USRSYSACL,
+    TWPSSOAPLCT) — the ones that matter for ticket-forgery analysis.
+    Skips DDIF_FIELDINFO_GET (no SOAP wrapper) and uses a static
+    column list per known kernel.  User-level paths (USREXTID, USRACL)
+    and the SSF FM probe are left out: they're intelligence-only and
+    not worth a one-shot SOAP envelope for each.  Operator who wants
+    them runs against a target with an open gateway.
+
+    Same return shape as retrieve_strustsso2_trust so the GUI's
+    trust-graph builder doesn't care which transport ran.
+    """
+    print(f"[*] {node.sid}: STRUSTSSO2 discovery via SOAP-RFC (system "
+          f"trust tables only; user-level paths skipped)")
+    entries = []
+    seen_keys = set()
+
+    # Static columns per kernel-version — DDIF discovery isn't
+    # available over SOAP yet, so we hard-code the most common
+    # signature shared by NW 7.40/7.50/7.54 + S/4 2020+.
+    _SOAP_TRUST_TABLES = {
+        "TWPSSO2ACL":  ["TRUSTSY", "TRUSTCL", "TRUSTSUBJ",
+                         "TRUSTISS", "SERNO"],
+        "USRSYSACL":   ["TRUSTSY", "TRUSTCL", "TRUSTSUBJ",
+                         "TRUSTISS", "SERNO"],
+        "TWPSSOAPLCT": ["TRUSTSY", "TRUSTCL", "TRUSTSUBJ",
+                         "TRUSTISS", "SERNO"],
+    }
+    for tbl, fields in _SOAP_TRUST_TABLES.items():
+        try:
+            r = soap_session.read_table(
+                tbl, fields=fields, max_rows=500)
+        except Exception as e:
+            print(f"[-] {node.sid}: {tbl} SOAP read raised: {e}")
+            continue
+        if not r.get("ok"):
+            err = (r.get("error") or "")[:80]
+            print(f"[*] {node.sid}: {tbl} not readable via SOAP "
+                  f"({err}) — kernel may use different columns")
+            continue
+        rows = r.get("rows", [])
+        if not rows:
+            print(f"[*] {node.sid}: {tbl} is empty (0 rows)")
+            continue
+        print(f"[+] {node.sid}: {tbl} returned {len(rows)} row(s) "
+              f"via SOAP")
+        for row in rows:
+            sysid   = (row.get("TRUSTSY", "") or "").strip()
+            client  = (row.get("TRUSTCL", "") or "").strip()
+            subject = (row.get("TRUSTSUBJ", "") or "").strip()
+            issuer  = (row.get("TRUSTISS", "") or "").strip()
+            serial  = (row.get("SERNO", "") or "").strip()
+            if not (sysid or subject):
+                continue
+            key = ("strust", client, sysid, subject, serial)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            entries.append({
+                "issuer_sid": "", "issuer_client": "",
+                "subject_dn": subject, "issuer_dn": issuer,
+                "serial": serial, "source": tbl,
+                "trusting_client": client, "kind": "system",
+            })
+    print(f"[+] {node.sid}: STRUSTSSO2 SOAP discovery — "
+          f"{len(entries)} system-level entries")
+    return entries
+
+
 def retrieve_strustsso2_trust(node: SAPNode,
                               creds: Credentials = None) -> list:
     """Discover STRUSTSSO2 trust entries on this system.
