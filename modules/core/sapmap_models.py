@@ -1987,12 +1987,14 @@ class SAPMAPState:
                 # the auto-download would always fail on HTTP-only
                 # targets.
                 soap_session = None
+                soap_route = None
                 try:
                     from sapmap_gui import (
                         find_soap_rfc_route_for_node)
                     from sapmap_exploit import _gateway_port_reachable
                     route = find_soap_rfc_route_for_node(self, node)
                     if route and not _gateway_port_reachable(node):
+                        soap_route = route
                         from sap_soap_basic import SOAPRFCSession
                         soap_session = SOAPRFCSession(
                             host=route["host"], port=route["port"],
@@ -2007,6 +2009,7 @@ class SAPMAPState:
                               f"via {route['via_destination']}")
                 except Exception:
                     soap_session = None
+                    soap_route = None
 
                 emit_finding(
                     "INFO", node.sid,
@@ -2018,7 +2021,8 @@ class SAPMAPState:
                       f"user creation — using best credentials")
                 results = download_and_decrypt(
                     node, creds, DEFAULT_KEY_HEX, state=self,
-                    soap_session=soap_session)
+                    soap_session=soap_session,
+                    soap_route=soap_route)
                 integrate_results(node, self, results)
                 ok = [r for r in results
                       if not r.get("error") and r.get("password")]

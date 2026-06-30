@@ -70,7 +70,7 @@ def test_user_creation_on_abap_node_triggers_secstore_download():
     called = {"args": None, "done": threading.Event()}
 
     def fake_download(n, creds, key_hex, state=None,
-                      soap_session=None):
+                      soap_session=None, soap_route=None):
         called["args"] = (n, creds, key_hex)
         called["done"].set()
         return [{"IDENT": "RFC/X", "password": "secret",

