@@ -2508,6 +2508,210 @@ _RFCDES_TYPE_FILTER = ("RFCTYPE = '3' OR RFCTYPE = 'G' OR "
                         "RFCTYPE = 'H'")
 
 
+# ---------------------------------------------------------------------------
+# Phase 3b: SOAP-RFC variants for HTTP-only ABAP targets
+# ---------------------------------------------------------------------------
+# Same FMs SAPMAP already calls via pyrfc (RFC_READ_TABLE on RFCDES /
+# RFCTRUST / RFCSYSACL); these helpers route the read through a
+# SOAPRFCSession so Retrieve RFC Destinations works against a node
+# whose gateway port (33NN) is firewalled.  Row parsing reuses
+# _build_rfcdes_conn and _rfcdes_is_trusted unchanged — only the
+# transport differs.
+
+def retrieve_rfc_connections_via_soap(node: SAPNode,
+                                       soap_session) -> list:
+    """Read RFCDES via SOAP-RFC and build RFCConn list.
+
+    soap_session: a configured SOAPRFCSession bound to the target node.
+    Returns the same list shape as retrieve_rfc_connections — caller
+    can feed it into the existing add_connection / ping pipeline
+    without other changes.
+    """
+    connections = []
+    print(f"[*] {node.sid}: reading RFCDES via SOAP-RFC...")
+    r = soap_session.read_table(
+        "RFCDES",
+        fields=["RFCDEST", "RFCTYPE", "RFCOPTIONS"],
+        where=[_RFCDES_TYPE_FILTER],
+        max_rows=500,
+    )
+    if not r["ok"]:
+        print(f"[-] {node.sid}: SOAP RFCDES read failed — "
+              f"{r['error'][:120]}")
+        return connections
+    for row in r["rows"]:
+        dest_name = (row.get("RFCDEST", "") or "").strip()
+        rfctype = (row.get("RFCTYPE", "") or "").strip()
+        options = (row.get("RFCOPTIONS", "") or "").strip()
+        if not dest_name:
+            continue
+        has_pwd = "%_PWD" in options
+        # Type-G/H without %_PWD = no recoverable credential, skip
+        if not has_pwd and rfctype in ("G", "H"):
+            continue
+        conn_obj = _build_rfcdes_conn(node, dest_name, rfctype, options)
+        if _rfcdes_is_trusted(rfctype, options):
+            conn_obj.trusted_system = True
+            conn_obj.trust_type = "trusted_rfc"
+        connections.append(conn_obj)
+    n3 = sum(1 for c in connections if (c.conn_type or "rfc") == "rfc")
+    n3_trusted = sum(1 for c in connections
+                     if (c.conn_type or "rfc") == "rfc"
+                     and c.trusted_system)
+    nh = len(connections) - n3
+    bits = [f"{n3} Type-3"]
+    if n3_trusted:
+        bits.append(f"({n3_trusted} trusted)")
+    bits.append(f"+ {nh} Type-G/H via SOAP-RFC RFCDES")
+    print(f"[+] {node.sid}: found {' '.join(bits)}")
+    return connections
+
+
+def retrieve_rfctrust_via_soap(node: SAPNode, soap_session) -> list:
+    """Read RFCTRUST via SOAP-RFC.  Same return shape as
+    retrieve_rfctrust (list of dicts with rfctrustid / rfctrustsy / ...).
+
+    Schema-probed like retrieve_rfcsysacl_via_soap — some kernels lack
+    one of the metadata columns; the cheap NO_DATA pre-call keeps us
+    resilient across kernel versions."""
+    entries = []
+    wanted = [
+        "RFCTRUSTID", "RFCTRUSTSY", "TLICENSE_NR",
+        "LLICENSE_NR", "RFCMSGSRV",
+    ]
+    fields_to_read = _soap_existing_fields(
+        soap_session, "RFCTRUST", wanted) or ["RFCTRUSTID"]
+    r = soap_session.read_table(
+        "RFCTRUST", fields=fields_to_read, max_rows=200)
+    if not r["ok"]:
+        err = r["error"]
+        if ("NOT_AUTHORIZED" in err or "TABLE_WITHOUT_DATA" in err
+                or "TABLE_NOT_AVAILABLE" in err):
+            print(f"[*] {node.sid}: RFCTRUST not readable via SOAP "
+                  f"(auth or empty)")
+        else:
+            print(f"[-] {node.sid}: Could not read RFCTRUST via SOAP: "
+                  f"{err[:80]}")
+        return entries
+    for row in r["rows"]:
+        entry = {
+            "rfctrustid":  (row.get("RFCTRUSTID", "") or "").strip(),
+            "rfctrustsy":  (row.get("RFCTRUSTSY", "") or "").strip(),
+            "tlicense_nr": (row.get("TLICENSE_NR", "") or "").strip(),
+            "llicense_nr": (row.get("LLICENSE_NR", "") or "").strip(),
+            "rfcmsgsrv":   (row.get("RFCMSGSRV", "") or "").strip(),
+        }
+        # Skip rows with no target — empty RFCTRUSTID is a deleted row
+        if not entry["rfctrustid"]:
+            continue
+        entries.append(entry)
+    if entries:
+        targets = [e["rfctrustid"] for e in entries]
+        print(f"[+] {node.sid}: RFCTRUST has {len(entries)} outbound "
+              f"trust entries → {', '.join(targets)} (via SOAP-RFC)")
+    else:
+        print(f"[*] {node.sid}: RFCTRUST is empty — no outbound "
+              f"trusted-RFC relationships")
+    return entries
+
+
+def _soap_existing_fields(soap_session, table: str,
+                           wanted: list) -> list:
+    """Probe `table`'s schema via NO_DATA=X and intersect with `wanted`.
+
+    Some tables (notably RFCSYSACL) carry different field sets across
+    kernel versions — kernel 742 has RFCTRUSTSY/RFCATRUSER where 754
+    has RFCEQUSER/RFCUSER.  Requesting a missing field raises
+    FIELD_NOT_VALID and aborts the whole read.  This helper does a
+    cheap NO_DATA=X call first (metadata-only — SAP returns FIELDS
+    table without any DATA rows) and returns only the fields that
+    exist on the target kernel.
+
+    Returns the original `wanted` list on probe failure (schema
+    discovery isn't strictly required — caller will get a
+    FIELD_NOT_VALID error and degrade gracefully).
+    """
+    # Use NO_DATA=X envelope directly — bypasses the high-level
+    # read_table which would try to fetch every row of every field
+    # (max_rows=0 means "no limit" in RFC_READ_TABLE, NOT "skip
+    # data") and trip DATA_BUFFER_EXCEEDED on large tables.
+    try:
+        from sap_soap_envelopes import (
+            build_rfc_read_table, parse_response)
+        body = build_rfc_read_table(table, no_data=True)
+        response_xml = soap_session._post_soap(body)
+        parsed = parse_response(response_xml, "RFC_READ_TABLE")
+    except Exception:
+        return wanted
+    if not parsed.get("ok"):
+        return wanted
+    available = set()
+    for row in parsed.get("tables", {}).get("FIELDS", []):
+        name = (row.get("FIELDNAME", "") or "").strip()
+        if name:
+            available.add(name)
+    if not available:
+        return wanted
+    return [f for f in wanted if f in available]
+
+
+def retrieve_rfcsysacl_via_soap(node: SAPNode, soap_session) -> list:
+    """Read RFCSYSACL via SOAP-RFC.  Same return shape as
+    retrieve_rfcsysacl (list of dicts with rfcsysid / rfcclient / ...).
+
+    Older kernels (742 et al.) have a different RFCSYSACL schema than
+    newer ones — RFCEQUSER / RFCUSER may be missing.  We probe column
+    availability first so the read succeeds on either kernel; absent
+    fields surface as '' in the returned dicts."""
+    entries = []
+    wanted = [
+        "RFCSYSID", "RFCCLIENT", "RFCEQUSER",
+        "RFCUSER", "RFCSNC", "RFCSAMEUSR",
+    ]
+    fields_to_read = _soap_existing_fields(
+        soap_session, "RFCSYSACL", wanted)
+    if not fields_to_read:
+        # Defensive — table itself missing or no overlap; fall back
+        # to just the SID so the caller still gets row count.
+        fields_to_read = ["RFCSYSID"]
+    r = soap_session.read_table(
+        "RFCSYSACL", fields=fields_to_read, max_rows=200)
+    if not r["ok"]:
+        err = r["error"]
+        if ("NOT_AUTHORIZED" in err or "TABLE_WITHOUT_DATA" in err
+                or "TABLE_NOT_AVAILABLE" in err):
+            print(f"[*] {node.sid}: RFCSYSACL not readable via SOAP "
+                  f"(auth or empty)")
+        else:
+            print(f"[-] {node.sid}: Could not read RFCSYSACL via SOAP: "
+                  f"{err[:80]}")
+        return entries
+    skipped = set(wanted) - set(fields_to_read)
+    if skipped:
+        print(f"[*] {node.sid}: RFCSYSACL on this kernel lacks "
+              f"{sorted(skipped)} — those fields surface as empty")
+    for row in r["rows"]:
+        entry = {
+            "rfcsysid":   (row.get("RFCSYSID", "") or "").strip(),
+            "rfcclient":  (row.get("RFCCLIENT", "") or "").strip(),
+            "rfcequser":  (row.get("RFCEQUSER", "") or "").strip(),
+            "rfcuser":    (row.get("RFCUSER", "") or "").strip(),
+            "rfcsnc":     (row.get("RFCSNC", "") or "").strip(),
+            "rfcsameusr": (row.get("RFCSAMEUSR", "") or "").strip(),
+        }
+        if not entry["rfcsysid"]:
+            continue
+        entries.append(entry)
+    if entries:
+        eq_y = sum(1 for e in entries if e["rfcequser"] == "Y")
+        print(f"[+] {node.sid}: RFCSYSACL has {len(entries)} trusted-"
+              f"caller entries ({eq_y} with RFCEQUSER=Y) (via SOAP-RFC)")
+    else:
+        print(f"[*] {node.sid}: RFCSYSACL is empty — no inbound "
+              f"trusted-RFC callers configured")
+    return entries
+
+
 def _rfcdes_is_trusted(rfctype: str, options: str) -> bool:
     """Return True iff this RFCDES row represents a *trusted* RFC.
 
