@@ -10225,7 +10225,34 @@ def create_app(api: SAPMAPApi) -> Bottle:
             fields = data.get("fields", [])
             where = data.get("where", "")
             max_rows = data.get("max_rows", 500)
-            rows = sapmap_rfc.read_table(node, table, fields, where, max_rows, creds)
+
+            # Phase 3b: route RFC_READ_TABLE through SOAP when the
+            # target's gateway port is firewalled.  Pyrfc would hang
+            # 60s on 3340 before failing — same fix shape as every
+            # other read_table path we've already wired (T000 in
+            # SecStore, RFCDES/RFCTRUST/RFCSYSACL in Retrieve RFCs).
+            soap_session, soap_route = resolve_soap_session_for_node(
+                api.state, node)
+            if soap_session is not None:
+                print(f"[*] {sid}: gateway down — reading {table} "
+                      f"via SOAP-RFC (via "
+                      f"{soap_route['via_destination']})")
+                # SOAP read_table takes WHERE as a list of strings
+                # (one per OPTIONS-table row, ≤72 chars each).  The
+                # GUI sends a single string — wrap if non-empty.
+                where_list = [where] if where else None
+                r = soap_session.read_table(
+                    table, fields=fields or None,
+                    where=where_list, max_rows=max_rows)
+                if r.get("ok"):
+                    rows = r["rows"]
+                else:
+                    print(f"[-] {sid}: {table} read via SOAP failed: "
+                          f"{r.get('error', '')[:200]}")
+                    rows = []
+            else:
+                rows = sapmap_rfc.read_table(
+                    node, table, fields, where, max_rows, creds)
             if rows:
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                 import sapmap_state as _ss
