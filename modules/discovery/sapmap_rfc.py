@@ -2462,6 +2462,23 @@ def _parse_rfcdes_http_options(conn: RFCConn, options_str: str):
                 use_https = True
         elif part.startswith("U="):
             conn.rfc_user = part[2:].strip()
+        elif part.startswith("D="):
+            # Some kernels store the SAP client (mandt) as a dedicated
+            # D= option.  When present it wins over the M=-as-client
+            # heuristic below.
+            d_val = part[2:].strip()
+            if d_val.isdigit() and len(d_val) <= 3:
+                conn.client = d_val.zfill(3)
+    # M=NNN heuristic for Type-H destinations: when the "path" field
+    # is just a 3-digit number with no slashes, SM59 was almost
+    # certainly using it to carry the SAP client (so the operator
+    # could type "001" instead of a real ICF path).  Promote it to
+    # conn.client so SOAP-RFC calls land on the intended client; drop
+    # it from the URL so we don't probe http://host/001 (which 404s).
+    if (path and path.isdigit() and len(path) <= 3
+            and not conn.client):
+        conn.client = path.zfill(3)
+        path = ""
     # Some kernels stash the full URL in J= directly — honour that and
     # skip the host/port reassembly.
     if scheme_or_url.lower().startswith(("http://", "https://")):
