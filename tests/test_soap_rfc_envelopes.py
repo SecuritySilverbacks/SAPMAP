@@ -12,6 +12,7 @@ from sap_soap_envelopes import (
     build_bapi_user_create1,
     build_bapi_user_get_detail,
     build_bapi_user_profiles_assign,
+    build_dest_check_connection,
     build_rfc_get_system_info,
     build_rfc_ping,
     build_rfc_read_table,
@@ -359,6 +360,7 @@ def test_all_builders_produce_parseable_xml():
     for env in (
             build_rfc_ping(),
             build_rfc_get_system_info(),
+            build_dest_check_connection("S4H_SVC"),
             build_bapi_user_create1("U", "P"),
             build_bapi_user_get_detail("U"),
             build_bapi_user_profiles_assign("U", ["SAP_ALL"]),
@@ -463,6 +465,21 @@ def test_rfc_read_table_pagination_via_rowcount_and_rowskips():
         "USR02", rowcount=100, rowskips=200)
     assert "<ROWCOUNT>100</ROWCOUNT>" in env
     assert "<ROWSKIPS>200</ROWSKIPS>" in env
+
+
+def test_dest_check_connection_envelope():
+    """Single NAME parameter naming the SM59 destination to ping."""
+    env = build_dest_check_connection("S4H_SVC")
+    assert "<urn:DEST_CHECK_CONNECTION>" in env
+    assert "<NAME>S4H_SVC</NAME>" in env
+    assert "</urn:DEST_CHECK_CONNECTION>" in env
+
+
+def test_dest_check_connection_escapes_name():
+    """Destination names are CHAR32 — operators don't put XML special
+    chars in them, but defensive escape guards against typos."""
+    env = build_dest_check_connection("WEIRD<&>NAME")
+    assert "<NAME>WEIRD&lt;&amp;&gt;NAME</NAME>" in env
 
 
 def test_rfc_get_system_info_envelope_no_destination():

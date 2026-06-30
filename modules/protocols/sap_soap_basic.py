@@ -31,6 +31,7 @@ from sap_soap_envelopes import (
     build_bapi_user_create1,
     build_bapi_user_get_detail,
     build_bapi_user_profiles_assign,
+    build_dest_check_connection,
     build_rfc_get_system_info,
     build_rfc_ping,
     build_rfc_read_table,
@@ -317,6 +318,70 @@ class SOAPRFCSession:
                     parts[idx].strip() if idx < len(parts) else "")
             result["rows"].append(row_dict)
         result["ok"] = True
+        return result
+
+    def dest_check_connection(self, destination_name: str) -> dict:
+        """Ping an SM59 destination via DEST_CHECK_CONNECTION.
+
+        Returns a dict shaped like sapmap_rfc.ping_rfc_destination's
+        result so the Retrieve RFCs loop can use either transport:
+
+          {
+            "ping_ok":       bool,    True when CONNECTION_TEST_RESULT
+                                       is empty
+            "logon_ok":      bool,    True when AUTHORIZATION_TEST_RESULT
+                                       is empty
+            "ping_message":  str,     CONNECTION_ERROR_TEXT or 'OK'
+            "remote_sid":    str,     from CONNECTION_PROPERTIES.SYSID
+            "remote_hostname": str,   from CONNECTION_PROPERTIES.RFCHOST
+            "remote_ip":       str,   (always '' over SOAP — no follow-
+                                       up RFC_GET_SYSTEM_INFO call;
+                                       caller can resolve from URL)
+            "remote_instance_nr": str, from RFCDEST suffix _NN
+            "error":         str,
+          }
+        """
+        result = {
+            "ping_ok": False, "ping_message": "", "logon_ok": False,
+            "remote_sid": "", "remote_hostname": "", "remote_ip": "",
+            "remote_instance_nr": "", "error": "",
+        }
+        try:
+            body = build_dest_check_connection(destination_name)
+            response_xml = self._post_soap(body)
+        except SOAPRFCError as e:
+            result["error"] = f"transport: {e}"
+            return result
+
+        parsed = parse_response(
+            response_xml, "DEST_CHECK_CONNECTION")
+        if not parsed["ok"] and parsed.get("error"):
+            result["error"] = parsed["error"]
+            return result
+
+        conn_res = (parsed["params"].get(
+            "CONNECTION_TEST_RESULT", "") or "").strip()
+        auth_res = (parsed["params"].get(
+            "AUTHORIZATION_TEST_RESULT", "") or "").strip()
+        err_text = (parsed["params"].get(
+            "CONNECTION_ERROR_TEXT", "") or "").strip()
+        result["ping_ok"] = conn_res == ""
+        result["logon_ok"] = auth_res == ""
+        result["ping_message"] = (err_text or
+                                  ("OK" if result["ping_ok"] else ""))
+
+        props = parsed["params"].get("CONNECTION_PROPERTIES", {})
+        if isinstance(props, dict):
+            result["remote_sid"] = (props.get("SYSID", "")
+                                    or "").strip()
+            result["remote_hostname"] = (props.get("RFCHOST", "")
+                                          or "").strip()
+            rfcdest = (props.get("RFCDEST", "") or "").strip()
+            if rfcdest:
+                import re as _re
+                m = _re.search(r'_(\d{2})$', rfcdest)
+                if m:
+                    result["remote_instance_nr"] = m.group(1)
         return result
 
     def get_system_info(self) -> dict:

@@ -271,6 +271,29 @@ def build_rfc_read_table(table: str, fields: list = None,
     return _wrap_envelope(body)
 
 
+def build_dest_check_connection(destination_name: str) -> str:
+    """DEST_CHECK_CONNECTION — ping an SM59 destination from the
+    target's perspective.
+
+    Same FM SAPMAP already uses for the Retrieve RFCs ping loop.
+    Routing this over SOAP-RFC instead of pyrfc avoids the 60-90s
+    pyrfc-on-3340 timeout per destination when the source node's
+    gateway is firewalled — the difference between a 7-second and
+    a 7-minute Retrieve operation against an HTTP-only target.
+
+    Returns CONNECTION_TEST_RESULT (empty = ok),
+    AUTHORIZATION_TEST_RESULT, CONNECTION_ERROR_TEXT, and the
+    CONNECTION_PROPERTIES structure with SYSID / RFCHOST / RFCDEST
+    etc. — same shape the pyrfc path's result parser expects.
+    """
+    body = (
+        '<urn:DEST_CHECK_CONNECTION>'
+        f'<NAME>{escape(destination_name)}</NAME>'
+        '</urn:DEST_CHECK_CONNECTION>'
+    )
+    return _wrap_envelope(body)
+
+
 def build_rfc_get_system_info() -> str:
     """RFC_GET_SYSTEM_INFO — authenticated system metadata.
 
