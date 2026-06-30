@@ -87,7 +87,37 @@ def list_scenarios() -> list[dict]:
 
 def _read_table(conn, table: str, fields: list, where: str = "",
                 max_rows: int = 500) -> list[dict]:
-    """Read an SAP table via RFC_READ_TABLE. Returns list of dicts."""
+    """Read an SAP table via RFC_READ_TABLE. Returns list of dicts.
+
+    Polymorphic on `conn`: a pyrfc Connection uses the gateway-port
+    path (.call('RFC_READ_TABLE', ...)).  A SOAPRFCSession routes over
+    HTTP using .read_table().  This lets every business-impact
+    scenario stay transport-agnostic — the only place that decides
+    which channel to use is assess_all's gateway-reachability gate.
+    """
+    # SOAP path — SOAPRFCSession exposes .read_table() with a
+    # different signature.  Chunked WHERE clauses become a list of
+    # ≤72-char rows; everything else stays the same.
+    if hasattr(conn, "read_table") and not hasattr(conn, "call"):
+        where_list = None
+        if where:
+            where_list = []
+            while where:
+                where_list.append(where[:72])
+                where = where[72:]
+        try:
+            r = conn.read_table(
+                table, fields=list(fields), where=where_list,
+                max_rows=max_rows)
+        except Exception as e:
+            logger.debug(f"SOAP read_table {table} failed: {e}")
+            return []
+        if not r.get("ok"):
+            logger.debug(
+                f"SOAP read_table {table}: {r.get('error', '')[:120]}")
+            return []
+        return r.get("rows", [])
+
     params = {
         "QUERY_TABLE": table,
         "DELIMITER": "|",
@@ -758,8 +788,16 @@ def assess_one(node: SAPNode, creds: Credentials, scenario_name: str,
 
 
 def assess_all(node: SAPNode, creds: Credentials,
-               conn=None, print_fn=None) -> list[ImpactResult]:
-    """Run all registered impact scenarios against a node."""
+               conn=None, print_fn=None, state=None) -> list[ImpactResult]:
+    """Run all registered impact scenarios against a node.
+
+    `state` (optional) — when provided AND the target's gateway port
+    is unreachable, the scenarios route through a SOAP-RFC session
+    resolved from any verified Type-G/H destination targeting this
+    node.  Without state we can't discover the route, so the SOAP
+    fallback is skipped and the operator gets the synthetic "skipped"
+    result.
+    """
     results = []
     pf = print_fn or print
 
@@ -784,34 +822,47 @@ def assess_all(node: SAPNode, creds: Credentials,
         results.sort(key=lambda r: -int(r.severity))
         return results
 
-    # Phase 3b: every business-impact scenario uses a pyrfc connection
-    # (the BSEG / BKPF / PA0001 / etc. reads need RFC_READ_TABLE with
-    # complex WHERE filters that aren't yet ported to SOAP-RFC).  Open
-    # to that later, but right now if the gateway is unreachable we
-    # would silently hang 60s before the operator saw any output.
-    # Detect it up-front and surface a clear "skipped" message + a
-    # synthetic ImpactResult so the modal renders something useful
-    # instead of staying empty.
+    # Phase 3b: when the gateway is unreachable but we have a verified
+    # SOAP-RFC route, use SOAPRFCSession as the conn — the _read_table
+    # helper is polymorphic (detects SOAP session via duck-typing on
+    # .read_table) so every scenario runs unchanged.  Pyrfc path is
+    # still the default for normal landscapes.
     try:
         from sapmap_exploit import _gateway_port_reachable
         gw_ok = _gateway_port_reachable(node)
     except Exception:
         gw_ok = True   # fail-open: try and let pyrfc surface the error
+
     if not gw_ok:
-        pf(f"[!] {node.sid}: gateway port (33NN) unreachable — "
-           f"Business Impact scenarios use pyrfc table reads that "
-           f"aren't ported to SOAP-RFC yet.  Skipping; either open the "
-           f"firewall to 33NN or run Business Impact from a node "
-           f"whose gateway IS reachable.")
+        soap_session = None
+        if state is not None:
+            try:
+                from sapmap_gui import resolve_soap_session_for_node
+                soap_session, _route = resolve_soap_session_for_node(
+                    state, node)
+            except Exception:
+                soap_session = None
+        if soap_session is not None:
+            pf(f"[*] {node.sid}: gateway down — routing Business "
+               f"Impact scenarios via SOAP-RFC")
+            _run(soap_session)
+            results.sort(key=lambda r: -int(r.severity))
+            return results
+        # No SOAP route either → surface the skip line + synthetic
+        # ImpactResult so the modal isn't blank.
+        pf(f"[!] {node.sid}: gateway port (33NN) unreachable AND no "
+           f"verified SOAP-RFC route — Business Impact assessment "
+           f"skipped.  Run Test Connection on a Type-G/H destination "
+           f"to {node.sid} first, then retry.")
         results.append(ImpactResult(
-            scenario="_all_skipped_no_gateway",
+            scenario="_all_skipped_no_route",
             category="Infrastructure",
             severity=Severity.INFO,
-            headline=("Gateway port (33NN) unreachable — Business "
-                      "Impact assessment skipped on this HTTP-only "
-                      "target.  Run from a node whose gateway IS "
-                      "reachable, or wait until the scenarios are "
-                      "ported to SOAP-RFC."),
+            headline=("Gateway port (33NN) unreachable and no SOAP-RFC "
+                      "route to this node — Business Impact "
+                      "assessment skipped.  Verify a Type-G/H "
+                      "destination first or run from a different "
+                      "source."),
             icon="🚧",
         ))
         return results
