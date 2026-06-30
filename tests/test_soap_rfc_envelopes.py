@@ -14,6 +14,7 @@ from sap_soap_envelopes import (
     build_bapi_user_get_detail,
     build_bapi_user_profiles_assign,
     build_dest_check_connection,
+    build_rfc_abap_install_and_run,
     build_rfc_get_system_info,
     build_rfc_ping,
     build_rfc_read_table,
@@ -240,6 +241,41 @@ _RESP_SOAP_FAULT_AUTH = (
 )
 
 
+_RESP_SOAP_FAULT_WITH_DETAIL = (
+    '<?xml version="1.0" encoding="UTF-8"?>'
+    '<SOAP-ENV:Envelope '
+    'xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/">'
+    '<SOAP-ENV:Body>'
+    '<SOAP-ENV:Fault>'
+    '<faultcode>SOAP-ENV:Client</faultcode>'
+    '<faultstring>Internal Server Error</faultstring>'
+    '<detail>'
+    '<rfc:Error xmlns:rfc="urn:sap-com:document:sap:soap:functions">'
+    '<type>ERROR_MESSAGE_STATE</type>'
+    '<message>Changes to repository objects are not permitted '
+    'in this client</message>'
+    '</rfc:Error></detail>'
+    '</SOAP-ENV:Fault>'
+    '</SOAP-ENV:Body></SOAP-ENV:Envelope>'
+)
+
+
+def test_parse_soap_fault_extracts_sap_detail_message():
+    """SAP wraps the actually-useful kernel error info in
+    <detail><rfc:Error><message> — generic faultstring just says
+    'Internal Server Error' which is useless for triage.  Parser must
+    flatten the detail into the error string so callers can branch on
+    'not permitted in this client' vs 'no authorization' vs 'syntax
+    error' without bespoke XML parsing."""
+    r = parse_response(
+        _RESP_SOAP_FAULT_WITH_DETAIL, "RFC_ABAP_INSTALL_AND_RUN")
+    assert r["ok"] is False
+    assert "Internal Server Error" in r["error"]
+    assert ("Changes to repository objects are not permitted "
+            "in this client") in r["error"]
+    assert "ERROR_MESSAGE_STATE" in r["error"]
+
+
 def test_parse_soap_fault_returns_error():
     """SOAP fault = ok=False and error contains both faultcode and
     faultstring so the caller can distinguish auth-rejected from
@@ -362,6 +398,8 @@ def test_all_builders_produce_parseable_xml():
             build_rfc_ping(),
             build_rfc_get_system_info(),
             build_dest_check_connection("S4H_SVC"),
+            build_rfc_abap_install_and_run(
+                ["REPORT t.", "WRITE 'x'."]),
             build_bapi_user_create1("U", "P"),
             build_bapi_user_delete("U"),
             build_bapi_user_get_detail("U"),
@@ -478,6 +516,37 @@ def test_bapi_user_delete_envelope_declares_return_table():
     assert "<urn:BAPI_USER_DELETE>" in env
     assert "<USERNAME>SAPMAP00</USERNAME>" in env
     assert "<RETURN/>" in env
+
+
+def test_rfc_abap_install_and_run_envelope_wraps_each_line_in_item():
+    """PROGRAM is a TABLE of program lines.  Each line must be wrapped
+    in <item><LINE>...</LINE></item> — sending a flat string of code
+    triggers RFC_INVALID_TABLE_FORMAT and the kernel rejects it before
+    syntax-checking the ABAP."""
+    env = build_rfc_abap_install_and_run([
+        "REPORT zsapmap.", "WRITE 'hello'.",
+    ])
+    assert "<PROGRAMNAME>ZSAPMAP</PROGRAMNAME>" in env
+    assert "<MODE>F</MODE>" in env
+    assert ("<PROGRAM>"
+            "<item><LINE>REPORT zsapmap.</LINE></item>"
+            "<item><LINE>WRITE &apos;hello&apos;.</LINE></item>"
+            "</PROGRAM>") in env
+    # Output placeholders — same kernel quirk as every other BAPI in
+    # this module; omit them and WRITES comes back missing
+    assert "<WRITES/>" in env
+    assert "<MESSAGES/>" in env
+
+
+def test_rfc_abap_install_and_run_escapes_program_lines():
+    """ABAP source can contain < > & ' (CONCATENATE 'a' '<b>' INTO x)
+    — defensive: real code routinely has these characters, and an
+    unescaped < turns into a malformed envelope and 400-error."""
+    env = build_rfc_abap_install_and_run([
+        "CONCATENATE 'a' '<b>' INTO x.",
+    ])
+    assert "&lt;b&gt;" in env
+    assert "<b>" not in env.replace("<b>'", "")  # not the raw chars
 
 
 def test_dest_check_connection_envelope():

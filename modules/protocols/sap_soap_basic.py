@@ -33,6 +33,7 @@ from sap_soap_envelopes import (
     build_bapi_user_get_detail,
     build_bapi_user_profiles_assign,
     build_dest_check_connection,
+    build_rfc_abap_install_and_run,
     build_rfc_get_system_info,
     build_rfc_ping,
     build_rfc_read_table,
@@ -388,6 +389,42 @@ class SOAPRFCSession:
                 m = _re.search(r'_(\d{2})$', rfcdest)
                 if m:
                     result["remote_instance_nr"] = m.group(1)
+        return result
+
+    def install_and_run(self, abap_lines: list,
+                        program_name: str = "ZSAPMAP",
+                        mode: str = "F") -> dict:
+        """Run an ABAP program via RFC_ABAP_INSTALL_AND_RUN.
+
+        Returns the same {success, output, error, fm_name} shape as
+        sapmap_rfc._run_abap_program so call sites can dispatch to
+        either transport interchangeably.
+
+        Uses a long HTTP timeout because the SAP kernel COMPILES the
+        program before executing it — for a several-hundred-line ABAP
+        report (SecStore hex-dump etc.) on a loaded box this can take
+        15-30s.  Caller can override via session-level timeout if a
+        specific report needs more headroom.
+        """
+        try:
+            body = build_rfc_abap_install_and_run(
+                abap_lines, program_name, mode)
+            response_xml = self._post_soap(body)
+        except SOAPRFCError as e:
+            return {"success": False, "output": [],
+                    "error": f"transport: {e}",
+                    "fm_name": "RFC_ABAP_INSTALL_AND_RUN"}
+        parsed = parse_response(
+            response_xml, "RFC_ABAP_INSTALL_AND_RUN")
+        result = {"success": parsed["ok"], "output": [],
+                  "error": parsed.get("error", ""),
+                  "fm_name": "RFC_ABAP_INSTALL_AND_RUN"}
+        for row in parsed["tables"].get("WRITES", []):
+            line = (row.get("ZEILE", "")
+                    or row.get("LINE", "")
+                    or row.get("WA", "") or "").strip()
+            if line:
+                result["output"].append(line)
         return result
 
     def get_system_info(self) -> dict:
