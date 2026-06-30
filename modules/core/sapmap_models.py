@@ -2052,8 +2052,15 @@ class SAPMAPState:
                         if getattr(s, "pwned", False))
         btp_pwned = sum(1 for b in (self.btp_subaccounts or {}).values()
                          if getattr(b, "pwned", False))
+        # SAProuter nodes already live in self.nodes (SAPNode with
+        # .saprouter set), so they are counted via len(self.nodes).
+        # SCCs and BTP subaccounts are tracked in their own dicts, so
+        # they have to be summed in explicitly to match the box count
+        # the operator sees on the map.
         return {
-            "systems": len(self.nodes),
+            "systems": (len(self.nodes)
+                        + len(self.scc_nodes)
+                        + len(self.btp_subaccounts or {})),
             "connections": len(self.connections),
             "pwned": (sum(1 for n in self.nodes.values() if n.pwned)
                       + scc_pwned + btp_pwned),

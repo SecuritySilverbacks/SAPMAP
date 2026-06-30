@@ -11430,7 +11430,13 @@ function startDrag(e, sid) {
 
 function updateStatusBar() {
   const s = mapState.stats || {};
-  document.getElementById('st-systems').textContent = s.systems || Object.keys(mapState.nodes||{}).length;
+  // Fallback sums SAP + SCC + BTP node maps so the count matches the
+  // number of boxes on the map even if s.systems is missing.
+  const fallbackSystems = Object.keys(mapState.nodes||{}).length
+                        + Object.keys(mapState.scc_nodes||{}).length
+                        + Object.keys(mapState.btp_subaccounts||{}).length;
+  document.getElementById('st-systems').textContent =
+      (s.systems !== undefined ? s.systems : fallbackSystems);
   document.getElementById('st-connections').textContent = s.connections || (mapState.connections||[]).length;
   document.getElementById('st-pwned').textContent = s.pwned || 0;
   document.getElementById('st-users').textContent = s.users_created || 0;
