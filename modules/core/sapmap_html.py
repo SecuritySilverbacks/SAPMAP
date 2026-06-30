@@ -7101,7 +7101,7 @@ function showDetails(sid) {
     </div>
     <div class="detail-section">
       <h4>Clients</h4>
-      ${(n.clients || []).map(c => { const nr = typeof c === 'object' ? (c.nr||'?') : String(c); const cat = typeof c === 'object' ? (c.category||'') : ''; const roleMap = {P:'Production',S:'SAP Reference Client',T:'Test',C:'Customising',D:'Demo',E:'Training'}; const label = roleMap[cat]; return `<div class="detail-row"><span class="detail-key">${escHtml(nr)}</span><span class="detail-val">${cat === 'P' ? '<span style="color:#f85149">Production</span>' : label ? escHtml(label) : escHtml(cat)}</span></div>`; }).join('') || '<div style="color:#484f58">None enumerated</div>'}
+      ${(n.clients || []).map(c => { const nr = typeof c === 'object' ? (c.nr||'?') : String(c); const cat = typeof c === 'object' ? (c.category||'') : ''; const roleMap = {P:'Production',S:'SAP Reference Client',T:'Test',C:'Customising',D:'Demo',E:'Training',V:'Verified (user created)'}; const label = roleMap[cat]; const valHtml = cat === 'P' ? '<span style="color:#f85149">Production</span>' : cat === 'V' ? '<span style="color:#3fb950">&#9989; Verified</span>' : label ? escHtml(label) : (cat ? escHtml(cat) : ''); return `<div class="detail-row"><span class="detail-key">${escHtml(nr)}</span><span class="detail-val">${valHtml}</span></div>`; }).join('') || '<div style="color:#484f58">None enumerated</div>'}
     </div>
     <div class="detail-section">
       <h4>Created Users (${(n.created_users||[]).length})</h4>
