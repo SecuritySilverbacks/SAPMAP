@@ -145,6 +145,148 @@ def build_bapi_user_get_detail(username: str) -> str:
     return _wrap_envelope(body)
 
 
+def build_sxpg_step_xpg_start(command: str, params: str = "",
+                              destination: str = "",
+                              long_params: str = "",
+                              mxrow: int = 9999) -> str:
+    """SXPG_STEP_XPG_START — execute an OS command on the SAP host.
+
+    Same FM SAPMAP already uses via pyrfc (sapmap_rfc.execute_remote_
+    command / execute_local_command); this builder produces the SOAP
+    envelope so the OS Terminal, bind shell, and reverse shell can
+    work over HTTP when the gateway port is firewalled.
+
+    Caller-supplied parameters mirror the pyrfc kwargs verbatim:
+      EXTPROG       — the binary to run (cmd.exe, /bin/sh, python3...)
+      PARAMS        — command-line args, capped at CHAR255 by ABAP
+      LONG_PARAMS   — args longer than 255 chars (kernel ≥ 711 only)
+      DESTINATION   — TCP/IP destination name (empty = local exec)
+      MXROW         — max LOG rows requested (older kernels raise
+                       RFC_INVALID_PARAMETER if present — handled by
+                       the session method's fallback retry)
+
+    All other SAP-defined fields use the same defaults as pyrfc:
+    STDINCNTL=R (read), STDOUT/ERRCNTL=M (merge), TRACECNTL=0,
+    TRACELEVEL=0, TERMCNTL=C (close), CONNCNTL=H (half-duplex).
+    """
+    body = (
+        '<urn:SXPG_STEP_XPG_START>'
+        f'<TARGET></TARGET>'
+        f'<DESTINATION>{escape(destination)}</DESTINATION>'
+        f'<EXTPROG>{escape(command)}</EXTPROG>'
+        f'<PARAMS>{escape(params)}</PARAMS>'
+        '<STDINCNTL>R</STDINCNTL>'
+        '<STDOUTCNTL>M</STDOUTCNTL>'
+        '<STDERRCNTL>M</STDERRCNTL>'
+        '<TRACECNTL>0</TRACECNTL>'
+        '<TERMCNTL>C</TERMCNTL>'
+        '<TRACELEVEL>0</TRACELEVEL>'
+        f'<LONG_PARAMS>{escape(long_params)}</LONG_PARAMS>'
+        '<CONNCNTL>H</CONNCNTL>'
+        f'<MXROW>{int(mxrow)}</MXROW>'
+        # Output table placeholders — SAP's SOAP kernel only emits
+        # tables it sees declared in the request (same quirk as
+        # BAPI_USER_GET_DETAIL.PROFILES).
+        '<LOG/>'
+        '</urn:SXPG_STEP_XPG_START>'
+    )
+    return _wrap_envelope(body)
+
+
+def build_sxpg_step_xpg_start_no_mxrow(command: str, params: str = "",
+                                       destination: str = "",
+                                       long_params: str = "") -> str:
+    """Variant without MXROW for older kernels that reject the field.
+
+    Mirrors the fallback retry in sapmap_rfc.execute_remote_command —
+    kernels around 7.0x raise RFC_INVALID_PARAMETER if MXROW is
+    present; default is 2 rows there, which is awful but the
+    alternative is the call failing outright.
+    """
+    body = (
+        '<urn:SXPG_STEP_XPG_START>'
+        f'<TARGET></TARGET>'
+        f'<DESTINATION>{escape(destination)}</DESTINATION>'
+        f'<EXTPROG>{escape(command)}</EXTPROG>'
+        f'<PARAMS>{escape(params)}</PARAMS>'
+        '<STDINCNTL>R</STDINCNTL>'
+        '<STDOUTCNTL>M</STDOUTCNTL>'
+        '<STDERRCNTL>M</STDERRCNTL>'
+        '<TRACECNTL>0</TRACECNTL>'
+        '<TERMCNTL>C</TERMCNTL>'
+        '<TRACELEVEL>0</TRACELEVEL>'
+        f'<LONG_PARAMS>{escape(long_params)}</LONG_PARAMS>'
+        '<CONNCNTL>H</CONNCNTL>'
+        '<LOG/>'
+        '</urn:SXPG_STEP_XPG_START>'
+    )
+    return _wrap_envelope(body)
+
+
+def build_rfc_read_table(table: str, fields: list = None,
+                         where: list = None,
+                         delimiter: str = "|",
+                         no_data: bool = False,
+                         rowcount: int = 0,
+                         rowskips: int = 0) -> str:
+    """RFC_READ_TABLE — generic table read.
+
+    Same FM SAPMAP already uses via pyrfc (sapmap_rfc.get_client_roles,
+    multiple other read paths).
+
+    Args:
+      table:     SAP table name (T000, USR02, RFCDES, ...)
+      fields:    list of field-name strings (empty / None = all fields,
+                 limited to the first ~5 by RFC interface practice)
+      where:     list of WHERE-clause strings, each ≤72 chars per the
+                 OPTIONS-row CHAR72 constraint.  Caller must split
+                 long predicates across rows.
+      delimiter: separator the SAP kernel inserts between fields in
+                 the WA output row (default '|' is the SAPMAP norm)
+      no_data:   when True, returns only the FIELDS metadata (used
+                 by DDIF lookups)
+      rowcount:  cap rows returned; 0 = no cap
+      rowskips:  skip the first N rows; 0 = none
+    """
+    fields_xml = ""
+    for f in (fields or []):
+        fields_xml += (
+            f'<item><FIELDNAME>{escape(str(f))}</FIELDNAME></item>')
+    options_xml = ""
+    for w in (where or []):
+        options_xml += (
+            f'<item><TEXT>{escape(str(w))}</TEXT></item>')
+    body = (
+        '<urn:RFC_READ_TABLE>'
+        f'<QUERY_TABLE>{escape(table)}</QUERY_TABLE>'
+        f'<DELIMITER>{escape(delimiter)}</DELIMITER>'
+        f'<NO_DATA>{"X" if no_data else ""}</NO_DATA>'
+        f'<ROWCOUNT>{int(rowcount)}</ROWCOUNT>'
+        f'<ROWSKIPS>{int(rowskips)}</ROWSKIPS>'
+        f'<OPTIONS>{options_xml}</OPTIONS>'
+        f'<FIELDS>{fields_xml}</FIELDS>'
+        '<DATA/>'
+        '</urn:RFC_READ_TABLE>'
+    )
+    return _wrap_envelope(body)
+
+
+def build_rfc_get_system_info() -> str:
+    """RFC_GET_SYSTEM_INFO — authenticated system metadata.
+
+    Same FM SAPMAP already uses for ping/discovery (no DESTINATION
+    parameter = local; with DESTINATION = forwarded RFC).  When called
+    over SOAP we always want local info (the target itself), so
+    DESTINATION is omitted.
+
+    Returns RFCSI_EXPORT structure with RFCDEST, RFCHOST, RFCSYSID,
+    RFCDATABS, RFCDBHOST, RFCDBSYS, RFCSAPRL (release), RFCMACH,
+    RFCOPSYS, RFCKERNRL (kernel), RFCIPADDR — populates the empty
+    OS/Database/Kernel/SAP Release rows in System Details.
+    """
+    return _wrap_envelope("<urn:RFC_GET_SYSTEM_INFO/>")
+
+
 def build_bapi_transaction_commit(wait: bool = True) -> str:
     """BAPI_TRANSACTION_COMMIT — flush pending updates.
 

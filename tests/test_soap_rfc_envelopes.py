@@ -12,7 +12,11 @@ from sap_soap_envelopes import (
     build_bapi_user_create1,
     build_bapi_user_get_detail,
     build_bapi_user_profiles_assign,
+    build_rfc_get_system_info,
     build_rfc_ping,
+    build_rfc_read_table,
+    build_sxpg_step_xpg_start,
+    build_sxpg_step_xpg_start_no_mxrow,
     parse_response,
 )
 
@@ -354,9 +358,118 @@ def test_all_builders_produce_parseable_xml():
     from xml.etree import ElementTree as ET
     for env in (
             build_rfc_ping(),
+            build_rfc_get_system_info(),
             build_bapi_user_create1("U", "P"),
             build_bapi_user_get_detail("U"),
             build_bapi_user_profiles_assign("U", ["SAP_ALL"]),
             build_bapi_transaction_commit(),
-            build_bapi_transaction_commit(wait=False)):
+            build_bapi_transaction_commit(wait=False),
+            build_sxpg_step_xpg_start("/bin/sh", "-c whoami"),
+            build_sxpg_step_xpg_start_no_mxrow("cmd.exe", "/c dir"),
+            build_rfc_read_table("T000"),
+            build_rfc_read_table("T000", fields=["MANDT"],
+                                 where=["MANDT NE '000'"]),
+            ):
         ET.fromstring(env)  # raises ParseError on malformed XML
+
+
+# ---------------------------------------------------------------------------
+# SXPG / RFC_READ_TABLE / RFC_GET_SYSTEM_INFO envelopes
+# ---------------------------------------------------------------------------
+
+def test_sxpg_envelope_includes_required_kernel_controls():
+    """STDOUTCNTL=M / STDERRCNTL=M merges OS stdout+stderr into LOG;
+    skipping these makes the kernel use the default 'F' (file) which
+    drops output to a /usr/sap log file the caller can't see."""
+    env = build_sxpg_step_xpg_start(
+        "/bin/sh", params="-c whoami")
+    assert "<EXTPROG>/bin/sh</EXTPROG>" in env
+    assert "<PARAMS>-c whoami</PARAMS>" in env
+    assert "<STDOUTCNTL>M</STDOUTCNTL>" in env
+    assert "<STDERRCNTL>M</STDERRCNTL>" in env
+    # Must declare LOG/ as a placeholder — same kernel quirk as
+    # BAPI_USER_GET_DETAIL.PROFILES; without it the output is lost.
+    assert "<LOG/>" in env
+    # MXROW default — present in the standard builder
+    assert "<MXROW>9999</MXROW>" in env
+
+
+def test_sxpg_envelope_no_mxrow_variant_for_old_kernels():
+    """The fallback builder must NOT include MXROW — older kernels
+    (Basis 7.0x) raise RFC_INVALID_PARAMETER if it's present."""
+    env = build_sxpg_step_xpg_start_no_mxrow(
+        "cmd.exe", params="/c whoami")
+    assert "<MXROW>" not in env
+    assert "<EXTPROG>cmd.exe</EXTPROG>" in env
+
+
+def test_sxpg_envelope_carries_long_params_separately():
+    """Big payloads (Python -c '<800 chars hex>') go in LONG_PARAMS
+    while a short marker stays in PARAMS — without this split, the
+    SAP kernel either truncates at CHAR255 or rejects."""
+    env = build_sxpg_step_xpg_start(
+        "python3", params="-c",
+        long_params="import base64; print(base64.b64decode('XYZ'))")
+    assert "<PARAMS>-c</PARAMS>" in env
+    assert "<LONG_PARAMS>import base64" in env
+
+
+def test_sxpg_envelope_escapes_dangerous_command_characters():
+    """Real commands contain & < > etc. — unescaped they break the
+    request envelope.  Defensive: prevents the operator's command from
+    silently turning into something else due to XML reinterpretation."""
+    env = build_sxpg_step_xpg_start(
+        "/bin/sh", params="-c 'echo a&b<c>d'")
+    assert "echo a&amp;b&lt;c&gt;d" in env
+
+
+def test_rfc_read_table_envelope_basic():
+    """Field-less / where-less table read — bare QUERY_TABLE +
+    DELIMITER suffice when caller wants all fields, all rows."""
+    env = build_rfc_read_table("T000")
+    assert "<QUERY_TABLE>T000</QUERY_TABLE>" in env
+    assert "<DELIMITER>|</DELIMITER>" in env
+    assert "<NO_DATA></NO_DATA>" in env
+    assert "<OPTIONS></OPTIONS>" in env
+    assert "<FIELDS></FIELDS>" in env
+    assert "<DATA/>" in env  # output placeholder
+
+
+def test_rfc_read_table_envelope_with_fields_and_options():
+    """FIELDS and OPTIONS are TABLEs in RFC_READ_TABLE's interface;
+    each row wrapped in <item> with FIELDNAME / TEXT field name."""
+    env = build_rfc_read_table(
+        "USR02", fields=["BNAME", "BCODE"],
+        where=["BNAME LIKE 'SAP%'", "MANDT EQ '000'"])
+    assert ("<FIELDS>"
+            "<item><FIELDNAME>BNAME</FIELDNAME></item>"
+            "<item><FIELDNAME>BCODE</FIELDNAME></item>"
+            "</FIELDS>") in env
+    assert "<item><TEXT>BNAME LIKE &apos;SAP%&apos;</TEXT></item>" in env
+    assert "<item><TEXT>MANDT EQ &apos;000&apos;</TEXT></item>" in env
+
+
+def test_rfc_read_table_no_data_flag():
+    """NO_DATA='X' = return only FIELDS metadata, skip DATA — used
+    by DDIF lookups when the caller wants the column list."""
+    env = build_rfc_read_table("T000", no_data=True)
+    assert "<NO_DATA>X</NO_DATA>" in env
+
+
+def test_rfc_read_table_pagination_via_rowcount_and_rowskips():
+    """When dumping large tables (USR02) we page; both fields must be
+    serialized so the kernel honors them."""
+    env = build_rfc_read_table(
+        "USR02", rowcount=100, rowskips=200)
+    assert "<ROWCOUNT>100</ROWCOUNT>" in env
+    assert "<ROWSKIPS>200</ROWSKIPS>" in env
+
+
+def test_rfc_get_system_info_envelope_no_destination():
+    """When called locally (over SOAP we always are — there's no
+    'forwarded RFC' concept), DESTINATION is omitted entirely, not
+    sent as empty.  Some kernels treat empty DESTINATION as 'route
+    to default RFC server' which is not what we want."""
+    env = build_rfc_get_system_info()
+    assert "<urn:RFC_GET_SYSTEM_INFO/>" in env
+    assert "<DESTINATION>" not in env

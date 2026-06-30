@@ -462,6 +462,190 @@ def test_get_user_profiles_handles_auth_rejection_gracefully():
         mock.stop()
 
 
+# ---------------------------------------------------------------------------
+# Phase 3b: SXPG OS exec, RFC_READ_TABLE, RFC_GET_SYSTEM_INFO
+# ---------------------------------------------------------------------------
+
+_SXPG_OK_TWO_LINES = (
+    '<?xml version="1.0"?><SOAP-ENV:Envelope '
+    'xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/">'
+    '<SOAP-ENV:Body>'
+    '<rfc:SXPG_STEP_XPG_START.Response '
+    'xmlns:rfc="urn:sap-com:document:sap:rfc:functions">'
+    '<STATUS>O</STATUS>'
+    '<LOG>'
+    '<item><MESSAGE>line one</MESSAGE></item>'
+    '<item><MESSAGE>line two</MESSAGE></item>'
+    '</LOG>'
+    '</rfc:SXPG_STEP_XPG_START.Response>'
+    '</SOAP-ENV:Body></SOAP-ENV:Envelope>')
+
+_SXPG_MXROW_REJECTED = (
+    '<?xml version="1.0"?><SOAP-ENV:Envelope '
+    'xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/">'
+    '<SOAP-ENV:Body>'
+    '<SOAP-ENV:Fault><faultcode>Client</faultcode>'
+    '<faultstring>RFC_INVALID_PARAMETER: '
+    'Field MXROW unknown</faultstring></SOAP-ENV:Fault>'
+    '</SOAP-ENV:Body></SOAP-ENV:Envelope>')
+
+
+def test_execute_os_command_collects_log_lines():
+    """SXPG output lives in the LOG table, one MESSAGE per line.
+    execute_os_command must aggregate them into result["output"]."""
+    mock = _MockSAP(_make_responder({
+        "SXPG_STEP_XPG_START": (200, _SXPG_OK_TWO_LINES),
+    }))
+    try:
+        sess = SOAPRFCSession(
+            host="127.0.0.1", port=mock.port, client="000",
+            user="u", password="p")
+        r = sess.execute_os_command("/bin/sh", "-c whoami")
+        assert r["success"] is True
+        assert r["output"] == ["line one", "line two"]
+        assert r["error"] == ""
+    finally:
+        mock.stop()
+
+
+def test_execute_os_command_falls_back_when_mxrow_rejected():
+    """Older kernels reject MXROW.  Session must auto-retry with the
+    no-mxrow variant — we'd lose every output line on legacy systems
+    otherwise."""
+    # Track which envelope was sent
+    bodies_seen = []
+
+    def responder(path, body):
+        bodies_seen.append(body)
+        if len(bodies_seen) == 1:
+            # First call: pretend kernel rejected MXROW
+            return 500, _SXPG_MXROW_REJECTED
+        # Second call: succeed
+        return 200, _SXPG_OK_TWO_LINES
+
+    mock = _MockSAP(responder)
+    try:
+        sess = SOAPRFCSession(
+            host="127.0.0.1", port=mock.port, client="000",
+            user="u", password="p")
+        r = sess.execute_os_command("/bin/sh", "-c whoami")
+        assert r["success"] is True
+        assert r["output"] == ["line one", "line two"]
+        assert len(bodies_seen) == 2
+        # First envelope had MXROW, second didn't
+        assert "<MXROW>" in bodies_seen[0]
+        assert "<MXROW>" not in bodies_seen[1]
+    finally:
+        mock.stop()
+
+
+_READ_TABLE_T000_TWO_CLIENTS = (
+    '<?xml version="1.0"?><SOAP-ENV:Envelope '
+    'xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/">'
+    '<SOAP-ENV:Body>'
+    '<rfc:RFC_READ_TABLE.Response '
+    'xmlns:rfc="urn:sap-com:document:sap:rfc:functions">'
+    '<FIELDS>'
+    '<item><FIELDNAME>MANDT</FIELDNAME><OFFSET>0</OFFSET>'
+    '<LENGTH>3</LENGTH><TYPE>C</TYPE><FIELDTEXT>Client</FIELDTEXT>'
+    '</item>'
+    '<item><FIELDNAME>CCCATEGORY</FIELDNAME><OFFSET>3</OFFSET>'
+    '<LENGTH>1</LENGTH><TYPE>C</TYPE><FIELDTEXT>Role</FIELDTEXT>'
+    '</item>'
+    '</FIELDS>'
+    '<DATA>'
+    '<item><WA>000|S</WA></item>'
+    '<item><WA>001|P</WA></item>'
+    '</DATA>'
+    '</rfc:RFC_READ_TABLE.Response>'
+    '</SOAP-ENV:Body></SOAP-ENV:Envelope>')
+
+
+def test_read_table_returns_field_keyed_dicts():
+    """read_table must hide the WA-string format from callers — the
+    convenience of dict[FIELDNAME] is the whole point."""
+    mock = _MockSAP(_make_responder({
+        "RFC_READ_TABLE": (200, _READ_TABLE_T000_TWO_CLIENTS),
+    }))
+    try:
+        sess = SOAPRFCSession(
+            host="127.0.0.1", port=mock.port, client="000",
+            user="u", password="p")
+        r = sess.read_table("T000", fields=["MANDT", "CCCATEGORY"])
+        assert r["ok"] is True
+        assert r["fields"] == ["MANDT", "CCCATEGORY"]
+        assert r["rows"] == [
+            {"MANDT": "000", "CCCATEGORY": "S"},
+            {"MANDT": "001", "CCCATEGORY": "P"},
+        ]
+    finally:
+        mock.stop()
+
+
+def test_read_table_handles_auth_rejection():
+    """RFC_READ_TABLE on certain tables requires S_TABU_DIS — when the
+    caller lacks it, the BAPI returns an exception (not an empty DATA
+    table).  Session must surface it as ok=False, not crash on missing
+    fields."""
+    mock = _MockSAP(_make_responder({
+        "RFC_READ_TABLE": (500, _AUTH_FAULT),
+    }))
+    try:
+        sess = SOAPRFCSession(
+            host="127.0.0.1", port=mock.port, client="000",
+            user="u", password="p")
+        r = sess.read_table("USR02", fields=["BNAME"])
+        assert r["ok"] is False
+        assert "RFC_AUTHORIZATION_FAILURE" in r["error"]
+        assert r["rows"] == []
+    finally:
+        mock.stop()
+
+
+_GET_SYSTEM_INFO_OK = (
+    '<?xml version="1.0"?><SOAP-ENV:Envelope '
+    'xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/">'
+    '<SOAP-ENV:Body>'
+    '<rfc:RFC_GET_SYSTEM_INFO.Response '
+    'xmlns:rfc="urn:sap-com:document:sap:rfc:functions">'
+    '<RFCSI_EXPORT>'
+    '<RFCSYSID>W74</RFCSYSID>'
+    '<RFCSAPRL>754</RFCSAPRL>'
+    '<RFCKERNRL>742</RFCKERNRL>'
+    '<RFCOPSYS>Windows NT</RFCOPSYS>'
+    '<RFCDBSYS>ADABAS D</RFCDBSYS>'
+    '<RFCDBHOST>WINWAS740</RFCDBHOST>'
+    '<RFCHOST>WINWAS74</RFCHOST>'
+    '<RFCIPADDR>192.168.2.29</RFCIPADDR>'
+    '</RFCSI_EXPORT>'
+    '</rfc:RFC_GET_SYSTEM_INFO.Response>'
+    '</SOAP-ENV:Body></SOAP-ENV:Envelope>')
+
+
+def test_get_system_info_unpacks_rfcsi_export():
+    """The interesting fields all live inside RFCSI_EXPORT.  Caller
+    gets a flat dict so populating node fields is one assignment per
+    column rather than nested traversal."""
+    mock = _MockSAP(_make_responder({
+        "RFC_GET_SYSTEM_INFO": (200, _GET_SYSTEM_INFO_OK),
+    }))
+    try:
+        sess = SOAPRFCSession(
+            host="127.0.0.1", port=mock.port, client="000",
+            user="u", password="p")
+        r = sess.get_system_info()
+        assert r["ok"] is True
+        info = r["info"]
+        assert info["RFCSYSID"] == "W74"
+        assert info["RFCSAPRL"] == "754"
+        assert info["RFCKERNRL"] == "742"
+        assert info["RFCOPSYS"] == "Windows NT"
+        assert info["RFCDBSYS"] == "ADABAS D"
+        assert info["RFCIPADDR"] == "192.168.2.29"
+    finally:
+        mock.stop()
+
+
 def test_create_user_via_soap_returns_bapi_compatible_shape_on_failure():
     """Same dict shape, success=False, message names the failing step."""
     mock = _MockSAP(_make_responder({"RFC_PING": (500, _AUTH_FAULT)}))
