@@ -7987,7 +7987,39 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
         def _run():
             creds = node.best_credentials()
-            conns = sapmap_rfc.retrieve_rfc_connections(node, creds)
+
+            # Phase 3b: Retrieve-RFCs path for HTTP-only ABAP targets.
+            # When the gateway port (33NN) is unreachable but we have
+            # a SOAP-RFC route (from an HTTP destination's verified
+            # creds), do the RFCDES/RFCTRUST/RFCSYSACL reads via
+            # SOAPRFCSession.read_table.  Avoids the 3 × 60s pyrfc
+            # timeouts that show up as "RFC_COMMUNICATION_FAILURE
+            # partner '192.168.2.29:3340'".
+            soap_route = find_soap_rfc_route_for_node(api.state, node)
+            soap_session = None
+            if soap_route:
+                from sapmap_exploit import _gateway_port_reachable
+                if not _gateway_port_reachable(node):
+                    print(f"[*] {sid}: gateway down — routing "
+                          f"Retrieve RFCs via SOAP-RFC "
+                          f"({soap_route['host']}:{soap_route['port']}, "
+                          f"via {soap_route['via_destination']})")
+                    from sap_soap_basic import SOAPRFCSession
+                    soap_session = SOAPRFCSession(
+                        host=soap_route["host"],
+                        port=soap_route["port"],
+                        client=soap_route["client"],
+                        user=soap_route["user"],
+                        password=soap_route["password"],
+                        https=soap_route["https"],
+                    )
+
+            if soap_session is not None:
+                conns = sapmap_rfc.retrieve_rfc_connections_via_soap(
+                    node, soap_session)
+            else:
+                conns = sapmap_rfc.retrieve_rfc_connections(
+                    node, creds)
             print(f"[+] Retrieved {len(conns)} RFC connections from {sid}")
 
             # Track discovered systems to avoid duplicate pings
@@ -8347,7 +8379,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
             # Read trust tables for intelligence
             try:
-                trust = sapmap_rfc.retrieve_rfctrust(node, creds)
+                if soap_session is not None:
+                    trust = sapmap_rfc.retrieve_rfctrust_via_soap(
+                        node, soap_session)
+                else:
+                    trust = sapmap_rfc.retrieve_rfctrust(node, creds)
                 # NOTE: we deliberately do NOT cross-reference RFCTRUST
                 # entries onto individual RFCConnection objects to mark
                 # them trusted_system=True.  RFCTRUST registers that a
@@ -8371,7 +8407,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
             except Exception as e:
                 logger.debug(f"RFCTRUST read failed for {sid}: {e}")
             try:
-                acl = sapmap_rfc.retrieve_rfcsysacl(node, creds)
+                if soap_session is not None:
+                    acl = sapmap_rfc.retrieve_rfcsysacl_via_soap(
+                        node, soap_session)
+                else:
+                    acl = sapmap_rfc.retrieve_rfcsysacl(node, creds)
                 if acl:
                     node.rfcsysacl_entries = acl
             except Exception as e:
