@@ -10,6 +10,7 @@ import modules  # noqa: F401  registers package paths
 from sap_soap_envelopes import (
     build_bapi_transaction_commit,
     build_bapi_user_create1,
+    build_bapi_user_get_detail,
     build_bapi_user_profiles_assign,
     build_rfc_ping,
     parse_response,
@@ -92,6 +93,22 @@ def test_bapi_user_profiles_assign_multiple_profiles():
             "<item><BAPIPROF>SAP_NEW</BAPIPROF></item>"
             "<item><BAPIPROF>S_A.SYSTEM</BAPIPROF></item>"
             ) in profiles_section
+
+
+def test_bapi_user_get_detail_envelope_minimal():
+    """Single USERNAME parameter — no structures, no tables."""
+    env = build_bapi_user_get_detail("SAPADM")
+    assert "<urn:BAPI_USER_GET_DETAIL>" in env
+    assert "<USERNAME>SAPADM</USERNAME>" in env
+    assert "</urn:BAPI_USER_GET_DETAIL>" in env
+
+
+def test_bapi_user_get_detail_escapes_username():
+    """Usernames containing < > & must be escaped — defensive: real
+    usernames don't have these chars but we don't want a malformed
+    envelope if test data is junk."""
+    env = build_bapi_user_get_detail("U<&>")
+    assert "<USERNAME>U&lt;&amp;&gt;</USERNAME>" in env
 
 
 def test_bapi_transaction_commit_wait_x():
@@ -281,6 +298,41 @@ def test_parse_bapi_transaction_commit_returns_structure_not_table():
 # templates slipping through.
 # ---------------------------------------------------------------------------
 
+_RESP_USER_GET_DETAIL_SAP_ALL = (
+    '<?xml version="1.0" encoding="UTF-8"?>'
+    '<SOAP-ENV:Envelope '
+    'xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/">'
+    '<SOAP-ENV:Body>'
+    '<rfc:BAPI_USER_GET_DETAIL.Response '
+    'xmlns:rfc="urn:sap-com:document:sap:rfc:functions">'
+    '<PROFILES>'
+    '<item><BAPIPROF>SAP_ALL</BAPIPROF>'
+    '<BAPIPTEXT>All authorisations</BAPIPTEXT></item>'
+    '<item><BAPIPROF>SAP_NEW</BAPIPROF>'
+    '<BAPIPTEXT>New authorisations</BAPIPTEXT></item>'
+    '</PROFILES>'
+    '<ACTIVITYGROUPS>'
+    '<item><AGR_NAME>SAP_BC_BASIS_ADMIN</AGR_NAME>'
+    '<AGR_TEXT>Basis Admin</AGR_TEXT></item>'
+    '</ACTIVITYGROUPS>'
+    '<RETURN/>'
+    '</rfc:BAPI_USER_GET_DETAIL.Response>'
+    '</SOAP-ENV:Body></SOAP-ENV:Envelope>'
+)
+
+
+def test_parse_user_get_detail_extracts_profiles_and_roles():
+    """The key parse: PROFILES + ACTIVITYGROUPS land in tables; each
+    is a list of structures keyed by their inner field names."""
+    r = parse_response(
+        _RESP_USER_GET_DETAIL_SAP_ALL, "BAPI_USER_GET_DETAIL")
+    assert r["ok"] is True
+    profiles = [row["BAPIPROF"] for row in r["tables"]["PROFILES"]]
+    assert profiles == ["SAP_ALL", "SAP_NEW"]
+    roles = [row["AGR_NAME"] for row in r["tables"]["ACTIVITYGROUPS"]]
+    assert roles == ["SAP_BC_BASIS_ADMIN"]
+
+
 def test_all_builders_produce_parseable_xml():
     """If a builder ever emits malformed XML (unbalanced tag, missing
     namespace, etc.), this test fails fast."""
@@ -288,6 +340,7 @@ def test_all_builders_produce_parseable_xml():
     for env in (
             build_rfc_ping(),
             build_bapi_user_create1("U", "P"),
+            build_bapi_user_get_detail("U"),
             build_bapi_user_profiles_assign("U", ["SAP_ALL"]),
             build_bapi_transaction_commit(),
             build_bapi_transaction_commit(wait=False)):

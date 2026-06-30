@@ -29,6 +29,7 @@ import urllib.request
 from sap_soap_envelopes import (
     build_bapi_transaction_commit,
     build_bapi_user_create1,
+    build_bapi_user_get_detail,
     build_bapi_user_profiles_assign,
     build_rfc_ping,
     parse_response,
@@ -183,6 +184,50 @@ class SOAPRFCSession:
         body = build_bapi_transaction_commit(wait)
         response_xml = self._post_soap(body)
         return parse_response(response_xml, "BAPI_TRANSACTION_COMMIT")
+
+    def bapi_user_get_detail(self, username: str) -> dict:
+        body = build_bapi_user_get_detail(username)
+        response_xml = self._post_soap(body)
+        return parse_response(response_xml, "BAPI_USER_GET_DETAIL")
+
+    def get_user_profiles(self, username: str) -> dict:
+        """High-level: read PROFILES + ACTIVITYGROUPS via BAPI.
+
+        Returns:
+          {
+            "ok":          bool,   True when BAPI returned, even if
+                                   the user has zero profiles
+            "profiles":    list[str],   names from PROFILES.BAPIPROF
+            "roles":       list[str],   names from ACTIVITYGROUPS.AGR_NAME
+            "has_sap_all": bool,   True iff 'SAP_ALL' is in profiles
+            "error":       str,    empty on success; populated when the
+                                   BAPI itself rejected (S_USER_GRP
+                                   missing → call-time auth failure)
+          }
+
+        Crucial property for the GUI: a missing-permission RETURN with
+        an empty PROFILES table still gives ok=True with profiles=[] —
+        the modal can then show "no profiles read" rather than
+        pretending the call failed.
+        """
+        result = self.bapi_user_get_detail(username)
+        out = {
+            "ok": result["ok"],
+            "profiles": [],
+            "roles": [],
+            "has_sap_all": False,
+            "error": result.get("error", ""),
+        }
+        for row in result["tables"].get("PROFILES", []):
+            name = (row.get("BAPIPROF", "") or "").strip()
+            if name:
+                out["profiles"].append(name)
+        for row in result["tables"].get("ACTIVITYGROUPS", []):
+            name = (row.get("AGR_NAME", "") or "").strip()
+            if name:
+                out["roles"].append(name)
+        out["has_sap_all"] = "SAP_ALL" in out["profiles"]
+        return out
 
     # -----------------------------------------------------------------
     # High-level orchestration
