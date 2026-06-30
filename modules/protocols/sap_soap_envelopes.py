@@ -111,6 +111,32 @@ def build_bapi_user_profiles_assign(username: str,
     return _wrap_envelope(body)
 
 
+def build_bapi_user_delete(username: str) -> str:
+    """BAPI_USER_DELETE — delete a user.
+
+    Same FM SAPMAP already uses via pyrfc (sapmap_rfc.delete_user).
+    Pairing with the create + profile-assign + commit flow makes the
+    full create/cleanup loop work over HTTP-only landscapes — operator
+    can run the assessment AND tidy up afterwards without needing the
+    gateway port open.
+
+    Returns: RETURN BAPIRET2 — caller checks for E/A/X to detect
+    "user doesn't exist" vs "no S_USER_GRP" vs success.
+
+    Note: BAPI_USER_DELETE doesn't auto-commit (consistent with
+    BAPI_USER_CREATE1).  Caller must follow up with
+    BAPI_TRANSACTION_COMMIT for the change to persist past the
+    work-process turnaround.
+    """
+    body = (
+        '<urn:BAPI_USER_DELETE>'
+        f'<USERNAME>{escape(username)}</USERNAME>'
+        '<RETURN/>'
+        '</urn:BAPI_USER_DELETE>'
+    )
+    return _wrap_envelope(body)
+
+
 def build_bapi_user_get_detail(username: str) -> str:
     """BAPI_USER_GET_DETAIL — read a user's profiles + roles.
 

@@ -10,6 +10,7 @@ import modules  # noqa: F401  registers package paths
 from sap_soap_envelopes import (
     build_bapi_transaction_commit,
     build_bapi_user_create1,
+    build_bapi_user_delete,
     build_bapi_user_get_detail,
     build_bapi_user_profiles_assign,
     build_dest_check_connection,
@@ -362,6 +363,7 @@ def test_all_builders_produce_parseable_xml():
             build_rfc_get_system_info(),
             build_dest_check_connection("S4H_SVC"),
             build_bapi_user_create1("U", "P"),
+            build_bapi_user_delete("U"),
             build_bapi_user_get_detail("U"),
             build_bapi_user_profiles_assign("U", ["SAP_ALL"]),
             build_bapi_transaction_commit(),
@@ -465,6 +467,17 @@ def test_rfc_read_table_pagination_via_rowcount_and_rowskips():
         "USR02", rowcount=100, rowskips=200)
     assert "<ROWCOUNT>100</ROWCOUNT>" in env
     assert "<ROWSKIPS>200</ROWSKIPS>" in env
+
+
+def test_bapi_user_delete_envelope_declares_return_table():
+    """Like every BAPI with output tables, RETURN must be declared as
+    a placeholder in the request or the kernel strips it from the
+    response and we can't distinguish 'user didn't exist' from 'no
+    S_USER_GRP authorization' from clean success."""
+    env = build_bapi_user_delete("SAPMAP00")
+    assert "<urn:BAPI_USER_DELETE>" in env
+    assert "<USERNAME>SAPMAP00</USERNAME>" in env
+    assert "<RETURN/>" in env
 
 
 def test_dest_check_connection_envelope():

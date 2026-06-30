@@ -14,7 +14,8 @@ import time
 
 import modules  # noqa: F401  registers package paths
 from sap_soap_basic import (
-    SOAPRFCError, SOAPRFCSession, create_user_via_soap,
+    SOAPRFCError, SOAPRFCSession,
+    create_user_via_soap, delete_user_via_soap,
 )
 
 
@@ -140,6 +141,30 @@ _AUTH_FAULT = (
     '<SOAP-ENV:Body><SOAP-ENV:Fault><faultcode>Client</faultcode>'
     '<faultstring>RFC_AUTHORIZATION_FAILURE</faultstring>'
     '</SOAP-ENV:Fault></SOAP-ENV:Body></SOAP-ENV:Envelope>')
+
+_USER_DELETE_OK = (
+    '<?xml version="1.0"?><SOAP-ENV:Envelope '
+    'xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/">'
+    '<SOAP-ENV:Body>'
+    '<rfc:BAPI_USER_DELETE.Response '
+    'xmlns:rfc="urn:sap-com:document:sap:rfc:functions">'
+    '<RETURN><item><TYPE>S</TYPE><ID>01</ID><NUMBER>123</NUMBER>'
+    '<MESSAGE>User SAPMAP00 deleted</MESSAGE></item></RETURN>'
+    '</rfc:BAPI_USER_DELETE.Response>'
+    '</SOAP-ENV:Body></SOAP-ENV:Envelope>')
+
+_USER_DELETE_NOT_FOUND = (
+    '<?xml version="1.0"?><SOAP-ENV:Envelope '
+    'xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/">'
+    '<SOAP-ENV:Body>'
+    '<rfc:BAPI_USER_DELETE.Response '
+    'xmlns:rfc="urn:sap-com:document:sap:rfc:functions">'
+    '<RETURN><item><TYPE>E</TYPE><ID>01</ID><NUMBER>124</NUMBER>'
+    '<MESSAGE>User SAPMAP00 does not exist</MESSAGE>'
+    '</item></RETURN>'
+    '</rfc:BAPI_USER_DELETE.Response>'
+    '</SOAP-ENV:Body></SOAP-ENV:Envelope>')
+
 
 _USER_GET_DETAIL_SAP_ALL = (
     '<?xml version="1.0"?><SOAP-ENV:Envelope '
@@ -364,6 +389,70 @@ def test_create_user_with_sap_all_aborts_on_profile_failure():
         # Commit should NOT have been called after a failed assign
         steps = [s for s, _ in r["details"]]
         assert "commit" not in steps
+    finally:
+        mock.stop()
+
+
+# ---------------------------------------------------------------------------
+# delete_user_via_soap — drop-in for sapmap_rfc.delete_user
+# ---------------------------------------------------------------------------
+
+def test_delete_user_via_soap_happy_path():
+    """Ping + delete + commit must all succeed → success=True with the
+    same {success, message, username} dict shape the GUI cleanup loop
+    branches on."""
+    mock = _MockSAP(_make_responder({
+        "RFC_PING":                (200, _PING_OK),
+        "BAPI_USER_DELETE":        (200, _USER_DELETE_OK),
+        "BAPI_TRANSACTION_COMMIT": (200, _COMMIT_OK),
+    }))
+    try:
+        r = delete_user_via_soap(
+            host="127.0.0.1", port=mock.port, client="000",
+            user="SAPADM", password="siroj1978",
+            victim_username="SAPMAP00")
+        assert r == {
+            "success": True,
+            "message": "User SAPMAP00 deleted via SOAP-RFC",
+            "username": "SAPMAP00",
+        }
+    finally:
+        mock.stop()
+
+
+def test_delete_user_via_soap_treats_not_exists_as_success():
+    """BAPI error 01/124 'User does not exist' means the goal state
+    (absent on target) is ALREADY satisfied.  Cleanup should report
+    success — telling the operator it failed when the user simply
+    wasn't there leads to false-positive 'cleanup failed' badges."""
+    mock = _MockSAP(_make_responder({
+        "RFC_PING":                (200, _PING_OK),
+        "BAPI_USER_DELETE":        (200, _USER_DELETE_NOT_FOUND),
+        "BAPI_TRANSACTION_COMMIT": (200, _COMMIT_OK),
+    }))
+    try:
+        r = delete_user_via_soap(
+            host="127.0.0.1", port=mock.port, client="000",
+            user="u", password="p", victim_username="SAPMAP00")
+        assert r["success"] is True
+    finally:
+        mock.stop()
+
+
+def test_delete_user_via_soap_aborts_on_bad_creds():
+    """RFC_PING failing (bad password etc.) must not proceed into
+    BAPI_USER_DELETE — we'd lock the SAP user out by hitting bad-
+    password thresholds on what should have been a single failed
+    auth."""
+    mock = _MockSAP(_make_responder({"RFC_PING": (500, _AUTH_FAULT)}))
+    try:
+        r = delete_user_via_soap(
+            host="127.0.0.1", port=mock.port, client="000",
+            user="u", password="bad", victim_username="SAPMAP00")
+        assert r["success"] is False
+        assert "RFC_PING failed" in r["message"]
+        # Mock saw only the ping — no DELETE attempted
+        assert len(mock.requests) == 1
     finally:
         mock.stop()
 
