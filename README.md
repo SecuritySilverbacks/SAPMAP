@@ -47,6 +47,7 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 - [AutoPwn — Full-Landscape Convergence Loop](#autopwn--full-landscape-convergence-loop)
 - [Local Privilege Escalation](#local-privilege-escalation)
 - [SSH Lateral Movement](#ssh-lateral-movement)
+- [SOAP-RFC over HTTP](#soap-rfc-over-http-firewalled-targets)
 - [Propagation](#propagation)
 - [SAProuter Support](#saprouter-support)
 - [SAP Secure Store Decryption](#sap-secure-store-rsectab-decryption)
@@ -100,6 +101,7 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 - **Destination testing** — Validate logon, ping, and latency via /SDF/RFC_CHECK with automatic fallback to DEST_CHECK_CONNECTION on older systems
 - **Automated propagation** — Iteratively exploit RFC connections to move across the landscape
 - **Attack path visualization** — Color-coded connections showing SAP_ALL access, gateway exploit paths, and risk levels
+- **HTTP-only transport** — Every authenticated RFC primitive (user create / delete / profile read, table read, system info, OS command, ABAP install-and-run, destination ping) also runs over SOAP-RFC against ABAP systems whose dispatcher / gateway ports (32NN / 33NN) are firewalled but whose ICM HTTP port is reachable.  See [SOAP-RFC over HTTP](#soap-rfc-over-http-firewalled-targets)
 - **SSH key harvest** — Exfiltrate SSH private keys from compromised SAP hosts (`~sidadm/.ssh/`).  Content-based detection reads the first 64 bytes of each file for `PRIVATE KEY` headers, catching non-standard key names (e.g. `my_id`).  Filters root-owned keys when running as sidadm, skips bare hostnames without dots from `known_hosts`
 - **SSH key harvest as root** — Harvest keys from all `/home/*/.ssh/` directories using the Linux LPE root channel (Copy Fail / Dirty Frag)
 - **SSH lateral movement** — Test harvested keys against `known_hosts` targets.  On success, marks the target node as pwned (red border + lightning bolt) and stores `ssh_access` metadata for persistent SSH-based command execution
@@ -293,7 +295,14 @@ modules/
 │   ├── sap_rfc_system_info.py         Unauthenticated RFC_SYSTEM_INFO probing
 │   ├── sap_rsec_cipher.py             SAP RSECCipher — proprietary 8-round Feistel 3DES
 │   ├── sap_router_info.py             SAProuter ROUTER_ADM info request
-│   └── sap_saprouter.py               SAProuter NI_ROUTE tunnel
+│   ├── sap_saprouter.py               SAProuter NI_ROUTE tunnel
+│   ├── sap_soap_envelopes.py          SOAP-RFC envelope builders + ElementTree response parser
+│   │                                   (RFC_PING, RFC_GET_SYSTEM_INFO, RFC_READ_TABLE,
+│   │                                    DEST_CHECK_CONNECTION, SXPG_STEP_XPG_START,
+│   │                                    RFC_ABAP_INSTALL_AND_RUN, BAPI_USER_*)
+│   └── sap_soap_basic.py              SOAPRFCSession — HTTP basic-auth SOAP-RFC client.
+│                                       Auto-fallback for firewalled gateways; drop-in
+│                                       shape for sapmap_rfc dispatcher
 │
 ├── discovery/                         Network discovery + recon
 │   ├── sapmap_scanner.py              Fast/deep scan, SAPControl, RFC probing
@@ -875,6 +884,67 @@ Nodes pwned via SSH gain three new capabilities in the Exploitation menu:
 - **Bind Shell** — Open a listening port on the target and connect to it
 
 Shell payloads use a multi-interpreter wrapper that auto-detects `python3` → `python` → `perl` → `bash /dev/tcp` on the remote, supporting both modern and legacy Linux hosts.
+
+---
+
+## SOAP-RFC over HTTP (firewalled targets)
+
+Modern SAP landscapes routinely firewall the dispatcher (sapdp&lt;NN&gt;, port 32NN) and the gateway (sapgw&lt;NN&gt;, port 33NN) so that only the ICM HTTP/HTTPS port is reachable from outside the secure zone — Type-H HTTP destinations on the source system then proxy RFC calls inside the firewall.  From the attacker's perspective this means pyrfc (which speaks raw CPIC to the gateway) sits there for 60-120s per call before failing.  SAPMAP's SOAP-RFC transport works around that by speaking SAP's SOAP-over-HTTP RFC bridge at `/sap/bc/soap/rfc` directly.
+
+### How it kicks in
+
+For every authenticated operation against an ABAP target SAPMAP:
+
+1. **Resolves a SOAP-RFC route** — scans the state for any Type-G/H HTTP destination targeting that node which has been verified by Test Connection and carries a SecStore-decrypted password.  The destination's RFC user + password become the SOAP basic-auth credential; the target's ICM HTTP port is discovered by `_discover_sid_http` (TCP-sweep of common ICM ports 8000-8050 / 8400-8450 / 50000-50020 + parsing of `/sap/public/info`)
+2. **TCP-probes the gateway port** — 2-second `socket.connect` to 33NN on the target's first instance
+3. **Routes the call accordingly** — if the gateway is reachable, uses the existing pyrfc path; if not, dispatches to `SOAPRFCSession` instead.  No operator action required — the fallback is fully transparent to every existing call site
+
+When the SOAP path is taken, the operator sees it: the OS Command Terminal labels each command with `[channel: soap_rfc, 234ms — soap-rfc via to_ABAP (gateway down)]`, retrieve-RFCs / create-user / cleanup all log `gateway down — using SOAP-RFC via &lt;destination&gt;`.
+
+### What works over HTTP
+
+| Capability | FM(s) | Notes |
+|---|---|---|
+| Credential verification | `RFC_PING` | Sets `conn.soap_rfc_verified` |
+| User creation + SAP_ALL | `BAPI_USER_CREATE1` + `BAPI_USER_PROFILES_ASSIGN` + `BAPI_TRANSACTION_COMMIT` | Continues past "user already exists" (01/102) |
+| User deletion (cleanup) | `BAPI_USER_DELETE` + `BAPI_TRANSACTION_COMMIT` | "Already gone" (01/124) treated as success |
+| Profile / role enumeration | `BAPI_USER_GET_DETAIL` | Drives the SAP_ALL badge in the modal |
+| System metadata | `RFC_GET_SYSTEM_INFO` | Populates OS / DB / Kernel / SAP Release in System Details |
+| Table read | `RFC_READ_TABLE` | Generic — used for T000 (client roles), RFCDES (destinations), RFCTRUST (outbound trust), RFCSYSACL (inbound ACL) |
+| Schema discovery | `RFC_READ_TABLE` with `NO_DATA=X` | Kernel-version resilient: requests only fields the target's RFCSYSACL/RFCTRUST schema actually has (kernel 742 strips RFCEQUSER/RFCUSER/RFCSAMEUSR — schema probe handles transparently) |
+| RFC destination ping | `DEST_CHECK_CONNECTION` | Replaces the 60-90s pyrfc ping per destination during Retrieve RFCs |
+| OS command execution | `SXPG_STEP_XPG_START` | Drives the OS Command Terminal, bind shells, reverse shells, all chunked-payload writes |
+| ABAP install + run | `RFC_ABAP_INSTALL_AND_RUN` | Drives SecStore RSECTAB hex-dump, SSFS file read (`OPEN DATASET`), OA2C profile harvest.  120-180s HTTP timeout because the kernel compiles the program before executing |
+
+### Measured wall-clock impact
+
+Live verification against an HTTP-only kernel-742 target (W74) with 3340 firewalled:
+
+| Operation | pyrfc (gateway down) | SOAP-RFC |
+|---|---|---|
+| Retrieve RFCs (RFCDES + RFCTRUST + RFCSYSACL + 7 destination pings) | ~10 minutes | **0.25 seconds** |
+| Test Connection on a Type-3 destination | 60-90 seconds | **<200 ms** |
+| Create Remote User (RFC_PING → CREATE → PROFILES_ASSIGN → COMMIT) | 60-120 s (then errored) | **~600 ms** |
+| Cleanup (delete user) | 60 s | **86 ms** |
+| OS Command (`whoami` via SXPG) | 60-90 s (then errored) | **~250 ms** |
+| Bind shell delivery (9-chunk payload + final exec) | timed out | succeeded end-to-end |
+
+### Auth modes
+
+* **HTTP basic auth** (`SOAPRFCSession` in `modules/protocols/sap_soap_basic.py`) — primary path, used for SecStore-recovered destination credentials
+* **MYSAPSSO2 cookie auth** (`SOAPRFCClient` in `modules/exploitation/sap_soap_rfc.py`) — ticket-forgery chain, used to call BAPIs as a forged SAP\* without knowing the password
+
+Both share envelope builders + the `parse_response` parser in `modules/protocols/sap_soap_envelopes.py`.
+
+### Wire-format notes
+
+A handful of SAP kernel quirks that bit us live and have been baked in:
+
+* The kernel only emits an output TABLE in the response if it was DECLARED as an empty placeholder in the request — every envelope builder declares `&lt;PROFILES/&gt;`, `&lt;WRITES/&gt;`, `&lt;LOG/&gt;`, `&lt;RETURN/&gt;` etc. as appropriate
+* SOAP faults bury the actually-useful kernel message under `&lt;detail&gt;&lt;rfc:Error&gt;&lt;type&gt;` / `&lt;message&gt;` — `parse_response` flattens that into the error string so callers can substring-match (`"not permitted in this client"`, `"NOT_AUTHORIZED"`, etc.) without bespoke XML parsing
+* `SXPG_STEP_XPG_START` requires `STDOUTCNTL=M` / `STDERRCNTL=M` to merge OS stdout+stderr into the LOG table — without them the kernel sends output to a /usr/sap log file the caller can't see
+* `MXROW` on SXPG must be retried without it on older kernels (Basis 7.0x) that raise `RFC_INVALID_PARAMETER`; session method handles this fallback automatically
+* `SOAPAction` header MUST be `""` (empty quoted string) — non-empty values trigger `invalid action` rejection on SAP's ICM
 
 ---
 
