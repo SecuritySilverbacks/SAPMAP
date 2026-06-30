@@ -6513,6 +6513,7 @@ function showConnInfo(e, connIdx) {
     ${isHttp ? `
       <div class="info-row"><span class="info-label">URL:</span><span class="info-val" style="word-break:break-all">${escHtml(conn.http_url || '?')}</span></div>
       <div class="info-row"><span class="info-label">Auth type:</span><span class="info-val">${escHtml(conn.http_auth_type || '?')}</span></div>
+      ${conn.client ? `<div class="info-row"><span class="info-label">Client:</span><span class="info-val">${escHtml(conn.client)}</span></div>` : ''}
       ${conn.http_proxy ? `<div class="info-row"><span class="info-label">Proxy:</span><span class="info-val">${escHtml(conn.http_proxy)}</span></div>` : ''}
       ${conn.http_target_platform ? `<div class="info-row"><span class="info-label">Platform:</span><span class="info-val">${escHtml(conn.http_target_platform)}</span></div>` : ''}
       <div class="info-row"><span class="info-label">User:</span><span class="info-val">${escHtml(conn.rfc_user || '?')}</span></div>

@@ -98,6 +98,50 @@ def test_http_options_path_without_leading_slash_gets_normalised():
     assert c.http_url == "https://h.example/sap/bc"
 
 
+def test_http_options_three_digit_path_treated_as_sap_client():
+    """When M= is a bare 3-digit number with no slashes, SM59 was
+    almost certainly using it to carry the SAP client (Mandant), not
+    a real URL path — http://host/001 wouldn't route to any ICF
+    service anyway.  Promote it to conn.client; URL must not carry it."""
+    c = _new_conn()
+    _parse_rfcdes_http_options(
+        c, "H=192.168.2.29,M=001,U=SAPADM,T=%_PWD")
+    assert c.client == "001"
+    # /001 must not leak into the URL — would cause a 404 on probe
+    assert c.http_url == "http://192.168.2.29"
+
+
+def test_http_options_short_client_padded_to_three_digits():
+    """SAP clients are always 3 digits — operators sometimes type
+    just '1' or '10' in SM59 and the kernel pads.  Mirror that
+    so the SOAP request's sap-client query param is well-formed."""
+    c = _new_conn()
+    _parse_rfcdes_http_options(c, "H=h,M=1,U=u")
+    assert c.client == "001"
+
+
+def test_http_options_d_field_takes_precedence_for_client():
+    """Some kernels store the client in a dedicated D= option.  When
+    both D= and a digit-looking M= are present, D= wins — it's the
+    documented field for client, M= as client is the fallback heuristic."""
+    c = _new_conn()
+    _parse_rfcdes_http_options(
+        c, "H=h,M=200,D=100,U=u")
+    assert c.client == "100"
+    # M=200 is then treated as a real path, not a client
+    assert c.http_url == "http://h/200"
+
+
+def test_http_options_non_digit_path_does_not_set_client():
+    """Real URL paths must NOT be interpreted as client.  Only bare
+    3-digit M= values trigger the client heuristic."""
+    c = _new_conn()
+    _parse_rfcdes_http_options(
+        c, "H=h,M=/sap/bc/srt/rfc,U=u")
+    assert c.client == ""   # untouched
+    assert c.http_url == "http://h/sap/bc/srt/rfc"
+
+
 # ---- _build_rfcdes_conn dispatch -------------------------------------
 
 def test_dispatch_uses_http_parser_for_type_g():
