@@ -9037,9 +9037,48 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
             print(f"[*] Testing {'TCP/IP' if is_type_t else 'RFC'} "
                   f"destination: {dest_name}...")
-            result = sapmap_rfc.test_rfc_destination(
-                node, dest_name, creds, api.state.rfc_check_cache
-            )
+
+            # Phase 3b: when the source node's gateway port is
+            # firewalled (typical Type-G/H landscape) and we have a
+            # verified SOAP-RFC route to this node, run
+            # DEST_CHECK_CONNECTION over SOAP instead of pyrfc.  Saves
+            # the 60-90s pyrfc-on-3340 timeout per Test Connection
+            # click against an HTTP-only source.
+            result = None
+            soap_route_src = find_soap_rfc_route_for_node(
+                api.state, node)
+            if soap_route_src:
+                from sapmap_exploit import _gateway_port_reachable
+                if not _gateway_port_reachable(node):
+                    print(f"[*] {sid}: gateway down — testing "
+                          f"{dest_name} via SOAP-RFC "
+                          f"DEST_CHECK_CONNECTION")
+                    import time as _t
+                    from sap_soap_basic import SOAPRFCSession
+                    sess = SOAPRFCSession(
+                        host=soap_route_src["host"],
+                        port=soap_route_src["port"],
+                        client=soap_route_src["client"],
+                        user=soap_route_src["user"],
+                        password=soap_route_src["password"],
+                        https=soap_route_src["https"])
+                    t0 = _t.time()
+                    soap_ping = sess.dest_check_connection(dest_name)
+                    # Shape into test_rfc_destination's expected dict
+                    result = {
+                        "ping_ok": soap_ping["ping_ok"],
+                        "logon_ok": soap_ping["logon_ok"],
+                        "ping_status": "1" if soap_ping["ping_ok"]
+                                        else "0",
+                        "latency_ms": int((_t.time() - t0) * 1000),
+                        "logon_message": soap_ping["ping_message"],
+                        "error": soap_ping["error"],
+                    }
+
+            if result is None:
+                result = sapmap_rfc.test_rfc_destination(
+                    node, dest_name, creds, api.state.rfc_check_cache
+                )
             conn.latency_ms = result.get("latency_ms", 0)
             conn.tested = True
 
