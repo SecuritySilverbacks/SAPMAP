@@ -9045,6 +9045,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
             # the 60-90s pyrfc-on-3340 timeout per Test Connection
             # click against an HTTP-only source.
             result = None
+            tested_via_soap = False
             soap_route_src = find_soap_rfc_route_for_node(
                 api.state, node)
             if soap_route_src:
@@ -9064,6 +9065,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         https=soap_route_src["https"])
                     t0 = _t.time()
                     soap_ping = sess.dest_check_connection(dest_name)
+                    tested_via_soap = True
                     # Shape into test_rfc_destination's expected dict
                     result = {
                         "ping_ok": soap_ping["ping_ok"],
@@ -9103,11 +9105,28 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 conn.logon_tested = True
                 conn.ping_ok = result.get("ping_ok", False)
                 if conn.logon_successful:
+                    # Clear any stale error from a previous failed
+                    # pyrfc attempt — leaving it set makes the modal
+                    # show a scary RFC_COMMUNICATION_FAILURE even
+                    # though THIS test succeeded.
+                    conn.user_detail_error = ""
                     print(f"[+] {dest_name}: Logon successful!")
                     target = api.state.get_node(conn.target_sid)
                     if target:
                         target.has_critical_finding = True
-                    if conn.rfc_user:
+                    if tested_via_soap:
+                        # SOAP path: the pyrfc-based profile read
+                        # (get_remote_user_profiles uses
+                        # ABAP_INSTALL_AND_RUN over the gateway) would
+                        # itself hang on 3340.  Mark soap_rfc_verified
+                        # so the Create Remote User button still
+                        # appears, with the click-time SAP_ALL check
+                        # path same as HTTP destinations get.
+                        conn.soap_rfc_verified = True
+                        print(f"[*] {dest_name}: profile read skipped "
+                              f"(via SOAP) — SAP_ALL will be verified "
+                              f"at Create Remote User click time")
+                    elif conn.rfc_user:
                         info = sapmap_rfc.get_remote_user_profiles(
                             node, conn.rfc_user, dest_name, creds
                         )
