@@ -4631,7 +4631,10 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 # Refresh OA2C in case the operator skipped a
                 # standalone harvest_btp_creds step.
                 try:
-                    node.oauth2_profiles = read_oa2c_profiles(node)
+                    _oa_sess, _ = resolve_soap_session_for_node(
+                        api.state, node)
+                    node.oauth2_profiles = read_oa2c_profiles(
+                        node, soap_session=_oa_sess)
                 except Exception as e:
                     print(f"[-] {sid}: implicit OA2C read failed — "
                           f"{e!s}")
@@ -11845,7 +11848,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         )
             else:
                 print(f"[*] {sid}: Running all business impact scenarios...")
-                results = sapmap_impact.assess_all(node, creds)
+                results = sapmap_impact.assess_all(
+                    node, creds, state=api.state)
                 node.impact_results = [r.to_dict() for r in results]
                 crit = sum(1 for r in results if r.severity.value >= 5)
                 high = sum(1 for r in results if r.severity.value == 4)
