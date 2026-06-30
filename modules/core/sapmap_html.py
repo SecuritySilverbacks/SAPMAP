@@ -1569,6 +1569,43 @@ body {
   </div>
 </div>
 
+<!-- Scan All Vulnerabilities Modal -->
+<div class="modal-overlay" id="vulns-select-modal">
+  <div class="modal" style="max-width:560px;width:95vw">
+    <h3>&#128299; Scan for Vulnerabilities</h3>
+    <div id="vulns-select-info" style="font-size:12px;color:#8b949e;margin-bottom:12px"></div>
+    <div style="font-size:11px;color:#8b949e;margin-bottom:10px;line-height:1.5">
+      Each check is a passive probe — no user is created, no command is executed.
+      Eligibility is enforced per node (Java-only checks skip ABAP, etc.).
+      Press STOP to cancel mid-sweep.
+    </div>
+    <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px">
+      <label class="autopwn-cb"><input type="checkbox" id="vsel-gw" checked> RFC Gateway Vulnerability (every SAP)</label>
+      <label class="autopwn-cb"><input type="checkbox" id="vsel-ms" checked> MS Betrusted / CVE-2020-6207 (every SAP)</label>
+      <label class="autopwn-cb"><input type="checkbox" id="vsel-cve-31324" checked> CVE-2025-31324 — VisualComposer JSP unauth (Java only)</label>
+      <label class="autopwn-cb"><input type="checkbox" id="vsel-cve-6287" checked> CVE-2020-6287 — RECON (Java only)</label>
+      <label class="autopwn-cb"><input type="checkbox" id="vsel-cve-22536" checked> CVE-2022-22536 — ICMAD smuggle (ABAP / Java / WD)</label>
+      <label class="autopwn-cb"><input type="checkbox" id="vsel-router-info" checked> SAProuter Info Leak (SAProuter nodes)</label>
+      <label class="autopwn-cb" style="color:#d29922">
+        <input type="checkbox" id="vsel-default-creds">
+        Default Credentials Test (DIAG) &mdash; <strong>may LOCK accounts</strong>
+      </label>
+    </div>
+    <div style="font-size:10px;color:#484f58;margin-bottom:14px;line-height:1.5">
+      Default Credentials probes SAP*, DDIC, TMSADM, EARLYWATCH, SAPCPIC and friends
+      against each enumerated client.  Failed attempts can lock accounts after the
+      configured retry threshold (typically 3-5) — only enable on systems where you
+      can tolerate that.
+    </div>
+    <div class="form-actions">
+      <button class="btn" onclick="selectAllVulns(true)">Select all</button>
+      <button class="btn" onclick="selectAllVulns(false)">Deselect all</button>
+      <button class="btn btn-primary" onclick="runSelectedVulns()">Run Selected</button>
+      <button class="btn" onclick="closeModal('vulns-select-modal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <!-- Table Download Modal -->
 <div class="modal-overlay" id="table-modal">
   <div class="modal">
@@ -10307,20 +10344,41 @@ async function checkAllGateways() {
     await api('POST', 'actions/check_all_gw');
   startPolling();
 }
-async function scanAllVulns() {
+function scanAllVulns() {
   const nodeCount = Object.keys(mapState.nodes || {}).length;
   if (nodeCount < 1) { alert('No systems on the map.'); return; }
-  if (confirm(`Scan for ALL vulnerabilities on ${nodeCount} system(s)?\n\n` +
-              `Runs every passive 'Check ...' probe per node:\n` +
-              ` • GW Vulnerability (every SAP)\n` +
-              ` • MS Betrusted / CVE-2020-6207 (every SAP)\n` +
-              ` • CVE-2025-31324 VisualComposer (Java only)\n` +
-              ` • CVE-2020-6287 RECON (Java only)\n` +
-              ` • CVE-2022-22536 ICMAD smuggle (ABAP/Java/WD)\n` +
-              ` • SAProuter Info Leak (SAProuter nodes)\n\n` +
-              `Excluded: Deep/SAPology scan, Default Accounts (may lock), RFC retrieval.\n\n` +
-              `Press STOP to cancel mid-sweep.`))
-    await api('POST', 'actions/check_all_vulns');
+  document.getElementById('vulns-select-info').textContent =
+    `Targeting ${nodeCount} system(s) on the map.`;
+  document.getElementById('vsel-default-creds').checked = false;
+  document.getElementById('vulns-select-modal').classList.add('visible');
+}
+function selectAllVulns(on) {
+  ['vsel-gw', 'vsel-ms', 'vsel-cve-31324', 'vsel-cve-6287',
+   'vsel-cve-22536', 'vsel-router-info', 'vsel-default-creds']
+    .forEach(id => { document.getElementById(id).checked = on; });
+}
+async function runSelectedVulns() {
+  const checks = {
+    gw:            document.getElementById('vsel-gw').checked,
+    ms:            document.getElementById('vsel-ms').checked,
+    cve_31324:     document.getElementById('vsel-cve-31324').checked,
+    cve_6287:      document.getElementById('vsel-cve-6287').checked,
+    cve_22536:     document.getElementById('vsel-cve-22536').checked,
+    router_info:   document.getElementById('vsel-router-info').checked,
+    default_creds: document.getElementById('vsel-default-creds').checked,
+  };
+  if (!Object.values(checks).some(v => v)) {
+    alert('Select at least one check.');
+    return;
+  }
+  if (checks.default_creds &&
+      !confirm('Default Credentials probes well-known SAP accounts (SAP*, DDIC, TMSADM, …) ' +
+               'over DIAG.  Failed attempts may LOCK these accounts after the configured ' +
+               'retry threshold (typically 3-5).\n\nProceed?')) {
+    return;
+  }
+  closeModal('vulns-select-modal');
+  await api('POST', 'actions/check_all_vulns', { checks });
   startPolling();
 }
 async function checkAllBetrusted() {

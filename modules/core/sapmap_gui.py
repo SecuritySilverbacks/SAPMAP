@@ -11568,22 +11568,30 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
     @app.route("/api/actions/check_all_vulns", method="POST")
     def actions_check_all_vulns():
-        """Run every passive 'Check ...' probe across every node on the map.
+        """Run selected passive 'Check ...' probes across every node.
+
+        The optional ``checks`` body picks which probes to run (the GUI's
+        multi-select modal builds it from the operator's checkboxes).
+        With no body, every check defaults on except default_creds.
 
         Mirrors the per-node right-click Scanning → Check * items, gated
         by the node's system_type:
-          - check_gw          — every node
-          - check_ms          — every node (39NN probe)
-          - check_cve_31324   — Java / double-stack only
-          - check_cve_6287    — Java / double-stack only
-          - check_cve_22536   — every HTTP-serving stack (ABAP/Java/WD)
-          - check_router_info — SAProuter nodes only
-        Deep scan / default-creds / RFC retrieval are excluded by design
-        (deep scan is SAPology; default-creds may lock accounts; RFC
-        retrieval needs authenticated logon — none are "vulnerability
-        checks" in the drive-by sense this action covers).
+          - gw            — every node
+          - ms            — every node (39NN probe)
+          - cve_31324     — Java / double-stack only
+          - cve_6287      — Java / double-stack only
+          - cve_22536     — every HTTP-serving stack (ABAP/Java/WD)
+          - router_info   — SAProuter nodes only
+          - default_creds — opt-in (may LOCK accounts after failed
+                              attempts; the GUI surfaces a warning)
         """
         response.content_type = "application/json"
+        data = request.json or {}
+        selected = data.get("checks") or {
+            "gw": True, "ms": True, "cve_31324": True,
+            "cve_6287": True, "cve_22536": True, "router_info": True,
+            "default_creds": False,
+        }
         nodes = list(api.state.nodes.values())
         if not nodes:
             return json.dumps({"error": "No systems on the map"})
@@ -11593,6 +11601,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
             import time as _time
             sapmap_stop.reset_stop()
             total = len(nodes)
+            default_creds_hits = set()
             print(f"[*] Scan for All Vulnerabilities — {total} system(s)")
             for idx, node in enumerate(nodes, 1):
                 if sapmap_stop.is_stop_requested():
@@ -11615,7 +11624,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                       f"({node.system_type or '?'}) — running vuln checks")
 
                 # 1. Gateway (every SAP system — skip pure routers)
-                if not is_router:
+                if selected.get("gw") and not is_router:
                     try:
                         print(f"[*] {node.sid}: check_gw")
                         sapmap_exploit.check_gw_vulnerable(node)
@@ -11626,7 +11635,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         return
 
                 # 2. MS betrusted / CVE-2020-6207 (every SAP system)
-                if not is_router:
+                if selected.get("ms") and not is_router:
                     try:
                         print(f"[*] {node.sid}: check_ms_betrusted")
                         sapmap_scanner.check_ms_betrusted(node)
@@ -11637,7 +11646,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         return
 
                 # 3. CVE-2025-31324 — Java / double-stack only
-                if is_java:
+                if selected.get("cve_31324") and is_java:
                     try:
                         print(f"[*] {node.sid}: check_cve_2025_31324")
                         sapmap_scanner.check_cve_2025_31324(node)
@@ -11648,7 +11657,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         return
 
                 # 4. CVE-2020-6287 (RECON) — Java / double-stack only
-                if is_java:
+                if selected.get("cve_6287") and is_java:
                     try:
                         print(f"[*] {node.sid}: check_cve_2020_6287 (RECON)")
                         sapmap_scanner.check_cve_2020_6287(node)
@@ -11668,7 +11677,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 is_wd = "WEB_DISPATCHER" in sys_type
                 is_http = (is_abap or is_java or is_wd
                              or getattr(node, "is_web_dispatcher", False))
-                if not is_router and is_http:
+                if selected.get("cve_22536") and not is_router and is_http:
                     try:
                         print(f"[*] {node.sid}: check_cve_2022_22536 (ICMAD)")
                         sapmap_scanner.check_cve_2022_22536(node)
@@ -11679,7 +11688,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         return
 
                 # 6. SAProuter info leak — SAProuter nodes only
-                if is_router:
+                if selected.get("router_info") and is_router:
                     try:
                         from sap_router_info import saprouter_info_request
                         host = node.ip or node.hostname
@@ -11715,6 +11724,72 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     except Exception as e:
                         print(f"[-] {node.sid}: check_router_info failed: {e}")
 
+                # 7. Default credentials (DIAG) — opt-in.  May lock
+                # accounts after the configured retry threshold; the GUI
+                # makes the operator confirm before passing the flag.
+                # Needs a 32XX dispatcher port — SAProuter nodes and
+                # WD-only systems skip.
+                if (selected.get("default_creds") and not is_router):
+                    try:
+                        from sap_default_creds import (
+                            check_default_credentials,
+                        )
+                        host = node.ip or node.hostname
+                        disp_port = None
+                        for inst in node.instances:
+                            for port, svc in inst.ports.items():
+                                if svc == "dispatcher" or 3200 <= port <= 3299:
+                                    disp_port = port
+                                    break
+                            if disp_port:
+                                break
+                        if host and disp_port:
+                            clients = [c.get("nr") if isinstance(c, dict)
+                                        else str(c) for c in node.clients]
+                            clients = [c for c in clients if c] or ["000"]
+                            print(f"[*] {node.sid}: check_default_creds "
+                                  f"({host}:{disp_port}, clients={','.join(clients)})")
+                            print(f"[!] {node.sid}: WARNING — failed "
+                                  f"login attempts may LOCK accounts!")
+                            findings = check_default_credentials(
+                                host, disp_port, clients,
+                                timeout=10, verbose=True,
+                                saprouter=node.saprouter)
+                            if findings:
+                                from sapmap_models import Credentials
+                                print(f"[+] {node.sid}: "
+                                      f"{len(findings)} default credential(s)")
+                                for f in findings:
+                                    cred = Credentials(
+                                        username=f["username"],
+                                        password=f["password"],
+                                        client=f["client"],
+                                        instance_nr=(node.instance_nrs()[0]
+                                                      if node.instance_nrs()
+                                                      else "00"),
+                                        verified=(f["result"] == "SUCCESS"),
+                                    )
+                                    if not any(c.username == cred.username
+                                                and c.client == cred.client
+                                                for c in node.credentials):
+                                        node.credentials.append(cred)
+                                        print(f"    [{f['severity']}] "
+                                              f"{f['username']}:{f['password']} "
+                                              f"client {f['client']} — "
+                                              f"{f['detail']}")
+                                default_creds_hits.add(node.sid)
+                        else:
+                            print(f"[-] {node.sid}: check_default_creds "
+                                  f"skipped — no dispatcher port reachable")
+                    except ImportError:
+                        print(f"[-] {node.sid}: sap_default_creds module "
+                              f"not available")
+                    except Exception as e:
+                        print(f"[-] {node.sid}: check_default_creds failed: {e}")
+                    if sapmap_stop.is_stop_requested():
+                        print(f"[!] STOP — vuln sweep aborted")
+                        return
+
             vulns = []
             for n in nodes:
                 hits = []
@@ -11729,6 +11804,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 if (getattr(n, "saprouter_info", None)
                         and n.saprouter_info.get("vulnerable")):
                     hits.append("Router-InfoLeak")
+                if n.sid in default_creds_hits:
+                    hits.append("DefaultCreds")
                 if hits:
                     vulns.append(f"{n.sid}: {', '.join(hits)}")
             print(f"[+] Vuln sweep complete — {len(vulns)} system(s) with findings")
