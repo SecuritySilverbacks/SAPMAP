@@ -32,22 +32,17 @@ def cleanup_node_users(node: SAPNode, state: SAPMAPState) -> dict:
         print(f"[*] No created users to clean up in {node.sid}")
         return result
 
-    # Resolve a SOAP-RFC route + gateway reachability ONCE, not per
-    # user.  Avoids re-probing the gateway socket for every deletion.
-    soap_route = None
-    use_soap = False
-    try:
-        from sapmap_gui import find_soap_rfc_route_for_node
-        from sapmap_exploit import _gateway_port_reachable
-        soap_route = find_soap_rfc_route_for_node(state, node)
-        if soap_route and not _gateway_port_reachable(node):
-            use_soap = True
-            print(f"[*] {node.sid}: gateway down — routing cleanup "
-                  f"via SOAP-RFC ({soap_route['host']}:"
-                  f"{soap_route['port']}, via "
-                  f"{soap_route['via_destination']})")
-    except Exception as e:
-        logger.debug(f"SOAP cleanup route check failed: {e}")
+    # Resolve a SOAP-RFC session + route ONCE, not per user.  Avoids
+    # re-probing the gateway socket on every deletion.
+    from sapmap_gui import resolve_soap_session_for_node
+    _soap_session, soap_route = resolve_soap_session_for_node(
+        state, node)
+    use_soap = _soap_session is not None
+    if use_soap:
+        print(f"[*] {node.sid}: gateway down — routing cleanup "
+              f"via SOAP-RFC ({soap_route['host']}:"
+              f"{soap_route['port']}, via "
+              f"{soap_route['via_destination']})")
 
     creds = node.best_credentials()
     if not creds and not use_soap:

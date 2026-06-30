@@ -1986,30 +1986,15 @@ class SAPMAPState:
                 # attempt would silently burn 60s on pyrfc retries —
                 # the auto-download would always fail on HTTP-only
                 # targets.
-                soap_session = None
-                soap_route = None
-                try:
-                    from sapmap_gui import (
-                        find_soap_rfc_route_for_node)
-                    from sapmap_exploit import _gateway_port_reachable
-                    route = find_soap_rfc_route_for_node(self, node)
-                    if route and not _gateway_port_reachable(node):
-                        soap_route = route
-                        from sap_soap_basic import SOAPRFCSession
-                        soap_session = SOAPRFCSession(
-                            host=route["host"], port=route["port"],
-                            client=route["client"],
-                            user=route["user"],
-                            password=route["password"],
-                            https=route["https"],
-                            timeout=180.0,
-                        )
-                        print(f"[*] SecStore {node.sid} (auto): "
-                              f"gateway down — using SOAP-RFC "
-                              f"via {route['via_destination']}")
-                except Exception:
-                    soap_session = None
-                    soap_route = None
+                from sapmap_gui import (
+                    resolve_soap_session_for_node)
+                soap_session, soap_route = (
+                    resolve_soap_session_for_node(
+                        self, node, timeout=180.0))
+                if soap_session is not None:
+                    print(f"[*] SecStore {node.sid} (auto): "
+                          f"gateway down — using SOAP-RFC "
+                          f"via {soap_route['via_destination']}")
 
                 emit_finding(
                     "INFO", node.sid,

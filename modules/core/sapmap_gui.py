@@ -405,6 +405,57 @@ def find_soap_rfc_route_for_node(state, target_node) -> dict:
     return None
 
 
+def resolve_soap_session_for_node(state, node,
+                                  timeout: float = 60.0):
+    """Single source of truth for the SOAP-RFC-session resolution
+    boilerplate.
+
+    Returns ``(soap_session, soap_route)``.  Both are None UNLESS:
+      * `find_soap_rfc_route_for_node` returns a viable route (Test-
+        Connection-verified HTTP destination with SecStore password)
+      * AND the target's gateway port (sapgw<NN>=33NN) is unreachable
+        from this host (2s TCP probe via
+        sapmap_exploit._gateway_port_reachable)
+
+    Replaces the ~12-line route-resolve + gateway-probe + session-
+    create block previously inlined at every SecStore / cleanup /
+    propagate call site — five places when the refactor was done, and
+    every future caller that picks up the same need.  Centralising it
+    also makes it impossible to forget the gateway-probe step (which
+    is what produces the desired "use pyrfc on healthy targets, SOAP
+    only on firewalled ones" semantic).
+
+    ``timeout`` propagates to the SOAPRFCSession's HTTP timeout — set
+    high (180s) for ABAP_INSTALL_AND_RUN paths where the SAP kernel
+    has to compile a program before executing it.  Default (60s) is
+    fine for the BAPI / table-read paths.
+
+    Any exception during resolution returns (None, None) silently —
+    SOAP-RFC fallback is best-effort; callers must continue to work
+    when the route can't be established, so failure to resolve is
+    not itself a critical condition.
+    """
+    try:
+        route = find_soap_rfc_route_for_node(state, node)
+        if not route:
+            return None, None
+        from sapmap_exploit import _gateway_port_reachable
+        if _gateway_port_reachable(node):
+            return None, None
+        from sap_soap_basic import SOAPRFCSession
+        session = SOAPRFCSession(
+            host=route["host"], port=route["port"],
+            client=route["client"],
+            user=route["user"],
+            password=route["password"],
+            https=route["https"],
+            timeout=float(timeout),
+        )
+        return session, route
+    except Exception:
+        return None, None
+
+
 def _resolve_soap_endpoint(conn, target_node) -> dict:
     """Pick a host/port/scheme tuple for SOAP-RFC against `target_node`.
 
@@ -10277,36 +10328,16 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
         def _run():
             creds = node.best_credentials()
-            # Phase 3b: resolve a SOAP-RFC route + gateway-reachability
-            # probe so the SSFS/RSECTAB reads route over HTTP on
-            # firewalled targets.  Without this, the right-click
-            # "Download SecStore" action on an HTTP-only target burns
-            # ~7-10 minutes hammering 3340 (step 1 ABAP + step 1b SXPG
-            # + step 2 ABAP + alt-client search) before giving up.
-            soap_session = None
-            soap_route = None
-            try:
-                route = find_soap_rfc_route_for_node(api.state, node)
-                if route and not (
-                        sapmap_exploit._gateway_port_reachable(node)):
-                    soap_route = route
-                    from sap_soap_basic import SOAPRFCSession
-                    soap_session = SOAPRFCSession(
-                        host=route["host"], port=route["port"],
-                        client=route["client"],
-                        user=route["user"],
-                        password=route["password"],
-                        https=route["https"],
-                        timeout=180.0,
-                    )
-                    print(f"[*] SecStore {sid}: gateway down — "
-                          f"routing via SOAP-RFC "
-                          f"({route['host']}:{route['port']}, via "
-                          f"{route['via_destination']})")
-            except Exception as e:
-                logger.debug(
-                    f"SecStore SOAP route check failed: {e}")
-
+            # Phase 3b: route SSFS/RSECTAB reads over HTTP on firewalled
+            # targets.  resolve_soap_session_for_node centralises the
+            # probe + session-create boilerplate.
+            soap_session, soap_route = resolve_soap_session_for_node(
+                api.state, node, timeout=180.0)
+            if soap_session is not None:
+                print(f"[*] SecStore {sid}: gateway down — routing "
+                      f"via SOAP-RFC ({soap_route['host']}:"
+                      f"{soap_route['port']}, via "
+                      f"{soap_route['via_destination']})")
             try:
                 results = sapmap_secstore.download_and_decrypt(
                     node, creds, key_hex, state=api.state,
