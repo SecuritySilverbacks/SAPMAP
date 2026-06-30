@@ -781,10 +781,44 @@ def assess_all(node: SAPNode, creds: Credentials,
 
     if conn:
         _run(conn)
-    else:
-        import sapmap_rfc
-        with sapmap_rfc._get_connection(node, creds) as c:
-            _run(c)
+        results.sort(key=lambda r: -int(r.severity))
+        return results
+
+    # Phase 3b: every business-impact scenario uses a pyrfc connection
+    # (the BSEG / BKPF / PA0001 / etc. reads need RFC_READ_TABLE with
+    # complex WHERE filters that aren't yet ported to SOAP-RFC).  Open
+    # to that later, but right now if the gateway is unreachable we
+    # would silently hang 60s before the operator saw any output.
+    # Detect it up-front and surface a clear "skipped" message + a
+    # synthetic ImpactResult so the modal renders something useful
+    # instead of staying empty.
+    try:
+        from sapmap_exploit import _gateway_port_reachable
+        gw_ok = _gateway_port_reachable(node)
+    except Exception:
+        gw_ok = True   # fail-open: try and let pyrfc surface the error
+    if not gw_ok:
+        pf(f"[!] {node.sid}: gateway port (33NN) unreachable — "
+           f"Business Impact scenarios use pyrfc table reads that "
+           f"aren't ported to SOAP-RFC yet.  Skipping; either open the "
+           f"firewall to 33NN or run Business Impact from a node "
+           f"whose gateway IS reachable.")
+        results.append(ImpactResult(
+            scenario="_all_skipped_no_gateway",
+            category="Infrastructure",
+            severity=Severity.INFO,
+            headline=("Gateway port (33NN) unreachable — Business "
+                      "Impact assessment skipped on this HTTP-only "
+                      "target.  Run from a node whose gateway IS "
+                      "reachable, or wait until the scenarios are "
+                      "ported to SOAP-RFC."),
+            icon="🚧",
+        ))
+        return results
+
+    import sapmap_rfc
+    with sapmap_rfc._get_connection(node, creds) as c:
+        _run(c)
 
     results.sort(key=lambda r: -int(r.severity))
     return results

