@@ -31,7 +31,11 @@ from sap_soap_envelopes import (
     build_bapi_user_create1,
     build_bapi_user_get_detail,
     build_bapi_user_profiles_assign,
+    build_rfc_get_system_info,
     build_rfc_ping,
+    build_rfc_read_table,
+    build_sxpg_step_xpg_start,
+    build_sxpg_step_xpg_start_no_mxrow,
     parse_response,
 )
 
@@ -184,6 +188,164 @@ class SOAPRFCSession:
         body = build_bapi_transaction_commit(wait)
         response_xml = self._post_soap(body)
         return parse_response(response_xml, "BAPI_TRANSACTION_COMMIT")
+
+    # -----------------------------------------------------------------
+    # Phase 3b: OS exec + table read + system info
+    # -----------------------------------------------------------------
+
+    def sxpg_step_xpg_start(self, command: str, params: str = "",
+                            destination: str = "",
+                            long_params: str = "",
+                            mxrow: int = 9999) -> dict:
+        """Run an OS command on the target via SXPG_STEP_XPG_START.
+
+        Same FM the gateway-port pyrfc path uses — just over HTTP.
+        Auto-retries without MXROW on older kernels that reject it
+        (mirrors the pyrfc fallback in sapmap_rfc.execute_remote_command).
+        """
+        body = build_sxpg_step_xpg_start(
+            command=command, params=params, destination=destination,
+            long_params=long_params, mxrow=mxrow)
+        response_xml = self._post_soap(body)
+        parsed = parse_response(response_xml, "SXPG_STEP_XPG_START")
+        # MXROW unsupported → SOAP fault with RFC_INVALID_PARAMETER.
+        # Retry without it and merge result.
+        if (not parsed["ok"]
+                and "MXROW" in (parsed.get("error", "") or "").upper()):
+            body2 = build_sxpg_step_xpg_start_no_mxrow(
+                command=command, params=params,
+                destination=destination, long_params=long_params)
+            response_xml = self._post_soap(body2)
+            parsed = parse_response(response_xml, "SXPG_STEP_XPG_START")
+        return parsed
+
+    def execute_os_command(self, command: str, params: str = "",
+                           long_params: str = "") -> dict:
+        """High-level OS exec — returns the same dict shape as
+        sapmap_rfc.execute_local_command so callers can dispatch to
+        either transport interchangeably:
+
+            {"success": bool, "output": list[str], "error": str}
+
+        Output comes from the LOG table (one MESSAGE/LINE/TEXT field
+        per row depending on kernel).  STATUS='O'/'0'/'' = success;
+        non-zero status with output still counts as success because
+        commands like `whoami` exit 0 but some kernels still set a
+        non-empty status string.
+        """
+        result = {"success": False, "output": [], "error": ""}
+        try:
+            parsed = self.sxpg_step_xpg_start(
+                command=command, params=params,
+                long_params=long_params)
+        except SOAPRFCError as e:
+            result["error"] = f"transport: {e}"
+            return result
+
+        if not parsed["ok"] and parsed.get("error"):
+            # SOAP fault — auth rejected, FM not authorised, etc.
+            result["error"] = parsed["error"]
+            return result
+
+        # LOG rows: dict items with MESSAGE / LINE / TEXT fields
+        for row in parsed["tables"].get("LOG", []):
+            line = (row.get("MESSAGE", "")
+                    or row.get("LINE", "")
+                    or row.get("TEXT", "") or "").strip()
+            if line:
+                result["output"].append(line)
+
+        status = (parsed["params"].get("STATUS", "") or "").strip()
+        if status in ("O", "0", ""):
+            result["success"] = True
+        elif result["output"]:
+            # Some kernels return output even on non-zero status
+            result["success"] = True
+        else:
+            result["error"] = (
+                parsed.get("error") or f"SXPG status: {status}")
+        return result
+
+    def read_table(self, table: str, fields: list = None,
+                   where: list = None, max_rows: int = 0,
+                   delimiter: str = "|") -> dict:
+        """Read a table via RFC_READ_TABLE.
+
+        Returns:
+          {
+            "ok":      bool,
+            "rows":    list[dict],   keyed by field name
+            "fields":  list[str],    column names in column order
+            "error":   str,
+          }
+
+        Each row dict maps FIELD_NAME → value, with values trimmed of
+        the delimiter padding.  Caller doesn't need to know the WA
+        split or column widths.
+        """
+        result = {"ok": False, "rows": [], "fields": [],
+                  "error": ""}
+        try:
+            body = build_rfc_read_table(
+                table=table, fields=fields, where=where,
+                delimiter=delimiter, rowcount=max_rows)
+            response_xml = self._post_soap(body)
+        except SOAPRFCError as e:
+            result["error"] = f"transport: {e}"
+            return result
+
+        parsed = parse_response(response_xml, "RFC_READ_TABLE")
+        if not parsed["ok"]:
+            result["error"] = parsed["error"]
+            return result
+
+        # FIELDS table → column order + names
+        column_names = []
+        for f in parsed["tables"].get("FIELDS", []):
+            name = (f.get("FIELDNAME", "") or "").strip()
+            if name:
+                column_names.append(name)
+        result["fields"] = column_names
+
+        # DATA table → list of WA strings, split by delimiter
+        for row in parsed["tables"].get("DATA", []):
+            wa = row.get("WA", "") or ""
+            parts = wa.split(delimiter)
+            row_dict = {}
+            for idx, name in enumerate(column_names):
+                row_dict[name] = (
+                    parts[idx].strip() if idx < len(parts) else "")
+            result["rows"].append(row_dict)
+        result["ok"] = True
+        return result
+
+    def get_system_info(self) -> dict:
+        """Read authoritative system info via RFC_GET_SYSTEM_INFO.
+
+        Returns the parsed RFCSI_EXPORT structure keyed by SAP field
+        names: RFCSYSID, RFCSAPRL (ABAP release, e.g. '754'),
+        RFCKERNRL (kernel patch, e.g. '742'), RFCOPSYS (e.g.
+        'Windows NT'), RFCDBSYS ('ADABAS D'), RFCDBHOST, RFCDATABS
+        (database SID), RFCDEST, RFCHOST, RFCIPADDR, RFCMACH.
+
+        Empty error means the read succeeded; the SOAP path returns
+        the same info the unauthenticated /sap/public/info probe
+        returns, but with authoritative auth context.
+        """
+        try:
+            body = build_rfc_get_system_info()
+            response_xml = self._post_soap(body)
+        except SOAPRFCError as e:
+            return {"ok": False, "info": {},
+                    "error": f"transport: {e}"}
+        parsed = parse_response(response_xml, "RFC_GET_SYSTEM_INFO")
+        if not parsed["ok"]:
+            return {"ok": False, "info": {},
+                    "error": parsed["error"]}
+        info = parsed["params"].get("RFCSI_EXPORT", {})
+        if not isinstance(info, dict):
+            info = {}
+        return {"ok": True, "info": info, "error": ""}
 
     def bapi_user_get_detail(self, username: str) -> dict:
         body = build_bapi_user_get_detail(username)
