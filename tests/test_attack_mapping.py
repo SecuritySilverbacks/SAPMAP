@@ -278,6 +278,7 @@ def test_track_created_user_tags_rfc_methods_with_t1021_lateral_movement():
         "direct_bapi_via_secstore",
         "direct_bapi_pwd_reset", "direct_bapi_recreate",
         "secstore_direct", "tcpip_sxpg",
+        "soap_rfc_via_secstore",
         "existing", "reused_existing",
     )
     for method in rfc_methods:

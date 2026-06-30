@@ -1811,6 +1811,16 @@ class SAPMAPState:
         if node:
             node.created_users.append(user)
             node.pwned = True
+            # Successful user creation proves the client exists and is
+            # reachable.  Add it to the enumerated clients list so the
+            # System Details modal reflects what we verified, rather
+            # than only what an explicit T000 read returned.  Category
+            # 'V' = verified-via-user-creation (distinct from 'P'
+            # productive / 'C' customizing read from T000).
+            if user.client:
+                cli = user.client.zfill(3)
+                if not any(c.get("nr") == cli for c in node.clients):
+                    node.clients.append({"nr": cli, "category": "V"})
         # Map the creation METHOD to the right ATT&CK capability key so
         # the heatmap reflects what the operator actually exercised.
         # Methods that use an established RFC destination from another
@@ -1836,6 +1846,12 @@ class SAPMAPState:
             "direct_bapi_recreate":     "lateral.rfc_propagate",
             "secstore_direct":          "lateral.rfc_propagate",
             "tcpip_sxpg":               "lateral.rfc_propagate",
+            # Phase 3a SOAP-RFC over HTTP — same semantic as direct
+            # BAPI but transport is the ICM HTTP port (not gateway),
+            # so it works against firewalled targets.  Still T1021 +
+            # T1078 — lateral movement via remote services with
+            # SecStore-recovered creds.
+            "soap_rfc_via_secstore":    "lateral.rfc_propagate",
             # ``existing`` and ``reused_existing`` are reached only AFTER
             # a successful RFC connection to the target verified that
             # our user already lives there.  No fresh BAPI create, but
