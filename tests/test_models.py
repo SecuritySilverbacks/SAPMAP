@@ -316,6 +316,63 @@ def test_state_stats_pwned_zero_when_no_sccs_no_pwned_nodes():
     assert state.stats()["pwned"] == 0
 
 
+def test_track_created_user_enriches_node_clients_with_verified_client():
+    """When a user is successfully created on a client we didn't have
+    a T000 read for, the client gets added to node.clients with
+    category 'V' (verified-via-user-creation).  Without this the System
+    Details modal shows "None enumerated" even after we've proven the
+    client exists by creating a user there — operator screenshot
+    showed exactly this: SAPMAP00 listed under Created Users with
+    "Client 001", but Clients section said None."""
+    from sapmap_models import CreatedUser
+    state = SAPMAPState()
+    state.add_node(SAPNode(sid="W74", system_type="ABAP"))
+
+    state.track_created_user(CreatedUser(
+        username="SAPMAP00", sid="W74", client="001",
+        hostname="winwas74", ip="192.168.2.29",
+        instance_nr="40", method="soap_rfc_via_secstore"))
+
+    node = state.get_node("W74")
+    assert any(c["nr"] == "001" and c["category"] == "V"
+               for c in node.clients)
+
+
+def test_track_created_user_does_not_duplicate_existing_client():
+    """If the client was already enumerated via T000 (category 'P' or
+    'C'), track_created_user must not append a second entry — the modal
+    would render the same client twice."""
+    from sapmap_models import CreatedUser
+    state = SAPMAPState()
+    n = SAPNode(sid="W74", system_type="ABAP")
+    n.clients = [{"nr": "001", "category": "P"}]
+    state.add_node(n)
+
+    state.track_created_user(CreatedUser(
+        username="SAPMAP00", sid="W74", client="001",
+        hostname="h", ip="i", instance_nr="40",
+        method="soap_rfc_via_secstore"))
+
+    nrs = [c["nr"] for c in state.get_node("W74").clients]
+    assert nrs == ["001"]
+    # Category 'P' must NOT get downgraded to 'V'
+    assert state.get_node("W74").clients[0]["category"] == "P"
+
+
+def test_track_created_user_pads_short_client_to_three_digits():
+    """Operators (or SecStore data) sometimes carry the client as '1'
+    or '10'.  Node.clients always stores 3-digit form so dedup and
+    the modal display are consistent."""
+    from sapmap_models import CreatedUser
+    state = SAPMAPState()
+    state.add_node(SAPNode(sid="W74", system_type="ABAP"))
+    state.track_created_user(CreatedUser(
+        username="U", sid="W74", client="1",
+        hostname="h", ip="i", instance_nr="40",
+        method="bapi_create"))
+    assert state.get_node("W74").clients[0]["nr"] == "001"
+
+
 def test_state_stats_pwned_includes_btp_subaccounts():
     """Same off-by-one risk as SCCs: the map draws a ⚡ over any
     BTPSubaccountNode.pwned=True, so the status-bar Pwned counter

@@ -8222,12 +8222,26 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             key = (host.lower(), inst)
                         if _http_info.get("hostname"):
                             remote_host = _http_info["hostname"]
+                        # Only record ports we've actually verified.
+                        # Probed icm_port → icm-http(s); URL port (if
+                        # different) → http.  Do NOT speculate
+                        # dispatcher 32NN / gateway 33NN — they may
+                        # be firewalled (which is the whole reason
+                        # Type-G/H destinations exist).
                         ports = {}
-                        if url_port:
+                        if _http_info.get("icm_port"):
+                            scheme = _http_info.get(
+                                "icm_scheme", "http")
+                            lbl = ("icm-https" if scheme == "https"
+                                   else "icm-http")
+                            ports[int(_http_info["icm_port"])] = lbl
+                        elif url_port:
                             ports[int(url_port)] = "http"
-                        ports[int(f"32{inst}")] = "dispatcher"
-                        ports[int(f"33{inst}")] = "gateway"
                     else:
+                        # Type-3 RFC destination — the gateway port
+                        # WAS actually used (ping succeeded), so 33NN
+                        # is verified.  Dispatcher 32NN is still
+                        # speculative but typically co-installed.
                         ports = {
                             int(f"32{inst}"): "dispatcher",
                             int(f"33{inst}"): "gateway",
