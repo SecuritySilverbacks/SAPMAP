@@ -95,12 +95,27 @@ def test_bapi_user_profiles_assign_multiple_profiles():
             ) in profiles_section
 
 
-def test_bapi_user_get_detail_envelope_minimal():
-    """Single USERNAME parameter — no structures, no tables."""
+def test_bapi_user_get_detail_envelope_declares_output_tables():
+    """SAP's SOAP-RFC kernel only emits TABLES in the response when
+    the request DECLARES them as empty placeholders.  Without these,
+    PROFILES + ACTIVITYGROUPS + RETURN come back missing from the
+    response — even though the BAPI populated them server-side."""
     env = build_bapi_user_get_detail("SAPADM")
     assert "<urn:BAPI_USER_GET_DETAIL>" in env
     assert "<USERNAME>SAPADM</USERNAME>" in env
+    # Empty-table placeholders — critical for response shape
+    assert "<PROFILES/>" in env
+    assert "<ACTIVITYGROUPS/>" in env
+    assert "<RETURN/>" in env
     assert "</urn:BAPI_USER_GET_DETAIL>" in env
+
+
+def test_bapi_user_get_detail_sends_cache_results_x():
+    """CACHE_RESULTS='X' forces a fresh read of USR04/UST04 rather than
+    serving stale SAP_USER buffer entries — relevant right after a
+    profile change."""
+    env = build_bapi_user_get_detail("U")
+    assert "<CACHE_RESULTS>X</CACHE_RESULTS>" in env
 
 
 def test_bapi_user_get_detail_escapes_username():
