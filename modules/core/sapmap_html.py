@@ -6392,6 +6392,11 @@ function _connInfoStateKey(c) {
     sapxpg_remote_works: !!c.sapxpg_remote_works,
     trusted_system:   !!c.trusted_system,
     ping_ok:          !!c.ping_ok,
+    // Phase 3a: SOAP-RFC verification flips logon_successful AND
+    // sets soap_rfc_verified — without this in the key, the open
+    // modal sees logon_successful=true unchanged and never re-renders.
+    soap_rfc_verified: !!c.soap_rfc_verified,
+    has_secstore_pwd:  !!c.secstore_password,
   });
 }
 
@@ -6437,6 +6442,13 @@ function showConnInfo(e, connIdx) {
   if (!conn) return;
 
   const panel = document.getElementById('info-panel');
+  // Remember which connection this modal is for, so the poll loop can
+  // re-render it when Test Connection updates the state in the
+  // background.  Without this the modal shows stale data until the
+  // user manually closes + reopens it.
+  panel.dataset.connIdx = String(connIdx);
+  panel.dataset.connKey = (conn.source_sid || '') + '|' +
+                          (conn.destination_name || '');
   const isHttp = (conn.conn_type || '') === 'http';
   const isTypeT = !isHttp && !!conn.sapxpg_remote_works;
   const isTrusted = !!conn.trusted_system;
