@@ -9676,13 +9676,25 @@ async function termExec() {
   out.textContent += '(executing...)\n';
   out.scrollTop = out.scrollHeight;
 
+  const t0 = performance.now();
   try {
     // Send raw cmdline — backend auto-detects OS and wraps in shell
     const res = await api('POST', `node/${sid}/exec_command`, { method, cmdline });
+    const elapsed = Math.round(performance.now() - t0);
+    // Diagnostic header — channel + reason (when present) + elapsed
+    // ms.  Without this the operator can't tell whether the call went
+    // via pyrfc SXPG (gateway port), SOAP-RFC (HTTP), GW SAPXPG
+    // (unauthenticated 10KBLAZE), CVE-2025-31324 (Java webshell) or
+    // SSH — all of which leave very different audit traces.
+    const ch = res.channel || method;
+    const reason = res.channel_reason ? ` — ${res.channel_reason}` : '';
+    out.textContent += `[channel: ${ch}, ${elapsed}ms${reason}]\n`;
     if (res.error) {
       out.textContent += `ERROR: ${res.error}\n`;
     } else if (res.output && res.output.length) {
       out.textContent += res.output.join('\n') + '\n';
+    } else if (res.success) {
+      out.textContent += '(no output, exit 0)\n';
     } else {
       out.textContent += '(no output)\n';
     }
