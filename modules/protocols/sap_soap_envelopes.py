@@ -297,6 +297,47 @@ def build_rfc_read_table(table: str, fields: list = None,
     return _wrap_envelope(body)
 
 
+def build_rfc_abap_install_and_run(abap_lines: list,
+                                    program_name: str = "ZSAPMAP",
+                                    mode: str = "F") -> str:
+    """RFC_ABAP_INSTALL_AND_RUN — compile + execute an ABAP program.
+
+    Same FM SAPMAP already uses via pyrfc (sapmap_rfc._run_abap_program)
+    — used by SecStore extraction (RSECTAB hex dump), OA2C OAuth profile
+    mining, and several other table-via-ABAP paths.  Adding the SOAP
+    envelope brings all of that to HTTP-only ABAP targets.
+
+    Parameters:
+      abap_lines:   list[str] — one ABAP source line per row, ≤72 chars
+                     each (PROGRAM table LINE field width).  Caller is
+                     responsible for splitting long lines.
+      program_name: PROGRAMNAME — the throwaway report identifier
+                     (CHAR30, defaults to ZSAPMAP).
+      mode:         "F" = fast (skip syntax-check feedback, just run);
+                     "S" = with syntax check.  Pyrfc usage is always F.
+
+    Output tables (declared as empty placeholders — same kernel quirk
+    as every other BAPI in this module):
+      WRITES         — every line from WRITE statements (ZEILE / LINE
+                        / WA field on different kernels)
+      MESSAGES       — runtime messages
+    """
+    program_xml = "".join(
+        f'<item><LINE>{escape(line)}</LINE></item>'
+        for line in abap_lines
+    )
+    body = (
+        '<urn:RFC_ABAP_INSTALL_AND_RUN>'
+        f'<PROGRAMNAME>{escape(program_name)}</PROGRAMNAME>'
+        f'<MODE>{escape(mode)}</MODE>'
+        f'<PROGRAM>{program_xml}</PROGRAM>'
+        '<WRITES/>'
+        '<MESSAGES/>'
+        '</urn:RFC_ABAP_INSTALL_AND_RUN>'
+    )
+    return _wrap_envelope(body)
+
+
 def build_dest_check_connection(destination_name: str) -> str:
     """DEST_CHECK_CONNECTION — ping an SM59 destination from the
     target's perspective.
@@ -387,19 +428,38 @@ def parse_response(xml_str: str, fm_name: str) -> dict:
         result["error"] = f"XML parse error: {e}"
         return result
 
-    # SOAP fault → transport/auth error
+    # SOAP fault → transport/auth/kernel error.  SAP nests its
+    # interesting error info under <detail><rfc:Error><type>... and
+    # <message> — without surfacing those, callers see only
+    # "Internal Server Error" / generic faultstring and can't
+    # distinguish "no auth" from "client locked" from "report
+    # syntax error" from "FM doesn't exist".
     for elem in root.iter():
         if _localname(elem.tag) == "Fault":
             code = ""
             string = ""
+            detail_msg = ""
+            detail_type = ""
             for child in elem:
                 lname = _localname(child.tag)
                 if lname == "faultcode":
                     code = (child.text or "").strip()
                 elif lname == "faultstring":
                     string = (child.text or "").strip()
-            result["error"] = (
-                f"SOAP fault: {code} - {string}".strip(" -"))
+                elif lname == "detail":
+                    for d in child.iter():
+                        dn = _localname(d.tag)
+                        if dn == "message" and d.text:
+                            detail_msg = d.text.strip()
+                        elif dn == "type" and d.text and not detail_type:
+                            detail_type = d.text.strip()
+            err = f"SOAP fault: {code} - {string}".strip(" -")
+            if detail_msg:
+                if detail_type:
+                    err += f" [{detail_type}: {detail_msg}]"
+                else:
+                    err += f" [{detail_msg}]"
+            result["error"] = err
             return result
 
     # Find the FM response element

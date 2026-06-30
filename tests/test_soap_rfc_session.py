@@ -711,6 +711,67 @@ _GET_SYSTEM_INFO_OK = (
     '</SOAP-ENV:Body></SOAP-ENV:Envelope>')
 
 
+_INSTALL_AND_RUN_OK = (
+    '<?xml version="1.0"?><SOAP-ENV:Envelope '
+    'xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/">'
+    '<SOAP-ENV:Body>'
+    '<rfc:RFC_ABAP_INSTALL_AND_RUN.Response '
+    'xmlns:rfc="urn:sap-com:document:sap:rfc:functions">'
+    '<WRITES>'
+    '<item><ZEILE>~~~I 000 /RFC/MY_DEST</ZEILE></item>'
+    '<item><ZEILE>~~~A 4F5051525354</ZEILE></item>'
+    '<item><ZEILE>~~~B 5556575859</ZEILE></item>'
+    '<item><ZEILE>~~~TOTAL: 1</ZEILE></item>'
+    '</WRITES>'
+    '</rfc:RFC_ABAP_INSTALL_AND_RUN.Response>'
+    '</SOAP-ENV:Body></SOAP-ENV:Envelope>')
+
+
+def test_install_and_run_collects_writes_output():
+    """ABAP WRITE output comes back in the WRITES table; each row's
+    ZEILE / LINE / WA carries one line.  The session helper aggregates
+    them into output[] so call sites can grep for ~~~I / ~~~A markers
+    same as the pyrfc path."""
+    mock = _MockSAP(_make_responder({
+        "RFC_ABAP_INSTALL_AND_RUN": (200, _INSTALL_AND_RUN_OK),
+    }))
+    try:
+        sess = SOAPRFCSession(
+            host="127.0.0.1", port=mock.port, client="000",
+            user="u", password="p")
+        r = sess.install_and_run(
+            ["REPORT z.", "WRITE 'hi'."])
+        assert r["success"] is True
+        assert r["fm_name"] == "RFC_ABAP_INSTALL_AND_RUN"
+        assert r["output"] == [
+            "~~~I 000 /RFC/MY_DEST",
+            "~~~A 4F5051525354",
+            "~~~B 5556575859",
+            "~~~TOTAL: 1",
+        ]
+    finally:
+        mock.stop()
+
+
+def test_install_and_run_surfaces_auth_failure_in_shape():
+    """No S_C_FUNCT for ABAP exec → SOAP fault; result keeps the
+    {success, output, error, fm_name} shape so callers don't have to
+    special-case the SOAP path's failure mode."""
+    mock = _MockSAP(_make_responder({
+        "RFC_ABAP_INSTALL_AND_RUN": (500, _AUTH_FAULT),
+    }))
+    try:
+        sess = SOAPRFCSession(
+            host="127.0.0.1", port=mock.port, client="000",
+            user="u", password="p")
+        r = sess.install_and_run(["REPORT z."])
+        assert r["success"] is False
+        assert "RFC_AUTHORIZATION_FAILURE" in r["error"]
+        assert r["output"] == []
+    finally:
+        mock.stop()
+
+
 _DEST_CHECK_OK = (
     '<?xml version="1.0"?><SOAP-ENV:Envelope '
     'xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/">'

