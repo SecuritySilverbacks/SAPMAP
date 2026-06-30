@@ -114,19 +114,19 @@ def build_bapi_user_profiles_assign(username: str,
 def build_bapi_user_get_detail(username: str) -> str:
     """BAPI_USER_GET_DETAIL — read a user's profiles + roles.
 
-    Single IMPORTING parameter (USERNAME) so the envelope body is
-    trivial.  Useful output tables come back in EXPORTING / TABLES:
+    IMPORTING: USERNAME + CACHE_RESULTS.
+    TABLES (returned): PROFILES, ACTIVITYGROUPS, RETURN.
 
-      PROFILES        — BAPIPROF (BAPIPROF / BAPIPTEXT) — what we
-                         scan for SAP_ALL membership
-      ACTIVITYGROUPS  — BAPIAGR  (AGR_NAME / ...)       — role names
-      RETURN          — BAPIRET2 — error channel
+    Critical detail: SAP's SOAP-RFC kernel only emits TABLES in the
+    response when the request DECLARES them (even empty).  Without the
+    <PROFILES/>, <ACTIVITYGROUPS/>, <RETURN/> placeholders below, the
+    BAPI runs and populates them server-side but the SOAP serializer
+    strips them on the way out — leaving us blind to SAP_ALL.
 
-    Caller (parse_response) gets all three from the parsed dict; the
-    Phase 3a Test Connection wiring distils that into conn.profiles
-    / conn.roles / conn.has_sap_all so the existing "SAP_ALL" badge
-    and Create Remote User button logic work identically to the
-    pyrfc-based path.
+    Verified empirically against kernel 742: with placeholders the
+    response carries the SAP_ALL row; without them the response is
+    EXPORTING-only.  Same kernel quirk applies to most BAPIs with
+    output tables.
 
     Requires S_USER_GRP read auth on the caller — almost always true
     for the SecStore-decrypted RFC user, but on the rare failure the
@@ -136,6 +136,10 @@ def build_bapi_user_get_detail(username: str) -> str:
     body = (
         '<urn:BAPI_USER_GET_DETAIL>'
         f'<USERNAME>{escape(username)}</USERNAME>'
+        '<CACHE_RESULTS>X</CACHE_RESULTS>'
+        '<PROFILES/>'
+        '<ACTIVITYGROUPS/>'
+        '<RETURN/>'
         '</urn:BAPI_USER_GET_DETAIL>'
     )
     return _wrap_envelope(body)
