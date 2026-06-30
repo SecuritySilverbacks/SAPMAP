@@ -111,6 +111,36 @@ def build_bapi_user_profiles_assign(username: str,
     return _wrap_envelope(body)
 
 
+def build_bapi_user_get_detail(username: str) -> str:
+    """BAPI_USER_GET_DETAIL — read a user's profiles + roles.
+
+    Single IMPORTING parameter (USERNAME) so the envelope body is
+    trivial.  Useful output tables come back in EXPORTING / TABLES:
+
+      PROFILES        — BAPIPROF (BAPIPROF / BAPIPTEXT) — what we
+                         scan for SAP_ALL membership
+      ACTIVITYGROUPS  — BAPIAGR  (AGR_NAME / ...)       — role names
+      RETURN          — BAPIRET2 — error channel
+
+    Caller (parse_response) gets all three from the parsed dict; the
+    Phase 3a Test Connection wiring distils that into conn.profiles
+    / conn.roles / conn.has_sap_all so the existing "SAP_ALL" badge
+    and Create Remote User button logic work identically to the
+    pyrfc-based path.
+
+    Requires S_USER_GRP read auth on the caller — almost always true
+    for the SecStore-decrypted RFC user, but on the rare failure the
+    BAPI returns RFC_AUTHORIZATION_FAILURE and the click-time check
+    path still applies.
+    """
+    body = (
+        '<urn:BAPI_USER_GET_DETAIL>'
+        f'<USERNAME>{escape(username)}</USERNAME>'
+        '</urn:BAPI_USER_GET_DETAIL>'
+    )
+    return _wrap_envelope(body)
+
+
 def build_bapi_transaction_commit(wait: bool = True) -> str:
     """BAPI_TRANSACTION_COMMIT — flush pending updates.
 

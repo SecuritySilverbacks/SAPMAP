@@ -6467,10 +6467,12 @@ function showConnInfo(e, connIdx) {
   }
   const riskClass = 'risk-' + risk.toLowerCase();
 
-  // Profiles / Roles are ABAP-RFC concepts; never apply to Type T
-  // (TCP/IP sapxpg) or HTTP destinations.
+  // Profiles / Roles are ABAP concepts; never apply to Type T
+  // (TCP/IP sapxpg).  For HTTP destinations they're populated when
+  // BAPI_USER_GET_DETAIL succeeds over SOAP-RFC (Phase 3a follow-up
+  // to the RFC_PING credential check).
   let profilesHtml = '';
-  if (!isTypeT && !isHttp) {
+  if (!isTypeT) {
     (conn.profiles || []).forEach(p => {
       const cls = p === 'SAP_ALL' ? 'profile-item sap-all' : 'profile-item';
       profilesHtml += `<div class="${cls}">${p === 'SAP_ALL' ? '&#9888; ' : ''}${escHtml(p)}</div>`;
@@ -6478,7 +6480,7 @@ function showConnInfo(e, connIdx) {
   }
 
   let rolesHtml = '';
-  if (!isTypeT && !isHttp) {
+  if (!isTypeT) {
     (conn.roles || []).forEach(r => {
       rolesHtml += `<div class="profile-item">${escHtml(r)}</div>`;
     });

@@ -8636,6 +8636,53 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                           f"RFC_PING OK — password "
                                           f"verified over HTTP")
                                     target_node.has_critical_finding = True
+
+                                    # Follow-up: read profiles + roles
+                                    # via BAPI_USER_GET_DETAIL so the
+                                    # modal shows actual SAP_ALL state
+                                    # without waiting for click-time.
+                                    print(f"[*] {dest_name}: reading "
+                                          f"profiles via SOAP "
+                                          f"BAPI_USER_GET_DETAIL "
+                                          f"for {rfc_user}...")
+                                    detail = soap_sess.get_user_profiles(
+                                        rfc_user)
+                                    if detail["ok"]:
+                                        conn.profiles = detail["profiles"]
+                                        conn.roles = detail["roles"]
+                                        conn.has_sap_all = (
+                                            detail["has_sap_all"])
+                                        conn.user_detail_error = ""
+                                        if conn.has_sap_all:
+                                            print(f"[!] {rfc_user}@"
+                                                  f"{conn.target_sid} "
+                                                  f"has SAP_ALL via "
+                                                  f"SOAP-RFC — 'Create "
+                                                  f"Remote User' "
+                                                  f"available")
+                                            api.state.notify_sap_all_if_elevated(
+                                                conn)
+                                        elif conn.profiles:
+                                            p_str = ", ".join(
+                                                conn.profiles[:5])
+                                            print(f"[*] {rfc_user}@"
+                                                  f"{conn.target_sid}:"
+                                                  f" profiles=[{p_str}]"
+                                                  f" (no SAP_ALL)")
+                                    else:
+                                        # Profile read rejected (likely
+                                        # S_USER_GRP missing on rfc_user).
+                                        # Surface it but keep
+                                        # soap_rfc_verified True so the
+                                        # click-time-check path stays.
+                                        err = detail.get(
+                                            "error", "")[:120]
+                                        conn.user_detail_error = (
+                                            f"SOAP profile read failed:"
+                                            f" {err}")
+                                        print(f"[-] {dest_name}: "
+                                              f"SOAP profile read "
+                                              f"failed — {err}")
                                 else:
                                     err = ping.get("error", "")[:120]
                                     print(f"[-] {dest_name}: "

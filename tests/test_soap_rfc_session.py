@@ -141,6 +141,36 @@ _AUTH_FAULT = (
     '<faultstring>RFC_AUTHORIZATION_FAILURE</faultstring>'
     '</SOAP-ENV:Fault></SOAP-ENV:Body></SOAP-ENV:Envelope>')
 
+_USER_GET_DETAIL_SAP_ALL = (
+    '<?xml version="1.0"?><SOAP-ENV:Envelope '
+    'xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/">'
+    '<SOAP-ENV:Body>'
+    '<rfc:BAPI_USER_GET_DETAIL.Response '
+    'xmlns:rfc="urn:sap-com:document:sap:rfc:functions">'
+    '<PROFILES>'
+    '<item><BAPIPROF>SAP_ALL</BAPIPROF></item>'
+    '<item><BAPIPROF>SAP_NEW</BAPIPROF></item>'
+    '</PROFILES>'
+    '<ACTIVITYGROUPS>'
+    '<item><AGR_NAME>SAP_BC_BASIS_ADMIN</AGR_NAME></item>'
+    '</ACTIVITYGROUPS>'
+    '<RETURN/>'
+    '</rfc:BAPI_USER_GET_DETAIL.Response>'
+    '</SOAP-ENV:Body></SOAP-ENV:Envelope>')
+
+_USER_GET_DETAIL_NO_SAP_ALL = (
+    '<?xml version="1.0"?><SOAP-ENV:Envelope '
+    'xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/">'
+    '<SOAP-ENV:Body>'
+    '<rfc:BAPI_USER_GET_DETAIL.Response '
+    'xmlns:rfc="urn:sap-com:document:sap:rfc:functions">'
+    '<PROFILES>'
+    '<item><BAPIPROF>S_A.CUSTOMIZ</BAPIPROF></item>'
+    '</PROFILES>'
+    '<RETURN/>'
+    '</rfc:BAPI_USER_GET_DETAIL.Response>'
+    '</SOAP-ENV:Body></SOAP-ENV:Envelope>')
+
 
 # ---------------------------------------------------------------------------
 # Wire format — auth header, endpoint, SOAPAction
@@ -365,6 +395,69 @@ def test_create_user_via_soap_returns_bapi_compatible_shape_on_success():
                         "via SOAP-RFC"),
             "username": "SAPMAP00",
         }
+    finally:
+        mock.stop()
+
+
+def test_get_user_profiles_extracts_sap_all_flag():
+    """get_user_profiles must distil PROFILES/ACTIVITYGROUPS into the
+    same shape as the pyrfc-based get_direct_user_profiles helper:
+    {ok, profiles, roles, has_sap_all, error}.  Caller flips
+    conn.has_sap_all directly from has_sap_all, so the dict key name
+    matters."""
+    mock = _MockSAP(_make_responder({
+        "BAPI_USER_GET_DETAIL": (200, _USER_GET_DETAIL_SAP_ALL),
+    }))
+    try:
+        sess = SOAPRFCSession(
+            host="127.0.0.1", port=mock.port, client="000",
+            user="SAPADM", password="siroj1978")
+        r = sess.get_user_profiles("SAPADM")
+        assert r["ok"] is True
+        assert r["error"] == ""
+        assert r["profiles"] == ["SAP_ALL", "SAP_NEW"]
+        assert r["roles"] == ["SAP_BC_BASIS_ADMIN"]
+        assert r["has_sap_all"] is True
+    finally:
+        mock.stop()
+
+
+def test_get_user_profiles_returns_false_when_no_sap_all():
+    """User with profiles but not SAP_ALL must report has_sap_all=False
+    — the create-remote-user button only fires on the SAP_ALL branch
+    (or the still-shippable click-time-check branch)."""
+    mock = _MockSAP(_make_responder({
+        "BAPI_USER_GET_DETAIL": (200, _USER_GET_DETAIL_NO_SAP_ALL),
+    }))
+    try:
+        sess = SOAPRFCSession(
+            host="127.0.0.1", port=mock.port, client="000",
+            user="u", password="p")
+        r = sess.get_user_profiles("U")
+        assert r["ok"] is True
+        assert r["profiles"] == ["S_A.CUSTOMIZ"]
+        assert r["has_sap_all"] is False
+    finally:
+        mock.stop()
+
+
+def test_get_user_profiles_handles_auth_rejection_gracefully():
+    """If the calling user lacks S_USER_GRP, the BAPI rejects with an
+    RFC_AUTHORIZATION_FAILURE — must come back as ok=False with the
+    fault text, not raise.  Click-time check then becomes the only
+    path, but we never crash the Test Connection flow."""
+    mock = _MockSAP(_make_responder({
+        "BAPI_USER_GET_DETAIL": (500, _AUTH_FAULT),
+    }))
+    try:
+        sess = SOAPRFCSession(
+            host="127.0.0.1", port=mock.port, client="000",
+            user="u", password="p")
+        r = sess.get_user_profiles("U")
+        assert r["ok"] is False
+        assert r["has_sap_all"] is False
+        assert r["profiles"] == []
+        assert "RFC_AUTHORIZATION_FAILURE" in r["error"]
     finally:
         mock.stop()
 
