@@ -2698,6 +2698,29 @@ def fingerprint_web_dispatcher(host: str, port: int,
         "/sap/wdisp/admin",
         "/sap/wdisp/admin/public/default.html",
         "/sapmap-no-such-path-fingerprint-9b3f7c",
+        # ICM-specific probes — these fire even when the operator has
+        # set icm/HTTP/server_header_suppression=2 AND hidden the
+        # ICMENOSERVERFOUND error page.  Without them, an ABAP ICM
+        # serving HTTPS-only on 443 (no dispatcher, no gateway, no
+        # /sap/wdisp/admin handler) silently fails the fingerprint and
+        # the operator sees a "no SAP" verdict on a real SAP system.
+        #
+        # /sap/public/info — unauthenticated SOAP-wrapped RFCSI_EXPORT
+        # on every NetWeaver ABAP kernel; returns 200 OK with
+        # <RFCSYSID>SID</RFCSYSID> in the body.  Java stacks 404.
+        #
+        # /sap/public/ping — minimal ICF service.  Returns 200 with a
+        # body matching "Server reached successfully" on a healthy ABAP
+        # ICM.  Note this path is sometimes disabled in production —
+        # not authoritative on its own, only corroborates.
+        #
+        # /sap/bc/soap/rfc — the SOAP-RFC bridge.  Hidden behind Basic
+        # auth on ABAP systems with the realm string
+        # "SAP NetWeaver Application Server [SID/CLNT]" — a literal
+        # SAP signature that no other product emits.
+        "/sap/public/info",
+        "/sap/public/ping",
+        "/sap/bc/soap/rfc",
     ]
 
     for path in paths:
@@ -2762,6 +2785,36 @@ def fingerprint_web_dispatcher(host: str, port: int,
                                                          errors="replace")
         # SAP ICM marker (weakest signal — tells us SAP, not WD/ICM)
         if b"x-sap-icm-err-id:" in resp.lower() or b"X-SAP-ICM-ERR-ID:" in resp:
+            out["is_sap_icm"] = True
+        # ICM signals that survive icm/HTTP/server_header_suppression=2:
+        #
+        # 1. /sap/public/info body carries <RFCSYSID> + <RFCSAPRL> +
+        #    other RFCSI_EXPORT fields, wrapped in a SOAP envelope.
+        #    These tag names are SAP-proprietary — no other product
+        #    emits them.
+        #
+        # 2. WWW-Authenticate: Basic realm="SAP NetWeaver Application
+        #    Server <SID>/<CLNT>"  — emitted by ABAP ICMs on any path
+        #    that needs auth (/sap/bc/*).  The realm string is a
+        #    literal SAP signature.
+        #
+        # 3. x-csrf-token header (any value) — SAP ABAP CSRF protection,
+        #    emitted by /sap/bc/* on first GET.  Some hardened ICMs
+        #    suppress server_header_suppression=2 AND ICMENO error pages
+        #    but still need to ship CSRF tokens for the WebGUI flow.
+        resp_low = resp.lower()
+        if (b"<rfcsysid>" in resp_low
+                or b"rfcsi_export" in resp_low
+                or b"sap netweaver application server"
+                    in resp_low):
+            out["is_sap_icm"] = True
+        if b"\r\nx-csrf-token:" in resp_low:
+            out["is_sap_icm"] = True
+        # /sap/public/ping body — "Server reached successfully" is the
+        # standard ICM response on a 200.  Match on the canonical
+        # phrase to avoid generic 200 OK pages being mis-flagged.
+        if (path == "/sap/public/ping"
+                and b"server reached successfully" in resp_low):
             out["is_sap_icm"] = True
         # Strong signals — definitive
         for pat, label in _WD_PATTERNS:
@@ -4023,23 +4076,28 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
             router_sid = router_sid or _router_sid_for(host)
             instance_sid_map[inst_nr] = router_sid
 
-    # Phase A3: WD-only instances.  A host that runs ONLY a Web
-    # Dispatcher (no co-located ABAP/Java instance) doesn't expose a
-    # 32XX dispatcher or 5XX13 SAPControl, so the SID-discovery cascade
-    # above yields nothing.  We synthesise a stable per-host SID of the
-    # form "W" + last-octet-hex so the WD lands on the map as its own
-    # node (matching the saprouter convention) and gets fingerprinted
-    # downstream as system_type=WEB_DISPATCHER.
+    # Phase A3: WD-only / ICM-only instances.  A host that runs ONLY a
+    # Web Dispatcher (no co-located ABAP/Java instance) or that only
+    # exposes a hardened ICM port (e.g. ABAP/Java with the dispatcher
+    # firewalled and only HTTPS 443 reachable) doesn't expose a 32XX
+    # dispatcher or 5XX13 SAPControl, so the SID-discovery cascade
+    # above yields nothing.  Synthesise a stable per-host SID of the
+    # form "W" + last-octet-hex so the system lands on the map as its
+    # own node (matching the saprouter convention) and gets
+    # fingerprinted downstream — for ICM-only ports the downstream
+    # /sap/public/info correction will rename the placeholder to the
+    # real SID once the HTTP probe lands.
     wd_sid = None
     wd_services_set = {"wd_http", "wd_https"}
+    icm_services_set = {"icm_http", "icm_https"}
+    wd_or_icm_set = wd_services_set | icm_services_set
     for inst_nr in list(instance_nrs):
         inst_services = {
             info["service"] for port, info in open_ports.items()
             if info["instance_nr"] == inst_nr
         }
-        if (inst_services & wd_services_set
-                and not (inst_services - wd_services_set - {"icm_http",
-                                                              "icm_https"})
+        if (inst_services & wd_or_icm_set
+                and not (inst_services - wd_or_icm_set)
                 and inst_nr not in instance_sid_map):
             try:
                 last = int(host.split(".")[-1]) & 0xFF
