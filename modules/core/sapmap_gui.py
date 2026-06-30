@@ -8123,9 +8123,17 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
                 print(f"[*] Ping {conn.destination_name} → "
                       f"{host}...")
-                ping = sapmap_rfc.ping_rfc_destination(
-                    node, conn.destination_name, creds
-                )
+                # Phase 3b: route DEST_CHECK_CONNECTION through SOAP
+                # too when the source node's gateway port is firewalled
+                # — otherwise each ping spends 60-90s on pyrfc TCP
+                # retries (× 7 destinations = ~10 minutes wasted).
+                if soap_session is not None:
+                    ping = soap_session.dest_check_connection(
+                        conn.destination_name)
+                else:
+                    ping = sapmap_rfc.ping_rfc_destination(
+                        node, conn.destination_name, creds
+                    )
 
                 if ping["ping_ok"]:
                     dest_sid = ping.get("remote_sid", "").strip()

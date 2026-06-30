@@ -622,6 +622,77 @@ _GET_SYSTEM_INFO_OK = (
     '</SOAP-ENV:Body></SOAP-ENV:Envelope>')
 
 
+_DEST_CHECK_OK = (
+    '<?xml version="1.0"?><SOAP-ENV:Envelope '
+    'xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/">'
+    '<SOAP-ENV:Body>'
+    '<rfc:DEST_CHECK_CONNECTION.Response '
+    'xmlns:rfc="urn:sap-com:document:sap:rfc:functions">'
+    '<CONNECTION_TEST_RESULT></CONNECTION_TEST_RESULT>'
+    '<AUTHORIZATION_TEST_RESULT></AUTHORIZATION_TEST_RESULT>'
+    '<CONNECTION_ERROR_TEXT></CONNECTION_ERROR_TEXT>'
+    '<CONNECTION_PROPERTIES>'
+    '<SYSID>S4H</SYSID>'
+    '<RFCHOST>s4hanadev</RFCHOST>'
+    '<RFCDEST>S4HANADEV_S4H_00</RFCDEST>'
+    '</CONNECTION_PROPERTIES>'
+    '</rfc:DEST_CHECK_CONNECTION.Response>'
+    '</SOAP-ENV:Body></SOAP-ENV:Envelope>')
+
+
+_DEST_CHECK_FAIL = (
+    '<?xml version="1.0"?><SOAP-ENV:Envelope '
+    'xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/">'
+    '<SOAP-ENV:Body>'
+    '<rfc:DEST_CHECK_CONNECTION.Response '
+    'xmlns:rfc="urn:sap-com:document:sap:rfc:functions">'
+    '<CONNECTION_TEST_RESULT>E</CONNECTION_TEST_RESULT>'
+    '<AUTHORIZATION_TEST_RESULT>X</AUTHORIZATION_TEST_RESULT>'
+    '<CONNECTION_ERROR_TEXT>partner not reached</CONNECTION_ERROR_TEXT>'
+    '</rfc:DEST_CHECK_CONNECTION.Response>'
+    '</SOAP-ENV:Body></SOAP-ENV:Envelope>')
+
+
+def test_dest_check_connection_success_extracts_sid_and_instance():
+    """Ping OK → result shape matches the pyrfc path's shape exactly
+    so the GUI Retrieve loop can swap transports transparently.  SID
+    and instance (from RFCDEST suffix) drive node-mapping downstream."""
+    mock = _MockSAP(_make_responder({
+        "DEST_CHECK_CONNECTION": (200, _DEST_CHECK_OK),
+    }))
+    try:
+        sess = SOAPRFCSession(
+            host="127.0.0.1", port=mock.port, client="000",
+            user="u", password="p")
+        r = sess.dest_check_connection("S4H_SVC")
+        assert r["ping_ok"] is True
+        assert r["logon_ok"] is True
+        assert r["remote_sid"] == "S4H"
+        assert r["remote_hostname"] == "s4hanadev"
+        assert r["remote_instance_nr"] == "00"   # from _NN suffix
+        assert r["error"] == ""
+    finally:
+        mock.stop()
+
+
+def test_dest_check_connection_failure_surfaces_error_text():
+    """Non-empty CONNECTION_TEST_RESULT = ping failed; the actual
+    error text comes from CONNECTION_ERROR_TEXT.  Caller uses this
+    to decide whether to skip the destination or treat it as alive."""
+    mock = _MockSAP(_make_responder({
+        "DEST_CHECK_CONNECTION": (200, _DEST_CHECK_FAIL),
+    }))
+    try:
+        sess = SOAPRFCSession(
+            host="127.0.0.1", port=mock.port, client="000",
+            user="u", password="p")
+        r = sess.dest_check_connection("DEAD_DEST")
+        assert r["ping_ok"] is False
+        assert "partner not reached" in r["ping_message"]
+    finally:
+        mock.stop()
+
+
 def test_get_system_info_unpacks_rfcsi_export():
     """The interesting fields all live inside RFCSI_EXPORT.  Caller
     gets a flat dict so populating node fields is one assignment per
