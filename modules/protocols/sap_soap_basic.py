@@ -29,6 +29,7 @@ import urllib.request
 from sap_soap_envelopes import (
     build_bapi_transaction_commit,
     build_bapi_user_create1,
+    build_bapi_user_delete,
     build_bapi_user_get_detail,
     build_bapi_user_profiles_assign,
     build_dest_check_connection,
@@ -184,6 +185,11 @@ class SOAPRFCSession:
         body = build_bapi_user_profiles_assign(username, profiles)
         response_xml = self._post_soap(body)
         return parse_response(response_xml, "BAPI_USER_PROFILES_ASSIGN")
+
+    def bapi_user_delete(self, username: str) -> dict:
+        body = build_bapi_user_delete(username)
+        response_xml = self._post_soap(body)
+        return parse_response(response_xml, "BAPI_USER_DELETE")
 
     def bapi_transaction_commit(self, wait: bool = True) -> dict:
         body = build_bapi_transaction_commit(wait)
@@ -517,6 +523,64 @@ class SOAPRFCSession:
 
         return {"ok": True, "step": "done", "error": "",
                 "details": details}
+
+
+def delete_user_via_soap(host: str, port: int, client: str,
+                         user: str, password: str,
+                         victim_username: str,
+                         https: bool = False) -> dict:
+    """Delete victim_username via SOAP-RFC.  Drop-in shape for the
+    sapmap_rfc.delete_user boolean return:
+
+        {"success": bool, "message": str, "username": str}
+
+    Calls BAPI_USER_DELETE + BAPI_TRANSACTION_COMMIT (delete is not
+    auto-committed by the BAPI itself — same as create).  'User
+    doesn't exist' (BAPI error 01/124) counts as success since the
+    caller's goal is "absent on target" and we already are there.
+    """
+    sess = SOAPRFCSession(
+        host=host, port=int(port), client=client or "000",
+        user=user, password=password, https=bool(https),
+    )
+    # Verify creds first — same pre-check shape as
+    # create_user_with_sap_all uses, keeps the failure mode consistent.
+    ping = sess.test_connection()
+    if not ping["ok"]:
+        return {
+            "success": False,
+            "message": (f"SOAP-RFC RFC_PING failed: "
+                        f"{ping.get('error', 'unknown')}"),
+            "username": victim_username,
+        }
+    delete = sess.bapi_user_delete(victim_username)
+    if not delete["ok"]:
+        err = delete.get("error", "")
+        # "User does not exist" → already absent, treat as success.
+        # SAP message 01/124 is the standard one.
+        already_gone = (
+            "does not exist" in err.lower()
+            or "01124" in err
+            or "01 124" in err)
+        if not already_gone:
+            return {
+                "success": False,
+                "message": f"SOAP-RFC delete failed: {err}",
+                "username": victim_username,
+            }
+    commit = sess.bapi_transaction_commit(wait=True)
+    if not commit["ok"]:
+        return {
+            "success": False,
+            "message": (f"SOAP-RFC commit failed: "
+                        f"{commit.get('error', 'unknown')}"),
+            "username": victim_username,
+        }
+    return {
+        "success": True,
+        "message": (f"User {victim_username} deleted via SOAP-RFC"),
+        "username": victim_username,
+    }
 
 
 def create_user_via_soap(host: str, port: int, client: str,

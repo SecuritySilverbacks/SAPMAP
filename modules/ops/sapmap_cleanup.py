@@ -19,6 +19,12 @@ def cleanup_node_users(node: SAPNode, state: SAPMAPState) -> dict:
     """Delete all SAPMAP-created users from a single node.
 
     Returns dict: {deleted: [username, ...], failed: [username, ...]}
+
+    Phase 3b: when the gateway port (33NN) is unreachable but we have
+    a SOAP-RFC route to the node (e.g. an HTTP destination's verified
+    creds), routes BAPI_USER_DELETE over SOAP instead of pyrfc.
+    Otherwise cleanup on firewalled targets would hang 60s per user
+    before failing.
     """
     result = {"deleted": [], "failed": []}
 
@@ -26,15 +32,47 @@ def cleanup_node_users(node: SAPNode, state: SAPMAPState) -> dict:
         print(f"[*] No created users to clean up in {node.sid}")
         return result
 
+    # Resolve a SOAP-RFC route + gateway reachability ONCE, not per
+    # user.  Avoids re-probing the gateway socket for every deletion.
+    soap_route = None
+    use_soap = False
+    try:
+        from sapmap_gui import find_soap_rfc_route_for_node
+        from sapmap_exploit import _gateway_port_reachable
+        soap_route = find_soap_rfc_route_for_node(state, node)
+        if soap_route and not _gateway_port_reachable(node):
+            use_soap = True
+            print(f"[*] {node.sid}: gateway down — routing cleanup "
+                  f"via SOAP-RFC ({soap_route['host']}:"
+                  f"{soap_route['port']}, via "
+                  f"{soap_route['via_destination']})")
+    except Exception as e:
+        logger.debug(f"SOAP cleanup route check failed: {e}")
+
     creds = node.best_credentials()
-    if not creds:
+    if not creds and not use_soap:
         print(f"[-] No credentials to connect to {node.sid} for cleanup")
         result["failed"] = [u.username for u in node.created_users]
         return result
 
     for user in list(node.created_users):
         print(f"[*] Deleting user {user.username} from {node.sid}...")
-        success = sapmap_rfc.delete_user(node, user.username, creds)
+        if use_soap:
+            from sap_soap_basic import delete_user_via_soap
+            r = delete_user_via_soap(
+                host=soap_route["host"], port=soap_route["port"],
+                client=soap_route["client"],
+                user=soap_route["user"],
+                password=soap_route["password"],
+                victim_username=user.username,
+                https=soap_route["https"])
+            success = r.get("success", False)
+            if not success:
+                print(f"[-] {node.sid}: "
+                      f"{r.get('message', 'unknown error')}")
+        else:
+            success = sapmap_rfc.delete_user(
+                node, user.username, creds)
         if success:
             result["deleted"].append(user.username)
             node.created_users.remove(user)
