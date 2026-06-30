@@ -405,6 +405,37 @@ def find_soap_rfc_route_for_node(state, target_node) -> dict:
     return None
 
 
+def _node_icm_endpoint(state, node):
+    """Return (host, port, https) for the ICM HTTP endpoint we can use
+    to talk SOAP-RFC to `node`, or None if undiscoverable.
+
+    Prefers a verified-destination route (carries authoritative
+    host/port from the previous probe).  Falls back to scanning the
+    node's instance ports map for an icm-http(s) label.  Used by the
+    operator-typed-credentials path (Test Connection on a username +
+    password from the Add Credentials modal), where we want to verify
+    the OPERATOR'S creds — not the saved destination's — over SOAP
+    when the gateway is firewalled.
+    """
+    try:
+        route = find_soap_rfc_route_for_node(state, node)
+        if route:
+            return route["host"], route["port"], route["https"]
+    except Exception:
+        pass
+    if not node or not node.instances:
+        return None
+    host = node.ip or node.hostname
+    if not host:
+        return None
+    for p, lbl in node.instances[0].ports.items():
+        if lbl == "icm-http":
+            return host, int(p), False
+        if lbl == "icm-https":
+            return host, int(p), True
+    return None
+
+
 def resolve_soap_session_for_node(state, node,
                                   timeout: float = 60.0):
     """Single source of truth for the SOAP-RFC-session resolution
@@ -3548,14 +3579,36 @@ def create_app(api: SAPMAPApi) -> Bottle:
             instance_nr=data.get("instance_nr", "00"),
         )
 
+        def _verify_creds():
+            """pyrfc test_connection by default; SOAP RFC_PING when the
+            gateway is firewalled.  Phase 3b: an operator typing in
+            credentials and clicking Test on an HTTP-only target
+            otherwise hangs 60s before reporting failure."""
+            if not sapmap_exploit._gateway_port_reachable(node):
+                endp = _node_icm_endpoint(api.state, node)
+                if endp:
+                    host, port, https = endp
+                    try:
+                        from sap_soap_basic import SOAPRFCSession
+                        _s = SOAPRFCSession(
+                            host=host, port=port,
+                            client=creds.client,
+                            user=creds.username,
+                            password=creds.password,
+                            https=https, timeout=15.0)
+                        return _s.test_connection().get("ok", False)
+                    except Exception:
+                        return False
+            return sapmap_rfc.test_connection(node, creds)
+
         if data.get("test_only"):
-            ok = sapmap_rfc.test_connection(node, creds)
+            ok = _verify_creds()
             return json.dumps({"success": ok, "message": "OK" if ok else "Failed"})
 
         # Test and save credentials
         print(f"[*] Testing credentials for {sid}: user={creds.username}, "
               f"client={creds.client}, instance={creds.instance_nr}")
-        creds.verified = sapmap_rfc.test_connection(node, creds)
+        creds.verified = _verify_creds()
         node.credentials.append(creds)
         if creds.verified:
             print(f"[+] Credentials saved and verified for {sid}")
@@ -3565,7 +3618,10 @@ def create_app(api: SAPMAPApi) -> Bottle:
             # business-language capabilities.
             try:
                 import sapmap_capability_analyser
-                sapmap_capability_analyser.analyse(node, creds)
+                _cap_sess, _ = resolve_soap_session_for_node(
+                    api.state, node)
+                sapmap_capability_analyser.analyse(
+                    node, creds, soap_session=_cap_sess)
             except Exception as e:
                 print(f"[-] {sid}: capability analyser auto-run "
                       f"failed — {e!s}")
@@ -6764,7 +6820,10 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 # actually do is the natural next step.
                 try:
                     import sapmap_capability_analyser
-                    sapmap_capability_analyser.analyse(node)
+                    _cs, _ = resolve_soap_session_for_node(
+                        api.state, node)
+                    sapmap_capability_analyser.analyse(
+                        node, soap_session=_cs)
                 except Exception as e:
                     print(f"[-] {sid}: capability analyser auto-run "
                           f"failed — {e!s}")
@@ -7059,7 +7118,14 @@ def create_app(api: SAPMAPApi) -> Bottle:
             #   ⇒ TrustRelation(trusting_sid=B, issuer_sid=A)
             # ----------------------------------------------------------
             try:
-                rfctrust = sapmap_rfc.retrieve_rfctrust(node, creds)
+                _trust_sess, _ = resolve_soap_session_for_node(
+                    api.state, node)
+                if _trust_sess is not None:
+                    rfctrust = sapmap_rfc.retrieve_rfctrust_via_soap(
+                        node, _trust_sess)
+                else:
+                    rfctrust = sapmap_rfc.retrieve_rfctrust(
+                        node, creds)
             except Exception as e:
                 logger.debug(f"RFCTRUST read failed during STRUSTSSO2 "
                              f"discovery for {sid}: {e}")
@@ -7212,8 +7278,14 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     print(f"[-] {sid}: STRUSTSSO2 read failed: {e}")
                     entries = []
                 try:
-                    rfctrust = sapmap_rfc.retrieve_rfctrust(
-                        node, creds)
+                    _ts, _ = resolve_soap_session_for_node(
+                        api.state, node)
+                    if _ts is not None:
+                        rfctrust = sapmap_rfc.retrieve_rfctrust_via_soap(
+                            node, _ts)
+                    else:
+                        rfctrust = sapmap_rfc.retrieve_rfctrust(
+                            node, creds)
                 except Exception as e:
                     print(f"[-] {sid}: RFCTRUST read failed: {e}")
                     rfctrust = []
@@ -7455,8 +7527,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
         def _run():
             try:
                 import sapmap_capability_analyser
+                _cs, _ = resolve_soap_session_for_node(
+                    api.state, node)
                 sapmap_capability_analyser.analyse(
-                    node, probe_row_counts=probe)
+                    node, probe_row_counts=probe,
+                    soap_session=_cs)
             except Exception as e:
                 print(f"[-] {sid}: capability analyser failed — "
                       f"{e!s}")
@@ -10425,10 +10500,33 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 gw_port = f"33{nrs[0]}" if nrs else "3300"
             print(f"[*] Creating TCP/IP dest from {sid} → "
                   f"{target_sid} ({tgt_host}, gw={gw_port})...")
-            result = sapmap_rfc.create_tcpip_destination(
-                node, tgt_host, target_sid=target_sid,
-                target_gw_port=gw_port, creds=creds
-            )
+            # Phase 3b: when the SOURCE node's gateway is firewalled,
+            # the DEST_RFC_TCPIP_CREATE call would itself hang 60s on
+            # pyrfc → 3340.  Route through SOAP-RFC when a session is
+            # available.  Same dest naming convention as the pyrfc
+            # path (SAPMAP_<sid>_<timestamp>).
+            _td_sess, _ = resolve_soap_session_for_node(
+                api.state, node)
+            if _td_sess is not None:
+                from datetime import datetime as _dt
+                _ts = _dt.now().strftime("%Y%m%d%H%M%S")
+                dest_name_guess = (f"SAPMAP_{target_sid}_{_ts}"
+                                    if target_sid else
+                                    f"SAPMAP_{tgt_host[:14]}_{_ts}")
+                print(f"[*] {sid}: gateway down — DEST_RFC_TCPIP_"
+                      f"CREATE via SOAP-RFC")
+                result = _td_sess.dest_rfc_tcpip_create(
+                    name=dest_name_guess,
+                    server_name=tgt_host,
+                    gateway_host=tgt_host,
+                    gateway_service=gw_port,
+                    description=(f"TCP/IP CONNECTION TO "
+                                 f"{target_sid or tgt_host}"))
+            else:
+                result = sapmap_rfc.create_tcpip_destination(
+                    node, tgt_host, target_sid=target_sid,
+                    target_gw_port=gw_port, creds=creds
+                )
             if not result["success"]:
                 print(f"[-] Failed: {result['message']}")
                 return
@@ -10449,9 +10547,19 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
             # Test the destination with /SDF/RFC_CHECK
             print(f"[*] Testing {dest_name} with /SDF/RFC_CHECK...")
-            check = sapmap_rfc.test_rfc_destination(
-                node, dest_name, creds, api.state.rfc_check_cache
-            )
+            if _td_sess is not None:
+                # SOAP variant: DEST_CHECK_CONNECTION returns ping_ok
+                # without the EV_PING_STATUS field.  Synthesise the
+                # ping_status the downstream code expects.
+                _r = _td_sess.dest_check_connection(dest_name)
+                check = {"ping_status": "1" if _r["ping_ok"] else "0",
+                         "logon_ok": _r["logon_ok"],
+                         "ping_ok": _r["ping_ok"],
+                         "error": _r["error"]}
+            else:
+                check = sapmap_rfc.test_rfc_destination(
+                    node, dest_name, creds, api.state.rfc_check_cache
+                )
 
             # For TCP/IP destinations, success = EV_PING_STATUS == 1
             ping_success = check.get("ping_status") == "1"
@@ -12513,9 +12621,30 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     username=user, password=pwd,
                     client=client, instance_nr=inst,
                 )
+                # Phase 3b: if the target's gateway is firewalled but
+                # we know its ICM HTTP port, verify via SOAP RFC_PING.
+                # Otherwise pyrfc → 60s timeout on every BTP test
+                # against an HTTP-only target.
+                def _btp_test():
+                    if not sapmap_exploit._gateway_port_reachable(target):
+                        endp = _node_icm_endpoint(api.state, target)
+                        if endp:
+                            host, port, https = endp
+                            try:
+                                from sap_soap_basic import SOAPRFCSession
+                                _s = SOAPRFCSession(
+                                    host=host, port=port,
+                                    client=client, user=user,
+                                    password=pwd, https=https,
+                                    timeout=15.0)
+                                return _s.test_connection().get(
+                                    "ok", False)
+                            except Exception:
+                                return False
+                    return sapmap_rfc.test_connection(target, rfc_creds)
                 t0 = _t.time()
                 try:
-                    if sapmap_rfc.test_connection(target, rfc_creds):
+                    if _btp_test():
                         conn.latency_ms = int((_t.time() - t0) * 1000)
                         conn.ping_ok = True
                         conn.logon_successful = True

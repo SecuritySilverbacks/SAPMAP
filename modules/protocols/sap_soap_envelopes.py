@@ -338,6 +338,47 @@ def build_rfc_abap_install_and_run(abap_lines: list,
     return _wrap_envelope(body)
 
 
+def build_dest_rfc_tcpip_create(name: str, server_name: str,
+                                 gateway_host: str,
+                                 gateway_service: str,
+                                 program: str = "sapxpg",
+                                 description: str = "",
+                                 method: str = "E",
+                                 cpic_timeout: str = "20") -> str:
+    """DEST_RFC_TCPIP_CREATE — create a Type-T (TCP/IP) RFC destination.
+
+    Same FM SAPMAP already uses via pyrfc (sapmap_rfc.
+    create_tcpip_destination).  Used for self-referencing SXPG
+    destinations during OS exec on the source itself, and for setting
+    up sapxpg pivots from one ABAP system to another.
+
+    Required CHAR fields:
+      NAME            — destination identifier (≤32 chars)
+      SERVER_NAME     — target host (forwarded to RFC dispatcher)
+      GATEWAY_HOST    — gateway host
+      GATEWAY_SERVICE — gateway port number / service name (e.g. 3300)
+      PROGRAM         — external program name (default 'sapxpg')
+      METHOD          — 'E' = start program at registration time
+      CPIC_TIMEOUT    — connection timeout in seconds
+
+    Returns RETURN BAPIRET2 — caller checks for E/A/X.
+    """
+    body = (
+        '<urn:DEST_RFC_TCPIP_CREATE>'
+        f'<NAME>{escape(name)}</NAME>'
+        f'<DESCRIPTION>{escape(description)}</DESCRIPTION>'
+        f'<SERVER_NAME>{escape(server_name)}</SERVER_NAME>'
+        f'<GATEWAY_HOST>{escape(gateway_host)}</GATEWAY_HOST>'
+        f'<GATEWAY_SERVICE>{escape(gateway_service)}</GATEWAY_SERVICE>'
+        f'<METHOD>{escape(method)}</METHOD>'
+        f'<PROGRAM>{escape(program)}</PROGRAM>'
+        f'<CPIC_TIMEOUT>{escape(cpic_timeout)}</CPIC_TIMEOUT>'
+        '<RETURN/>'
+        '</urn:DEST_RFC_TCPIP_CREATE>'
+    )
+    return _wrap_envelope(body)
+
+
 def build_dest_check_connection(destination_name: str) -> str:
     """DEST_CHECK_CONNECTION — ping an SM59 destination from the
     target's perspective.

@@ -33,6 +33,7 @@ from sap_soap_envelopes import (
     build_bapi_user_get_detail,
     build_bapi_user_profiles_assign,
     build_dest_check_connection,
+    build_dest_rfc_tcpip_create,
     build_rfc_abap_install_and_run,
     build_rfc_get_system_info,
     build_rfc_ping,
@@ -325,6 +326,54 @@ class SOAPRFCSession:
                     parts[idx].strip() if idx < len(parts) else "")
             result["rows"].append(row_dict)
         result["ok"] = True
+        return result
+
+    def dest_rfc_tcpip_create(self, name: str, server_name: str,
+                              gateway_host: str,
+                              gateway_service: str,
+                              program: str = "sapxpg",
+                              description: str = "",
+                              method: str = "E",
+                              cpic_timeout: str = "20") -> dict:
+        """Create a Type-T (TCP/IP) RFC destination.
+
+        Returns a dict shaped to match
+        sapmap_rfc.create_tcpip_destination's contract:
+          {"success": bool, "message": str, "dest_name": str}
+        — so the GUI handler can dispatch to either transport.
+        """
+        result = {"success": False, "message": "", "dest_name": name}
+        try:
+            body = build_dest_rfc_tcpip_create(
+                name=name, server_name=server_name,
+                gateway_host=gateway_host,
+                gateway_service=gateway_service,
+                program=program, description=description,
+                method=method, cpic_timeout=cpic_timeout)
+            response_xml = self._post_soap(body)
+        except SOAPRFCError as e:
+            result["message"] = f"transport: {e}"
+            return result
+        parsed = parse_response(
+            response_xml, "DEST_RFC_TCPIP_CREATE")
+        if not parsed["ok"] and parsed.get("error"):
+            result["message"] = parsed["error"]
+            return result
+        # RETURN may come back as a single BAPIRET2 structure (not a
+        # table) — same shape DEST_RFC_TCPIP_CREATE uses via pyrfc.
+        ret = parsed["params"].get("RETURN", {})
+        if isinstance(ret, dict) and ret.get("TYPE", "") in ("E", "A"):
+            result["message"] = ret.get("MESSAGE", "Unknown error")
+            return result
+        # Some kernels return it as a table — handle both.
+        for row in parsed["tables"].get("RETURN", []):
+            if row.get("TYPE", "") in ("E", "A"):
+                result["message"] = row.get(
+                    "MESSAGE", "Unknown error")
+                return result
+        result["success"] = True
+        result["message"] = (
+            f"TCP/IP destination {name} created via SOAP-RFC")
         return result
 
     def dest_check_connection(self, destination_name: str) -> dict:

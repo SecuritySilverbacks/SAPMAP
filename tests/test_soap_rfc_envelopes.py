@@ -14,6 +14,7 @@ from sap_soap_envelopes import (
     build_bapi_user_get_detail,
     build_bapi_user_profiles_assign,
     build_dest_check_connection,
+    build_dest_rfc_tcpip_create,
     build_rfc_abap_install_and_run,
     build_rfc_get_system_info,
     build_rfc_ping,
@@ -398,6 +399,8 @@ def test_all_builders_produce_parseable_xml():
             build_rfc_ping(),
             build_rfc_get_system_info(),
             build_dest_check_connection("S4H_SVC"),
+            build_dest_rfc_tcpip_create(
+                "X", "h", "h", "3340"),
             build_rfc_abap_install_and_run(
                 ["REPORT t.", "WRITE 'x'."]),
             build_bapi_user_create1("U", "P"),
@@ -547,6 +550,27 @@ def test_rfc_abap_install_and_run_escapes_program_lines():
     ])
     assert "&lt;b&gt;" in env
     assert "<b>" not in env.replace("<b>'", "")  # not the raw chars
+
+
+def test_dest_rfc_tcpip_create_envelope_carries_all_required_fields():
+    """DEST_RFC_TCPIP_CREATE rejects calls missing any of SERVER_NAME /
+    GATEWAY_HOST / GATEWAY_SERVICE / METHOD / PROGRAM — older kernels
+    raise FIELD_MISSING, newer ones silently no-op the create.  Pin all
+    of them in the envelope shape."""
+    env = build_dest_rfc_tcpip_create(
+        name="SAPMAP_W74_20260630",
+        server_name="winwas740",
+        gateway_host="winwas740",
+        gateway_service="3340")
+    assert "<NAME>SAPMAP_W74_20260630</NAME>" in env
+    assert "<SERVER_NAME>winwas740</SERVER_NAME>" in env
+    assert "<GATEWAY_HOST>winwas740</GATEWAY_HOST>" in env
+    assert "<GATEWAY_SERVICE>3340</GATEWAY_SERVICE>" in env
+    assert "<METHOD>E</METHOD>" in env
+    assert "<PROGRAM>sapxpg</PROGRAM>" in env
+    assert "<CPIC_TIMEOUT>20</CPIC_TIMEOUT>" in env
+    # RETURN placeholder so the kernel emits BAPIRET2 in the response
+    assert "<RETURN/>" in env
 
 
 def test_dest_check_connection_envelope():
