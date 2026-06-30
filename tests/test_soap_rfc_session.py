@@ -772,6 +772,74 @@ def test_install_and_run_surfaces_auth_failure_in_shape():
         mock.stop()
 
 
+_TCPIP_CREATE_OK = (
+    '<?xml version="1.0"?><SOAP-ENV:Envelope '
+    'xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/">'
+    '<SOAP-ENV:Body>'
+    '<rfc:DEST_RFC_TCPIP_CREATE.Response '
+    'xmlns:rfc="urn:sap-com:document:sap:rfc:functions">'
+    '<RETURN><TYPE>S</TYPE><ID>RFC</ID><NUMBER>001</NUMBER>'
+    '<MESSAGE>destination created</MESSAGE></RETURN>'
+    '</rfc:DEST_RFC_TCPIP_CREATE.Response>'
+    '</SOAP-ENV:Body></SOAP-ENV:Envelope>')
+
+
+_TCPIP_CREATE_AUTH_ERR = (
+    '<?xml version="1.0"?><SOAP-ENV:Envelope '
+    'xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/">'
+    '<SOAP-ENV:Body>'
+    '<rfc:DEST_RFC_TCPIP_CREATE.Response '
+    'xmlns:rfc="urn:sap-com:document:sap:rfc:functions">'
+    '<RETURN><TYPE>E</TYPE><ID>RFC</ID><NUMBER>028</NUMBER>'
+    '<MESSAGE>No authorization for activity create (S_RFC_ADM)</MESSAGE>'
+    '</RETURN>'
+    '</rfc:DEST_RFC_TCPIP_CREATE.Response>'
+    '</SOAP-ENV:Body></SOAP-ENV:Envelope>')
+
+
+def test_dest_rfc_tcpip_create_success_returns_pyrfc_compatible_shape():
+    """Drop-in shape match for sapmap_rfc.create_tcpip_destination so
+    the GUI handler can dispatch to either transport without other
+    changes: {success, message, dest_name}."""
+    mock = _MockSAP(_make_responder({
+        "DEST_RFC_TCPIP_CREATE": (200, _TCPIP_CREATE_OK),
+    }))
+    try:
+        sess = SOAPRFCSession(
+            host="127.0.0.1", port=mock.port, client="000",
+            user="u", password="p")
+        r = sess.dest_rfc_tcpip_create(
+            name="SAPMAP_W74_20260630",
+            server_name="winwas740",
+            gateway_host="winwas740",
+            gateway_service="3340")
+        assert r["success"] is True
+        assert r["dest_name"] == "SAPMAP_W74_20260630"
+        assert "SOAP-RFC" in r["message"]
+    finally:
+        mock.stop()
+
+
+def test_dest_rfc_tcpip_create_surfaces_auth_error():
+    """RFC/028 (no S_RFC_ADM) is the common failure on hardened systems
+    — must surface to the operator as success=False with the SAP-side
+    message, not silently 'succeed' with no actual destination."""
+    mock = _MockSAP(_make_responder({
+        "DEST_RFC_TCPIP_CREATE": (200, _TCPIP_CREATE_AUTH_ERR),
+    }))
+    try:
+        sess = SOAPRFCSession(
+            host="127.0.0.1", port=mock.port, client="000",
+            user="u", password="p")
+        r = sess.dest_rfc_tcpip_create(
+            name="X", server_name="h", gateway_host="h",
+            gateway_service="3340")
+        assert r["success"] is False
+        assert "S_RFC_ADM" in r["message"]
+    finally:
+        mock.stop()
+
+
 _DEST_CHECK_OK = (
     '<?xml version="1.0"?><SOAP-ENV:Envelope '
     'xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/">'

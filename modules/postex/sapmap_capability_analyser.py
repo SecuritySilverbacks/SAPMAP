@@ -430,20 +430,21 @@ _SUPER_PROFILES = {"SAP_ALL", "SAP_NEW", "S_A.SYSTEM",
 
 
 def _read_user_profiles(node: SAPNode, username: str,
-                          creds: Optional[Credentials]) -> list:
+                          creds: Optional[Credentials],
+                          soap_session=None) -> list:
     """Pull the profile list for a user from UST04 (user -> profile
     mapping).  Returns a list of profile names (uppercase, stripped).
     Empty on read failure — caller falls back to role-only resolution
     in that case."""
-    import sapmap_rfc
     user_upper = (username or "").strip().upper()
     if not user_upper:
         return []
     try:
-        rows = sapmap_rfc.read_table(
+        rows = _read_table(
             node, "UST04", fields=_UST04_FIELDS,
             where=f"BNAME = '{user_upper}'",
-            creds=creds, max_rows=500) or []
+            creds=creds, max_rows=500,
+            soap_session=soap_session)
     except Exception as e:
         print(f"[-] {node.sid}: UST04 read failed for "
               f"{user_upper} — {e!s}")
@@ -474,22 +475,23 @@ def _capabilities_from_super_profile(profile_name: str) -> list:
 
 
 def _read_user_grants(node: SAPNode, username: str,
-                        creds: Optional[Credentials]) -> list:
+                        creds: Optional[Credentials],
+                        soap_session=None) -> list:
     """Pull every AGR_1251 row for `username` by joining AGR_USERS
     (role -> user) with AGR_1251 (role -> auth object).  Returns
     a flat list of {AGR_NAME, OBJECT, FIELD, LOW} dicts.
     """
-    import sapmap_rfc
     user_upper = (username or "").strip().upper()
     if not user_upper:
         return []
     # 1. Roles assigned to this user
     user_rows = []
     try:
-        user_rows = sapmap_rfc.read_table(
+        user_rows = _read_table(
             node, "AGR_USERS", fields=_AGR_USERS_FIELDS,
             where=f"UNAME = '{user_upper}'",
-            creds=creds, max_rows=2000) or []
+            creds=creds, max_rows=2000,
+            soap_session=soap_session)
     except Exception as e:
         print(f"[-] {node.sid}: AGR_USERS read failed for "
               f"{user_upper} — {e!s}")
@@ -507,9 +509,10 @@ def _read_user_grants(node: SAPNode, username: str,
         chunk = roles[i:i + chunk_size]
         clause = " OR ".join(f"AGR_NAME = '{r}'" for r in chunk)
         try:
-            rows = sapmap_rfc.read_table(
+            rows = _read_table(
                 node, "AGR_1251", fields=_AGR_1251_FIELDS,
-                where=clause, creds=creds, max_rows=5000) or []
+                where=clause, creds=creds, max_rows=5000,
+                soap_session=soap_session)
             out.extend(rows)
         except Exception as e:
             print(f"[-] {node.sid}: AGR_1251 read for {chunk[:2]} "
@@ -556,7 +559,8 @@ _ROW_PROBE_PSEUDO_TABLES = {
 
 
 def _row_count_for_table(node: SAPNode, table: str,
-                          creds: Optional[Credentials]) -> int:
+                          creds: Optional[Credentials],
+                          soap_session=None) -> int:
     """Probe whether a table exists from this user's perspective.
     Cached on `node.capability_row_counts` so a CISO-facing line stays
     cheap on repeat opens.  Returns -1 on failure / unknown."""
@@ -569,7 +573,6 @@ def _row_count_for_table(node: SAPNode, table: str,
     if table.lower() in _ROW_PROBE_PSEUDO_TABLES:
         node.capability_row_counts[table] = -1
         return -1
-    import sapmap_rfc
     try:
         # Probe with a single short field (MANDT) instead of fields=None.
         # RFC_READ_TABLE's WA buffer is ~512 bytes per row, which can't
@@ -578,15 +581,17 @@ def _row_count_for_table(node: SAPNode, table: str,
         # one field is enough — and MANDT exists on every client-aware
         # table.  quiet=True suppresses the noisy "Could not read X"
         # console line; the analyser already handles the -1 sentinel.
-        rows = sapmap_rfc.read_table(
-            node, table, fields=["MANDT"], creds=creds,
-            max_rows=1, quiet=True) or []
+        rows = _read_table(
+            node, table, fields=["MANDT"], where="",
+            creds=creds, max_rows=1,
+            soap_session=soap_session, quiet=True)
         if not rows:
             # MANDT-less table (e.g. some kernel/profile tables) — retry
             # with a default probe.  Still quiet; failure is fine.
-            rows = sapmap_rfc.read_table(
-                node, table, fields=None, creds=creds,
-                max_rows=1, quiet=True) or []
+            rows = _read_table(
+                node, table, fields=None, where="",
+                creds=creds, max_rows=1,
+                soap_session=soap_session, quiet=True)
         node.capability_row_counts[table] = -1 if not rows else 1
         return -1 if not rows else 1
     except Exception:
@@ -594,9 +599,38 @@ def _row_count_for_table(node: SAPNode, table: str,
         return -1
 
 
+def _read_table(node, table, fields, where, creds, max_rows,
+                 soap_session=None, quiet: bool = False):
+    """Dispatcher: SOAP-RFC when a session is supplied, pyrfc
+    otherwise.  Same return shape (list[dict]) so the analyser's
+    column-name access works identically against either transport.
+
+    Phase 3b: lets the analyser auto-run after credential verification
+    on HTTP-only ABAP targets without 60s pyrfc-on-3340 timeouts per
+    table read (5 read_table sites × 60s would freeze the post-Add-
+    Credentials path for ~5 minutes).
+    """
+    if soap_session is not None:
+        where_list = [where] if where else None
+        r = soap_session.read_table(
+            table, fields=fields or None, where=where_list,
+            max_rows=max_rows or 0)
+        if r.get("ok"):
+            return r.get("rows", [])
+        if not quiet:
+            print(f"[-] {node.sid}: {table} read failed via SOAP: "
+                  f"{r.get('error', '')[:120]}")
+        return []
+    import sapmap_rfc
+    return sapmap_rfc.read_table(
+        node, table, fields=fields, where=where, creds=creds,
+        max_rows=max_rows, quiet=quiet) or []
+
+
 def analyse(node: SAPNode,
               creds: Optional[Credentials] = None,
-              probe_row_counts: bool = False) -> list:
+              probe_row_counts: bool = False,
+              soap_session=None) -> list:
     """Run the analyser against every user we own on `node`.
     Stores results on `node.capability_results`, emits one Finding
     per user, and returns the list of result dicts.
@@ -625,10 +659,12 @@ def analyse(node: SAPNode,
         #      for SAPMAP-created users: BAPI_USER_PROFILES_ASSIGN
         #      gives them SAP_ALL via the profile path with no role
         #      assignments at all.
-        rows = _read_user_grants(node, username, creds)
+        rows = _read_user_grants(
+            node, username, creds, soap_session=soap_session)
         capabilities = _resolve_user_capabilities(rows)
 
-        profiles = _read_user_profiles(node, username, creds)
+        profiles = _read_user_profiles(
+            node, username, creds, soap_session=soap_session)
         super_profile = next(
             (p for p in profiles if p in _SUPER_PROFILES), None)
         if super_profile:
@@ -656,7 +692,8 @@ def analyse(node: SAPNode,
         if probe_row_counts and capabilities:
             for c in capabilities:
                 for t in c["tables"]:
-                    _row_count_for_table(node, t, creds)
+                    _row_count_for_table(
+                        node, t, creds, soap_session=soap_session)
 
         summary = _english_summary(
             username, node.sid, client, capabilities,
