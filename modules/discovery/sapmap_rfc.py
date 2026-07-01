@@ -1279,6 +1279,155 @@ def ping_rfc_destination(node: SAPNode, destination_name: str,
     return result
 
 
+def http_dest_ping(rfc_conn, timeout: float = 5.0) -> dict:
+    """Ping a Type-G / Type-H HTTP RFC destination directly.
+
+    The generic ``ping_rfc_destination`` path routes through
+    DEST_CHECK_CONNECTION → /SDF/RFC_CHECK → IWB_SHE_RFCDESTINATION_CHECK
+    → last-resort direct-TCP-on-33NN.  That last fallback is wrong for
+    HTTP destinations: it treats the RFCOPTIONS ``S=`` value as an
+    instance number and TCP-connects to ``3300 + int(S)`` — but for
+    Type-G/H, ``S=`` is the HTTP port.  Result: a Type-G to
+    10.10.1.38:50313 gets probed at 10.10.1.38:3300 and reports
+    "not reachable" even when the ICM answers instantly.
+
+    This helper takes the RFCConnection directly, parses conn.http_url,
+    does a TCP+HTTP probe against the correct host:port, applies the
+    Note 1177315 rule for benign 4xx/5xx statuses, and returns the
+    same shape as ``ping_rfc_destination`` so the caller loop can
+    swap it in transparently.
+
+    Returns:
+      { ping_ok, ping_message, remote_sid, remote_hostname,
+        remote_ip, remote_instance_nr, logon_ok, error }
+    """
+    import socket as _sock
+    from urllib.parse import urlparse
+    result = {
+        "ping_ok": False, "ping_message": "", "logon_ok": False,
+        "remote_sid": "", "remote_hostname": "", "remote_ip": "",
+        "remote_instance_nr": "", "error": "",
+    }
+    url = (rfc_conn.http_url or "").strip()
+    if not url:
+        result["error"] = "no http_url on destination"
+        return result
+    try:
+        parts = urlparse(url)
+    except Exception as e:
+        result["error"] = f"invalid http_url: {e}"
+        return result
+    host = parts.hostname or ""
+    if not host:
+        result["error"] = "http_url has no hostname"
+        return result
+    scheme = (parts.scheme or "http").lower()
+    port = parts.port or (443 if scheme == "https" else 80)
+    is_https = scheme == "https"
+
+    # 1. TCP-level reachability.  Fast fail on refused / timeout /
+    # DNS error — no point sending an HTTP request if the socket
+    # never opens.
+    try:
+        s = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect((host, port))
+    except Exception as e:
+        result["error"] = (f"TCP connect to {host}:{port} failed: "
+                           f"{type(e).__name__}: {e}")
+        return result
+
+    # 2. HTTP round-trip.  A GET on the destination's own path is the
+    # closest match to what SM59 Test Connection does.  Wrap in TLS
+    # when the URL is HTTPS.
+    path = parts.path or "/"
+    if parts.query:
+        path = f"{path}?{parts.query}"
+    try:
+        if is_https:
+            import ssl as _ssl
+            ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
+            ctx.check_hostname = False
+            ctx.verify_mode = _ssl.CERT_NONE
+            try:
+                ctx.minimum_version = _ssl.TLSVersion.TLSv1
+            except (AttributeError, ValueError):
+                pass
+            s = ctx.wrap_socket(s, server_hostname=host)
+        req = (f"GET {path} HTTP/1.0\r\nHost: {host}:{port}\r\n"
+               f"User-Agent: sapmap-http-ping/1.0\r\n"
+               f"Connection: close\r\n\r\n").encode("iso-8859-1")
+        s.sendall(req)
+        resp = b""
+        try:
+            while len(resp) < 8192:
+                chunk = s.recv(2048)
+                if not chunk:
+                    break
+                resp += chunk
+        except _sock.timeout:
+            pass
+        try:
+            s.close()
+        except Exception:
+            pass
+    except Exception as e:
+        result["ping_ok"] = True  # TCP opened, HTTP faulted — target IS up
+        result["ping_message"] = (f"TCP open on {host}:{port}, "
+                                   f"HTTP faulted: {type(e).__name__}")
+        return result
+
+    # 3. Parse the response.  ANY status code proves the target
+    # answered — that's the working definition of ping_ok for HTTP
+    # destinations, mirroring what DEST_CHECK_CONNECTION would say if
+    # it handled Type-G correctly.
+    import re as _re
+    m_status = _re.search(rb"HTTP/\S+\s+(\d{3})", resp)
+    http_status = int(m_status.group(1)) if m_status else 0
+    rfc_conn.http_status = http_status
+    result["ping_ok"] = True
+    result["ping_message"] = (f"HTTP {http_status} from {host}:{port}"
+                              if http_status else
+                              f"connected to {host}:{port}")
+    result["remote_ip"] = host if _re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$",
+                                             host) else ""
+    result["remote_hostname"] = ("" if result["remote_ip"] else host)
+
+    # 4. ICF-NF error page carries HOST_SID_NN — lift SID + instance
+    # if it's present.  Same regex as fingerprint_web_dispatcher.
+    _icf = _re.search(
+        rb'ICF-NF-http-i([A-Za-z0-9._-]+)_([A-Z0-9]{3})_(\d{2})-',
+        resp)
+    if _icf:
+        result["remote_hostname"] = (result["remote_hostname"]
+                                      or _icf.group(1).decode(
+                                          "iso-8859-1", "replace"))
+        result["remote_sid"] = _icf.group(2).decode("ascii", "replace")
+        result["remote_instance_nr"] = _icf.group(3).decode("ascii",
+                                                              "replace")
+    # 5. Note 1177315: reinterpret 403/404/405/500 as benign when the
+    # destination is ADS-shaped.  Marker-in-body also triggers.
+    resp_low = resp.lower()
+    marker_hit = any(
+        m in resp_low for m in (
+            b"expected request method post",
+            b"com.sap.soa.wsr.030104",
+            b"wsaddressingexception",
+        )
+    )
+    if marker_hit and not rfc_conn.is_ads_dest:
+        rfc_conn.is_ads_dest = True
+    if (rfc_conn.is_ads_dest
+            and (marker_hit
+                 or http_status in (403, 404, 405, 500))):
+        rfc_conn.note_1177315_hit = True
+        result["ping_message"] += (
+            f"  [Note 1177315: HTTP {http_status} on ADS destination "
+            f"— target answered]")
+
+    return result
+
+
 def _ping_via_iwb_check(node, destination_name, creds=None):
     """Fallback ping via IWB_SHE_RFCDESTINATION_CHECK (available on older kernels)."""
     result = {"ping_ok": False, "remote_sid": "", "remote_hostname": "",
