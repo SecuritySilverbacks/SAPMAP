@@ -1428,6 +1428,139 @@ def http_dest_ping(rfc_conn, timeout: float = 5.0) -> dict:
     return result
 
 
+def sapcontrol_auth_probe(url: str, user: str, password: str,
+                             timeout: float = 8.0) -> dict:
+    """Basic-auth probe against a SAPControl / SAP Host Agent endpoint.
+
+    SAPControl doesn't implement RFC_PING (that's the ABAP RFC layer);
+    it exposes its own SOAP contract at urn:SAPControl.  The lightest
+    call that requires auth is <GetProcessList/> — unhardened
+    installs answer 200 with an <item> array when the credential is
+    valid, 401 when it isn't.
+
+    Returns dict with:
+      ok        — True iff the endpoint answered 200 with SAPControl
+                    content (SID/instance/process list).
+      status    — HTTP status code from the response.
+      error     — populated on network / TLS / non-200 failures.
+      sid, instance_nr, hostname — lifted from the response body
+                    when the auth succeeded (SAPControl includes
+                    <SAPSYSTEMNAME>, <instanceNr>, <hostname> in
+                    every response).
+      response_body — first 2 KiB of the response, for the operator's
+                       benefit when debugging non-200s.
+    """
+    import socket as _sock
+    import base64 as _b64
+    from urllib.parse import urlparse
+    out = {"ok": False, "status": 0, "error": "",
+            "sid": "", "instance_nr": "", "hostname": "",
+            "response_body": ""}
+    if not url:
+        out["error"] = "empty URL"
+        return out
+    try:
+        parts = urlparse(url)
+    except Exception as e:
+        out["error"] = f"invalid URL: {e}"
+        return out
+    host = parts.hostname or ""
+    if not host:
+        out["error"] = "no hostname in URL"
+        return out
+    scheme = (parts.scheme or "http").lower()
+    is_https = scheme == "https"
+    port = parts.port or (443 if is_https else 80)
+    # The destination's own path (usually /SAPControl.CGI or
+    # /SAPHostControl.CGI) is where the SOAP endpoint lives.
+    path = parts.path or "/SAPControl.CGI"
+
+    body = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<SOAP-ENV:Envelope xmlns:SOAP-ENV='
+        '"http://schemas.xmlsoap.org/soap/envelope/">'
+        '<SOAP-ENV:Body>'
+        '<ns1:GetProcessList xmlns:ns1="urn:SAPControl"/>'
+        '</SOAP-ENV:Body></SOAP-ENV:Envelope>'
+    )
+    body_bytes = body.encode("utf-8")
+    auth = _b64.b64encode(
+        f"{user}:{password}".encode("utf-8")).decode("ascii")
+    hdr = (
+        f"POST {path} HTTP/1.0\r\n"
+        f"Host: {host}:{port}\r\n"
+        f"Content-Type: text/xml; charset=utf-8\r\n"
+        f"Content-Length: {len(body_bytes)}\r\n"
+        f"SOAPAction: \"\"\r\n"
+        f"Authorization: Basic {auth}\r\n"
+        f"User-Agent: sapmap-sapcontrol-probe/1.0\r\n"
+        f"Connection: close\r\n\r\n"
+    ).encode("iso-8859-1")
+
+    try:
+        s = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect((host, port))
+        if is_https:
+            import ssl as _ssl
+            ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
+            ctx.check_hostname = False
+            ctx.verify_mode = _ssl.CERT_NONE
+            try:
+                ctx.minimum_version = _ssl.TLSVersion.TLSv1
+            except (AttributeError, ValueError):
+                pass
+            s = ctx.wrap_socket(s, server_hostname=host)
+        s.sendall(hdr + body_bytes)
+        resp = b""
+        try:
+            while len(resp) < 65536:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                resp += chunk
+        except _sock.timeout:
+            pass
+        try:
+            s.close()
+        except Exception:
+            pass
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {e}"
+        return out
+
+    import re as _re
+    m_status = _re.search(rb"HTTP/\S+\s+(\d{3})", resp)
+    if m_status:
+        out["status"] = int(m_status.group(1))
+    out["response_body"] = resp[-2048:].decode("iso-8859-1",
+                                                 errors="replace")
+    if out["status"] == 401:
+        out["error"] = "HTTP 401 — credentials rejected"
+        return out
+    if out["status"] not in (200, 204):
+        out["error"] = f"HTTP {out['status'] or '<no status>'}"
+        return out
+    # Auth accepted.  Lift SID / instance / hostname from the SAPControl
+    # response body — every method returns these in the SOAP header
+    # even when the FM is unknown.  Tag namespaces vary
+    # (sap:, ns1:, plain); strip prefixes to match all.
+    def _tag(name):
+        m = _re.search(
+            rb'<(?:[A-Za-z0-9_]+:)?'
+            + name.encode() + rb'[^>]*>([^<]*)</',
+            resp, _re.I)
+        return m.group(1).decode("iso-8859-1", "replace").strip() if m else ""
+    out["sid"] = _tag("SAPSYSTEMNAME") or _tag("sapSystemName")
+    out["instance_nr"] = (_tag("instanceNr")
+                          or _tag("SAPSYSTEM"))
+    if out["instance_nr"].isdigit():
+        out["instance_nr"] = out["instance_nr"].zfill(2)
+    out["hostname"] = _tag("hostname")
+    out["ok"] = True
+    return out
+
+
 def _ping_via_iwb_check(node, destination_name, creds=None):
     """Fallback ping via IWB_SHE_RFCDESTINATION_CHECK (available on older kernels)."""
     result = {"ping_ok": False, "remote_sid": "", "remote_hostname": "",
