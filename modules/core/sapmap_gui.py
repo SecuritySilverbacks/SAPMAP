@@ -8929,19 +8929,40 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     _sc_result = sapmap_rfc.sapcontrol_auth_probe(
                         conn.http_url, rfc_user, rfc_pwd, timeout=8.0)
                     if _sc_result["ok"]:
-                        conn.logon_successful = True
-                        conn.os_exec_verified = True
-                        print(f"[+] {dest_name}: SAPControl auth OK — "
-                              f"SID={_sc_result['sid'] or '?'} "
-                              f"inst={_sc_result['instance_nr'] or '?'} "
-                              f"host={_sc_result['hostname'] or '?'} "
-                              f"— OS access via OSExecute unlocked")
-                        # OS access on the target beats SAP_ALL —
-                        # emit a CRITICAL finding so the operator
-                        # sees the escalation in the findings bus,
-                        # not just in the console.  meta carries the
-                        # source/target for the pulse overlay.
-                        if conn.target_sid:
+                        # Stage 1 (GetInstanceProperties) is UNAUTH
+                        # on default kernels — it proves the endpoint
+                        # is a SAPControl but not that our credential
+                        # works.  Stage 2 (AccessCheck) is what
+                        # actually validates the password + authz;
+                        # only flip os_exec_verified when it returned
+                        # <access>1</access>.
+                        _osx = int(_sc_result.get("osexec_access", -1))
+                        conn.logon_successful = (_osx == 1)
+                        conn.os_exec_verified = (_osx == 1)
+                        _identity = (f"SID={_sc_result['sid'] or '?'} "
+                                     f"inst={_sc_result['instance_nr'] or '?'} "
+                                     f"host={_sc_result['hostname'] or '?'}")
+                        if _osx == 1:
+                            print(f"[+] {dest_name}: SAPControl auth OK — "
+                                  f"{_identity} — OSExecute AccessCheck "
+                                  f"passed, OS access unlocked")
+                        elif _osx == 0:
+                            print(f"[-] {dest_name}: SAPControl endpoint "
+                                  f"reachable ({_identity}) but "
+                                  f"credential lacks OSExecute authz "
+                                  f"(AccessCheck returned <access>0</access>)")
+                        else:
+                            _ace = (_sc_result.get("access_check_error")
+                                     or "AccessCheck failed").strip()
+                            print(f"[-] {dest_name}: SAPControl endpoint "
+                                  f"reachable ({_identity}) but "
+                                  f"credential validation failed — "
+                                  f"{_ace}")
+                        # CRITICAL finding fires only when we've
+                        # actually proven the credential unlocks
+                        # OSExecute — a reachable-but-unauthenticated
+                        # SAPControl endpoint isn't a compromise.
+                        if conn.os_exec_verified and conn.target_sid:
                             try:
                                 from sapmap_findings import (
                                     emit_finding)

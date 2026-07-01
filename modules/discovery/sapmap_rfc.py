@@ -1455,7 +1455,13 @@ def sapcontrol_auth_probe(url: str, user: str, password: str,
     from urllib.parse import urlparse
     out = {"ok": False, "status": 0, "error": "",
             "sid": "", "instance_nr": "", "hostname": "",
-            "response_body": ""}
+            "response_body": "",
+            # Stage-2 AccessCheck fields — always present, so callers
+            # can .get() without worrying whether stage 1 short-
+            # circuited before we ran the auth probe.
+            "osexec_access": -1,
+            "access_check_status": 0,
+            "access_check_error": ""}
     if not url:
         out["error"] = "empty URL"
         return out
@@ -1475,10 +1481,28 @@ def sapcontrol_auth_probe(url: str, user: str, password: str,
     # /SAPHostControl.CGI) is where the SOAP endpoint lives.
     path = parts.path or "/SAPControl.CGI"
 
-    # GetInstanceProperties is the standard "who are you" call —
-    # returns SID, instance, host, SAPLOCALHOST, INSTANCE_NAME, and
-    # a lot more.  Small response, auth-gated, so a 200 proves the
-    # credential is valid AND lifts the target's identity for free.
+    # Two-stage probe:
+    #
+    # 1. GetInstanceProperties — SAP kernel serves this WITHOUT
+    #    authentication by default (protection=NONE in the SAPControl
+    #    ACL).  Confirms the endpoint IS a SAPControl webservice and
+    #    lets us lift SID / instance / host from the response.  Does
+    #    NOT validate the credential — that was the old bug behind
+    #    "SAPControl auth OK" followed by "HTTP 500 Invalid
+    #    Credentials" on the first OSExecute attempt.
+    #
+    # 2. AccessCheck(function="OSExecute") — SAP designed this
+    #    specifically to test whether the caller is authorized to
+    #    invoke a given SAPControl method WITHOUT actually invoking
+    #    it (no audit trail from a fake command).  Requires basic
+    #    auth: HTTP 500 "Invalid Credentials" when the password is
+    #    wrong; HTTP 200 with <access>1</access> when the user is
+    #    permitted; HTTP 200 with <access>0</access> when the user
+    #    authenticates but lacks S_ADMI_FCD-equivalent authz for
+    #    OSExecute.
+    #
+    # os_exec_verified is only set (by the caller) when stage 2
+    # returns 200 + access=1.  Stage 1 alone is not enough.
     body = (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<SOAP-ENV:Envelope xmlns:SOAP-ENV='
@@ -1576,6 +1600,133 @@ def sapcontrol_auth_probe(url: str, user: str, password: str,
         out["instance_nr"] = inst
     out["hostname"] = (props.get("SAPLOCALHOST")
                         or props.get("INSTANCE_NAME") or "").strip()
+
+    # Stage 2 — AccessCheck for OSExecute.  This is what actually
+    # validates the credential AND authorization for the operation
+    # we care about.  Returns:
+    #   out["osexec_access"] = 1  → credential + authz OK, OSExecute
+    #                                is unlocked
+    #   out["osexec_access"] = 0  → credential OK but authz denied
+    #                                (rare — <sid>adm nearly always
+    #                                has S_ADMI_FCD-equiv)
+    #   out["osexec_access"] = -1 → credential rejected (HTTP 401 or
+    #                                500 Invalid Credentials)
+    # The caller inspects this and only sets os_exec_verified when
+    # osexec_access == 1.
+    out["osexec_access"] = -1
+    ac_body = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<SOAP-ENV:Envelope xmlns:SOAP-ENV='
+        '"http://schemas.xmlsoap.org/soap/envelope/">'
+        '<SOAP-ENV:Body>'
+        '<ns1:AccessCheck xmlns:ns1="urn:SAPControl">'
+        '<function>OSExecute</function>'
+        '</ns1:AccessCheck>'
+        '</SOAP-ENV:Body></SOAP-ENV:Envelope>'
+    )
+    ac_body_bytes = ac_body.encode("utf-8")
+    ac_hdr = (
+        f"POST {path} HTTP/1.0\r\n"
+        f"Host: {host}:{port}\r\n"
+        f"Content-Type: text/xml; charset=utf-8\r\n"
+        f"Content-Length: {len(ac_body_bytes)}\r\n"
+        f"SOAPAction: \"\"\r\n"
+        f"Authorization: Basic {auth}\r\n"
+        f"User-Agent: sapmap-sapcontrol-probe/1.0\r\n"
+        f"Connection: close\r\n\r\n"
+    ).encode("iso-8859-1")
+
+    ac_resp = b""
+    try:
+        s2 = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+        s2.settimeout(timeout)
+        s2.connect((host, port))
+        if is_https:
+            import ssl as _ssl
+            ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
+            ctx.check_hostname = False
+            ctx.verify_mode = _ssl.CERT_NONE
+            try:
+                ctx.minimum_version = _ssl.TLSVersion.TLSv1
+            except (AttributeError, ValueError):
+                pass
+            s2 = ctx.wrap_socket(s2, server_hostname=host)
+        s2.sendall(ac_hdr + ac_body_bytes)
+        try:
+            while len(ac_resp) < 65536:
+                chunk = s2.recv(4096)
+                if not chunk:
+                    break
+                ac_resp += chunk
+        except _sock.timeout:
+            pass
+        try:
+            s2.close()
+        except Exception:
+            pass
+    except Exception as e:
+        out["ok"] = True   # stage 1 already succeeded
+        out["access_check_error"] = f"{type(e).__name__}: {e}"
+        return out
+
+    m_ac_status = _re.search(rb"HTTP/\S+\s+(\d{3})", ac_resp)
+    ac_status = int(m_ac_status.group(1)) if m_ac_status else 0
+    out["access_check_status"] = ac_status
+
+    if ac_status == 401:
+        out["ok"] = True
+        out["access_check_error"] = "HTTP 401 — credential rejected"
+        return out
+    if ac_status not in (200, 204):
+        # HTTP 500 with body "Invalid Credentials" is what OSExecute
+        # returns when the password is wrong.  Mirror the same
+        # detection for the AccessCheck path — some kernels return
+        # the same error for AccessCheck too.
+        body_low = ac_resp.lower()
+        if b"invalid credential" in body_low:
+            out["ok"] = True
+            out["access_check_error"] = (
+                f"HTTP {ac_status} — credential rejected")
+            return out
+        # AccessCheck may not be implemented on very old kernels —
+        # not fatal.  Leave osexec_access=-1 so the caller doesn't
+        # blindly set os_exec_verified, and surface the error.
+        m_fault = _re.search(
+            rb"<faultstring[^>]*>([^<]*)</faultstring>", ac_resp)
+        fault = (m_fault.group(1).decode("iso-8859-1", "replace")
+                  .strip() if m_fault else "")
+        out["ok"] = True
+        out["access_check_error"] = (
+            f"HTTP {ac_status}"
+            + (f" — {fault}" if fault else ""))
+        return out
+
+    # 200 OK — parse <access>N</access>.  Accept both plain and
+    # namespaced tags.  On some kernels the field is named
+    # <status> instead, with 0 for allowed, 1 for denied.  Handle
+    # the ambiguity by looking for both and preferring the specific
+    # "access denied" text if present.
+    m_access = _re.search(
+        rb"<(?:[A-Za-z0-9_]+:)?access[^>]*>(-?\d+)</",
+        ac_resp, _re.I)
+    ac_body_low = ac_resp.lower()
+    if m_access:
+        try:
+            out["osexec_access"] = int(m_access.group(1))
+        except ValueError:
+            pass
+    elif b"access denied" in ac_body_low:
+        out["osexec_access"] = 0
+    else:
+        # Ambiguous 200 with no <access> tag.  Optimistically treat
+        # as allowed — the kernel accepted the credentials (that's
+        # what a 200 means for an authenticated method) and didn't
+        # reject the AccessCheck.  If OSExecute later fails we'll
+        # surface that error to the operator directly.
+        out["osexec_access"] = 1
+        out["access_check_note"] = (
+            "AccessCheck returned 200 with no <access> tag — "
+            "treating as allowed")
     out["ok"] = True
     return out
 
