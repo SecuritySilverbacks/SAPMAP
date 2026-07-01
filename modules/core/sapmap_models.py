@@ -1199,7 +1199,16 @@ class RFCConnection:
     os_exec_verified: bool = False
 
     def risk_level(self) -> str:
-        """Return risk assessment for this connection."""
+        """Return risk assessment for this connection.
+
+        os_exec_verified beats has_sap_all: SAP_ALL is
+        application-level (still gated by S_RFC / S_TCODE and the ABAP
+        auth engine), while a proven OSExecute channel gives shell as
+        <sid>adm on the target host — full kernel-level control,
+        bypasses the entire SAP auth model.
+        """
+        if self.os_exec_verified:
+            return "CRITICAL"
         if self.has_sap_all and self.logon_successful:
             return "CRITICAL"
         if self.trusted_system:
