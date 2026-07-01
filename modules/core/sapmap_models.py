@@ -1829,18 +1829,27 @@ class SAPMAPState:
 
     # -- Connection management --
 
-    def materialise_type_g_target(self, conn: "RFCConnection") -> None:
+    def materialise_type_g_target(self, conn: "RFCConnection",
+                                     allow_placeholder: bool = True) -> None:
         """Attach a target node to a Type-G / HTTP RFCConnection.
 
         First tries to link to an existing node via find_node_by_host
-        against the URL's hostname (Phase 3).  When no match exists,
-        synthesises a placeholder node so the connection line has
-        somewhere to end on the map (Phase 3b):
+        against the URL's hostname (Phase 3).  When no match exists
+        AND ``allow_placeholder=True``, synthesises a placeholder
+        node so the connection line has somewhere to end on the map
+        (Phase 3b):
 
           * conn.is_btp_dest → reuse the existing BTPDISC_<slug>
             path for uniformity with BTP-sourced destinations.
           * otherwise         → RFCDISC_<slug> with
             discovered_via_rfc_g=True.
+
+        ``allow_placeholder=False`` is the safe default used by
+        ``add_connection``: we don't know yet whether the target is
+        actually reachable, so plotting a placeholder for every
+        RFCDES row would litter the map with dead-URL boxes.  Callers
+        that have just verified reachability (ping_ok=True) pass
+        allow_placeholder=True to promote the target.
 
         No-op for Type-3 connections (conn.conn_type != 'http') or
         when target_sid is already populated (e.g. by an earlier
@@ -1867,6 +1876,14 @@ class SAPMAPState:
             conn.target_host = existing.hostname or host
             conn.target_ip = existing.ip or (
                 host if _looks_like_ipv4(host) else "")
+            return
+
+        # No existing node found.  When the caller hasn't confirmed
+        # reachability yet, bail out without materialising — we don't
+        # want to plot dead-URL boxes for every dangling Type-G
+        # destination in RFCDES.  Ping loops that observe ping_ok=True
+        # re-call with allow_placeholder=True to promote.
+        if not allow_placeholder:
             return
 
         # No existing node — synthesise a placeholder.  Pick the
@@ -1937,10 +1954,15 @@ class SAPMAPState:
             conn.target_instance_nr = inst_nr
 
     def add_connection(self, conn: RFCConnection) -> None:
-        # Type-G / HTTP destinations: resolve or materialise the
-        # target node so the connection has an endpoint to attach to.
-        # No-op for Type-3 RFC.
-        self.materialise_type_g_target(conn)
+        # Type-G / HTTP destinations: try to LINK to an existing node
+        # matching the URL host, but do NOT auto-materialise a
+        # placeholder here — we don't know yet whether the target is
+        # reachable, and littering the map with dead-URL RFCDISC_
+        # boxes for every dangling destination is worse than showing
+        # nothing.  The ping loop (Retrieve RFCs / Test HTTP) re-calls
+        # materialise_type_g_target with allow_placeholder=True once
+        # it has confirmed ping_ok=True.
+        self.materialise_type_g_target(conn, allow_placeholder=False)
         was_new_or_elevated = True
         # Avoid duplicates
         for existing in self.connections:

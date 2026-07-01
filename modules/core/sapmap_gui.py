@@ -8757,6 +8757,12 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             conn.target_sid = _rs
                             print(f"[*] {dest_name}: resolved target "
                                   f"→ {_rs} (from ICF-NF lift)")
+                    # Reachable Type-G: promote to a placeholder
+                    # node if there's no existing one yet.  Only fires
+                    # on ping_ok=True — unreachable destinations stay
+                    # target-less and their line stays hidden.
+                    api.state.materialise_type_g_target(
+                        conn, allow_placeholder=True)
                     if conn.target_sid:
                         target = api.state.get_node(conn.target_sid)
                         if target:
