@@ -4087,6 +4087,20 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
     # fingerprinted downstream — for ICM-only ports the downstream
     # /sap/public/info correction will rename the placeholder to the
     # real SID once the HTTP probe lands.
+    #
+    # ICM-only nuance: WD ports and standalone-HTTPS ABAP hosts belong
+    # on the map as their own boxes, but a stray ICM port co-located
+    # with an already-discovered SAP system (e.g. 8080 sitting on a
+    # host that already has S4D on inst 02) is almost always the same
+    # system's ICM under a non-canonical instance number, not a fresh
+    # box.  Only synthesise a Wxx SID for an ICM-only instance when
+    # NO other real SID exists on this host — otherwise let Phase B
+    # fold the ICM port into the host's default_sid (the first known
+    # non-router SID).  Operator-reported false positive: S4D + ICM
+    # on 8080 at 192.168.2.209 produced a phantom WD1 node.
+    non_router_sids_present = any(
+        s != router_sid for s in instance_sid_map.values()
+    )
     wd_sid = None
     wd_services_set = {"wd_http", "wd_https"}
     icm_services_set = {"icm_http", "icm_https"}
@@ -4096,16 +4110,22 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
             info["service"] for port, info in open_ports.items()
             if info["instance_nr"] == inst_nr
         }
-        if (inst_services & wd_or_icm_set
-                and not (inst_services - wd_or_icm_set)
-                and inst_nr not in instance_sid_map):
-            try:
-                last = int(host.split(".")[-1]) & 0xFF
-            except Exception:
-                import zlib
-                last = zlib.crc32(host.encode("utf-8", "replace")) & 0xFF
-            wd_sid = wd_sid or f"W{last:02X}"
-            instance_sid_map[inst_nr] = wd_sid
+        if inst_nr in instance_sid_map:
+            continue
+        is_pure_wd = (inst_services & wd_services_set
+                       and not (inst_services - wd_or_icm_set))
+        is_pure_icm = (inst_services
+                        and not (inst_services & wd_services_set)
+                        and inst_services.issubset(icm_services_set))
+        if not (is_pure_wd or (is_pure_icm and not non_router_sids_present)):
+            continue
+        try:
+            last = int(host.split(".")[-1]) & 0xFF
+        except Exception:
+            import zlib
+            last = zlib.crc32(host.encode("utf-8", "replace")) & 0xFF
+        wd_sid = wd_sid or f"W{last:02X}"
+        instance_sid_map[inst_nr] = wd_sid
 
     # Phase B: Assign unresolved instances to the first known SID (or UNK).
     # Skip router_sid when picking the default — the router should never
