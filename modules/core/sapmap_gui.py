@@ -8973,7 +8973,14 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             timeout=8.0)
                         if _ba.get("logon_successful"):
                             conn.logon_successful = True
-                            conn.soap_rfc_verified = True
+                            # NOTE: don't set soap_rfc_verified here.
+                            # That flag specifically means "ABAP
+                            # SOAP-RFC RFC_PING works" and gates the
+                            # Create Remote User button — but Java /
+                            # BTP / ADS targets can't do BAPI_USER_CREATE1
+                            # over SOAP-RFC.  Basic-auth pass on a
+                            # Java target proves the credential is
+                            # live for UME/HTTP use, nothing more.
                             print(f"[+] {dest_name}: HTTP "
                                   f"{_ba['status']} — credential "
                                   f"accepted on {_label} target")
@@ -9560,10 +9567,49 @@ def create_app(api: SAPMAPApi) -> Bottle:
             return json.dumps({"error": (f"connection {dest_name} is "
                                             f"missing url / user / "
                                             f"password")})
+        # SAPControl OSExecute exec()s the command directly — no shell
+        # in between.  "whoami" without a path fails with exit=2 on
+        # Linux (kernel searches nothing, /usr/bin isn't looked up).
+        # Wrap through the target OS's shell so PATH lookups + I/O
+        # redirection + &&/|| work as the operator expects.
+        # OS is derived from the target node's os_type when available;
+        # falls back to the shell hint on the user pattern
+        # (SAPService<SID> → Windows, otherwise Unix).
+        target_os = ""
+        if conn.target_sid:
+            tgt = api.state.get_node(conn.target_sid)
+            if tgt:
+                target_os = (tgt.os_type or "").lower()
+        is_windows = (
+            any(w in target_os for w in ("windows", "nt", "win"))
+            or user.lower().startswith("sapservice")
+        )
+        # Skip wrapping if the operator already wrote a shell
+        # invocation — respect explicit intent.
+        already_wrapped = (
+            command.startswith(("sh ", "bash ", "/bin/sh ",
+                                 "/bin/bash "))
+            or command.startswith(("cmd ", "cmd.exe ",
+                                    "powershell "))
+            or command.startswith(("/", "c:\\", "C:\\"))
+        )
+        raw_cmd = command
+        if not already_wrapped:
+            if is_windows:
+                # cmd /c "<user cmd>" — escape embedded double quotes.
+                esc = command.replace('"', '""')
+                raw_cmd = f'cmd.exe /c "{esc}"'
+            else:
+                # /bin/sh -c '<user cmd>' — escape embedded single quotes
+                # by closing, escaping, and reopening.
+                esc = command.replace("'", r"'\''")
+                raw_cmd = f"/bin/sh -c '{esc}'"
         print(f"[*] {dest_name}: OSExecute on {conn.http_url} as "
-              f"{user} → {command[:80]!r} (timeout={timeout}s)")
+              f"{user} → {raw_cmd[:120]!r} (timeout={timeout}s, "
+              f"target_os={'windows' if is_windows else 'unix'})")
         result = sapmap_rfc.sapcontrol_os_execute(
-            conn.http_url, user, pwd, command, timeout=float(timeout))
+            conn.http_url, user, pwd, raw_cmd, timeout=float(timeout))
+        result["command_sent"] = raw_cmd
         if result["ok"]:
             print(f"[+] {dest_name}: OSExecute rc={result['exit_code']} "
                   f"pid={result['pid']} "
