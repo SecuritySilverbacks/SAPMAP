@@ -8646,7 +8646,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     return
                 print(f"[*] Testing {conn.destination_name}...")
                 result = sapmap_rfc.test_rfc_destination(
-                    node, conn.destination_name, creds, api.state.rfc_check_cache
+                    node, conn.destination_name, creds, api.state.rfc_check_cache,
+                    rfc_conn=conn,
                 )
                 conn.logon_successful = result.get("logon_ok", False)
                 conn.logon_tested = True
@@ -8714,7 +8715,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
             if (conn.conn_type or "").lower() == "http":
                 print(f"[*] Testing HTTP destination: {dest_name}...")
                 result = sapmap_rfc.test_rfc_destination(
-                    node, dest_name, creds, api.state.rfc_check_cache
+                    node, dest_name, creds, api.state.rfc_check_cache,
+                    rfc_conn=conn,
                 )
                 conn.latency_ms = result.get("latency_ms", 0)
                 conn.tested = True
@@ -9267,7 +9269,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
             if result is None:
                 result = sapmap_rfc.test_rfc_destination(
-                    node, dest_name, creds, api.state.rfc_check_cache
+                    node, dest_name, creds, api.state.rfc_check_cache,
+                    rfc_conn=conn,
                 )
             conn.latency_ms = result.get("latency_ms", 0)
             conn.tested = True

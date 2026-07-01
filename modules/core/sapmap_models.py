@@ -11,10 +11,18 @@ from __future__ import annotations
 
 import copy
 import json
+import re as _re
 from dataclasses import dataclass, field, fields
 from datetime import datetime
 from enum import IntEnum
 from typing import Any, Optional
+
+
+_IPV4_RE = _re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+
+
+def _looks_like_ipv4(host: str) -> bool:
+    return bool(_IPV4_RE.match(host or ""))
 
 
 # ---------------------------------------------------------------------------
@@ -769,6 +777,11 @@ class SAPNode:
     # GUI can render it as an unverified placeholder until the
     # operator runs Test Connection / scan against it.
     discovered_via_btp: bool = False
+    # True when this node was auto-materialised from a Type-G RFC
+    # destination on another SAP system (source's RFCDES points at
+    # this host).  Same GUI treatment as discovered_via_btp — dashed
+    # outline until an active scan promotes it.
+    discovered_via_rfc_g: bool = False
 
     # USREXTID table — on-prem cert-CN → ABAP user mapping.  Populated
     # by Data Extraction → Read USREXTID.  Each entry is a row dict
@@ -964,6 +977,7 @@ class SAPNode:
             "dpmon_sap_star_available": self.dpmon_sap_star_available,
             "dpmon_sap_star_used": self.dpmon_sap_star_used,
             "discovered_via_btp": self.discovered_via_btp,
+            "discovered_via_rfc_g": self.discovered_via_rfc_g,
             "oauth2_profiles": list(self.oauth2_profiles),
             "usrextid_entries": list(self.usrextid_entries),
             "usrextid_read_at": self.usrextid_read_at,
@@ -1081,6 +1095,7 @@ class SAPNode:
                 "dpmon_sap_star_available", False),
             dpmon_sap_star_used=d.get("dpmon_sap_star_used", False),
             discovered_via_btp=d.get("discovered_via_btp", False),
+            discovered_via_rfc_g=d.get("discovered_via_rfc_g", False),
             oauth2_profiles=list(d.get("oauth2_profiles", [])),
             capability_results=list(d.get("capability_results", [])),
             capability_row_counts=dict(
@@ -1154,6 +1169,35 @@ class RFCConnection:
     # have an HTTP equivalent for — that's Phase 3b).
     soap_rfc_verified: bool = False
 
+    # Type G / HTTP-destination target classification.  Populated by
+    # _classify_type_g_target during _build_rfcdes_conn so downstream
+    # code can route: SAPControl+<sid>adm gets an OS-exec path, ADS
+    # gets the Note 1177315 test interpretation, BTP-shaped hosts get
+    # the BTPDISC materialisation.
+    #
+    #   os_access_type — highest-value classification:
+    #     "sapcontrol_sidadm"  — /SAPControl.CGI + <sid>adm user
+    #                              → OS shell one hop away via OSExecute
+    #     "sapcontrol_generic" — /SAPControl.CGI, non-sidadm user
+    #     "hostagent_sapadm"   — /SAPHostControl.CGI + sapadm user
+    #                              → OS shell for EVERY SID on the host
+    #     ""                    — regular Type G
+    #   is_ads_dest — Adobe Document Services (Note 1177315 applies)
+    #   is_btp_dest — target hostname matches *.hana.ondemand.com
+    #                  → materialise as BTPDISC_ placeholder, not RFCDISC_
+    #   http_status — last-observed HTTP status from a test/probe
+    #   note_1177315_hit — True when a 4xx/5xx test result was
+    #                       reinterpreted as "target answered" per
+    #                       Note 1177315
+    #   os_exec_verified — True after a live OSExecute call returned
+    #                       exit code 0 against SAPControl / Host Agent
+    os_access_type: str = ""
+    is_ads_dest: bool = False
+    is_btp_dest: bool = False
+    http_status: int = 0
+    note_1177315_hit: bool = False
+    os_exec_verified: bool = False
+
     def risk_level(self) -> str:
         """Return risk assessment for this connection."""
         if self.has_sap_all and self.logon_successful:
@@ -1197,6 +1241,12 @@ class RFCConnection:
             "http_target_platform": self.http_target_platform,
             "secstore_password": self.secstore_password,
             "soap_rfc_verified": self.soap_rfc_verified,
+            "os_access_type": self.os_access_type,
+            "is_ads_dest": self.is_ads_dest,
+            "is_btp_dest": self.is_btp_dest,
+            "http_status": self.http_status,
+            "note_1177315_hit": self.note_1177315_hit,
+            "os_exec_verified": self.os_exec_verified,
         }
 
     @classmethod
@@ -1779,7 +1829,118 @@ class SAPMAPState:
 
     # -- Connection management --
 
+    def materialise_type_g_target(self, conn: "RFCConnection") -> None:
+        """Attach a target node to a Type-G / HTTP RFCConnection.
+
+        First tries to link to an existing node via find_node_by_host
+        against the URL's hostname (Phase 3).  When no match exists,
+        synthesises a placeholder node so the connection line has
+        somewhere to end on the map (Phase 3b):
+
+          * conn.is_btp_dest → reuse the existing BTPDISC_<slug>
+            path for uniformity with BTP-sourced destinations.
+          * otherwise         → RFCDISC_<slug> with
+            discovered_via_rfc_g=True.
+
+        No-op for Type-3 connections (conn.conn_type != 'http') or
+        when target_sid is already populated (e.g. by an earlier
+        active probe in the retrieval pipeline).
+        """
+        if (getattr(conn, "conn_type", "rfc") or "rfc") != "http":
+            return
+        if conn.target_sid:
+            return
+        url = (conn.http_url or "").strip()
+        if not url:
+            return
+        try:
+            from urllib.parse import urlparse
+            host = (urlparse(url).hostname or "").strip()
+        except Exception:
+            host = ""
+        if not host:
+            return
+
+        existing = self.find_node_by_host(hostname=host, ip=host)
+        if existing is not None:
+            conn.target_sid = existing.sid
+            conn.target_host = existing.hostname or host
+            conn.target_ip = existing.ip or (
+                host if _looks_like_ipv4(host) else "")
+            return
+
+        # No existing node — synthesise a placeholder.  Pick the
+        # BTP path when the destination classifier flagged the
+        # hostname as a BTP tenant; else use the RFC-G equivalent.
+        if getattr(conn, "is_btp_dest", False):
+            slug_prefix = "BTPDISC_"
+        else:
+            slug_prefix = "RFCDISC_"
+        slug = (host.replace(".", "_").replace("-", "_")
+                    .replace(":", "_").upper())
+        sid_base = f"{slug_prefix}{slug}"
+        sid = sid_base
+        n = 2
+        while sid in self.nodes:
+            sid = f"{sid_base}_{n}"
+            n += 1
+
+        # System-type inference from URL port (best effort).
+        port = 0
+        try:
+            from urllib.parse import urlparse as _urlparse
+            port = _urlparse(url).port or 0
+        except Exception:
+            pass
+        inferred_type = "UNKNOWN"
+        inst_nr = ""
+        if getattr(conn, "is_btp_dest", False):
+            inferred_type = "BTP"
+        elif getattr(conn, "os_access_type", "").startswith("sapcontrol"):
+            inferred_type = "ABAP+JAVA"  # SAPControl runs on both
+            # 5NN13/5NN14 → instance NN
+            if 50000 <= port <= 59999 and port % 100 in (13, 14):
+                inst_nr = f"{(port - 50000) // 100:02d}"
+        elif getattr(conn, "os_access_type", "") == "hostagent_sapadm":
+            inferred_type = "SAP"
+        elif 50000 <= port <= 59999 and port % 100 == 0:
+            # 5NN00 → Java HTTP for instance NN
+            inferred_type = "JAVA"
+            inst_nr = f"{(port - 50000) // 100:02d}"
+        elif 8000 <= port <= 8099:
+            # 80NN → ABAP ICM HTTP for instance NN
+            inferred_type = "ABAP"
+            inst_nr = f"{port - 8000:02d}"
+
+        is_ip = _looks_like_ipv4(host)
+        placeholder = SAPNode(
+            sid=sid,
+            system_type=inferred_type,
+            hostname="" if is_ip else host,
+            ip=host if is_ip else "",
+            instances=([InstanceInfo(
+                instance_nr=inst_nr,
+                ip=host if is_ip else "",
+                ports={port: "http"} if port else {})]
+                if inst_nr else []),
+        )
+        placeholder.linked_target_sid = conn.source_sid
+        if getattr(conn, "is_btp_dest", False):
+            placeholder.discovered_via_btp = True
+        else:
+            placeholder.discovered_via_rfc_g = True
+        self.nodes[sid] = placeholder
+        conn.target_sid = sid
+        conn.target_host = "" if is_ip else host
+        conn.target_ip = host if is_ip else ""
+        if inst_nr:
+            conn.target_instance_nr = inst_nr
+
     def add_connection(self, conn: RFCConnection) -> None:
+        # Type-G / HTTP destinations: resolve or materialise the
+        # target node so the connection has an endpoint to attach to.
+        # No-op for Type-3 RFC.
+        self.materialise_type_g_target(conn)
         was_new_or_elevated = True
         # Avoid duplicates
         for existing in self.connections:

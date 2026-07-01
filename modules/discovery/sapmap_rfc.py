@@ -1019,11 +1019,17 @@ def _test_via_dest_check_raw(conn, destination_name: str, result: dict):
 
 def test_rfc_destination(node: SAPNode, destination_name: str,
                          creds: Credentials = None,
-                         rfc_check_cache: dict = None) -> dict:
+                         rfc_check_cache: dict = None,
+                         rfc_conn=None) -> dict:
     """Test an RFC destination via /SDF/RFC_CHECK, falling back to
     DEST_CHECK_CONNECTION on older systems where the FM doesn't exist.
 
     Returns dict with: logon_ok, ping_ok, latency_ms, logon_message, error
+
+    When ``rfc_conn`` (RFCConnection) is supplied and its ``conn_type``
+    is 'http', interpret_http_dest_test_result() is invoked afterwards
+    to apply SAP Note 1177315's benign-status rule for ADS destinations.
+    Callers that already have the RFCConnection handy should pass it in.
     """
     # Check cache first
     if rfc_check_cache and destination_name in rfc_check_cache:
@@ -1060,6 +1066,15 @@ def test_rfc_destination(node: SAPNode, destination_name: str,
             except Exception as e2:
                 result["error"] = format_rfc_exception(e2).split("\n")[0]
                 logger.debug(f"call_raw DEST_CHECK also failed: {format_rfc_exception(e2)}")
+
+    # Note 1177315 rule for HTTP destinations: reinterpret benign
+    # 4xx/5xx statuses as ping_ok=True.  Only fires when the caller
+    # passed the RFCConnection so we know the destination type.
+    if rfc_conn is not None:
+        try:
+            interpret_http_dest_test_result(rfc_conn, result)
+        except Exception:
+            pass
 
     # Cache the result
     if rfc_check_cache is not None:
@@ -2812,6 +2827,187 @@ def _rfcdes_is_trusted(rfctype: str, options: str) -> bool:
     return False
 
 
+# SAP Note 1177315 — ADS RFC destination test returns 403/404/405/500
+# on SM59 CONNECTION_TEST.  Root cause: SM59 fires a GET, the ADS
+# SOAP endpoint on AS Java only accepts POST.  Java kernel version
+# determines which status code comes back:
+#   NW 04 / 7.0 / 7.0.1        → 403 (Web Service Navigator auth)
+#   NW 7.1 / 7.11              → 404
+#   NW 7.20 / 7.30 / 7.31+     → 405 (Expected POST, got GET)
+#   SAP Cloud Platform Forms   → 500
+# All four are benign — ADS works.  The diagnostic marker for the
+# 7.20+ case is the string "Expected request method POST. Found GET."
+# or the class name WSAddressingException, both of which leak into
+# the CONNECTION_ERROR_TEXT that SDF/RFC_CHECK / DEST_CHECK_CONNECTION
+# surface.
+_NOTE_1177315_STATUSES = {"403", "404", "405", "500"}
+_NOTE_1177315_MARKERS = (
+    "expected request method post",         # NW 7.20+ SOAP fault
+    "com.sap.soa.wsr.030104",                # SOAP fault code
+    "wsaddressingexception",                  # AS Java class name
+)
+_HTTP_STATUS_RE = None  # lazy-compiled below
+
+
+def interpret_http_dest_test_result(conn, result: dict) -> None:
+    """Post-process a Type G/H test result per SAP Note 1177315.
+
+    Mutates ``result`` in place, and sets ``conn.note_1177315_hit`` /
+    ``conn.http_status`` when the reinterpretation fired.  Safe to
+    call on Type-3 results too — the classification gates on
+    ``conn.conn_type`` and returns without touching anything for
+    plain RFC destinations.
+
+    Rules (applied to the merged ``logon_message`` + ``error`` text):
+    1. Extract HTTP status if the message contains one — SM59 usually
+       renders it as "HTTP Response 405" or "status code: 405".
+    2. If the destination is ADS-shaped (conn.is_ads_dest) AND the
+       status is in {403, 404, 405, 500} → ping_ok=True,
+       note_1177315_hit=True.
+    3. If the message body matches one of the Note's diagnostic
+       markers ("Expected request method POST", the SOAP fault code)
+       → same treatment, and additionally set is_ads_dest=True
+       retroactively (the marker proves it).
+    """
+    if (conn.conn_type or "rfc") != "http":
+        return
+
+    global _HTTP_STATUS_RE
+    if _HTTP_STATUS_RE is None:
+        import re
+        _HTTP_STATUS_RE = re.compile(
+            r'\b(?:HTTP\s+response\s*[:\s]|status(?:\s+code)?[:\s])\s*'
+            r'(\d{3})\b', re.I)
+
+    text = " ".join(filter(None, (
+        result.get("logon_message", ""),
+        result.get("error", ""),
+    ))).lower()
+    if not text:
+        return
+
+    # Pull HTTP status if it's in the text.  Populate conn.http_status
+    # regardless of whether Note 1177315 fires — the UI badge uses it.
+    m = _HTTP_STATUS_RE.search(text)
+    if m and not conn.http_status:
+        try:
+            conn.http_status = int(m.group(1))
+        except ValueError:
+            pass
+
+    marker_hit = any(marker in text for marker in _NOTE_1177315_MARKERS)
+    if marker_hit and not conn.is_ads_dest:
+        # Marker is definitive — retroactively classify as ADS.
+        conn.is_ads_dest = True
+
+    if conn.is_ads_dest and (
+            marker_hit
+            or (m and m.group(1) in _NOTE_1177315_STATUSES)):
+        result["ping_ok"] = True
+        conn.note_1177315_hit = True
+        # Preserve the original diagnostic in logon_message so the
+        # operator can still see why we reinterpreted, but tag it.
+        orig = result.get("logon_message", "")
+        marker_note = ("HTTP {}".format(conn.http_status)
+                       if conn.http_status else "SOAP fault")
+        result["logon_message"] = (
+            f"{orig}  [Note 1177315: {marker_note} on ADS "
+            f"destination — target answered; use FP_PDF_TEST_00 "
+            f"to verify functionally]"
+        ).strip()
+
+
+def _classify_type_g_target(conn: RFCConn) -> None:
+    """Classify a Type-G / Type-H HTTP destination into the buckets
+    that drive downstream routing:
+
+    * os_access_type    — SAPControl / Host Agent + <sid>adm heuristic
+    * is_ads_dest       — Adobe Document Services (Note 1177315)
+    * is_btp_dest       — target host matches BTP domain suffixes
+
+    Reads conn.http_url, conn.rfc_user, conn.destination_name.
+    """
+    import re
+    from urllib.parse import urlparse
+
+    url = conn.http_url or ""
+    if not url:
+        return
+    try:
+        parts = urlparse(url)
+    except Exception:
+        return
+    host = (parts.hostname or "").lower()
+    port = parts.port or 0
+    path = (parts.path or "").lower()
+    user = (conn.rfc_user or "").strip()
+    dest = (conn.destination_name or "").strip()
+
+    # --- BTP target detection (target host is the classifier) ---------
+    # Public BTP domains — hostnames that unambiguously identify a
+    # tenant of SAP Business Technology Platform.  Cover the -com and
+    # -cn (Alibaba region) variants, plus the newer .cloud.sap TLD.
+    _BTP_SUFFIXES = (
+        ".hana.ondemand.com",
+        ".hana.ondemand.cn",
+        ".cfapps.eu10.hana.ondemand.com",
+        ".cfapps.us10.hana.ondemand.com",
+        ".hana.ondemand.sap",
+        ".cloud.sap",
+        ".authentication.sap.hana.ondemand.com",
+    )
+    if any(host.endswith(sfx) for sfx in _BTP_SUFFIXES):
+        conn.is_btp_dest = True
+        conn.http_target_platform = (conn.http_target_platform
+                                       or "BTP")
+
+    # --- ADS (Adobe Document Services) detection ----------------------
+    # Path or destination name gives it away.  Note 1177315 applies:
+    # SM59 tests get 403/404/405/500 depending on Java kernel — all
+    # benign, ADS itself works.
+    if (re.search(r"/adobedocumentservices(sec)?/config",
+                    path, re.I)
+            or re.match(r"^ADS(_HTTPS?)?$", dest, re.I)
+            or re.match(r"^FP_.*", dest, re.I)):
+        conn.is_ads_dest = True
+        # Java stack is the only place ADS runs.
+        conn.http_target_platform = (conn.http_target_platform
+                                       or "JAVA")
+
+    # --- SAPControl / Host Agent + <sid>adm detection -----------------
+    # Path matches: /SAPControl.CGI, /SAPHostControl.CGI, and the
+    # underlying WSDL discovery endpoints.  Port matches are a
+    # secondary signal (SAPControl HTTP=5NN13, HTTPS=5NN14; Host
+    # Agent HTTP=1128, HTTPS=1129) — they alone aren't enough
+    # (operators can rebind) but corroborate the path signal.
+    is_sapcontrol_path = ("/sapcontrol.cgi" in path
+                          or "/sapcontrol/wsdl" in path)
+    is_hostagent_path = ("/saphostcontrol.cgi" in path
+                          or "/saphostagent/wsdl" in path)
+    port_looks_sapcontrol = (
+        (50000 <= port <= 59999 and port % 100 in (13, 14))
+        or port in (1128, 1129)
+    )
+
+    # <sid>adm user pattern.  Case-insensitive on Unix (sj1adm),
+    # Windows equivalent SAPService<SID>, and the multi-SID sapadm
+    # for the Host Agent.  Anchored so we don't false-positive on
+    # user names like "MYCOMPANY_ADM".
+    is_sidadm_user = bool(
+        re.match(r"^[A-Za-z0-9]{3}adm$", user)
+        or re.match(r"^SAPService[A-Z0-9]{3}$", user)
+    )
+    is_sapadm_user = user.lower() == "sapadm"
+
+    if is_hostagent_path or (port in (1128, 1129) and is_sapadm_user):
+        conn.os_access_type = "hostagent_sapadm"
+    elif is_sapcontrol_path or (port_looks_sapcontrol and is_sidadm_user):
+        conn.os_access_type = (
+            "sapcontrol_sidadm" if is_sidadm_user
+            else "sapcontrol_generic"
+        )
+
+
 def _build_rfcdes_conn(node: SAPNode, dest_name: str,
                         rfctype: str, options: str) -> RFCConn:
     """Build an RFCConn from one RFCDES row, dispatching to the
@@ -2823,6 +3019,7 @@ def _build_rfcdes_conn(node: SAPNode, dest_name: str,
     )
     if rfctype in ("G", "H"):
         _parse_rfcdes_http_options(conn_obj, options)
+        _classify_type_g_target(conn_obj)
     else:
         _parse_rfcdes_options(conn_obj, options)
     return conn_obj
