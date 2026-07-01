@@ -8725,33 +8725,51 @@ def create_app(api: SAPMAPApi) -> Bottle:
             #          → enables "Create Remote User".
             if (conn.conn_type or "").lower() == "http":
                 print(f"[*] Testing HTTP destination: {dest_name}...")
-                result = sapmap_rfc.test_rfc_destination(
-                    node, dest_name, creds, api.state.rfc_check_cache,
-                    rfc_conn=conn,
-                )
-                conn.latency_ms = result.get("latency_ms", 0)
+                # Direct HTTP probe from SAPMAP against the URL's real
+                # host:port.  Runs FIRST because the ABAP-side
+                # DEST_CHECK_CONNECTION frequently reports SDEST 047
+                # CHECK_NOT_POSSIBLE on Type-G destinations to hosts
+                # the source system can't route to (external
+                # webservices, cross-VPC targets, etc.) — which was
+                # producing "HTTP connection failed
+                # (ABAPApplicationError: RFC_ABAP_EXCEPTION ...)" even
+                # when the URL is up and answering.  Our probe uses
+                # the correct URL:port from conn.http_url, applies
+                # ICF-NF lift + Note 1177315, and never touches the
+                # ABAP RFC layer.
+                _t0 = time.time()
+                _http_ping = sapmap_rfc.http_dest_ping(conn, timeout=8.0)
+                conn.latency_ms = int((time.time() - _t0) * 1000)
                 conn.tested = True
-                conn.ping_ok = result.get("ping_ok", False)
+                conn.ping_ok = _http_ping.get("ping_ok", False)
                 conn.logon_tested = True
                 if conn.ping_ok:
                     conn.logon_successful = True
-                    msg = result.get("logon_message", "").strip()
+                    msg = (_http_ping.get("ping_message") or "").strip()
                     if not msg:
                         msg = "OK"
-                    print(f"[+] {dest_name}: HTTP connection OK ({msg})")
+                    print(f"[+] {dest_name}: HTTP {conn.http_status or ''} "
+                          f"OK ({msg[:120]})")
+                    _rs = _http_ping.get("remote_sid", "").strip()
+                    if _rs and not conn.target_sid:
+                        tgt = api.state.get_node(_rs)
+                        if tgt:
+                            conn.target_sid = _rs
+                            print(f"[*] {dest_name}: resolved target "
+                                  f"→ {_rs} (from ICF-NF lift)")
                     if conn.target_sid:
                         target = api.state.get_node(conn.target_sid)
                         if target:
                             target.has_critical_finding = True
                 else:
                     conn.logon_successful = False
-                    err = result.get("error", "")
-                    err_short = (err.split("\n")[0][:120]) if err else ""
+                    err = (_http_ping.get("error") or "").strip()
+                    err_short = err[:160]
                     if err_short:
-                        print(f"[-] {dest_name}: HTTP connection "
-                              f"failed ({err_short})")
+                        print(f"[-] {dest_name}: HTTP probe failed "
+                              f"({err_short})")
                     else:
-                        print(f"[-] {dest_name}: HTTP connection failed")
+                        print(f"[-] {dest_name}: HTTP probe failed")
 
                 # Phase 2: discover target SID + instance via RFC ping
                 # (DEST_CHECK_CONNECTION returns RFCDEST with instance).
