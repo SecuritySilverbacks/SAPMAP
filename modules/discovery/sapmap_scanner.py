@@ -2861,6 +2861,27 @@ def fingerprint_web_dispatcher(host: str, port: int,
                     _mi = re.search(r'_(\d{2})$', _rd)
                     if _mi:
                         out["instance_nr"] = _mi.group(1)
+
+        # Fallback SID / host / instance lift: the ICF "service not
+        # found" error page carries a canonical marker with the
+        # server-side identity baked in — "ICF-NF-http-i<HOST>_<SID>_<NN>-".
+        # Fires on any 404 from the ICM (including the bogus-path
+        # probe above), so we catch systems where /sap/public/info is
+        # blocked (SICF service inactive, hardened kernel) but a
+        # simple GET on an unknown path still returns the ICF error
+        # frame.  Confirmed live against 192.168.2.29 (W74).
+        if not out["sid"]:
+            _icf = re.search(
+                rb'ICF-NF-http-i([A-Za-z0-9._-]+)_([A-Z0-9]{3})_(\d{2})-',
+                resp)
+            if _icf:
+                out["hostname"] = out["hostname"] or _icf.group(1).decode(
+                    "iso-8859-1", "replace")
+                out["sid"] = out["sid"] or _icf.group(2).decode("ascii",
+                                                                  "replace")
+                out["instance_nr"] = out["instance_nr"] or _icf.group(3).decode(
+                    "ascii", "replace")
+                out["is_sap_icm"] = True
         if b"\r\nx-csrf-token:" in resp_low:
             out["is_sap_icm"] = True
         # /sap/public/ping body — "Server reached successfully" is the
