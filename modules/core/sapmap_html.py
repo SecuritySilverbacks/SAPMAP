@@ -6731,40 +6731,49 @@ function showConnInfo(e, connIdx) {
     <div style="text-align:right;margin-top:8px;display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">
       ${conn.os_exec_verified ? `<button class="btn" style="background:#c0392b;color:#fff;font-weight:600" onclick="openOSExecuteModal('${escHtml(conn.source_sid)}','${escHtml(conn.destination_name)}')">&#9889; OS Command (via SAPControl)</button>` : ''}
       ${(() => {
-        // Create Remote User (Java UME) — for Type-G destinations
-        // whose target is a Java system already known to be
-        // exploitable via CVE-2025-31324 / RECON / GW SAPXPG.
-        // Delegates to the existing create_user_java endpoint on
-        // the target, which handles the JSP deploy + UME UACC/USER
-        // row insertion + group assignment.  Prompts mirror the
-        // right-click Create-User-Java action.
+        // Create Remote User (Java UME) — delegates to the target's
+        // existing create_user_java endpoint, which handles the JSP
+        // deploy + UME UACC/USER row insertion + group assignment.
+        //
+        // Gate: show whenever the destination points somewhere we
+        // can plausibly deploy the UME JSP.  Two branches:
+        //   (a) SAPControl OSExecute already verified → we have OS
+        //       shell as <sid>adm regardless of whether the classic
+        //       CVEs are usable.  Fires even when the target node
+        //       is a bare placeholder (system_type='', port=50NN13
+        //       SAPControl not 50NN00 Java) because we know a real
+        //       SID is behind the credential we just proved.  If
+        //       the target turns out to be ABAP-only, the backend
+        //       endpoint refuses cleanly with 'not a Java stack'.
+        //   (b) target is Java (system_type has JAVA, or URL port
+        //       is 5NN00/5NN01) AND has a classic Java exploit
+        //       usable (CVE-31324 / RECON / GW SAPXPG).
         if (!isHttp || !conn.target_sid || !conn.logon_successful) return '';
         const tgtNode = (mapState.nodes || {})[conn.target_sid];
         if (!tgtNode) return '';
-        const tst = (tgtNode.system_type || '').toUpperCase();
-        // Explicit gate on Java-shaped port too, so a placeholder
-        // with system_type='' but URL port 5NN00 still qualifies.
-        let portIsJava = false;
-        try {
-          const u = new URL(conn.http_url || '');
-          const p = parseInt(u.port) || 0;
-          portIsJava = (p >= 50000 && p <= 59999 && (p % 100 === 0 || p % 100 === 1));
-        } catch(_) {}
-        const isJavaTgt = tst.indexOf('JAVA') !== -1 || portIsJava;
-        if (!isJavaTgt) return '';
-        const canCve = !!tgtNode.cve_2025_31324_vulnerable;
-        const canRecon = !!tgtNode.cve_2020_6287_vulnerable;
-        const canGw = !!tgtNode.gw_vulnerable;
-        // SAPControl OSExecute route unlocks the same JSP-deploy
-        // path even when the classic CVEs aren't usable — the
-        // OS-exec channel we already verified serves as the deploy
-        // primitive.  Pass the connection coordinates through so
-        // the handler picks method='sapcontrol'.
         const canSapctl = !!conn.os_exec_verified;
-        if (!(canCve || canRecon || canGw || canSapctl)) return '';
+        let show = canSapctl;   // OSExecute branch — always show
+        if (!show) {
+          const tst = (tgtNode.system_type || '').toUpperCase();
+          let portIsJava = false;
+          try {
+            const u = new URL(conn.http_url || '');
+            const p = parseInt(u.port) || 0;
+            portIsJava = (p >= 50000 && p <= 59999 && (p % 100 === 0 || p % 100 === 1));
+          } catch(_) {}
+          const isJavaTgt = tst.indexOf('JAVA') !== -1 || portIsJava;
+          const canCve   = !!tgtNode.cve_2025_31324_vulnerable;
+          const canRecon = !!tgtNode.cve_2020_6287_vulnerable;
+          const canGw    = !!tgtNode.gw_vulnerable;
+          show = isJavaTgt && (canCve || canRecon || canGw);
+        }
+        if (!show) return '';
         const argSrc = escHtml(conn.source_sid);
         const argDest = escHtml(conn.destination_name);
-        return `<button class="btn" style="background:#b33;color:#fff" onclick="createUserOnJavaTarget('${escHtml(conn.target_sid)}','${argSrc}','${argDest}')">Create Remote User (Java UME)</button>`;
+        const label = canSapctl
+          ? 'Create Java User (via OSExecute)'
+          : 'Create Remote User (Java UME)';
+        return `<button class="btn" style="background:#b33;color:#fff" onclick="createUserOnJavaTarget('${escHtml(conn.target_sid)}','${argSrc}','${argDest}')">${label}</button>`;
       })()}
       ${(() => {
         // Create Remote User calls BAPI_USER_CREATE1 — an ABAP-side
