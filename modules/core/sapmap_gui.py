@@ -9567,14 +9567,24 @@ def create_app(api: SAPMAPApi) -> Bottle:
             return json.dumps({"error": (f"connection {dest_name} is "
                                             f"missing url / user / "
                                             f"password")})
-        # SAPControl OSExecute exec()s the command directly — no shell
-        # in between.  "whoami" without a path fails with exit=2 on
-        # Linux (kernel searches nothing, /usr/bin isn't looked up).
-        # Wrap through the target OS's shell so PATH lookups + I/O
-        # redirection + &&/|| work as the operator expects.
-        # OS is derived from the target node's os_type when available;
-        # falls back to the shell hint on the user pattern
-        # (SAPService<SID> → Windows, otherwise Unix).
+        # SAPControl OSExecute tokenises the command string on
+        # whitespace and passes the resulting argv to execvp — no
+        # shell in between.  Two consequences:
+        #
+        #   * bare "whoami" fails: kernel searches PATH but with the
+        #     restricted PATH sapstartsrv runs under, /usr/bin is
+        #     often not on it.
+        #   * "sh -c 'uname -a'" also fails: kernel splits on space
+        #     inside the quotes → argv=[sh, -c, 'uname, -a'], sh
+        #     complains about the unmatched quote.
+        #
+        # Fix: base64-encode the user command, then send an argv
+        # whose third token is a pipeline that decodes and executes
+        # it.  ${IFS} in the pipeline expands to whitespace INSIDE
+        # the shell, so the string reaching the kernel has no
+        # literal whitespace to split on.  Works on any POSIX sh
+        # and mirrors the standard "sapcontrol OSExecute base64"
+        # technique documented in field guides.
         target_os = ""
         if conn.target_sid:
             tgt = api.state.get_node(conn.target_sid)
@@ -9584,8 +9594,6 @@ def create_app(api: SAPMAPApi) -> Bottle:
             any(w in target_os for w in ("windows", "nt", "win"))
             or user.lower().startswith("sapservice")
         )
-        # Skip wrapping if the operator already wrote a shell
-        # invocation — respect explicit intent.
         already_wrapped = (
             command.startswith(("sh ", "bash ", "/bin/sh ",
                                  "/bin/bash "))
@@ -9595,17 +9603,30 @@ def create_app(api: SAPMAPApi) -> Bottle:
         )
         raw_cmd = command
         if not already_wrapped:
+            import base64 as _b64
             if is_windows:
-                # cmd /c "<user cmd>" — escape embedded double quotes.
-                esc = command.replace('"', '""')
-                raw_cmd = f'cmd.exe /c "{esc}"'
+                # PowerShell -EncodedCommand takes UTF-16LE base64.
+                # No spaces in the encoded portion → kernel splits
+                # into four clean argv tokens.
+                b64 = _b64.b64encode(
+                    command.encode("utf-16-le")).decode("ascii")
+                raw_cmd = (f"powershell -NoProfile -NonInteractive "
+                           f"-EncodedCommand {b64}")
             else:
-                # /bin/sh -c '<user cmd>' — escape embedded single quotes
-                # by closing, escaping, and reopening.
-                esc = command.replace("'", r"'\''")
-                raw_cmd = f"/bin/sh -c '{esc}'"
+                # base64 of the user command has no whitespace.
+                # `echo${IFS}<b64>|base64${IFS}-d|/bin/sh` reaches
+                # the kernel as three argv tokens; sh -c runs the
+                # pipeline, ${IFS} expands to whitespace inside the
+                # shell, base64 -d writes the original command, sh
+                # then runs it with proper PATH + quoting.
+                b64 = _b64.b64encode(
+                    command.encode("utf-8")).decode("ascii")
+                raw_cmd = (f"/bin/sh -c "
+                           f"echo${{IFS}}{b64}|base64${{IFS}}"
+                           f"-d|/bin/sh")
         print(f"[*] {dest_name}: OSExecute on {conn.http_url} as "
-              f"{user} → {raw_cmd[:120]!r} (timeout={timeout}s, "
+              f"{user} → command={command[:60]!r} "
+              f"(timeout={timeout}s, "
               f"target_os={'windows' if is_windows else 'unix'})")
         result = sapmap_rfc.sapcontrol_os_execute(
             conn.http_url, user, pwd, raw_cmd, timeout=float(timeout))
