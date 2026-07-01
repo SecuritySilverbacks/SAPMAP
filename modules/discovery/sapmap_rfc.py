@@ -1580,6 +1580,117 @@ def sapcontrol_auth_probe(url: str, user: str, password: str,
     return out
 
 
+def http_basic_auth_probe(url: str, user: str, password: str,
+                             timeout: float = 8.0) -> dict:
+    """Generic HTTP basic-auth probe for Type-G destinations.
+
+    Sends GET <url> with Authorization: Basic base64(user:password)
+    and interprets the response:
+      * 200 / 302 / 303 → credential accepted, target serves content
+      * 403             → credential accepted, ACL denies content
+      * 401             → credential rejected
+      * anything else   → target answered (ping_ok=True) but auth
+                            outcome is inconclusive
+    Used when the target isn't a SAPControl endpoint AND isn't an
+    ABAP RFC surface — most commonly a Java ICM (port 5NN00 /
+    5NN01), a BTP tenant, or a third-party HTTP API.  RFC_PING would
+    fault on those with an XML parse error because the response
+    isn't a SOAP envelope.
+
+    Returns:
+      { ok, status, error, logon_successful, response_body }
+    """
+    import socket as _sock
+    import base64 as _b64
+    from urllib.parse import urlparse
+    out = {"ok": False, "status": 0, "error": "",
+            "logon_successful": False, "response_body": ""}
+    if not url:
+        out["error"] = "empty URL"
+        return out
+    try:
+        parts = urlparse(url)
+    except Exception as e:
+        out["error"] = f"invalid URL: {e}"
+        return out
+    host = parts.hostname or ""
+    if not host:
+        out["error"] = "no hostname in URL"
+        return out
+    scheme = (parts.scheme or "http").lower()
+    is_https = scheme == "https"
+    port = parts.port or (443 if is_https else 80)
+    path = parts.path or "/"
+    if parts.query:
+        path = f"{path}?{parts.query}"
+
+    auth = _b64.b64encode(
+        f"{user}:{password}".encode("utf-8")).decode("ascii")
+    req = (
+        f"GET {path} HTTP/1.0\r\n"
+        f"Host: {host}:{port}\r\n"
+        f"Authorization: Basic {auth}\r\n"
+        f"User-Agent: sapmap-basicauth-probe/1.0\r\n"
+        f"Connection: close\r\n\r\n"
+    ).encode("iso-8859-1")
+
+    try:
+        s = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect((host, port))
+        if is_https:
+            import ssl as _ssl
+            ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
+            ctx.check_hostname = False
+            ctx.verify_mode = _ssl.CERT_NONE
+            try:
+                ctx.minimum_version = _ssl.TLSVersion.TLSv1
+            except (AttributeError, ValueError):
+                pass
+            s = ctx.wrap_socket(s, server_hostname=host)
+        s.sendall(req)
+        resp = b""
+        try:
+            while len(resp) < 32768:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                resp += chunk
+        except _sock.timeout:
+            pass
+        try:
+            s.close()
+        except Exception:
+            pass
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {e}"
+        return out
+
+    import re as _re
+    m_status = _re.search(rb"HTTP/\S+\s+(\d{3})", resp)
+    if m_status:
+        out["status"] = int(m_status.group(1))
+    out["response_body"] = resp[-2048:].decode("iso-8859-1",
+                                                 errors="replace")
+    if out["status"] == 0:
+        out["error"] = "no HTTP response"
+        return out
+    if out["status"] == 401:
+        out["ok"] = True   # target answered
+        out["logon_successful"] = False
+        out["error"] = "HTTP 401 — credentials rejected"
+        return out
+    if out["status"] in (200, 302, 303, 403):
+        out["ok"] = True
+        out["logon_successful"] = True
+        return out
+    # Anything else: target answered but auth outcome unclear.
+    out["ok"] = True
+    out["logon_successful"] = False
+    out["error"] = f"HTTP {out['status']} — auth outcome inconclusive"
+    return out
+
+
 def _ping_via_iwb_check(node, destination_name, creds=None):
     """Fallback ping via IWB_SHE_RFCDESTINATION_CHECK (available on older kernels)."""
     result = {"ping_ok": False, "remote_sid": "", "remote_hostname": "",
