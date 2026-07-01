@@ -2710,12 +2710,20 @@ def _parse_rfcdes_http_options(conn: RFCConn, options_str: str):
         elif part.startswith("U="):
             conn.rfc_user = part[2:].strip()
         elif part.startswith("D="):
-            # Some kernels store the SAP client (mandt) as a dedicated
-            # D= option.  When present it wins over the M=-as-client
-            # heuristic below.
+            # The D= field is overloaded across kernels + RFCTYPEs:
+            #   * short numeric (≤3 digits) → SAP client (mandt)
+            #   * everything else            → HTTP basic-auth user
+            # Type-G rows on modern kernels stash the user in D=
+            # rather than U= (operator-reported: SAPControl.CGI
+            # destinations to sm1adm / sj1adm landed with rfc_user
+            # blank because we only checked U=).  Numeric values keep
+            # the historic "D=<mandt>" meaning to avoid regressing
+            # older Type-H destinations that carry the client here.
             d_val = part[2:].strip()
             if d_val.isdigit() and len(d_val) <= 3:
                 conn.client = d_val.zfill(3)
+            elif d_val and not conn.rfc_user:
+                conn.rfc_user = d_val
     # Port precedence: I=<port> (Type-G explicit) wins over S=<port>.
     # Reject non-digit values from either — some kernels put a service
     # name in S= (e.g. "sapms<SID>") which would crash the urlparse
