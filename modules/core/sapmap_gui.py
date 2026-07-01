@@ -8925,7 +8925,83 @@ def create_app(api: SAPMAPApi) -> Bottle:
                               f"failed — HTTP "
                               f"{_sc_result['status'] or '?'} "
                               f"({_sc_result['error'][:120]})")
-                elif (rfc_user and rfc_pwd and conn.target_sid):
+                # Java-shaped target: URL port matches 5NN00/5NN01
+                # (Java HTTP/HTTPS), or the target node is explicitly
+                # tagged JAVA/BTP, or is_ads_dest (ADS = Java only),
+                # or the URL host suggests BTP.  SOAP-RFC RFC_PING
+                # would XML-parse-error against these endpoints
+                # because the response isn't a SOAP envelope — use a
+                # basic HTTP auth probe instead.
+                _did_java_probe = False
+                if (rfc_user and rfc_pwd
+                        and not (conn.os_access_type or "").startswith(
+                            ("sapcontrol", "hostagent"))):
+                    _target_is_java = False
+                    _target_is_btp = getattr(conn, "is_btp_dest", False)
+                    _is_ads = getattr(conn, "is_ads_dest", False)
+                    try:
+                        from urllib.parse import urlparse as _up_j
+                        _p = _up_j(conn.http_url or "")
+                        _url_port = _p.port or 0
+                        # 5NN00 / 5NN01 = Java HTTP/HTTPS.  Excludes
+                        # 5NN13/5NN14 which are SAPControl (handled
+                        # above) and 5NN08 which is the admin telnet.
+                        if (50000 <= _url_port <= 59999
+                                and _url_port % 100 in (0, 1)):
+                            _target_is_java = True
+                    except Exception:
+                        pass
+                    _tgt = (api.state.get_node(conn.target_sid)
+                             if conn.target_sid else None)
+                    if _tgt:
+                        _st = (_tgt.system_type or "").upper()
+                        if "JAVA" in _st and "ABAP" not in _st:
+                            _target_is_java = True
+                        if "BTP" in _st:
+                            _target_is_btp = True
+
+                    if _target_is_java or _target_is_btp or _is_ads:
+                        _did_java_probe = True
+                        _label = ("BTP" if _target_is_btp
+                                   else "ADS/Java" if _is_ads
+                                   else "Java")
+                        print(f"[*] {dest_name}: {_label} target — basic "
+                              f"HTTP auth probe on {conn.http_url} as "
+                              f"{rfc_user}...")
+                        _ba = sapmap_rfc.http_basic_auth_probe(
+                            conn.http_url, rfc_user, rfc_pwd,
+                            timeout=8.0)
+                        if _ba.get("logon_successful"):
+                            conn.logon_successful = True
+                            conn.soap_rfc_verified = True
+                            print(f"[+] {dest_name}: HTTP "
+                                  f"{_ba['status']} — credential "
+                                  f"accepted on {_label} target")
+                            if _tgt:
+                                _tgt.has_critical_finding = True
+                        elif _ba.get("ok"):
+                            print(f"[-] {dest_name}: HTTP "
+                                  f"{_ba['status']} — credential "
+                                  f"rejected ({_ba['error']})")
+                        else:
+                            print(f"[-] {dest_name}: HTTP probe "
+                                  f"failed ({_ba['error'][:120]})")
+                    else:
+                        # ABAP target (or unknown) — fall through to
+                        # the direct-RFC + SOAP-RFC RFC_PING cascade
+                        # below by dropping into the ABAP branch.
+                        pass
+                # ABAP branch — fires ONLY when the Java branch above
+                # didn't run (target wasn't Java-shaped) AND the
+                # SAPControl branch didn't handle it either.  A Java
+                # target that returned 401 to basic auth is a valid
+                # negative result; falling through to the ABAP RFC
+                # cascade would produce the ugly XML parse error the
+                # operator reported.
+                if (not conn.logon_successful and not _did_java_probe
+                        and rfc_user and rfc_pwd and conn.target_sid
+                        and not (conn.os_access_type or "").startswith(
+                            ("sapcontrol", "hostagent"))):
                     target_node = api.state.get_node(conn.target_sid)
                     if target_node and "ABAP" in (
                             target_node.system_type or "ABAP").upper():
