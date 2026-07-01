@@ -319,9 +319,13 @@ class _ScriptedSock:
     # ICMENOSERVERFOUND signature on the no-such-path probe
     (b"HTTP/1.0 503 Service Unavailable\r\nx-sap-icm-err-id: "
      b"ICMENOSERVERFOUND\r\n\r\n<html>err</html>", True, "icm_no_server_err"),
-    # Plain ABAP ICM — no WD signals
+    # Plain ABAP ICM — no WD signals, but the Server banner literally
+    # contains "SAP NetWeaver Application Server" which is one of the
+    # ICM markers.  is_wd stays False (correct — not a WD) but the
+    # evidence lands as sap_icm_err_id_present (via the
+    # is_sap_icm-only fallback at the end of the function).
     (b"HTTP/1.1 200 OK\r\nServer: SAP NetWeaver Application Server / "
-     b"ABAP 758\r\n\r\n", False, ""),
+     b"ABAP 758\r\n\r\n", False, "sap_icm_err_id_present"),
     # Nginx in front — no WD signals
     (b"HTTP/1.1 404 Not Found\r\nServer: nginx/1.20.1\r\n\r\n", False, ""),
 ])
