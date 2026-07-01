@@ -1148,6 +1148,14 @@ class RFCConnection:
     # is set for AS Java HTTP destinations pulled from J2EE_CONFIGENTRY
     # — Java→Java admin / service calls using BASICAUTH etc.
     conn_type: str = "rfc"          # "rfc" | "http"
+    # Raw RFCTYPE from the SM59 / RFCDES row.  Kept separately from
+    # conn_type so the operator can tell "G = HTTP to external
+    # server" apart from "H = HTTP to ABAP system" — the
+    # exploitation surface differs (H targets can do SOAP-RFC
+    # RFC_PING; G targets typically can't).  Empty when the
+    # connection wasn't sourced from an RFCDES row (e.g. BTP
+    # destination-service enumeration, Java SecStoreFS parse).
+    rfc_type: str = ""              # "3" | "G" | "H" | "T" | "L" | ""
     http_url: str = ""              # full target URL for HTTP destinations
     http_auth_type: str = ""        # BASICAUTHENTICATION | SSO2 | X509 | NONE
     http_proxy: str = ""            # "host:port" if the destination uses one
@@ -1256,6 +1264,7 @@ class RFCConnection:
             "http_status": self.http_status,
             "note_1177315_hit": self.note_1177315_hit,
             "os_exec_verified": self.os_exec_verified,
+            "rfc_type": self.rfc_type,
         }
 
     @classmethod

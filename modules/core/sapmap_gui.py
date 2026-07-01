@@ -9510,6 +9510,69 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:test_rfc:{dest_name}", "Test RFC", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/sapcontrol_osexecute", method="POST")
+    def node_sapcontrol_osexecute(sid):
+        """Run an OS command via SAPControl OSExecute on the target of
+        a Type-G destination whose credentials we've already verified
+        (conn.os_exec_verified=True).  Synchronous — the SOAP call
+        blocks until the child process exits (kernel-side timeout
+        provided by the operator, defaults 30s).
+
+        Payload:
+          { destination_name: str, command: str, timeout?: int }
+        Returns:
+          { ok, exit_code, output, error, status, pid }
+        """
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        data = request.json or {}
+        dest_name = (data.get("destination_name") or "").strip()
+        command = (data.get("command") or "").strip()
+        timeout = int(data.get("timeout") or 30)
+        if not dest_name:
+            return json.dumps({"error": "destination_name required"})
+        if not command:
+            return json.dumps({"error": "command required"})
+        conn = None
+        for c in api.state.get_connections_from(sid):
+            if c.destination_name == dest_name:
+                conn = c
+                break
+        if not conn:
+            return json.dumps({"error": f"connection {dest_name} not "
+                                          f"found on {sid}"})
+        if not (conn.os_access_type or "").startswith(
+                ("sapcontrol", "hostagent")):
+            return json.dumps({"error": (f"connection {dest_name} is "
+                                            f"not a SAPControl / Host "
+                                            f"Agent destination")})
+        if not conn.os_exec_verified:
+            return json.dumps({"error": (f"connection {dest_name} has "
+                                            f"not been verified — run "
+                                            f"Test Connection first "
+                                            f"so os_exec_verified is "
+                                            f"set")})
+        pwd = conn.secstore_password or ""
+        user = conn.rfc_user or ""
+        if not (user and pwd and conn.http_url):
+            return json.dumps({"error": (f"connection {dest_name} is "
+                                            f"missing url / user / "
+                                            f"password")})
+        print(f"[*] {dest_name}: OSExecute on {conn.http_url} as "
+              f"{user} → {command[:80]!r} (timeout={timeout}s)")
+        result = sapmap_rfc.sapcontrol_os_execute(
+            conn.http_url, user, pwd, command, timeout=float(timeout))
+        if result["ok"]:
+            print(f"[+] {dest_name}: OSExecute rc={result['exit_code']} "
+                  f"pid={result['pid']} "
+                  f"({len(result['output'])} bytes output)")
+        else:
+            print(f"[-] {dest_name}: OSExecute failed — "
+                  f"{result['error'][:200]}")
+        return json.dumps(result)
+
     @app.route("/api/node/<sid>/exec_command", method="POST")
     def node_exec_command(sid):
         """Execute an OS command on a node (synchronous).

