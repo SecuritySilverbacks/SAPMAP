@@ -1606,42 +1606,52 @@ body {
   </div>
 </div>
 
-<!-- SAPControl OSExecute Modal -->
-<div class="modal-overlay" id="osexecute-modal">
-  <div class="modal" style="max-width:820px;width:95vw">
-    <h3>&#9889; OS Command via SAPControl OSExecute</h3>
-    <div id="osexecute-context" style="font-size:12px;color:#8b949e;margin-bottom:8px"></div>
-    <div style="font-size:11px;color:#8b949e;margin-bottom:10px;line-height:1.5">
-      Runs the command as <code>&lt;sid&gt;adm</code> — the OS user that owns the SAP install
-      on the target host.  Output is captured and returned when the child exits (or the
-      timeout expires, whichever is first).  Commands with shell metacharacters
-      (<code>|</code>, <code>&amp;&amp;</code>, redirects) work as expected — the SAP kernel
-      spawns the child through a shell.
+<!-- SAPControl OSExecute Modal — draggable + resizable -->
+<div class="modal-overlay" id="osexecute-modal" style="align-items:flex-start">
+  <div class="modal" id="osexecute-modal-inner"
+       style="max-width:none;width:900px;height:640px;min-width:520px;min-height:400px;resize:both;overflow:hidden;display:flex;flex-direction:column;position:relative;padding:0">
+    <div id="osexecute-drag-handle"
+         style="cursor:move;user-select:none;padding:16px 20px 8px 20px;border-bottom:1px solid #30363d">
+      <h3 style="margin:0">&#9889; OS Command via SAPControl OSExecute
+        <span style="float:right;font-size:10px;color:#484f58;font-weight:400">drag header to move · resize from bottom-right</span>
+      </h3>
     </div>
-    <div class="form-row">
-      <label>Command</label>
-      <input type="text" id="osexecute-cmd" placeholder="whoami"
-             onkeydown="if(event.key==='Enter'){event.preventDefault();runOSExecute();}">
-    </div>
-    <div class="form-row" style="display:flex;gap:12px;align-items:center">
-      <div style="flex:1">
-        <label>Timeout (seconds)</label>
-        <input type="number" id="osexecute-timeout" value="30" min="1" max="300" style="width:100px">
+    <div style="padding:12px 20px;overflow:auto;flex:0 0 auto">
+      <div id="osexecute-context" style="font-size:12px;color:#8b949e;margin-bottom:8px"></div>
+      <div style="font-size:11px;color:#8b949e;margin-bottom:10px;line-height:1.5">
+        Runs the command as <code>&lt;sid&gt;adm</code> — the OS user that owns the SAP install
+        on the target host.  SAPMAP auto-wraps the command in the target OS's shell
+        (<code>/bin/sh -c</code> on Unix, <code>cmd.exe /c</code> on Windows) so PATH
+        lookups + <code>|</code> / <code>&amp;&amp;</code> / redirects work as expected.
+        Wrapping is skipped when the command already starts with an absolute path or
+        shell binary.
       </div>
-      <div style="flex:2;font-size:10px;color:#484f58;line-height:1.4">
-        Presets:
-        <a href="#" onclick="event.preventDefault();document.getElementById('osexecute-cmd').value='whoami'"><code>whoami</code></a> ·
-        <a href="#" onclick="event.preventDefault();document.getElementById('osexecute-cmd').value='id'"><code>id</code></a> ·
-        <a href="#" onclick="event.preventDefault();document.getElementById('osexecute-cmd').value='uname -a'"><code>uname -a</code></a> ·
-        <a href="#" onclick="event.preventDefault();document.getElementById('osexecute-cmd').value='cat /etc/passwd'"><code>cat /etc/passwd</code></a> ·
-        <a href="#" onclick="event.preventDefault();document.getElementById('osexecute-cmd').value='ls -la /usr/sap'"><code>ls /usr/sap</code></a>
+      <div class="form-row">
+        <label>Command</label>
+        <input type="text" id="osexecute-cmd" placeholder="whoami"
+               onkeydown="if(event.key==='Enter'){event.preventDefault();runOSExecute();}">
+      </div>
+      <div class="form-row" style="display:flex;gap:12px;align-items:center">
+        <div style="flex:1">
+          <label>Timeout (seconds)</label>
+          <input type="number" id="osexecute-timeout" value="30" min="1" max="300" style="width:100px">
+        </div>
+        <div style="flex:2;font-size:10px;color:#484f58;line-height:1.4">
+          Presets:
+          <a href="#" onclick="event.preventDefault();document.getElementById('osexecute-cmd').value='whoami'"><code>whoami</code></a> ·
+          <a href="#" onclick="event.preventDefault();document.getElementById('osexecute-cmd').value='id'"><code>id</code></a> ·
+          <a href="#" onclick="event.preventDefault();document.getElementById('osexecute-cmd').value='uname -a'"><code>uname -a</code></a> ·
+          <a href="#" onclick="event.preventDefault();document.getElementById('osexecute-cmd').value='cat /etc/passwd'"><code>cat /etc/passwd</code></a> ·
+          <a href="#" onclick="event.preventDefault();document.getElementById('osexecute-cmd').value='ls -la /usr/sap'"><code>ls /usr/sap</code></a>
+        </div>
       </div>
     </div>
-    <div class="form-row">
-      <label>Output</label>
-      <pre id="osexecute-output" style="background:#0d1117;border:1px solid #30363d;padding:8px;border-radius:4px;max-height:340px;overflow:auto;font-size:11px;color:#e6edf3;white-space:pre-wrap;word-break:break-all;margin:0"></pre>
+    <div style="padding:0 20px;flex:1 1 auto;display:flex;flex-direction:column;min-height:0">
+      <label style="font-size:11px;color:#8b949e;margin-bottom:3px;display:block">Output</label>
+      <pre id="osexecute-output"
+           style="background:#0d1117;border:1px solid #30363d;padding:8px;border-radius:4px;flex:1 1 auto;overflow:auto;font-size:11px;color:#e6edf3;white-space:pre-wrap;word-break:break-all;margin:0;min-height:120px"></pre>
     </div>
-    <div class="form-actions">
+    <div class="form-actions" style="padding:12px 20px 16px 20px;border-top:1px solid #30363d;margin-top:0">
       <button class="btn btn-primary" onclick="runOSExecute()">Run</button>
       <button class="btn" onclick="closeModal('osexecute-modal')">Close</button>
     </div>
@@ -6506,6 +6516,19 @@ function _connInfoStateKey(c) {
     // modal sees logon_successful=true unchanged and never re-renders.
     soap_rfc_verified: !!c.soap_rfc_verified,
     has_secstore_pwd:  !!c.secstore_password,
+    // Type-G additions — the "Test Connection" flow can flip these
+    // (SAPControl auth OK → os_exec_verified, Java 401 → http_status,
+    // ADS body marker → is_ads_dest / note_1177315_hit, classifier
+    // re-run → os_access_type).  Without them in the key the modal
+    // shows stale MEDIUM risk and no "OS Command" button until the
+    // operator closes + reopens.
+    os_exec_verified:  !!c.os_exec_verified,
+    os_access_type:    c.os_access_type || '',
+    is_ads_dest:       !!c.is_ads_dest,
+    is_btp_dest:       !!c.is_btp_dest,
+    note_1177315_hit:  !!c.note_1177315_hit,
+    http_status:       c.http_status || 0,
+    rfc_type:          c.rfc_type || '',
   });
 }
 
@@ -6702,8 +6725,33 @@ function showConnInfo(e, connIdx) {
     ${(isHttp && conn.soap_rfc_verified && !conn.has_sap_all) ? `<div class="info-section" style="color:#8b949e;font-size:11px">Create Remote User will attempt BAPI_USER_CREATE1 + SAP_ALL via SOAP-RFC. The user's authorization for these BAPIs (S_USER_GRP, S_USER_PRO) is checked at click time.</div>` : ''}
     <div style="text-align:right;margin-top:8px;display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">
       ${conn.os_exec_verified ? `<button class="btn" style="background:#c0392b;color:#fff;font-weight:600" onclick="openOSExecuteModal('${escHtml(conn.source_sid)}','${escHtml(conn.destination_name)}')">&#9889; OS Command (via SAPControl)</button>` : ''}
-      ${(!isTypeT && conn.logon_successful && (conn.has_sap_all || conn.soap_rfc_verified) && conn.target_sid) ?
-        `<button class="btn" style="background:#b33;color:#fff" onclick="createUserOnTarget('${escHtml(conn.source_sid)}','${escHtml(conn.destination_name)}','${escHtml(conn.target_sid)}')">Create Remote User</button>` : ''}
+      ${(() => {
+        // Create Remote User calls BAPI_USER_CREATE1 — an ABAP-side
+        // BAPI.  Hide the button when the destination is unmistakably
+        // pointing at a non-ABAP target (SAPControl / Java / BTP /
+        // ADS) because that call will always fail with
+        // "Illegal destination type 'G'" / XML parse errors.
+        if (isTypeT || !conn.logon_successful || !conn.target_sid) return '';
+        if (!(conn.has_sap_all || conn.soap_rfc_verified)) return '';
+        const oat = (conn.os_access_type || '').toLowerCase();
+        if (oat.startsWith('sapcontrol') || oat.startsWith('hostagent')) return '';
+        if (conn.is_btp_dest || conn.is_ads_dest) return '';
+        // Java-shaped URL port (5NN00 / 5NN01) — same logic as the
+        // backend Java branch.  Extract port from URL and check.
+        try {
+          const u = new URL(conn.http_url || '');
+          const p = parseInt(u.port) || 0;
+          if (p >= 50000 && p <= 59999 && (p % 100 === 0 || p % 100 === 1)) return '';
+        } catch(_) {}
+        // Target node explicitly tagged JAVA / BTP.
+        const tgtNode = (mapState.nodes || {})[conn.target_sid];
+        if (tgtNode) {
+          const st = (tgtNode.system_type || '').toUpperCase();
+          if (st.indexOf('BTP') !== -1) return '';
+          if (st.indexOf('JAVA') !== -1 && st.indexOf('ABAP') === -1) return '';
+        }
+        return `<button class="btn" style="background:#b33;color:#fff" onclick="createUserOnTarget('${escHtml(conn.source_sid)}','${escHtml(conn.destination_name)}','${escHtml(conn.target_sid)}')">Create Remote User</button>`;
+      })()}
       ${isTypeT ? '' :
         `<button class="btn" onclick="testConnection('${escHtml(conn.source_sid)}','${escHtml(conn.destination_name)}',${connIdx})">Test Connection</button>`}
       <button class="btn" onclick="document.getElementById('info-panel').classList.remove('visible')">Close</button>
@@ -6750,6 +6798,37 @@ async function createUserViaRfc(sourceSid, destName, targetSid) {
 }
 
 let _osExecuteCtx = { sid: '', destName: '' };
+let _osExecuteDragInit = false;
+function _initOSExecuteDrag() {
+  if (_osExecuteDragInit) return;
+  _osExecuteDragInit = true;
+  const inner = document.getElementById('osexecute-modal-inner');
+  const handle = document.getElementById('osexecute-drag-handle');
+  if (!inner || !handle) return;
+  let dragging = false, dx = 0, dy = 0;
+  handle.addEventListener('mousedown', (e) => {
+    if (e.target.closest('button, a, input')) return;
+    dragging = true;
+    const rect = inner.getBoundingClientRect();
+    // Switch from centred flex layout to absolute positioning on
+    // first drag so subsequent moves are stable.
+    inner.style.position = 'absolute';
+    inner.style.left = rect.left + 'px';
+    inner.style.top = rect.top + 'px';
+    inner.style.margin = '0';
+    dx = e.clientX - rect.left;
+    dy = e.clientY - rect.top;
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const nx = Math.max(0, Math.min(window.innerWidth  - 100, e.clientX - dx));
+    const ny = Math.max(0, Math.min(window.innerHeight - 40,  e.clientY - dy));
+    inner.style.left = nx + 'px';
+    inner.style.top  = ny + 'px';
+  });
+  document.addEventListener('mouseup', () => { dragging = false; });
+}
 function openOSExecuteModal(sid, destName) {
   _osExecuteCtx.sid = sid;
   _osExecuteCtx.destName = destName;
@@ -6765,6 +6844,7 @@ function openOSExecuteModal(sid, destName) {
   document.getElementById('osexecute-timeout').value = '30';
   document.getElementById('osexecute-output').textContent = '';
   document.getElementById('osexecute-modal').classList.add('visible');
+  _initOSExecuteDrag();
   setTimeout(() => document.getElementById('osexecute-cmd').focus(), 50);
 }
 async function runOSExecute() {
@@ -6773,6 +6853,7 @@ async function runOSExecute() {
   const outEl = document.getElementById('osexecute-output');
   if (!cmd) { alert('Command required.'); return; }
   outEl.textContent = `[*] Running: ${cmd}\n[*] Timeout: ${timeout}s\n[*] Waiting for output…\n`;
+  outEl.scrollTop = outEl.scrollHeight;
   const r = await api('POST', `node/${_osExecuteCtx.sid}/sapcontrol_osexecute`, {
     destination_name: _osExecuteCtx.destName,
     command: cmd,
@@ -6782,9 +6863,13 @@ async function runOSExecute() {
     outEl.textContent = `[-] Error: ${r.error}`;
     return;
   }
+  const wrapped = (r.command_sent && r.command_sent !== cmd)
+    ? `[*] Wrapped as: ${r.command_sent}\n` : '';
   const header = `[+] exit=${r.exit_code}  pid=${r.pid}  status=HTTP ${r.status}\n`
+                + wrapped
                 + `----- output (${(r.output||'').length} bytes) -----\n`;
   outEl.textContent = header + (r.output || '<no output>');
+  outEl.scrollTop = 0;
 }
 
 // Generic dispatcher — routes BTP-sourced edges to /api/btp/* endpoints,
