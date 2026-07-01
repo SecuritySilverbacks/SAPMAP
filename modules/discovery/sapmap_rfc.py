@@ -2682,14 +2682,24 @@ def _parse_rfcdes_http_options(conn: RFCConn, options_str: str):
     """
     conn.conn_type = "http"
     host = path = scheme_or_url = ""
-    port = ""
+    port_i = ""     # I=<port>  — Type-G (authoritative on modern kernels)
+    port_s = ""     # S=<port>  — Type-H / older kernels
     use_https = False
     for part in options_str.split(","):
         part = part.strip()
         if part.startswith("H="):
             host = part[2:].strip()
+        elif part.startswith("I="):
+            # Type-G RFCDES stores the HTTP port in I=<port> —
+            # authoritative when present.  Operator-reported:
+            # I=50113 for a SAPControl destination that Type-G
+            # writers stash there, while S= carries something
+            # unrelated (or empty) so the S=-based path built
+            # http://host/ with no port and http_dest_ping defaulted
+            # to 80.
+            port_i = part[2:].strip()
         elif part.startswith("S="):
-            port = part[2:].strip()
+            port_s = part[2:].strip()
         elif part.startswith("M="):
             path = part[2:].strip()
         elif part.startswith("J="):
@@ -2706,6 +2716,15 @@ def _parse_rfcdes_http_options(conn: RFCConn, options_str: str):
             d_val = part[2:].strip()
             if d_val.isdigit() and len(d_val) <= 3:
                 conn.client = d_val.zfill(3)
+    # Port precedence: I=<port> (Type-G explicit) wins over S=<port>.
+    # Reject non-digit values from either — some kernels put a service
+    # name in S= (e.g. "sapms<SID>") which would crash the urlparse
+    # int(port) call downstream.
+    port = ""
+    if port_i and port_i.isdigit():
+        port = port_i
+    elif port_s and port_s.isdigit():
+        port = port_s
     # M=NNN heuristic for Type-H destinations: when the "path" field
     # is just a 3-digit number with no slashes, SM59 was almost
     # certainly using it to carry the SAP client (so the operator
