@@ -6755,8 +6755,16 @@ function showConnInfo(e, connIdx) {
         const canCve = !!tgtNode.cve_2025_31324_vulnerable;
         const canRecon = !!tgtNode.cve_2020_6287_vulnerable;
         const canGw = !!tgtNode.gw_vulnerable;
-        if (!(canCve || canRecon || canGw)) return '';
-        return `<button class="btn" style="background:#b33;color:#fff" onclick="createUserOnJavaTarget('${escHtml(conn.target_sid)}')">Create Remote User (Java UME)</button>`;
+        // SAPControl OSExecute route unlocks the same JSP-deploy
+        // path even when the classic CVEs aren't usable — the
+        // OS-exec channel we already verified serves as the deploy
+        // primitive.  Pass the connection coordinates through so
+        // the handler picks method='sapcontrol'.
+        const canSapctl = !!conn.os_exec_verified;
+        if (!(canCve || canRecon || canGw || canSapctl)) return '';
+        const argSrc = escHtml(conn.source_sid);
+        const argDest = escHtml(conn.destination_name);
+        return `<button class="btn" style="background:#b33;color:#fff" onclick="createUserOnJavaTarget('${escHtml(conn.target_sid)}','${argSrc}','${argDest}')">Create Remote User (Java UME)</button>`;
       })()}
       ${(() => {
         // Create Remote User calls BAPI_USER_CREATE1 — an ABAP-side
@@ -6835,37 +6843,60 @@ async function createUserViaRfc(sourceSid, destName, targetSid) {
 // existing /api/node/<target>/create_user_java endpoint.  Marks the
 // target node as pwned on success (via the state poll picking up
 // track_created_user).
-async function createUserOnJavaTarget(targetSid) {
+async function createUserOnJavaTarget(targetSid, sapctlSourceSid, sapctlDestName) {
   const n = (mapState.nodes || {})[targetSid];
   if (!n) { alert('Target node ' + targetSid + ' not found on map.'); return; }
+  const conn = sapctlDestName
+    ? (mapState.connections || []).find(
+        c => c.source_sid === sapctlSourceSid
+          && c.destination_name === sapctlDestName)
+    : null;
+  const hasSapctl = !!(conn && conn.os_exec_verified);
+  const hasCve   = !!n.cve_2025_31324_vulnerable;
+  const hasRecon = !!n.cve_2020_6287_vulnerable;
+  const hasGw    = !!n.gw_vulnerable;
   const u = prompt('Create Java user on ' + targetSid + '\n\nUsername:', 'SAPMAP00');
   if (!u || !u.trim()) return;
   const p = prompt('Password (leave empty for random):', 'Andinyougo123!');
   if (p === null) return;
   const g = prompt('Add to group (blank = Administrators):', 'Administrators');
   if (g === null) return;
-  const hasCve   = !!n.cve_2025_31324_vulnerable;
-  const hasRecon = !!n.cve_2020_6287_vulnerable;
-  const hasGw    = !!n.gw_vulnerable;
-  let method = 'auto';
+  // Default to SAPControl OSExecute when we've got it — that's the
+  // channel the operator explicitly verified for this destination.
+  let method = hasSapctl ? 'sapcontrol' : 'auto';
   const paths = [];
-  if (hasCve)   paths.push('"cve" (CVE-2025-31324)');
-  if (hasRecon) paths.push('"recon" (CVE-2020-6287 RECON)');
-  if (hasGw)    paths.push('"gw" (RFC Gateway SAPXPG)');
+  if (hasSapctl) paths.push('"sapctl" (SAPControl OSExecute — recommended)');
+  if (hasCve)    paths.push('"cve" (CVE-2025-31324)');
+  if (hasRecon)  paths.push('"recon" (CVE-2020-6287 RECON)');
+  if (hasGw)     paths.push('"gw" (RFC Gateway SAPXPG)');
   if (paths.length > 1) {
+    const dflt = hasSapctl ? 'sapctl' : 'auto';
     const m = prompt('Method — ' + paths.join(', ') +
-                      '.\nLeave "auto" to let SAPMAP pick the best:', 'auto');
+                      '.\nLeave "' + dflt + '" to use the highlighted default:',
+                      dflt);
     if (m === null) return;
-    if      (/^cve/i.test(m) && !/recon/i.test(m)) method = 'cve_31324';
-    else if (/^recon/i.test(m))                     method = 'recon';
-    else if (/^gw/i.test(m))                        method = 'gw';
+    if      (/^sapctl/i.test(m))                     method = 'sapcontrol';
+    else if (/^cve/i.test(m) && !/recon/i.test(m))   method = 'cve_31324';
+    else if (/^recon/i.test(m))                       method = 'recon';
+    else if (/^gw/i.test(m))                          method = 'gw';
+    else if (/^auto/i.test(m))                        method = 'auto';
   }
-  await api('POST', `node/${targetSid}/create_user_java`, {
+  const body = {
     username: u.trim(),
     password: (p || '').trim(),
     group:    (g || 'Administrators').trim(),
     method:   method,
-  });
+  };
+  if (method === 'sapcontrol') {
+    if (!hasSapctl) {
+      alert('SAPControl method needs a verified OSExecute connection — ' +
+            'run Test Connection on the Type-G destination first.');
+      return;
+    }
+    body.sapcontrol_source_sid = sapctlSourceSid;
+    body.sapcontrol_dest_name  = sapctlDestName;
+  }
+  await api('POST', `node/${targetSid}/create_user_java`, body);
   startPolling();
 }
 

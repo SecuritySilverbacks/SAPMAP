@@ -6695,11 +6695,51 @@ def create_app(api: SAPMAPApi) -> Bottle:
         password = (data.get("password") or "").strip()
         group    = (data.get("group") or "Administrators").strip()
         method   = (data.get("method") or "auto").strip()
+        # For method='sapcontrol' the caller supplies a Type-G
+        # connection whose SAPControl OSExecute is already verified.
+        # We look it up on the source node so the connection modal
+        # can call this endpoint with just (source_sid, dest_name)
+        # instead of shipping URL / user / password over the wire.
+        sc_source_sid = (data.get("sapcontrol_source_sid") or "").strip()
+        sc_dest_name  = (data.get("sapcontrol_dest_name") or "").strip()
+        sc_url = sc_user = sc_pwd = ""
+        if method == "sapcontrol":
+            if not (sc_source_sid and sc_dest_name):
+                return json.dumps({"error": (
+                    "method=sapcontrol requires sapcontrol_source_sid "
+                    "and sapcontrol_dest_name")})
+            src_node = api.state.get_node(sc_source_sid)
+            if not src_node:
+                return json.dumps({"error": (f"SAPControl source node "
+                                                f"{sc_source_sid} not found")})
+            sc_conn = None
+            for c in api.state.get_connections_from(sc_source_sid):
+                if c.destination_name == sc_dest_name:
+                    sc_conn = c
+                    break
+            if not sc_conn:
+                return json.dumps({"error": (f"SAPControl connection "
+                                                f"{sc_dest_name} not found "
+                                                f"on {sc_source_sid}")})
+            if not sc_conn.os_exec_verified:
+                return json.dumps({"error": (
+                    f"connection {sc_dest_name} is not "
+                    "os_exec_verified — run Test Connection first")})
+            sc_url  = sc_conn.http_url or ""
+            sc_user = sc_conn.rfc_user or ""
+            sc_pwd  = sc_conn.secstore_password or ""
+            if not (sc_url and sc_user and sc_pwd):
+                return json.dumps({"error": (
+                    f"connection {sc_dest_name} missing url / user / "
+                    "password on the source connection")})
 
         def _run():
             created = sapmap_exploit.create_user_java(
                 node, api.state, username=username, password=password,
-                group=group, method=method)
+                group=group, method=method,
+                sapcontrol_url=sc_url,
+                sapcontrol_user=sc_user,
+                sapcontrol_pwd=sc_pwd)
             if created:
                 api.state.track_created_user(created)
 
