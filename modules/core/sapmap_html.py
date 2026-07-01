@@ -1609,13 +1609,18 @@ body {
 <!-- SAPControl OSExecute Modal — draggable + resizable -->
 <div class="modal-overlay" id="osexecute-modal" style="align-items:flex-start">
   <div class="modal" id="osexecute-modal-inner"
-       style="max-width:none;width:900px;height:640px;min-width:520px;min-height:400px;resize:both;overflow:hidden;display:flex;flex-direction:column;position:relative;padding:0">
+       style="max-width:none;width:900px;height:640px;min-width:520px;min-height:400px;overflow:hidden;display:flex;flex-direction:column;position:relative;padding:0">
     <div id="osexecute-drag-handle"
          style="cursor:move;user-select:none;padding:16px 20px 8px 20px;border-bottom:1px solid #30363d">
       <h3 style="margin:0">&#9889; OS Command via SAPControl OSExecute
         <span style="float:right;font-size:10px;color:#484f58;font-weight:400">drag header to move · resize from bottom-right</span>
       </h3>
     </div>
+    <!-- Custom resize handle — a small triangle in the bottom-right
+         corner.  CSS resize:both is unreliable with flex parents +
+         align-items:flex-start on the overlay, so we drive it in JS. -->
+    <div id="osexecute-resize-handle" title="drag to resize"
+         style="position:absolute;right:2px;bottom:2px;width:16px;height:16px;cursor:nwse-resize;background:linear-gradient(135deg,transparent 0%,transparent 45%,#484f58 46%,#484f58 55%,transparent 56%,transparent 70%,#484f58 71%,#484f58 80%,transparent 81%);z-index:5"></div>
     <div style="padding:12px 20px;overflow:auto;flex:0 0 auto">
       <div id="osexecute-context" style="font-size:12px;color:#8b949e;margin-bottom:8px"></div>
       <div style="font-size:11px;color:#8b949e;margin-bottom:10px;line-height:1.5">
@@ -6726,6 +6731,34 @@ function showConnInfo(e, connIdx) {
     <div style="text-align:right;margin-top:8px;display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">
       ${conn.os_exec_verified ? `<button class="btn" style="background:#c0392b;color:#fff;font-weight:600" onclick="openOSExecuteModal('${escHtml(conn.source_sid)}','${escHtml(conn.destination_name)}')">&#9889; OS Command (via SAPControl)</button>` : ''}
       ${(() => {
+        // Create Remote User (Java UME) — for Type-G destinations
+        // whose target is a Java system already known to be
+        // exploitable via CVE-2025-31324 / RECON / GW SAPXPG.
+        // Delegates to the existing create_user_java endpoint on
+        // the target, which handles the JSP deploy + UME UACC/USER
+        // row insertion + group assignment.  Prompts mirror the
+        // right-click Create-User-Java action.
+        if (!isHttp || !conn.target_sid || !conn.logon_successful) return '';
+        const tgtNode = (mapState.nodes || {})[conn.target_sid];
+        if (!tgtNode) return '';
+        const tst = (tgtNode.system_type || '').toUpperCase();
+        // Explicit gate on Java-shaped port too, so a placeholder
+        // with system_type='' but URL port 5NN00 still qualifies.
+        let portIsJava = false;
+        try {
+          const u = new URL(conn.http_url || '');
+          const p = parseInt(u.port) || 0;
+          portIsJava = (p >= 50000 && p <= 59999 && (p % 100 === 0 || p % 100 === 1));
+        } catch(_) {}
+        const isJavaTgt = tst.indexOf('JAVA') !== -1 || portIsJava;
+        if (!isJavaTgt) return '';
+        const canCve = !!tgtNode.cve_2025_31324_vulnerable;
+        const canRecon = !!tgtNode.cve_2020_6287_vulnerable;
+        const canGw = !!tgtNode.gw_vulnerable;
+        if (!(canCve || canRecon || canGw)) return '';
+        return `<button class="btn" style="background:#b33;color:#fff" onclick="createUserOnJavaTarget('${escHtml(conn.target_sid)}')">Create Remote User (Java UME)</button>`;
+      })()}
+      ${(() => {
         // Create Remote User calls BAPI_USER_CREATE1 — an ABAP-side
         // BAPI.  Hide the button when the destination is unmistakably
         // pointing at a non-ABAP target (SAPControl / Java / BTP /
@@ -6797,6 +6830,45 @@ async function createUserViaRfc(sourceSid, destName, targetSid) {
   startPolling();
 }
 
+// Create Remote User (Java UME) on a Type-G connection's target —
+// mirrors the right-click Create-User-Java prompts + delegates to the
+// existing /api/node/<target>/create_user_java endpoint.  Marks the
+// target node as pwned on success (via the state poll picking up
+// track_created_user).
+async function createUserOnJavaTarget(targetSid) {
+  const n = (mapState.nodes || {})[targetSid];
+  if (!n) { alert('Target node ' + targetSid + ' not found on map.'); return; }
+  const u = prompt('Create Java user on ' + targetSid + '\n\nUsername:', 'SAPMAP00');
+  if (!u || !u.trim()) return;
+  const p = prompt('Password (leave empty for random):', 'Andinyougo123!');
+  if (p === null) return;
+  const g = prompt('Add to group (blank = Administrators):', 'Administrators');
+  if (g === null) return;
+  const hasCve   = !!n.cve_2025_31324_vulnerable;
+  const hasRecon = !!n.cve_2020_6287_vulnerable;
+  const hasGw    = !!n.gw_vulnerable;
+  let method = 'auto';
+  const paths = [];
+  if (hasCve)   paths.push('"cve" (CVE-2025-31324)');
+  if (hasRecon) paths.push('"recon" (CVE-2020-6287 RECON)');
+  if (hasGw)    paths.push('"gw" (RFC Gateway SAPXPG)');
+  if (paths.length > 1) {
+    const m = prompt('Method — ' + paths.join(', ') +
+                      '.\nLeave "auto" to let SAPMAP pick the best:', 'auto');
+    if (m === null) return;
+    if      (/^cve/i.test(m) && !/recon/i.test(m)) method = 'cve_31324';
+    else if (/^recon/i.test(m))                     method = 'recon';
+    else if (/^gw/i.test(m))                        method = 'gw';
+  }
+  await api('POST', `node/${targetSid}/create_user_java`, {
+    username: u.trim(),
+    password: (p || '').trim(),
+    group:    (g || 'Administrators').trim(),
+    method:   method,
+  });
+  startPolling();
+}
+
 let _osExecuteCtx = { sid: '', destName: '' };
 let _osExecuteDragInit = false;
 function _initOSExecuteDrag() {
@@ -6828,6 +6900,28 @@ function _initOSExecuteDrag() {
     inner.style.top  = ny + 'px';
   });
   document.addEventListener('mouseup', () => { dragging = false; });
+
+  // Bottom-right resize handle — drag to change size.
+  const rh = document.getElementById('osexecute-resize-handle');
+  if (rh) {
+    let rz = false, sx = 0, sy = 0, sw = 0, sh = 0;
+    rh.addEventListener('mousedown', (e) => {
+      rz = true;
+      const rect = inner.getBoundingClientRect();
+      sx = e.clientX; sy = e.clientY;
+      sw = rect.width; sh = rect.height;
+      e.preventDefault();
+      e.stopPropagation();
+    });
+    document.addEventListener('mousemove', (e) => {
+      if (!rz) return;
+      const nw = Math.max(520, sw + (e.clientX - sx));
+      const nh = Math.max(400, sh + (e.clientY - sy));
+      inner.style.width  = nw + 'px';
+      inner.style.height = nh + 'px';
+    });
+    document.addEventListener('mouseup', () => { rz = false; });
+  }
 }
 function openOSExecuteModal(sid, destName) {
   _osExecuteCtx.sid = sid;
