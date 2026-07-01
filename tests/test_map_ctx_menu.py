@@ -214,22 +214,28 @@ def test_scan_all_vulns_summary_collects_icmad_hits():
 
 
 def test_scan_all_vulns_confirm_dialog_mentions_icmad():
-    """The Scan for All Vulnerabilities confirm dialog enumerates
-    every check the sweep runs.  ICMAD must appear in that list
-    so the operator knows what they're triggering BEFORE pressing
-    OK - hidden behavioural changes are worse than visible ones."""
+    """The Scan for All Vulnerabilities modal enumerates every check
+    the sweep runs.  ICMAD must appear in the modal checkbox list so
+    the operator knows what they're triggering BEFORE pressing Run
+    Selected — hidden behavioural changes are worse than visible ones.
+
+    The former confirm() dialog was replaced with a multi-select modal
+    (#vulns-select-modal) that lets the operator deselect individual
+    checks; the ICMAD entry still has to be visible in the modal
+    label to preserve the enumeration guarantee.
+    """
     import sapmap_html
     html = sapmap_html.get_html()
-    # Look for the scan-all confirm() text.  Locate via the dialog
-    # opening line, then check the list region.
     import re
+    # Locate the vulnerability-select modal block and confirm the
+    # ICMAD label sits inside it.
     m = re.search(
-        r"Scan for ALL vulnerabilities on.*?Press STOP to cancel",
+        r'id="vulns-select-modal".*?</div>\s*</div>\s*</div>',
         html, re.DOTALL)
-    assert m, "scanAllVulns confirm() text not found"
+    assert m, "vulns-select-modal not found in HTML"
     dialog = m.group(0)
     assert "ICMAD" in dialog or "22536" in dialog, (
-        "confirm() dialog must list ICMAD / CVE-2022-22536 - "
+        "vulns-select-modal must list ICMAD / CVE-2022-22536 - "
         "operator-visible enumeration of every check in the sweep")
 
 

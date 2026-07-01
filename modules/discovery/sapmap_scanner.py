@@ -2688,7 +2688,15 @@ def fingerprint_web_dispatcher(host: str, port: int,
     out = {"is_wd": False, "confidence": "", "evidence": "",
             "server_header": "", "wd_version": "", "status": 0,
             "via": "saprouter" if saprouter else "direct",
-            "is_sap_icm": False}
+            "is_sap_icm": False,
+            # RFCSI_EXPORT fields lifted from /sap/public/info when the
+            # target is an ABAP ICM.  When populated, the node-builder
+            # uses the real SID instead of synthesising a Wxx
+            # placeholder from the host IP's last-octet hex.  All empty
+            # for pure WDs and Java stacks (those paths 404 or don't
+            # answer /sap/public/info).
+            "sid": "", "hostname": "", "kernel": "",
+            "sap_release": "", "os_type": "", "db_type": ""}
 
     paths = [
         "/",
@@ -2808,6 +2816,35 @@ def fingerprint_web_dispatcher(host: str, port: int,
                 or b"sap netweaver application server"
                     in resp_low):
             out["is_sap_icm"] = True
+        # Lift RFCSI_EXPORT fields out of /sap/public/info's SOAP body.
+        # Namespace prefixes vary across kernels (rfc:, n0:, default)
+        # — strip any prefix off the tag name when matching, mirroring
+        # the identical logic in query_public_info().  Once populated,
+        # the node-builder promotes these into the SAPNode so the
+        # operator sees the real SID + kernel + OS + DB on first draw,
+        # avoiding the Wxx / UNK_<ip> placeholder path.
+        if (path == "/sap/public/info"
+                and b"<rfcsysid" in resp_low):
+            def _field(name: str) -> str:
+                pat = (rb"<(?:[A-Za-z0-9_]+:)?" + name.encode()
+                       + rb"(?:\s[^>]*)?>([^<]*)</(?:[A-Za-z0-9_]+:)?"
+                       + name.encode() + rb">")
+                m = re.search(pat, resp, re.I)
+                return (m.group(1).decode("iso-8859-1", "replace")
+                        .strip() if m else "")
+            if not out["sid"]:
+                out["sid"] = _field("RFCSYSID")
+            if not out["hostname"]:
+                out["hostname"] = (_field("RFCHOST2")
+                                    or _field("RFCHOST"))
+            if not out["os_type"]:
+                out["os_type"] = _field("RFCOPSYS")
+            if not out["db_type"]:
+                out["db_type"] = _field("RFCDBSYS")
+            if not out["kernel"]:
+                out["kernel"] = _field("RFCKERNRL")
+            if not out["sap_release"]:
+                out["sap_release"] = _field("RFCSAPRL")
         if b"\r\nx-csrf-token:" in resp_low:
             out["is_sap_icm"] = True
         # /sap/public/ping body — "Server reached successfully" is the
@@ -4045,6 +4082,48 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
                 if sc_os: bits.append(f"OS={sc_os}")
                 print(f"[+] {host}: SID from SAPControl ({host}:{sc_port}): "
                       f"{sc_sid}  [{', '.join(bits) if bits else '?'}]")
+
+    # Phase A1.5: promote SID discovered by fingerprint_web_dispatcher
+    # from /sap/public/info into instance_sid_map + instance_sysinfo.
+    # A host that ONLY exposes an ICM (say port 80 or 443, with the
+    # dispatcher / gateway / SAPControl all firewalled) reaches this
+    # point with instance_sid_map still empty for its WD-tagged
+    # instance.  Without this pass, Phase A3 would synthesise a Wxx
+    # placeholder even though the WD fingerprint just lifted the real
+    # SID out of RFCSI_EXPORT.  Operator-reported: 192.168.2.29:80
+    # (W74) was plotting as W1D because Phase A3 fired first.
+    wd_info = scan_result.get("wd_info", {}) or {}
+    for p, fp in wd_info.items():
+        real_sid = (fp.get("sid") or "").strip()
+        if not real_sid:
+            continue
+        port_info = open_ports.get(p)
+        if not port_info:
+            continue
+        inst_nr = port_info.get("instance_nr", "")
+        if not inst_nr or inst_nr in instance_sid_map:
+            continue
+        instance_sid_map[inst_nr] = real_sid
+        merged = {
+            "sid": real_sid,
+            "hostname": fp.get("hostname", ""),
+            "os_type": fp.get("os_type", ""),
+            "db_type": fp.get("db_type", ""),
+            "kernel": fp.get("kernel", ""),
+            "sap_release": fp.get("sap_release", ""),
+            "_is_abap": True,
+        }
+        existing = instance_sysinfo.get(inst_nr) or {}
+        for k, v in merged.items():
+            if v and not existing.get(k):
+                existing[k] = v
+        instance_sysinfo[inst_nr] = existing
+        if not known_host_sid:
+            known_host_sid = real_sid
+        print(f"[+] {host}:{p}: SID from /sap/public/info: {real_sid} "
+              f"[{fp.get('sap_release') or '?'} kernel="
+              f"{fp.get('kernel') or '?'} OS={fp.get('os_type') or '?'} "
+              f"DB={fp.get('db_type') or '?'}]")
 
     # Phase A2: Split off SAProuter-only instances into their own synthetic
     # SID *before* the default-SID fallback, so port 3299 on a host that
