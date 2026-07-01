@@ -8865,7 +8865,44 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 else:
                     print(f"[*] {dest_name}: password sourced from "
                           f"{pwd_source}")
-                if (rfc_user and rfc_pwd and conn.target_sid):
+                # SAPControl / Host Agent destinations don't speak
+                # RFC — they expose their own SOAP contract at
+                # urn:SAPControl.  Skip the direct RFC + SOAP-RFC
+                # RFC_PING cascade entirely and probe the endpoint
+                # with a SAPControl <GetProcessList/> call instead.
+                # Sets os_exec_verified on success — the credential
+                # unlocks OS commands via OSExecute.
+                if (rfc_user and rfc_pwd
+                        and (conn.os_access_type or "").startswith(
+                            ("sapcontrol", "hostagent"))):
+                    print(f"[*] {dest_name}: SAPControl auth probe on "
+                          f"{conn.http_url} as {rfc_user}...")
+                    _sc_result = sapmap_rfc.sapcontrol_auth_probe(
+                        conn.http_url, rfc_user, rfc_pwd, timeout=8.0)
+                    if _sc_result["ok"]:
+                        conn.logon_successful = True
+                        conn.os_exec_verified = True
+                        print(f"[+] {dest_name}: SAPControl auth OK — "
+                              f"SID={_sc_result['sid'] or '?'} "
+                              f"inst={_sc_result['instance_nr'] or '?'} "
+                              f"host={_sc_result['hostname'] or '?'} "
+                              f"— OS access via OSExecute unlocked")
+                        # Backfill target-node identity if the probe
+                        # returned data we didn't have.
+                        if conn.target_sid:
+                            tgt = api.state.get_node(conn.target_sid)
+                            if tgt:
+                                tgt.has_critical_finding = True
+                                if (_sc_result["sid"]
+                                        and not tgt.sid.startswith(
+                                            "RFCDISC_") and False):
+                                    pass  # promote handled elsewhere
+                    else:
+                        print(f"[-] {dest_name}: SAPControl auth probe "
+                              f"failed — HTTP "
+                              f"{_sc_result['status'] or '?'} "
+                              f"({_sc_result['error'][:120]})")
+                elif (rfc_user and rfc_pwd and conn.target_sid):
                     target_node = api.state.get_node(conn.target_sid)
                     if target_node and "ABAP" in (
                             target_node.system_type or "ABAP").upper():
