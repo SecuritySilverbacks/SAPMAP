@@ -1475,12 +1475,16 @@ def sapcontrol_auth_probe(url: str, user: str, password: str,
     # /SAPHostControl.CGI) is where the SOAP endpoint lives.
     path = parts.path or "/SAPControl.CGI"
 
+    # GetInstanceProperties is the standard "who are you" call —
+    # returns SID, instance, host, SAPLOCALHOST, INSTANCE_NAME, and
+    # a lot more.  Small response, auth-gated, so a 200 proves the
+    # credential is valid AND lifts the target's identity for free.
     body = (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<SOAP-ENV:Envelope xmlns:SOAP-ENV='
         '"http://schemas.xmlsoap.org/soap/envelope/">'
         '<SOAP-ENV:Body>'
-        '<ns1:GetProcessList xmlns:ns1="urn:SAPControl"/>'
+        '<ns1:GetInstanceProperties xmlns:ns1="urn:SAPControl"/>'
         '</SOAP-ENV:Body></SOAP-ENV:Envelope>'
     )
     body_bytes = body.encode("utf-8")
@@ -1541,22 +1545,37 @@ def sapcontrol_auth_probe(url: str, user: str, password: str,
     if out["status"] not in (200, 204):
         out["error"] = f"HTTP {out['status'] or '<no status>'}"
         return out
-    # Auth accepted.  Lift SID / instance / hostname from the SAPControl
-    # response body — every method returns these in the SOAP header
-    # even when the FM is unknown.  Tag namespaces vary
-    # (sap:, ns1:, plain); strip prefixes to match all.
-    def _tag(name):
-        m = _re.search(
-            rb'<(?:[A-Za-z0-9_]+:)?'
-            + name.encode() + rb'[^>]*>([^<]*)</',
-            resp, _re.I)
-        return m.group(1).decode("iso-8859-1", "replace").strip() if m else ""
-    out["sid"] = _tag("SAPSYSTEMNAME") or _tag("sapSystemName")
-    out["instance_nr"] = (_tag("instanceNr")
-                          or _tag("SAPSYSTEM"))
-    if out["instance_nr"].isdigit():
-        out["instance_nr"] = out["instance_nr"].zfill(2)
-    out["hostname"] = _tag("hostname")
+    # Auth accepted.  GetInstanceProperties returns a repeating
+    # <item><property>NAME</property><propertytype>...</propertytype>
+    # <value>VAL</value></item> shape.  Pull each item, split into
+    # (property → value), then look up the ones we care about.
+    # Namespaces vary across kernels — strip prefixes.
+    props = {}
+    for item in _re.findall(
+            rb'<item>(.*?)</item>', resp, _re.DOTALL):
+        m_p = _re.search(
+            rb'<(?:[A-Za-z0-9_]+:)?property[^>]*>'
+            rb'([^<]*)</(?:[A-Za-z0-9_]+:)?property>',
+            item, _re.I)
+        m_v = _re.search(
+            rb'<(?:[A-Za-z0-9_]+:)?value[^>]*>'
+            rb'([^<]*)</(?:[A-Za-z0-9_]+:)?value>',
+            item, _re.I)
+        if m_p and m_v:
+            k = m_p.group(1).decode("iso-8859-1",
+                                     "replace").strip().upper()
+            v = m_v.group(1).decode("iso-8859-1",
+                                     "replace").strip()
+            if k:
+                props[k] = v
+    out["sid"] = (props.get("SAPSYSTEMNAME") or "").strip()
+    inst = (props.get("SAPSYSTEM") or "").strip()
+    if inst.isdigit():
+        out["instance_nr"] = inst.zfill(2)
+    else:
+        out["instance_nr"] = inst
+    out["hostname"] = (props.get("SAPLOCALHOST")
+                        or props.get("INSTANCE_NAME") or "").strip()
     out["ok"] = True
     return out
 
@@ -3285,17 +3304,25 @@ def _classify_type_g_target(conn: RFCConn) -> None:
 
     # --- SAPControl / Host Agent + <sid>adm detection -----------------
     # Path matches: /SAPControl.CGI, /SAPHostControl.CGI, and the
-    # underlying WSDL discovery endpoints.  Port matches are a
-    # secondary signal (SAPControl HTTP=5NN13, HTTPS=5NN14; Host
-    # Agent HTTP=1128, HTTPS=1129) — they alone aren't enough
-    # (operators can rebind) but corroborate the path signal.
+    # underlying WSDL discovery endpoints.  Port matches: SAPControl
+    # HTTP=5NN13, HTTPS=5NN14; Host Agent HTTP=1128, HTTPS=1129.
+    # Real-world RFCDES rows often omit the M=<path> entirely (SAP
+    # kernel supplies the default at runtime), so the URL parses to
+    # scheme://host:port with an empty path — path-based detection
+    # would miss those.  Classify as SAPControl when EITHER the path
+    # signal is present OR the port is unambiguous SAPControl AND
+    # the path doesn't clearly point somewhere else (empty, "/",
+    # or ends in ".cgi").
     is_sapcontrol_path = ("/sapcontrol.cgi" in path
                           or "/sapcontrol/wsdl" in path)
     is_hostagent_path = ("/saphostcontrol.cgi" in path
                           or "/saphostagent/wsdl" in path)
-    port_looks_sapcontrol = (
-        (50000 <= port <= 59999 and port % 100 in (13, 14))
-        or port in (1128, 1129)
+    port_is_sapcontrol = (
+        50000 <= port <= 59999 and port % 100 in (13, 14)
+    )
+    port_is_hostagent = port in (1128, 1129)
+    path_is_unspecific = (
+        not path or path == "/" or path.endswith(".cgi")
     )
 
     # <sid>adm user pattern.  Case-insensitive on Unix (sj1adm),
@@ -3308,9 +3335,12 @@ def _classify_type_g_target(conn: RFCConn) -> None:
     )
     is_sapadm_user = user.lower() == "sapadm"
 
-    if is_hostagent_path or (port in (1128, 1129) and is_sapadm_user):
-        conn.os_access_type = "hostagent_sapadm"
-    elif is_sapcontrol_path or (port_looks_sapcontrol and is_sidadm_user):
+    if is_hostagent_path or (port_is_hostagent and path_is_unspecific):
+        conn.os_access_type = (
+            "hostagent_sapadm" if is_sapadm_user
+            else "hostagent_generic"
+        )
+    elif is_sapcontrol_path or (port_is_sapcontrol and path_is_unspecific):
         conn.os_access_type = (
             "sapcontrol_sidadm" if is_sidadm_user
             else "sapcontrol_generic"

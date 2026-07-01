@@ -8725,6 +8725,15 @@ def create_app(api: SAPMAPApi) -> Bottle:
             #          → enables "Create Remote User".
             if (conn.conn_type or "").lower() == "http":
                 print(f"[*] Testing HTTP destination: {dest_name}...")
+                # Re-run the Type-G classifier on every Test HTTP.
+                # Cheap (no network calls), and it means connections
+                # retrieved BEFORE the classifier logic existed get
+                # upgraded automatically on the first re-test — no
+                # need to re-retrieve the whole RFCDES table.
+                try:
+                    sapmap_rfc._classify_type_g_target(conn)
+                except Exception:
+                    pass
                 # Direct HTTP probe from SAPMAP against the URL's real
                 # host:port.  Runs FIRST because the ABAP-side
                 # DEST_CHECK_CONNECTION frequently reports SDEST 047
@@ -8887,16 +8896,30 @@ def create_app(api: SAPMAPApi) -> Bottle:
                               f"inst={_sc_result['instance_nr'] or '?'} "
                               f"host={_sc_result['hostname'] or '?'} "
                               f"— OS access via OSExecute unlocked")
-                        # Backfill target-node identity if the probe
-                        # returned data we didn't have.
+                        # OS access on the target beats SAP_ALL —
+                        # emit a CRITICAL finding so the operator
+                        # sees the escalation in the findings bus,
+                        # not just in the console.  meta carries the
+                        # source/target for the pulse overlay.
                         if conn.target_sid:
+                            try:
+                                from sapmap_findings import (
+                                    emit_finding)
+                                emit_finding(
+                                    "CRITICAL", conn.source_sid,
+                                    f"RFC destination {dest_name!r} "
+                                    f"unlocks OS shell as {rfc_user} "
+                                    f"on {conn.target_sid} via "
+                                    f"SAPControl OSExecute — full "
+                                    f"kernel-level pivot confirmed",
+                                    meta={"source_sid": conn.source_sid,
+                                          "target_sid": conn.target_sid},
+                                )
+                            except Exception:
+                                pass
                             tgt = api.state.get_node(conn.target_sid)
                             if tgt:
                                 tgt.has_critical_finding = True
-                                if (_sc_result["sid"]
-                                        and not tgt.sid.startswith(
-                                            "RFCDISC_") and False):
-                                    pass  # promote handled elsewhere
                     else:
                         print(f"[-] {dest_name}: SAPControl auth probe "
                               f"failed — HTTP "
