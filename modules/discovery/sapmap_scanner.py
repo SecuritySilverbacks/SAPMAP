@@ -2696,7 +2696,15 @@ def fingerprint_web_dispatcher(host: str, port: int,
             # for pure WDs and Java stacks (those paths 404 or don't
             # answer /sap/public/info).
             "sid": "", "hostname": "", "kernel": "",
-            "sap_release": "", "os_type": "", "db_type": ""}
+            "sap_release": "", "os_type": "", "db_type": "",
+            # Two-digit SAP instance number lifted from RFCDEST — the
+            # RFCSI_EXPORT destination name is conventionally
+            # "<HOST>_<SID>_<NN>", so the trailing _NN is the instance.
+            # Populated only when /sap/public/info answered; empty
+            # otherwise.  Used by the node-builder to replace the
+            # port-scanner's "WD" placeholder instance_nr with the
+            # real one (e.g. port 80 → inst 00 for a W74 ICM).
+            "instance_nr": ""}
 
     paths = [
         "/",
@@ -2845,6 +2853,14 @@ def fingerprint_web_dispatcher(host: str, port: int,
                 out["kernel"] = _field("RFCKERNRL")
             if not out["sap_release"]:
                 out["sap_release"] = _field("RFCSAPRL")
+            if not out["instance_nr"]:
+                # RFCDEST convention: "<HOST>_<SID>_<NN>".  The
+                # trailing _NN is the real two-digit instance number.
+                _rd = _field("RFCDEST")
+                if _rd:
+                    _mi = re.search(r'_(\d{2})$', _rd)
+                    if _mi:
+                        out["instance_nr"] = _mi.group(1)
         if b"\r\nx-csrf-token:" in resp_low:
             out["is_sap_icm"] = True
         # /sap/public/ping body — "Server reached successfully" is the
@@ -4100,6 +4116,19 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
         port_info = open_ports.get(p)
         if not port_info:
             continue
+        # When /sap/public/info returned RFCDEST with the "_NN"
+        # instance suffix, replace the port-scanner's "WD" placeholder
+        # instance_nr with the real one.  Also update the parent list
+        # of instance_nrs so downstream phases group correctly.
+        real_inst = (fp.get("instance_nr") or "").strip()
+        placeholder_inst = port_info.get("instance_nr", "")
+        if real_inst and placeholder_inst == "WD":
+            port_info["instance_nr"] = real_inst
+            if placeholder_inst in instance_nrs:
+                instance_nrs.remove(placeholder_inst)
+            if real_inst not in instance_nrs:
+                instance_nrs.append(real_inst)
+            instance_nrs.sort()
         inst_nr = port_info.get("instance_nr", "")
         if not inst_nr or inst_nr in instance_sid_map:
             continue
