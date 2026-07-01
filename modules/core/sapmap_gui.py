@@ -8311,11 +8311,22 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
                 print(f"[*] Ping {conn.destination_name} → "
                       f"{host}...")
-                # Phase 3b: route DEST_CHECK_CONNECTION through SOAP
-                # too when the source node's gateway port is firewalled
-                # — otherwise each ping spends 60-90s on pyrfc TCP
-                # retries (× 7 destinations = ~10 minutes wasted).
-                if soap_session is not None:
+                # Type-G / Type-H HTTP destinations: probe the URL's
+                # host+port directly, NOT the 33NN gateway.  The
+                # generic DEST_CHECK_CONNECTION / IWB / direct-TCP
+                # cascade falls back to 3300+int(inst) which is a
+                # Type-3 assumption — for Type-G that misreads the
+                # RFCOPTIONS S= (HTTP port) as an instance number and
+                # probes the wrong port entirely.  http_dest_ping is
+                # the correct path: TCP+GET on the URL, ICF-NF marker
+                # lift, Note 1177315 reinterpretation.
+                if conn.conn_type == "http":
+                    ping = sapmap_rfc.http_dest_ping(conn, timeout=5.0)
+                elif soap_session is not None:
+                    # Phase 3b: route DEST_CHECK_CONNECTION through SOAP
+                    # too when the source node's gateway port is firewalled
+                    # — otherwise each ping spends 60-90s on pyrfc TCP
+                    # retries (× 7 destinations = ~10 minutes wasted).
                     ping = soap_session.dest_check_connection(
                         conn.destination_name)
                 else:
