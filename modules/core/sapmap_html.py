@@ -6905,7 +6905,19 @@ async function createUserOnJavaTarget(targetSid, sapctlSourceSid, sapctlDestName
     body.sapcontrol_source_sid = sapctlSourceSid;
     body.sapcontrol_dest_name  = sapctlDestName;
   }
-  await api('POST', `node/${targetSid}/create_user_java`, body);
+  showToast(
+    `Creating Java user <code>${escHtml(body.username)}</code> in ` +
+    `group <code>${escHtml(body.group)}</code> on ` +
+    `<strong>${escHtml(targetSid)}</strong>` +
+    (method === 'sapcontrol'
+      ? ' via SAPControl OSExecute — watch the console for JSP deploy progress'
+      : ` via method <code>${escHtml(method)}</code>`),
+    { autoCloseMs: 8000 });
+  const r = await api('POST', `node/${targetSid}/create_user_java`, body);
+  if (r && r.error) {
+    alert('Create Java user failed: ' + r.error);
+    return;
+  }
   startPolling();
 }
 
