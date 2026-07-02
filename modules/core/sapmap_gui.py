@@ -9692,16 +9692,34 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                     "powershell "))
             or command.startswith(("/", "c:\\", "C:\\"))
         )
-        # Raw-safe: commands with no whitespace AND no shell
-        # metacharacters resolve via CreateProcess (Windows) or
-        # execve (Unix) directly.  `whoami`, `id`, `hostname`, `date`
-        # etc. all fall into this bucket and work on both platforms
-        # without any wrap — no shell needed.  Skips the whole
-        # wrap-mismatch problem for the common case.
+        # Raw-safe: no whitespace, no shell metacharacters.  Kernel
+        # can execve/CreateProcess this directly.  Two conditions
+        # need to hold for it to actually resolve:
+        #
+        #   * Windows target: CreateProcess is PATH-aware, and the
+        #     service PATH always includes System32, so bare
+        #     `whoami` / `hostname` / `ipconfig` all resolve.
+        #   * Absolute path (starts with / or C:\ / c:\): no PATH
+        #     lookup needed at all.
+        #
+        # On Linux the SAP sapstartsrv service runs with a
+        # restricted PATH (typically only /usr/sap/<SID>/<inst>/exe),
+        # so bare `whoami` execve fails at path lookup with exit=2
+        # and empty output.  Force the shell wrap in that case so
+        # /bin/sh -c can do a proper PATH search.  Operator-
+        # reported: sj1adm on srv01sm1.ncmi.co Linux target
+        # returned rc=2 empty output for `whoami` (worked for
+        # `uname -a` because THAT went through the wrap).
         raw_safe = (
             not any(c in command for c in " \t|&<>$`\"'\\")
         )
-        if raw_safe:
+        cmd_is_absolute = (
+            command.startswith(("/",))
+            or (len(command) >= 3
+                and command[0].isalpha()
+                and command[1:3] == ":\\")
+        )
+        if raw_safe and (is_windows or cmd_is_absolute):
             already_wrapped = True   # send verbatim
         raw_cmd = command
         if not already_wrapped:
