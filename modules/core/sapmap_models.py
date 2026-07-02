@@ -1205,6 +1205,11 @@ class RFCConnection:
     http_status: int = 0
     note_1177315_hit: bool = False
     os_exec_verified: bool = False
+    # OS detected via the Test Connection uname probe: "unix" | "windows" | "".
+    # Empty when the probe hasn't run yet OR failed inconclusively;
+    # the OSExecute wrap layer falls back to target_node.os_type in
+    # that case.  Populated by sapcontrol_auth_probe stage 3.
+    target_os_hint: str = ""
 
     def risk_level(self) -> str:
         """Return risk assessment for this connection.
@@ -1265,6 +1270,7 @@ class RFCConnection:
             "note_1177315_hit": self.note_1177315_hit,
             "os_exec_verified": self.os_exec_verified,
             "rfc_type": self.rfc_type,
+            "target_os_hint": self.target_os_hint,
         }
 
     @classmethod
