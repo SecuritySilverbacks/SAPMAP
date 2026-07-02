@@ -1279,6 +1279,139 @@ def ping_rfc_destination(node: SAPNode, destination_name: str,
     return result
 
 
+def _run_sapcontrol_identity_probe(host, port, is_https, result,
+                                     timeout, _sock):
+    """Populate result["remote_sid"] / "remote_hostname" /
+    "remote_instance_nr" via an UNAUTHENTICATED SAPControl
+    GetInstanceProperties call.
+
+    Every SAP kernel serves that method with protection=NONE, so no
+    credential is needed.  Probes up to three port slots on the same
+    host in priority order:
+      1. The URL's own port when it matches SAPControl (5NN13/14) or
+         Host Agent (1128/1129).
+      2. The PARALLEL SAPControl port when the URL is Java HTTP
+         (5NN00 → 5NN13/14 on the same instance) or ABAP ICM
+         (80NN → 5NN13/14 on inst NN).
+      3. Host Agent 1128 as a universal fallback.
+    Never overwrites remote_sid when a preceding path (ICF-NF
+    error page) already set it.
+    """
+    if result.get("remote_sid"):
+        return
+    import re as _re
+    _identity_candidates = []
+    _port_is_sapcontrol = (
+        50000 <= port <= 59999 and port % 100 in (13, 14))
+    _port_is_hostagent = port in (1128, 1129)
+    _port_is_java_http = (
+        50000 <= port <= 59999 and port % 100 in (0, 1))
+    _port_is_abap_icm = (
+        (8000 <= port <= 8099)
+        or (44300 <= port <= 44399))
+    if _port_is_sapcontrol:
+        _identity_candidates.append((port, is_https,
+                                       "/SAPControl.CGI"))
+    elif _port_is_hostagent:
+        _identity_candidates.append((port, is_https, "/"))
+    elif _port_is_java_http:
+        _nn = (port - 50000) // 100
+        _identity_candidates.append((50013 + _nn * 100, False,
+                                       "/SAPControl.CGI"))
+        _identity_candidates.append((50014 + _nn * 100, True,
+                                       "/SAPControl.CGI"))
+    elif _port_is_abap_icm:
+        _nn = ((port - 8000) if 8000 <= port <= 8099
+               else (port - 44300))
+        _identity_candidates.append((50013 + _nn * 100, False,
+                                       "/SAPControl.CGI"))
+        _identity_candidates.append((50014 + _nn * 100, True,
+                                       "/SAPControl.CGI"))
+    _identity_candidates.append((1128, False, "/"))
+
+    _sc_body = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<SOAP-ENV:Envelope xmlns:SOAP-ENV='
+        '"http://schemas.xmlsoap.org/soap/envelope/">'
+        '<SOAP-ENV:Body>'
+        '<ns1:GetInstanceProperties xmlns:ns1="urn:SAPControl"/>'
+        '</SOAP-ENV:Body></SOAP-ENV:Envelope>'
+    ).encode("utf-8")
+
+    for _cand_port, _cand_https, _cand_path in _identity_candidates:
+        if result.get("remote_sid"):
+            return
+        try:
+            _sc_hdr = (
+                f"POST {_cand_path} HTTP/1.0\r\n"
+                f"Host: {host}:{_cand_port}\r\n"
+                f"Content-Type: text/xml; charset=utf-8\r\n"
+                f"Content-Length: {len(_sc_body)}\r\n"
+                f"SOAPAction: \"\"\r\n"
+                f"User-Agent: sapmap-sapcontrol-ident/1.0\r\n"
+                f"Connection: close\r\n\r\n"
+            ).encode("iso-8859-1")
+            _s3 = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+            _s3.settimeout(min(timeout, 3.0))
+            _s3.connect((host, _cand_port))
+            if _cand_https:
+                import ssl as _ssl
+                ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
+                ctx.check_hostname = False
+                ctx.verify_mode = _ssl.CERT_NONE
+                try:
+                    ctx.minimum_version = _ssl.TLSVersion.TLSv1
+                except (AttributeError, ValueError):
+                    pass
+                _s3 = ctx.wrap_socket(_s3, server_hostname=host)
+            _s3.sendall(_sc_hdr + _sc_body)
+            _sc_resp = b""
+            try:
+                while len(_sc_resp) < 65536:
+                    chunk = _s3.recv(4096)
+                    if not chunk:
+                        break
+                    _sc_resp += chunk
+            except _sock.timeout:
+                pass
+            try:
+                _s3.close()
+            except Exception:
+                pass
+            _props = {}
+            for _item in _re.findall(
+                    rb'<item>(.*?)</item>', _sc_resp, _re.DOTALL):
+                _mp = _re.search(
+                    rb'<(?:[A-Za-z0-9_]+:)?property[^>]*>'
+                    rb'([^<]*)</(?:[A-Za-z0-9_]+:)?property>',
+                    _item, _re.I)
+                _mv = _re.search(
+                    rb'<(?:[A-Za-z0-9_]+:)?value[^>]*>'
+                    rb'([^<]*)</(?:[A-Za-z0-9_]+:)?value>',
+                    _item, _re.I)
+                if _mp and _mv:
+                    _k = _mp.group(1).decode(
+                        "iso-8859-1", "replace").strip().upper()
+                    _v = _mv.group(1).decode(
+                        "iso-8859-1", "replace").strip()
+                    if _k:
+                        _props[_k] = _v
+            _sc_sid = (_props.get("SAPSYSTEMNAME") or "").strip()
+            if len(_sc_sid) == 3 and _sc_sid.isalnum():
+                result["remote_sid"] = _sc_sid
+                _sc_host = (_props.get("SAPLOCALHOST")
+                             or _props.get("INSTANCE_NAME")
+                             or "").strip()
+                if _sc_host:
+                    result["remote_hostname"] = (
+                        result["remote_hostname"] or _sc_host)
+                _sc_inst = (_props.get("SAPSYSTEM") or "").strip()
+                if _sc_inst.isdigit():
+                    result["remote_instance_nr"] = _sc_inst.zfill(2)
+        except Exception:
+            continue
+
+
 def http_dest_ping(rfc_conn, timeout: float = 5.0) -> dict:
     """Ping a Type-G / Type-H HTTP RFC destination directly.
 
@@ -1324,6 +1457,14 @@ def http_dest_ping(rfc_conn, timeout: float = 5.0) -> dict:
     scheme = (parts.scheme or "http").lower()
     port = parts.port or (443 if scheme == "https" else 80)
     is_https = scheme == "https"
+
+    # 0. Identity probe — fire BEFORE the URL's own TCP connect so
+    # we still learn the target's SID/host/instance even when the
+    # URL port is firewalled from us but SAPControl on a parallel
+    # port answers.  Same host, only a few probe targets; bounded
+    # per-candidate timeout so total budget stays modest.
+    _run_sapcontrol_identity_probe(host, port, is_https, result,
+                                     timeout, _sock)
 
     # 1. TCP-level reachability.  Fast fail on refused / timeout /
     # DNS error — no point sending an HTTP request if the socket
@@ -1406,102 +1547,12 @@ def http_dest_ping(rfc_conn, timeout: float = 5.0) -> dict:
         result["remote_instance_nr"] = _icf.group(3).decode("ascii",
                                                               "replace")
 
-    # 4b. When the URL port matches SAPControl (5NN13 / 5NN14) or the
-    # SAP Host Agent (1128 / 1129), fire an unauthenticated
-    # GetInstanceProperties SOAP call.  Every kernel serves this
-    # method with protection=NONE, so we get SID / host / instance
-    # WITHOUT credentials — perfect for the retrieve-RFCs ping loop
-    # to plot the real SID upfront instead of letting the placeholder
-    # SID fall back to "172" / hostname-derived guesses.  Only
-    # touches remote_sid when the ICF-NF regex above didn't already
-    # populate it (ABAP ICM sources take precedence).
-    _port_is_sapcontrol = (
-        50000 <= port <= 59999 and port % 100 in (13, 14))
-    _port_is_hostagent = port in (1128, 1129)
-    if ((_port_is_sapcontrol or _port_is_hostagent)
-            and not result.get("remote_sid")):
-        try:
-            _sc_body = (
-                '<?xml version="1.0" encoding="UTF-8"?>'
-                '<SOAP-ENV:Envelope xmlns:SOAP-ENV='
-                '"http://schemas.xmlsoap.org/soap/envelope/">'
-                '<SOAP-ENV:Body>'
-                '<ns1:GetInstanceProperties xmlns:ns1="urn:SAPControl"/>'
-                '</SOAP-ENV:Body></SOAP-ENV:Envelope>'
-            ).encode("utf-8")
-            _sc_path = ("/SAPControl.CGI" if _port_is_sapcontrol
-                         else "/")
-            _sc_hdr = (
-                f"POST {_sc_path} HTTP/1.0\r\n"
-                f"Host: {host}:{port}\r\n"
-                f"Content-Type: text/xml; charset=utf-8\r\n"
-                f"Content-Length: {len(_sc_body)}\r\n"
-                f"SOAPAction: \"\"\r\n"
-                f"User-Agent: sapmap-sapcontrol-ident/1.0\r\n"
-                f"Connection: close\r\n\r\n"
-            ).encode("iso-8859-1")
-            _s3 = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
-            _s3.settimeout(min(timeout, 3.0))
-            _s3.connect((host, port))
-            if is_https:
-                import ssl as _ssl
-                ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
-                ctx.check_hostname = False
-                ctx.verify_mode = _ssl.CERT_NONE
-                try:
-                    ctx.minimum_version = _ssl.TLSVersion.TLSv1
-                except (AttributeError, ValueError):
-                    pass
-                _s3 = ctx.wrap_socket(_s3, server_hostname=host)
-            _s3.sendall(_sc_hdr + _sc_body)
-            _sc_resp = b""
-            try:
-                while len(_sc_resp) < 65536:
-                    chunk = _s3.recv(4096)
-                    if not chunk:
-                        break
-                    _sc_resp += chunk
-            except _sock.timeout:
-                pass
-            try:
-                _s3.close()
-            except Exception:
-                pass
-            # Same property-item parser as sapcontrol_auth_probe.
-            _props = {}
-            for _item in _re.findall(
-                    rb'<item>(.*?)</item>', _sc_resp, _re.DOTALL):
-                _mp = _re.search(
-                    rb'<(?:[A-Za-z0-9_]+:)?property[^>]*>'
-                    rb'([^<]*)</(?:[A-Za-z0-9_]+:)?property>',
-                    _item, _re.I)
-                _mv = _re.search(
-                    rb'<(?:[A-Za-z0-9_]+:)?value[^>]*>'
-                    rb'([^<]*)</(?:[A-Za-z0-9_]+:)?value>',
-                    _item, _re.I)
-                if _mp and _mv:
-                    _k = _mp.group(1).decode("iso-8859-1",
-                                              "replace").strip().upper()
-                    _v = _mv.group(1).decode("iso-8859-1",
-                                              "replace").strip()
-                    if _k:
-                        _props[_k] = _v
-            _sc_sid = (_props.get("SAPSYSTEMNAME") or "").strip()
-            if (len(_sc_sid) == 3
-                    and _sc_sid.isalnum()):
-                result["remote_sid"] = _sc_sid
-                _sc_host = (_props.get("SAPLOCALHOST")
-                             or _props.get("INSTANCE_NAME")
-                             or "").strip()
-                if _sc_host:
-                    result["remote_hostname"] = (
-                        result["remote_hostname"] or _sc_host)
-                _sc_inst = (_props.get("SAPSYSTEM") or "").strip()
-                if _sc_inst.isdigit():
-                    result["remote_instance_nr"] = _sc_inst.zfill(2)
-        except Exception:
-            # Identity probe is a bonus — never fail the ping over it.
-            pass
+    # 4b. Re-run the SAPControl identity probe now that we have the
+    # target's HTTP response too — the top-of-function call may
+    # have missed if we're calling this helper standalone.  Cheap
+    # no-op when remote_sid is already populated.
+    _run_sapcontrol_identity_probe(host, port, is_https, result,
+                                     timeout, _sock)
     # 5. Note 1177315: reinterpret 403/404/405/500 as benign when the
     # destination is ADS-shaped.  Marker-in-body also triggers.
     resp_low = resp.lower()
