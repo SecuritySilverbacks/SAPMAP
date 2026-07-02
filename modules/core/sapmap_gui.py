@@ -6687,14 +6687,23 @@ def create_app(api: SAPMAPApi) -> Bottle:
         node = api.state.get_node(sid)
         if not node:
             return json.dumps({"error": f"Node {sid} not found"})
-        sys_type = (node.system_type or "").upper()
-        if "JAVA" not in sys_type:
-            return json.dumps({"error": "Not a Java / dual-stack system"})
 
         username = (data.get("username") or "SAPMAP00").strip()
         password = (data.get("password") or "").strip()
         group    = (data.get("group") or "Administrators").strip()
         method   = (data.get("method") or "auto").strip()
+
+        # Java-only guard.  Skip for method='sapcontrol' — the
+        # operator explicitly picked that channel against a target
+        # they know is Java (SAPControl runs on both stacks, so we
+        # can't fingerprint from the URL alone), and placeholder
+        # nodes from Type-G materialisation land here with
+        # system_type=''.  Operator-reported: pure-Java stack
+        # (jstart-only) refused by this early check even though
+        # create_user_java has its own bypass now.
+        sys_type = (node.system_type or "").upper()
+        if method != "sapcontrol" and "JAVA" not in sys_type:
+            return json.dumps({"error": "Not a Java / dual-stack system"})
         # For method='sapcontrol' the caller supplies a Type-G
         # connection whose SAPControl OSExecute is already verified.
         # We look it up on the source node so the connection modal
@@ -8939,6 +8948,15 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         _osx = int(_sc_result.get("osexec_access", -1))
                         conn.logon_successful = (_osx == 1)
                         conn.os_exec_verified = (_osx == 1)
+                        # Stage 3 result (OS hint from uname probe).
+                        # Cached on the connection so subsequent
+                        # OSExecute calls pick the right shell wrap
+                        # without needing another round-trip.
+                        _oh = (_sc_result.get("os_hint") or "").strip()
+                        if _oh:
+                            conn.target_os_hint = _oh
+                            print(f"[+] {dest_name}: target OS "
+                                  f"detected via probe: {_oh}")
                         _identity = (f"SID={_sc_result['sid'] or '?'} "
                                      f"inst={_sc_result['instance_nr'] or '?'} "
                                      f"host={_sc_result['hostname'] or '?'}")
@@ -9646,15 +9664,27 @@ def create_app(api: SAPMAPApi) -> Bottle:
         # literal whitespace to split on.  Works on any POSIX sh
         # and mirrors the standard "sapcontrol OSExecute base64"
         # technique documented in field guides.
+        # OS resolution — prefer, in order:
+        #   1. conn.target_os_hint (uname probe result stashed by
+        #      Test Connection).  This is DEFINITIVE: it came from
+        #      actually running a command on the target.
+        #   2. target_node.os_type (fingerprint metadata).
+        #   3. Username heuristic (SAPService<SID> → Windows).
         target_os = ""
         if conn.target_sid:
             tgt = api.state.get_node(conn.target_sid)
             if tgt:
                 target_os = (tgt.os_type or "").lower()
-        is_windows = (
-            any(w in target_os for w in ("windows", "nt", "win"))
-            or user.lower().startswith("sapservice")
-        )
+        hint = (conn.target_os_hint or "").lower()
+        if hint == "windows":
+            is_windows = True
+        elif hint == "unix":
+            is_windows = False
+        else:
+            is_windows = (
+                any(w in target_os for w in ("windows", "nt", "win"))
+                or user.lower().startswith("sapservice")
+            )
         already_wrapped = (
             command.startswith(("sh ", "bash ", "/bin/sh ",
                                  "/bin/bash "))
@@ -9662,6 +9692,17 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                     "powershell "))
             or command.startswith(("/", "c:\\", "C:\\"))
         )
+        # Raw-safe: commands with no whitespace AND no shell
+        # metacharacters resolve via CreateProcess (Windows) or
+        # execve (Unix) directly.  `whoami`, `id`, `hostname`, `date`
+        # etc. all fall into this bucket and work on both platforms
+        # without any wrap — no shell needed.  Skips the whole
+        # wrap-mismatch problem for the common case.
+        raw_safe = (
+            not any(c in command for c in " \t|&<>$`\"'\\")
+        )
+        if raw_safe:
+            already_wrapped = True   # send verbatim
         raw_cmd = command
         if not already_wrapped:
             import base64 as _b64

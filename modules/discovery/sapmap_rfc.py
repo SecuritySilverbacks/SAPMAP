@@ -1727,6 +1727,32 @@ def sapcontrol_auth_probe(url: str, user: str, password: str,
         out["access_check_note"] = (
             "AccessCheck returned 200 with no <access> tag — "
             "treating as allowed")
+
+    # Stage 3 — target OS detection.  Only fires when AccessCheck
+    # confirmed OSExecute is authorized; we don't want to burn a
+    # probe on an unusable credential.  Runs a single `uname` call
+    # (no shell wrap needed — one word, no whitespace, no
+    # metacharacters, kernel invokes it directly via execve/
+    # CreateProcess).  Success + non-empty output ⇒ Unix; anything
+    # else ⇒ Windows.  Result stored on out["os_hint"] so the
+    # caller can cache it on the connection for subsequent
+    # OSExecute wrap decisions.
+    out["os_hint"] = ""
+    if out.get("osexec_access") == 1:
+        try:
+            os_probe = sapcontrol_os_execute(
+                url, user, password, "uname", timeout=8.0)
+            if (os_probe.get("ok")
+                    and os_probe.get("exit_code") == 0
+                    and (os_probe.get("output") or "").strip()):
+                out["os_hint"] = "unix"
+            else:
+                out["os_hint"] = "windows"
+        except Exception:
+            # Probe error is not fatal — leave hint empty and let
+            # the wrap layer fall back to its usual heuristic.
+            pass
+
     out["ok"] = True
     return out
 
