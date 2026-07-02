@@ -29,6 +29,8 @@ Supported actions:
     impact_assess, impact_show, impact_export, analyze_chains,
     check_all_gw, check_all_betrusted, propagate, deep_scan, lpe,
     highlight_chain, layout, sleep,
+    # Node identity
+    set_sid, set_instance_nr,
     # SAProuter
     set_saprouter, check_router_info, router_scan,
     # Java data extraction / business impact
@@ -290,6 +292,43 @@ def _map_step(step: dict) -> tuple:
         #           saprouter: "/H/192.168.2.209/S/3299"
         return ("POST", f"/api/node/{target}/set_saprouter", {
             "saprouter": (step.get("saprouter") or "").strip(),
+        }, False)
+
+    if action == "set_sid":
+        # Rename a node's SID (rewires every reference — connections,
+        # created users, forged tickets, secstore entries, etc.).  Most
+        # common use in scripts: replace a placeholder SID (RFCDISC_,
+        # BTPDISC_, hostname-derived guess like "NCM") with the real
+        # three-char SID once the operator knows it.
+        # Usage:  - action: set_sid
+        #           target: RFCDISC_10_10_1_12
+        #           new_sid: SJ1
+        new_sid = (step.get("new_sid") or step.get("sid")
+                    or "").strip().upper()
+        if not (len(new_sid) == 3 and new_sid.isalnum()):
+            raise ValueError(
+                f"set_sid: new_sid must be 3 alphanumeric chars "
+                f"(got {new_sid!r})")
+        return ("POST", f"/api/node/{target}/set_sid", {
+            "new_sid": new_sid,
+        }, False)
+
+    if action == "set_instance_nr":
+        # Set (or override) a node's two-digit SAP instance number.
+        # Backfills the conventional per-instance ports (32NN dispatcher,
+        # 33NN gateway, 36NN MS, 80NN ICM) so GW / RFC / MS actions
+        # unlock without a full port scan.
+        # Usage:  - action: set_instance_nr
+        #           target: S4H
+        #           instance_nr: "00"
+        inst = (step.get("instance_nr")
+                or step.get("instance") or "").strip()
+        if not (len(inst) == 2 and inst.isdigit()):
+            raise ValueError(
+                f"set_instance_nr: instance_nr must be two digits "
+                f"(got {inst!r})")
+        return ("POST", f"/api/node/{target}/set_instance_nr", {
+            "instance_nr": inst,
         }, False)
 
     if action == "check_router_info":
@@ -660,6 +699,8 @@ _ACTION_LABELS = {
     "lpe":                    "Local privilege escalation",
     "exploit_cve_31324":      "Exploiting CVE-2025-31324",
     "set_saprouter":          "Attaching SAProuter prefix",
+    "set_sid":                "Renaming node SID",
+    "set_instance_nr":        "Setting instance number",
     "check_router_info":      "Probing SAProuter info leak",
     "router_scan":            "Scanning internal net via SAProuter",
     "layout":                 "Rearranging map",
