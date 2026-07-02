@@ -715,7 +715,26 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
     # with a clear error rather than dying at the certutil decode
     # step (operator-reported: JAV/J02 on Windows returned
     # PATH_NOT_FOUND from certutil).
+    def _extract_inst_nr(inst_dirname):
+        """Pull the two-digit NN out of "J00" / "JC01" / "JD20"
+        etc.  Returns None if the trailing chars aren't 2 digits —
+        happens for custom instance names.  Preserves the original
+        java_instance_nr as fallback in that case."""
+        import re as _re
+        m = _re.search(r"(\d{2})$", inst_dirname)
+        return int(m.group(1)) if m else None
+
     def _probe_java_root(nr):
+        """Return (root_path, discovered_instance_nr) — the second
+        value can differ from the SAPControl instance passed in when
+        the operator's landscape has separate J<NN> (Java Central
+        Instance) and SCS<NN> (Central Services) instances.
+        Operator-reported: SAPControl at port 50113 = inst 01 (SCS),
+        but the Java Central Instance is J00 with IRJ under
+        /usr/sap/THJ/J00/... — so nr=01 misses and enumeration must
+        return the ACTUAL nr=0 so the JSP URL uses port 50000, not
+        50100 which is SCS's msg-server-related slot.
+        """
         inst_candidates = [
             f"J{int(nr):02d}",
             f"JC{int(nr):02d}",
@@ -728,20 +747,16 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
                         f"irj/servlet_jsp/irj/root")
                 r = exec_fn("/usr/bin/test", f"-d {root}")
                 if r.get("success") and r.get("exit_code", 0) == 0:
-                    return root
-            # Fallback: enumerate /usr/sap/<SID>/ to find the ACTUAL
-            # instance folder (SCS01, J00, D00, whatever) and look
-            # for the servlet_jsp/irj/root subdir under each.
-            # `ls -1 /usr/sap/<SID>` returns one dir per line; then
-            # /usr/bin/find scoped to each candidate is quick.  Uses
-            # absolute paths because sapstartsrv PATH is restricted.
+                    return root, _extract_inst_nr(inst)
+            # Fallback: enumerate /usr/sap/<SID>/.  Real-world J
+            # Central Instances often use a different NN than the
+            # SAPControl-derived guess (SCS runs on inst 01, J
+            # Central on inst 00 — separate sapstartsrv per
+            # instance).
             r = exec_fn("/bin/ls", f"-1 {base}")
             if r.get("success") and r.get("exit_code", 0) == 0:
                 subdirs = [ln.strip() for ln in
                              (r.get("output") or []) if ln.strip()]
-                # Order by likelihood: J* / JC* / JD* first, then
-                # anything else.  Skip SYS (shared symlinks) and
-                # ASCS/SCS (Central Services — never has IRJ).
                 skip = ("SYS", "SCS", "ASCS", "ERS", "SMDA")
                 subdirs = [d for d in subdirs
                             if not any(d.startswith(s) for s in skip)]
@@ -754,8 +769,8 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
                     r2 = exec_fn("/usr/bin/test", f"-d {root}")
                     if r2.get("success") and r2.get(
                             "exit_code", 0) == 0:
-                        return root
-            return None
+                        return root, _extract_inst_nr(inst)
+            return None, None
         # Windows
         base = fr"C:\usr\sap\{sid}"
         for inst in inst_candidates:
@@ -768,7 +783,7 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
                 str(l) for l in (r.get("output") or [])
             ).strip().upper()
             if "YES" in out:
-                return root
+                return root, _extract_inst_nr(inst)
         # Fallback: enumerate C:\usr\sap\<SID>\ and try each subdir.
         r = exec_fn("cmd.exe", f'/C dir /B "{base}"')
         out_lines = [ln.strip() for ln in (r.get("output") or [])
@@ -789,15 +804,28 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
                 str(l) for l in (r2.get("output") or [])
             ).strip().upper()
             if "YES" in out2:
-                return root
-        return None
+                return root, _extract_inst_nr(inst)
+        return None, None
 
-    probed_root = _probe_java_root(java_instance_nr)
+    probed_root, probed_inst = _probe_java_root(java_instance_nr)
     if probed_root:
         target_path = probed_root + (("/" if linux else "\\")
                                        + jsp_name)
-        print(f"[+] {node.sid}: probed Java root — using "
-              f"{probed_root}")
+        # If enumeration turned up a different instance number
+        # (SAPControl was inst 01 = SCS, but J Central is J00), use
+        # THAT instance for the JSP URL — otherwise the URL points
+        # at port 5NN00 for the wrong NN and the JSP is unreachable
+        # even though it landed on disk.
+        if probed_inst is not None and probed_inst != java_instance_nr:
+            print(f"[+] {node.sid}: probed Java root — using "
+                  f"{probed_root} (Java instance {probed_inst:02d} "
+                  f"differs from SAPControl instance "
+                  f"{java_instance_nr:02d} — JSP URL will target "
+                  f"the Java instance, not SAPControl's)")
+            java_instance_nr = probed_inst
+        else:
+            print(f"[+] {node.sid}: probed Java root — using "
+                  f"{probed_root}")
     else:
         # Enumerate what IS under /usr/sap/<SID>/ so the operator
         # can see whether this is a Portal-less install (only
