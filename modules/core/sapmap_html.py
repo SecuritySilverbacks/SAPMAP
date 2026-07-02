@@ -4175,6 +4175,15 @@ function showCtxMenu(e, sid) {
   const isWindows = n && (n.os_type || '').toLowerCase().includes('windows');
   const hasCve31324 = n && n.cve_2025_31324_vulnerable;
   const hasSshAccess = n && (n.ssh_access || []).length > 0;
+  // SAPControl OSExecute pivot — any INCOMING Type-G connection from
+  // another node whose credentials we've verified against SAPControl
+  // gives us OS shell as <sid>adm on this target.  Same class of
+  // access as GW SAPXPG / CVE-31324 shell — enables OS Command
+  // Terminal, Reverse Shell, and downstream OS actions.  Read once
+  // here so every consumer below stays consistent.
+  const hasSapControlOsExec = n && (mapState.connections || []).some(
+    c => c && c.target_sid === sid
+       && c.os_exec_verified === true);
   const hasCve6287  = n && n.cve_2020_6287_vulnerable;
   const hasGwPort = n && (n.instances || []).some(i => Object.entries(i.ports || {}).some(([p,s]) => s === 'gateway' || (p >= 3300 && p <= 3399)));
   const hasFindings = n && (n.findings || []).length > 0;
@@ -4309,8 +4318,8 @@ function showCtxMenu(e, sid) {
     //     <sid>adm. So hasGwVuln enables terminal regardless of stack.
     //   - ABAP SXPG: requires an ABAP dialog/RFC user with SAP_ALL.
     //   - CVE-2025-31324 webshell: Java only, unauth.
-    'os_terminal':      hasGwVuln || (isAbapStack && hasCreatedUsers) || hasCve31324 || hasSshAccess,
-    'reverse_shell':    hasGwVuln || (isAbapStack && hasCreatedUsers) || hasCve31324 || hasSshAccess,
+    'os_terminal':      hasGwVuln || (isAbapStack && hasCreatedUsers) || hasCve31324 || hasSshAccess || hasSapControlOsExec,
+    'reverse_shell':    hasGwVuln || (isAbapStack && hasCreatedUsers) || hasCve31324 || hasSshAccess || hasSapControlOsExec,
     'ssh_harvest':      !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
     'ssh_harvest_root': !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers)
                           && !!(n && (n.copyfail_root_obtained || n.dirtyfrag_root_obtained
@@ -4546,7 +4555,7 @@ function showCtxMenu(e, sid) {
     'impact_assess_java': (javaDeployBlocked
         ? 'RECON admin user exists but no JSP-deploy primitive is reachable (CTC ConfigServlet removed, admin telnet firewalled). System is hardened — data extraction not available from here.'
         : 'Requires Java/dual-stack + CVE-2025-31324, GW SAPXPG, or a Java admin user with a reachable CTC / telnet endpoint'),
-    'os_terminal':      'Requires an OS-exec path: vulnerable GW (any stack), ABAP+created-user (SXPG), CVE-2025-31324 webshell (Java), or SSH lateral movement',
+    'os_terminal':      'Requires an OS-exec path: vulnerable GW (any stack), ABAP+created-user (SXPG), CVE-2025-31324 webshell (Java), SSH lateral movement, or SAPControl OSExecute from a verified Type-G destination',
     'reverse_shell':    'Requires an OS-exec path: vulnerable GW (any stack), ABAP+created-user (SXPG), or CVE-2025-31324 webshell (Java)',
     'ssh_harvest':      'Requires OS-exec on a Linux host — reads /etc/passwd + .ssh dirs via GW SAPXPG, CVE-2025-31324, or SXPG_STEP_XPG_START',
     'ssh_harvest_root': 'Requires a viable Linux LPE (Copy Fail / pedit-COW / Dirty Frag) — run "Escalate to Root" first. Reads ALL users\' .ssh directories as root.',
@@ -10024,6 +10033,16 @@ function showTerminalModal(sid) {
   addT('gateway', 'Gateway (unauthenticated)', !hasGw);
   if (isAbapT) addT('sxpg', 'SXPG (via SAP_ALL user)', !hasCreated);
   addT('cve_31324', 'CVE-2025-31324 (Java unauth)', !hasCve);
+  // SAPControl OSExecute — enabled when there's an incoming Type-G
+  // destination with os_exec_verified=True.  Shell as <sid>adm via
+  // the SAPControl SOAP endpoint.
+  const _scConn = (mapState.connections || []).find(
+    c => c && c.target_sid === sid && c.os_exec_verified === true);
+  addT('sapcontrol',
+       _scConn
+         ? `SAPControl OSExecute (${_scConn.rfc_user}@${_scConn.source_sid}→${sid})`
+         : 'SAPControl OSExecute (no verified Type-G destination)',
+       !_scConn);
   // SYSTEM via Windows LPE — needs a viable Windows LPE technique
   // (EfsPotato / GodPotato / MiniPlasma) AND the operator must have
   // run Check Windows SYSTEM LPE first so the picker's per-technique
@@ -10062,7 +10081,8 @@ function showTerminalModal(sid) {
                               : (hasCve ? 'cve_31324'
                                         : (hasGw ? 'gateway'
                                                  : (isAbapT && hasCreated ? 'sxpg'
-                                                   : (hasSsh ? 'ssh' : 'gateway'))));
+                                                   : (_scConn ? 'sapcontrol'
+                                                     : (hasSsh ? 'ssh' : 'gateway')))));
   // Info text
   let info = [];
   if (hasGw) info.push('Gateway: vulnerable');
