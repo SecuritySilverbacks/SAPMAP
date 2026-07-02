@@ -1461,7 +1461,8 @@ def sapcontrol_auth_probe(url: str, user: str, password: str,
             # circuited before we ran the auth probe.
             "osexec_access": -1,
             "access_check_status": 0,
-            "access_check_error": ""}
+            "access_check_error": "",
+            "os_name": ""}
     if not url:
         out["error"] = "empty URL"
         return out
@@ -1746,6 +1747,7 @@ def sapcontrol_auth_probe(url: str, user: str, password: str,
     # doesn't fit either pattern), leave hint empty so the wrap
     # layer falls back to node.os_type / user-pattern heuristics.
     out["os_hint"] = ""
+    out["os_name"] = ""   # raw uname output when Unix — e.g. "Linux"
     if out.get("osexec_access") == 1:
         try:
             os_probe = sapcontrol_os_execute(
@@ -1759,10 +1761,19 @@ def sapcontrol_auth_probe(url: str, user: str, password: str,
                     and any(m in probe_out.lower()
                             for m in _unix_markers)):
                 out["os_hint"] = "unix"
+                # Take the first non-empty line of uname output —
+                # that's the raw OS name Sapmap can display in
+                # System Details ("Linux", "Darwin", "AIX", ...).
+                for _ln in probe_out.splitlines():
+                    _ln = _ln.strip()
+                    if _ln:
+                        out["os_name"] = _ln
+                        break
             elif ("createprocess" in probe_err
                     or "createprocess" in (
                         os_probe.get("output") or "").lower()):
                 out["os_hint"] = "windows"
+                out["os_name"] = "Windows NT"
             # Anything else — leave hint empty; wrap layer falls
             # back to node.os_type / user-pattern heuristics.
         except Exception:

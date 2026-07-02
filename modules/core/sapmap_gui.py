@@ -9032,6 +9032,26 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         if _tgt_node:
                             if _real_host and not _tgt_node.hostname:
                                 _tgt_node.hostname = _real_host
+                            # Backfill os_type from the uname probe
+                            # result so System Details reflects the
+                            # detected OS.  Placeholder targets land
+                            # here with os_type='' — the uname probe
+                            # is ground truth (came from actually
+                            # running a command).  Use the raw uname
+                            # output when Unix ("Linux", "AIX",
+                            # "Darwin", …) so the operator can tell
+                            # distros apart; "Windows NT" for the
+                            # Windows case.  Don't overwrite an
+                            # explicit os_type the operator set.
+                            _os_name = (
+                                _sc_result.get("os_name") or "").strip()
+                            if _os_name and not (
+                                    _tgt_node.os_type or "").strip():
+                                _tgt_node.os_type = _os_name
+                                print(f"[+] {dest_name}: backfilled "
+                                      f"{conn.target_sid}.os_type = "
+                                      f"{_os_name!r} from SAPControl "
+                                      f"uname probe")
                             if _real_inst:
                                 # Add / update the instance entry.
                                 _found = False
