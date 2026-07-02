@@ -8963,17 +8963,21 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             conn.target_os_hint = _oh
                             print(f"[+] {dest_name}: target OS "
                                   f"detected via probe: {_oh}")
-                        # Placeholder-target promotion.  RFCDISC_
-                        # / <hex>_<inst> placeholders from Type-G
-                        # materialisation have generic SIDs that
-                        # don't match the real /usr/sap/<SID>/
-                        # tree — later JSP-deploy paths compose
-                        # C:\usr\sap\10_1\J03\... and certutil
-                        # decodes into PATH_NOT_FOUND.  When
-                        # SAPControl returns a real 3-char SID +
-                        # instance + host, rename the placeholder
-                        # to that identity so all subsequent
-                        # operations see the real target.
+                        # Placeholder-target promotion.  The SAPControl
+                        # response is ground truth: it came from the
+                        # target's own GetInstanceProperties call.
+                        # RFC destination names, hostname-derived
+                        # placeholders (like "NCM" from srv01sm1.
+                        # ncmi.co via _derive_sid taking 3 chars off
+                        # "ncmi"), and RFCDISC_-shaped placeholders
+                        # are ALL heuristic guesses that should defer
+                        # to the authoritative reply.  Rename
+                        # whenever SAPControl says something different
+                        # from the current SID.  If a real node with
+                        # that SID is already on the map, merge into
+                        # it (target_sid re-pointed, placeholder
+                        # deleted) so we don't end up with duplicate
+                        # boxes.
                         _real_sid = (_sc_result.get("sid")
                                       or "").strip().upper()
                         _real_inst = (_sc_result.get("instance_nr")
@@ -8985,25 +8989,40 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                 and len(_real_sid) == 3
                                 and _real_sid.isalnum()
                                 and _real_sid != conn.target_sid):
-                            _placeholder = api.state.get_node(
-                                conn.target_sid)
-                            _is_placeholder = _placeholder and (
-                                _placeholder.discovered_via_rfc_g
-                                or conn.target_sid.startswith(
-                                    ("RFCDISC_", "BTPDISC_"))
-                                or "_" in conn.target_sid)
-                            if _is_placeholder:
-                                _old = conn.target_sid
+                            _old = conn.target_sid
+                            # If a node already exists with the
+                            # real SID (operator explicitly
+                            # scanned SJ1 earlier), merge:
+                            # re-point every connection at the
+                            # real one, remove the placeholder.
+                            _existing = api.state.get_node(_real_sid)
+                            if _existing is not None:
+                                for _c in api.state.connections:
+                                    if _c.target_sid == _old:
+                                        _c.target_sid = _real_sid
+                                    if _c.source_sid == _old:
+                                        _c.source_sid = _real_sid
+                                api.state.remove_node(_old)
+                                conn.target_sid = _real_sid
+                                print(f"[+] {dest_name}: merged "
+                                      f"placeholder {_old} into "
+                                      f"existing node "
+                                      f"{_real_sid} — SAPControl "
+                                      f"identity match")
+                            else:
                                 err = api.state.rename_node_sid(
                                     _old, _real_sid)
                                 if not err:
                                     conn.target_sid = _real_sid
                                     print(f"[+] {dest_name}: "
-                                          f"promoted placeholder "
+                                          f"promoted node "
                                           f"{_old} → {_real_sid} "
-                                          f"from SAPControl reply")
-                                    _placeholder = api.state.get_node(
-                                        _real_sid)
+                                          f"(SAPControl reply is "
+                                          f"authoritative)")
+                                else:
+                                    print(f"[!] {dest_name}: could "
+                                          f"not rename {_old} → "
+                                          f"{_real_sid}: {err}")
                         # Even without a rename, backfill any
                         # identity fields we now know but the node
                         # is missing.
