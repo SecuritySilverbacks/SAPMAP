@@ -9669,10 +9669,24 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 # PowerShell -EncodedCommand takes UTF-16LE base64.
                 # No spaces in the encoded portion → kernel splits
                 # into four clean argv tokens.
+                #
+                # Use the ABSOLUTE path to powershell.exe:
+                # sapstartsrv runs as a Windows service with a
+                # restricted PATH that often lacks
+                # C:\Windows\System32\WindowsPowerShell\v1.0, so
+                # bare "powershell" resolves to nothing and
+                # CreateProcess fails (operator-reported:
+                # 10.10.1.38:50313 sjjadm → "HTTP 500 CreateProcess
+                # failed").  System32 is always on the service PATH
+                # so the .exe under it is reachable.
                 b64 = _b64.b64encode(
                     command.encode("utf-16-le")).decode("ascii")
-                raw_cmd = (f"powershell -NoProfile -NonInteractive "
-                           f"-EncodedCommand {b64}")
+                raw_cmd = (
+                    r"C:\Windows\System32\WindowsPowerShell\v1.0"
+                    r"\powershell.exe"
+                    f" -NoProfile -NonInteractive"
+                    f" -EncodedCommand {b64}"
+                )
             else:
                 # base64 of the user command has no whitespace.
                 # `echo${IFS}<b64>|base64${IFS}-d|/bin/sh` reaches
