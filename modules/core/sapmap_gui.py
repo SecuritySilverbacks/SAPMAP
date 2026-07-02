@@ -9811,7 +9811,19 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 and command[0].isalpha()
                 and command[1:3] == ":\\")
         )
-        if raw_safe and (is_windows or cmd_is_absolute):
+        # Absolute-path bypass works on both platforms — CreateProcess
+        # and execve both take absolute paths as-is.  For bare command
+        # names, we ALWAYS need a shell wrap, on both platforms:
+        # * Linux: sapstartsrv's restricted PATH doesn't find /usr/bin
+        #   binaries (whoami, id, hostname, ...).
+        # * Windows: cmd.exe built-ins (dir, type, cls, set, echo, ...)
+        #   aren't real .exe files, so CreateProcess("Dir") fails
+        #   with "CreateProcess failed".  Only whoami / hostname /
+        #   ipconfig / systeminfo work bare (they are real .exes).
+        # Wrapping through PowerShell -EncodedCommand handles both
+        # built-ins and PATH-search, so gate raw-safe on absolute
+        # paths only.
+        if raw_safe and cmd_is_absolute:
             already_wrapped = True   # send verbatim
         raw_cmd = command
         if not already_wrapped:

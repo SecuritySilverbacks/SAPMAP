@@ -840,6 +840,19 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
                         f'"{target_path}"')
         cleanup_args = f"/C del /q {tmp_b64} 2>nul"
 
+        # cmd.exe accepts ~8191 chars per command line.  The old GW
+        # SAPXPG limit (255 B) meant 144 chunks per JSP.  SAPControl
+        # OSExecute has no such limit, but it allocates a temp file
+        # per call to capture stdout — 144 rapid calls exhausted the
+        # SAPControl kernel's temp filename namespace and returned
+        # "Cannot create temporary protocol filename" partway through.
+        # Grow to ~4000 chars per chunk so we make ~4 calls instead
+        # of 144.  Only applies to the SAPControl channel: callers
+        # keep the default 100 by not overriding chunk_size, so the
+        # GW path stays byte-identical.
+        if tmp_dir:
+            chunk_size = max(chunk_size, 4000)
+
     jsp_b64 = base64.b64encode(UME_CREATE_JSP.encode("utf-8")).decode("ascii")
     chunks = [jsp_b64[i:i + chunk_size]
               for i in range(0, len(jsp_b64), chunk_size)]
