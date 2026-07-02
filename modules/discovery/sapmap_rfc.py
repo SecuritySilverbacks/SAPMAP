@@ -1730,27 +1730,42 @@ def sapcontrol_auth_probe(url: str, user: str, password: str,
 
     # Stage 3 — target OS detection.  Only fires when AccessCheck
     # confirmed OSExecute is authorized; we don't want to burn a
-    # probe on an unusable credential.  Runs a single `uname` call
-    # (no shell wrap needed — one word, no whitespace, no
-    # metacharacters, kernel invokes it directly via execve/
-    # CreateProcess).  Success + non-empty output ⇒ Unix; anything
-    # else ⇒ Windows.  Result stored on out["os_hint"] so the
-    # caller can cache it on the connection for subsequent
-    # OSExecute wrap decisions.
+    # probe on an unusable credential.  Runs one call with the
+    # ABSOLUTE Linux path /bin/uname:
+    #   * Linux → succeeds (uname is at /bin on every distro that
+    #             ships /bin as a real directory or symlink),
+    #             returns "Linux" / "SunOS" / "AIX" / "Darwin" /
+    #             "HP-UX".  sapstartsrv's restricted PATH doesn't
+    #             matter because the binary is addressed absolutely.
+    #   * Windows → CreateProcess("/bin/uname", []) has no chance
+    #             (Windows doesn't understand the path), and the
+    #             kernel reports "CreateProcess failed" in the
+    #             HTTP 500 body.  That literal marker gives us a
+    #             positive Windows signal.
+    # When neither signal is definitive (network fault, response
+    # doesn't fit either pattern), leave hint empty so the wrap
+    # layer falls back to node.os_type / user-pattern heuristics.
     out["os_hint"] = ""
     if out.get("osexec_access") == 1:
         try:
             os_probe = sapcontrol_os_execute(
-                url, user, password, "uname", timeout=8.0)
+                url, user, password, "/bin/uname", timeout=8.0)
+            probe_out = (os_probe.get("output") or "").strip()
+            probe_err = (os_probe.get("error") or "").lower()
+            _unix_markers = ("linux", "sunos", "aix", "darwin",
+                              "hp-ux", "freebsd", "openbsd", "netbsd")
             if (os_probe.get("ok")
                     and os_probe.get("exit_code") == 0
-                    and (os_probe.get("output") or "").strip()):
+                    and any(m in probe_out.lower()
+                            for m in _unix_markers)):
                 out["os_hint"] = "unix"
-            else:
+            elif ("createprocess" in probe_err
+                    or "createprocess" in (
+                        os_probe.get("output") or "").lower()):
                 out["os_hint"] = "windows"
+            # Anything else — leave hint empty; wrap layer falls
+            # back to node.os_type / user-pattern heuristics.
         except Exception:
-            # Probe error is not fatal — leave hint empty and let
-            # the wrap layer fall back to its usual heuristic.
             pass
 
     out["ok"] = True
@@ -2479,43 +2494,91 @@ def retrieve_rfcsysacl(node: SAPNode, creds: Credentials = None) -> list:
     movement case.
     """
     entries = []
+    # Kernel-version-specific field set.  RFCSYSACL's columns vary:
+    # kernel 720/730 lacks RFCEQUSER/RFCUSER/RFCSAMEUSR, while 754+
+    # ships them all.  Ask FIRST for everything; on FIELD_NOT_VALID
+    # (operator-reported NW 7.30 stack) probe the schema via
+    # DDIF_FIELDINFO_GET and retry with the intersected list.
     fields_to_read = [
         "RFCSYSID", "RFCCLIENT", "RFCEQUSER",
         "RFCUSER", "RFCSNC", "RFCSAMEUSR",
     ]
 
-    try:
+    def _read_with_fields(fields):
         with _get_connection(node, creds) as conn:
-            result = conn.call(
+            return conn.call(
                 RFC_READ_TABLE,
                 QUERY_TABLE="RFCSYSACL",
                 DELIMITER="|",
-                FIELDS=[{"FIELDNAME": f} for f in fields_to_read],
+                FIELDS=[{"FIELDNAME": f} for f in fields],
                 ROWCOUNT=200,
             )
-            data = result.get("DATA", [])
-            for row in data:
-                wa = row.get("WA", "")
-                parts = [p.strip() for p in wa.split("|")]
-                if len(parts) < 3:
-                    continue
-                entry = {
-                    "rfcsysid":  parts[0] if len(parts) > 0 else "",
-                    "rfcclient": parts[1] if len(parts) > 1 else "",
-                    "rfcequser": parts[2] if len(parts) > 2 else "",
-                    "rfcuser":   parts[3] if len(parts) > 3 else "",
-                    "rfcsnc":    parts[4] if len(parts) > 4 else "",
-                    "rfcsameusr":parts[5] if len(parts) > 5 else "",
-                }
-                entries.append(entry)
 
-            if entries:
-                eq_y = sum(1 for e in entries if e["rfcequser"] == "Y")
-                print(f"[+] {node.sid}: RFCSYSACL has {len(entries)} "
-                      f"trusted-caller entries ({eq_y} with RFCEQUSER=Y)")
-            else:
-                print(f"[*] {node.sid}: RFCSYSACL is empty — no inbound "
-                      f"trusted-RFC callers configured")
+    def _probe_existing_fields(all_wanted):
+        """Return the subset of ``all_wanted`` that exists on this
+        kernel.  Uses DDIF_FIELDINFO_GET (metadata-only, cheap).
+        Falls back to the input list on any error so the caller
+        surfaces the original FIELD_NOT_VALID rather than a
+        misleading schema-probe error.
+        """
+        try:
+            cols = get_table_columns(node, "RFCSYSACL", creds=creds)
+        except Exception:
+            return all_wanted
+        if not cols:
+            return all_wanted
+        available = {c.upper() for c in cols}
+        return [f for f in all_wanted if f in available]
+
+    try:
+        try:
+            result = _read_with_fields(fields_to_read)
+        except Exception as e:
+            err = format_rfc_exception(e)
+            if "FIELD_NOT_VALID" not in err:
+                raise
+            # Older kernel — reduce the field list to what actually
+            # exists on this system and retry.
+            existing = _probe_existing_fields(fields_to_read)
+            if not existing or existing == fields_to_read:
+                # Probe didn't help (no schema access, or all fields
+                # exist yet the call still errored).  Re-raise so the
+                # outer handler logs the original error.
+                raise
+            print(f"[*] {node.sid}: RFCSYSACL kernel schema differs "
+                  f"({len(fields_to_read) - len(existing)} field(s) "
+                  f"missing) — retrying with "
+                  f"{'/'.join(existing)}")
+            fields_to_read = existing
+            result = _read_with_fields(fields_to_read)
+
+        # Build a column-name → row-index map so we can populate the
+        # entry dict tolerantly (missing columns land as "").
+        col_idx = {name.upper(): i
+                   for i, name in enumerate(fields_to_read)}
+        data = result.get("DATA", [])
+        for row in data:
+            wa = row.get("WA", "")
+            parts = [p.strip() for p in wa.split("|")]
+            def _col(name):
+                i = col_idx.get(name)
+                return parts[i] if i is not None and i < len(parts) else ""
+            entries.append({
+                "rfcsysid":  _col("RFCSYSID"),
+                "rfcclient": _col("RFCCLIENT"),
+                "rfcequser": _col("RFCEQUSER"),
+                "rfcuser":   _col("RFCUSER"),
+                "rfcsnc":    _col("RFCSNC"),
+                "rfcsameusr":_col("RFCSAMEUSR"),
+            })
+
+        if entries:
+            eq_y = sum(1 for e in entries if e["rfcequser"] == "Y")
+            print(f"[+] {node.sid}: RFCSYSACL has {len(entries)} "
+                  f"trusted-caller entries ({eq_y} with RFCEQUSER=Y)")
+        else:
+            print(f"[*] {node.sid}: RFCSYSACL is empty — no inbound "
+                  f"trusted-RFC callers configured")
 
     except Exception as e:
         err = format_rfc_exception(e)
