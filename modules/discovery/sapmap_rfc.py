@@ -1610,7 +1610,8 @@ def sapcontrol_auth_probe(url: str, user: str, password: str,
             "osexec_access": -1,
             "access_check_status": 0,
             "access_check_error": "",
-            "os_name": ""}
+            "os_name": "",
+            "stack_hint": ""}
     if not url:
         out["error"] = "empty URL"
         return out
@@ -1749,6 +1750,33 @@ def sapcontrol_auth_probe(url: str, user: str, password: str,
         out["instance_nr"] = inst
     out["hostname"] = (props.get("SAPLOCALHOST")
                         or props.get("INSTANCE_NAME") or "").strip()
+
+    # Stack detection from INSTANCE_NAME.  SAP kernel names the
+    # instance folder by role:
+    #   D<NN>   → ABAP dialog       (ABAP)
+    #   J<NN>   → Java central      (JAVA)
+    #   JC<NN>  → Java Central w/ SCS
+    #   JD<NN>  → Java dialog
+    #   SCS<NN> → Standalone Central Services (Java-side)
+    #   ASCS<NN>→ ABAP Central Services
+    #   HDB<NN> → HANA
+    # Used by the caller to backfill node.system_type on placeholder
+    # targets that had it empty — the frontend's isJavaStack /
+    # isAbapStack gates read from system_type, so without this the
+    # Java-only menu items stay hidden even after we've proven
+    # OSExecute against the target.
+    _inst_name = (props.get("INSTANCE_NAME") or "").strip().upper()
+    out["stack_hint"] = ""
+    if _inst_name.startswith(("JC", "JD", "J")):
+        out["stack_hint"] = "JAVA"
+    elif _inst_name.startswith("SCS"):
+        out["stack_hint"] = "JAVA"   # SCS is Java-side CS
+    elif _inst_name.startswith("D"):
+        out["stack_hint"] = "ABAP"
+    elif _inst_name.startswith("ASCS"):
+        out["stack_hint"] = "ABAP"
+    elif _inst_name.startswith("HDB"):
+        out["stack_hint"] = "HANA"
 
     # Stage 2 — AccessCheck for OSExecute.  This is what actually
     # validates the credential AND authorization for the operation

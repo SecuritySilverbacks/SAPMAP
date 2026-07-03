@@ -9052,6 +9052,32 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                       f"{conn.target_sid}.os_type = "
                                       f"{_os_name!r} from SAPControl "
                                       f"uname probe")
+                            # Backfill system_type from the stack
+                            # hint derived from SAPControl's
+                            # INSTANCE_NAME (J* / JC* → JAVA,
+                            # D* / ASCS* → ABAP, HDB* → HANA).
+                            # Without this, placeholder targets stay
+                            # system_type='' and the Java-only menu
+                            # items ('Download Java Secure Store',
+                            # 'Read Java Destinations', etc.) stay
+                            # hidden — collapsing the whole Data
+                            # Extraction submenu because it has no
+                            # actionable items left.
+                            _stack_hint = (
+                                _sc_result.get("stack_hint")
+                                or "").strip().upper()
+                            _cur_stack = (
+                                _tgt_node.system_type or "").upper()
+                            if (_stack_hint
+                                    and _stack_hint not in _cur_stack):
+                                _tgt_node.system_type = (
+                                    f"{_cur_stack}+{_stack_hint}"
+                                    if _cur_stack else _stack_hint)
+                                print(f"[+] {dest_name}: backfilled "
+                                      f"{conn.target_sid}.system_type "
+                                      f"→ {_tgt_node.system_type!r} "
+                                      f"(from SAPControl "
+                                      f"INSTANCE_NAME)")
                             if _real_inst:
                                 # Add / update the instance entry.
                                 _found = False
