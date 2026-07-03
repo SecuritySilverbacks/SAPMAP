@@ -4297,12 +4297,17 @@ function showCtxMenu(e, sid) {
     // reachable CTC/telnet cannot extract hashes/tables, so gate the
     // Java branch on hasJavaDeploy rather than hasJavaAdmin.
     'download_hashes':    hasUsableAbapAccess ||
-                          (isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy)),
+                          (isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy || hasSapControlOsExec)),
     'download_secstore':  hasUsableAbapAccess,        // RSECTAB is ABAP
-    'download_java_secstore': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy),
+    // Java SecStore extraction reads three files off the OS
+    // filesystem ($SAPGLOBAL/security/data/SecStore.{properties,key}
+    // + the encrypted contents).  Any OS-exec path lets us do that
+    // — including the SAPControl OSExecute channel unlocked by a
+    // verified Type-G destination on this target.
+    'download_java_secstore': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy || hasSapControlOsExec),
     'view_java_secstore':     n && n.java_secstore_checked,
     'download_table':     hasUsableAbapAccess ||
-                          (isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy)),
+                          (isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy || hasSapControlOsExec)),
     // ABAP-only AND needs a real credential (verified RFC login or
     // a SAPMAP-created user).  node.pwned alone isn't enough — the
     // BAPI / RFC_READ_TABLE calls behind the impact scenarios fail
