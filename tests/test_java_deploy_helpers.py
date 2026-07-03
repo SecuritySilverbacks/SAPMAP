@@ -118,20 +118,30 @@ class TestDeployGW:
     def test_linux_chunks_use_python_no_shell(self, monkeypatch):
         """Linux chunked write must go through python3, not /bin/sh —
         SAPXPG's whitespace tokenizer breaks any `sh -c` form.
+        Uses ABSOLUTE python3 path (/usr/bin/python3 or a fallback
+        candidate) so sapstartsrv's restricted PATH can find it.
         """
         calls = self._capture(monkeypatch)
         node = _make_java_node(os_type="Linux")
         r = ex._deploy_jsp_via_gw(node, b"<%=1%>" * 40, "/path/x.jsp")
         assert r["success"]
         assert r["method"].endswith("linux")
-        # python3 gets called: first with --version (preflight), then
-        # with -c scripts for each chunk.
-        py_calls = [p for c, p in calls if c == "python3"]
-        assert "--version" in py_calls, \
+        # python3 gets called with an absolute path: first with
+        # --version (preflight probe walks the candidate list), then
+        # -c scripts for each chunk.  Whichever candidate answered
+        # --version first is reused for chunk writes.
+        py_calls = [(c, p) for c, p in calls
+                     if c.endswith("/python3") or "/python3." in c]
+        assert any(p == "--version" for _, p in py_calls), \
             "expected a python3 --version preflight call"
-        chunk_scripts = [p for p in py_calls if p.startswith("-c ")]
+        chunk_scripts = [(c, p) for c, p in py_calls
+                          if p.startswith("-c ")]
         assert len(chunk_scripts) >= 1
-        for p in chunk_scripts:
+        # Every chunk's python3 binary must be absolute.
+        for c, _ in chunk_scripts:
+            assert c.startswith("/"), \
+                f"chunk python3 must be absolute path, got {c!r}"
+        for _, p in chunk_scripts:
             assert "open(" in p
             assert ".write(" in p
             # Script portion (after "-c ") must have no whitespace —
