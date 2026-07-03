@@ -4687,10 +4687,15 @@ function showCtxMenu(e, sid) {
     // — the bug is in the ICM itself and detection applies broadly.
     'icmad_acl_bypass':        !n.is_web_dispatcher,
     'icmad_heapdump_pull':     !n.is_web_dispatcher,
-    // Java-only (dual-stack also counts as Java here)
-    'download_java_secstore':     !isJavaStack,
-    'view_java_secstore':         !isJavaStack,
-    'read_java_destinations':     !isJavaStack,
+    // Java-only (dual-stack also counts as Java here).  Relax the
+    // hide rule when we have a verified SAPControl OSExecute pivot
+    // targeting this node — the operator has already proven they
+    // have OS shell as <sid>adm.  Placeholder targets from Type-G
+    // materialisation land with system_type='' and would otherwise
+    // hide the whole Java flyout even after pwn confirmed.
+    'download_java_secstore':     !isJavaStack && !hasSapControlOsExec,
+    'view_java_secstore':         !isJavaStack && !hasSapControlOsExec,
+    'read_java_destinations':     !isJavaStack && !hasSapControlOsExec,
     'check_cve_6287':             !isJavaStack,
     'check_cve_31324':            !isJavaStack,
     'exploit_cve_31324_drop':     !isJavaStack,
