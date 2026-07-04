@@ -102,8 +102,16 @@ def set_sdk_path(path: str):
     _sdk_path = path
 
 
-def _get_connection(node: SAPNode, creds: Credentials = None):
+def _get_connection(node: SAPNode, creds: Credentials = None,
+                     host_override: str = ""):
     """Create an RFC connection to a node using credentials.
+
+    `host_override` — when non-empty, use this host instead of
+    `node.ip / node.hostname` for the ASHOST field.  Used when
+    testing an RFC destination whose stored target host differs
+    from the discovered node IP (e.g. destination points at an
+    internal address the source can reach; discovery found a
+    different NAT-ed IP).
 
     Returns an sap_rfc_ctypes.RFCConnection (context manager).
     """
@@ -114,7 +122,8 @@ def _get_connection(node: SAPNode, creds: Credentials = None):
     if creds is None:
         raise ValueError(f"No credentials available for {node.sid}")
 
-    host = node.ip or node.hostname
+    host = host_override.strip() if host_override else (
+        node.ip or node.hostname)
     params = {
         "ashost": host,
         "sysnr": creds.instance_nr,
@@ -135,20 +144,31 @@ def _get_connection(node: SAPNode, creds: Credentials = None):
 # Test connection
 # ---------------------------------------------------------------------------
 
-def test_connection(node: SAPNode, creds: Credentials = None) -> bool:
-    """Test if credentials work by opening a connection and pinging."""
+def test_connection(node: SAPNode, creds: Credentials = None,
+                     host_override: str = "") -> bool:
+    """Test if credentials work by opening a connection and pinging.
+
+    `host_override` — force the ASHOST value (see `_get_connection`).
+    Used to test RFC destinations against their RFCDES-stored host
+    rather than the node's discovered IP, which can differ when the
+    landscape uses multiple network paths (internal vs NAT).
+    """
+    host_label = host_override or (node.ip or node.hostname)
     try:
-        with _get_connection(node, creds) as conn:
+        with _get_connection(node, creds,
+                              host_override=host_override) as conn:
             ok = conn.ping()
             if ok and creds:
                 creds.verified = True
                 print(f"[+] Connection test OK for {node.sid} "
-                      f"(user={creds.username}, client={creds.client}, "
+                      f"(host={host_label}, user={creds.username}, "
+                      f"client={creds.client}, "
                       f"inst={creds.instance_nr})")
             return ok
     except Exception as e:
         err = format_rfc_exception(e)
-        print(f"[-] Connection test failed for {node.sid}: {err}")
+        print(f"[-] Connection test failed for {node.sid} "
+              f"(host={host_label}): {err}")
         if "password" in err.lower() or "logon" in err.lower():
             print(f"    Check username/password and client number")
         elif "communication" in err.lower() or "connect" in err.lower():
