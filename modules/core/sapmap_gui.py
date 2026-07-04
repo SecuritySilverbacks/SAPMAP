@@ -9557,8 +9557,31 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         client=target_client,
                         instance_nr=target_inst,
                     )
+                    # Host candidates — prefer the RFCDES-stored host
+                    # (what the destination actually uses in real SAP
+                    # calls) over the discovery-derived node IP.  In
+                    # multi-network landscapes these differ: e.g. dest
+                    # on SJJ stores 172.31.8.88 (internal to reach
+                    # S4D) while discovery found S4D at 172.31.35.41
+                    # via a different route.  Operator-reported: the
+                    # test was failing on the discovered IP even
+                    # though the destination's own IP would have
+                    # worked from SAPMAP too.
+                    _host_candidates = []
+                    for _h in (conn.target_ip, conn.target_host,
+                                target_node.ip, target_node.hostname):
+                        _h = (_h or "").strip()
+                        if _h and _h not in _host_candidates:
+                            _host_candidates.append(_h)
                     try:
-                        if sapmap_rfc.test_connection(target_node, direct_creds):
+                        _test_ok = False
+                        for _h in _host_candidates:
+                            if sapmap_rfc.test_connection(
+                                    target_node, direct_creds,
+                                    host_override=_h):
+                                _test_ok = True
+                                break
+                        if _test_ok:
                             conn.logon_successful = True
                             conn.logon_tested = True
                             conn.ping_ok = True
