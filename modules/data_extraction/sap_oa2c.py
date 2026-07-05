@@ -372,6 +372,20 @@ def read_oa2c_profiles(node: SAPNode,
     looks it up against ``node.secstore_entries`` by CLIENT_UUID at
     candidate-build time.
     """
+    # Negative-result cache.  When we've already established that
+    # OA2C_CLIENT / OA2C_CONFIG / OAUTH2_CLIENT_CONFIG all return
+    # "table not available" or 0 rows on this node, re-probing every
+    # AutoPwn wave burns 7-10s per pwned node for zero new signal
+    # (operator-reported: SB6, AED, SJ1 spent ~30s per wave × 3 waves
+    # on this).  Skip once we've stamped the flag.  The DDIF probe
+    # runs pyrfc's DDIF_FIELDINFO_GET which itself times out ~60s per
+    # table when the gateway is firewalled — the cost compounds fast.
+    if getattr(node, "_oa2c_absent", False):
+        print(f"[*] {node.sid}: OA2C tables previously verified "
+              f"absent — skipping re-probe (clear "
+              f"node._oa2c_absent to force re-check)")
+        return []
+
     print(f"[*] {node.sid}: reading OAuth 2.0 client config "
           f"(transaction OA2C_CONFIG tables)")
 
@@ -413,6 +427,13 @@ def read_oa2c_profiles(node: SAPNode,
         if not fallback_rows:
             print(f"[*] {node.sid}: no OAuth client config visible "
                   f"across {', '.join(_CLIENT_TABLE_VARIANTS)}")
+            # Stamp the negative cache so the next wave doesn't
+            # re-probe.  Only stamp when we ACTUALLY confirmed
+            # absence (fell all the way through the fallback path
+            # and got zero rows) — not when the RFC call itself
+            # errored out (transient connection issues shouldn't
+            # poison the cache).
+            node._oa2c_absent = True
             return []
         columns = list(fallback_rows[0].keys())
 
@@ -446,6 +467,11 @@ def read_oa2c_profiles(node: SAPNode,
     if not clients:
         print(f"[*] {node.sid}: {table} returned 0 rows — table "
               f"exists but has no OAuth profiles configured")
+        # Same negative-cache reasoning as above: no OAuth clients
+        # configured is a stable landscape fact; the operator would
+        # need to touch OA2C_CONFIG on the target before it changes.
+        # Stamp so subsequent AutoPwn waves skip.
+        node._oa2c_absent = True
         return []
 
     # When the kernel doesn't honour USE_ET_DATA_4_RETURN — or
