@@ -55,6 +55,7 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 - [Engagement Reports & Diffs](#engagement-reports--diffs)
 - [Evasion & Detection Avoidance (Tier 3)](#evasion--detection-avoidance-tier-3)
 - [Standalone Tools](#standalone-tools)
+- [Scripted Scenarios](#scripted-scenarios)
 - [State Management](#state-management)
 - [Testing](#testing)
 - [Configuration](#configuration)
@@ -1092,9 +1093,9 @@ Set your API key once via **Settings → Set hashes.com API Key** (stored in `se
 
 SAPMAP detects SCC HA master/shadow pairs. Run **Extract Keystore** on either node — it reads `scc_config/scc_config.ini` from the backup zip (`<haRole>`, `<shadowHost>`, `<masterHost>`) and draws a dashed **violet line** between the paired nodes labeled `HA: MASTER ⇄ SHADOW`.
 
-### Scripted Scenarios
+### Scripting SCC operations
 
-All SCC operations are scriptable. The `target` for SCC actions is the **SCC host IP** (e.g. `"192.168.2.167"`); for node-side harvest actions it is the **SAP SID** (e.g. `S4H`).
+All SCC operations are scriptable via the [Scripted Scenarios](#scripted-scenarios) engine. The `target` for SCC actions is the **SCC host IP** (e.g. `"192.168.2.167"`); for node-side harvest actions it is the **SAP SID** (e.g. `S4H`).
 
 #### SCC Script Actions
 
