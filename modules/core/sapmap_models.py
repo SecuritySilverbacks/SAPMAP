@@ -1205,6 +1205,13 @@ class RFCConnection:
     http_status: int = 0
     note_1177315_hit: bool = False
     os_exec_verified: bool = False
+    # Which SOAP channel actually confirmed OS execution.  "" (unknown /
+    # legacy field), "sapcontrol" (SAPControl OSExecute), or "ctcws"
+    # (CTCWebService/FileSystemConfig).  Lets the auth-probe pass in
+    # AutoPwn Phase 3 skip re-verification when a prior wave already
+    # confirmed the channel, and lets execute_os_command pick the
+    # cached pivot without re-detecting.
+    os_exec_channel: str = ""
     # OS detected via the Test Connection uname probe: "unix" | "windows" | "".
     # Empty when the probe hasn't run yet OR failed inconclusively;
     # the OSExecute wrap layer falls back to target_node.os_type in
@@ -1269,6 +1276,7 @@ class RFCConnection:
             "http_status": self.http_status,
             "note_1177315_hit": self.note_1177315_hit,
             "os_exec_verified": self.os_exec_verified,
+            "os_exec_channel": self.os_exec_channel,
             "rfc_type": self.rfc_type,
             "target_os_hint": self.target_os_hint,
         }
