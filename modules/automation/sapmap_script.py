@@ -23,28 +23,62 @@ Script format (YAML):
       ...
 
 Supported actions:
-    add_system, set_credentials, scan, check_gw, check_ms, betrusted,
-    betrusted_chain, create_user, create_user_via_rfc, retrieve_rfcs,
-    test_rfcs, test_rfc_single, download_hashes, download_secstore,
+    # Core discovery / add
+    add_system, set_credentials, scan, standard_scan, deep_scan,
+    rfc_system_info, check_default_creds, check_snc, enum_clients,
+    client_roles,
+    # ABAP vuln checks + exploitation
+    check_gw, check_ms, check_cve_6287, betrusted, betrusted_chain,
+    create_user, create_user_via_rfc, retrieve_rfcs, test_rfcs,
+    test_rfc_single, download_hashes, download_secstore, download_table,
+    import_transport, create_tcpip_dest, cleanup, cleanup_all,
+    # ICMAD (CVE-2022-22536)
+    check_cve_22536, icmad_acl_bypass, icmad_heapdump_pull,
+    # Java vuln checks + data extraction
+    check_cve_31324, java_secstore, extract_java_hashes,
+    read_java_destinations, download_java_table, impact_assess_java,
+    # Java exploitation (--confirm)
+    exploit_cve_31324, create_user_java,
+    # OS execution
+    exec_command, sapcontrol_osexecute,
+    # Linux + Windows LPE
+    check_linux_lpe, exploit_linux_lpe, check_windows_lpe,
+    exploit_windows_lpe, lpe,
+    # Web Dispatcher / ICM admin
+    wd_rediscover, wd_admin_set_credentials, wd_admin_probe_defaults,
+    wd_extract_icmauth,
+    # MYSAPSSO2 ticket forgery
+    forge_ticket, propagate_ticket, forge_and_fanout,
+    discover_strustsso2,
+    # SSH lateral movement
+    ssh_harvest, ssh_test_keys, ssh_plant_key,
+    # Business impact + trust chain analysis
     impact_assess, impact_show, impact_export, analyze_chains,
-    check_all_gw, check_all_betrusted, propagate, deep_scan, lpe,
-    highlight_chain, layout, sleep,
-    # Node identity
-    set_sid, set_instance_nr,
+    highlight_chain, layout, sleep, verify_pp_impersonation,
+    read_usrextid, read_oa2c, analyse_capabilities,
+    # Node identity / metadata overrides
+    set_sid, set_instance_nr, set_type, set_db_type, set_os_type,
+    set_telnet_override,
     # SAProuter
     set_saprouter, check_router_info, router_scan,
-    # Java data extraction / business impact
-    java_secstore, extract_java_hashes, read_java_destinations,
-    download_java_table, impact_assess_java,
-    # Java vulnerability checks
-    check_cve_31324, check_cve_6287, check_all_cve_31324,
-    # Java exploitation (requires --confirm on the CLI)
-    exploit_cve_31324, create_user_java,
+    # SAP Cloud Connector
+    scc_set_credentials, scc_probe_creds, scc_pull_mappings,
+    scc_probe_mappings, scc_extract_keystore, scc_download_hashes,
+    scc_lookup_hashes, scc_decrypt_ssfs, harvest_scc,
+    harvest_scc_mappings, harvest_scc_ssfs,
+    harvest_scc_hashes_via_lpe,
     # BTP — cloud-side enumeration with a stored token
     btp_set_token, btp_enumerate, btp_pull_destinations_for_token,
     btp_test_destination, btp_create_user_on_target,
     # BTP — on-prem → cloud lateral pivot
     harvest_btp_creds, mint_btp_token,
+    # Landscape-wide sweeps + AutoPwn
+    autopwn, propagate, propagate_all,
+    check_all_gw, check_all_ms, check_all_betrusted, check_all_cve_31324,
+    check_all_cve_6287, check_all_cve_22536, check_all_router_info,
+    check_all_snc, check_all_vulns,
+    # State management
+    save_state, load_state,
     # Macros (expanded at load time into multiple sub-steps)
     java_pipeline
 """
@@ -543,6 +577,403 @@ def _map_step(step: dict) -> tuple:
         return ("POST", f"/api/node/{target}/harvest_btp_creds",
                 {}, True)
 
+    # -----------------------------------------------------------------
+    # AutoPwn — full-landscape convergence loop
+    # -----------------------------------------------------------------
+    if action == "autopwn":
+        # Launch the AutoPwn scan → exploit → enrich → propagate loop.
+        # All knobs optional; defaults mirror the GUI's launcher.
+        #   max_waves:        int  (default 5)
+        #   include_lpe:      bool (default False)
+        #   include_btp:      bool (default True)
+        #   scan_gw:          bool (default True)
+        #   scan_10kblaze:    bool (default False — slow multi-hop)
+        #   scan_cve_31324:   bool (default True)
+        #   scan_recon:       bool (default True)
+        #   include_icmad_detection:       bool (default True)
+        #   include_router_info_detection: bool (default True)
+        return ("POST", "/api/actions/autopwn", {
+            "max_waves": int(step.get("max_waves", 5)),
+            "include_lpe": bool(step.get("include_lpe", False)),
+            "include_btp": bool(step.get("include_btp", True)),
+            "scan_gw": bool(step.get("scan_gw", True)),
+            "scan_10kblaze": bool(step.get("scan_10kblaze", False)),
+            "scan_cve_31324": bool(step.get("scan_cve_31324", True)),
+            "scan_recon": bool(step.get("scan_recon", True)),
+            "include_icmad_detection": bool(
+                step.get("include_icmad_detection", True)),
+            "include_router_info_detection": bool(
+                step.get("include_router_info_detection", True)),
+        }, True)
+
+    # -----------------------------------------------------------------
+    # Node identity / metadata overrides
+    # -----------------------------------------------------------------
+    if action == "set_type":
+        # Force node.system_type (e.g. "ABAP" / "JAVA" / "ABAP+JAVA"
+        # / "WEB_DISPATCHER").  set_type=WEB_DISPATCHER also flips
+        # node.is_web_dispatcher on for ICMAD severity + menu gating.
+        return ("POST", f"/api/node/{target}/set_type", {
+            "system_type": (step.get("system_type") or "").strip(),
+        }, False)
+
+    if action == "set_db_type":
+        # Set node.db_type — used by GW SAPXPG SQL writer chain and
+        # SecStore.  Codes: HDB, ADA, MSS, ORA, DB6.
+        return ("POST", f"/api/node/{target}/set_db_type", {
+            "db_type": (step.get("db_type") or "").strip(),
+        }, False)
+
+    if action == "set_os_type":
+        # Force node.os_type — controls shell wrapping in every
+        # OS-exec path.  Values like "Linux", "Windows NT", "AIX".
+        return ("POST", f"/api/node/{target}/set_os_type", {
+            "os_type": (step.get("os_type") or "").strip(),
+        }, False)
+
+    if action == "set_telnet_override":
+        # Override the AS Java admin telnet host:port (5NN08) with a
+        # tunnel endpoint.  Empty string clears the override.
+        return ("POST", f"/api/node/{target}/set_telnet_override", {
+            "telnet_override": (step.get("telnet_override") or "").strip(),
+        }, False)
+
+    # -----------------------------------------------------------------
+    # Scan / discovery
+    # -----------------------------------------------------------------
+    if action == "standard_scan":
+        # Standard-depth port + service scan on an existing node.
+        # Lighter than deep_scan (no CVE probes) but populates
+        # dispatcher / gateway / MS / ICM ports.
+        return ("POST", f"/api/node/{target}/standard_scan", {}, True)
+
+    if action == "rfc_system_info":
+        # Unauthenticated SID probe on discovered ports.  Fills
+        # node.sid / node.system_type when successful.
+        return ("POST", f"/api/node/{target}/rfc_system_info", {}, True)
+
+    if action == "check_default_creds":
+        # Sequential DIAG probe of the 16 vendor-default credentials
+        # (SAP*, DDIC, EARLYWATCH, TMSADM, …) across each known client.
+        # Sequential by design to minimise lockout risk.
+        return ("POST", f"/api/node/{target}/check_default_creds", {}, True)
+
+    if action == "check_snc":
+        # Read snc/enable + snc/data_protection/* profile params.
+        return ("POST", f"/api/node/{target}/check_snc", {}, True)
+
+    if action == "enum_clients":
+        # DIAG-based enumeration of visible SAP clients on the node.
+        return ("POST", f"/api/node/{target}/enum_clients", {}, True)
+
+    if action == "client_roles":
+        # Read T000 client roles table.
+        return ("POST", f"/api/node/{target}/client_roles", {}, True)
+
+    if action == "check_cve_22536":
+        # ICMAD (CVE-2022-22536) — patch-table lookup + live smuggle
+        # probe on every discovered ICM port.
+        return ("POST", f"/api/node/{target}/check_cve_2022_22536", {},
+                True)
+
+    if action == "icmad_acl_bypass":
+        # D.2 — sweep 12 hand-picked admin/recon paths through the
+        # ICMAD smuggle bypass.  Requires check_cve_22536 first.
+        return ("POST", f"/api/node/{target}/icmad_acl_bypass", {
+            "outer_path": step.get("outer_path", "/sap/wzip?aaa"),
+        }, True)
+
+    if action == "icmad_heapdump_pull":
+        # D.3 — list available heap dumps (no `dump` field) or pull
+        # a specific dump via the ICMAD smuggle bypass.
+        payload = {"outer_path": step.get("outer_path", "/sap/wzip?aaa")}
+        if step.get("dump"):
+            payload["dump"] = step["dump"]
+        return ("POST", f"/api/node/{target}/icmad_heapdump_pull",
+                payload, True)
+
+    # -----------------------------------------------------------------
+    # ICM / Web Dispatcher
+    # -----------------------------------------------------------------
+    if action == "wd_rediscover":
+        # Rescan a Web Dispatcher / ICM node for admin ports and
+        # backend routes.
+        return ("POST", f"/api/node/{target}/wd_rediscover", {}, True)
+
+    if action == "wd_admin_set_credentials":
+        # Store admin credentials for the ICM/WD admin UI.
+        return ("POST", f"/api/node/{target}/wd_admin_set_credentials", {
+            "username": step.get("username", ""),
+            "password": step.get("password", ""),
+        }, False)
+
+    if action == "wd_admin_probe_defaults":
+        # Probe default credentials against the ICM/WD admin UI.
+        return ("POST", f"/api/node/{target}/wd_admin_probe_defaults",
+                {}, True)
+
+    if action == "wd_extract_icmauth":
+        # Pull icmauth.txt (hashed webadmin credentials) via admin API.
+        return ("POST", f"/api/node/{target}/wd_extract_icmauth", {},
+                True)
+
+    # -----------------------------------------------------------------
+    # Windows LPE
+    # -----------------------------------------------------------------
+    if action == "check_windows_lpe":
+        # Probe EfsPotato / GodPotato / MiniPlasma viability.
+        return ("POST", f"/api/node/{target}/check_windows_lpe", {}, True)
+
+    if action == "exploit_windows_lpe":
+        # Run a shell command as NT AUTHORITY\SYSTEM via the best
+        # viable Windows LPE.  DESTRUCTIVE.
+        return ("POST", f"/api/node/{target}/exploit_windows_lpe", {
+            "command": step.get("command", "whoami"),
+            "av_evasion": bool(step.get("av_evasion", False)),
+        }, True)
+
+    # -----------------------------------------------------------------
+    # MYSAPSSO2 ticket forgery + propagation
+    # -----------------------------------------------------------------
+    if action == "forge_ticket":
+        # Forge a MYSAPSSO2 ticket impersonating an arbitrary user,
+        # signed by the target's SAPSYS.pse.  DESTRUCTIVE — writes to
+        # loot and (via propagate_ticket) enables SAP_ALL sessions
+        # against every STRUSTSSO2-trusted receiver.
+        payload = {
+            "user": step.get("user", "SAP*"),
+            "client": str(step.get("client", "100")),
+            "validity_min": int(step.get("validity_min", 120)),
+            "digest": step.get("digest", "sha256"),
+        }
+        if step.get("pin"):
+            payload["pin"] = step["pin"]
+        if step.get("recipient_sid"):
+            payload["recipient_sid"] = step["recipient_sid"]
+        if step.get("recipient_client"):
+            payload["recipient_client"] = step["recipient_client"]
+        return ("POST", f"/api/node/{target}/forge_ticket", payload,
+                True)
+
+    if action == "propagate_ticket":
+        # Replay a forged ticket against one or more receivers.
+        payload = {
+            "ticket_index": int(step.get("ticket_index", 0)),
+            "timeout": int(step.get("timeout", 10)),
+        }
+        if step.get("target_sids"):
+            payload["target_sids"] = step["target_sids"]
+        if step.get("channels"):
+            payload["channels"] = step["channels"]
+        return ("POST", f"/api/node/{target}/propagate_ticket", payload,
+                True)
+
+    if action == "forge_and_fanout":
+        # Forge a ticket then auto-replay it against every trusted
+        # receiver in state.trust_relations.  DESTRUCTIVE.
+        payload = {
+            "user": step.get("user", "SAP*"),
+            "client": str(step.get("client", "100")),
+            "validity_min": int(step.get("validity_min", 120)),
+            "digest": step.get("digest", "sha1"),
+            "timeout": int(step.get("timeout", 10)),
+        }
+        if step.get("recipient_sid"):
+            payload["recipient_sid"] = step["recipient_sid"]
+        if step.get("recipient_client"):
+            payload["recipient_client"] = step["recipient_client"]
+        if step.get("channels"):
+            payload["channels"] = step["channels"]
+        return ("POST", f"/api/node/{target}/forge_and_fanout", payload,
+                True)
+
+    if action == "discover_strustsso2":
+        # Discover STRUSTSSO2 trust relationships on a pwned ABAP
+        # node.  Populates state.trust_relations so forge_and_fanout
+        # knows which receivers to hit.
+        return ("POST", f"/api/node/{target}/discover_strustsso2", {},
+                True)
+
+    # -----------------------------------------------------------------
+    # Table / transport / user extras
+    # -----------------------------------------------------------------
+    if action == "read_usrextid":
+        # Read on-prem USREXTID (cert-CN → ABAP user mappings).
+        return ("POST", f"/api/node/{target}/read_usrextid", {}, True)
+
+    if action == "read_oa2c":
+        # Read OA2C_CLIENT + OA2C_CLIENT_EXT — OAuth2 profiles for
+        # BTP token minting.
+        return ("POST", f"/api/node/{target}/read_oa2c", {}, True)
+
+    if action == "verify_pp_impersonation":
+        # After SCC PP analysis + USREXTID read, verify the SCC's
+        # subject-pattern rule actually opens a session as the
+        # impersonation-target ABAP user.
+        return ("POST", f"/api/node/{target}/verify_pp_impersonation",
+                {}, True)
+
+    if action == "download_table":
+        # Generic RFC_READ_TABLE download.  Fields defaults to * ,
+        # max_rows caps result size.
+        return ("POST", f"/api/node/{target}/download_table", {
+            "table": (step.get("table") or "").strip(),
+            "fields": step.get("fields", []),
+            "where": (step.get("where") or "").strip(),
+            "max_rows": int(step.get("max_rows", 500)),
+        }, True)
+
+    if action == "import_transport":
+        # STMS transport import.  DESTRUCTIVE (dry_run=False installs
+        # code on the target).  Note: zip payload must be handed to a
+        # multipart upload; scripts can only trigger a dry-run over
+        # an already-uploaded transport.  For full uploads use the
+        # GUI's Import Transport menu.
+        return ("POST", f"/api/node/{target}/import_transport", {
+            "target_client": str(step.get("target_client", "001")),
+            "dry_run": "1" if step.get("dry_run", True) else "0",
+            "channel": step.get("channel", "auto"),
+        }, True)
+
+    if action == "create_tcpip_dest":
+        # Create a TCP/IP RFC destination on a pwned ABAP node.  Used
+        # to seed a Type-T destination that later SXPG calls will
+        # bounce through.
+        return ("POST", f"/api/node/{target}/create_tcpip_dest", {
+            "destination": step.get("destination", ""),
+            "host": step.get("host", ""),
+            "program": step.get("program", ""),
+        }, True)
+
+    # -----------------------------------------------------------------
+    # OS execution — direct + SAPControl OSExecute channel
+    # -----------------------------------------------------------------
+    if action == "exec_command":
+        # Run a shell command via one of the three OS-exec channels:
+        #   method=gateway    — GW SAPXPG (needs gw_vulnerable)
+        #   method=sxpg       — authenticated SXPG (needs creds)
+        #   method=cve_31324  — CVE-2025-31324 JSP webshell
+        #   method=sapcontrol — SAPControl OSExecute pivot (Type-G).
+        #                       Requires cached pivot on target.
+        # cmdline auto-wraps in the target OS's shell.
+        return ("POST", f"/api/node/{target}/exec_command", {
+            "method": step.get("method", "gateway"),
+            "cmdline": step.get("cmdline", ""),
+            "command": step.get("command", ""),
+            "params": step.get("params", ""),
+        }, True)
+
+    if action == "sapcontrol_osexecute":
+        # Run a shell command via SAPControl OSExecute directly, using
+        # a specified Type-G destination.  Synchronous — the SOAP
+        # call blocks until the child exits.  Requires the connection
+        # to be os_exec_verified (run test_rfc_single first).
+        return ("POST", f"/api/node/{target}/sapcontrol_osexecute", {
+            "destination_name": step.get("destination_name",
+                                          step.get("destination", "")),
+            "command": step.get("command", ""),
+            "timeout": int(step.get("timeout", 30)),
+        }, True)
+
+    # -----------------------------------------------------------------
+    # SSH lateral movement
+    # -----------------------------------------------------------------
+    if action == "ssh_harvest":
+        # Phase 1 — enumerate OS users, exfiltrate SSH keys, parse
+        # known_hosts + authorized_keys + config.
+        return ("POST", f"/api/node/{target}/ssh_harvest", {
+            "channel": step.get("channel", "auto"),
+        }, True)
+
+    if action == "ssh_test_keys":
+        # Phase 2 — test harvested SSH keys against known targets.
+        payload = {"channel": step.get("channel", "auto")}
+        if step.get("keys"):
+            payload["keys"] = step["keys"]
+        if step.get("os_users"):
+            payload["os_users"] = step["os_users"]
+        return ("POST", f"/api/node/{target}/ssh_test_keys", payload,
+                True)
+
+    if action == "ssh_plant_key":
+        # Phase 3 — plant SAPMAP SSH pubkey for persistence.
+        # DESTRUCTIVE (writes authorized_keys).
+        return ("POST", f"/api/node/{target}/ssh_plant_key", {
+            "channel": step.get("channel", "auto"),
+            "target_user": step.get("target_user", ""),
+        }, True)
+
+    # -----------------------------------------------------------------
+    # SCC harvest via LPE
+    # -----------------------------------------------------------------
+    if action == "harvest_scc_hashes_via_lpe":
+        # LPE-elevated harvest of SCC users.xml (needs root LPE
+        # on a co-located node).
+        return ("POST",
+                f"/api/node/{target}/harvest_scc_hashes_via_lpe", {},
+                True)
+
+    if action == "analyse_capabilities":
+        # MITRE ATT&CK-style capability rules run against a pwned
+        # node — outputs what's actionable given current state.
+        return ("POST", f"/api/node/{target}/analyse_capabilities", {},
+                True)
+
+    # -----------------------------------------------------------------
+    # Cleanup + landscape-wide sweeps
+    # -----------------------------------------------------------------
+    if action == "cleanup":
+        # Delete every SAPMAP-created user on this node.
+        return ("POST", f"/api/node/{target}/cleanup", {}, True)
+
+    if action == "cleanup_all":
+        # Delete SAPMAP-created users on every node.
+        return ("POST", "/api/actions/cleanup_all", {}, True)
+
+    if action == "propagate_all":
+        # Retrieve RFCs + attempt propagation across every pwned node.
+        return ("POST", "/api/actions/propagate_all", {}, True)
+
+    if action == "check_all_ms":
+        # Sweep MS_BETRUSTED across the landscape.
+        return ("POST", "/api/actions/check_all_ms", {}, True)
+
+    if action == "check_all_cve_6287":
+        # Sweep CVE-2020-6287 across the landscape.
+        return ("POST", "/api/actions/check_all_cve_6287", {}, True)
+
+    if action == "check_all_cve_22536":
+        # Sweep ICMAD across the landscape.
+        return ("POST", "/api/actions/check_all_cve_22536", {}, True)
+
+    if action == "check_all_router_info":
+        # Sweep CVE-2017-12636 across every SAProuter node.
+        return ("POST", "/api/actions/check_all_router_info", {}, True)
+
+    if action == "check_all_snc":
+        # Sweep SNC configuration across the landscape.
+        return ("POST", "/api/actions/check_all_snc", {}, True)
+
+    if action == "check_all_vulns":
+        # Meta-sweep: run every vuln check across the landscape.
+        return ("POST", "/api/actions/check_all_vulns", {}, True)
+
+    # -----------------------------------------------------------------
+    # State management
+    # -----------------------------------------------------------------
+    if action == "save_state":
+        # Save the current session to states/<name>.sapmap.  When
+        # name is omitted the auto-save path is used.
+        return ("POST", "/api/state/save", {
+            "name": (step.get("name") or "").strip(),
+        }, True)
+
+    if action == "load_state":
+        # Load a session file from states/<name>.sapmap.
+        return ("POST", "/api/state/load", {
+            "name": (step.get("name") or "").strip(),
+        }, True)
+
     if action == "mint_btp_token":
         # Exchange a captured (uaa_url, client_id, client_secret) at
         # XSUAA's /oauth/token for a BTP access token.  Stores the
@@ -617,6 +1048,12 @@ DESTRUCTIVE_ACTIONS = {
     "harvest_scc",            # writes files to /tmp on target host
     "exploit_copyfail",       # legacy alias — patches /usr/bin/su page cache
     "exploit_linux_lpe",      # auto-picker: Copy Fail or Dirty Frag
+    "exploit_windows_lpe",    # SYSTEM via EfsPotato / GodPotato / MiniPlasma
+    "forge_ticket",           # writes forged MYSAPSSO2 to loot
+    "forge_and_fanout",       # forge + auto-replay against trusted receivers
+    "ssh_plant_key",          # writes authorized_keys — persistence marker
+    "import_transport",       # STMS transport import (only dry_run is safe)
+    "autopwn",                # full scan → exploit → propagate loop
 }
 
 
@@ -714,6 +1151,66 @@ _ACTION_LABELS = {
     "btp_create_user_on_target":  "Creating user via BTP edge",
     "harvest_btp_creds":          "Harvesting BTP credentials",
     "mint_btp_token":             "Minting BTP token",
+    # AutoPwn
+    "autopwn":                    "Running AutoPwn convergence loop",
+    # Node metadata overrides
+    "set_type":                   "Setting system type",
+    "set_db_type":                "Setting DB type",
+    "set_os_type":                "Setting OS type",
+    "set_telnet_override":        "Setting telnet override",
+    # Scan / discovery
+    "standard_scan":              "Standard scan",
+    "rfc_system_info":            "Probing RFC system info",
+    "check_default_creds":        "Probing default credentials",
+    "check_snc":                  "Checking SNC configuration",
+    "enum_clients":               "Enumerating clients",
+    "client_roles":               "Reading client roles",
+    "check_cve_22536":            "Checking CVE-2022-22536 (ICMAD)",
+    "icmad_acl_bypass":           "Running ICMAD ACL bypass",
+    "icmad_heapdump_pull":        "Pulling ICMAD heap dump",
+    # Web Dispatcher / ICM
+    "wd_rediscover":              "Rediscovering Web Dispatcher",
+    "wd_admin_set_credentials":   "Setting WD admin credentials",
+    "wd_admin_probe_defaults":    "Probing WD admin defaults",
+    "wd_extract_icmauth":         "Extracting icmauth.txt",
+    # Windows LPE
+    "check_windows_lpe":          "Checking Windows LPE",
+    "exploit_windows_lpe":        "Exploiting Windows LPE",
+    # MYSAPSSO2 ticket forgery
+    "forge_ticket":               "Forging MYSAPSSO2 ticket",
+    "propagate_ticket":           "Propagating forged ticket",
+    "forge_and_fanout":           "Forging + fanning out ticket",
+    "discover_strustsso2":        "Discovering STRUSTSSO2 trust",
+    # Table / transport / user extras
+    "read_usrextid":              "Reading USREXTID",
+    "read_oa2c":                  "Reading OA2C profiles",
+    "verify_pp_impersonation":    "Verifying PP impersonation",
+    "download_table":             "Downloading RFC table",
+    "import_transport":           "Importing transport",
+    "create_tcpip_dest":          "Creating TCP/IP destination",
+    # OS execution
+    "exec_command":               "Executing OS command",
+    "sapcontrol_osexecute":       "SAPControl OSExecute",
+    # SSH lateral
+    "ssh_harvest":                "Harvesting SSH keys",
+    "ssh_test_keys":              "Testing SSH keys",
+    "ssh_plant_key":              "Planting SSH persistence",
+    # SCC LPE / capabilities
+    "harvest_scc_hashes_via_lpe": "Harvesting SCC hashes via LPE",
+    "analyse_capabilities":       "Analysing ATT&CK capabilities",
+    # Cleanup + landscape-wide
+    "cleanup":                    "Cleaning up SAPMAP users",
+    "cleanup_all":                "Cleaning up on every node",
+    "propagate_all":              "Landscape-wide propagation",
+    "check_all_ms":               "Sweeping MS betrusted",
+    "check_all_cve_6287":         "Sweeping CVE-2020-6287",
+    "check_all_cve_22536":        "Sweeping CVE-2022-22536 (ICMAD)",
+    "check_all_router_info":      "Sweeping SAProuter info leak",
+    "check_all_snc":              "Sweeping SNC config",
+    "check_all_vulns":            "Sweeping every vuln check",
+    # State
+    "save_state":                 "Saving session state",
+    "load_state":                 "Loading session state",
 }
 
 

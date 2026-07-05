@@ -1395,55 +1395,180 @@ steps:
 
 ### Available Actions
 
+Actions marked **⚠** are exploitation / destructive — they only run when the CLI is invoked with `--confirm`.  Any other run logs a `[SKIP]` line for those steps so a script can safely be dry-run end-to-end (discovery + data-read) and re-run with `--confirm` when you're ready to land the exploitation stage.
+
 #### System Management
 
 | Action | Parameters | Description |
 |--------|-----------|-------------|
 | `add_system` | `sid`, `ip`, `instance`, `saprouter` (optional) | Add a system to the map |
 | `set_credentials` | `target`, `username`, `password`, `client` | Store credentials for a system |
+| `set_sid` | `target`, `new_sid` | Rename a node's SID and rewire every reference (connections, users, tickets, SecStore).  Use to promote placeholders like `RFCDISC_10_10_1_12` → `SJ1` once the real SID is known |
+| `set_instance_nr` | `target`, `instance_nr` (2 digits) | Set the node's SAP instance NN.  Backfills conventional per-instance ports (32NN, 33NN, 36NN, 80NN) so GW / RFC / MS actions unlock without a full port scan |
+| `set_type` | `target`, `system_type` | Force `node.system_type` (`ABAP` / `JAVA` / `ABAP+JAVA` / `WEB_DISPATCHER`).  `WEB_DISPATCHER` also flips `is_web_dispatcher` for ICMAD severity gating |
+| `set_db_type` | `target`, `db_type` (`HDB`, `ADA`, `MSS`, `ORA`, `DB6`) | Set the backing DB — used by the GW SAPXPG SQL writer chain and RSECTAB decrypt |
+| `set_os_type` | `target`, `os_type` (`Linux` / `Windows NT` / `AIX` …) | Force the OS type — controls shell wrapping in every OS-exec path |
+| `set_telnet_override` | `target`, `telnet_override` (`host:port`) | Override the AS Java admin telnet (5NN08) with a tunnel endpoint.  Empty clears |
+| `save_state` | `name` (optional) | Save the session to `states/<name>.sapmap` (auto-save path when name is omitted) |
+| `load_state` | `name` | Load a session file from `states/<name>.sapmap` |
 | `sleep` | `seconds` | Pause between steps |
+| `layout` | `mode` (`grid` / `radial` / `waterfall` / …) | Rearrange nodes on the map |
 
 #### Scanning & Detection
 
 | Action | Parameters | Description |
 |--------|-----------|-------------|
-| `scan` | `targets` (CIDR/range/IP), `mode` (`fast` or `deep`), `concurrent_hosts` (default: 5) | Scan a network for SAP systems (e.g. `192.168.2.0/24`) |
-| `check_gw` | `target` | Check if SAP Gateway is vulnerable to SAPXPG exploit |
+| `scan` | `targets` (CIDR / range / IP), `mode` (`fast` or `deep`), `concurrent_hosts` (default: 5) | Scan a network for SAP systems (e.g. `192.168.2.0/24`) |
+| `standard_scan` | `target` | Standard-depth port + service scan on an existing node (lighter than `deep_scan`) |
+| `deep_scan` | `target` | Full SAPology vulnerability scan |
+| `rfc_system_info` | `target` | Unauthenticated SID probe — fills `sid` / `system_type` from V6 / V2 / Chipik responses |
+| `check_gw` | `target` | Check SAP Gateway SAPXPG (10KBlaze) reachability |
 | `check_ms` | `target` | Check if MS internal port is unprotected (CVE-2020-6207) |
-| `deep_scan` | `target` | Run full SAPology vulnerability scan |
-| `check_all_gw` | *(none)* | Check GW vulnerability on all systems on the map |
-| `check_all_betrusted` | `attacker_ip` (`auto` = detect) | Check 10KBlaze on all systems on the map |
+| `check_cve_31324` | `target` | Check CVE-2025-31324 (VisualComposer JSP RCE) |
+| `check_cve_6287` | `target` | Check CVE-2020-6287 (RECON) |
+| `check_cve_22536` | `target` | Check CVE-2022-22536 (ICMAD HTTP-smuggle) |
+| `check_default_creds` | `target` | Sequential DIAG probe of 16 vendor-default credentials across each client (sequential = lockout-safe) |
+| `check_snc` | `target` | Read `snc/enable` + `snc/data_protection/*` profile params |
+| `check_snc` | `target` | Read SNC configuration |
+| `enum_clients` | `target` | DIAG-based enumeration of visible SAP clients |
+| `client_roles` | `target` | Read T000 client roles table |
+| `check_router_info` | `target` | CVE-2017-12636 / ROUTER_ADM info leak probe on a SAProuter node |
+| `check_linux_lpe` (alias `check_copyfail`) | `target` | Probe Copy Fail + Dirty Frag root-LPE viability |
+| `check_windows_lpe` | `target` | Probe EfsPotato / GodPotato / MiniPlasma SYSTEM-LPE viability |
+| `check_all_gw` | *(none)* | Sweep GW vulnerability across every node |
+| `check_all_ms` | *(none)* | Sweep MS betrusted |
+| `check_all_betrusted` | `attacker_ip` (`auto` = detect) | Sweep 10KBlaze full-chain reachability |
+| `check_all_cve_31324` | *(none)* | Sweep CVE-2025-31324 |
+| `check_all_cve_6287` | *(none)* | Sweep CVE-2020-6287 (RECON) |
+| `check_all_cve_22536` | *(none)* | Sweep ICMAD |
+| `check_all_router_info` | *(none)* | Sweep CVE-2017-12636 on every SAProuter node |
+| `check_all_snc` | *(none)* | Sweep SNC config |
+| `check_all_vulns` | *(none)* | Meta-sweep: every vuln check across the landscape |
 
-#### Exploitation
+#### Exploitation ⚠
 
 | Action | Parameters | Description |
 |--------|-----------|-------------|
 | `betrusted` | `target`, `attacker_ip` (`auto` = detect), `nilist_wait` (default: 30) | Inject attacker IP into GW trust list via MS betrusted |
 | `betrusted_chain` | `target`, `attacker_ip`, `nilist_wait`, `client` | Full 10KBlaze chain: betrusted → GW exploit → create user |
-| `create_user` | `target`, `method` (`gw_exploit` or `credentials`), `client` | Create a SAPMAP user with SAP_ALL |
-| `create_user_via_rfc` | `target` (source SID), `destination` (RFC dest name), `target_sid` (remote SID) | Create a user on a remote system via an RFC destination |
-| `lpe` | `target`, `method` (optional — tries all if omitted) | Local privilege escalation (assign SAP_ALL to current user) |
-| `propagate` | `target` | Exploit RFC connections to reach other systems |
+| `create_user` | `target`, `method` (`gw_exploit` / `credentials`), `client` | Create a SAPMAP user with SAP_ALL on ABAP |
+| `create_user_java` | `target`, `method` (`auto` / `cve_31324` / `gw` / `sapcontrol`), plus SAPControl `sapcontrol_source_sid` + `sapcontrol_dest_name` when `method=sapcontrol` | Create a SAPMAP Java UME user |
+| `create_user_via_rfc` | `target` (source SID), `destination`, `target_sid` | Create a user on a remote system via a stored RFC destination |
+| `exploit_cve_31324` | `target`, `command` (default `whoami`) | Run a shell command via CVE-2025-31324 JSP shell |
+| `exploit_linux_lpe` (alias `exploit_copyfail`) | `target`, `command` (default `id`) | Run a command as root via the best viable Linux LPE (Copy Fail → Dirty Frag) |
+| `exploit_windows_lpe` | `target`, `command` (default `whoami`), `av_evasion` | Run a command as `NT AUTHORITY\SYSTEM` via the best viable Windows LPE |
+| `lpe` | `target`, `method` (optional) | ABAP LPE — assign SAP_ALL to the current user (SXPG / WebGUI RSBDCOS0 / BAPI) |
+| `icmad_acl_bypass` | `target`, `outer_path` | ICMAD D.2 — sweep 12 admin/recon paths through the smuggle bypass (requires `check_cve_22536` first) |
+| `icmad_heapdump_pull` | `target`, `dump` (empty = list) | ICMAD D.3 — list or pull HPROF heap dumps via the ACL bypass |
+
+#### AutoPwn — Full-Landscape Convergence Loop ⚠
+
+| Action | Parameters | Description |
+|--------|-----------|-------------|
+| `autopwn` | `max_waves` (5), `include_lpe` (false), `include_btp` (true), `scan_gw` (true), `scan_10kblaze` (false), `scan_cve_31324` (true), `scan_recon` (true), `include_icmad_detection` (true), `include_router_info_detection` (true) | Launch the full scan → exploit → enrich → propagate loop.  Includes the SAPControl OSExecute Type-G path — a source ABAP's `to_<target>` destination + `<sid>adm` creds unlocks OS-shell on firewalled Java stacks |
+| `propagate` | `target` | Exploit RFC connections from one pwned node |
+| `propagate_all` | *(none)* | Retrieve RFCs + propagate from every pwned node |
 
 #### Data Extraction
 
 | Action | Parameters | Description |
 |--------|-----------|-------------|
-| `retrieve_rfcs` | `target` | Retrieve all RFC destinations from the system |
-| `test_rfcs` | `target` | Test/ping all discovered RFC destinations |
-| `test_rfc_single` | `target`, `destination` (RFC destination name) | Test a single specific RFC destination |
+| `retrieve_rfcs` | `target` | Retrieve every RFC destination from the system.  For Type-G / SAPControl destinations this also caches the OSExecute pivot on the target when creds are already available |
+| `test_rfcs` | `target` | Test/ping every discovered RFC destination.  Triggers the SAPControl auth probe on Type-G endpoints |
+| `test_rfc_single` | `target`, `destination` | Test one specific destination.  Same SAPControl-probe hook as `test_rfcs` for Type-G |
 | `download_hashes` | `target` | Extract USR02 password hashes (BCODE/PASSCODE) |
-| `download_secstore` | `target` | Decrypt SecStore (RSECTAB) — RFC/DB/CTS/SMTP passwords |
-| `impact_assess` | `target`, `client` (optional), `scenario` (optional) | Run business impact assessment (all or one scenario) |
-| `impact_show` | `target` | Print all impact results to the console |
-| `impact_export` | `target`, `scenario` (optional — omit to export all) | Export impact data to CSV in `loot/bia/` (`bia_<SID>_<scenario>.csv`) |
+| `download_secstore` | `target` | Decrypt ABAP SecStore (RSECTAB) — RFC/DB/CTS/SMTP passwords |
+| `download_table` | `target`, `table`, `fields`, `where`, `max_rows` (500) | Generic `RFC_READ_TABLE` — routes over SOAP-RFC when the gateway is firewalled |
+| `read_usrextid` | `target` | Read USREXTID (cert-CN → ABAP user mappings) |
+| `read_oa2c` | `target` | Read OA2C_CLIENT + OA2C_CLIENT_EXT — OAuth2 profiles for BTP token minting |
+| `create_tcpip_dest` | `target`, `destination`, `host`, `program` | Create a TCP/IP RFC destination on a pwned ABAP node |
+| `verify_pp_impersonation` | `target` | Verify that a SCC subject-pattern rule opens a session as the impersonation-target ABAP user |
+| `import_transport` ⚠ | `target`, `target_client` (`001`), `dry_run` (true), `channel` (`auto` / `gw` / `sxpg`) | STMS transport dry-run against a previously-uploaded transport (full upload uses the GUI's Import Transport menu) |
+| `cleanup` | `target` | Delete every SAPMAP-created user on this node |
+| `cleanup_all` | *(none)* | Delete SAPMAP-created users on every node |
+
+#### OS Execution
+
+| Action | Parameters | Description |
+|--------|-----------|-------------|
+| `exec_command` | `target`, `method` (`gateway` / `sxpg` / `cve_31324` / `sapcontrol`), `cmdline` | Run a shell command via the picked OS-exec channel.  `cmdline` auto-wraps in the target OS's shell |
+| `sapcontrol_osexecute` | `target`, `destination_name`, `command`, `timeout` (30) | Run a command via SAPControl OSExecute directly.  Requires `os_exec_verified` on the connection — run `test_rfc_single` first |
+
+#### Java Data Extraction / Impact
+
+| Action | Parameters | Description |
+|--------|-----------|-------------|
+| `java_secstore` | `target` | Extract + decrypt the Java Secure Store on-server via dropped JSP |
+| `extract_java_hashes` | `target` | Extract UME password hashes + `J2EE_CONFIGENTRY` credential entries |
+| `read_java_destinations` | `target` | Read all JCo destinations from `J2EE_CONFIGENTRY`, plot downstream targets, import credentials |
+| `download_java_table` | `target`, `table`, `fields` (`*`), `where`, `max_rows` (500) | Run a SELECT against the Java stack's DB via JSP/JDBC |
+| `impact_assess_java` | `target` | Run Java business-impact scenarios (PI/PO, NWDI/CTS+, HR/ESS, KMC, audit tamper) |
+
+**Macro** `java_pipeline` — one-line convenience that expands to `check_cve_31324` → `java_secstore` → `extract_java_hashes` → `read_java_destinations` → `impact_assess_java`.
+
+#### MYSAPSSO2 Ticket Forgery ⚠
+
+| Action | Parameters | Description |
+|--------|-----------|-------------|
+| `discover_strustsso2` | `target` | Populate `state.trust_relations` from USREXTID / USRACL / STRUSTSSO2 |
+| `forge_ticket` | `target`, `user` (`SAP*`), `client` (`100`), `validity_min` (120), `digest` (`sha256`), `pin` (optional), `recipient_sid` (optional), `recipient_client` (optional) | Forge a MYSAPSSO2 logon ticket signed by the target's SAPSYS.pse |
+| `propagate_ticket` | `target`, `ticket_index` (0), `target_sids` (list), `channels` (`http`/`rfc`), `timeout` (10) | Replay a forged ticket against one or more receivers |
+| `forge_and_fanout` | `target`, `user`, `client`, `validity_min`, `digest`, `channels`, `timeout` | Forge + auto-replay against every trusted receiver in `state.trust_relations` |
+
+#### SSH Lateral Movement
+
+| Action | Parameters | Description |
+|--------|-----------|-------------|
+| `ssh_harvest` | `target`, `channel` (`auto`) | Enumerate OS users, exfiltrate SSH keys, parse `known_hosts` + `authorized_keys` + `config` |
+| `ssh_test_keys` | `target`, `channel`, `keys`, `os_users` (all optional) | Test harvested keys against known targets — falls back to `loot/ssh/<host>/harvest.json` |
+| `ssh_plant_key` ⚠ | `target`, `channel`, `target_user` | Plant the SAPMAP SSH pubkey for persistence |
+
+#### SAP Cloud Connector (SCC)
+
+Cloud Connector actions come in two flavours — `scc_*` operate against an SCC host directly, `harvest_scc*` run through OS-exec on a co-located pwned SAP node.
+
+| Action | Parameters | Description |
+|--------|-----------|-------------|
+| `scc_set_credentials` | `target` (SCC host), `username`, `password` | Store SCC admin credentials |
+| `scc_probe_creds` | `target` | Probe SCC default credentials |
+| `scc_pull_mappings` | `target`, `username`, `password` | Pull cloud→on-prem mappings via SCC admin REST API |
+| `scc_probe_mappings` | `target` | TCP/HTTP smoke-test every SCC mapping |
+| `scc_extract_keystore` ⚠ | `target`, `username`, `password`, `backup_password` | Pull backup, extract keystores, decrypt SSFS |
+| `scc_download_hashes` | `target` | Download SCC user hashes (`users.xml`) via OS-exec / zip / REST |
+| `scc_lookup_hashes` | `target`, `api_key` (optional), `hashes` (optional) | Look up SCC hashes against hashes.com rainbow tables |
+| `scc_decrypt_ssfs` | `target` | Decrypt SSFS_SCC blob from a previously extracted backup |
+| `harvest_scc` ⚠ | `target` (SAP node SID) | Post-RCE SCC harvest (ARP sweep, keystore bundle exfil, …) |
+| `harvest_scc_mappings` | `target` (SAP node SID) | Read `backends.xml` via OS-exec on a co-located SAP node |
+| `harvest_scc_ssfs` | `target` (SAP node SID) | Read on-host SSFS_SCC.KEY/.DAT via OS-exec, decrypt secrets |
+| `harvest_scc_hashes_via_lpe` | `target` (SAP node SID) | LPE-elevated harvest of `users.xml` (requires root LPE on a co-located node) |
+
+#### SAProuter
+
+| Action | Parameters | Description |
+|--------|-----------|-------------|
+| `set_saprouter` | `target`, `saprouter` (`/H/host/S/3299`) | Attach a SAProuter prefix so subsequent ops tunnel through it |
+| `check_router_info` | `target` | CVE-2017-12636 / ROUTER_ADM info leak probe |
+| `router_scan` | `target`, `targets`, `auto_targets`, `inst_from`, `inst_to`, `mode` (`sap` / `full`), `concurrency`, `timeout` | Scan internal hosts through a SAProuter node |
+
+#### Web Dispatcher / ICM Admin
+
+| Action | Parameters | Description |
+|--------|-----------|-------------|
+| `wd_rediscover` | `target` | Rescan a WD / ICM node for admin ports and backend routes |
+| `wd_admin_set_credentials` | `target`, `username`, `password` | Store admin credentials for the ICM/WD admin UI |
+| `wd_admin_probe_defaults` | `target` | Probe default credentials against the ICM/WD admin UI |
+| `wd_extract_icmauth` | `target` | Pull `icmauth.txt` (hashed webadmin credentials) via admin API |
 
 #### Landscape Analysis
 
 | Action | Parameters | Description |
 |--------|-----------|-------------|
-| `analyze_chains` | *(none)* | Discover RFC trust chain escalation paths across the landscape |
-| `highlight_chain` | `start` + `end` (SIDs), or `index` (0-based) | Highlight an attack chain on the map with pulsing red path |
+| `impact_assess` | `target`, `client`, `scenario` (optional) | Business impact assessment |
+| `impact_show` | `target` | Print impact results to the console |
+| `impact_export` | `target`, `scenario` (optional) | Export impact data to CSV in `loot/bia/` |
+| `analyze_chains` | *(none)* | Discover RFC trust-chain escalation paths |
+| `highlight_chain` | `start` + `end` (SIDs), or `index` (0-based) | Highlight an attack chain on the map |
+| `analyse_capabilities` | `target` | MITRE ATT&CK-style capability analysis on a pwned node |
 
 #### BTP — Cloud-Side (with a stored token)
 
@@ -1550,6 +1675,95 @@ steps:
     client: "001"
 
   - action: analyze_chains
+```
+
+### Example: AutoPwn on a Subnet
+
+Fire-and-forget end-to-end run.  AutoPwn discovers, scans, exploits, propagates and stops when no new nodes come in.
+
+```yaml
+name: "Landscape AutoPwn"
+description: "Scan the subnet then run the convergence loop"
+
+steps:
+  - action: scan
+    targets: "10.10.1.0/24"
+    mode: fast
+
+  - action: autopwn
+    max_waves: 5
+    scan_10kblaze: false
+    include_lpe: false
+    include_btp: true
+```
+
+### Example: SB6 (ABAP) → SJJ (Java, firewalled) → S4D via SAPControl OSExecute
+
+Chain the Type-G SAPControl OSExecute pivot to reach a Java stack whose gateway is firewalled, extract its SecStore, and land credentials on the ABAP backend it talks to.
+
+```yaml
+name: "Type-G pivot chain"
+description: "SB6 -> SJJ via SAPControl OSExecute -> S4D via recovered SecStore creds"
+
+steps:
+  # Compromise the source ABAP
+  - action: add_system
+    sid: SB6
+    ip: 10.10.1.22
+    instance: "00"
+
+  - action: check_gw
+    target: SB6
+
+  - action: create_user
+    target: SB6
+    method: gw_exploit
+    client: "001"
+
+  # Retrieve destinations — Type-G endpoints get the SAPControl auth probe
+  # inline; a successful probe caches the OSExecute pivot on SJJ.
+  - action: retrieve_rfcs
+    target: SB6
+
+  - action: test_rfcs
+    target: SB6
+
+  # Extract SJJ's SecStore via the cached SAPControl pivot (JSP writes
+  # transparently route through OSExecute; no gateway 33NN needed).
+  - action: java_secstore
+    target: SJJ
+
+  # S4D was auto-plotted from a JCo destination in SJJ's SecStore.
+  # Test the recovered edge — RFCDES host wins over the discovered
+  # node IP (see aad27c7).  If has_sap_all, we're in.
+  - action: test_rfc_single
+    target: SJJ
+    destination: to_s4d
+
+  - action: analyze_chains
+```
+
+### Example: MYSAPSSO2 fan-out from a pwned issuer
+
+```yaml
+name: "SAPSYS fan-out"
+description: "Forge a SAP* ticket on the issuer then replay against every trusted receiver"
+
+steps:
+  - action: create_user
+    target: NPL
+    method: gw_exploit
+    client: "001"
+
+  - action: discover_strustsso2
+    target: NPL
+
+  - action: forge_and_fanout
+    target: NPL
+    user: "SAP*"
+    client: "100"
+    validity_min: 240
+    channels: ["http", "rfc"]
 ```
 
 ### Console Output
