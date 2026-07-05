@@ -6748,7 +6748,7 @@ function showConnInfo(e, connIdx) {
     })() : ''}
     ${(isHttp && conn.soap_rfc_verified && !conn.has_sap_all) ? `<div class="info-section" style="color:#8b949e;font-size:11px">Create Remote User will attempt BAPI_USER_CREATE1 + SAP_ALL via SOAP-RFC. The user's authorization for these BAPIs (S_USER_GRP, S_USER_PRO) is checked at click time.</div>` : ''}
     <div style="text-align:right;margin-top:8px;display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">
-      ${conn.os_exec_verified ? `<button class="btn" style="background:#c0392b;color:#fff;font-weight:600" onclick="openOSExecuteModal('${escHtml(conn.source_sid)}','${escHtml(conn.destination_name)}')">&#9889; OS Command (via SAPControl)</button>` : ''}
+      ${conn.os_exec_verified ? `<button class="btn" style="background:#c0392b;color:#fff;font-weight:600" onclick="openOSExecuteModal('${escHtml(conn.source_sid)}','${escHtml(conn.destination_name)}')">&#9889; OS Command (via ${conn.os_exec_channel === 'ctcws' ? 'CTCWebService' : 'SAPControl'})</button>` : ''}
       ${(() => {
         // Create Remote User (Java UME) — delegates to the target's
         // existing create_user_java endpoint, which handles the JSP
@@ -6940,7 +6940,7 @@ async function createUserOnJavaTarget(targetSid, sapctlSourceSid, sapctlDestName
   startPolling();
 }
 
-let _osExecuteCtx = { sid: '', destName: '' };
+let _osExecuteCtx = { sid: '', destName: '', channel: 'sapcontrol' };
 let _osExecuteDragInit = false;
 function _initOSExecuteDrag() {
   if (_osExecuteDragInit) return;
@@ -6999,10 +6999,24 @@ function openOSExecuteModal(sid, destName) {
   _osExecuteCtx.destName = destName;
   const conn = (mapState.connections || []).find(
     c => c.source_sid === sid && c.destination_name === destName);
+  // Route to the right SOAP endpoint.  os_exec_channel is set by the
+  // pivot probe (SAPControl or CTCWebService); legacy state files
+  // without the field fall back to SAPControl — that was the only
+  // channel before ctcws existed.
+  _osExecuteCtx.channel = (conn && conn.os_exec_channel) || 'sapcontrol';
+  const channelLabel = _osExecuteCtx.channel === 'ctcws'
+    ? 'CTCWebService' : 'SAPControl OSExecute';
+  const titleEl = document.querySelector('#osexecute-drag-handle h3');
+  if (titleEl) {
+    titleEl.innerHTML = `&#9889; OS Command via ${escHtml(channelLabel)}`
+      + `<span style="float:right;font-size:10px;color:#484f58;font-weight:400">`
+      + `drag header to move · resize from bottom-right</span>`;
+  }
   const info = conn
     ? `<strong>${escHtml(sid)}</strong> &rarr; ${escHtml(conn.target_sid || '?')} `
       + `via <code>${escHtml(destName.slice(0, 32))}${destName.length > 32 ? '…' : ''}</code>`
       + ` &nbsp; <span style="color:#8b949e">as ${escHtml(conn.rfc_user || '?')} on ${escHtml(conn.http_url || '?')}</span>`
+      + ` &nbsp; <span style="color:#c0392b;font-weight:600">[${escHtml(channelLabel)}]</span>`
     : `${escHtml(sid)} &rarr; ${escHtml(destName)}`;
   document.getElementById('osexecute-context').innerHTML = info;
   document.getElementById('osexecute-cmd').value = 'whoami';
@@ -7019,7 +7033,9 @@ async function runOSExecute() {
   if (!cmd) { alert('Command required.'); return; }
   outEl.textContent = `[*] Running: ${cmd}\n[*] Timeout: ${timeout}s\n[*] Waiting for output…\n`;
   outEl.scrollTop = outEl.scrollHeight;
-  const r = await api('POST', `node/${_osExecuteCtx.sid}/sapcontrol_osexecute`, {
+  const endpoint = _osExecuteCtx.channel === 'ctcws'
+    ? 'ctcws_osexecute' : 'sapcontrol_osexecute';
+  const r = await api('POST', `node/${_osExecuteCtx.sid}/${endpoint}`, {
     destination_name: _osExecuteCtx.destName,
     command: cmd,
     timeout: timeout,

