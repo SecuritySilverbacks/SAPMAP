@@ -3698,25 +3698,37 @@ def quick_probe_sid(host: str, saprouter: str = None,
 
 
 def _query_host_agent_systems(host: str, port: int,
-                                 timeout: float = 3) -> dict:
-    """Query SAP Host Agent (1128) for the SID list via
+                                 timeout: float = 3,
+                                 use_tls: bool = False) -> dict:
+    """Query SAP Host Agent (1128/1129) for the SID list via
     GetSystemInstanceList.  Returns a dict with the first system's
     SID + lowest instance number, or None.  The host agent runs as
     'saphostctrl' and returns info for every SAP system on the box
     without authentication on an unhardened install.
+
+    ``use_tls=True`` wraps the socket in SSL for the HTTPS port (1129).
+    Many hardened installations mute plaintext 1128 but keep 1129 open.
     """
     import re as _re
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(timeout)
         sock.connect((host, port))
+        if use_tls:
+            import ssl as _ssl
+            ctx = _ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = _ssl.CERT_NONE
+            sock = ctx.wrap_socket(sock, server_hostname=host)
         body = (
             '<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/">'
             '<SOAP-ENV:Body><ns1:GetSystemInstanceList xmlns:ns1="urn:SAPControl">'
             '</ns1:GetSystemInstanceList></SOAP-ENV:Body></SOAP-ENV:Envelope>'
         )
         req = (f"POST / HTTP/1.1\r\nHost: {host}:{port}\r\n"
-                f"Content-Type: text/xml\r\nContent-Length: {len(body)}\r\n"
+                f"Content-Type: text/xml\r\n"
+                f'SOAPAction: ""\r\n'
+                f"Content-Length: {len(body)}\r\n"
                 f"\r\n{body}")
         sock.sendall(req.encode())
         resp = b""
@@ -3762,6 +3774,37 @@ def _query_host_agent_systems(host: str, port: int,
                 }
     except Exception:
         pass
+    return None
+
+
+def query_host_agent_sid(host: str, timeout: float = 2.5) -> dict:
+    """Public wrapper: probe SAP Host Agent for SID on both HTTP:1128
+    and HTTPS:1129, returning the first hit.  Logs one-liner status
+    so operators can see WHY placeholder SIDs like "10_" / "172" turn
+    up when the agent isn't running or is TLS-only.
+
+    Returns the same dict shape as :func:`_query_host_agent_systems`
+    (sid, instance_nr, http_port, https_port, …) or None when both
+    probes miss.
+    """
+    if not host:
+        return None
+    # HTTP first — cheaper, most agents accept plain.
+    ha = _query_host_agent_systems(host, 1128, timeout=timeout)
+    if ha and ha.get("sid"):
+        print(f"[+] Host Agent probe: {host}:1128 -> "
+              f"SID={ha['sid']} inst={ha.get('instance_nr', '?')}")
+        return ha
+    # HTTPS 1129 — common when 1128 is muted or the agent enforces TLS.
+    ha = _query_host_agent_systems(host, 1129, timeout=timeout,
+                                     use_tls=True)
+    if ha and ha.get("sid"):
+        print(f"[+] Host Agent probe: {host}:1129 (TLS) -> "
+              f"SID={ha['sid']} inst={ha.get('instance_nr', '?')}")
+        return ha
+    print(f"[*] Host Agent probe: {host} — no SID via 1128/1129 "
+          f"(port silent, not Host Agent, or GetSystemInstanceList "
+          f"returned empty)")
     return None
 
 

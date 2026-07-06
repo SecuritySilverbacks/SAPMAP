@@ -255,16 +255,14 @@ def _discover_sid_http(base_url: str,
         except Exception:
             pass
 
-    # Last resort — Host Agent (port 1128) SOAP probe.
-    # SAPControl's ``GetSystemInstanceList`` returns SID + instance for
-    # every SAP system on the box.  1128 is often the ONLY port a
-    # firewalled RFC target exposes: dispatcher 32XX and gateway 33XX
-    # are blocked, ICM 8XXX / 50XX aren't running, but the Host Agent
-    # stays reachable because SolMan / LaMa / DBACockpit rely on it.
-    # Without this probe every such target ends up plotted with a
-    # placeholder SID derived from its IP ("10_", "172", …) via
-    # _derive_sid.  Matches nmap-sap's port-1128 fingerprint (send
-    # GetSystemInstanceList SOAP, extract <SAPSYSTEMNAME>).
+    # Last resort — Host Agent SOAP probe on 1128/1129.
+    # ``GetSystemInstanceList`` returns SID + instance for every SAP
+    # system on the box.  1128/1129 is often the ONLY port a firewalled
+    # RFC target exposes: dispatcher 32XX and gateway 33XX are blocked,
+    # ICM 8XXX / 50XX aren't running, but the Host Agent stays reachable
+    # because SolMan / LaMa / DBACockpit rely on it.  Without this probe
+    # every such target ends up plotted with a placeholder SID derived
+    # from its IP ("10_", "172", …) via _derive_sid.
     if not info.get("sid"):
         try:
             p = _up(base)
@@ -273,17 +271,16 @@ def _discover_sid_http(base_url: str,
             _ha_host = ""
         if _ha_host:
             try:
-                from sapmap_scanner import _query_host_agent_systems
-                ha = _query_host_agent_systems(
-                    _ha_host, 1128, timeout=2.5)
+                from sapmap_scanner import query_host_agent_sid
+                ha = query_host_agent_sid(_ha_host, timeout=2.5)
                 if ha and ha.get("sid"):
                     info["sid"] = ha["sid"]
                     if ha.get("instance_nr") and not info.get(
                             "instance_nr"):
                         info["instance_nr"] = ha["instance_nr"]
                     # http_port from the Host Agent reply IS the ICM
-                    # port for the running instance — much more
-                    # accurate than a candidate-port sweep.
+                    # port for the running instance — much more accurate
+                    # than a candidate-port sweep.
                     if ha.get("http_port") and not info.get(
                             "icm_port"):
                         info["icm_port"] = ha["http_port"]
@@ -292,13 +289,10 @@ def _discover_sid_http(base_url: str,
                             "icm_port"):
                         info["icm_port"] = ha["https_port"]
                         info["icm_scheme"] = "https"
-                    print(f"[+] Host Agent 1128 SOAP probe: "
-                          f"{_ha_host} -> SID={ha['sid']} "
-                          f"inst={ha.get('instance_nr', '?')}")
             except Exception as _ha_err:
                 # Non-fatal — Host Agent may be off, firewalled, or
                 # hardened.  Falls through to _derive_sid downstream.
-                print(f"[!] Host Agent 1128 probe on {_ha_host} "
+                print(f"[!] Host Agent probe on {_ha_host} "
                       f"failed: {_ha_err!s:.80}")
 
     errs = info.pop("_errs", {})
@@ -343,7 +337,15 @@ def _derive_sid(destination_name: str, host: str) -> str:
     for p in parts:
         if 2 <= len(p) <= 4 and p.isalnum() and not p.isdigit():
             return p[:3]
-    return h[:3] if len(h) >= 3 else "UNK"
+    # Last-resort fallback: h[:3] returns numeric-only for IP-only
+    # hosts ("10.10.1.4" -> "10_", "172.31.12.212" -> "172") which
+    # then land on the map looking like real SIDs.  Return "UNK" for
+    # anything digits-only; the caller's uniqueness counter turns
+    # collisions into UNK, UNK1, UNK2, …
+    fallback = h[:3] if len(h) >= 3 else "UNK"
+    if all(c.isdigit() or c == '_' for c in fallback):
+        return "UNK"
+    return fallback
 
 
 def _resolve_host(host: str) -> str:
@@ -8557,9 +8559,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     if not dest_sid and host:
                         try:
                             from sapmap_scanner import (
-                                _query_host_agent_systems)
-                            _ha = _query_host_agent_systems(
-                                host, 1128, timeout=2.5)
+                                query_host_agent_sid)
+                            _ha = query_host_agent_sid(
+                                host, timeout=2.5)
                             if _ha and _ha.get("sid"):
                                 dest_sid = _ha["sid"]
                                 if (_ha.get("instance_nr")
@@ -8573,12 +8575,12 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                     _http_info["icm_port"] = (
                                         _ha["http_port"])
                                     _http_info["icm_scheme"] = "http"
-                                print(f"[+] Host Agent 1128 probe: "
-                                      f"{host} -> SID={dest_sid} "
-                                      f"inst="
-                                      f"{_ha.get('instance_nr', '?')}")
+                                elif _ha.get("https_port"):
+                                    _http_info["icm_port"] = (
+                                        _ha["https_port"])
+                                    _http_info["icm_scheme"] = "https"
                         except Exception as _ha_err:
-                            print(f"[!] Host Agent 1128 probe on "
+                            print(f"[!] Host Agent probe on "
                                   f"{host} failed: {_ha_err!s:.80}")
 
                     # 4. Still nothing — derive from name/host as
@@ -8692,6 +8694,46 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             int(f"32{inst}"): "dispatcher",
                             int(f"33{inst}"): "gateway",
                         }
+                    # BTP subaccount detection — hostnames matching
+                    # *.hana.ondemand.com are BTP tenants, not on-prem
+                    # SAP systems.  Plot them as cloud-shaped nodes
+                    # (state.btp_subaccounts) instead of the default
+                    # rectangular SAPNode.
+                    _btp_host_lo = (remote_host or host or "").lower()
+                    if ".hana.ondemand.com" in _btp_host_lo:
+                        try:
+                            from sapmap_models import (
+                                BTPSubaccountNode)
+                            _bparts = _btp_host_lo.split(".")
+                            _bsubdomain = _bparts[0] if _bparts else ""
+                            _bregion = (_bparts[2]
+                                         if len(_bparts) >= 3 else "")
+                            _btp_uuid = _btp_host_lo
+                            if _btp_uuid not in api.state.btp_subaccounts:
+                                api.state.btp_subaccounts[_btp_uuid] = (
+                                    BTPSubaccountNode(
+                                        uuid=_btp_uuid,
+                                        display_name=(
+                                            _bsubdomain
+                                            or _btp_host_lo),
+                                        region=_bregion,
+                                        subdomain=_bsubdomain,
+                                    ))
+                                print(f"[+] Discovered BTP subaccount "
+                                      f"{_bsubdomain or _btp_host_lo} "
+                                      f"— plotted as cloud "
+                                      f"(hana.ondemand.com host)")
+                            conn.target_sid = _btp_uuid
+                            conn.is_btp_dest = True
+                            discovered[key]["remote_sid"] = _btp_uuid
+                            api.state.add_connection(conn)
+                            time.sleep(0.6)
+                            continue
+                        except Exception as _btp_err:
+                            print(f"[!] BTP node creation failed for "
+                                  f"{_btp_host_lo}: {_btp_err!s:.80}")
+                            # Fall through to standard SAPNode path.
+
                     new_inst = InstanceInfo(
                         instance_nr=inst, ip=host,
                         ports=ports)
