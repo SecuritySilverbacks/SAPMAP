@@ -4475,6 +4475,27 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
             db_type = "HDB"
             print(f"[+] {sid}: HANA database detected via SQL port")
 
+        # Co-hosted HDB — the HANA SQL port lives on a DIFFERENT
+        # instance nr on the SAME host (typical Suite-on-HANA
+        # deployment: SBD-ABAP on inst 00/01, HDB on inst 10 with
+        # port 31013).  The per-instance grouping above missed it
+        # because instance 10's SID is the HDB tenant name (e.g.
+        # "S4H"), so this SID's own ports don't include hana_sql.
+        # Only apply when we haven't already resolved db_type via
+        # RFCSI / SAPControl / /sap/public/info, and skip pure-HANA
+        # tenants themselves (they're handled by has_hana_port).
+        if not db_type and not has_hana_port:
+            all_host_services = {info["service"]
+                                  for info in open_ports.values()}
+            if "hana_sql" in all_host_services:
+                db_type = "HDB"
+                _hana_ports = sorted(
+                    p for p, info in open_ports.items()
+                    if info["service"] == "hana_sql")
+                print(f"[+] {sid}: HDB co-hosted on same host — "
+                      f"HANA SQL port(s) {_hana_ports} present on a "
+                      f"sibling instance; marking db_type=HDB")
+
         # Determine system type from this SID's ports + SAPControl hints
         has_dispatcher = "dispatcher" in sid_port_services
         has_saprouter = "saprouter" in sid_port_services
