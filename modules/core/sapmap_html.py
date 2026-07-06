@@ -3160,7 +3160,12 @@ function updateMap() {
   };
   conns.forEach((conn, ci) => {
     let srcNode = nodes[conn.source_sid] || _resolveBtpSrc(conn.source_sid);
-    let tgtNode = nodes[conn.target_sid];
+    // Target lookup falls through btpNodes when the destination points
+    // at a *.hana.ondemand.com host — those live in state.btp_subaccounts
+    // as cloud-shaped nodes, not in state.nodes as rectangles.
+    let tgtNode = nodes[conn.target_sid]
+      || btpNodes[conn.target_sid]
+      || _resolveBtpSrc(conn.target_sid);
 
     if (!tgtNode && showUnknown) {
       const key = conn.target_host || conn.target_sid || '';
