@@ -4080,6 +4080,29 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
                     instance_sysinfo[inst_nr] = sys_info
                     if not known_host_sid:
                         known_host_sid = sys_info["sid"]
+                # Restore the derived gateway port to open_ports when the
+                # RFC_SYSTEM_INFO probe returned any SAP-shaped evidence
+                # (sid / hostname / kernel / sap_release).  The Phase-1
+                # CPIC verifier is stricter than the RFC-SYSTEM-INFO
+                # Chipik F_SAP_INIT path — a gateway that silently drops
+                # the startrfc CPIC handshake but happily leaks
+                # component=SAP-Gateway + kernel_release + hostname on
+                # the RFC probe is a real SAP gateway that the CPIC
+                # verifier dropped as "non-SAP" (operator-reported SB6:
+                # port 3300 confirmed by RFC probe but missing from the
+                # Open Ports panel because it was deleted at CPIC time).
+                if any(sys_info.get(k) for k in
+                       ("sid", "hostname", "kernel", "sap_release")):
+                    if derived_gw not in open_ports:
+                        open_ports[derived_gw] = {
+                            "service": "gateway",
+                            "instance_nr": inst_nr,
+                        }
+                        print(f"[+] {host}:{derived_gw} restored as "
+                              f"gateway — CPIC verify dropped it but "
+                              f"RFC_SYSTEM_INFO confirmed SAP presence "
+                              f"(kernel={sys_info.get('kernel') or '?'}, "
+                              f"host={sys_info.get('hostname') or '?'})")
                 break
         # Preserve what we learned from the first enrichment so downstream
         # node-build can still show hostname/kernel/OS even without a SID.
