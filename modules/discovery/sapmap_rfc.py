@@ -970,8 +970,22 @@ def _test_via_dest_check(conn, destination_name: str, result: dict):
     CONNECTION_TEST_RESULT='' means TCP connection OK.
     CONNECTION_PROPERTIES contains remote SID, client, basis release.
     """
-    check_result = conn.call("DEST_CHECK_CONNECTION",
-                             NAME=destination_name)
+    # Bound at 25 s — a broken destination pointing at a dead gateway
+    # otherwise hangs the FM inside the source kernel indefinitely.
+    # Mirrors the timeout on _test_via_sdf_rfc_check so both probe
+    # paths respect the same wall-clock ceiling.
+    check_result, timed_out = _run_with_timeout(
+        conn.call, 25.0, "DEST_CHECK_CONNECTION", NAME=destination_name)
+    if timed_out:
+        _detach_if_timed_out(conn, True)
+        result["logon_ok"] = False
+        result["ping_ok"] = False
+        result["error"] = (f"timeout after 25s on DEST_CHECK_CONNECTION "
+                            f"— destination probably points at a dead "
+                            f"gateway")
+        logger.debug(f"DEST_CHECK_CONNECTION on {destination_name} "
+                      f"timed out")
+        return
 
     auth_result = check_result.get("AUTHORIZATION_TEST_RESULT", "X").strip()
     conn_result = check_result.get("CONNECTION_TEST_RESULT", "X").strip()
@@ -1018,8 +1032,22 @@ def _test_via_dest_check_raw(conn, destination_name: str, result: dict):
         ('CONNECTION_PROPERTIES',      RFC_EXPORT, RFCTYPE_STRUCTURE, 0,   0,  props_td),
     ])
 
-    check_result = conn.call_raw('DEST_CHECK_CONNECTION', func_desc,
-                                  NAME=destination_name)
+    # Same 25 s cap as the metadata-driven fallback — call_raw skips
+    # RFC_GET_FUNCTION_INTERFACE but still blocks inside the kernel FM
+    # when the destination is dead.
+    check_result, timed_out = _run_with_timeout(
+        conn.call_raw, 25.0, 'DEST_CHECK_CONNECTION', func_desc,
+        NAME=destination_name)
+    if timed_out:
+        _detach_if_timed_out(conn, True)
+        result["logon_ok"] = False
+        result["ping_ok"] = False
+        result["error"] = (f"timeout after 25s on DEST_CHECK_CONNECTION "
+                            f"(raw) — destination probably points at a "
+                            f"dead gateway")
+        logger.debug(f"DEST_CHECK_CONNECTION raw on {destination_name} "
+                      f"timed out")
+        return
 
     auth_result = check_result.get("AUTHORIZATION_TEST_RESULT", "X").strip()
     conn_result = check_result.get("CONNECTION_TEST_RESULT", "X").strip()
@@ -1037,6 +1065,20 @@ def _test_via_dest_check_raw(conn, destination_name: str, result: dict):
         result["remote_release"] = props.get("BASIS_RELEASE", "").strip()
 
 
+TEST_RFC_DESTINATION_OVERALL_TIMEOUT = 60.0
+"""Wall-clock ceiling for :func:`test_rfc_destination`.
+
+Fires when every inner per-call timeout has already failed to bound the
+work — a defence-in-depth backstop against pyrfc / SDK / connection-open
+paths that don't respect Python-level thread abandonment.  60 s comfortably
+exceeds the sum of the inner ``/SDF/RFC_CHECK`` (25 s) and
+``DEST_CHECK_CONNECTION`` (25 s) caps, so legitimately slow destinations
+still complete.  Overrides above this ceiling defeat the safety net —
+operators who need longer waits should raise the individual per-call
+timeouts, not this one.
+"""
+
+
 def test_rfc_destination(node: SAPNode, destination_name: str,
                          creds: Credentials = None,
                          rfc_check_cache: dict = None,
@@ -1050,11 +1092,54 @@ def test_rfc_destination(node: SAPNode, destination_name: str,
     is 'http', interpret_http_dest_test_result() is invoked afterwards
     to apply SAP Note 1177315's benign-status rule for ADS destinations.
     Callers that already have the RFCConnection handy should pass it in.
+
+    Wall-clock bounded at :data:`TEST_RFC_DESTINATION_OVERALL_TIMEOUT` —
+    after that a graceful failure dict is returned regardless of which
+    inner call is stuck.  The bulk-retrieve caller (AutoPwn's propagate
+    phase, GUI Test RFCs) can then move on to the next destination.
     """
-    # Check cache first
+    # Cache lookup and cache-write happen in the wrapper so the impl
+    # is a pure function of (node, dest, creds) — safer to abandon
+    # to a daemon thread if the timeout fires.
     if rfc_check_cache and destination_name in rfc_check_cache:
         return rfc_check_cache[destination_name]
 
+    result, timed_out = _run_with_timeout(
+        _test_rfc_destination_impl,
+        TEST_RFC_DESTINATION_OVERALL_TIMEOUT,
+        node, destination_name, creds, rfc_conn)
+
+    if timed_out:
+        result = {
+            "logon_ok": False,
+            "ping_ok": False,
+            "latency_ms": 0,
+            "logon_message": "",
+            "error": (f"overall timeout {int(TEST_RFC_DESTINATION_OVERALL_TIMEOUT)}s — "
+                       f"destination is unresponsive, skipping"),
+        }
+        # Print so the operator sees the skip in the AutoPwn log — a
+        # silent-return would look identical to a hang from the outside.
+        print(f"[-] RFC {destination_name}: watchdog timeout after "
+              f"{int(TEST_RFC_DESTINATION_OVERALL_TIMEOUT)}s — skipping "
+              f"(destination unresponsive, continuing with next)")
+        logger.debug(
+            f"test_rfc_destination watchdog fired for "
+            f"{destination_name}@{node.sid} after "
+            f"{TEST_RFC_DESTINATION_OVERALL_TIMEOUT}s")
+
+    if rfc_check_cache is not None:
+        rfc_check_cache[destination_name] = result
+    return result
+
+
+def _test_rfc_destination_impl(node: SAPNode, destination_name: str,
+                                creds: Credentials = None,
+                                rfc_conn=None) -> dict:
+    """Body of :func:`test_rfc_destination` — split out so the public
+    entry point can wrap it in an overall watchdog.  Never called
+    directly by anything other than the wrapper.
+    """
     result = {
         "logon_ok": False,
         "ping_ok": False,
@@ -1095,10 +1180,6 @@ def test_rfc_destination(node: SAPNode, destination_name: str,
             interpret_http_dest_test_result(rfc_conn, result)
         except Exception:
             pass
-
-    # Cache the result
-    if rfc_check_cache is not None:
-        rfc_check_cache[destination_name] = result
 
     return result
 
