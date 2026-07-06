@@ -2265,12 +2265,53 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
         except Exception:
             pass
 
+    # SAPControl.GetProcessList — reliably reports the HANA engine
+    # processes (hdbnameserver / hdbindexserver / hdbdaemon / …) when
+    # HDB is co-hosted with the AS.  Kernel 9.16 (S/4 2025) sometimes
+    # ships without the ``Database`` property in GetInstanceProperties,
+    # so this is the fastest confirmatory signal we have short of
+    # opening a HANA SQL socket.  Runs on every SAPControl port we
+    # already discovered — stops at the first hit.
+    if not info["db_type"]:
+        for inst_nr in ordered_nrs:
+            _inst_str = str(inst_nr) if not isinstance(inst_nr, str) else inst_nr
+            if not _inst_str.isdigit():
+                continue
+            sc_port = 50000 + int(_inst_str) * 100 + 13
+            names = _query_sapcontrol_process_names(
+                host, sc_port, timeout=min(timeout, 3),
+                saprouter=saprouter)
+            if names and _detect_hdb_from_process_names(names):
+                info["db_type"] = "HDB"
+                hits = [n for n in names
+                         if any((n or "").lower().startswith(m)
+                                for m in _HDB_PROCESS_MARKERS)]
+                print(f"[+] {tag}: HANA detected via SAPControl "
+                      f"GetProcessList ({host}:{sc_port}) — "
+                      f"{len(hits)} HDB process(es): "
+                      f"{', '.join(hits[:4])}"
+                      f"{' …' if len(hits) > 4 else ''}")
+                break
+
     # Probe HANA SQL ports on the same host (3XX13/3XX15 where XX = instance).
-    # Only check a few likely instance numbers to keep it fast.
+    # Broadened from the original 0-3 range: HANA is often installed
+    # on a dedicated instance nr outside the AS range (common: 00/02
+    # for SoH, 30/40/50 for isolated HDB slots).  We union the
+    # dispatcher-derived instance nrs with a standing candidate list
+    # so DEDICATED-HANA deployments still get caught.
     if not info["db_type"]:
         import socket
-        # Derive instance numbers to try from the gateway port and common defaults
-        inst_candidates = {0, 1, 2, 3}
+        inst_candidates = set()
+        # Anything the port scanner already saw as a dispatcher is a
+        # strong candidate.
+        for _n in ordered_nrs:
+            _ns = str(_n) if not isinstance(_n, str) else _n
+            if _ns.isdigit():
+                inst_candidates.add(int(_ns))
+        # Standing candidates: 0-9 (typical AS range) plus 30/40/50
+        # (common dedicated-HDB slots).
+        inst_candidates.update(range(0, 10))
+        inst_candidates.update({30, 40, 50})
         if gw_port and 3300 <= gw_port <= 3399:
             inst_candidates.add(gw_port - 3300)
         for inst in sorted(inst_candidates):
@@ -3808,14 +3849,16 @@ def query_host_agent_sid(host: str, timeout: float = 2.5) -> dict:
     return None
 
 
-def _query_sapcontrol_os(host: str, port: int, timeout: float = 3,
-                         saprouter: str = "") -> str:
-    """Detect OS type via SAPControl GetProcessList.
+def _query_sapcontrol_process_names(host: str, port: int,
+                                     timeout: float = 3,
+                                     saprouter: str = "") -> list:
+    """Fetch the list of process names from SAPControl.GetProcessList.
 
-    Process names ending with .EXE indicate Windows; otherwise Linux/Unix.
-    GetProcessList is usually available without authentication.
-
-    Returns os_type string ("Linux", "Windows") or "" if detection fails.
+    Returns a list of strings (may be empty) or None on transport error.
+    Empty list means the endpoint answered but no <name> element was
+    parseable — most commonly a 401.  Callers use the same list to
+    infer OS (``.EXE`` suffix) and to spot HDB (``hdbnameserver`` /
+    ``hdbindexserver`` etc.) without paying a second SOAP round-trip.
     """
     import re as _re
     try:
@@ -3853,19 +3896,55 @@ def _query_sapcontrol_os(host: str, port: int, timeout: float = 3,
             pass
         sock.close()
         text = resp.decode("utf-8", errors="replace")
-
         if "401" in text[:80]:
-            return ""
-
-        names = _re.findall(r'<name>([^<]+)</name>', text)
-        if not names:
-            return ""
-
-        if any(n.upper().endswith(".EXE") for n in names):
-            return "Windows"
-        return "Linux"
+            return []
+        return _re.findall(r'<name>([^<]+)</name>', text)
     except Exception:
+        return None
+
+
+def _query_sapcontrol_os(host: str, port: int, timeout: float = 3,
+                         saprouter: str = "") -> str:
+    """Detect OS type via SAPControl GetProcessList.
+
+    Process names ending with .EXE indicate Windows; otherwise Linux/Unix.
+    GetProcessList is usually available without authentication.
+
+    Returns os_type string ("Linux", "Windows") or "" if detection fails.
+    """
+    names = _query_sapcontrol_process_names(
+        host, port, timeout=timeout, saprouter=saprouter)
+    if not names:
         return ""
+    if any(n.upper().endswith(".EXE") for n in names):
+        return "Windows"
+    return "Linux"
+
+
+# HANA process names published by SAPControl.GetProcessList on a
+# co-hosted HDB (S/4HANA "Suite on HANA" and "HANA Live" deployments).
+# nameserver + indexserver are the two we can rely on; the daemon /
+# preprocessor / xsengine / compileserver names show up on richer
+# deployments and are extras that reinforce the verdict.
+_HDB_PROCESS_MARKERS = (
+    "hdbnameserver", "hdbindexserver", "hdbdaemon",
+    "hdbpreprocessor", "hdbxsengine", "hdbcompileserver",
+    "hdbstatisticsserver",
+)
+
+
+def _detect_hdb_from_process_names(names: list) -> bool:
+    """True when SAPControl.GetProcessList reports at least one HDB
+    engine process on the target host.  Matches lowercase-prefix so
+    kernels that append PID / suffix to the name still trigger.
+    """
+    if not names:
+        return False
+    for raw in names:
+        lo = (raw or "").lower()
+        if any(lo.startswith(m) for m in _HDB_PROCESS_MARKERS):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------

@@ -185,6 +185,11 @@ def _no_op_diag_ms_os(monkeypatch):
                          lambda *a, **k: ("", "", ""))
     monkeypatch.setattr(sapmap_scanner, "_query_sapcontrol_os",
                          lambda *a, **k: "")
+    # Stub the HDB-detection SAPControl.GetProcessList probe so unit
+    # tests don't attempt real network I/O when db_type is empty.
+    monkeypatch.setattr(sapmap_scanner,
+                         "_query_sapcontrol_process_names",
+                         lambda *a, **k: None)
 
 
 def test_enrich_uses_public_info_to_fill_empty_fields(monkeypatch):
