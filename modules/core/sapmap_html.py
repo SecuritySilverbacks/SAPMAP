@@ -3047,25 +3047,41 @@ function updateMap() {
   }
   svg.setAttribute('viewBox', `${viewBox.x} ${viewBox.y} ${viewBox.w} ${viewBox.h}`);
 
-  // Count connections per source→target pair for curve offsets
+  // Count connections per source→target pair for curve offsets.
+  //
+  // Normalise BTP-sentinel sids ("BTP:<uuid8>") to the actual BTP
+  // subaccount uuid before pairing, so synthetic BTP→on-prem edges
+  // (source_sid="BTP:<uuid8>", from link_destinations_to_onprem) and
+  // real on-prem→BTP edges (target_sid=<real_uuid>) fall into the
+  // SAME pair bucket instead of two separate groups.  Without this
+  // normalisation each half thinks it's small-N and applies minimal
+  // curve/label spread, and the two clusters overlap in the middle.
+  const btpNodesLocal = mapState.btp_subaccounts || {};
+  const _canonicalNodeKey = (sid) => {
+    if (!sid) return '';
+    if (sid.startsWith('BTP:')) {
+      const suffix = sid.slice(4);
+      for (const u in btpNodesLocal) {
+        if (u.startsWith(suffix)) return u;
+      }
+    }
+    return sid;
+  };
+  const _pairKey = (conn) => {
+    const a = _canonicalNodeKey(conn.source_sid || '');
+    const b = _canonicalNodeKey(conn.target_sid || conn.target_host || '');
+    return a < b ? a + '|' + b : b + '|' + a;
+  };
   const pairCount = {};
   const pairIdx = {};
   conns.forEach((conn, ci) => {
-    // Use sorted pair key so A→B and B→A share offset space
-    const a = conn.source_sid || '', b = conn.target_sid || conn.target_host || '';
-    const pairKey = a < b ? a + '|' + b : b + '|' + a;
+    const pairKey = _pairKey(conn);
     pairCount[pairKey] = (pairCount[pairKey] || 0) + 1;
-  });
-  conns.forEach((conn, ci) => {
-    const a = conn.source_sid || '', b = conn.target_sid || conn.target_host || '';
-    const pairKey = a < b ? a + '|' + b : b + '|' + a;
-    pairIdx[ci] = (pairIdx[ci - 1] !== undefined ? 0 : 0);  // placeholder
   });
   // Assign index within each pair
   const pairCurrent = {};
   conns.forEach((conn, ci) => {
-    const a = conn.source_sid || '', b = conn.target_sid || conn.target_host || '';
-    const pairKey = a < b ? a + '|' + b : b + '|' + a;
+    const pairKey = _pairKey(conn);
     pairCurrent[pairKey] = (pairCurrent[pairKey] || 0);
     pairIdx[ci] = pairCurrent[pairKey];
     pairCurrent[pairKey]++;
@@ -3262,8 +3278,11 @@ function updateMap() {
     // Determine curve offset for parallel connections
     // Use canonical (sorted) direction for the perpendicular so that
     // A→B and B→A connections curve to opposite sides instead of overlapping.
-    const a = conn.source_sid || '', b = conn.target_sid || conn.target_host || '';
-    const pairKey = a < b ? a + '|' + b : b + '|' + a;
+    // Canonicalise both sides so BTP-sentinel sids fold into the same
+    // pair bucket as real-uuid target ids (see _pairKey above).
+    const a = _canonicalNodeKey(conn.source_sid || '');
+    const b = _canonicalNodeKey(conn.target_sid || conn.target_host || '');
+    const pairKey = _pairKey(conn);
     const total = pairCount[pairKey] || 1;
     const idx = pairIdx[ci] || 0;
 
