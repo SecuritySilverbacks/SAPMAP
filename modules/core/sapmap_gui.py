@@ -8546,7 +8546,43 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                   f"maps to existing {existing.sid}")
                         continue
 
-                    # 3. No existing node — derive SID if not yet known
+                    # 3. No existing node — Host Agent 1128 SOAP fallback
+                    #    before the last-resort SID derivation.  Many
+                    #    firewalled RFC targets expose only port 1128
+                    #    (SolMan / LaMa / DBACockpit rely on it) and
+                    #    GetSystemInstanceList returns the real SID
+                    #    without auth.  Without this, an interactive
+                    #    "Retrieve RFC Destinations" ended up plotting
+                    #    IP-derived placeholders like "10_" or "172".
+                    if not dest_sid and host:
+                        try:
+                            from sapmap_scanner import (
+                                _query_host_agent_systems)
+                            _ha = _query_host_agent_systems(
+                                host, 1128, timeout=2.5)
+                            if _ha and _ha.get("sid"):
+                                dest_sid = _ha["sid"]
+                                if (_ha.get("instance_nr")
+                                        and not _http_info.get(
+                                            "instance_nr")):
+                                    _http_info["instance_nr"] = (
+                                        _ha["instance_nr"])
+                                    inst = _ha["instance_nr"]
+                                    key = (host.lower(), inst)
+                                if _ha.get("http_port"):
+                                    _http_info["icm_port"] = (
+                                        _ha["http_port"])
+                                    _http_info["icm_scheme"] = "http"
+                                print(f"[+] Host Agent 1128 probe: "
+                                      f"{host} -> SID={dest_sid} "
+                                      f"inst="
+                                      f"{_ha.get('instance_nr', '?')}")
+                        except Exception as _ha_err:
+                            print(f"[!] Host Agent 1128 probe on "
+                                  f"{host} failed: {_ha_err!s:.80}")
+
+                    # 4. Still nothing — derive from name/host as
+                    #    absolute last resort.
                     if not dest_sid:
                         dest_sid = _derive_sid(
                             conn.destination_name, host)
@@ -9297,19 +9333,46 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             if (_target_is_java
                                     and not _target_is_btp
                                     and not _is_ads):
-                                print(f"[*] {dest_name}: CTCWebService "
-                                      f"auth probe on {conn.http_url} "
-                                      f"as {rfc_user}...")
-                                try:
-                                    import sap_java_ctcws as _cws
-                                    _cws_r = _cws.ctcws_auth_probe(
-                                        conn.http_url, rfc_user, rfc_pwd,
-                                        timeout=10.0)
-                                except Exception as _e:
-                                    _cws_r = {"ok": False,
-                                              "status": 0,
-                                              "error": f"probe crashed: {_e}",
-                                              "os_exec_verified": False}
+                                # Cached verdict — SAP Note 2757006
+                                # has stripped the FileSystemConfig
+                                # provider on this target.  Auth still
+                                # passes, but EXECUTE_CMD is gone;
+                                # every fresh credential ends up
+                                # returning the same ASJ.ejb.005043
+                                # wrapper.  Skip the ~8 s probe.
+                                _skip_ctc = False
+                                if _tgt is not None and getattr(
+                                        _tgt,
+                                        "_ctcws_provider_stripped",
+                                        False):
+                                    print(f"[*] {dest_name}: "
+                                          f"CTCWebService probe skipped "
+                                          f"— {conn.target_sid} "
+                                          f"previously returned "
+                                          f"ASJ.ejb.005043 "
+                                          f"(FileSystemConfig provider "
+                                          f"stripped, SAP Note 2757006)")
+                                    _cws_r = {"ok": True, "status": 500,
+                                              "error": ("cached: provider "
+                                                        "stripped per SAP "
+                                                        "Note 2757006"),
+                                              "os_exec_verified": False,
+                                              "provider_stripped": True}
+                                    _skip_ctc = True
+                                if not _skip_ctc:
+                                    print(f"[*] {dest_name}: CTCWebService "
+                                          f"auth probe on {conn.http_url} "
+                                          f"as {rfc_user}...")
+                                    try:
+                                        import sap_java_ctcws as _cws
+                                        _cws_r = _cws.ctcws_auth_probe(
+                                            conn.http_url, rfc_user, rfc_pwd,
+                                            timeout=10.0)
+                                    except Exception as _e:
+                                        _cws_r = {"ok": False,
+                                                  "status": 0,
+                                                  "error": f"probe crashed: {_e}",
+                                                  "os_exec_verified": False}
                                 if _cws_r.get("os_exec_verified"):
                                     conn.os_exec_verified = True
                                     conn.os_exec_channel = "ctcws"
@@ -9418,6 +9481,63 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                           f"CTCWebService probe did "
                                           f"not unlock OS-exec "
                                           f"(HTTP {_st}: {_er})")
+                                    # ASJ.ejb.005043 verdict — SAP Note
+                                    # 2757006 stripped the
+                                    # FileSystemConfig / EXECUTE_CMD
+                                    # provider on this target.  Cache
+                                    # the flag so a manual re-test on
+                                    # a sibling destination (same
+                                    # Java stack, different URL) or a
+                                    # future AutoPwn wave doesn't burn
+                                    # another 8-s probe on the same
+                                    # dead endpoint.  Emit a MEDIUM
+                                    # finding once so the operator
+                                    # sees the note reference in the
+                                    # report even though it's a dead
+                                    # end.
+                                    if (_cws_r.get("provider_stripped")
+                                            and conn.target_sid
+                                            and _tgt is not None
+                                            and not getattr(
+                                                _tgt,
+                                                "_ctcws_provider_stripped",
+                                                False)):
+                                        _tgt._ctcws_provider_stripped = True
+                                        print(f"[*] {conn.target_sid}: "
+                                              f"CTCWebService "
+                                              f"FileSystemConfig "
+                                              f"provider stripped "
+                                              f"(SAP Note 2757006 "
+                                              f"applied) — cached; "
+                                              f"future probes will "
+                                              f"skip this endpoint")
+                                        try:
+                                            emit_finding(
+                                                "MEDIUM",
+                                                conn.target_sid,
+                                                f"CTCWebService/"
+                                                f"FileSystemConfig/"
+                                                f"EXECUTE_CMD "
+                                                f"unavailable on "
+                                                f"{conn.target_sid} — "
+                                                f"endpoint present but "
+                                                f"returns "
+                                                f"ASJ.ejb.005043 "
+                                                f"(provider stripped "
+                                                f"per SAP Note "
+                                                f"2757006).  Auth "
+                                                f"channel is fine; "
+                                                f"the OS-exec "
+                                                f"provider chain is "
+                                                f"gone.",
+                                                ref="ctcws.provider_stripped",
+                                                meta={
+                                                  "target_sid":
+                                                    conn.target_sid,
+                                                  "note": "2757006"},
+                                            )
+                                        except Exception:
+                                            pass
                         elif _ba.get("ok"):
                             print(f"[-] {dest_name}: HTTP "
                                   f"{_ba['status']} — credential "
