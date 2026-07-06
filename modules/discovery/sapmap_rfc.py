@@ -2474,8 +2474,24 @@ def retrieve_rfc_connections(node: SAPNode, creds: Credentials = None) -> list:
     AutoPwn multi-wave run, the same node otherwise re-runs the
     same 2-minute poll every wave for zero yield.  Operator-reported:
     SB6/AED wasted 6+ min across three waves before this cache.
+
+    Java-only stacks have no RFCDES table and no XBP RSRFCCHK support,
+    but they still accept RFC connect attempts on their gateway (33XX)
+    just long enough to hit the SAP NW RFC SDK timeout — ~60s per call.
+    In AutoPwn's per-wave auto-propagate loop the same 5 Java nodes
+    burned ~5 min per wave before this gate.  Return empty immediately
+    when ``system_type`` reports pure JAVA with no ABAP kernel.
     """
     connections = []
+
+    _stype = (node.system_type or "").upper()
+    if ("JAVA" in _stype
+            and "ABAP" not in _stype
+            and "HANA" not in _stype):
+        print(f"[*] {node.sid}: RFC destination retrieval skipped — "
+              f"Java-only stack has no RFCDES/RSRFCCHK "
+              f"(system_type={node.system_type!r})")
+        return []
 
     if getattr(node, "_rsrfcchk_useless", False):
         print(f"[*] {node.sid}: RSRFCCHK previously produced no rows — "

