@@ -625,7 +625,15 @@ class TestChunkedReadAdapter:
         assert calls == [("whoami", "")]
 
     def test_chunked_read_reassembles_file(self):
-        """A multi-chunk base64 read returns the full file as one b64 line."""
+        """A multi-chunk base64 read returns the full file as one b64 line.
+
+        Also verifies the fast-path probe: on a target that truncates
+        single-call ``base64 <path>`` output, the adapter must detect
+        the truncation and fall back to chunked reads.  The mock
+        returns only the first 16 raw bytes for the single-call probe
+        (simulating a kernel 793+ TLV output cap) so the fast path
+        bails, then all 200+ bytes come through chunked.
+        """
         from sap_pse_loot import make_chunked_read_adapter
         import base64 as _b64
 
@@ -638,6 +646,14 @@ class TestChunkedReadAdapter:
         def raw(program, args):
             if "print(42777)" in args:
                 return {"success": True, "output": ["42777"], "error": ""}
+            # Fast-path single-call base64 probe — simulate TLV
+            # output truncation by returning only 16 raw bytes.
+            if program == "base64" and args == target_path:
+                truncated = target_bytes[:16]
+                return {"success": True,
+                        "output": [
+                            _b64.b64encode(truncated).decode("ascii")],
+                        "error": ""}
             assert program == "python3"
             if "getsize" in args:
                 return {"success": True,
@@ -680,6 +696,14 @@ class TestChunkedReadAdapter:
         def raw(program, args):
             if "print(42777)" in args:
                 return {"success": True, "output": ["42777"], "error": ""}
+            # Force fallback to chunked by returning a truncated
+            # single-call probe result (10 of 100 bytes).
+            if program == "base64" and args == "/foo":
+                return {"success": True,
+                        "output": [
+                            _b64.b64encode(
+                                target_bytes[:10]).decode("ascii")],
+                        "error": ""}
             assert program == "python3"
             if "getsize" in args:
                 return {"success": True,
@@ -725,3 +749,37 @@ class TestChunkedReadAdapter:
         r = adapter("base64", "/empty/file")
         assert r["success"]
         assert r["output"] == [""]
+
+    def test_fast_path_full_file_in_one_call(self):
+        """On kernels without the TLV output cap, one base64 call
+        returns the whole file and chunked reads are skipped."""
+        from sap_pse_loot import make_chunked_read_adapter
+        import base64 as _b64
+        target_bytes = b"kernel-742-full-single-call" * 30  # ~810 B
+        target_path = "/etc/testfile"
+        chunk_calls = []
+
+        def raw(program, args):
+            if "print(42777)" in args:
+                return {"success": True, "output": ["42777"], "error": ""}
+            if program == "base64" and args == target_path:
+                # Full file in one shot — no truncation.
+                return {"success": True,
+                        "output": [
+                            _b64.b64encode(target_bytes).decode("ascii")],
+                        "error": ""}
+            if program == "python3" and "getsize" in args:
+                return {"success": True,
+                        "output": [str(len(target_bytes))],
+                        "error": ""}
+            # Any chunked read call here is a bug — the fast path
+            # should have short-circuited.
+            chunk_calls.append((program, args))
+            return {"success": False, "output": [], "error": "unexpected"}
+
+        adapter = make_chunked_read_adapter(raw)
+        r = adapter("base64", target_path)
+        assert r["success"]
+        assert _b64.b64decode("".join(r["output"])) == target_bytes
+        assert chunk_calls == [], (
+            f"fast path should skip chunked reads, got {chunk_calls}")
