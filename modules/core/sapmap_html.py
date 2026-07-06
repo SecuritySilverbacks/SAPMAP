@@ -3286,7 +3286,13 @@ function updateMap() {
       const len = Math.sqrt(cdx*cdx + cdy*cdy) || 1;
       // Perpendicular based on canonical direction (consistent for both A→B and B→A)
       const px = -cdy / len, py = cdx / len;
-      const offset = (idx - (total - 1) / 2) * 40;
+      // Curve-spread multiplier grows with edge count so 3+ parallel
+      // edges don't collapse toward the straight-line axis.  2 edges
+      // stay at ±20 (Q-midpoint), 3 edges spread ±30, 4 edges ±45,
+      // etc.  Keeps close doubles tidy while pulling long clusters
+      // apart enough to distinguish routes.
+      const curveMul = total <= 2 ? 40 : 40 + (total - 2) * 20;
+      const offset = (idx - (total - 1) / 2) * curveMul;
       const qx = mx + px * offset, qy = my + py * offset;
       // Invisible wider hit area for dashed/dotted lines
       if (dashArray) {
@@ -3308,12 +3314,30 @@ function updateMap() {
       const cdy2 = a < b ? (cy2 - cy1) : (cy1 - cy2);
       const len2 = Math.sqrt(cdx2*cdx2 + cdy2*cdy2) || 1;
       const px2 = -cdy2 / len2, py2 = cdx2 / len2;
-      const off2 = (idx - (total - 1) / 2) * 40;
-      // Place label at quadratic bezier midpoint (t=0.5)
-      lx = mx2 + px2 * off2 * 0.5;
-      ly = my2 + py2 * off2 * 0.5 - 6;
+      // Mirror the curveMul used for the edge path so labels stay
+      // on their own curves when total > 2.
+      const curveMul2 = total <= 2 ? 40 : 40 + (total - 2) * 20;
+      const off2 = (idx - (total - 1) / 2) * curveMul2;
+      // Perpendicular offset onto the Q-bezier midpoint (existing).
+      const perpX = px2 * off2 * 0.5;
+      const perpY = py2 * off2 * 0.5;
+      // Along-axis stagger: distribute labels along ~30% of edge
+      // length so 3+ nearly-parallel labels don't stack on top of
+      // each other.  Fix for BTP→on-prem clusters where multiple
+      // synthetic edges from the same subaccount to the same SAP
+      // node use the identical (source_sid, target_sid) pair.
+      const dux = (cx2 - cx1) / len2, duy = (cy2 - cy1) / len2;
+      const stagger = (idx - (total - 1) / 2) * Math.min(80, len2 * 0.15);
+      lx = mx2 + perpX + dux * stagger;
+      ly = my2 + perpY + duy * stagger - 6;
     }
-    let label = conn.destination_name || '';
+    // Strip the "BTP:<uuid8>::" prefix that link_destinations_to_onprem
+    // stamps onto synthetic BTP→on-prem destination_names.  The source
+    // node in the label position already tells the operator which BTP
+    // subaccount owns the destination; the prefix is redundant and
+    // was making labels wide enough to overlap with sibling edges.
+    let label = (conn.destination_name || '').replace(
+        /^BTP:[0-9a-f]{8}::/i, '');
     if (conn.rfc_user) label += ' / ' + conn.rfc_user;
     if (conn.trusted_system) label += ' (Trusted)';
     else if (conn.has_sap_all) label += ' (SAP_ALL)';
