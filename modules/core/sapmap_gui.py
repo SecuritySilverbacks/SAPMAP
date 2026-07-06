@@ -4798,6 +4798,14 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     sub_node.enumerated_at = (
                         datetime.now().isoformat())
                     sub_node.destinations = dests
+                    # Fold any FQDN-keyed placeholder cloud for the
+                    # same subdomain (created earlier by
+                    # materialise_type_g_target when an RFC destination
+                    # to *.hana.ondemand.com surfaced before harvest).
+                    _folded = api.state.fold_btp_placeholders(sub_node)
+                    if _folded:
+                        print(f"[+] {sid}: folded {_folded} placeholder "
+                              f"BTP node(s) into subaccount {sub_uuid[:8]}")
                     before_disc = {
                         s for s, n in api.state.nodes.items()
                         if n.discovered_via_btp}
@@ -13607,6 +13615,10 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                 or sub_node.subdomain)
         sub_node.enumerated_at = datetime.now().isoformat()
         sub_node.destinations = dests
+        _folded = api.state.fold_btp_placeholders(sub_node)
+        if _folded:
+            print(f"[+] folded {_folded} placeholder BTP node(s) "
+                  f"into subaccount {sub_uuid[:8]}")
 
         before_disc = {s for s, n in api.state.nodes.items()
                         if n.discovered_via_btp}
@@ -13788,6 +13800,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 or sub_node.parent_global_account)
             sub_node.scc_locations = m_by_sub.get(uuid, [])
             sub_node.enumerated_at = now_iso
+            api.state.fold_btp_placeholders(sub_node)
         print(f"[+] BTP {region}: enumerated {len(subs)} subaccount(s), "
               f"{len(mappings)} SCC mapping(s); {added} new BTP node(s) "
               f"(plus CF topology: {len(cf_topology.get('orgs', []))} orgs, "
