@@ -2118,6 +2118,60 @@ class SAPMAPState:
             except Exception:
                 pass
 
+    def fold_btp_placeholders(self, canonical) -> int:
+        """Merge FQDN-keyed placeholder BTP subaccounts into ``canonical``.
+
+        materialise_type_g_target creates a BTPSubaccountNode keyed by the
+        destination host FQDN (``<sub>.authentication.<region>.hana.
+        ondemand.com``) the first time any RFC destination points at a
+        BTP tenant — before the operator has run mint/harvest.  Later,
+        when the mint/harvest path lands a token for the same tenant,
+        it registers a *second* BTPSubaccountNode keyed by the real
+        subaccount UUID, leaving two identical clouds side-by-side.
+
+        This helper folds every other entry that shares ``canonical.
+        subdomain`` (case-insensitive) into ``canonical``: connection
+        target_sid pointers are rewritten to canonical.uuid, any
+        destinations/position the placeholder accumulated are absorbed
+        only when canonical is still empty, and the placeholder entry
+        is deleted.  Returns the number of placeholders folded.
+
+        Called by the mint/harvest sites once ``canonical.subdomain``
+        is populated (so subdomain-matching is safe).
+        """
+        if not canonical:
+            return 0
+        subdomain = (canonical.subdomain or "").lower()
+        if not subdomain:
+            return 0
+        canonical_uuid = canonical.uuid
+        folded = 0
+        for placeholder_uuid in list(self.btp_subaccounts.keys()):
+            if placeholder_uuid == canonical_uuid:
+                continue
+            placeholder = self.btp_subaccounts[placeholder_uuid]
+            if (getattr(placeholder, "subdomain", "") or "").lower() != subdomain:
+                continue
+            # Rewrite every connection's target_sid so edges keep
+            # terminating on the canonical cloud after the placeholder
+            # is deleted.
+            for c in self.connections:
+                if c.target_sid == placeholder_uuid:
+                    c.target_sid = canonical_uuid
+            # Absorb visual position only if canonical hasn't been
+            # positioned yet (operator drag on the placeholder shouldn't
+            # be lost).
+            if not canonical.position and placeholder.position:
+                canonical.position = placeholder.position
+            # Absorb destinations only when canonical still has none —
+            # the real UUID node from mint/harvest carries authoritative
+            # destination data with cleartext creds; never overwrite it.
+            if not canonical.destinations and placeholder.destinations:
+                canonical.destinations = placeholder.destinations
+            del self.btp_subaccounts[placeholder_uuid]
+            folded += 1
+        return folded
+
     def notify_sap_all_if_elevated(self, conn) -> None:
         """Emit a CRITICAL finding (with source/target meta for the pulse
         overlay) when a connection's has_sap_all + logon_successful flags
@@ -2465,7 +2519,39 @@ class SAPMAPState:
             state.scc_nodes[host] = SCCNode.from_dict(scc_d)
         for uuid, sub_d in d.get("btp_subaccounts", {}).items():
             state.btp_subaccounts[uuid] = BTPSubaccountNode.from_dict(sub_d)
+        # One-shot dedup pass: fold FQDN-keyed placeholder BTP nodes
+        # (from earlier materialise_type_g_target runs) into any
+        # real-UUID node that shares the same subdomain.  Handles
+        # sessions that were saved before fold_btp_placeholders was
+        # wired into the mint/harvest sites — otherwise the operator
+        # would see the duplicate cloud until they re-ran harvest.
+        state._dedupe_btp_subaccounts_by_subdomain()
         return state
+
+    def _dedupe_btp_subaccounts_by_subdomain(self) -> int:
+        """Sweep btp_subaccounts and fold duplicates that share a
+        subdomain.  Picks the winner per subdomain by preferring
+        the one with more destinations, then pwned=True, then the
+        shorter uuid (real UUIDs are shorter than FQDNs).  Returns
+        the total number of nodes folded."""
+        by_sub = {}
+        for uuid, sub in self.btp_subaccounts.items():
+            key = (sub.subdomain or "").lower()
+            if not key:
+                continue
+            by_sub.setdefault(key, []).append(sub)
+        folded = 0
+        for group in by_sub.values():
+            if len(group) < 2:
+                continue
+            group.sort(key=lambda s: (
+                -len(s.destinations or []),
+                0 if s.pwned else 1,
+                len(s.uuid),
+            ))
+            canonical = group[0]
+            folded += self.fold_btp_placeholders(canonical)
+        return folded
 
     def to_json(self, indent: int = 2) -> str:
         return json.dumps(self.to_dict(), indent=indent, default=str)
