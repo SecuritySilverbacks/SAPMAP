@@ -1902,6 +1902,59 @@ class SAPMAPState:
         if not host:
             return
 
+        # BTP-cloud short-circuit — hostnames matching *.hana.ondemand.com
+        # (and the other BTP suffixes recognised by _classify_type_g_target)
+        # belong on the cloud tier, not the on-prem layer.  Reuse an
+        # existing BTPSubaccountNode when one already covers the same
+        # FQDN, else synthesise a fresh cloud-shaped node.  This runs
+        # regardless of ping_ok / allow_placeholder — a BTP tenant that
+        # 401s on ping is still a legitimate landing zone for the edge,
+        # and the operator needs the visual link.  Fixes: BTP conns
+        # (is_btp_dest=True) ending up with target_sid='' after every
+        # Retrieve-RFCs pass because _classify_type_g_target flags the
+        # conn but doesn't attach a target.
+        host_lc = host.lower()
+        _BTP_SUFFIXES = (
+            ".hana.ondemand.com",
+            ".hana.ondemand.cn",
+            ".hana.ondemand.sap",
+            ".cloud.sap",
+        )
+        is_btp_host = (getattr(conn, "is_btp_dest", False)
+                       or any(host_lc.endswith(sfx)
+                              for sfx in _BTP_SUFFIXES))
+        if is_btp_host:
+            # Prefer an already-registered BTP subaccount whose FQDN
+            # matches this hostname (exact key, then subdomain suffix
+            # match so multiple destinations for the same tenant fold
+            # into one cloud node).
+            btp_uuid = None
+            if host_lc in self.btp_subaccounts:
+                btp_uuid = host_lc
+            else:
+                parts = host_lc.split(".")
+                subdomain = parts[0] if parts else ""
+                if subdomain:
+                    for u, sub in self.btp_subaccounts.items():
+                        if (getattr(sub, "subdomain", "") or "").lower() == subdomain:
+                            btp_uuid = u
+                            break
+            if btp_uuid is None:
+                parts = host_lc.split(".")
+                subdomain = parts[0] if parts else ""
+                region = parts[2] if len(parts) >= 3 else ""
+                btp_uuid = host_lc
+                self.btp_subaccounts[btp_uuid] = BTPSubaccountNode(
+                    uuid=btp_uuid,
+                    display_name=subdomain or host_lc,
+                    region=region,
+                    subdomain=subdomain,
+                )
+            conn.target_sid = btp_uuid
+            conn.target_host = host
+            conn.is_btp_dest = True
+            return
+
         existing = self.find_node_by_host(hostname=host, ip=host)
         if existing is not None:
             conn.target_sid = existing.sid
@@ -2017,6 +2070,13 @@ class SAPMAPState:
                     "ping_ok", "tested", "latency_ms",
                     "sapxpg_remote_works", "remote_user_created",
                     "remote_user_name", "soap_rfc_verified",
+                    # target_sid / target_host / target_ip preserved so a
+                    # bare RFCDES re-fetch (which parses only source-side
+                    # options) doesn't erase a target link established by
+                    # an earlier probe — most importantly the
+                    # is_btp_dest → BTPSubaccountNode link set by
+                    # materialise_type_g_target.
+                    "target_sid", "target_host", "target_ip",
                 )
                 for attr in preserve_if_empty:
                     old_val = getattr(existing, attr, None)
