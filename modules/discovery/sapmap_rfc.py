@@ -2467,8 +2467,26 @@ def retrieve_rfc_connections(node: SAPNode, creds: Credentials = None) -> list:
 
     Uses the XBP job scheduling approach from poc_remote_abap_exec.py.
     Returns list of RFCConn objects.
+
+    Skips the XBP + RSRFCCHK path when a prior invocation flagged the
+    node with ``_rsrfcchk_useless`` — either the job never finished
+    within the poll window, or it finished with no rows.  In an
+    AutoPwn multi-wave run, the same node otherwise re-runs the
+    same 2-minute poll every wave for zero yield.  Operator-reported:
+    SB6/AED wasted 6+ min across three waves before this cache.
     """
     connections = []
+
+    if getattr(node, "_rsrfcchk_useless", False):
+        print(f"[*] {node.sid}: RSRFCCHK previously produced no rows — "
+              f"skipping XBP job, going straight to RFCDES fallback")
+        try:
+            with _get_connection(node, creds) as conn:
+                return _try_rfc_read_table_fallback(conn, node)
+        except Exception as e:
+            logger.debug(f"RFCDES fallback (rsrfcchk-cached-useless) "
+                          f"failed for {node.sid}: {format_rfc_exception(e)}")
+            return []
 
     try:
         with _get_connection(node, creds) as conn:
@@ -2484,6 +2502,10 @@ def retrieve_rfc_connections(node: SAPNode, creds: Credentials = None) -> list:
             ret = xmi_result.get("RETURN", {})
             if isinstance(ret, dict) and ret.get("TYPE", "") in ("E", "A"):
                 print(f"[-] {node.sid}: XBP logon failed: {ret.get('MESSAGE', '')}")
+                try:
+                    node._rsrfcchk_useless = True
+                except Exception:
+                    pass
                 return _try_rfc_read_table_fallback(conn, node)
 
             # Step 2: Open job
@@ -2544,6 +2566,10 @@ def retrieve_rfc_connections(node: SAPNode, creds: Credentials = None) -> list:
 
             if not finished:
                 print(f"[-] {node.sid}: Job did not finish, trying table fallback...")
+                try:
+                    node._rsrfcchk_useless = True
+                except Exception:
+                    pass
                 return _try_rfc_read_table_fallback(conn, node)
 
             # Step 7: Read spool output
@@ -2586,6 +2612,10 @@ def retrieve_rfc_connections(node: SAPNode, creds: Credentials = None) -> list:
             # If RSRFCCHK yielded nothing, fall back to RFCDES table
             if not connections:
                 print(f"[*] {node.sid}: No connections from RSRFCCHK, trying RFCDES fallback...")
+                try:
+                    node._rsrfcchk_useless = True
+                except Exception:
+                    pass
                 connections = _try_rfc_read_table_fallback(conn, node)
 
     except Exception as e:

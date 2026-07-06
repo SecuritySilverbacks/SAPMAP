@@ -1035,6 +1035,23 @@ def harvest_scc_mappings_from_pwned_node(node: SAPNode, state: SAPMAPState) -> d
     """
     sid = node.sid or "?"
 
+    # OS-aware early gate.  SAP Cloud Connector ships Linux-only
+    # tar/zip packages; there's no Windows build.  Firing `ls
+    # /opt/sap/scc/...` five times through a SAPControl OSExecute
+    # pivot on a Windows target burns ~65 s on HTTP 500 CreateProcess
+    # errors × 4-attempt retry backoff × 5 candidate paths (operator-
+    # reported J75 + SJJ during autopwn).  Skip immediately when the
+    # target is known Windows.
+    _os_hint = (node.os_type or "").lower()
+    _sc_pivot = getattr(node, "_cached_sapcontrol_pivot", None) or {}
+    _pivot_hint = (_sc_pivot.get("os_hint") or "").lower()
+    _is_windows = ("win" in _os_hint or "nt" in _os_hint
+                    or _pivot_hint == "windows")
+    if _is_windows:
+        print(f"[*] {sid}: harvest_scc_mappings — target OS is Windows, "
+              f"skipping SCC probe (Cloud Connector is Linux-only)")
+        return {"ok": False, "error": "SCC not supported on Windows targets"}
+
     def _gw_b64(prog, arg):
         """Run prog arg via SAPXPG, base64-decode output. Returns (bytes|None, err_str)."""
         r = execute_gw_command(node, prog, arg, long_params="")
