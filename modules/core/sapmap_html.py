@@ -105,11 +105,14 @@ body {
 .node-box:active { cursor: grabbing; }
 .node-header { cursor: grab; }
 .edge-line { cursor: pointer; }
-.edge-line:hover { stroke-width: 8 !important; filter: brightness(1.3); }
+.edge-line:hover { stroke-width: 12 !important; filter: brightness(1.3); }
 
 /* === Legend === */
+/* Slim bar with a Legend button + Show-unknown-targets checkbox.  The
+   full legend content lives behind a modal so it doesn't crowd the
+   map — click the button to expand. */
 .legend-bar {
-  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
   row-gap: 4px;
   background: #161b22; border-bottom: 1px solid #30363d;
   padding: 4px 12px; font-size: 11px; color: #8b949e; flex-shrink: 0;
@@ -118,10 +121,61 @@ body {
 .legend-swatch {
   width: 14px; height: 10px; border-radius: 2px; display: inline-block;
 }
-/* Vertical divider between legend groups (Nodes | Edges | SCC tunnel) */
 .legend-sep {
   width: 1px; height: 14px; background: #30363d;
   align-self: center;
+}
+.legend-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 12px; border: 1px solid #30363d; border-radius: 4px;
+  background: #21262d; color: #c9d1d9; font-size: 11px;
+  cursor: pointer; user-select: none;
+  transition: background 0.12s, border-color 0.12s;
+}
+.legend-btn:hover {
+  background: #30363d; border-color: #484f58; color: #f0883e;
+}
+.legend-btn .caret { color: #6e7681; font-size: 9px; }
+
+/* Full legend modal — wider than the standard credential modals since
+   it lists 20+ edge/node types side-by-side.  Grid layout groups items
+   under section headings. */
+.legend-modal { width: 720px; max-width: 92vw; }
+.legend-modal h3 {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 15px; margin-bottom: 12px;
+}
+.legend-modal .close-x {
+  background: transparent; border: none; color: #8b949e;
+  cursor: pointer; font-size: 20px; line-height: 1; padding: 0 6px;
+}
+.legend-modal .close-x:hover { color: #f85149; }
+.legend-section {
+  margin-bottom: 14px;
+  border-top: 1px solid #21262d; padding-top: 10px;
+}
+.legend-section:first-of-type { border-top: none; padding-top: 0; }
+.legend-section h4 {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
+  color: #58a6ff; margin: 0 0 8px 0;
+}
+.legend-grid {
+  display: grid; grid-template-columns: repeat(2, 1fr);
+  gap: 6px 20px; font-size: 12px; color: #c9d1d9;
+}
+.legend-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 3px 0;
+}
+.legend-row .swatch-cell {
+  flex: 0 0 40px; display: flex; align-items: center;
+  justify-content: center;
+}
+.legend-row .label {
+  flex: 1; font-size: 11px; color: #c9d1d9; line-height: 1.3;
+}
+.legend-row .hint {
+  color: #8b949e; font-size: 10px; margin-top: 2px;
 }
 
 /* === Console === */
@@ -859,29 +913,107 @@ body {
                 pointer-events:none;z-index:5"></svg>
   </div>
 
-  <!-- Legend -->
+  <!-- Legend — collapsed bar (click LEGEND to expand modal) -->
   <div class="legend-bar" id="legend-bar" style="display:none">
-    <span style="color:#8b949e;font-weight:600">LEGEND</span>
+    <button class="legend-btn" onclick="openLegend()" title="Show map legend">
+      &#128712;&#65039; Legend <span class="caret">&#9660;</span>
+    </button>
     <span class="legend-sep"></span>
-    <span class="legend-item"><span class="legend-swatch" style="background:#4a1a1a;border:1px solid #8b0000"></span> PRD</span>
-    <span class="legend-item"><span class="legend-swatch" style="background:#4a3a1a;border:1px solid #e67e22"></span> Non-PRD</span>
-    <span class="legend-item"><span class="legend-swatch" style="background:transparent;border:2px solid #8b0000"></span> Critical</span>
-    <span class="legend-item">&#9889; Pwned</span>
-    <span class="legend-item"><span class="legend-swatch" style="background:#046c7a"></span> SAP Cloud Connector</span>
-    <span class="legend-sep"></span>
-    <span class="legend-item"><span class="legend-swatch" style="background:#e74c3c"></span> RFC Logon OK + SAP_ALL</span>
-    <span class="legend-item" title="Trusted RFC: RFCOPTIONS has Q=Y (SM59 Trust Relationship = Yes). Inbound trust means this caller can land authenticated calls without a password."><svg width="22" height="10" style="vertical-align:middle"><line x1="0" y1="5" x2="22" y2="5" stroke="#f0883e" stroke-width="3" stroke-dasharray="6,2"/></svg> Trusted RFC</span>
-    <span class="legend-item"><span class="legend-swatch" style="background:#2ecc71"></span> RFC Logon OK</span>
-    <span class="legend-item"><span class="legend-swatch" style="background:#5dade2"></span> RFC (untested)</span>
-    <span class="legend-item"><span class="legend-swatch" style="background:#a371f7;border:2px dotted #a371f7;background:transparent"></span> HTTP destination</span>
-    <span class="legend-item"><span class="legend-swatch" style="background:#ff6b35;border:2px dashed #ff6b35;background:transparent"></span> TCP/IP (sapxpg)</span>
-    <span class="legend-sep"></span>
-    <span class="legend-item" title="All SCC mappings to this ABAP node have been smoke-tested and reach the backend successfully"><span class="legend-swatch" style="background:transparent;border-top:2px dashed #3fb950;border-radius:0;width:18px;height:0"></span> SCC tunnel: reach OK</span>
-    <span class="legend-item" title="At least one SCC mapping to this ABAP node failed its smoke test"><span class="legend-swatch" style="background:transparent;border-top:2px dashed #f85149;border-radius:0;width:18px;height:0"></span> SCC tunnel: unreachable</span>
-    <span class="legend-item" title="SCC mapping uses principal propagation (KERBEROS / X509_*) — pair with the PP analyser finding"><span class="legend-swatch" style="background:transparent;border-top:2px dashed #f0883e;border-radius:0;width:18px;height:0"></span> SCC tunnel: PP enabled</span>
-    <span class="legend-item" title="PP impersonation live-verified — a SAPMAP probe successfully landed a request as an impersonated on-prem user"><span class="legend-swatch" style="background:transparent;border-top:3px solid #f85149;border-radius:0;width:18px;height:0"></span> SCC tunnel: PP CONFIRMED</span>
+    <!-- Show a few of the highest-value swatches inline so the bar
+         still gives at-a-glance recall.  Full detail lives in the modal. -->
+    <span class="legend-item" title="Deep-red thick line = OS shell on target (SAPControl OSExecute / CTCWebService)">
+      <svg width="22" height="10" style="vertical-align:middle"><line x1="0" y1="5" x2="22" y2="5" stroke="#c0392b" stroke-width="5"/></svg>
+      OS shell
+    </span>
+    <span class="legend-item" title="Bright-red line = RFC logon OK + SAP_ALL role">
+      <svg width="22" height="10" style="vertical-align:middle"><line x1="0" y1="5" x2="22" y2="5" stroke="#e74c3c" stroke-width="4"/></svg>
+      SAP_ALL
+    </span>
+    <span class="legend-item" title="Green line = RFC logon OK (creds work)">
+      <svg width="22" height="10" style="vertical-align:middle"><line x1="0" y1="5" x2="22" y2="5" stroke="#2ecc71" stroke-width="4"/></svg>
+      Logon OK
+    </span>
+    <span class="legend-item" title="Purple dotted = Type-G / Type-H HTTP destination">
+      <svg width="22" height="10" style="vertical-align:middle"><line x1="0" y1="5" x2="22" y2="5" stroke="#a371f7" stroke-width="3" stroke-dasharray="2,2"/></svg>
+      HTTP
+    </span>
+    <span class="legend-item" title="Light-blue line = RFC destination (not tested yet)">
+      <svg width="22" height="10" style="vertical-align:middle"><line x1="0" y1="5" x2="22" y2="5" stroke="#5dade2" stroke-width="3"/></svg>
+      Untested
+    </span>
     <span style="flex:1"></span>
     <label style="cursor:pointer;display:flex;align-items:center;gap:6px;padding:2px 10px;border:1px solid #30363d;border-radius:4px;background:#161b22;color:#c9d1d9;font-size:11px"><input type="checkbox" id="show-unknown" style="accent-color:#f0883e;width:14px;height:14px" onchange="updateMap()"> Show unknown targets</label>
+  </div>
+
+  <!-- Legend — full modal.  Groups every edge/node style into sections
+       so operators can look up unfamiliar renderings without hunting
+       through source code. -->
+  <div class="modal-overlay" id="legend-modal"
+       onclick="if(event.target===this)closeModal('legend-modal')">
+    <div class="modal legend-modal">
+      <h3>
+        <span>&#128712;&#65039; Map Legend</span>
+        <button class="close-x" onclick="closeModal('legend-modal')" title="Close">&times;</button>
+      </h3>
+
+      <div class="legend-section">
+        <h4>Nodes</h4>
+        <div class="legend-grid">
+          <div class="legend-row"><span class="swatch-cell"><span class="legend-swatch" style="background:#4a1a1a;border:1px solid #8b0000;width:22px;height:14px"></span></span><span class="label"><b>PRD system</b> — red-tinted box, treat any finding as blocking</span></div>
+          <div class="legend-row"><span class="swatch-cell"><span class="legend-swatch" style="background:#4a3a1a;border:1px solid #e67e22;width:22px;height:14px"></span></span><span class="label"><b>Non-PRD system</b> — dev / QA / test tier</span></div>
+          <div class="legend-row"><span class="swatch-cell"><span class="legend-swatch" style="background:transparent;border:2px solid #8b0000;width:22px;height:14px"></span></span><span class="label"><b>Critical finding</b> — thick red border on any node</span></div>
+          <div class="legend-row"><span class="swatch-cell" style="font-size:16px">&#9889;</span><span class="label"><b>Pwned</b> — SAPMAP has created a user or captured shell</span></div>
+          <div class="legend-row"><span class="swatch-cell"><span class="legend-swatch" style="background:#046c7a;width:22px;height:14px;clip-path:polygon(15% 0,85% 0,100% 50%,85% 100%,15% 100%,0 50%)"></span></span><span class="label"><b>SAP Cloud Connector</b> — hexagonal teal node</span></div>
+          <div class="legend-row"><span class="swatch-cell"><span class="legend-swatch" style="background:#4d9eb6;width:22px;height:14px"></span></span><span class="label"><b>Web Dispatcher</b> — cyan node with backend fan-out</span></div>
+          <div class="legend-row"><span class="swatch-cell"><span style="color:#a371f7;font-size:16px">&#9729;</span></span><span class="label"><b>BTP subaccount</b> — cloud shape, one per subaccount</span></div>
+          <div class="legend-row"><span class="swatch-cell"><span class="legend-swatch" style="background:#1a1a2e;border:3px dashed #484f58;width:22px;height:14px"></span></span><span class="label"><b>Unknown target</b> — placeholder (opt-in via checkbox)</span></div>
+        </div>
+      </div>
+
+      <div class="legend-section">
+        <h4>RFC destinations (Type-3)</h4>
+        <div class="legend-grid">
+          <div class="legend-row"><span class="swatch-cell"><svg width="34" height="10"><line x1="0" y1="5" x2="34" y2="5" stroke="#c0392b" stroke-width="9"/></svg></span><span class="label"><b>OS shell verified</b> — SAPControl OSExecute or CTCWebService/FileSystemConfig grants shell as &lt;sid&gt;adm (kernel-level, beats SAP_ALL)</span></div>
+          <div class="legend-row"><span class="swatch-cell"><svg width="34" height="10"><line x1="0" y1="5" x2="34" y2="5" stroke="#e74c3c" stroke-width="8"/></svg></span><span class="label"><b>RFC Logon OK + SAP_ALL</b> — captured a stored credential with SAP_ALL role</span></div>
+          <div class="legend-row"><span class="swatch-cell"><svg width="34" height="10"><line x1="0" y1="5" x2="34" y2="5" stroke="#ff6b35" stroke-width="7" stroke-dasharray="8,4"/></svg></span><span class="label"><b>TCP/IP (sapxpg) works</b> — 10KBLAZE / GW SAPXPG remote command execution</span></div>
+          <div class="legend-row"><span class="swatch-cell"><svg width="34" height="10"><line x1="0" y1="5" x2="34" y2="5" stroke="#f0883e" stroke-width="7" stroke-dasharray="12,4"/></svg></span><span class="label"><b>Trusted RFC</b> — SM59 Trust = Yes (RFCOPTIONS Q=Y).  Inbound trust: caller can land authenticated calls without a password</span></div>
+          <div class="legend-row"><span class="swatch-cell"><svg width="34" height="10"><line x1="0" y1="5" x2="34" y2="5" stroke="#2ecc71" stroke-width="7"/></svg></span><span class="label"><b>RFC Logon OK</b> — creds work, role not yet SAP_ALL confirmed</span></div>
+          <div class="legend-row"><span class="swatch-cell"><svg width="34" height="10"><line x1="0" y1="5" x2="34" y2="5" stroke="#5dade2" stroke-width="6"/></svg></span><span class="label"><b>RFC (untested)</b> — destination present, credential/reach not verified</span></div>
+        </div>
+      </div>
+
+      <div class="legend-section">
+        <h4>HTTP destinations (Type-G / Type-H)</h4>
+        <div class="legend-grid">
+          <div class="legend-row"><span class="swatch-cell"><svg width="34" height="10"><line x1="0" y1="5" x2="34" y2="5" stroke="#a371f7" stroke-width="6" stroke-dasharray="2,2"/></svg></span><span class="label"><b>HTTP destination</b> — Type-G (external HTTP) or Type-H (HTTP to ABAP).  Purple dotted; upgrades to OS-shell red once SAPControl OSExecute or CTCWebService confirms shell control</span></div>
+        </div>
+      </div>
+
+      <div class="legend-section">
+        <h4>SAP Cloud Connector tunnels</h4>
+        <div class="legend-grid">
+          <div class="legend-row"><span class="swatch-cell"><svg width="34" height="10"><line x1="0" y1="5" x2="34" y2="5" stroke="#3fb950" stroke-width="5" stroke-dasharray="6,4"/></svg></span><span class="label"><b>Reach OK</b> — every mapping smoke-tested successfully</span></div>
+          <div class="legend-row"><span class="swatch-cell"><svg width="34" height="10"><line x1="0" y1="5" x2="34" y2="5" stroke="#f85149" stroke-width="5" stroke-dasharray="6,4"/></svg></span><span class="label"><b>Unreachable</b> — at least one mapping failed its probe</span></div>
+          <div class="legend-row"><span class="swatch-cell"><svg width="34" height="10"><line x1="0" y1="5" x2="34" y2="5" stroke="#f0883e" stroke-width="5" stroke-dasharray="6,4"/></svg></span><span class="label"><b>PP enabled</b> — Principal Propagation configured (KERBEROS / X509_*)</span></div>
+          <div class="legend-row"><span class="swatch-cell"><svg width="34" height="10"><line x1="0" y1="5" x2="34" y2="5" stroke="#f85149" stroke-width="6"/></svg></span><span class="label"><b>PP CONFIRMED</b> — SAPMAP live-verified impersonation through this SCC</span></div>
+          <div class="legend-row"><span class="swatch-cell"><svg width="34" height="10"><line x1="0" y1="5" x2="34" y2="5" stroke="#a371f7" stroke-width="4" stroke-dasharray="2,3"/></svg></span><span class="label"><b>HA shadow</b> — master ↔ shadow pair between two SCCs</span></div>
+        </div>
+      </div>
+
+      <div class="legend-section">
+        <h4>Other edges &amp; markers</h4>
+        <div class="legend-grid">
+          <div class="legend-row"><span class="swatch-cell"><svg width="34" height="10"><line x1="0" y1="5" x2="34" y2="5" stroke="#4d9eb6" stroke-width="4"/></svg></span><span class="label"><b>Web Dispatcher &rarr; backend</b> — cyan; dashed when the backend's Server header was suppressed</span></div>
+          <div class="legend-row"><span class="swatch-cell"><svg width="34" height="10"><line x1="0" y1="5" x2="34" y2="5" stroke="#5dade2" stroke-width="4.5" stroke-dasharray="4,4"/></svg></span><span class="label"><b>SCC tunnel indicator</b> — matched location_id mapping between an SCC node and a plotted backend</span></div>
+          <div class="legend-row"><span class="swatch-cell"><svg width="34" height="10"><line x1="0" y1="5" x2="34" y2="5" stroke="#e74c3c" stroke-width="4"/></svg></span><span class="label"><b>Attack-chain highlight</b> — animated red glow when a chain is selected in the Attack Paths panel</span></div>
+          <div class="legend-row"><span class="swatch-cell"><span style="color:#a371f7;font-size:16px">&#9729;</span></span><span class="label"><b>OAuth 2.0 client_secret</b> — small purple cloud on a node = /OA2C/CS_ row present in SecStore (BTP-lateral material)</span></div>
+        </div>
+      </div>
+
+      <div class="form-actions">
+        <button class="btn" onclick="closeModal('legend-modal')">Close</button>
+      </div>
+    </div>
   </div>
 
   <!-- Console restore button (visible when console is minimized) -->
@@ -3041,25 +3173,28 @@ function updateMap() {
     const isNewConn = !firstRender && !prevConns.has(connKey);
     const newAttr = isNewConn ? ' data-new="1"' : '';
 
+    // Base widths bumped uniformly by +2 so every destination edge is
+    // easier to click.  Preserves the relative hierarchy
+    // (OS-exec > SAP_ALL > SAPXPG > trusted > logon > HTTP > default).
     let color = '#5dade2';
-    let width = 4;
+    let width = 6;
     let dashArray = '';
     const isHttp = (conn.conn_type || '') === 'http';
     const isTrusted = !!conn.trusted_system;
     if (conn.os_exec_verified) {
       // OS shell as <sid>adm via SAPControl OSExecute — beats
       // SAP_ALL (kernel vs application level).  Deep red + thick.
-      color = '#c0392b'; width = 7;
+      color = '#c0392b'; width = 9;
     } else if (conn.has_sap_all && conn.logon_successful) {
-      color = '#e74c3c'; width = 6;
+      color = '#e74c3c'; width = 8;
     } else if (conn.sapxpg_remote_works) {
-      color = '#ff6b35'; width = 5.5; dashArray = '8,4';
+      color = '#ff6b35'; width = 7.5; dashArray = '8,4';
     } else if (isTrusted) {
-      color = '#f0883e'; width = 5; dashArray = '12,4';
+      color = '#f0883e'; width = 7; dashArray = '12,4';
     } else if (conn.logon_successful) {
-      color = '#2ecc71'; width = 5;
+      color = '#2ecc71'; width = 7;
     } else if (isHttp) {
-      color = '#a371f7'; width = 4; dashArray = '2,2';
+      color = '#a371f7'; width = 6; dashArray = '2,2';
     }
 
     // Arrow marker
@@ -3220,7 +3355,7 @@ function updateMap() {
       else if (allProbed && reachOk)          { stroke = '#3fb950'; labelColor = '#3fb950'; dashArrayPP = '6,4'; }
       else if (ppHi)                          { stroke = '#f0883e'; labelColor = '#f0883e'; dashArrayPP = '6,4'; }
       else                                    { stroke = '#046c7a'; labelColor = '#9bb1c4'; dashArrayPP = '6,4'; }
-      const width = (ppVerified ? 4 : (ppHi || reachBad > 0 || (allProbed && reachOk)) ? 3 : 2);
+      const width = (ppVerified ? 6 : (ppHi || reachBad > 0 || (allProbed && reachOk)) ? 5 : 4);
       // Bundled-with-badge: one line per (SCC, SAP) pair regardless of how
       // many mappings traverse it.  Label shows mapping count and (when
       // probed) a reach badge "X/Y reach".
@@ -3270,7 +3405,7 @@ function updateMap() {
       const stroke = '#4d9eb6';
       const dash = bk.is_suppressed ? ' stroke-dasharray="4,3"' : '';
       html += `<line class="edge-line" x1="${sx}" y1="${sy}" ` +
-        `x2="${tx}" y2="${ty}" stroke="${stroke}" stroke-width="2"` +
+        `x2="${tx}" y2="${ty}" stroke="${stroke}" stroke-width="4"` +
         `${dash} fill="none" pointer-events="none" />`;
       const mx = (sx + tx) / 2, my = (sy + ty) / 2;
       // Prefer the admin-table SRCURL (authoritative from
@@ -3355,7 +3490,7 @@ function updateMap() {
       const tx = (bn._x || 0) + BOX_W / 2;
       const ty = (bn._y || 0) + BOX_H / 2;
       html += `<line class="edge-line" x1="${sx}" y1="${sy}" x2="${tx}" y2="${ty}" ` +
-        `stroke="#5dade2" stroke-width="2.5" stroke-dasharray="4,4" fill="none" ` +
+        `stroke="#5dade2" stroke-width="4.5" stroke-dasharray="4,4" fill="none" ` +
         `pointer-events="none" />`;
       const mx = (sx + tx) / 2, my = (sy + ty) / 2;
       const lbl = locId ? `SCC tunnel: ${locId}` : 'SCC tunnel';
@@ -3381,7 +3516,7 @@ function updateMap() {
     const bx = (pn._x || 0) + BOX_W / 2, by = (pn._y || 0) + BOX_H / 2;
     // Solid violet line — distinct from the teal/orange/red SCC→SAP edges.
     html += `<line class="edge-line" x1="${ax}" y1="${ay}" x2="${bx}" y2="${by}" ` +
-      `stroke="#a371f7" stroke-width="2" stroke-dasharray="2,3" fill="none" pointer-events="none" />`;
+      `stroke="#a371f7" stroke-width="4" stroke-dasharray="2,3" fill="none" pointer-events="none" />`;
     const mx = (ax + bx) / 2, my = (ay + by) / 2;
     const roleA = (sn.ha_role || '?').toUpperCase();
     const roleB = (pn.ha_role || sn.ha_peer_role || '?').toUpperCase();
@@ -9551,6 +9686,20 @@ async function saveSaprouter() {
 }
 
 function closeModal(id) { document.getElementById(id).classList.remove('visible'); }
+function openLegend() {
+  // Show the full map-legend modal.  Closes on backdrop click,
+  // ESC key, or the Close button — same UX as every other modal.
+  document.getElementById('legend-modal').classList.add('visible');
+}
+// ESC closes the legend modal (matches the credential/BTP-token modals).
+document.addEventListener('keydown', function(ev) {
+  if (ev.key === 'Escape') {
+    const lm = document.getElementById('legend-modal');
+    if (lm && lm.classList.contains('visible')) {
+      lm.classList.remove('visible');
+    }
+  }
+});
 
 async function showSetPasswordModal() {
   const res = await api('GET', 'settings/password');

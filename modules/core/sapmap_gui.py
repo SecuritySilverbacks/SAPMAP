@@ -255,6 +255,52 @@ def _discover_sid_http(base_url: str,
         except Exception:
             pass
 
+    # Last resort — Host Agent (port 1128) SOAP probe.
+    # SAPControl's ``GetSystemInstanceList`` returns SID + instance for
+    # every SAP system on the box.  1128 is often the ONLY port a
+    # firewalled RFC target exposes: dispatcher 32XX and gateway 33XX
+    # are blocked, ICM 8XXX / 50XX aren't running, but the Host Agent
+    # stays reachable because SolMan / LaMa / DBACockpit rely on it.
+    # Without this probe every such target ends up plotted with a
+    # placeholder SID derived from its IP ("10_", "172", …) via
+    # _derive_sid.  Matches nmap-sap's port-1128 fingerprint (send
+    # GetSystemInstanceList SOAP, extract <SAPSYSTEMNAME>).
+    if not info.get("sid"):
+        try:
+            p = _up(base)
+            _ha_host = p.hostname or ""
+        except Exception:
+            _ha_host = ""
+        if _ha_host:
+            try:
+                from sapmap_scanner import _query_host_agent_systems
+                ha = _query_host_agent_systems(
+                    _ha_host, 1128, timeout=2.5)
+                if ha and ha.get("sid"):
+                    info["sid"] = ha["sid"]
+                    if ha.get("instance_nr") and not info.get(
+                            "instance_nr"):
+                        info["instance_nr"] = ha["instance_nr"]
+                    # http_port from the Host Agent reply IS the ICM
+                    # port for the running instance — much more
+                    # accurate than a candidate-port sweep.
+                    if ha.get("http_port") and not info.get(
+                            "icm_port"):
+                        info["icm_port"] = ha["http_port"]
+                        info["icm_scheme"] = "http"
+                    elif ha.get("https_port") and not info.get(
+                            "icm_port"):
+                        info["icm_port"] = ha["https_port"]
+                        info["icm_scheme"] = "https"
+                    print(f"[+] Host Agent 1128 SOAP probe: "
+                          f"{_ha_host} -> SID={ha['sid']} "
+                          f"inst={ha.get('instance_nr', '?')}")
+            except Exception as _ha_err:
+                # Non-fatal — Host Agent may be off, firewalled, or
+                # hardened.  Falls through to _derive_sid downstream.
+                print(f"[!] Host Agent 1128 probe on {_ha_host} "
+                      f"failed: {_ha_err!s:.80}")
+
     errs = info.pop("_errs", {})
     if not info["sid"] and not info["instance_nr"] and errs:
         first_two = list(errs.items())[:2]
