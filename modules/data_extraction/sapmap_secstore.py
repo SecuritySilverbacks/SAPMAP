@@ -566,6 +566,64 @@ def _read_ssfs_files_via_sxpg(node, creds, soap_route=None) -> tuple:
     return key_bytes, dat_bytes
 
 
+def _enrich_db_type_from_public_info(node) -> str:
+    """Best-effort DB-type fallback via unauthenticated /sap/public/info.
+
+    RFCSI_EXPORT (returned by /sap/public/info) carries RFCDBSYS — same
+    value RFC_SYSTEM_INFO would return.  Cheap to try, doesn't need a
+    user, works even when the gateway is firewalled: the ICM HTTP port
+    is normally open.  Fills node.db_type in place and returns the
+    resolved value ("" if the probe couldn't determine anything).
+
+    Iterates instances × known ICM ports; short timeout so a dead node
+    costs a couple of seconds at most.
+    """
+    try:
+        from sapmap_scanner import query_public_info
+    except Exception:
+        return ""
+    # Try every instance × ICM port; scanner captures port labels like
+    # "icm-http" / "icm-https" and integer instance-derived 80NN/443NN
+    # defaults.  We iterate carefully to avoid pinging random ports.
+    seen = set()
+    candidates = []
+    for inst in node.instances or []:
+        host = inst.ip or node.ip or node.hostname or ""
+        if not host:
+            continue
+        for port, label in (inst.ports or {}).items():
+            try:
+                port = int(port)
+            except (TypeError, ValueError):
+                continue
+            https = "https" in (label or "").lower()
+            candidates.append((host, port, https))
+        # Fall back to standard SAP ICM ports if the instance nr is known.
+        inst_nr = (inst.instance_nr or "").zfill(2)
+        if inst_nr.isdigit():
+            candidates.append((host, int(f"80{inst_nr}"), False))
+            candidates.append((host, int(f"443{inst_nr}"), True))
+    for host, port, https in candidates:
+        key = (host, port, https)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            info = query_public_info(host, port, timeout=3.0,
+                                       saprouter=node.saprouter or "",
+                                       use_https=https)
+        except Exception:
+            continue
+        db_type = (info.get("db_type") or "").strip().upper()
+        if db_type:
+            node.db_type = db_type
+            print(f"[+] {node.sid}: enriched db_type={db_type} via "
+                  f"/sap/public/info ({host}:{port}"
+                  f"{' TLS' if https else ''})")
+            return db_type
+    return ""
+
+
 def _read_rsectab_via_sxpg(node, creds) -> list | None:
     """Read RSECTAB via direct database query through SXPG OS commands.
 
@@ -577,6 +635,13 @@ def _read_rsectab_via_sxpg(node, creds) -> list | None:
     Returns list of (ident, data_hex) tuples, or None if not possible.
     """
     db_type = (node.db_type or "").upper()
+    if not db_type:
+        # Fallback: RFCSI_EXPORT via unauthenticated /sap/public/info
+        # carries RFCDBSYS.  Cheap probe (~2 s), unlocks the SXPG path
+        # for W74 / TWT-style nodes where the scanner missed db_type.
+        print(f"[*] {node.sid}: db_type unknown — probing /sap/public/info "
+              f"as fallback before giving up on SXPG RSECTAB read")
+        db_type = _enrich_db_type_from_public_info(node)
     if not db_type:
         print(f"[-] {node.sid}: Cannot read RSECTAB via SXPG — DB type unknown")
         return None

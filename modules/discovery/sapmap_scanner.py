@@ -3824,11 +3824,24 @@ def query_host_agent_sid(host: str, timeout: float = 2.5) -> dict:
     so operators can see WHY placeholder SIDs like "10_" / "172" turn
     up when the agent isn't running or is TLS-only.
 
+    BTP tenant hostnames (``*.ondemand.com`` / ``*.cfapps.*``) short-
+    circuit immediately — SAP Host Agent doesn't run on cloud
+    frontends, so both probes would silently time out (10 s wasted
+    per BTP destination).  Callers should have plotted the host as a
+    ``BTPSubaccountNode`` already; this guard is a safety net.
+
     Returns the same dict shape as :func:`_query_host_agent_systems`
     (sid, instance_nr, http_port, https_port, …) or None when both
     probes miss.
     """
     if not host:
+        return None
+    _hl = host.lower()
+    if (".ondemand.com" in _hl
+            or ".cfapps." in _hl
+            or ".hana.ondemand.com" in _hl):
+        print(f"[*] Host Agent probe: {host} — skipped, BTP tenant "
+              f"hostname does not run SAP Host Agent")
         return None
     # HTTP first — cheaper, most agents accept plain.
     ha = _query_host_agent_systems(host, 1128, timeout=timeout)
