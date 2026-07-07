@@ -83,15 +83,29 @@ echo "[*] Building: $CC ${CFLAGS[*]} ${LDFLAGS[*]} -o $OUT $SRC"
 size_bytes=$(wc -c < "$OUT")
 echo "[+] Built: $OUT ($size_bytes bytes)"
 file "$OUT" 2>/dev/null || true
-ldd "$OUT" 2>&1 || true
 
-# Basic sanity: the binary should refuse to run without a --pid,
-# and its help text should mention "sap_audit_hook".  Both prove the
-# binary is executable and not corrupted.
-if ./"$OUT" --help 2>&1 | grep -qi "sap_audit_hook\|Usage:"; then
+# ldd is meaningful only for dynamic builds; static binaries print
+# "not a dynamic executable" and confuse operators into thinking it's
+# an error.  Only run it when we actually expect dynamic linkage.
+if [ "$MODE" = "dynamic" ]; then
+    ldd "$OUT" 2>&1 || true
+fi
+
+# Sanity check: run --help and confirm the output contains the word
+# "Usage" (unique to Julian's usage() function).  Use extended regex
+# (-E) so the OR alternation works portably between GNU + BSD grep;
+# also print the captured output so a failed match is diagnosable
+# instead of a bare "inspect manually".
+HELP_OUT="$(./"$OUT" --help 2>&1 || true)"
+if printf '%s\n' "$HELP_OUT" | grep -qiE 'usage|sap_audit_hook'; then
     echo "[+] Sanity check: --help output looks right"
 else
-    echo "[!] Sanity check: --help output unexpected — inspect manually" >&2
+    echo "[!] Sanity check: --help output unexpected." >&2
+    echo "    Actual --help output was:" >&2
+    printf '    | %s\n' "$HELP_OUT" >&2
+    echo "    Binary is $size_bytes bytes and reported as: " >&2
+    file "$OUT" >&2 2>/dev/null || true
+    echo "    You can still commit it if you know it's correct." >&2
 fi
 
 echo
