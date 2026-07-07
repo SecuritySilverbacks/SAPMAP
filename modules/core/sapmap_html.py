@@ -4497,9 +4497,19 @@ function showCtxMenu(e, sid) {
     // --allow-evasion without a baseline detour.
     'tier3_sal_death_star_launch': !isWindows
         && (hasGwVuln || hasCve31324 || hasCreatedUsers || hasSapControlOsExec)
-        && !!(mapState.evasion && mapState.evasion.allow_evasion),
+        && !!(mapState.evasion && mapState.evasion.allow_evasion)
+        // Don't offer Arm when a hook is already running on this node.
+        // Prevents accidental double-arm which would kill the running
+        // hook and re-plant INT3s — unnecessary churn on live disp+work.
+        && !(n && n.death_star_hook_pid > 0),
+    // Disarm is only meaningful when a hook is actually armed.  Gate
+    // on ``death_star_hook_pid > 0`` (set by tier3_sal_death_star_launch
+    // after a successful arm, cleared by tier3_sal_death_star_stop
+    // after a clean disarm).  Prevents the "click Disarm on a node
+    // that was never armed" flow from firing a pointless SIGTERM cycle.
     'tier3_sal_death_star_stop': !isWindows
-        && !!(mapState.evasion && mapState.evasion.allow_evasion),
+        && !!(mapState.evasion && mapState.evasion.allow_evasion)
+        && !!(n && n.death_star_hook_pid > 0),
     'retrieve_rfcs':    hasUsableAbapAccess,        // ABAP-only RFC + BAPI
     'test_rfcs':        hasUsableAbapAccess && hasRFCs,
     'read_java_destinations': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy),
@@ -4746,13 +4756,17 @@ function showCtxMenu(e, sid) {
         (isWindows
          ? 'Windows kernel target — the C hook uses process_vm_readv + PTRACE_ATTACH which are Linux-only. Not supported on this OS.'
          : ((mapState.evasion && mapState.evasion.allow_evasion)
-            ? 'MUTATES disp+work in-memory. Uploads Julian Petersohn\'s sap_audit_hook.c to /tmp, compiles as <sid>adm, picks a dialog worker PID and ptrace-attaches. Plants INT3 breakpoints on the two fwrite calls, write_event_to_DB, and the three EtdSender calls in rsauwr1ex. In --suppress mode audit records matching the filter (or all events when empty) are silently dropped — SM20 never sees them, no disk write, no DB row, no ETD/SIEM. Persists as a background process on the target until Disarm. Requires Linux + <sid>adm + kernel.yama.ptrace_scope <= 1. Not a 0-day — SAP publicly confirmed this is post-exploitation.'
+            ? ((n && n.death_star_hook_pid > 0)
+               ? ('A Death Star hook is already armed on this node (hook PID ' + n.death_star_hook_pid + '). Disarm it first before re-arming.')
+               : 'MUTATES disp+work in-memory. Uploads Julian Petersohn\'s sap_audit_hook.c to /tmp, compiles as <sid>adm, picks a dialog worker PID and ptrace-attaches. Plants INT3 breakpoints on the two fwrite calls, write_event_to_DB, and the three EtdSender calls in rsauwr1ex. In --suppress mode audit records matching the filter (or all events when empty) are silently dropped — SM20 never sees them, no disk write, no DB row, no ETD/SIEM. Persists as a background process on the target until Disarm. Requires Linux + <sid>adm + kernel.yama.ptrace_scope <= 1. Not a 0-day — SAP publicly confirmed this is post-exploitation.')
             : 'Tier 3 not armed — restart SAPMAP with --allow-evasion (see disclaimer banner).')),
     'tier3_sal_death_star_stop':
         (isWindows
          ? 'Windows target — no Linux ptrace hook was armed here.'
          : ((mapState.evasion && mapState.evasion.allow_evasion)
-            ? 'SIGTERM the running sap_audit_hook. The hook\'s signal handler calls detach_all() which restores every INT3 byte in the target disp+work text segment and releases ptrace cleanly before exiting. Idempotent — safe to click even when nothing is running.'
+            ? ((n && n.death_star_hook_pid > 0)
+               ? ('SIGTERM the running sap_audit_hook (hook PID ' + n.death_star_hook_pid + '). The hook\'s signal handler calls detach_all() which restores every INT3 byte in the target disp+work text segment and releases ptrace cleanly before exiting.')
+               : 'No Death Star hook armed on this node — run "Arm Virtual SAP Death Star..." first.')
             : 'Tier 3 not armed — restart SAPMAP with --allow-evasion (see disclaimer banner).')),
     'retrieve_rfcs':    'Needs a verified RFC credential or a SAPMAP-created user — RSRFCCHK and the RFCDES read both require a working logon.',
     'test_rfcs':        (!hasRFCs
