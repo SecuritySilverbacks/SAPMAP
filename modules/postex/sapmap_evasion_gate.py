@@ -221,8 +221,32 @@ EVASION_BANNER = (
 )
 
 
+# One-shot flag so the banner cannot be printed twice in a single
+# process even if the caller wires it into multiple hooks.  Operator
+# reported the banner appearing 70+ times back-to-back at startup;
+# root cause was never pinned down (possibly pywebview / GUI console
+# re-emitting), so the safe fix is to make the function idempotent at
+# the emit point.  Reset via ``_reset_evasion_banner()`` — kept public
+# for tests that need to re-arm the guard.
+_banner_emitted = False
+
+
 def print_evasion_banner() -> None:
-    """Emit the banner.  Called by sapmap.py at startup when the flag
-    is set in argv.  Also re-emitted into the GUI console as a sticky
-    warning."""
+    """Emit the banner exactly once per process.  Called by sapmap.py
+    at startup when the ``--allow-evasion`` flag is set in argv.
+
+    Subsequent calls are silent no-ops — protects against the "banner
+    printed dozens of times" bug the operator saw at startup.
+    """
+    global _banner_emitted
+    if _banner_emitted:
+        return
+    _banner_emitted = True
     print(EVASION_BANNER)
+
+
+def _reset_evasion_banner() -> None:
+    """Test helper — clears the one-shot guard so the banner can be
+    re-emitted in a fresh test scenario."""
+    global _banner_emitted
+    _banner_emitted = False
