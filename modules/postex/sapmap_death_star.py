@@ -363,16 +363,44 @@ def compile_hook(node, source_path: str,
     # If the target's gcc is older than 7 and rejects it, the compile
     # log will surface that clearly instead of a mysterious silent
     # failure.
+    #
+    # Compiler discovery: SAP application servers often ship without a
+    # compiler installed (production hardening).  Try common names +
+    # install paths in order — first hit wins.  If nothing is found we
+    # emit ``STATUS: no_compiler`` and the operator gets a clear
+    # remediation message (install a compiler, or drop a pre-built
+    # binary alongside the source).
     compile_log = f"{remote_dir.rstrip('/')}/sap_audit_hook.compile.log"
     scratch_sh = (f"{remote_dir.rstrip('/')}/"
                     f"sapmap_ds_compile_{_rand_suffix()}.sh")
     script = (
         f"#!/bin/sh\n"
         f"rm -f {binary_path} {compile_log}\n"
-        f"gcc -O2 -Wall -Wno-format-truncation "
+        # Search PATH for a compiler.  POSIX ``command -v`` returns
+        # the resolved path if found, empty otherwise.  Fall back to
+        # explicit install paths for hosts where PATH doesn't include
+        # the compiler's directory (SAP <sid>adm profile scripts often
+        # strip PATH down to /usr/sap-only bins).
+        f"CC=\n"
+        f"for candidate in gcc cc clang "
+        f"/usr/bin/gcc /usr/bin/cc /usr/bin/clang "
+        f"/usr/local/bin/gcc /opt/gcc/bin/gcc; do\n"
+        f"  if [ -x \"$candidate\" ] 2>/dev/null; then\n"
+        f"    CC=\"$candidate\"; break\n"
+        f"  fi\n"
+        f"  if command -v \"$candidate\" >/dev/null 2>&1; then\n"
+        f"    CC=`command -v \"$candidate\"`; break\n"
+        f"  fi\n"
+        f"done\n"
+        f"if [ -z \"$CC\" ]; then\n"
+        f"  echo STATUS: no_compiler\n"
+        f"  exit 0\n"
+        f"fi\n"
+        f"echo STATUS: compiler=$CC\n"
+        f"$CC -O2 -Wall -Wno-format-truncation "
         f"-o {binary_path} {source_path} > {compile_log} 2>&1\n"
         f"RC=$?\n"
-        f"echo STATUS: gcc_exit=$RC\n"
+        f"echo STATUS: cc_exit=$RC\n"
         f"if [ -x {binary_path} ]; then\n"
         # Size via wc -c (POSIX); portable across Linux + BSD.
         f"  SZ=`wc -c < {binary_path} 2>/dev/null`\n"
@@ -405,7 +433,9 @@ def compile_hook(node, source_path: str,
             f"{r.get('error') or 'unknown'}")
 
     # Parse STATUS lines and gcc log lines.
-    gcc_exit = None
+    compiler_path = None
+    no_compiler = False
+    cc_exit = None
     binary_present = False
     binary_size = None
     gcc_log = []
@@ -414,9 +444,13 @@ def compile_hook(node, source_path: str,
         s = ln.strip()
         if s.startswith("STATUS:"):
             body = s[len("STATUS:"):].strip()
-            if body.startswith("gcc_exit="):
+            if body == "no_compiler":
+                no_compiler = True
+            elif body.startswith("compiler="):
+                compiler_path = body.split("=", 1)[1].strip()
+            elif body.startswith("cc_exit="):
                 try:
-                    gcc_exit = int(body.split("=", 1)[1])
+                    cc_exit = int(body.split("=", 1)[1])
                 except (ValueError, IndexError):
                     pass
             elif body.startswith("binary_present"):
@@ -437,25 +471,46 @@ def compile_hook(node, source_path: str,
         elif in_log:
             gcc_log.append(s)
 
+    # No compiler on target — SAP application servers are often hardened
+    # this way.  Clear operator guidance in the error so they can
+    # install one or ship a pre-built binary.
+    if no_compiler:
+        raise DeathStarError(
+            "no C compiler found on the target — checked gcc, cc, "
+            "clang in PATH plus common install paths "
+            "(/usr/bin, /usr/local/bin, /opt/gcc/bin).  SAP "
+            "application servers are often hardened without a "
+            "compiler installed.  Options: (a) install gcc/cc as "
+            "root on the target — e.g. ``zypper install gcc`` on "
+            "SUSE, ``apt install build-essential`` on Debian/Ubuntu, "
+            "``yum install gcc`` on RHEL; (b) build the binary on a "
+            "matching Linux host (see modules/postex/vendor/README.md) "
+            "and drop it at " + binary_path + " manually via any "
+            "OS-exec channel, then re-arm with skip_upload=True + "
+            "skip_compile=True.")
+
+    if compiler_path:
+        print(f"[*] {node.sid}: death_star: using {compiler_path}")
+
     if gcc_log:
         # Surface every gcc line so the operator sees the actual error
         # (missing headers, invalid flag on old gcc, etc.).
         for line in gcc_log:
-            print(f"[*] {node.sid}: death_star:   gcc: {line}")
+            print(f"[*] {node.sid}: death_star:   cc: {line}")
 
     if not binary_present:
-        # No binary + gcc log → clearest possible operator error.
+        # No binary + compile log → clearest possible operator error.
         log_summary = (" | ".join(gcc_log[-5:]) if gcc_log
-                        else "(no gcc output captured)")
+                        else "(no compile output captured)")
         raise DeathStarError(
-            f"gcc did not produce {binary_path!r} "
-            f"(gcc exit code = {gcc_exit}).  Last gcc log lines: "
+            f"{compiler_path or 'cc'} did not produce {binary_path!r} "
+            f"(exit code = {cc_exit}).  Last compile log lines: "
             f"{log_summary}.  Full log on target: {compile_log}")
 
-    if gcc_exit not in (None, 0):
-        # Weird case: binary exists but gcc reported non-zero.
-        print(f"[!] {node.sid}: death_star: gcc exited non-zero "
-               f"({gcc_exit}) but binary was produced — continuing")
+    if cc_exit not in (None, 0):
+        # Weird case: binary exists but compiler reported non-zero.
+        print(f"[!] {node.sid}: death_star: compiler exited non-zero "
+               f"({cc_exit}) but binary was produced — continuing")
 
     print(f"[+] {node.sid}: death_star: compiled — "
            f"{binary_path} ({binary_size} B)")
