@@ -313,6 +313,74 @@ def test_stop_refuses_kernel_pid_from_stale_pidfile():
     assert "nothing to stop" in r["message"]
 
 
+def test_has_prebuilt_binary_returns_false_when_absent(tmp_path,
+                                                          monkeypatch):
+    """When the vendored ``sap_audit_hook.linux-x86_64`` is missing,
+    ``has_prebuilt_binary()`` returns False so the compile-on-target
+    path takes over."""
+    monkeypatch.setattr(sapmap_death_star, "HOOK_PREBUILT_PATH",
+                         str(tmp_path / "no_such_binary"))
+    assert sapmap_death_star.has_prebuilt_binary() is False
+
+
+def test_has_prebuilt_binary_returns_true_when_present(tmp_path,
+                                                          monkeypatch):
+    """Real vendored binary present → True."""
+    fake = tmp_path / "sap_audit_hook.linux-x86_64"
+    fake.write_bytes(b"\x7fELF" + b"\x00" * 200)  # ELF magic + padding
+    monkeypatch.setattr(sapmap_death_star, "HOOK_PREBUILT_PATH",
+                         str(fake))
+    assert sapmap_death_star.has_prebuilt_binary() is True
+
+
+def test_upload_prebuilt_binary_uploads_and_chmods(tmp_path,
+                                                        monkeypatch):
+    """The prebuilt-upload path: write file → chmod +x → --help
+    verify → return remote path."""
+    fake = tmp_path / "sap_audit_hook.linux-x86_64"
+    fake.write_bytes(b"\x7fELF" + b"stub" * 100)
+    monkeypatch.setattr(sapmap_death_star, "HOOK_PREBUILT_PATH",
+                         str(fake))
+
+    calls = []
+    raw_len = len(fake.read_bytes())
+    import base64 as _b64
+    b64_len = len(_b64.b64encode(fake.read_bytes()))
+
+    def fake(node, command, params):
+        calls.append((command, params))
+        if command == "wc":
+            path = params.split()[-1]
+            size = b64_len if path.endswith(".b64") else raw_len
+            return {"success": True,
+                     "output": [f"{size} {path}"], "error": ""}
+        if command.endswith("sap_audit_hook") and params == "--help":
+            # Julian's --help output contains "Usage:" and the binary name.
+            return {"success": True,
+                     "output": ["Usage: sap_audit_hook [options]"],
+                     "error": ""}
+        return {"success": True, "output": [], "error": ""}
+
+    with patch("sapmap_exploit.run_os_command", side_effect=fake):
+        result = sapmap_death_star.upload_prebuilt_binary(
+            _mk_node(), binary_path="/tmp/sap_audit_hook")
+
+    assert result == "/tmp/sap_audit_hook"
+    # chmod +x must have been invoked.
+    assert any(c[0] == "chmod" and "+x /tmp/sap_audit_hook" in c[1]
+                for c in calls), (
+        f"chmod +x call not seen; calls={calls}")
+
+
+def test_upload_prebuilt_rejects_missing_vendored_binary(tmp_path,
+                                                              monkeypatch):
+    monkeypatch.setattr(sapmap_death_star, "HOOK_PREBUILT_PATH",
+                         str(tmp_path / "nonexistent"))
+    with pytest.raises(sapmap_death_star.DeathStarError,
+                        match="not found"):
+        sapmap_death_star.upload_prebuilt_binary(_mk_node())
+
+
 def test_stop_status_parser_ignores_diag_line_digits():
     """Regression: previously the stopper joined all output lines with
     spaces and grabbed ``split()[-1]`` as the PID.  DIAG lines contain
