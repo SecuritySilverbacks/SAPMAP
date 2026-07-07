@@ -438,17 +438,46 @@ def launch(node, binary_path: str, target_pid: int,
     #     ``stop()`` can find it.
     script = (
         f"#!/bin/sh\n"
+        # Best-effort cleanup of any prior instance.  Same PID sanity
+        # checks as stop(): a stale pidfile might contain "2" or a
+        # kernel PID; killing that would either fail (kernel threads
+        # ignore SIGTERM from userspace) or hit an innocent recycled
+        # PID.  Validate before signaling.
         f"if [ -s {pidfile_path} ]; then\n"
-        f"  OLD=`cat {pidfile_path}`\n"
-        f"  if [ -n \"$OLD\" ]; then\n"
-        f"    kill -0 $OLD 2>/dev/null && kill -TERM $OLD 2>/dev/null\n"
+        f"  OLD=`cat {pidfile_path} 2>/dev/null`\n"
+        f"  case \"$OLD\" in\n"
+        f"    ''|*[!0-9]*) OLD= ;;\n"
+        f"  esac\n"
+        f"  if [ -n \"$OLD\" ] && [ \"$OLD\" -ge 100 ] "
+        f"&& [ -r /proc/$OLD/comm ]; then\n"
+        f"    OLDCOMM=`cat /proc/$OLD/comm 2>/dev/null`\n"
+        f"    case \"$OLDCOMM\" in\n"
+        f"      sap_audit_hook*)\n"
+        f"        kill -TERM $OLD 2>/dev/null\n"
+        f"        ;;\n"
+        f"    esac\n"
         f"  fi\n"
         f"  rm -f {pidfile_path}\n"
         f"fi\n"
+        # Launch detached.  setsid gives a fresh session so the
+        # operator's SXPG session teardown doesn't reap the hook.
         f"setsid nohup {hook_cmdline} "
         f">> {log_path} 2>&1 < /dev/null &\n"
-        f"echo $! > {pidfile_path}\n"
-        f"cat {pidfile_path}\n"
+        f"NEW=$!\n"
+        f"echo $NEW > {pidfile_path}\n"
+        # Give the hook a moment to complete its ptrace-attach setup
+        # (open /proc/PID/maps, plant INT3s, first PTRACE_CONT).  If
+        # ptrace_scope > 1 or the target PID is invalid, the hook
+        # will have died before this check.
+        f"sleep 1\n"
+        f"if kill -0 $NEW 2>/dev/null; then\n"
+        f"  echo STATUS: ALIVE $NEW\n"
+        f"else\n"
+        f"  echo STATUS: DIED $NEW\n"
+        f"  echo DIAG: hook process exited within 1s — check "
+        f"{log_path} for ptrace_scope/attach errors\n"
+        f"  rm -f {pidfile_path}\n"
+        f"fi\n"
     )
 
     _write_remote_file(node, scratch_sh, script.encode("utf-8"),
@@ -467,16 +496,42 @@ def launch(node, binary_path: str, target_pid: int,
     if not r.get("success"):
         raise DeathStarError(
             f"launch failed: {r.get('error') or 'unknown'}")
-    out = " ".join(r.get("output") or []).strip().split()
-    if not out:
+
+    # Emit DIAG lines to the operator's console — same pattern as
+    # stop(), so a ptrace-scope-denied launch surfaces its "check log
+    # file" hint instead of a bare "hook died" mystery.
+    lines = r.get("output") or []
+    for ln in lines:
+        s = ln.strip()
+        if s.startswith("DIAG:"):
+            print(f"[*] {node.sid}: death_star:   {s}")
+
+    # Look for a tagged STATUS line — same discipline as stop() so DIAG
+    # lines don't accidentally get parsed as PIDs.
+    status = ""
+    for ln in lines:
+        s = ln.strip()
+        if s.startswith("STATUS:"):
+            status = s[len("STATUS:"):].strip()
+            break
+    if not status:
         raise DeathStarError(
-            "launch succeeded but no PID emitted — check "
-            f"{log_path} on the target for hook start-up errors")
+            f"launch produced no STATUS line — raw output: "
+            f"{' '.join(lines)!r}. Check {log_path} on the target.")
+    if status.startswith("DIED"):
+        raise DeathStarError(
+            "hook process exited within 1 s of launch — likely "
+            "kernel.yama.ptrace_scope > 1 (check with "
+            "'sysctl kernel.yama.ptrace_scope' on the target) or the "
+            "target PID is invalid.  Full hook log: " + log_path)
+    if not status.startswith("ALIVE"):
+        raise DeathStarError(
+            f"unexpected launch STATUS: {status!r}")
     try:
-        hook_pid = int(out[-1])
-    except ValueError:
+        hook_pid = int(status.split()[-1])
+    except (IndexError, ValueError):
         raise DeathStarError(
-            f"unexpected launch output — got {' '.join(out)!r}")
+            f"could not parse hook PID from STATUS: {status!r}")
     print(f"[+] {node.sid}: death_star: hook running as PID {hook_pid} "
            f"(log: {log_path})")
     return hook_pid
@@ -514,22 +569,88 @@ def stop(node, pidfile_path: Optional[str] = None,
     # POSIX sh — best-effort: try the pidfile first, fall back to
     # ``pgrep -f`` on the binary path when the pidfile is missing or
     # empty (operator may have rebooted the SAPMAP host mid-run).
-    # Wait up to ~3 s for the hook to detach cleanly before reporting
-    # STILL_RUNNING; the hook's SIGTERM handler runs detach_all() which
-    # restores every INT3 byte, so a hurried report is misleading.
+    #
+    # Defensive PID validation before signaling — operator report:
+    # stopper found "PID 2" (kthreadd) in the pidfile and tried to
+    # SIGTERM it, wasted 6 s on a wait loop that could never succeed.
+    # Sources of a bad PID:
+    #   * Stale pidfile from an earlier crashed launch (echo $! with
+    #     $! unset gives a blank line, but partial writes can happen)
+    #   * pgrep matching itself or the parent SXPG shell if their
+    #     cmdline happens to include the binary path substring
+    #   * Kernel PID recycling on a long-running host (unlikely to
+    #     land on 2, but not impossible)
+    #
+    # Every check emits a tagged ``DIAG:`` line so operators can see
+    # what went wrong.  Parser filters on ``STATUS:`` first-tokens so
+    # DIAG lines don't accidentally get parsed as PID values.
     script = (
         f"#!/bin/sh\n"
         f"PID=\n"
+        f"SRC=none\n"
         f"if [ -s {pidfile_path} ]; then\n"
-        f"  PID=`cat {pidfile_path}`\n"
+        f"  PID=`cat {pidfile_path} 2>/dev/null`\n"
+        f"  SRC=pidfile\n"
+        f"  echo DIAG: pidfile={pidfile_path} contents=[$PID]\n"
+        f"else\n"
+        f"  echo DIAG: pidfile={pidfile_path} not-present\n"
         f"fi\n"
         f"if [ -z \"$PID\" ]; then\n"
         f"  PID=`pgrep -f {binary_path} 2>/dev/null | head -1`\n"
+        f"  SRC=pgrep\n"
+        f"  echo DIAG: pgrep-fallback pid=[$PID]\n"
         f"fi\n"
         f"if [ -z \"$PID\" ]; then\n"
-        f"  echo NOT_RUNNING\n"
+        f"  echo STATUS: NOT_RUNNING\n"
         f"  exit 0\n"
         f"fi\n"
+        # PID must be a decimal integer — anything else is corruption.
+        # POSIX case-glob is portable; `expr` / `-eq` would error out.
+        f"case \"$PID\" in\n"
+        f"  ''|*[!0-9]*)\n"
+        f"    echo DIAG: stale-pid-not-integer src=$SRC value=[$PID]\n"
+        f"    rm -f {pidfile_path}\n"
+        f"    echo STATUS: NOT_RUNNING\n"
+        f"    exit 0\n"
+        f"    ;;\n"
+        f"esac\n"
+        # PID < 100 = kernel-owned process (kthreadd, init, workqueues).
+        # Real SAP work-processes are always well above that.  Signalling
+        # PID 2 is the exact failure mode we're patching around.
+        f"if [ \"$PID\" -lt 100 ]; then\n"
+        f"  echo DIAG: stale-pid-too-low src=$SRC pid=$PID\n"
+        f"  rm -f {pidfile_path}\n"
+        f"  echo STATUS: NOT_RUNNING\n"
+        f"  exit 0\n"
+        f"fi\n"
+        # PID must reference a live process.  /proc/<pid>/ existing is
+        # authoritative on Linux.
+        f"if [ ! -d /proc/$PID ]; then\n"
+        f"  echo DIAG: pid-not-alive src=$SRC pid=$PID\n"
+        f"  rm -f {pidfile_path}\n"
+        f"  echo STATUS: NOT_RUNNING\n"
+        f"  exit 0\n"
+        f"fi\n"
+        # And the process must actually BE our hook.  /proc/<pid>/comm
+        # is truncated at TASK_COMM_LEN-1 = 15 chars; "sap_audit_hook"
+        # (14) fits.  If comm doesn't match, we're looking at a
+        # recycled PID or misplaced pidfile — do not touch it.
+        f"COMM=\n"
+        f"if [ -r /proc/$PID/comm ]; then\n"
+        f"  COMM=`cat /proc/$PID/comm 2>/dev/null`\n"
+        f"fi\n"
+        f"case \"$COMM\" in\n"
+        f"  sap_audit_hook*) : ;;\n"
+        f"  *)\n"
+        f"    echo DIAG: wrong-process src=$SRC pid=$PID comm=[$COMM]\n"
+        f"    rm -f {pidfile_path}\n"
+        f"    echo STATUS: NOT_RUNNING\n"
+        f"    exit 0\n"
+        f"    ;;\n"
+        f"esac\n"
+        # All sanity checks passed — signal the hook and wait for its
+        # SIGTERM handler to run detach_all() + restore INT3 bytes.
+        f"echo DIAG: sending SIGTERM src=$SRC pid=$PID comm=$COMM\n"
         f"kill -TERM $PID 2>/dev/null\n"
         f"i=0\n"
         f"while [ $i -lt 6 ]; do\n"
@@ -538,9 +659,9 @@ def stop(node, pidfile_path: Optional[str] = None,
         f"  i=`expr $i + 1`\n"
         f"done\n"
         f"if kill -0 $PID 2>/dev/null; then\n"
-        f"  echo STILL_RUNNING $PID\n"
+        f"  echo STATUS: STILL_RUNNING $PID\n"
         f"else\n"
-        f"  echo STOPPED $PID\n"
+        f"  echo STATUS: STOPPED $PID\n"
         f"  rm -f {pidfile_path}\n"
         f"fi\n"
     )
@@ -557,25 +678,48 @@ def stop(node, pidfile_path: Optional[str] = None,
     _run(node, "/bin/rm", f"-f {scratch_sh}",
           label="cleanup stopper")
 
-    out = " ".join(r.get("output") or []).strip()
+    # Emit every DIAG line to the operator's console so the failure
+    # mode (bad pidfile, wrong process, kernel PID) is visible.
+    lines = r.get("output") or []
+    for ln in lines:
+        s = ln.strip()
+        if s.startswith("DIAG:"):
+            print(f"[*] {node.sid}: death_star:   {s}")
+
+    # Parse only STATUS lines — DIAG lines contain digits that would
+    # otherwise get mis-parsed as PID values by ``split()[-1]``.
+    status = ""
+    for ln in lines:
+        s = ln.strip()
+        if s.startswith("STATUS:"):
+            status = s[len("STATUS:"):].strip()
+            break
+
     if not r.get("success"):
         return {"ok": False, "pid": None,
                 "message": f"stopper script failed: "
-                           f"{r.get('error') or out or 'unknown'}"}
-    if "NOT_RUNNING" in out:
+                           f"{r.get('error') or status or 'unknown'}"}
+    if not status:
+        # No STATUS line at all → script exited before printing one
+        # (syntax error, sh missing, etc).  Surface raw output.
+        joined = " ".join(lines).strip()
+        return {"ok": False, "pid": None,
+                "message": f"stopper produced no STATUS line; raw "
+                           f"output: {joined[:200]!r}"}
+    if status.startswith("NOT_RUNNING"):
         return {"ok": False, "pid": None,
                 "message": "no hook process found — nothing to stop"}
-    if out.startswith("STOPPED"):
+    if status.startswith("STOPPED"):
         try:
-            pid = int(out.split()[-1])
+            pid = int(status.split()[-1])
         except (IndexError, ValueError):
             pid = None
         print(f"[+] {node.sid}: death_star: hook PID {pid} stopped "
                f"(INT3 bytes restored, ptrace detached)")
         return {"ok": True, "pid": pid, "message": "stopped cleanly"}
-    if out.startswith("STILL_RUNNING"):
+    if status.startswith("STILL_RUNNING"):
         try:
-            pid = int(out.split()[-1])
+            pid = int(status.split()[-1])
         except (IndexError, ValueError):
             pid = None
         print(f"[!] {node.sid}: death_star: hook PID {pid} did not exit "
@@ -583,7 +727,7 @@ def stop(node, pidfile_path: Optional[str] = None,
         return {"ok": False, "pid": pid,
                 "message": "SIGTERM sent but hook did not exit within 6 s"}
     return {"ok": False, "pid": None,
-            "message": f"unexpected stop output: {out!r}"}
+            "message": f"unexpected STATUS: {status!r}"}
 
 
 # ---------------------------------------------------------------------------
