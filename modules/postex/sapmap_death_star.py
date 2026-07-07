@@ -333,41 +333,132 @@ def upload_source(node, remote_dir: str = DEFAULT_REMOTE_DIR,
 # ---------------------------------------------------------------------------
 
 def compile_hook(node, source_path: str,
-                  binary_path: Optional[str] = None) -> str:
+                  binary_path: Optional[str] = None,
+                  remote_dir: str = DEFAULT_REMOTE_DIR) -> str:
     """Compile the uploaded source with gcc.  Returns the absolute path
     to the produced binary.  Raises ``DeathStarError`` on any gcc
     failure — the compilation output is included in the message so the
     operator can see missing headers, etc.
 
-    ``gcc`` accepts a space-delimited argv verbatim — nothing to quote,
-    nothing to escape.  Same for ``test`` / ``ls`` in the verify pass.
+    We can't run gcc directly with SXPG and see its stderr — SXPG's
+    ``success`` flag reflects only its own protocol, not gcc's exit
+    code, so a silent gcc failure previously came back as
+    ``success=True`` with no binary produced.  Instead, drop a small
+    compile-wrapper script that:
+
+      * Wipes any prior binary so a re-compile isn't fooled by a
+        stale artefact.
+      * Runs gcc with stderr redirected to a log file.
+      * Prints tagged ``STATUS:`` lines the caller can parse verbatim
+        (gcc exit code, binary presence + size).
+      * Dumps the compile log so the operator sees the actual error.
+
+    Then invoke ``sh /tmp/<compile>.sh`` — two-token SXPG-safe argv.
     """
     if binary_path is None:
         binary_path = source_path[:-2] if source_path.endswith(".c") else (
             source_path + ".bin")
-    # Straight space-delimited args — no shell in the loop.  Dropping
-    # -Wno-format-truncation because older gcc (< 7) rejects the flag
-    # with a fatal error; the upstream README lists it as a warning
-    # suppression only.  Modern gcc still tolerates its absence.
-    params = f"-O2 -Wall -o {binary_path} {source_path}"
-    r = _run(node, "gcc", params,
+
+    # -Wno-format-truncation matches Julian's upstream README verbatim.
+    # If the target's gcc is older than 7 and rejects it, the compile
+    # log will surface that clearly instead of a mysterious silent
+    # failure.
+    compile_log = f"{remote_dir.rstrip('/')}/sap_audit_hook.compile.log"
+    scratch_sh = (f"{remote_dir.rstrip('/')}/"
+                    f"sapmap_ds_compile_{_rand_suffix()}.sh")
+    script = (
+        f"#!/bin/sh\n"
+        f"rm -f {binary_path} {compile_log}\n"
+        f"gcc -O2 -Wall -Wno-format-truncation "
+        f"-o {binary_path} {source_path} > {compile_log} 2>&1\n"
+        f"RC=$?\n"
+        f"echo STATUS: gcc_exit=$RC\n"
+        f"if [ -x {binary_path} ]; then\n"
+        # Size via wc -c (POSIX); portable across Linux + BSD.
+        f"  SZ=`wc -c < {binary_path} 2>/dev/null`\n"
+        f"  echo STATUS: binary_present size=$SZ path={binary_path}\n"
+        f"else\n"
+        f"  echo STATUS: binary_missing path={binary_path}\n"
+        f"fi\n"
+        # Dump the compile log so the operator sees the actual error
+        # lines when something went wrong.  Cap at 40 lines to keep
+        # the SXPG output field within its cap on old kernels.
+        f"if [ -s {compile_log} ]; then\n"
+        f"  echo GCC_LOG_BEGIN:\n"
+        f"  head -40 {compile_log}\n"
+        f"  echo GCC_LOG_END:\n"
+        f"fi\n"
+    )
+
+    _write_remote_file(node, scratch_sh, script.encode("utf-8"),
+                        label=f"drop compile wrapper → {scratch_sh}")
+
+    r = _run(node, "sh", scratch_sh,
               label=f"compile → {binary_path}")
+    _run(node, "/bin/rm", f"-f {scratch_sh}",
+          label="cleanup compile wrapper")
+
+    lines = r.get("output") or []
     if not r.get("success"):
-        stderr = r.get("error") or ""
-        stdout = "\n".join(r.get("output") or [])
         raise DeathStarError(
-            f"gcc failed: {stderr or stdout or 'unknown'}")
-    # Verify with ``ls -la`` — outputs to stdout, SXPG captures.
-    # Prints size + mode so the operator can see the binary is
-    # executable + non-empty in one glance.
-    check = _run(node, "ls", f"-la {binary_path}",
-                  label="verify binary")
-    got_out = " ".join(check.get("output") or []).strip()
-    if not check.get("success") or not got_out:
+            f"compile wrapper failed to run: "
+            f"{r.get('error') or 'unknown'}")
+
+    # Parse STATUS lines and gcc log lines.
+    gcc_exit = None
+    binary_present = False
+    binary_size = None
+    gcc_log = []
+    in_log = False
+    for ln in lines:
+        s = ln.strip()
+        if s.startswith("STATUS:"):
+            body = s[len("STATUS:"):].strip()
+            if body.startswith("gcc_exit="):
+                try:
+                    gcc_exit = int(body.split("=", 1)[1])
+                except (ValueError, IndexError):
+                    pass
+            elif body.startswith("binary_present"):
+                binary_present = True
+                # Parse size=NNN
+                for tok in body.split():
+                    if tok.startswith("size="):
+                        try:
+                            binary_size = int(tok.split("=", 1)[1])
+                        except (ValueError, IndexError):
+                            pass
+            elif body.startswith("binary_missing"):
+                binary_present = False
+        elif s == "GCC_LOG_BEGIN:":
+            in_log = True
+        elif s == "GCC_LOG_END:":
+            in_log = False
+        elif in_log:
+            gcc_log.append(s)
+
+    if gcc_log:
+        # Surface every gcc line so the operator sees the actual error
+        # (missing headers, invalid flag on old gcc, etc.).
+        for line in gcc_log:
+            print(f"[*] {node.sid}: death_star:   gcc: {line}")
+
+    if not binary_present:
+        # No binary + gcc log → clearest possible operator error.
+        log_summary = (" | ".join(gcc_log[-5:]) if gcc_log
+                        else "(no gcc output captured)")
         raise DeathStarError(
-            f"compile reported success but {binary_path!r} not "
-            "visible via ls (check gcc actually produced a file)")
-    print(f"[+] {node.sid}: death_star: compiled — {got_out}")
+            f"gcc did not produce {binary_path!r} "
+            f"(gcc exit code = {gcc_exit}).  Last gcc log lines: "
+            f"{log_summary}.  Full log on target: {compile_log}")
+
+    if gcc_exit not in (None, 0):
+        # Weird case: binary exists but gcc reported non-zero.
+        print(f"[!] {node.sid}: death_star: gcc exited non-zero "
+               f"({gcc_exit}) but binary was produced — continuing")
+
+    print(f"[+] {node.sid}: death_star: compiled — "
+           f"{binary_path} ({binary_size} B)")
     return binary_path
 
 
