@@ -4487,16 +4487,21 @@ function showCtxMenu(e, sid) {
     // Virtual SAP Death Star — Linux-only (Julian Petersohn's C hook
     // uses process_vm_readv + PTRACE_ATTACH + /proc/<pid>/exe).
     // Needs an OS-exec channel to upload + compile + launch the hook
-    // as <sid>adm.  Arm requires a captured baseline (documentation +
-    // audit trail) even though the C hook restores its own INT3 bytes;
-    // Disarm skips baseline gating so operators can clean up even if
-    // baseline metadata was lost mid-run.
+    // as <sid>adm.  Both Arm and Disarm gate on
+    // ``allow_evasion + baseline_captured_at`` for UX consistency with
+    // every other item under the Evasion submenu — operator feedback
+    // was that disarm being enabled while everything else was greyed
+    // read as inconsistent.  Edge case of "baseline lost mid-run"
+    // (rare — baseline is loot-directory JSON, not in-memory-only) is
+    // handled by manual ``kill -TERM $(cat /tmp/sap_audit_hook.pid)``
+    // on the target if it ever happens.
     'tier3_sal_death_star_launch': !isWindows
         && (hasGwVuln || hasCve31324 || hasCreatedUsers || hasSapControlOsExec)
         && !!(mapState.evasion && mapState.evasion.allow_evasion)
         && !!(mapState.evasion && mapState.evasion.baseline_captured_at),
     'tier3_sal_death_star_stop': !isWindows
-        && !!(mapState.evasion && mapState.evasion.allow_evasion),
+        && !!(mapState.evasion && mapState.evasion.allow_evasion)
+        && !!(mapState.evasion && mapState.evasion.baseline_captured_at),
     'retrieve_rfcs':    hasUsableAbapAccess,        // ABAP-only RFC + BAPI
     'test_rfcs':        hasUsableAbapAccess && hasRFCs,
     'read_java_destinations': isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy),
@@ -4751,7 +4756,9 @@ function showCtxMenu(e, sid) {
         (isWindows
          ? 'Windows target — no Linux ptrace hook was armed here.'
          : ((mapState.evasion && mapState.evasion.allow_evasion)
-            ? 'SIGTERM the running sap_audit_hook. The hook\'s signal handler calls detach_all() which restores every INT3 byte in the target disp+work text segment and releases ptrace cleanly before exiting. Idempotent — safe to click even when nothing is running.'
+            ? ((mapState.evasion && mapState.evasion.baseline_captured_at)
+               ? 'SIGTERM the running sap_audit_hook. The hook\'s signal handler calls detach_all() which restores every INT3 byte in the target disp+work text segment and releases ptrace cleanly before exiting. Idempotent — safe to click even when nothing is running.'
+               : 'Tier 3 armed but no baseline captured yet — run "Capture Evasion Baseline" on this node first.')
             : 'Tier 3 not armed — restart SAPMAP with --allow-evasion (see disclaimer banner).')),
     'retrieve_rfcs':    'Needs a verified RFC credential or a SAPMAP-created user — RSRFCCHK and the RFCDES read both require a working logon.',
     'test_rfcs':        (!hasRFCs
