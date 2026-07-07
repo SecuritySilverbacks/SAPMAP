@@ -545,6 +545,54 @@ def test_death_star_launch_calls_deploy_when_armed():
     assert node._death_star_state["filter_classes"] == "AUW"
 
 
+def test_death_star_launch_sets_public_hook_pid_flag():
+    """After a successful arm, ``node.death_star_hook_pid`` is set to
+    the hook PID — the GUI reads this to gate the Disarm menu item.
+    Prevents the ``Arm never run → Disarm enabled anyway`` UX bug."""
+    state = _armed_state()
+    node = _mk_node()
+    node._evasion_baseline = {"params": {}}
+    assert node.death_star_hook_pid == 0
+    fake_result = {
+        "ok": True,
+        "source_path": "/tmp/sap_audit_hook.c",
+        "binary_path": "/tmp/sap_audit_hook",
+        "target_pid": 4712,
+        "target_comm": "dw.sapS4H_D00_W0",
+        "hook_pid": 4900,
+        "log_path": "/tmp/sap_audit_hook.log",
+        "pidfile_path": "/tmp/sap_audit_hook.pid",
+        "filter_classes": "AUW",
+    }
+    with patch("sapmap_death_star.deploy_and_launch",
+                 return_value=fake_result):
+        sapmap_evasion_tier3.tier3_sal_death_star_launch(state, node)
+    assert node.death_star_hook_pid == 4900
+
+
+def test_death_star_stop_clears_public_hook_pid_flag():
+    """Paired ``stop`` must clear ``death_star_hook_pid`` so the GUI's
+    Disarm menu greys out again after a clean disarm."""
+    state = _armed_state()
+    node = _mk_node()
+    node._evasion_baseline = {"params": {}}
+    node.death_star_hook_pid = 4900
+    node._death_star_state = {
+        "hook_pid": 4900,
+        "target_pid": 4712,
+        "target_comm": "dw.sapS4H_D00_W0",
+        "binary_path": "/tmp/sap_audit_hook",
+        "pidfile_path": "/tmp/sap_audit_hook.pid",
+        "log_path": "/tmp/sap_audit_hook.log",
+        "filter_classes": "AUW",
+    }
+    with patch("sapmap_death_star.stop",
+                 return_value={"ok": True, "pid": 4900,
+                               "message": "stopped cleanly"}):
+        sapmap_evasion_tier3.tier3_sal_death_star_stop(state, node)
+    assert node.death_star_hook_pid == 0
+
+
 def test_death_star_stop_removes_state_on_success():
     state = _armed_state()
     node = _mk_node()

@@ -1551,6 +1551,14 @@ def tier3_sal_death_star_launch(state, node,
         "log_path": result["log_path"],
         "filter_classes": result["filter_classes"],
     }
+    # Public marker for the GUI — Disarm menu gates on this being > 0
+    # so the item only becomes clickable when a hook is actually armed
+    # on this node.  Cleared to 0 by ``_stop``.  Serialised via
+    # SAPNode.to_dict so it survives state saves/loads.
+    try:
+        node.death_star_hook_pid = int(result["hook_pid"])
+    except (KeyError, TypeError, ValueError):
+        node.death_star_hook_pid = 0
 
     try:
         from sapmap_findings import emit_finding
@@ -1614,6 +1622,8 @@ def tier3_sal_death_star_stop(state, node) -> dict:
             delattr(node, "_death_star_state")
         except AttributeError:
             pass
+        # Public marker → 0 so the GUI's Disarm menu greys out again.
+        node.death_star_hook_pid = 0
         try:
             from sapmap_findings import emit_finding
             emit_finding(

@@ -725,6 +725,15 @@ class SAPNode:
     peditcow_kernel: str = ""
     linux_lpe_method: str = ""           # "copyfail" / "dirtyfrag" / "peditcow" / ""
 
+    # Virtual SAP Death Star arm state — public so the GUI can gate the
+    # Disarm menu on ``death_star_hook_pid > 0`` (only enable Disarm
+    # when a hook is actually running).  Set by
+    # ``tier3_sal_death_star_launch`` after a successful arm, cleared
+    # to 0 by ``tier3_sal_death_star_stop`` after a clean disarm.
+    # Deployment paths + pidfile stay on the private ``_death_star_state``
+    # attribute — this field only exposes the "is it armed?" bit.
+    death_star_hook_pid: int = 0
+
     # SSH key harvest + lateral movement state
     ssh_keys_harvested: bool = False     # True after sap_ssh_lateral.ssh_harvest()
     ssh_keys_planted: bool = False       # True after sap_ssh_lateral.ssh_plant_key()
@@ -958,6 +967,7 @@ class SAPNode:
             "peditcow_vulnerable": self.peditcow_vulnerable,
             "peditcow_root_obtained": self.peditcow_root_obtained,
             "peditcow_kernel": self.peditcow_kernel,
+            "death_star_hook_pid": self.death_star_hook_pid,
             "linux_lpe_method": self.linux_lpe_method,
             "ssh_keys_harvested": self.ssh_keys_harvested,
             "ssh_keys_planted": self.ssh_keys_planted,
@@ -1070,6 +1080,7 @@ class SAPNode:
             peditcow_vulnerable=d.get("peditcow_vulnerable", False),
             peditcow_root_obtained=d.get("peditcow_root_obtained", False),
             peditcow_kernel=d.get("peditcow_kernel", ""),
+            death_star_hook_pid=int(d.get("death_star_hook_pid", 0) or 0),
             linux_lpe_method=d.get("linux_lpe_method", ""),
             ssh_keys_harvested=d.get("ssh_keys_harvested", False),
             ssh_keys_planted=d.get("ssh_keys_planted", False),
