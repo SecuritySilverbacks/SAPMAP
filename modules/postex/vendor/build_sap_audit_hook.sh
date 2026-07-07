@@ -108,6 +108,21 @@ else
     echo "    You can still commit it if you know it's correct." >&2
 fi
 
+# Strip debug_info + symbol table.  Cuts ~16% off the binary size and
+# shortens the SXPG chunk-upload wall clock on the target by ~1-2 min
+# per deploy.  Behaviour is unchanged: strip drops .debug/.symtab but
+# leaves .text alone, and the ptrace hook resolves target addresses at
+# runtime via the TARGET disp+work's ELF symtab (not our own).
+if command -v strip >/dev/null 2>&1; then
+    stripped_before=$(wc -c < "$OUT")
+    strip "$OUT"
+    stripped_after=$(wc -c < "$OUT")
+    echo "[+] Stripped: $stripped_before B → $stripped_after B"
+else
+    echo "[*] strip not installed — binary keeps debug_info " \
+         "(harmless, just larger)"
+fi
+
 echo
 echo "Next steps:"
 echo "  git add $OUT"
