@@ -4487,14 +4487,17 @@ function showCtxMenu(e, sid) {
     // Virtual SAP Death Star — Linux-only (Julian Petersohn's C hook
     // uses process_vm_readv + PTRACE_ATTACH + /proc/<pid>/exe).
     // Needs an OS-exec channel to upload + compile + launch the hook
-    // as <sid>adm.  Arm requires a captured baseline (documentation +
-    // audit trail) even though the C hook restores its own INT3 bytes;
-    // Disarm skips baseline gating so operators can clean up even if
-    // baseline metadata was lost mid-run.
+    // as <sid>adm.  Unlike sibling Tier 3 mutations, Death Star does
+    // NOT require a captured baseline — the C hook only mutates live
+    // INT3 bytes in disp+work, which its own SIGTERM handler restores
+    // via detach_all(); nothing that a baseline snapshot (rsau params,
+    // SAL slot definitions) would help restore.  The tier3 entry
+    // itself already passes ``require_baseline=False`` — mirror that
+    // relaxation in the GUI so the operator can arm right after
+    // --allow-evasion without a baseline detour.
     'tier3_sal_death_star_launch': !isWindows
         && (hasGwVuln || hasCve31324 || hasCreatedUsers || hasSapControlOsExec)
-        && !!(mapState.evasion && mapState.evasion.allow_evasion)
-        && !!(mapState.evasion && mapState.evasion.baseline_captured_at),
+        && !!(mapState.evasion && mapState.evasion.allow_evasion),
     'tier3_sal_death_star_stop': !isWindows
         && !!(mapState.evasion && mapState.evasion.allow_evasion),
     'retrieve_rfcs':    hasUsableAbapAccess,        // ABAP-only RFC + BAPI
@@ -4743,9 +4746,7 @@ function showCtxMenu(e, sid) {
         (isWindows
          ? 'Windows kernel target — the C hook uses process_vm_readv + PTRACE_ATTACH which are Linux-only. Not supported on this OS.'
          : ((mapState.evasion && mapState.evasion.allow_evasion)
-            ? ((mapState.evasion && mapState.evasion.baseline_captured_at)
-               ? 'MUTATES disp+work in-memory. Uploads Julian Petersohn\'s sap_audit_hook.c to /tmp, compiles as <sid>adm, picks a dialog worker PID and ptrace-attaches. Plants INT3 breakpoints on the two fwrite calls, write_event_to_DB, and the three EtdSender calls in rsauwr1ex. In --suppress mode audit records matching the filter (or all events when empty) are silently dropped — SM20 never sees them, no disk write, no DB row, no ETD/SIEM. Persists as a background process on the target until Disarm. Requires Linux + <sid>adm + kernel.yama.ptrace_scope <= 1. Not a 0-day — SAP publicly confirmed this is post-exploitation.'
-               : 'Tier 3 armed but no baseline captured yet — run "Capture Evasion Baseline" on this node first.')
+            ? 'MUTATES disp+work in-memory. Uploads Julian Petersohn\'s sap_audit_hook.c to /tmp, compiles as <sid>adm, picks a dialog worker PID and ptrace-attaches. Plants INT3 breakpoints on the two fwrite calls, write_event_to_DB, and the three EtdSender calls in rsauwr1ex. In --suppress mode audit records matching the filter (or all events when empty) are silently dropped — SM20 never sees them, no disk write, no DB row, no ETD/SIEM. Persists as a background process on the target until Disarm. Requires Linux + <sid>adm + kernel.yama.ptrace_scope <= 1. Not a 0-day — SAP publicly confirmed this is post-exploitation.'
             : 'Tier 3 not armed — restart SAPMAP with --allow-evasion (see disclaimer banner).')),
     'tier3_sal_death_star_stop':
         (isWindows
