@@ -6428,9 +6428,15 @@ async function ctxAction(action) {
       const dsFilter = dsFilterRaw.trim();
       const dsPidRaw = prompt(
         'Target work-process PID?\n\n'
-        + 'Leave EMPTY to auto-pick the first _W<n> worker.\n'
-        + 'Or paste a specific PID (from ps -eo pid,comm,args on the\n'
-        + 'target) to force a particular disp+work process.',
+        + 'Leave EMPTY (RECOMMENDED) to attach to ALL disp+work\n'
+        + 'processes — the C hook walks /proc itself and hooks every\n'
+        + 'worker (dialog, batch, spool, update). This is what you\n'
+        + 'want because SAP round-robins dialog sessions across the\n'
+        + 'whole worker pool; hooking only one worker leaves audit\n'
+        + 'events on the others still landing in SM20.\n\n'
+        + 'Or paste a single PID (from ps -eo pid,comm on the target)\n'
+        + 'to hook only that specific disp+work process — useful for\n'
+        + 'debugging or targeting a known logon session.',
         '');
       if (dsPidRaw === null) break;
       const dsPid = dsPidRaw.trim() ? parseInt(dsPidRaw, 10) : null;
@@ -6441,7 +6447,7 @@ async function ctxAction(action) {
       if (!confirm(
         'ARM the Virtual SAP Death Star on ' + sid + '?\n\n'
         + 'Filter:   ' + (dsFilter || '(all SAL classes)') + '\n'
-        + 'Target:   ' + (dsPid ? 'PID ' + dsPid : 'auto-pick worker') + '\n'
+        + 'Target:   ' + (dsPid ? 'PID ' + dsPid + ' only' : 'ALL disp+work workers (auto)') + '\n'
         + 'Method:   ptrace INT3 hook in disp+work rsauwr1ex\n'
         + 'Persist:  background process on target until Disarm\n'
         + '\n'

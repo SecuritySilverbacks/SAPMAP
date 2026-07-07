@@ -260,6 +260,73 @@ def test_launcher_script_dropped_then_invoked_with_two_token_argv(tmp_path):
         f"sh params must be a single path token, got {sh_params!r}")
 
 
+def test_launch_omits_pid_flag_when_target_pid_is_none():
+    """Default arm should let the C hook auto-attach to ALL workers.
+    Julian's find_pids() walks /proc when --pid is absent and hooks
+    every disp+work process — critical because SAP round-robins
+    dialog sessions across the pool.  If launch always passes --pid,
+    only one worker gets hooked and audit events on the others still
+    land in SM20 (operator-reported bug)."""
+    captured = {}
+
+    def fake_write(node, path, data, label=""):
+        # Capture the launcher script content so we can inspect the
+        # hook command line embedded in it.
+        captured["script"] = data.decode("utf-8", errors="replace")
+
+    def fake_run(node, command, params="", label="", quiet=False):
+        if command == "sh" and "/tmp/sapmap_ds_launch" in params:
+            return {"success": True,
+                     "output": ["STATUS: ALIVE 12345"], "error": ""}
+        return {"success": True, "output": [], "error": ""}
+
+    with patch("sapmap_death_star._write_remote_file",
+                 side_effect=fake_write), \
+         patch("sapmap_exploit.run_os_command",
+                 side_effect=fake_run):
+        pid = sapmap_death_star.launch(
+            _mk_node(),
+            binary_path="/tmp/sap_audit_hook",
+            target_pid=None,        # ← default = all workers
+            filter_classes="AUW",
+        )
+    assert pid == 12345
+    script = captured.get("script", "")
+    assert "--suppress" in script, "expected --suppress in launcher"
+    assert "--pid" not in script, (
+        f"launcher must NOT pass --pid when target_pid=None (all-workers "
+        f"mode); got script:\n{script}")
+
+
+def test_launch_includes_pid_flag_when_target_pid_given():
+    """When operator supplies a PID explicitly, single-process mode
+    is respected — the hook attaches only to that PID."""
+    captured = {}
+
+    def fake_write(node, path, data, label=""):
+        captured["script"] = data.decode("utf-8", errors="replace")
+
+    def fake_run(node, command, params="", label="", quiet=False):
+        if command == "sh" and "/tmp/sapmap_ds_launch" in params:
+            return {"success": True,
+                     "output": ["STATUS: ALIVE 12345"], "error": ""}
+        return {"success": True, "output": [], "error": ""}
+
+    with patch("sapmap_death_star._write_remote_file",
+                 side_effect=fake_write), \
+         patch("sapmap_exploit.run_os_command",
+                 side_effect=fake_run):
+        sapmap_death_star.launch(
+            _mk_node(),
+            binary_path="/tmp/sap_audit_hook",
+            target_pid=7959,
+        )
+    script = captured.get("script", "")
+    assert "--pid 7959" in script, (
+        f"expected --pid 7959 in launcher (single-process mode); "
+        f"got script:\n{script}")
+
+
 def test_launch_raises_when_hook_dies_within_1s():
     """The launcher's ``STATUS: DIED`` case (usually ptrace_scope > 1
     or an invalid target PID) must surface as a clear operator error,

@@ -1562,12 +1562,23 @@ def tier3_sal_death_star_launch(state, node,
 
     try:
         from sapmap_findings import emit_finding
+        # Different message shape depending on whether the operator
+        # supplied a specific PID or let the C hook auto-attach to
+        # every work-process.  The all-workers case is the normal one
+        # since SAP round-robins dialog sessions across the pool.
+        if result.get("target_pid"):
+            scope = (f"work-process PID {result['target_pid']} "
+                      f"({result['target_comm']})")
+        else:
+            n = result.get("workers_hooked") or 0
+            scope = (f"all {n} work-processes on {sid} "
+                      f"— every dialog / batch / spool / update PID")
         emit_finding(
             "CRITICAL", sid,
             f"Tier 3: Virtual SAP Death Star armed on {sid} — SAL "
             f"events matching {result['filter_classes'] or '(all)'} "
             f"are silently dropped at fwrite/write_event_to_DB/ETD in "
-            f"work-process PID {result['target_pid']}.  Hook PID "
+            f"{scope}.  Hook PID "
             f"{result['hook_pid']} on the target; stop with the "
             f"paired Disarm action or SIGTERM to restore INT3 bytes.")
     except Exception:

