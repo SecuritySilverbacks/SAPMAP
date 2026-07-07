@@ -1177,13 +1177,30 @@ def stop(node, pidfile_path: Optional[str] = None,
 # End-to-end
 # ---------------------------------------------------------------------------
 
+def read_hook_log(node, log_path: str,
+                    max_lines: int = 100) -> list[str]:
+    """Fetch the last ``max_lines`` lines of ``/tmp/sap_audit_hook.log``.
+
+    Returns a list of stripped lines (empty list on any failure).
+    Never raises — this is a diagnostic helper the caller invokes to
+    surface hook startup messages / plant errors to the operator's
+    console, and it must not derail the arm flow when the log is
+    empty or unreadable.
+    """
+    r = _run(node, "tail", f"-n {int(max_lines)} {log_path}",
+              label=f"read hook log ({log_path})")
+    if not r.get("success"):
+        return []
+    return [ln.rstrip() for ln in (r.get("output") or []) if ln.strip()]
+
+
 def deploy_and_launch(node, filter_classes: str = "",
                         remote_dir: str = DEFAULT_REMOTE_DIR,
                         target_pid: Optional[int] = None,
                         skip_upload: bool = False,
                         skip_compile: bool = False,
                         force_source: bool = False,
-                        verbose: bool = False) -> dict:
+                        verbose: bool = True) -> dict:
     """Full pipeline: upload → (compile) → find worker → launch.
 
     Two deployment paths, auto-selected in this order:
@@ -1338,6 +1355,40 @@ def deploy_and_launch(node, filter_classes: str = "",
                        pidfile_path=pidfile_path,
                        remote_dir=remote_dir)
 
+    # Post-arm log dump — critical diagnostic surface.  Julian's C
+    # hook writes both attach/plant errors and (with -v) every audit
+    # record it sees to this log.  If the runtime scan can't find
+    # hook sites in this build of disp+work, ``plant_bp`` refuses to
+    # patch (its ``0xE8`` sanity check protects against corrupting
+    # unrelated bytes) — and those refusals only surface via the log.
+    # Auto-dumping saves the operator a manual ``cat`` on the target
+    # to figure out why SM20 still shows events.
+    import time as _time
+    _time.sleep(1.5)  # give the hook time to write its startup lines
+    log_tail = read_hook_log(node, log_path, max_lines=60)
+    attach_ok = sum(1 for ln in log_tail if "attached pid" in ln)
+    plant_fails = sum(1 for ln in log_tail
+                       if "failed to plant" in ln or "expected CALL" in ln)
+    if log_tail:
+        print(f"[*] {node.sid}: death_star: hook log ({log_path}) — "
+              f"{len(log_tail)} line(s), {attach_ok} attach OK, "
+              f"{plant_fails} plant warning(s):")
+        for ln in log_tail:
+            print(f"[*] {node.sid}: death_star:   log: {ln[:200]}")
+        if plant_fails > 0:
+            print(f"[!] {node.sid}: death_star: {plant_fails} hook site(s) "
+                   f"could not be planted — the hook is attached but is "
+                   f"NOT intercepting those SAL sinks.  Audit events "
+                   f"routed through the un-planted paths will still land "
+                   f"in SM20.  This usually means the C hook's runtime "
+                   f"address scan didn't recognise this kernel build's "
+                   f"``rsauwr1ex`` layout.")
+    else:
+        print(f"[*] {node.sid}: death_star: hook log at {log_path} is "
+               f"empty — the hook may be running in silent mode or the "
+               f"log path is wrong.  Check on the target with "
+               f"``ls -la {log_path}``.")
+
     return {
         "ok": True,
         "mode": mode,
@@ -1350,4 +1401,7 @@ def deploy_and_launch(node, filter_classes: str = "",
         "log_path": log_path,
         "pidfile_path": pidfile_path,
         "filter_classes": filter_classes,
+        "log_tail": log_tail,
+        "attach_ok_count": attach_ok,
+        "plant_fails_count": plant_fails,
     }

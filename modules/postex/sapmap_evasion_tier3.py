@@ -1573,6 +1573,7 @@ def tier3_sal_death_star_launch(state, node,
             n = result.get("workers_hooked") or 0
             scope = (f"all {n} work-processes on {sid} "
                       f"— every dialog / batch / spool / update PID")
+        plant_fails = result.get("plant_fails_count") or 0
         emit_finding(
             "CRITICAL", sid,
             f"Tier 3: Virtual SAP Death Star armed on {sid} — SAL "
@@ -1581,6 +1582,21 @@ def tier3_sal_death_star_launch(state, node,
             f"{scope}.  Hook PID "
             f"{result['hook_pid']} on the target; stop with the "
             f"paired Disarm action or SIGTERM to restore INT3 bytes.")
+        # If plant_bp refused to patch on any site (kernel-build offset
+        # mismatch), surface a distinct WARNING finding so the operator
+        # can't miss the "hook attached but not fully intercepting"
+        # state.  When this fires, some SAL events will still land in
+        # SM20 — exactly what the operator saw on the S/4 793 target.
+        if plant_fails > 0:
+            emit_finding(
+                "WARNING", sid,
+                f"Tier 3: Death Star hook PID {result['hook_pid']} "
+                f"attached to {result.get('attach_ok_count', '?')} work-"
+                f"process(es) but plant_bp refused {plant_fails} hook "
+                f"site(s) — this kernel build's ``rsauwr1ex`` layout "
+                f"doesn't match the runtime address scan.  SAL events "
+                f"routed through the un-planted sinks WILL still appear "
+                f"in SM20.  Full hook log: {result.get('log_path')}")
     except Exception:
         pass
 
