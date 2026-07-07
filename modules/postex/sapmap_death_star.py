@@ -919,24 +919,35 @@ def launch(node, binary_path: str,
         f"  fi\n"
         f"  rm -f {pidfile_path}\n"
         f"fi\n"
-        # Launch detached.  setsid gives a fresh session so the
-        # operator's SXPG session teardown doesn't reap the hook.
-        # nohup is NOT used — it caused spurious ENOENT failures on
-        # SUSE targets ("nohup: failed to run command: No such file
-        # or directory") even though the binary was present and
-        # executable.  setsid alone is sufficient: it creates a new
-        # session and the backgrounded process survives the parent's
-        # exit.  stdin is redirected from /dev/null so no SIGHUP is
-        # raised when the controlling terminal goes away.
-        f"setsid {hook_cmdline} "
-        f">> {log_path} 2>&1 < /dev/null &\n"
-        f"NEW=$!\n"
-        f"echo $NEW > {pidfile_path}\n"
-        # Give the hook a moment to complete its ptrace-attach setup
-        # (open /proc/PID/maps, plant INT3s, first PTRACE_CONT).  If
-        # ptrace_scope > 1 or the target PID is invalid, the hook
-        # will have died before this check.
-        f"sleep 1\n"
+        # Launch detached via a subshell with exec-level redirects.
+        # Previous approach (``setsid cmd >> log 2>&1 &``) produced a
+        # 0-byte log on SUSE SLES despite the hook being alive and
+        # attached — the shell-level redirect was not inherited by the
+        # setsid child on some systemd mount-namespace configurations
+        # (PrivateTmp).  The subshell form ``(exec >> log 2>&1; setsid
+        # cmd &)`` forces the redirect onto the subshell's own FD
+        # table BEFORE setsid forks, guaranteeing the hook inherits
+        # the open file descriptor.  ``exec`` without a command
+        # applies the redirects to the current shell; the subsequent
+        # ``setsid cmd &`` then runs with those FDs already in place.
+        f"(\n"
+        f"  exec >> {log_path} 2>&1\n"
+        f"  exec < /dev/null\n"
+        f"  setsid {hook_cmdline} &\n"
+        f"  echo $! > {pidfile_path}\n"
+        f") &\n"
+        # The outer & backgrounds the subshell; wait a moment then
+        # read the pidfile to discover the hook PID.
+        f"sleep 2\n"
+        f"if [ ! -s {pidfile_path} ]; then\n"
+        f"  echo STATUS: NO_PIDFILE\n"
+        f"  echo DIAG: launcher subshell did not write pidfile\n"
+        f"  exit 0\n"
+        f"fi\n"
+        f"NEW=`cat {pidfile_path}`\n"
+        # The 2s sleep above gives the hook time to ptrace-attach,
+        # plant INT3s, and PTRACE_CONT all workers.  If ptrace_scope
+        # > 1 or targets are invalid, the hook will have died.
         f"if kill -0 $NEW 2>/dev/null; then\n"
         f"  echo STATUS: ALIVE $NEW\n"
         f"else\n"
@@ -1024,6 +1035,11 @@ def launch(node, binary_path: str,
                 f"{_pid_int} is not alive (/proc/{_pid_int}/comm: "
                 f"{_av_out[:100]!r}) — hook died before we could "
                 f"verify.  Check {log_path} on the target.")
+    if status.startswith("NO_PIDFILE"):
+        raise DeathStarError(
+            f"launcher subshell did not write the pidfile after 2 s — "
+            f"the setsid launch may have failed silently.  Check "
+            f"{log_path} on the target for ptrace errors.")
     if status.startswith("MISSING"):
         raise DeathStarError(
             f"binary not found at launch time — the upload succeeded "
@@ -1440,7 +1456,7 @@ def deploy_and_launch(node, filter_classes: str = "",
     # Auto-dumping saves the operator a manual ``cat`` on the target
     # to figure out why SM20 still shows events.
     import time as _time
-    _time.sleep(1.5)  # give the hook time to write its startup lines
+    _time.sleep(3)  # launcher waits 2s; add 3s for attach + log flush
     log_tail = read_hook_log(node, log_path, max_lines=60)
     attach_ok = sum(1 for ln in log_tail if "attached pid" in ln)
     plant_fails = sum(1 for ln in log_tail
