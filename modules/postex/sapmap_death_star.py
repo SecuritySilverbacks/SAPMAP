@@ -982,9 +982,48 @@ def launch(node, binary_path: str,
             status = s[len("STATUS:"):].strip()
             break
     if not status:
-        raise DeathStarError(
-            f"launch produced no STATUS line — raw output: "
-            f"{' '.join(lines)!r}. Check {log_path} on the target.")
+        # Fallback — some SXPG/SAPControl backends swallow the parent
+        # shell's stdout when it forks a setsid-detached child (pipe
+        # bookkeeping bug on the sapstartsrv/sapxpg side, empirically
+        # observed on S/4HANA hosts running SUSE kernels).  The
+        # launcher writes the hook PID to pidfile_path BEFORE it
+        # echoes STATUS, so the pidfile is authoritative even when
+        # stdout is lost.  Read it back with a separate exec and
+        # verify the hook is alive.
+        print(f"[!] {node.sid}: death_star: launcher stdout empty — "
+               f"falling back to pidfile check at {pidfile_path}")
+        _pf = _run(node, "cat", pidfile_path,
+                    label=f"read pidfile — {pidfile_path}")
+        _pid_lines = [l.strip() for l in (_pf.get("output") or [])
+                        if l.strip()]
+        _pid_str = _pid_lines[0] if _pid_lines else ""
+        if not _pid_str.isdigit():
+            raise DeathStarError(
+                f"launch produced no STATUS line AND pidfile "
+                f"{pidfile_path} was empty/unreadable — likely the "
+                f"launcher script itself never ran.  Check "
+                f"{log_path} on the target.")
+        _pid_int = int(_pid_str)
+        # Read /proc/PID/comm — SXPG-safe two-token argv, no shell
+        # quoting needed.  Alive → comm printed (e.g. "sap_audit_hook").
+        # Dead → cat errors "No such file" into the LOG table.
+        _alive = _run(node, "/bin/cat",
+                       f"/proc/{_pid_int}/comm",
+                       label=f"verify hook alive — /proc/{_pid_int}/comm")
+        _av_out = " ".join(str(l) for l in
+                             (_alive.get("output") or [])).lower()
+        if ("sap_audit_hook" in _av_out
+                or ("no such" not in _av_out
+                    and _av_out.strip() != "")):
+            status = f"ALIVE {_pid_int}"
+            print(f"[+] {node.sid}: death_star: pidfile-based verify "
+                   f"confirms hook running as PID {_pid_int}")
+        else:
+            raise DeathStarError(
+                f"launch produced no STATUS line AND the pidfile PID "
+                f"{_pid_int} is not alive (/proc/{_pid_int}/comm: "
+                f"{_av_out[:100]!r}) — hook died before we could "
+                f"verify.  Check {log_path} on the target.")
     if status.startswith("MISSING"):
         raise DeathStarError(
             f"binary not found at launch time — the upload succeeded "
