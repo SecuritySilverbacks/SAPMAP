@@ -96,6 +96,16 @@ TIER3_TECHNIQUES: dict = {
         # 4.B.1 / 4.B.5 — Java NWA severity / defaultTrace flip
         Tier3Technique("java_nwa_severity",
                         "Java NWA log severity flip"),
+        # 4.A.6 — Virtual SAP Death Star.  In-memory ptrace hook into
+        # disp+work that silently drops SAL events across all three
+        # sinks (disk fwrite, DB write_event_to_DB, ETD SendEvent).
+        # Upstream: Julian Petersohn — https://github.com/randomstr1ng/
+        #                              virtual-sap-death-star
+        # SAP publicly confirmed this is not a 0-day (post-exploitation
+        # from local <sid>adm).  Requires Linux OS-exec + ptrace_scope
+        # <= 1 on the target host.
+        Tier3Technique("sal_death_star",
+                        "SAL In-Memory Hook Suppress (Death Star)"),
     )
 }
 
@@ -196,6 +206,9 @@ EVASION_BANNER = (
     "     rec/client, stat/level, rdisp/TRACE, gw/logging) at runtime\n"
     "   * Delete SAL message templates via SE92\n"
     "   * Flip Java NWA log-severity at the server level\n"
+    "   * Arm the Virtual SAP Death Star — in-memory ptrace hook into\n"
+    "     disp+work that silently drops SAL events across fwrite / DB /\n"
+    "     ETD sinks (Julian Petersohn; SAP-confirmed non-0-day)\n"
     "\n"
     " Every Tier 3 action snapshots a baseline first and is restored\n"
     " on exit (or window-context completion).  Even so, a crash or kill\n"
