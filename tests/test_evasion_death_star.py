@@ -471,12 +471,79 @@ def test_find_worker_pid_refuses_dispatcher():
 
 
 def test_find_worker_pid_raises_when_ps_fails():
+    """When ps fails AND the /proc walk fallback also produces nothing,
+    a clear ``no work-processes`` error surfaces."""
+    def fake(node, command, params="", label="", quiet=False):
+        return {"success": False, "output": [], "error": "SXPG denied"}
+    with patch("sapmap_death_star._run", side_effect=fake):
+        # Stub _write_remote_file so we don't need to mock all its
+        # SXPG round-trips — the writer is exercised elsewhere.
+        with patch("sapmap_death_star._write_remote_file"):
+            with pytest.raises(sapmap_death_star.DeathStarError,
+                                match="no disp\\+work"):
+                sapmap_death_star.find_worker_pid(_mk_node())
+
+
+def test_find_worker_pid_recognises_modern_kernel_750_plus_comm():
+    """Regression: operator's S/4 793 target exposed comm as
+    ``SAP_S4H_00_W0`` (kernel-750+ format).  Previous version
+    required either ``disp+work`` or ``dw.sap`` prefix — modern
+    comm has neither — so workers were skipped.  Lock the new
+    ``_W\\d+`` suffix classification here."""
+    ps_out = [
+        "  7948 SAP_S4H_00_DP    dw.sapS4H_D00 pf=/usr/sap/S4H/SYS/profile/S4H_D00_s4hanadev",
+        "  7959 SAP_S4H_00_W0    dw.sapS4H_D00 pf=/usr/sap/S4H/SYS/profile/S4H_D00_s4hanadev",
+        "  7960 SAP_S4H_00_W1    dw.sapS4H_D00 pf=/usr/sap/S4H/SYS/profile/S4H_D00_s4hanadev",
+        "  7973 SAP_S4H_00_W14   dw.sapS4H_D00 pf=/usr/sap/S4H/SYS/profile/S4H_D00_s4hanadev",
+    ]
     with patch("sapmap_death_star._run") as mock_run:
-        mock_run.return_value = {"success": False, "output": [],
-                                  "error": "SXPG denied"}
-        with pytest.raises(sapmap_death_star.DeathStarError,
-                            match="ps failed"):
-            sapmap_death_star.find_worker_pid(_mk_node())
+        mock_run.return_value = {"success": True, "output": ps_out,
+                                  "error": ""}
+        pid, comm = sapmap_death_star.find_worker_pid(_mk_node())
+    # First dialog worker wins — DP is skipped (dispatcher).
+    assert pid == 7959
+    assert comm == "SAP_S4H_00_W0"
+
+
+def test_classify_worker_covers_common_shapes():
+    """Direct unit test of the classifier so the two discovery routes
+    (ps + /proc walk) agree on what counts as a worker."""
+    classify = sapmap_death_star._classify_worker
+    # Modern kernel-750+ shapes.
+    assert classify("SAP_S4H_00_W0") == "worker"
+    assert classify("SAP_S4H_00_W14") == "worker"
+    assert classify("SAP_S4H_00_BTC") == "fallback"
+    assert classify("SAP_S4H_00_SPO") == "fallback"
+    assert classify("SAP_S4H_00_UP2") == "fallback"
+    assert classify("SAP_S4H_00_DP") is None  # dispatcher — refused
+    # Legacy kernel-≤749 shape.
+    assert classify("disp+work") == "fallback"
+    assert classify("dw.sapS4H_D00") == "fallback"
+    # Non-SAP processes.
+    assert classify("bash") is None
+    assert classify("systemd") is None
+
+
+def test_find_worker_pid_falls_back_to_proc_walk_when_ps_empty():
+    """When ps returns zero SAP processes (SXPG PATH constraint or a
+    non-procps ps variant), the /proc walker script kicks in and
+    produces a valid worker PID."""
+    def fake(node, command, params="", label="", quiet=False):
+        # ps call: no matches.
+        if command == "ps":
+            return {"success": True, "output": [], "error": ""}
+        # /proc walker script: return one dialog worker + one fallback.
+        if command == "sh" and "procwalk" in params:
+            return {"success": True,
+                     "output": ["7959 SAP_S4H_00_W0",
+                                "7970 SAP_S4H_00_BTC"],
+                     "error": ""}
+        return {"success": True, "output": [], "error": ""}
+    with patch("sapmap_death_star._run", side_effect=fake):
+        with patch("sapmap_death_star._write_remote_file"):
+            pid, comm = sapmap_death_star.find_worker_pid(_mk_node())
+    assert pid == 7959  # dialog worker preferred
+    assert comm == "SAP_S4H_00_W0"
 
 
 # ---------------------------------------------------------------------------
