@@ -4454,7 +4454,13 @@ function showCtxMenu(e, sid) {
     'analyse_capabilities': isAbapStack && (
         (n && (n.credentials || []).some(c => c && c.verified))
         || hasCreatedUsers),
-    'probe_telemetry':  hasUsableAbapAccess,        // ABAP RFC reads only
+    // Sits behind --allow-evasion like every other Evasion-submenu entry
+    // for UX consistency — the operator opts in to the evasion workflow
+    // at startup, then everything under the ninja icon becomes available.
+    // The probe itself is pure-read (no target state changes) but it's
+    // still an evasion-workflow step, not a discovery step.
+    'probe_telemetry':  hasUsableAbapAccess
+        && !!(mapState.evasion && mapState.evasion.allow_evasion),
     'capture_evasion_baseline': hasUsableAbapAccess
         && !!(mapState.evasion && mapState.evasion.allow_evasion),
     'probe_rsau_api': hasUsableAbapAccess
@@ -4685,7 +4691,10 @@ function showCtxMenu(e, sid) {
     'exploit_linux_lpe': 'Requires OS-exec on Linux host — run Check first to confirm at least one technique (Copy Fail / pedit-COW / Dirty Frag) is viable',
     'check_windows_lpe':   'Requires OS-exec on a Windows host (GW SAPXPG, CVE-2025-31324 shell, or SAPMAP-created OS-user)',
     'exploit_windows_lpe': 'Requires OS-exec on Windows host — run Check first to confirm MiniPlasma is viable (Win10 1709+ / Server 2019+ with cldflt.sys + .NET 4.7.2+)',
-    'probe_telemetry':  'Needs a verified RFC credential or a SAPMAP-created user — reads runtime profile parameters via TH_GET_PARAMETER (lightweight kernel FM) plus RSAU_PERS for SAL slots. No ABAP install, no AUM/AUW events.',
+    'probe_telemetry':
+        ((mapState.evasion && mapState.evasion.allow_evasion)
+         ? 'Needs a verified RFC credential or a SAPMAP-created user — reads runtime profile parameters via TH_GET_PARAMETER (lightweight kernel FM) plus RSAU_PERS for SAL slots. No ABAP install, no AUM/AUW events.'
+         : 'Tier 3 not armed — restart SAPMAP with --allow-evasion (see disclaimer banner).'),
     'capture_evasion_baseline':
         ((mapState.evasion && mapState.evasion.allow_evasion)
          ? 'Needs a verified RFC credential — calls TH_GET_PARAMETER + RSAU_API_GET_AUDIT_CONFIG and writes loot/baseline/<SID>/baseline_<ts>.json. Pure read; no mutation. Unblocks the require_baseline gate on every Tier 3 technique for this node.'
