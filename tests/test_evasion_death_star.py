@@ -144,9 +144,12 @@ def test_launcher_script_dropped_then_invoked_with_two_token_argv(tmp_path):
 
     def fake_run_os_command(node, command, params):
         calls.append((command, params))
-        # Simulate the launcher printing a PID (last line of stdout).
+        # Simulate the launcher printing the tagged STATUS line the
+        # parser now looks for.
         if command == "sh" and params.startswith("/tmp/sapmap_ds_launch"):
-            return {"success": True, "output": ["12345"], "error": ""}
+            return {"success": True,
+                     "output": ["STATUS: ALIVE 12345"],
+                     "error": ""}
         return {"success": True, "output": [], "error": ""}
 
     with patch("sapmap_exploit.run_os_command",
@@ -169,6 +172,83 @@ def test_launcher_script_dropped_then_invoked_with_two_token_argv(tmp_path):
     assert sh_params.startswith("/tmp/sapmap_ds_launch_"), sh_params
     assert " " not in sh_params, (
         f"sh params must be a single path token, got {sh_params!r}")
+
+
+def test_launch_raises_when_hook_dies_within_1s():
+    """The launcher's ``STATUS: DIED`` case (usually ptrace_scope > 1
+    or an invalid target PID) must surface as a clear operator error,
+    not a bare 'launch failed'."""
+    def fake_run_os_command(node, command, params):
+        if command == "sh" and params.startswith("/tmp/sapmap_ds_launch"):
+            return {"success": True,
+                     "output": ["DIAG: hook process exited within 1s "
+                                "— check /tmp/sap_audit_hook.log for "
+                                "ptrace_scope/attach errors",
+                                "STATUS: DIED 12345"],
+                     "error": ""}
+        return {"success": True, "output": [], "error": ""}
+
+    with patch("sapmap_exploit.run_os_command",
+                 side_effect=fake_run_os_command):
+        with pytest.raises(sapmap_death_star.DeathStarError,
+                            match="ptrace_scope"):
+            sapmap_death_star.launch(
+                _mk_node(),
+                binary_path="/tmp/sap_audit_hook",
+                target_pid=4712,
+            )
+
+
+def test_stop_refuses_kernel_pid_from_stale_pidfile():
+    """PID 2 (kthreadd) is exactly the failure the operator reported.
+    The remote stopper script validates the PID before signaling; here
+    we simulate the shell-level sanity check reporting the stale PID
+    and confirm the Python parser reads it back as ``NOT_RUNNING``
+    (not as a hook-still-running error)."""
+    def fake_run_os_command(node, command, params):
+        if command == "sh" and params.startswith("/tmp/sapmap_ds_stop"):
+            # Shell script detected PID 2 in the pidfile, refused to
+            # signal it, cleaned up the stale pidfile, reported
+            # NOT_RUNNING.
+            return {"success": True,
+                     "output": ["DIAG: pidfile=/tmp/sap_audit_hook.pid "
+                                "contents=[2]",
+                                "DIAG: stale-pid-too-low src=pidfile "
+                                "pid=2",
+                                "STATUS: NOT_RUNNING"],
+                     "error": ""}
+        return {"success": True, "output": [], "error": ""}
+
+    with patch("sapmap_exploit.run_os_command",
+                 side_effect=fake_run_os_command):
+        r = sapmap_death_star.stop(_mk_node())
+    assert r["ok"] is False
+    assert r["pid"] is None
+    assert "nothing to stop" in r["message"]
+
+
+def test_stop_status_parser_ignores_diag_line_digits():
+    """Regression: previously the stopper joined all output lines with
+    spaces and grabbed ``split()[-1]`` as the PID.  DIAG lines contain
+    digits (``pid=2``, ``contents=[2]``); if we accidentally parse
+    them as PID we'd report ``STILL_RUNNING PID 2`` instead of the
+    real STOPPED status.  Lock the tagged-line parser here."""
+    def fake_run_os_command(node, command, params):
+        if command == "sh" and params.startswith("/tmp/sapmap_ds_stop"):
+            return {"success": True,
+                     "output": ["DIAG: pidfile=/tmp/sap_audit_hook.pid "
+                                "contents=[4900]",
+                                "DIAG: sending SIGTERM src=pidfile "
+                                "pid=4900 comm=sap_audit_hook",
+                                "STATUS: STOPPED 4900"],
+                     "error": ""}
+        return {"success": True, "output": [], "error": ""}
+
+    with patch("sapmap_exploit.run_os_command",
+                 side_effect=fake_run_os_command):
+        r = sapmap_death_star.stop(_mk_node())
+    assert r["ok"] is True
+    assert r["pid"] == 4900
 
 
 def test_filter_classes_rejects_shell_metacharacters():
