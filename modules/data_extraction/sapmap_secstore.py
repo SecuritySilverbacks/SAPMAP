@@ -624,6 +624,42 @@ def _enrich_db_type_from_public_info(node) -> str:
     return ""
 
 
+def _normalize_db_type(raw: str) -> str:
+    """Map RFCDBSYS / RFCSI_EXPORT long-form DB names to SXPG short codes.
+
+    RFC_SYSTEM_INFO and /sap/public/info return the DB type as SAP has
+    always spelled it — long-form strings like ``ADABAS D``, ``MICROSOFT
+    SQL SERVER``, ``HANA DATABASE``, ``IBM DB2 z/OS``.  The SXPG RSECTAB
+    reader dispatches on the 2-3-letter DBMSTYPE codes (HDB, MSS, ORA,
+    ADA, DB6) that SAP kernel installers use internally.  Without
+    normalization the reader falls off the else branch with "Unsupported
+    DB type" even though the DB is fully supported.
+
+    Returns the normalized code (upper-case), or the input upper-cased
+    if no mapping matched (so already-short values like "HDB" pass
+    through unchanged).
+    """
+    if not raw:
+        return ""
+    up = raw.strip().upper()
+    # Ordered by specificity: keep long-form checks before shorter
+    # substrings so "MICROSOFT SQL SERVER" doesn't accidentally match
+    # a hypothetical "SQL" prefix rule.
+    if "HANA" in up or up == "HDB":
+        return "HDB"
+    if "ADABAS" in up or up == "ADA" or "MAXDB" in up:
+        return "ADA"
+    if "MICROSOFT" in up or up.startswith("MSS") or "SQL SERVER" in up:
+        return "MSS"
+    if "ORACLE" in up or up == "ORA":
+        return "ORA"
+    if "DB6" in up or "DB2" in up or "IBM DB" in up:
+        return "DB6"
+    if "SYBASE" in up or up == "SYB" or "ASE" in up.split():
+        return "SYB"
+    return up
+
+
 def _read_rsectab_via_sxpg(node, creds) -> list | None:
     """Read RSECTAB via direct database query through SXPG OS commands.
 
@@ -634,17 +670,24 @@ def _read_rsectab_via_sxpg(node, creds) -> list | None:
 
     Returns list of (ident, data_hex) tuples, or None if not possible.
     """
-    db_type = (node.db_type or "").upper()
+    db_type_raw = (node.db_type or "").strip()
+    db_type = _normalize_db_type(db_type_raw)
     if not db_type:
         # Fallback: RFCSI_EXPORT via unauthenticated /sap/public/info
         # carries RFCDBSYS.  Cheap probe (~2 s), unlocks the SXPG path
         # for W74 / TWT-style nodes where the scanner missed db_type.
         print(f"[*] {node.sid}: db_type unknown — probing /sap/public/info "
               f"as fallback before giving up on SXPG RSECTAB read")
-        db_type = _enrich_db_type_from_public_info(node)
+        db_type = _normalize_db_type(_enrich_db_type_from_public_info(node))
     if not db_type:
         print(f"[-] {node.sid}: Cannot read RSECTAB via SXPG — DB type unknown")
         return None
+    if db_type_raw and db_type_raw.upper() != db_type:
+        # Log the mapping so operators can see "ADABAS D" → "ADA"
+        # in the reader's output rather than wondering why the else
+        # branch didn't fire.
+        print(f"[*] {node.sid}: normalized db_type "
+              f"{db_type_raw!r} → {db_type} for SXPG dispatch")
 
     sid = node.sid
     is_windows = (node.os_type or "").lower() in ("windows", "win", "nt")
@@ -697,7 +740,12 @@ def _read_rsectab_via_sxpg(node, creds) -> list | None:
     # 368 hex chars / 120 per chunk = 4 queries (ident + 3 hex chunks)
     chunk = 120  # fits within 128-char SXPG line limit
 
-    if db_key in ("HDB", "HANA"):
+    # db_key is the normalized short code from _normalize_db_type — the
+    # long-form variants (HANA, ORACLE, ADABAS D, DB2) collapse to their
+    # canonical HDB / ORA / ADA / DB6 form so a single arm per DB is
+    # enough.  Keep the else branch informative in case a new SAP-
+    # supported DB appears without a mapping.
+    if db_key == "HDB":
         run_q = _hdb_query
         tbl = "RSECTAB"
         hex_fn = "BINTOHEX(DATA)"
@@ -709,24 +757,25 @@ def _read_rsectab_via_sxpg(node, creds) -> list | None:
         tbl = f"[{sid.upper()}].[{sid.lower()}].[RSECTAB]"
         hex_fn = "CONVERT(VARCHAR(400),DATA,2)"
         sub_fn = "SUBSTRING"
-    elif db_key in ("ORA", "ORACLE"):
+    elif db_key == "ORA":
         run_q = _ora_query
         tbl = "SAPSR3.RSECTAB"
         hex_fn = "RAWTOHEX(DATA)"
         sub_fn = "SUBSTR"
-    elif db_key in ("ADA", "MAXDB", "ADABAS"):
+    elif db_key == "ADA":
         run_q = _ada_query
         tbl = "RSECTAB"
         hex_fn = "RAWTOHEX(DATA)"
         sub_fn = "SUBSTR"
-    elif db_key in ("DB6", "DB2"):
+    elif db_key == "DB6":
         run_q = _db2_query
         tbl = "RSECTAB"
         hex_fn = "HEX(DATA)"
         sub_fn = "SUBSTR"
 
     else:
-        print(f"[-] {node.sid}: Unsupported DB type for SXPG RSECTAB: {db_type}")
+        print(f"[-] {node.sid}: Unsupported DB type for SXPG RSECTAB: "
+              f"{db_type_raw or db_type} (normalized={db_type!r})")
         return None
 
     # ORDER BY MANDT,IDENT ensures all 5 queries return rows in the same order
