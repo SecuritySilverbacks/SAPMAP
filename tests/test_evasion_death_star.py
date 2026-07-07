@@ -13,6 +13,7 @@ same environment as the rest of the SAPMAP suite.
 """
 from __future__ import annotations
 
+import base64
 import os
 import re
 from unittest.mock import patch, MagicMock
@@ -106,34 +107,119 @@ def test_gzip_b64_compresses_the_source():
 #
 # These tests lock that invariant on the two failure-prone code paths.
 
-def test_chunk_write_command_has_no_shell_metacharacters(tmp_path):
-    """The chunk-write python3 -c payload must be one whitespace-free
-    token after ``-c`` — the invariant that SXPG relies on."""
+def _mk_upload_fake(raw_len: int):
+    """Return a fake ``run_os_command`` that satisfies the size-verify
+    steps in ``_write_remote_file`` for a payload of the given raw
+    length.  Records every call so tests can inspect the argv shape.
+    """
     calls = []
+    import base64 as _b64
+    b64_len = len(_b64.b64encode(b"X" * raw_len))
 
-    def fake_run_os_command(node, command, params):
+    def fake(node, command, params):
         calls.append((command, params))
+        if command == "wc":
+            # First wc verifies the .b64 scratch (b64 length), second
+            # wc verifies the decoded final (raw length).  Look at the
+            # path token to know which one is being checked.
+            path = params.split()[-1]
+            if path.endswith(".b64"):
+                size = b64_len
+            else:
+                size = raw_len
+            return {"success": True,
+                     "output": [f"{size} {path}"], "error": ""}
         return {"success": True, "output": [], "error": ""}
 
-    with patch("sapmap_exploit.run_os_command",
-                 side_effect=fake_run_os_command):
+    return fake, calls
+
+
+def test_chunk_write_command_has_no_shell_metacharacters():
+    """The chunk-write python3 -c payload must be one whitespace-free
+    token after ``-c`` — the invariant that SXPG relies on."""
+    fake, calls = _mk_upload_fake(300)
+    with patch("sapmap_exploit.run_os_command", side_effect=fake):
         sapmap_death_star._write_remote_file(
             _mk_node(), "/tmp/target.dat", b"ABC" * 100,
             label="test upload")
 
-    # First call is the rm -f prep; skip it.  Subsequent calls are
-    # the chunk writes.  Every one must be `python3 -c <one token>`
-    # with the token containing zero spaces / tabs / newlines.
-    chunk_calls = [c for c in calls if c[0] == "python3"]
+    # Every python3 -c chunk-write call (identified by opening the
+    # .b64 scratch for write/append and pasting a raw b'B64' literal)
+    # must have zero whitespace in the code portion after ``-c ``.
+    # The dpmon-style pattern writes b64 literally (no in-flight
+    # decode wrapper) which keeps the PARAMS field well under the
+    # 255-char SXPG truncation limit.
+    chunk_calls = [
+        c for c in calls
+        if c[0] == "python3"
+        and "open('/tmp/target.dat.b64','wb').write(b'" in c[1]
+        or "open('/tmp/target.dat.b64','ab').write(b'" in c[1]
+    ]
     assert chunk_calls, "expected at least one python3 chunk write"
     for cmd, params in chunk_calls:
         assert params.startswith("-c "), (
             f"chunk params must start with '-c ', got {params[:40]!r}")
         code = params[len("-c "):]
-        # No whitespace anywhere in the code portion — that would
-        # confuse SXPG's argv split.
         assert not any(ws in code for ws in (" ", "\t", "\n")), (
             f"python3 code portion contains whitespace: {code[:80]!r}")
+        # The dpmon pattern writes b'B64' literally, no wrapper — the
+        # code should NOT include base64.b64decode inline.  Locks the
+        # PARAMS budget so future edits don't push chunks back over
+        # the SXPG truncation limit.
+        assert "b64decode" not in code, (
+            f"chunk write must not decode in-flight (PARAMS budget): "
+            f"got {code[:120]!r}")
+
+
+def test_chunk_write_params_stay_under_sxpg_255_char_cap():
+    """The reason we switched to the write-then-decode-once pattern:
+    each chunk-write PARAMS field must fit in the SXPG PARAMS cap
+    (~255 chars on older kernels).  Lock the budget here so future
+    edits to the code template don't push us back over."""
+    fake, calls = _mk_upload_fake(1519)
+    with patch("sapmap_exploit.run_os_command", side_effect=fake):
+        # A realistic-length target path — the death star install
+        # dir is /tmp so paths run about 30-40 chars.
+        sapmap_death_star._write_remote_file(
+            _mk_node(), "/tmp/sapmap_ds_stop_ezjdkeva.sh",
+            b"X" * 1519, label="length test")
+
+    chunk_calls = [
+        c for c in calls
+        if c[0] == "python3"
+        and ("open('/tmp/sapmap_ds_stop_ezjdkeva.sh.b64','wb')" in c[1]
+              or "open('/tmp/sapmap_ds_stop_ezjdkeva.sh.b64','ab')" in c[1])
+    ]
+    assert chunk_calls, "expected chunk writes"
+    for cmd, params in chunk_calls:
+        # The full PARAMS field (as sent to SXPG) is what matters for
+        # the truncation cap.  ``-c `` prefix + one code token.
+        assert len(params) <= 255, (
+            f"chunk PARAMS length {len(params)} exceeds 255-char SXPG "
+            f"cap — chunks WILL be truncated in transit.  Code: "
+            f"{params[:120]!r}…")
+
+
+def test_upload_raises_on_scratch_size_mismatch():
+    """When the b64 scratch verify shows a mismatch, ``_write_remote_file``
+    must raise so the operator sees the SXPG truncation cause — not a
+    confused shell error 30 s later."""
+    def fake(node, command, params):
+        if command == "wc":
+            # Report a scratch b64 size shorter than expected — simulates
+            # a chunk getting truncated in transit.
+            path = params.split()[-1]
+            return {"success": True,
+                     "output": [f"5 {path}"],  # obviously wrong
+                     "error": ""}
+        return {"success": True, "output": [], "error": ""}
+
+    with patch("sapmap_exploit.run_os_command", side_effect=fake):
+        with pytest.raises(sapmap_death_star.DeathStarError,
+                            match="size mismatch"):
+            sapmap_death_star._write_remote_file(
+                _mk_node(), "/tmp/x.sh", b"Y" * 500,
+                label="corruption test")
 
 
 def test_launcher_script_dropped_then_invoked_with_two_token_argv(tmp_path):
