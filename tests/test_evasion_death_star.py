@@ -422,9 +422,13 @@ def test_upload_prebuilt_binary_uploads_and_chmods(tmp_path,
             return {"success": True,
                      "output": [f"{size} {path}"], "error": ""}
         if command.endswith("sap_audit_hook") and params == "--help":
-            # Julian's --help output contains "Usage:" and the binary name.
             return {"success": True,
-                     "output": ["Usage: sap_audit_hook [options]"],
+                     "output": [
+                         "Usage: sap_audit_hook [options]",
+                         "  --pid <PID>       target specific disp+work PID",
+                         "  --suppress        drop matching audit writes",
+                         "  --filter CLASS    only act on these event classes",
+                     ],
                      "error": ""}
         return {"success": True, "output": [], "error": ""}
 
@@ -437,6 +441,42 @@ def test_upload_prebuilt_binary_uploads_and_chmods(tmp_path,
     assert any(c[0] == "chmod" and "+x /tmp/sap_audit_hook" in c[1]
                 for c in calls), (
         f"chmod +x call not seen; calls={calls}")
+
+
+def test_upload_prebuilt_rejects_error_containing_binary_name(tmp_path,
+                                                                    monkeypatch):
+    """Regression: previous loose verify matched error messages that
+    contained the binary path, e.g. 'nohup: failed to run command
+    /tmp/sap_audit_hook: No such file or directory'."""
+    fake = tmp_path / "sap_audit_hook.linux-x86_64"
+    fake.write_bytes(b"\x7fELF" + b"stub" * 100)
+    monkeypatch.setattr(sapmap_death_star, "HOOK_PREBUILT_PATH",
+                         str(fake))
+
+    raw_len = len(fake.read_bytes())
+    import base64 as _b64
+    b64_len = len(_b64.b64encode(fake.read_bytes()))
+
+    def fake_run(node, command, params):
+        if command == "wc":
+            path = params.split()[-1]
+            size = b64_len if path.endswith(".b64") else raw_len
+            return {"success": True,
+                     "output": [f"{size} {path}"], "error": ""}
+        if command.endswith("sap_audit_hook") and params == "--help":
+            return {"success": True,
+                     "output": [
+                         "nohup: failed to run command "
+                         "'/tmp/sap_audit_hook': No such file",
+                     ],
+                     "error": ""}
+        return {"success": True, "output": [], "error": ""}
+
+    with patch("sapmap_exploit.run_os_command", side_effect=fake_run):
+        with pytest.raises(sapmap_death_star.DeathStarError,
+                            match="--suppress.*--filter"):
+            sapmap_death_star.upload_prebuilt_binary(
+                _mk_node(), binary_path="/tmp/sap_audit_hook")
 
 
 def test_upload_prebuilt_rejects_missing_vendored_binary(tmp_path,
