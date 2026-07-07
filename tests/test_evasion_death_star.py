@@ -66,12 +66,6 @@ def test_death_star_label_lookup():
 # Payload / helpers
 # ---------------------------------------------------------------------------
 
-def test_shellquote_escapes_single_quotes():
-    assert sapmap_death_star._shellquote("plain") == "'plain'"
-    # Embedded single quotes get resumed via '"'"'
-    assert sapmap_death_star._shellquote("it's") == "'it'\"'\"'s'"
-
-
 def test_gzip_b64_roundtrip():
     """The payload must decode back to the original bytes so the
     on-target ``base64 -d | gunzip`` produces byte-identical source."""
@@ -92,6 +86,106 @@ def test_gzip_b64_compresses_the_source():
     assert len(b64) < len(src) * 0.6, (
         f"gzip+b64 payload ({len(b64)} B) not smaller enough than raw "
         f"source ({len(src)} B) — check gzip level")
+
+
+# ---------------------------------------------------------------------------
+# SXPG-safety invariant — the reason for this whole module's shape
+# ---------------------------------------------------------------------------
+#
+# SAP's SXPG channel splits the ``PARAMS`` field at whitespace and strips
+# outer single-quotes.  ``sh -c '<script with spaces>'`` therefore
+# collapses into ``sh -c`` (empty argument) and sh dies with
+# ``-c: option requires an argument``.  The safe pattern is:
+#
+#     command = "<no-space executable path>"
+#     params  = "<one-or-more space-delimited tokens, no wrapping quotes>"
+#
+# After ``-c`` in the python3 upload chunks, the payload after the
+# single space that separates ``-c`` from the code must be exactly one
+# whitespace-free token — no shell metacharacters, no embedded quotes.
+#
+# These tests lock that invariant on the two failure-prone code paths.
+
+def test_chunk_write_command_has_no_shell_metacharacters(tmp_path):
+    """The chunk-write python3 -c payload must be one whitespace-free
+    token after ``-c`` — the invariant that SXPG relies on."""
+    calls = []
+
+    def fake_run_os_command(node, command, params):
+        calls.append((command, params))
+        return {"success": True, "output": [], "error": ""}
+
+    with patch("sapmap_exploit.run_os_command",
+                 side_effect=fake_run_os_command):
+        sapmap_death_star._write_remote_file(
+            _mk_node(), "/tmp/target.dat", b"ABC" * 100,
+            label="test upload")
+
+    # First call is the rm -f prep; skip it.  Subsequent calls are
+    # the chunk writes.  Every one must be `python3 -c <one token>`
+    # with the token containing zero spaces / tabs / newlines.
+    chunk_calls = [c for c in calls if c[0] == "python3"]
+    assert chunk_calls, "expected at least one python3 chunk write"
+    for cmd, params in chunk_calls:
+        assert params.startswith("-c "), (
+            f"chunk params must start with '-c ', got {params[:40]!r}")
+        code = params[len("-c "):]
+        # No whitespace anywhere in the code portion — that would
+        # confuse SXPG's argv split.
+        assert not any(ws in code for ws in (" ", "\t", "\n")), (
+            f"python3 code portion contains whitespace: {code[:80]!r}")
+
+
+def test_launcher_script_dropped_then_invoked_with_two_token_argv(tmp_path):
+    """Confirm the launch path uses the file-drop pattern (no ``sh -c``
+    with a big scripted-string that SXPG would mangle).  The final
+    invocation must be ``sh /tmp/xxx.sh`` — two tokens, no quoting."""
+    calls = []
+
+    def fake_run_os_command(node, command, params):
+        calls.append((command, params))
+        # Simulate the launcher printing a PID (last line of stdout).
+        if command == "sh" and params.startswith("/tmp/sapmap_ds_launch"):
+            return {"success": True, "output": ["12345"], "error": ""}
+        return {"success": True, "output": [], "error": ""}
+
+    with patch("sapmap_exploit.run_os_command",
+                 side_effect=fake_run_os_command):
+        pid = sapmap_death_star.launch(
+            _mk_node(),
+            binary_path="/tmp/sap_audit_hook",
+            target_pid=4712,
+            filter_classes="AUW",
+        )
+    assert pid == 12345
+
+    # There must be exactly one ``sh <path>`` call — the actual launcher
+    # invocation.  ``sh`` command, single-path params → SXPG-safe.
+    sh_calls = [c for c in calls if c[0] == "sh"]
+    assert len(sh_calls) == 1, (
+        f"expected 1 sh call, got {len(sh_calls)}: {sh_calls}")
+    _, sh_params = sh_calls[0]
+    # ``params`` must be exactly the script path — no ``-c``, no spaces.
+    assert sh_params.startswith("/tmp/sapmap_ds_launch_"), sh_params
+    assert " " not in sh_params, (
+        f"sh params must be a single path token, got {sh_params!r}")
+
+
+def test_filter_classes_rejects_shell_metacharacters():
+    """The launch path won't accept a filter with anything but
+    ``[A-Z0-9,]``.  Prevents an operator smuggling shell metacharacters
+    (``;``, backticks, etc.) into the launcher script."""
+    with patch("sapmap_exploit.run_os_command",
+                 return_value={"success": True, "output": [],
+                                "error": ""}):
+        with pytest.raises(sapmap_death_star.DeathStarError,
+                            match="invalid filter_classes"):
+            sapmap_death_star.launch(
+                _mk_node(),
+                binary_path="/tmp/sap_audit_hook",
+                target_pid=4712,
+                filter_classes="AUW; rm -rf /",
+            )
 
 
 # ---------------------------------------------------------------------------

