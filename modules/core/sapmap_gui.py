@@ -4618,6 +4618,14 @@ def create_app(api: SAPMAPApi) -> Bottle:
         node = api.state.get_node(sid)
         if not node:
             return json.dumps({"error": f"Node {sid} not found"})
+        # Clear the AutoPwn skip-if-done flags — the operator explicitly
+        # asked for a fresh harvest, so we shouldn't short-circuit here
+        # or in the next AutoPwn wave.
+        for _attr in ("_btp_harvested_at", "_oa2c_refreshed_at"):
+            try:
+                delattr(node, _attr)
+            except AttributeError:
+                pass
         is_abap = "ABAP" in (node.system_type or "").upper()
         if is_abap:
             try:
@@ -12397,6 +12405,13 @@ def create_app(api: SAPMAPApi) -> Bottle:
         response.content_type = "application/json"
 
         def _run():
+            # Operator-initiated Propagate All clears the AutoPwn
+            # skip-if-done flag so every pwned node gets re-processed.
+            for _n in api.state.nodes.values():
+                try:
+                    delattr(_n, "_propagate_all_ran_at")
+                except AttributeError:
+                    pass
             sapmap_exploit.propagate_all(api.state)
 
         _bg("_propagate_all", "Propagate All", _run)
