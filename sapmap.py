@@ -163,19 +163,10 @@ def main():
         _cli_scan(api, args)
         return
 
-    # Redirect stdout to capture console output
-    sys.stdout = OutputCapture(sys.__stdout__)
-
-    # Create Bottle app
-    app = create_app(api)
-
-    # Find port
-    port = args.port or find_free_port()
-    url = f"http://127.0.0.1:{port}"
-
-    # Disclaimer banner — printed once at startup.  SAPMAP ships real
-    # working SAP exploits; make it impossible to miss the intended-use
-    # boundaries on the way in.
+    # Disclaimer + evasion banner — printed BEFORE OutputCapture is
+    # installed so they go only to the real terminal, not through the
+    # GUI console capture layer (which caused the "banner 80x" bug on
+    # some pywebview/Bottle thread setups).
     banner = (
         "\n"
         "================================================================\n"
@@ -199,15 +190,22 @@ def main():
     )
     print(banner)
 
-    # Tier 3 evasion banner — only when the operator armed it.  We
-    # print it AFTER the disclaimer so the two warnings stack, and
-    # set the persistent flag on the API's state object below.
     if getattr(args, "allow_evasion", False):
         try:
             from sapmap_evasion_gate import print_evasion_banner
             print_evasion_banner()
         except Exception as e:
             print(f"[!] Could not print evasion banner: {e}")
+
+    # Redirect stdout to capture console output
+    sys.stdout = OutputCapture(sys.__stdout__)
+
+    # Create Bottle app
+    app = create_app(api)
+
+    # Find port
+    port = args.port or find_free_port()
+    url = f"http://127.0.0.1:{port}"
 
     print(f"[*] Starting SAPMAP server on {url}")
 
