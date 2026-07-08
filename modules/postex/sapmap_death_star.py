@@ -155,6 +155,46 @@ def _run(node, command: str, params: str = "",
 #
 # ---------------------------------------------------------------------------
 
+def _fmt_duration(seconds: float) -> str:
+    """Format a duration for the upload-progress line.  ``5.2`` →
+    ``5s``, ``72`` → ``1m12s``, ``3720`` → ``1h02m``.  Kept short so
+    the progress line stays scannable."""
+    s = int(round(max(0.0, seconds)))
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m{s % 60:02d}s"
+    return f"{s // 3600}h{(s % 3600) // 60:02d}m"
+
+
+def _verify_scratch_size(node, scratch_path: str, expected: int,
+                           chunks_done: int, n_chunks: int) -> None:
+    """Run ``wc -c`` on the target-side scratch b64 file and raise if
+    its size doesn't match the number of bytes we've streamed so far.
+    Called mid-upload every _VERIFY_INTERVAL chunks so a truncated
+    chunk surfaces within seconds instead of at end-of-loop.
+
+    We swallow non-success wc results (network hiccup) because the
+    final wc -c at the end of ``_write_remote_file`` catches anything
+    the mid-flight check missed."""
+    r = _run(node, "wc", f"-c {scratch_path}",
+              label=f"verify chunks 1..{chunks_done}", quiet=True)
+    if not r.get("success"):
+        return
+    out = " ".join(r.get("output") or []).strip()
+    try:
+        got = int(out.split()[0])
+    except (ValueError, IndexError):
+        return
+    if got != expected:
+        raise DeathStarError(
+            f"scratch b64 size mismatch at chunk {chunks_done}/"
+            f"{n_chunks}: expected {expected} B, got {got} B.  A "
+            f"chunk between #{max(1, chunks_done - 49)} and "
+            f"#{chunks_done} was truncated in transit (SXPG PARAMS "
+            f"field cap likely exceeded on this kernel build).")
+
+
 def _write_remote_file(node, remote_path: str, data: bytes,
                         label: str = "") -> None:
     """Drop ``data`` at ``remote_path`` on the target via chunked
@@ -196,6 +236,15 @@ def _write_remote_file(node, remote_path: str, data: bytes,
     _run(node, "/bin/rm", f"-f {scratch_path} {remote_path}",
           label=f"clear prior {remote_path}(.b64)?")
 
+    import time as _time
+    upload_start = _time.time()
+    # Interim ``wc -c`` verify every _VERIFY_INTERVAL chunks catches a
+    # silently-truncated chunk within seconds — instead of after ~7 min
+    # of upload followed by an end-of-loop size mismatch that leaves
+    # the operator wondering which chunk actually failed.  50 chunks
+    # over ~700 total → ~14 extra RTTs, ~10 s added to the total upload.
+    _VERIFY_INTERVAL = 50
+
     for i in range(n_chunks):
         chunk_b64 = payload[i * _UPLOAD_CHUNK:(i + 1) * _UPLOAD_CHUNK]
         mode = "wb" if i == 0 else "ab"
@@ -211,12 +260,31 @@ def _write_remote_file(node, remote_path: str, data: bytes,
             raise DeathStarError(
                 f"chunk write failed at {i + 1}/{n_chunks}: "
                 f"{r.get('error') or 'unknown'}")
-        # Progress every ~10 chunks (or last) so the operator sees the
-        # upload moving without 100+ log lines.
-        if (i + 1) % 10 == 0 or (i + 1) == n_chunks:
-            pct = int(100 * (i + 1) / n_chunks)
+        chunks_done = i + 1
+
+        # Progress every ~10 chunks (or last) — includes elapsed + ETA
+        # so the operator has a rough sense of when the upload finishes
+        # instead of watching a bare percent creep.
+        if chunks_done % 10 == 0 or chunks_done == n_chunks:
+            elapsed = _time.time() - upload_start
+            rate = chunks_done / elapsed if elapsed > 0 else 0
+            eta_s = ((n_chunks - chunks_done) / rate) if rate > 0 else 0
+            pct = int(100 * chunks_done / n_chunks)
             print(f"[*] {node.sid}: death_star:   chunk "
-                  f"{i + 1}/{n_chunks} ({pct}%)")
+                  f"{chunks_done}/{n_chunks} ({pct}%) — "
+                  f"elapsed {_fmt_duration(elapsed)}, "
+                  f"ETA {_fmt_duration(eta_s)} "
+                  f"@ {rate * _UPLOAD_CHUNK / 1024:.1f} KB/s")
+
+        # Interim size verification.  If a chunk was truncated in
+        # transit (SXPG PARAMS overrun on this kernel build), the
+        # scratch file size will diverge from expected within 50
+        # chunks and we fail with a precise range.
+        if (chunks_done % _VERIFY_INTERVAL == 0
+                and chunks_done != n_chunks):
+            expected = min(chunks_done * _UPLOAD_CHUNK, len(payload))
+            _verify_scratch_size(node, scratch_path, expected,
+                                    chunks_done, n_chunks)
 
     # Verify the scratch b64 has the expected byte count — catches any
     # silent truncation of a chunk write before we spend time on the
