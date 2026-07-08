@@ -1353,6 +1353,42 @@ def deploy_and_launch(node, filter_classes: str = "",
     log_path = f"{remote_dir.rstrip('/')}/{DEFAULT_LOG_NAME}"
     pidfile_path = f"{remote_dir.rstrip('/')}/{DEFAULT_PIDFILE_NAME}"
 
+    # Pre-flight: kernel.yama.ptrace_scope must be 0 for a same-uid
+    # PTRACE_ATTACH from <sid>adm to succeed against the disp+work
+    # pool.  Default on SUSE/RHEL/Ubuntu is 1 (only children) or 2
+    # (admin only) — both refuse our attach with EPERM ("Operation
+    # not permitted"), which we saw on S4H (SUSE-based S/4HANA 2023).
+    # Bail out BEFORE burning ~8 minutes on the 91 KB binary upload.
+    _pt = _run(node, "/bin/cat",
+                "/proc/sys/kernel/yama/ptrace_scope",
+                label="pre-flight: check kernel.yama.ptrace_scope")
+    _pt_lines = [l.strip() for l in (_pt.get("output") or [])
+                    if l.strip()]
+    _pt_val = None
+    if _pt_lines and _pt_lines[0].isdigit():
+        _pt_val = int(_pt_lines[0])
+    if _pt_val is not None and _pt_val > 0:
+        raise DeathStarError(
+            f"kernel.yama.ptrace_scope = {_pt_val} on the target — "
+            f"PTRACE_ATTACH from <sid>adm to sibling disp+work "
+            f"processes will fail with EPERM.  The hook needs "
+            f"same-uid ptrace, which is only allowed when "
+            f"ptrace_scope = 0.  To arm Death Star, ask a root "
+            f"account on the target to run: "
+            f"'echo 0 > /proc/sys/kernel/yama/ptrace_scope' "
+            f"(temporary) or 'sysctl -w kernel.yama.ptrace_scope=0' "
+            f"(persistent for this boot).  Rerun after that.")
+    if _pt_val is None:
+        # Kernel without CONFIG_SECURITY_YAMA (older / minimal
+        # distros) — /proc/sys/kernel/yama/ doesn't exist and cat
+        # errored "No such file".  ptrace_scope isn't enforced, so
+        # same-uid attach works.  Proceed.
+        print(f"[*] {node.sid}: death_star: no yama LSM on target "
+               f"(ptrace_scope not enforced) — proceeding")
+    else:
+        print(f"[*] {node.sid}: death_star: kernel.yama.ptrace_scope "
+               f"= 0 — same-uid ptrace allowed, proceeding")
+
     use_prebuilt = has_prebuilt_binary() and not force_source
     if use_prebuilt:
         mode = "prebuilt"
