@@ -8107,7 +8107,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                              f"got {target_pid_raw!r}"})
         skip_upload = bool(data.get("skip_upload", False))
         skip_compile = bool(data.get("skip_compile", False))
-        verbose = bool(data.get("verbose", False))
+        verbose = bool(data.get("verbose", True))
 
         def _run():
             try:
