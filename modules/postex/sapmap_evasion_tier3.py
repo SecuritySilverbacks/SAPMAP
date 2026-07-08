@@ -1458,7 +1458,7 @@ def tier3_sal_death_star_launch(state, node,
                                   target_pid=None,
                                   skip_upload: bool = False,
                                   skip_compile: bool = False,
-                                  verbose: bool = False) -> dict:
+                                  verbose: bool = True) -> dict:
     """Deploy + launch Julian Petersohn's ``sap_audit_hook`` on ``node``.
 
     Uploads the vendored C source, compiles it as ``<sid>adm`` on the
