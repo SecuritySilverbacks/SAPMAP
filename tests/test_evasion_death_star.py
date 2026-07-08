@@ -200,6 +200,59 @@ def test_chunk_write_params_stay_under_sxpg_255_char_cap():
             f"{params[:120]!r}…")
 
 
+def test_upload_progress_line_includes_eta_and_rate(capsys):
+    """Operator UX: for the 7-minute prebuilt-binary upload, the
+    progress line must show elapsed + ETA + throughput so the operator
+    knows roughly when it finishes.  A bare percent-only progress
+    (previous behaviour) leaves them guessing between ``5%`` and
+    ``95%`` whether it's stuck or just slow."""
+    fake, _ = _mk_upload_fake(2200)   # 2200 raw → ~2934 b64 → ~17 chunks
+    with patch("sapmap_exploit.run_os_command", side_effect=fake):
+        sapmap_death_star._write_remote_file(
+            _mk_node(), "/tmp/eta_test.dat", b"P" * 2200,
+            label="eta test")
+    out = capsys.readouterr().out
+    assert "elapsed " in out and "ETA " in out, (
+        f"expected 'elapsed'/'ETA' in progress; got:\n{out}")
+    assert "KB/s" in out, (
+        f"expected throughput (KB/s) in progress line; got:\n{out}")
+
+
+def test_upload_interim_verify_catches_mid_flight_truncation():
+    """The interim ``wc -c`` check must fail fast at chunk 50 if a
+    chunk was truncated in transit — instead of waiting through 600+
+    more chunks and reporting the mismatch at end-of-loop.  Simulate a
+    scratch b64 file that is 100 B short of expected after 50 chunks
+    and assert we raise with chunk-range context."""
+    # Payload large enough (~180*60 = 10.8 KB b64) to force at least
+    # one interim verify at chunk 50.
+    raw = b"Q" * 8100      # 8100 raw → 10800 b64 → 60 chunks
+    call_no = {"n": 0}
+
+    def fake(node, command, params):
+        if command == "python3" and "write(b'" in params:
+            call_no["n"] += 1
+            return {"success": True, "output": [], "error": ""}
+        if command == "wc":
+            path = params.split()[-1]
+            if path.endswith(".b64"):
+                # After chunk 50 the interim verify expects 9000 B.
+                # Report 8900 B → 100 B short → simulates a truncated
+                # chunk somewhere in the 1..50 range.
+                return {"success": True,
+                         "output": [f"8900 {path}"], "error": ""}
+            return {"success": True,
+                     "output": [f"{len(raw)} {path}"], "error": ""}
+        return {"success": True, "output": [], "error": ""}
+
+    with patch("sapmap_exploit.run_os_command", side_effect=fake):
+        with pytest.raises(sapmap_death_star.DeathStarError,
+                            match=r"chunk 50/60.*truncated"):
+            sapmap_death_star._write_remote_file(
+                _mk_node(), "/tmp/truncation_test.dat", raw,
+                label="truncation test")
+
+
 def test_upload_raises_on_scratch_size_mismatch():
     """When the b64 scratch verify shows a mismatch, ``_write_remote_file``
     must raise so the operator sees the SXPG truncation cause — not a
