@@ -327,6 +327,54 @@ def test_launch_includes_pid_flag_when_target_pid_given():
         f"got script:\n{script}")
 
 
+def test_launch_includes_audit_file_flag_when_provided():
+    """When the caller discovers a .AUD path on the target, launch
+    must weave ``--audit-file <path>`` into the hook command line so
+    Julian's C hook can inotify-poison the file sink in addition to
+    the DB/ETD sinks.  Regression: the C hook's Build-A-only symbol
+    scan (NM_H_RSAU_FILE) comes up empty on kernel 793 SUSE builds,
+    and without --audit-file file-based SAL keeps recording."""
+    captured = {}
+
+    def fake_write(node, path, data, label=""):
+        captured["script"] = data.decode("utf-8", errors="replace")
+
+    def fake_run(node, command, params="", label="", quiet=False):
+        if command == "sh" and "/tmp/sapmap_ds_launch" in params:
+            return {"success": True,
+                     "output": ["STATUS: ALIVE 12345"], "error": ""}
+        return {"success": True, "output": [], "error": ""}
+
+    with patch("sapmap_death_star._write_remote_file",
+                 side_effect=fake_write), \
+         patch("sapmap_exploit.run_os_command",
+                 side_effect=fake_run):
+        sapmap_death_star.launch(
+            _mk_node(),
+            binary_path="/tmp/sap_audit_hook",
+            target_pid=None,
+            audit_file="/usr/sap/S4H/D00/log/20260708000000.AUD",
+        )
+    script = captured.get("script", "")
+    assert "--audit-file /usr/sap/S4H/D00/log/20260708000000.AUD" in script, (
+        f"expected --audit-file <path> in launcher; got script:\n{script}")
+
+
+def test_launch_rejects_audit_file_with_shell_metacharacters():
+    """Defence-in-depth: even though the discovery script uses ``find``
+    with fixed globs, an attacker with write access to /usr/sap could
+    plant an .AUD symlink whose name contains ``;`` or ``$(...)``.
+    Validate the path here so a poisoned discovery result can't inject
+    shell into the SXPG launcher."""
+    with pytest.raises(sapmap_death_star.DeathStarError,
+                         match="shell metacharacters"):
+        sapmap_death_star.launch(
+            _mk_node(),
+            binary_path="/tmp/sap_audit_hook",
+            audit_file="/usr/sap/S4H/D00/log/a.AUD;rm -rf /",
+        )
+
+
 def test_launch_raises_when_hook_dies_within_1s():
     """The launcher's ``STATUS: DIED`` case (usually ptrace_scope > 1
     or an invalid target PID) must surface as a clear operator error,

