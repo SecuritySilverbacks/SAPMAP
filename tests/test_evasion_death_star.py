@@ -380,6 +380,100 @@ def test_launch_includes_pid_flag_when_target_pid_given():
         f"got script:\n{script}")
 
 
+def test_diagnose_audit_symbols_parses_nm_output(capsys):
+    """The symbol dump must correctly parse ``nm -C`` output and
+    surface the write_event_to_DB hit + archive-interface candidates.
+    Simulates a kernel-793-style disp+work where BOTH the classic
+    write_event_to_DB and a new AI_write_ae are present — the exact
+    scenario that produces the SM20-still-leaks bug the operator saw.
+    """
+    def fake(node, command, params):
+        if command == "sh" and params.startswith("/tmp/sapmap_ds_symdump"):
+            return {"success": True,
+                     "output": [
+                         "TOOL: nm",
+                         "00000000005dc4784 t write_event_to_DB(...)",
+                         "00000000005dc4200 t AI_write_ae(...)",
+                         "00000000005dc4300 t rsau_ae_open(...)",
+                         "00000000005dc4400 t rsauwr1ex(...)",
+                         "00000000005dc4500 t EtdSendEvent(...)",
+                         "END_SYMDUMP",
+                     ], "error": ""}
+        return {"success": True, "output": [], "error": ""}
+
+    with patch("sapmap_exploit.run_os_command", side_effect=fake):
+        diag = sapmap_death_star.diagnose_audit_symbols(
+            _mk_node(), "/usr/sap/S4H/D00/exe/disp+work")
+        sapmap_death_star.report_audit_symbol_diagnosis(_mk_node(), diag)
+
+    assert diag["tool"] == "nm"
+    assert diag["hooked_present"] is True, (
+        "write_event_to_DB must be marked present when in the dump")
+    assert len(diag["matches"]) == 5
+
+    out = capsys.readouterr().out
+    # The classifier must have grouped the AI_write_ae symbol under
+    # the archive-interface bucket — that's the actionable signal for
+    # the operator (this is what causes SM20 leaks when SM19 is set to
+    # 'Audit Log with Archive Interface').
+    assert "Archive Interface" in out
+    assert "AI_write_ae" in out
+    # And the classic direct-DB writer must be flagged as present.
+    assert "'write_event_to_DB' IS present" in out
+
+
+def test_diagnose_audit_symbols_missing_write_event_to_db(capsys):
+    """When the current hook target isn't in the binary, the operator
+    MUST see a distinct warning — this is the case where the hook's
+    write_db breakpoint literally cannot fire, and the fix requires
+    Julian's C hook to gain a new symbol name."""
+    def fake(node, command, params):
+        if command == "sh" and params.startswith("/tmp/sapmap_ds_symdump"):
+            return {"success": True,
+                     "output": [
+                         "TOOL: nm",
+                         "00000000005dc4200 t AI_write_ae(...)",
+                         "00000000005dc4300 t rsau_write_db_v2(...)",
+                         "END_SYMDUMP",
+                     ], "error": ""}
+        return {"success": True, "output": [], "error": ""}
+
+    with patch("sapmap_exploit.run_os_command", side_effect=fake):
+        diag = sapmap_death_star.diagnose_audit_symbols(
+            _mk_node(), "/usr/sap/S4H/D00/exe/disp+work")
+        sapmap_death_star.report_audit_symbol_diagnosis(_mk_node(), diag)
+
+    assert diag["hooked_present"] is False
+    out = capsys.readouterr().out
+    assert "'write_event_to_DB' NOT found" in out, (
+        f"expected missing-symbol warning; got:\n{out}")
+
+
+def test_diagnose_audit_symbols_handles_no_binutils(capsys):
+    """Hardened SUSE hosts sometimes strip binutils from <sid>adm's
+    PATH.  The diagnostic must degrade gracefully — return tool=none
+    and print a hint, not raise or hang."""
+    def fake(node, command, params):
+        if command == "sh" and params.startswith("/tmp/sapmap_ds_symdump"):
+            return {"success": True,
+                     "output": [
+                         "TOOL: none",
+                         "REASON: neither nm nor readelf found in PATH",
+                         "END_SYMDUMP",
+                     ], "error": ""}
+        return {"success": True, "output": [], "error": ""}
+
+    with patch("sapmap_exploit.run_os_command", side_effect=fake):
+        diag = sapmap_death_star.diagnose_audit_symbols(
+            _mk_node(), "/usr/sap/S4H/D00/exe/disp+work")
+        sapmap_death_star.report_audit_symbol_diagnosis(_mk_node(), diag)
+
+    assert diag["tool"] == "none"
+    assert diag["matches"] == []
+    out = capsys.readouterr().out
+    assert "no nm/readelf on target" in out
+
+
 def test_launch_includes_audit_file_flag_when_provided():
     """When the caller discovers a .AUD path on the target, launch
     must weave ``--audit-file <path>`` into the hook command line so

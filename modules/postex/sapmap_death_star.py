@@ -958,6 +958,247 @@ def _find_workers_via_proc(node,
 
 
 # ---------------------------------------------------------------------------
+# Audit-symbol diagnostic
+# ---------------------------------------------------------------------------
+#
+# Regex the target-side grep uses to filter nm output down to
+# audit-relevant symbols.  Case-insensitive, wide enough to catch:
+#
+#   * write_event_to_DB  — the classic Julian hook target
+#   * write_ae_to_DB / write_audit_event_to_DB — hypothetical renames
+#   * rsau_*             — the whole rsau family (rsauwr1ex, rsau_ae_open, …)
+#   * AI_write / arch_write / ai_wr — SAP Archive Interface (the likely
+#     path on kernel 793 when Recording Type = "Audit Log with Archive
+#     Interface" is set — bypasses write_event_to_DB entirely).
+#   * EtdSend*           — SAP Enterprise Threat Detection
+#   * write_ae / ae_write / write_ae_entry — audit-event write helpers
+#   * flush_ae / flush_rsau — buffered-flush workers (spawned on UP2)
+#   * insert_rsauxad     — direct insert into the RSAUXAD backing table
+#
+# grep -E is POSIX-safe and available on every SUSE/RHEL/Ubuntu host.
+# Case-insensitive (grep -i) catches mixed-case C++ demangled symbols.
+_AUDIT_SYMBOL_GREP = (
+    r"(write.*_to_.*[Dd][Bb]|rsau_|rsauwr|AI_write|arch_write|ai_wr|"
+    r"EtdSend|write_ae|ae_write|flush.*ae|flush.*rsau|insert.*rsauxad|"
+    r"write.*rsauxad|write_event)"
+)
+
+
+def _resolve_dispwork_path(node, worker_pid: int) -> Optional[str]:
+    """Discover the ``disp+work`` binary path via
+    ``readlink -f /proc/<PID>/exe`` on the target.
+
+    We use ``/proc/PID/exe`` (a symlink pointing to the running binary)
+    rather than hard-coding ``/usr/sap/<SID>/<INST>/exe/disp+work``
+    because the instance-name segment varies (``D00`` on some builds,
+    ``DVEBMGS00`` on others), and older SAP kernels sometimes symlink
+    the exe out of ``/sapmnt`` instead of ``/usr/sap``.  Whatever the
+    layout, the running worker's ``/proc/PID/exe`` is authoritative.
+    """
+    r = _run(node, "readlink", f"-f /proc/{int(worker_pid)}/exe",
+              label=f"resolve disp+work path via /proc/{worker_pid}/exe")
+    if not r.get("success"):
+        return None
+    for line in r.get("output") or []:
+        s = line.strip()
+        # Expect an absolute path ending in ``disp+work`` or ``dw.sap*``.
+        # Reject blank lines and error output ("readlink: /proc/…: No
+        # such file or directory") — those don't start with ``/``.
+        if s.startswith("/") and (s.endswith("disp+work")
+                                     or "/dw.sap" in s
+                                     or s.endswith("/disp+work")):
+            return s
+    return None
+
+
+def diagnose_audit_symbols(node, disp_work_path: str,
+                              remote_dir: str = DEFAULT_REMOTE_DIR
+                              ) -> dict:
+    """Dump audit-related symbols from the target's ``disp+work`` binary.
+
+    On kernel 793 (S/4HANA 2023) with SM19 Recording Type = "Audit Log
+    with Archive Interface", the classic ``write_event_to_DB`` symbol
+    Julian's C hook targets is patched successfully but never called
+    for CUZ / BU4 / AU3 / AU1 events — those writes take the archive-
+    interface path instead, which uses a different function name.
+    This diagnostic surfaces the actual audit-writer symbols present
+    in disp+work so we know what to extend the hook to cover.
+
+    Runs ``nm -C <path>`` (demangled) on the target, filtered through
+    ``grep -E`` against _AUDIT_SYMBOL_GREP to keep the output small.
+    Falls back to ``readelf -s`` when ``nm`` is missing (some hardened
+    SUSE hosts strip binutils from <sid>adm's PATH).
+
+    Returns::
+
+        {
+          "binary_path":     str,          # what we scanned
+          "tool":            "nm" | "readelf" | "none",
+          "matches":         [str, ...],   # filtered symbol lines
+          "hooked_present":  bool,         # True if write_event_to_DB found
+          "hooked_symbol":   str,          # the current hook target name
+        }
+
+    Non-fatal — returns an empty ``matches`` list if the target has no
+    binutils installed.  The caller should surface findings via
+    ``print()`` to the operator's console.
+    """
+    scratch_sh = (f"{remote_dir.rstrip('/')}/"
+                    f"sapmap_ds_symdump_{_rand_suffix()}.sh")
+    # Try nm first (demangles C++ symbols so ``write_event_to_DB``
+    # appears as-is instead of ``_ZL17write_event_to_DB``), fall back
+    # to readelf -s (raw mangled names, but always available with
+    # binutils).  Both filter server-side via grep so the SXPG output
+    # stays under the 4 KB response cap.
+    script = (
+        "#!/bin/sh\n"
+        f"BIN={disp_work_path}\n"
+        "if [ ! -r \"$BIN\" ]; then\n"
+        "  echo TOOL: none\n"
+        "  echo REASON: unreadable $BIN\n"
+        "  exit 0\n"
+        "fi\n"
+        "if command -v nm >/dev/null 2>&1; then\n"
+        "  echo TOOL: nm\n"
+        f"  nm -C \"$BIN\" 2>/dev/null | grep -Ei '{_AUDIT_SYMBOL_GREP}' "
+        "| head -200\n"
+        "elif command -v readelf >/dev/null 2>&1; then\n"
+        "  echo TOOL: readelf\n"
+        f"  readelf -s \"$BIN\" 2>/dev/null | grep -Ei '{_AUDIT_SYMBOL_GREP}' "
+        "| head -200\n"
+        "else\n"
+        "  echo TOOL: none\n"
+        "  echo REASON: neither nm nor readelf found in PATH\n"
+        "fi\n"
+        "echo END_SYMDUMP\n"
+    )
+
+    result = {
+        "binary_path": disp_work_path,
+        "tool": "none",
+        "matches": [],
+        "hooked_present": False,
+        "hooked_symbol": "write_event_to_DB",
+    }
+
+    try:
+        _write_remote_file(node, scratch_sh, script.encode("utf-8"),
+                            label=f"drop symbol-dump script → {scratch_sh}")
+    except DeathStarError as e:
+        print(f"[!] {node.sid}: death_star: symbol-dump drop failed: {e}")
+        return result
+
+    r = _run(node, "sh", scratch_sh,
+              label=f"dump audit symbols from {disp_work_path}")
+    _run(node, "/bin/rm", f"-f {scratch_sh}",
+          label="cleanup symbol-dump script")
+
+    tool = "none"
+    matches: list[str] = []
+    for line in r.get("output") or []:
+        s = line.rstrip()
+        if s.startswith("TOOL:"):
+            tool = s.split(":", 1)[1].strip()
+            continue
+        if s.startswith("REASON:") or s == "END_SYMDUMP" or not s:
+            continue
+        matches.append(s)
+
+    result["tool"] = tool
+    result["matches"] = matches
+    result["hooked_present"] = any(
+        "write_event_to_DB" in ln for ln in matches)
+    return result
+
+
+def report_audit_symbol_diagnosis(node, diag: dict) -> None:
+    """Pretty-print the diagnostic result to the operator's console.
+
+    Called from ``deploy_and_launch`` after arm so the operator sees,
+    right next to the hook-alive confirmation, whether the kernel this
+    hook attached to actually has the symbol the hook is trying to
+    intercept.  When the answer is "no" (or "yes but there's also a
+    parallel archive-interface writer"), the operator has the raw
+    signal they need to file a hook-extension request instead of
+    chasing SM20 ghosts.
+    """
+    sid = node.sid
+    tool = diag.get("tool", "none")
+    matches = diag.get("matches", [])
+    hooked_symbol = diag.get("hooked_symbol", "write_event_to_DB")
+    hooked_present = diag.get("hooked_present", False)
+
+    if tool == "none":
+        print(f"[!] {sid}: death_star: symbol diagnostic skipped — no "
+               f"nm/readelf on target.  Install binutils on the SAP "
+               f"host to enable this (harmless; hook still runs).")
+        return
+
+    print(f"[*] {sid}: death_star: symbol diagnostic — {len(matches)} "
+           f"audit-related symbol(s) found via {tool} in "
+           f"{diag.get('binary_path')}:")
+
+    # Group matches by category so the operator can spot which paths
+    # exist on this kernel.  Categorising is heuristic — the ordering
+    # matches the priority we would hook if writing a v2 of Julian's
+    # patcher: DB direct → archive interface → buffered flush → ETD.
+    cats = {
+        "DB direct (write_event_to_DB etc.)": [
+            ln for ln in matches
+            if "write_event" in ln
+            or "write_ae_to_DB" in ln
+            or "write_ae_to_db" in ln
+        ],
+        "Archive Interface (AI_write / arch_write)": [
+            ln for ln in matches
+            if "AI_write" in ln or "arch_write" in ln
+            or "ai_wr" in ln.lower()
+        ],
+        "Buffered flush (flush_ae / flush_rsau)": [
+            ln for ln in matches
+            if "flush" in ln.lower()
+        ],
+        "rsau family (rsauwr1ex, rsau_ae_*)": [
+            ln for ln in matches
+            if "rsau_" in ln or "rsauwr" in ln
+        ],
+        "ETD sender (EtdSend*)": [
+            ln for ln in matches if "EtdSend" in ln
+        ],
+        "Other": [],
+    }
+    already = {ln for cat in cats.values() for ln in cat}
+    cats["Other"] = [ln for ln in matches if ln not in already]
+
+    for cat, lns in cats.items():
+        if not lns:
+            continue
+        print(f"[*] {sid}: death_star:   [{cat}] "
+               f"{len(lns)} symbol(s):")
+        # Trim each line to 180 chars — nm output can be long when the
+        # symbol contains a template parameter.
+        for ln in lns[:20]:
+            print(f"[*] {sid}: death_star:     {ln[:180]}")
+        if len(lns) > 20:
+            print(f"[*] {sid}: death_star:     … "
+                   f"{len(lns) - 20} more line(s) elided")
+
+    if hooked_present:
+        print(f"[+] {sid}: death_star: hook target '{hooked_symbol}' "
+               f"IS present in disp+work — the classic path is hooked, "
+               f"but if SM19 uses 'Audit Log with Archive Interface' "
+               f"some events bypass it via the archive-interface writer "
+               f"above.  Set Recording Type to a non-archive DB target "
+               f"to force writes through the hooked path.")
+    else:
+        print(f"[!] {sid}: death_star: hook target '{hooked_symbol}' "
+               f"NOT found in disp+work — this kernel build renamed or "
+               f"removed the classic direct-DB writer.  The hook's "
+               f"write_db breakpoint will never fire on this kernel.  "
+               f"Candidate replacement symbols in the categories above.")
+
+
+# ---------------------------------------------------------------------------
 # Launch
 # ---------------------------------------------------------------------------
 
@@ -1646,6 +1887,47 @@ def deploy_and_launch(node, filter_classes: str = "",
     audit_file = _discover_audit_file(node, node.sid,
                                         remote_dir=remote_dir)
 
+    # Symbol diagnostic — dump audit-related symbols from disp+work so
+    # the operator can see whether the hook's ``write_event_to_DB``
+    # target actually exists on this kernel build.  On kernel 793 with
+    # SM19 Recording Type = "Audit Log with Archive Interface", the
+    # classic symbol is patched but never called — the writes take a
+    # parallel archive-interface path.  Running this before launch (a
+    # ~3 s round-trip) surfaces the symbol picture next to the arm log
+    # instead of forcing the operator to grep disp+work by hand.
+    #
+    # Uses one of the worker PIDs (from the /proc walk above) as the
+    # ``/proc/PID/exe`` source — sidesteps hardcoded exe path guessing.
+    symbol_diag: dict = {}
+    try:
+        # Grab any worker PID via the same /proc walk find_worker_pid
+        # uses.  We don't need the classifier here — any live worker's
+        # /proc/PID/exe points at the correct disp+work binary.
+        _sample_workers, _sample_fallbacks = _find_workers_via_proc(
+            node, remote_dir=remote_dir)
+        _any_worker_pid = None
+        if _sample_workers:
+            _any_worker_pid = _sample_workers[0][0]
+        elif _sample_fallbacks:
+            _any_worker_pid = _sample_fallbacks[0][0]
+        if _any_worker_pid is not None:
+            _dispwork = _resolve_dispwork_path(node, _any_worker_pid)
+            if _dispwork:
+                symbol_diag = diagnose_audit_symbols(
+                    node, _dispwork, remote_dir=remote_dir)
+                report_audit_symbol_diagnosis(node, symbol_diag)
+            else:
+                print(f"[!] {node.sid}: death_star: symbol diagnostic "
+                       f"skipped — could not resolve disp+work path via "
+                       f"/proc/{_any_worker_pid}/exe")
+        else:
+            print(f"[!] {node.sid}: death_star: symbol diagnostic "
+                   f"skipped — no worker PID available for /proc/PID/exe")
+    except Exception as e:
+        # Diagnostic must never derail the arm flow.
+        print(f"[!] {node.sid}: death_star: symbol diagnostic failed "
+               f"({e}); continuing to arm")
+
     hook_pid = launch(node, binary_path, target_pid,
                        filter_classes=filter_classes,
                        verbose=verbose,
@@ -1723,6 +2005,7 @@ def deploy_and_launch(node, filter_classes: str = "",
         "log_path": log_path,
         "pidfile_path": pidfile_path,
         "audit_file": audit_file,          # None → DB-only recording
+        "symbol_diag": symbol_diag,        # nm/readelf diagnostic dump
         "filter_classes": filter_classes,
         "log_tail": log_tail,
         "attach_ok_count": attach_ok,
