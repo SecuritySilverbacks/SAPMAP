@@ -1272,6 +1272,29 @@ Right-click → Evasion → **Dump Dynamic Profile**
 
 Calls `RSAU_API_GET_PROFILE(ID_DYN_CONF='X')` and dumps the verbatim `ET_FILT` / `ET_FILTEX` / `ET_TEXT` / `ET_LOG` rows to `loot/baseline/<SID>/dyn_profile_<ts>.json`.  Reveals the exact 12-field RSAUPROF row shape the writer needs to construct.  Pure read — no mutation.
 
+#### Virtual SAP Death Star (ptrace SAL suppressor)
+
+Right-click → Evasion → **Arm Death Star** / **Disarm Death Star**
+
+Deploys Julian Petersohn's [`sap_audit_hook`](modules/postex/vendor/sap_audit_hook.c) to `/tmp` on the target as `<sid>adm`, then PTRACE_ATTACHes to every `disp+work` worker and plants `INT3` breakpoints at the audit-writer callsites inside `rsauwr1ex` — `fwrite` for the file sink, `write_event_to_DB` (all overloads — see below) for the DB sink, `EtdSenderIsActive` + `EtdSendEvent` for SAP Enterprise Threat Detection.  Every trap dispatches to a handler that either lets the write through or (in `--suppress` mode) rewrites `RIP` past the call site with `RAX=0` — the audit event is silently dropped in-memory across all three sinks.
+
+**Prerequisites:**
+- `<sid>adm` shell access via any OS-exec channel (SAPXPG P1→P2→P3, SXPG, LPE)
+- Linux `kernel.yama.ptrace_scope <= 1` (default on RHEL / SUSE / Ubuntu without hardening)
+- Vendored pre-built binary (`sap_audit_hook.linux-x86_64`, 91 KB stripped, musl-static) — no compiler on the target needed
+
+**Arm flow:** Chunked SXPG-safe base-64 upload of the 91 KB binary (~7 min on typical hosts, with elapsed / ETA / KB/s in the operator console + per-50-chunk `wc -c` size-verify) → chmod +x → SAL audit-file auto-discovery (`find /usr/sap/<SID>/*/log/*.AUD` for the `--audit-file` inotify-poison path) → `disp+work` audit-symbol diagnostic (see next) → launch detached via `setsid` with `exec >>` subshell FD redirects (works around SUSE PrivateTmp mount-namespace quirks) → pidfile-based liveness verify.
+
+**Filter:** `filter_classes` is a comma-separated list of SAL event classes (`AUW,AU3,EUP`).  Empty string → suppress every class (default).
+
+**Kernel 793 / S/4HANA 2023 dual-overload fix:** disp+work on kernel 793 ships **two** overloaded `write_event_to_DB` functions.  Julian's original hook resolved only the first symbol match, leaving CUZ / BU4 / AU3 / AU1 writes on the second overload completely un-hooked (SM20 kept receiving events while armed).  SAPMAP's vendored copy of the hook now walks the entire `.symtab` collecting up to 6 STT_FUNC matches for the demangled `write_event_to_DB` prefix, then plants a breakpoint at every rsauwr1ex call site targeting any overload.  Confirmed working on S4H 793 in July 2026 — SM20 clean during arm window.
+
+**Auto symbol diagnostic:** Every arm runs a `nm -C` dump of the target's `disp+work` binary (with `readelf -s` fallback), server-side-grepped for audit-writer patterns (`write.*_to_.*DB`, `rsau_`, `AI_write`, `arch_write`, `EtdSend*`, `flush_ae`, `insert_rsauxad`), and categorises the matches in the operator log.  When a future SAP kernel renames or splits an audit-writer function, the diagnostic surfaces the new symbol name so the hook can be extended without guesswork.
+
+**Disarm flow:** Read pidfile → SIGTERM the hook → the hook's SIGTERM handler runs `detach_all()` which restores every INT3 byte in the target `disp+work` text segment and releases ptrace.  Idempotent: safe to call when no hook is armed.
+
+**Vendor build:** `modules/postex/vendor/build_sap_audit_hook.sh` rebuilds the binary via `musl-gcc -O2 -static` and re-runs a `--help` sanity check + strip.  Rebuild whenever `sap_audit_hook.c` changes.
+
 ### Architecture
 
 - **`modules/postex/sapmap_evasion_baseline.py`** — Baseline snapshot capture, SAL config readers/writers (`read_legacy_sal_config`, `write_legacy_sal_config`, `capture_baseline`)
@@ -1587,6 +1610,31 @@ Cloud Connector actions come in two flavours — `scc_*` operate against an SCC 
 |--------|-----------|-------------|
 | `harvest_btp_creds` | `target` (must be ABAP for OA2C refresh) | Refresh `OA2C_CLIENT[+_EXT]` and scan SM59 destinations + ABAP RSECTAB + Java SecStoreFS + OA2C profiles for BTP-shaped credentials.  Returns candidates ready to mint |
 | `mint_btp_token` | `target` (source node SID), `uaa_url`, `client_id`, `client_secret` (or `path:<file>`) | Exchange `(client_id, client_secret)` at XSUAA's `/oauth/token` for a BTP access token, store keyed by region (auto-derived from `iss` claim).  Auto-fires the cloud-side enumeration on completion |
+
+#### Tier 3 Evasion — Virtual SAP Death Star ⚠
+
+Requires the SAPMAP session to have been started with `--allow-evasion`.  Both endpoints refuse otherwise.  See [Virtual SAP Death Star](#virtual-sap-death-star-ptrace-sal-suppressor) for the technique itself.
+
+| Action | Parameters | Description |
+|--------|-----------|-------------|
+| `tier3_arm_death_star` ⚠ | `target`, `filter_classes` (default `""` = all classes), `target_pid` (default auto), `skip_upload` (false), `skip_compile` (false), `verbose` (true) | Deploy Julian's `sap_audit_hook` on the target and ptrace-attach to every `disp+work` worker.  SAL events matching `filter_classes` are silently dropped across `fwrite` / `write_event_to_DB` (all overloads) / `EtdSendEvent`.  Bracket noisy exploit blocks between this and the disarm step — SM20 stays clean during the armed window |
+| `tier3_disarm_death_star` | `target` | SIGTERM the hook.  The hook's handler restores every INT3 byte in `disp+work` text and releases ptrace.  Idempotent — safe to call when nothing is armed |
+
+**Typical wrap pattern:**
+
+```yaml
+- action: tier3_arm_death_star
+  target: S4H
+  # filter_classes: AUW,AU3   # optional — omit to suppress every SAL class
+  timeout: 900                # first arm on a new host takes ~7 min (chunked binary upload)
+
+# ... noisy exploit steps (create_user, download_secstore, propagate, …) ...
+
+- action: tier3_disarm_death_star
+  target: S4H
+```
+
+Arming is destructive (writes a 91 KB binary + patches `disp+work` text) so a dry-run playbook will `[SKIP]` it — the disarm step still fires, but with nothing armed it's a no-op.  Re-run the same YAML with `--confirm` to actually arm.
 
 ### Per-Step Options
 
