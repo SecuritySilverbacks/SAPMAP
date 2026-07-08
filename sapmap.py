@@ -163,10 +163,20 @@ def main():
         _cli_scan(api, args)
         return
 
-    # Disclaimer + evasion banner — printed BEFORE OutputCapture is
-    # installed so they go only to the real terminal, not through the
-    # GUI console capture layer (which caused the "banner 80x" bug on
-    # some pywebview/Bottle thread setups).
+    # Redirect stdout FIRST so the banners land in both the real
+    # terminal AND the GUI console.  Earlier code printed the
+    # banners before OutputCapture to work around a "banner
+    # duplicated 80x" report — but that pushed the disclaimer
+    # off the GUI entirely, which was worse than the original
+    # bug.  ``print_evasion_banner()`` still carries an internal
+    # ``_banner_emitted`` idempotent guard, and ``main()`` runs
+    # exactly once per process, so neither print here can fire
+    # more than once anyway.
+    sys.stdout = OutputCapture(sys.__stdout__)
+
+    # Disclaimer banner — first thing an operator sees in the GUI
+    # console.  SAPMAP ships real working SAP exploits; make the
+    # intended-use boundaries impossible to miss on the way in.
     banner = (
         "\n"
         "================================================================\n"
@@ -196,9 +206,6 @@ def main():
             print_evasion_banner()
         except Exception as e:
             print(f"[!] Could not print evasion banner: {e}")
-
-    # Redirect stdout to capture console output
-    sys.stdout = OutputCapture(sys.__stdout__)
 
     # Create Bottle app
     app = create_app(api)
