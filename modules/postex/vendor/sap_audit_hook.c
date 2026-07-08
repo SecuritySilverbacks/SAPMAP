@@ -88,15 +88,39 @@
 #define GLIBC_FILE_FILENO_OFF  112
 
 /* ─── Hook definitions ──────────────────────────────────────────────────────*/
+/*
+ * Kernel 793 (S/4HANA 2023) ships TWO overloaded write_event_to_DB
+ * functions in disp+work — one for the hot path, one for a cold /
+ * archive-interface path.  find_elf_symbol_prefix returns the first
+ * match only; the second overload was un-hooked, and CUZ / BU4 / AU3
+ * / AU1 events routed through it survived the Death Star.  We now
+ * carry up to WRITE_DB_MAX_CALLSITES call-site slots for write_db —
+ * every 0xe8 call inside rsauwr1ex whose target is ANY overload of
+ * write_event_to_DB gets its own breakpoint.  Handler is identical
+ * (handle_writedb_trap dispatches by regs), so no per-slot logic is
+ * needed downstream.
+ */
+#define WRITE_DB_MAX_CALLSITES 6
+
 typedef enum {
     HOOK_FWRITE_ENTRY=0,
     HOOK_FWRITE_HEADER,
-    HOOK_WRITE_DB,
+    HOOK_WRITE_DB,             /* first / primary write_db call site   */
+    HOOK_WRITE_DB_2,           /* second overload call site (kernel 793+) */
+    HOOK_WRITE_DB_3,           /* headroom — some future kernel might add more */
+    HOOK_WRITE_DB_4,
+    HOOK_WRITE_DB_5,
+    HOOK_WRITE_DB_6,
     HOOK_ETD_ACTIVE_1,   /* EtdSenderIsActive gate 1 – return 0 to skip ETD */
     HOOK_ETD_ACTIVE_2,   /* EtdSenderIsActive gate 2 – return 0 to skip ETD */
     HOOK_ETD_SEND,       /* EtdSendEvent – PoC/unverified; return 0 to drop  */
     HOOK_MAX
 } HookType;
+
+/* Convenience: is a hook index one of the write_db call-site slots?
+ * All HOOK_WRITE_DB_N slots share the same trap handler. */
+#define IS_WRITE_DB_HOOK(idx) \
+    ((idx) >= HOOK_WRITE_DB && (idx) < HOOK_WRITE_DB + WRITE_DB_MAX_CALLSITES)
 
 static const struct {
     uintptr_t   nm_off;
@@ -106,6 +130,11 @@ static const struct {
     { NM_FWRITE_ENTRY,   "fwrite:entry",   HOOK_FWRITE_ENTRY   },
     { NM_FWRITE_HEADER, "fwrite:header", HOOK_FWRITE_HEADER },
     { NM_WRITE_DB,       "write_db",       HOOK_WRITE_DB       },
+    { 0,                 "write_db#2",     HOOK_WRITE_DB_2     },
+    { 0,                 "write_db#3",     HOOK_WRITE_DB_3     },
+    { 0,                 "write_db#4",     HOOK_WRITE_DB_4     },
+    { 0,                 "write_db#5",     HOOK_WRITE_DB_5     },
+    { 0,                 "write_db#6",     HOOK_WRITE_DB_6     },
     { NM_ETD_ACTIVE_1,   "etd:active(1)",  HOOK_ETD_ACTIVE_1   },
     { NM_ETD_ACTIVE_2,   "etd:active(2)",  HOOK_ETD_ACTIVE_2   },
     { NM_ETD_SEND,       "etd:send",       HOOK_ETD_SEND       },
@@ -373,11 +402,25 @@ static uintptr_t find_plt_entry(const char *exepath, const char *symname)
     return result;
 }
 
-/* Like find_elf_symbol but matches any symbol whose name starts with prefix.
- * Used for C++ mangled names whose parameter-type suffix varies per build. */
-static int find_elf_symbol_prefix(const char *exepath, const char *prefix,
-                                   uintptr_t *out_value, uintptr_t *out_size)
+/*
+ * Find ALL symbols in .symtab whose name starts with `prefix` and
+ * fill up to `max` offsets into `out`.  Returns the number of
+ * matches actually stored (0 if none, capped at max).  Same logic
+ * as find_elf_symbol_prefix but continues past the first match.
+ *
+ * Rationale: C++ overloaded functions (like write_event_to_DB on
+ * kernel 793) share the mangled-name prefix but have distinct
+ * suffixes encoding parameter types.  A prefix match returns the
+ * first-encountered overload; the caller wants ALL of them so every
+ * call site inside rsauwr1ex can be scanned for calls to any
+ * overload, not just the first one.
+ */
+static size_t find_elf_symbol_prefix_all(const char *exepath,
+                                            const char *prefix,
+                                            uintptr_t *out, size_t max)
 {
+    size_t found = 0;
+    if (max == 0) return 0;
     size_t plen = strlen(prefix);
     int fd = open(exepath, O_RDONLY);
     if (fd < 0) return 0;
@@ -392,7 +435,6 @@ static int find_elf_symbol_prefix(const char *exepath, const char *prefix,
         if (shdrs[i].sh_type == SHT_SYMTAB && !symtab_sh) symtab_sh = &shdrs[i];
     if (symtab_sh && symtab_sh->sh_link < ehdr.e_shnum)
         strtab_sh = &shdrs[symtab_sh->sh_link];
-    int found = 0;
     if (symtab_sh && strtab_sh) {
         size_t nsym = symtab_sh->sh_size / sizeof(Elf64_Sym);
         Elf64_Sym *syms = malloc(symtab_sh->sh_size);
@@ -400,12 +442,21 @@ static int find_elf_symbol_prefix(const char *exepath, const char *prefix,
         if (syms && strtab) {
             lseek(fd, symtab_sh->sh_offset, SEEK_SET); read(fd, syms,   symtab_sh->sh_size);
             lseek(fd, strtab_sh->sh_offset, SEEK_SET); read(fd, strtab, strtab_sh->sh_size);
-            for (size_t j = 0; j < nsym && !found; j++) {
+            for (size_t j = 0; j < nsym && found < max; j++) {
                 if (syms[j].st_name == 0) continue;
+                /* Only accept function symbols (STT_FUNC).  Filters
+                 * out the .bss static-var overload variant at the
+                 * same demangled name — that's a data pointer, not
+                 * a function, and we'd corrupt data patching INT3
+                 * into it. */
+                if (ELF64_ST_TYPE(syms[j].st_info) != STT_FUNC) continue;
                 if (strncmp(strtab + syms[j].st_name, prefix, plen) == 0) {
-                    *out_value = syms[j].st_value;
-                    *out_size  = syms[j].st_size;
-                    found = 1;
+                    /* Dedup by value — some builds emit the same
+                     * function under multiple symbol aliases. */
+                    int dup = 0;
+                    for (size_t k = 0; k < found; k++)
+                        if (out[k] == syms[j].st_value) { dup = 1; break; }
+                    if (!dup) out[found++] = syms[j].st_value;
                 }
             }
         }
@@ -413,13 +464,6 @@ static int find_elf_symbol_prefix(const char *exepath, const char *prefix,
     }
     free(shdrs); close(fd);
     return found;
-}
-
-static uintptr_t find_elf_symbol_prefix_offset(const char *exepath, const char *prefix)
-{
-    uintptr_t value = 0, size = 0;
-    find_elf_symbol_prefix(exepath, prefix, &value, &size);
-    return value;
 }
 
 static uintptr_t resolve_base(pid_t pid)
@@ -1167,7 +1211,7 @@ static void handle_waitpid_event(pid_t pid, int status)
         /* re-read regs after setregs */
         ptrace(PTRACE_GETREGS, pid, NULL, &regs);
 
-        if (matched == HOOK_WRITE_DB)
+        if (IS_WRITE_DB_HOOK(matched))
             handle_writedb_trap(tp, matched, &regs);
         else if (matched == HOOK_ETD_ACTIVE_1 ||
                  matched == HOOK_ETD_ACTIVE_2 ||
@@ -1226,7 +1270,11 @@ static int attach_process(pid_t pid)
     uintptr_t rsauwr1ex_off = 0,      rsauwr1ex_size = 0;
     uintptr_t rsauwr1ex_cold_off = 0, rsauwr1ex_cold_size = 0;
     uintptr_t fwrite_entry_addr = 0,  fwrite_header_addr = 0;
-    uintptr_t write_db_addr     = 0;
+    /* write_db_addrs[i] holds the i-th CALL-SITE address inside
+     * rsauwr1ex that targets one of the write_event_to_DB overloads.
+     * Populated in scan order; unused slots stay 0. */
+    uintptr_t write_db_addrs[WRITE_DB_MAX_CALLSITES] = {0};
+    size_t    write_db_addrs_n = 0;
     uintptr_t etd_active1_addr  = 0,  etd_active2_addr = 0;
     uintptr_t etd_send_addr     = 0;
 
@@ -1236,7 +1284,15 @@ static int attach_process(pid_t pid)
         find_elf_symbol(exepath, "rsauwr1ex.cold", &rsauwr1ex_cold_off, &rsauwr1ex_cold_size);
 
         uintptr_t fwrite_plt_off = find_plt_entry(exepath, "fwrite");
-        uintptr_t write_db_off   = find_elf_symbol_prefix_offset(exepath, SYM_WRITE_DB_PFX);
+        /* Collect ALL write_event_to_DB overloads — kernel 793 ships
+         * two (hot + archive-interface variant), and only hooking one
+         * lets CUZ/BU4/AU3/AU1 events survive.  Cap at
+         * WRITE_DB_MAX_CALLSITES symbols; the scan then plants a BP
+         * for every rsauwr1ex call site targeting any of them. */
+        uintptr_t write_db_offs[WRITE_DB_MAX_CALLSITES] = {0};
+        size_t write_db_offs_n = find_elf_symbol_prefix_all(
+            exepath, SYM_WRITE_DB_PFX, write_db_offs,
+            WRITE_DB_MAX_CALLSITES);
         uintptr_t etd_active_off = find_elf_symbol_offset(exepath, "EtdSenderIsActive");
         uintptr_t etdsend_off    = find_elf_symbol_offset(exepath, "EtdSendEvent");
 
@@ -1256,11 +1312,32 @@ static int attach_process(pid_t pid)
                     if (fwrite_plt_off && target == base + fwrite_plt_off) {
                         if (++fwrite_cnt == 1) fwrite_entry_addr  = fn_addr + k;
                         else if (fwrite_cnt == 2) fwrite_header_addr = fn_addr + k;
-                    } else if (write_db_off && target == base + write_db_off && !write_db_addr) {
-                        write_db_addr = fn_addr + k;
                     } else if (etd_active_off && target == base + etd_active_off) {
                         if (++active_cnt == 1) etd_active1_addr = fn_addr + k;
                         else if (active_cnt == 2) etd_active2_addr = fn_addr + k;
+                    } else {
+                        /* write_event_to_DB overload check — the call
+                         * site is patched if its target matches ANY
+                         * discovered overload.  We keep going even
+                         * after finding one because kernel 793 has
+                         * separate call sites for the two overloads
+                         * (hot path calls overload #1, cold/archive
+                         * path calls overload #2). */
+                        for (size_t oi = 0; oi < write_db_offs_n; oi++) {
+                            if (target != base + write_db_offs[oi]) continue;
+                            /* Dedup against already-recorded call sites
+                             * in case the same call site is scanned twice
+                             * (shouldn't happen but harmless). */
+                            uintptr_t site = fn_addr + k;
+                            int dup = 0;
+                            for (size_t s = 0; s < write_db_addrs_n; s++)
+                                if (write_db_addrs[s] == site) { dup = 1; break; }
+                            if (!dup && write_db_addrs_n <
+                                    WRITE_DB_MAX_CALLSITES) {
+                                write_db_addrs[write_db_addrs_n++] = site;
+                            }
+                            break;
+                        }
                     }
                 }
             }
@@ -1294,7 +1371,15 @@ static int attach_process(pid_t pid)
     }
     if (fwrite_entry_addr)  tp->bps[HOOK_FWRITE_ENTRY].addr  = fwrite_entry_addr;
     if (fwrite_header_addr) tp->bps[HOOK_FWRITE_HEADER].addr = fwrite_header_addr;
-    if (write_db_addr)      tp->bps[HOOK_WRITE_DB].addr      = write_db_addr;
+    /* Populate HOOK_WRITE_DB..HOOK_WRITE_DB+WRITE_DB_MAX_CALLSITES-1
+     * from write_db_addrs[].  Slots without a discovered call site
+     * are left at ``base + 0`` (unusable — plant_bp will fail its
+     * sanity check and quietly skip).  We DON'T fall back to base +
+     * NM_WRITE_DB for the primary slot: on kernel builds where the
+     * scanner does find a real call site, the NM_ fallback would be
+     * a stale hardcoded offset that plant_bp would refuse anyway. */
+    for (size_t s = 0; s < write_db_addrs_n && s < WRITE_DB_MAX_CALLSITES; s++)
+        tp->bps[HOOK_WRITE_DB + s].addr = write_db_addrs[s];
     if (etd_active1_addr)   tp->bps[HOOK_ETD_ACTIVE_1].addr  = etd_active1_addr;
     if (etd_active2_addr)   tp->bps[HOOK_ETD_ACTIVE_2].addr  = etd_active2_addr;
     if (etd_send_addr)      tp->bps[HOOK_ETD_SEND].addr      = etd_send_addr;
@@ -1314,14 +1399,27 @@ static int attach_process(pid_t pid)
     if (g_audit_path[0] == 0)
         find_audit_file(pid, base);
 
+    /* Emit one line per discovered write_db call site so the operator
+     * can count them.  On kernel 793 we expect 2 (one per overload);
+     * on earlier kernels 1 is normal. */
+    char wdb_line[512] = {0};
+    size_t wdb_off = 0;
+    for (size_t s = 0; s < WRITE_DB_MAX_CALLSITES && wdb_off + 32 < sizeof(wdb_line); s++) {
+        if (tp->bps[HOOK_WRITE_DB + s].addr == base) continue;  /* empty slot */
+        wdb_off += snprintf(wdb_line + wdb_off, sizeof(wdb_line) - wdb_off,
+                             "  0x%lx", tp->bps[HOOK_WRITE_DB + s].addr);
+    }
+    if (wdb_off == 0)
+        snprintf(wdb_line, sizeof(wdb_line), "  (none — write_db path unhooked!)");
+
     info("[+] attached pid %-6d  type=%-3s  base=0x%lx\n"
          "      file:  entry@0x%lx  header@0x%lx\n"
-         "      db:    write_db@0x%lx\n"
+         "      db:    %zu overload call-site(s):%s\n"
          "      etd:   active1@0x%lx  active2@0x%lx  send@0x%lx\n",
          pid, work_type_name(whoami), base,
          tp->bps[HOOK_FWRITE_ENTRY].addr,
          tp->bps[HOOK_FWRITE_HEADER].addr,
-         tp->bps[HOOK_WRITE_DB].addr,
+         write_db_addrs_n, wdb_line,
          tp->bps[HOOK_ETD_ACTIVE_1].addr,
          tp->bps[HOOK_ETD_ACTIVE_2].addr,
          tp->bps[HOOK_ETD_SEND].addr);
@@ -1441,7 +1539,7 @@ int main(int argc, char **argv)
     signal(SIGTERM, sig_handler);
 
     info("=== sap_audit_hook ===  mode=%s  suppress=%s  filter=%s\n"
-         "    hooks: file(fwrite x2) + db(write_event_to_DB) + etd(active x2 + send)\n",
+         "    hooks: file(fwrite x2) + db(write_event_to_DB up to 6 overload call-sites) + etd(active x2 + send)\n",
          g_mode_monitor ? "monitor(read-only)" : "hook",
          g_suppress ? "yes" : "no",
          g_filter[0] ? g_filter : "(all)");
