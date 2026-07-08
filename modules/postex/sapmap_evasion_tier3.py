@@ -1549,6 +1549,7 @@ def tier3_sal_death_star_launch(state, node,
         "binary_path": result["binary_path"],
         "pidfile_path": result["pidfile_path"],
         "log_path": result["log_path"],
+        "audit_file": result.get("audit_file"),
         "filter_classes": result["filter_classes"],
     }
     # Public marker for the GUI — Disarm menu gates on this being > 0
@@ -1574,6 +1575,12 @@ def tier3_sal_death_star_launch(state, node,
             scope = (f"all {n} work-processes on {sid} "
                       f"— every dialog / batch / spool / update PID")
         plant_fails = result.get("plant_fails_count") or 0
+        af = result.get("audit_file")
+        af_note = (f" File-based SAL sink: {af} (also poisoned)"
+                    if af else
+                    " No .AUD file discovered on target — DB-only "
+                    "recording or symbol scan failed (only DB/ETD "
+                    "sinks suppressed)")
         emit_finding(
             "CRITICAL", sid,
             f"Tier 3: Virtual SAP Death Star armed on {sid} — SAL "
@@ -1581,7 +1588,8 @@ def tier3_sal_death_star_launch(state, node,
             f"are silently dropped at fwrite/write_event_to_DB/ETD in "
             f"{scope}.  Hook PID "
             f"{result['hook_pid']} on the target; stop with the "
-            f"paired Disarm action or SIGTERM to restore INT3 bytes.")
+            f"paired Disarm action or SIGTERM to restore INT3 bytes."
+            f"{af_note}")
         # If plant_bp refused to patch on any site (kernel-build offset
         # mismatch), surface a distinct WARNING finding so the operator
         # can't miss the "hook attached but not fully intercepting"
