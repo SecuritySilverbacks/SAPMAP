@@ -746,6 +746,36 @@ def _run_abap_program(conn, abap_lines: list, program_name: str = "ZSAPMAP") -> 
             if line:
                 output_lines.append(line)
 
+        # Detect the "compiled with syntax error" fault mode: WRITES
+        # is empty AND the FM returned a compile error in the
+        # MESSAGE / ERRORMESSAGE fields.  Surfacing this prevents
+        # the caller from getting a bare ``success=True + output=[]``
+        # that used to look identical to "S_DEVELOP denied" or "old
+        # kernel" — a nightmare to diagnose against a live system.
+        compile_err = ""
+        if not output_lines:
+            msg_tab = run_result.get("MESSAGES") or []
+            for row in msg_tab if isinstance(msg_tab, list) else []:
+                if isinstance(row, dict):
+                    m = (row.get("MESSAGE", "") or "").strip()
+                    if m:
+                        compile_err = m
+                        break
+                elif isinstance(row, str) and row.strip():
+                    compile_err = row.strip()
+                    break
+            if not compile_err:
+                em = (run_result.get("ERRORMESSAGE", "") or "").strip()
+                if em:
+                    compile_err = em
+
+        if compile_err:
+            return {
+                "success": False, "output": output_lines,
+                "fm_name": fm_name,
+                "error": f"ABAP compile/runtime error: {compile_err}",
+            }
+
         return {
             "success": True, "output": output_lines,
             "fm_name": fm_name, "error": "",
