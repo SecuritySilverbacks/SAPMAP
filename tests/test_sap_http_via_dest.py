@@ -18,6 +18,7 @@ from sap_http_via_dest import (
     _validate_destination_name,
     call_via_destination,
     enumerate_btp_subaccount_destinations,
+    flag_btp_cleartext,
 )
 from sapmap_models import SAPNode
 
@@ -291,6 +292,40 @@ def test_call_via_destination_returns_body_on_200():
 # ---------------------------------------------------------------------------
 # BTP subaccount destinations enumeration
 # ---------------------------------------------------------------------------
+
+def test_flag_btp_cleartext_finds_password():
+    """The shared cleartext detector — used by both
+    enumerate_btp_subaccount_destinations and the Retrieve-RFCs
+    auto-probe fallback.  Any string field named Password /
+    ClientSecret / etc. with a non-empty non-masked value gets
+    flagged with source dest name + user + target URL."""
+    dests = [
+        {"Name": "ONPREM_A", "URL": "http://back:8080",
+         "User": "SVC_A", "Password": "hunter2"},
+        {"Name": "PUBLIC", "Authentication": "NoAuthentication"},
+        {"Name": "MASKED", "Password": "***"},  # kernel placeholder
+    ]
+    hits = flag_btp_cleartext(dests)
+    assert len(hits) == 1
+    assert hits[0]["name"] == "ONPREM_A"
+    assert hits[0]["field"] == "Password"
+    assert hits[0]["user"] == "SVC_A"
+
+
+def test_flag_btp_cleartext_ignores_non_dict_entries():
+    """Robustness — some BTP responses stick a metadata string at
+    the tail of the array.  Non-dict entries must be silently
+    skipped, not crash the auto-probe pipeline."""
+    dests = [
+        "some_string_at_the_end",
+        None,
+        42,
+        {"Name": "OK", "ClientSecret": "abcd"},
+    ]
+    hits = flag_btp_cleartext(dests)
+    assert len(hits) == 1
+    assert hits[0]["field"] == "ClientSecret"
+
 
 def test_enumerate_btp_flags_cleartext_password():
     """The exploitation payoff — when the BTP destination service
