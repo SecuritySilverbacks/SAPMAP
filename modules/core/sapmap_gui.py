@@ -363,6 +363,44 @@ def _resolve_host(host: str) -> str:
         return ""
 
 
+def _derive_inst_from_url_port(url: str) -> str:
+    """Derive the SAP instance number (NN) from the port in an HTTP URL.
+
+    Recognises the three port families the kernel binds by convention:
+
+      * 5NN13 / 5NN14 → SAPControl HTTP/HTTPS on instance NN
+      * 5NN00 / 5NN01 → Java HTTP/HTTPS on instance NN
+      * 80NN / 443NN  → ABAP ICM HTTP/HTTPS on instance NN
+
+    Returns "" when the port matches none of these families — the
+    caller should keep whatever default it had (usually "00").  This
+    is a targeted fix for Type-G/H destinations whose RFCOPTIONS
+    parser doesn't populate ``conn.target_instance_nr``: without the
+    derivation, ``find_node_by_host(instance_nr="00")`` misses the
+    existing node (Inst 02) for a SAPControl.CGI destination on port
+    50213 and the pipeline then creates a duplicate SID (SJJ1 next to
+    SJJ) with the wrong instance.  Mirrors the block in
+    ``SAPMAPState.materialise_type_g_target``.
+    """
+    try:
+        from urllib.parse import urlparse as _up
+        p = _up(url)
+        port = p.port or 0
+    except Exception:
+        return ""
+    if not port:
+        return ""
+    if 50000 <= port <= 59999 and port % 100 in (13, 14):
+        return f"{(port - 50000) // 100:02d}"
+    if 50000 <= port <= 59999 and port % 100 in (0, 1):
+        return f"{(port - 50000) // 100:02d}"
+    if 8000 <= port <= 8099:
+        return f"{port - 8000:02d}"
+    if 44300 <= port <= 44399:
+        return f"{port - 44300:02d}"
+    return ""
+
+
 def _correct_node_from_http(target_node, http_info: dict):
     """Apply HTTP-probed instance_nr / ip / hostname to an existing node.
 
@@ -8776,6 +8814,23 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     except Exception:
                         pass
                 inst = conn.target_instance_nr or "00"
+                # Type-G/H port heuristic: RFCOPTIONS parsing on Type-G
+                # doesn't populate target_instance_nr (kernel doesn't
+                # store one — the URL is authoritative), so ``inst``
+                # would otherwise sit at "00" and:
+                #   * find_node_by_host(instance_nr="00") would miss an
+                #     existing SJJ (Inst 02) → duplicate SJJ1 gets
+                #     created
+                #   * the "Add new system" branch would plot the box
+                #     as Inst 00 despite the URL saying 50213 (=02)
+                # Derive from the URL port when target_instance_nr is
+                # empty; ping-returned remote_instance_nr (identity
+                # probe) still wins below when it fires.
+                if (inst == "00" and not conn.target_instance_nr
+                        and conn.conn_type == "http" and conn.http_url):
+                    _derived = _derive_inst_from_url_port(conn.http_url)
+                    if _derived:
+                        inst = _derived
                 key = (host.lower(), inst)
 
                 if key in discovered:
@@ -9040,8 +9095,13 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             url_port = None
                         if _http_info.get("instance_nr"):
                             inst = _http_info["instance_nr"]
-                        elif url_port and 8000 <= url_port <= 8999:
-                            inst = f"{(url_port - 8000) // 100:02d}"
+                        else:
+                            # Same SAPControl/Java/ICM port heuristic as
+                            # the initial ``inst`` derivation above.
+                            _der = _derive_inst_from_url_port(
+                                conn.http_url)
+                            if _der:
+                                inst = _der
                         if _http_info.get("ip"):
                             host = _http_info["ip"]
                             key = (host.lower(), inst)
