@@ -646,6 +646,61 @@ def _btp_section(state: SAPMAPState) -> list:
     return out
 
 
+def _cert_auth_destinations_section(state: SAPMAPState) -> list:
+    """Certificate-authenticated Type-G / Type-H HTTP destinations.
+
+    These edges used to be invisible: SAPMAP dropped every G/H
+    RFCDES row without ``%_PWD``, so cert-auth destinations to BTP
+    or third-party SaaS were silently discarded.  The Phase 1
+    parser change makes them first-class citizens; this section
+    reports them so the engagement-report audience can see the
+    kernel-proxied exploitation surface at a glance.
+
+    One row per cert-auth edge, grouped by source system.  Empty
+    section when the landscape has none (no header noise).
+    """
+    rows: list[tuple[str, str, str, str, str, bool]] = []
+    for node in state.nodes.values():
+        for c in state.get_connections_from(node.sid):
+            if c.http_auth_type != "X509":
+                continue
+            is_btp = (getattr(c, "is_btp_dest", False)
+                        or ".hana.ondemand.com" in (c.http_url or ""))
+            rows.append((
+                node.sid,
+                c.destination_name or "?",
+                c.http_url or "?",
+                c.http_cert_pse or "?",
+                c.target_sid or "",
+                bool(is_btp),
+            ))
+    if not rows:
+        return []
+
+    n_btp = sum(1 for r in rows if r[5])
+    out = ["## Certificate-authenticated HTTP destinations", ""]
+    out.append(
+        f"{len(rows)} X.509 client-certificate destination(s) discovered "
+        f"across the landscape ({n_btp} pointing at BTP / "
+        f"``*.hana.ondemand.com``).  These destinations do not carry a "
+        f"stored password — authentication happens via a STRUST PSE on "
+        f"the source system.  With ``S_RFC`` + ``S_ICF`` on that source, "
+        f"an operator can proxy HTTP calls through "
+        f"``HTTP_CLIENT_CREATE_BY_DESTINATION`` — the kernel performs "
+        f"mutual-TLS transparently and the target sees requests as "
+        f"coming from the SAP system itself.")
+    out.append("")
+    out.append("| Source | Destination | Target URL | PSE | Target node | BTP |")
+    out.append("| --- | --- | --- | --- | --- | --- |")
+    for src, dest, url, pse, tgt, is_btp in sorted(rows):
+        out.append(
+            f"| {_esc(src)} | {_esc(dest)} | {_esc(url)} | "
+            f"`{_esc(pse)}` | {_esc(tgt) if tgt else '—'} | "
+            f"{'☁️' if is_btp else '—'} |")
+    out.append("")
+    return out
+
+
 def _derive_landscape_recommendations(state: SAPMAPState) -> list:
     """Inspect the whole landscape state and produce structural
     remediation guidance — independent of whether individual findings
@@ -1378,6 +1433,11 @@ def build_markdown_report(state: SAPMAPState,
         sections.append("---")
         sections.append("")
         sections.extend(btp_section)
+    cert_dest_section = _cert_auth_destinations_section(state)
+    if cert_dest_section:
+        sections.append("---")
+        sections.append("")
+        sections.extend(cert_dest_section)
     # Hardening checklist supersedes the older _recommendations_section
     # — same author voice but driven by the central remediation catalog
     # (modules.core.sapmap_remediation) so the prose in this section and
