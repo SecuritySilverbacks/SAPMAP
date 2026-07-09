@@ -4103,8 +4103,20 @@ function updateMap() {
     const dests = (bn.destinations || []);
     const cleartextCount = dests.filter(d => d && d.cleartext_captured).length;
     const linkedCount = dests.filter(d => d && d.linked_target_sid).length;
-    const borderC = bn.pwned ? '#8b0000' : (cleartextCount > 0 ? '#d29922' : btpStroke);
-    const borderW = bn.pwned ? 6 : 4;
+    // pwned / has_critical_finding = red (fully-authenticated
+    // kernel-proxy access; parity with GW-exploit / SCC-crack).
+    // cert_auth_trusted = purple (mTLS handshake succeeded but
+    // this endpoint denied us — transport-trust breach only).
+    // cleartextCount > 0 = amber (BTP subaccount destinations
+    // gave up cleartext creds).
+    const borderC = (bn.pwned || bn.has_critical_finding)
+      ? '#8b0000'
+      : (bn.cert_auth_trusted
+          ? '#8b3aad'
+          : (cleartextCount > 0 ? '#d29922' : btpStroke));
+    const borderW = (bn.pwned || bn.has_critical_finding)
+      ? 6
+      : (bn.cert_auth_trusted ? 5 : 4);
 
     html += `<g class="node-box" data-btp="${escHtml(uuid)}" `
          + `onmousedown="startDrag(event,'${dragId}')" `
