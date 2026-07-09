@@ -4531,13 +4531,20 @@ function showCtxMenu(e, sid) {
     'check_windows_lpe':   isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers || hasCreds),
     'exploit_windows_lpe': isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers || hasCreds),
     'deep_scan':        true,                       // always available
-    // BTP-discovered placeholders OR WD-discovered placeholders that
-    // carry a MSHOST.  Both lack a real port-scan footprint until the
-    // operator explicitly runs Standard Scan against the hostname/IP
-    // the parent (BTP destination / WD wdisp/system_*) revealed.
-    'standard_scan':    !!n.discovered_via_btp
-                          || !!(n.discovered_via_wd_sid
-                                && (n.hostname || n.ip)),
+    // Standard Scan runs the discovery sweep against the node's
+    // host + IP.  Two modes, chosen automatically by the backend:
+    //   * Placeholder (BTP / WD / RFC-G materialised) → PROMOTE:
+    //     replace with freshly-fingerprinted node, re-point edges,
+    //     carry over credentials and findings.
+    //   * Real node (already fingerprinted, may carry credentials +
+    //     findings + CVE flags) → RESCAN: MERGE newly-found ports
+    //     and instances into the existing node without touching
+    //     the enrichment.  Used e.g. when SJJ came in via a Type-G
+    //     SAPControl destination with only :50200 recorded and the
+    //     operator needs the gateway port (3302) discovered so
+    //     Check GW Vulnerability can run.
+    // Only requirement: a host / IP to sweep.
+    'standard_scan':    !!(n && (n.hostname || n.ip)),
     // ABAP-only AND needs a real credential (verified RFC login or
     // a SAPMAP-created user) — the analyser reads AGR_USERS / UST04
     // via RFC; node.pwned alone (e.g. pwned via GW exploit without
