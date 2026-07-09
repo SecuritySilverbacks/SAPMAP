@@ -3339,8 +3339,7 @@ def _try_rfc_read_table_fallback(conn, node: SAPNode) -> list:
                 rfctype = parts[1].strip() if len(parts) > 1 else ""
                 options = parts[2].strip() if len(parts) > 2 else ""
 
-                has_pwd = "%_PWD" in options
-                if not has_pwd and rfctype in ("G", "H"):
+                if not _rfcdes_row_has_creds(rfctype, options):
                     continue
 
                 conn_obj = _build_rfcdes_conn(
@@ -3427,8 +3426,7 @@ def _try_rfcdes_raw_fallback(conn, node: SAPNode) -> list:
                 dest_name = parts[0].strip()
                 rfctype = parts[1].strip() if len(parts) > 1 else ""
                 options = parts[2].strip() if len(parts) > 2 else ""
-                has_pwd = "%_PWD" in options
-                if not has_pwd and rfctype in ("G", "H"):
+                if not _rfcdes_row_has_creds(rfctype, options):
                     continue
                 conn_obj = _build_rfcdes_conn(
                     node, dest_name, rfctype, options)
@@ -3597,8 +3595,7 @@ def _try_tableblock_compressed_fallback(conn, node: SAPNode) -> list:
                                            ).rstrip('\x00').strip()
             if not rfcdest or rfctype not in ('3', 'G', 'H'):
                 continue
-            has_pwd = '%_PWD' in rfcoptions
-            if not has_pwd and rfctype in ('G', 'H'):
+            if not _rfcdes_row_has_creds(rfctype, rfcoptions):
                 continue
 
             conn_obj = _build_rfcdes_conn(
@@ -3642,37 +3639,99 @@ def _parse_rfcdes_options(conn: RFCConn, options_str: str):
             conn.client = part[2:].strip()
 
 
+def _rfcdes_row_has_creds(rfctype: str, options_str: str) -> bool:
+    """Should a Type G/H RFCDES row be kept even without ``%_PWD``?
+
+    The three RFCDES readers used to drop every G/H row that lacked
+    the ``%_PWD`` marker on the assumption that "no stored password"
+    == "no useful destination".  That assumption is wrong for
+    certificate-authenticated destinations: SAP → BTP and SAP →
+    third-party SaaS via mTLS both write RFCOPTIONS rows with
+    ``t=<pse_name>`` (SSL Client Application) and no password —
+    and those are precisely the destinations we want to plot, because
+    they can be exploited by proxying an HTTP call through the SAP
+    kernel via ``HTTP_CLIENT_CREATE_BY_DESTINATION``.
+
+    Non-G/H rows never triggered the gate — they always passed.  This
+    helper preserves that path and only broadens G/H acceptance.
+
+    Cert-auth signature (per RFCDES2RFCDISPLAY ABAP source):
+
+      * ``t=<non-empty>``  — STRUST PSE name (authoritative marker;
+                              ``t=DFAULT`` is the standard SSL Client)
+      * ``Q=A``            — SSL Client Certificate logon mode
+
+    Either marker in the RFCOPTIONS string flips the row from
+    "silently drop" to "keep for exploitation".
+    """
+    if rfctype not in ("G", "H"):
+        return True
+    if "%_PWD" in options_str:
+        return True
+    return _rfcdes_row_is_cert_auth(options_str)
+
+
+def _rfcdes_row_is_cert_auth(options_str: str) -> bool:
+    """True when the RFCOPTIONS carries an X.509-cert-auth marker.
+
+    Split out so the parser and the reader gate agree exactly on
+    what counts as cert auth (avoids drift where the reader keeps
+    the row but the parser doesn't tag ``http_auth_type=X509``).
+    """
+    for part in options_str.split(","):
+        part = part.strip()
+        if part.startswith("t=") and part[2:].strip():
+            return True
+        if part == "Q=A":
+            return True
+    return False
+
+
 def _parse_rfcdes_http_options(conn: RFCConn, options_str: str):
     """Parse RFCDES RFCOPTIONS for Type-G / Type-H destinations.
 
-    SM59 HTTP destinations encode their target as a comma-separated
-    keyed list inside RFCOPTIONS.  Kernel versions vary, but the
-    common keys are:
+    Mapping is anchored to the RFCDES2RFCDISPLAY ABAP function
+    module — kernel-authoritative, not empirically guessed.  Keys
+    that matter for exploitation:
 
-      ``H=`` host
-      ``S=`` port
-      ``M=`` path (sometimes "M=" carries the full path without a
-              leading slash)
-      ``J=`` either an SSL flag (``2``, ``S``, ``Y``) OR — on newer
-              kernels — the full target URL ``J=https://host/...``
-      ``Q=`` ``Y`` ⇒ TLS, ``N`` ⇒ plain HTTP
-      ``U=`` HTTP basic-auth user (only when stored creds, gated
-              by the ``%_PWD`` marker the readers already check for)
-      ``Y=`` logon language (ignored for our purposes)
-      ``L=`` accept-language (ignored)
-      ``T=`` SecStore-managed password marker (``%_PWD``)
+      ``H=<host>``    target host
+      ``I=<port>``    HTTP port (Type-G, authoritative on modern kernels)
+      ``S=<port>``    HTTP port (Type-H / older kernels)
+      ``M=<path>``    URL path fragment
+      ``N=<path>``    path prefix (up to 255 chars)
+      ``Q=<mode>``    on G/H holds ``rfcslogin`` — SSL logon mode:
+                        ``A`` = SSL Client Certificate (mTLS)
+                        ``Y`` = Send logon ticket (SSO2 in some kernels)
+                        ``N`` / blank = no SSL logon procedure
+      ``t=<pse>``     STRUST SSL Client Application (PSE name) —
+                        authoritative cert-auth marker.  Populated
+                        even without ``Q=A`` on some kernel builds.
+      ``T=%_PWD``     stored basic-auth password (marker only)
+      ``U=<user>``    basic-auth user (older format)
+      ``D=<value>``   basic-auth user OR client (see D= disambig below)
+      ``R=<user>``    proxy user
+      ``r=<pw>``      proxy password
+      ``J=<ticket>``  ON G/H: assertion-ticket flag ("Send Assertion
+                        Ticket for Dedicated Target System" in SM59).
+                        NOT a scheme or URL — SAPMAP historically
+                        misread this and built ``http://https://…``
+                        URLs when kernels stashed the target URL here.
+                        We now honour ``J=`` only as an SSO2 marker
+                        and derive the URL from H/I/S/M.
+      ``n=<sysid>``   assertion-ticket target SID (goes with J=)
+      ``p=<client>``  assertion-ticket target client (goes with J=)
 
     Sets ``conn.conn_type='http'`` and synthesises ``http_url``.
-    The downstream BTP-credential harvester filters on host suffix
-    so a best-effort URL is good enough; the secstore extraction
-    fills in the password later when it matches the destination
-    name.
+    Populates ``http_auth_type`` based on the highest-priority marker
+    found (X509 > SSO2 > BASICAUTHENTICATION > NONE).
     """
     conn.conn_type = "http"
-    host = path = scheme_or_url = ""
+    host = path = path_prefix = ""
     port_i = ""     # I=<port>  — Type-G (authoritative on modern kernels)
     port_s = ""     # S=<port>  — Type-H / older kernels
     use_https = False
+    is_cert_auth = False        # Q=A or t=<pse>
+    is_assertion_ticket = False  # J= present on G/H → SSO2 mode
     for part in options_str.split(","):
         part = part.strip()
         if part.startswith("H="):
@@ -3690,10 +3749,43 @@ def _parse_rfcdes_http_options(conn: RFCConn, options_str: str):
             port_s = part[2:].strip()
         elif part.startswith("M="):
             path = part[2:].strip()
+        elif part.startswith("N="):
+            # Path prefix (SM59 "Path Prefix" field — kernel allows
+            # up to 255 chars).  Independent from M= (which is the
+            # "Path" field on the same tab); some SAP kernels use
+            # N= for the full request path when M= is blank.
+            path_prefix = part[2:].strip()
         elif part.startswith("J="):
-            scheme_or_url = part[2:].strip()
+            # On G/H rows J= is the assertion-ticket flag (SM59
+            # "Send Assertion Ticket for Dedicated Target System"),
+            # NOT a scheme / URL.  SAPMAP historically misread this
+            # and produced ``http://https://…`` URLs for kernels
+            # that legitimately used J= for the target URL — that
+            # code path is gone.  We only treat J= as an SSO2
+            # marker now; the URL is built from H/I/S/M/N.
+            is_assertion_ticket = True
         elif part.startswith("Q="):
-            if part[2:].strip().upper() == "Y":
+            # rfcslogin field.  On G/H:
+            #   Q=A  — SSL Client Certificate (mTLS)
+            #   Q=Y  — Send SSO2 ticket without target ref
+            #   Q=N  — none / plain
+            q_val = part[2:].strip().upper()
+            if q_val == "A":
+                is_cert_auth = True
+                use_https = True
+            elif q_val == "Y":
+                # SSO2 without cert; kernel still uses HTTPS for
+                # secure transport (a bare HTTP ticket would leak).
+                use_https = True
+        elif part.startswith("t="):
+            # STRUST SSL Client Application (PSE name).  Authoritative
+            # marker: presence of this field means the destination
+            # authenticates via that PSE's client cert.  ``t=DFAULT``
+            # is the standard SSL Client PSE.
+            pse = part[2:].strip()
+            if pse:
+                conn.http_cert_pse = pse
+                is_cert_auth = True
                 use_https = True
         elif part.startswith("U="):
             conn.rfc_user = part[2:].strip()
@@ -3731,26 +3823,38 @@ def _parse_rfcdes_http_options(conn: RFCConn, options_str: str):
             and not conn.client):
         conn.client = path.zfill(3)
         path = ""
-    # Some kernels stash the full URL in J= directly — honour that and
-    # skip the host/port reassembly.
-    if scheme_or_url.lower().startswith(("http://", "https://")):
-        conn.http_url = scheme_or_url.rstrip("/") + (
-            path if (path and path.startswith("/")) else
-            ("/" + path if path else ""))
+    # Combine N=<prefix> + M=<path> into the final path.  Both may be
+    # present, both may be absent.  Ensure a single leading slash and
+    # no double slashes at the join point.
+    combined_path = ""
+    for seg in (path_prefix, path):
+        seg = (seg or "").strip()
+        if not seg:
+            continue
+        if not seg.startswith("/"):
+            seg = "/" + seg
+        combined_path += seg
+    # Assemble the URL from scratch — no more J= "might be a URL"
+    # branch.  The parser is now authoritative about the scheme (from
+    # Q=/t= markers plus the port heuristic).
+    if not use_https and port == "443":
+        use_https = True   # opportunistic — kernels sometimes omit Q=
+    proto = "https" if use_https else "http"
+    if port and port not in ("80", "443"):
+        conn.http_url = f"{proto}://{host}:{port}{combined_path}"
     else:
-        if scheme_or_url.upper() in ("2", "S", "Y") or use_https:
-            use_https = True
-        proto = "https" if use_https else "http"
-        norm_path = path if not path or path.startswith("/") else "/" + path
-        if port and port not in ("80", "443"):
-            conn.http_url = f"{proto}://{host}:{port}{norm_path}"
-        else:
-            conn.http_url = f"{proto}://{host}{norm_path}"
-    # Auth type is best-effort; secstore-recovered passwords land in
-    # conn.secstore_password regardless.  When the password marker is
-    # absent the field stays "" and the harvester skips the row.
+        conn.http_url = f"{proto}://{host}{combined_path}"
+    # Auth type priority: X509 (cert) > SSO2 (assertion ticket) >
+    # BASICAUTHENTICATION (has %_PWD or U=) > NONE.  Cert auth wins
+    # over basic auth even if U= is set, because mTLS is what actually
+    # authenticates on the wire — U= then just carries a display name.
     if not conn.http_auth_type:
-        conn.http_auth_type = "BASICAUTHENTICATION"
+        if is_cert_auth:
+            conn.http_auth_type = "X509"
+        elif is_assertion_ticket:
+            conn.http_auth_type = "SSO2"
+        else:
+            conn.http_auth_type = "BASICAUTHENTICATION"
 
 
 # RFCDES filter shared by every reader path.  '3' = Type-3 RFC,
@@ -3797,9 +3901,7 @@ def retrieve_rfc_connections_via_soap(node: SAPNode,
         options = (row.get("RFCOPTIONS", "") or "").strip()
         if not dest_name:
             continue
-        has_pwd = "%_PWD" in options
-        # Type-G/H without %_PWD = no recoverable credential, skip
-        if not has_pwd and rfctype in ("G", "H"):
+        if not _rfcdes_row_has_creds(rfctype, options):
             continue
         conn_obj = _build_rfcdes_conn(node, dest_name, rfctype, options)
         if _rfcdes_is_trusted(rfctype, options):

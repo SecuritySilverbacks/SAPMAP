@@ -78,15 +78,26 @@ def test_http_options_plain_http_no_q_flag():
     assert c.http_url == "http://internal:8080/app"
 
 
-def test_http_options_full_url_in_j_field():
-    """Some kernels store the whole target URL in J= directly.
-    When that happens the host/port parts are usually empty — the
-    parser should honour J= verbatim and just append M= as the path
-    when J= didn't already contain one."""
+def test_http_options_j_field_is_assertion_ticket_not_url():
+    """Regression pin for the parser rewrite (2026-07-09).
+
+    An earlier iteration of the parser had a speculative branch that
+    treated ``J=https://…`` as a full target URL.  The RFCDES2RFCDISPLAY
+    ABAP FM the operator shared showed that assumption was wrong: on
+    G/H rows ``J=`` is the "Send Assertion Ticket for Dedicated Target
+    System" flag (SM59 → Logon & Security), and its value is not a
+    URL at all.  Kernels that actually use assertion tickets pair J=
+    with ``n=<sysid>`` and ``p=<client>``.
+
+    The URL must be assembled from H+I/S+M+N verbatim; when H= is
+    absent the URL simply has no host (empty).  Auth type flips to
+    SSO2 because J= was present.
+    """
     c = _new_conn()
     _parse_rfcdes_http_options(
-        c, "J=https://api.cf.eu10-004.hana.ondemand.com,M=/v3/apps,U=u")
-    assert c.http_url == "https://api.cf.eu10-004.hana.ondemand.com/v3/apps"
+        c, "H=abap.target.example,I=443,J=X,n=SID,p=100,T=N,U=u")
+    assert c.http_url == "https://abap.target.example"
+    assert c.http_auth_type == "SSO2"
 
 
 def test_http_options_path_without_leading_slash_gets_normalised():
