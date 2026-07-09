@@ -3326,15 +3326,15 @@ function updateMap() {
       // the fan grows only linearly at first, then plateaus at
       // ±maxSpread/2.
       //
-      // With maxSpread=260 / maxCurveMul=60:
+      // With maxSpread=500 / maxCurveMul=60:
       //   2 edges → ±20    (unchanged)
       //   3 edges → ±60    (unchanged)
-      //   4 edges → ±90    (was ±120)
-      //   6 edges → ±130   (was ±300)
-      //   8 edges → ±130   (was ±560)
-      //  15 edges → ±130   (was ±1120)
+      //   4 edges → ±90    (unchanged)
+      //   6 edges → ±150   (was ±130 at 260 cap; labels breathe)
+      //   8 edges → ±210   (was ±130 at 260 cap; operator-tuned)
+      //  15 edges → ±250   (was ±130 at 260 cap)
       const maxCurveMul = 60;
-      const maxSpread = 260;
+      const maxSpread = 500;
       const curveMul = total <= 2
         ? 40
         : Math.min(maxCurveMul, maxSpread / (total - 1));
@@ -3365,7 +3365,7 @@ function updateMap() {
       // the edge-path block above — a drift would put labels on
       // wrong curves.
       const maxCurveMul2 = 60;
-      const maxSpread2 = 260;
+      const maxSpread2 = 500;
       const curveMul2 = total <= 2
         ? 40
         : Math.min(maxCurveMul2, maxSpread2 / (total - 1));
