@@ -7075,7 +7075,14 @@ function showConnInfo(e, connIdx) {
     <div class="info-row"><span class="info-label">Destination:</span><span class="info-val">${escHtml(conn.destination_name)} (Type ${connType})</span></div>
     ${isHttp ? `
       <div class="info-row"><span class="info-label">URL:</span><span class="info-val" style="word-break:break-all">${escHtml(conn.http_url || '?')}</span></div>
-      <div class="info-row"><span class="info-label">Auth type:</span><span class="info-val">${escHtml(conn.http_auth_type || '?')}</span></div>
+      <div class="info-row"><span class="info-label">Auth type:</span><span class="info-val">${
+        conn.http_auth_type === 'X509'
+          ? '&#128272; X.509 client cert (mTLS)' +
+              (conn.http_cert_pse
+                ? ' &middot; PSE: <code>' + escHtml(conn.http_cert_pse) + '</code>'
+                : '')
+          : escHtml(conn.http_auth_type || '?')
+      }</span></div>
       ${conn.client ? `<div class="info-row"><span class="info-label">Client:</span><span class="info-val">${escHtml(conn.client)}</span></div>` : ''}
       ${conn.http_proxy ? `<div class="info-row"><span class="info-label">Proxy:</span><span class="info-val">${escHtml(conn.http_proxy)}</span></div>` : ''}
       ${conn.http_target_platform ? `<div class="info-row"><span class="info-label">Platform:</span><span class="info-val">${escHtml(conn.http_target_platform)}</span></div>` : ''}
@@ -7085,6 +7092,27 @@ function showConnInfo(e, connIdx) {
         ${(() => {
           const plat = (conn.http_target_platform || '').toUpperCase();
           const u = escHtml(conn.rfc_user || 'the user');
+          if (conn.http_auth_type === 'X509') {
+            // Cert-auth path — the interesting one.  Kernel-proxied
+            // exploitation via HTTP_CLIENT_CREATE_BY_DESTINATION is
+            // the actual attack; explain it so the operator doesn't
+            // assume "no password = nothing to do here".
+            const pse = escHtml(conn.http_cert_pse || 'the STRUST PSE');
+            const isBtp = (conn.http_url || '').includes('.hana.ondemand.com');
+            const btpNote = isBtp
+              ? '  Target is BTP (*.hana.ondemand.com) — kernel-proxied ' +
+                'HTTP against /destination-configuration/v1/subaccountDestinations ' +
+                'often yields cloud-side destination secrets in cleartext, ' +
+                'closing the on-prem → cloud → on-prem loop.'
+              : '';
+            return `X.509 cert-auth destination — the private key stays ` +
+              `on the SAP host (PSE <code>${pse}</code>), but with S_RFC + ` +
+              `S_ICF on the source ABAP you can call ` +
+              `<code>HTTP_CLIENT_CREATE_BY_DESTINATION</code> + ` +
+              `<code>HTTP_ISSUE_REQUEST</code> and the kernel does mutual-TLS ` +
+              `for you.  From the target's perspective you ARE the SAP ` +
+              `system.${btpNote}`;
+          }
           if (plat === 'ABAP') {
             return `ABAP HTTP destination — if ${u} carries SAP_ALL (or S_USER_GRP / S_USER_AGR with full activity) you can log straight into SAP GUI / Fiori / SOAP or call BAPI_USER_CREATE1 against the target client to mint a foothold.  Test Connection runs basic-auth, then probes profiles via direct RFC.`;
           }
