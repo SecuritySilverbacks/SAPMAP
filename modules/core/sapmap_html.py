@@ -3349,20 +3349,25 @@ function updateMap() {
       // above/below the actual nodes.
       //
       // maxSpread caps TOTAL fan width; maxCurveMul caps per-edge
-      // step so 2-3 parallel edges keep the readable ±20/±60
+      // step so 2-3 parallel edges keep the readable ±20/±80
       // spacing they had before.  Beyond that, step shrinks so
       // the fan grows only linearly at first, then plateaus at
       // ±maxSpread/2.
       //
-      // With maxSpread=500 / maxCurveMul=60:
-      //   2 edges → ±20    (unchanged)
-      //   3 edges → ±60    (unchanged)
-      //   4 edges → ±90    (unchanged)
-      //   6 edges → ±150   (was ±130 at 260 cap; labels breathe)
-      //   8 edges → ±210   (was ±130 at 260 cap; operator-tuned)
-      //  15 edges → ±250   (was ±130 at 260 cap)
-      const maxCurveMul = 60;
-      const maxSpread = 500;
+      // Bumped 500/60 → 700/80 on 2026-07-09 after operator report
+      // that ~10 parallel destinations between AED and AE1 were
+      // still bunching labels together at the current cap.
+      //
+      // With maxSpread=700 / maxCurveMul=80:
+      //   2 edges → ±20    (unchanged; hardcoded)
+      //   3 edges → ±80    (was ±60)
+      //   4 edges → ±120   (was ±90)
+      //   6 edges → ±200   (was ±150)
+      //   8 edges → ±280   (was ±210)
+      //  12 edges → ±350   (was ±227)
+      //  15 edges → ±350   (was ±250)
+      const maxCurveMul = 80;
+      const maxSpread = 700;
       const curveMul = total <= 2
         ? 40
         : Math.min(maxCurveMul, maxSpread / (total - 1));
@@ -3392,8 +3397,8 @@ function updateMap() {
       // on their own curves when total > 2.  Constants MUST match
       // the edge-path block above — a drift would put labels on
       // wrong curves.
-      const maxCurveMul2 = 60;
-      const maxSpread2 = 500;
+      const maxCurveMul2 = 80;
+      const maxSpread2 = 700;
       const curveMul2 = total <= 2
         ? 40
         : Math.min(maxCurveMul2, maxSpread2 / (total - 1));
