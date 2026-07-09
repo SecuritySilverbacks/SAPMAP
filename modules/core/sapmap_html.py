@@ -7236,6 +7236,13 @@ function showConnInfo(e, connIdx) {
       })()}
       ${isTypeT ? '' :
         `<button class="btn" onclick="testConnection('${escHtml(conn.source_sid)}','${escHtml(conn.destination_name)}',${connIdx})">Test Connection</button>`}
+      ${conn.http_auth_type === 'X509' ? `
+        <button class="btn"
+                style="background:#8b3aad;color:#fff"
+                title="Kernel-proxied HTTP over this cert-authenticated destination.  The SAP kernel does mutual TLS with the STRUST PSE; the operator never touches the private key.  BTP-shaped targets get automatic subaccount-destination enumeration on top."
+                onclick="probeCertDest('${escHtml(conn.source_sid)}','${escHtml(conn.destination_name)}')">
+          &#128272; Probe Cert-Auth
+        </button>` : ''}
       <button class="btn" onclick="document.getElementById('info-panel').classList.remove('visible')">Close</button>
     </div>
   `;
@@ -7267,6 +7274,23 @@ async function testSingleRfc(sid, destName, connIdx) {
   // and phase-2 (profiles+roles+has_sap_all) updates and re-renders
   // the modal in place when either lands.  No separate poller here.
   await api('POST', `node/${sid}/test_rfc_single`, { destination_name: destName });
+  startPolling();
+}
+
+// Kernel-proxied HTTP call over a cert-authenticated Type G/H
+// destination.  The backend endpoint refuses non-X509 destinations,
+// so the button is only rendered when http_auth_type === 'X509'.
+// Findings + operator-console output stream back through the normal
+// polling loop; we just kick it off.
+async function probeCertDest(sid, destName) {
+  const r = await api('POST', `node/${sid}/cert_dest_probe`,
+                       { destination_name: destName });
+  if (r && r.error) {
+    showToast('Cert-auth probe rejected: ' + r.error, 'error');
+    return;
+  }
+  showToast('Cert-auth probe on ' + destName +
+             ' — watch the console for BTP loot / status.', 'info');
   startPolling();
 }
 
