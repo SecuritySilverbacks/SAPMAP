@@ -3311,12 +3311,33 @@ function updateMap() {
       const len = Math.sqrt(cdx*cdx + cdy*cdy) || 1;
       // Perpendicular based on canonical direction (consistent for both A→B and B→A)
       const px = -cdy / len, py = cdx / len;
-      // Curve-spread multiplier grows with edge count so 3+ parallel
-      // edges don't collapse toward the straight-line axis.  2 edges
-      // stay at ±20 (Q-midpoint), 3 edges spread ±30, 4 edges ±45,
-      // etc.  Keeps close doubles tidy while pulling long clusters
-      // apart enough to distinguish routes.
-      const curveMul = total <= 2 ? 40 : 40 + (total - 2) * 20;
+      // Curve-spread multiplier — grows with edge count so 3+
+      // parallel edges don't collapse onto the straight-line axis,
+      // but capped so 8+ parallel RFCs (real on landscapes with
+      // many destinations between two systems) don't blow the fan
+      // out to hundreds of pixels of empty space.  Operator report
+      // 2026-07-09: 8 parallel destinations between AED and AE1
+      // had outermost curves at ±560 px — labels floated in a void
+      // above/below the actual nodes.
+      //
+      // maxSpread caps TOTAL fan width; maxCurveMul caps per-edge
+      // step so 2-3 parallel edges keep the readable ±20/±60
+      // spacing they had before.  Beyond that, step shrinks so
+      // the fan grows only linearly at first, then plateaus at
+      // ±maxSpread/2.
+      //
+      // With maxSpread=260 / maxCurveMul=60:
+      //   2 edges → ±20    (unchanged)
+      //   3 edges → ±60    (unchanged)
+      //   4 edges → ±90    (was ±120)
+      //   6 edges → ±130   (was ±300)
+      //   8 edges → ±130   (was ±560)
+      //  15 edges → ±130   (was ±1120)
+      const maxCurveMul = 60;
+      const maxSpread = 260;
+      const curveMul = total <= 2
+        ? 40
+        : Math.min(maxCurveMul, maxSpread / (total - 1));
       const offset = (idx - (total - 1) / 2) * curveMul;
       const qx = mx + px * offset, qy = my + py * offset;
       // Invisible wider hit area for dashed/dotted lines
@@ -3340,8 +3361,14 @@ function updateMap() {
       const len2 = Math.sqrt(cdx2*cdx2 + cdy2*cdy2) || 1;
       const px2 = -cdy2 / len2, py2 = cdx2 / len2;
       // Mirror the curveMul used for the edge path so labels stay
-      // on their own curves when total > 2.
-      const curveMul2 = total <= 2 ? 40 : 40 + (total - 2) * 20;
+      // on their own curves when total > 2.  Constants MUST match
+      // the edge-path block above — a drift would put labels on
+      // wrong curves.
+      const maxCurveMul2 = 60;
+      const maxSpread2 = 260;
+      const curveMul2 = total <= 2
+        ? 40
+        : Math.min(maxCurveMul2, maxSpread2 / (total - 1));
       const off2 = (idx - (total - 1) / 2) * curveMul2;
       // Perpendicular offset onto the Q-bezier midpoint (existing).
       const perpX = px2 * off2 * 0.5;
