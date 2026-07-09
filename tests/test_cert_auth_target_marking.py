@@ -70,6 +70,95 @@ def test_sapnode_pwned_wins_visually_over_cert_auth_trusted():
 # BTPSubaccountNode: same flags mirrored
 # ---------------------------------------------------------------------------
 
+def test_resolve_probe_target_finds_btp_tenant_by_hostname():
+    """Regression pin for the "target stayed blue" bug (2026-07-09).
+
+    BTP tenants are stored in ``state.btp_subaccounts`` keyed by
+    full hostname (e.g. ``api.eu1.hana.ondemand.com``), NOT in
+    ``state.nodes``.  The bare ``state.get_node(conn.target_sid)``
+    lookup missed them, so a CRITICAL finding fired but the target
+    tenant never flipped red.  ``_resolve_probe_target`` must
+    check both dicts."""
+    import sys, os
+    sys.path.insert(0, os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..")))
+    from modules.core.sapmap_gui import _resolve_probe_target
+    from sapmap_models import (
+        SAPMAPState, BTPSubaccountNode, RFCConnection)
+
+    state = SAPMAPState()
+    tenant_uuid = "api.eu1.hana.ondemand.com"
+    state.btp_subaccounts[tenant_uuid] = BTPSubaccountNode(
+        uuid=tenant_uuid,
+        display_name="api",
+        subdomain="api",
+        region="eu1")
+    conn = RFCConnection(
+        source_sid="AE1", source_host="10.10.1.6",
+        destination_name="TEST_MARCH", rfc_type="G",
+        conn_type="http", http_auth_type="X509",
+        http_cert_pse="DFAULT",
+        http_url="https://api.eu1.hana.ondemand.com",
+        target_sid=tenant_uuid)
+
+    tgt = _resolve_probe_target(state, conn)
+    assert tgt is not None, (
+        "expected the BTP subaccount lookup to succeed — state."
+        "get_node alone would have returned None here")
+    assert tgt.uuid == tenant_uuid
+
+
+def test_resolve_probe_target_falls_back_to_hostname_match():
+    """Even when the connection has no target_sid yet (pre-ping),
+    the helper must still find the BTP tenant by parsing the URL.
+    Prevents the "clicked Probe Cert-Auth before Retrieve RFCs
+    finished" edge case."""
+    import sys, os
+    sys.path.insert(0, os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..")))
+    from modules.core.sapmap_gui import _resolve_probe_target
+    from sapmap_models import (
+        SAPMAPState, BTPSubaccountNode, RFCConnection)
+
+    state = SAPMAPState()
+    tenant_uuid = "api.eu1.hana.ondemand.com"
+    state.btp_subaccounts[tenant_uuid] = BTPSubaccountNode(
+        uuid=tenant_uuid, display_name="api")
+    conn = RFCConnection(
+        source_sid="AE1", source_host="10.10.1.6",
+        destination_name="TEST_MARCH", rfc_type="G",
+        conn_type="http", http_auth_type="X509",
+        http_url="https://api.eu1.hana.ondemand.com",
+        target_sid="")   # no target_sid → hostname fallback
+
+    tgt = _resolve_probe_target(state, conn)
+    assert tgt is not None
+    assert tgt.uuid == tenant_uuid
+
+
+def test_resolve_probe_target_finds_regular_sapnode():
+    """SAPNode targets (BTPDISC_ placeholders, real ABAP systems)
+    must still resolve — the fix mustn't break the pre-existing
+    lookup path."""
+    import sys, os
+    sys.path.insert(0, os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..")))
+    from modules.core.sapmap_gui import _resolve_probe_target
+    from sapmap_models import (
+        SAPMAPState, SAPNode, RFCConnection)
+
+    state = SAPMAPState()
+    state.nodes["SB1"] = SAPNode(sid="SB1", ip="172.31.14.107")
+    conn = RFCConnection(
+        source_sid="AE1", source_host="10.10.1.6",
+        destination_name="AE1_TO_SB1", rfc_type="3",
+        target_sid="SB1")
+
+    tgt = _resolve_probe_target(state, conn)
+    assert tgt is not None
+    assert tgt.sid == "SB1"
+
+
 def test_btp_subaccount_node_carries_cert_auth_flags():
     """BTP subaccount tenants may also become the target of a
     kernel-proxied cert-auth probe (when SM59 destinations to

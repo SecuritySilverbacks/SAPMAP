@@ -1881,6 +1881,60 @@ class SAPMAPApi:
 # Bottle app with routes
 # ===========================================================================
 
+def _resolve_probe_target(state, conn):
+    """Find the target node for a cert-auth kernel-proxy probe.
+
+    ``conn.target_sid`` may point at either a regular ``SAPNode``
+    (BTPDISC_* placeholders, ABAP/JAVA systems) or a
+    ``BTPSubaccountNode`` in ``state.btp_subaccounts`` — for BTP-
+    shaped destinations the ping-materialiser stores the FULL
+    hostname (e.g. ``api.eu1.hana.ondemand.com``) as the tenant's
+    uuid AND writes it back to ``conn.target_sid``.  The regular
+    ``state.get_node`` only sees the SAPNode dict, which is why
+    the BTP tenant appeared blue in the operator log despite a
+    CRITICAL finding firing.
+
+    Returns whichever target object matched, or ``None`` — the
+    caller then sets ``pwned`` / ``cert_auth_trusted`` on it.
+    """
+    tid = (getattr(conn, "target_sid", "") or "").strip()
+    if tid:
+        n = state.get_node(tid)
+        if n is not None:
+            return n
+        try:
+            btp = getattr(state, "btp_subaccounts", None) or {}
+            if tid in btp:
+                return btp[tid]
+        except Exception:
+            pass
+    # No target_sid, or the lookup missed — try to match by
+    # hostname extracted from http_url.  Handles the pre-ping case
+    # where the BTP tenant hasn't been materialised yet.
+    url = (getattr(conn, "http_url", "") or "").lower()
+    if url:
+        try:
+            from urllib.parse import urlparse as _urlparse
+            host = (_urlparse(url).hostname or "").lower()
+        except Exception:
+            host = ""
+        if host:
+            try:
+                btp = getattr(state, "btp_subaccounts", None) or {}
+                if host in btp:
+                    return btp[host]
+            except Exception:
+                pass
+            # Last resort — walk SAPNodes for a hostname match.
+            for n in state.nodes.values():
+                if (n.hostname or "").lower() == host:
+                    return n
+                if host in {h.lower()
+                             for h in (n.all_hostnames() or [])}:
+                    return n
+    return None
+
+
 def create_app(api: SAPMAPApi) -> Bottle:
     app = Bottle()
 
@@ -8179,8 +8233,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 # Same status-aware severity as the auto-probe path
                 # in retrieve_rfcs.  2xx = full pwn (target red);
                 # non-2xx = cert trusted but this endpoint denied.
-                t_node = (api.state.get_node(conn.target_sid)
-                            if conn.target_sid else None)
+                # ``_resolve_probe_target`` checks BOTH state.nodes
+                # AND state.btp_subaccounts — the plain
+                # ``state.get_node`` misses BTP tenants because they
+                # live in a separate dict keyed by full hostname.
+                t_node = _resolve_probe_target(api.state, conn)
                 if 200 <= r["status"] < 300:
                     emit_finding(
                         "CRITICAL", sid,
@@ -9190,8 +9247,10 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         #        = True`` for a visible-but-non-red
                         #        indicator.
                         #  5xx / other = HIGH, cert-trusted only.
-                        _t_node = (api.state.get_node(_c.target_sid)
-                                    if _c.target_sid else None)
+                        # Look up target across BOTH state.nodes and
+                        # state.btp_subaccounts — see
+                        # ``_resolve_probe_target`` for the rationale.
+                        _t_node = _resolve_probe_target(api.state, _c)
                         if 200 <= _r["status"] < 300:
                             emit_finding(
                                 "CRITICAL", sid,
