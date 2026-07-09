@@ -409,7 +409,10 @@ Authenticated RFC calls (BAPI user creation, RFC connection retrieval, table rea
    ```bash
    export LD_LIBRARY_PATH=/opt/nwrfcsdk/lib:$LD_LIBRARY_PATH
    ```
-4. Pass `--sdk /opt/nwrfcsdk/lib` when launching SAPMAP
+4. Tell SAPMAP where the SDK's `lib/` directory lives — three options, first non-empty wins:
+   - `--sdk /opt/nwrfcsdk/lib` on the CLI (per-run override)
+   - **Actions → 📁 Set NW RFC SDK Path** in the GUI (persisted to `settings.local.json`, gitignored) — the recommended way to set it once and never type `--sdk` again.  Live-applied to the running session so no restart is needed after saving.
+   - Nothing set — SAPMAP falls back to the process `LD_LIBRARY_PATH` / `DYLD_LIBRARY_PATH`
 
 > Unauthenticated features (scanning, gateway exploit, system info) work without the SDK.
 
