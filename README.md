@@ -392,7 +392,7 @@ The `modules/__init__.py` registers each subpackage on `sys.path` so existing fl
 ### Setup
 
 ```bash
-git clone https://github.com/kloris/SAPMAP.git
+git clone https://github.com/OWASP/SAPMAP.git
 cd SAPMAP
 pip install bottle pywebview pycryptodome
 ```
