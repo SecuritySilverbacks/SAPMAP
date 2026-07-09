@@ -577,6 +577,18 @@ class SAPNode:
     findings: list = field(default_factory=list)    # [Finding, ...]
     has_critical_finding: bool = False
     pwned: bool = False
+    # Set True when a source SAP system's X.509 identity (STRUST
+    # PSE) authenticated successfully at the TLS layer against this
+    # target — kernel-proxied via HTTP_CLIENT_CREATE_BY_DESTINATION.
+    # Distinguishes "our cert is trusted" (transport-layer breach —
+    # deserves attention but stops short of ``pwned``) from "we hit
+    # an authenticated endpoint that answered 2xx" (full pwn, which
+    # DOES flip ``pwned=True`` + ``has_critical_finding=True``).
+    #
+    # Rendered in the GUI as a distinct border glow so the operator
+    # sees the trust-only-vs-fully-authenticated distinction at a
+    # glance.
+    cert_auth_trusted: bool = False
     credentials: list = field(default_factory=list) # [Credentials, ...]
     created_users: list = field(default_factory=list)  # [CreatedUser, ...]
     # Forged MYSAPSSO2 logon tickets — signed by THIS system's
@@ -903,6 +915,7 @@ class SAPNode:
             "findings": [f.to_dict() for f in self.findings],
             "has_critical_finding": self.has_critical_finding,
             "pwned": self.pwned,
+            "cert_auth_trusted": self.cert_auth_trusted,
             "credentials": [c.to_dict() for c in self.credentials],
             "created_users": [u.to_dict() for u in self.created_users],
             "forged_tickets": [t.to_dict()
@@ -1015,6 +1028,7 @@ class SAPNode:
             findings=[Finding.from_dict(f) for f in d.get("findings", [])],
             has_critical_finding=d.get("has_critical_finding", False),
             pwned=d.get("pwned", False),
+            cert_auth_trusted=d.get("cert_auth_trusted", False),
             credentials=[Credentials.from_dict(c) for c in d.get("credentials", [])],
             created_users=[CreatedUser.from_dict(u) for u in d.get("created_users", [])],
             forged_tickets=[ForgedTicket.from_dict(t)
@@ -1594,6 +1608,19 @@ class BTPSubaccountNode:
     # cleartext, OR a custom IdP / wildcard PP rule was found.  Drives
     # the ⚡ overlay on the cloud node.
     pwned: bool = False
+    # Set True when a source SAP system's X.509 identity (STRUST PSE)
+    # authenticated at the TLS layer against this BTP tenant but the
+    # kernel-proxied HTTP call came back non-2xx (401 / 403 / 404).
+    # Meaning: the cert IS trusted at the transport layer, we just
+    # weren't authorized for that specific endpoint.  Distinct from
+    # ``pwned`` because we haven't demonstrably enumerated resources
+    # yet; still worth surfacing so the operator knows this on-prem
+    # → cloud trust bridge exists.
+    cert_auth_trusted: bool = False
+    # Critical-finding flag mirrors the SAPNode field so the frontend
+    # can style BTP tenants that received a CRITICAL finding (e.g. a
+    # 2xx cert-auth response = full kernel-proxied access).
+    has_critical_finding: bool = False
     findings: list = field(default_factory=list)    # [Finding, ...]
 
     def to_dict(self) -> dict:
@@ -1614,6 +1641,8 @@ class BTPSubaccountNode:
             "enumerated_at":         self.enumerated_at,
             "position":              list(self.position) if self.position else None,
             "pwned":                 self.pwned,
+            "cert_auth_trusted":     self.cert_auth_trusted,
+            "has_critical_finding":  self.has_critical_finding,
             "findings":              [f.to_dict() if hasattr(f, "to_dict") else f
                                        for f in (self.findings or [])],
         }
