@@ -3761,6 +3761,7 @@ def _parse_rfcdes_http_options(conn: RFCConn, options_str: str):
     use_https = False
     is_cert_auth = False        # Q=A or t=<pse>
     is_assertion_ticket = False  # J= present on G/H → SSO2 mode
+    is_sso2_ticket = False       # Q=Y — SSO2 ticket without target ref
     for part in options_str.split(","):
         part = part.strip()
         if part.startswith("H="):
@@ -3806,6 +3807,7 @@ def _parse_rfcdes_http_options(conn: RFCConn, options_str: str):
                 # SSO2 without cert; kernel still uses HTTPS for
                 # secure transport (a bare HTTP ticket would leak).
                 use_https = True
+                is_sso2_ticket = True
         elif part.startswith("t="):
             # STRUST SSL Client Application (PSE name for TLS
             # server-cert validation).  Present on basically every
@@ -3869,6 +3871,47 @@ def _parse_rfcdes_http_options(conn: RFCConn, options_str: str):
     # Q=/t= markers plus the port heuristic).
     if not use_https and port == "443":
         use_https = True   # opportunistic — kernels sometimes omit Q=
+    # Port-based scheme normalisation.  RFCDES rows routinely carry a
+    # stale ``t=<pse>`` STRUST marker from when the destination was
+    # HTTPS in the past — the parser above uses that as an "HTTPS
+    # transport" hint, but when the port unambiguously identifies the
+    # HTTP variant of a known SAP service (SAPControl 5NN13, Java HTTP
+    # 5NN00, ABAP ICM 80NN, Host Agent 1128), the port wins over the
+    # PSE field.  Without this, ``t=DFAULT,I=50213`` produces
+    # ``https://…:50213/SAPControl.CGI`` and every direct probe fails
+    # with ``[SSL: WRONG_VERSION_NUMBER]`` — SAPMAP is speaking TLS to
+    # a plain-text server.
+    #
+    # Two carve-outs keep HTTPS on the URL even when the port says
+    # HTTP, because both mechanisms leak credentials over plain HTTP:
+    #   * Q=A (mTLS)         → cert-auth needs TLS to present the cert
+    #   * Q=Y (SSO2 ticket)  → ticket must not travel in clear
+    # For those, a mis-matched port is a real misconfiguration on the
+    # SAP side; keep the scheme so the failure is loud and visible
+    # rather than silently downgrading and leaking secrets.
+    try:
+        port_int = int(port) if port else 0
+    except ValueError:
+        port_int = 0
+    if port_int:
+        _https_port_family = (
+            port_int == 443
+            or (50000 <= port_int <= 59999
+                and port_int % 100 in (1, 14))
+            or (44300 <= port_int <= 44399)
+            or port_int == 1129)
+        _http_port_family = (
+            port_int == 80
+            or (50000 <= port_int <= 59999
+                and port_int % 100 in (0, 13))
+            or (8000 <= port_int <= 8099)
+            or port_int == 1128)
+        _tls_required = (is_cert_auth or is_assertion_ticket
+                          or is_sso2_ticket)
+        if _https_port_family:
+            use_https = True
+        elif _http_port_family and not _tls_required:
+            use_https = False
     proto = "https" if use_https else "http"
     if port and port not in ("80", "443"):
         conn.http_url = f"{proto}://{host}:{port}{combined_path}"
