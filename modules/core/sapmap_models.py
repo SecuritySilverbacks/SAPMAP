@@ -1169,6 +1169,14 @@ class RFCConnection:
     rfc_type: str = ""              # "3" | "G" | "H" | "T" | "L" | ""
     http_url: str = ""              # full target URL for HTTP destinations
     http_auth_type: str = ""        # BASICAUTHENTICATION | SSO2 | X509 | NONE
+    # STRUST SSL Client Application (PSE name).  Populated from the
+    # RFCOPTIONS ``t=`` field for cert-authenticated Type G/H rows —
+    # e.g. ``DFAULT`` for the standard SSL Client PSE.  When set,
+    # ``http_auth_type`` is ``X509`` and the destination authenticates
+    # via that PSE's client cert instead of a stored password.  Enables
+    # kernel-proxied HTTP calls through HTTP_CLIENT_CREATE_BY_DESTINATION
+    # without ever handling the private key ourselves.
+    http_cert_pse: str = ""
     http_proxy: str = ""            # "host:port" if the destination uses one
     # Target platform stack for HTTP destinations.  BTP-sourced edges
     # carry this from the destination's sap-platform additional
@@ -1277,6 +1285,7 @@ class RFCConnection:
             "conn_type": self.conn_type,
             "http_url": self.http_url,
             "http_auth_type": self.http_auth_type,
+            "http_cert_pse": self.http_cert_pse,
             "http_proxy": self.http_proxy,
             "http_target_platform": self.http_target_platform,
             "secstore_password": self.secstore_password,
