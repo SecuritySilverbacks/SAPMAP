@@ -4311,10 +4311,28 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
     def _kick_standard_scan(sid: str) -> bool:
         """Fire the standard discovery sweep against the host of the
-        placeholder SAPNode `sid`.  Returns True when a background
-        task was actually scheduled.  Reused from the manual context
-        menu route AND the auto-trigger path after a BTP destination
-        materialises a placeholder."""
+        SAPNode `sid`.  Returns True when a background task was
+        actually scheduled.
+
+        Two modes, picked automatically from the node's discovery
+        flags:
+
+          * PROMOTE — the node is a placeholder (BTP-materialised,
+            WD-discovered, or RFC-G-materialised).  The scan callback
+            replaces node state with the freshly-fingerprinted data;
+            post-scan logic re-points RFC connections + copies over
+            credentials and findings from the placeholder.  This is
+            the pre-existing behaviour.
+
+          * RESCAN — the node was already fingerprinted (real ports,
+            credentials, findings, CVE markers).  The scan callback
+            MERGES newly-discovered ports/instances/hostnames into
+            the existing node; everything else is preserved.  Used
+            e.g. when SJJ came in via a SAPControl.CGI destination
+            with only :50200 recorded and the operator wants to
+            discover the gateway port for a Check GW Vulnerability
+            run.
+        """
         node = api.state.get_node(sid)
         if not node:
             return False
@@ -4328,9 +4346,81 @@ def create_app(api: SAPMAPApi) -> Bottle:
         threads = int(cfg.get("threads", 30))
         port_timeout = float(cfg.get("port_timeout", 3.0))
 
+        # Placeholder vs real node — mode selector.  Any of the three
+        # "discovered_via" flags counts; a fresh node created by the
+        # Type-3 ping loop has none of them and is treated as real.
+        is_placeholder = bool(
+            getattr(node, "discovered_via_btp", False)
+            or getattr(node, "discovered_via_wd_sid", "")
+            or getattr(node, "discovered_via_rfc_g", False))
+
+        def _merge_scan_into_existing(existing, scanned):
+            """Fold ``scanned`` port/instance/metadata into
+            ``existing`` without overwriting enrichment
+            (credentials, findings, pwned/CVE flags, secstore, etc.).
+
+            Instances are matched by ``instance_nr``: same nr →
+            union the ports map; new nr → append InstanceInfo.
+            Metadata fields (hostname, os_type, system_type,
+            kernel, sap_release) fill in only when the existing
+            slot is empty."""
+            for si in (scanned.instances or []):
+                match = None
+                for ei in (existing.instances or []):
+                    if ei.instance_nr == si.instance_nr:
+                        match = ei
+                        break
+                if match is None:
+                    existing.instances.append(si)
+                else:
+                    for p, lbl in (si.ports or {}).items():
+                        match.ports.setdefault(p, lbl)
+                    if not match.ip and si.ip:
+                        match.ip = si.ip
+            for attr in ("hostname", "ip", "os_type", "system_type",
+                         "sap_release", "kernel", "database"):
+                if not getattr(existing, attr, "") and getattr(
+                        scanned, attr, ""):
+                    setattr(existing, attr, getattr(scanned, attr))
+
+        def _cb(scanned_node):
+            if is_placeholder:
+                api.state.add_node(scanned_node)
+                return
+            # Rescan: only fold in when the scan result is for the
+            # same host (SID may differ if the scanner mis-guessed).
+            existing = api.state.get_node(sid)
+            if existing is None:
+                api.state.add_node(scanned_node)
+                return
+            s_ips = set(scanned_node.all_ips() or [])
+            s_names = {h.lower() for h in
+                       (scanned_node.all_hostnames() or [])}
+            e_ips = set(existing.all_ips() or [])
+            e_names = {h.lower() for h in
+                       (existing.all_hostnames() or [])}
+            if (scanned_node.sid == existing.sid
+                    or (s_ips & e_ips)
+                    or (s_names & e_names)
+                    or host in s_ips
+                    or host.lower() in s_names):
+                _merge_scan_into_existing(existing, scanned_node)
+            else:
+                api.state.add_node(scanned_node)
+
         def _run():
-            print(f"[*] Standard scan starting on {host} "
-                  f"(placeholder {sid}) — running discovery sweep …")
+            if is_placeholder:
+                print(f"[*] Standard scan starting on {host} "
+                      f"(placeholder {sid}) — running discovery "
+                      f"sweep …")
+            else:
+                inst_ports_before = sum(
+                    len(i.ports or {}) for i in (node.instances or []))
+                print(f"[*] Standard rescan on {host} (existing {sid}) "
+                      f"— merging new ports/instances into place; "
+                      f"credentials, findings, and CVE flags "
+                      f"preserved (currently {inst_ports_before} "
+                      f"known port(s))")
             try:
                 discovered = sapmap_scanner.discover_systems(
                     [host],
@@ -4340,12 +4430,34 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     cancel_event=api.cancel_event,
                     skip_alive=True,
                     port_timeout=port_timeout,
-                    node_callback=lambda n: api.state.add_node(n),
+                    node_callback=_cb,
                     scc_callback=lambda s: api.state.scc_nodes.update(
                         {s.host: s}),
                 )
             except Exception as e:
                 print(f"[-] Standard scan failed on {host}: {e}")
+                return
+            if not is_placeholder:
+                # Rescan: merge already done in-callback; report
+                # the delta so the operator can see whether the
+                # sweep uncovered a gateway / dispatcher / etc.
+                cur = api.state.get_node(sid)
+                if cur is not None:
+                    inst_ports_after = sum(
+                        len(i.ports or {}) for i in (
+                            cur.instances or []))
+                    new_ports = []
+                    for i in (cur.instances or []):
+                        for p, lbl in (i.ports or {}).items():
+                            if lbl in ("gateway", "dispatcher",
+                                        "message-server",
+                                        "gateway-secure",
+                                        "icm-http", "icm-https"):
+                                new_ports.append(f"{p}/{lbl}")
+                    print(f"[+] Standard rescan of {sid} complete: "
+                          f"{inst_ports_after} port(s) total "
+                          f"(pertinent: "
+                          f"{', '.join(sorted(set(new_ports))) or '—'})")
                 return
             real_nodes = [n for n in (discovered or [])
                           if not n.discovered_via_btp]
