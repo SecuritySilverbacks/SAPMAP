@@ -55,10 +55,11 @@ def test_gh_row_with_pwd_passes_gate():
         "G", "H=api.example.com,I=443,T=%_PWD,U=svcuser,Q=Y")
 
 
-def test_gh_row_with_cert_pse_passes_gate():
+def test_gh_row_with_cert_pse_passes_gate_via_q_a():
     """The regression this whole change fixes: TEST_MARCH-shaped rows
     used to be silently dropped because they have T=N (no %_PWD)
-    instead of T=%_PWD.  ``t=DFAULT`` alone must now keep the row."""
+    instead of T=%_PWD.  ``Q=A`` keeps them (``t=DFAULT`` alone
+    would not — see the mis-classification regression test below)."""
     opts = ("H=api.eu1.hana.ondemand.com,W=Y,B=N,C=N,E=N,T=N,K=Y,"
              "Q=A,s=Y,u=N,1=00,q=0,b=N,k=N,F=0      0000,j=N,t=DFAULT,")
     assert _rfcdes_row_has_creds("G", opts)
@@ -72,6 +73,27 @@ def test_gh_row_with_q_a_but_no_t_passes_gate():
     opts = "H=api.example.com,I=443,Q=A,T=N,U=,D="
     assert _rfcdes_row_has_creds("G", opts)
     assert _rfcdes_row_is_cert_auth(opts)
+
+
+def test_t_field_alone_is_NOT_cert_auth_regression():
+    """CRITICAL regression pin (2026-07-09).  On a live retrieval
+    from AE1, 16 out of 17 Type-G destinations were mis-classified
+    as X.509 because the parser flipped ``is_cert_auth`` on any
+    ``t=<pse>`` marker.  Per the RFCDES2RFCDISPLAY ABAP FM, ``t=``
+    is the STRUST PSE for TLS **server-cert validation** — present
+    on every HTTPS destination regardless of auth mode.  Only
+    ``Q=A`` (rfcslogin='A') means client-cert auth.
+
+    Real fixture from AE1's ABEXJIRA destination: basic-auth to
+    Atlassian, has ``t=DFAULT``, no ``Q=A``.  Must classify as
+    BASICAUTHENTICATION or get dropped (no %_PWD in this sample),
+    NEVER X509."""
+    opts = ("H=abap-experts.atlassian.net,W=Y,B=N,C=N,E=N,T=N,K=Y,"
+             "Q=N,s=Y,u=N,1=00,q=0,b=N,k=N,F=0      0000,j=N,t=DFAULT,")
+    assert not _rfcdes_row_is_cert_auth(opts), (
+        "t=DFAULT alone must NOT flip cert-auth")
+    # No Q=A, no %_PWD → row gets dropped by the reader gate
+    assert not _rfcdes_row_has_creds("G", opts)
 
 
 def test_gh_row_with_empty_t_field_is_not_cert_auth():

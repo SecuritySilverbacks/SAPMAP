@@ -3657,12 +3657,13 @@ def _rfcdes_row_has_creds(rfctype: str, options_str: str) -> bool:
 
     Cert-auth signature (per RFCDES2RFCDISPLAY ABAP source):
 
-      * ``t=<non-empty>``  — STRUST PSE name (authoritative marker;
-                              ``t=DFAULT`` is the standard SSL Client)
-      * ``Q=A``            — SSL Client Certificate logon mode
+      * ``Q=A``  — SSL Client Certificate logon mode (rfcslogin='A')
 
-    Either marker in the RFCOPTIONS string flips the row from
-    "silently drop" to "keep for exploitation".
+    ``t=<pse>`` is the STRUST PSE for TLS **server-cert validation**
+    — populated on almost every HTTPS destination regardless of auth
+    mode.  Using it as a cert-auth marker would (and did) mis-classify
+    every basic-auth SaaS destination (SAP Support / Jira / etc.) as
+    X.509 and burn kernel-proxy round-trips on all of them.
     """
     if rfctype not in ("G", "H"):
         return True
@@ -3672,17 +3673,15 @@ def _rfcdes_row_has_creds(rfctype: str, options_str: str) -> bool:
 
 
 def _rfcdes_row_is_cert_auth(options_str: str) -> bool:
-    """True when the RFCOPTIONS carries an X.509-cert-auth marker.
+    """True when the RFCOPTIONS carries the X.509-cert-auth marker.
 
-    Split out so the parser and the reader gate agree exactly on
-    what counts as cert auth (avoids drift where the reader keeps
-    the row but the parser doesn't tag ``http_auth_type=X509``).
+    Only ``Q=A`` is authoritative (per RFCDES2RFCDISPLAY):
+    ``rfcslogin='A'`` = SSL Client Certificate logon mode.  The
+    STRUST PSE from ``t=`` is captured separately in the parser so
+    findings can name the PSE, but it doesn't gate the row here.
     """
     for part in options_str.split(","):
-        part = part.strip()
-        if part.startswith("t=") and part[2:].strip():
-            return True
-        if part == "Q=A":
+        if part.strip() == "Q=A":
             return True
     return False
 
@@ -3778,14 +3777,15 @@ def _parse_rfcdes_http_options(conn: RFCConn, options_str: str):
                 # secure transport (a bare HTTP ticket would leak).
                 use_https = True
         elif part.startswith("t="):
-            # STRUST SSL Client Application (PSE name).  Authoritative
-            # marker: presence of this field means the destination
-            # authenticates via that PSE's client cert.  ``t=DFAULT``
-            # is the standard SSL Client PSE.
+            # STRUST SSL Client Application (PSE name for TLS
+            # server-cert validation).  Present on basically every
+            # HTTPS destination regardless of auth mode, so we do
+            # NOT use it as a cert-auth signal — only ``Q=A`` does.
+            # Still worth capturing: findings can name the PSE, and
+            # its presence means the transport is HTTPS.
             pse = part[2:].strip()
             if pse:
                 conn.http_cert_pse = pse
-                is_cert_auth = True
                 use_https = True
         elif part.startswith("U="):
             conn.rfc_user = part[2:].strip()

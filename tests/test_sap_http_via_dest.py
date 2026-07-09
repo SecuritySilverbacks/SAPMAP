@@ -31,10 +31,15 @@ def _node():
 # ---------------------------------------------------------------------------
 
 def test_valid_destination_names_accepted():
-    """SM59 rules: uppercase letters, digits, underscore, dot, slash,
-    up to 32 chars.  These must pass so real destinations work."""
+    """SM59 rules: uppercase letters, digits, hyphen, underscore,
+    dot, slash, up to 32 chars.  These must pass so real
+    destinations work — hyphen support added 2026-07-09 after an
+    auto-probe run rejected every ``SAP-SUPPORT_*`` and
+    ``SA2-ABAP-CUSTB``-style name in a real landscape."""
     for name in ["TEST_MARCH", "HTTPS_FORTINET_TEST",
-                    "AE1_TO_BTP", "SAP/HTTP.G1", "A" * 32]:
+                    "AE1_TO_BTP", "SAP/HTTP.G1", "A" * 32,
+                    "SAP-SUPPORT_NOTE_DOWNLOAD",
+                    "SA2-ABAP-CUSTB"]:
         _validate_destination_name(name)  # no raise
 
 
@@ -112,6 +117,23 @@ def test_abap_program_chunks_body_within_zeile_width():
     assert "lv_take > 200" in joined or "lv_take = 200" in joined
 
 
+def test_abap_program_wraps_calls_in_try_catch_cx_root():
+    """Regression pin (2026-07-09).  ``EXCEPTIONS OTHERS = 1`` on
+    older classic call sites does NOT catch class-based exceptions
+    like CX_HTTP_INVALID_STATE / CX_SY_REF_IS_INITIAL — those
+    short-dump the report and the caller sees success=True with
+    zero output.  The TRY / CATCH cx_root wrapper is what turns
+    those into an emitted ~~~ERR line."""
+    prog = _build_abap_program("TEST_MARCH", "GET", "/")
+    joined = "\n".join(prog)
+    assert "TRY." in joined
+    assert "CATCH cx_root" in joined
+    assert "ENDTRY." in joined
+    # And the wrapper must surface the exception text via ~~~ERR
+    # so the operator sees WHY the call failed, not just "empty".
+    assert "'~~~ERR: exception'" in joined
+
+
 # ---------------------------------------------------------------------------
 # _parse_abap_output — WRITE-format → structured dict
 # ---------------------------------------------------------------------------
@@ -146,14 +168,26 @@ def test_parse_create_by_destination_failure_surfaces_error():
     assert "create_by_destination" in r["error"]
 
 
-def test_parse_no_markers_reports_diagnostic():
-    """When the ABAP report doesn't even install (compile error /
-    S_DEVELOP denied), the returned lines carry no markers.  Rather
-    than silently succeed with empty body, we must produce a clear
-    diagnostic."""
+def test_parse_no_markers_but_output_reports_preview():
+    """When the ABAP report emits output but none of the markers
+    (e.g. an ABAP-side WRITE we didn't anticipate), the diagnostic
+    must include a preview of what actually came back so the
+    operator can debug against ST22 / SM21 on the target."""
     r = _parse_abap_output(["random ABAP compile error output"])
     assert r["ok"] is False
-    assert "install" in r["error"].lower()
+    assert "no ~~~STATUS" in r["error"]
+    assert "random ABAP compile error output" in r["error"]
+
+
+def test_parse_empty_output_reports_short_dump_hint():
+    """success=True + zero output lines almost always means a
+    class-based exception escaped the TRY/CATCH and short-dumped
+    the report.  Nudge the operator toward ST22 rather than leaving
+    them staring at a bare "no markers"."""
+    r = _parse_abap_output([])
+    assert r["ok"] is False
+    assert "short dump" in r["error"].lower()
+    assert "ST22" in r["error"]
 
 
 # ---------------------------------------------------------------------------
