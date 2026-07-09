@@ -8176,14 +8176,39 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 print(f"[+] {sid}: {dest_name}: HTTP {r['status']} "
                       f"{r.get('reason', '')} "
                       f"({len(r['body'])} B body)")
-                emit_finding(
-                    "HIGH", sid,
-                    f"Kernel-proxied cert-auth via {dest_name} → "
-                    f"{conn.http_url}: HTTP {r['status']}.  Source "
-                    f"ABAP's X.509 identity (PSE "
-                    f"{conn.http_cert_pse or '?'}) is trusted by the "
-                    f"target — kernel-proxied HTTP lateral-move "
-                    f"channel confirmed.")
+                # Same status-aware severity as the auto-probe path
+                # in retrieve_rfcs.  2xx = full pwn (target red);
+                # non-2xx = cert trusted but this endpoint denied.
+                t_node = (api.state.get_node(conn.target_sid)
+                            if conn.target_sid else None)
+                if 200 <= r["status"] < 300:
+                    emit_finding(
+                        "CRITICAL", sid,
+                        f"Kernel-proxied cert-auth via {dest_name} "
+                        f"→ {conn.http_url}: HTTP {r['status']}.  "
+                        f"Source ABAP's X.509 identity (PSE "
+                        f"{conn.http_cert_pse or '?'}) is trusted "
+                        f"AND authorized — kernel-proxied HTTP "
+                        f"lateral-move channel fully open into "
+                        f"{conn.target_sid or conn.http_url}.",
+                        attack_capability=(
+                            "lateral.cert_proxy_open"))
+                    if t_node is not None:
+                        t_node.pwned = True
+                        t_node.has_critical_finding = True
+                else:
+                    emit_finding(
+                        "HIGH", sid,
+                        f"Kernel-proxied cert-auth via {dest_name} "
+                        f"→ {conn.http_url}: HTTP {r['status']} "
+                        f"{r.get('reason', '')}.  Source ABAP's "
+                        f"X.509 identity (PSE "
+                        f"{conn.http_cert_pse or '?'}) is trusted at "
+                        f"the TLS layer — target accepted our client "
+                        f"cert but denied this endpoint.  Other APIs "
+                        f"may grant access.")
+                    if t_node is not None:
+                        t_node.cert_auth_trusted = True
                 # Opportunistic BTP-destination-service parse.  Fires
                 # only when host is *.hana.ondemand.com AND status is
                 # 2xx AND body looks JSON-shaped.  Silent otherwise
@@ -9153,13 +9178,50 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         print(f"[+] {sid}: {_dest}: HTTP "
                                f"{_r['status']} {_r.get('reason','')} "
                                f"({len(_r['body'])} B body)")
-                        emit_finding(
-                            "HIGH", sid,
-                            f"Auto-probe of {_dest} → {_c.http_url}: "
-                            f"HTTP {_r['status']}.  Source X.509 "
-                            f"identity (PSE {_c.http_cert_pse or '?'}) "
-                            f"is trusted by the target — kernel-proxied "
-                            f"HTTP lateral-move channel confirmed.")
+                        # Status-aware severity:
+                        #  2xx = authenticated + authorized = full
+                        #        kernel-proxied access = CRITICAL,
+                        #        target flips ``pwned=True``
+                        #        + ``has_critical_finding=True``.
+                        #  4xx = mTLS handshake succeeded (cert
+                        #        trusted at transport layer) but this
+                        #        endpoint requires more auth.  Still
+                        #        HIGH, target gets ``cert_auth_trusted
+                        #        = True`` for a visible-but-non-red
+                        #        indicator.
+                        #  5xx / other = HIGH, cert-trusted only.
+                        _t_node = (api.state.get_node(_c.target_sid)
+                                    if _c.target_sid else None)
+                        if 200 <= _r["status"] < 300:
+                            emit_finding(
+                                "CRITICAL", sid,
+                                f"Auto-probe of {_dest} → "
+                                f"{_c.http_url}: HTTP {_r['status']}. "
+                                f" Source X.509 identity (PSE "
+                                f"{_c.http_cert_pse or '?'}) is "
+                                f"trusted AND authorized — kernel-"
+                                f"proxied HTTP lateral-move channel "
+                                f"fully open into "
+                                f"{_c.target_sid or _c.http_url}.",
+                                attack_capability=(
+                                    "lateral.cert_proxy_open"))
+                            if _t_node is not None:
+                                _t_node.pwned = True
+                                _t_node.has_critical_finding = True
+                        else:
+                            emit_finding(
+                                "HIGH", sid,
+                                f"Auto-probe of {_dest} → "
+                                f"{_c.http_url}: HTTP {_r['status']} "
+                                f"{_r.get('reason', '')}.  Source "
+                                f"X.509 identity (PSE "
+                                f"{_c.http_cert_pse or '?'}) is "
+                                f"trusted at the TLS layer — the "
+                                f"target accepted our client cert "
+                                f"but denied this endpoint.  Other "
+                                f"APIs may grant access.")
+                            if _t_node is not None:
+                                _t_node.cert_auth_trusted = True
                         # Opportunistic BTP-destination-service parse.
                         # Fires ONLY when we got 2xx AND the body looks
                         # like JSON (starts with [ or {) AND the target

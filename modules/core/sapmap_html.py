@@ -3702,6 +3702,13 @@ function updateMap() {
     else if (Object.keys(n.clients || {}).length > 0) fill = '#4a3a1a';
 
     if (n.pwned || n.has_critical_finding || n.gw_vulnerable || n.ms_vulnerable || n.cve_2025_31324_vulnerable || n.cve_2020_6287_vulnerable || n.cve_2022_22536_vulnerable) { borderColor = '#8b0000'; borderWidth = 6; }
+    // cert_auth_trusted = kernel-proxied cert-auth reached this
+    // target with a non-2xx response (TLS handshake succeeded,
+    // endpoint denied).  Distinguishes "our cert is trusted at the
+    // transport layer" from "we authenticated AND authorized"
+    // (which flips pwned/has_critical_finding red above).  Purple
+    // matches the 🔐 Probe Cert-Auth button colour on the modal.
+    else if (n.cert_auth_trusted) { borderColor = '#8b3aad'; borderWidth = 5; }
 
     // Scanning radar pulse + probe lines (behind node)
     if (isScanning) {
