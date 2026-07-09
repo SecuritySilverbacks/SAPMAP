@@ -798,6 +798,7 @@ body {
       <div class="dd-item" onclick="showSetPasswordModal()">&#128273; Set Default Password</div>
       <div class="dd-sep"></div>
       <div class="dd-item" onclick="showHashesApiKeyModal()">&#128273; Set hashes.com API Key</div>
+      <div class="dd-item" onclick="showSdkPathModal()">&#128194; Set NW RFC SDK Path</div>
       <div class="dd-item" onclick="showBtpTokenModal()">&#9729;&#65039; BTP — Paste cf oauth-token</div>
       <div class="dd-item" onclick="showBtpProxyModal()">&#9729;&#65039; BTP — Connectivity Proxy Override</div>
     </div>
@@ -1703,6 +1704,33 @@ body {
     <div class="form-actions">
       <button class="btn btn-primary" onclick="saveHashesApiKey()">Save</button>
       <button class="btn" onclick="closeModal('hashes-api-modal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- NW RFC SDK Path Modal -->
+<div class="modal-overlay" id="sdk-path-modal">
+  <div class="modal" style="max-width:560px">
+    <h3>&#128194; NW RFC SDK Path</h3>
+    <div style="font-size:12px;color:#8b949e;margin-bottom:12px;line-height:1.5">
+      Path to the SAP NW RFC SDK <code>lib/</code> directory (the folder containing
+      <code>libsapnwrfc.so</code> on Linux, <code>libsapnwrfc.dylib</code> on macOS,
+      or <code>sapnwrfc.dll</code> on Windows).  Enables all authenticated RFC
+      operations (BAPI calls, SecStore, RSAU_API, etc.).
+      <br><br>
+      Saved in <code>settings.local.json</code> (gitignored) and loaded on every
+      startup — equivalent to passing <code>--sdk &lt;path&gt;</code> on the CLI.
+      A <code>--sdk</code> flag on the command line still overrides this value.
+      Leave empty and Save to clear.
+    </div>
+    <div class="form-row">
+      <label>SDK lib/ path</label>
+      <input type="text" id="sdk-path-input" placeholder="e.g. ./nwrfcsdk/lib or /opt/nwrfcsdk/lib" autocomplete="off">
+    </div>
+    <div id="sdk-path-current" style="font-size:11px;color:#8b949e;margin-bottom:12px"></div>
+    <div class="form-actions">
+      <button class="btn btn-primary" onclick="saveSdkPath()">Save</button>
+      <button class="btn" onclick="closeModal('sdk-path-modal')">Cancel</button>
     </div>
   </div>
 </div>
@@ -9090,6 +9118,46 @@ async function saveHashesApiKey() {
     closeModal('hashes-api-modal');
   } else {
     showToast('Failed to save: ' + (d.error||'?'), 'error');
+  }
+}
+
+async function showSdkPathModal() {
+  // Preload the currently-stored value (if any) so the operator can
+  // see what's active and edit rather than re-type from scratch.
+  try {
+    const s = await fetch('/api/settings/local').then(r => r.json());
+    const input = document.getElementById('sdk-path-input');
+    const info  = document.getElementById('sdk-path-current');
+    if (input) input.value = s.nwrfcsdk_path || '';
+    if (info) {
+      info.textContent = s.nwrfcsdk_path
+        ? 'Current: ' + s.nwrfcsdk_path
+        : 'Not set — RFC ops fall back to system LD_LIBRARY_PATH / DYLD_*.';
+    }
+  } catch(e) {}
+  document.getElementById('sdk-path-modal').classList.add('visible');
+}
+
+async function saveSdkPath() {
+  // Empty string is a valid save — clears the setting.  We do NOT
+  // require the operator to confirm; if they hit Save with a blank
+  // field they explicitly asked to unset it.
+  const val = (document.getElementById('sdk-path-input').value || '').trim();
+  const r = await fetch('/api/settings/local', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({nwrfcsdk_path: val})
+  });
+  const d = await r.json();
+  if (d.ok) {
+    const msg = val
+      ? ('NW RFC SDK path saved: ' + val
+          + (d.warning ? '  — ' + d.warning : ''))
+      : 'NW RFC SDK path cleared (falls back to system libs).';
+    showToast(msg, d.warning ? 'warn' : 'success');
+    closeModal('sdk-path-modal');
+  } else {
+    showToast('Failed to save: ' + (d.error || '?'), 'error');
   }
 }
 

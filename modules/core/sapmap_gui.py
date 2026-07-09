@@ -3422,16 +3422,21 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
     @app.route("/api/settings/local", method="GET")
     def get_local_settings():
-        """Return non-sensitive local settings (API keys etc)."""
+        """Return non-sensitive local settings (API keys etc).
+
+        API-key VALUES are not returned (only their set/unset boolean),
+        but the NW RFC SDK path IS returned verbatim — it's a plain
+        filesystem path, not a secret, and the modal needs to show the
+        current value so the operator can see what they've saved."""
         response.content_type = "application/json"
         try:
             with open("settings.local.json") as f:
                 data = json.load(f)
         except Exception:
             data = {}
-        # Only expose key existence, not the actual key value
         return json.dumps({
-            "hashes_com_api_key_set": bool(data.get("hashes_com_api_key"))
+            "hashes_com_api_key_set": bool(data.get("hashes_com_api_key")),
+            "nwrfcsdk_path": data.get("nwrfcsdk_path", ""),
         })
 
     @app.route("/api/settings/local", method="POST")
@@ -3447,10 +3452,34 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 existing = {}
             if "hashes_com_api_key" in data:
                 existing["hashes_com_api_key"] = data["hashes_com_api_key"]
+            # NW RFC SDK path — empty string clears the setting so the
+            # operator can go back to relying on --sdk / LD_LIBRARY_PATH.
+            # Live-apply so the change takes effect without restart.
+            warn = ""
+            if "nwrfcsdk_path" in data:
+                sdk_path = str(data["nwrfcsdk_path"]).strip()
+                if sdk_path:
+                    existing["nwrfcsdk_path"] = sdk_path
+                    if not os.path.isdir(sdk_path):
+                        warn = (f"path {sdk_path!r} does not exist "
+                                 f"or is not a directory — saved anyway "
+                                 f"(fix before next restart)")
+                    else:
+                        try:
+                            import sapmap_rfc as _rfc
+                            _rfc.set_sdk_path(sdk_path)
+                            print(f"[*] NW RFC SDK path set from GUI: "
+                                   f"{sdk_path}")
+                        except Exception as _e:
+                            warn = (f"saved OK, but live-apply failed: "
+                                     f"{_e}.  Will take effect on next "
+                                     f"restart.")
+                else:
+                    existing.pop("nwrfcsdk_path", None)
             with open("settings.local.json", "w") as f:
                 json.dump(existing, f, indent=2)
             os.chmod("settings.local.json", 0o600)
-            return json.dumps({"ok": True})
+            return json.dumps({"ok": True, "warning": warn})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
