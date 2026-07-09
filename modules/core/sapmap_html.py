@@ -12204,9 +12204,9 @@ function showAbout() {
   </div>
 
   <div style="margin-top:16px;font-size:12px;color:#8b949e">
-    Source: <a href="https://github.com/kloris/SAPMAP"
+    Source: <a href="https://github.com/OWASP/SAPMAP"
                 target="_blank"
-                style="color:#58a6ff">github.com/kloris/SAPMAP</a>
+                style="color:#58a6ff">github.com/OWASP/SAPMAP</a>
     &nbsp;·&nbsp; Report issues, PRs welcome.
   </div>
 
