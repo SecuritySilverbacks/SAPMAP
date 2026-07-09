@@ -65,6 +65,38 @@ def find_free_port() -> int:
         return s.getsockname()[1]
 
 
+def _resolve_sdk_path(cli_arg: str | None) -> tuple[str, str]:
+    """Decide which NW RFC SDK path to activate at startup.
+
+    Resolution order (first non-empty wins):
+
+      1. ``--sdk`` on the CLI (explicit operator override for this run)
+      2. ``nwrfcsdk_path`` in ``settings.local.json`` (set via
+         Actions → Set NW RFC SDK Path in the GUI, persisted
+         CWD-relative and gitignored)
+      3. Nothing set — return ``("", "")`` and let the caller fall
+         back to system ``LD_LIBRARY_PATH`` / ``DYLD_LIBRARY_PATH``.
+
+    Returns ``(sdk_path, source_label)`` — source is used in the
+    ``[*] NW RFC SDK path: ... (source: ...)`` log line so the
+    operator can tell why the value they see was picked.
+
+    Kept as a module-level helper (not inlined in ``main()``) so the
+    resolution can be unit-tested with a tmp settings file.
+    """
+    if cli_arg:
+        return cli_arg, "--sdk"
+    try:
+        import json as _json
+        with open("settings.local.json") as _f:
+            stored = _json.load(_f).get("nwrfcsdk_path", "")
+            if stored:
+                return stored, "settings.local.json"
+    except Exception:
+        pass
+    return "", ""
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="SAPMAP — SAP Landscape Attack Path Mapper"
@@ -124,10 +156,10 @@ def main():
 
     print(BANNER)
 
-    # Set SDK path
-    if args.sdk:
-        sapmap_rfc.set_sdk_path(args.sdk)
-        print(f"[*] NW RFC SDK path: {args.sdk}")
+    sdk_path, sdk_source = _resolve_sdk_path(args.sdk)
+    if sdk_path:
+        sapmap_rfc.set_sdk_path(sdk_path)
+        print(f"[*] NW RFC SDK path: {sdk_path} (source: {sdk_source})")
 
     # Create API controller
     api = SAPMAPApi()
