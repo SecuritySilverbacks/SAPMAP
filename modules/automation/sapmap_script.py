@@ -168,7 +168,14 @@ def _map_step(step: dict) -> tuple:
         }, True)
 
     if action == "retrieve_rfcs":
-        return ("POST", f"/api/node/{target}/retrieve_rfcs", {}, True)
+        # ``auto_probe_cert_auth`` (default True) fires the kernel-
+        # proxy primitive against every X.509 destination discovered
+        # in the same run.  Playbooks that only want the raw RFCDES
+        # rows can pass ``auto_probe_cert_auth: false``.
+        return ("POST", f"/api/node/{target}/retrieve_rfcs", {
+            "auto_probe_cert_auth": step.get(
+                "auto_probe_cert_auth", True),
+        }, True)
 
     if action == "test_rfcs":
         return ("POST", f"/api/node/{target}/test_rfcs", {}, True)
