@@ -1,18 +1,35 @@
 # SAPMAP runtime dependencies
 # Install with:  pip3 install -r requirements.txt
+#
+# Every package below is REQUIRED at import time somewhere in the
+# main code paths.  They were previously marked "optional / lazy-
+# imported" but in practice every real engagement hits every one
+# of them:  requests+urllib3 for HTTP-side exploits, pycryptodome
+# for SecStore, pyyaml for scripted scenarios, pyjks for the Java
+# SecStore offline path.  The comment column names one representative
+# call site; there are usually several more.
 
-# --- Required ---
 bottle>=0.12        # embedded HTTP server for the GUI (sapmap_gui.py)
-requests>=2.28      # HTTP client for LPE / SAP Java modules
+pywebview>=4.0      # native desktop window (falls back to browser tab if missing)
+requests>=2.28      # HTTP client for CVE checks, LPE, Java exploits, BTP
 urllib3>=1.26       # used directly (disable_warnings) and as requests transport
-pycryptodome>=3.18  # DES/3DES for SecStore decryption (ABAP + Java)
+pycryptodome>=3.18  # DES/3DES + PBKDF2 for SecStore decryption (ABAP + Java)
+pyyaml>=6.0         # YAML parser for scripted scenarios (--script foo.yaml)
+pyjks>=20           # JKS keystore reader for Java SecStore offline decrypt
 
-# --- Optional (lazy-imported, feature-specific) ---
-# pywebview>=4.0    # native desktop window (falls back to browser if missing)
-# pyyaml>=6.0       # only needed for .yaml script files (sapmap_script.py)
-# pyjks>=20.0       # only for 3DES offline Java SecStore path (sap_java_secstore.py)
+# --- Optional platform GUI extras ---
 # pyobjc-framework-Cocoa ; sys_platform == "darwin"   # macOS dock icon
 # pygobject         ; sys_platform == "linux"         # Linux GTK/WebKit2 native window
 #
+# --- Optional discovery back-end ---
 # SAPology is an optional deep-scan backend (not on PyPI) — drop the
 # SAPology package on PYTHONPATH to enable it; otherwise fast-scan is used.
+#
+# --- SAP NetWeaver RFC SDK (recommended, not on PyPI) ---
+# Not a Python package — a native library from SAP Software Center.
+# Enables the authenticated RFC surface (BAPI user creation, RFC
+# destination retrieval, SecStore extraction, LPE, MYSAPSSO2 ticket
+# forgery, dpmon, etc.).  See README "SAP NW RFC SDK" section for
+# install + configuration.  Without it, only unauthenticated features
+# (port scan, gateway exploit fingerprint, RFC_SYSTEM_INFO leak)
+# work.

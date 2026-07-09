@@ -385,36 +385,59 @@ The `modules/__init__.py` registers each subpackage on `sys.path` so existing fl
 
 ### Requirements
 
-- Python 3.8+
-- `bottle` — HTTP server framework
-- `pywebview` — Native window (optional, falls back to browser)
+- **Python 3.8+**
+- The Python packages listed below (all required — see `requirements.txt`)
+- **SAP NetWeaver RFC SDK** — strongly recommended for a real engagement; enables the entire authenticated attack surface
+
+### Python packages (all required)
+
+| Package | Minimum | Used for |
+|---|---|---|
+| `bottle` | 0.12 | Embedded HTTP server that powers the GUI |
+| `pywebview` | 4.0 | Native desktop window (falls back to a browser tab if the platform can't spawn it) |
+| `requests` | 2.28 | HTTP client for CVE checks, LPE, Java exploits, BTP token exchange |
+| `urllib3` | 1.26 | TLS-warning suppression + underlying transport for `requests` |
+| `pycryptodome` | 3.18 | DES/3DES + PBKDF2 for SecStore (RSECTAB) decryption on both ABAP and Java |
+| `pyyaml` | 6.0 | YAML parser for scripted scenarios (`--script foo.yaml`) |
+| `pyjks` | 20 | JKS keystore reader for the offline Java SecStore decrypt path |
 
 ### Setup
 
 ```bash
 git clone https://github.com/OWASP/SAPMAP.git
 cd SAPMAP
-pip install bottle pywebview pycryptodome
+pip3 install -r requirements.txt
 ```
 
-> `pycryptodome` is required for SecStore (RSECTAB) decryption. Without it, all other features work normally.
+### SAP NW RFC SDK (strongly recommended)
 
-### SAP NW RFC SDK (optional, for authenticated operations)
+The NW RFC SDK is a native SAP library (not a PyPI package) that enables **most** of what makes SAPMAP useful in an authorized engagement:
 
-Authenticated RFC calls (BAPI user creation, RFC connection retrieval, table reads) require the SAP NetWeaver RFC SDK:
+- Authenticated BAPI calls — user creation, profile assignment, `BAPI_USER_GET_DETAIL`
+- Full RFC destination retrieval from RFCDES / RFCTRUST / RFCSYSACL
+- SecStore (RSECTAB) extraction on ABAP + Java
+- Local privilege escalation (`bapi_profiles_assign`, `webgui_rsbdcos0`)
+- MYSAPSSO2 ticket forgery + fanout
+- dpmon virtual SAP\* activation
+- OA2C profile mining for BTP token pivots
+- Kernel-proxied HTTP-over-RFC for cert-authenticated destinations
+- Death Star (SAL suppressor) deployment
 
-1. Download from SAP Software Center (requires S-user)
+Without it you're limited to unauthenticated features only (port scan, gateway exploit fingerprint, SAPControl SOAP, RFC_SYSTEM_INFO leak) — most engagement value is behind the SDK.
+
+**Install:**
+
+1. Download from SAP Software Center (requires S-user access — SAP does not distribute the SDK publicly)
 2. Extract to e.g. `/opt/nwrfcsdk/`
-3. Set the library path:
+3. Set the library search path so the OS loader can find `libsapnwrfc.so`:
    ```bash
-   export LD_LIBRARY_PATH=/opt/nwrfcsdk/lib:$LD_LIBRARY_PATH
+   export LD_LIBRARY_PATH=/opt/nwrfcsdk/lib:$LD_LIBRARY_PATH   # Linux
+   export DYLD_LIBRARY_PATH=/opt/nwrfcsdk/lib:$DYLD_LIBRARY_PATH   # macOS
    ```
 4. Tell SAPMAP where the SDK's `lib/` directory lives — three options, first non-empty wins:
    - `--sdk /opt/nwrfcsdk/lib` on the CLI (per-run override)
    - **Actions → 📁 Set NW RFC SDK Path** in the GUI (persisted to `settings.local.json`, gitignored) — the recommended way to set it once and never type `--sdk` again.  Live-applied to the running session so no restart is needed after saving.
    - Nothing set — SAPMAP falls back to the process `LD_LIBRARY_PATH` / `DYLD_LIBRARY_PATH`
-
-> Unauthenticated features (scanning, gateway exploit, system info) work without the SDK.
 
 ---
 
