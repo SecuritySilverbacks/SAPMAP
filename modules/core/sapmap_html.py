@@ -3403,16 +3403,28 @@ function updateMap() {
         ? 40
         : Math.min(maxCurveMul2, maxSpread2 / (total - 1));
       const off2 = (idx - (total - 1) / 2) * curveMul2;
-      // Perpendicular offset onto the Q-bezier midpoint (existing).
-      const perpX = px2 * off2 * 0.5;
-      const perpY = py2 * off2 * 0.5;
-      // Along-axis stagger: distribute labels along ~30% of edge
-      // length so 3+ nearly-parallel labels don't stack on top of
+      // Perpendicular offset onto the Q-bezier midpoint.  Bumped
+      // from 0.5→0.75 (2026-07-09) so labels sit closer to the
+      // peak of their own curve — at 0.5 the label was midway
+      // between the axis and the curve peak, which for wide fans
+      // put it visually between two curves and made it hard to
+      // tell which line the label belonged to.
+      const perpX = px2 * off2 * 0.75;
+      const perpY = py2 * off2 * 0.75;
+      // Along-axis stagger: distribute labels a little along the
+      // line so 3+ nearly-parallel labels don't stack on top of
       // each other.  Fix for BTP→on-prem clusters where multiple
       // synthetic edges from the same subaccount to the same SAP
       // node use the identical (source_sid, target_sid) pair.
+      //
+      // Trimmed 80/0.15 → 25/0.04 (2026-07-09) after operator
+      // report: for 15 destinations on a ~1500 px line, the old
+      // formula pushed idx=0 labels 560 px along-axis (75% of edge
+      // length!) — labels floated above/left of the source box
+      // instead of sitting near the middle of their curves.  New
+      // formula keeps stagger under 15% of edge length.
       const dux = (cx2 - cx1) / len2, duy = (cy2 - cy1) / len2;
-      const stagger = (idx - (total - 1) / 2) * Math.min(80, len2 * 0.15);
+      const stagger = (idx - (total - 1) / 2) * Math.min(25, len2 * 0.04);
       lx = mx2 + perpX + dux * stagger;
       ly = my2 + perpY + duy * stagger - 6;
     }
