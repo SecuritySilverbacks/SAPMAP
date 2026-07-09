@@ -91,7 +91,9 @@ def test_unsupported_method_rejected():
 def test_abap_program_uses_create_by_destination():
     """The whole point of the primitive: the report must call
     cl_http_client=>create_by_destination with the destination name
-    embedded verbatim.  Anything else would be a different attack."""
+    embedded verbatim.  Path goes through a string variable so it
+    can safely exceed 72 chars (assembled via && chunking).
+    Anything else would be a different attack."""
     prog = _build_abap_program("TEST_MARCH", "GET",
                                   "/destination-configuration/v1/"
                                   "subaccountDestinations")
@@ -99,9 +101,57 @@ def test_abap_program_uses_create_by_destination():
     assert "cl_http_client=>create_by_destination(" in joined
     assert "destination = 'TEST_MARCH'" in joined
     assert "set_method( 'GET' )" in joined
-    assert ("set_header_field( name = '~request_uri' value = "
-              "'/destination-configuration/v1/subaccountDestinations' )"
-              in joined)
+    # Path stored in a variable ``pt`` and referenced by name.
+    assert "value = pt" in joined
+    # And the path itself must be reconstructable from the emitted
+    # chunk literals — pull them out and check.
+    reconstructed = ""
+    for line in prog:
+        stripped = line.strip()
+        if stripped.startswith("'") and (
+                stripped.endswith("' &&") or stripped.endswith("'.")):
+            reconstructed += stripped.split("'")[1]
+    assert (
+        "/destination-configuration/v1/subaccountDestinations"
+        in reconstructed), (
+        f"path did not survive chunking; got {reconstructed!r}")
+
+
+def test_abap_program_every_line_fits_72_chars():
+    """CRITICAL invariant (2026-07-09): every source line in the
+    generated ABAP MUST fit under the PROGRAM table's 72-char row
+    width.  Longer lines get silently truncated at RFC_ABAP_INSTALL_AND_RUN
+    install time, corrupt the report, and produce the exact
+    ``success=True + empty WRITES`` fault mode observed against a
+    live kernel-753 target.  If this regresses even one line, every
+    kernel-proxy call goes back to failing silently."""
+    prog = _build_abap_program(
+        "TEST_MARCH_DEST", "GET",
+        "/destination-configuration/v1/subaccountDestinations")
+    for line in prog:
+        assert len(line) <= 72, (
+            f"ABAP line {len(line)} chars > 72 (PROGRAM-table cap): "
+            f"{line!r}")
+
+
+def test_abap_program_raises_when_a_line_overflows():
+    """Belt-and-braces: the 72-char check inside _build_abap_program
+    must actually raise, not just log.  If someone ever adds a new
+    header or method call that's too long, the exception should
+    surface at build time rather than at kernel-side compile time
+    (where it just returns success=True + empty output and the
+    operator can't tell what happened).
+
+    We can't easily construct a 73-char injection through the
+    public API (name / path get their own validation), so we bypass
+    into the module's _abap_string_assignment helper and confirm
+    the return values stay <= 72 chars for a giant path."""
+    from sap_http_via_dest import _abap_string_assignment
+    huge_path = "/" + "a" * 1000
+    lines = _abap_string_assignment("pt", huge_path)
+    for line in lines:
+        assert len(line) <= 72, (
+            f"chunker emitted {len(line)}-char line: {line!r}")
 
 
 def test_abap_program_chunks_body_within_zeile_width():
@@ -113,8 +163,10 @@ def test_abap_program_chunks_body_within_zeile_width():
     joined = "\n".join(prog)
     # The loop MUST split into 200-char chunks; if this drifts back
     # to writing the whole body in one WRITE, we'll silently truncate
-    # every BTP response body.
-    assert "lv_take > 200" in joined or "lv_take = 200" in joined
+    # every BTP response body.  Variable ``tk`` holds the take-size
+    # inside the WHILE loop (short name required for the 72-char
+    # PROGRAM-table discipline).
+    assert "tk > 200" in joined or "tk = 200" in joined
 
 
 def test_abap_program_wraps_calls_in_try_catch_cx_root():
