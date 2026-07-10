@@ -5667,11 +5667,15 @@ function showBtpMintViaCertModal(uuid) {
         </div>
 
         <div class="form-row" style="display:flex;flex-direction:column;gap:4px;margin-bottom:10px">
-          <label style="font-size:11px;color:#8b949e">
-            BTP client_id
+          <label style="font-size:11px;color:#8b949e;display:flex;align-items:center;gap:6px">
+            <span>BTP client_id</span>
             <span title="From cf service-key &lt;name&gt; &lt;keyname&gt; | jq .credentials.uaa.clientid — typical shape sb-&lt;uuid&gt;!b&lt;N&gt;|destination-xsappname!b&lt;M&gt;" style="color:#58a6ff;cursor:help">&#9432;</span>
+            <button type="button" id="btpc-autodetect-btn" onclick="autoDetectBtpClientId('${escHtml(uuid)}')" style="margin-left:auto;background:#238636;color:#fff;border:0;padding:2px 10px;border-radius:3px;cursor:pointer;font-size:10px">
+              &#128269; Auto-detect from ABAP captures
+            </button>
           </label>
           <input id="btpc-cid" placeholder="sb-&lt;serviceinstanceid&gt;!b&lt;subaccount&gt;|destination-xsappname!b&lt;xsappname-id&gt;" style="padding:6px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:4px;font-family:monospace;font-size:11px">
+          <select id="btpc-cid-choices" style="display:none;padding:6px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:4px;font-family:monospace;font-size:11px" onchange="document.getElementById('btpc-cid').value = this.value"></select>
         </div>
 
         <div class="form-row" style="display:flex;flex-direction:column;gap:4px;margin-bottom:14px">
@@ -5720,8 +5724,121 @@ function showBtpMintViaCertModal(uuid) {
   overlay.dataset.dests = JSON.stringify(dests);
 }
 
+// Auto-detect the BTP client_id from ABAP captures already in
+// SAPMAP state (OA2C_CONFIG rows, RSECTAB entries, SM59 destinations
+// to *.hana.ondemand.com, Java SecStoreFS).
+//
+// Reuses the existing /api/node/<sid>/harvest_btp_creds endpoint —
+// same one the "Harvest BTP Credentials" modal uses.  The
+// harvester returns (uaa_url, client_id, client_secret) triples;
+// for cert-auth we only care about the client_id, so a candidate
+// missing the secret still counts.  We filter to candidates whose
+// uaa_url or origin points at THIS subaccount's tenant (subdomain
+// or region match), so unrelated BTP tokens on other tenants don't
+// pollute the picker.
+async function autoDetectBtpClientId(uuid) {
+  const overlay = document.getElementById('btpc-modal-overlay');
+  if (!overlay) return;
+  const dests = JSON.parse(overlay.dataset.dests || '[]');
+  const idx = parseInt(document.getElementById('btpc-dest').value, 10);
+  const dest = dests[idx];
+  const bn = (mapState.btp_subaccounts || {})[uuid] || {};
+  const btn = document.getElementById('btpc-autodetect-btn');
+  const cidInput = document.getElementById('btpc-cid');
+  const choicesSel = document.getElementById('btpc-cid-choices');
+  const result = document.getElementById('btpc-result');
+
+  if (!dest) {
+    result.style.color = '#f85149';
+    result.textContent = 'Auto-detect needs a destination selected first';
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = 'Harvesting…';
+  result.style.color = '#8b949e';
+  result.textContent = `Harvesting BTP credential candidates from ${dest.source_sid} …`;
+
+  const r = await api('POST', `node/${dest.source_sid}/harvest_btp_creds`);
+  btn.disabled = false;
+  btn.textContent = '🔍 Auto-detect from ABAP captures';
+
+  const cands = (r && r.candidates) || [];
+  if (cands.length === 0) {
+    result.style.color = '#e3b341';
+    result.textContent =
+      `No BTP credential candidates found on ${dest.source_sid}.\n`
+      + 'The harvester scans OA2C_CONFIG + RSECTAB + Java SecStoreFS; '
+      + 'cert-auth destinations that never held a client_secret leave '
+      + 'no trace there.  Paste the client_id manually or run '
+      + '"Retrieve RFC Connections" + "Download SecStore" first.';
+    return;
+  }
+
+  // Filter to candidates that plausibly belong to THIS subaccount.
+  // Subdomain is the strongest signal (it appears in the uaa_url
+  // host), region is a weaker fall-back.
+  const target_subdomain = (bn.subdomain || '').toLowerCase();
+  const target_region = (bn.region || '').toLowerCase();
+  const target_host_lc = (dest.host || '').toLowerCase();
+  const match = cands.filter(c => {
+    const uaa = (c.uaa_url || '').toLowerCase();
+    if (target_subdomain && uaa.indexOf(target_subdomain) !== -1) return true;
+    if (target_host_lc && uaa.indexOf(target_host_lc) !== -1) return true;
+    if (target_region && (c.region_hint || '').toLowerCase() === target_region) return true;
+    return false;
+  });
+
+  // De-dupe by client_id — the same id often appears via multiple
+  // sources (SM59 + OA2C + SecStore).
+  const seen = new Set();
+  const unique = [];
+  match.forEach(c => {
+    if (c.client_id && !seen.has(c.client_id)) {
+      seen.add(c.client_id);
+      unique.push(c);
+    }
+  });
+
+  if (unique.length === 0) {
+    result.style.color = '#e3b341';
+    result.textContent =
+      `${cands.length} BTP credential(s) harvested on ${dest.source_sid}, but none `
+      + `matched subaccount ${target_subdomain || uuid.slice(0, 8)} `
+      + `(region ${target_region || '?'}).  Paste manually.`;
+    return;
+  }
+
+  if (unique.length === 1) {
+    cidInput.value = unique[0].client_id;
+    choicesSel.style.display = 'none';
+    result.style.color = '#3fb950';
+    result.textContent =
+      `Auto-detected ✓  client_id from `
+      + `${unique[0].source} (${unique[0].label || 'no label'})`;
+    return;
+  }
+
+  // Multiple hits — show a picker.  Fill the input with the first
+  // choice by default; onchange on the select swaps into the input.
+  choicesSel.innerHTML = unique.map((c, i) =>
+    `<option value="${escHtml(c.client_id)}" ${i === 0 ? 'selected' : ''}>`
+    + `${escHtml(c.source)} · ${escHtml(c.label || '?').substring(0, 60)} — `
+    + `${escHtml(c.client_id).substring(0, 50)}${(c.client_id||'').length > 50 ? '…' : ''}`
+    + `</option>`).join('');
+  choicesSel.style.display = 'block';
+  cidInput.value = unique[0].client_id;
+  result.style.color = '#3fb950';
+  result.textContent =
+    `Auto-detected ${unique.length} candidate(s) for `
+    + `${target_subdomain || uuid.slice(0, 8)}. Pick one from the `
+    + `dropdown that appeared below the client_id field.`;
+}
+
 async function doBtpMintViaCert(uuid) {
-  const overlay = document.querySelector('.modal-overlay');
+  // Target by unique id — .modal-overlay collides with several
+  // always-in-DOM modals (credentials, SCC, etc.) so a class
+  // selector grabs the wrong one and dests parses as [].
+  const overlay = document.getElementById('btpc-modal-overlay');
   const dests = JSON.parse(overlay.dataset.dests || '[]');
   const idx = parseInt(document.getElementById('btpc-dest').value, 10);
   const dest = dests[idx];
