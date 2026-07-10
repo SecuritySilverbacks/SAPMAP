@@ -5612,7 +5612,19 @@ function showBtpMintViaCertModal(uuid) {
   const bn = (mapState.btp_subaccounts || {})[uuid] || {};
   const dests = _btpEligibleCertDestinations(uuid);
   const cachedIds = mapState.btp_mint_client_ids || {};
+  // Kill any previous instance FIRST — reopening the modal without
+  // this leaves two overlays stacked and doBtpMintViaCert's lookup
+  // grabs whichever one document.querySelector finds first.
+  const existing = document.getElementById('btpc-modal-overlay');
+  if (existing) existing.remove();
   const overlay = document.createElement('div');
+  // Unique id — plain `.modal-overlay` class collides with the
+  // pre-existing (permanently-in-DOM) credentials / SCC / etc.
+  // modals, and querySelector('.modal-overlay') would return one
+  // of those instead of ours.  Bug pin (2026-07-10): dests read
+  // as [] → "No destination selected" despite dropdown being
+  // clearly populated in the screenshot.
+  overlay.id = 'btpc-modal-overlay';
   overlay.className = 'modal-overlay';
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center';
   overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
