@@ -4877,6 +4877,87 @@ def create_app(api: SAPMAPApi) -> Bottle:
               f"candidate(s) from existing captures")
         return json.dumps({"candidates": cands})
 
+    def _post_mint_auto_enumerate(token: str, region: str,
+                                     claims: dict, sid: str,
+                                     data: dict) -> dict:
+        """Shared post-mint auto-enumerate step for both the basic-
+        auth and cert-auth mint routes.
+
+        Stores nothing itself — the caller already put the token in
+        ``api.btp_tokens[region]``.  Pulls destinations via the
+        destination-service token, materialises / refreshes the
+        BTPSubaccountNode, folds any FQDN-keyed placeholders,
+        links captured destinations back to on-prem SAPNodes, and
+        auto-fires standard scans on freshly-materialised placeholders.
+
+        Honours ``data.auto_enumerate=false`` (script-side opt-out
+        for the "mint now, enumerate in a separate explicit step"
+        pattern).  Returns the ``enum_result`` dict the caller
+        should include in its response body.
+        """
+        auto = data.get("auto_enumerate", True)
+        if isinstance(auto, str):
+            auto = auto.lower() not in ("false", "0", "no", "off")
+        if not auto:
+            return {}
+        try:
+            from sap_btp import (
+                pull_destinations_via_destination_token,
+                link_destinations_to_onprem,
+                extract_subaccount_id_from_destination_token,
+                extract_subdomain_from_token,
+            )
+            from sapmap_models import BTPSubaccountNode
+            dests, err, sub_uuid = (
+                pull_destinations_via_destination_token(
+                    token, region))
+            if err:
+                print(f"[-] {sid}: auto-enumerate after mint "
+                      f"failed — {err}")
+                return {"error": err}
+            sub_node = api.state.btp_subaccounts.get(sub_uuid)
+            if sub_node is None:
+                sub_node = BTPSubaccountNode(uuid=sub_uuid)
+                api.state.btp_subaccounts[sub_uuid] = sub_node
+            sub_node.region = region
+            sub_node.subdomain = (
+                extract_subdomain_from_token(claims)
+                or sub_node.subdomain)
+            sub_node.enumerated_at = datetime.now().isoformat()
+            sub_node.destinations = dests
+            _folded = api.state.fold_btp_placeholders(sub_node)
+            if _folded:
+                print(f"[+] {sid}: folded {_folded} placeholder "
+                      f"BTP node(s) into subaccount {sub_uuid[:8]}")
+            before_disc = {
+                s for s, n in api.state.nodes.items()
+                if n.discovered_via_btp}
+            linked = link_destinations_to_onprem(
+                api.state, sub_node)
+            new_disc = [
+                s for s, n in api.state.nodes.items()
+                if n.discovered_via_btp
+                   and s not in before_disc]
+            for new_sid in new_disc:
+                if hasattr(api, "_kick_standard_scan"):
+                    api._kick_standard_scan(new_sid)
+            captured = sum(1 for d in dests
+                            if d.cleartext_captured)
+            print(f"[+] {sid}: post-mint enumerate — "
+                  f"{len(dests)} destination(s), {captured} "
+                  f"cleartext, {linked} linked to on-prem "
+                  f"(subaccount {sub_uuid[:8]})")
+            return {
+                "subaccount_uuid": sub_uuid,
+                "destinations": len(dests),
+                "cleartext_captured": captured,
+                "linked_to_onprem": linked,
+            }
+        except Exception as e:
+            print(f"[-] {sid}: auto-enumerate after mint raised "
+                  f"— {e!s}")
+            return {"error": str(e)[:200]}
+
     @app.route("/api/node/<sid>/mint_btp_token", method="POST")
     def node_mint_btp_token(sid):
         """Exchange a captured (uaa_url, client_id, client_secret) for
@@ -5002,82 +5083,177 @@ def create_app(api: SAPMAPApi) -> Bottle:
         except Exception:
             pass
 
-        # Auto-enumerate destinations on the bound subaccount.
-        # Default ON because the only useful next step after minting
-        # is reading the destinations the token unlocks.  Pass
-        # auto_enumerate=false to opt out (e.g. when chaining the
-        # explicit btp_pull_destinations_for_token step from a script).
-        auto = data.get("auto_enumerate", True)
-        if isinstance(auto, str):
-            auto = auto.lower() not in ("false", "0", "no", "off")
-        enum_result: dict = {}
-        if auto:
-            try:
-                from sap_btp import (
-                    pull_destinations_via_destination_token,
-                    link_destinations_to_onprem,
-                    extract_subaccount_id_from_destination_token,
-                    extract_subdomain_from_token,
-                )
-                from sapmap_models import BTPSubaccountNode
-                dests, err, sub_uuid = (
-                    pull_destinations_via_destination_token(
-                        token, region))
-                if err:
-                    print(f"[-] {sid}: auto-enumerate after mint "
-                          f"failed — {err}")
-                    enum_result = {"error": err}
-                else:
-                    sub_node = api.state.btp_subaccounts.get(sub_uuid)
-                    if sub_node is None:
-                        sub_node = BTPSubaccountNode(uuid=sub_uuid)
-                        api.state.btp_subaccounts[sub_uuid] = sub_node
-                    sub_node.region = region
-                    sub_node.subdomain = (
-                        extract_subdomain_from_token(claims)
-                        or sub_node.subdomain)
-                    sub_node.enumerated_at = (
-                        datetime.now().isoformat())
-                    sub_node.destinations = dests
-                    # Fold any FQDN-keyed placeholder cloud for the
-                    # same subdomain (created earlier by
-                    # materialise_type_g_target when an RFC destination
-                    # to *.hana.ondemand.com surfaced before harvest).
-                    _folded = api.state.fold_btp_placeholders(sub_node)
-                    if _folded:
-                        print(f"[+] {sid}: folded {_folded} placeholder "
-                              f"BTP node(s) into subaccount {sub_uuid[:8]}")
-                    before_disc = {
-                        s for s, n in api.state.nodes.items()
-                        if n.discovered_via_btp}
-                    linked = link_destinations_to_onprem(
-                        api.state, sub_node)
-                    new_disc = [
-                        s for s, n in api.state.nodes.items()
-                        if n.discovered_via_btp
-                           and s not in before_disc]
-                    for new_sid in new_disc:
-                        if hasattr(api, "_kick_standard_scan"):
-                            api._kick_standard_scan(new_sid)
-                    captured = sum(1 for d in dests
-                                    if d.cleartext_captured)
-                    print(f"[+] {sid}: post-mint enumerate — "
-                          f"{len(dests)} destination(s), {captured} "
-                          f"cleartext, {linked} linked to on-prem "
-                          f"(subaccount {sub_uuid[:8]})")
-                    enum_result = {
-                        "subaccount_uuid": sub_uuid,
-                        "destinations": len(dests),
-                        "cleartext_captured": captured,
-                        "linked_to_onprem": linked,
-                    }
-            except Exception as e:
-                print(f"[-] {sid}: auto-enumerate after mint raised "
-                      f"— {e!s}")
-                enum_result = {"error": str(e)[:200]}
+        enum_result = _post_mint_auto_enumerate(
+            token, region, claims, sid, data)
 
         return json.dumps({"ok": True, "region": region,
                            "enumerate": enum_result})
+
+    @app.route("/api/node/<sid>/mint_btp_token_via_cert",
+                method="POST")
+    def node_mint_btp_token_via_cert(sid):
+        """Mint a BTP access token via the RFC-8705 mTLS cert-auth
+        flow, using an existing X509 Type-G SM59 destination on
+        ``sid`` as the transport.
+
+        Body params:
+          destination_name  — SM59 destination name (required).  Must
+                               already exist on ``sid`` with
+                               http_auth_type=X509 and a URL pointing
+                               at ``.hana.ondemand.com``.
+          client_id          — BTP-issued client_id from an x509
+                               service key (required).
+          scope              — optional space-separated scopes to
+                               request (blank = whatever the client
+                               is entitled to by default).
+          auto_enumerate     — default True; set False to skip the
+                               post-mint pull-destinations step.
+
+        On success:
+          * ``api.btp_tokens[region] = token``
+          * ``api.btp_mint_client_ids[(sub_uuid, dest_name)] = client_id``
+            so re-mint doesn't re-prompt for the id
+          * CRITICAL finding with the cert thumbprint
+            (``cnf.x5t#S256`` claim) in meta
+          * auto-enumerate + auto-fold placeholder BTP nodes
+        """
+        from sap_onprem_to_btp import mint_btp_token_via_cert
+        from sap_btp import extract_region_from_token
+        response.content_type = "application/json"
+        data = request.json or {}
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        dest_name = (data.get("destination_name") or "").strip()
+        client_id = (data.get("client_id") or "").strip()
+        scope = (data.get("scope") or "").strip()
+
+        missing = [n for n, v in
+                    (("destination_name", dest_name),
+                     ("client_id", client_id)) if not v]
+        if missing:
+            return json.dumps({"error":
+                f"missing required field(s): {', '.join(missing)}"})
+
+        # Locate the destination on this node — must be X509 and
+        # target a BTP host.  Reject early with a clear message; the
+        # kernel-proxy call would fail later anyway but with a much
+        # less actionable "invalid_client" or SSL error.
+        conn = next((c for c in api.state.connections
+                     if c.source_sid == sid
+                        and c.destination_name == dest_name), None)
+        if conn is None:
+            return json.dumps({"error":
+                f"destination {dest_name!r} not found on {sid}.  "
+                f"Run Retrieve RFC Connections first."})
+        if (conn.http_auth_type or "").upper() != "X509":
+            return json.dumps({"error":
+                f"destination {dest_name!r} is not X509 "
+                f"(http_auth_type={conn.http_auth_type or 'unset'}).  "
+                f"Cert-auth mint requires SM59 Q=A (SSL Client "
+                f"Certificate) + a configured PSE."})
+        from urllib.parse import urlparse as _up_cert
+        try:
+            target_host = (_up_cert(conn.http_url or "").hostname
+                           or "").lower()
+        except Exception:
+            target_host = ""
+        if ".hana.ondemand.com" not in target_host:
+            return json.dumps({"error":
+                f"destination {dest_name!r} target host "
+                f"{target_host!r} is not a BTP endpoint.  Cert-auth "
+                f"mint only targets XSUAA at "
+                f"<sub>.authentication.cert.<region>.hana.ondemand.com."})
+
+        # Warn (do not fail) when the URL doesn't include the .cert.
+        # variant of the authentication host.  XSUAA's mTLS token
+        # endpoint lives at <sub>.authentication.CERT.<region>… —
+        # the non-cert variant will 401 with invalid_client.  We
+        # surface this as a hint in the ok=False response so the
+        # UI can render a "point at .cert. variant" button.
+        hint = ""
+        if (".authentication." in target_host
+                and ".authentication.cert." not in target_host):
+            hint = (f"destination targets {target_host!r} — the mTLS "
+                    f"token endpoint is at the .cert. variant "
+                    f"(<sub>.authentication.CERT.<region>.hana."
+                    f"ondemand.com).  If the mint 401s with "
+                    f"invalid_client, point this destination at the "
+                    f".cert. hostname (same PSE, same client_id) and "
+                    f"retry.")
+
+        creds = node.best_credentials()
+        token, err, claims = mint_btp_token_via_cert(
+            node, dest_name, client_id, creds, scope=scope)
+        if err:
+            print(f"[-] {sid}: cert-auth BTP mint failed — {err}")
+            out = {"ok": False, "error": err}
+            if hint:
+                out["hint"] = hint
+            return json.dumps(out)
+
+        region = extract_region_from_token(token) or ""
+        if not region:
+            return json.dumps({"ok": False,
+                               "error": ("token minted but region "
+                                          "could not be derived "
+                                          "from iss claim"),
+                               "claims": claims})
+
+        api.btp_tokens[region] = token
+        thumbprint = ""
+        try:
+            cnf = claims.get("cnf") or {}
+            thumbprint = cnf.get("x5t#S256") or ""
+        except Exception:
+            pass
+
+        # Cache the (subaccount, destination) → client_id pair in
+        # process memory so a re-mint after token expiry doesn't
+        # re-prompt.  Deliberately NOT persisted to .sapmap — the
+        # client_id is a semi-secret best kept out of on-disk state.
+        try:
+            zid = claims.get("zid") or ""
+            if zid:
+                if not hasattr(api, "btp_mint_client_ids"):
+                    api.btp_mint_client_ids = {}
+                api.btp_mint_client_ids[(zid, dest_name)] = client_id
+        except Exception:
+            pass
+
+        print(f"[+] {sid}: BTP cert-auth mint OK — region {region!r} "
+              f"(cid={client_id[:40]}…, "
+              f"thumbprint={thumbprint[:12]}…, "
+              f"scope={claims.get('scope', '?')})")
+        try:
+            sapmap_findings.emit_finding(
+                "CRITICAL", sid,
+                f"On-prem → BTP lateral: minted access token for "
+                f"region {region} via RFC-8705 cert-auth through "
+                f"destination {dest_name} (PSE "
+                f"{conn.http_cert_pse or '?'}).  Token is bound to "
+                f"the client cert (x5t#S256={thumbprint[:16]}…) — "
+                f"anyone with the same cert can re-mint at will.",
+                ref="onprem.to.btp.token_minted_via_cert",
+                meta={"region":       region,
+                      "client_id":    client_id,
+                      "destination":  dest_name,
+                      "pse":          conn.http_cert_pse or "",
+                      "thumbprint":   thumbprint,
+                      "target_host":  target_host})
+        except Exception:
+            pass
+
+        enum_result = _post_mint_auto_enumerate(
+            token, region, claims, sid, data)
+
+        return json.dumps({
+            "ok":          True,
+            "region":      region,
+            "thumbprint":  thumbprint,
+            "scopes":      claims.get("scope") or [],
+            "enumerate":   enum_result,
+        })
 
     @app.route("/api/node/<sid>/set_type", method="POST")
     def node_set_type(sid):
