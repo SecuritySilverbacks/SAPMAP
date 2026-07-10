@@ -217,6 +217,26 @@ def test_accept_encoding_identity_header_emitted():
         assert "'identity'" in joined
 
 
+def test_connection_close_header_emitted():
+    """S4H kernel 793 empirically returned 0 bytes from BOTH get_data
+    and get_cdata when XSUAA answered 200 with Transfer-Encoding:
+    chunked and no Content-Length.  Ask for Connection: close so the
+    reverse proxy drops chunked framing and the ABAP client reads a
+    close-delimited body instead."""
+    for method in ("GET", "POST"):
+        lines = _build_abap_program(
+            "T", method, "/oauth/token",
+            body=("grant_type=client_credentials"
+                   if method == "POST" else ""),
+            content_type=("application/x-www-form-urlencoded"
+                            if method == "POST" else ""))
+        joined = "\n".join(lines)
+        assert "'Connection'" in joined, (
+            f"Connection header missing on {method} — chunked-body "
+            f"kernel bug will re-trigger")
+        assert "'close'" in joined
+
+
 def test_diagnostic_markers_emitted():
     """The wrapper writes ~~~CENC:, ~~~CLEN:, ~~~XLEN: alongside the
     existing ~~~STATUS: / ~~~REASON: so the parser can distinguish
