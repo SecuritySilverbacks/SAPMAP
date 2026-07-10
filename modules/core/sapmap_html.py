@@ -1302,6 +1302,7 @@ body {
 <div class="ctx-menu" id="btp-ctx-menu">
   <div class="ctx-item" data-action="btp_details">&#128269; View Subaccount Details</div>
   <div class="ctx-sep"></div>
+  <div class="ctx-item" data-action="btp_mint_via_cert">&#128273; Mint Token via Cert-Auth (RFC 8705)</div>
   <div class="ctx-item" data-action="btp_pull_destinations">&#128229; Refresh Destinations</div>
   <div class="ctx-item" data-action="btp_highlight_links">&#128279; Highlight Linked On-prem Targets</div>
   <div class="ctx-sep"></div>
@@ -5517,6 +5518,9 @@ document.getElementById('btp-ctx-menu').addEventListener('click', function(e) {
     case 'btp_details':
       showBTPDetail(uuid);
       break;
+    case 'btp_mint_via_cert':
+      showBtpMintViaCertModal(uuid);
+      break;
     case 'btp_pull_destinations':
       btpRefreshDestinations(uuid);
       break;
@@ -5552,6 +5556,208 @@ async function btpRefreshDestinations(uuid) {
   } catch (e) {
     alert('Refresh error: ' + e);
   }
+}
+
+// RFC 8705 cert-auth token mint UX.
+//
+// Prereqs the operator has to have set up before this runs:
+//   * BTP-side: an x509 service key (X509_PROVIDED or _GENERATED)
+//     on a destination-service instance, granting whatever scopes
+//     the token should carry
+//   * On-prem: an SM59 Type-G destination with SSL Client PSE set
+//     to the cert BTP has on file, URL pointing at the
+//     <sub>.authentication.cert.<region>.hana.ondemand.com/oauth/token
+//     endpoint, Q=A (SSL Client Certificate).  See the README for
+//     the full setup walk-through.
+//
+// The modal lists every eligible X509 Type-G destination in the
+// session (any on-prem system may source one; multiple destinations
+// per subaccount is legal) and asks for the BTP-issued client_id.
+// The mint helper's response is echoed inline so the operator sees
+// the enumerate delta without a second click.
+function _btpEligibleCertDestinations(uuid) {
+  const bn = (mapState.btp_subaccounts || {})[uuid] || {};
+  const target = (bn.subdomain || '').toLowerCase();
+  const hostSuffix = '.hana.ondemand.com';
+  const out = [];
+  (mapState.connections || []).forEach(c => {
+    if (!c) return;
+    if ((c.conn_type || '') !== 'http') return;
+    if ((c.http_auth_type || '').toUpperCase() !== 'X509') return;
+    const url = c.http_url || '';
+    if (!url) return;
+    let host = '';
+    try { host = new URL(url).hostname.toLowerCase(); } catch (_) { return; }
+    if (!host.endsWith(hostSuffix)) return;
+    // Loose match on subdomain — the subaccount tenant's XSUAA
+    // host starts with the subdomain (or its cert. sibling).
+    if (target && !host.startsWith(target + '.') && !host.startsWith(target + '-')) {
+      // No positive subdomain match — but the destination still
+      // lands in the same tenant if the subaccount was
+      // auto-materialised keyed by hostname.  Include as a weak
+      // candidate; the operator picks.
+    }
+    out.push({
+      source_sid: c.source_sid,
+      dest_name: c.destination_name,
+      host: host,
+      pse: c.http_cert_pse || '',
+      is_cert_host: host.indexOf('.authentication.cert.') !== -1,
+    });
+  });
+  return out;
+}
+
+function showBtpMintViaCertModal(uuid) {
+  const bn = (mapState.btp_subaccounts || {})[uuid] || {};
+  const dests = _btpEligibleCertDestinations(uuid);
+  const cachedIds = mapState.btp_mint_client_ids || {};
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center';
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+  const destOptions = dests.map((d, i) => {
+    const warn = d.is_cert_host ? ''
+      : ' <span style="color:#e3b341;font-size:10px">(non-.cert. host — will 401)</span>';
+    return `<option value="${i}" ${i === 0 ? 'selected' : ''}>` +
+      `${escHtml(d.source_sid)} · ${escHtml(d.dest_name)} → ` +
+      `${escHtml(d.host)} (PSE ${escHtml(d.pse || '?')})</option>`;
+  }).join('');
+
+  const noDestBlock = `
+    <div style="padding:14px;background:#0d1117;border:1px dashed #30363d;border-radius:6px;text-align:center;color:#8b949e;font-size:12px;line-height:1.5">
+      No eligible X509 destinations found for this subaccount.<br>
+      Create an SM59 Type-G destination on the on-prem system with:<br>
+      &nbsp;&nbsp;• Host: <code>&lt;subdomain&gt;.authentication.cert.&lt;region&gt;.hana.ondemand.com</code><br>
+      &nbsp;&nbsp;• Port: <code>443</code>, Path Prefix: <code>/oauth/token</code><br>
+      &nbsp;&nbsp;• Logon &amp; Security: <b>SSL Active</b>, PSE holding the cert BTP has on file, Q=A<br>
+      then run <b>Retrieve RFC Connections</b> and re-open this modal.
+    </div>`;
+
+  overlay.innerHTML = `
+    <div class="modal" style="max-width:820px;width:96%;max-height:90vh;overflow-y:auto;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px 20px;color:#c9d1d9">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <h3 style="margin:0;color:#f0883e">&#128273; Mint BTP Token via Cert-Auth (RFC 8705)</h3>
+        <button onclick="this.closest('.modal-overlay').remove()" style="background:transparent;border:0;color:#c9d1d9;font-size:22px;cursor:pointer">&times;</button>
+      </div>
+      <div style="font-size:12px;color:#8b949e;margin-bottom:12px;line-height:1.5">
+        Target subaccount <code>${escHtml(bn.subdomain || uuid.slice(0, 8))}</code> (region <code>${escHtml(bn.region || '?')}</code>).
+        The SAP kernel presents the PSE's client cert on the mTLS handshake to XSUAA's
+        <code>/oauth/token</code> endpoint; BTP validates the RFC-8705 x5t#S256 binding and issues a
+        destination-service-scoped access token — <b>no client_secret required</b>.
+      </div>
+
+      ${dests.length === 0 ? noDestBlock : `
+        <div class="form-row" style="display:flex;flex-direction:column;gap:4px;margin-bottom:10px">
+          <label style="font-size:11px;color:#8b949e">Destination (source · SM59 name → BTP host)</label>
+          <select id="btpc-dest" style="padding:6px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:4px;font-family:monospace;font-size:11px">${destOptions}</select>
+        </div>
+
+        <div class="form-row" style="display:flex;flex-direction:column;gap:4px;margin-bottom:10px">
+          <label style="font-size:11px;color:#8b949e">
+            BTP client_id
+            <span title="From cf service-key &lt;name&gt; &lt;keyname&gt; | jq .credentials.uaa.clientid — typical shape sb-&lt;uuid&gt;!b&lt;N&gt;|destination-xsappname!b&lt;M&gt;" style="color:#58a6ff;cursor:help">&#9432;</span>
+          </label>
+          <input id="btpc-cid" placeholder="sb-&lt;serviceinstanceid&gt;!b&lt;subaccount&gt;|destination-xsappname!b&lt;xsappname-id&gt;" style="padding:6px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:4px;font-family:monospace;font-size:11px">
+        </div>
+
+        <div class="form-row" style="display:flex;flex-direction:column;gap:4px;margin-bottom:14px">
+          <label style="font-size:11px;color:#8b949e">
+            Requested scope (optional)
+            <span title="Blank = default scopes on the client binding. Set to (e.g.) destination_configuration.ApiAccess to explicitly demand that scope." style="color:#58a6ff;cursor:help">&#9432;</span>
+          </label>
+          <input id="btpc-scope" placeholder="(blank = default; e.g. destination_configuration.ApiAccess)" style="padding:6px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:4px;font-family:monospace;font-size:11px">
+        </div>
+
+        <div style="display:flex;justify-content:flex-end;gap:8px">
+          <button onclick="this.closest('.modal-overlay').remove()" style="background:transparent;color:#c9d1d9;border:1px solid #30363d;padding:6px 14px;border-radius:4px;cursor:pointer">Cancel</button>
+          <button id="btpc-mint-btn" onclick="doBtpMintViaCert('${escHtml(uuid)}')" style="background:#1f6feb;color:#fff;border:0;padding:6px 14px;border-radius:4px;cursor:pointer">Mint Token</button>
+        </div>
+
+        <div id="btpc-result" style="margin-top:12px;font-size:12px;font-family:monospace;color:#8b949e;white-space:pre-wrap"></div>
+      `}
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  // Pre-fill client_id from the in-memory cache if we've minted for
+  // this (subaccount, destination) before.  Backend serialises the
+  // cache with "<uuid>|<dest_name>" keys (Python tuples can't
+  // JSON-serialise), so we build the string key here.
+  if (dests.length > 0) {
+    const cacheHit = cachedIds[uuid + '|' + dests[0].dest_name];
+    if (cacheHit) document.getElementById('btpc-cid').value = cacheHit;
+  }
+
+  // React to destination-picker changes: swap in whichever cached
+  // client_id matches the newly-picked destination.  Convenience for
+  // operators with multiple X509 destinations to the same tenant.
+  const destPicker = document.getElementById('btpc-dest');
+  if (destPicker) {
+    destPicker.addEventListener('change', () => {
+      const j = parseInt(destPicker.value, 10);
+      const key = uuid + '|' + (dests[j] || {}).dest_name;
+      const hit = cachedIds[key];
+      if (hit) document.getElementById('btpc-cid').value = hit;
+    });
+  }
+
+  // Store the destination list on the modal so the mint handler
+  // can read them back without re-computing.
+  overlay.dataset.dests = JSON.stringify(dests);
+}
+
+async function doBtpMintViaCert(uuid) {
+  const overlay = document.querySelector('.modal-overlay');
+  const dests = JSON.parse(overlay.dataset.dests || '[]');
+  const idx = parseInt(document.getElementById('btpc-dest').value, 10);
+  const dest = dests[idx];
+  const cid = document.getElementById('btpc-cid').value.trim();
+  const scope = document.getElementById('btpc-scope').value.trim();
+  const result = document.getElementById('btpc-result');
+  const btn = document.getElementById('btpc-mint-btn');
+
+  result.style.color = '#c9d1d9';
+  if (!dest) { result.style.color = '#f85149'; result.textContent = 'No destination selected'; return; }
+  if (!cid) { result.style.color = '#f85149'; result.textContent = 'client_id is required'; return; }
+
+  btn.disabled = true;
+  btn.textContent = 'Minting…';
+  result.textContent = `POST /oauth/token via ${dest.source_sid}/${dest.dest_name} → ${dest.host} …`;
+
+  const r = await api('POST', `node/${dest.source_sid}/mint_btp_token_via_cert`, {
+    destination_name: dest.dest_name,
+    client_id: cid,
+    scope: scope,
+  });
+  btn.disabled = false;
+  btn.textContent = 'Mint Token';
+
+  if (!r || !r.ok) {
+    result.style.color = '#f85149';
+    let msg = `Mint failed: ${(r && r.error) || 'unknown error'}`;
+    if (r && r.hint) msg += `\n\nHint: ${r.hint}`;
+    result.textContent = msg;
+    return;
+  }
+
+  result.style.color = '#3fb950';
+  const e = r.enumerate || {};
+  let line = `Token minted for region ${r.region} ✓`;
+  if (r.thumbprint) line += `\n  bound to cert x5t#S256=${r.thumbprint.substring(0, 16)}…`;
+  if (Array.isArray(r.scopes) && r.scopes.length) {
+    line += `\n  scopes: ${r.scopes.join(', ')}`;
+  }
+  if (typeof e.destinations === 'number') {
+    line += `\n\nauto-enumerate: ${e.destinations} destination(s), `
+          + `${e.cleartext_captured} cleartext, `
+          + `${e.linked_to_onprem} linked to on-prem`;
+  } else if (e.error) {
+    line += `\n\nauto-enumerate error: ${e.error}`;
+  }
+  result.textContent = line;
+  startPolling();
 }
 
 function btpHighlightLinkedTargets(uuid) {

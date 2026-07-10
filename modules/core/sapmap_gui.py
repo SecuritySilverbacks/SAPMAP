@@ -1758,6 +1758,12 @@ class SAPMAPApi:
         # operator pasting a new token for the same region replaces
         # the previous one.  A blank token clears the slot.
         self.btp_tokens: dict = {}
+        # BTP mint client_id cache.  Map: (subaccount_uuid,
+        # dest_name) -> client_id.  Populated by the cert-auth mint
+        # route so a re-mint after token expiry doesn't re-prompt
+        # for the id.  Process-memory only; not persisted (the
+        # client_id is a semi-secret best kept off disk).
+        self.btp_mint_client_ids: dict = {}
         # BTP connectivity-proxy override.  Set by the operator via
         # Settings → BTP Connectivity Proxy Override (or per-call body
         # param).  Used by the PP-impersonation live probe — empty =
@@ -1912,6 +1918,16 @@ class SAPMAPApi:
         d["btp_token_regions"] = list((self.btp_tokens or {}).keys())
         d["btp_proxy_override"] = self.btp_proxy_override or ""
         d["btp_proxy_auth_token_present"] = bool(self.btp_proxy_auth_token)
+        # BTP mint client_id cache: keyed "<subaccount_uuid>|<dest_name>"
+        # so the cert-auth mint modal can pre-fill the field on re-mint
+        # after a token expiry.  Held in memory only — populated by
+        # the /mint_btp_token_via_cert route, cleared on process
+        # restart, never touches disk (would be a semi-secret leak in
+        # session snapshots).
+        _mint_cache = getattr(self, "btp_mint_client_ids", None) or {}
+        d["btp_mint_client_ids"] = {
+            f"{k[0]}|{k[1]}": v for k, v in _mint_cache.items()
+        }
         return d
 
 
