@@ -221,6 +221,31 @@ def test_2xx_without_access_token_is_error():
     assert "no access_token" in err
 
 
+def test_2xx_with_empty_wire_body_names_compression_cause():
+    """The bug we chased down live: some SAP kernels return empty
+    from get_cdata() when XSUAA replies with Content-Encoding: gzip.
+    The wrapper now surfaces content_length + content_encoding +
+    wire_bytes as diagnostic fields; the mint helper uses them to
+    render a specific error naming compression as the likely cause
+    (instead of the previous cryptic "returned no access_token
+    field: {}")."""
+    resp = {"ok": True, "status": 200,
+             "body": "",                # get_cdata came back empty
+             "error": "",
+             "content_encoding": "gzip",
+             "content_length": "1183",   # server DID send bytes
+             "wire_bytes": 0}
+    with patch("sap_onprem_to_btp.call_via_destination",
+                return_value=resp):
+        token, err, _ = mint_btp_token_via_cert(
+            _node(), "TO_BTP", "sb-x!b1")
+    assert token == ""
+    assert "empty on the wire" in err
+    assert "gzip" in err
+    assert "1183" in err
+    assert "Accept-Encoding: identity" in err
+
+
 # ---------------------------------------------------------------------------
 # Argument + kernel-proxy failure guards
 # ---------------------------------------------------------------------------

@@ -192,6 +192,78 @@ def test_get_still_carries_accept_json():
 # 72-char guard is still armed
 # ---------------------------------------------------------------------------
 
+def test_accept_encoding_identity_header_emitted():
+    """XSUAA + most BTP APIs would otherwise send gzip'd bodies, and
+    some SAP kernel versions return an empty string from get_cdata()
+    on compressed replies.  Force uncompressed with
+    Accept-Encoding: identity on every call — GET and POST alike."""
+    for method in ("GET", "POST"):
+        lines = _build_abap_program(
+            "T", method, "/oauth/token",
+            body=("grant_type=client_credentials"
+                   if method == "POST" else ""),
+            content_type=("application/x-www-form-urlencoded"
+                            if method == "POST" else ""))
+        joined = "\n".join(lines)
+        assert "'Accept-Encoding'" in joined, (
+            f"Accept-Encoding header missing on {method} — response "
+            f"would come back gzip'd and get_cdata would return empty")
+        assert "'identity'" in joined
+
+
+def test_diagnostic_markers_emitted():
+    """The wrapper writes ~~~CENC:, ~~~CLEN:, ~~~XLEN: alongside the
+    existing ~~~STATUS: / ~~~REASON: so the parser can distinguish
+    "server sent 0 bytes" from "kernel couldn't decode a compressed
+    body".  Without these markers, an empty-body 200 looks
+    identical to the operator regardless of cause."""
+    lines = _build_abap_program(
+        "TO_BTP", "POST", "/oauth/token",
+        body="grant_type=client_credentials&client_id=x",
+        content_type="application/x-www-form-urlencoded")
+    joined = "\n".join(lines)
+    assert "'~~~CENC:'" in joined
+    assert "'~~~CLEN:'" in joined
+    assert "'~~~XLEN:'" in joined
+
+
+def test_get_data_fallback_when_cdata_empty():
+    """When get_cdata() returns an empty string, the wrapper must
+    fall through to get_data() (raw XSTRING) and codepage-decode.
+    This is the gzip-compressed-response rescue path for older
+    kernels that swallow compressed bodies at the string layer."""
+    lines = _build_abap_program(
+        "T", "POST", "/oauth/token",
+        body="x=y", content_type="text/plain")
+    joined = "\n".join(lines)
+    assert "get_data(" in joined
+    assert "cl_abap_codepage=>convert_from" in joined
+    assert "codepage = 'UTF-8'" in joined
+
+
+def test_parser_captures_diagnostic_fields():
+    """Corresponding parser side: the diagnostic markers turn into
+    result['content_encoding'] / ['content_length'] / ['wire_bytes']."""
+    from sap_http_via_dest import _parse_abap_output
+    out = _parse_abap_output([
+        "~~~STATUS:            200",
+        "~~~REASON: OK",
+        "~~~CENC: gzip",
+        "~~~CLEN: 1234",
+        "~~~XLEN:            0",
+        "~~~BODY_START",
+        "~~~BODY_END",
+    ])
+    assert out["status"] == 200
+    assert out["content_encoding"] == "gzip"
+    assert out["content_length"] == "1234"
+    assert out["wire_bytes"] == 0
+    # ok=True because status is set even though body empty — the mint
+    # helper then surfaces the "compressed body couldn't decode" hint
+    # from these diagnostic fields.
+    assert out["ok"] is True
+
+
 def test_72_char_guard_still_fires_on_body_path():
     """If a body ever manages to produce a line over 72 chars —
     would silently truncate on the PROGRAM table row — the guard
