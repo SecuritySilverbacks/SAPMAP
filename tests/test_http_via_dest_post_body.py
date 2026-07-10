@@ -167,15 +167,21 @@ def test_body_with_bang_and_pipe_accepted():
 
 def test_get_no_body_emits_no_rq_data_line():
     """When the caller doesn't pass a body, the ABAP report must
-    NOT declare an unused `rq` variable — kernels that treat unused
-    DATAs as warnings would emit noise, and the historical shape
-    is what every existing regression pin expects."""
+    NOT declare an unused `rq` variable, set_cdata, or the request-
+    side Content-Type header.  The response-side Content-Type read
+    (``ct = c->response->get_header_field(...)``) is a diagnostic
+    and DOES fire on every call — regardless of method."""
     lines = _build_abap_program(
         "TO_BTP", "GET",
         "/destination-configuration/v1/subaccountDestinations")
     assert not any("DATA: rq" in ln for ln in lines)
     assert not any("set_cdata" in ln for ln in lines)
-    assert not any("'Content-Type'" in ln for ln in lines)
+    # Request-side header emission uses request->set_header_field —
+    # that's what must NOT fire for a Content-Type on a GET.  The
+    # response-side get_header_field('Content-Type') diagnostic is
+    # unrelated and always runs.
+    joined = "\n".join(lines)
+    assert "request->set_header_field(\n    name  = 'Content-Type'" not in joined
 
 
 def test_get_still_carries_accept_json():
@@ -243,25 +249,67 @@ def test_get_data_fallback_when_cdata_empty():
 
 def test_parser_captures_diagnostic_fields():
     """Corresponding parser side: the diagnostic markers turn into
-    result['content_encoding'] / ['content_length'] / ['wire_bytes']."""
+    result['content_encoding'] / ['content_length'] / ['wire_bytes']
+    / ['transfer_encoding'] / ['content_type'] / ['response_headers']."""
     from sap_http_via_dest import _parse_abap_output
     out = _parse_abap_output([
         "~~~STATUS:            200",
         "~~~REASON: OK",
         "~~~CENC: gzip",
         "~~~CLEN: 1234",
+        "~~~TENC: chunked",
+        "~~~CTYP: application/json",
         "~~~XLEN:            0",
+        "~~~HDR: Content-Type = application/json",
+        "~~~HDR: Server = nginx",
         "~~~BODY_START",
         "~~~BODY_END",
     ])
     assert out["status"] == 200
     assert out["content_encoding"] == "gzip"
     assert out["content_length"] == "1234"
+    assert out["transfer_encoding"] == "chunked"
+    assert out["content_type"] == "application/json"
     assert out["wire_bytes"] == 0
+    assert ("Content-Type", "application/json") in out["response_headers"]
+    assert ("Server", "nginx") in out["response_headers"]
     # ok=True because status is set even though body empty — the mint
     # helper then surfaces the "compressed body couldn't decode" hint
     # from these diagnostic fields.
     assert out["ok"] is True
+
+
+def test_body_read_uses_get_data_first():
+    """Some SAP kernels have a "first-read consumes" bug: calling
+    get_cdata first empties the buffer for a subsequent get_data.
+    The wrapper reads get_data first now to avoid it.  Regression
+    catch: if a future refactor puts get_cdata back first, this test
+    fires."""
+    lines = _build_abap_program("T", "POST", "/oauth/token",
+                                    body="x=y", content_type="text/plain")
+    joined = "\n".join(lines)
+    cdata_pos = joined.find("get_cdata(")
+    data_pos = joined.find("get_data(")
+    assert data_pos != -1 and cdata_pos != -1
+    assert data_pos < cdata_pos, (
+        f"get_data must be called BEFORE get_cdata to avoid the "
+        f"kernel's first-read-consumes bug on chunked bodies "
+        f"(get_data at {data_pos}, get_cdata at {cdata_pos})")
+
+
+def test_response_header_dump_emitted():
+    """The full header dump (up to 20 entries) is emitted on every
+    call so operators can distinguish "kernel received nothing" from
+    "kernel got a response but body-read failed"."""
+    lines = _build_abap_program("T", "POST", "/oauth/token",
+                                    body="x=y", content_type="text/plain")
+    joined = "\n".join(lines)
+    assert "get_header_fields(" in joined
+    assert "'~~~HDR:'" in joined
+    assert "hd-name" in joined and "hd-value" in joined
+    # And the 20-entry cap must be present so a chatty proxy can't
+    # blow past the WRITE table.
+    assert "IF hc > 20." in joined
 
 
 def test_72_char_guard_still_fires_on_body_path():

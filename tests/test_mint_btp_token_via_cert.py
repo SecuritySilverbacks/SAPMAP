@@ -243,7 +243,11 @@ def test_2xx_with_empty_wire_body_names_compression_cause():
     assert "empty on the wire" in err
     assert "gzip" in err
     assert "1183" in err
-    assert "Accept-Encoding: identity" in err
+    # Message no longer names Accept-Encoding directly — after the
+    # header-dump refactor the operator gets the FULL header list
+    # on stderr and a shorter inline summary.  The header-dump path
+    # is the actionable one now; message just points there.
+    assert "Full header dump printed" in err
 
 
 # ---------------------------------------------------------------------------
