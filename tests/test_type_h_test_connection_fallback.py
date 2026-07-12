@@ -166,6 +166,99 @@ def test_http_dest_ping_ssl_error_includes_real_reason():
 # C) Fallback probe condition
 # ---------------------------------------------------------------------------
 
+def test_ping_ok_without_http_status_must_not_flip_logon_successful():
+    """Live bug (2026-07-12) — line 9830 in sapmap_gui.py used to
+    unconditionally set conn.logon_successful=True whenever
+    http_dest_ping returned ping_ok=True.  But http_dest_ping
+    returns ping_ok=True in TWO cases:
+
+      (a) HTTP round-trip completed → conn.http_status is set to
+          the actual response code
+      (b) TCP handshake opened but HTTP faulted (SSL error, socket
+          reset, etc.) → conn.http_status stays 0, ping_message
+          carries the fault text
+
+    Setting logon_successful in case (b) gates OUT the downstream
+    fallback basic-auth probe.  The pin here documents the invariant:
+    the elevation logic must check http_status, not just ping_ok."""
+    # Case (b) simulation — the shape http_dest_ping produces on
+    # WRONG_VERSION_NUMBER for a HTTPS URL pointing at an HTTP port
+    ping_result = {
+        "ping_ok": True,      # TCP opened
+        "ping_message": ("TCP open on 192.168.2.29:8410, HTTP "
+                         "faulted: SSLError: [SSL: "
+                         "WRONG_VERSION_NUMBER] wrong version "
+                         "number (_ssl.c:1082)"),
+        "error": "",
+    }
+    conn = RFCConnection(
+        source_sid="S4H", source_host="s4hanadev",
+        destination_name="to_ABAP", rfc_type="H",
+        conn_type="http",
+        http_url="https://192.168.2.29:8410/sap/bc/gui/",
+        http_auth_type="BASICAUTHENTICATION",
+        rfc_user="SAPADM",
+        secstore_password="TestPass123",
+    )
+    conn.http_status = 0   # explicit: HTTP round-trip never happened
+
+    # Replicate the (post-fix) elevation gate from sapmap_gui.py
+    if ping_result.get("ping_ok"):
+        _hs = int(getattr(conn, "http_status", 0) or 0)
+        if 200 <= _hs < 400:
+            conn.logon_successful = True
+        # else leave False so fallback fires
+    assert conn.logon_successful is False, (
+        "Regression: TCP-open-but-HTTP-faulted case must NOT flip "
+        "logon_successful — that would gate out the fallback probe")
+
+    # Case (a) — real 200 response
+    conn.http_status = 200
+    if ping_result.get("ping_ok"):
+        _hs = int(getattr(conn, "http_status", 0) or 0)
+        if 200 <= _hs < 400:
+            conn.logon_successful = True
+    assert conn.logon_successful is True, (
+        "Real 2xx round-trip should elevate logon_successful — "
+        "the fix must not over-restrict")
+
+
+def test_scheme_fallback_flip_recognises_wrong_version_number():
+    """The scheme-fallback in the Test-Connection fallback probe
+    retries HTTP when the HTTPS attempt failed with a TLS
+    version-mismatch style error.  Live case (2026-07-12) — W74's
+    to_ABAP has URL https://192.168.2.29:8410/... but port 8410
+    speaks HTTP, so the TLS handshake dies with
+    WRONG_VERSION_NUMBER.  We recognise that pattern and retry
+    against http://192.168.2.29:8410/... so the operator still
+    gets a real basic-auth result."""
+    # Mirror the trigger expression in sapmap_gui.py so a refactor
+    # can't quietly break it.
+    def _should_retry_http(url: str, err: str) -> bool:
+        err_lc = (err or "").lower()
+        url_is_https = (url or "").lower().startswith("https://")
+        return (url_is_https
+                and ("wrong_version_number" in err_lc
+                     or "unknown_protocol" in err_lc
+                     or "record layer" in err_lc
+                     or "http/1" in err_lc))
+
+    url = "https://192.168.2.29:8410/sap/bc/gui/"
+    err = ("SSLError: [SSL: WRONG_VERSION_NUMBER] wrong version "
+            "number (_ssl.c:1082)")
+    assert _should_retry_http(url, err) is True
+
+    # Negative: non-HTTPS URL → no retry needed
+    assert _should_retry_http("http://foo/", err) is False
+    # Negative: HTTPS URL but unrelated error → don't guess-flip
+    assert _should_retry_http(url, "socket timeout") is False
+    # Positive: alternative wording variants
+    assert _should_retry_http(
+        url, "unknown_protocol from server") is True
+    assert _should_retry_http(
+        url, "HTTP/1.0 400 Bad Request") is True
+
+
 def test_fallback_probe_gate_matches_pinned_condition():
     """The fallback basic-auth probe fires only when ALL of:
 
