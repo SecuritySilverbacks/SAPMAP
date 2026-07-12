@@ -9556,8 +9556,26 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                 BTPSubaccountNode)
                             _bparts = _btp_host_lo.split(".")
                             _bsubdomain = _bparts[0] if _bparts else ""
-                            _bregion = (_bparts[2]
-                                         if len(_bparts) >= 3 else "")
+                            # Region parsing: for a plain
+                            # <sub>.authentication.<region>.hana.ondemand.com
+                            # host, parts[2] is the region.  But
+                            # for the cert-auth variant
+                            # <sub>.authentication.cert.<region>.hana.ondemand.com
+                            # parts[2] is 'cert' — the real region
+                            # is at parts[3].  Same for the
+                            # .authentication.cert-something. variants.
+                            # Also there are region codes that CONTAIN
+                            # dashes (eu10-004) that mustn't get
+                            # mistaken for the .cert. infix.
+                            # Approach: skip parts[2] if it exactly
+                            # equals 'cert', otherwise use it as is.
+                            _bregion = ""
+                            if len(_bparts) >= 3:
+                                _c = _bparts[2]
+                                if _c == "cert" and len(_bparts) >= 4:
+                                    _bregion = _bparts[3]
+                                else:
+                                    _bregion = _c
                             _btp_uuid = _btp_host_lo
                             if _btp_uuid not in api.state.btp_subaccounts:
                                 api.state.btp_subaccounts[_btp_uuid] = (
