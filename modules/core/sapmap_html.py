@@ -12635,20 +12635,28 @@ function _loPlaceBtpTier(xStart, yStart) {
 function layoutCircle() {
   const sids = _loSortedNodeKeys();
   const sccHosts = Object.keys(mapState.scc_nodes || {}).sort();
+  // BTP subaccounts join the ring alongside on-prem nodes.  Operator
+  // report (2026-07-12): previously the BTP nodes were dropped into
+  // a separate "tier" strip above the circle — which made sense on
+  // hierarchical layouts but on CIRCLE looked like the BTP node was
+  // orphaned in a corner, disconnected from every edge terminating
+  // on the ring.  For a circular topology the whole point is "one
+  // ring with everything on it"; the cloud tier belongs to the
+  // hierarchical / grid layouts, not this one.
+  const btpUuids = Object.keys(mapState.btp_subaccounts || {}).sort();
   const allItems = [
+    ...btpUuids.map(u => ({ id: u, obj: (mapState.btp_subaccounts||{})[u] })),
     ...sids.map(id => ({ id, obj: (mapState.nodes||{})[id] })),
     ...sccHosts.map(h => ({ id: h, obj: (mapState.scc_nodes||{})[h] })),
-  ];
+  ].filter(x => x.obj);
   if (allItems.length === 0) return;
   flashActivity('Rearranging: Circle');
   // Radius scales with total node count so boxes never overlap on the ring.
   const total = allItems.length;
   const circ = total * (_LO_BOX_W + _LO_MARGIN);
   const r = Math.max(360, circ / (2 * Math.PI));
-  // BTP cloud tier sits above the ring so it doesn't overlap centre / spokes.
-  const btpTier = _loPlaceBtpTier(_LO_MARGIN, _LO_MARGIN);
   const cx = r + _LO_BOX_W;
-  const cy = btpTier + r + _LO_BOX_H;
+  const cy = r + _LO_BOX_H + _LO_MARGIN;
   allItems.forEach(({obj}, i) => {
     const angle = (2 * Math.PI * i) / total - Math.PI / 2;
     _loCenter(obj, cx + r * Math.cos(angle), cy + r * Math.sin(angle));
@@ -12675,15 +12683,18 @@ function layoutStar() {
   sids.forEach(s => {
     if (!hub || deg[s] > deg[hub] || (deg[s] === deg[hub] && s < hub)) hub = s;
   });
+  // BTP subaccounts join the spokes too — same rationale as
+  // layoutCircle: cloud nodes make sense as ring members on a
+  // star topology, not as an orphaned tier strip.
+  const btpUuids = Object.keys(mapState.btp_subaccounts || {}).sort();
   const spokes = [
+    ...btpUuids.map(u => ({ obj: (mapState.btp_subaccounts||{})[u] })),
     ...sids.filter(s => s !== hub).map(id => ({ obj: nodes[id] })),
     ...sccHosts.map(h => ({ obj: (mapState.scc_nodes||{})[h] })),
-  ];
+  ].filter(x => x.obj);
   const r = Math.max(360, spokes.length * (_LO_BOX_W + _LO_MARGIN) / (2 * Math.PI));
-  // BTP cloud tier sits above the hub-and-spoke pattern.
-  const btpTier = _loPlaceBtpTier(_LO_MARGIN, _LO_MARGIN);
   const cx = r + _LO_BOX_W;
-  const cy = btpTier + r + _LO_BOX_H;
+  const cy = r + _LO_BOX_H + _LO_MARGIN;
   if (hub) _loCenter(nodes[hub], cx, cy);
   spokes.forEach(({obj}, i) => {
     const angle = (2 * Math.PI * i) / spokes.length - Math.PI / 2;
