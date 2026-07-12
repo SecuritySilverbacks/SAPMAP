@@ -378,15 +378,29 @@ def test_http2_disable_tries_multiple_method_names():
 
 
 def test_http2_disable_also_sends_request_hints():
-    """When no transport disable API exists, some kernel builds
-    honour the ~server_protocol request pseudo-header and/or
-    Connection: close as a "downgrade to HTTP/1.1" hint on this
-    connection.  Zero-cost belt-and-braces."""
+    """When no transport disable API exists, force HTTP/1.0 on the
+    request line.  Confirmed via live curl probe (2026-07-12):
+
+      * XSUAA on HTTP/1.1 always sends transfer-encoding: chunked
+      * XSUAA on HTTP/1.0 downgrades to HTTP/1.0 200 OK with
+        connection-close framing (no chunking)
+
+    Kernel 7.53's chunked-response reader has an empty-body bug
+    even after h2 is disabled via profile parameter.  The 1.0
+    response reader is much older/simpler code and handles
+    connection-close framing correctly.
+
+    ~server_protocol and ~http_version are both request pseudo-
+    headers different kernel builds honour; setting both is
+    zero-cost belt-and-braces."""
     lines = _build_abap_program(
         "T", "POST", "/", body="x=y", content_type="text/plain")
     joined = "\n".join(lines)
     assert "'~server_protocol'" in joined
-    assert "'HTTP/1.1'" in joined
+    assert "'~http_version'" in joined
+    assert "'HTTP/1.0'" in joined, (
+        "must force HTTP/1.0 to bypass XSUAA's chunked-response "
+        "framing that kernel 7.53's HTTP client parses incorrectly")
     assert "'Connection'" in joined
     assert "'close'" in joined
 
