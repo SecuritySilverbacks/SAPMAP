@@ -3254,9 +3254,31 @@ function updateMap() {
       color = '#a371f7'; width = 6; dashArray = '2,2';
     }
 
-    // Arrow marker
-    html += `<defs><marker id="arrow-${ci}" markerWidth="14" markerHeight="10" ` +
-      `refX="13" refY="5" orient="auto" markerUnits="userSpaceOnUse"><polygon points="0 0, 14 5, 0 10" fill="${color}"/></marker></defs>`;
+    // Direction markers.  Two problems the earlier single-arrow
+    // version had:
+    //   * on dashed lines (Type-G/H HTTP, BTP back-edges) the tiny
+    //     14×10 arrow-head was hard to distinguish from the last
+    //     dash, especially when several parallel curves overlap
+    //   * with A→B and B→A curves fanning to opposite sides, only
+    //     the arrow-head tells them apart, and small heads make
+    //     "who initiates" hard to read at a glance
+    //
+    // Solution: two markers per edge.  A SOURCE marker (filled
+    // circle "bullet") at the origin, plus a LARGER arrow-head at
+    // the destination.  Convention borrowed from UML — bullet =
+    // start, arrow = end.  Zero ambiguity even on dashed edges
+    // and even when hovering multiple parallel curves.
+    html += `<defs>` +
+      `<marker id="arrow-${ci}" markerWidth="18" markerHeight="12" ` +
+        `refX="17" refY="6" orient="auto" markerUnits="userSpaceOnUse">` +
+        `<polygon points="0 0, 18 6, 0 12" fill="${color}"/>` +
+      `</marker>` +
+      `<marker id="src-${ci}" markerWidth="10" markerHeight="10" ` +
+        `refX="5" refY="5" orient="auto" markerUnits="userSpaceOnUse">` +
+        `<circle cx="5" cy="5" r="4" fill="${color}" ` +
+                `stroke="#0d1117" stroke-width="1"/>` +
+      `</marker>` +
+      `</defs>`;
 
     const dashAttr = dashArray ? ` stroke-dasharray="${dashArray}"` : '';
 
@@ -3279,7 +3301,7 @@ function updateMap() {
       const cpx = sx + loopR;
       html += `<path class="edge-line" d="M${sx},${sy} C${cpx},${sy} ${cpx},${ey} ${sx},${ey}" ` +
         `stroke="${color}" stroke-width="${width}" fill="none"${dashAttr}${newAttr} data-orig-dash="${dashArray}" ` +
-        `marker-end="url(#arrow-${ci})" data-conn-idx="${ci}" ` +
+        `marker-start="url(#src-${ci})" marker-end="url(#arrow-${ci})" data-conn-idx="${ci}" ` +
         `onclick="showConnInfo(event, ${ci})" />`;
       // Label to the right of the loop
       let label = conn.destination_name || '';
@@ -3331,7 +3353,7 @@ function updateMap() {
       }
       html += `<line class="edge-line" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" ` +
         `stroke="${color}" stroke-width="${width}" fill="none"${dashAttr}${newAttr} data-orig-dash="${dashArray}" ` +
-        `marker-end="url(#arrow-${ci})" data-conn-idx="${ci}" ` +
+        `marker-start="url(#src-${ci})" marker-end="url(#arrow-${ci})" data-conn-idx="${ci}" ` +
         `onclick="showConnInfo(event, ${ci})" />`;
     } else {
       const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
@@ -3383,7 +3405,7 @@ function updateMap() {
       }
       html += `<path class="edge-line" d="M${x1},${y1} Q${qx},${qy} ${x2},${y2}" ` +
         `stroke="${color}" stroke-width="${width}" fill="none"${dashAttr}${newAttr} data-orig-dash="${dashArray}" ` +
-        `marker-end="url(#arrow-${ci})" data-conn-idx="${ci}" ` +
+        `marker-start="url(#src-${ci})" marker-end="url(#arrow-${ci})" data-conn-idx="${ci}" ` +
         `onclick="showConnInfo(event, ${ci})" />`;
     }
 
