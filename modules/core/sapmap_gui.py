@@ -4963,11 +4963,45 @@ def create_app(api: SAPMAPApi) -> Bottle:
                   f"{len(dests)} destination(s), {captured} "
                   f"cleartext, {linked} linked to on-prem "
                   f"(subaccount {sub_uuid[:8]})")
+
+            # Auto-sweep Test Connection on freshly-linked BTP→
+            # on-prem edges.  Every cleartext-captured destination
+            # that resolved to an on-prem node deserves an
+            # immediate connectivity + profile probe: it turns
+            # "4 destinations captured, 4 linked" into "…4 SAP_ALL
+            # findings surfaced" in one shot rather than requiring
+            # the operator to click Test Connection per row.
+            # Reuses _btp_test_conn_body (extracted from the manual
+            # route earlier) so the two paths run identical logic.
+            # Fires in background threads via _bg so the mint route
+            # response doesn't block waiting on 4× RFC handshakes.
+            btp_source_sid = f"BTP:{sub_uuid[:8]}"
+            sweep_targets = [
+                c for c in api.state.connections
+                if c.source_sid == btp_source_sid
+                   and c.target_sid
+                   and c.rfc_user
+                   and c.secstore_password
+                   and not c.tested]
+            if sweep_targets and hasattr(
+                    api, "_btp_test_conn_body"):
+                print(f"[*] {sid}: auto-sweep — testing "
+                      f"{len(sweep_targets)} freshly-captured "
+                      f"BTP → on-prem credential(s) in the "
+                      f"background")
+                for _c in sweep_targets:
+                    _dn = _c.destination_name
+                    _bg(f"{btp_source_sid}:btp_test_auto:{_dn}",
+                        f"BTP auto-test {_dn}",
+                        (lambda _c=_c, _dn=_dn:
+                            api._btp_test_conn_body(
+                                _c, btp_source_sid, _dn)))
             return {
                 "subaccount_uuid": sub_uuid,
                 "destinations": len(dests),
                 "cleartext_captured": captured,
                 "linked_to_onprem": linked,
+                "auto_swept": len(sweep_targets),
             }
         except Exception as e:
             print(f"[-] {sid}: auto-enumerate after mint raised "
@@ -15059,238 +15093,252 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 f"connection {source_sid} → {dest_name} not found"})
 
         def _run():
-            import time as _t
-            import urllib.request, urllib.error, base64, ssl
-            conn.tested = False
-            conn.check_error = ""
-            conn.user_detail_error = ""
-            user = conn.rfc_user or ""
-            pwd = conn.secstore_password or ""
-            target = (api.state.get_node(conn.target_sid)
-                      if conn.target_sid else None)
-            is_rfc = (conn.conn_type or "").lower() == "rfc"
-            print(f"[*] BTP test: {source_sid} → {dest_name} "
-                  f"(type={conn.conn_type or 'rfc'}, "
-                  f"target={conn.target_sid}, user={user})")
-            if not user or not pwd:
-                conn.check_error = ("missing user / password — "
-                                     "destination did not capture cleartext")
-                conn.tested = True
-                print(f"[-] BTP test: {conn.check_error}")
-                return
-
-            # ---- Phase 1: connectivity / auth probe -------------------
-            if is_rfc:
-                # Direct RFC test against the target.  No URL needed —
-                # JCo destinations carry ashost / sysnr / client in
-                # additional_properties and we already projected those
-                # onto conn.target_instance_nr / conn.client.
-                if not target:
-                    conn.check_error = (f"target {conn.target_sid} not "
-                                         f"on the map — run Standard Scan "
-                                         f"on it first")
-                    conn.tested = True
-                    print(f"[-] BTP test: {conn.check_error}")
-                    return
-                inst = (conn.target_instance_nr or "").strip() or (
-                    target.instances[0].instance_nr
-                    if target.instances else "00")
-                client = (conn.client or "000")
-                rfc_creds = Credentials(
-                    username=user, password=pwd,
-                    client=client, instance_nr=inst,
-                )
-                # Phase 3b: if the target's gateway is firewalled but
-                # we know its ICM HTTP port, verify via SOAP RFC_PING.
-                # Otherwise pyrfc → 60s timeout on every BTP test
-                # against an HTTP-only target.
-                def _btp_test():
-                    if not sapmap_exploit._gateway_port_reachable(target):
-                        endp = _node_icm_endpoint(api.state, target)
-                        if endp:
-                            host, port, https = endp
-                            try:
-                                from sap_soap_basic import SOAPRFCSession
-                                _s = SOAPRFCSession(
-                                    host=host, port=port,
-                                    client=client, user=user,
-                                    password=pwd, https=https,
-                                    timeout=15.0)
-                                return _s.test_connection().get(
-                                    "ok", False)
-                            except Exception:
-                                return False
-                    return sapmap_rfc.test_connection(target, rfc_creds)
-                t0 = _t.time()
-                try:
-                    if _btp_test():
-                        conn.latency_ms = int((_t.time() - t0) * 1000)
-                        conn.ping_ok = True
-                        conn.logon_successful = True
-                        conn.logon_tested = True
-                        print(f"[+] BTP test: RFC logon OK on "
-                              f"{conn.target_sid} ({user}/{client}, "
-                              f"sysnr={inst}, {conn.latency_ms}ms)")
-                    else:
-                        conn.latency_ms = int((_t.time() - t0) * 1000)
-                        conn.ping_ok = True   # answered, auth rejected
-                        conn.logon_successful = False
-                        conn.logon_tested = True
-                        conn.check_error = "RFC logon rejected"
-                        print(f"[-] BTP test: RFC logon failed on "
-                              f"{conn.target_sid} ({user}/{client}, "
-                              f"sysnr={inst})")
-                except Exception as e:
-                    conn.check_error = str(e)[:200]
-                    print(f"[-] BTP test: RFC connect failed — "
-                          f"{conn.check_error}")
-                conn.tested = True
-            else:
-                # HTTP basic-auth probe.
-                url = conn.http_url or ""
-                if not url:
-                    conn.check_error = ("missing http_url — destination "
-                                         "did not capture URL")
-                    conn.tested = True
-                    print(f"[-] BTP test: {conn.check_error}")
-                    return
-                # When the destination URL has no path (or just "/"), the
-                # ICF root usually answers 404 even for valid creds.
-                # Append the SAP GUI-for-HTML probe path with the
-                # destination's client so basic-auth actually fires.
-                # 401 means "wrong credential", 403/200 mean "credential
-                # accepted (but maybe no permission for webgui)".  An
-                # operator-supplied path (e.g. /sap/myservice) is left
-                # alone.
-                from urllib.parse import urlparse, urlunparse
-                probe_url = url
-                parts = urlparse(url)
-                if not parts.path or parts.path in ("/", ""):
-                    client = (conn.client or "000")
-                    probe_path = "/sap/bc/gui/sap/its/webgui"
-                    probe_query = (
-                        f"sap-client={client}&sap-language=EN")
-                    probe_url = urlunparse((
-                        parts.scheme, parts.netloc,
-                        probe_path, "", probe_query, ""))
-                t0 = _t.time()
-                try:
-                    req = urllib.request.Request(probe_url, method="GET")
-                    tok = base64.b64encode(
-                        f"{user}:{pwd}".encode("utf-8")).decode("ascii")
-                    req.add_header("Authorization", f"Basic {tok}")
-                    req.add_header("User-Agent", "SAPMAP-BTP-probe/1.0")
-                    ctx = ssl.create_default_context()
-                    ctx.check_hostname = False
-                    ctx.verify_mode = ssl.CERT_NONE
-                    with urllib.request.urlopen(
-                            req, timeout=10, context=ctx) as r:
-                        code = r.getcode()
-                        conn.latency_ms = int((_t.time() - t0) * 1000)
-                        conn.ping_ok = True
-                        conn.logon_successful = code != 401
-                        conn.logon_tested = True
-                        print(f"[+] BTP test: HTTP {code} from "
-                              f"{probe_url} ({conn.latency_ms}ms) — "
-                              f"basic-auth OK")
-                except urllib.error.HTTPError as he:
-                    conn.latency_ms = int((_t.time() - t0) * 1000)
-                    conn.ping_ok = True
-                    # 401 = wrong credential.  403 = creds OK but
-                    # missing S_ICF / S_SERVICE for webgui — still a
-                    # valid logon.  Anything else < 500 also counts
-                    # the basic-auth as accepted (the ICF responder
-                    # ran past the auth challenge).
-                    conn.logon_successful = (he.code != 401
-                                              and he.code < 500)
-                    conn.logon_tested = True
-                    conn.check_error = f"HTTP {he.code}"
-                    verdict = ("rejected" if he.code == 401
-                                else ("OK (no service auth)"
-                                       if he.code == 403
-                                       else "OK"
-                                       if conn.logon_successful
-                                       else "server error"))
-                    print(f"[-] BTP test: HTTP {he.code} from "
-                          f"{probe_url} ({conn.latency_ms}ms) — "
-                          f"basic-auth {verdict}")
-                except Exception as e:
-                    conn.check_error = str(e)[:200]
-                    print(f"[-] BTP test: {probe_url} unreachable — "
-                          f"{conn.check_error}")
-                conn.tested = True
-
-            # ---- Phase 2: profile fetch on ABAP target ----------------
-            target_is_abap = (target
-                              and "ABAP" in (target.system_type or "").upper())
-            platform = (conn.http_target_platform or "").upper()
-            # RFC-typed edge implies ABAP target — SAP kernel forbids
-            # Type-3 destinations to non-ABAP.  So when is_rfc is True
-            # we KNOW the target runs ABAP even if target.system_type
-            # is empty (typical for on-prem SAPNodes materialised
-            # only through BTP destination linking, no Standard Scan
-            # yet).  Live bug 2026-07-12: W74 landed via BTP linking
-            # with system_type='', so target_is_abap was False, so
-            # the profile fetch skipped, so has_sap_all stayed False,
-            # so the "Create Remote User" button hid — despite
-            # sapadm actually carrying SAP_ALL on W74.
-            #
-            # HTTP-typed edge only gets the BAPI fetch when the
-            # destination's sap-platform explicitly says ABAP (or is
-            # unset and the target node is ABAP-flagged).
-            wants_bapi = conn.logon_successful and (
-                is_rfc                          # Type-3 → ABAP by def
-                or (target_is_abap
-                    and (platform == "ABAP" or not platform)))
-            # And backfill system_type when we've just proven RFC
-            # logon works — that's evidence the target IS ABAP even
-            # if discovery hasn't fingerprinted it yet.  System
-            # Details modal now shows the ABAP badge, and future
-            # menu-item gates that look at system_type behave
-            # correctly.
-            if (is_rfc and conn.logon_successful and target
-                    and not (target.system_type or "").strip()):
-                target.system_type = "ABAP"
-                print(f"[+] BTP test: backfilled "
-                      f"{conn.target_sid}.system_type = 'ABAP' "
-                      f"(Type-3 RFC logon is definitional proof)")
-            if wants_bapi:
-                inst = (conn.target_instance_nr or "").strip() or (
-                    target.instances[0].instance_nr
-                    if target.instances else "00")
-                client = conn.client or "000"
-                rfc_creds = Credentials(
-                    username=user, password=pwd,
-                    client=client, instance_nr=inst,
-                )
-                try:
-                    info = sapmap_rfc.get_direct_user_profiles(
-                        target, user, rfc_creds)
-                    conn.profiles = info.get("profiles", [])
-                    conn.roles = info.get("roles", [])
-                    conn.has_sap_all = info.get("has_sap_all", False)
-                    conn.user_detail_error = info.get("error", "")
-                    if not any(c.username == user and c.password == pwd
-                               for c in target.credentials):
-                        target.credentials.append(rfc_creds)
-                    if conn.has_sap_all:
-                        print(f"[!] {user}@{conn.target_sid} carries "
-                              f"SAP_ALL — Create Remote User now "
-                              f"available")
-                        target.has_critical_finding = True
-                        api.state.notify_sap_all_if_elevated(conn)
-                    elif conn.profiles or conn.roles:
-                        print(f"[*] {user}@{conn.target_sid}: "
-                              f"profiles={len(conn.profiles)}, "
-                              f"roles={len(conn.roles)} — no SAP_ALL")
-                except Exception as e:
-                    conn.user_detail_error = str(e)[:200]
-                    print(f"[-] BTP test: RFC profile fetch failed — "
-                          f"{conn.user_detail_error}")
-
+            _btp_test_conn_body(conn, source_sid, dest_name)
         _bg(f"{source_sid}:btp_test:{dest_name}",
             f"BTP test {dest_name}", _run)
         return json.dumps({"status": "started"})
+
+    def _btp_test_conn_body(conn, source_sid, dest_name):
+        """Actual test-connection logic for a BTP→on-prem edge.
+
+        Extracted from the ``btp_test_destination`` route so the
+        auto-sweep after a cert-auth mint can call the same code
+        path.  Runs synchronously in whatever thread the caller
+        chooses; both the route and the auto-sweep wrap it in
+        ``_bg`` for background execution.
+        """
+        import time as _t
+        import urllib.request, urllib.error, base64, ssl
+        conn.tested = False
+        conn.check_error = ""
+        conn.user_detail_error = ""
+        user = conn.rfc_user or ""
+        pwd = conn.secstore_password or ""
+        target = (api.state.get_node(conn.target_sid)
+                  if conn.target_sid else None)
+        is_rfc = (conn.conn_type or "").lower() == "rfc"
+        print(f"[*] BTP test: {source_sid} → {dest_name} "
+              f"(type={conn.conn_type or 'rfc'}, "
+              f"target={conn.target_sid}, user={user})")
+        if not user or not pwd:
+            conn.check_error = ("missing user / password — "
+                                 "destination did not capture cleartext")
+            conn.tested = True
+            print(f"[-] BTP test: {conn.check_error}")
+            return
+
+        # ---- Phase 1: connectivity / auth probe -------------------
+        if is_rfc:
+            # Direct RFC test against the target.  No URL needed —
+            # JCo destinations carry ashost / sysnr / client in
+            # additional_properties and we already projected those
+            # onto conn.target_instance_nr / conn.client.
+            if not target:
+                conn.check_error = (f"target {conn.target_sid} not "
+                                     f"on the map — run Standard Scan "
+                                     f"on it first")
+                conn.tested = True
+                print(f"[-] BTP test: {conn.check_error}")
+                return
+            inst = (conn.target_instance_nr or "").strip() or (
+                target.instances[0].instance_nr
+                if target.instances else "00")
+            client = (conn.client or "000")
+            rfc_creds = Credentials(
+                username=user, password=pwd,
+                client=client, instance_nr=inst,
+            )
+            # Phase 3b: if the target's gateway is firewalled but
+            # we know its ICM HTTP port, verify via SOAP RFC_PING.
+            # Otherwise pyrfc → 60s timeout on every BTP test
+            # against an HTTP-only target.
+            def _btp_test():
+                if not sapmap_exploit._gateway_port_reachable(target):
+                    endp = _node_icm_endpoint(api.state, target)
+                    if endp:
+                        host, port, https = endp
+                        try:
+                            from sap_soap_basic import SOAPRFCSession
+                            _s = SOAPRFCSession(
+                                host=host, port=port,
+                                client=client, user=user,
+                                password=pwd, https=https,
+                                timeout=15.0)
+                            return _s.test_connection().get(
+                                "ok", False)
+                        except Exception:
+                            return False
+                return sapmap_rfc.test_connection(target, rfc_creds)
+            t0 = _t.time()
+            try:
+                if _btp_test():
+                    conn.latency_ms = int((_t.time() - t0) * 1000)
+                    conn.ping_ok = True
+                    conn.logon_successful = True
+                    conn.logon_tested = True
+                    print(f"[+] BTP test: RFC logon OK on "
+                          f"{conn.target_sid} ({user}/{client}, "
+                          f"sysnr={inst}, {conn.latency_ms}ms)")
+                else:
+                    conn.latency_ms = int((_t.time() - t0) * 1000)
+                    conn.ping_ok = True   # answered, auth rejected
+                    conn.logon_successful = False
+                    conn.logon_tested = True
+                    conn.check_error = "RFC logon rejected"
+                    print(f"[-] BTP test: RFC logon failed on "
+                          f"{conn.target_sid} ({user}/{client}, "
+                          f"sysnr={inst})")
+            except Exception as e:
+                conn.check_error = str(e)[:200]
+                print(f"[-] BTP test: RFC connect failed — "
+                      f"{conn.check_error}")
+            conn.tested = True
+        else:
+            # HTTP basic-auth probe.
+            url = conn.http_url or ""
+            if not url:
+                conn.check_error = ("missing http_url — destination "
+                                     "did not capture URL")
+                conn.tested = True
+                print(f"[-] BTP test: {conn.check_error}")
+                return
+            # When the destination URL has no path (or just "/"), the
+            # ICF root usually answers 404 even for valid creds.
+            # Append the SAP GUI-for-HTML probe path with the
+            # destination's client so basic-auth actually fires.
+            # 401 means "wrong credential", 403/200 mean "credential
+            # accepted (but maybe no permission for webgui)".  An
+            # operator-supplied path (e.g. /sap/myservice) is left
+            # alone.
+            from urllib.parse import urlparse, urlunparse
+            probe_url = url
+            parts = urlparse(url)
+            if not parts.path or parts.path in ("/", ""):
+                client = (conn.client or "000")
+                probe_path = "/sap/bc/gui/sap/its/webgui"
+                probe_query = (
+                    f"sap-client={client}&sap-language=EN")
+                probe_url = urlunparse((
+                    parts.scheme, parts.netloc,
+                    probe_path, "", probe_query, ""))
+            t0 = _t.time()
+            try:
+                req = urllib.request.Request(probe_url, method="GET")
+                tok = base64.b64encode(
+                    f"{user}:{pwd}".encode("utf-8")).decode("ascii")
+                req.add_header("Authorization", f"Basic {tok}")
+                req.add_header("User-Agent", "SAPMAP-BTP-probe/1.0")
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                with urllib.request.urlopen(
+                        req, timeout=10, context=ctx) as r:
+                    code = r.getcode()
+                    conn.latency_ms = int((_t.time() - t0) * 1000)
+                    conn.ping_ok = True
+                    conn.logon_successful = code != 401
+                    conn.logon_tested = True
+                    print(f"[+] BTP test: HTTP {code} from "
+                          f"{probe_url} ({conn.latency_ms}ms) — "
+                          f"basic-auth OK")
+            except urllib.error.HTTPError as he:
+                conn.latency_ms = int((_t.time() - t0) * 1000)
+                conn.ping_ok = True
+                # 401 = wrong credential.  403 = creds OK but
+                # missing S_ICF / S_SERVICE for webgui — still a
+                # valid logon.  Anything else < 500 also counts
+                # the basic-auth as accepted (the ICF responder
+                # ran past the auth challenge).
+                conn.logon_successful = (he.code != 401
+                                          and he.code < 500)
+                conn.logon_tested = True
+                conn.check_error = f"HTTP {he.code}"
+                verdict = ("rejected" if he.code == 401
+                            else ("OK (no service auth)"
+                                   if he.code == 403
+                                   else "OK"
+                                   if conn.logon_successful
+                                   else "server error"))
+                print(f"[-] BTP test: HTTP {he.code} from "
+                      f"{probe_url} ({conn.latency_ms}ms) — "
+                      f"basic-auth {verdict}")
+            except Exception as e:
+                conn.check_error = str(e)[:200]
+                print(f"[-] BTP test: {probe_url} unreachable — "
+                      f"{conn.check_error}")
+            conn.tested = True
+
+        # ---- Phase 2: profile fetch on ABAP target ----------------
+        target_is_abap = (target
+                          and "ABAP" in (target.system_type or "").upper())
+        platform = (conn.http_target_platform or "").upper()
+        # RFC-typed edge implies ABAP target — SAP kernel forbids
+        # Type-3 destinations to non-ABAP.  So when is_rfc is True
+        # we KNOW the target runs ABAP even if target.system_type
+        # is empty (typical for on-prem SAPNodes materialised
+        # only through BTP destination linking, no Standard Scan
+        # yet).  Live bug 2026-07-12: W74 landed via BTP linking
+        # with system_type='', so target_is_abap was False, so
+        # the profile fetch skipped, so has_sap_all stayed False,
+        # so the "Create Remote User" button hid — despite
+        # sapadm actually carrying SAP_ALL on W74.
+        #
+        # HTTP-typed edge only gets the BAPI fetch when the
+        # destination's sap-platform explicitly says ABAP (or is
+        # unset and the target node is ABAP-flagged).
+        wants_bapi = conn.logon_successful and (
+            is_rfc                          # Type-3 → ABAP by def
+            or (target_is_abap
+                and (platform == "ABAP" or not platform)))
+        # And backfill system_type when we've just proven RFC
+        # logon works — that's evidence the target IS ABAP even
+        # if discovery hasn't fingerprinted it yet.  System
+        # Details modal now shows the ABAP badge, and future
+        # menu-item gates that look at system_type behave
+        # correctly.
+        if (is_rfc and conn.logon_successful and target
+                and not (target.system_type or "").strip()):
+            target.system_type = "ABAP"
+            print(f"[+] BTP test: backfilled "
+                  f"{conn.target_sid}.system_type = 'ABAP' "
+                  f"(Type-3 RFC logon is definitional proof)")
+        if wants_bapi:
+            inst = (conn.target_instance_nr or "").strip() or (
+                target.instances[0].instance_nr
+                if target.instances else "00")
+            client = conn.client or "000"
+            rfc_creds = Credentials(
+                username=user, password=pwd,
+                client=client, instance_nr=inst,
+            )
+            try:
+                info = sapmap_rfc.get_direct_user_profiles(
+                    target, user, rfc_creds)
+                conn.profiles = info.get("profiles", [])
+                conn.roles = info.get("roles", [])
+                conn.has_sap_all = info.get("has_sap_all", False)
+                conn.user_detail_error = info.get("error", "")
+                if not any(c.username == user and c.password == pwd
+                           for c in target.credentials):
+                    target.credentials.append(rfc_creds)
+                if conn.has_sap_all:
+                    print(f"[!] {user}@{conn.target_sid} carries "
+                          f"SAP_ALL — Create Remote User now "
+                          f"available")
+                    target.has_critical_finding = True
+                    api.state.notify_sap_all_if_elevated(conn)
+                elif conn.profiles or conn.roles:
+                    print(f"[*] {user}@{conn.target_sid}: "
+                          f"profiles={len(conn.profiles)}, "
+                          f"roles={len(conn.roles)} — no SAP_ALL")
+            except Exception as e:
+                conn.user_detail_error = str(e)[:200]
+                print(f"[-] BTP test: RFC profile fetch failed — "
+                      f"{conn.user_detail_error}")
+
+    # Expose to _post_mint_auto_enumerate so the auto-sweep can
+    # schedule the same test on every freshly-linked back-edge.
+    api._btp_test_conn_body = _btp_test_conn_body
 
     @app.route("/api/btp/create_user_on_target", method="POST")
     def btp_create_user_on_target():
