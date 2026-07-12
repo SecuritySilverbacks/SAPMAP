@@ -318,34 +318,63 @@ def test_body_read_uses_get_data_first():
 
 
 def test_http2_disable_emitted_on_every_call():
-    """Force HTTP/1.1 upstream via if_http_transport->set_use_http2(
-    abap_false).  Kernel 7.53 negotiates HTTP/2 with any server
-    that advertises it via ALPN, then downgrades to HTTP/1.1
-    chunked for the ABAP client layer — the translation LOSES
-    body frames on some replies (headers arrive, body empty).
-    Live proof (2026-07-12): mint against XSUAA returned 17
-    headers with sap-original-protocol: h2 and zero body bytes.
+    """Force HTTP/1.1 upstream by disabling HTTP/2 on the transport.
+    Kernel 7.53 negotiates HTTP/2 with any server that advertises it
+    via ALPN, then downgrades to HTTP/1.1 chunked for the ABAP client
+    layer — the translation LOSES body frames on some replies
+    (headers arrive, body empty).  Live proof (2026-07-12): mint
+    against XSUAA returned 17 headers with sap-original-protocol: h2
+    and zero body bytes.
 
-    Wrapped in TRY/CATCH so pre-7.53 kernels (no HTTP/2 support to
-    disable) don't hard-fail when the interface method is missing."""
+    Uses DYNAMIC method invocation — CALL METHOD c->('GET_TRANSPORT') —
+    so the compiler doesn't reject the report on kernels where
+    if_http_client doesn't declare GET_TRANSPORT.  Reported live
+    2026-07-12: "ABAP compile/runtime error: Method GET_TRANSPORT
+    is unknown or PROTECTED".  Static calls fail at COMPILE time
+    which TRY/CATCH cannot handle; dynamic calls fail at RUNTIME
+    with CX_SY_DYN_CALL_ERROR — the guard actually fires."""
     for method in ("GET", "POST"):
         lines = _build_abap_program(
             "T", method, "/oauth/token",
             body=("x=y" if method == "POST" else ""),
             content_type=("text/plain" if method == "POST" else ""))
         joined = "\n".join(lines)
-        assert "get_transport(" in joined, (
-            f"{method}: HTTP/2-disable path missing — this is what "
-            f"stops the kernel-7.53 h2 → HTTP/1.1 body-frame loss")
-        assert "set_use_http2( abap_false )" in joined
+        # Dynamic-call form (parenthesised method name in quotes)
+        # is what makes this compile on old kernels.
+        assert "c->('GET_TRANSPORT')" in joined, (
+            f"{method}: HTTP/2-disable must be dynamic — a static "
+            f"c->get_transport( ) call fails at COMPILE time on "
+            f"kernels where if_http_client lacks GET_TRANSPORT, "
+            f"and TRY/CATCH does NOT catch compile errors")
+        assert "tp->('SET_USE_HTTP2')" in joined
+        assert "use_http2 = abap_false" in joined
         # Must be guarded — older kernels have no set_use_http2 and
-        # would CX_SY_DYN_CALL_ERROR mid-report.
-        idx_use_http2 = joined.find("set_use_http2")
-        idx_try = joined.rfind("TRY.", 0, idx_use_http2)
-        idx_catch = joined.find("CATCH cx_root.", idx_use_http2)
+        # would raise CX_SY_DYN_CALL_ERROR at runtime otherwise.
+        idx_call = joined.find("c->('GET_TRANSPORT')")
+        idx_try = joined.rfind("TRY.", 0, idx_call)
+        idx_catch = joined.find("CATCH cx_root.", idx_call)
         assert idx_try != -1 and idx_catch != -1, (
-            "set_use_http2 must be inside a TRY / CATCH cx_root "
-            "so old kernels degrade gracefully")
+            "dynamic HTTP/2-disable must be inside a TRY / CATCH "
+            "cx_root so old kernels degrade gracefully at runtime")
+        # And it must be BEFORE we start setting request headers /
+        # sending — no point disabling h2 after the request left.
+        idx_send = joined.find("c->send(")
+        assert idx_call < idx_send
+
+
+def test_http2_disable_static_call_never_regressed():
+    """Regression catch: if anyone reverts the dynamic-call form to
+    the STATIC c->get_transport( )->set_use_http2( abap_false ),
+    the report stops compiling on kernel 7.53 (live bug 2026-07-12).
+    Guard against a well-meaning refactor removing the parentheses."""
+    lines = _build_abap_program(
+        "T", "POST", "/", body="x=y", content_type="text/plain")
+    joined = "\n".join(lines)
+    assert "c->get_transport( )->set_use_http2" not in joined, (
+        "static get_transport()->set_use_http2 call REGRESSED — "
+        "will fail at ABAP compile time on kernels missing "
+        "GET_TRANSPORT (kernel 7.53).  Use CALL METHOD "
+        "c->('GET_TRANSPORT') instead.")
 
 
 def test_response_header_dump_emitted():
