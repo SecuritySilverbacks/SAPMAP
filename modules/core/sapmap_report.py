@@ -646,6 +646,220 @@ def _btp_section(state: SAPMAPState) -> list:
     return out
 
 
+def _cloud_lateral_section(state: SAPMAPState) -> list:
+    """Narrative summary of cloud ↔ on-prem lateral moves.
+
+    Rolls up what the individual BTP-subaccount table, the
+    cleartext-credentials table, and the cert-auth-destinations
+    table each show in isolation, into one exec-friendly block:
+
+      "Cert DFAULT on S4H → BTP tenant researchlab-yehctg7m →
+       4 destinations pulled → sapadm@W74 + joris@S4H
+       credentials in the clear."
+
+    Emitted ONLY when there's a lateral chain to report — a
+    landscape with no BTP-side credential capture doesn't get a
+    hollow header.  Groups by subaccount so multi-tenant
+    engagements produce one paragraph per tenant.
+
+    Data sources:
+      * state.btp_subaccounts — subaccount metadata + destination
+        list (populated by the mint auto-enumerate step)
+      * findings with ref="onprem.to.btp.token_minted*" and
+        "btp.token_minted_via_local_cert" — mint provenance +
+        cert thumbprints
+      * findings with ref="btp.cleartext.captured" — cleartext
+        counts per subaccount
+      * state.connections BTP:<uuid8>→<sid> — post-sweep
+        has_sap_all flags
+    """
+    subs = getattr(state, "btp_subaccounts", None) or {}
+    # Skip when there's no BTP presence at all.
+    if not subs:
+        return []
+    # Or when no subaccount has captured a real destination — an
+    # operator who enumerated an empty subaccount doesn't need a
+    # cloud-lateral section.
+    total_dests = sum(
+        len(list(getattr(s, "destinations", []) or []))
+        for s in subs.values())
+    if total_dests == 0:
+        return []
+
+    # Gather mint-provenance findings so we can name the source
+    # side of each lateral move (which on-prem system's cert or
+    # workstation-side key material issued the token).
+    mint_findings_by_uuid: dict = {}
+    for node in state.nodes.values():
+        for f in getattr(node, "findings", []) or []:
+            ref = getattr(f, "ref", "") or ""
+            if not ref.startswith("onprem.to.btp.token_minted"):
+                continue
+            meta = getattr(f, "meta", {}) or {}
+            uuid = (meta.get("region", "")   # fallback if zid missing
+                    if not meta.get("zid") else meta.get("zid", ""))
+            # meta.zid was added later; fall back to matching by
+            # region + destination host if absent.
+            mint_findings_by_uuid.setdefault(uuid, []).append(f)
+    # Also pull the workstation-side mint findings (source_sid
+    # is 'BTP:<uuid8>' so we scan the state-level findings bus
+    # instead of a specific SAPNode).
+    for f in getattr(state, "findings", None) or []:
+        ref = getattr(f, "ref", "") or ""
+        if ref == "btp.token_minted_via_local_cert":
+            meta = getattr(f, "meta", {}) or {}
+            zid = meta.get("region", "") or ""
+            mint_findings_by_uuid.setdefault(zid, []).append(f)
+
+    # Only emit for subaccounts that either have destinations OR a
+    # mint finding — a subaccount SAPMAP knows about only through
+    # an SM59 destination but never enumerated isn't lateral yet.
+    interesting_subs = []
+    for uuid, sub in subs.items():
+        dests = list(getattr(sub, "destinations", []) or [])
+        region = getattr(sub, "region", "") or ""
+        finds = (mint_findings_by_uuid.get(uuid, [])
+                  + mint_findings_by_uuid.get(region, []))
+        if dests or finds:
+            interesting_subs.append((uuid, sub, dests, finds))
+    if not interesting_subs:
+        return []
+
+    out = ["## Cloud ↔ on-prem lateral moves", ""]
+    out.append(
+        f"SAPMAP established {len(interesting_subs)} cloud-side "
+        f"lateral entry point(s).  Each represents a working chain "
+        f"from on-prem cert-auth (or workstation-side cert files) "
+        f"through SAP BTP's XSUAA + Destination Service to on-prem "
+        f"back-ends whose credentials leaked in the clear.")
+    out.append("")
+
+    for uuid, sub, dests, mint_findings in interesting_subs:
+        subdomain = (getattr(sub, "subdomain", "")
+                      or getattr(sub, "display_name", "")
+                      or uuid[:8])
+        region = getattr(sub, "region", "") or "?"
+        # Destination bookkeeping
+        cleartext_count = sum(
+            1 for d in dests
+            if getattr(d, "cleartext_captured", False)
+            or (isinstance(d, dict) and d.get("cleartext_captured")))
+        linked_count = sum(
+            1 for d in dests
+            if (getattr(d, "linked_target_sid", "")
+                 or (isinstance(d, dict)
+                     and d.get("linked_target_sid"))))
+        linked_sids = set()
+        for d in dests:
+            lts = (getattr(d, "linked_target_sid", "")
+                    or (isinstance(d, dict)
+                        and d.get("linked_target_sid")))
+            if lts:
+                linked_sids.add(lts)
+
+        # Mint provenance
+        mint_bullets = []
+        for f in mint_findings:
+            meta = getattr(f, "meta", {}) or {}
+            ref = getattr(f, "ref", "") or ""
+            thumbprint = meta.get("thumbprint", "")[:12]
+            if "via_cert" in ref:
+                src = (f"SM59 destination "
+                        f"`{meta.get('destination', '?')}` "
+                        f"on `{getattr(f, 'sid', '?')}` "
+                        f"(PSE `{meta.get('pse', '?')}`)")
+            elif "via_local_cert" in ref:
+                src = (f"local cert file "
+                        f"`{meta.get('cert_path', '?')}` on the "
+                        f"SAPMAP host")
+            else:
+                src = "unknown mint path"
+            mint_bullets.append(
+                f"- **Token minted via** {src}; RFC-8705 x5t#S256 "
+                f"prefix `{thumbprint}…`")
+
+        # BTP → on-prem back-edges surfaced by the auto-sweep
+        back_edges = [
+            c for c in getattr(state, "connections", []) or []
+            if c.source_sid == f"BTP:{uuid[:8]}"
+               and c.target_sid]
+        sap_all_hits = [c for c in back_edges if c.has_sap_all]
+
+        out.append(f"### `{_esc(subdomain)}` (region `{_esc(region)}`)")
+        out.append("")
+        # One-liner exec summary
+        pieces = [
+            f"**{len(dests)} destination(s) enumerated**",
+        ]
+        if cleartext_count:
+            pieces.append(
+                f"**{cleartext_count} carrying cleartext credentials**")
+        if linked_count:
+            targets_txt = ", ".join(
+                f"`{_esc(s)}`" for s in sorted(linked_sids))
+            pieces.append(
+                f"**{linked_count} linked to on-prem** ({targets_txt})")
+        if sap_all_hits:
+            pieces.append(
+                f"**{len(sap_all_hits)} credential(s) confirmed with "
+                f"SAP_ALL on the target**")
+        out.append(" — ".join(pieces) + ".")
+        out.append("")
+        # Mint provenance bullets
+        if mint_bullets:
+            out.extend(mint_bullets)
+            out.append("")
+        # Back-edge table (only when we have anything to show)
+        if back_edges:
+            out.append("| Destination | Target | User | Client | "
+                        "SAP_ALL? | Notes |")
+            out.append(
+                "| --- | --- | --- | --- | --- | --- |")
+            for c in back_edges:
+                target = state.get_node(c.target_sid)
+                target_label = c.target_sid or "?"
+                if target and (target.hostname or target.ip):
+                    target_label += (f" ({target.hostname or target.ip})")
+                sap_all = "⚡ **yes**" if c.has_sap_all else "—"
+                note = ""
+                if c.check_error:
+                    note = _esc(c.check_error[:80])
+                elif c.tested and c.logon_successful:
+                    note = "logon OK"
+                elif c.tested:
+                    note = "credential rejected"
+                else:
+                    note = "not tested yet"
+                out.append(
+                    f"| `{_esc(c.destination_name or '?')}` | "
+                    f"{_esc(target_label)} | "
+                    f"`{_esc(c.rfc_user or '?')}` | "
+                    f"{_esc(c.client or '?')} | "
+                    f"{sap_all} | {note} |")
+            out.append("")
+        # Password reuse callout — often the loudest finding on a
+        # BTP lateral.  If any two back-edges share a password
+        # across DIFFERENT user names or target SIDs, name it.
+        pw_users: dict = {}
+        for c in back_edges:
+            if c.secstore_password and c.rfc_user:
+                pw_users.setdefault(c.secstore_password, set()).add(
+                    (c.rfc_user, c.target_sid))
+        reuse = {p: v for p, v in pw_users.items()
+                  if len(v) > 1}
+        if reuse:
+            out.append("**Password reuse detected:**")
+            for pw, pairs in reuse.items():
+                pairs_str = ", ".join(
+                    f"`{_esc(u)}@{_esc(s)}`" for u, s in sorted(pairs))
+                out.append(
+                    f"- The same password unlocks {pairs_str} — one "
+                    f"leak, multiple systems compromised.")
+            out.append("")
+
+    return out
+
+
 def _cert_auth_destinations_section(state: SAPMAPState) -> list:
     """Certificate-authenticated Type-G / Type-H HTTP destinations.
 
@@ -1433,6 +1647,11 @@ def build_markdown_report(state: SAPMAPState,
         sections.append("---")
         sections.append("")
         sections.extend(btp_section)
+    cloud_lat_section = _cloud_lateral_section(state)
+    if cloud_lat_section:
+        sections.append("---")
+        sections.append("")
+        sections.extend(cloud_lat_section)
     cert_dest_section = _cert_auth_destinations_section(state)
     if cert_dest_section:
         sections.append("---")
@@ -2380,6 +2599,26 @@ def build_html_report(state: SAPMAPState,
                   else "none in scope")),
                 "#f85149" if btp_pwned else
                 ("#0969da" if btp_subs else "#d0d7de"))}
+    {_kpi_card(
+        "Cloud → on-prem laterals",
+        f"{sum(1 for _c in conns if (_c.source_sid or '').startswith('BTP:') and _c.has_sap_all)}",
+        (
+          "confirmed cleartext + SAP_ALL"
+          if any((c.source_sid or "").startswith("BTP:")
+                 and c.has_sap_all for c in conns)
+          else (f"{sum(1 for _c in conns if (_c.source_sid or '').startswith('BTP:') and _c.target_sid)}"
+                 " BTP → on-prem edge(s) mapped"
+                 if any((c.source_sid or '').startswith('BTP:')
+                        for c in conns)
+                 else "none captured")
+        ),
+        "#f85149"
+        if any((c.source_sid or '').startswith('BTP:')
+               and c.has_sap_all for c in conns)
+        else ("#0969da"
+              if any((c.source_sid or '').startswith('BTP:')
+                     for c in conns)
+              else "#d0d7de"))}
   </div>
 
   <section>
