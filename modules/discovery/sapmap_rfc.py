@@ -1645,8 +1645,18 @@ def http_dest_ping(rfc_conn, timeout: float = 5.0) -> dict:
             pass
     except Exception as e:
         result["ping_ok"] = True  # TCP opened, HTTP faulted — target IS up
+        # Include the real exception message, not just the type name.
+        # For SSL failures this is the difference between a useless
+        # "HTTP faulted: SSLError" and a diagnosable
+        # "HTTP faulted: SSLError: [SSL: WRONG_VERSION_NUMBER] wrong
+        # version number (_ssl.c:1082)" that names port-was-HTTP-not-
+        # HTTPS as the cause.  Cap the message to keep the console
+        # tidy on the multi-line SSL protocol errors from some libs.
+        msg = str(e)[:200]
         result["ping_message"] = (f"TCP open on {host}:{port}, "
-                                   f"HTTP faulted: {type(e).__name__}")
+                                   f"HTTP faulted: "
+                                   f"{type(e).__name__}"
+                                   f"{': ' + msg if msg else ''}")
         return result
 
     # 3. Parse the response.  ANY status code proves the target
@@ -3857,7 +3867,11 @@ def _parse_rfcdes_http_options(conn: RFCConn, options_str: str):
         path = ""
     # Combine N=<prefix> + M=<path> into the final path.  Both may be
     # present, both may be absent.  Ensure a single leading slash and
-    # no double slashes at the join point.
+    # no double slashes at the join point — the pre-fix loop just
+    # concatenated after adding a leading '/' to each segment, so
+    # N='/' + M='/sap/bc/gui/sap/its/webgui' produced
+    # '//sap/bc/gui/sap/its/webgui' (live report 2026-07-12 on W74's
+    # ``to_ABAP`` destination).
     combined_path = ""
     for seg in (path_prefix, path):
         seg = (seg or "").strip()
@@ -3865,6 +3879,13 @@ def _parse_rfcdes_http_options(conn: RFCConn, options_str: str):
             continue
         if not seg.startswith("/"):
             seg = "/" + seg
+        if combined_path.endswith("/") and seg.startswith("/"):
+            # Strip the trailing slash on the accumulator OR the
+            # leading slash on the incoming segment — the join
+            # otherwise produces "//".  Keeping the leading slash
+            # on ``seg`` (dropping trailing from accumulator) is
+            # symmetric with how urllib.parse.urljoin normalises.
+            combined_path = combined_path.rstrip("/")
         combined_path += seg
     # Assemble the URL from scratch — no more J= "might be a URL"
     # branch.  The parser is now authoritative about the scheme (from
