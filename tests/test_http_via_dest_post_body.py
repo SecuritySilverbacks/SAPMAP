@@ -362,6 +362,47 @@ def test_http2_disable_emitted_on_every_call():
         assert idx_call < idx_send
 
 
+def test_http2_disable_tries_multiple_method_names():
+    """Kernel 7.53 has no stable name for the h2-disable API —
+    different patch levels have SET_USE_HTTP2, DISABLE_HTTP2, or
+    SET_HTTP_VERSION.  Try each one dynamically; whichever
+    exists on the running kernel wins.  Live report 2026-07-12
+    shows SET_USE_HTTP2 alone wasn't enough; the wrapper must
+    fan out."""
+    lines = _build_abap_program(
+        "T", "POST", "/", body="x=y", content_type="text/plain")
+    joined = "\n".join(lines)
+    assert "tp->('SET_USE_HTTP2')" in joined
+    assert "tp->('DISABLE_HTTP2')" in joined
+    assert "tp->('SET_HTTP_VERSION')" in joined
+
+
+def test_http2_disable_also_sends_request_hints():
+    """When no transport disable API exists, some kernel builds
+    honour the ~server_protocol request pseudo-header and/or
+    Connection: close as a "downgrade to HTTP/1.1" hint on this
+    connection.  Zero-cost belt-and-braces."""
+    lines = _build_abap_program(
+        "T", "POST", "/", body="x=y", content_type="text/plain")
+    joined = "\n".join(lines)
+    assert "'~server_protocol'" in joined
+    assert "'HTTP/1.1'" in joined
+    assert "'Connection'" in joined
+    assert "'close'" in joined
+
+
+def test_receive_data_deep_fallback_present():
+    """When get_data returns empty AND get_cdata returns empty
+    (chunked-body h2 downgrade), attempt to drain any remaining
+    chunks via the dynamic RECEIVE_DATA method.  Some kernel
+    patches leave data in the socket buffer that the initial
+    receive() didn't fully drain."""
+    lines = _build_abap_program(
+        "T", "POST", "/", body="x=y", content_type="text/plain")
+    joined = "\n".join(lines)
+    assert "c->('RECEIVE_DATA')" in joined
+
+
 def test_http2_disable_static_call_never_regressed():
     """Regression catch: if anyone reverts the dynamic-call form to
     the STATIC c->get_transport( )->set_use_http2( abap_false ),

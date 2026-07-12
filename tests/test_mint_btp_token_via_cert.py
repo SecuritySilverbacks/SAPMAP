@@ -254,11 +254,16 @@ def test_2xx_with_empty_wire_body_and_h2_names_kernel_bug():
     # h2 must be named explicitly — that's what the operator needs
     # to see to know what workaround to apply.
     assert "HTTP/2" in err
-    assert "sap-original-protocol" in err
-    assert "set_use_http2" in err
-    # And the profile-parameter workaround for older kernels
-    # that don't have the disable API.
+    # And the profile-parameter step-by-step for kernels whose
+    # disable API isn't available.  Numbered instructions land in
+    # the message so the operator has RZ10 + SMICM guidance.
+    # Kernel 7.53's parameter is icm/HTTP/client/support_http2;
+    # newer kernels use icm/HTTP/client_2/enabled.  Both must
+    # appear so operators on either kernel find the right knob.
+    assert "icm/HTTP/client/support_http2" in err
     assert "icm/HTTP/client_2/enabled" in err
+    assert "RZ10" in err
+    assert "SMICM" in err
 
 
 def test_2xx_with_empty_wire_body_names_compression_cause():
