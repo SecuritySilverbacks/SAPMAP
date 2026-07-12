@@ -221,6 +221,46 @@ def test_2xx_without_access_token_is_error():
     assert "no access_token" in err
 
 
+def test_2xx_with_empty_wire_body_and_h2_names_kernel_bug():
+    """Live capture (2026-07-12): kernel returned HTTP 200 with 17
+    headers, transfer-encoding=chunked, and sap-original-protocol=h2
+    — but zero body bytes.  Diagnosis: kernel 7.53 HTTP/2-downgrade
+    lost the body during h2 → HTTP/1.1 translation.
+
+    When the debug header dump includes `sap-original-protocol: h2`
+    AND the body came back empty, the mint helper must surface a
+    specific message calling out the kernel bug and the workaround
+    (icm/HTTP/client_2/enabled = 0 profile param, or a kernel
+    upgrade).  Generic "compressed body" wording sends operators
+    down the wrong rabbit-hole."""
+    resp = {"ok": True, "status": 200,
+             "body": "", "error": "",
+             "content_encoding": "",
+             "content_length": "",
+             "transfer_encoding": "chunked",
+             "content_type": "application/json",
+             "wire_bytes": 0,
+             "response_headers": [
+                 ("~response_line", "HTTP/1.1 200 OK"),
+                 ("content-type", "application/json"),
+                 ("transfer-encoding", "chunked"),
+                 ("sap-original-protocol", "h2"),
+             ]}
+    with patch("sap_onprem_to_btp.call_via_destination",
+                return_value=resp):
+        token, err, _ = mint_btp_token_via_cert(
+            _node(), "TO_BTP", "sb-x!b1")
+    assert token == ""
+    # h2 must be named explicitly — that's what the operator needs
+    # to see to know what workaround to apply.
+    assert "HTTP/2" in err
+    assert "sap-original-protocol" in err
+    assert "set_use_http2" in err
+    # And the profile-parameter workaround for older kernels
+    # that don't have the disable API.
+    assert "icm/HTTP/client_2/enabled" in err
+
+
 def test_2xx_with_empty_wire_body_names_compression_cause():
     """The bug we chased down live: some SAP kernels return empty
     from get_cdata() when XSUAA replies with Content-Encoding: gzip.

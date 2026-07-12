@@ -317,6 +317,37 @@ def test_body_read_uses_get_data_first():
         f"(get_data at {data_pos}, get_cdata at {cdata_pos})")
 
 
+def test_http2_disable_emitted_on_every_call():
+    """Force HTTP/1.1 upstream via if_http_transport->set_use_http2(
+    abap_false).  Kernel 7.53 negotiates HTTP/2 with any server
+    that advertises it via ALPN, then downgrades to HTTP/1.1
+    chunked for the ABAP client layer — the translation LOSES
+    body frames on some replies (headers arrive, body empty).
+    Live proof (2026-07-12): mint against XSUAA returned 17
+    headers with sap-original-protocol: h2 and zero body bytes.
+
+    Wrapped in TRY/CATCH so pre-7.53 kernels (no HTTP/2 support to
+    disable) don't hard-fail when the interface method is missing."""
+    for method in ("GET", "POST"):
+        lines = _build_abap_program(
+            "T", method, "/oauth/token",
+            body=("x=y" if method == "POST" else ""),
+            content_type=("text/plain" if method == "POST" else ""))
+        joined = "\n".join(lines)
+        assert "get_transport(" in joined, (
+            f"{method}: HTTP/2-disable path missing — this is what "
+            f"stops the kernel-7.53 h2 → HTTP/1.1 body-frame loss")
+        assert "set_use_http2( abap_false )" in joined
+        # Must be guarded — older kernels have no set_use_http2 and
+        # would CX_SY_DYN_CALL_ERROR mid-report.
+        idx_use_http2 = joined.find("set_use_http2")
+        idx_try = joined.rfind("TRY.", 0, idx_use_http2)
+        idx_catch = joined.find("CATCH cx_root.", idx_use_http2)
+        assert idx_try != -1 and idx_catch != -1, (
+            "set_use_http2 must be inside a TRY / CATCH cx_root "
+            "so old kernels degrade gracefully")
+
+
 def test_response_header_dump_emitted():
     """The full header dump (up to 20 entries) is emitted on every
     call so operators can distinguish "kernel received nothing" from
