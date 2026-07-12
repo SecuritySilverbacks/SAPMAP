@@ -1303,6 +1303,7 @@ body {
   <div class="ctx-item" data-action="btp_details">&#128269; View Subaccount Details</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-action="btp_mint_via_cert">&#128273; Mint Token via Cert-Auth (RFC 8705)</div>
+  <div class="ctx-item" data-action="btp_mint_via_local_cert">&#128274; Mint Token via Local Cert Files (workstation)</div>
   <div class="ctx-item" data-action="btp_pull_destinations">&#128229; Refresh Destinations</div>
   <div class="ctx-item" data-action="btp_highlight_links">&#128279; Highlight Linked On-prem Targets</div>
   <div class="ctx-sep"></div>
@@ -5521,6 +5522,9 @@ document.getElementById('btp-ctx-menu').addEventListener('click', function(e) {
     case 'btp_mint_via_cert':
       showBtpMintViaCertModal(uuid);
       break;
+    case 'btp_mint_via_local_cert':
+      showBtpMintViaLocalCertModal(uuid);
+      break;
     case 'btp_pull_destinations':
       btpRefreshDestinations(uuid);
       break;
@@ -5722,6 +5726,143 @@ function showBtpMintViaCertModal(uuid) {
   // Store the destination list on the modal so the mint handler
   // can read them back without re-computing.
   overlay.dataset.dests = JSON.stringify(dests);
+}
+
+// Mint a BTP access token via cert-auth using cert+key files on
+// the SAPMAP HOST (not proxied through S4H's ABAP kernel).
+//
+// Escape hatch for kernels whose HTTP client fails on the response
+// side — kernel 7.53's chunked-response body loss is confirmed
+// (2026-07-12).  Operator supplies:
+//   * UAA URL (typically the .cert. hostname's /oauth/token)
+//   * client_id (same one the kernel-proxied path would use)
+//   * cert_path + key_path (from `cf create-service-key ...` on the
+//     SAPMAP host — X509_GENERATED bindings produce both)
+//
+// Same RFC-8705 x5t#S256 cert-binding on the resulting token —
+// same security model as the kernel-proxied flow.
+function showBtpMintViaLocalCertModal(uuid) {
+  const bn = (mapState.btp_subaccounts || {})[uuid] || {};
+  const existing = document.getElementById('btpc-modal-overlay');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'btpc-modal-overlay';
+  overlay.className = 'modal-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center';
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+  const guessed_uaa = bn.subdomain && bn.region
+    ? `https://${bn.subdomain}.authentication.cert.${bn.region}.hana.ondemand.com/oauth/token`
+    : '';
+
+  overlay.innerHTML = `
+    <div class="modal" style="max-width:820px;width:96%;max-height:90vh;overflow-y:auto;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px 20px;color:#c9d1d9">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <h3 style="margin:0;color:#f0883e">&#128274; Mint BTP Token via Local Cert Files</h3>
+        <button onclick="this.closest('.modal-overlay').remove()" style="background:transparent;border:0;color:#c9d1d9;font-size:22px;cursor:pointer">&times;</button>
+      </div>
+      <div style="font-size:12px;color:#8b949e;margin-bottom:12px;line-height:1.5">
+        Escape hatch for kernels whose HTTP client can't read XSUAA response bodies (kernel 7.53 chunked-body bug).
+        SAPMAP's Python <code>requests</code> stack POSTs directly to XSUAA using cert + key files from THIS host — no SAP kernel involved.
+        Same RFC-8705 x5t#S256 cert-binding on the issued token; same subaccount <code>${escHtml(bn.subdomain || uuid.slice(0, 8))}</code>.
+      </div>
+
+      <div class="form-row" style="display:flex;flex-direction:column;gap:4px;margin-bottom:10px">
+        <label style="font-size:11px;color:#8b949e">UAA URL (token endpoint)</label>
+        <input id="btplc-uaa" value="${escHtml(guessed_uaa)}" placeholder="https://&lt;sub&gt;.authentication.cert.&lt;region&gt;.hana.ondemand.com/oauth/token" style="padding:6px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:4px;font-family:monospace;font-size:11px">
+      </div>
+
+      <div class="form-row" style="display:flex;flex-direction:column;gap:4px;margin-bottom:10px">
+        <label style="font-size:11px;color:#8b949e">BTP client_id</label>
+        <input id="btplc-cid" placeholder="sb-&lt;serviceinstanceid&gt;!b&lt;subaccount&gt;|destination-xsappname!b&lt;xsappname-id&gt;" style="padding:6px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:4px;font-family:monospace;font-size:11px">
+      </div>
+
+      <div class="form-row" style="display:flex;flex-direction:column;gap:4px;margin-bottom:10px">
+        <label style="font-size:11px;color:#8b949e">
+          Client cert (PEM) — path on SAPMAP host
+          <span title="From cf service-key output: credentials.certificate — saved as a .crt/.pem file. Example: /tmp/btp-client.crt" style="color:#58a6ff;cursor:help">&#9432;</span>
+        </label>
+        <input id="btplc-cert" placeholder="/tmp/btp-client.crt" style="padding:6px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:4px;font-family:monospace;font-size:11px">
+      </div>
+
+      <div class="form-row" style="display:flex;flex-direction:column;gap:4px;margin-bottom:10px">
+        <label style="font-size:11px;color:#8b949e">
+          Private key (PEM) — path on SAPMAP host
+          <span title="From cf service-key output: credentials.key — saved as a .key/.pem file. Example: /tmp/btp-client.key" style="color:#58a6ff;cursor:help">&#9432;</span>
+        </label>
+        <input id="btplc-key" placeholder="/tmp/btp-client.key" style="padding:6px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:4px;font-family:monospace;font-size:11px">
+      </div>
+
+      <div class="form-row" style="display:flex;flex-direction:column;gap:4px;margin-bottom:14px">
+        <label style="font-size:11px;color:#8b949e">Requested scope (optional)</label>
+        <input id="btplc-scope" placeholder="(blank = default)" style="padding:6px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:4px;font-family:monospace;font-size:11px">
+      </div>
+
+      <div style="display:flex;justify-content:flex-end;gap:8px">
+        <button onclick="this.closest('.modal-overlay').remove()" style="background:transparent;color:#c9d1d9;border:1px solid #30363d;padding:6px 14px;border-radius:4px;cursor:pointer">Cancel</button>
+        <button id="btplc-mint-btn" onclick="doBtpMintViaLocalCert()" style="background:#1f6feb;color:#fff;border:0;padding:6px 14px;border-radius:4px;cursor:pointer">Mint Token</button>
+      </div>
+
+      <div id="btplc-result" style="margin-top:12px;font-size:12px;font-family:monospace;color:#8b949e;white-space:pre-wrap"></div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+}
+
+async function doBtpMintViaLocalCert() {
+  const uaa = document.getElementById('btplc-uaa').value.trim();
+  const cid = document.getElementById('btplc-cid').value.trim();
+  const cert = document.getElementById('btplc-cert').value.trim();
+  const key = document.getElementById('btplc-key').value.trim();
+  const scope = document.getElementById('btplc-scope').value.trim();
+  const result = document.getElementById('btplc-result');
+  const btn = document.getElementById('btplc-mint-btn');
+  result.style.color = '#c9d1d9';
+
+  const missing = [];
+  if (!uaa) missing.push('UAA URL');
+  if (!cid) missing.push('client_id');
+  if (!cert) missing.push('cert path');
+  if (!key) missing.push('key path');
+  if (missing.length) {
+    result.style.color = '#f85149';
+    result.textContent = 'Missing: ' + missing.join(', ');
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Minting…';
+  result.textContent = `POST ${uaa} with cert=${cert}, key=${key} …`;
+
+  const r = await api('POST', 'btp/mint_token_via_local_cert', {
+    uaa_url: uaa, client_id: cid, cert_path: cert, key_path: key, scope: scope,
+  });
+  btn.disabled = false;
+  btn.textContent = 'Mint Token';
+
+  if (!r || !r.ok) {
+    result.style.color = '#f85149';
+    result.textContent = `Mint failed: ${(r && r.error) || 'unknown error'}`;
+    return;
+  }
+
+  result.style.color = '#3fb950';
+  const e = r.enumerate || {};
+  let line = `Token minted for region ${r.region} ✓`;
+  if (r.thumbprint) line += `\n  bound to cert x5t#S256=${r.thumbprint.substring(0, 16)}…`;
+  if (Array.isArray(r.scopes) && r.scopes.length) {
+    line += `\n  scopes: ${r.scopes.join(', ')}`;
+  }
+  if (typeof e.destinations === 'number') {
+    line += `\n\nauto-enumerate: ${e.destinations} destination(s), `
+          + `${e.cleartext_captured} cleartext, `
+          + `${e.linked_to_onprem} linked to on-prem`;
+  } else if (e.error) {
+    line += `\n\nauto-enumerate error: ${e.error}`;
+  }
+  result.textContent = line;
+  startPolling();
 }
 
 // Auto-detect the BTP client_id from ABAP captures already in

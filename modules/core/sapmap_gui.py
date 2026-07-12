@@ -5271,6 +5271,115 @@ def create_app(api: SAPMAPApi) -> Bottle:
             "enumerate":   enum_result,
         })
 
+    @app.route("/api/btp/mint_token_via_local_cert",
+                method="POST")
+    def btp_mint_token_via_local_cert():
+        """Mint a BTP access token via RFC-8705 cert-auth using
+        cert + key files on the SAPMAP host — NOT proxied through
+        an SM59 destination.
+
+        Escape hatch for kernels whose HTTP client fails on the
+        response side (kernel 7.53 chunked-response body loss,
+        confirmed 2026-07-12 against XSUAA).  The operator must
+        already have a PEM cert + PEM key on the SAPMAP host —
+        typical for X509_GENERATED bindings where BTP produces
+        both via ``cf create-service-key``.  Same client_id, same
+        subaccount, same RFC-8705 x5t#S256 cert binding.
+
+        Body params:
+          uaa_url:    XSUAA /oauth/token endpoint (typically the
+                      .cert. hostname)
+          client_id:  BTP-issued client_id
+          cert_path:  path to PEM cert on the SAPMAP host
+          key_path:   path to PEM private key on the SAPMAP host
+          scope:      optional explicit scope request
+          auto_enumerate: default True (calls the shared
+                      _post_mint_auto_enumerate)
+
+        The result token is stored in ``api.btp_tokens[region]``
+        and a CRITICAL finding fires under the "BTP:" pseudo-SID
+        (no source ABAP was involved, so no SAPNode owns this
+        lateral).
+        """
+        from sap_onprem_to_btp import mint_btp_token_via_local_cert
+        from sap_btp import extract_region_from_token
+        response.content_type = "application/json"
+        data = request.json or {}
+        uaa_url = (data.get("uaa_url") or "").strip()
+        client_id = (data.get("client_id") or "").strip()
+        cert_path = (data.get("cert_path") or "").strip()
+        key_path = (data.get("key_path") or "").strip()
+        scope = (data.get("scope") or "").strip()
+
+        missing = [n for n, v in
+                    (("uaa_url", uaa_url),
+                     ("client_id", client_id),
+                     ("cert_path", cert_path),
+                     ("key_path", key_path)) if not v]
+        if missing:
+            return json.dumps({"error":
+                f"missing required field(s): {', '.join(missing)}"})
+
+        token, err, claims = mint_btp_token_via_local_cert(
+            uaa_url, client_id, cert_path, key_path, scope=scope)
+        if err:
+            print(f"[-] BTP local-cert mint failed — {err}")
+            return json.dumps({"ok": False, "error": err})
+
+        region = extract_region_from_token(token) or ""
+        if not region:
+            return json.dumps({"ok": False,
+                               "error": ("token minted but region "
+                                          "could not be derived "
+                                          "from iss claim"),
+                               "claims": claims})
+
+        api.btp_tokens[region] = token
+        thumbprint = ""
+        try:
+            cnf = claims.get("cnf") or {}
+            thumbprint = cnf.get("x5t#S256") or ""
+        except Exception:
+            pass
+
+        print(f"[+] BTP local-cert mint OK — region {region!r} "
+              f"(cid={client_id[:40]}…, "
+              f"thumbprint={thumbprint[:12]}…, "
+              f"scope={claims.get('scope', '?')})")
+        try:
+            zid = claims.get("zid") or ""
+            sapmap_findings.emit_finding(
+                "CRITICAL", f"BTP:{zid[:8]}" if zid else "BTP:?",
+                f"BTP cert-auth token minted from workstation "
+                f"cert+key files ({cert_path}) — bypasses SAP "
+                f"kernel HTTP client entirely.  Token bound to "
+                f"cert x5t#S256={thumbprint[:16]}… — anyone with "
+                f"the private key can re-mint.",
+                ref="btp.token_minted_via_local_cert",
+                meta={"region":     region,
+                      "client_id":  client_id,
+                      "cert_path":  cert_path,
+                      "thumbprint": thumbprint,
+                      "uaa_url":    uaa_url})
+        except Exception:
+            pass
+
+        # Reuse the shared post-mint auto-enumerate — no source sid
+        # here, so pass a synthetic "BTP:<zid>" for the finding /
+        # log lineage.
+        zid = claims.get("zid") or ""
+        pseudo_sid = f"BTP:{zid[:8]}" if zid else "BTP:local"
+        enum_result = _post_mint_auto_enumerate(
+            token, region, claims, pseudo_sid, data)
+
+        return json.dumps({
+            "ok":         True,
+            "region":     region,
+            "thumbprint": thumbprint,
+            "scopes":     claims.get("scope") or [],
+            "enumerate":  enum_result,
+        })
+
     @app.route("/api/node/<sid>/set_type", method="POST")
     def node_set_type(sid):
         response.content_type = "application/json"
