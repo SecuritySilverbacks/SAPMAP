@@ -9828,12 +9828,42 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 conn.ping_ok = _http_ping.get("ping_ok", False)
                 conn.logon_tested = True
                 if conn.ping_ok:
-                    conn.logon_successful = True
+                    # http_dest_ping returns ping_ok=True in TWO
+                    # cases:
+                    #   (a) full HTTP round-trip completed (any
+                    #       status set on conn.http_status), or
+                    #   (b) TCP handshake opened but the HTTP-level
+                    #       request faulted (SSL error, socket
+                    #       reset, etc.)  http_status stays at 0 and
+                    #       ping_message carries the fault text.
+                    # Only (a) with a 2xx/3xx status justifies
+                    # claiming logon_successful — case (b) means we
+                    # haven't reached the application layer at all,
+                    # and setting logon_successful=True would gate
+                    # OUT the fallback basic-auth probe below (live
+                    # regression 2026-07-12 on W74's to_ABAP:
+                    # SSL: WRONG_VERSION_NUMBER, port 8410 speaks
+                    # HTTP not HTTPS, but logon_successful got set
+                    # anyway and the fallback silently skipped).
+                    _hs = int(getattr(conn, "http_status", 0) or 0)
+                    if 200 <= _hs < 400:
+                        conn.logon_successful = True
+                    else:
+                        conn.logon_successful = False
                     msg = (_http_ping.get("ping_message") or "").strip()
                     if not msg:
                         msg = "OK"
-                    print(f"[+] {dest_name}: HTTP {conn.http_status or ''} "
-                          f"OK ({msg[:120]})")
+                    if _hs:
+                        print(f"[+] {dest_name}: HTTP {_hs} "
+                              f"OK ({msg[:120]})")
+                    else:
+                        # No HTTP status reached — TCP-only case.
+                        # Say so plainly instead of the misleading
+                        # "HTTP  OK" (empty status) line the pre-fix
+                        # log rendered.
+                        print(f"[!] {dest_name}: TCP reachable but "
+                              f"HTTP layer failed ({msg[:160]}) — "
+                              f"falling through to basic-auth probe")
                     _rs = _http_ping.get("remote_sid", "").strip()
                     if _rs and not conn.target_sid:
                         tgt = api.state.get_node(_rs)
@@ -10801,16 +10831,51 @@ def create_app(api: SAPMAPApi) -> Bottle:
                           f"(neither Java nor ABAP branch could "
                           f"resolve target {conn.target_sid or '?'} "
                           f"— probing the URL directly)")
-                    try:
-                        _fb = sapmap_rfc.http_basic_auth_probe(
-                            conn.http_url, rfc_user, rfc_pwd,
-                            timeout=8.0)
-                    except Exception as _fb_e:
-                        _fb = {"ok": False, "status": 0,
-                                "error": (f"probe crashed: "
-                                          f"{type(_fb_e).__name__}: "
-                                          f"{_fb_e!s:.120}"),
-                                "logon_successful": False}
+
+                    def _probe(_url):
+                        try:
+                            return sapmap_rfc.http_basic_auth_probe(
+                                _url, rfc_user, rfc_pwd, timeout=8.0)
+                        except Exception as _e:
+                            return {"ok": False, "status": 0,
+                                     "error": (f"probe crashed: "
+                                               f"{type(_e).__name__}: "
+                                               f"{_e!s:.120}"),
+                                     "logon_successful": False}
+
+                    _fb = _probe(conn.http_url)
+                    # Scheme-fallback: if HTTPS failed with a TLS
+                    # version-mismatch style error, retry as HTTP.
+                    # Live case (2026-07-12, W74's to_ABAP): SM59
+                    # URL was https://192.168.2.29:8410/... but the
+                    # port actually speaks HTTP — TLS handshake
+                    # died with WRONG_VERSION_NUMBER.  Instead of
+                    # leaving the operator with a bare "probe
+                    # failed", flip the scheme and try once more.
+                    _err_lc = (_fb.get("error") or "").lower()
+                    _url_is_https = (conn.http_url or "").lower(
+                        ).startswith("https://")
+                    if (not _fb.get("ok")
+                            and _url_is_https
+                            and ("wrong_version_number" in _err_lc
+                                 or "unknown_protocol" in _err_lc
+                                 or "record layer" in _err_lc
+                                 or "http/1" in _err_lc)):
+                        _http_url = "http://" + conn.http_url[len(
+                            "https://"):]
+                        print(f"[*] {dest_name}: HTTPS handshake said "
+                              f"port speaks plain HTTP — retrying "
+                              f"basic-auth against {_http_url}")
+                        _fb2 = _probe(_http_url)
+                        if _fb2.get("ok") or _fb2.get(
+                                "logon_successful"):
+                            _fb = _fb2
+                            print(f"[!] {dest_name}: SM59 URL scheme "
+                                  f"is wrong — points at https:// "
+                                  f"but port speaks HTTP.  Fix in "
+                                  f"SM59 (Path Prefix stays, only "
+                                  f"the URL scheme changes).")
+
                     if _fb.get("logon_successful"):
                         conn.logon_successful = True
                         print(f"[+] {dest_name}: HTTP "
