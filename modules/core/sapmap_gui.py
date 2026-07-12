@@ -15224,12 +15224,36 @@ def create_app(api: SAPMAPApi) -> Bottle:
             target_is_abap = (target
                               and "ABAP" in (target.system_type or "").upper())
             platform = (conn.http_target_platform or "").upper()
-            # RFC-typed edge implies ABAP target.  HTTP-typed edge only
-            # gets the BAPI fetch when the destination's sap-platform
-            # explicitly says ABAP (or is unset and the target node is
-            # ABAP-flagged).
-            wants_bapi = conn.logon_successful and target_is_abap and (
-                is_rfc or platform == "ABAP" or not platform)
+            # RFC-typed edge implies ABAP target — SAP kernel forbids
+            # Type-3 destinations to non-ABAP.  So when is_rfc is True
+            # we KNOW the target runs ABAP even if target.system_type
+            # is empty (typical for on-prem SAPNodes materialised
+            # only through BTP destination linking, no Standard Scan
+            # yet).  Live bug 2026-07-12: W74 landed via BTP linking
+            # with system_type='', so target_is_abap was False, so
+            # the profile fetch skipped, so has_sap_all stayed False,
+            # so the "Create Remote User" button hid — despite
+            # sapadm actually carrying SAP_ALL on W74.
+            #
+            # HTTP-typed edge only gets the BAPI fetch when the
+            # destination's sap-platform explicitly says ABAP (or is
+            # unset and the target node is ABAP-flagged).
+            wants_bapi = conn.logon_successful and (
+                is_rfc                          # Type-3 → ABAP by def
+                or (target_is_abap
+                    and (platform == "ABAP" or not platform)))
+            # And backfill system_type when we've just proven RFC
+            # logon works — that's evidence the target IS ABAP even
+            # if discovery hasn't fingerprinted it yet.  System
+            # Details modal now shows the ABAP badge, and future
+            # menu-item gates that look at system_type behave
+            # correctly.
+            if (is_rfc and conn.logon_successful and target
+                    and not (target.system_type or "").strip()):
+                target.system_type = "ABAP"
+                print(f"[+] BTP test: backfilled "
+                      f"{conn.target_sid}.system_type = 'ABAP' "
+                      f"(Type-3 RFC logon is definitional proof)")
             if wants_bapi:
                 inst = (conn.target_instance_nr or "").strip() or (
                     target.instances[0].instance_nr
