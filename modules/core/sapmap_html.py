@@ -3303,6 +3303,12 @@ function updateMap() {
         `stroke="${color}" stroke-width="${width}" fill="none"${dashAttr}${newAttr} data-orig-dash="${dashArray}" ` +
         `marker-start="url(#src-${ci})" marker-end="url(#arrow-${ci})" data-conn-idx="${ci}" ` +
         `onclick="showConnInfo(event, ${ci})" />`;
+      // Mid-loop direction arrow.  Cubic Bezier P0→P1→P2→P3 with
+      // P0=(sx,sy), P1=P2=(cpx,sy)/(cpx,ey), P3=(sx,ey).  At t=0.5
+      // the point simplifies to (cpx·0.75 + sx·0.25, (sy+ey)/2) —
+      // the rightmost point of the arc.  Tangent is vertical
+      // pointing down (from sy toward ey), so orient with dy>0.
+      html += midArrow(sx * 0.25 + cpx * 0.75, (sy + ey) / 2, 0, 1, 8);
       // Label to the right of the loop
       let label = conn.destination_name || '';
       if (conn.rfc_user) label += ' / ' + conn.rfc_user;
@@ -3344,6 +3350,32 @@ function updateMap() {
     const total = pairCount[pairKey] || 1;
     const idx = pairIdx[ci] || 0;
 
+    // Helper to render a mid-line arrow polygon.  Operator report
+    // (2026-07-12): the source-bullet marker gets covered by the
+    // SAP box outline when the line originates inside the box (the
+    // clipToBox trim leaves the marker on the box border, and the
+    // box's own fill sits on top).  A mid-line arrow is always
+    // visible regardless of endpoint clipping, so use it as the
+    // primary direction indicator.
+    //
+    // Args:
+    //   mx,my   — polygon centre (arrow midpoint)
+    //   dx,dy   — direction vector (source→target), used for
+    //             rotation angle
+    //   size    — apex length (px)
+    // Emits a filled triangle pointing along dx,dy with a thin
+    // canvas-coloured stroke so it stays crisp on dashed lines.
+    function midArrow(mx, my, dx, dy, size) {
+      const a = Math.atan2(dy, dx) * 180 / Math.PI;
+      const s = size || 8;
+      // Triangle points along +X in local coords: apex at (s,0),
+      // base at (-s*0.7,-s*0.7) to (-s*0.7,s*0.7).
+      return `<polygon points="${s},0 ${-s*0.7},${-s*0.7} ${-s*0.7},${s*0.7}" ` +
+        `fill="${color}" stroke="#0d1117" stroke-width="1" ` +
+        `transform="translate(${mx.toFixed(1)},${my.toFixed(1)}) rotate(${a.toFixed(1)})" ` +
+        `pointer-events="none" />`;
+    }
+
     if (total === 1) {
       // Invisible wider hit area for dashed/dotted lines
       if (dashArray) {
@@ -3355,6 +3387,9 @@ function updateMap() {
         `stroke="${color}" stroke-width="${width}" fill="none"${dashAttr}${newAttr} data-orig-dash="${dashArray}" ` +
         `marker-start="url(#src-${ci})" marker-end="url(#arrow-${ci})" data-conn-idx="${ci}" ` +
         `onclick="showConnInfo(event, ${ci})" />`;
+      // Mid-line direction arrow — visible even when the source
+      // bullet is behind the source box.
+      html += midArrow((x1+x2)/2, (y1+y2)/2, x2-x1, y2-y1, 8);
     } else {
       const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
       // Canonical direction: always from alphabetically smaller to larger SID
@@ -3407,6 +3442,17 @@ function updateMap() {
         `stroke="${color}" stroke-width="${width}" fill="none"${dashAttr}${newAttr} data-orig-dash="${dashArray}" ` +
         `marker-start="url(#src-${ci})" marker-end="url(#arrow-${ci})" data-conn-idx="${ci}" ` +
         `onclick="showConnInfo(event, ${ci})" />`;
+      // Mid-line direction arrow on the curve.  For a quadratic
+      // Bezier P0→P1→P2, the point at t=0.5 is
+      // (P0 + 2·P1 + P2) / 4 — offset from the straight-line
+      // midpoint toward the control point by half the control
+      // offset.  Tangent direction at t=0.5 is (P2 - P0), so the
+      // source→target vector suffices for the rotation.  Result:
+      // each fanned parallel edge gets its own visible arrow sitting
+      // right on top of its own curve, not the straight-line axis.
+      const arrowMx = (x1 + 2*qx + x2) / 4;
+      const arrowMy = (y1 + 2*qy + y2) / 4;
+      html += midArrow(arrowMx, arrowMy, x2 - x1, y2 - y1, 8);
     }
 
     // Connection label at midpoint
