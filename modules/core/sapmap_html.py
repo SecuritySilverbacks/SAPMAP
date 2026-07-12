@@ -5680,6 +5680,22 @@ function showBtpMintViaCertModal(uuid) {
           </label>
           <input id="btpc-cid" placeholder="sb-&lt;serviceinstanceid&gt;!b&lt;subaccount&gt;|destination-xsappname!b&lt;xsappname-id&gt;" style="padding:6px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:4px;font-family:monospace;font-size:11px">
           <select id="btpc-cid-choices" style="display:none;padding:6px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:4px;font-family:monospace;font-size:11px" onchange="document.getElementById('btpc-cid').value = this.value"></select>
+          <details style="margin-top:4px">
+            <summary style="cursor:pointer;font-size:10px;color:#58a6ff">Where do I find the client_id?</summary>
+            <div style="font-size:11px;color:#8b949e;padding:6px 8px;background:#0d1117;border:1px solid #30363d;border-radius:4px;margin-top:4px;line-height:1.5">
+              The client_id is a <b>BTP-side identifier</b> minted by XSUAA when the x509 service key was bound. It has no relation to the on-prem SAP system. Three ways to retrieve it:
+              <br><br>
+              <b>1. cf CLI</b> — if you ran <code>cf create-service-key</code> already, its output has it:
+              <br><code style="color:#7ee787">cf service-key &lt;instance&gt; &lt;keyname&gt; | jq -r .credentials.uaa.clientid</code>
+              <br><br>
+              <b>2. BTP cockpit</b> — Subaccount → Services → Instances and Subscriptions → your <code>destination</code> (or x509 xsappname) service → Service Keys tab → click the key → the <code>clientid</code> field is visible in the credentials block.
+              <br><br>
+              <b>3. Service Manager API</b> — if you have a CF token with <code>service_manager.read</code>:
+              <br><code style="color:#7ee787">TOKEN=$(cf oauth-token | awk '{print $2}')<br>curl -H "Authorization: bearer $TOKEN" \\<br>&nbsp;&nbsp;https://service-manager.cfapps.&lt;region&gt;.hana.ondemand.com/v1/service_bindings \\<br>&nbsp;&nbsp;| jq '.items[] | select(.credentials["credential-type"] | contains("X509")) | .credentials.uaa.clientid'</code>
+              <br><br>
+              The <b>Auto-detect</b> button above only finds client_ids that leaked into on-prem OA2C_CONFIG / RSECTAB / SecStoreFS — mostly useful for basic-auth destinations. For cert-auth bindings the client_id never leaves BTP by default; use one of the three methods above.
+            </div>
+          </details>
         </div>
 
         <div class="form-row" style="display:flex;flex-direction:column;gap:4px;margin-bottom:14px">
@@ -5796,6 +5812,20 @@ function showBtpMintViaLocalCertModal(uuid) {
       <div class="form-row" style="display:flex;flex-direction:column;gap:4px;margin-bottom:10px">
         <label style="font-size:11px;color:#8b949e">BTP client_id</label>
         <input id="btplc-cid" placeholder="sb-&lt;serviceinstanceid&gt;!b&lt;subaccount&gt;|destination-xsappname!b&lt;xsappname-id&gt;" style="padding:6px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:4px;font-family:monospace;font-size:11px">
+        <details style="margin-top:4px">
+          <summary style="cursor:pointer;font-size:10px;color:#58a6ff">Where do I find the client_id?</summary>
+          <div style="font-size:11px;color:#8b949e;padding:6px 8px;background:#0d1117;border:1px solid #30363d;border-radius:4px;margin-top:4px;line-height:1.5">
+            The client_id is a <b>BTP-side identifier</b> minted by XSUAA when the x509 service key was bound. It has no relation to any on-prem SAP system. Three ways to retrieve it:
+            <br><br>
+            <b>1. cf CLI</b> — same <code>cf service-key</code> output that gave you the cert + key files:
+            <br><code style="color:#7ee787">cf service-key &lt;instance&gt; &lt;keyname&gt; | jq -r .credentials.uaa.clientid</code>
+            <br><br>
+            <b>2. BTP cockpit</b> — Subaccount → Services → Instances and Subscriptions → your <code>destination</code> (or x509 xsappname) service → Service Keys tab → click the key → the <code>clientid</code> field is visible in the credentials block.
+            <br><br>
+            <b>3. Service Manager API</b> — if you have a CF token with <code>service_manager.read</code>:
+            <br><code style="color:#7ee787">TOKEN=$(cf oauth-token | awk '{print $2}')<br>curl -H "Authorization: bearer $TOKEN" \\<br>&nbsp;&nbsp;https://service-manager.cfapps.&lt;region&gt;.hana.ondemand.com/v1/service_bindings \\<br>&nbsp;&nbsp;| jq '.items[] | select(.credentials["credential-type"] | contains("X509")) | .credentials.uaa.clientid'</code>
+          </div>
+        </details>
       </div>
 
       <div class="form-row" style="display:flex;flex-direction:column;gap:4px;margin-bottom:10px">
