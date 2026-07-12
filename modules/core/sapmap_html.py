@@ -5752,9 +5752,29 @@ function showBtpMintViaLocalCertModal(uuid) {
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center';
   overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
 
-  const guessed_uaa = bn.subdomain && bn.region
-    ? `https://${bn.subdomain}.authentication.cert.${bn.region}.hana.ondemand.com/oauth/token`
-    : '';
+  // URL guesser.  Two problems the pre-fix version had:
+  //
+  //   1. bn.region can carry the STRING "cert" if the subaccount
+  //      was auto-materialised from a .authentication.cert.<region>.
+  //      URL — the parser picked parts[2] which is "cert" for that
+  //      shape.  Filter it out so we don't produce ...cert.cert...
+  //      (live 2026-07-12 bug — the wrong URL returned 503 "no
+  //      server for tenant" from XSUAA nginx routing).
+  //
+  //   2. Even with the region right, an existing X509 destination
+  //      to this subaccount carries the authoritative URL.  Prefer
+  //      that when present — it's what the operator has already
+  //      configured and tested.
+  const cert_dests = (typeof _btpEligibleCertDestinations === 'function')
+    ? _btpEligibleCertDestinations(uuid) : [];
+  let guessed_uaa = '';
+  const cert_dest_url = cert_dests.length > 0 ? cert_dests[0].host : '';
+  if (cert_dest_url) {
+    // Existing destination — use its hostname, force /oauth/token path
+    guessed_uaa = `https://${cert_dest_url}/oauth/token`;
+  } else if (bn.subdomain && bn.region && bn.region !== 'cert') {
+    guessed_uaa = `https://${bn.subdomain}.authentication.cert.${bn.region}.hana.ondemand.com/oauth/token`;
+  }
 
   overlay.innerHTML = `
     <div class="modal" style="max-width:820px;width:96%;max-height:90vh;overflow-y:auto;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px 20px;color:#c9d1d9">
