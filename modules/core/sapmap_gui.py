@@ -10771,6 +10771,60 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                 print(f"[-] {dest_name}: no SOAP-RFC "
                                       f"endpoint — {endpoint['error']}")
 
+                # Fallback basic-auth HTTP probe.  Fires when NONE of
+                # the branches above ran a probe:
+                #   * SAPControl branch — target isn't a SAPControl
+                #     endpoint
+                #   * Java / BTP / ADS branch — target stack couldn't
+                #     be classified as Java-shape (unknown port
+                #     family, target_node absent or empty
+                #     system_type)
+                #   * ABAP branch — target_node is None (target_sid
+                #     points at a SID SAPMAP doesn't have as a real
+                #     node) OR the node is present but system_type
+                #     isn't ABAP
+                # For a Type-H HTTP-to-ABAP destination that ended up
+                # here, the user's URL + SecStore creds still deserve
+                # SOME real answer.  http_basic_auth_probe honours the
+                # URL scheme (https:// wraps in TLS, http:// doesn't),
+                # so this covers HTTPS-configured Type-H destinations
+                # against unresolved targets — exact case reported
+                # 2026-07-12 for W74's ``to_ABAP`` destination.
+                if (not conn.logon_successful
+                        and not _did_java_probe
+                        and rfc_user and rfc_pwd
+                        and conn.http_url
+                        and not (conn.os_access_type or "").startswith(
+                            ("sapcontrol", "hostagent"))):
+                    print(f"[*] {dest_name}: fallback basic-auth HTTP "
+                          f"probe on {conn.http_url} as {rfc_user} "
+                          f"(neither Java nor ABAP branch could "
+                          f"resolve target {conn.target_sid or '?'} "
+                          f"— probing the URL directly)")
+                    try:
+                        _fb = sapmap_rfc.http_basic_auth_probe(
+                            conn.http_url, rfc_user, rfc_pwd,
+                            timeout=8.0)
+                    except Exception as _fb_e:
+                        _fb = {"ok": False, "status": 0,
+                                "error": (f"probe crashed: "
+                                          f"{type(_fb_e).__name__}: "
+                                          f"{_fb_e!s:.120}"),
+                                "logon_successful": False}
+                    if _fb.get("logon_successful"):
+                        conn.logon_successful = True
+                        print(f"[+] {dest_name}: HTTP "
+                              f"{_fb.get('status', '?')} — credential "
+                              f"accepted at {conn.http_url}")
+                    elif _fb.get("ok"):
+                        print(f"[-] {dest_name}: HTTP "
+                              f"{_fb.get('status', '?')} — credential "
+                              f"rejected or endpoint denied "
+                              f"({_fb.get('error', '')[:120]})")
+                    else:
+                        print(f"[-] {dest_name}: fallback HTTP probe "
+                              f"failed ({_fb.get('error', '')[:200]})")
+
                 print(f"[+] Single test done for {dest_name}")
                 return
 
