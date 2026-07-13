@@ -3511,11 +3511,16 @@ def _try_tableblock_compressed_fallback(conn, node: SAPNode) -> list:
     print(f"[*] {node.sid}: Trying GET_TABLEBLOCK_COMPRESSED_RFC on RFCDES ...")
     connections = []
 
-    # File now lives in modules/discovery/; sap_decompress stays at project root.
+    # sap_decompress binary lives under tools/sap_decompress/ —
+    # moved out of the repo root on 2026-07-13 for tidiness (matches
+    # the folder-per-tool pattern used by dirtyfrag, godpotato, etc.).
+    # Path: <this-file>/../../tools/sap_decompress/sap_decompress
     decompress_bin = os.path.join(os.path.dirname(__file__),
-                                   "..", "..", "sap_decompress")
+                                   "..", "..", "tools",
+                                   "sap_decompress", "sap_decompress")
     if not os.path.isfile(decompress_bin):
-        print(f"[-] {node.sid}: sap_decompress binary not found, skipping")
+        print(f"[-] {node.sid}: sap_decompress binary not found "
+              f"at {decompress_bin!r} — skipping")
         return connections
 
     try:
