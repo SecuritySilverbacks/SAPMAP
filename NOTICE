@@ -1,0 +1,47 @@
+SAPMAP — SAP Landscape Attack Path Mapper
+Copyright 2026 Joris van de Vis <jorisvandevis@hotmail.com>
+
+This product includes software developed by Joris van de Vis and
+contributors, licensed under the Apache License, Version 2.0.
+
+---------------------------------------------------------------------
+Third-party components with separate licensing terms
+---------------------------------------------------------------------
+
+The following component ships alongside SAPMAP but is licensed
+separately from SAPMAP's own Apache-2.0 grant.  These components
+are invoked via subprocess boundaries (fork/exec), not linked into
+SAPMAP's own Python address space, so SAPMAP itself remains
+Apache-2.0.
+
+  * tools/sap_decompress/sap_decompress
+      Precompiled ELF binary that decompresses SAP's proprietary
+      LZH format (used inside GET_TABLEBLOCK_COMPRESSED_RFC
+      responses).  Built from the pysap project's pysapcompress
+      module — see https://github.com/OpenCyberTranslated/pysap.
+      pysap is distributed under the GNU General Public License
+      version 2 (GPL-2.0).  SAPMAP invokes this binary via
+      subprocess only; it does not link the pysap library into
+      its own process.
+
+      Full GPL-2.0 text: https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt
+
+      A tools/sap_decompress/README.md file in this repository
+      describes the binary's provenance and how to rebuild it
+      from pysap sources for architectures other than x86-64
+      Linux.
+
+---------------------------------------------------------------------
+Disclaimer regarding intended use
+---------------------------------------------------------------------
+
+SAPMAP implements real, working exploits against SAP NetWeaver
+ABAP and Java stacks (Gateway RCE, Message Server bypass, ABAP
+BAPI user creation, Java UME manipulation, kernel-proxied
+lateral movement, and more).  Distribution under Apache-2.0 does
+not authorize use against any system.  Running SAPMAP against a
+system you do not own or do not have explicit written permission
+to test may be illegal in your jurisdiction.
+
+See DISCLAIMER.md for the full intended-use policy, safety-line
+list, and cleanup responsibilities.
