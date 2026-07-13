@@ -94,3 +94,13 @@ sapcrypto*.dll
 *.mp4
 *.pptx
 *.key
+
+# Research folder — early-stage exploit ideas, PoC plans, threat
+# modelling notes, unreleased offensive tooling designs.  These
+# often name specific customers, describe destructive primitives
+# (ransomware simulations, wiper PoCs, etc.), or reference SAP
+# Notes / CVE prerelease intel that is customer-only.  Anything
+# under research/ MUST NOT be pushed to a public repo — treat
+# the whole folder as local-only until each item is explicitly
+# reviewed and moved (or rewritten) elsewhere in the tree.
+research/
