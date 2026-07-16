@@ -441,6 +441,10 @@ Without it you're limited to unauthenticated features only (port scan, gateway e
    - **Actions → 📁 Set NW RFC SDK Path** in the GUI (persisted to `settings.local.json`, gitignored) — the recommended way to set it once and never type `--sdk` again.  Live-applied to the running session so no restart is needed after saving.
    - Nothing set — SAPMAP falls back to the process `LD_LIBRARY_PATH` / `DYLD_LIBRARY_PATH`
 
+### Anti-Virus
+
+Some AV software (especially on Windows systems) might flag SAPMAP as being malicious. This is a.o. because SAPMAP includes functionality for a reverse- or bind-shell and contains some well-known exploits. Accepting these risks might be needed to have SAPMAP properly functioning on Windows based systems.
+
 ---
 
 ## Usage
