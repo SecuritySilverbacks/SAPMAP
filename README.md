@@ -1956,4 +1956,9 @@ Linux, Windows, AIX, HP-UX, SunOS
 
 ## License
 
-For authorized security testing only. Unauthorized access to computer systems is illegal.
+SAPMAP is licensed under the GNU General Public License v3.0 (or, at
+your option, any later version) — see [LICENSE](LICENSE) and
+[NOTICE](NOTICE) for details, including third-party code ported from
+the [pysap](https://github.com/OWASP/pysap) project (GPLv2-or-later).
+
+For authorized security testing only. Unauthorized access to computer systems is illegal. See [DISCLAIMER.md](DISCLAIMER.md).

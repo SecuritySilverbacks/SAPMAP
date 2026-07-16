@@ -1,35 +1,46 @@
 SAPMAP — SAP Landscape Attack Path Mapper
-Copyright 2026 Joris van de Vis <jorisvandevis@hotmail.com>
+Copyright (C) 2026 Joris van de Vis <jorisvandevis@hotmail.com>
 
-This product includes software developed by Joris van de Vis and
-contributors, licensed under the Apache License, Version 2.0.
+SAPMAP is free software: you can redistribute it and/or modify it
+under the terms of the GNU General Public License, version 3 (or,
+at your option, any later version), as published by the Free
+Software Foundation.  See the LICENSE file for the full text.
 
 ---------------------------------------------------------------------
-Third-party components with separate licensing terms
+Third-party code incorporated into SAPMAP
 ---------------------------------------------------------------------
 
-The following component ships alongside SAPMAP but is licensed
-separately from SAPMAP's own Apache-2.0 grant.  These components
-are invoked via subprocess boundaries (fork/exec), not linked into
-SAPMAP's own Python address space, so SAPMAP itself remains
-Apache-2.0.
+Several SAPMAP modules port or adapt protocol logic from the pysap
+project (https://github.com/OWASP/pysap, OWASP CBAS project, by
+Martin Gallo / SecureAuth). pysap is licensed under the GNU General
+Public License, version 2 or (at pysap's option) any later version —
+GPLv2-or-later. Because SAPMAP incorporates pysap-derived code, the
+combined work is licensed under the GPL as well; this is why SAPMAP
+as a whole is distributed under GPLv3 rather than a permissive
+license such as Apache-2.0 (Apache-2.0 code cannot be combined with
+GPLv2-only code, but GPLv2-or-later code — like pysap's — is
+compatible with GPLv3).
+
+Files with pysap-derived logic include (non-exhaustive):
+  * modules/protocols/sap_rsec_cipher.py
+  * modules/protocols/sap_snc.py
+  * modules/protocols/sap_router_info.py
+  * modules/protocols/sap_saprouter.py
+  * modules/exploitation/sap_gw_xpg_standalone.py
+  * modules/exploitation/sap_ms_betrusted.py
+  * modules/discovery/sap_client_enum.py
+  * modules/discovery/sapmap_scanner.py
+  * modules/discovery/sapmap_rfc.py
+  * modules/data_extraction/sapmap_secstore.py
+  * modules/data_extraction/sapmap_scc_ssfs_decrypt.py
+  * modules/postex/sap_pse_loot.py
 
   * tools/sap_decompress/sap_decompress
       Precompiled ELF binary that decompresses SAP's proprietary
       LZH format (used inside GET_TABLEBLOCK_COMPRESSED_RFC
-      responses).  Built from the pysap project's pysapcompress
-      module — see https://github.com/OpenCyberTranslated/pysap.
-      pysap is distributed under the GNU General Public License
-      version 2 (GPL-2.0).  SAPMAP invokes this binary via
-      subprocess only; it does not link the pysap library into
-      its own process.
-
-      Full GPL-2.0 text: https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt
-
-      A tools/sap_decompress/README.md file in this repository
-      describes the binary's provenance and how to rebuild it
-      from pysap sources for architectures other than x86-64
-      Linux.
+      responses).  Built from pysap's pysapcompress module.  See
+      tools/sap_decompress/README.md for provenance and rebuild
+      instructions.
 
 ---------------------------------------------------------------------
 Disclaimer regarding intended use
@@ -38,10 +49,11 @@ Disclaimer regarding intended use
 SAPMAP implements real, working exploits against SAP NetWeaver
 ABAP and Java stacks (Gateway RCE, Message Server bypass, ABAP
 BAPI user creation, Java UME manipulation, kernel-proxied
-lateral movement, and more).  Distribution under Apache-2.0 does
-not authorize use against any system.  Running SAPMAP against a
-system you do not own or do not have explicit written permission
-to test may be illegal in your jurisdiction.
+lateral movement, and more).  The GPL grants broad rights to use,
+modify, and redistribute SAPMAP, but it does not authorize use
+against any system.  Running SAPMAP against a system you do not
+own or do not have explicit written permission to test may be
+illegal in your jurisdiction.
 
 See DISCLAIMER.md for the full intended-use policy, safety-line
 list, and cleanup responsibilities.
