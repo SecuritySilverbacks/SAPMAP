@@ -463,17 +463,56 @@ Without it you're limited to unauthenticated features only (port scan, gateway e
 
 **Install:**
 
-1. Download from SAP Software Center (requires S-user access — SAP does not distribute the SDK publicly)
-2. Extract to e.g. `/opt/nwrfcsdk/`
-3. Set the library search path so the OS loader can find `libsapnwrfc.so`:
+Instructions per OS below.  In all cases the last step is to tell SAPMAP where the SDK's `lib/` directory lives — three options, first non-empty wins:
+
+- `--sdk <path>` on the CLI (per-run override — path is OS-specific: `/opt/nwrfcsdk/lib` on Linux/macOS, `C:\nwrfcsdk\lib` on Windows)
+- **Actions → 📁 Set NW RFC SDK Path** in the GUI (persisted to `settings.local.json`, gitignored) — the recommended way to set it once and never type `--sdk` again.  Live-applied to the running session so no restart is needed after saving.
+- Nothing set — SAPMAP falls back to the OS loader's search path (`LD_LIBRARY_PATH` on Linux, `DYLD_LIBRARY_PATH` on macOS, `PATH` on Windows)
+
+#### Linux
+
+1. Download from SAP Software Center (requires S-user access — SAP does not distribute the SDK publicly).  Pick the Linux x86-64 variant.
+2. Extract to e.g. `/opt/nwrfcsdk/`.
+3. Point the loader at the `lib/` directory (only needed if you plan to use the LD-based fallback rather than `--sdk` / the GUI setting):
    ```bash
-   export LD_LIBRARY_PATH=/opt/nwrfcsdk/lib:$LD_LIBRARY_PATH   # Linux
-   export DYLD_LIBRARY_PATH=/opt/nwrfcsdk/lib:$DYLD_LIBRARY_PATH   # macOS
+   export LD_LIBRARY_PATH=/opt/nwrfcsdk/lib:$LD_LIBRARY_PATH
    ```
-4. Tell SAPMAP where the SDK's `lib/` directory lives — three options, first non-empty wins:
-   - `--sdk /opt/nwrfcsdk/lib` on the CLI (per-run override)
-   - **Actions → 📁 Set NW RFC SDK Path** in the GUI (persisted to `settings.local.json`, gitignored) — the recommended way to set it once and never type `--sdk` again.  Live-applied to the running session so no restart is needed after saving.
-   - Nothing set — SAPMAP falls back to the process `LD_LIBRARY_PATH` / `DYLD_LIBRARY_PATH`
+4. Verify: `ls /opt/nwrfcsdk/lib/libsapnwrfc.so`.
+
+#### macOS
+
+1. Download the macOS variant from SAP Software Center.
+2. Extract to e.g. `/opt/nwrfcsdk/`.
+3. Point the loader at the `lib/` directory:
+   ```bash
+   export DYLD_LIBRARY_PATH=/opt/nwrfcsdk/lib:$DYLD_LIBRARY_PATH
+   ```
+4. macOS quarantine may block unsigned SAP dylibs — if the RFC probe reports "cannot load library", `xattr -dr com.apple.quarantine /opt/nwrfcsdk` clears it.
+
+#### Windows
+
+1. Download the Windows x86-64 variant from SAP Software Center (typically a `NWRFC_*.SAR` archive).  SAR files are extracted with `SAPCAR.EXE` (also on SAP Software Center):
+   ```powershell
+   .\SAPCAR.EXE -xvf NWRFC_75-70003216.SAR -R C:\nwrfcsdk
+   ```
+2. The archive contains a top-level `nwrfcsdk\` folder — you should end up with `C:\nwrfcsdk\lib\sapnwrfc.dll` (plus `libsapucum.dll`, `icuuc50.dll`, `icudt50.dll`, `icuin50.dll`).
+3. Add the `lib` directory to your user or system `PATH` so the Windows loader can find the DLLs:
+   ```powershell
+   # PowerShell (per-user PATH, requires new shell to take effect):
+   setx PATH "$env:PATH;C:\nwrfcsdk\lib"
+   ```
+   Or via the GUI: *System Properties → Environment Variables → PATH → Edit → New → `C:\nwrfcsdk\lib`*.
+4. The SDK's DLLs are built against the **Microsoft Visual C++ 2013 Redistributable (x64)** — install it from Microsoft's download center if it isn't already present.  Missing VC++ redist manifests as a `126 (module not found)` load error even when the DLL path is correct.
+5. Tell SAPMAP where the `lib` directory is — either `--sdk C:\nwrfcsdk\lib` on the CLI, or set it once via **Actions → 📁 Set NW RFC SDK Path** in the GUI (persisted to `settings.local.json`).
+
+**Windows troubleshooting:**
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `Cannot load library sapnwrfc.dll` on startup | `PATH` doesn't include `C:\nwrfcsdk\lib`, OR a new PowerShell wasn't opened after `setx` | Open a fresh terminal.  Verify with `where.exe sapnwrfc.dll`. |
+| `Error 126: The specified module could not be found` (with sapnwrfc.dll in PATH) | Missing Visual C++ 2013 Redistributable | Install `vcredist_x64.exe` from Microsoft. |
+| `Error 193: %1 is not a valid Win32 application` | 32-bit SDK on 64-bit Python (or vice-versa) | Match SDK bitness to your Python — `python -c "import struct; print(struct.calcsize('P')*8)"` reports 64 or 32. |
+| RFC probe succeeds but SAPMAP's Anti-Virus scanner quarantines it | AV flags SAPMAP's exploit primitives (10KBlaze, betrusted, VisualComposer shell) | See the **Anti-Virus** section below. |
 
 ### Anti-Virus
 
