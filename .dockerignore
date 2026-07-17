@@ -1,0 +1,84 @@
+# Keep the docker build context small AND keep sensitive material
+# out of the resulting image — this file mirrors .gitignore but is
+# stricter (e.g. we exclude the .git dir entirely).
+.git/
+.github/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+.venv/
+venv/
+env/
+.tox/
+
+# Runtime / per-engagement artefacts — MUST NOT ship in the image.
+states/
+loot/
+*.sapmap
+*.log
+dev_rfc.log
+
+# Local settings / IDE / MCP configs — often contain credentials.
+settings.local.json
+.mcp.json
+.vsp.json
+vsp
+.claude/
+.vscode/
+.idea/
+
+# Never ship SAP-licensed binaries (SDK, SNC libs, sap_decompress
+# happens to be ours-built from pysap so it CAN ship — but the
+# vendor SDKs and SNC libs cannot).
+nwrfcsdk/
+libsapscc*.dylib
+libsapscc*.so
+libsapscc*.dll
+sapcrypto*.dylib
+sapcrypto*.so
+sapcrypto*.dll
+
+# Sensitive key material.
+*.p12
+*.jks
+*.pfx
+
+# Research / unreleased offensive tooling — never ship.
+research/
+docs/research/
+
+# Build-tool intermediates that bloat the context.
+tools/miniplasma/packages/
+tools/miniplasma/src/bin/
+tools/miniplasma/src/obj/
+tools/miniplasma/confuser/
+tools/miniplasma/nuget.exe
+tools/godpotato/src/upstream/
+tools/godpotato/confuser/
+tools/efspotato/src/upstream/
+tools/efspotato/confuser/
+tools/peditcow/src/upstream/
+tools/ssfs_decrypt/build/
+tools/ssfs_decrypt/*.jar
+
+# Understand-anything cache.
+.understand-anything/
+
+# OS junk.
+.DS_Store
+
+# Media.
+*.mov
+*.mp4
+*.pptx
+*.key
+
+# Lab target lists (may name internal IPs).
+targets.txt
+
+# Docker itself.
+Dockerfile
+.dockerignore

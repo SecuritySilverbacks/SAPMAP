@@ -401,15 +401,49 @@ The `modules/__init__.py` registers each subpackage on `sys.path` so existing fl
 | `urllib3` | 1.26 | TLS-warning suppression + underlying transport for `requests` |
 | `pycryptodome` | 3.18 | DES/3DES + PBKDF2 for SecStore (RSECTAB) decryption on both ABAP and Java |
 | `pyyaml` | 6.0 | YAML parser for scripted scenarios (`--script foo.yaml`) |
-| `pyjks` | 20 | JKS keystore reader for the offline Java SecStore decrypt path |
+
+### Optional Python packages
+
+| Package | Enables | Why it's optional |
+|---|---|---|
+| `pyjks` (≥ 20) | OFFLINE 3DES Java-SecStore decrypt path | Pulls in `twofish==0.3.0` (2013), which has no wheels for Python 3.12+ and fails to build cleanly on modern envs.  The JSP / server-side path works without it, so a fresh install can skip pyjks and still cover Java SecStore. |
+
+Install optional extras with `pip install pyjks` when you need them — or use the Docker image below, which bakes them in.
 
 ### Setup
 
 ```bash
-git clone https://github.com/OWASP/SAPMAP.git
+git clone https://github.com/kloris/SAPMAP.git
 cd SAPMAP
 pip3 install -r requirements.txt
 ```
+
+### Docker (recommended if you keep hitting install pain)
+
+The container image bundles every Python dependency (including the tricky `pyjks` / `twofish` chain) so you don't have to negotiate Python 3.12 build breakage.  The SAP NW RFC SDK stays on the host (SAP EULA — cannot ship it) and gets bind-mounted at run time.
+
+```bash
+docker build -t sapmap:latest .
+
+docker run --rm -it \
+    --network host \
+    -v /opt/nwrfcsdk:/opt/nwrfcsdk:ro \
+    -v $(pwd)/loot:/opt/sapmap/loot \
+    -v $(pwd)/states:/opt/sapmap/states \
+    sapmap:latest
+```
+
+Then open `http://127.0.0.1:8080` in your host browser.
+
+Or use the wrapper: `./scripts/run-container.sh` (respects `SDK_PATH`, `IMAGE`, `LOOT_DIR`, `STATE_DIR` env vars).
+
+**Notes:**
+
+- `--network host` is **Linux only** and the recommended path because SAPMAP needs to reach arbitrary SAP hosts on your LAN.  On macOS / Windows Docker Desktop use `-p 8080:8080` and note that LAN reachability from the container is limited by Docker Desktop's networking — for real engagements, run SAPMAP natively on those platforms.
+- The image runs in `--browser` mode; `pywebview` cannot spawn a desktop window from inside a container.
+- The image binds to `0.0.0.0` inside the container.  With `--network host` that resolves to your real network interfaces — do **not** run this on an untrusted network.
+- `loot/` and `states/` are volume-mounted so findings, reports, and `.sapmap` snapshots survive container restarts.
+- Publishing a pre-built image to a registry is a follow-up (see issue tracker).
 
 ### SAP NW RFC SDK (strongly recommended)
 
