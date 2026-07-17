@@ -2564,6 +2564,11 @@ let _dismissedFindingIds = new Set();
 // Auto-expire (5 s) → hide from banner only; badge + drawer keep it.
 let _bannerHiddenIds = new Set();
 let _findingsDrawerOpen = false;
+// Issue #2 (item 3) — track which SID's Findings panel is currently
+// open so the scan-poll loop can re-render it when new findings for
+// that SID arrive.  The panel would otherwise stay stale until the
+// operator closes and re-opens it.
+let _openFindingsPanelSid = null;
 let pollTimer = null;
 let selectedNodeSid = null;
 let dragNode = null;
@@ -2760,6 +2765,20 @@ async function pollUpdates() {
         findingsCursor = fd.cursor || findingsCursor;
         renderFindings();
         try { updateMap(); } catch (_) {}
+        // Issue #2 (item 3) — if the per-node Findings panel is open
+        // and any of the new records belong to that SID, re-render
+        // the panel so its content stays live.  Gated by data-view so
+        // we don't fight another panel that reused #detail-panel.
+        try {
+          const panel = document.getElementById('detail-panel');
+          const openSid = _openFindingsPanelSid;
+          if (openSid && panel && panel.classList.contains('visible')
+              && panel.getAttribute('data-view') === 'findings'
+              && panel.getAttribute('data-sid') === openSid) {
+            const hasNewForSid = fd.findings.some(r => r.node === openSid);
+            if (hasNewForSid) showFindings(openSid);
+          }
+        } catch (_) {}
       }
     } catch (_) { /* findings polling never blocks state refresh */ }
 
@@ -2788,9 +2807,30 @@ async function pollUpdates() {
           state.btp_subaccounts[u]._y = oldBtp[u]._y;
         }
       }
+      // Issue #2 (item 3) — detect a growth in the open panel's
+      // persistent findings (arriving via state, not the findings
+      // bus) BEFORE mapState is replaced.  Persistent findings show
+      // up when a scan finalises node.findings on the server side.
+      let _findingsPanelNeedsRefresh = false;
+      try {
+        const openSid = _openFindingsPanelSid;
+        const panel = document.getElementById('detail-panel');
+        if (openSid && panel && panel.classList.contains('visible')
+            && panel.getAttribute('data-view') === 'findings'
+            && panel.getAttribute('data-sid') === openSid) {
+          const oldN = (mapState.nodes || {})[openSid];
+          const newN = (state.nodes || {})[openSid];
+          const oldLen = oldN && oldN.findings ? oldN.findings.length : 0;
+          const newLen = newN && newN.findings ? newN.findings.length : 0;
+          if (newLen > oldLen) _findingsPanelNeedsRefresh = true;
+        }
+      } catch (_) {}
       mapState = state;
       activeTasks = state.active_tasks || {};
       updateMap();
+      if (_findingsPanelNeedsRefresh) {
+        try { showFindings(_openFindingsPanelSid); } catch (_) {}
+      }
       updateStatusBar();
       updateActivityBar();
       // Tier 3 armed-mode bar — visible while state.evasion.allow_evasion
@@ -10067,6 +10107,14 @@ function showFindings(sid) {
   const n = (mapState.nodes || {})[sid];
   if (!n) return;
   const panel = document.getElementById('detail-panel');
+  // Track which SID's panel is open so the scan-poll loop can
+  // re-render it when new findings for that SID arrive (issue #2
+  // item 3).  Any OTHER showX function that writes into #detail-panel
+  // overwrites the data-view attr, so the poll loop knows to stop
+  // re-rendering as Findings the moment the operator navigates away.
+  _openFindingsPanelSid = sid;
+  panel.setAttribute('data-view', 'findings');
+  panel.setAttribute('data-sid', sid);
   const sevMap = { 5:'critical', 4:'high', 3:'medium', 2:'low', 1:'info' };
   const sevToNum = { CRITICAL: 5, HIGH: 4, MEDIUM: 3, LOW: 2, INFO: 1 };
 
