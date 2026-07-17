@@ -61,6 +61,36 @@ body {
 }
 .menu-dropdown .dd-item:hover { background: #30363d; }
 .menu-dropdown .dd-sep { border-top: 1px solid #30363d; margin: 4px 0; }
+/* Issue #2 (item 5) — subheader rows inside long dropdowns so the
+   Actions menu stops reading as an undifferentiated wall of items. */
+.menu-dropdown .dd-header {
+  padding: 8px 16px 3px 12px;
+  font-size: 10px; letter-spacing: 0.5px;
+  text-transform: uppercase; color: #6e7681;
+  font-weight: 600; cursor: default; user-select: none;
+}
+/* Empty-canvas welcome card — dismissable "getting started" hint
+   shown only when the landscape is empty AND the user hasn't
+   dismissed it before (localStorage). */
+#welcome-card {
+  position: absolute; top: 60%; left: 50%;
+  transform: translate(-50%, 0);
+  max-width: 460px; padding: 14px 18px;
+  background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+  color: #c9d1d9; font-size: 12px; line-height: 1.55;
+  box-shadow: 0 4px 16px rgba(0,0,0,.35);
+  display: none; z-index: 5;
+}
+#welcome-card h4 {
+  color: #58a6ff; font-size: 13px; margin: 0 0 8px 0;
+}
+#welcome-card ol { margin: 6px 0 6px 18px; padding: 0; }
+#welcome-card li { margin: 3px 0; }
+#welcome-card .welcome-dismiss {
+  position: absolute; top: 6px; right: 10px;
+  cursor: pointer; color: #6e7681; font-size: 16px;
+}
+#welcome-card .welcome-dismiss:hover { color: #c9d1d9; }
 
 /* === Toolbar === */
 .toolbar {
@@ -766,6 +796,7 @@ body {
   </div>
   <div class="menu-item">Actions
     <div class="menu-dropdown">
+      <div class="dd-header">Landscape-wide</div>
       <div class="dd-item" onclick="scanAllVulns()" style="color:#f0883e">&#128270; Scan for All Vulnerabilities</div>
       <div class="dd-item" onclick="showAutoPwnModal()" style="color:#f85149;font-weight:bold">&#9889; AutoPwn</div>
       <div class="dd-item" onclick="propagateAll()">&#128640; Auto-Propagate All</div>
@@ -779,6 +810,7 @@ body {
            items conditionally based on landscape contents; this list does
            NOT — the per-action JS handlers already alert when there's
            nothing eligible (e.g. checkAllGateways() with no GW ports). -->
+      <div class="dd-header">Bulk vuln checks</div>
       <div class="dd-item" onclick="checkAllGateways()">&#128272; Check All GW Vulnerabilities</div>
       <div class="dd-item" onclick="checkAllBetrusted()">&#128272; Check All 10KBlaze (MS Betrusted)</div>
       <div class="dd-item" onclick="checkAllCve31324()">&#128272; Check All CVE-2025-31324 (Java VisualComposer)</div>
@@ -787,16 +819,18 @@ body {
       <div class="dd-item" onclick="checkAllRouterInfo()">&#128272; Check All SAProuter Info Leak</div>
       <div class="dd-item" onclick="checkAllSnc()">&#128274; Check All SNC Posture</div>
       <div class="dd-sep"></div>
+      <div class="dd-header">Analysis</div>
       <div class="dd-item" onclick="showAttackCoverage()">&#9876;&#65039; ATT&amp;CK Coverage Matrix</div>
       <div class="dd-item" onclick="analyzeChains()">&#128279; Analyze Trust Chains</div>
       <div class="dd-sep"></div>
+      <div class="dd-header">Engagement housekeeping</div>
       <div class="dd-item" onclick="showCreatedUsers()">&#128203; View Created Users</div>
       <div class="dd-item" onclick="showCreatedDestinations()">&#128203; View Created TCP/IP Destinations</div>
       <div class="dd-item" onclick="clearCreatedDestinations()">&#128465; Clear TCP/IP Destinations List</div>
       <div class="dd-sep"></div>
+      <div class="dd-header">Add / configure</div>
       <div class="dd-item" onclick="showAddSystemModal()">&#10133; Add System Manually</div>
       <div class="dd-item" onclick="showSetPasswordModal()">&#128273; Set Default Password</div>
-      <div class="dd-sep"></div>
       <div class="dd-item" onclick="showHashesApiKeyModal()">&#128273; Set hashes.com API Key</div>
       <div class="dd-item" onclick="showSdkPathModal()">&#128194; Set NW RFC SDK Path</div>
       <div class="dd-item" onclick="showBtpTokenModal()">&#9729;&#65039; BTP — Paste cf oauth-token</div>
@@ -905,6 +939,21 @@ body {
   <!-- Map -->
   <div class="map-container" id="map-container">
     <div class="empty-msg" id="empty-msg">Start a scan or load a saved state to discover SAP systems</div>
+    <!-- Issue #2 (item 5) — one-time onboarding card shown on empty
+         landscape.  localStorage key sapmap.welcome.dismissed keeps
+         it away after the operator closes it once. -->
+    <div id="welcome-card" role="dialog" aria-label="Getting started">
+      <span class="welcome-dismiss" onclick="dismissWelcomeCard()" title="Don't show again">&times;</span>
+      <h4>&#128075; Welcome to SAPMAP</h4>
+      <div>Four ways to get systems onto the map:</div>
+      <ol>
+        <li><strong>Scan a network</strong> — open the Scan panel (top-nav <em>Scan</em> or Ctrl+K) and enter targets.</li>
+        <li><strong>Add manually</strong> — <em>Actions &rarr; Add System Manually</em> if you already know the host / instance.</li>
+        <li><strong>Load a saved state</strong> — <em>File &rarr; Load</em> to open a `.sapmap` snapshot from a previous engagement.</li>
+        <li><strong>Right-click the canvas</strong> for the full bulk-action menu (Check All GW, All 10KBlaze, All CVE-…, chain analysis, etc.).</li>
+      </ol>
+      <div style="color:#6e7681;font-size:11px;margin-top:6px">The top-nav <em>Actions</em> menu also holds every scan-wide operation — vuln checks, AutoPwn, propagation, cleanup — worth a look on first run.</div>
+    </div>
     <svg id="map-svg" xmlns="http://www.w3.org/2000/svg"></svg>
     <!-- Pulse overlay: short-lived SVG rects/lines flashed when a finding
          fires.  Lives outside #map-svg so innerHTML rebuilds don't wipe
@@ -2931,16 +2980,32 @@ function updateMap() {
       _msg.textContent = 'Scan errored — check the console output. '
                           + 'Start another scan or load a saved state.';
     } else {
-      _msg.textContent = 'Start a scan or load a saved state to '
-                          + 'discover SAP systems';
+      _msg.textContent = 'Start a scan or load a saved state — or right-click '
+                          + 'the canvas / use the Actions menu for more options.';
     }
     _msg.style.display = 'block';
     document.getElementById('legend-bar').style.display = 'none';
     document.getElementById('map-svg').innerHTML = '';
+    // Issue #2 (item 5) — show the welcome card on empty landscape
+    // unless the operator already dismissed it.  Only when the scan
+    // isn't running so we don't overlay the live-progress hint.
+    try {
+      const dismissed = localStorage.getItem('sapmap.welcome.dismissed') === '1';
+      const card = document.getElementById('welcome-card');
+      if (card) {
+        card.style.display = (!dismissed && _scanState !== 'running')
+                              ? 'block' : 'none';
+      }
+    } catch (_) {}
     return;
   }
   document.getElementById('empty-msg').style.display = 'none';
   document.getElementById('legend-bar').style.display = 'flex';
+  // Card is only for the empty-canvas state.
+  try {
+    const _card = document.getElementById('welcome-card');
+    if (_card) _card.style.display = 'none';
+  } catch (_) {}
 
   const svg = document.getElementById('map-svg');
   const BOX_W = 240, BOX_H = 174, MARGIN = 60;
@@ -10970,6 +11035,14 @@ async function doMintBtpToken(sid, idx) {
 // --- Non-blocking toast (bottom-right) ---
 // Used by the Java Secure Store extraction path so results appear
 // without hiding auto-plotted downstream nodes behind a full modal.
+// Issue #2 (item 5) — dismiss the empty-canvas onboarding card
+// permanently.  localStorage-only; nothing goes to the server.
+function dismissWelcomeCard() {
+  try { localStorage.setItem('sapmap.welcome.dismissed', '1'); } catch (_) {}
+  const card = document.getElementById('welcome-card');
+  if (card) card.style.display = 'none';
+}
+
 function showToast(html, {stickUntilClose=false, autoCloseMs=15000} = {}) {
   const stack = document.getElementById('toast-stack');
   if (!stack) return;
