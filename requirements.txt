@@ -1,13 +1,9 @@
 # SAPMAP runtime dependencies
 # Install with:  pip3 install -r requirements.txt
 #
-# Every package below is REQUIRED at import time somewhere in the
-# main code paths.  They were previously marked "optional / lazy-
-# imported" but in practice every real engagement hits every one
-# of them:  requests+urllib3 for HTTP-side exploits, pycryptodome
-# for SecStore, pyyaml for scripted scenarios, pyjks for the Java
-# SecStore offline path.  The comment column names one representative
-# call site; there are usually several more.
+# Core packages are imported by main code paths and are required for
+# a working install:  requests+urllib3 for HTTP-side exploits,
+# pycryptodome for SecStore, pyyaml for scripted scenarios.
 
 bottle>=0.12        # embedded HTTP server for the GUI (sapmap_gui.py)
 pywebview>=4.0      # native desktop window (falls back to browser tab if missing)
@@ -15,7 +11,23 @@ requests>=2.28      # HTTP client for CVE checks, LPE, Java exploits, BTP
 urllib3>=1.26       # used directly (disable_warnings) and as requests transport
 pycryptodome>=3.18  # DES/3DES + PBKDF2 for SecStore decryption (ABAP + Java)
 pyyaml>=6.0         # YAML parser for scripted scenarios (--script foo.yaml)
-pyjks>=20           # JKS keystore reader for Java SecStore offline decrypt
+
+# --- Optional: Java SecStore offline decryption ---
+# pyjks enables the OFFLINE 3DES decryption path in
+# modules/data_extraction/sap_java_secstore.py (used when you already
+# have SecStore.data + SecStore.key files pulled from the server and
+# want to decrypt them locally without touching the target again).
+# The JSP / server-side path (sap_java_secstore.invoke_secstore_jsp)
+# works without pyjks, so you can skip this on a fresh machine and
+# still get full Java SecStore coverage.
+#
+# pyjks transitively depends on `twofish==0.3.0` (2013) which has no
+# wheels for Python 3.12+ and fails to build cleanly on modern envs.
+# Uncomment ONLY if you need the offline path AND you have a working
+# C build toolchain (or use `pip install pyjks --no-build-isolation`
+# on Py 3.12+).
+#
+# pyjks>=20         # PBE-with-SHA-and-3DES-CBC keystore reader
 
 # --- Optional platform GUI extras ---
 # pyobjc-framework-Cocoa ; sys_platform == "darwin"   # macOS dock icon
