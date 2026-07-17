@@ -2806,6 +2806,33 @@ async function pollUpdates() {
         document.getElementById('st-status').textContent =
           state.scan_state.charAt(0).toUpperCase() + state.scan_state.slice(1);
       }
+      // Issue #2 (item 1) — fire ONE toast when the scan state
+      // transitions from `running` to a terminal state.  Operators
+      // focused on the console don't otherwise get a clear signal
+      // that the scan finished.  Guard with a module-level "last
+      // seen" so we don't re-fire on every poll cycle.
+      const _terminal = state.scan_state === 'complete'
+                      || state.scan_state === 'error'
+                      || state.scan_state === 'cancelled';
+      if (_terminal && window._lastScanState === 'running') {
+        const totalNodes = Object.keys(state.nodes || {}).length;
+        let vulnCount = 0;
+        for (const sid in (state.nodes || {})) {
+          const n = state.nodes[sid];
+          if (n.gw_vulnerable || n.ms_betrusted_vulnerable
+              || n.cve_31324_vulnerable || n.cve_6287_vulnerable
+              || n.cve_22536_vulnerable) vulnCount++;
+        }
+        const label = state.scan_state === 'complete' ? 'Scan complete'
+                    : state.scan_state === 'cancelled' ? 'Scan cancelled'
+                    : 'Scan aborted';
+        const kind = state.scan_state === 'complete' ? 'success'
+                    : state.scan_state === 'cancelled' ? 'warn' : 'error';
+        const msg = `${label} — ${totalNodes} system${totalNodes===1?'':'s'}`
+                  + (vulnCount ? `, ${vulnCount} vulnerable` : '');
+        try { showToast(msg, kind); } catch(_) {}
+      }
+      window._lastScanState = state.scan_state;
     }
 
     // Poll UI commands (from script runner)

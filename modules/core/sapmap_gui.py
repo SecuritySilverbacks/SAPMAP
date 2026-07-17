@@ -1818,6 +1818,12 @@ class SAPMAPApi:
         return {"status": "started"}
 
     def _run_scan(self, config):
+        # Snapshot pre-scan counters so we can report the delta at the
+        # end.  Nodes may be added via callback DURING the scan so we
+        # can't rely on `len(nodes)` from the return value alone.
+        t0 = time.monotonic()
+        n_nodes_before = len(self.state.nodes)
+        f_before_cursor = sapmap_findings.get_since(0).get("cursor", 0)
         try:
             targets_str = config.get("targets", "")
             inst_from = config.get("inst_from", 0)
@@ -1842,6 +1848,9 @@ class SAPMAPApi:
                 self.scan_state = "error"
                 self.scan_error = "No valid targets"
                 self.scan_running = False
+                self._print_scan_summary(t0, n_nodes_before, f_before_cursor,
+                                         outcome="error",
+                                         detail="no valid targets")
                 return
 
             self.state.scan_config = config
@@ -1869,15 +1878,98 @@ class SAPMAPApi:
 
             if self.cancel_event.is_set():
                 self.scan_state = "cancelled"
+                self._print_scan_summary(t0, n_nodes_before, f_before_cursor,
+                                         outcome="cancelled")
             else:
                 self.scan_state = "complete"
+                self._print_scan_summary(t0, n_nodes_before, f_before_cursor,
+                                         outcome="complete")
 
         except Exception as e:
             self.scan_state = "error"
             self.scan_error = str(e)
             print(f"[-] Scan error: {e}")
+            self._print_scan_summary(t0, n_nodes_before, f_before_cursor,
+                                     outcome="error", detail=str(e))
         finally:
             self.scan_running = False
+
+    def _print_scan_summary(self, t0, n_nodes_before, f_before_cursor,
+                            outcome, detail=""):
+        """End-of-scan banner in the console + a matching INFO finding.
+
+        Issue #2 (item 1) — operators focused on console output want a
+        clear "Scan finished" line, not just a state flip in the top
+        banner.  Also emits an INFO finding so the drawer / bell mark
+        the boundary between scans.
+        """
+        elapsed = time.monotonic() - t0
+        added = max(0, len(self.state.nodes) - n_nodes_before)
+        # Count vulnerable nodes (all-time, not just this scan — findings
+        # buffer is per-session).
+        n_vuln = 0
+        for n in self.state.nodes.values():
+            if (getattr(n, "gw_vulnerable", False)
+                    or getattr(n, "ms_betrusted_vulnerable", False)
+                    or getattr(n, "cve_31324_vulnerable", False)
+                    or getattr(n, "cve_6287_vulnerable", False)
+                    or getattr(n, "cve_22536_vulnerable", False)):
+                n_vuln += 1
+        # Count NEW critical/high findings since scan start.
+        n_crit = n_high = 0
+        try:
+            since = sapmap_findings.get_since(f_before_cursor)
+            for f in since.get("findings", []):
+                sev = (f.get("severity") or "").upper()
+                if sev == "CRITICAL":
+                    n_crit += 1
+                elif sev == "HIGH":
+                    n_high += 1
+        except Exception:
+            pass
+
+        if outcome == "complete":
+            label = "Scan finished"
+            css = "cl-ok"
+            emit_sev = "INFO"
+        elif outcome == "cancelled":
+            label = "Scan cancelled"
+            css = "cl-warn"
+            emit_sev = "INFO"
+        else:
+            label = "Scan aborted"
+            css = "cl-err"
+            emit_sev = "INFO"
+
+        # Build the one-line summary.
+        parts = [
+            f"{elapsed:.1f}s",
+            f"{added} new node(s)",
+            f"{len(self.state.nodes)} total",
+        ]
+        if n_vuln:
+            parts.append(f"{n_vuln} vulnerable")
+        if n_crit:
+            parts.append(f"{n_crit} CRITICAL")
+        if n_high:
+            parts.append(f"{n_high} HIGH")
+        if detail:
+            parts.append(detail)
+        summary = " · ".join(parts)
+
+        ts = datetime.now().strftime("%H:%M:%S")
+        _add_console_line(ts, f"════════  {label}  —  {summary}  ════════",
+                          css_class=css)
+        try:
+            sapmap_findings.emit_finding(
+                emit_sev, "?",
+                f"{label} — {summary}",
+                meta={"scan_outcome": outcome, "elapsed_s": round(elapsed, 1),
+                      "new_nodes": added, "vulnerable_nodes": n_vuln,
+                      "new_critical": n_crit, "new_high": n_high},
+            )
+        except Exception:
+            pass
 
     def stop_scan(self):
         # Three layers — older callers + new global poll:
