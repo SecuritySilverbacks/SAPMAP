@@ -706,8 +706,14 @@ def decrypt_files_offline(properties_text: str, key_bytes: bytes,
     try:
         import jks.util as _jksu  # type: ignore
     except ImportError:
-        result["error"] = ("3DES offline decrypt requires pyjks "
-                            "(`pip install pyjks`); or use the JSP path")
+        result["error"] = (
+            "3DES offline decrypt requires the optional `pyjks` package "
+            "(`pip install pyjks`).  pyjks transitively pulls in the "
+            "`twofish` build (2013) which fails to build on Python 3.12+ "
+            "without wheels — try `pip install pyjks --no-build-isolation` "
+            "or fall back to the JSP / server-side path "
+            "(sap_java_secstore.invoke_secstore_jsp) which does not need "
+            "pyjks.")
         return result
 
     # Version < 7.00 appends the SID to the keyphrase.
