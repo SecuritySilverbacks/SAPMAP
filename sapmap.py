@@ -107,6 +107,15 @@ def main():
                         help="Path to SAP NW RFC SDK lib directory")
     parser.add_argument("--port", type=int, default=0,
                         help="HTTP server port (0=auto)")
+    parser.add_argument("--host", metavar="ADDR",
+                        default="127.0.0.1",
+                        help="HTTP server bind address (default: 127.0.0.1). "
+                             "Set to 0.0.0.0 when running inside a Docker "
+                             "container with bridge networking so the GUI "
+                             "is reachable from the host — see the Docker "
+                             "section of README.md.  Binding to 0.0.0.0 on "
+                             "a bare host exposes SAPMAP to the LAN and is "
+                             "NOT recommended.")
     parser.add_argument("--browser", action="store_true",
                         help="Force browser mode (skip pywebview)")
     parser.add_argument("--no-gui", action="store_true",
@@ -256,7 +265,7 @@ def main():
 
     server_thread = threading.Thread(
         target=lambda: app.run(
-            host="127.0.0.1", port=port, quiet=True,
+            host=args.host, port=port, quiet=True,
             server_class=ThreadedWSGIServer,
         ),
         daemon=True,
