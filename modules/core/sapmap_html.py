@@ -2904,7 +2904,13 @@ async function pollUpdates() {
                       || state.scan_state === 'error'
                       || state.scan_state === 'cancelled';
       if (_terminal && window._lastScanState === 'running') {
-        const totalNodes = Object.keys(state.nodes || {}).length;
+        // Match the backend banner: total = SAP + SCC + BTP.  Toast
+        // was previously undercounting when a scan only found a
+        // Cloud Connector or a BTP subaccount.
+        const sapCount = Object.keys(state.nodes || {}).length;
+        const sccCount = Object.keys(state.scc_nodes || {}).length;
+        const btpCount = Object.keys(state.btp_subaccounts || {}).length;
+        const totalNodes = sapCount + sccCount + btpCount;
         let vulnCount = 0;
         for (const sid in (state.nodes || {})) {
           const n = state.nodes[sid];

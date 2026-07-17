@@ -1821,8 +1821,13 @@ class SAPMAPApi:
         # Snapshot pre-scan counters so we can report the delta at the
         # end.  Nodes may be added via callback DURING the scan so we
         # can't rely on `len(nodes)` from the return value alone.
+        # "Total systems" spans SAP nodes + SCC nodes + BTP subaccounts
+        # so the banner matches the status bar (issue #2 follow-up —
+        # earlier the banner said "3 total" when SCC brought it to 4).
         t0 = time.monotonic()
-        n_nodes_before = len(self.state.nodes)
+        n_nodes_before = (len(self.state.nodes)
+                          + len(getattr(self.state, "scc_nodes", {}))
+                          + len(getattr(self.state, "btp_subaccounts", {})))
         f_before_cursor = sapmap_findings.get_since(0).get("cursor", 0)
         try:
             targets_str = config.get("targets", "")
@@ -1904,9 +1909,17 @@ class SAPMAPApi:
         the boundary between scans.
         """
         elapsed = time.monotonic() - t0
-        added = max(0, len(self.state.nodes) - n_nodes_before)
-        # Count vulnerable nodes (all-time, not just this scan — findings
-        # buffer is per-session).
+        # Same-shape total as the snapshot at scan start — includes SCC
+        # + BTP so a scan that only finds a Cloud Connector still shows
+        # a non-zero delta.
+        n_nodes_now = (len(self.state.nodes)
+                       + len(getattr(self.state, "scc_nodes", {}))
+                       + len(getattr(self.state, "btp_subaccounts", {})))
+        added = max(0, n_nodes_now - n_nodes_before)
+        # Count vulnerable SAP nodes (all-time, not just this scan —
+        # findings buffer is per-session).  SCC/BTP nodes don't yet
+        # carry an is-vulnerable flag on the model, so they don't
+        # contribute to n_vuln.
         n_vuln = 0
         for n in self.state.nodes.values():
             if (getattr(n, "gw_vulnerable", False)
@@ -1945,7 +1958,7 @@ class SAPMAPApi:
         parts = [
             f"{elapsed:.1f}s",
             f"{added} new node(s)",
-            f"{len(self.state.nodes)} total",
+            f"{n_nodes_now} total",
         ]
         if n_vuln:
             parts.append(f"{n_vuln} vulnerable")
@@ -1965,7 +1978,8 @@ class SAPMAPApi:
                 emit_sev, "?",
                 f"{label} — {summary}",
                 meta={"scan_outcome": outcome, "elapsed_s": round(elapsed, 1),
-                      "new_nodes": added, "vulnerable_nodes": n_vuln,
+                      "new_nodes": added, "total_nodes": n_nodes_now,
+                      "vulnerable_nodes": n_vuln,
                       "new_critical": n_crit, "new_high": n_high},
             )
         except Exception:
