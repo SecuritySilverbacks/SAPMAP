@@ -412,10 +412,22 @@ Install optional extras with `pip install pyjks` when you need them — or use t
 
 ### Setup
 
+> [!NOTE] 
+> It is recommended to use a virtual Python environment to avoid any dependency conflicts with other packages already installed on your machine. 
+
 ```bash
 git clone https://github.com/kloris/SAPMAP.git
 cd SAPMAP
+
+# Setup a virtual Python environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Install the dependencies
 pip3 install -r requirements.txt
+
+# run SAPMAP
+python3 sapmap.py
 ```
 
 ### Docker (recommended if you keep hitting install pain)
