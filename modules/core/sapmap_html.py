@@ -1779,7 +1779,7 @@ body {
          The SDK path is set by the entrypoint on every restart and
          settings.local.json inside the container is ephemeral, so
          there's nothing meaningful to edit here. -->
-    <div id="sdk-path-container-notice" style="display:none;font-size:12px;color:#c9d1d9;margin-bottom:12px;line-height:1.5;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:12px">
+    <div id="sdk-path-container-notice" style="display:none;font-size:12px;color:#c9d1d9;margin-bottom:12px;line-height:1.5;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:12px;word-break:break-all;overflow-wrap:anywhere">
       <div style="color:#58a6ff;font-weight:600;margin-bottom:6px">&#128230; Running inside a Docker container</div>
       <div id="sdk-path-container-body"></div>
     </div>
@@ -1787,7 +1787,9 @@ body {
       <label>SDK lib/ path</label>
       <input type="text" id="sdk-path-input" placeholder="e.g. ./nwrfcsdk/lib or /opt/nwrfcsdk/lib" autocomplete="off">
     </div>
-    <div id="sdk-path-current" style="font-size:11px;color:#8b949e;margin-bottom:12px"></div>
+    <!-- word-break here handles the "Active from --sdk : /long/path" line
+         which otherwise overflowed the modal in container mode. -->
+    <div id="sdk-path-current" style="font-size:11px;color:#8b949e;margin-bottom:12px;word-break:break-all;overflow-wrap:anywhere"></div>
     <div class="form-actions">
       <button class="btn btn-primary" id="sdk-path-save-btn" onclick="saveSdkPath()">Save</button>
       <button class="btn" onclick="closeModal('sdk-path-modal')" id="sdk-path-cancel-btn">Cancel</button>
