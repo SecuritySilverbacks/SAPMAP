@@ -5651,8 +5651,11 @@ async function sccRemoveFromMap(host) {
   if (!confirm('Remove SCC ' + host + ' from the map? (Local-only; will reappear on next scan if still present.)')) return;
   // Server-side removal so the next /api/state poll doesn't restore
   // the node (issue #2 follow-up).  Local delete first for snappy UI.
+  // NB: previous code called renderMap() which doesn't exist — that
+  // ReferenceError silently aborted the handler before any DELETE
+  // fired.  Correct redraw entry point is updateMap().
   if (mapState.scc_nodes) delete mapState.scc_nodes[host];
-  renderMap();
+  updateMap();
   try {
     const r = await api('DELETE', `scc/${encodeURIComponent(host)}`);
     if (r && r.error) showToast('SCC delete failed: ' + r.error, 'error');
@@ -6313,8 +6316,11 @@ async function btpRemoveFromMap(uuid) {
               + 'with a token for the same subaccount.)')) return;
   // Server-side removal so the next /api/state poll doesn't restore
   // the node (issue #2 follow-up).  Local delete first for snappy UI.
+  // NB: previous code called renderMap() which doesn't exist — that
+  // ReferenceError silently aborted the handler before any DELETE
+  // fired.  Correct redraw entry point is updateMap().
   if (mapState.btp_subaccounts) delete mapState.btp_subaccounts[uuid];
-  renderMap();
+  updateMap();
   try {
     const r = await api('DELETE', `btp/subaccount/${encodeURIComponent(uuid)}`);
     if (r && r.error) showToast('BTP delete failed: ' + r.error, 'error');
@@ -9979,13 +9985,29 @@ async function showSdkPathModal() {
     if (info) {
       const persisted = s.nwrfcsdk_path || '';
       const active    = s.nwrfcsdk_path_active || '';
+      // Docker-container awareness: the active path is the IN-CONTAINER
+      // mount target (e.g. /opt/nwrfcsdk/lib), not the host filesystem
+      // path the operator remembers.  When the wrapper passed
+      // SAPMAP_HOST_SDK_PATH, tack it on so the operator can trace
+      // /opt/nwrfcsdk/lib back to ~/Downloads/nwrfcsdk on their laptop.
+      const inContainer = !!s.in_container;
+      const hostPath = s.host_sdk_path || '';
+      const containerHint = inContainer
+        ? (hostPath
+            ? ' · Container mount ← host: ' + hostPath
+            : ' · (in-container mount target; host origin unknown)')
+        : '';
       if (active && persisted && active === persisted) {
-        info.textContent = 'Active (from settings.local.json): ' + active;
+        info.textContent = 'Active (from settings.local.json): ' + active + containerHint;
       } else if (active && !persisted) {
         info.textContent = 'Active (from --sdk on the CLI): ' + active
-          + ' — save here to persist and survive restarts.';
+          + containerHint
+          + (inContainer
+              ? ' — this is the container path; leave it as-is and Save to persist.'
+              : ' — save here to persist and survive restarts.');
       } else if (active && persisted && active !== persisted) {
         info.textContent = 'Active (from --sdk): ' + active
+          + containerHint
           + ' · Persisted: ' + persisted
           + ' — Save will overwrite the persisted value; the active '
           + '--sdk value keeps priority until the next restart.';

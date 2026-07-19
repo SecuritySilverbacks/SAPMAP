@@ -52,7 +52,12 @@ fi
 # mount modes.
 SDK_ARGS=()
 if [[ -d "$SDK_PATH/lib" ]]; then
-    SDK_ARGS=(--mount "type=bind,source=$SDK_PATH,target=/opt/nwrfcsdk,readonly")
+    # Also pass the HOST-side SDK path as an env var so the GUI's
+    # settings modal can show the operator where the SDK lives on
+    # their laptop, not just the container-side mount target
+    # /opt/nwrfcsdk/lib (which is confusing in a Docker context).
+    SDK_ARGS=(--mount "type=bind,source=$SDK_PATH,target=/opt/nwrfcsdk,readonly"
+              --env "SAPMAP_HOST_SDK_PATH=$SDK_PATH")
     echo "[+] Mounting SDK from $SDK_PATH"
 else
     echo "[!] No SDK found at $SDK_PATH/lib — running with unauthenticated"

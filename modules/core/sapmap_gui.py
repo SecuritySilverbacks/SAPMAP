@@ -3658,10 +3658,17 @@ def create_app(api: SAPMAPApi) -> Bottle:
             active_sdk = sapmap_rfc.get_sdk_path()
         except Exception:
             active_sdk = ""
+        # Container awareness — the run-container.sh wrapper passes
+        # SAPMAP_HOST_SDK_PATH so the modal can show the operator
+        # where the SDK lives on the HOST (their Mac / Linux box),
+        # not just the in-container mount target /opt/nwrfcsdk/lib.
+        # SAPMAP_IN_CONTAINER=1 is set in the Dockerfile ENV.
         return json.dumps({
             "hashes_com_api_key_set": bool(data.get("hashes_com_api_key")),
             "nwrfcsdk_path": data.get("nwrfcsdk_path", ""),
             "nwrfcsdk_path_active": active_sdk,
+            "in_container": bool(os.environ.get("SAPMAP_IN_CONTAINER")),
+            "host_sdk_path": os.environ.get("SAPMAP_HOST_SDK_PATH", ""),
         })
 
     @app.route("/api/settings/local", method="POST")
