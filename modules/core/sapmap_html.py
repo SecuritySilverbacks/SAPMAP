@@ -1763,7 +1763,7 @@ body {
 <div class="modal-overlay" id="sdk-path-modal">
   <div class="modal" style="max-width:560px">
     <h3>&#128194; NW RFC SDK Path</h3>
-    <div style="font-size:12px;color:#8b949e;margin-bottom:12px;line-height:1.5">
+    <div id="sdk-path-help" style="font-size:12px;color:#8b949e;margin-bottom:12px;line-height:1.5">
       Path to the SAP NW RFC SDK <code>lib/</code> directory (the folder containing
       <code>libsapnwrfc.so</code> on Linux, <code>libsapnwrfc.dylib</code> on macOS,
       or <code>sapnwrfc.dll</code> on Windows).  Enables all authenticated RFC
@@ -1774,14 +1774,23 @@ body {
       A <code>--sdk</code> flag on the command line still overrides this value.
       Leave empty and Save to clear.
     </div>
-    <div class="form-row">
+    <!-- Container-mode informational banner — swapped in for the
+         normal help text when running inside a Docker container.
+         The SDK path is set by the entrypoint on every restart and
+         settings.local.json inside the container is ephemeral, so
+         there's nothing meaningful to edit here. -->
+    <div id="sdk-path-container-notice" style="display:none;font-size:12px;color:#c9d1d9;margin-bottom:12px;line-height:1.5;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:12px">
+      <div style="color:#58a6ff;font-weight:600;margin-bottom:6px">&#128230; Running inside a Docker container</div>
+      <div id="sdk-path-container-body"></div>
+    </div>
+    <div class="form-row" id="sdk-path-form-row">
       <label>SDK lib/ path</label>
       <input type="text" id="sdk-path-input" placeholder="e.g. ./nwrfcsdk/lib or /opt/nwrfcsdk/lib" autocomplete="off">
     </div>
     <div id="sdk-path-current" style="font-size:11px;color:#8b949e;margin-bottom:12px"></div>
     <div class="form-actions">
-      <button class="btn btn-primary" onclick="saveSdkPath()">Save</button>
-      <button class="btn" onclick="closeModal('sdk-path-modal')">Cancel</button>
+      <button class="btn btn-primary" id="sdk-path-save-btn" onclick="saveSdkPath()">Save</button>
+      <button class="btn" onclick="closeModal('sdk-path-modal')" id="sdk-path-cancel-btn">Cancel</button>
     </div>
   </div>
 </div>
@@ -9974,8 +9983,48 @@ async function showSdkPathModal() {
   // settings.local.json (what "Save" will write).  The info line
   // reflects what's ACTIVE in the running process — which may come
   // from --sdk on the CLI or the Docker entrypoint instead.
+  //
+  // Container-mode UX: when SAPMAP_IN_CONTAINER is set, swap the
+  // help + input + Save for an informational banner.  The
+  // entrypoint sets --sdk on every restart and settings.local.json
+  // is ephemeral (lost on --rm), so there's nothing to persist.
   try {
     const s = await fetch('/api/settings/local').then(r => r.json());
+    const inContainer = !!s.in_container;
+    // Toggle container-mode UI vs edit-mode UI in one place.
+    const help    = document.getElementById('sdk-path-help');
+    const notice  = document.getElementById('sdk-path-container-notice');
+    const nBody   = document.getElementById('sdk-path-container-body');
+    const formRow = document.getElementById('sdk-path-form-row');
+    const saveBtn = document.getElementById('sdk-path-save-btn');
+    const cancelBtn = document.getElementById('sdk-path-cancel-btn');
+    if (inContainer) {
+      if (help)    help.style.display    = 'none';
+      if (formRow) formRow.style.display = 'none';
+      if (saveBtn) saveBtn.style.display = 'none';
+      if (cancelBtn) cancelBtn.textContent = 'Close';
+      if (notice) notice.style.display = 'block';
+      const host   = s.host_sdk_path || '(unknown — SAPMAP_HOST_SDK_PATH not passed)';
+      const active = s.nwrfcsdk_path_active || '(none — RFC ops will fall back)';
+      if (nBody) nBody.innerHTML =
+          'The container entrypoint set the SDK path via <code>--sdk</code> on '
+        + 'every startup, so there is nothing to edit here.'
+        + '<div style="margin-top:10px">'
+        +   '<div><span style="color:#8b949e">Active in container:</span> <code>' + escHtml(active) + '</code></div>'
+        +   '<div style="margin-top:4px"><span style="color:#8b949e">Bind-mounted from host:</span> <code>' + escHtml(host) + '</code></div>'
+        + '</div>'
+        + '<div style="margin-top:10px;color:#8b949e;font-size:11px">'
+        +   'To change the SDK path, restart the container with a different '
+        +   '<code>SDK_PATH</code> env var: '
+        +   '<code>SDK_PATH=/path/to/other/nwrfcsdk ./scripts/run-container.sh</code>.'
+        + '</div>';
+    } else {
+      if (help)    help.style.display    = '';
+      if (formRow) formRow.style.display = '';
+      if (saveBtn) saveBtn.style.display = '';
+      if (cancelBtn) cancelBtn.textContent = 'Cancel';
+      if (notice) notice.style.display = 'none';
+    }
     const input = document.getElementById('sdk-path-input');
     const info  = document.getElementById('sdk-path-current');
     // Prefer persisted value; if nothing persisted but --sdk supplied
