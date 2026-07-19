@@ -5649,8 +5649,14 @@ document.getElementById('scc-ctx-menu').addEventListener('click', function(e) {
 
 async function sccRemoveFromMap(host) {
   if (!confirm('Remove SCC ' + host + ' from the map? (Local-only; will reappear on next scan if still present.)')) return;
+  // Server-side removal so the next /api/state poll doesn't restore
+  // the node (issue #2 follow-up).  Local delete first for snappy UI.
   if (mapState.scc_nodes) delete mapState.scc_nodes[host];
   renderMap();
+  try {
+    const r = await api('DELETE', `scc/${encodeURIComponent(host)}`);
+    if (r && r.error) showToast('SCC delete failed: ' + r.error, 'error');
+  } catch (e) { showToast('SCC delete error: ' + e, 'error'); }
 }
 
 async function sccAnalysePP(host) {
@@ -6301,12 +6307,18 @@ function btpHighlightLinkedTargets(uuid) {
   showToast(`Pulsing ${unique.length} linked target${unique.length>1?'s':''}: ${unique.join(', ')}`, 'info');
 }
 
-function btpRemoveFromMap(uuid) {
+async function btpRemoveFromMap(uuid) {
   if (!confirm('Remove BTP subaccount ' + (uuid.slice(0, 8)) + '… from the map?\n\n'
               + '(Local-only; will reappear next time you re-enumerate '
               + 'with a token for the same subaccount.)')) return;
+  // Server-side removal so the next /api/state poll doesn't restore
+  // the node (issue #2 follow-up).  Local delete first for snappy UI.
   if (mapState.btp_subaccounts) delete mapState.btp_subaccounts[uuid];
   renderMap();
+  try {
+    const r = await api('DELETE', `btp/subaccount/${encodeURIComponent(uuid)}`);
+    if (r && r.error) showToast('BTP delete failed: ' + r.error, 'error');
+  } catch (e) { showToast('BTP delete error: ' + e, 'error'); }
 }
 
 function _copyToClipboard(text, label) {
@@ -9951,15 +9963,39 @@ async function saveHashesApiKey() {
 async function showSdkPathModal() {
   // Preload the currently-stored value (if any) so the operator can
   // see what's active and edit rather than re-type from scratch.
+  //
+  // Two-value display: the input reflects what's persisted in
+  // settings.local.json (what "Save" will write).  The info line
+  // reflects what's ACTIVE in the running process — which may come
+  // from --sdk on the CLI or the Docker entrypoint instead.
   try {
     const s = await fetch('/api/settings/local').then(r => r.json());
     const input = document.getElementById('sdk-path-input');
     const info  = document.getElementById('sdk-path-current');
-    if (input) input.value = s.nwrfcsdk_path || '';
+    // Prefer persisted value; if nothing persisted but --sdk supplied
+    // an active path (typical in the Docker container), pre-populate
+    // it so a Save with no edits promotes it into settings.local.json.
+    if (input) input.value = s.nwrfcsdk_path || s.nwrfcsdk_path_active || '';
     if (info) {
-      info.textContent = s.nwrfcsdk_path
-        ? 'Current: ' + s.nwrfcsdk_path
-        : 'Not set — RFC ops fall back to system LD_LIBRARY_PATH / DYLD_*.';
+      const persisted = s.nwrfcsdk_path || '';
+      const active    = s.nwrfcsdk_path_active || '';
+      if (active && persisted && active === persisted) {
+        info.textContent = 'Active (from settings.local.json): ' + active;
+      } else if (active && !persisted) {
+        info.textContent = 'Active (from --sdk on the CLI): ' + active
+          + ' — save here to persist and survive restarts.';
+      } else if (active && persisted && active !== persisted) {
+        info.textContent = 'Active (from --sdk): ' + active
+          + ' · Persisted: ' + persisted
+          + ' — Save will overwrite the persisted value; the active '
+          + '--sdk value keeps priority until the next restart.';
+      } else if (persisted && !active) {
+        info.textContent = 'Persisted: ' + persisted
+          + ' — but not currently loaded (RFC SDK could not be located).';
+      } else {
+        info.textContent = 'Not set — RFC ops fall back to system '
+          + 'LD_LIBRARY_PATH / DYLD_LIBRARY_PATH / PATH.';
+      }
     }
   } catch(e) {}
   document.getElementById('sdk-path-modal').classList.add('visible');

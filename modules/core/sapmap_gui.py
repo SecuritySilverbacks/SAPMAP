@@ -3648,9 +3648,20 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 data = json.load(f)
         except Exception:
             data = {}
+        # Also report the currently-ACTIVE SDK path — the value
+        # sapmap_rfc is using RIGHT NOW.  This can differ from the
+        # persisted value: e.g. when --sdk was passed on the CLI (or
+        # by the Docker entrypoint), the modal used to show "Not set"
+        # because it only looked at settings.local.json.  Now the
+        # modal can distinguish "persisted" vs "active from --sdk".
+        try:
+            active_sdk = sapmap_rfc.get_sdk_path()
+        except Exception:
+            active_sdk = ""
         return json.dumps({
             "hashes_com_api_key_set": bool(data.get("hashes_com_api_key")),
             "nwrfcsdk_path": data.get("nwrfcsdk_path", ""),
+            "nwrfcsdk_path_active": active_sdk,
         })
 
     @app.route("/api/settings/local", method="POST")
@@ -13442,6 +13453,29 @@ def create_app(api: SAPMAPApi) -> Bottle:
             print(f"[*] Removed system {sid} from the map")
             return json.dumps({"status": "ok"})
         return json.dumps({"error": f"Node {sid} not found"})
+
+    @app.route("/api/scc/<host>", method="DELETE")
+    def scc_delete(host):
+        """Remove an SCC node from the map.  Client-only via mapState was
+        insufficient — the next /api/state poll re-served the deleted
+        node from api.state.scc_nodes and it reappeared (issue #2
+        follow-up: "SCC/BTP won't delete")."""
+        response.content_type = "application/json"
+        if api.state.scc_nodes.pop(host, None) is not None:
+            print(f"[*] Removed SCC {host} from the map")
+            return json.dumps({"status": "ok"})
+        return json.dumps({"error": f"SCC {host} not found"})
+
+    @app.route("/api/btp/subaccount/<uuid>", method="DELETE")
+    def btp_delete(uuid):
+        """Remove a BTP subaccount (real or BTPDISC_ placeholder) from
+        the map.  Same reasoning as scc_delete above — the state poll
+        would restore the deleted node otherwise."""
+        response.content_type = "application/json"
+        if api.state.btp_subaccounts.pop(uuid, None) is not None:
+            print(f"[*] Removed BTP subaccount {uuid} from the map")
+            return json.dumps({"status": "ok"})
+        return json.dumps({"error": f"BTP subaccount {uuid} not found"})
 
     @app.route("/api/node/add", method="POST")
     def node_add():

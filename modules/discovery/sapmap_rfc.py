@@ -102,6 +102,14 @@ def set_sdk_path(path: str):
     _sdk_path = path
 
 
+def get_sdk_path() -> str:
+    """Return the currently-active NW RFC SDK library path (or empty
+    string).  Callers include the GUI's settings modal, which needs
+    to reflect the actual runtime value regardless of whether it was
+    supplied via --sdk, settings.local.json, or nothing."""
+    return _sdk_path or ""
+
+
 def _get_connection(node: SAPNode, creds: Credentials = None,
                      host_override: str = ""):
     """Create an RFC connection to a node using credentials.
