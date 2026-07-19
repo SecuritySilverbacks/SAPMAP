@@ -422,20 +422,37 @@ pip3 install -r requirements.txt
 
 The container image bundles every Python dependency (including the tricky `pyjks` / `twofish` chain) so you don't have to negotiate Python 3.12 build breakage.  The SAP NW RFC SDK stays on the host (SAP EULA — cannot ship it) and gets bind-mounted at run time.
 
+**Linux:**
+
 ```bash
 docker build -t sapmap:latest .
 
 docker run --rm -it \
     --network host \
-    -v /opt/nwrfcsdk:/opt/nwrfcsdk:ro \
-    -v $(pwd)/loot:/opt/sapmap/loot \
-    -v $(pwd)/states:/opt/sapmap/states \
+    --mount type=bind,source=/opt/nwrfcsdk,target=/opt/nwrfcsdk,readonly \
+    --mount type=bind,source=$(pwd)/loot,target=/opt/sapmap/loot \
+    --mount type=bind,source=$(pwd)/states,target=/opt/sapmap/states \
+    sapmap:latest
+```
+
+**macOS (Docker Desktop) — including Apple Silicon:**
+
+The SAP NW RFC SDK is Linux x86-64 only, so `--platform linux/amd64` is required at both build and run time on Apple Silicon (runs under Rosetta 2).  macOS Docker Desktop doesn't support `--network host` — use `-p 8080:8080` instead.
+
+```bash
+docker build --platform linux/amd64 -t sapmap:latest .
+
+docker run --platform linux/amd64 --rm -it \
+    -p 8080:8080 \
+    --mount type=bind,source=$HOME/nwrfcsdk,target=/opt/nwrfcsdk,readonly \
+    --mount type=bind,source=$(pwd)/loot,target=/opt/sapmap/loot \
+    --mount type=bind,source=$(pwd)/states,target=/opt/sapmap/states \
     sapmap:latest
 ```
 
 Then open `http://127.0.0.1:8080` in your host browser.
 
-Or use the wrapper: `./scripts/run-container.sh` (respects `SDK_PATH`, `IMAGE`, `LOOT_DIR`, `STATE_DIR` env vars).
+Or use the wrapper: `./scripts/run-container.sh` (auto-detects Linux vs macOS, arm64 vs x86-64, and mount syntax; respects `SDK_PATH`, `IMAGE`, `LOOT_DIR`, `STATE_DIR` env vars; set `DEBUG=1` to see the exact `docker run` command).
 
 **Notes:**
 
