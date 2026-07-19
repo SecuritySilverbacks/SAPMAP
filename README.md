@@ -434,7 +434,21 @@ python3 sapmap.py
 
 The container image bundles every Python dependency (including the tricky `pyjks` / `twofish` chain) so you don't have to negotiate Python 3.12 build breakage.  The SAP NW RFC SDK stays on the host (SAP EULA — cannot ship it) and gets bind-mounted at run time.
 
-**Linux:**
+**Prerequisites (any platform):**
+
+- Docker (or Podman aliased to `docker`) — Docker Desktop is fine on macOS / Windows; native `docker` on Linux.
+- The **Linux x86-64** variant of the NW RFC SDK from SAP Software Center, extracted to a folder on your host (e.g. `~/nwrfcsdk/` or `/opt/nwrfcsdk/`).  Even on macOS and Windows hosts you need the *Linux* SDK — the container runs Linux Python and can't load a macOS `.dylib` or Windows `.dll`.
+- First build takes ~5–10 min (the `twofish` C extension is slow to compile inside `pyjks`).  Subsequent builds are cached and take seconds.
+
+**Easiest path — use the wrapper:**
+
+```bash
+SDK_PATH=~/nwrfcsdk ./scripts/run-container.sh
+```
+
+The wrapper auto-detects Linux vs macOS, arm64 vs x86-64, sets `--platform linux/amd64` where needed, and mounts everything correctly.  Env vars: `SDK_PATH`, `IMAGE`, `LOOT_DIR`, `STATE_DIR`.  Add `DEBUG=1` to print the exact `docker run` command the wrapper is about to execute (handy for troubleshooting).
+
+**Manual — Linux:**
 
 ```bash
 docker build -t sapmap:latest .
@@ -442,12 +456,13 @@ docker build -t sapmap:latest .
 docker run --rm -it \
     --network host \
     --mount type=bind,source=/opt/nwrfcsdk,target=/opt/nwrfcsdk,readonly \
+    --env SAPMAP_HOST_SDK_PATH=/opt/nwrfcsdk \
     --mount type=bind,source=$(pwd)/loot,target=/opt/sapmap/loot \
     --mount type=bind,source=$(pwd)/states,target=/opt/sapmap/states \
     sapmap:latest
 ```
 
-**macOS (Docker Desktop) — including Apple Silicon:**
+**Manual — macOS (Docker Desktop), including Apple Silicon:**
 
 The SAP NW RFC SDK is Linux x86-64 only, so `--platform linux/amd64` is required at both build and run time on Apple Silicon (runs under Rosetta 2).  macOS Docker Desktop doesn't support `--network host` — use `-p 8080:8080` instead.
 
@@ -457,6 +472,7 @@ docker build --platform linux/amd64 -t sapmap:latest .
 docker run --platform linux/amd64 --rm -it \
     -p 8080:8080 \
     --mount type=bind,source=$HOME/nwrfcsdk,target=/opt/nwrfcsdk,readonly \
+    --env SAPMAP_HOST_SDK_PATH=$HOME/nwrfcsdk \
     --mount type=bind,source=$(pwd)/loot,target=/opt/sapmap/loot \
     --mount type=bind,source=$(pwd)/states,target=/opt/sapmap/states \
     sapmap:latest
@@ -464,14 +480,37 @@ docker run --platform linux/amd64 --rm -it \
 
 Then open `http://127.0.0.1:8080` in your host browser.
 
-Or use the wrapper: `./scripts/run-container.sh` (auto-detects Linux vs macOS, arm64 vs x86-64, and mount syntax; respects `SDK_PATH`, `IMAGE`, `LOOT_DIR`, `STATE_DIR` env vars; set `DEBUG=1` to see the exact `docker run` command).
+**Verify it's working:**
 
-**Notes:**
+Three checks worth running in a second terminal while the container is up:
 
-- `--network host` is **Linux only** and the recommended path because SAPMAP needs to reach arbitrary SAP hosts on your LAN.  On macOS / Windows Docker Desktop use `-p 8080:8080` and note that LAN reachability from the container is limited by Docker Desktop's networking — for real engagements, run SAPMAP natively on those platforms.
+```bash
+# 1. Container is running
+docker ps
+
+# 2. SDK loads under Rosetta (Apple Silicon) / natively (Intel/Linux)
+docker exec <container-id> python3 -c \
+    "from ctypes import CDLL; CDLL('/opt/nwrfcsdk/lib/libsapnwrfc.so'); print('SDK loads OK')"
+
+# 3. Target reachability from inside the container (replace 192.168.x.y)
+docker exec <container-id> python3 -c \
+    "import socket; socket.create_connection(('192.168.x.y', 3200), timeout=3); print('reachable')"
+```
+
+**LAN reachability — tested and it works on macOS Docker Desktop.**  Contrary to the caveats often given for Docker Desktop, LAN scans against arbitrary hosts on the operator's home network *do* work end-to-end with bridge networking + `-p 8080:8080`.  Verified against a real S/4 landscape from an Apple Silicon MacBook.  You may still hit VPN / corporate-network cases where Docker Desktop's NAT isolates the container — the `docker exec … socket.create_connection` check above tells you in one line.
+
+**Lessons from real testing:**
+
+- **Directory names with colons break the older `-v HOST:CONTAINER` syntax.**  Docker splits `-v` values on `:`, so a working directory like `~/Research/SAPmap:SAPology/SAPMAP` reads as three colon-separated fields and Docker rejects it with `invalid mode: /opt/sapmap/loot`.  The Dockerfile examples above (and the wrapper) all use `--mount type=bind,source=…,target=…` which uses named fields and is immune to this.  If you must use `-v`, keep colons out of your working directory path.
+- **Hard-reload the browser (⌘⇧R on macOS, Ctrl+F5 on Windows/Linux) after re-building or pulling GUI changes.**  SAPMAP's HTML/JS is served from the Bottle app; browsers cache it aggressively and stale JS can hide legitimate fixes.
+- **In-container, the SDK modal is read-only.**  `settings.local.json` inside a `--rm` container disappears on exit, and the entrypoint sets `--sdk /opt/nwrfcsdk/lib` on every start anyway.  The modal reflects this: it shows the active container path plus the bind-mount host source, and directs you to restart with a different `SDK_PATH` env var if you want to change SDK.
+- **First `pip install pyjks` layer is slow (~5 min).**  If your build hangs there, that's expected — the twofish C extension is compiling.
+- **`loot/` and `states/` bind mounts survive container restart.**  Findings, reports, and `.sapmap` snapshots you save land on the host filesystem, not inside the container.
+
+**Other notes:**
+
 - The image runs in `--browser` mode; `pywebview` cannot spawn a desktop window from inside a container.
-- The image binds to `0.0.0.0` inside the container.  With `--network host` that resolves to your real network interfaces — do **not** run this on an untrusted network.
-- `loot/` and `states/` are volume-mounted so findings, reports, and `.sapmap` snapshots survive container restarts.
+- The image binds to `0.0.0.0` inside the container.  With `--network host` on Linux that resolves to your real network interfaces — do **not** run this on an untrusted network.
 - Publishing a pre-built image to a registry is a follow-up (see issue tracker).
 
 ### SAP NW RFC SDK (strongly recommended)
