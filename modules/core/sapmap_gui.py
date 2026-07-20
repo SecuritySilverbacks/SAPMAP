@@ -7299,29 +7299,41 @@ def create_app(api: SAPMAPApi) -> Bottle:
             r = sapmap_exploit.download_java_table(
                 node, table, fields=fields, where=where, max_rows=max_rows)
             if r.get("success"):
-                # Stash for the modal to pick up
-                if not hasattr(node, "java_table_dumps"):
-                    node.java_table_dumps = []
-                node.java_table_dumps.append({
-                    "table": table, "columns": r.get("columns", []),
-                    "rows": r.get("rows", []),
-                    "row_count": r.get("row_count", 0),
-                })
-                # Persist to loot/tables/ as CSV
-                import os as _os
                 from datetime import datetime as _dt
-                import sapmap_state as _ss
-                loot_dir = _ss.ensure_loot_dir("tables")
-                ts = _dt.now().strftime("%Y%m%d_%H%M%S")
-                fpath = _os.path.join(loot_dir,
-                    f"table_java_{sid}_{table.replace('.','_')}_{ts}.csv")
-                import csv as _csv
-                with open(fpath, "w", newline="", encoding="utf-8") as fh:
-                    w = _csv.writer(fh)
-                    w.writerow(r.get("columns", []))
-                    for row in r.get("rows", []):
-                        w.writerow(row)
-                print(f"[+] {sid}: rows written to {fpath}")
+                rows = r.get("rows", [])
+                if not rows:
+                    _add_console_line(
+                        _dt.now().strftime("%H:%M:%S"),
+                        f"Table {table} on {sid} returned no entries",
+                        "cl-warn")
+                else:
+                    if not hasattr(node, "java_table_dumps"):
+                        node.java_table_dumps = []
+                    node.java_table_dumps.append({
+                        "table": table, "columns": r.get("columns", []),
+                        "rows": rows,
+                        "row_count": r.get("row_count", 0),
+                    })
+                    import os as _os
+                    import sapmap_state as _ss
+                    loot_dir = _ss.ensure_loot_dir("tables")
+                    ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+                    fpath = _os.path.join(loot_dir,
+                        f"table_java_{sid}_{table.replace('.','_')}_{ts}.csv")
+                    import csv as _csv
+                    with open(fpath, "w", newline="", encoding="utf-8") as fh:
+                        w = _csv.writer(fh)
+                        w.writerow(r.get("columns", []))
+                        for row in rows:
+                            w.writerow(row)
+                    print(f"[+] {sid}: rows written to {fpath}")
+            else:
+                from datetime import datetime as _dt
+                _add_console_line(
+                    _dt.now().strftime("%H:%M:%S"),
+                    f"Table {table} on {sid}: "
+                    f"{r.get('error', 'unknown error')[:200]}",
+                    "cl-err")
 
         _bg(f"{sid}:download_java_table", "Download Java Table", _run)
         return json.dumps({"status": "started"})
@@ -12896,6 +12908,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     ref="data.read_table",
                     attack_capability="data.read_table",
                 )
+            else:
+                _add_console_line(
+                    datetime.now().strftime("%H:%M:%S"),
+                    f"Table {table} on {sid} returned no entries",
+                    "cl-warn")
 
         _bg(f"{sid}:download_table", "Download Table", _run)
         return json.dumps({"status": "started"})
