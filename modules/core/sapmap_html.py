@@ -53,7 +53,20 @@ body {
   display: none; position: absolute; left: 0; top: 100%;
   background: #1c2128; border: 1px solid #30363d; border-radius: 6px;
   min-width: 220px; padding: 4px 0; z-index: 1000; box-shadow: 0 8px 24px rgba(0,0,0,.4);
+  /* The Actions menu grew past the viewport on short screens (macOS
+     browser window ~800px tall) so entries at the bottom were
+     unreachable.  Cap the height at 85% of the viewport and let the
+     dropdown scroll internally. */
+  max-height: 85vh; overflow-y: auto; overflow-x: hidden;
+  /* Firefox scrollbar styling — Chromium uses the ::-webkit rule below. */
+  scrollbar-width: thin; scrollbar-color: #30363d #1c2128;
 }
+.menu-dropdown::-webkit-scrollbar { width: 8px; }
+.menu-dropdown::-webkit-scrollbar-track { background: #1c2128; }
+.menu-dropdown::-webkit-scrollbar-thumb {
+  background: #30363d; border-radius: 4px;
+}
+.menu-dropdown::-webkit-scrollbar-thumb:hover { background: #484f58; }
 .menu-item:hover .menu-dropdown { display: block; }
 .menu-dropdown .dd-item {
   padding: 6px 16px; cursor: pointer; display: flex; align-items: center; gap: 8px;
@@ -833,6 +846,7 @@ body {
       <div class="dd-item" onclick="showSetPasswordModal()">&#128273; Set Default Password</div>
       <div class="dd-item" onclick="showHashesApiKeyModal()">&#128273; Set hashes.com API Key</div>
       <div class="dd-item" onclick="showSdkPathModal()">&#128194; Set NW RFC SDK Path</div>
+      <div class="dd-item" onclick="showSapologyPathModal()">&#128194; Set SAPology Path (Deep Scan)</div>
       <div class="dd-item" onclick="showBtpTokenModal()">&#9729;&#65039; BTP — Paste cf oauth-token</div>
       <div class="dd-item" onclick="showBtpProxyModal()">&#9729;&#65039; BTP — Connectivity Proxy Override</div>
     </div>
@@ -1793,6 +1807,33 @@ body {
     <div class="form-actions">
       <button class="btn btn-primary" id="sdk-path-save-btn" onclick="saveSdkPath()">Save</button>
       <button class="btn" onclick="closeModal('sdk-path-modal')" id="sdk-path-cancel-btn">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- SAPology Path Modal (Deep Scan) -->
+<div class="modal-overlay" id="sapology-path-modal">
+  <div class="modal" style="max-width:560px">
+    <h3>&#128194; SAPology Path (Deep Scan)</h3>
+    <div style="font-size:12px;color:#8b949e;margin-bottom:12px;line-height:1.5">
+      Path to the <a href="https://github.com/kloris/SAPology" target="_blank" style="color:#58a6ff">SAPology</a> checkout used for Deep Scan vulnerability
+      assessment.  Defaults to a sibling directory of the SAPMAP root
+      (<code>../SAPology</code>).
+      <br><br>
+      Saved in <code>settings.local.json</code> (gitignored) and applied
+      immediately — the next Deep Scan uses the new location without a
+      restart.  Also configurable via <code>--sapology &lt;path&gt;</code> on the
+      CLI or the <code>SAPMAP_SAPOLOGY_PATH</code> env var (both take priority).
+      Leave empty and Save to revert to the default sibling directory.
+    </div>
+    <div class="form-row">
+      <label>SAPology directory</label>
+      <input type="text" id="sapology-path-input" placeholder="e.g. /Users/you/git/SAPology" autocomplete="off">
+    </div>
+    <div id="sapology-path-current" style="font-size:11px;color:#8b949e;margin-bottom:12px;word-break:break-all;overflow-wrap:anywhere"></div>
+    <div class="form-actions">
+      <button class="btn btn-primary" onclick="saveSapologyPath()">Save</button>
+      <button class="btn" onclick="closeModal('sapology-path-modal')">Cancel</button>
     </div>
   </div>
 </div>
@@ -10092,6 +10133,61 @@ async function saveSdkPath() {
       : 'NW RFC SDK path cleared (falls back to system libs).';
     showToast(msg, d.warning ? 'warn' : 'success');
     closeModal('sdk-path-modal');
+  } else {
+    showToast('Failed to save: ' + (d.error || '?'), 'error');
+  }
+}
+
+async function showSapologyPathModal() {
+  // Populates the current value + status line for the SAPology path.
+  // Mirrors showSdkPathModal but keeps the flow simple — SAPology is
+  // a plain directory checkout, no Docker container swap and no
+  // multi-source ambiguity beyond the persisted-vs-active display.
+  try {
+    const s = await fetch('/api/settings/local').then(r => r.json());
+    const input = document.getElementById('sapology-path-input');
+    const info  = document.getElementById('sapology-path-current');
+    if (input) input.value = s.sapology_path || s.sapology_path_active || '';
+    if (info) {
+      const persisted = s.sapology_path || '';
+      const active    = s.sapology_path_active || '';
+      if (active && persisted && active === persisted) {
+        info.textContent = 'Active (from settings.local.json): ' + active;
+      } else if (active && !persisted) {
+        info.textContent = 'Active (default sibling or --sapology / '
+          + '$SAPMAP_SAPOLOGY_PATH): ' + active
+          + ' — save here to persist a custom path in settings.local.json.';
+      } else if (active && persisted && active !== persisted) {
+        info.textContent = 'Active: ' + active
+          + ' · Persisted: ' + persisted
+          + ' — CLI / env override wins until the next restart.';
+      } else if (persisted && !active) {
+        info.textContent = 'Persisted: ' + persisted
+          + ' — but the directory could not be located.';
+      } else {
+        info.textContent = 'Not set — Deep Scan will silently fall back '
+          + 'to Fast Scan with enrichment.';
+      }
+    }
+  } catch(e) {}
+  document.getElementById('sapology-path-modal').classList.add('visible');
+}
+
+async function saveSapologyPath() {
+  const val = (document.getElementById('sapology-path-input').value || '').trim();
+  const r = await fetch('/api/settings/local', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({sapology_path: val})
+  });
+  const d = await r.json();
+  if (d.ok) {
+    const msg = val
+      ? ('SAPology path saved: ' + val
+          + (d.warning ? '  — ' + d.warning : ''))
+      : 'SAPology path cleared (reverted to default sibling directory).';
+    showToast(msg, d.warning ? 'warn' : 'success');
+    closeModal('sapology-path-modal');
   } else {
     showToast('Failed to save: ' + (d.error || '?'), 'error');
   }
