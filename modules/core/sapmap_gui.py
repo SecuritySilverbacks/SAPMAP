@@ -3663,10 +3663,17 @@ def create_app(api: SAPMAPApi) -> Bottle:
         # where the SDK lives on the HOST (their Mac / Linux box),
         # not just the in-container mount target /opt/nwrfcsdk/lib.
         # SAPMAP_IN_CONTAINER=1 is set in the Dockerfile ENV.
+        try:
+            import sapmap_scanner as _scanner
+            active_sapology = _scanner.get_sapology_path()
+        except Exception:
+            active_sapology = ""
         return json.dumps({
             "hashes_com_api_key_set": bool(data.get("hashes_com_api_key")),
             "nwrfcsdk_path": data.get("nwrfcsdk_path", ""),
             "nwrfcsdk_path_active": active_sdk,
+            "sapology_path": data.get("sapology_path", ""),
+            "sapology_path_active": active_sapology,
             "in_container": bool(os.environ.get("SAPMAP_IN_CONTAINER")),
             "host_sdk_path": os.environ.get("SAPMAP_HOST_SDK_PATH", ""),
         })
@@ -3708,6 +3715,37 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                      f"restart.")
                 else:
                     existing.pop("nwrfcsdk_path", None)
+            # SAPology path — same pattern: empty clears, live-apply
+            # via sapmap_scanner.set_sapology_path so the next Deep
+            # Scan picks up the new location without restart.
+            if "sapology_path" in data:
+                sap_path = str(data["sapology_path"]).strip()
+                if sap_path:
+                    existing["sapology_path"] = sap_path
+                    if not os.path.isdir(sap_path):
+                        _extra = (f"SAPology path {sap_path!r} does not "
+                                  f"exist or is not a directory — saved "
+                                  f"anyway (fix before next Deep Scan)")
+                        warn = f"{warn}; {_extra}" if warn else _extra
+                    else:
+                        try:
+                            import sapmap_scanner as _scanner
+                            _scanner.set_sapology_path(sap_path)
+                            print(f"[*] SAPology path set from GUI: "
+                                  f"{sap_path}")
+                        except Exception as _e:
+                            _extra = (f"SAPology path saved OK, but "
+                                      f"live-apply failed: {_e}.  Will "
+                                      f"take effect on next restart.")
+                            warn = f"{warn}; {_extra}" if warn else _extra
+                else:
+                    existing.pop("sapology_path", None)
+                    try:
+                        import sapmap_scanner as _scanner
+                        _scanner.set_sapology_path(
+                            _scanner._default_sapology_dir())
+                    except Exception:
+                        pass
             with open("settings.local.json", "w") as f:
                 json.dump(existing, f, indent=2)
             os.chmod("settings.local.json", 0o600)

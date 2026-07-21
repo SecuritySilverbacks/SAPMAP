@@ -97,6 +97,40 @@ def _resolve_sdk_path(cli_arg: str | None) -> tuple[str, str]:
     return "", ""
 
 
+def _resolve_sapology_path(cli_arg: str | None) -> tuple[str, str]:
+    """Decide which SAPology directory to activate at startup.
+
+    Resolution order (first non-empty wins):
+
+      1. ``--sapology`` on the CLI (explicit operator override).
+      2. ``$SAPMAP_SAPOLOGY_PATH`` environment variable — useful
+         inside Docker where a bind mount lands the SAPology tree
+         at a fixed target path.
+      3. ``sapology_path`` in ``settings.local.json`` (set via the
+         GUI settings modal).
+      4. Nothing set — return ``("", "")`` and let
+         ``sapmap_scanner`` fall back to its default sibling
+         directory (``../SAPology`` relative to the SAPMAP root).
+
+    Returns ``(sapology_path, source_label)`` so main() can print
+    ``[*] SAPology path: ... (source: ...)``.
+    """
+    if cli_arg:
+        return cli_arg, "--sapology"
+    env = os.environ.get("SAPMAP_SAPOLOGY_PATH")
+    if env:
+        return env, "SAPMAP_SAPOLOGY_PATH env"
+    try:
+        import json as _json
+        with open("settings.local.json") as _f:
+            stored = _json.load(_f).get("sapology_path", "")
+            if stored:
+                return stored, "settings.local.json"
+    except Exception:
+        pass
+    return "", ""
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="SAPMAP — SAP Landscape Attack Path Mapper"
@@ -105,6 +139,12 @@ def main():
                         help="Load a saved .sapmap state file")
     parser.add_argument("--sdk", metavar="PATH",
                         help="Path to SAP NW RFC SDK lib directory")
+    parser.add_argument("--sapology", metavar="PATH",
+                        help="Path to the SAPology checkout used for Deep "
+                             "Scan.  Defaults to a sibling directory of "
+                             "the SAPMAP root (../SAPology).  Also "
+                             "configurable via $SAPMAP_SAPOLOGY_PATH or "
+                             "'sapology_path' in settings.local.json.")
     parser.add_argument("--port", type=int, default=0,
                         help="HTTP server port (0=auto)")
     parser.add_argument("--host", metavar="ADDR",
@@ -169,6 +209,13 @@ def main():
     if sdk_path:
         sapmap_rfc.set_sdk_path(sdk_path)
         print(f"[*] NW RFC SDK path: {sdk_path} (source: {sdk_source})")
+
+    sapology_path, sapology_source = _resolve_sapology_path(args.sapology)
+    if sapology_path:
+        from sapmap_scanner import set_sapology_path as _set_sapology
+        _set_sapology(sapology_path)
+        print(f"[*] SAPology path: {sapology_path} "
+              f"(source: {sapology_source})")
 
     # Create API controller
     api = SAPMAPApi()

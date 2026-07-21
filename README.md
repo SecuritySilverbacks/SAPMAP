@@ -646,6 +646,7 @@ python3 sapmap.py --script scripts/demo_10kblaze.yaml  # Run scripted scenario w
 |--------|-------------|
 | `--load FILE` | Load a saved `.sapmap` state file |
 | `--sdk PATH` | Path to SAP NW RFC SDK lib directory |
+| `--sapology PATH` | Path to the SAPology checkout for Deep Scan (default: `../SAPology`) |
 | `--port PORT` | HTTP server port (0 = auto-select) |
 | `--script FILE` | Run a scripted scenario (YAML/JSON) with GUI visualization ([details](#scripted-scenarios)) |
 | `--browser` | Force browser mode (skip pywebview) |
@@ -770,6 +771,13 @@ git clone https://github.com/kloris/SAPology.git
 pip3 install -r SAPology/requirements.txt
 ```
 
+**Custom SAPology location:** the default `../SAPology` sibling can be overridden — first non-empty wins:
+
+1. `--sapology PATH` on the CLI (per-run override)
+2. `$SAPMAP_SAPOLOGY_PATH` environment variable (handy in Docker)
+3. `sapology_path` in `settings.local.json` (set via the GUI settings modal — live-applied)
+4. Default sibling directory (no config needed)
+
 If SAPology is missing when you launch a Deep Scan, SAPMAP prints `[!] SAPology unavailable: …` followed by the sibling directory it expected, then downgrades to the Fast Scan path — the scan still succeeds, but you lose the vulnerability assessment layer.
 
 **Troubleshooting: `module 'SAPology' has no attribute 'discover_systems'`**
@@ -782,13 +790,23 @@ This means `import SAPology` succeeded but pulled in an empty namespace director
 
 SAPMAP now prints the full path it tried and where the wrong `SAPology` was loaded from, which makes the mis-location obvious in the console.
 
-**Docker note:** the container ships with Fast Scan only.  Deep Scan inside a container needs a bind-mount of the SAPology tree at `/SAPology` (the scanner looks for it as a sibling of the SAPMAP root, which inside the container is `/opt/sapmap`, so `../../../SAPology` from `modules/discovery/` resolves to `/SAPology`).  Add this to the `docker run` invocation:
+**Docker note:** the container ships with Fast Scan only.  Deep Scan inside a container needs a bind-mount of the SAPology tree; the target path can be anywhere on the container filesystem because `$SAPMAP_SAPOLOGY_PATH` tells the scanner where to look.  Simplest form:
 
 ```bash
---mount type=bind,source=/path/to/SAPology,target=/SAPology,readonly
+--mount type=bind,source=/path/to/SAPology,target=/opt/SAPology,readonly \
+--env SAPMAP_SAPOLOGY_PATH=/opt/SAPology
 ```
 
-or as a Compose volume: `- /path/to/SAPology:/SAPology:ro`.  SAPology's own Python deps must already be installed in the image — either add them to `requirements.txt` before build, or `pip install -r /SAPology/requirements.txt` inside the running container.
+or as a Compose volume:
+
+```yaml
+volumes:
+  - /path/to/SAPology:/opt/SAPology:ro
+environment:
+  - SAPMAP_SAPOLOGY_PATH=/opt/SAPology
+```
+
+SAPology's own Python deps must already be installed in the image — either add them to `requirements.txt` before build, or `pip install -r /opt/SAPology/requirements.txt` inside the running container.
 
 ---
 

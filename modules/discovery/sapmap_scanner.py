@@ -38,13 +38,61 @@ def _attack_for(capability_key: str) -> list:
 
 logger = logging.getLogger(__name__)
 
-# Add SAPology (sister project, sits next to SAPMAP root) to path for
-# imports.  This file now lives in modules/discovery/, so the SAPology
-# directory is three levels up.
-_sapology_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                              "..", "..", "..", "SAPology")
-if os.path.isdir(_sapology_dir) and _sapology_dir not in sys.path:
-    sys.path.insert(0, _sapology_dir)
+# --- SAPology sister-project location --------------------------------
+#
+# SAPology (sister project) is loaded on demand for Deep Scan.  Its
+# location is configurable so operators can point at any checkout,
+# not just the default sibling directory next to the SAPMAP root.
+#
+# Resolution order (main() in sapmap.py applies these in this order):
+#   1. --sapology PATH             (CLI flag)
+#   2. $SAPMAP_SAPOLOGY_PATH       (env var — useful in Docker)
+#   3. sapology_path in            (persisted via GUI settings modal)
+#      settings.local.json
+#   4. Default sibling             (../../../SAPology from this file
+#      directory                    → next to the SAPMAP checkout)
+_sapology_dir = None    # active path (set by set_sapology_path)
+
+
+def _default_sapology_dir() -> str:
+    """Absolute path to the default sibling SAPology directory."""
+    return os.path.abspath(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                     "..", "..", "..", "SAPology"))
+
+
+def set_sapology_path(path: str) -> None:
+    """Override which SAPology directory Deep Scan will import from.
+
+    Removes any previously registered SAPology path from ``sys.path``
+    and inserts the new one.  Passing ``None`` or ``""`` clears the
+    override without registering a replacement (Deep Scan will then
+    fail the ``discover_systems`` guard and fall back to Fast Scan).
+    """
+    global _sapology_dir
+    if _sapology_dir and _sapology_dir in sys.path:
+        try:
+            sys.path.remove(_sapology_dir)
+        except ValueError:
+            pass
+    _sapology_dir = (os.path.abspath(os.path.expanduser(path))
+                     if path else None)
+    if _sapology_dir and os.path.isdir(_sapology_dir):
+        if _sapology_dir not in sys.path:
+            sys.path.insert(0, _sapology_dir)
+    # Drop any cached SAPology from a previous (possibly wrong) location
+    # so the next `import SAPology` re-resolves from the new sys.path.
+    sys.modules.pop("SAPology", None)
+
+
+def get_sapology_path() -> str:
+    """Return the currently active SAPology directory (or ``""``)."""
+    return _sapology_dir or ""
+
+
+# Register the default sibling location at import time so unmodified
+# setups keep working with zero config.
+set_sapology_path(_default_sapology_dir())
 
 # Import from existing modules in SAPMAP directory
 from sap_rfc_system_info import probe_sap_system
@@ -4944,8 +4992,11 @@ def discover_systems(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RAN
             logger.warning(f"SAPology unavailable ({_reason}), "
                            f"falling back to fast scan + enrichment")
             print(f"[!] SAPology unavailable: {_reason}")
-            print(f"[!] Expected sibling directory: "
-                  f"{os.path.abspath(_sapology_dir)}")
+            _expected = _sapology_dir or _default_sapology_dir()
+            print(f"[!] Expected SAPology directory: {_expected}")
+            print(f"[!] Override with --sapology PATH, "
+                  f"$SAPMAP_SAPOLOGY_PATH, or 'sapology_path' in "
+                  f"settings.local.json")
             print(f"[!] Falling back to fast scan with enrichment")
             return discover_systems(targets, instance_range, timeout, threads,
                                     fast_mode=True, cancel_event=cancel_event,
