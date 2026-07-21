@@ -44,8 +44,13 @@ if [[ "$PERSIST" == "1" ]]; then
     # Re-attach if the named container already exists.  Two states:
     #   - Running   → docker attach
     #   - Exited    → docker start -ai (start + attach, streams stdin/tty)
-    if docker inspect "$NAME" >/dev/null 2>&1; then
-        STATE="$(docker inspect -f '{{.State.Status}}' "$NAME")"
+    #
+    # NB: use `docker container inspect` (or --type=container) — plain
+    # `docker inspect NAME` matches the image `sapmap:latest` first
+    # (images have no .State.Status) and blows up with:
+    #     template parsing error: map has no entry for key "State"
+    if docker container inspect "$NAME" >/dev/null 2>&1; then
+        STATE="$(docker container inspect -f '{{.State.Status}}' "$NAME")"
         case "$STATE" in
             running)
                 echo "[+] Container '$NAME' is already running — attaching."
