@@ -480,6 +480,45 @@ docker run --platform linux/amd64 --rm -it \
 
 Then open `http://127.0.0.1:8080` in your host browser.
 
+**Ephemeral vs. persistent — and why the Docker Desktop "Run" button doesn't work:**
+
+The default `docker run --rm` deletes the container as soon as you stop it, so it never appears in the Docker Desktop "Containers" list — only the image survives.  Hitting the ▶️ button on the image in Docker Desktop then starts a brand-new container **without** the port mapping, volume mounts, or `--platform` flag that SAPMAP needs, so it either binds an unreachable port, crashes on the missing SDK bind mount, or (on Apple Silicon) fails to load the x86-64 SDK because Rosetta wasn't requested.  In short: the dashboard's "Run image" button is not the right entry point for this container.
+
+Two fixes, pick one:
+
+1. **Run the wrapper in persistent mode** — the container gets a fixed name, survives stop, and Docker Desktop's Start/Stop buttons on the **Containers** tab then work correctly:
+
+    ```bash
+    PERSIST=1 SDK_PATH=~/nwrfcsdk ./scripts/run-container.sh    # first run
+    docker start -ai sapmap                                     # bring back up
+    docker stop  sapmap                                         # clean stop
+    docker rm    sapmap                                         # throw it away
+    ```
+
+    Re-running `PERSIST=1 ./scripts/run-container.sh` after a stop just re-attaches to the existing `sapmap` container (script detects state=exited and does `docker start -ai`).  Use `NAME=sapmap-dev PERSIST=1 …` to keep more than one around side-by-side.
+
+2. **Docker Compose** — if you prefer Docker Desktop's stack UI, drop this into `docker-compose.yml` at the repo root and hit ▶️ on the stack:
+
+    ```yaml
+    services:
+      sapmap:
+        image: sapmap:latest
+        platform: linux/amd64          # comment out on Intel/Linux hosts
+        container_name: sapmap
+        ports:
+          - "8080:8080"
+        environment:
+          - SAPMAP_HOST_SDK_PATH=${HOME}/nwrfcsdk
+        volumes:
+          - ${HOME}/nwrfcsdk:/opt/nwrfcsdk:ro
+          - ./loot:/opt/sapmap/loot
+          - ./states:/opt/sapmap/states
+        stdin_open: true
+        tty: true
+    ```
+
+    Then `docker compose up` (or Docker Desktop → Compose stack → Start).
+
 **Verify it's working:**
 
 Three checks worth running in a second terminal while the container is up:
