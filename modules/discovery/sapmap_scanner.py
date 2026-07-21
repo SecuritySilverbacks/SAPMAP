@@ -4917,13 +4917,36 @@ def discover_systems(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RAN
             print(f"")
     else:
         # Deep scan: use SAPology if available
+        _fallback_reason = None
         try:
             import SAPology
+            # Guard: `import SAPology` can succeed while returning an
+            # empty namespace package (a bare directory called SAPology
+            # somewhere on sys.path, no __init__.py, no SAPology.py
+            # inside).  Classic symptom is a colleague seeing
+            #     AttributeError: module 'SAPology' has no attribute
+            #                     'discover_systems'
+            # — usually because they cloned SAPology *inside* SAPMAP
+            # instead of as a sibling directory.
+            if not hasattr(SAPology, "discover_systems"):
+                loaded_from = getattr(SAPology, "__file__", None) \
+                    or getattr(SAPology, "__path__", ["<unknown>"])
+                _fallback_reason = (
+                    f"imported SAPology from {loaded_from} but it is "
+                    f"missing discover_systems() — likely an empty "
+                    f"namespace directory, wrong clone location, or an "
+                    f"unrelated package with the same name")
+                raise ImportError(_fallback_reason)
             _deep_scan_with_sapology(targets, instance_range, timeout, threads,
                                      cancel_event, progress_callback, nodes)
-        except ImportError:
-            logger.warning("SAPology not available, falling back to fast scan + enrichment")
-            print("[!] SAPology not importable, falling back to fast scan with enrichment")
+        except ImportError as _e:
+            _reason = _fallback_reason or str(_e) or "not installed"
+            logger.warning(f"SAPology unavailable ({_reason}), "
+                           f"falling back to fast scan + enrichment")
+            print(f"[!] SAPology unavailable: {_reason}")
+            print(f"[!] Expected sibling directory: "
+                  f"{os.path.abspath(_sapology_dir)}")
+            print(f"[!] Falling back to fast scan with enrichment")
             return discover_systems(targets, instance_range, timeout, threads,
                                     fast_mode=True, cancel_event=cancel_event,
                                     progress_callback=progress_callback, verbose=verbose,

@@ -770,7 +770,17 @@ git clone https://github.com/kloris/SAPology.git
 pip3 install -r SAPology/requirements.txt
 ```
 
-If SAPology is missing when you launch a Deep Scan, SAPMAP prints `[!] SAPology not importable, falling back to fast scan with enrichment` and silently downgrades to the Fast Scan path — the scan still succeeds, but you lose the vulnerability assessment layer.
+If SAPology is missing when you launch a Deep Scan, SAPMAP prints `[!] SAPology unavailable: …` followed by the sibling directory it expected, then downgrades to the Fast Scan path — the scan still succeeds, but you lose the vulnerability assessment layer.
+
+**Troubleshooting: `module 'SAPology' has no attribute 'discover_systems'`**
+
+This means `import SAPology` succeeded but pulled in an empty namespace directory instead of the real project.  Almost always one of:
+
+1. **SAPology was cloned *inside* SAPMAP** (as `SAPMAP/SAPology/`) rather than **beside** it.  Python 3.3+ treats any bare directory on `sys.path` as an empty namespace package, so the wrong `SAPology/` gets imported.  Fix by moving the clone up one level so the two repos are siblings — see the directory diagram above.
+2. **GitHub ZIP download** left the folder named `SAPology-main`.  SAPMAP looks for a folder literally named `SAPology`.  Rename it: `mv SAPology-main SAPology`.
+3. **Case mismatch** — `sapology/` on macOS's case-insensitive filesystem imports fine but from an unexpected location.  Keep the exact spelling `SAPology`.
+
+SAPMAP now prints the full path it tried and where the wrong `SAPology` was loaded from, which makes the mis-location obvious in the console.
 
 **Docker note:** the container ships with Fast Scan only.  Deep Scan inside a container needs a bind-mount of the SAPology tree at `/SAPology` (the scanner looks for it as a sibling of the SAPMAP root, which inside the container is `/opt/sapmap`, so `../../../SAPology` from `modules/discovery/` resolves to `/SAPology`).  Add this to the `docker run` invocation:
 
