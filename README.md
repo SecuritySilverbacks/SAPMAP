@@ -752,7 +752,33 @@ For each discovered system, SAPMAP automatically:
 
 ### Deep Scan
 
-Uses SAPology for comprehensive port scanning, service fingerprinting, and vulnerability assessment including SSL/TLS checks, MS ACL testing, and CVE detection.
+Uses [SAPology](https://github.com/kloris/SAPology) for comprehensive port scanning, service fingerprinting, and vulnerability assessment including SSL/TLS checks, MS ACL testing, and CVE detection.
+
+**SAPology is a sister project and is not bundled with SAPMAP** — you have to clone it separately.  SAPMAP looks for it as a **sibling directory** of the SAPMAP checkout (not inside it):
+
+```
+<workspace>/
+├── SAPMAP/         ← this repo
+└── SAPology/       ← clone side-by-side
+```
+
+Install:
+
+```bash
+cd <parent-directory-of-SAPMAP>
+git clone https://github.com/kloris/SAPology.git
+pip3 install -r SAPology/requirements.txt
+```
+
+If SAPology is missing when you launch a Deep Scan, SAPMAP prints `[!] SAPology not importable, falling back to fast scan with enrichment` and silently downgrades to the Fast Scan path — the scan still succeeds, but you lose the vulnerability assessment layer.
+
+**Docker note:** the container ships with Fast Scan only.  Deep Scan inside a container needs a bind-mount of the SAPology tree at `/SAPology` (the scanner looks for it as a sibling of the SAPMAP root, which inside the container is `/opt/sapmap`, so `../../../SAPology` from `modules/discovery/` resolves to `/SAPology`).  Add this to the `docker run` invocation:
+
+```bash
+--mount type=bind,source=/path/to/SAPology,target=/SAPology,readonly
+```
+
+or as a Compose volume: `- /path/to/SAPology:/SAPology:ro`.  SAPology's own Python deps must already be installed in the image — either add them to `requirements.txt` before build, or `pip install -r /SAPology/requirements.txt` inside the running container.
 
 ---
 
