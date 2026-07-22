@@ -2926,9 +2926,64 @@ async function pollUpdates() {
           if (newLen > oldLen) _findingsPanelNeedsRefresh = true;
         }
       } catch (_) {}
+      // Details-panel live refresh — detect whether the currently open
+      // system/SCC/BTP details panel points at a node whose data changed
+      // in this poll (e.g. GW vuln flipped to YES mid-scan) and mark for
+      // re-render.  JSON-stringify diff avoids clobbering hover / copy
+      // interactions when nothing changed.  Gated by data-view so we
+      // don't fight the findings-panel refresh above or any other view
+      // that shares #detail-panel.
+      let _detailsPanelNeedsRefresh = false;
+      let _detailsRefreshKind = null;
+      let _detailsRefreshKey = null;
+      try {
+        const panel = document.getElementById('detail-panel');
+        if (panel && panel.classList.contains('visible')) {
+          const view = panel.getAttribute('data-view');
+          const dsid = panel.dataset.sid || '';
+          if (view === 'details' && dsid) {
+            const oldN = (mapState.nodes || {})[dsid];
+            const newN = (state.nodes || {})[dsid];
+            if (newN && JSON.stringify(oldN) !== JSON.stringify(newN)) {
+              _detailsPanelNeedsRefresh = true;
+              _detailsRefreshKind = 'details';
+              _detailsRefreshKey = dsid;
+            }
+          } else if (view === 'scc' && dsid.indexOf('scc:') === 0) {
+            const host = dsid.slice(4);
+            const oldS = (mapState.scc_nodes || {})[host];
+            const newS = (state.scc_nodes || {})[host];
+            if (newS && JSON.stringify(oldS) !== JSON.stringify(newS)) {
+              _detailsPanelNeedsRefresh = true;
+              _detailsRefreshKind = 'scc';
+              _detailsRefreshKey = host;
+            }
+          } else if (view === 'btp' && dsid.indexOf('btp:') === 0) {
+            const uuid = dsid.slice(4);
+            const oldB = (mapState.btp_subaccounts || {})[uuid];
+            const newB = (state.btp_subaccounts || {})[uuid];
+            if (newB && JSON.stringify(oldB) !== JSON.stringify(newB)) {
+              _detailsPanelNeedsRefresh = true;
+              _detailsRefreshKind = 'btp';
+              _detailsRefreshKey = uuid;
+            }
+          }
+        }
+      } catch (_) { /* details refresh never blocks state update */ }
       mapState = state;
       activeTasks = state.active_tasks || {};
       updateMap();
+      if (_detailsPanelNeedsRefresh) {
+        try {
+          if (_detailsRefreshKind === 'details') {
+            showDetails(_detailsRefreshKey, {refresh: true});
+          } else if (_detailsRefreshKind === 'scc') {
+            showSCCDetail(_detailsRefreshKey, {refresh: true});
+          } else if (_detailsRefreshKind === 'btp') {
+            showBTPDetail(_detailsRefreshKey, {refresh: true});
+          }
+        } catch (_) {}
+      }
       if (_findingsPanelNeedsRefresh) {
         try { showFindings(_openFindingsPanelSid); } catch (_) {}
       }
@@ -8353,15 +8408,20 @@ async function createUserOnTarget(sourceSid, destName, targetSid) {
 }
 
 // --- Detail panel ---
-function showDetails(sid) {
+function showDetails(sid, opts) {
   const n = (mapState.nodes || {})[sid];
   if (!n) return;
   const panel = document.getElementById('detail-panel');
-  if (panel.classList.contains('visible') && panel.dataset.sid === sid) {
+  const refresh = !!(opts && opts.refresh);
+  if (!refresh && panel.classList.contains('visible') && panel.dataset.sid === sid) {
     panel.classList.remove('visible');
     return;
   }
+  // Preserve scroll position on refresh so live updates don't yank the
+  // panel back to the top while the operator is reading.
+  const preservedScroll = refresh ? (panel.scrollTop || 0) : 0;
   panel.dataset.sid = sid;
+  panel.setAttribute('data-view', 'details');
   panel.innerHTML = `
     <span class="close-btn" onclick="this.parentElement.classList.remove('visible')">&times;</span>
     <h3>${escHtml(n.sid)} System Details</h3>
@@ -9025,18 +9085,22 @@ function showDetails(sid) {
   });
 
   panel.classList.add('visible');
+  if (refresh && preservedScroll) panel.scrollTop = preservedScroll;
 }
 
 // SAP Cloud Connector — read-only detail drawer (Week 1: no actions yet).
-function showSCCDetail(host) {
+function showSCCDetail(host, opts) {
   const sn = (mapState.scc_nodes || {})[host];
   if (!sn) return;
   const panel = document.getElementById('detail-panel');
-  if (panel.classList.contains('visible') && panel.dataset.sid === 'scc:' + host) {
+  const refresh = !!(opts && opts.refresh);
+  if (!refresh && panel.classList.contains('visible') && panel.dataset.sid === 'scc:' + host) {
     panel.classList.remove('visible');
     return;
   }
+  const preservedScroll = refresh ? (panel.scrollTop || 0) : 0;
   panel.dataset.sid = 'scc:' + host;
+  panel.setAttribute('data-view', 'scc');
   const tls = sn.tls_fingerprint || {};
   const cves = [].concat(sn.cves_confirmed || [], sn.cves_suspected || []);
   panel.innerHTML = `
@@ -9237,17 +9301,21 @@ function showSCCDetail(host) {
     </div>
   `;
   panel.classList.add('visible');
+  if (refresh && preservedScroll) panel.scrollTop = preservedScroll;
 }
 
-function showBTPDetail(uuid) {
+function showBTPDetail(uuid, opts) {
   const bn = (mapState.btp_subaccounts || {})[uuid];
   if (!bn) return;
   const panel = document.getElementById('detail-panel');
-  if (panel.classList.contains('visible') && panel.dataset.sid === 'btp:' + uuid) {
+  const refresh = !!(opts && opts.refresh);
+  if (!refresh && panel.classList.contains('visible') && panel.dataset.sid === 'btp:' + uuid) {
     panel.classList.remove('visible');
     return;
   }
+  const preservedScroll = refresh ? (panel.scrollTop || 0) : 0;
   panel.dataset.sid = 'btp:' + uuid;
+  panel.setAttribute('data-view', 'btp');
   const dests = bn.destinations || [];
   const cleartext = dests.filter(d => d && d.cleartext_captured);
   const linked = dests.filter(d => d && d.linked_target_sid);
@@ -9288,6 +9356,7 @@ function showBTPDetail(uuid) {
     </div>
   `;
   panel.classList.add('visible');
+  if (refresh && preservedScroll) panel.scrollTop = preservedScroll;
 }
 
 async function sccProbeCreds(host) {
