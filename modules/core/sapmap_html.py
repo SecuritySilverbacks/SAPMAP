@@ -10619,12 +10619,17 @@ async function rwEncrypt(sid) {
   btn.disabled = true;
   btn.textContent = 'Encrypting...';
 
-  await api('POST', 'node/' + sid + '/ransapware/encrypt', {
-    table, fields: checked, key_fields: keyFields,
-    max_rows: maxRows, send_popup: sendPopup,
-  });
-  showToast('RanSAPware encryption started — check console for progress', 'info');
-  startPolling();
+  try {
+    await api('POST', 'node/' + sid + '/ransapware/encrypt', {
+      table, fields: checked, key_fields: keyFields,
+      max_rows: maxRows, send_popup: sendPopup,
+    });
+    showToast('RanSAPware encryption started — check console for progress', 'info');
+    startPolling();
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '&#128274; ENCRYPT TABLE DATA';
+  }
 }
 
 async function showRansapwareDecryptModal(sid) {
