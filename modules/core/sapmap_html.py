@@ -5052,6 +5052,8 @@ function showCtxMenu(e, sid) {
     // Tighten to ABAP + a usable RFC credential to match the
     // canonical analyse_capabilities / retrieve_rfcs gate.
     'harvest_btp_creds': hasUsableAbapAccess,
+    'ransapware_encrypt': hasUsableAbapAccess,
+    'ransapware_decrypt': hasUsableAbapAccess,
     'cleanup':          hasCreatedUsers,             // need created users to clean up
     'client_roles':     hasUsableAbapAccess,        // ABAP-only RFC reads
     'read_usrextid':    hasUsableAbapAccess,        // ABAP-only RFC reads
@@ -5237,6 +5239,8 @@ function showCtxMenu(e, sid) {
         ? 'Create TCP/IP Dest is ABAP-only — RFC Type-T destinations + RFC_DESTINATION_INSERT live on the ABAP stack.'
         : 'Needs a verified RFC credential or a SAPMAP-created user — RFC_DESTINATION_INSERT requires an actual logon.  Save credentials or create a user first.'),
     'propagate':        'Provide credentials or create a user first',
+    'ransapware_encrypt': 'Needs ABAP stack + a verified RFC credential or SAPMAP-created user — RFC_ABAP_INSTALL_AND_RUN must be available.',
+    'ransapware_decrypt': 'Needs ABAP stack + a verified RFC credential or SAPMAP-created user — RFC_ABAP_INSTALL_AND_RUN must be available.',
     'cleanup':          'No created users to clean up',
     'client_roles':     'Needs a verified RFC credential or a SAPMAP-created user — the role-walk reads AGR_USERS / AGR_DEFINE via RFC.',
     'read_usrextid':    'Needs a verified RFC credential or a SAPMAP-created user — USREXTID read uses RFC_READ_TABLE.',
@@ -5302,6 +5306,8 @@ function showCtxMenu(e, sid) {
     'create_user_creds':     !isAbapStack,
     'create_user_betrusted': !isAbapStack,
     'download_secstore':     !isAbapStack,  // RSECTAB is an ABAP table
+    'ransapware_encrypt':    !isAbapStack,
+    'ransapware_decrypt':    !isAbapStack,
     // create_user_gw stays visible on both ABAP and Java — click handler
     // dispatches to the right backend (ABAP USR02 SQL insert vs. Java UME
     // via JSP), and is hidden only on non-ABAP/non-Java stacks.
