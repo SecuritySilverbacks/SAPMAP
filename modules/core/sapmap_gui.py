@@ -14744,6 +14744,16 @@ def create_app(api: SAPMAPApi) -> Bottle:
         def _run():
             import sap_ransapware
             import sapmap_state as _ss
+            loot_dir = _ss.ensure_loot_dir("ransapware")
+            existing = sap_ransapware.find_manifests(loot_dir, sid)
+            active = [m for m in existing
+                      if m.get("table") == table_name
+                      and not m.get("decrypted")
+                      and m.get("rows_encrypted", 0) > 0]
+            if active:
+                print(f"[-] RanSAPware {sid}: table {table_name} already "
+                      f"has an active encryption — decrypt first")
+                return
             soap_session, _ = resolve_soap_session_for_node(
                 api.state, node, timeout=180.0)
             try:
@@ -14752,7 +14762,6 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     key_fields, max_rows=max_rows,
                     send_popup=send_popup,
                     soap_session=soap_session)
-                loot_dir = _ss.ensure_loot_dir("ransapware")
                 path = sap_ransapware.save_manifest(manifest, loot_dir)
                 print(f"[+] RanSAPware {sid}: manifest saved to {path}")
                 if manifest.rows_encrypted > 0:
@@ -14789,15 +14798,17 @@ def create_app(api: SAPMAPApi) -> Bottle:
             import sap_ransapware
             try:
                 manifest = sap_ransapware.load_manifest(manifest_path)
+                if manifest.decrypted:
+                    print(f"[-] RanSAPware {sid}: manifest already "
+                          f"decrypted — skipping to prevent double-decrypt")
+                    return
                 soap_session, _ = resolve_soap_session_for_node(
                     api.state, node, timeout=180.0)
                 result = sap_ransapware.decrypt_table(
                     node, creds, manifest,
                     soap_session=soap_session)
                 if result.get("success"):
-                    sap_ransapware.save_manifest(
-                        manifest,
-                        os.path.dirname(os.path.dirname(manifest_path)))
+                    sap_ransapware.update_manifest(manifest, manifest_path)
                     print(f"[+] RanSAPware {sid}: decryption complete, "
                           f"manifest updated")
             except Exception as e:
