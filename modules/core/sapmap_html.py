@@ -10441,7 +10441,7 @@ function showImpactDetail(sid) {
             if (isStringRows) {
               return '<tr><td style="padding:2px 6px;border-bottom:1px solid #21262d;font-family:monospace;color:#c9d1d9;word-break:break-all">' + escHtml(String(row)) + '</td></tr>';
             }
-            return '<tr>' + cols.map(c => '<td style="padding:2px 6px;border-bottom:1px solid #21262d;font-family:monospace;color:#c9d1d9">' + escHtml(String(row[c]||'')) + '</td></tr>').join('') + '</tr>';
+            return '<tr>' + cols.map(c => '<td style="padding:2px 6px;border-bottom:1px solid #21262d;font-family:monospace;color:#c9d1d9">' + escHtml(String(row[c]||'')) + '</td>').join('') + '</tr>';
           }).join('') +
           '</table></div>' +
           '<a href="#" class="csv-export-link" data-sid="' + escHtml(n.sid) + '" data-scenario="' + escHtml(r.scenario) + '" ' +
