@@ -14814,7 +14814,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
         import sap_ransapware
         import sapmap_state as _ss
         loot_dir = _ss.ensure_loot_dir("ransapware")
-        return json.dumps(sap_ransapware.find_manifests(loot_dir, sid))
+        all_m = sap_ransapware.find_manifests(loot_dir, sid)
+        return json.dumps([m for m in all_m if m.get("rows_encrypted", 0) > 0])
 
     # -- Export --
     @app.route("/api/export/json")
