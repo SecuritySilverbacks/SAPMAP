@@ -2180,76 +2180,121 @@ The script logs progress to the SAPMAP console:
 
 ## MCP Server
 
-SAPMAP includes a [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that lets LLM agents (Claude, GPT, etc.) drive SAPMAP programmatically.  The MCP server wraps SAPMAP's HTTP API into ~20 curated tool functions plus a generic passthrough, using stdio transport.
+SAPMAP includes a [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that exposes SAPMAP's capabilities as 29 curated tool functions plus a generic passthrough, allowing LLM agents (Claude, GPT, etc.) to drive SAPMAP programmatically.  The MCP server runs as a separate process using stdio transport, connecting to SAPMAP's Bottle HTTP server over localhost.
 
 ### Quick Start
 
 ```bash
-# Launch SAPMAP with MCP server
-python3 sapmap.py --mcp
+# Terminal 1: Start SAPMAP
+python3 sapmap.py --no-gui --port 8080
 
-# Or run the MCP server standalone (SAPMAP must already be running)
-python3 -m modules.mcp.sapmap_mcp_server --port 8080
+# Terminal 2: Run the MCP server standalone
+python3 modules/mcp/sapmap_mcp_server.py --port 8080
 ```
 
-### Claude Desktop / claude_desktop_config.json
+Or launch both together:
+
+```bash
+python3 sapmap.py --mcp --port 8080
+```
+
+### Claude Code (.mcp.json)
+
+Create a `.mcp.json` in the SAPMAP directory (already gitignored):
 
 ```json
 {
   "mcpServers": {
     "sapmap": {
       "command": "python3",
-      "args": ["-m", "modules.mcp.sapmap_mcp_server", "--port", "8080"],
+      "args": ["modules/mcp/sapmap_mcp_server.py", "--port", "8080"]
+    }
+  }
+}
+```
+
+Then start SAPMAP (`python3 sapmap.py --no-gui --port 8080`) and open Claude Code in the same directory — it will detect and offer to connect to the SAPMAP MCP server.
+
+### Claude Desktop (claude_desktop_config.json)
+
+```json
+{
+  "mcpServers": {
+    "sapmap": {
+      "command": "python3",
+      "args": ["modules/mcp/sapmap_mcp_server.py", "--port", "8080"],
       "cwd": "/path/to/SAPMAP"
     }
   }
 }
 ```
 
-### Available Tools
+### MCP Inspector (debugging)
+
+```bash
+npx @modelcontextprotocol/inspector python3 modules/mcp/sapmap_mcp_server.py --port 8080
+```
+
+Opens a browser UI to browse tool schemas, call tools interactively, and inspect JSON-RPC traffic.
+
+### Available Tools (29)
 
 | Tool | Description |
 |------|-------------|
+| **Landscape & State** | |
 | `get_landscape` | Current landscape state — systems, findings, tasks |
 | `get_system_detail` | Detailed info for a specific SID |
 | `get_findings` | All security findings by severity |
 | `get_attack_chains` | RFC trust-chain attack path analysis |
+| `save_state` | Save session to `.sapmap` file |
+| **System Management** | |
 | `add_system` | Add an SAP system to the map |
 | `set_credentials` | Store credentials for a system |
+| `configure_system` | Set system type, DB, OS, SAProuter |
+| **Scanning & Discovery** | |
 | `scan_network` | Scan a network range for SAP systems |
 | `probe_system` | Probe a system (RFC info, clients, SNC, ports) |
 | `check_default_credentials` | Test 16 default SAP credentials |
-| `check_vulnerability` | Check specific CVEs (GW, MS, 31324, RECON, etc.) |
+| **Vulnerability Checking** | |
+| `check_vulnerability` | Check specific CVEs (GW, MS, 31324, RECON, ICMAD) |
+| **Exploitation** | |
 | `exploit` | Execute exploitation actions (requires `confirm: true`) |
 | `exec_command` | OS command execution on pwned systems |
+| `autopwn` | Full convergence loop — scan → exploit → propagate |
+| **RFC & Lateral Movement** | |
 | `manage_rfcs` | RFC destination discovery, testing, propagation |
 | `create_user_via_rfc` | Create SAPMAP user on remote system via RFC destination |
 | `create_tcpip_dest` | Create TCP/IP (Type-T) RFC destination for pivoting |
 | `sapcontrol_osexecute` | OS command execution via SAPControl Type-G destination |
-| `autopwn` | Full convergence loop — scan → exploit → propagate |
+| **Data Extraction** | |
 | `extract_data` | Hashes, SecStore, tables, OA2C, Java artifacts |
+| **Cloud & SCC** | |
 | `scc_action` | SAP Cloud Connector operations |
 | `btp_action` | BTP cloud lateral movement |
+| **Identity & Persistence** | |
 | `ticket_forgery` | MYSAPSSO2 ticket forging and fanout |
 | `ssh_lateral` | SSH key harvesting, testing, planting |
+| **RanSAPware** | |
 | `ransapware` | RanSAPware Awareness PoC operations |
+| **Reporting & Cleanup** | |
 | `business_impact` | Impact assessment scenarios |
 | `export_report` | Generate engagement report |
 | `cleanup` | Remove SAPMAP-created users |
-| `run_sapmap_action` | Generic passthrough for any scripting action |
+| **Generic** | |
+| `run_sapmap_action` | Passthrough for any scripting action not covered above |
 
 ### Safety
 
-All exploitation tools require `confirm: true` to execute — without it they return a preview of what would happen.  This mirrors the `--confirm` gate from Scripted Scenarios and prevents accidental exploitation by an LLM agent.
+All exploitation and lateral movement tools require `confirm: true` to execute — without it they return a preview of what would happen.  This mirrors the `--confirm` gate from Scripted Scenarios and prevents accidental exploitation by an LLM agent.
 
 ### Resources
 
-The MCP server also exposes read-only resources:
+The MCP server also exposes read-only MCP resources:
 
-- `sapmap://landscape` — Full landscape state
-- `sapmap://findings` — Security findings
-- `sapmap://console` — Recent console output
-- `sapmap://chains` — Attack chain analysis
+- `sapmap://landscape` — Full landscape state with system summaries
+- `sapmap://findings` — Security findings sorted by severity
+- `sapmap://console` — Recent console output from SAPMAP operations
+- `sapmap://chains` — RFC trust-chain attack paths
 
 ---
 
