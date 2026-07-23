@@ -14791,6 +14791,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
             return json.dumps({"error": f"No credentials for {sid}"})
         data = request.json or {}
         manifest_path = data.get("manifest_path", "")
+        reverse = bool(data.get("reverse", False))
         if not manifest_path:
             return json.dumps({"error": "No manifest_path specified"})
 
@@ -14798,7 +14799,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
             import sap_ransapware
             try:
                 manifest = sap_ransapware.load_manifest(manifest_path)
-                if manifest.decrypted:
+                if not reverse and manifest.decrypted:
                     print(f"[-] RanSAPware {sid}: manifest already "
                           f"decrypted — skipping to prevent double-decrypt")
                     return
@@ -14806,10 +14807,14 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     api.state, node, timeout=180.0)
                 result = sap_ransapware.decrypt_table(
                     node, creds, manifest,
-                    soap_session=soap_session)
+                    soap_session=soap_session,
+                    reverse=reverse)
                 if result.get("success"):
+                    if reverse:
+                        manifest.decrypted = False
                     sap_ransapware.update_manifest(manifest, manifest_path)
-                    print(f"[+] RanSAPware {sid}: decryption complete, "
+                    verb = "recovery" if reverse else "decryption"
+                    print(f"[+] RanSAPware {sid}: {verb} complete, "
                           f"manifest updated")
             except Exception as e:
                 import traceback

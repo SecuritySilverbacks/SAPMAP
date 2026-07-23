@@ -10664,7 +10664,9 @@ async function showRansapwareDecryptModal(sid) {
         ${m.popup_sent ? ' &middot; <span style="color:#d29922">TH_POPUP sent</span>' : ''}
       </div>
       ${!m.decrypted ? `<button class="btn" style="margin-top:8px;background:#238636;border:1px solid #2ea043;color:#fff;padding:4px 14px;font-size:12px;border-radius:4px;cursor:pointer"
-        onclick="rwDecrypt('${escHtml(sid)}', '${escHtml(m.path)}')">&#128275; Decrypt (Restore)</button>` : ''}
+        onclick="rwDecrypt('${escHtml(sid)}', '${escHtml(m.path)}', false)">&#128275; Decrypt (Restore)</button>` : ''}
+      ${m.decrypted ? `<button class="btn" style="margin-top:8px;background:#d29922;border:1px solid #e3b341;color:#fff;padding:4px 14px;font-size:12px;border-radius:4px;cursor:pointer"
+        onclick="rwDecrypt('${escHtml(sid)}', '${escHtml(m.path)}', true)">&#9888; Undo decrypt (re-encrypt with this key)</button>` : ''}
     </div>`;
   };
 
@@ -10678,10 +10680,16 @@ async function showRansapwareDecryptModal(sid) {
   panel.classList.add('visible');
 }
 
-async function rwDecrypt(sid, manifestPath) {
-  if (!confirm('Decrypt and restore the table data?')) return;
-  await api('POST', 'node/' + sid + '/ransapware/decrypt', {manifest_path: manifestPath});
-  showToast('RanSAPware decryption started — check console', 'info');
+async function rwDecrypt(sid, manifestPath, reverse) {
+  const msg = reverse
+    ? 'RECOVERY: This will RE-ENCRYPT the data using the manifest key to undo an erroneous decrypt.\\n\\nContinue?'
+    : 'Decrypt and restore the table data?';
+  if (!confirm(msg)) return;
+  await api('POST', 'node/' + sid + '/ransapware/decrypt', {
+    manifest_path: manifestPath, reverse: !!reverse
+  });
+  const label = reverse ? 'Recovery (re-encrypt)' : 'Decryption';
+  showToast('RanSAPware ' + label + ' started — check console', 'info');
   startPolling();
   setTimeout(() => showRansapwareDecryptModal(sid), 3000);
 }
