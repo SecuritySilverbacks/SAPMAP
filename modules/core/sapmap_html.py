@@ -10681,10 +10681,14 @@ async function showRansapwareDecryptModal(sid) {
         FM: ${escHtml(m.fm_name || '?')}
         ${m.popup_sent ? ' &middot; <span style="color:#d29922">TH_POPUP sent</span>' : ''}
       </div>
-      ${!m.decrypted ? `<button class="btn" data-rw-action="decrypt" style="margin-top:8px;background:#238636;border:1px solid #2ea043;color:#fff;padding:4px 14px;font-size:12px;border-radius:4px;cursor:pointer"
-        onclick="rwDecrypt('${escHtml(sid)}', '${escHtml(m.path)}', false)">&#128275; Decrypt (Restore)</button>` : ''}
-      ${m.decrypted ? `<button class="btn" data-rw-action="undo" style="margin-top:8px;background:#d29922;border:1px solid #e3b341;color:#fff;padding:4px 14px;font-size:12px;border-radius:4px;cursor:pointer"
-        onclick="rwDecrypt('${escHtml(sid)}', '${escHtml(m.path)}', true)">&#9888; Undo decrypt (re-encrypt with this key)</button>` : ''}
+      ${!m.decrypted ? `<div style="display:flex;gap:8px;margin-top:8px;align-items:center"><button class="btn" data-rw-action="decrypt" style="background:#238636;border:1px solid #2ea043;color:#fff;padding:4px 14px;font-size:12px;border-radius:4px;cursor:pointer"
+        onclick="rwDecrypt('${escHtml(sid)}', '${escHtml(m.path)}', false)">&#128275; Decrypt (Restore)</button>
+        <button class="btn" style="background:transparent;border:1px solid #484f58;color:#8b949e;padding:4px 10px;font-size:11px;border-radius:4px;cursor:pointer"
+        onclick="rwDeleteManifest('${escHtml(sid)}', '${escHtml(m.path)}')">&#128465; Delete manifest</button></div>` : ''}
+      ${m.decrypted ? `<div style="display:flex;gap:8px;margin-top:8px;align-items:center"><button class="btn" data-rw-action="undo" style="background:#d29922;border:1px solid #e3b341;color:#fff;padding:4px 14px;font-size:12px;border-radius:4px;cursor:pointer"
+        onclick="rwDecrypt('${escHtml(sid)}', '${escHtml(m.path)}', true)">&#9888; Undo decrypt (re-encrypt with this key)</button>
+        <button class="btn" style="background:transparent;border:1px solid #484f58;color:#8b949e;padding:4px 10px;font-size:11px;border-radius:4px;cursor:pointer"
+        onclick="rwDeleteManifest('${escHtml(sid)}', '${escHtml(m.path)}')">&#128465; Delete manifest</button></div>` : ''}
     </div>`;
   };
 
@@ -10715,6 +10719,13 @@ async function rwDecrypt(sid, manifestPath, reverse, evt) {
   showToast('RanSAPware ' + label + ' started — check console', 'info');
   startPolling();
   setTimeout(() => showRansapwareDecryptModal(sid), 3000);
+}
+
+async function rwDeleteManifest(sid, manifestPath) {
+  if (!confirm('Delete this manifest?\n\nOnly do this if the encryption never actually succeeded (e.g. ABAP error). If the table IS encrypted, use Decrypt instead.')) return;
+  await api('POST', 'node/' + sid + '/ransapware/manifest/delete', {manifest_path: manifestPath});
+  showToast('Manifest deleted', 'info');
+  showRansapwareDecryptModal(sid);
 }
 
 function showFindings(sid) {

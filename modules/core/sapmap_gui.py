@@ -14833,6 +14833,22 @@ def create_app(api: SAPMAPApi) -> Bottle:
         all_m = sap_ransapware.find_manifests(loot_dir, sid)
         return json.dumps([m for m in all_m if m.get("rows_encrypted", 0) > 0])
 
+    @app.route("/api/node/<sid>/ransapware/manifest/delete",
+               method="POST")
+    def ransapware_manifest_delete(sid):
+        response.content_type = "application/json"
+        data = request.json or {}
+        manifest_path = data.get("manifest_path", "")
+        if not manifest_path or not os.path.isfile(manifest_path):
+            return json.dumps({"error": "Manifest not found"})
+        try:
+            os.remove(manifest_path)
+            print(f"[*] RanSAPware {sid}: deleted manifest "
+                  f"{os.path.basename(manifest_path)}")
+            return json.dumps({"status": "deleted"})
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+
     # -- Export --
     @app.route("/api/export/json")
     def export_json():
