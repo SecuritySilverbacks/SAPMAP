@@ -248,7 +248,7 @@ def get_findings() -> str:
 def get_attack_chains() -> str:
     """Analyze and return RFC trust-chain attack paths across the landscape.
     Shows how lateral movement can reach production systems."""
-    _api("POST", "/api/chains/analyze", {})
+    _api("POST", "/api/actions/analyze_chains", {})
     _wait_for_tasks(timeout=60)
     resp = _api("GET", "/api/chains")
     return json.dumps(resp, indent=2)
@@ -784,16 +784,19 @@ def btp_action(action: str, region: str = "", token: str = "",
         resp = _api("POST", "/api/btp/set_token",
                     {"token": token, "region": region})
     elif action == "enumerate":
-        resp = _api("POST", f"/api/btp/enumerate/{region}", {})
+        resp = _api("POST", "/api/btp/enumerate",
+                    {"region": region})
     elif action == "pull_destinations":
-        resp = _api("POST", f"/api/btp/pull_destinations/{region}", {})
+        resp = _api("POST", "/api/btp/pull_destinations_for_token",
+                    {"region": region})
     elif action == "test_destination":
-        resp = _api("POST", f"/api/node/{source_sid}/btp/test_destination",
-                    {"destination_name": destination_name})
+        resp = _api("POST", "/api/btp/test_destination",
+                    {"source_sid": source_sid,
+                     "destination_name": destination_name})
     elif action == "create_user_on_target":
-        resp = _api("POST",
-                    f"/api/node/{source_sid}/btp/create_user_on_target",
-                    {"destination_name": destination_name,
+        resp = _api("POST", "/api/btp/create_user_on_target",
+                    {"source_sid": source_sid,
+                     "destination_name": destination_name,
                      "target_sid": target_sid})
     elif action == "harvest_creds":
         resp = _api("POST", f"/api/node/{source_sid}/harvest_btp_creds", {})
@@ -927,7 +930,7 @@ def ransapware(sid: str, action: str = "list_tables",
         })
 
     if action == "list_tables":
-        resp = _api("GET", f"/api/node/{sid}/ransapware/suggested_tables")
+        resp = _api("GET", "/api/ransapware/suggested_tables")
     elif action == "get_fields":
         resp = _api("POST", f"/api/node/{sid}/ransapware/fields",
                     {"table": table})
@@ -1001,7 +1004,7 @@ def business_impact(sid: str, action: str = "assess",
         else:
             resp = _api("GET", f"/api/node/{sid}/impact")
     elif action == "scenarios":
-        resp = _api("GET", f"/api/node/{sid}/impact/scenarios")
+        resp = _api("GET", "/api/impact/scenarios")
     else:
         return json.dumps({"error": f"Unknown impact action: {action}"})
     return json.dumps(resp)
