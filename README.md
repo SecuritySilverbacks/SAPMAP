@@ -43,6 +43,7 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 - [Scanning](#scanning)
 - [Default Account Detection](#default-account-detection)
 - [Exploitation](#exploitation)
+- [RanSAPware Awareness PoC](#ransapware-awareness-poc)
 - [MYSAPSSO2 Ticket Forgery](#mysapsso2-ticket-forgery)
 - [AutoPwn — Full-Landscape Convergence Loop](#autopwn--full-landscape-convergence-loop)
 - [Local Privilege Escalation](#local-privilege-escalation)
@@ -89,6 +90,17 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 - **Java post-RECON deploy paths** — CTC ConfigServlet and Telnet console deploy of JSPs once a Java UME admin has been created (handles hardened PI/MDM systems where /irj/ is blocked)
 - **Post-creation verification** — Confirm user exists and has SAP_ALL via RFC logon + BAPI_USER_GET_DETAIL
 - **MYSAPSSO2 ticket forgery** — Extract `SAPSYS.pse` + `cred_v2` from a compromised ABAP host, derive the signing key, and forge a MYSAPSSO2 logon ticket impersonating any user (e.g. SAP\*).  Multi-instance SECUDIR probing discovers central-instance layouts (D/DVEBMGS/ASCS/SCS + all known instance numbers).  Chunked binary read adapter with `python3` → `python` fallback for older systems.  Generates `.sap` GUI shortcut, `curl.sh`, and `pyrfc.json` delivery artifacts with correct instance number derived from the SECUDIR path
+
+### RanSAPware Awareness PoC
+- **Table data encryption** — Encrypt character fields in any SAP table via `RFC_ABAP_INSTALL_AND_RUN`, rendering business-critical data unreadable in seconds
+- **Modular rotation cipher** — Per-byte rotation within printable ASCII (0x20–0x7E, 95 chars); length-preserving, stays in printable range, reversible with the manifest key
+- **Manifest-based tracking** — Every encryption run produces a JSON manifest (table, fields, key, row count, timestamp) saved to `loot/<SID>/`; decryption requires the exact manifest
+- **Double-operation prevention** — Backend + frontend guards prevent encrypting an already-encrypted table or decrypting an already-decrypted one
+- **TH_POPUP ransom note** — Optional broadcast popup to all logged-in users via `TH_POPUP` after encryption
+- **Suggested tables** — Pre-configured list of high-impact tables (PA0002, KNA1, LFA1, VBAK, EKKO, BKPF, MARA, MAKT, AUFK) with category labels and business descriptions
+- **Field metadata discovery** — Automatic detection of encryptable character fields via `DDIF_FIELDINFO_GET`, filtering out structures, table types, and reference types
+- **Business impact preview** — Sample data preview before encryption showing what will be affected
+- **Recovery workflow** — Decrypt from manifest, undo erroneous decrypts via reverse-encrypt, delete stale manifests from the UI
 
 ### Local Privilege Escalation
 - **Extensible LPE framework** — Plugin-style `@lpe_method` decorator: add new methods by writing one function
@@ -324,6 +336,7 @@ modules/
 │   ├── sap_betrusted_chain.py         Full 10KBLAZE chain: betrusted → GW trust → user create
 │   ├── sap_gw_xpg_standalone.py       Standalone Gateway SAPXPG client
 │   ├── sap_db_sql_writers.py          GW-SAPXPG database SQL writers (HANA / MSSQL / Oracle / MaxDB)
+│   ├── sap_ransapware.py             RanSAPware Awareness PoC — table data encryption/decryption
 │   ├── sap_java_ctc.py                Java CTC ConfigServlet deploy
 │   ├── sap_java_telnet.py             Java telnet console deploy
 │   └── sapmap_copyfail.py             CVE-2026-31431 root LPE on Linux (page-cache patch) — validated on SLES 11 + 15 + 6.4.0
@@ -909,6 +922,64 @@ When credentials are available, SAPMAP creates users via standard BAPI function 
 ### RFC Destination Testing
 
 SAPMAP tests RFC destinations using `/SDF/RFC_CHECK` with automatic fallback to `DEST_CHECK_CONNECTION` on older systems (NW < 7.40) where `/SDF/RFC_CHECK` doesn't exist. The fallback also provides remote system SID, client, and basis release.
+
+---
+
+## RanSAPware Awareness PoC
+
+Demonstrates that an attacker with `RFC_ABAP_INSTALL_AND_RUN` access can render business-critical table data unreadable in seconds — a ransomware-style scenario for SAP.  Purely for authorized security-awareness demonstrations: the cipher is a simple modular rotation (not AES/RSA), and the decryption key stays in the local manifest file on the operator's machine.
+
+### How It Works
+
+1. **Pick a table** — Select from a curated list of high-impact tables (customer master, vendor master, sales orders, HR data, materials, finance) or enter any custom table name
+2. **Field discovery** — SAPMAP calls `DDIF_FIELDINFO_GET` to enumerate all character-type fields (CHAR, NUMC, DATS, TIMS, CLNT, LANG, CUKY, UNIT, SSTR), filtering out structures, table types, and reference types
+3. **Business impact preview** — Sample rows are shown before encryption so the operator sees exactly what data will be affected
+4. **Encrypt** — A dynamically generated ABAP program runs via `RFC_ABAP_INSTALL_AND_RUN`:
+   - `SELECT ... INTO CORRESPONDING FIELDS OF TABLE @lt_data` reads all eligible rows (up to configurable max, default 5000)
+   - Each character field is rotated byte-by-byte using a random 16-character key within the printable ASCII range (0x20–0x7E, 95 characters)
+   - `UPDATE <table> SET ... WHERE ...` writes the ciphered values back
+5. **Ransom note** — An optional `TH_POPUP` broadcast sends a message to all logged-in SAP users
+6. **Manifest** — A JSON manifest is saved to `loot/<SID>/` containing the table name, encrypted fields, key, row count, and timestamp
+
+### Cipher
+
+Per-byte modular rotation within printable ASCII:
+
+```
+encrypt: ciphertext[i] = ((plaintext[i] - 0x20 + key[i % keylen]) MOD 95) + 0x20
+decrypt: plaintext[i]  = ((ciphertext[i] - 0x20 - key[i % keylen] + 95*256) MOD 95) + 0x20
+```
+
+The cipher is length-preserving (no field overflow), stays within the printable range (no binary corruption), and is fully reversible given the key.  Non-ASCII characters are passed through untouched.
+
+### Decryption & Recovery
+
+- **Normal decrypt** — Select a manifest from the decrypt modal, click Decrypt.  The same ABAP program runs with the reverse rotation
+- **Undo erroneous decrypt** — If a table was accidentally decrypted twice (garbling the data), the "Undo decrypt (re-encrypt with this key)" button re-applies the encryption with the manifest's key to reverse the damage
+- **Delete stale manifest** — Manifests from failed runs (0 rows encrypted, or test runs) can be deleted directly from the UI
+
+### Double-Operation Prevention
+
+- **Encrypt guard** — The backend checks for any active (non-decrypted) manifest on the same table before allowing a new encryption.  The frontend disables the Encrypt button when an active manifest exists
+- **Decrypt guard** — A manifest that has already been decrypted cannot be decrypted again.  The UI shows its status as "Restored" with no Decrypt button
+
+### GUI Access
+
+**Right-click a pwned ABAP node → Exploitation → RanSAPware Awareness**
+
+The modal provides:
+- Table selector with suggested tables (category + description) and a custom table input
+- Field list with select/deselect all, field type indicators, and row count
+- Business impact preview table showing sample data
+- Max rows slider (default 5000)
+- TH_POPUP toggle for the ransom note broadcast
+- Encrypt / Decrypt buttons with real-time status
+
+### Implementation
+
+- Backend: `modules/exploitation/sap_ransapware.py` (ABAP generation, cipher, manifest I/O)
+- API: `POST /api/node/<sid>/ransapware/encrypt`, `POST /api/node/<sid>/ransapware/decrypt`, `GET /api/node/<sid>/ransapware/manifests`, `POST /api/node/<sid>/ransapware/manifest/delete`
+- UI: `modules/core/sapmap_html.py` — RanSAPware modal in the right-click exploitation submenu
 
 ---
 
@@ -1748,6 +1819,8 @@ Actions marked **⚠** are exploitation / destructive — they only run when the
 | `exploit_linux_lpe` (alias `exploit_copyfail`) | `target`, `command` (default `id`) | Run a command as root via the best viable Linux LPE (Copy Fail → Dirty Frag) |
 | `exploit_windows_lpe` | `target`, `command` (default `whoami`), `av_evasion` | Run a command as `NT AUTHORITY\SYSTEM` via the best viable Windows LPE |
 | `lpe` | `target`, `method` (optional) | ABAP LPE — assign SAP_ALL to the current user (SXPG / WebGUI RSBDCOS0 / BAPI) |
+| `ransapware_encrypt` ⚠ | `target`, `table`, `max_rows` (5000), `send_popup` (true) | Encrypt character fields in an SAP table (RanSAPware Awareness PoC) |
+| `ransapware_decrypt` | `target`, `manifest_path` | Decrypt a previously encrypted table using its manifest |
 | `icmad_acl_bypass` | `target`, `outer_path` | ICMAD D.2 — sweep 12 admin/recon paths through the smuggle bypass (requires `check_cve_22536` first) |
 | `icmad_heapdump_pull` | `target`, `dump` (empty = list) | ICMAD D.3 — list or pull HPROF heap dumps via the ACL bypass |
 
