@@ -14411,7 +14411,10 @@ def create_app(api: SAPMAPApi) -> Bottle:
         if not name:
             filepath = state_mgr.auto_save_path()
         else:
-            filepath = os.path.join(state_mgr.STATE_DIR, name)
+            safe_name = os.path.basename(name)
+            if not safe_name:
+                return json.dumps({"error": "Invalid filename"})
+            filepath = os.path.join(state_mgr.STATE_DIR, safe_name)
         try:
             state_mgr.save_state(api.state, filepath)
             return json.dumps({"status": "ok", "path": filepath})
@@ -14426,10 +14429,10 @@ def create_app(api: SAPMAPApi) -> Bottle:
         if not name:
             return json.dumps({"error": "No file specified"})
 
-        # Try as absolute path, then relative to states dir
-        filepath = name
-        if not os.path.isabs(filepath):
-            filepath = os.path.join(state_mgr.STATE_DIR, name)
+        safe_name = os.path.basename(name)
+        if not safe_name:
+            return json.dumps({"error": "Invalid filename"})
+        filepath = os.path.join(state_mgr.STATE_DIR, safe_name)
         if not filepath.endswith(".sapmap") and not filepath.endswith(".json"):
             filepath += ".sapmap"
 
@@ -14841,10 +14844,15 @@ def create_app(api: SAPMAPApi) -> Bottle:
         manifest_path = data.get("manifest_path", "")
         if not manifest_path or not os.path.isfile(manifest_path):
             return json.dumps({"error": "Manifest not found"})
+        import sapmap_state as _ss
+        loot_dir = os.path.realpath(_ss.LOOT_DIR)
+        real_path = os.path.realpath(manifest_path)
+        if not real_path.startswith(loot_dir + os.sep):
+            return json.dumps({"error": "Path outside loot directory"})
         try:
-            os.remove(manifest_path)
+            os.remove(real_path)
             print(f"[*] RanSAPware {sid}: deleted manifest "
-                  f"{os.path.basename(manifest_path)}")
+                  f"{os.path.basename(real_path)}")
             return json.dumps({"status": "deleted"})
         except Exception as e:
             return json.dumps({"error": str(e)})
