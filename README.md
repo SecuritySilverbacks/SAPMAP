@@ -2223,6 +2223,9 @@ python3 -m modules.mcp.sapmap_mcp_server --port 8080
 | `exploit` | Execute exploitation actions (requires `confirm: true`) |
 | `exec_command` | OS command execution on pwned systems |
 | `manage_rfcs` | RFC destination discovery, testing, propagation |
+| `create_user_via_rfc` | Create SAPMAP user on remote system via RFC destination |
+| `create_tcpip_dest` | Create TCP/IP (Type-T) RFC destination for pivoting |
+| `sapcontrol_osexecute` | OS command execution via SAPControl Type-G destination |
 | `autopwn` | Full convergence loop — scan → exploit → propagate |
 | `extract_data` | Hashes, SecStore, tables, OA2C, Java artifacts |
 | `scc_action` | SAP Cloud Connector operations |

