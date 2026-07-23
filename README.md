@@ -57,6 +57,7 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 - [Evasion & Detection Avoidance (Tier 3)](#evasion--detection-avoidance-tier-3)
 - [Standalone Tools](#standalone-tools)
 - [Scripted Scenarios](#scripted-scenarios)
+- [MCP Server](#mcp-server)
 - [State Management](#state-management)
 - [Testing](#testing)
 - [Configuration](#configuration)
@@ -304,6 +305,9 @@ modules/
 │
 ├── automation/
 │   └── sapmap_script.py               YAML / JSON script runner for repeatable scenarios
+│
+├── mcp/
+│   └── sapmap_mcp_server.py           Model Context Protocol server for LLM-driven operation
 │
 ├── protocols/                         Low-level SAP protocol primitives
 │   ├── sap_rfc_ctypes.py              ctypes wrapper for SAP NW RFC SDK
@@ -667,6 +671,7 @@ python3 sapmap.py --script scripts/demo_10kblaze.yaml  # Run scripted scenario w
 | `--targets TARGETS` | Scan targets (CLI mode, implies --no-gui) |
 | `--fast` | Fast scan mode (default) |
 | `--deep` | Deep scan mode (full SAPology) |
+| `--mcp` | Launch MCP server alongside GUI for LLM-driven operation ([details](#mcp-server)) |
 | `-v, --verbose` | Verbose output |
 | `--debug` | Enable debug logging |
 
@@ -2170,6 +2175,78 @@ The script logs progress to the SAPMAP console:
 ...
 [SCRIPT] === All 8 steps completed ===
 ```
+
+---
+
+## MCP Server
+
+SAPMAP includes a [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that lets LLM agents (Claude, GPT, etc.) drive SAPMAP programmatically.  The MCP server wraps SAPMAP's HTTP API into ~20 curated tool functions plus a generic passthrough, using stdio transport.
+
+### Quick Start
+
+```bash
+# Launch SAPMAP with MCP server
+python3 sapmap.py --mcp
+
+# Or run the MCP server standalone (SAPMAP must already be running)
+python3 -m modules.mcp.sapmap_mcp_server --port 8080
+```
+
+### Claude Desktop / claude_desktop_config.json
+
+```json
+{
+  "mcpServers": {
+    "sapmap": {
+      "command": "python3",
+      "args": ["-m", "modules.mcp.sapmap_mcp_server", "--port", "8080"],
+      "cwd": "/path/to/SAPMAP"
+    }
+  }
+}
+```
+
+### Available Tools
+
+| Tool | Description |
+|------|-------------|
+| `get_landscape` | Current landscape state — systems, findings, tasks |
+| `get_system_detail` | Detailed info for a specific SID |
+| `get_findings` | All security findings by severity |
+| `get_attack_chains` | RFC trust-chain attack path analysis |
+| `add_system` | Add an SAP system to the map |
+| `set_credentials` | Store credentials for a system |
+| `scan_network` | Scan a network range for SAP systems |
+| `probe_system` | Probe a system (RFC info, clients, SNC, ports) |
+| `check_default_credentials` | Test 16 default SAP credentials |
+| `check_vulnerability` | Check specific CVEs (GW, MS, 31324, RECON, etc.) |
+| `exploit` | Execute exploitation actions (requires `confirm: true`) |
+| `exec_command` | OS command execution on pwned systems |
+| `manage_rfcs` | RFC destination discovery, testing, propagation |
+| `autopwn` | Full convergence loop — scan → exploit → propagate |
+| `extract_data` | Hashes, SecStore, tables, OA2C, Java artifacts |
+| `scc_action` | SAP Cloud Connector operations |
+| `btp_action` | BTP cloud lateral movement |
+| `ticket_forgery` | MYSAPSSO2 ticket forging and fanout |
+| `ssh_lateral` | SSH key harvesting, testing, planting |
+| `ransapware` | RanSAPware Awareness PoC operations |
+| `business_impact` | Impact assessment scenarios |
+| `export_report` | Generate engagement report |
+| `cleanup` | Remove SAPMAP-created users |
+| `run_sapmap_action` | Generic passthrough for any scripting action |
+
+### Safety
+
+All exploitation tools require `confirm: true` to execute — without it they return a preview of what would happen.  This mirrors the `--confirm` gate from Scripted Scenarios and prevents accidental exploitation by an LLM agent.
+
+### Resources
+
+The MCP server also exposes read-only resources:
+
+- `sapmap://landscape` — Full landscape state
+- `sapmap://findings` — Security findings
+- `sapmap://console` — Recent console output
+- `sapmap://chains` — Attack chain analysis
 
 ---
 

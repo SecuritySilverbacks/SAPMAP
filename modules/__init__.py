@@ -13,7 +13,7 @@ import sys as _sys
 _HERE = _os.path.dirname(_os.path.abspath(__file__))
 for _sub in ("core", "automation", "protocols", "discovery",
              "exploitation", "postex", "data_extraction",
-             "business_impact", "ops"):
+             "business_impact", "ops", "mcp"):
     _p = _os.path.join(_HERE, _sub)
     if _p not in _sys.path:
         _sys.path.insert(0, _p)

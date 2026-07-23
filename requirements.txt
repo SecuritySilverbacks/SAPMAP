@@ -11,6 +11,7 @@ requests>=2.28      # HTTP client for CVE checks, LPE, Java exploits, BTP
 urllib3>=1.26       # used directly (disable_warnings) and as requests transport
 pycryptodome>=3.18  # DES/3DES + PBKDF2 for SecStore decryption (ABAP + Java)
 pyyaml>=6.0         # YAML parser for scripted scenarios (--script foo.yaml)
+mcp>=1.0            # Model Context Protocol SDK for LLM integration (--mcp)
 
 # --- Optional: Java SecStore offline decryption ---
 # pyjks enables the OFFLINE 3DES decryption path in

@@ -181,6 +181,13 @@ def main():
                         help="Verbose output")
     parser.add_argument("--debug", action="store_true",
                         help="Enable debug logging")
+    parser.add_argument("--mcp", action="store_true",
+                        help="Launch a Model Context Protocol (MCP) server "
+                             "alongside the GUI.  The MCP server exposes "
+                             "SAPMAP's capabilities as MCP tools over stdio "
+                             "transport, allowing LLM agents (Claude, etc.) "
+                             "to drive SAPMAP programmatically.  Connects "
+                             "to the same HTTP server as the GUI.")
     parser.add_argument("--allow-evasion", action="store_true",
                         help="Arm Tier 3 active-evasion techniques "
                              "(SAL filter narrow, kernel-param dynamic-set, "
@@ -344,6 +351,24 @@ def main():
             runner.run(print_fn=print)
         script_thread = threading.Thread(target=_delayed_script, daemon=True)
         script_thread.start()
+
+    # Launch MCP server (if --mcp)
+    if args.mcp:
+        try:
+            from sapmap_mcp_server import _set_base_url, mcp as mcp_server
+            _set_base_url(port)
+            mcp_thread = threading.Thread(
+                target=lambda: mcp_server.run(transport="stdio"),
+                daemon=True,
+            )
+            mcp_thread.start()
+            print(f"[*] MCP server started (stdio transport, "
+                  f"backend → http://127.0.0.1:{port})")
+        except ImportError:
+            print("[!] MCP server unavailable — install the 'mcp' package: "
+                  "pip install mcp")
+        except Exception as e:
+            print(f"[!] MCP server failed to start: {e}")
 
     # Launch GUI
     use_browser = args.browser or args.no_gui
