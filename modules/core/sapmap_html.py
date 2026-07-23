@@ -7631,7 +7631,7 @@ async function ctxAction(action) {
     case 'enum_clients':
       await api('POST', `node/${sid}/enum_clients`); break;
     case 'default_creds':
-      if (confirm('⚠️ WARNING: Checking default accounts may LOCK user accounts after failed login attempts.\\n\\nThis tests well-known SAP default credentials (SAP*, DDIC, TMSADM, etc.) via DIAG protocol.\\n\\nProceed?'))
+      if (confirm('⚠️ WARNING: Checking default accounts may LOCK user accounts after failed login attempts.\n\nThis tests well-known SAP default credentials (SAP*, DDIC, TMSADM, etc.) via DIAG protocol.\n\nProceed?'))
         api('POST', `node/${sid}/check_default_creds`);
       break;
     case 'set_saprouter': showSaprouterModal(sid); break;
@@ -10624,12 +10624,12 @@ async function rwEncrypt(sid) {
   const sendPopup = document.getElementById('rw-popup').checked;
 
   if (!confirm(
-    'RANSAPWARE AWARENESS PoC\\n\\n'
+    'RANSAPWARE AWARENESS PoC\n\n'
     + 'This will ENCRYPT ' + checked.length + ' field(s) in table ' + table
-    + ' on ' + sid + ' (up to ' + maxRows + ' rows).\\n\\n'
-    + 'The data will be UNREADABLE until decrypted.\\n'
-    + (sendPopup ? 'A TH_POPUP ransom note will appear on ALL user screens.\\n\\n' : '\\n')
-    + 'You MUST have the manifest file (saved in loot/) to reverse this.\\n\\n'
+    + ' on ' + sid + ' (up to ' + maxRows + ' rows).\n\n'
+    + 'The data will be UNREADABLE until decrypted.\n'
+    + (sendPopup ? 'A TH_POPUP ransom note will appear on ALL user screens.\n\n' : '\n')
+    + 'You MUST have the manifest file (saved in loot/) to reverse this.\n\n'
     + 'Continue?'
   )) return;
 
@@ -10700,7 +10700,7 @@ async function showRansapwareDecryptModal(sid) {
 
 async function rwDecrypt(sid, manifestPath, reverse, evt) {
   const msg = reverse
-    ? 'RECOVERY: This will RE-ENCRYPT the data using the manifest key to undo an erroneous decrypt.\\n\\nContinue?'
+    ? 'RECOVERY: This will RE-ENCRYPT the data using the manifest key to undo an erroneous decrypt.\n\nContinue?'
     : 'Decrypt and restore the table data?';
   if (!confirm(msg)) return;
   // Disable all decrypt/undo buttons to prevent double-click
@@ -11450,7 +11450,7 @@ function showPropagateModal(sid) {
   }
 
   if (Object.keys(targets).length === 0) {
-    alert('No exploitable targets found.\\n\\nNeed: RFC Type 3 with SAP_ALL, TCP/IP with ping OK, or vulnerable gateway on a target system.');
+    alert('No exploitable targets found.\n\nNeed: RFC Type 3 with SAP_ALL, TCP/IP with ping OK, or vulnerable gateway on a target system.');
     return;
   }
 
