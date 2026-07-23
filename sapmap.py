@@ -357,10 +357,16 @@ def main():
         try:
             from sapmap_mcp_server import _set_base_url, mcp as mcp_server
             _set_base_url(port)
-            mcp_thread = threading.Thread(
-                target=lambda: mcp_server.run(transport="stdio"),
-                daemon=True,
-            )
+            # MCP stdio transport needs the real stdin/stdout (with .buffer),
+            # but OutputCapture has already replaced sys.stdout above.
+            # Restore originals inside the MCP thread.
+            _real_stdin = sys.__stdin__
+            _real_stdout = sys.__stdout__
+            def _run_mcp():
+                sys.stdin = _real_stdin
+                sys.stdout = _real_stdout
+                mcp_server.run(transport="stdio")
+            mcp_thread = threading.Thread(target=_run_mcp, daemon=True)
             mcp_thread.start()
             print(f"[*] MCP server started (stdio transport, "
                   f"backend → http://127.0.0.1:{port})")
