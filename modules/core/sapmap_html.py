@@ -624,7 +624,13 @@ body {
   font-size: 12px; color: #58a6ff; font-weight: 600; white-space: nowrap;
 }
 .ctx-suggest-item:hover { background: #1a3a5c; }
-.ctx-item.ctx-highlighted { color: #58a6ff; font-weight: 600; }
+.ctx-item.ctx-highlighted {
+  color: #58a6ff; font-weight: 600;
+  background: rgba(88, 166, 255, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(88, 166, 255, 0.5);
+  border-radius: 3px;
+}
+.ctx-item.ctx-highlighted:hover { background: rgba(88, 166, 255, 0.22); }
 /* Inline action buttons in details panel */
 .detail-action-btn {
   display: inline-block; font-size: 10px; color: #58a6ff; cursor: pointer;
