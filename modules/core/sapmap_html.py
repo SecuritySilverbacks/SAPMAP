@@ -616,6 +616,27 @@ body {
 /* Remediation badges next to the fix summary (restart needed / online,
    effort estimate, severity if delayed).  Same shape language as the
    ATT&CK pills but in muted grey so they don't fight the green block. */
+/* Suggested actions (context menu guidance) */
+.ctx-suggested { padding: 4px 0; border-bottom: 1px solid #30363d; }
+.ctx-suggested-hdr { padding: 2px 12px; font-size: 9px; color: #8b949e; text-transform: uppercase; letter-spacing: 1px; pointer-events: none; }
+.ctx-suggest-item {
+  padding: 5px 12px; cursor: pointer; display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: #58a6ff; font-weight: 600; white-space: nowrap;
+}
+.ctx-suggest-item:hover { background: #1a3a5c; }
+/* Inline action buttons in details panel */
+.detail-action-btn {
+  display: inline-block; font-size: 10px; color: #58a6ff; cursor: pointer;
+  margin-left: 8px; text-decoration: underline; text-underline-offset: 2px;
+}
+.detail-action-btn:hover { color: #79c0ff; }
+/* Next-step links in finding toasts */
+.finding-action {
+  flex-shrink: 0; font-size: 10px; cursor: pointer;
+  padding: 2px 8px; border: 1px solid currentColor; border-radius: 3px;
+  text-decoration: none; opacity: 0.9;
+}
+.finding-action:hover { opacity: 1; filter: brightness(1.2); }
 .rem-badge {
   display: inline-block; font-family: monospace; font-size: 10px;
   padding: 1px 6px; border-radius: 2px;
@@ -4740,6 +4761,75 @@ function renderRemediationBlock(rem) {
     </div>`;
 }
 
+function getSuggestedActions(n, sid) {
+  if (!n) return [];
+  const suggestions = [];
+  const sysType = ((n.system_type || '') + '').toUpperCase();
+  const isAbap = sysType.indexOf('ABAP') !== -1;
+  const isJava = sysType.indexOf('JAVA') !== -1;
+  const isWin = (n.os_type || '').toLowerCase().includes('windows');
+  const hasGwPort = (n.instances || []).some(i => Object.entries(i.ports || {}).some(([p,s]) => s === 'gateway' || (p >= 3300 && p <= 3399)));
+  const hasGw = !!n.gw_vulnerable;
+  const hasMs = !!n.ms_vulnerable;
+  const hasCve31324 = !!n.cve_2025_31324_vulnerable;
+  const hasCve6287 = !!n.cve_2020_6287_vulnerable;
+  const pwned = !!n.pwned;
+  const creds = n.credentials || [];
+  const created = n.created_users || [];
+  const hasCreds = creds.length > 0 || created.length > 0;
+  const hasVerified = creds.some(c => c && c.verified);
+  const hasUsableAbap = isAbap && (hasVerified || created.length > 0);
+  const hasRFCs = (mapState.connections || []).some(c => c.source_sid === sid);
+  const hasUntested = (mapState.connections || []).some(c => c.source_sid === sid && !c.tested);
+  const hasTestedReachable = (mapState.connections || []).some(c => c.source_sid === sid && c.tested && c.reachable);
+  const linuxLpeViable = !isWin && (n.copyfail_vulnerable || n.dirtyfrag_vulnerable || n.peditcow_vulnerable);
+  const winLpeViable = isWin && (n.miniplasma_vulnerable || n.godpotato_vulnerable || n.efspotato_vulnerable);
+  const hasOsExec = hasGw || hasCve31324 || created.length > 0;
+
+  // Phase 1: Discovery — has system info but no vuln checks done
+  if (hasGwPort && !hasGw && !n.ms_vulnerable && !n.ms_acl_protected
+      && !n.cve_2025_31324_checked && !n.cve_2020_6287_checked) {
+    suggestions.push({icon: '🔍', label: 'Check Vulnerabilities', action: 'check_gw'});
+  }
+
+  // Phase 2: Exploitation
+  if (hasGw && !pwned)
+    suggestions.push({icon: '⚡', label: 'Create User via GW', action: 'create_user_gw'});
+  if (hasMs && !pwned)
+    suggestions.push({icon: '⚡', label: 'Betrusted Chain', action: 'create_user_betrusted'});
+  if (hasCve31324 && !pwned)
+    suggestions.push({icon: '⚡', label: 'Exploit CVE-2025-31324', action: 'exploit_cve_31324_drop'});
+  if (hasCve6287 && !pwned)
+    suggestions.push({icon: '⚡', label: 'Create User (RECON)', action: 'create_user_java'});
+  if (hasCreds && !pwned && isAbap)
+    suggestions.push({icon: '🔓', label: 'Privilege Escalation', action: 'lpe'});
+  if (linuxLpeViable && pwned)
+    suggestions.push({icon: '🐧', label: 'Escalate to Root', action: 'exploit_linux_lpe'});
+  if (winLpeViable && pwned)
+    suggestions.push({icon: '🪟', label: 'Escalate to SYSTEM', action: 'exploit_windows_lpe'});
+
+  // Phase 3: Post-Exploitation
+  if (isAbap && hasUsableAbap && !hasRFCs)
+    suggestions.push({icon: '🔗', label: 'Retrieve RFC Destinations', action: 'retrieve_rfcs'});
+  if (hasRFCs && hasUntested)
+    suggestions.push({icon: '🧪', label: 'Test RFC Connections', action: 'test_rfcs'});
+  if (hasRFCs && hasTestedReachable)
+    suggestions.push({icon: '🌐', label: 'Propagate to Reachable', action: 'propagate'});
+  if (hasUsableAbap && !(n.secstore_entries || []).length)
+    suggestions.push({icon: '🔐', label: 'Download Hashes', action: 'download_hashes'});
+  if (isJava && (hasCve31324 || hasGw) && !n.java_secstore_checked)
+    suggestions.push({icon: '🔐', label: 'Extract Java Hashes', action: 'download_hashes'});
+  if (isJava && (hasCve31324 || hasGw || (n.created_users || []).some(u => (u.method||'').toLowerCase().indexOf('java') === 0)))
+    if (!(mapState.connections || []).some(c => c.source_sid === sid && c.is_btp_dest !== undefined))
+      suggestions.push({icon: '📡', label: 'Read Java Destinations', action: 'read_java_destinations'});
+
+  // Phase 4: BTP
+  if (hasUsableAbap && !Object.keys(mapState.btp_subaccounts || {}).length)
+    suggestions.push({icon: '☁', label: 'Harvest BTP Credentials', action: 'harvest_btp_creds'});
+
+  return suggestions.slice(0, 3);
+}
+
 function showCtxMenu(e, sid) {
   e.preventDefault();
   e.stopPropagation();
@@ -5485,6 +5575,20 @@ function showCtxMenu(e, sid) {
     }
   }
 
+  // Suggested next actions (contextual guidance)
+  let oldSugg = menu.querySelector('.ctx-suggested');
+  if (oldSugg) oldSugg.remove();
+  const suggestions = getSuggestedActions(n, sid);
+  if (suggestions.length > 0) {
+    const suggDiv = document.createElement('div');
+    suggDiv.className = 'ctx-suggested';
+    suggDiv.innerHTML = '<div class="ctx-suggested-hdr">Suggested Next</div>'
+      + suggestions.map(s =>
+        `<div class="ctx-suggest-item" data-action="${s.action}">${s.icon} ${s.label}</div>`
+      ).join('');
+    menu.insertBefore(suggDiv, menu.firstChild);
+  }
+
   // Position menu within viewport — measure actual height
   menu.classList.add('visible');
   const menuRect = menu.getBoundingClientRect();
@@ -5692,7 +5796,7 @@ function hideCtxMenu() {
 
 // Delegate clicks from context menu items
 document.getElementById('ctx-menu').addEventListener('click', function(e) {
-  const item = e.target.closest('.ctx-item[data-action]');
+  const item = e.target.closest('.ctx-item[data-action], .ctx-suggest-item[data-action]');
   if (!item || item.classList.contains('disabled')) return;
   ctxAction(item.getAttribute('data-action'));
 });
@@ -8454,9 +8558,9 @@ function showDetails(sid, opts) {
       <div class="detail-row"><span class="detail-key">SAP Release</span><span class="detail-val">${escHtml(n.sap_release)}</span></div>
       <div class="detail-row"><span class="detail-key">Production</span><span class="detail-val">${n.is_production ? '<span style="color:#f85149">YES</span>' : 'No'}</span></div>
       <div class="detail-row"><span class="detail-key">Pwned</span><span class="detail-val">${n.pwned ? '<span style="color:#f0883e">&#9889; YES</span>' : 'No'}</span></div>
-      <div class="detail-row"><span class="detail-key">GW Vulnerable</span><span class="detail-val">${n.gw_vulnerable ? '<span style="color:#f85149">YES — SAPXPG</span>' : 'No'}</span></div>
+      <div class="detail-row"><span class="detail-key">GW Vulnerable</span><span class="detail-val">${n.gw_vulnerable ? `<span style="color:#f85149">YES — SAPXPG</span>${!n.pwned ? `<span class="detail-action-btn" onclick="selectedNodeSid='${escHtml(n.sid)}';ctxAction('create_user_gw')">Exploit →</span>` : ''}` : 'No'}</span></div>
       <div class="detail-row"><span class="detail-key">MS Vulnerable</span><span class="detail-val">${
-        n.ms_vulnerable ? `<span style="color:#f85149">YES — betrusted (port ${n.ms_port})</span>`
+        n.ms_vulnerable ? `<span style="color:#f85149">YES — betrusted (port ${n.ms_port})</span>` + (!n.pwned ? `<span class="detail-action-btn" onclick="selectedNodeSid='${escHtml(n.sid)}';ctxAction('create_user_betrusted')">Exploit →</span>` : '')
         : n.ms_acl_protected ? `<span style="color:#d29922">ACL protected (port ${n.ms_port})</span>`
         : n.ms_port ? `<span style="color:#3fb950">Port ${n.ms_port} open</span>`
         : 'Not checked'
@@ -8464,7 +8568,7 @@ function showDetails(sid, opts) {
       ${(n.system_type || '').toUpperCase().indexOf('JAVA') !== -1 ? `
       <div class="detail-row"><span class="detail-key">CVE-2025-31324</span><span class="detail-val">${
         n.cve_2025_31324_vulnerable
-          ? `<span style="color:#f85149">YES — metadatauploader RCE (port ${n.cve_2025_31324_port}${n.cve_2025_31324_https ? ' HTTPS' : ''})</span>`
+          ? `<span style="color:#f85149">YES — metadatauploader RCE (port ${n.cve_2025_31324_port}${n.cve_2025_31324_https ? ' HTTPS' : ''})</span>` + (!n.pwned ? `<span class="detail-action-btn" onclick="selectedNodeSid='${escHtml(n.sid)}';ctxAction('exploit_cve_31324_drop')">Exploit →</span>` : '')
           : n.cve_2025_31324_checked
             ? `<span style="color:#3fb950">Not vulnerable</span><span style="color:#8b949e"> · ${escHtml(n.cve_2025_31324_evidence || '')}</span>`
             : 'Not checked'
@@ -8474,7 +8578,7 @@ function showDetails(sid, opts) {
       ${(n.system_type || '').toUpperCase().indexOf('JAVA') !== -1 ? `
       <div class="detail-row"><span class="detail-key">CVE-2020-6287</span><span class="detail-val">${
         n.cve_2020_6287_vulnerable
-          ? `<span style="color:#f85149">YES — RECON unauth admin (port ${n.cve_2020_6287_port}${n.cve_2020_6287_https ? ' HTTPS' : ''})</span>`
+          ? `<span style="color:#f85149">YES — RECON unauth admin (port ${n.cve_2020_6287_port}${n.cve_2020_6287_https ? ' HTTPS' : ''})</span>` + (!n.pwned ? `<span class="detail-action-btn" onclick="selectedNodeSid='${escHtml(n.sid)}';ctxAction('create_user_java')">Exploit →</span>` : '')
           : n.cve_2020_6287_checked
             ? `<span style="color:#3fb950">Not vulnerable</span><span style="color:#8b949e"> · ${escHtml(n.cve_2020_6287_evidence || '')}</span>`
             : 'Not checked'
@@ -13883,6 +13987,39 @@ function _escapeHtml(s) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+function _findingNextStep(f) {
+  if (!f || !f.node) return '';
+  const sid = f.node;
+  const n = (mapState.nodes || {})[sid];
+  if (!n) return '';
+  const msg = (f.msg || '').toLowerCase();
+  const cve = (f.cve || '').toUpperCase();
+  if (msg.includes('gateway vulnerable') || msg.includes('sapxpg')) {
+    if (!n.pwned) return {label: 'Create User via GW', action: 'create_user_gw'};
+  }
+  if (msg.includes('message server') && msg.includes('vulnerable') || msg.includes('betrusted')) {
+    if (!n.pwned) return {label: 'Betrusted Chain', action: 'create_user_betrusted'};
+  }
+  if (cve === 'CVE-2025-31324' || msg.includes('metadatauploader') || msg.includes('31324')) {
+    if (!n.pwned) return {label: 'Exploit CVE-2025-31324', action: 'exploit_cve_31324_drop'};
+  }
+  if (cve === 'CVE-2020-6287' || msg.includes('recon') && msg.includes('vulnerable')) {
+    if (!n.pwned) return {label: 'Create User (RECON)', action: 'create_user_java'};
+  }
+  if (msg.includes('user created') || msg.includes('pwned')) {
+    const sysType = ((n.system_type || '') + '').toUpperCase();
+    if (sysType.indexOf('ABAP') !== -1)
+      return {label: 'Retrieve RFCs', action: 'retrieve_rfcs'};
+  }
+  if (msg.includes('rfc destinations') && msg.includes('retrieved')) {
+    return {label: 'Test RFCs', action: 'test_rfcs'};
+  }
+  if (msg.includes('rfc') && msg.includes('reachable')) {
+    return {label: 'Propagate', action: 'propagate'};
+  }
+  return '';
+}
+
 function renderFindings() {
   const bar = document.getElementById('findings-bar');
   const bell = document.getElementById('findings-bell');
@@ -13909,10 +14046,14 @@ function renderFindings() {
       : '';
     const cve = f.cve
       ? ` <span class="finding-cve">${_escapeHtml(f.cve)}</span>` : '';
+    const nextStep = _findingNextStep(f);
+    const nextHtml = nextStep
+      ? ` <span class="finding-action" onclick="selectedNodeSid='${_escapeHtml(f.node)}';ctxAction('${nextStep.action}')">${nextStep.label} →</span>`
+      : '';
     return `<div class="finding-row sev-${sev}">`
       + `<span class="finding-sev">${sev}</span>`
       + `<span class="finding-node"${nodeClick}>${node}</span>`
-      + `<span class="finding-msg">${_escapeHtml(f.msg)}</span>${cve}`
+      + `<span class="finding-msg">${_escapeHtml(f.msg)}</span>${cve}${nextHtml}`
       + `<span class="finding-dismiss" title="Dismiss"`
       + ` onclick="dismissFinding(${f.id})">&times;</span>`
       + `</div>`;
