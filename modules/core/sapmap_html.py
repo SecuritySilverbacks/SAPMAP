@@ -11609,6 +11609,10 @@ function showPropagateModal(sid) {
       targets[key].methods.push(`RFC+SAP_ALL: ${c.destination_name}`);
     } else if (c.logon_successful) {
       targets[key].methods.push(`RFC Logon OK: ${c.destination_name}`);
+    } else if (c.secstore_password) {
+      // Java-sourced HTTP destination with decrypted SecStore creds —
+      // backend fast path can log on to the target directly.
+      targets[key].methods.push(`SecStore creds: ${c.destination_name}`);
     }
   }
   // Also add GW-vulnerable targets that are on the map
