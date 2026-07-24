@@ -4788,7 +4788,22 @@ function getSuggestedActions(n, sid) {
   const hasUsableAbap = isAbap && (hasVerified || created.length > 0);
   const hasRFCs = (mapState.connections || []).some(c => c.source_sid === sid);
   const hasUntested = (mapState.connections || []).some(c => c.source_sid === sid && !c.tested);
-  const hasTestedReachable = (mapState.connections || []).some(c => c.source_sid === sid && c.tested && (c.logon_successful || c.sapxpg_remote_works));
+  // Lateral-movement viability: a destination is "reachable" from this
+  // node if we have proven working creds against the target OR we hold
+  // usable creds we haven't tried yet.  Includes:
+  //   * classic RFC destinations that logon_successful=true
+  //   * TCP/IP (Type-T) destinations that sapxpg_remote_works=true
+  //   * Java-sourced HTTP destinations with a decrypted secstore_password
+  //     (propagate_from_node takes the direct-target-login shortcut when
+  //     given the destination name — no source access needed on the target).
+  // The target must exist on the map and not already be pwned.
+  const hasTestedReachable = (mapState.connections || []).some(c => {
+    if (c.source_sid !== sid || !c.target_sid) return false;
+    const tgt = (mapState.nodes || {})[c.target_sid];
+    if (!tgt || tgt.pwned) return false;
+    return (c.tested && (c.logon_successful || c.sapxpg_remote_works))
+        || !!c.secstore_password;
+  });
   const linuxLpeViable = !isWin && (n.copyfail_vulnerable || n.dirtyfrag_vulnerable || n.peditcow_vulnerable);
   const winLpeViable = isWin && (n.miniplasma_vulnerable || n.godpotato_vulnerable || n.efspotato_vulnerable);
   const hasOsExec = hasGw || hasCve31324 || created.length > 0;
