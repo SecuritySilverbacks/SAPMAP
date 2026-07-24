@@ -4795,12 +4795,13 @@ function getSuggestedActions(n, sid) {
 
   // Phase 1: Discovery — has system info but no vuln checks done
   const stackKnown = isAbap || isJava;
+  const anyVulnChecked = !!(n.cve_2025_31324_checked || n.cve_2020_6287_checked
+                            || n.cve_2022_22536_checked || n.gw_vulnerable
+                            || n.ms_vulnerable || n.ms_acl_protected);
   if (!stackKnown && (n.hostname || n.ip)) {
     suggestions.push({icon: '🔍', label: 'Standard Scan (fingerprint)', action: 'standard_scan'});
-  } else if (hasGwPort && !hasGw && !n.ms_vulnerable && !n.ms_acl_protected) {
-    suggestions.push({icon: '🔍', label: 'Check Vulnerabilities', action: 'check_gw'});
-  } else if (isJava && !n.cve_2025_31324_checked && !n.cve_2020_6287_checked) {
-    suggestions.push({icon: '🔍', label: 'Check Vulnerabilities', action: 'check_cve_31324'});
+  } else if (stackKnown && !anyVulnChecked) {
+    suggestions.push({icon: '🔍', label: 'Check Vulnerabilities (all)', action: 'check_node_vulns'});
   }
 
   // Phase 2: Exploitation
@@ -6733,6 +6734,26 @@ async function ctxAction(action) {
       await api('POST', `node/${sid}/check_cve_2020_6287`); break;
     case 'check_cve_22536':
       await api('POST', `node/${sid}/check_cve_2022_22536`); break;
+    case 'check_node_vulns': {
+      // Fires every vulnerability check applicable to this node's stack.
+      // Backend jobs run in the background; we kick them off in parallel
+      // and let the operator watch the console for results.
+      const nn = (mapState.nodes || {})[sid];
+      if (!nn) break;
+      const st = ((nn.system_type || '') + '').toUpperCase();
+      const isA = st.indexOf('ABAP') !== -1;
+      const isJ = st.indexOf('JAVA') !== -1;
+      const gwPort = (nn.instances || []).some(i => Object.entries(i.ports || {}).some(([p,s]) => s === 'gateway' || (p >= 3300 && p <= 3399)));
+      const jobs = [];
+      if (gwPort) jobs.push(api('POST', `node/${sid}/check_gw`));
+      if (isA || isJ) jobs.push(api('POST', `node/${sid}/check_ms`));
+      if (isJ) jobs.push(api('POST', `node/${sid}/check_cve_2025_31324`));
+      if (isJ) jobs.push(api('POST', `node/${sid}/check_cve_2020_6287`));
+      if (isA || isJ || nn.is_web_dispatcher) jobs.push(api('POST', `node/${sid}/check_cve_2022_22536`));
+      await Promise.allSettled(jobs);
+      showToast(`Started ${jobs.length} vulnerability check(s) on ${sid} — watch console`, 'info');
+      break;
+    }
     case 'wd_rediscover':
       await api('POST', `node/${sid}/wd_rediscover`);
       showToast('WD topology rediscovery started — see console for cache + backend results', 'info');
