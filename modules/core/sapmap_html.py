@@ -4805,14 +4805,18 @@ function getSuggestedActions(n, sid) {
   }
 
   // Phase 2: Exploitation
-  if (hasGw && !pwned)
+  // ABAP-only nodes: GW exploit creates an ABAP user directly (pwns).
+  // Java stacks need a Java UME user for real pwn — so on Java/dual
+  // stacks with GW/CVE-31324/CVE-6287 we suggest Create User (Java UME).
+  const hasJavaUmeUser = (n.created_users || []).some(u => (u.method || '').toLowerCase().indexOf('java') === 0);
+  if (hasGw && !pwned && isAbap && !isJava)
     suggestions.push({icon: '⚡', label: 'Create User via GW', action: 'create_user_gw'});
   if (hasMs && !pwned)
     suggestions.push({icon: '⚡', label: 'Betrusted Chain', action: 'create_user_betrusted'});
   if (hasCve31324 && !pwned)
     suggestions.push({icon: '⚡', label: 'Exploit CVE-2025-31324', action: 'exploit_cve_31324_drop'});
-  if (hasCve6287 && !pwned)
-    suggestions.push({icon: '⚡', label: 'Create User (RECON)', action: 'create_user_java'});
+  if (isJava && (hasCve31324 || hasCve6287 || hasGw) && !hasJavaUmeUser)
+    suggestions.push({icon: '👤', label: 'Create User (Java UME)', action: 'create_user_java'});
   if ((hasVerified || created.length > 0) && !pwned && isAbap)
     suggestions.push({icon: '🔓', label: 'Privilege Escalation', action: 'lpe'});
   if (linuxLpeViable && pwned)
