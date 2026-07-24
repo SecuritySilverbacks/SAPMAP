@@ -4781,15 +4781,16 @@ function getSuggestedActions(n, sid) {
   const hasUsableAbap = isAbap && (hasVerified || created.length > 0);
   const hasRFCs = (mapState.connections || []).some(c => c.source_sid === sid);
   const hasUntested = (mapState.connections || []).some(c => c.source_sid === sid && !c.tested);
-  const hasTestedReachable = (mapState.connections || []).some(c => c.source_sid === sid && c.tested && c.reachable);
+  const hasTestedReachable = (mapState.connections || []).some(c => c.source_sid === sid && c.tested && (c.logon_successful || c.sapxpg_remote_works));
   const linuxLpeViable = !isWin && (n.copyfail_vulnerable || n.dirtyfrag_vulnerable || n.peditcow_vulnerable);
   const winLpeViable = isWin && (n.miniplasma_vulnerable || n.godpotato_vulnerable || n.efspotato_vulnerable);
   const hasOsExec = hasGw || hasCve31324 || created.length > 0;
 
   // Phase 1: Discovery — has system info but no vuln checks done
-  if (hasGwPort && !hasGw && !n.ms_vulnerable && !n.ms_acl_protected
-      && !n.cve_2025_31324_checked && !n.cve_2020_6287_checked) {
+  if (hasGwPort && !hasGw && !n.ms_vulnerable && !n.ms_acl_protected) {
     suggestions.push({icon: '🔍', label: 'Check Vulnerabilities', action: 'check_gw'});
+  } else if (isJava && !n.cve_2025_31324_checked && !n.cve_2020_6287_checked) {
+    suggestions.push({icon: '🔍', label: 'Check Vulnerabilities', action: 'check_cve_31324'});
   }
 
   // Phase 2: Exploitation
@@ -4801,7 +4802,7 @@ function getSuggestedActions(n, sid) {
     suggestions.push({icon: '⚡', label: 'Exploit CVE-2025-31324', action: 'exploit_cve_31324_drop'});
   if (hasCve6287 && !pwned)
     suggestions.push({icon: '⚡', label: 'Create User (RECON)', action: 'create_user_java'});
-  if (hasCreds && !pwned && isAbap)
+  if ((hasVerified || created.length > 0) && !pwned && isAbap)
     suggestions.push({icon: '🔓', label: 'Privilege Escalation', action: 'lpe'});
   if (linuxLpeViable && pwned)
     suggestions.push({icon: '🐧', label: 'Escalate to Root', action: 'exploit_linux_lpe'});
