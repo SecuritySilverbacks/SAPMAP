@@ -4788,7 +4788,10 @@ function getSuggestedActions(n, sid) {
   const hasOsExec = hasGw || hasCve31324 || created.length > 0;
 
   // Phase 1: Discovery — has system info but no vuln checks done
-  if (hasGwPort && !hasGw && !n.ms_vulnerable && !n.ms_acl_protected) {
+  const stackKnown = isAbap || isJava;
+  if (!stackKnown && (n.hostname || n.ip)) {
+    suggestions.push({icon: '🔍', label: 'Standard Scan (fingerprint)', action: 'standard_scan'});
+  } else if (hasGwPort && !hasGw && !n.ms_vulnerable && !n.ms_acl_protected) {
     suggestions.push({icon: '🔍', label: 'Check Vulnerabilities', action: 'check_gw'});
   } else if (isJava && !n.cve_2025_31324_checked && !n.cve_2020_6287_checked) {
     suggestions.push({icon: '🔍', label: 'Check Vulnerabilities', action: 'check_cve_31324'});
