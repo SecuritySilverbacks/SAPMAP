@@ -4809,9 +4809,10 @@ function getSuggestedActions(n, sid) {
     suggestions.push({icon: '🪟', label: 'Escalate to SYSTEM', action: 'exploit_windows_lpe'});
 
   // Phase 3: Post-Exploitation
-  if (isAbap && hasUsableAbap && !hasRFCs)
+  const hasSomeTested = (mapState.connections || []).some(c => c.source_sid === sid && c.tested);
+  if (isAbap && hasUsableAbap && !hasSomeTested)
     suggestions.push({icon: '🔗', label: 'Retrieve RFC Destinations', action: 'retrieve_rfcs'});
-  if (hasRFCs && hasUntested)
+  if (hasRFCs && hasUntested && hasSomeTested)
     suggestions.push({icon: '🧪', label: 'Test RFC Connections', action: 'test_rfcs'});
   if (hasRFCs && hasTestedReachable)
     suggestions.push({icon: '🌐', label: 'Propagate to Reachable', action: 'propagate'});
