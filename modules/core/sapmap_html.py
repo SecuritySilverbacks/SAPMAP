@@ -624,6 +624,7 @@ body {
   font-size: 12px; color: #58a6ff; font-weight: 600; white-space: nowrap;
 }
 .ctx-suggest-item:hover { background: #1a3a5c; }
+.ctx-item.ctx-highlighted { color: #58a6ff; font-weight: 600; }
 /* Inline action buttons in details panel */
 .detail-action-btn {
   display: inline-block; font-size: 10px; color: #58a6ff; cursor: pointer;
@@ -5590,6 +5591,13 @@ function showCtxMenu(e, sid) {
       ).join('');
     menu.insertBefore(suggDiv, menu.firstChild);
   }
+
+  // Highlight matching items in submenus
+  menu.querySelectorAll('.ctx-item.ctx-highlighted').forEach(el => el.classList.remove('ctx-highlighted'));
+  const suggActions = new Set(suggestions.map(s => s.action));
+  menu.querySelectorAll('.ctx-item[data-action]').forEach(item => {
+    if (suggActions.has(item.getAttribute('data-action'))) item.classList.add('ctx-highlighted');
+  });
 
   // Position menu within viewport — measure actual height
   menu.classList.add('visible');
