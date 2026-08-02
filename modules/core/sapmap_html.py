@@ -637,6 +637,37 @@ body {
   margin-left: 8px; text-decoration: underline; text-underline-offset: 2px;
 }
 .detail-action-btn:hover { color: #79c0ff; }
+/* Phase-progress indicator (top of details panel) */
+.phase-progress {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 12px; margin: 6px 0 12px 0;
+  background: #0d1117; border: 1px solid #21262d; border-radius: 6px;
+  font-size: 10px;
+}
+.phase-step {
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  flex: 0 0 auto; text-align: center; min-width: 60px;
+}
+.phase-dot {
+  width: 14px; height: 14px; border-radius: 50%;
+  border: 2px solid #30363d; background: transparent;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 8px; color: transparent;
+}
+.phase-step.done .phase-dot { background: #238636; border-color: #238636; color: #fff; }
+.phase-step.done .phase-dot::before { content: '\2713'; color: #fff; font-size: 9px; font-weight: bold; }
+.phase-step.active .phase-dot {
+  border-color: #58a6ff; background: rgba(88,166,255,0.15);
+  box-shadow: 0 0 0 3px rgba(88,166,255,0.25);
+}
+.phase-step.active .phase-label { color: #58a6ff; font-weight: 600; }
+.phase-label { color: #8b949e; letter-spacing: 0.3px; text-transform: uppercase; }
+.phase-step.done .phase-label { color: #3fb950; }
+.phase-connector {
+  flex: 1; height: 2px; background: #30363d; margin: 0 4px;
+  align-self: flex-start; margin-top: 20px; min-width: 12px;
+}
+.phase-connector.done { background: #238636; }
 /* Next-step links in finding toasts */
 .finding-action {
   flex-shrink: 0; font-size: 10px; cursor: pointer;
@@ -4859,6 +4890,30 @@ function getSuggestedActions(n, sid) {
   if (hasUsableAbap && !Object.keys(mapState.btp_subaccounts || {}).length)
     suggestions.push({icon: '☁', label: 'Harvest BTP Credentials', action: 'harvest_btp_creds'});
 
+  // Phase 5: SCC on same host — if the SAP node is pwned (or has OS-exec
+  // via GW/CVE-31324/created-users) and an SCC lives on the same IP,
+  // suggest harvesting its mappings.  Only surface when no SCC creds have
+  // been captured yet — otherwise the operator should go work on the SCC
+  // directly (via the SCC context menu's own Suggested Next).
+  if (_hasSccOnSameHost(n) && (hasOsExec || pwned)) {
+    const sccHost = _sccHostForNode(n);
+    const sn = sccHost ? (mapState.scc_nodes || {})[sccHost] : null;
+    const sccHasCreds = sn && (sn.credentials || []).length > 0;
+    if (!sccHasCreds)
+      suggestions.push({icon: '☁', label: 'Harvest SCC Mappings', action: 'harvest_scc_mappings'});
+  }
+
+  // Phase 7: Reporting — once we've pwned this node, offer to export the
+  // engagement report.  Simple gate: don't spam it before there's a story
+  // to report.  Only counts nodes with created_users so a passively
+  // "gw_vulnerable" node without action doesn't trigger it.
+  if (pwned && created.length > 0) {
+    const totalPwned = Object.values(mapState.nodes || {})
+      .filter(nn => nn.pwned).length;
+    if (totalPwned >= 1)
+      suggestions.push({icon: '📝', label: 'Export Engagement Report', action: 'export_report'});
+  }
+
   return suggestions.slice(0, 3);
 }
 
@@ -5843,6 +5898,36 @@ document.getElementById('ctx-menu').addEventListener('click', function(e) {
 // --- SAP Cloud Connector context menu ---
 let selectedSccHost = null;
 
+function getSCCSuggestedActions(sn, host) {
+  // Phase 5: SCC — walks operator through the SCC assessment workflow.
+  if (!sn) return [];
+  const suggestions = [];
+  const hasCreds = (sn.credentials || []).length > 0;
+  const credsTried = hasCreds || !!sn.admin_session_obtained
+                     || !!sn.default_creds_live;
+  const hasMappings = (sn.mappings || []).length > 0;
+  // "Probed" heuristic: any mapping row with a probe_signature / reachable
+  // flag set means Probe Mappings has run.
+  const mappingsProbed = (sn.mappings || []).some(m =>
+    m && (m.reachable !== undefined || m.probe_signature
+          || m.last_probed_at));
+
+  // 1. Never tried default creds → probe them.
+  if (!credsTried)
+    suggestions.push({icon: '🔑', label: 'Probe Default Account', action: 'scc_probe_creds'});
+
+  // 2. Authenticated (creds captured OR default_creds_live) but no
+  //    mappings pulled yet → pull mappings.
+  if (credsTried && !hasMappings)
+    suggestions.push({icon: '📁', label: 'Pull Mappings', action: 'scc_pull_mappings'});
+
+  // 3. Mappings pulled but never probed → smoke-test backend reachability.
+  if (hasMappings && !mappingsProbed)
+    suggestions.push({icon: '📡', label: 'Probe Mappings', action: 'scc_probe_mappings'});
+
+  return suggestions.slice(0, 3);
+}
+
 function showSCCCtxMenu(e, host) {
   e.preventDefault();
   e.stopPropagation();
@@ -5876,6 +5961,26 @@ function showSCCCtxMenu(e, host) {
     }
   }
 
+  // Suggested next actions (Phase 5 workflow guidance)
+  let oldSugg = menu.querySelector('.ctx-suggested');
+  if (oldSugg) oldSugg.remove();
+  const suggestions = getSCCSuggestedActions(sn, host);
+  if (suggestions.length > 0) {
+    const suggDiv = document.createElement('div');
+    suggDiv.className = 'ctx-suggested';
+    suggDiv.innerHTML = '<div class="ctx-suggested-hdr">Suggested Next</div>'
+      + suggestions.map(s =>
+        `<div class="ctx-suggest-item" data-action="${s.action}">${s.icon} ${s.label}</div>`
+      ).join('');
+    menu.insertBefore(suggDiv, menu.firstChild);
+  }
+  // Highlight matching items in submenus
+  menu.querySelectorAll('.ctx-item.ctx-highlighted').forEach(el => el.classList.remove('ctx-highlighted'));
+  const suggActions = new Set(suggestions.map(s => s.action));
+  menu.querySelectorAll('.ctx-item[data-action]').forEach(item => {
+    if (suggActions.has(item.getAttribute('data-action'))) item.classList.add('ctx-highlighted');
+  });
+
   menu.classList.add('visible');
   // Position with viewport clamp
   const w = menu.offsetWidth || 280;
@@ -5892,7 +5997,7 @@ function hideSCCCtxMenu() {
 }
 
 document.getElementById('scc-ctx-menu').addEventListener('click', function(e) {
-  const item = e.target.closest('.ctx-item[data-action]');
+  const item = e.target.closest('.ctx-item[data-action], .ctx-suggest-item[data-action]');
   if (!item || item.classList.contains('disabled')) return;
   const action = item.getAttribute('data-action');
   hideSCCCtxMenu();
@@ -7132,6 +7237,10 @@ async function ctxAction(action) {
       await api('POST', `node/${sid}/deep_scan`); break;
     case 'standard_scan':
       await api('POST', `node/${sid}/standard_scan`); break;
+    case 'export_report':
+      // Delegates to the top-nav Export Engagement Report flow — same
+      // endpoint, same server-side write to loot/reports/.
+      exportReport(); break;
     case 'analyse_capabilities': {
       const probe = confirm(
         'Run user capability analyser on ' + sid + '?\n\n' +
@@ -8589,6 +8698,77 @@ async function createUserOnTarget(sourceSid, destName, targetSid) {
 }
 
 // --- Detail panel ---
+function getPhaseProgress(n, sid) {
+  // Derive 5-phase assessment state from node fields.
+  // Returned array is fed to renderPhaseProgress() below.
+  if (!n) return [];
+  const sysType = ((n.system_type || '') + '').toUpperCase();
+  const isJava = sysType.indexOf('JAVA') !== -1;
+
+  // Phase 1: Scan — node has been fingerprinted (has instances).
+  const scanned = (n.instances || []).length > 0
+                  || !!n.system_type || !!n.kernel;
+
+  // Phase 2: Vulns Checked — at least one vulnerability check ran on
+  // this node (either found something or explicitly checked-and-safe).
+  const vulnsChecked = !!(n.gw_vulnerable || n.ms_vulnerable
+                          || n.ms_acl_protected
+                          || n.cve_2025_31324_checked
+                          || n.cve_2020_6287_checked
+                          || n.cve_2022_22536_checked
+                          || n.ms_port);
+
+  // Phase 3: Exploited — node is fully compromised.
+  const exploited = !!n.pwned;
+
+  // Phase 4: Extracted — data pulled after pwn (secstore / Java secstore /
+  // RFC destinations discovered).  Ignore auto-populated single-conn edges
+  // from CVE-31324 shells — require secstore OR ≥2 outbound RFCs.
+  const rfcCount = (mapState.connections || [])
+    .filter(c => c.source_sid === sid).length;
+  const extracted = !!((n.secstore_entries || []).length
+                       || n.java_secstore_checked
+                       || rfcCount >= 2);
+
+  // Phase 5: Propagated — at least one outbound RFC connection to a
+  // now-pwned target (i.e. we used this node to compromise another).
+  const propagated = (mapState.connections || []).some(c => {
+    if (c.source_sid !== sid || !c.target_sid) return false;
+    const tgt = (mapState.nodes || {})[c.target_sid];
+    return tgt && tgt.pwned;
+  });
+
+  // Active = first not-done phase.  Everything before is 'done', the
+  // active step gets the highlight ring.
+  const flags = [scanned, vulnsChecked, exploited, extracted, propagated];
+  let activeIdx = flags.findIndex(f => !f);
+  if (activeIdx === -1) activeIdx = flags.length;   // all done
+
+  const labels = ['Scan', 'Vulns', 'Exploit', 'Extract', 'Move'];
+  return labels.map((label, i) => ({
+    label,
+    done:   flags[i],
+    active: i === activeIdx,
+  }));
+}
+
+function renderPhaseProgress(phases) {
+  if (!phases || !phases.length) return '';
+  const parts = ['<div class="phase-progress" title="Assessment phase — filled = done, ring = next step">'];
+  phases.forEach((p, i) => {
+    if (i > 0) {
+      // Connector between step i-1 and step i: green when i-1 is done.
+      const cls = phases[i-1].done ? 'phase-connector done' : 'phase-connector';
+      parts.push(`<div class="${cls}"></div>`);
+    }
+    const cls = 'phase-step' + (p.done ? ' done' : '') + (p.active ? ' active' : '');
+    parts.push(`<div class="${cls}"><div class="phase-dot"></div>`
+             + `<div class="phase-label">${p.label}</div></div>`);
+  });
+  parts.push('</div>');
+  return parts.join('');
+}
+
 function showDetails(sid, opts) {
   const n = (mapState.nodes || {})[sid];
   if (!n) return;
@@ -8606,6 +8786,7 @@ function showDetails(sid, opts) {
   panel.innerHTML = `
     <span class="close-btn" onclick="this.parentElement.classList.remove('visible')">&times;</span>
     <h3>${escHtml(n.sid)} System Details</h3>
+    ${renderPhaseProgress(getPhaseProgress(n, sid))}
     <div class="detail-section">
       <div class="detail-row"><span class="detail-key">SID</span><span class="detail-val">${escHtml(n.sid)}</span></div>
       <div class="detail-row"><span class="detail-key">Type</span><span class="detail-val">${escHtml(n.system_type)}</span></div>
