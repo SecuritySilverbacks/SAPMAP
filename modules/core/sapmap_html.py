@@ -639,33 +639,34 @@ body {
 .detail-action-btn:hover { color: #79c0ff; }
 /* Phase-progress indicator (top of details panel) */
 .phase-progress {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 10px 12px; margin: 6px 0 12px 0;
+  display: flex; align-items: flex-start; justify-content: space-between;
+  padding: 8px 6px; margin: 6px 0 12px 0;
   background: #0d1117; border: 1px solid #21262d; border-radius: 6px;
-  font-size: 10px;
+  font-size: 9px; box-sizing: border-box; width: 100%;
+  overflow: hidden;
 }
 .phase-step {
-  display: flex; flex-direction: column; align-items: center; gap: 4px;
-  flex: 0 0 auto; text-align: center; min-width: 60px;
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+  flex: 0 0 auto; text-align: center; min-width: 0;
 }
 .phase-dot {
-  width: 14px; height: 14px; border-radius: 50%;
+  width: 12px; height: 12px; border-radius: 50%;
   border: 2px solid #30363d; background: transparent;
   display: flex; align-items: center; justify-content: center;
-  font-size: 8px; color: transparent;
+  font-size: 8px; color: transparent; flex-shrink: 0;
 }
 .phase-step.done .phase-dot { background: #238636; border-color: #238636; color: #fff; }
-.phase-step.done .phase-dot::before { content: '\2713'; color: #fff; font-size: 9px; font-weight: bold; }
+.phase-step.done .phase-dot::before { content: '\2713'; color: #fff; font-size: 8px; font-weight: bold; }
 .phase-step.active .phase-dot {
   border-color: #58a6ff; background: rgba(88,166,255,0.15);
-  box-shadow: 0 0 0 3px rgba(88,166,255,0.25);
+  box-shadow: 0 0 0 2px rgba(88,166,255,0.25);
 }
 .phase-step.active .phase-label { color: #58a6ff; font-weight: 600; }
-.phase-label { color: #8b949e; letter-spacing: 0.3px; text-transform: uppercase; }
+.phase-label { color: #8b949e; letter-spacing: 0.2px; text-transform: uppercase; white-space: nowrap; }
 .phase-step.done .phase-label { color: #3fb950; }
 .phase-connector {
-  flex: 1; height: 2px; background: #30363d; margin: 0 4px;
-  align-self: flex-start; margin-top: 20px; min-width: 12px;
+  flex: 1 1 auto; height: 2px; background: #30363d; margin: 0 3px;
+  margin-top: 7px; min-width: 6px;
 }
 .phase-connector.done { background: #238636; }
 /* Next-step links in finding toasts */
