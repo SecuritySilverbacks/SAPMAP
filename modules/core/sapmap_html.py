@@ -3161,12 +3161,17 @@ function _isBareAwsDefaultDest(c) {
 // node is nothing more than a hostname pointing at ec2/s3.amazonaws.com
 // with no enrichment (no creds, no pwn, no vulns, no findings).  Any
 // real interaction lights up one of those flags and the node reappears.
+// The placeholder synthesises a fake Inst 00 record so we don't gate on
+// (n.instances||[]).length — check ports/services on the instance
+// instead, which stay empty until a real scan lands data on it.
 function _isBareAwsDefaultNode(n) {
   if (!n) return false;
   const host = (n.hostname || '').toLowerCase();
   const ip = (n.ip || '').toLowerCase();
   if (!_isBareAwsDefaultHost(host) && !_isBareAwsDefaultHost(ip))
     return false;
+  const anyRealPort = (n.instances || []).some(i =>
+    i && Object.keys(i.ports || {}).length > 0);
   const hasEnrichment = !!(n.pwned
     || (n.credentials || []).length
     || (n.created_users || []).length
@@ -3174,7 +3179,7 @@ function _isBareAwsDefaultNode(n) {
     || n.gw_vulnerable || n.ms_vulnerable
     || n.cve_2025_31324_vulnerable || n.cve_2020_6287_vulnerable
     || n.cve_2022_22536_vulnerable
-    || (n.instances || []).length);
+    || anyRealPort);
   return !hasEnrichment;
 }
 
