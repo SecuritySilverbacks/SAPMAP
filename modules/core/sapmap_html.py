@@ -8812,6 +8812,65 @@ function getPhaseProgress(n, sid) {
   }));
 }
 
+function getSCCPhaseProgress(sn) {
+  // 5-phase view aligned with the SAP-node bar so the UI reads the same:
+  //   Scan   — SCC fingerprinted (host + admin UI probed)
+  //   Vulns  — version-based CVE bucketing produced any hits, or default
+  //            creds probe attempted (default_creds_live one way or the
+  //            other), or a cred was captured
+  //   Auth   — we hold an admin session (captured cred, admin_session_obtained,
+  //            or default_creds_live)
+  //   Extract— mappings pulled OR keystore extracted OR ssfs decrypted
+  //   Move   — PP analyser has run OR tunnel replay confirmed
+  if (!sn) return [];
+  const scanned = !!(sn.admin_ui_reachable || sn.version || sn.bundle_hash);
+  const vulnsChecked = !!((sn.cves_confirmed || []).length
+                          || (sn.cves_suspected || []).length
+                          || sn.default_creds_live
+                          || (sn.credentials || []).length);
+  const authed = !!(sn.admin_session_obtained || sn.default_creds_live
+                    || (sn.credentials || []).length);
+  const extracted = !!((sn.mappings || []).length
+                       || sn.keystore_extracted
+                       || sn.ssfs_decrypted);
+  const moved = !!(sn.tunnel_replayed
+                   || (sn.pp_analysis && sn.pp_analysis.method));
+  const flags = [scanned, vulnsChecked, authed, extracted, moved];
+  let activeIdx = flags.findIndex(f => !f);
+  if (activeIdx === -1) activeIdx = flags.length;
+  const labels = ['Scan', 'Vulns', 'Auth', 'Extract', 'Move'];
+  return labels.map((label, i) => ({
+    label, done: flags[i], active: i === activeIdx,
+  }));
+}
+
+function getBTPPhaseProgress(bn) {
+  // 5-phase view aligned with the SAP + SCC bars:
+  //   Discover — subaccount landed on the map (uuid + region known)
+  //   Token    — an operator token minted for this region (in mapState)
+  //   Enum     — /destinations enumerated (at least one destination row)
+  //   Extract  — at least one destination carries a cleartext password
+  //   Move     — a destination has been linked to an on-prem SAPNode
+  //              (or we hold cert-auth-trusted status from a real probe)
+  if (!bn) return [];
+  const discovered = !!(bn.uuid || bn.region);
+  const region = (bn.region || '').toLowerCase();
+  const haveToken = (mapState.btp_token_regions || [])
+    .some(r => (r || '').toLowerCase() === region);
+  const dests = bn.destinations || [];
+  const enumerated = dests.length > 0;
+  const extracted = dests.some(d => d && (d.cleartext_captured || d.password));
+  const moved = !!(bn.cert_auth_trusted
+                   || dests.some(d => d && d.linked_target_sid));
+  const flags = [discovered, haveToken, enumerated, extracted, moved];
+  let activeIdx = flags.findIndex(f => !f);
+  if (activeIdx === -1) activeIdx = flags.length;
+  const labels = ['Discover', 'Token', 'Enum', 'Extract', 'Move'];
+  return labels.map((label, i) => ({
+    label, done: flags[i], active: i === activeIdx,
+  }));
+}
+
 function renderPhaseProgress(phases) {
   if (!phases || !phases.length) return '';
   const parts = ['<div class="phase-progress" title="Assessment phase — filled = done, ring = next step">'];
@@ -9528,6 +9587,7 @@ function showSCCDetail(host, opts) {
   panel.innerHTML = `
     <span class="close-btn" onclick="this.parentElement.classList.remove('visible')">&times;</span>
     <h3>&#9729; SAP Cloud Connector — ${escHtml(host)}</h3>
+    ${renderPhaseProgress(getSCCPhaseProgress(sn))}
     <div class="detail-section">
       <div class="detail-row"><span class="detail-key">Host</span><span class="detail-val">${escHtml(sn.host || host)}</span></div>
       <div class="detail-row"><span class="detail-key">Admin UI</span><span class="detail-val">https://${escHtml(host)}:${sn.admin_ui_port || 8443}/scc/ui</span></div>
@@ -9763,6 +9823,7 @@ function showBTPDetail(uuid, opts) {
   panel.innerHTML = `
     <span class="close-btn" onclick="this.parentElement.classList.remove('visible')">&times;</span>
     <h3>&#9729; BTP Subaccount — ${escHtml(bn.display_name || bn.subdomain || uuid.slice(0, 8))}</h3>
+    ${renderPhaseProgress(getBTPPhaseProgress(bn))}
     <div class="detail-section">
       <div class="detail-row"><span class="detail-key">UUID</span><span class="detail-val" style="font-family:monospace;font-size:11px;word-break:break-all">${escHtml(uuid)}</span></div>
       <div class="detail-row"><span class="detail-key">Region</span><span class="detail-val">${escHtml(bn.region || '?')}</span></div>
