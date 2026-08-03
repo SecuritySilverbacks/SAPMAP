@@ -3140,6 +3140,9 @@ async function pollUpdates() {
 // and they clutter the map on every landscape.  Hide unless someone
 // has actually populated them with a user + secstore password (in
 // which case they're real lateral targets and belong on the map).
+function _isBareAwsDefaultHost(host) {
+  return /^(ec2|s3)([.-][a-z0-9.-]+)?\.amazonaws\.com$/i.test(host || '');
+}
 function _isBareAwsDefaultDest(c) {
   if (!c) return false;
   if ((c.conn_type || '') !== 'http') return false;
@@ -3148,20 +3151,48 @@ function _isBareAwsDefaultDest(c) {
     try { host = new URL(c.http_url).hostname.toLowerCase(); }
     catch(_) {}
   }
-  // ec2.amazonaws.com, s3.amazonaws.com, and their regional
-  // subdomains (s3-us-east-1., ec2.us-west-2., ...).
-  if (!/^(ec2|s3)([.-][a-z0-9.-]+)?\.amazonaws\.com$/i.test(host))
-    return false;
+  if (!_isBareAwsDefaultHost(host)) return false;
   const hasCreds = !!(c.rfc_user
                       && (c.secstore_password || c.password));
   return !hasCreds;
 }
+// Companion filter: the auto-materialised placeholder SAP node created
+// when we first discover one of these Type-G defaults.  Hide when the
+// node is nothing more than a hostname pointing at ec2/s3.amazonaws.com
+// with no enrichment (no creds, no pwn, no vulns, no findings).  Any
+// real interaction lights up one of those flags and the node reappears.
+function _isBareAwsDefaultNode(n) {
+  if (!n) return false;
+  const host = (n.hostname || '').toLowerCase();
+  const ip = (n.ip || '').toLowerCase();
+  if (!_isBareAwsDefaultHost(host) && !_isBareAwsDefaultHost(ip))
+    return false;
+  const hasEnrichment = !!(n.pwned
+    || (n.credentials || []).length
+    || (n.created_users || []).length
+    || (n.findings || []).length
+    || n.gw_vulnerable || n.ms_vulnerable
+    || n.cve_2025_31324_vulnerable || n.cve_2020_6287_vulnerable
+    || n.cve_2022_22536_vulnerable
+    || (n.instances || []).length);
+  return !hasEnrichment;
+}
 
 // --- Map rendering ---
 function updateMap() {
-  const nodes = mapState.nodes || {};
+  // Filter out SAP-shipped ec2/s3 defaults from both nodes AND
+  // connections so we don't render orphaned placeholder boxes.
+  const _allNodes = mapState.nodes || {};
+  const nodes = {};
+  for (const sid in _allNodes) {
+    if (!_isBareAwsDefaultNode(_allNodes[sid])) nodes[sid] = _allNodes[sid];
+  }
   const conns = (mapState.connections || [])
-    .filter(c => !_isBareAwsDefaultDest(c));
+    .filter(c => !_isBareAwsDefaultDest(c))
+    // Also drop edges that terminate on a node we just hid, so a
+    // surviving edge doesn't render into empty space.
+    .filter(c => !c.target_sid || nodes[c.target_sid]
+                  || !_allNodes[c.target_sid]);
   const nodeKeys = Object.keys(nodes);
   const _sccCount = Object.keys(mapState.scc_nodes || {}).length;
   const _btpCount = Object.keys(mapState.btp_subaccounts || {}).length;
