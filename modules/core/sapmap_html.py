@@ -3135,10 +3135,33 @@ async function pollUpdates() {
   }
 }
 
+// Default SAP-shipped Type-G destinations to AWS (ec2 / s3) — the
+// standard S/4 install ships two of these with no stored credentials
+// and they clutter the map on every landscape.  Hide unless someone
+// has actually populated them with a user + secstore password (in
+// which case they're real lateral targets and belong on the map).
+function _isBareAwsDefaultDest(c) {
+  if (!c) return false;
+  if ((c.conn_type || '') !== 'http') return false;
+  let host = (c.target_host || '').toLowerCase();
+  if (!host && c.http_url) {
+    try { host = new URL(c.http_url).hostname.toLowerCase(); }
+    catch(_) {}
+  }
+  // ec2.amazonaws.com, s3.amazonaws.com, and their regional
+  // subdomains (s3-us-east-1., ec2.us-west-2., ...).
+  if (!/^(ec2|s3)([.-][a-z0-9.-]+)?\.amazonaws\.com$/i.test(host))
+    return false;
+  const hasCreds = !!(c.rfc_user
+                      && (c.secstore_password || c.password));
+  return !hasCreds;
+}
+
 // --- Map rendering ---
 function updateMap() {
   const nodes = mapState.nodes || {};
-  const conns = mapState.connections || [];
+  const conns = (mapState.connections || [])
+    .filter(c => !_isBareAwsDefaultDest(c));
   const nodeKeys = Object.keys(nodes);
   const _sccCount = Object.keys(mapState.scc_nodes || {}).length;
   const _btpCount = Object.keys(mapState.btp_subaccounts || {}).length;
