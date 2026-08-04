@@ -175,8 +175,17 @@ def test_connection(node: SAPNode, creds: Credentials = None,
             return ok
     except Exception as e:
         err = format_rfc_exception(e)
+        # Surface the full credential context on failure so the operator
+        # can tell WHICH user/client we tried — otherwise "logon failed
+        # for host=X" is ambiguous when multiple test_connection calls
+        # fire against different clients / usernames in a row.
+        cred_ctx = ""
+        if creds:
+            cred_ctx = (f", user={creds.username}, "
+                        f"client={creds.client}, "
+                        f"inst={creds.instance_nr}")
         print(f"[-] Connection test failed for {node.sid} "
-              f"(host={host_label}): {err}")
+              f"(host={host_label}{cred_ctx}): {err}")
         if "password" in err.lower() or "logon" in err.lower():
             print(f"    Check username/password and client number")
         elif "communication" in err.lower() or "connect" in err.lower():
