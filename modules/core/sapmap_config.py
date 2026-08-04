@@ -228,6 +228,25 @@ def sql_oracle(sid: str, client: str, username: str, schema: str = "SAPSR3",
             f"UPDATE {s}.USR02 SET PASSCODE='{PASSCODE_HEX}' "
             f"WHERE BNAME='{username}' AND MANDT='{client}';COMMIT;EXIT;"
         )
+    # Modern kernels (7.30+ with login/password_hash_algorithm=SHA-256)
+    # prefer PWDSALTEDHASH over BCODE/PASSCODE.  If PWDSALTEDHASH is set
+    # (or SALT has a stale value), the kernel checks SHA-256+SALT against
+    # our password and fails — even though BCODE/PASSCODE would match.
+    # Clear both so the kernel falls back to CODVN=G verification.
+    # Wrapped in a per-column NULL update: harmless if the column doesn't
+    # exist (Oracle returns "invalid identifier" for missing columns —
+    # sqlplus continues past that error and still commits the previous
+    # write).  Applied via IF-EXISTS-style guard is not possible in
+    # Oracle without PL/SQL blocks, so we just emit the UPDATE and let
+    # sqlplus report ORA-00904 on old kernels without the column.
+    stmts.append(
+        f"UPDATE {s}.USR02 SET SALT=NULL "
+        f"WHERE BNAME='{username}' AND MANDT='{client}';COMMIT;EXIT;"
+    )
+    stmts.append(
+        f"UPDATE {s}.USR02 SET PWDSALTEDHASH=NULL "
+        f"WHERE BNAME='{username}' AND MANDT='{client}';COMMIT;EXIT;"
+    )
     stmts += [
         f"INSERT INTO {s}.USREFUS (MANDT,BNAME,REFUSER) "
         f"VALUES ('{client}','{username}','DDIC');COMMIT;EXIT;",
