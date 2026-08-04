@@ -86,9 +86,10 @@ body {
    shown only when the landscape is empty AND the user hasn't
    dismissed it before (localStorage). */
 #welcome-card {
-  position: absolute; top: 60%; left: 50%;
-  transform: translate(-50%, 0);
-  max-width: 460px; padding: 14px 18px;
+  position: absolute; top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  max-width: 460px; max-height: calc(100% - 40px);
+  overflow-y: auto; padding: 14px 18px;
   background: #161b22; border: 1px solid #30363d; border-radius: 8px;
   color: #c9d1d9; font-size: 12px; line-height: 1.55;
   box-shadow: 0 4px 16px rgba(0,0,0,.35);
