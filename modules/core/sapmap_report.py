@@ -77,7 +77,9 @@ def _executive_summary(state: SAPMAPState) -> list:
                if str(getattr(f, "severity", "")).endswith("HIGH")
                or getattr(f, "severity", None) == Severity.HIGH)
 
-    pct_pwned = (100 * len(pwned) // len(nodes)) if nodes else 0
+    total_systems_md = len(nodes) + scc_count + btp_count
+    total_pwned_md = len(pwned) + scc_pwned + btp_pwned
+    pct_pwned = (100 * total_pwned_md // total_systems_md) if total_systems_md else 0
 
     out = ["## Executive summary", ""]
     out.extend(_stat_table([
@@ -93,7 +95,8 @@ def _executive_summary(state: SAPMAPState) -> list:
           f"{conn_tested_ok_md} tested OK"
           if conn_total_md else "0")),
         ("Systems pwned",
-         f"{len(pwned)} / {len(nodes)} ({pct_pwned}%)"),
+         f"{total_pwned_md} / {total_systems_md} ({pct_pwned}%) — "
+         f"{len(pwned)} SAP, {scc_pwned} SCC, {btp_pwned} BTP"),
         ("**Production systems pwned**",
          f"**{len(pwned_prd)}**" + (
              f" — {', '.join(n.sid for n in pwned_prd)}"
@@ -2443,7 +2446,6 @@ def build_html_report(state: SAPMAPState,
                   if (n.system_type or "").upper() == "SAPROUTER")
     pwned = [n for n in nodes if n.pwned]
     pwned_prd = [n for n in pwned if n.is_production]
-    pct_pwned = (100 * len(pwned) // len(nodes)) if nodes else 0
     created = sum(len(n.created_users) for n in nodes)
     secstore_total = sum(len(n.secstore_entries or []) for n in nodes)
     java_secstore_total = sum(len(n.java_secstore_entries or []) for n in nodes)
@@ -2454,6 +2456,14 @@ def build_html_report(state: SAPMAPState,
     btp_subs = (getattr(state, "btp_subaccounts", {}) or {})
     btp_pwned = sum(1 for b in btp_subs.values()
                      if getattr(b, "pwned", False))
+    # KPI totals mirror the GUI status-bar semantics (state.stats()):
+    # every box on the map is a "system", so SAP + SCC + BTP are all
+    # counted.  Reporting SAP-only here made "1/6 pwned" show up while
+    # the operator saw "4/10" in the app — a discrepancy caught in
+    # engagement review.
+    total_systems = len(nodes) + len(sccs) + len(btp_subs)
+    total_pwned = len(pwned) + scc_pwned + btp_pwned
+    pct_pwned = (100 * total_pwned // total_systems) if total_systems else 0
     # Edge counts.  "Total" includes every RFC / HTTP / synthetic
     # destination on the map; "SAP_ALL" surfaces the biggest-blast-
     # radius edges so the KPI card reads as a risk number, not just a
@@ -2942,12 +2952,13 @@ def build_html_report(state: SAPMAPState,
   </div>
 
   <div class="kpis">
-    {_kpi_card("Systems discovered", str(len(nodes)),
-                f"{abap} ABAP · {java} Java · {routers} SAProuter",
+    {_kpi_card("Systems discovered", str(total_systems),
+                f"{abap} ABAP · {java} Java · {routers} SAProuter · "
+                f"{len(sccs)} SCC · {len(btp_subs)} BTP",
                 "#0969da")}
-    {_kpi_card("Systems pwned", f"{len(pwned)}/{len(nodes)}",
+    {_kpi_card("Systems pwned", f"{total_pwned}/{total_systems}",
                 f"{pct_pwned}% of landscape",
-                "#db6d28" if pwned else "#3fb950")}
+                "#db6d28" if total_pwned else "#3fb950")}
     {_kpi_card("Production pwned", str(len(pwned_prd)),
                 ", ".join(n.sid for n in pwned_prd) or "none",
                 "#f85149" if pwned_prd else "#3fb950")}
