@@ -1131,6 +1131,199 @@ def _cert_auth_destinations_section(state: SAPMAPState) -> list:
     return out
 
 
+def _impact_section(state: SAPMAPState) -> list:
+    """Business-impact scenarios grouped by SID.  Only shows hits."""
+    have = False
+    out = ["## Business impact", ""]
+    out.append(
+        "Concrete blast-radius reads across finance / HR / vendor "
+        "tables — the numbers to quote when quantifying exposure.  "
+        "Empty-return scenarios omitted.")
+    out.append("")
+    for sid, n in sorted(state.nodes.items()):
+        rows = []
+        for r in (n.impact_results or []):
+            if not isinstance(r, dict):
+                continue
+            if r.get("error") or (r.get("record_count", 0) or 0) <= 0:
+                continue
+            rows.append(r)
+        if not rows:
+            continue
+        have = True
+        out.append(f"### {sid}")
+        out.append("")
+        out.append("| Severity | Scenario | Headline | Records |")
+        out.append("| --- | --- | --- | --- |")
+        for r in rows:
+            out.append(
+                f"| {_esc(r.get('severity_label', '?'))} | "
+                f"{_esc(r.get('icon', ''))} "
+                f"{_esc(r.get('scenario', '?'))} | "
+                f"{_esc(r.get('headline', ''))} | "
+                f"{r.get('record_count', 0):,} |")
+        out.append("")
+    return out if have else []
+
+
+def _secstore_section(state: SAPMAPState) -> list:
+    """ABAP + Java SecStore extraction results across the landscape."""
+    abap_rows, java_rows = [], []
+    for sid, n in sorted(state.nodes.items()):
+        for e in (n.secstore_entries or []):
+            if isinstance(e, dict):
+                abap_rows.append((sid, e))
+        for e in (n.java_secstore_entries or []):
+            if isinstance(e, dict):
+                java_rows.append((sid, e))
+    if not abap_rows and not java_rows:
+        return []
+    out = ["## Secure-Store recovery", ""]
+    out.append(
+        "Passwords cached inside SAP secure stores that SAPMAP was "
+        "able to decrypt.  Each entry is a credential the operator "
+        "can log in with (or a downstream system whose password we "
+        "now hold).  Plaintext values live in `loot/secstore/`.")
+    out.append("")
+    if abap_rows:
+        out.append(f"### ABAP SecStore (RSECTAB) — {len(abap_rows)} entries")
+        out.append("")
+        out.append("| SID | Ident | Category | Status |")
+        out.append("| --- | --- | --- | --- |")
+        for sid, e in abap_rows:
+            status = ("**plaintext**" if e.get("password") else "no pw")
+            out.append(
+                f"| {sid} | `{_esc(e.get('ident', '?'))}` | "
+                f"{_esc(e.get('category', '?'))} | {status} |")
+        out.append("")
+    if java_rows:
+        out.append(f"### Java SecStoreFS — {len(java_rows)} entries")
+        out.append("")
+        out.append("| SID | Name | Kind | Downstream SID | Status |")
+        out.append("| --- | --- | --- | --- | --- |")
+        for sid, e in java_rows:
+            status = ("**plaintext**" if e.get("value") else "no val")
+            if e.get("is_downstream"):
+                status += " (↓ downstream)"
+            out.append(
+                f"| {sid} | `{_esc(e.get('name', '?'))}` | "
+                f"{_esc(e.get('kind', ''))} | "
+                f"{_esc(e.get('target_sid', '') or '—')} | "
+                f"{status} |")
+        out.append("")
+    return out
+
+
+def _created_users_section(state: SAPMAPState) -> list:
+    """Every SAPMAP-created account across the landscape."""
+    users = list(getattr(state, "created_users", []) or [])
+    if not users:
+        return []
+    out = ["## SAPMAP-created accounts", ""]
+    out.append(
+        "Every account SAPMAP created during this engagement.  Use "
+        '"Cleanup All Users" in the GUI or delete manually before '
+        "handover.  Passwords redacted here; plaintext lives in the "
+        "session `.sapmap` file.")
+    out.append("")
+    out.append("| SID | User | Client | Host | Inst | Method | Created |")
+    out.append("| --- | --- | --- | --- | --- | --- | --- |")
+    for u in sorted(users, key=lambda x: (x.sid, x.client, x.username)):
+        out.append(
+            f"| {u.sid} | `{_esc(u.username)}` | {u.client} | "
+            f"`{_esc(u.hostname or u.ip or '?')}` | {u.instance_nr or '?'} | "
+            f"{_esc(u.method)} | {(u.created_at or '')[:19]} |")
+    out.append("")
+    return out
+
+
+def _persistence_section(state: SAPMAPState) -> list:
+    """Forged tickets + dpmon SAP* + injected RFC destinations."""
+    tickets = list(getattr(state, "forged_tickets", []) or [])
+    created_dests = list(getattr(state, "created_destinations", []) or [])
+    dpmon_sids = [n.sid for n in state.nodes.values()
+                  if getattr(n, "dpmon_sap_star_used", False)]
+    if not (tickets or created_dests or dpmon_sids):
+        return []
+    out = ["## Persistence footprint", ""]
+    out.append(
+        "Artifacts SAPMAP planted that outlive the current shell — "
+        "forged MYSAPSSO2 tickets, dpmon SAP* activations, and RFC "
+        "destinations injected into remote systems.  Every entry "
+        "here needs an explicit cleanup step at handover.")
+    out.append("")
+    if dpmon_sids:
+        out.append(f"### Virtual SAP* activated ({len(dpmon_sids)})")
+        out.append("")
+        out.append(
+            "Kernel ≥ 790 dpmon primitive (SAP Note 3303172) — a one-time "
+            f"password was issued for a virtual SAP* logon on: "
+            f"**{_esc(', '.join(dpmon_sids))}**.")
+        out.append("")
+    if tickets:
+        out.append(f"### Forged MYSAPSSO2 tickets ({len(tickets)})")
+        out.append("")
+        out.append("| Issuer | User | Client | Size | TTL | Replays | Forged at |")
+        out.append("| --- | --- | --- | --- | --- | --- | --- |")
+        for t in tickets:
+            used = len(getattr(t, "used_on", []) or [])
+            out.append(
+                f"| {_esc(getattr(t, 'sid', '?'))} | "
+                f"`{_esc(getattr(t, 'user', '?'))}` | "
+                f"{_esc(getattr(t, 'client', '?'))} | "
+                f"{getattr(t, 'ticket_size', 0)} B | "
+                f"{getattr(t, 'validity_min', 0)} min | "
+                f"{used} | "
+                f"{(getattr(t, 'forged_at', '') or '')[:19]} |")
+        out.append("")
+    if created_dests:
+        out.append(f"### Injected RFC destinations ({len(created_dests)})")
+        out.append("")
+        out.append("| Dest | Source SID | Target SID | Type | Created |")
+        out.append("| --- | --- | --- | --- | --- |")
+        for d in created_dests:
+            if not isinstance(d, dict):
+                continue
+            out.append(
+                f"| `{_esc(d.get('dest_name', '?'))}` | "
+                f"{_esc(d.get('source_sid', '?'))} | "
+                f"{_esc(d.get('target_sid', '?'))} | "
+                f"{_esc(d.get('type', '?'))} | "
+                f"{(d.get('created_at', '') or '')[:19]} |")
+        out.append("")
+    return out
+
+
+def _evasion_section(state: SAPMAPState) -> list:
+    """OPSEC posture — what evasion primitives were armed."""
+    ev = getattr(state, "evasion", {}) or {}
+    armed = bool(ev.get("allow_evasion"))
+    diag = ev.get("diag_terminal_name") or ""
+    channel = ev.get("os_exec_channel") or ""
+    sso_users = ev.get("mysapsso2_users") or ""
+    baseline_at = ev.get("baseline_captured_at") or ""
+    if not (armed or diag or channel or sso_users or baseline_at):
+        return []
+    out = ["## OPSEC posture (evasion)", ""]
+    out.append(
+        "Evasion primitives armed for this engagement.  Attribution "
+        "record — matters for blue-team debrief and red-team "
+        "attribution honesty.")
+    out.append("")
+    rows = [("Tier 3 armed", "**YES**" if armed else "no")]
+    if diag:
+        rows.append(("DIAG terminal spoof", f"`{_esc(diag)}`"))
+    if channel:
+        rows.append(("Forced OS-exec channel", f"`{_esc(channel)}`"))
+    if sso_users:
+        rows.append(("MYSAPSSO2 fanout identities", f"`{_esc(sso_users)}`"))
+    if baseline_at:
+        rows.append(("Baseline captured", baseline_at[:19]))
+    out.extend(_stat_table(rows))
+    out.append("")
+    return out
+
+
 def _derive_landscape_recommendations(state: SAPMAPState) -> list:
     """Inspect the whole landscape state and produce structural
     remediation guidance — independent of whether individual findings
@@ -1873,6 +2066,15 @@ def build_markdown_report(state: SAPMAPState,
         sections.append("---")
         sections.append("")
         sections.extend(cert_dest_section)
+    for extra in (_impact_section(state),
+                  _secstore_section(state),
+                  _created_users_section(state),
+                  _persistence_section(state),
+                  _evasion_section(state)):
+        if extra:
+            sections.append("---")
+            sections.append("")
+            sections.extend(extra)
     # Hardening checklist supersedes the older _recommendations_section
     # — same author voice but driven by the central remediation catalog
     # (modules.core.sapmap_remediation) so the prose in this section and
@@ -2275,6 +2477,402 @@ def _build_landscape_svg(state: SAPMAPState) -> str:
 # + capability + recommendations); the SCC, BTP, cloud-lateral, cert-auth
 # and ATT&CK coverage sections existed in Markdown only.
 # ---------------------------------------------------------------------------
+
+def _html_attack_coverage_section(state: SAPMAPState) -> str:
+    """MITRE ATT&CK coverage — tactic-grouped grid of exercised
+    techniques.  Mirrors _attack_coverage_section (MD) so the HTML
+    report matches its Markdown twin."""
+    try:
+        from sapmap_attack import (
+            heatmap_grid, ATTACK_VERSION, lookup,
+        )
+    except Exception:
+        return ""
+    grid = heatmap_grid(state)
+    totals = grid.get("totals", {})
+    if not totals.get("techniques"):
+        return ""
+
+    rows = []
+    for col in grid.get("columns", []):
+        observed = [c for c in col["cells"] if c["score"] > 0]
+        if not observed:
+            continue
+        tech_cells, sids = [], set()
+        for c in observed:
+            info = lookup(c["id"])
+            if info:
+                tech_cells.append(
+                    f'<a href="{_hesc(info["url"])}" target="_blank" '
+                    f'rel="noopener" style="color:#0969da;'
+                    f'text-decoration:none">{_hesc(c["id"])}</a>')
+            else:
+                tech_cells.append(_hesc(c["id"]))
+            sids.update(c["sids"])
+        rows.append(
+            f'<tr><td>{_hesc(col["tactic_name"])}</td>'
+            f'<td>{" · ".join(tech_cells)}</td>'
+            f'<td class="mono">{_hesc(", ".join(sorted(sids)))}</td>'
+            f'</tr>')
+    return (
+        '<section>'
+        '<h2>🎯 MITRE ATT&amp;CK coverage</h2>'
+        '<p style="font-size:12px;color:#6b7280;margin:0 0 12px">'
+        f'This engagement exercised <b>{totals["techniques"]} techniques</b>'
+        f' across <b>{totals["tactics"]} tactics</b> '
+        f'(mapped against ATT&amp;CK Enterprise {_hesc(ATTACK_VERSION)}). '
+        f'Drop the matching <code>sapmap_attack_layer.json</code> into '
+        f'<a href="https://mitre-attack.github.io/attack-navigator/" '
+        f'target="_blank" rel="noopener">ATT&amp;CK Navigator</a> for the '
+        f'interactive heatmap.'
+        '</p>'
+        '<table class="grid"><thead><tr>'
+        '<th>Tactic</th><th>Techniques</th><th>SIDs touched</th>'
+        '</tr></thead><tbody>' + "".join(rows) + '</tbody></table>'
+        '</section>')
+
+
+def _html_medium_info_findings_section(state: SAPMAPState) -> str:
+    """Findings section for MEDIUM + INFO severities.
+
+    The HTML report already renders CRITICAL + HIGH inline in the
+    hero block; MED / INFO used to fall through the cracks entirely
+    even though they were surfaced in the GUI finding drawer.  This
+    section mirrors the MD `_findings_section` for the two lower tiers.
+    """
+    med, info = [], []
+    for sid, n in sorted(state.nodes.items()):
+        for f in (n.findings or []):
+            sev = getattr(f, "severity", None)
+            if sev == Severity.MEDIUM:
+                med.append((sid, f))
+            elif sev == Severity.INFO or sev == Severity.LOW:
+                info.append((sid, f))
+    if not med and not info:
+        return ""
+
+    def _rows(items):
+        out = ""
+        for sid, f in items:
+            det = (getattr(f, "detail", "") or "")[:200]
+            rem = getattr(f, "remediation", "")
+            if isinstance(rem, dict):
+                rem = rem.get("fix_summary", "") or ""
+            out += (
+                f'<tr>'
+                f'<td class="mono"><b>{_hesc(sid)}</b></td>'
+                f'<td>{_hesc(getattr(f, "name", "") or "?")}</td>'
+                f'<td>{_hesc(det)}</td>'
+                f'<td>{_hesc(rem)}</td>'
+                f'</tr>')
+        return out
+
+    parts = ['<section><h2>ℹ️ Medium &amp; informational findings</h2>']
+    parts.append(
+        '<p style="font-size:12px;color:#6b7280;margin:0 0 12px">'
+        'Everything the scan flagged at MEDIUM / LOW / INFO — mostly '
+        'hardening opportunities that are not immediately exploitable '
+        'but should still be tracked.'
+        '</p>')
+    if med:
+        parts.append(f'<h3 style="margin:14px 0 6px;font-size:13px">'
+                     f'Medium ({len(med)})</h3>')
+        parts.append(
+            '<table class="grid" style="font-size:12px"><thead><tr>'
+            '<th>SID</th><th>Finding</th><th>Detail</th><th>Remediation</th>'
+            '</tr></thead><tbody>' + _rows(med) + '</tbody></table>')
+    if info:
+        parts.append(f'<h3 style="margin:14px 0 6px;font-size:13px">'
+                     f'Low / Info ({len(info)})</h3>')
+        parts.append(
+            '<table class="grid" style="font-size:12px"><thead><tr>'
+            '<th>SID</th><th>Finding</th><th>Detail</th><th>Remediation</th>'
+            '</tr></thead><tbody>' + _rows(info) + '</tbody></table>')
+    parts.append('</section>')
+    return "".join(parts)
+
+
+def _html_created_users_section(state: SAPMAPState) -> str:
+    """Every SAPMAP-created / owned user across the landscape.
+
+    One row per CreatedUser so the operator has a single cleanup
+    reference at engagement end (which SID / client / method / when).
+    """
+    users = list(getattr(state, "created_users", []) or [])
+    if not users:
+        return ""
+    rows = ""
+    for u in sorted(users, key=lambda x: (x.sid, x.client, x.username)):
+        rows += (
+            f'<tr>'
+            f'<td class="mono"><b>{_hesc(u.sid)}</b></td>'
+            f'<td class="mono">{_hesc(u.username)}</td>'
+            f'<td>{_hesc(u.client)}</td>'
+            f'<td class="mono">{_hesc(u.hostname or u.ip or "?")}</td>'
+            f'<td>{_hesc(u.instance_nr or "?")}</td>'
+            f'<td>{_hesc(u.method)}</td>'
+            f'<td class="mono" style="font-size:11px">'
+            f'{_hesc((u.created_at or "")[:19])}</td>'
+            f'</tr>')
+    return (
+        '<section><h2>👤 SAPMAP-created accounts</h2>'
+        '<p style="font-size:12px;color:#6b7280;margin:0 0 12px">'
+        'Every account SAPMAP created during this engagement — one '
+        'row per (SID, client) pair.  Use "Cleanup All Users" in the '
+        'GUI or delete manually before handover.  Passwords redacted; '
+        'plaintext lives in the session <code>.sapmap</code> file.'
+        '</p>'
+        '<table class="grid"><thead><tr>'
+        '<th>SID</th><th>User</th><th>Client</th><th>Host</th>'
+        '<th>Inst</th><th>Method</th><th>Created</th>'
+        '</tr></thead><tbody>' + rows + '</tbody></table>'
+        '</section>')
+
+
+def _html_impact_section(state: SAPMAPState) -> str:
+    """Business-impact scenarios that produced records.
+
+    Only surfaces scenarios where record_count > 0 — no-hit reads are
+    just noise for an executive audience.  Groups by SID so a
+    stakeholder can see "on S4H we can read 14,382 salary records".
+    """
+    have_any = False
+    blocks = []
+    sev_color = {5: "#e74c3c", 4: "#e67e22",
+                 3: "#f1c40f", 2: "#3498db", 1: "#95a5a6"}
+    for sid, n in sorted(state.nodes.items()):
+        rows = []
+        for r in (n.impact_results or []):
+            if not isinstance(r, dict):
+                continue
+            if r.get("error") or (r.get("record_count", 0) or 0) <= 0:
+                continue
+            have_any = True
+            sev = r.get("severity", 1)
+            col = sev_color.get(sev, "#95a5a6")
+            rows.append(
+                f'<tr>'
+                f'<td><span class="badge" style="background:{col};'
+                f'color:#fff;font-size:10px;padding:2px 6px;'
+                f'border-radius:3px">'
+                f'{_hesc(r.get("severity_label", "?"))}</span></td>'
+                f'<td>{_hesc(r.get("icon", ""))} '
+                f'{_hesc(r.get("scenario", "?"))}</td>'
+                f'<td>{_hesc(r.get("headline", ""))}</td>'
+                f'<td class="num">'
+                f'{r.get("record_count", 0):,}</td>'
+                f'</tr>')
+        if rows:
+            blocks.append(
+                f'<h3 style="margin:14px 0 6px;font-size:13px">'
+                f'{_hesc(sid)}</h3>'
+                f'<table class="grid" style="font-size:12px">'
+                f'<thead><tr>'
+                f'<th>Severity</th><th>Scenario</th>'
+                f'<th>Headline</th><th>Records</th>'
+                f'</tr></thead><tbody>' + "".join(rows) +
+                '</tbody></table>')
+    if not have_any:
+        return ""
+    return (
+        '<section><h2>💰 Business impact</h2>'
+        '<p style="font-size:12px;color:#6b7280;margin:0 0 12px">'
+        'Concrete blast-radius reads across finance / HR / vendor '
+        'tables — the numbers a CISO can quote to quantify exposure.  '
+        'Empty-return scenarios are omitted; only hits are shown.'
+        '</p>' + "".join(blocks) + '</section>')
+
+
+def _html_secstore_section(state: SAPMAPState) -> str:
+    """ABAP + Java SecStore extraction results across the landscape."""
+    abap_rows = []
+    java_rows = []
+    for sid, n in sorted(state.nodes.items()):
+        for e in (n.secstore_entries or []):
+            if not isinstance(e, dict):
+                continue
+            has_pw = bool(e.get("password"))
+            abap_rows.append(
+                f'<tr>'
+                f'<td class="mono"><b>{_hesc(sid)}</b></td>'
+                f'<td class="mono">{_hesc(e.get("ident", "?"))}</td>'
+                f'<td>{_hesc(e.get("category", "?"))}</td>'
+                f'<td>'
+                + ('<span class="badge badge-bad">plaintext</span>'
+                   if has_pw else '<span class="badge">no pw</span>')
+                + '</td>'
+                f'</tr>')
+        for e in (n.java_secstore_entries or []):
+            if not isinstance(e, dict):
+                continue
+            has_val = bool(e.get("value"))
+            downstream = bool(e.get("is_downstream"))
+            java_rows.append(
+                f'<tr>'
+                f'<td class="mono"><b>{_hesc(sid)}</b></td>'
+                f'<td class="mono">{_hesc(e.get("name", "?"))}</td>'
+                f'<td>{_hesc(e.get("kind", ""))}</td>'
+                f'<td class="mono">'
+                f'{_hesc(e.get("target_sid", "") or "—")}</td>'
+                f'<td>'
+                + ('<span class="badge badge-bad">plaintext</span>'
+                   if has_val else '<span class="badge">no val</span>')
+                + ('' if not downstream else
+                   ' <span class="badge badge-mid">↓ downstream</span>')
+                + '</td>'
+                f'</tr>')
+    if not abap_rows and not java_rows:
+        return ""
+    parts = ['<section><h2>🔐 Secure-Store recovery</h2>'
+             '<p style="font-size:12px;color:#6b7280;margin:0 0 12px">'
+             'Passwords cached inside SAP secure stores that SAPMAP was '
+             'able to decrypt.  Every entry represents a credential the '
+             'operator can now log in with (or a downstream system whose '
+             'password we now hold).  Plaintext values live in '
+             '<code>loot/secstore/</code>.'
+             '</p>']
+    if abap_rows:
+        parts.append(f'<h3 style="margin:14px 0 6px;font-size:13px">'
+                     f'ABAP SecStore (RSECTAB) — {len(abap_rows)} entries</h3>'
+                     f'<table class="grid" style="font-size:12px">'
+                     f'<thead><tr><th>SID</th><th>Ident</th>'
+                     f'<th>Category</th><th>Status</th>'
+                     f'</tr></thead><tbody>' + "".join(abap_rows)
+                     + '</tbody></table>')
+    if java_rows:
+        parts.append(f'<h3 style="margin:14px 0 6px;font-size:13px">'
+                     f'Java SecStoreFS — {len(java_rows)} entries</h3>'
+                     f'<table class="grid" style="font-size:12px">'
+                     f'<thead><tr><th>SID</th><th>Name</th>'
+                     f'<th>Kind</th><th>Downstream SID</th><th>Status</th>'
+                     f'</tr></thead><tbody>' + "".join(java_rows)
+                     + '</tbody></table>')
+    parts.append('</section>')
+    return "".join(parts)
+
+
+def _html_persistence_section(state: SAPMAPState) -> str:
+    """Persistence footprint — forged tickets, dpmon SAP* activations,
+    injected RFC destinations.  Together these are what the operator
+    needs to make sure to clean up (or, for a red-team engagement,
+    what the defender needs to hunt for)."""
+    tickets = list(getattr(state, "forged_tickets", []) or [])
+    created_dests = list(getattr(state, "created_destinations", []) or [])
+    dpmon_sids = [n.sid for n in state.nodes.values()
+                  if getattr(n, "dpmon_sap_star_used", False)]
+    if not (tickets or created_dests or dpmon_sids):
+        return ""
+
+    parts = ['<section><h2>🕳️ Persistence footprint</h2>'
+             '<p style="font-size:12px;color:#6b7280;margin:0 0 12px">'
+             'Artifacts SAPMAP planted that outlive the current shell — '
+             'forged MYSAPSSO2 tickets, dpmon SAP* activations, and RFC '
+             'destinations injected into remote systems.  Every entry '
+             'here needs an explicit cleanup step at handover.'
+             '</p>']
+
+    if dpmon_sids:
+        parts.append(
+            '<h3 style="margin:14px 0 6px;font-size:13px">'
+            f'Virtual SAP* activated ({len(dpmon_sids)})</h3>'
+            '<p style="font-size:12px;color:#374151;margin:4px 0">'
+            'Kernel ≥ 790 dpmon primitive (SAP Note 3303172) — a one-time '
+            'password was issued for a virtual SAP* logon on: '
+            '<b>' + _hesc(", ".join(dpmon_sids)) + '</b>. '
+            'The primitive auto-deactivates after use but leaves an '
+            'audit trail; remind the customer to rotate SAP* on affected '
+            'clients.</p>')
+
+    if tickets:
+        rows = ""
+        for t in tickets:
+            used = len(getattr(t, "used_on", []) or [])
+            rows += (
+                f'<tr>'
+                f'<td class="mono"><b>{_hesc(getattr(t, "sid", "?"))}</b></td>'
+                f'<td class="mono">{_hesc(getattr(t, "user", "?"))}</td>'
+                f'<td>{_hesc(getattr(t, "client", "?"))}</td>'
+                f'<td>{getattr(t, "ticket_size", 0)} B</td>'
+                f'<td>{getattr(t, "validity_min", 0)} min</td>'
+                f'<td class="num">{used}</td>'
+                f'<td class="mono" style="font-size:11px">'
+                f'{_hesc((getattr(t, "forged_at", "") or "")[:19])}</td>'
+                f'</tr>')
+        parts.append(
+            f'<h3 style="margin:14px 0 6px;font-size:13px">'
+            f'Forged MYSAPSSO2 tickets ({len(tickets)})</h3>'
+            '<table class="grid" style="font-size:12px"><thead><tr>'
+            '<th>Issuer</th><th>User</th><th>Client</th><th>Size</th>'
+            '<th>TTL</th><th>Replays</th><th>Forged at</th>'
+            '</tr></thead><tbody>' + rows + '</tbody></table>')
+
+    if created_dests:
+        rows = ""
+        for d in created_dests:
+            if not isinstance(d, dict):
+                continue
+            rows += (
+                f'<tr>'
+                f'<td class="mono">{_hesc(d.get("dest_name", "?"))}</td>'
+                f'<td class="mono">{_hesc(d.get("source_sid", "?"))}</td>'
+                f'<td class="mono">{_hesc(d.get("target_sid", "?"))}</td>'
+                f'<td>{_hesc(d.get("type", "?"))}</td>'
+                f'<td class="mono" style="font-size:11px">'
+                f'{_hesc((d.get("created_at", "") or "")[:19])}</td>'
+                f'</tr>')
+        parts.append(
+            f'<h3 style="margin:14px 0 6px;font-size:13px">'
+            f'Injected RFC destinations ({len(created_dests)})</h3>'
+            '<table class="grid" style="font-size:12px"><thead><tr>'
+            '<th>Dest name</th><th>Source SID</th><th>Target SID</th>'
+            '<th>Type</th><th>Created</th>'
+            '</tr></thead><tbody>' + rows + '</tbody></table>')
+
+    parts.append('</section>')
+    return "".join(parts)
+
+
+def _html_evasion_section(state: SAPMAPState) -> str:
+    """OPSEC posture — what evasion primitives were armed for this
+    engagement.  Section is emitted only when the operator explicitly
+    opted into anything (default config = no section)."""
+    ev = getattr(state, "evasion", {}) or {}
+    if not ev:
+        return ""
+    armed = bool(ev.get("allow_evasion"))
+    diag = ev.get("diag_terminal_name") or ""
+    channel = ev.get("os_exec_channel") or ""
+    sso_users = ev.get("mysapsso2_users") or ""
+    baseline_at = ev.get("baseline_captured_at") or ""
+    if not (armed or diag or channel or sso_users or baseline_at):
+        return ""
+    rows = []
+    rows.append(("Tier 3 armed",
+                 ('<span class="badge badge-bad">YES</span>'
+                  if armed else
+                  '<span class="badge badge-ok">no</span>')))
+    if diag:
+        rows.append(("DIAG terminal spoof", f'<code>{_hesc(diag)}</code>'))
+    if channel:
+        rows.append(("Forced OS-exec channel",
+                     f'<code>{_hesc(channel)}</code>'))
+    if sso_users:
+        rows.append(("MYSAPSSO2 fanout identities",
+                     f'<code>{_hesc(sso_users)}</code>'))
+    if baseline_at:
+        rows.append(("Baseline captured", _hesc(baseline_at[:19])))
+    trs = "".join(f'<tr><td>{k}</td><td>{v}</td></tr>' for k, v in rows)
+    return (
+        '<section><h2>🥷 OPSEC posture (evasion)</h2>'
+        '<p style="font-size:12px;color:#6b7280;margin:0 0 12px">'
+        'Evasion primitives armed for this engagement.  Attribution '
+        'record — matters for both blue-team debrief and red-team '
+        'attribution honesty.'
+        '</p>'
+        '<table class="grid" style="font-size:12px">'
+        '<tbody>' + trs + '</tbody></table>'
+        '</section>')
+
 
 def _html_scc_section(state: SAPMAPState) -> str:
     """SCC landscape section — one row per Cloud Connector."""
@@ -3279,6 +3877,13 @@ def build_html_report(state: SAPMAPState,
     btp_section_html = _html_btp_section(state)
     cloud_lat_section_html = _html_cloud_lateral_section(state)
     cert_dest_section_html = _html_cert_auth_destinations_section(state)
+    attack_coverage_html = _html_attack_coverage_section(state)
+    med_info_html = _html_medium_info_findings_section(state)
+    created_users_html = _html_created_users_section(state)
+    impact_html = _html_impact_section(state)
+    secstore_html = _html_secstore_section(state)
+    persistence_html = _html_persistence_section(state)
+    evasion_html = _html_evasion_section(state)
 
     # CSS block injected once into <style> for structured remediation
     # cards + Hardening-checklist cards.
@@ -3500,6 +4105,20 @@ def build_html_report(state: SAPMAPState,
   {cloud_lat_section_html}
 
   {cert_dest_section_html}
+
+  {med_info_html}
+
+  {impact_html}
+
+  {secstore_html}
+
+  {created_users_html}
+
+  {persistence_html}
+
+  {attack_coverage_html}
+
+  {evasion_html}
 
   <section>
     <h2>📋 Recommendations</h2>
