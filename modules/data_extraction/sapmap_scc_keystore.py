@@ -939,6 +939,42 @@ def try_decrypt_users_xml(zip_path: str, backup_password: str,
         except Exception:
             pass
 
+    # --- Approach E: SCC's BackupSecret cipher (VERIFIED against 2.19) ---
+    # Reverse-engineered from
+    #   ROOT/WEB-INF/classes/com/sap/scc/config/backup/BackupSecret.class
+    #   ROOT/WEB-INF/classes/com/sap/scc/util/SecTools.class
+    # (SCC 2.19.0.2 on Windows; class references AES/GCM/NoPadding constant
+    # with GCM_TAG_BITLENGTH=128 and GCM_IV_SIZE=12).
+    #
+    # Layout:
+    #   esalt.bin        = AES-GCM(k=SHA256(pw), n=esalt[:12], ct=esalt[12:])
+    #                      → plaintext = 16-byte random salt
+    #   config/users.xml = AES-GCM(k=PBKDF2-SHA1(pw, salt, 65536, 16),
+    #                              n=file[:12], ct=file[12:])
+    #                      → plaintext = the original users.xml
+    # (Same scheme for descriptor.json and any other backup content file.)
+    if not xml_bytes and esalt and pw and len(esalt) >= 28:
+        try:
+            import hashlib as _hl
+            from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+            from cryptography.hazmat.primitives import hashes as _hz
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+            # 1. decrypt esalt.bin → 16-byte salt
+            salt_key = _hl.sha256(pw).digest()          # AES-256 key
+            salt_pt  = AESGCM(salt_key).decrypt(
+                esalt[:12], esalt[12:], None)
+            if len(salt_pt) == 16:
+                # 2. derive AES-128 content key
+                kdf = PBKDF2HMAC(algorithm=_hz.SHA1(), length=16,
+                                  salt=salt_pt, iterations=65536)
+                content_key = kdf.derive(pw)
+                # 3. decrypt the content file
+                if len(encrypted) >= 28:
+                    xml_bytes = AESGCM(content_key).decrypt(
+                        encrypted[:12], encrypted[12:], None)
+        except Exception:
+            pass
+
     if xml_bytes is None:
         return None
 
