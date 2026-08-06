@@ -2052,6 +2052,379 @@ def _build_landscape_svg(state: SAPMAPState) -> str:
     return svg
 
 
+# ---------------------------------------------------------------------------
+# HTML report sections — ported 1:1 from the equivalent Markdown builders
+# so the HTML report has the same coverage.  Issue #31 root cause: build_
+# html_report only rendered a subset (findings + chains + inventory + creds
+# + capability + recommendations); the SCC, BTP, cloud-lateral, cert-auth
+# and ATT&CK coverage sections existed in Markdown only.
+# ---------------------------------------------------------------------------
+
+def _html_scc_section(state: SAPMAPState) -> str:
+    """SCC landscape section — one row per Cloud Connector."""
+    sccs = (getattr(state, "scc_nodes", {}) or {})
+    if not sccs:
+        return ""
+    rows = []
+    for host, sn in sorted(sccs.items()):
+        cves_confirmed = getattr(sn, "cves_confirmed", []) or []
+        cves_suspect = getattr(sn, "cves_suspected", []) or []
+        cves_cell = ""
+        if cves_confirmed:
+            cves_cell += ('<span class="risk-pill" style="background:#c0392b">'
+                          + _hesc(", ".join(cves_confirmed)) + '</span> ')
+        if cves_suspect:
+            cves_cell += ('<span class="badge" style="background:#f3d5c4;'
+                          'color:#943e00">' + _hesc(", ".join(cves_suspect))
+                          + '</span>')
+        if not cves_cell:
+            cves_cell = "—"
+        default = ('<span class="risk-pill" style="background:#c0392b">LIVE</span>'
+                    if getattr(sn, "default_creds_live", False) else "—")
+        pwned = ('<span class="risk-pill" style="background:#8b0000">⚡ PWNED</span>'
+                  if getattr(sn, "pwned", False) else "—")
+        ks_extracted = "✅" if getattr(sn, "keystore_extracted", False) else "—"
+        ssfs = "✅" if getattr(sn, "ssfs_decrypted", False) else "—"
+        pp_weak = getattr(sn, "pp_weak_count", 0) or 0
+        pp_cell = (f'<span class="badge" style="background:#f3d5c4;'
+                   f'color:#943e00">{pp_weak} weak</span>'
+                   if pp_weak else "—")
+        creds_n = len(getattr(sn, "credentials", []) or [])
+        creds_cell = (f'<span class="badge" style="background:#d4edda;'
+                      f'color:#155724">{creds_n}</span>' if creds_n else "—")
+        nmap = len(getattr(sn, "mappings", []) or [])
+        rows.append(
+            f'<tr>'
+            f'<td class="mono"><b>{_hesc(host)}</b></td>'
+            f'<td>{_hesc(getattr(sn, "version", "") or "?")}</td>'
+            f'<td>{pwned}</td>'
+            f'<td>{cves_cell}</td>'
+            f'<td>{default}</td>'
+            f'<td class="num">{creds_cell}</td>'
+            f'<td class="num">{nmap}</td>'
+            f'<td>{ks_extracted}</td>'
+            f'<td>{ssfs}</td>'
+            f'<td>{pp_cell}</td>'
+            f'</tr>')
+    return (
+        '<section>'
+        '<h2>☁️ SAP Cloud Connectors</h2>'
+        '<p style="font-size:12px;color:#6b7280;margin:0 0 12px">'
+        'On-premise ↔ BTP tunnel gateways.  '
+        '<b>Keystore</b> ✅ means the backup zip was pulled and parsed '
+        '(crown-jewel material lives in <code>loot/scc/&lt;host&gt;/</code>).  '
+        '<b>SSFS</b> ✅ means the secure-store file was decrypted (JAVA '
+        'keystore / LDAP / Kerberos / proxy passwords recovered).  '
+        '<b>PP weak</b> counts high/critical Principal-Propagation trust-rule '
+        'issues surfaced by the PP analyser.'
+        '</p>'
+        '<table class="grid"><thead><tr>'
+        '<th>Host</th><th>Version</th><th>Status</th>'
+        '<th>CVEs</th><th>Default creds</th>'
+        '<th>Creds captured</th><th>Mappings</th>'
+        '<th>Keystore</th><th>SSFS</th><th>PP</th>'
+        '</tr></thead><tbody>' + "".join(rows) + '</tbody></table>'
+        '</section>')
+
+
+def _html_btp_section(state: SAPMAPState) -> str:
+    """BTP subaccount inventory."""
+    subs = (getattr(state, "btp_subaccounts", {}) or {})
+    if not subs:
+        return ""
+    rows = []
+    for uuid, sub in sorted(
+            subs.items(),
+            key=lambda kv: (getattr(kv[1], "subdomain", "") or kv[0])):
+        dests = list(getattr(sub, "destinations", []) or [])
+        clear = sum(1 for d in dests
+                     if getattr(d, "cleartext_captured", False)
+                     or (isinstance(d, dict) and d.get("cleartext_captured")))
+        linked = sum(1 for d in dests
+                      if (getattr(d, "linked_target_sid", "")
+                          or (isinstance(d, dict)
+                              and d.get("linked_target_sid"))))
+        pwned = ('<span class="risk-pill" style="background:#8b0000">⚡</span>'
+                  if getattr(sub, "pwned", False) else "—")
+        cert = ("🔒" if getattr(sub, "cert_auth_trusted", False) else "—")
+        sub_label = (getattr(sub, "subdomain", "")
+                      or getattr(sub, "display_name", "")
+                      or uuid[:8])
+        clear_cell = (f'<span class="risk-pill" style="background:#c0392b">'
+                      f'{clear}</span>' if clear else "—")
+        linked_cell = (f'<span class="badge" style="background:#d4edda;'
+                       f'color:#155724">{linked}</span>' if linked else "—")
+        rows.append(
+            f'<tr>'
+            f'<td class="mono"><b>{_hesc(sub_label)}</b></td>'
+            f'<td>{_hesc(getattr(sub, "region", "") or "?")}</td>'
+            f'<td class="num">{len(dests)}</td>'
+            f'<td class="num">{clear_cell}</td>'
+            f'<td class="num">{linked_cell}</td>'
+            f'<td>{cert}</td>'
+            f'<td>{pwned}</td>'
+            f'</tr>')
+    return (
+        '<section>'
+        '<h2>☁️ SAP BTP subaccounts</h2>'
+        '<p style="font-size:12px;color:#6b7280;margin:0 0 12px">'
+        'Cloud tenants reachable from this landscape.  <b>Cleartext</b> = '
+        'BTP destinations with captured on-prem credentials in plain text; '
+        '<b>Linked</b> = destinations resolved to a mapped on-prem SID.  '
+        '<b>Cert-auth 🔒</b> = an on-prem X.509 identity successfully '
+        'authenticated at the TLS layer against this tenant.'
+        '</p>'
+        '<table class="grid"><thead><tr>'
+        '<th>Subdomain</th><th>Region</th><th>Destinations</th>'
+        '<th>Cleartext</th><th>Linked</th><th>Cert-auth</th><th>Pwned</th>'
+        '</tr></thead><tbody>' + "".join(rows) + '</tbody></table>'
+        '</section>')
+
+
+def _html_cloud_lateral_section(state: SAPMAPState) -> str:
+    """Cloud ↔ on-prem lateral-move summary — HTML version of the
+    same narrative logic used in the Markdown report."""
+    subs = getattr(state, "btp_subaccounts", None) or {}
+    if not subs:
+        return ""
+    total_dests = sum(
+        len(list(getattr(s, "destinations", []) or []))
+        for s in subs.values())
+    if total_dests == 0:
+        return ""
+
+    # Same mint-provenance gathering as the MD path.
+    mint_findings_by_uuid: dict = {}
+    for node in state.nodes.values():
+        for f in getattr(node, "findings", []) or []:
+            ref = getattr(f, "ref", "") or ""
+            if not ref.startswith("onprem.to.btp.token_minted"):
+                continue
+            meta = getattr(f, "meta", {}) or {}
+            uuid = (meta.get("region", "")
+                     if not meta.get("zid") else meta.get("zid", ""))
+            mint_findings_by_uuid.setdefault(uuid, []).append(f)
+    for f in getattr(state, "findings", None) or []:
+        ref = getattr(f, "ref", "") or ""
+        if ref == "btp.token_minted_via_local_cert":
+            meta = getattr(f, "meta", {}) or {}
+            zid = meta.get("region", "") or ""
+            mint_findings_by_uuid.setdefault(zid, []).append(f)
+
+    interesting = []
+    for uuid, sub in subs.items():
+        dests = list(getattr(sub, "destinations", []) or [])
+        region = getattr(sub, "region", "") or ""
+        finds = (mint_findings_by_uuid.get(uuid, [])
+                  + mint_findings_by_uuid.get(region, []))
+        if dests or finds:
+            interesting.append((uuid, sub, dests, finds))
+    if not interesting:
+        return ""
+
+    blocks = []
+    for uuid, sub, dests, mint_findings in interesting:
+        subdomain = (getattr(sub, "subdomain", "")
+                      or getattr(sub, "display_name", "")
+                      or uuid[:8])
+        region = getattr(sub, "region", "") or "?"
+        clear_ct = sum(
+            1 for d in dests
+            if getattr(d, "cleartext_captured", False)
+            or (isinstance(d, dict) and d.get("cleartext_captured")))
+        linked_ct = sum(
+            1 for d in dests
+            if (getattr(d, "linked_target_sid", "")
+                 or (isinstance(d, dict)
+                     and d.get("linked_target_sid"))))
+        linked_sids = sorted({
+            (getattr(d, "linked_target_sid", "")
+             or (isinstance(d, dict) and d.get("linked_target_sid")))
+            for d in dests
+            if (getattr(d, "linked_target_sid", "")
+                or (isinstance(d, dict) and d.get("linked_target_sid")))
+        })
+        # Back-edges to on-prem
+        back_edges = [
+            c for c in getattr(state, "connections", []) or []
+            if c.source_sid == f"BTP:{uuid[:8]}" and c.target_sid]
+        sap_all_hits = [c for c in back_edges if c.has_sap_all]
+
+        # Headline
+        pieces = [f'<b>{len(dests)}</b> destination(s) enumerated']
+        if clear_ct:
+            pieces.append(f'<b>{clear_ct}</b> carrying cleartext credentials')
+        if linked_ct:
+            targets_txt = ", ".join(
+                f'<code>{_hesc(s)}</code>' for s in linked_sids)
+            pieces.append(
+                f'<b>{linked_ct}</b> linked to on-prem ({targets_txt})')
+        if sap_all_hits:
+            pieces.append(
+                f'<b>{len(sap_all_hits)}</b> credential(s) confirmed with '
+                f'<span class="risk-pill" style="background:#8b0000">'
+                f'SAP_ALL</span> on the target')
+        headline = " · ".join(pieces) + "."
+
+        # Mint provenance
+        mint_html = ""
+        if mint_findings:
+            bullets = []
+            for f in mint_findings:
+                meta = getattr(f, "meta", {}) or {}
+                ref = getattr(f, "ref", "") or ""
+                thumb = meta.get("thumbprint", "")[:12]
+                if "via_cert" in ref:
+                    src = (f'SM59 destination '
+                           f'<code>{_hesc(meta.get("destination", "?"))}</code> '
+                           f'on <code>{_hesc(getattr(f, "sid", "?"))}</code> '
+                           f'(PSE <code>{_hesc(meta.get("pse", "?"))}</code>)')
+                elif "via_local_cert" in ref:
+                    src = (f'local cert file '
+                           f'<code>{_hesc(meta.get("cert_path", "?"))}</code> '
+                           f'on the SAPMAP host')
+                else:
+                    src = "unknown mint path"
+                bullets.append(
+                    f'<li>Token minted via {src}; RFC-8705 x5t#S256 prefix '
+                    f'<code>{_hesc(thumb)}…</code></li>')
+            mint_html = ('<ul style="margin:8px 0;padding-left:20px;'
+                         'font-size:13px">' + "".join(bullets) + '</ul>')
+
+        # Back-edge table
+        edge_rows = []
+        for c in back_edges:
+            target = state.get_node(c.target_sid)
+            target_label = c.target_sid or "?"
+            if target and (target.hostname or target.ip):
+                target_label += f' ({target.hostname or target.ip})'
+            sap_all = ('<span class="risk-pill" style="background:#8b0000">'
+                        'yes</span>' if c.has_sap_all else "—")
+            if c.check_error:
+                note = _hesc(c.check_error[:80])
+            elif c.tested and c.logon_successful:
+                note = "logon OK"
+            elif c.tested:
+                note = "credential rejected"
+            else:
+                note = "not tested"
+            edge_rows.append(
+                f'<tr>'
+                f'<td class="mono"><code>{_hesc(c.destination_name or "?")}</code></td>'
+                f'<td>{_hesc(target_label)}</td>'
+                f'<td class="mono"><code>{_hesc(c.rfc_user or "?")}</code></td>'
+                f'<td>{_hesc(c.client or "?")}</td>'
+                f'<td>{sap_all}</td>'
+                f'<td>{note}</td>'
+                f'</tr>')
+        edge_table_html = ""
+        if edge_rows:
+            edge_table_html = (
+                '<table class="grid" style="margin-top:10px"><thead><tr>'
+                '<th>Destination</th><th>Target</th><th>User</th><th>Client</th>'
+                '<th>SAP_ALL</th><th>Notes</th></tr></thead><tbody>'
+                + "".join(edge_rows) + '</tbody></table>')
+
+        # Password reuse callout
+        pw_users: dict = {}
+        for c in back_edges:
+            if c.secstore_password and c.rfc_user:
+                pw_users.setdefault(c.secstore_password, set()).add(
+                    (c.rfc_user, c.target_sid))
+        reuse = {p: v for p, v in pw_users.items() if len(v) > 1}
+        reuse_html = ""
+        if reuse:
+            reuse_bullets = []
+            for pw, pairs in reuse.items():
+                pairs_str = ", ".join(
+                    f'<code>{_hesc(u)}@{_hesc(s)}</code>'
+                    for u, s in sorted(pairs))
+                reuse_bullets.append(
+                    f'<li>The same password unlocks {pairs_str} — one '
+                    f'leak, multiple systems compromised.</li>')
+            reuse_html = (
+                '<p style="margin-top:10px;color:#8b0000;font-weight:600">'
+                '⚠️ Password reuse detected:</p>'
+                '<ul style="margin:4px 0 8px;padding-left:20px;font-size:13px">'
+                + "".join(reuse_bullets) + '</ul>')
+
+        blocks.append(
+            f'<div style="margin-bottom:20px;padding:14px 16px;'
+            f'background:#fafbfc;border-left:3px solid #e07f00;'
+            f'border-radius:4px">'
+            f'<h3 style="margin:0 0 8px;font-size:14px">'
+            f'<code>{_hesc(subdomain)}</code> '
+            f'<span style="color:#6b7280;font-weight:400">'
+            f'(region <code>{_hesc(region)}</code>)</span></h3>'
+            f'<p style="margin:0;font-size:13px">{headline}</p>'
+            f'{mint_html}{edge_table_html}{reuse_html}'
+            f'</div>')
+
+    return (
+        '<section>'
+        '<h2>🌉 Cloud ↔ on-prem lateral moves</h2>'
+        f'<p style="font-size:12px;color:#6b7280;margin:0 0 16px">'
+        f'SAPMAP established <b>{len(interesting)}</b> cloud-side lateral '
+        f'entry point(s).  Each represents a working chain from on-prem '
+        f'cert-auth (or workstation-side cert files) through SAP BTP\'s '
+        f'XSUAA + Destination Service to on-prem back-ends whose '
+        f'credentials leaked in the clear.'
+        f'</p>'
+        + "".join(blocks) + '</section>')
+
+
+def _html_cert_auth_destinations_section(state: SAPMAPState) -> str:
+    """Cert-authenticated Type-G / H HTTP destinations."""
+    rows_data: list[tuple[str, str, str, str, str, bool]] = []
+    for node in state.nodes.values():
+        for c in state.get_connections_from(node.sid):
+            if c.http_auth_type != "X509":
+                continue
+            is_btp = (getattr(c, "is_btp_dest", False)
+                        or ".hana.ondemand.com" in (c.http_url or ""))
+            rows_data.append((
+                node.sid,
+                c.destination_name or "?",
+                c.http_url or "?",
+                c.http_cert_pse or "?",
+                c.target_sid or "",
+                bool(is_btp),
+            ))
+    if not rows_data:
+        return ""
+    n_btp = sum(1 for r in rows_data if r[5])
+    rows = []
+    for src, dest, url, pse, tgt, is_btp in sorted(rows_data):
+        rows.append(
+            f'<tr>'
+            f'<td class="mono"><b>{_hesc(src)}</b></td>'
+            f'<td class="mono">{_hesc(dest)}</td>'
+            f'<td class="mono" style="font-size:11px;word-break:break-all;'
+            f'max-width:340px">{_hesc(url)}</td>'
+            f'<td class="mono"><code>{_hesc(pse)}</code></td>'
+            f'<td>{_hesc(tgt) if tgt else "—"}</td>'
+            f'<td>{"☁️" if is_btp else "—"}</td>'
+            f'</tr>')
+    return (
+        '<section>'
+        '<h2>🔐 Certificate-authenticated HTTP destinations</h2>'
+        f'<p style="font-size:12px;color:#6b7280;margin:0 0 12px">'
+        f'{len(rows_data)} X.509 client-cert destination(s) discovered '
+        f'({n_btp} pointing at BTP / <code>*.hana.ondemand.com</code>).  '
+        f'These carry <b>no stored password</b> — auth uses a STRUST PSE '
+        f'on the source system.  With <code>S_RFC</code> + '
+        f'<code>S_ICF</code> on that source, an operator proxies HTTP '
+        f'through <code>HTTP_CLIENT_CREATE_BY_DESTINATION</code>: the '
+        f'kernel performs mutual-TLS transparently and the target sees '
+        f'requests as coming from the SAP system itself.'
+        f'</p>'
+        '<table class="grid"><thead><tr>'
+        '<th>Source</th><th>Destination</th><th>Target URL</th>'
+        '<th>PSE</th><th>Target node</th><th>BTP</th>'
+        '</tr></thead><tbody>' + "".join(rows) + '</tbody></table>'
+        '</section>')
+
+
 def build_html_report(state: SAPMAPState,
                         engagement_name: Optional[str] = None) -> str:
     """Build a single self-contained HTML page with embedded CSS.
@@ -2457,6 +2830,15 @@ def build_html_report(state: SAPMAPState,
     else:
         capability_html = ""
 
+    # Cloud / trust-edge sections that Markdown had all along — porting
+    # into HTML for issue #31 parity.  Each returns "" when the
+    # underlying landscape state doesn't warrant the section, so empty
+    # engagements don't accumulate empty section blocks.
+    scc_section_html = _html_scc_section(state)
+    btp_section_html = _html_btp_section(state)
+    cloud_lat_section_html = _html_cloud_lateral_section(state)
+    cert_dest_section_html = _html_cert_auth_destinations_section(state)
+
     # CSS block injected once into <style> for structured remediation
     # cards + Hardening-checklist cards.
     rem_block_css = _REM_BLOCK_CSS
@@ -2668,6 +3050,14 @@ def build_html_report(state: SAPMAPState,
   </section>
 
   {capability_html}
+
+  {scc_section_html}
+
+  {btp_section_html}
+
+  {cloud_lat_section_html}
+
+  {cert_dest_section_html}
 
   <section>
     <h2>📋 Recommendations</h2>

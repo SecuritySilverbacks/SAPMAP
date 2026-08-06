@@ -400,19 +400,118 @@ def test_html_report_recommendations_section_renders_derived_cards():
     assert "SAP Note 1408081" in html
 
 
-def test_html_report_no_dedicated_scc_section_even_with_sccs():
-    """Belt-and-braces: even when SCCs exist, no separate <section>
-    for them — they live inline."""
+def test_html_report_has_dedicated_scc_section_when_sccs_present():
+    """Issue #31: SCC nodes get their own <section> in the HTML report
+    (in addition to their inline row in the landscape inventory).
+    Previously the report only had SCC data in the inventory table —
+    dedicated section was Markdown-only."""
     class _FakeSCC:
         host = "scc1"
         version = "2.10"
-        cves_suspected = []
+        cves_confirmed = []
+        cves_suspected = ["CVE-2024-XXXX"]
         mappings = []
         default_creds_live = False
         pwned = False
+        credentials = []
+        keystore_extracted = False
+        ssfs_decrypted = False
+        pp_weak_count = 0
     state = SAPMAPState()
     state.scc_nodes = {"scc1": _FakeSCC()}
     html = build_html_report(state)
-    # The bullet header marker we used to emit
-    assert "SAP Cloud Connectors" not in html or \
-           html.find("SAP Cloud Connectors") < 0
+    # Dedicated section heading must be present
+    assert "SAP Cloud Connectors" in html
+    # And the host must appear inside the new section (as a <b>Host</b>
+    # cell in the section's table)
+    assert "scc1" in html
+
+
+def test_html_report_scc_section_richer_than_inventory_row():
+    """Issue #31: SCC section surfaces fields that the inventory row
+    doesn't — keystore/SSFS extraction state, PP-analysis weakness
+    count, captured-cred count, confirmed vs suspected CVEs."""
+    class _FakeSCC:
+        host = "scc-rich"
+        version = "2.19.0.2"
+        cves_confirmed = ["CVE-2024-42020"]
+        cves_suspected = []
+        mappings = [{"virtual_host": "vh1"}, {"virtual_host": "vh2"}]
+        default_creds_live = True
+        pwned = True
+        credentials = [
+            Credentials(username="Administrator", password="stolen",
+                         verified=True)]
+        keystore_extracted = True
+        ssfs_decrypted = True
+        pp_weak_count = 3
+    state = SAPMAPState()
+    state.scc_nodes = {"scc-rich": _FakeSCC()}
+    html = build_html_report(state)
+    # Confirmed CVE should appear as a red risk pill
+    assert "CVE-2024-42020" in html
+    # LIVE default-creds badge
+    assert "LIVE" in html
+    # PP weakness count in a badge
+    assert "3 weak" in html
+
+
+def test_html_report_has_btp_section_when_subaccounts_present():
+    """BTP subaccount section — mirrors the MD _btp_section."""
+    class _FakeDest:
+        cleartext_captured = True
+        linked_target_sid = "S4P"
+    class _FakeSub:
+        subdomain = "researchlab-yehctg7m"
+        display_name = "researchlab-yehctg7m"
+        region = "eu10"
+        destinations = [_FakeDest()]
+        pwned = True
+        cert_auth_trusted = True
+    state = SAPMAPState()
+    state.btp_subaccounts = {"uuid1234": _FakeSub()}
+    html = build_html_report(state)
+    assert "SAP BTP subaccounts" in html
+    assert "researchlab-yehctg7m" in html
+    assert "eu10" in html
+
+
+def test_html_report_has_cloud_lateral_section_when_dests_present():
+    """Cloud ↔ on-prem lateral section renders when a subaccount has
+    at least one destination."""
+    class _FakeDest:
+        cleartext_captured = True
+        linked_target_sid = "S4P"
+    class _FakeSub:
+        subdomain = "researchlab-yehctg7m"
+        display_name = "researchlab-yehctg7m"
+        region = "eu10"
+        destinations = [_FakeDest()]
+        pwned = True
+        cert_auth_trusted = False
+    state = SAPMAPState()
+    state.btp_subaccounts = {"uuid1234": _FakeSub()}
+    html = build_html_report(state)
+    assert "Cloud" in html and "on-prem lateral moves" in html
+
+
+def test_html_report_has_cert_auth_dests_section():
+    """Cert-authenticated Type-G/H HTTP destinations section."""
+    state = SAPMAPState()
+    src = SAPNode(sid="S4P", system_type="ABAP",
+                   hostname="s4p", ip="10.0.0.1")
+    state.nodes["S4P"] = src
+    state.connections.append(RFCConnection(
+        source_sid="S4P", source_host="s4p",
+        destination_name="BTP_TENANT",
+        target_sid="",
+        http_url="https://researchlab-yehctg7m.cfapps.eu10.hana.ondemand.com",
+        http_auth_type="X509",
+        http_cert_pse="DFAULT",
+        conn_type="http",
+        rfc_type="G",
+    ))
+    html = build_html_report(state)
+    assert "Certificate-authenticated HTTP destinations" in html
+    assert "BTP_TENANT" in html
+    assert "DFAULT" in html
