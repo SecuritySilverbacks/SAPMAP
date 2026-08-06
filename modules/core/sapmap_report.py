@@ -547,21 +547,234 @@ def _credentials_section(state: SAPMAPState) -> list:
 
 
 def _scc_section(state: SAPMAPState) -> list:
-    """Cloud Connector landscape, if any SCCs are mapped."""
+    """Cloud Connector landscape, if any SCCs are mapped.
+
+    Surfaces every SCCNode field that carries loot / risk signal:
+    version + confirmed CVEs, HA topology, principal-propagation
+    posture, captured admin credentials, extracted keystores,
+    decrypted SSFS, mapped subaccounts.  A shallow one-line table
+    per SCC would hide the crown-jewels (pp_ca_privkey_fp,
+    unlocked_keystores, users_xml_loot_path) that are exactly what a
+    stakeholder needs to see.
+    """
     sccs = (getattr(state, "scc_nodes", {}) or {})
     if not sccs:
         return []
     out = ["## SAP Cloud Connectors", ""]
-    out.append("| Host | Version | CVEs (suspected) | Default creds | "
-               "Mappings |")
-    out.append("| --- | --- | --- | --- | --- |")
+
+    # -- Landscape roll-up table --
+    out.append("| Host | Version | HA | CVEs | Default creds | Mappings | "
+               "SSFS | Keystore | PP weak | Creds captured |")
+    out.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     for host, sn in sorted(sccs.items()):
-        cves = ", ".join(getattr(sn, "cves_suspected", []) or []) or "—"
-        default = "**LIVE**" if getattr(sn, "default_creds_live", False) else "—"
+        conf = list(getattr(sn, "cves_confirmed", []) or [])
+        susp = list(getattr(sn, "cves_suspected", []) or [])
+        if conf:
+            cves = "**" + ", ".join(conf) + "**"
+            if susp:
+                cves += f" ({len(susp)} suspected)"
+        elif susp:
+            cves = f"{len(susp)} suspected"
+        else:
+            cves = "—"
+        default = ("**LIVE**"
+                   if getattr(sn, "default_creds_live", False) else "—")
         nmap = len(getattr(sn, "mappings", []) or [])
-        out.append(f"| {host} | {_esc(getattr(sn, 'version', '') or '?')} | "
-                   f"{_esc(cves)} | {default} | {nmap} |")
+        ssfs = ("✓" if getattr(sn, "ssfs_decrypted", False) else "—")
+        ks = ("✓" if getattr(sn, "keystore_extracted", False) else "—")
+        pp = getattr(sn, "pp_weak_count", 0)
+        pp_cell = f"**{pp}**" if pp else "—"
+        ncreds = len(getattr(sn, "credentials", []) or [])
+        creds_cell = ("**" + str(ncreds) + "**" if ncreds else "—")
+        ha = getattr(sn, "ha_role", "") or "—"
+        ver = getattr(sn, "version", "") or "?"
+        out.append(f"| {host} | {_esc(ver)} | {_esc(ha)} | {cves} | "
+                   f"{default} | {nmap} | {ssfs} | {ks} | {pp_cell} | "
+                   f"{creds_cell} |")
     out.append("")
+
+    # -- Per-SCC detail (only when we actually have loot to surface) --
+    for host, sn in sorted(sccs.items()):
+        creds = list(getattr(sn, "credentials", []) or [])
+        keystore = getattr(sn, "keystore_extracted", False)
+        ssfs = getattr(sn, "ssfs_decrypted", False)
+        pp_ca = getattr(sn, "pp_ca_privkey_fp", "") or ""
+        tun_fp = getattr(sn, "tunnel_privkey_fp", "") or ""
+        unlocked = list(getattr(sn, "unlocked_keystores", []) or [])
+        ssfs_keys = list(getattr(sn, "ssfs_secrets_keys", []) or [])
+        pp_ana = getattr(sn, "pp_analysis", {}) or {}
+        sub_uuids = list(getattr(sn, "subaccount_uuids", []) or [])
+        loc_ids = list(getattr(sn, "location_ids", []) or [])
+        region = getattr(sn, "tunnel_region", "") or ""
+        replayed = getattr(sn, "tunnel_replayed", False)
+        users_xml = getattr(sn, "users_xml_loot_path", "") or ""
+        ha_peer = getattr(sn, "ha_shadow_host", "") or ""
+        has_detail = (creds or keystore or ssfs or pp_ca or tun_fp
+                      or unlocked or ssfs_keys or pp_ana or sub_uuids
+                      or loc_ids or users_xml or ha_peer or replayed)
+        if not has_detail:
+            continue
+
+        out.append(f"### SCC {host} — details")
+        out.append("")
+
+        # HA / trust topology
+        if ha_peer or region or sub_uuids or loc_ids:
+            topo_rows = []
+            if getattr(sn, "ha_role", ""):
+                topo_rows.append(
+                    ("HA role",
+                     f"{_esc(sn.ha_role)}"
+                     + (f" (peer: {_esc(ha_peer)} · "
+                        f"{_esc(getattr(sn, 'ha_peer_role', '') or '?')})"
+                        if ha_peer else "")))
+            if region:
+                topo_rows.append(("BTP tunnel region", _esc(region)))
+            if sub_uuids:
+                topo_rows.append(
+                    ("Subaccounts trusted",
+                     f"{len(sub_uuids)} — "
+                     f"{_esc(', '.join(sub_uuids[:3]))}"
+                     + ("…" if len(sub_uuids) > 3 else "")))
+            if loc_ids:
+                topo_rows.append(
+                    ("Location IDs",
+                     _esc(", ".join(loc_ids)) or "—"))
+            if replayed:
+                topo_rows.append(
+                    ("Tunnel handshake",
+                     "**replayed** (persistence achieved)"))
+            out.extend(_stat_table(topo_rows))
+            out.append("")
+
+        # Crown-jewel artifacts
+        crown_rows = []
+        if keystore and getattr(sn, "keystore_loot_path", ""):
+            crown_rows.append(
+                ("Keystore",
+                 f"extracted → `{_esc(sn.keystore_loot_path)}`"))
+        if users_xml:
+            crown_rows.append(
+                ("Users.xml (plaintext)",
+                 f"decrypted → `{_esc(users_xml)}`"))
+        if tun_fp:
+            crown_rows.append(
+                ("Tunnel private key",
+                 f"SHA-256 `{_esc(tun_fp[:16])}…` — system-identity"))
+        if pp_ca:
+            crown_rows.append(
+                ("**PP CA private key**",
+                 f"SHA-256 `{_esc(pp_ca[:16])}…` — **can mint client "
+                 "certs for any subaccount user**"))
+        if ssfs and (getattr(sn, "ssfs_secrets_path", "") or ssfs_keys):
+            crown_rows.append(
+                ("SSFS secrets",
+                 f"decrypted → "
+                 f"`{_esc(getattr(sn, 'ssfs_secrets_path', '') or '?')}`"
+                 f" ({len(ssfs_keys)} keys)"))
+        if crown_rows:
+            out.append("**Crown-jewel artifacts:**")
+            out.append("")
+            out.extend(_stat_table(crown_rows))
+            out.append("")
+
+        # SSFS secret key names (names only — plaintext values stay
+        # in the side file at 0600).
+        if ssfs_keys:
+            out.append(
+                f"_SSFS secret keys captured ({len(ssfs_keys)}): "
+                + _esc(", ".join(ssfs_keys[:20]))
+                + ("…" if len(ssfs_keys) > 20 else "")
+                + "_")
+            out.append("")
+
+        # Unlocked keystores (one line per cert)
+        if unlocked:
+            out.append("**Unlocked tunnel keystores:**")
+            out.append("")
+            out.append("| Path | Cert subject | SHA-256 |")
+            out.append("| --- | --- | --- |")
+            for k in unlocked[:20]:
+                p = k.get("path", "") or "?"
+                subj = k.get("cert_subject", "") or "?"
+                fp = k.get("cert_sha256", "") or ""
+                fp_short = (fp[:16] + "…") if fp else "—"
+                out.append(f"| `{_esc(p)}` | {_esc(subj)} | "
+                           f"`{_esc(fp_short)}` |")
+            if len(unlocked) > 20:
+                out.append(f"| …{len(unlocked) - 20} more | | |")
+            out.append("")
+
+        # Captured admin credentials
+        if creds:
+            out.append("**Captured admin credentials:**")
+            out.append("")
+            out.append("| User | Hash / marker | Verified |")
+            out.append("| --- | --- | --- |")
+            for c in creds:
+                user = (getattr(c, "user", "")
+                        or (isinstance(c, dict) and c.get("user"))
+                        or "?")
+                # Never emit the plaintext password — mark presence only.
+                pw = (getattr(c, "password", "")
+                      or (isinstance(c, dict) and c.get("password"))
+                      or "")
+                h = (getattr(c, "hash", "")
+                     or (isinstance(c, dict) and c.get("hash"))
+                     or "")
+                verified = bool(
+                    getattr(c, "verified", False)
+                    or (isinstance(c, dict) and c.get("verified")))
+                if pw:
+                    marker = "plaintext captured"
+                elif h:
+                    marker = f"hash `{_esc(h[:24])}…`"
+                else:
+                    marker = "—"
+                out.append(f"| `{_esc(user)}` | {marker} | "
+                           f"{'✓' if verified else '—'} |")
+            out.append("")
+
+        # Principal-Propagation analyser verdict
+        summary = pp_ana.get("summary") if isinstance(pp_ana, dict) else None
+        findings = pp_ana.get("findings") if isinstance(pp_ana, dict) else None
+        if summary or findings:
+            crit = (summary or {}).get("critical", 0)
+            high = (summary or {}).get("high", 0)
+            med = (summary or {}).get("medium", 0)
+            out.append(
+                f"**Principal-Propagation analysis:** "
+                f"{crit} CRITICAL · {high} HIGH · {med} MEDIUM "
+                f"(analysed at {_esc(getattr(sn, 'pp_analysis_at', '') or '?')})")
+            out.append("")
+            if findings:
+                out.append("| Severity | Finding |")
+                out.append("| --- | --- |")
+                for f in findings[:15]:
+                    sev = f.get("severity", "?") if isinstance(f, dict) else "?"
+                    hl = ((f.get("headline") or f.get("title") or "")
+                          if isinstance(f, dict) else str(f))
+                    out.append(f"| {_esc(sev)} | {_esc(hl)} |")
+                if len(findings) > 15:
+                    out.append(f"| … | {len(findings) - 15} more |")
+                out.append("")
+
+        # Confirmed CVEs (with severity from cve_details if present)
+        cve_det = getattr(sn, "cve_details", []) or []
+        if cve_det:
+            out.append("**CVE assessment:**")
+            out.append("")
+            out.append("| CVE | Severity | Status | Headline |")
+            out.append("| --- | --- | --- | --- |")
+            for d in cve_det:
+                if not isinstance(d, dict):
+                    continue
+                out.append(
+                    f"| {_esc(d.get('cve', '?'))} | "
+                    f"{_esc(d.get('severity', '?'))} | "
+                    f"{_esc(d.get('status', '?'))} | "
+                    f"{_esc(d.get('headline', ''))} |")
+            out.append("")
     return out
 
 
@@ -2109,6 +2322,223 @@ def _html_scc_section(state: SAPMAPState) -> str:
             f'<td>{ssfs}</td>'
             f'<td>{pp_cell}</td>'
             f'</tr>')
+    # Per-SCC detail blocks — crown-jewel artifacts, unlocked
+    # keystores, captured admin creds, PP analyser verdict, CVE detail.
+    detail_blocks = []
+    for host, sn in sorted(sccs.items()):
+        creds = list(getattr(sn, "credentials", []) or [])
+        keystore = getattr(sn, "keystore_extracted", False)
+        ssfs = getattr(sn, "ssfs_decrypted", False)
+        pp_ca = getattr(sn, "pp_ca_privkey_fp", "") or ""
+        tun_fp = getattr(sn, "tunnel_privkey_fp", "") or ""
+        unlocked = list(getattr(sn, "unlocked_keystores", []) or [])
+        ssfs_keys = list(getattr(sn, "ssfs_secrets_keys", []) or [])
+        pp_ana = getattr(sn, "pp_analysis", {}) or {}
+        sub_uuids = list(getattr(sn, "subaccount_uuids", []) or [])
+        loc_ids = list(getattr(sn, "location_ids", []) or [])
+        region = getattr(sn, "tunnel_region", "") or ""
+        replayed = getattr(sn, "tunnel_replayed", False)
+        users_xml = getattr(sn, "users_xml_loot_path", "") or ""
+        ha_role = getattr(sn, "ha_role", "") or ""
+        ha_peer = getattr(sn, "ha_shadow_host", "") or ""
+        cve_det = getattr(sn, "cve_details", []) or []
+        if not (creds or keystore or ssfs or pp_ca or tun_fp or unlocked
+                or ssfs_keys or pp_ana or sub_uuids or loc_ids
+                or users_xml or ha_peer or replayed or cve_det):
+            continue
+        parts = [f'<h3 style="margin:18px 0 8px;font-size:14px">'
+                 f'SCC {_hesc(host)} — details</h3>']
+
+        # Topology / trust
+        topo = []
+        if ha_role:
+            topo.append(
+                (f"HA role", _hesc(ha_role) + (
+                    f" (peer: <code>{_hesc(ha_peer)}</code> · "
+                    f"{_hesc(getattr(sn, 'ha_peer_role', '') or '?')})"
+                    if ha_peer else "")))
+        if region:
+            topo.append(("Tunnel region", _hesc(region)))
+        if sub_uuids:
+            topo.append(
+                ("Subaccounts trusted",
+                 f"{len(sub_uuids)} — "
+                 f"{_hesc(', '.join(sub_uuids[:3]))}"
+                 + ("…" if len(sub_uuids) > 3 else "")))
+        if loc_ids:
+            topo.append(
+                ("Location IDs", _hesc(", ".join(loc_ids))))
+        if replayed:
+            topo.append(
+                ("Tunnel handshake",
+                 '<b style="color:#b91c1c">replayed</b> '
+                 '(persistence achieved)'))
+        if topo:
+            trs = "".join(f'<tr><td>{k}</td><td>{v}</td></tr>'
+                          for k, v in topo)
+            parts.append(
+                '<table class="grid" style="font-size:12px;'
+                'margin-bottom:10px">'
+                '<tbody>' + trs + '</tbody></table>')
+
+        # Crown-jewel artifacts
+        crown = []
+        if keystore and getattr(sn, "keystore_loot_path", ""):
+            crown.append(("Keystore",
+                          "extracted → <code>"
+                          + _hesc(sn.keystore_loot_path) + "</code>"))
+        if users_xml:
+            crown.append(("Users.xml (plaintext)",
+                          "decrypted → <code>"
+                          + _hesc(users_xml) + "</code>"))
+        if tun_fp:
+            crown.append(("Tunnel private key",
+                          "SHA-256 <code>"
+                          + _hesc(tun_fp[:16]) + "…</code>"))
+        if pp_ca:
+            crown.append(
+                ("<b>PP CA private key</b>",
+                 "SHA-256 <code>" + _hesc(pp_ca[:16]) + "…</code> — "
+                 "<b style='color:#b91c1c'>can mint client certs for any "
+                 "subaccount user</b>"))
+        if ssfs and (getattr(sn, "ssfs_secrets_path", "") or ssfs_keys):
+            crown.append(
+                ("SSFS secrets",
+                 "decrypted → <code>"
+                 + _hesc(getattr(sn, "ssfs_secrets_path", "") or "?")
+                 + "</code> "
+                 + f"({len(ssfs_keys)} keys)"))
+        if crown:
+            trs = "".join(f'<tr><td>{k}</td><td>{v}</td></tr>'
+                          for k, v in crown)
+            parts.append(
+                '<h4 style="margin:10px 0 4px;font-size:12px">'
+                'Crown-jewel artifacts</h4>'
+                '<table class="grid" style="font-size:12px;'
+                'margin-bottom:10px">'
+                '<tbody>' + trs + '</tbody></table>')
+
+        # SSFS key names (names only)
+        if ssfs_keys:
+            parts.append(
+                '<p style="font-size:12px;color:#374151;margin:6px 0">'
+                f'<b>SSFS secret keys captured ({len(ssfs_keys)}):</b> '
+                '<code>'
+                + _hesc(", ".join(ssfs_keys[:20]))
+                + ("…" if len(ssfs_keys) > 20 else "")
+                + '</code></p>')
+
+        # Unlocked keystores
+        if unlocked:
+            trs = ""
+            for k in unlocked[:20]:
+                p = k.get("path", "") or "?"
+                subj = k.get("cert_subject", "") or "?"
+                fp = k.get("cert_sha256", "") or ""
+                fp_short = (fp[:16] + "…") if fp else "—"
+                trs += (f'<tr><td class="mono">{_hesc(p)}</td>'
+                        f'<td>{_hesc(subj)}</td>'
+                        f'<td class="mono">{_hesc(fp_short)}</td></tr>')
+            if len(unlocked) > 20:
+                trs += (f'<tr><td colspan="3" style="color:#6b7280">'
+                        f'…{len(unlocked) - 20} more</td></tr>')
+            parts.append(
+                '<h4 style="margin:10px 0 4px;font-size:12px">'
+                'Unlocked tunnel keystores</h4>'
+                '<table class="grid" style="font-size:12px;'
+                'margin-bottom:10px"><thead><tr>'
+                '<th>Path</th><th>Cert subject</th><th>SHA-256</th>'
+                '</tr></thead><tbody>' + trs + '</tbody></table>')
+
+        # Captured admin creds (marker only — never plaintext)
+        if creds:
+            trs = ""
+            for c in creds:
+                user = (getattr(c, "user", "")
+                        or (isinstance(c, dict) and c.get("user"))
+                        or "?")
+                pw = (getattr(c, "password", "")
+                      or (isinstance(c, dict) and c.get("password"))
+                      or "")
+                h = (getattr(c, "hash", "")
+                     or (isinstance(c, dict) and c.get("hash"))
+                     or "")
+                verified = bool(
+                    getattr(c, "verified", False)
+                    or (isinstance(c, dict) and c.get("verified")))
+                if pw:
+                    marker = ('<span class="risk-pill" '
+                              'style="background:#c0392b">plaintext</span>')
+                elif h:
+                    marker = ('<code>' + _hesc(h[:24]) + '…</code>')
+                else:
+                    marker = "—"
+                trs += (f'<tr><td class="mono">{_hesc(user)}</td>'
+                        f'<td>{marker}</td>'
+                        f'<td>{"✓" if verified else "—"}</td></tr>')
+            parts.append(
+                '<h4 style="margin:10px 0 4px;font-size:12px">'
+                'Captured admin credentials</h4>'
+                '<table class="grid" style="font-size:12px;'
+                'margin-bottom:10px"><thead><tr>'
+                '<th>User</th><th>Hash / marker</th><th>Verified</th>'
+                '</tr></thead><tbody>' + trs + '</tbody></table>')
+
+        # Principal-Propagation analyser verdict
+        summary = pp_ana.get("summary") if isinstance(pp_ana, dict) else None
+        findings = (pp_ana.get("findings")
+                    if isinstance(pp_ana, dict) else None)
+        if summary or findings:
+            crit = (summary or {}).get("critical", 0)
+            high = (summary or {}).get("high", 0)
+            med = (summary or {}).get("medium", 0)
+            head = (
+                '<h4 style="margin:10px 0 4px;font-size:12px">'
+                'Principal-Propagation analysis</h4>'
+                '<p style="font-size:12px;color:#374151;margin:4px 0">'
+                f'{crit} CRITICAL · {high} HIGH · {med} MEDIUM '
+                f'(analysed at {_hesc(getattr(sn, "pp_analysis_at", "") or "?")})'
+                '</p>')
+            parts.append(head)
+            if findings:
+                trs = ""
+                for f in findings[:15]:
+                    sev = (f.get("severity", "?")
+                           if isinstance(f, dict) else "?")
+                    hl = ((f.get("headline") or f.get("title") or "")
+                          if isinstance(f, dict) else str(f))
+                    trs += (f'<tr><td>{_hesc(sev)}</td>'
+                            f'<td>{_hesc(hl)}</td></tr>')
+                if len(findings) > 15:
+                    trs += (f'<tr><td colspan="2" style="color:#6b7280">'
+                            f'…{len(findings) - 15} more</td></tr>')
+                parts.append(
+                    '<table class="grid" style="font-size:12px;'
+                    'margin-bottom:10px"><thead><tr>'
+                    '<th>Severity</th><th>Finding</th>'
+                    '</tr></thead><tbody>' + trs + '</tbody></table>')
+
+        # CVE detail rows
+        if cve_det:
+            trs = ""
+            for d in cve_det:
+                if not isinstance(d, dict):
+                    continue
+                trs += (f'<tr><td class="mono">{_hesc(d.get("cve", "?"))}</td>'
+                        f'<td>{_hesc(d.get("severity", "?"))}</td>'
+                        f'<td>{_hesc(d.get("status", "?"))}</td>'
+                        f'<td>{_hesc(d.get("headline", ""))}</td></tr>')
+            parts.append(
+                '<h4 style="margin:10px 0 4px;font-size:12px">'
+                'CVE assessment</h4>'
+                '<table class="grid" style="font-size:12px;'
+                'margin-bottom:10px"><thead><tr>'
+                '<th>CVE</th><th>Severity</th><th>Status</th>'
+                '<th>Headline</th></tr></thead>'
+                '<tbody>' + trs + '</tbody></table>')
+
+        detail_blocks.append("".join(parts))
+
     return (
         '<section>'
         '<h2>☁️ SAP Cloud Connectors</h2>'
@@ -2127,6 +2557,7 @@ def _html_scc_section(state: SAPMAPState) -> str:
         '<th>Creds captured</th><th>Mappings</th>'
         '<th>Keystore</th><th>SSFS</th><th>PP</th>'
         '</tr></thead><tbody>' + "".join(rows) + '</tbody></table>'
+        + "".join(detail_blocks) +
         '</section>')
 
 
