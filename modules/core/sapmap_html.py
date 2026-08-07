@@ -465,6 +465,31 @@ body {
 .modal::-webkit-scrollbar { width: 8px; }
 .modal::-webkit-scrollbar-track { background: #1c2128; }
 .modal::-webkit-scrollbar-thumb { background: #484f58; border-radius: 4px; }
+/* Draggable + resizable variant — used by the ATT&CK coverage modal
+   so the operator can reposition it to reveal map nodes underneath
+   and resize when the grid grows tall.  position:fixed pops it out
+   of the flex-centered overlay flow; the JS drag handler updates
+   top/left on the .modal element directly. */
+.modal.modal-draggable {
+  position: fixed;
+  top: 6vh; left: 2vw;
+  margin: 0;
+  resize: both;
+  min-width: 640px; min-height: 320px;
+  max-width: 98vw; max-height: 94vh;
+  overflow: hidden;   /* inner scrollable body handles overflow */
+}
+.modal.modal-draggable > .modal-body {
+  overflow: auto; flex: 1;
+}
+.modal .modal-drag-handle { cursor: move; user-select: none; }
+.modal-overlay.overlay-transparent {
+  background: transparent;
+  /* Let clicks reach the map when the modal is dragged aside; only
+     the modal itself remains interactive. */
+  pointer-events: none;
+}
+.modal-overlay.overlay-transparent .modal { pointer-events: auto; }
 .modal h3 { font-size: 14px; color: #f0883e; margin-bottom: 16px; }
 .modal .form-row { margin-bottom: 10px; }
 .modal .form-row label { display: block; font-size: 11px; color: #8b949e; margin-bottom: 3px; }
@@ -1697,32 +1722,39 @@ body {
   </div>
 </div>
 
-<!-- MITRE ATT&CK Coverage Modal -->
-<div class="modal-overlay" id="attack-modal">
-  <div class="modal" style="max-width:1600px;width:97vw;max-height:90vh;display:flex;flex-direction:column">
-    <h3 style="margin:0 0 6px 0">&#9876;&#65039; MITRE ATT&amp;CK Coverage
-      <span style="color:#8b949e;font-weight:normal;font-size:11px"
-            id="attack-modal-subtitle"></span>
-    </h3>
-    <div style="font-size:11px;color:#8b949e;margin-bottom:10px">
-      Techniques exercised across this engagement, grouped by tactic.
-      Severity-coloured (INFO → CRITICAL); click a cell to flash the
-      map nodes where the technique was observed.
-      <div style="margin-top:8px;padding:8px 10px;background:#0d1117;border:1px solid #21262d;border-radius:4px">
-        <a href="#" onclick="downloadAttackNavigatorLayer();return false"
-           style="color:#79c0ff;font-weight:600">&#128190; Export Navigator layer (JSON → loot/reports/)</a>
-        <div style="margin-top:6px;color:#6e7681;line-height:1.5">
-          Then open
-          <a href="https://mitre-attack.github.io/attack-navigator/" target="_blank" rel="noopener noreferrer"
-             style="color:#79c0ff">mitre-attack.github.io/attack-navigator</a>
-          &rarr; <em>Open Existing Layer</em> &rarr; <em>Upload from local</em>
-          &rarr; pick the file from <code style="color:#cfd9df">loot/reports/</code>.
-          You'll get MITRE's canonical interactive heatmap of this engagement.
+<!-- MITRE ATT&CK Coverage Modal — draggable + resizable so the
+     operator can shove it aside to inspect map nodes underneath. -->
+<div class="modal-overlay overlay-transparent" id="attack-modal">
+  <div class="modal modal-draggable" style="width:97vw;height:88vh;display:flex;flex-direction:column">
+    <div class="modal-drag-handle" style="padding-bottom:6px">
+      <h3 style="margin:0 0 6px 0;display:flex;align-items:center;gap:8px">
+        <span style="color:#6e7681;font-size:11px;font-weight:normal">&#9868;&#65039;</span>
+        &#9876;&#65039; MITRE ATT&amp;CK Coverage
+        <span style="color:#8b949e;font-weight:normal;font-size:11px"
+              id="attack-modal-subtitle"></span>
+      </h3>
+    </div>
+    <div class="modal-body" style="padding:0 2px">
+      <div style="font-size:11px;color:#8b949e;margin-bottom:10px">
+        Techniques exercised across this engagement, grouped by tactic.
+        Severity-coloured (INFO → CRITICAL); click a cell to flash the
+        map nodes where the technique was observed.
+        <div style="margin-top:8px;padding:8px 10px;background:#0d1117;border:1px solid #21262d;border-radius:4px">
+          <a href="#" onclick="downloadAttackNavigatorLayer();return false"
+             style="color:#79c0ff;font-weight:600">&#128190; Export Navigator layer (JSON → loot/reports/)</a>
+          <div style="margin-top:6px;color:#6e7681;line-height:1.5">
+            Then open
+            <a href="https://mitre-attack.github.io/attack-navigator/" target="_blank" rel="noopener noreferrer"
+               style="color:#79c0ff">mitre-attack.github.io/attack-navigator</a>
+            &rarr; <em>Open Existing Layer</em> &rarr; <em>Upload from local</em>
+            &rarr; pick the file from <code style="color:#cfd9df">loot/reports/</code>.
+            You'll get MITRE's canonical interactive heatmap of this engagement.
+          </div>
         </div>
       </div>
-    </div>
-    <div id="attack-heatmap-body" style="overflow:auto;flex:1;padding:4px">
-      <div style="color:#8b949e;text-align:center;padding:30px">Loading…</div>
+      <div id="attack-heatmap-body" style="padding:4px">
+        <div style="color:#8b949e;text-align:center;padding:30px">Loading…</div>
+      </div>
     </div>
     <div class="form-actions" style="margin-top:8px">
       <button class="btn" onclick="closeModal('attack-modal')">Close</button>
@@ -13178,8 +13210,72 @@ async function checkAllSnc() {
 // =========================================================================
 // MITRE ATT&CK coverage modal
 // =========================================================================
+
+// Wire pointer-drag handlers onto a modal so the operator can move
+// it by grabbing the `.modal-drag-handle` element inside it.  Idempotent
+// via `_dragWired` — repeated calls are cheap.  Position is stored on
+// the modal element itself (via top/left inline styles) so it survives
+// close → reopen within the same page load; a fresh reload resets to
+// the CSS default (top:6vh; left:2vw).
+function makeModalDraggable(modalEl) {
+  if (!modalEl || modalEl._dragWired) return;
+  const handle = modalEl.querySelector('.modal-drag-handle');
+  if (!handle) return;
+  modalEl._dragWired = true;
+  let dragging = false, sx = 0, sy = 0, sl = 0, st = 0;
+  handle.addEventListener('mousedown', (e) => {
+    // Ignore drags that start on a link/button/input inside the header.
+    if (e.target.closest('a, button, input, select, textarea')) return;
+    dragging = true;
+    const rect = modalEl.getBoundingClientRect();
+    sx = e.clientX; sy = e.clientY;
+    sl = rect.left;  st = rect.top;
+    // Force position:fixed geometry we can update (CSS already does
+    // this via .modal-draggable, but a stale inline top/left from a
+    // previous drag would otherwise carry over).
+    modalEl.style.left = sl + 'px';
+    modalEl.style.top  = st + 'px';
+    modalEl.style.margin = '0';
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const nl = sl + (e.clientX - sx);
+    const nt = st + (e.clientY - sy);
+    // Clamp so the drag handle stays inside the viewport.
+    const margin = 20;
+    const w = modalEl.offsetWidth, h = modalEl.offsetHeight;
+    const maxL = window.innerWidth  - margin;
+    const maxT = window.innerHeight - margin;
+    const minL = margin - w;
+    const minT = 0;   // never drag the header above the top
+    modalEl.style.left = Math.min(maxL, Math.max(minL, nl)) + 'px';
+    modalEl.style.top  = Math.min(maxT, Math.max(minT, nt)) + 'px';
+  });
+  window.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.style.userSelect = '';
+  });
+}
+
 async function showAttackCoverage() {
   document.getElementById('attack-modal').classList.add('visible');
+  // Wire drag handlers once (idempotent) and re-enable on every open
+  // so a prior close doesn't leave the modal off-screen.
+  const modalEl = document.querySelector('#attack-modal .modal-draggable');
+  if (modalEl) {
+    makeModalDraggable(modalEl);
+    // If a previous drag pushed the modal fully off-screen, snap it
+    // back to a sane starting position on reopen.
+    const r = modalEl.getBoundingClientRect();
+    if (r.right < 40 || r.bottom < 40
+        || r.left > window.innerWidth - 40
+        || r.top  > window.innerHeight - 40) {
+      modalEl.style.left = ''; modalEl.style.top = ''; modalEl.style.margin = '';
+    }
+  }
   const body = document.getElementById('attack-heatmap-body');
   body.innerHTML = '<div style="color:#8b949e;text-align:center;padding:30px">Loading…</div>';
   let grid;
