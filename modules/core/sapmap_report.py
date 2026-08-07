@@ -2515,7 +2515,7 @@ def _html_attack_coverage_section(state: SAPMAPState) -> str:
             f'<td class="mono">{_hesc(", ".join(sorted(sids)))}</td>'
             f'</tr>')
     return (
-        '<section>'
+        '<section id="sec-attack">'
         '<h2>🎯 MITRE ATT&amp;CK coverage</h2>'
         '<p style="font-size:12px;color:#6b7280;margin:0 0 12px">'
         f'This engagement exercised <b>{totals["techniques"]} techniques</b>'
@@ -2567,7 +2567,8 @@ def _html_medium_info_findings_section(state: SAPMAPState) -> str:
                 f'</tr>')
         return out
 
-    parts = ['<section><h2>ℹ️ Medium &amp; informational findings</h2>']
+    parts = ['<section id="sec-medinfo">'
+             '<h2>ℹ️ Medium &amp; informational findings</h2>']
     parts.append(
         '<p style="font-size:12px;color:#6b7280;margin:0 0 12px">'
         'Everything the scan flagged at MEDIUM / LOW / INFO — mostly '
@@ -2615,7 +2616,7 @@ def _html_created_users_section(state: SAPMAPState) -> str:
             f'{_hesc((u.created_at or "")[:19])}</td>'
             f'</tr>')
     return (
-        '<section><h2>👤 SAPMAP-created accounts</h2>'
+        '<section id="sec-users"><h2>👤 SAPMAP-created accounts</h2>'
         '<p style="font-size:12px;color:#6b7280;margin:0 0 12px">'
         'Every account SAPMAP created during this engagement — one '
         'row per (SID, client) pair.  Use "Cleanup All Users" in the '
@@ -2675,7 +2676,7 @@ def _html_impact_section(state: SAPMAPState) -> str:
     if not have_any:
         return ""
     return (
-        '<section><h2>💰 Business impact</h2>'
+        '<section id="sec-impact"><h2>💰 Business impact</h2>'
         '<p style="font-size:12px;color:#6b7280;margin:0 0 12px">'
         'Concrete blast-radius reads across finance / HR / vendor '
         'tables — the numbers a CISO can quote to quantify exposure.  '
@@ -2723,7 +2724,7 @@ def _html_secstore_section(state: SAPMAPState) -> str:
                 f'</tr>')
     if not abap_rows and not java_rows:
         return ""
-    parts = ['<section><h2>🔐 Secure-Store recovery</h2>'
+    parts = ['<section id="sec-secstore"><h2>🔐 Secure-Store recovery</h2>'
              '<p style="font-size:12px;color:#6b7280;margin:0 0 12px">'
              'Passwords cached inside SAP secure stores that SAPMAP was '
              'able to decrypt.  Every entry represents a credential the '
@@ -2763,7 +2764,7 @@ def _html_persistence_section(state: SAPMAPState) -> str:
     if not (tickets or created_dests or dpmon_sids):
         return ""
 
-    parts = ['<section><h2>🕳️ Persistence footprint</h2>'
+    parts = ['<section id="sec-persistence"><h2>🕳️ Persistence footprint</h2>'
              '<p style="font-size:12px;color:#6b7280;margin:0 0 12px">'
              'Artifacts SAPMAP planted that outlive the current shell — '
              'forged MYSAPSSO2 tickets, dpmon SAP* activations, and RFC '
@@ -2863,7 +2864,7 @@ def _html_evasion_section(state: SAPMAPState) -> str:
         rows.append(("Baseline captured", _hesc(baseline_at[:19])))
     trs = "".join(f'<tr><td>{k}</td><td>{v}</td></tr>' for k, v in rows)
     return (
-        '<section><h2>🥷 OPSEC posture (evasion)</h2>'
+        '<section id="sec-opsec"><h2>🥷 OPSEC posture (evasion)</h2>'
         '<p style="font-size:12px;color:#6b7280;margin:0 0 12px">'
         'Evasion primitives armed for this engagement.  Attribution '
         'record — matters for both blue-team debrief and red-team '
@@ -3138,7 +3139,7 @@ def _html_scc_section(state: SAPMAPState) -> str:
         detail_blocks.append("".join(parts))
 
     return (
-        '<section>'
+        '<section id="sec-scc">'
         '<h2>☁️ SAP Cloud Connectors</h2>'
         '<p style="font-size:12px;color:#6b7280;margin:0 0 12px">'
         'On-premise ↔ BTP tunnel gateways.  '
@@ -3197,7 +3198,7 @@ def _html_btp_section(state: SAPMAPState) -> str:
             f'<td>{pwned}</td>'
             f'</tr>')
     return (
-        '<section>'
+        '<section id="sec-btp">'
         '<h2>☁️ SAP BTP subaccounts</h2>'
         '<p style="font-size:12px;color:#6b7280;margin:0 0 12px">'
         'Cloud tenants reachable from this landscape.  <b>Cleartext</b> = '
@@ -3393,7 +3394,7 @@ def _html_cloud_lateral_section(state: SAPMAPState) -> str:
             f'</div>')
 
     return (
-        '<section>'
+        '<section id="sec-cloud-lat">'
         '<h2>🌉 Cloud ↔ on-prem lateral moves</h2>'
         f'<p style="font-size:12px;color:#6b7280;margin:0 0 16px">'
         f'SAPMAP established <b>{len(interesting)}</b> cloud-side lateral '
@@ -3438,7 +3439,7 @@ def _html_cert_auth_destinations_section(state: SAPMAPState) -> str:
             f'<td>{"☁️" if is_btp else "—"}</td>'
             f'</tr>')
     return (
-        '<section>'
+        '<section id="sec-certauth">'
         '<h2>🔐 Certificate-authenticated HTTP destinations</h2>'
         f'<p style="font-size:12px;color:#6b7280;margin:0 0 12px">'
         f'{len(rows_data)} X.509 client-cert destination(s) discovered '
@@ -3860,7 +3861,7 @@ def build_html_report(state: SAPMAPState,
                 f'</div>')
     if cap_blocks:
         capability_html = (
-            '<section><h2>📊 User capability inventory</h2>'
+            '<section id="sec-capability"><h2>📊 User capability inventory</h2>'
             '<p style="font-size:12px;color:#6b7280;margin:0 0 12px">'
             'What each user we own can actually do, mapped from raw '
             '<code>AGR_USERS</code> / <code>AGR_1251</code> / '
@@ -3884,6 +3885,55 @@ def build_html_report(state: SAPMAPState,
     secstore_html = _html_secstore_section(state)
     persistence_html = _html_persistence_section(state)
     evasion_html = _html_evasion_section(state)
+
+    # Table of contents — one row per section that actually rendered.
+    # Section IDs match the anchors on the <section id="..."> tags
+    # below.  Inline sections (map, findings, chains, inventory, creds,
+    # recommendations) always render; the rest are gated on their
+    # builder returning non-empty HTML.
+    _toc_entries = [
+        ("sec-landscape-map", "🗺️ Landscape map",        True),
+        ("sec-critical",      "🛑 Critical findings",     True),
+        ("sec-high",          "⚠️ High findings",         True),
+        ("sec-chains",        "🔗 Trust chains",          True),
+        ("sec-inventory",     "🗺️ Landscape inventory",   True),
+        ("sec-credentials",   "🔑 Recovered credentials", True),
+        ("sec-capability",    "📊 User capability inventory",
+                              bool(capability_html)),
+        ("sec-scc",           "☁️ SAP Cloud Connectors",
+                              bool(scc_section_html)),
+        ("sec-btp",           "☁️ SAP BTP subaccounts",
+                              bool(btp_section_html)),
+        ("sec-cloud-lat",     "🌉 Cloud ↔ on-prem lateral moves",
+                              bool(cloud_lat_section_html)),
+        ("sec-certauth",      "🔐 Cert-auth HTTP destinations",
+                              bool(cert_dest_section_html)),
+        ("sec-medinfo",       "ℹ️ Medium & informational findings",
+                              bool(med_info_html)),
+        ("sec-impact",        "💰 Business impact",
+                              bool(impact_html)),
+        ("sec-secstore",      "🔐 Secure-Store recovery",
+                              bool(secstore_html)),
+        ("sec-users",         "👤 SAPMAP-created accounts",
+                              bool(created_users_html)),
+        ("sec-persistence",   "🕳️ Persistence footprint",
+                              bool(persistence_html)),
+        ("sec-attack",        "🎯 MITRE ATT&CK coverage",
+                              bool(attack_coverage_html)),
+        ("sec-opsec",         "🥷 OPSEC posture (evasion)",
+                              bool(evasion_html)),
+        ("sec-recommendations", "📋 Recommendations",    True),
+    ]
+    toc_items = "".join(
+        f'<li><a href="#{sid}">{_hesc(label)}</a></li>'
+        for sid, label, present in _toc_entries if present)
+    toc_html = (
+        '<nav class="toc" aria-label="Table of contents">'
+        '<h2 style="margin:0 0 10px;font-size:14px;color:#374151;'
+        'letter-spacing:.4px;text-transform:uppercase">Contents</h2>'
+        '<ol style="margin:0;padding-left:22px;'
+        'columns:2;column-gap:32px;line-height:1.7">'
+        + toc_items + '</ol></nav>')
 
     # CSS block injected once into <style> for structured remediation
     # cards + Hardening-checklist cards.
@@ -3922,6 +3972,16 @@ def build_html_report(state: SAPMAPState,
   .kpi-l{{font-size:11px;color:#6b7280;text-transform:uppercase;
         letter-spacing:.5px;margin-top:4px;font-weight:600}}
   .kpi-s{{font-size:11px;color:#9ca3af;margin-top:6px}}
+  /* Table of contents */
+  .toc{{background:#fff;border-radius:12px;padding:18px 24px;
+        margin:0 0 24px;box-shadow:0 1px 3px rgba(0,0,0,.06);
+        border-left:4px solid #0969da}}
+  .toc a{{color:#0969da;text-decoration:none;font-size:13px}}
+  .toc a:hover{{text-decoration:underline}}
+  .toc li{{break-inside:avoid;margin-bottom:2px}}
+  html{{scroll-behavior:smooth}}
+  section{{scroll-margin-top:12px}}
+  @media (max-width:640px){{.toc ol{{columns:1}}}}
   /* Sections */
   section{{background:#fff;border-radius:12px;padding:24px 28px;margin-bottom:24px;
         box-shadow:0 1px 3px rgba(0,0,0,.06)}}
@@ -4050,7 +4110,9 @@ def build_html_report(state: SAPMAPState,
               else "#d0d7de"))}
   </div>
 
-  <section>
+  {toc_html}
+
+  <section id="sec-landscape-map">
     <h2>🗺️ Landscape map</h2>
     <p style="font-size:12px;color:#6b7280;margin:0 0 14px">
       Auto-laid-out snapshot of every discovered system.  Pwned systems
@@ -4061,24 +4123,24 @@ def build_html_report(state: SAPMAPState,
     {_build_landscape_svg(state)}
   </section>
 
-  <section>
+  <section id="sec-critical">
     <h2>🛑 Critical findings ({len(crit_findings)})</h2>
     {crit_html}
   </section>
 
-  <section>
+  <section id="sec-high">
     <h2>⚠️ High findings ({len(high_findings)})</h2>
     {high_html}
   </section>
 
-  <section>
+  <section id="sec-chains">
     <h2>🔗 Lateral movement / trust chains ({chain_count})</h2>
     <table class="grid"><thead><tr>
       <th>Risk</th><th>Path</th><th>Hops</th><th>PRD</th><th>Entry</th>
     </tr></thead><tbody>{chain_rows_html}</tbody></table>
   </section>
 
-  <section>
+  <section id="sec-inventory">
     <h2>🗺️ Landscape inventory</h2>
     <table class="grid"><thead><tr>
       <th>SID</th><th>Type</th><th>OS</th><th>DB</th><th>Host</th>
@@ -4086,7 +4148,7 @@ def build_html_report(state: SAPMAPState,
     </tr></thead><tbody>{inv_rows}</tbody></table>
   </section>
 
-  <section>
+  <section id="sec-credentials">
     <h2>🔑 Recovered credentials</h2>
     <p style="font-size:12px;color:#6b7280;margin:0 0 12px">
       Passwords masked in this report — full plaintext lives in
@@ -4120,7 +4182,7 @@ def build_html_report(state: SAPMAPState,
 
   {evasion_html}
 
-  <section>
+  <section id="sec-recommendations">
     <h2>📋 Recommendations</h2>
     {rec_html}
   </section>

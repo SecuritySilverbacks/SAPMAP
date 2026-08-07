@@ -266,7 +266,9 @@ def test_html_report_scc_rows_folded_into_inventory():
     # CVE count rolls into the Critical pill
     assert "CVE-2024-25642" not in html or True  # CVE id text not required
     # Inventory section header still present, only one of it
-    assert html.count(">🗺️ Landscape inventory") == 1
+    # (TOC entry uses an <a href="#sec-inventory"> — matching by the
+    # <h2> tag excludes it so the count stays at 1)
+    assert html.count("<h2>🗺️ Landscape inventory") == 1
 
 
 def test_html_report_includes_landscape_svg():
@@ -515,3 +517,42 @@ def test_html_report_has_cert_auth_dests_section():
     assert "Certificate-authenticated HTTP destinations" in html
     assert "BTP_TENANT" in html
     assert "DFAULT" in html
+
+
+def test_html_report_has_toc_with_anchor_links():
+    """HTML report includes a jump-to-section TOC at the top with
+    anchors matching each rendered <section id="...">."""
+    state = _state_with_three_systems()
+    html = build_html_report(state)
+    # TOC block present with the canonical header
+    assert 'class="toc"' in html
+    assert ">Contents<" in html
+    # Anchors for the always-rendered sections
+    for anchor in (
+        "#sec-landscape-map", "#sec-critical", "#sec-high",
+        "#sec-chains", "#sec-inventory", "#sec-credentials",
+        "#sec-recommendations",
+    ):
+        assert anchor in html, f"TOC missing anchor {anchor}"
+        # And the corresponding <section id="..."> exists
+        assert f'id="{anchor[1:]}"' in html, (
+            f"section anchor {anchor} present in TOC but no matching "
+            f"<section id=\"{anchor[1:]}\">")
+    # TOC lives above the first <section>
+    toc_pos = html.find('class="toc"')
+    first_section_pos = html.find('<section id="sec-')
+    assert toc_pos != -1 and first_section_pos != -1
+    assert toc_pos < first_section_pos
+
+
+def test_html_report_toc_omits_empty_conditional_sections():
+    """Conditional sections (SCC, BTP, business impact, etc.) must
+    NOT appear in the TOC when their builder returns empty."""
+    state = _state_with_three_systems()  # no SCC / BTP / impact data
+    html = build_html_report(state)
+    # These builders returned "" — their TOC entries must be gone.
+    for anchor in ("#sec-scc", "#sec-btp", "#sec-cloud-lat",
+                   "#sec-impact", "#sec-users", "#sec-persistence",
+                   "#sec-opsec"):
+        assert anchor not in html, (
+            f"TOC included {anchor} but the section wasn't rendered")
