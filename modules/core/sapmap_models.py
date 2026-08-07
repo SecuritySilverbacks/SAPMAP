@@ -1153,6 +1153,19 @@ class RFCConnection:
     has_sap_all: bool = False
     user_detail_error: str = ""  # e.g. "No authorization for BAPI_USER_GET_DETAIL"
 
+    # Fine-grained "can this RFC user create a target-side user?"
+    # reach signal — issue #23.  Distinct from has_sap_all so a user
+    # who holds S_USER_GRP + S_USER_PRO without SAP_ALL still lights
+    # up the Create Remote User path.  None = never probed.
+    can_create_user:      Optional[bool] = None
+    can_assign_sap_all:   Optional[bool] = None    # S_USER_PRO 22/SAP_ALL
+    can_assign_role:      Optional[bool] = None    # S_USER_AGR 22/*
+    create_user_probe:    str = ""    # "sap_all" | "role_heuristic"
+                                       # | "authority_check" | "canary"
+    create_user_evidence: str = ""    # human-readable reason
+    create_user_probe_at: str = ""    # ISO timestamp of last probe
+    create_user_probe_error: str = ""
+
     # /SDF/RFC_CHECK results
     logon_successful: bool = False
     logon_tested: bool = False   # True after explicit logon test (Test RFCs)
@@ -1313,6 +1326,13 @@ class RFCConnection:
             "os_exec_channel": self.os_exec_channel,
             "rfc_type": self.rfc_type,
             "target_os_hint": self.target_os_hint,
+            "can_create_user": self.can_create_user,
+            "can_assign_sap_all": self.can_assign_sap_all,
+            "can_assign_role": self.can_assign_role,
+            "create_user_probe": self.create_user_probe,
+            "create_user_evidence": self.create_user_evidence,
+            "create_user_probe_at": self.create_user_probe_at,
+            "create_user_probe_error": self.create_user_probe_error,
         }
 
     @classmethod

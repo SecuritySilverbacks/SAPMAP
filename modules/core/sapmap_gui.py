@@ -676,6 +676,49 @@ _ui_commands = []
 _ui_cmd_lock = threading.Lock()
 
 
+def _probe_create_user_reach(state, conn, fallback_creds) -> None:
+    """Run the layered create-user reach probe on `conn` and stash
+    the verdict on the connection.  Silent on non-fatal errors —
+    caller keeps whatever prior verdict existed.
+
+    Layers 1-3 only (fast, safe).  Layer 4 (canary create+delete)
+    lives on a separate operator-triggered route.  Issue #23.
+    """
+    try:
+        if not (conn.logon_successful and conn.rfc_user and conn.target_sid):
+            return
+        target = state.get_node(conn.target_sid)
+        if target is None:
+            return
+        creds_arg = fallback_creds
+        if conn.secstore_password:
+            from sapmap_models import Credentials
+            creds_arg = Credentials(
+                username=conn.rfc_user,
+                password=conn.secstore_password,
+                client=conn.client or "")
+        cu = sapmap_rfc.check_can_create_user(
+            target,
+            existing_profiles=conn.profiles,
+            existing_roles=conn.roles,
+            creds=creds_arg)
+        conn.can_create_user      = cu.get("can_create_user")
+        conn.can_assign_sap_all   = cu.get("can_assign_sap_all")
+        conn.can_assign_role      = cu.get("can_assign_role")
+        conn.create_user_probe    = cu.get("probe", "")
+        conn.create_user_evidence = cu.get("evidence", "")
+        conn.create_user_probe_error = cu.get("error", "")
+        from datetime import datetime as _dt, timezone as _tz
+        conn.create_user_probe_at = (
+            _dt.now(_tz.utc).isoformat(timespec="seconds"))
+        if conn.can_create_user and not conn.has_sap_all:
+            print(f"[+] {conn.destination_name}: create-user reach "
+                  f"WITHOUT SAP_ALL — {conn.create_user_evidence}")
+    except Exception as _e:
+        print(f"[!] {conn.destination_name}: create-user probe "
+              f"failed: {_e}")
+
+
 def ui_command(cmd: str, **kwargs):
     """Queue a command for the frontend to execute on its next poll."""
     with _ui_cmd_lock:
@@ -10246,6 +10289,14 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         sap_all_count += 1
                         print(f"[!] {conn.rfc_user} in {conn.destination_name} has SAP_ALL!")
                     api.state.notify_sap_all_if_elevated(conn)
+
+                # Issue #23 — fine-grained create-user reach probe.
+                # Runs even when has_sap_all is False (that's the whole
+                # point): a user with S_USER_GRP + S_USER_PRO can
+                # create SAPMAP00 despite lacking the SAP_ALL profile
+                # literal.  Layers 1-3 only; canary create (layer 4)
+                # is operator-triggered via a separate route.
+                _probe_create_user_reach(api.state, conn, creds)
             print(f"[+] RFC Testing done for {sid}: "
                   f"{tested_count} tested, {logon_ok_count} logon OK, "
                   f"{sap_all_count} with SAP_ALL")
@@ -11627,6 +11678,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         if conn.has_sap_all:
                             print(f"[!] {conn.rfc_user} in {dest_name} has SAP_ALL!")
                         api.state.notify_sap_all_if_elevated(conn)
+                    # Issue #23 — fine-grained create-user reach probe
+                    # for the single-destination test path.
+                    _probe_create_user_reach(api.state, conn, creds)
                 else:
                     err = result.get("error", "")
                     if err:
@@ -11637,6 +11691,106 @@ def create_app(api: SAPMAPApi) -> Bottle:
             print(f"[+] Single test done for {dest_name}")
 
         _bg(f"{sid}:test_rfc:{dest_name}", "Test RFC", _run)
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/canary_create_user", method="POST")
+    def node_canary_create_user(sid):
+        """Issue #23 layer 4 — attempt BAPI_USER_CREATE1 with a canary
+        username and immediately delete it.  Definitively proves
+        create-user reach even when ABAP AUTHORITY-CHECK is blocked,
+        at the cost of a real audit trail (SAL entries for both
+        create AND delete).
+
+        Operator-triggered only.  Requires explicit `confirm=true`
+        in the POST body — the front-end passes it after a modal.
+        """
+        response.content_type = "application/json"
+        data = request.json or {}
+        if not data.get("confirm"):
+            return json.dumps({"error":
+                "confirm=true required — canary create leaves an audit trail"})
+        dest_name = data.get("destination_name", "")
+        if not dest_name:
+            return json.dumps({"error": "destination_name required"})
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        conn = None
+        for c in api.state.get_connections_from(sid):
+            if c.destination_name == dest_name:
+                conn = c
+                break
+        if not conn:
+            return json.dumps({"error":
+                f"Connection {dest_name!r} not found on {sid}"})
+        target = api.state.get_node(conn.target_sid)
+        if target is None:
+            return json.dumps({"error":
+                f"Target SID {conn.target_sid!r} not on map"})
+
+        def _run():
+            _task_start(f"{sid}:canary:{dest_name}",
+                        f"Canary create on {conn.target_sid}")
+            try:
+                creds = None
+                if conn.rfc_user and conn.secstore_password:
+                    from sapmap_models import Credentials
+                    creds = Credentials(
+                        username=conn.rfc_user,
+                        password=conn.secstore_password,
+                        client=conn.client or "")
+                res = sapmap_rfc.canary_create_user_probe(
+                    target, creds=creds)
+                # Update the create-user reach fields based on the
+                # canary outcome — this is the most authoritative
+                # answer, so it always overwrites prior verdicts.
+                from datetime import datetime as _dt, timezone as _tz
+                conn.create_user_probe_at = (
+                    _dt.now(_tz.utc).isoformat(timespec="seconds"))
+                conn.create_user_probe = "canary"
+                if res.get("success"):
+                    conn.can_create_user = True
+                    conn.create_user_evidence = (
+                        f"canary user {res['username']} created + "
+                        f"deleted successfully")
+                    conn.create_user_probe_error = ""
+                    print(f"[+] {dest_name}: canary create+delete OK — "
+                          f"create-user reach CONFIRMED")
+                    try:
+                        sapmap_findings.emit_finding(
+                            "CRITICAL", conn.source_sid,
+                            f"Canary create+delete via {dest_name!r} "
+                            f"on {conn.target_sid} succeeded — RFC "
+                            f"user {conn.rfc_user} can create SAP "
+                            f"users despite no SAP_ALL profile",
+                            ref="rfc.canary.create_ok",
+                            attack_capability="lateral.rfc_propagate")
+                    except Exception:
+                        pass
+                elif res.get("created") and not res.get("deleted"):
+                    conn.can_create_user = True
+                    conn.create_user_evidence = (
+                        f"canary user {res['username']} CREATED but "
+                        f"delete failed — CLEANUP MANUALLY")
+                    conn.create_user_probe_error = res.get("error", "")
+                    print(f"[!] {dest_name}: canary CREATED but delete "
+                          f"failed — manual cleanup required: "
+                          f"BAPI_USER_DELETE {res['username']}")
+                else:
+                    conn.can_create_user = False
+                    conn.create_user_evidence = (
+                        "canary create rejected — "
+                        + (res.get("error", "")[:200] or "no auth"))
+                    conn.create_user_probe_error = res.get("error", "")
+                    print(f"[-] {dest_name}: canary create rejected — "
+                          f"{res.get('error', '')[:200]}")
+            except Exception as e:
+                print(f"[-] {dest_name}: canary probe crashed: {e}")
+            finally:
+                _task_end(f"{sid}:canary:{dest_name}")
+
+        _bg(f"{sid}:canary:{dest_name}",
+             f"Canary create-user probe → {dest_name}", _run)
         return json.dumps({"status": "started"})
 
     @app.route("/api/node/<sid>/sapcontrol_osexecute", method="POST")

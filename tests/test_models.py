@@ -142,6 +142,39 @@ def test_rfcconnection_roundtrip():
     assert restored.secstore_password == "decrypted_pw"
 
 
+def test_rfcconnection_create_user_reach_fields_roundtrip():
+    """Issue #23 — the fine-grained create-user reach signal survives
+    to_dict / from_dict, including the None sentinel for the never-
+    probed state."""
+    conn = RFCConnection(
+        source_sid="S4H", source_host="s4hana",
+        target_sid="ERP", destination_name="ERP_100",
+        rfc_user="RFC_USER",
+        can_create_user=True,
+        can_assign_sap_all=True,
+        can_assign_role=False,
+        create_user_probe="authority_check",
+        create_user_evidence="S_USER_GRP 01/SUPER + S_USER_PRO 22/SAP_ALL",
+        create_user_probe_at="2026-08-08T12:00:00+00:00",
+    )
+    d = conn.to_dict()
+    restored = RFCConnection.from_dict(d)
+    assert restored.can_create_user is True
+    assert restored.can_assign_sap_all is True
+    assert restored.can_assign_role is False
+    assert restored.create_user_probe == "authority_check"
+    assert "S_USER_GRP" in restored.create_user_evidence
+    assert restored.create_user_probe_at.startswith("2026-08-08")
+
+    # Default (never probed) round-trips as None
+    fresh = RFCConnection(source_sid="X", source_host="x")
+    assert fresh.can_create_user is None
+    d2 = fresh.to_dict()
+    restored2 = RFCConnection.from_dict(d2)
+    assert restored2.can_create_user is None
+    assert restored2.create_user_probe == ""
+
+
 def test_rfcconnection_from_dict_unknown_keys():
     d = {
         "source_sid": "S4H",

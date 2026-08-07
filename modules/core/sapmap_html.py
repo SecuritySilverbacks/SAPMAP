@@ -8193,6 +8193,11 @@ function _connInfoStateKey(c) {
     profiles_len:     (c.profiles || []).length,
     roles_len:        (c.roles || []).length,
     user_detail_err:  (c.user_detail_error || '').length,
+    // Issue #23 — poll loop must re-render when the create-user
+    // reach probe finishes (either the auto-probe on Test Connection
+    // or the operator-triggered canary route).
+    can_create_user:  c.can_create_user,
+    create_user_probe: c.create_user_probe || '',
     sapxpg_remote_works: !!c.sapxpg_remote_works,
     trusted_system:   !!c.trusted_system,
     ping_ok:          !!c.ping_ok,
@@ -8410,6 +8415,53 @@ function showConnInfo(e, connIdx) {
     ${profilesHtml ? `<div class="info-section"><strong style="font-size:11px;color:#8b949e">Profiles</strong><div class="profile-list">${profilesHtml}</div></div>` : ''}
     ${rolesHtml ? `<div class="info-section"><strong style="font-size:11px;color:#8b949e">Roles</strong><div class="profile-list">${rolesHtml}</div></div>` : ''}
     ${conn.user_detail_error ? `<div class="info-section" style="color:#d29922;font-size:11px">${escHtml(conn.user_detail_error)}</div>` : ''}
+    ${(() => {
+      // Issue #23 — surface the fine-grained create-user reach
+      // signal so the operator sees "yes, S_USER_GRP + S_USER_PRO
+      // are enough" even without SAP_ALL, and vice versa.
+      const p = conn.create_user_probe || '';
+      const ev = conn.create_user_evidence || '';
+      if (conn.can_create_user === null || conn.can_create_user === undefined) {
+        if (!conn.logon_successful) return '';
+        return `<div class="info-section" style="color:#484f58;font-size:11px">
+          <strong style="color:#8b949e">Create-user reach:</strong>
+          <span style="color:#8b949e">not probed — run Test Connection to check</span></div>`;
+      }
+      let icon, color, label;
+      if (conn.can_create_user === true) {
+        if (p === 'sap_all') {
+          icon = '&#128994;'; color = '#3fb950';
+          label = 'Yes — SAP_ALL profile';
+        } else if (p === 'authority_check') {
+          icon = '&#128994;'; color = '#3fb950';
+          label = 'Yes — ' + escHtml(ev);
+        } else if (p === 'canary') {
+          icon = '&#128994;'; color = '#3fb950';
+          label = 'Yes — canary create+delete confirmed';
+        } else {
+          icon = '&#128993;'; color = '#d29922';
+          label = 'Likely — ' + escHtml(ev);
+        }
+      } else {
+        icon = '&#128308;'; color = '#f85149';
+        label = 'No — ' + escHtml(ev || 'S_USER_GRP denied');
+      }
+      const canCanary = conn.logon_successful && conn.rfc_user;
+      const canaryBtn = canCanary ? (
+        `<button class="btn" style="margin-left:8px;font-size:10px;padding:2px 8px" `
+        + `onclick="runCanaryCreate('${escHtml(conn.source_sid)}','${escHtml(conn.destination_name)}')" `
+        + `title="Layer 4 — creates + immediately deletes a canary user. Leaves an audit trail.">`
+        + `Verify by canary</button>`
+      ) : '';
+      const probeErr = conn.create_user_probe_error
+        ? `<div style="color:#484f58;font-size:10px;margin-top:2px">${escHtml(conn.create_user_probe_error)}</div>`
+        : '';
+      return `<div class="info-section">
+        <strong style="font-size:11px;color:#8b949e">Create-user reach</strong>
+        <div style="font-size:12px;color:${color};margin-top:2px">${icon} ${label}${canaryBtn}</div>
+        ${probeErr}
+      </div>`;
+    })()}
     ${isHttp ? `<div class="info-section">
       <strong style="font-size:11px;color:#8b949e">DEST_CHECK_CONNECTION</strong>
       ${conn.tested ? `
@@ -8427,7 +8479,7 @@ function showConnInfo(e, connIdx) {
     <div class="info-section">
       <div class="info-row"><span class="info-label">Risk:</span><span class="info-val"><span class="risk-badge ${riskClass}">${risk}</span></span></div>
     </div>
-    ${(isHttp && conn.tested && conn.ping_ok && !conn.has_sap_all && !conn.soap_rfc_verified) ? (() => {
+    ${(isHttp && conn.tested && conn.ping_ok && !conn.has_sap_all && !conn.soap_rfc_verified && conn.can_create_user !== true) ? (() => {
       const reasons = [];
       if (!conn.rfc_user) reasons.push('no RFC user on destination');
       if (!conn.target_sid) reasons.push('target SID unresolved');
@@ -8490,7 +8542,11 @@ function showConnInfo(e, connIdx) {
         // ADS) because that call will always fail with
         // "Illegal destination type 'G'" / XML parse errors.
         if (isTypeT || !conn.logon_successful || !conn.target_sid) return '';
-        if (!(conn.has_sap_all || conn.soap_rfc_verified)) return '';
+        // Issue #23 — accept the fine-grained can_create_user reach
+        // as an alternative to the has_sap_all shortcut so users with
+        // S_USER_GRP + S_USER_PRO can still trigger BAPI_USER_CREATE1.
+        if (!(conn.has_sap_all || conn.soap_rfc_verified
+                || conn.can_create_user === true)) return '';
         const oat = (conn.os_access_type || '').toLowerCase();
         if (oat.startsWith('sapcontrol') || oat.startsWith('hostagent')) return '';
         if (conn.is_btp_dest || conn.is_ads_dest) return '';
@@ -8782,6 +8838,25 @@ async function testConnection(sid, destName, connIdx) {
     await api('POST', `node/${sid}/test_rfc_single`, {
       destination_name: destName });
   }
+  startPolling();
+}
+
+// Issue #23 layer 4 — canary create+delete probe.  Explicit
+// operator confirmation required because it leaves a real audit
+// trail on the target.
+async function runCanaryCreate(sourceSid, destName) {
+  const ok = confirm(
+    `Canary create-user probe on ${destName}:\n\n` +
+    `Creates a SAPMAP_CANARY_<ts> user via BAPI_USER_CREATE1 and\n` +
+    `immediately deletes it via BAPI_USER_DELETE.  Definitively\n` +
+    `answers "can this RFC user create users?" — but leaves BOTH\n` +
+    `events in the target's SAL audit log.\n\n` +
+    `Continue?`);
+  if (!ok) return;
+  flashActivity(
+    `${sourceSid}: canary create-user probe on ${destName}`, 6000);
+  await api('POST', `node/${sourceSid}/canary_create_user`, {
+    destination_name: destName, confirm: true });
   startPolling();
 }
 

@@ -291,6 +291,243 @@ def get_user_details(node: SAPNode, username: str,
     return result_info
 
 
+_KNOWN_ADMIN_ROLES = frozenset({
+    "SAP_BC_USER_ADMIN",
+    "SAP_BC_USER_ADMIN_CUA",
+    "SAP_BC_BASIS_ADMIN",
+    "SAP_BC_BASIS_ADMIN_XFULL",
+    "Z_USER_ADMIN", "Y_USER_ADMIN",   # customer-namespace conventions
+    "Z_BASIS_ADMIN", "Y_BASIS_ADMIN",
+})
+
+
+def check_can_create_user(node: SAPNode,
+                          existing_profiles: list = None,
+                          existing_roles: list = None,
+                          creds: Credentials = None) -> dict:
+    """Probe whether the RFC user has enough authorization to call
+    BAPI_USER_CREATE1 on the target — layered check, first
+    authoritative answer wins.
+
+    Layer 1  SAP_ALL fast-path — profile list already loaded.
+    Layer 2  Role-name heuristic — SAP_BC_USER_ADMIN & friends.
+    Layer 3  Native ABAP AUTHORITY-CHECK via RFC_ABAP_INSTALL_AND_RUN
+             for S_USER_GRP 01/{SUPER,''} + S_USER_PRO 22/SAP_ALL
+             + S_USER_AGR 22/SAP_BC_USER_ADMIN.
+
+    Layer 4 (canary create+delete) is NOT run here — it's operator-
+    triggered via a separate route because it leaves an audit trail.
+
+    Returns dict:
+        {
+          "can_create_user":    bool | None,   # None = inconclusive
+          "can_assign_sap_all": bool | None,
+          "can_assign_role":    bool | None,
+          "probe":              "sap_all" | "role_heuristic"
+                                | "authority_check",
+          "evidence":           "S_USER_GRP 01/SUPER + …",
+          "error":              str,           # empty on success
+        }
+    """
+    result = {
+        "can_create_user": None,
+        "can_assign_sap_all": None,
+        "can_assign_role": None,
+        "probe": "",
+        "evidence": "",
+        "error": "",
+    }
+    profiles = list(existing_profiles or [])
+    roles = list(existing_roles or [])
+
+    # ---- Layer 1 — SAP_ALL fast-path ---------------------------------
+    if "SAP_ALL" in profiles:
+        result.update({
+            "can_create_user": True,
+            "can_assign_sap_all": True,
+            "can_assign_role": True,
+            "probe": "sap_all",
+            "evidence": "SAP_ALL profile present",
+        })
+        return result
+
+    # ---- Layer 2 — well-known admin role heuristic -------------------
+    hit_role = next((r for r in roles if r in _KNOWN_ADMIN_ROLES), "")
+    if hit_role:
+        result.update({
+            "can_create_user": True,
+            "can_assign_sap_all": None,   # unknown without ABAP check
+            "can_assign_role":    True,
+            "probe": "role_heuristic",
+            "evidence": f"role {hit_role} present (heuristic — "
+                         f"verify with canary create)",
+        })
+        # Don't return — fall through to layer 3 for a confirmatory
+        # check when RFC_ABAP_INSTALL_AND_RUN is available.  If it is,
+        # the layer-3 verdict will overwrite this one.
+
+    # ---- Layer 3 — native ABAP AUTHORITY-CHECK -----------------------
+    abap_lines = [
+        "REPORT zsapmap_ac.",
+        "DATA: rc_grp_super TYPE i, rc_grp_default TYPE i,",
+        "      rc_pro       TYPE i, rc_agr         TYPE i.",
+        "AUTHORITY-CHECK OBJECT 'S_USER_GRP'",
+        "  ID 'ACTVT' FIELD '01'",
+        "  ID 'CLASS' FIELD 'SUPER'.",
+        "rc_grp_super = sy-subrc.",
+        "AUTHORITY-CHECK OBJECT 'S_USER_GRP'",
+        "  ID 'ACTVT' FIELD '01'",
+        "  ID 'CLASS' FIELD ' '.",
+        "rc_grp_default = sy-subrc.",
+        "AUTHORITY-CHECK OBJECT 'S_USER_PRO'",
+        "  ID 'ACTVT'   FIELD '22'",
+        "  ID 'PROFILE' FIELD 'SAP_ALL'.",
+        "rc_pro = sy-subrc.",
+        "AUTHORITY-CHECK OBJECT 'S_USER_AGR'",
+        "  ID 'ACTVT'     FIELD '22'",
+        "  ID 'ACT_GROUP' FIELD 'SAP_BC_USER_ADMIN'.",
+        "rc_agr = sy-subrc.",
+        "WRITE: / 'GRP_SUPER=',   rc_grp_super.",
+        "WRITE: / 'GRP_DEFAULT=', rc_grp_default.",
+        "WRITE: / 'PRO_SAPALL=',  rc_pro.",
+        "WRITE: / 'AGR_ADMIN=',   rc_agr.",
+    ]
+    try:
+        with _get_connection(node, creds) as conn:
+            run = _run_abap_program(conn, abap_lines, "ZSAPMAP_AC")
+    except Exception as e:
+        # Only report the ABAP-run error if the heuristic didn't
+        # already produce a verdict — otherwise keep the heuristic
+        # answer and surface the error as advisory.
+        err = format_rfc_exception(e)
+        if not result["probe"]:
+            result["error"] = f"ABAP AUTHORITY-CHECK: {err}"
+        else:
+            result["error"] = (f"ABAP verification unavailable — kept "
+                                f"heuristic verdict ({err})")
+        return result
+    if not run.get("success"):
+        # Same fallthrough — RFC_ABAP_INSTALL_AND_RUN blocked is the
+        # common case, don't overwrite a heuristic verdict.
+        if not result["probe"]:
+            result["error"] = ("ABAP AUTHORITY-CHECK blocked: "
+                                + (run.get("error") or "unknown"))
+        else:
+            result["error"] = ("ABAP verification unavailable — kept "
+                                "heuristic verdict")
+        return result
+
+    # Parse the four `NAME= value` lines.
+    subrcs = {}
+    import re
+    for line in run.get("output", []):
+        m = re.match(r"([A-Z_]+)=\s*(-?\d+)", line.strip())
+        if m:
+            subrcs[m.group(1)] = int(m.group(2))
+    if not subrcs:
+        result["error"] = ("ABAP AUTHORITY-CHECK ran but no parseable "
+                            "subrc output — RFC_ABAP_INSTALL_AND_RUN "
+                            "quirks; keep prior verdict if any")
+        return result
+
+    can_grp = (subrcs.get("GRP_SUPER") == 0
+                or subrcs.get("GRP_DEFAULT") == 0)
+    can_pro = subrcs.get("PRO_SAPALL", 4) == 0
+    can_agr = subrcs.get("AGR_ADMIN", 4) == 0
+
+    # The BAPI needs BOTH create-user AND grant-something rights.
+    # Without grant, we can only make a shell account — still "can
+    # create user" but not "SAP_ALL"; caller must weight that.
+    create_ok = can_grp
+    evidence_bits = []
+    if subrcs.get("GRP_SUPER") == 0:
+        evidence_bits.append("S_USER_GRP 01/SUPER")
+    if (subrcs.get("GRP_DEFAULT") == 0
+            and subrcs.get("GRP_SUPER") != 0):
+        evidence_bits.append("S_USER_GRP 01/DEFAULT")
+    if can_pro:
+        evidence_bits.append("S_USER_PRO 22/SAP_ALL")
+    if can_agr:
+        evidence_bits.append("S_USER_AGR 22/SAP_BC_USER_ADMIN")
+    result.update({
+        "can_create_user": create_ok,
+        "can_assign_sap_all": can_pro,
+        "can_assign_role":    can_agr,
+        "probe": "authority_check",
+        "evidence": (" + ".join(evidence_bits) if evidence_bits
+                      else "no S_USER_* auth granted"),
+        "error": "",   # authoritative — clears any prior advisory
+    })
+    return result
+
+
+def canary_create_user_probe(node: SAPNode,
+                             creds: Credentials = None,
+                             username: str = "") -> dict:
+    """Layer 4 — attempt BAPI_USER_CREATE1 with a canary username
+    and immediately delete it.  Definitively answers "can this RFC
+    user create a user?" even when RFC_ABAP_INSTALL_AND_RUN is
+    blocked, at the cost of a real audit trail.
+
+    Operator-triggered only — never called from Test Connection.
+
+    Returns:
+        {
+          "success":  bool,       # canary create AND delete succeeded
+          "created":  bool,       # BAPI_USER_CREATE1 returned OK
+          "deleted":  bool,       # cleanup delete succeeded
+          "username": str,        # the canary name used
+          "error":    str,
+        }
+    """
+    import time
+    if not username:
+        # Use a timestamp so repeated probes don't collide.
+        username = f"SAPMAP_CANARY_{int(time.time())}"[:12]
+    username = username.upper()
+    result = {"success": False, "created": False, "deleted": False,
+              "username": username, "error": ""}
+    try:
+        with _get_connection(node, creds) as conn:
+            # Minimum-viable create — no profiles, no roles.
+            try:
+                r = conn.call(
+                    BAPI_USER_CREATE,
+                    USERNAME=username,
+                    PASSWORD={"BAPIPWD": "Sapmap_Canary_1!"},
+                    ADDRESS={"LASTNAME": "SAPMAP CANARY"},
+                    LOGONDATA={"USTYP": "A"},
+                )
+                errs = [m for m in (r.get("RETURN") or [])
+                        if (m.get("TYPE") or "").upper() in ("E", "A")]
+                if errs:
+                    result["error"] = "; ".join(
+                        m.get("MESSAGE", "")[:140] for m in errs)
+                    return result
+                result["created"] = True
+            except Exception as e:
+                result["error"] = f"BAPI_USER_CREATE1: {format_rfc_exception(e)}"
+                return result
+            # Always try cleanup — leaving a canary alive is a
+            # persistent audit-trail item the operator didn't ask for.
+            try:
+                d = conn.call(BAPI_USER_DELETE, USERNAME=username)
+                errs = [m for m in (d.get("RETURN") or [])
+                        if (m.get("TYPE") or "").upper() in ("E", "A")]
+                result["deleted"] = not errs
+                if errs:
+                    result["error"] = ("delete failed: "
+                                        + "; ".join(m.get("MESSAGE", "")[:140]
+                                                    for m in errs))
+            except Exception as e:
+                result["error"] = (f"delete failed: "
+                                    f"{format_rfc_exception(e)}")
+        result["success"] = result["created"] and result["deleted"]
+    except Exception as e:
+        result["error"] = format_rfc_exception(e)
+    return result
+
+
 def _abap_install_and_run(conn, destination: str, username: str) -> dict:
     """Execute BAPI_USER_GET_DETAIL on a remote system via ABAP_INSTALL_AND_RUN.
 
