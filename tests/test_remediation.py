@@ -42,6 +42,17 @@ def test_every_capability_in_attack_map_has_remediation_or_explicit_exemption():
         "recon.wd_fingerprint", "recon.wd_backends",
         "recon.scc_fingerprint", "recon.scc_relay",
         "recon.btp_subaccount_enum",
+        # RFC_SYSTEM_INFO leak — pre-auth info-disclosure that SAP
+        # accepts by design (SAP Note 927637 clarifies).  Awareness only.
+        "recon.rfc_system_info_leak",
+        # USREXTID / OA2C enumeration — read-only auth-table reads that
+        # only work AFTER foothold.  The parent user-creation /
+        # credential-access findings carry the actual fix.
+        "recon.usrextid_read", "recon.oa2c_read",
+        # WD backend-table read via authenticated WD admin — the WD
+        # default-creds catalog entry already prescribes rotating the
+        # WD admin password; no separate fix needed.
+        "data.wd_backend_table_read",
         # Mid-chain post-foothold capabilities; their parent persist/
         # lateral entry carries the operator fix.
         "exploit.sapxpg",
@@ -66,7 +77,7 @@ def test_every_capability_in_attack_map_has_remediation_or_explicit_exemption():
         # vulnerability with a vendor fix.  Awareness only.
         "ransapware.encrypt", "ransapware.decrypt",
         # Tier 3 evasion — operator-side OPSEC, no target fix.
-        "evasion.death_star",
+        "evasion.death_star", "evasion.rsau_disable",
         # Persistence sub-actions covered by persist.create_user etc.
         "persist.sap_all_assign", "persist.ssh_key_plant",
         "persist.web_shell",

@@ -4929,6 +4929,20 @@ def create_app(api: SAPMAPApi) -> Bottle:
                           f"land on yet.")
                 else:
                     print(f"[+] {sid}: USREXTID read — {len(rows)} entry(s)")
+                    # ATT&CK-tagged enumeration finding so the
+                    # heatmap lights TA0007 T1087.002 for domain-
+                    # account discovery.  Info-level; the CRITICAL
+                    # emit below fires only when privileged users
+                    # are actually reachable via a weak PP rule.
+                    try:
+                        sapmap_findings.emit_finding(
+                            "INFO", sid,
+                            f"USREXTID enumerated — {len(rows)} "
+                            f"cert/SNC → ABAP user mapping(s) read",
+                            ref="usrextid.enumerated",
+                            attack_capability="recon.usrextid_read")
+                    except Exception:
+                        pass
                 # Cross-link with every linked SCC's PP rule.  We pick
                 # the first SCC with PP analysis for the impersonation
                 # report; if multiple SCCs link to this node, the
@@ -5041,6 +5055,19 @@ def create_app(api: SAPMAPApi) -> Bottle:
                   f"profile(s) total, {n_btp} BTP-bound.  Run "
                   f"Harvest BTP Credentials to surface them as mint "
                   f"candidates.")
+            # ATT&CK: TA0007 Discovery — enumerating the cloud
+            # services this ABAP has OAuth2 trust with (T1526 Cloud
+            # Service Discovery + T1087 Account Discovery).
+            if profiles:
+                try:
+                    sapmap_findings.emit_finding(
+                        "INFO", sid,
+                        f"OA2C OAuth2 profiles enumerated — "
+                        f"{len(profiles)} client(s), {n_btp} BTP-bound",
+                        ref="oa2c.enumerated",
+                        attack_capability="recon.oa2c_read")
+                except Exception:
+                    pass
 
         _bg(f"{sid}:read_oa2c", "Read OA2C OAuth Profiles", _run)
         return json.dumps({"status": "started"})
@@ -6086,6 +6113,24 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                   f" entry/entries")
                             _enrich_wd_backends_from_admin_table(
                                 node, r["systems"], state=api.state)
+                            # ATT&CK: landscape-topology dump via
+                            # authenticated WD admin.  T1213 + T1526
+                            # in one HTTP GET.  Info-level — the
+                            # WD-admin default-creds finding above
+                            # carries the CRITICAL severity.
+                            try:
+                                sapmap_findings.emit_finding(
+                                    "INFO", sid,
+                                    f"WD /sap/wdisp/admin backend "
+                                    f"table read — {len(r['systems'])}"
+                                    f" backend(s) discovered "
+                                    f"(SID, MSHOST, MSPORT, "
+                                    f"SSL_ENCRYPT, SRCURL)",
+                                    ref="wd.backend_table.read",
+                                    attack_capability=(
+                                        "data.wd_backend_table_read"))
+                            except Exception:
+                                pass
                         else:
                             print(f"[-] {sid}: admin-table extract "
                                   f"failed ({r['error']}) — falling "
@@ -8595,7 +8640,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                       f"{out.get('error')}")
                 emit_finding("WARNING", sid,
                               f"Tier 3 SAL slot disable failed: "
-                              f"{out.get('error')}")
+                              f"{out.get('error')}",
+                              attack_capability="evasion.rsau_disable")
                 return
             mode = ("STEALTH/SHM-only" if out.get("stealth_mode")
                     else f"API (disk persist: "
@@ -8604,6 +8650,20 @@ def create_app(api: SAPMAPApi) -> Bottle:
                   f"round-trip complete [{mode}] (baseline statuses "
                   f"{out.get('baseline_statuses')}, active before: "
                   f"{out.get('before_active_count')})")
+            # ATT&CK: TA0005 Stealth — SAL slot disable / re-enable
+            # cycle is a T1562.001+T1562.006 event.  HIGH severity
+            # because the ~hold_seconds window silently drops audit
+            # events matching the slot's filter.
+            try:
+                emit_finding(
+                    "HIGH", sid,
+                    f"Tier 3 SAL slot disable: slot(s) "
+                    f"{out.get('slotno')} muted for "
+                    f"{hold_seconds}s [{mode}]",
+                    ref="tier3.sal.slot_disable",
+                    attack_capability="evasion.rsau_disable")
+            except Exception:
+                pass
 
         _bg(f"{sid}:tier3_sal_slot_disable",
              f"Tier 3: disable SAL slot {slotno}", _run)
@@ -8677,7 +8737,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 print(f"[-] {sid}: param set failed — {out.get('error')}")
                 emit_finding("WARNING", sid,
                               f"Tier 3 param set failed: "
-                              f"{out.get('error')}")
+                              f"{out.get('error')}",
+                              attack_capability="evasion.rsau_disable")
                 return
             applied = out.get("applied", False)
             after_write = out.get("live_after_write", "")
@@ -8752,7 +8813,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                       f"{out.get('error')}")
                 emit_finding("WARNING", sid,
                               f"Tier 3 SAL UNAME narrow failed: "
-                              f"{out.get('error')}")
+                              f"{out.get('error')}",
+                              attack_capability="evasion.rsau_disable")
                 return
             print(f"[+] {sid}: SAL slot(s) {out['slotno']} UNAME swap "
                   f"round-trip complete (baseline UNAMEs "
@@ -8795,7 +8857,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                       f"{out.get('error')}")
                 emit_finding("WARNING", sid,
                               f"Tier 3 Java SAL suppress failed: "
-                              f"{out.get('error')}")
+                              f"{out.get('error')}",
+                              attack_capability="evasion.rsau_disable")
                 return
             print(f"[+] {sid}: Java SAL suppress round-trip complete — "
                   f"suppressed {out.get('suppress_ok', 0)} categories, "
@@ -8849,7 +8912,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                       f"{out.get('error')}")
                 emit_finding("WARNING", sid,
                               f"Tier 3 DBTABLOG purge failed: "
-                              f"{out.get('error')}")
+                              f"{out.get('error')}",
+                              attack_capability="evasion.rsau_disable")
                 return
             dc = out.get("deleted_count", 0)
             via = out.get("via", "?")
@@ -9085,7 +9149,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                       f"{out.get('error')}")
                 emit_finding("WARNING", sid,
                               f"Tier 3 Death Star arm failed: "
-                              f"{out.get('error')}")
+                              f"{out.get('error')}",
+                              attack_capability="evasion.rsau_disable")
                 return
             print(f"[+] {sid}: Death Star armed — hook PID "
                   f"{out.get('hook_pid')} → worker PID "
@@ -9132,7 +9197,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                           f"{msg}")
                     emit_finding("WARNING", sid,
                                   f"Tier 3 Death Star disarm issue: "
-                                  f"{msg}")
+                                  f"{msg}",
+                                  attack_capability="evasion.rsau_disable")
                 return
             print(f"[+] {sid}: Death Star disarmed — hook PID "
                   f"{out.get('hook_pid')} stopped cleanly")

@@ -2057,6 +2057,22 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
                   f"Host={info['hostname'] or '?'}, OS={info['os_type'] or '?'}, "
                   f"DB={info['db_type'] or '?'}, Kernel={info['kernel'] or '?'}, "
                   f"Release={info['sap_release'] or '?'}")
+            # Info-level ATT&CK-tagged finding so the heatmap lights
+            # TA0043 Reconnaissance / TA0007 Discovery on the very
+            # first thing SAPMAP does against a target.  Skips when
+            # nothing meaningful leaked (pure gateway-alive result).
+            try:
+                emit_finding(
+                    "INFO", tag,
+                    f"Pre-auth kernel/hostname leak via RFC_SYSTEM_INFO "
+                    f"({status}) on {host}:{gw_port} — "
+                    f"SID={info['sid'] or '?'}, "
+                    f"Host={info['hostname'] or '?'}, "
+                    f"Kernel={info['kernel'] or '?'}",
+                    ref="rfc.system_info.leak",
+                    attack_capability="recon.rfc_system_info_leak")
+            except Exception:
+                pass
         else:
             methods = result.get("methods_tried", [])
             methods_ok = result.get("methods_success", [])

@@ -115,6 +115,8 @@ TECHNIQUES: Dict[str, Dict] = {
     # Stealth (formerly Defense Evasion — renamed in ATT&CK v19)
     "T1574":     {"name": "Hijack Execution Flow",          "tactic": "TA0005"},
     "T1562":     {"name": "Impair Defenses",                "tactic": "TA0005"},
+    "T1562.001": {"name": "Disable or Modify Tools",        "tactic": "TA0005", "sub_of": "T1562"},
+    "T1562.006": {"name": "Indicator Blocking",             "tactic": "TA0005", "sub_of": "T1562"},
     "T1055":     {"name": "Process Injection",              "tactic": "TA0005"},
 
     # Credential Access
@@ -139,10 +141,20 @@ TECHNIQUES: Dict[str, Dict] = {
     "T1550.004": {"name": "Web Session Cookie",             "tactic": "TA0008", "sub_of": "T1550"},
     "T1090":     {"name": "Proxy",                          "tactic": "TA0011"},
     "T1090.001": {"name": "Internal Proxy",                 "tactic": "TA0011", "sub_of": "T1090"},
+    # Application-layer protocol (HTTPS) — populates TA0011 for
+    # cert-proxy tunnels that were previously invisible on the C2 column.
+    "T1071":     {"name": "Application Layer Protocol",     "tactic": "TA0011"},
+    "T1071.001": {"name": "Web Protocols",                  "tactic": "TA0011", "sub_of": "T1071"},
 
     # Collection
     "T1213":     {"name": "Data from Information Repositories", "tactic": "TA0009"},
     "T1074":     {"name": "Data Staged",                    "tactic": "TA0009"},
+    "T1560":     {"name": "Archive Collected Data",         "tactic": "TA0009"},
+
+    # Exfiltration — SCC backup zip / users.xml pull leaves the
+    # target over the SCC admin HTTPS port; populates TA0010 which
+    # would otherwise stay empty on the grid.
+    "T1567":     {"name": "Exfiltration Over Web Service",  "tactic": "TA0010"},
 
     # Impact (ransapware writes ciphertext into productive tables —
     # dual-tagged as encryption-for-impact and stored-data manipulation
@@ -174,6 +186,20 @@ CAPABILITY_MAP: Dict[str, List[str]] = {
     "recon.btp_subaccount_enum": ["T1526"],
     "recon.saprouter_info":      ["T1018", "T1592"],
     "snc.scan":                  ["T1082"],
+    # Pre-auth kernel/hostname/instance leak via V6/V2/Chipik RFC probes.
+    # This runs on every fresh scan target — first ATT&CK step in the
+    # engagement, previously invisible on the grid.
+    "recon.rfc_system_info_leak": ["T1592", "T1082"],
+    # USREXTID / USR21 / USR02 dump for domain-account harvesting.
+    "recon.usrextid_read":       ["T1087", "T1087.002"],
+    # OA2C_CLIENT / OA2C_CONFIG dump — reveals which cloud services the
+    # target has OAuth2 trust with.  Discovery of cloud service links.
+    "recon.oa2c_read":           ["T1087", "T1526"],
+    # Web Dispatcher /sap/wdisp/admin backend-table read — full landscape
+    # topology (SID, MSHOST, MSPORT, SSL_ENCRYPT, SRCURL) via a single
+    # authenticated HTTP GET.  Data-from-repositories + cloud-service
+    # discovery in one shot.
+    "data.wd_backend_table_read": ["T1213", "T1526"],
 
     # ---- Initial Access / Execution ----
     "exploit.10kblaze":          ["T1190", "T1059"],
@@ -200,7 +226,10 @@ CAPABILITY_MAP: Dict[str, List[str]] = {
     "creds.abap_secstore":       ["T1555"],
     "creds.java_secstore":       ["T1555"],
     "creds.btp_destinations":    ["T1552.001"],
-    "creds.scc_keystore":        ["T1555", "T1552.004"],
+    # SCC backup zip pulls over the SCC's own HTTPS admin port — that
+    # is Exfiltration Over Web Service (T1567), on top of the credential-
+    # access primitives.
+    "creds.scc_keystore":        ["T1555", "T1552.004", "T1567"],
     "creds.scc_users_xml":       ["T1555"],
     "creds.pse_loot":            ["T1552.004"],
     "creds.ssh_private_key":     ["T1552.004", "T1145"],
@@ -219,17 +248,17 @@ CAPABILITY_MAP: Dict[str, List[str]] = {
     "lateral.sxpg_exec":         ["T1021", "T1059"],
     "lateral.wd_pivot":          ["T1090", "T1021"],
     "lateral.saprouter_tunnel":  ["T1090.001"],
-    "lateral.scc_tunnel_impersonate": ["T1078.004", "T1550"],
+    "lateral.scc_tunnel_impersonate": ["T1078.004", "T1550", "T1071.001"],
     # Kernel-proxied cert-auth = using a source ABAP's SAPSSLC PSE
     # (via HTTP_CLIENT_CREATE_BY_DESTINATION) to call a BTP / cloud
     # endpoint under the source system's cloud identity.  Lateral
-    # movement + valid alternate auth material.
-    "lateral.btp_cert_proxy":    ["T1550", "T1078.004"],
+    # movement + valid alternate auth material + HTTPS as C2 channel.
+    "lateral.btp_cert_proxy":    ["T1550", "T1078.004", "T1071.001"],
     # Auto-probe of a cert-authenticated Type-G/H destination that
     # returned 2xx — proves the endpoint is trusted AND authorized
     # end-to-end.  Semantically the same as btp_cert_proxy but the
     # key exists as a separate name for finding provenance clarity.
-    "lateral.cert_proxy_open":   ["T1550", "T1078.004"],
+    "lateral.cert_proxy_open":   ["T1550", "T1078.004", "T1071.001"],
     "lateral.internal_ip_spoof": ["T1078"],
     "lateral.ssh_key_reuse":     ["T1021.004", "T1078.001"],
 
@@ -250,7 +279,7 @@ CAPABILITY_MAP: Dict[str, List[str]] = {
     # ---- Collection ----
     "data.read_table":           ["T1213"],
     "data.capability_analyse":   ["T1213"],
-    "data.scc_users_dump":       ["T1213"],
+    "data.scc_users_dump":       ["T1213", "T1567"],
     # Reading /opt/sap/scc/config/users.xml via sidadm → root pivot
     # chains: Privilege Escalation (T1068, the LPE itself) +
     # OS Credential Dumping (T1003, harvesting the bcrypt hashes) +
@@ -260,7 +289,10 @@ CAPABILITY_MAP: Dict[str, List[str]] = {
     # one's gated on a working Linux LPE, the other on SCC admin web
     # creds.
     "data.scc_users_dump_via_lpe": ["T1068", "T1003", "T1213"],
-    "data.loot_stage":           ["T1074"],
+    # Loot staging = writing collected data to a working dir on the
+    # target before exfil.  When SAPMAP tars/zips before pulling it's
+    # also Archive Collected Data (T1560).
+    "data.loot_stage":           ["T1074", "T1560"],
 
     # ---- Stealth / Defense Impairment (Tier 3) ----
     # Virtual SAP Death Star = live disp+work hook that swallows SAL /
@@ -269,6 +301,11 @@ CAPABILITY_MAP: Dict[str, List[str]] = {
     # memory only.  ATT&CK: T1562 Impair Defenses (subtype: indicator
     # blocking) + T1055.008 Ptrace System Calls for the injection.
     "evasion.death_star":        ["T1562", "T1055"],
+    # Static Tier 3 audit-log manipulation — RSAU slot disable, SAL
+    # uname narrow, DBTABLOG purge, Java SAL suppress.  These all
+    # touch defensive controls without ptrace, so no T1055 — just the
+    # two T1562 sub-techniques that describe what actually happens.
+    "evasion.rsau_disable":      ["T1562.001", "T1562.006"],
 
     # ---- Impact ----
     # Ransapware encrypts productive table fields in place — the DB
