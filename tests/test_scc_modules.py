@@ -922,3 +922,46 @@ def test_dedupe_scc_nodes_from_dict_runs_on_load():
     survivor = next(iter(reloaded.scc_nodes.values()))
     assert survivor.version == "2.19.0.2"
     assert survivor.ha_role == "shadow"
+
+
+def test_find_scc_by_alias_uses_sap_node_hostname_crossref():
+    """Real-world path: an SCC gets detected on 192.168.2.209 and
+    keyed by IP only (scanner sees no hostname).  A SAP node already
+    on the map at the same IP knows the host is "s4hanadev".  When
+    the master's HA backup reports the peer as "s4hanadev", the
+    resolver must find the existing SCC via the SAP node's alias
+    set — DNS won't help because the hostname is target-local."""
+    from sapmap_models import SAPMAPState, SAPNode, SCCNode
+    s = SAPMAPState()
+    s.nodes["S4H"] = SAPNode(sid="S4H", hostname="s4hanadev",
+                              ip="192.168.2.209", system_type="ABAP")
+    s.scc_nodes["192.168.2.209"] = SCCNode(host="192.168.2.209",
+                                            ip="192.168.2.209")
+    hit = s.find_scc_by_alias("s4hanadev")
+    assert hit is not None
+    assert hit[0] == "192.168.2.209"
+
+
+def test_dedupe_uses_sap_node_hostname_crossref():
+    """Same real-world case at the dedup layer: an alias-duplicate
+    pair (192.168.2.209 keyed by IP, s4hanadev keyed by hostname)
+    must fold on load when a SAP node ties the two aliases together."""
+    from sapmap_models import SAPMAPState, SAPNode, SCCNode
+    s = SAPMAPState()
+    s.nodes["S4H"] = SAPNode(sid="S4H", hostname="s4hanadev",
+                              ip="192.168.2.209", system_type="ABAP")
+    s.scc_nodes["192.168.2.209"] = SCCNode(host="192.168.2.209",
+                                            ip="192.168.2.209",
+                                            version="2.19.0.2")
+    s.scc_nodes["s4hanadev"] = SCCNode(host="s4hanadev", ip="s4hanadev",
+                                        ha_role="shadow",
+                                        ha_peer_role="master",
+                                        ha_shadow_host="192.168.2.167")
+    dropped = s.dedupe_scc_nodes()
+    assert len(s.scc_nodes) == 1
+    assert next(iter(s.scc_nodes)) == "192.168.2.209"
+    survivor = s.scc_nodes["192.168.2.209"]
+    assert survivor.version == "2.19.0.2"
+    assert survivor.ha_role == "shadow"
+    assert survivor.ha_shadow_host == "192.168.2.167"
+    assert ("s4hanadev", "192.168.2.209") in dropped

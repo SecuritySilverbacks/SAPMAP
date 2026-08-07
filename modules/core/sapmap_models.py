@@ -2011,7 +2011,34 @@ class SAPMAPState:
         for k, n in self.scc_nodes.items():
             if (n.host or "").lower() == cl or (n.ip or "").lower() == cl:
                 return k, n
-        # 3. DNS round-trip — swallow every socket error so a lookup
+        # 3. Cross-reference SAP nodes on the map — a SAP node at
+        #    the same IP as an SCC will typically know the local
+        #    hostname (e.g. "s4hanadev") that the SCC's HA-peer
+        #    payload uses.  This is the common case: the target
+        #    reports its own bare hostname, which never resolves
+        #    from the operator's machine.
+        try:
+            sap_ips = set()
+            for sn in getattr(self, "nodes", {}).values():
+                names = {h.lower() for h in
+                         (getattr(sn, "all_hostnames", lambda: [])() or [])}
+                ips = set(getattr(sn, "all_ips", lambda: [])() or [])
+                # Fallbacks in case a SAPNode lacks the helpers.
+                if not names and getattr(sn, "hostname", ""):
+                    names = {sn.hostname.lower()}
+                if not ips and getattr(sn, "ip", ""):
+                    ips = {sn.ip}
+                if cl in names or c in ips:
+                    sap_ips.update(ips)
+                    sap_ips.update(names)
+            if sap_ips:
+                for k, n in self.scc_nodes.items():
+                    if ((n.host or "").lower() in sap_ips
+                            or (n.ip or "") in sap_ips):
+                        return k, n
+        except Exception:
+            pass
+        # 4. DNS round-trip — swallow every socket error so a lookup
         #    against an internal-only host never blocks or raises.
         try:
             import socket
@@ -2108,6 +2135,28 @@ class SAPMAPState:
         aliases_b = {s.lower() for s in (nb.host or "", nb.ip or "", b) if s}
         if aliases_a & aliases_b:
             return True
+        # SAP-node cross-reference: a SAP node co-located with either
+        # SCC contributes its hostname/IP aliases to that SCC's set.
+        try:
+            for sn in getattr(self, "nodes", {}).values():
+                names = {h.lower() for h in
+                         (getattr(sn, "all_hostnames", lambda: [])() or [])}
+                ips = set(getattr(sn, "all_ips", lambda: [])() or [])
+                if not names and getattr(sn, "hostname", ""):
+                    names = {sn.hostname.lower()}
+                if not ips and getattr(sn, "ip", ""):
+                    ips = {sn.ip}
+                node_aliases = names | ips
+                touches_a = bool(node_aliases & aliases_a)
+                touches_b = bool(node_aliases & aliases_b)
+                if touches_a:
+                    aliases_a |= node_aliases
+                if touches_b:
+                    aliases_b |= node_aliases
+            if aliases_a & aliases_b:
+                return True
+        except Exception:
+            pass
         # DNS both directions.
         try:
             import socket
