@@ -1386,6 +1386,75 @@ class SCCMapping:
         return cls(**{k: v for k, v in d.items() if k in known})
 
 
+def _scc_richness(sn) -> int:
+    """Rough "how much loot does this SCC node carry" score, used to
+    pick the survivor when merging two alias duplicates.  Higher wins."""
+    s = 0
+    if getattr(sn, "keystore_extracted", False):    s += 100
+    if getattr(sn, "ssfs_decrypted", False):        s += 50
+    if getattr(sn, "admin_session_obtained", False):s += 30
+    if getattr(sn, "pwned", False):                 s += 30
+    s += 10 * len(getattr(sn, "credentials", []) or [])
+    s += 5  * len(getattr(sn, "mappings", []) or [])
+    s += 5  * len(getattr(sn, "unlocked_keystores", []) or [])
+    s += 3  * len(getattr(sn, "ssfs_secrets_keys", []) or [])
+    s += 2  * len(getattr(sn, "cves_confirmed", []) or [])
+    s += 1  * len(getattr(sn, "cves_suspected", []) or [])
+    if getattr(sn, "version", ""):                  s += 5
+    return s
+
+
+def _merge_scc_fields(dst, src) -> None:
+    """Copy every field on `src` into `dst` when `dst` has no value.
+    Never overwrites existing data on the survivor."""
+    scalar_defaults = {
+        "": ["ip", "version", "version_source", "bundle_hash",
+             "favicon_sha256", "server_header", "tunnel_region",
+             "ha_role", "ha_peer_role", "ha_shadow_host",
+             "keystore_loot_path", "tunnel_privkey_fp",
+             "pp_ca_privkey_fp", "ssfs_secrets_path",
+             "users_xml_loot_path", "backup_password", "notes",
+             "pp_analysis_at"],
+    }
+    for empty, names in scalar_defaults.items():
+        for name in names:
+            if not getattr(dst, name, empty):
+                v = getattr(src, name, empty)
+                if v:
+                    setattr(dst, name, v)
+    for name in ("admin_ui_reachable", "admin_session_obtained",
+                 "default_creds_live", "keystore_extracted",
+                 "tunnel_replayed", "ssfs_decrypted",
+                 "principal_propagation_enabled", "pwned"):
+        if not getattr(dst, name, False) and getattr(src, name, False):
+            setattr(dst, name, True)
+    if not getattr(dst, "favicon_mmh3", 0):
+        dst.favicon_mmh3 = getattr(src, "favicon_mmh3", 0)
+    if not getattr(dst, "pp_weak_count", 0):
+        dst.pp_weak_count = getattr(src, "pp_weak_count", 0)
+    if not getattr(dst, "tls_fingerprint", {}):
+        dst.tls_fingerprint = dict(getattr(src, "tls_fingerprint", {}) or {})
+    if not getattr(dst, "pp_analysis", {}):
+        dst.pp_analysis = dict(getattr(src, "pp_analysis", {}) or {})
+    # List-of-dict / list-of-str merges — dedup by string repr so
+    # re-runs are idempotent.
+    for name in ("cves_confirmed", "cves_suspected", "cve_details",
+                 "subaccount_uuids", "location_ids", "mappings",
+                 "ssfs_secrets_keys", "unlocked_keystores",
+                 "findings", "credentials"):
+        dst_list = list(getattr(dst, name, []) or [])
+        src_list = list(getattr(src, name, []) or [])
+        seen = {repr(x) for x in dst_list}
+        for item in src_list:
+            if repr(item) not in seen:
+                dst_list.append(item)
+                seen.add(repr(item))
+        setattr(dst, name, dst_list)
+    # Preserve either node's on-map position if the survivor has none.
+    if not getattr(dst, "position", None) and getattr(src, "position", None):
+        dst.position = src.position
+
+
 @dataclass
 class SCCNode:
     """A SAP Cloud Connector instance — sibling to SAPNode on the map.
@@ -1907,6 +1976,156 @@ class SAPMAPState:
         """Find a node matching host + instance number."""
         return self.find_node_by_host(hostname=host, ip=host,
                                       instance_nr=instance_nr)
+
+    def find_scc_by_alias(self, candidate: str):
+        """Look up an existing SCC node by host OR ip alias.
+
+        SCC HA-peer discovery paths get the peer's *host* string from
+        different sources (REST API returns the operator-configured
+        hostname like "s4hanadev"; backup zip returns whatever was in
+        scc_config.ini).  Meanwhile the peer may already be on the map
+        under its IP because it was in the original scan target list.
+        A raw dict-key lookup misses this and materialises a duplicate
+        SCC node — the exact bug where a Master↔Shadow link ends up
+        pointing at a new "s4hanadev" node instead of the existing
+        "192.168.2.209" one.
+
+        Match rules, checked in order:
+          1. Exact key match (fastest — the common case)
+          2. Any existing node's .host or .ip equals candidate
+          3. DNS: gethostbyname(candidate) matches an existing .ip,
+             or gethostbyaddr(candidate) matches an existing .host
+
+        Returns (key, SCCNode) on a hit; None otherwise.
+        """
+        if not candidate:
+            return None
+        c = candidate.strip()
+        if not c:
+            return None
+        # 1. Exact key
+        if c in self.scc_nodes:
+            return c, self.scc_nodes[c]
+        # 2. Host / ip field on any existing node
+        cl = c.lower()
+        for k, n in self.scc_nodes.items():
+            if (n.host or "").lower() == cl or (n.ip or "").lower() == cl:
+                return k, n
+        # 3. DNS round-trip — swallow every socket error so a lookup
+        #    against an internal-only host never blocks or raises.
+        try:
+            import socket
+            resolved_ip = ""
+            try:
+                resolved_ip = socket.gethostbyname(c)
+            except Exception:
+                pass
+            resolved_host = ""
+            try:
+                resolved_host = socket.gethostbyaddr(c)[0]
+            except Exception:
+                pass
+            for k, n in self.scc_nodes.items():
+                if resolved_ip and (n.ip or "") == resolved_ip:
+                    return k, n
+                if resolved_host and (n.host or "").lower() == resolved_host.lower():
+                    return k, n
+                # And symmetrically: resolve the existing node's alias
+                # too, so an existing "s4hanadev" node matches a peer
+                # given as "192.168.2.209".
+                try:
+                    if n.host and n.host != n.ip:
+                        n_ip = socket.gethostbyname(n.host)
+                        if n_ip == c:
+                            return k, n
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return None
+
+    def dedupe_scc_nodes(self) -> list:
+        """Collapse duplicate SCC nodes that reference the same host
+        under different aliases (e.g. "s4hanadev" and "192.168.2.209"
+        both being the same physical Cloud Connector).
+
+        Runs the same alias-matching logic as find_scc_by_alias — for
+        each pair that resolves to the same host, keep the "richer"
+        node (the one with a backup pulled, credentials captured,
+        mappings, PP analysis, …) and merge missing fields from the
+        sparser one before dropping it.
+
+        Returns a list of (dropped_key, merged_into_key) tuples so
+        callers can log what changed.  Safe to call repeatedly.
+        """
+        if len(self.scc_nodes) < 2:
+            return []
+        merged = []
+        # Iterate over a copy of the keys so we can mutate the dict.
+        keys = list(self.scc_nodes.keys())
+        seen = set()
+        # For each key, find every OTHER key that aliases to it.
+        for k in keys:
+            if k in seen or k not in self.scc_nodes:
+                continue
+            base = self.scc_nodes[k]
+            # Collect every peer key that resolves to the same host as
+            # base (by field match or by DNS).
+            for other_key in list(self.scc_nodes.keys()):
+                if other_key == k or other_key in seen:
+                    continue
+                if not self._scc_keys_alias(k, other_key):
+                    continue
+                other = self.scc_nodes[other_key]
+                # Pick the richer node as the survivor.
+                if _scc_richness(other) > _scc_richness(base):
+                    survivor, loser = other, base
+                    survivor_key, loser_key = other_key, k
+                else:
+                    survivor, loser = base, other
+                    survivor_key, loser_key = k, other_key
+                _merge_scc_fields(survivor, loser)
+                del self.scc_nodes[loser_key]
+                seen.add(loser_key)
+                merged.append((loser_key, survivor_key))
+                if loser_key == k:
+                    # We dropped the outer iteration's node — stop
+                    # aliasing against it.
+                    base = survivor
+                    k = survivor_key
+        return merged
+
+    def _scc_keys_alias(self, a: str, b: str) -> bool:
+        """True iff SCC dict keys a and b reference the same physical
+        Cloud Connector (host or IP alias, incl. DNS resolution)."""
+        if a == b:
+            return True
+        na = self.scc_nodes.get(a)
+        nb = self.scc_nodes.get(b)
+        if na is None or nb is None:
+            return False
+        aliases_a = {s.lower() for s in (na.host or "", na.ip or "", a) if s}
+        aliases_b = {s.lower() for s in (nb.host or "", nb.ip or "", b) if s}
+        if aliases_a & aliases_b:
+            return True
+        # DNS both directions.
+        try:
+            import socket
+            for x in list(aliases_a):
+                try:
+                    if socket.gethostbyname(x).lower() in aliases_b:
+                        return True
+                except Exception:
+                    pass
+            for x in list(aliases_b):
+                try:
+                    if socket.gethostbyname(x).lower() in aliases_a:
+                        return True
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return False
 
     # -- Connection management --
 
@@ -2566,6 +2785,13 @@ class SAPMAPState:
                                  for r in d.get("trust_relations", [])]
         for host, scc_d in d.get("scc_nodes", {}).items():
             state.scc_nodes[host] = SCCNode.from_dict(scc_d)
+        # Fold SCC nodes that reference the same physical host under
+        # different aliases (hostname vs IP).  Older state files can
+        # carry a duplicate when HA-peer discovery ran BEFORE the
+        # alias-aware lookup shipped — this pass collapses them on
+        # load so the operator no longer sees two shadow boxes for
+        # the same connector.
+        state.dedupe_scc_nodes()
         for uuid, sub_d in d.get("btp_subaccounts", {}).items():
             state.btp_subaccounts[uuid] = BTPSubaccountNode.from_dict(sub_d)
         # One-shot dedup pass: fold FQDN-keyed placeholder BTP nodes

@@ -224,8 +224,11 @@ def harvest_scc_from_pwned_node(node: SAPNode, state: SAPMAPState) -> dict:
                     fp = scc_fingerprint(ip, port=8443, timeout=4.0)
                     if fp and fp.get("is_scc"):
                         neighbor_sccs.append(ip)
-                        # Register the new SCC node on the map if not already present
-                        if ip not in state.scc_nodes:
+                        # Register the new SCC node on the map if not
+                        # already present — alias-aware so an SCC
+                        # already keyed by hostname doesn't get a
+                        # duplicate IP-keyed sibling.
+                        if state.find_scc_by_alias(ip) is None:
                             from sapmap_models import SCCNode
                             new_scc = SCCNode(
                                 host=ip,

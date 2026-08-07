@@ -2393,9 +2393,15 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                   "peer_role": ha.get("peer_role"),
                                   "peer_host": peer_host})
                         # Register the peer as its own SCCNode so the
-                        # front-end draws it.  Don't overwrite an existing
-                        # entry — the peer may already have been scanned.
-                        if peer_host not in api.state.scc_nodes:
+                        # front-end draws it.  Resolve host/IP aliases
+                        # first — the peer may already be on the map
+                        # under a different alias (e.g. keyed by IP
+                        # from the original scan target list, while
+                        # the REST API returns the operator-configured
+                        # hostname).  find_scc_by_alias also does a
+                        # DNS round-trip so hostname↔IP pairs match.
+                        existing = api.state.find_scc_by_alias(peer_host)
+                        if existing is None:
                             from sapmap_models import SCCNode
                             api.state.scc_nodes[peer_host] = SCCNode(
                                 host=peer_host,
@@ -2408,13 +2414,19 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                 notes=f"Discovered as HA peer of {host}",
                             )
                         else:
-                            peer_node = api.state.scc_nodes[peer_host]
+                            _peer_key, peer_node = existing
                             if not peer_node.ha_shadow_host:
                                 peer_node.ha_shadow_host = host
                             if not peer_node.ha_role:
                                 peer_node.ha_role = ha.get("peer_role", "") or ""
                             if not peer_node.ha_peer_role:
                                 peer_node.ha_peer_role = sn.ha_role
+                            # Pin the alias the master pointed at so
+                            # future diffs surface the alternate name.
+                            if peer_host and peer_host not in (peer_node.host, peer_node.ip):
+                                peer_node.notes = (
+                                    (peer_node.notes + " · " if peer_node.notes else "")
+                                    + f"HA peer of {host} (also known as {peer_host})")
                     else:
                         # Dump every endpoint we tried (status + body
                         # prefix) so we can spot which URL exposes the
@@ -2883,7 +2895,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                       "peer_host": peer,
                                       "is_ha_active": is_active,
                                       "is_shadow_enabled": is_enabled})
-                            if peer not in api.state.scc_nodes:
+                            # Same alias-aware lookup as the REST path
+                            # above — see find_scc_by_alias for the
+                            # rules (exact key → host/ip field → DNS).
+                            existing_peer = api.state.find_scc_by_alias(peer)
+                            if existing_peer is None:
                                 from sapmap_models import SCCNode
                                 api.state.scc_nodes[peer] = SCCNode(
                                     host=peer,
@@ -2896,13 +2912,17 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                     notes=f"Discovered as HA peer of {host}",
                                 )
                             else:
-                                pn = api.state.scc_nodes[peer]
+                                _pk, pn = existing_peer
                                 if not pn.ha_shadow_host:
                                     pn.ha_shadow_host = host
                                 if not pn.ha_role:
                                     pn.ha_role = peer_role
                                 if not pn.ha_peer_role:
                                     pn.ha_peer_role = sn.ha_role
+                                if peer and peer not in (pn.host, pn.ip):
+                                    pn.notes = (
+                                        (pn.notes + " · " if pn.notes else "")
+                                        + f"HA peer of {host} (also known as {peer})")
                     else:
                         print(f"[-] SCC {host}: HA-from-zip parse: "
                               f"{hres.get('error')}")

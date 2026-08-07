@@ -829,3 +829,96 @@ def test_scc_default_port_constant_matches_8443():
         f"WD-fingerprint-loop fallback in sapmap_scanner.py "
         f"specifically guards p == SCC_DEFAULT_PORT - if the "
         f"constant moves, that guard must too")
+
+
+# ---------------------------------------------------------------------------
+# SCC alias-aware lookup + dedup (issue: master → shadow discovery
+# materialises a duplicate SCC node when the existing peer is keyed
+# by IP but the master hands us the hostname).
+# ---------------------------------------------------------------------------
+
+def test_find_scc_by_alias_exact_key():
+    from sapmap_models import SAPMAPState, SCCNode
+    s = SAPMAPState()
+    s.scc_nodes["1.2.3.4"] = SCCNode(host="1.2.3.4", ip="1.2.3.4")
+    hit = s.find_scc_by_alias("1.2.3.4")
+    assert hit is not None
+    assert hit[0] == "1.2.3.4"
+
+
+def test_find_scc_by_alias_matches_host_field():
+    """Peer given as hostname but existing node stored under IP alias
+    with matching .host field."""
+    from sapmap_models import SAPMAPState, SCCNode
+    s = SAPMAPState()
+    s.scc_nodes["1.2.3.4"] = SCCNode(host="scc.example", ip="1.2.3.4")
+    hit = s.find_scc_by_alias("scc.example")
+    assert hit is not None
+    assert hit[0] == "1.2.3.4"
+
+
+def test_find_scc_by_alias_returns_none_for_unknown():
+    from sapmap_models import SAPMAPState, SCCNode
+    s = SAPMAPState()
+    s.scc_nodes["1.2.3.4"] = SCCNode(host="1.2.3.4", ip="1.2.3.4")
+    assert s.find_scc_by_alias("5.6.7.8") is None
+    assert s.find_scc_by_alias("") is None
+    assert s.find_scc_by_alias("   ") is None
+
+
+def test_dedupe_scc_nodes_merges_alias_pair_and_keeps_richer():
+    """Two SCC entries — one keyed by IP with a keystore extracted,
+    one keyed by hostname pointing at the same host via .ip.  Dedup
+    must keep the richer entry and drop the other, merging any
+    extra fields from the loser."""
+    from sapmap_models import SAPMAPState, SCCNode
+    s = SAPMAPState()
+    s.scc_nodes["1.2.3.4"] = SCCNode(
+        host="1.2.3.4", ip="1.2.3.4",
+        keystore_extracted=True, keystore_loot_path="/loot/x",
+        version="2.19.0.2",
+    )
+    s.scc_nodes["s4hanadev"] = SCCNode(
+        host="s4hanadev", ip="1.2.3.4",
+        ha_role="shadow", ha_peer_role="master",
+        ha_shadow_host="master.example",
+    )
+    dropped = s.dedupe_scc_nodes()
+    assert len(s.scc_nodes) == 1
+    survivor_key = next(iter(s.scc_nodes))
+    assert survivor_key == "1.2.3.4"
+    survivor = s.scc_nodes[survivor_key]
+    # Keystore data from the richer node preserved…
+    assert survivor.keystore_extracted is True
+    assert survivor.keystore_loot_path == "/loot/x"
+    # …and HA fields merged from the sparser one.
+    assert survivor.ha_role == "shadow"
+    assert survivor.ha_shadow_host == "master.example"
+    # Dropped tuple points at the sparser node that was folded in.
+    assert ("s4hanadev", "1.2.3.4") in dropped
+
+
+def test_dedupe_scc_nodes_no_op_when_nothing_aliases():
+    from sapmap_models import SAPMAPState, SCCNode
+    s = SAPMAPState()
+    s.scc_nodes["a"] = SCCNode(host="a", ip="1.1.1.1")
+    s.scc_nodes["b"] = SCCNode(host="b", ip="2.2.2.2")
+    assert s.dedupe_scc_nodes() == []
+    assert len(s.scc_nodes) == 2
+
+
+def test_dedupe_scc_nodes_from_dict_runs_on_load():
+    """Round-tripping a state with alias-duplicate SCCs through
+    from_dict must silently collapse them — old sessions saved before
+    the alias fix should self-heal on the first load."""
+    from sapmap_models import SAPMAPState, SCCNode
+    s = SAPMAPState()
+    s.scc_nodes["1.2.3.4"] = SCCNode(host="1.2.3.4", ip="1.2.3.4",
+                                     version="2.19.0.2")
+    s.scc_nodes["s4hanadev"] = SCCNode(host="s4hanadev", ip="1.2.3.4",
+                                       ha_role="shadow")
+    reloaded = SAPMAPState.from_dict(s.to_dict())
+    assert len(reloaded.scc_nodes) == 1
+    survivor = next(iter(reloaded.scc_nodes.values()))
+    assert survivor.version == "2.19.0.2"
+    assert survivor.ha_role == "shadow"
