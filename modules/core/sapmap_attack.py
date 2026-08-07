@@ -114,6 +114,8 @@ TECHNIQUES: Dict[str, Dict] = {
 
     # Stealth (formerly Defense Evasion — renamed in ATT&CK v19)
     "T1574":     {"name": "Hijack Execution Flow",          "tactic": "TA0005"},
+    "T1562":     {"name": "Impair Defenses",                "tactic": "TA0005"},
+    "T1055":     {"name": "Process Injection",              "tactic": "TA0005"},
 
     # Credential Access
     "T1003":     {"name": "OS Credential Dumping",          "tactic": "TA0006"},
@@ -141,6 +143,13 @@ TECHNIQUES: Dict[str, Dict] = {
     # Collection
     "T1213":     {"name": "Data from Information Repositories", "tactic": "TA0009"},
     "T1074":     {"name": "Data Staged",                    "tactic": "TA0009"},
+
+    # Impact (ransapware writes ciphertext into productive tables —
+    # dual-tagged as encryption-for-impact and stored-data manipulation
+    # so both defensive lenses light up).
+    "T1486":     {"name": "Data Encrypted for Impact",      "tactic": "TA0040"},
+    "T1565":     {"name": "Data Manipulation",              "tactic": "TA0040"},
+    "T1565.001": {"name": "Stored Data Manipulation",       "tactic": "TA0040", "sub_of": "T1565"},
 }
 
 
@@ -180,6 +189,7 @@ CAPABILITY_MAP: Dict[str, List[str]] = {
     "privesc.webgui_rsbdcos0":   ["T1068", "T1059.006"],
     "lpe.copyfail":              ["T1068"],
     "lpe.dirtyfrag":             ["T1068"],
+    "lpe.peditcow":              ["T1068"],
     "lpe.miniplasma":            ["T1068"],
     "lpe.godpotato":             ["T1068"],
     "lpe.efspotato":             ["T1068"],
@@ -195,6 +205,11 @@ CAPABILITY_MAP: Dict[str, List[str]] = {
     "creds.pse_loot":            ["T1552.004"],
     "creds.ssh_private_key":     ["T1552.004", "T1145"],
     "creds.oa2c_secrets":        ["T1555"],
+    # Web Dispatcher's icmauth.txt is an on-disk password file that
+    # ICM parses at start-up — reading it (via WD admin creds or an
+    # LPE) is Credentials in Files (T1552.001) with a Valid Accounts
+    # (T1078) follow-through when the hashes get cracked.
+    "creds.wd_icmauth":          ["T1552.001", "T1078"],
 
     # ---- Lateral Movement ----
     "lateral.rfc_propagate":     ["T1021", "T1078"],
@@ -205,6 +220,16 @@ CAPABILITY_MAP: Dict[str, List[str]] = {
     "lateral.wd_pivot":          ["T1090", "T1021"],
     "lateral.saprouter_tunnel":  ["T1090.001"],
     "lateral.scc_tunnel_impersonate": ["T1078.004", "T1550"],
+    # Kernel-proxied cert-auth = using a source ABAP's SAPSSLC PSE
+    # (via HTTP_CLIENT_CREATE_BY_DESTINATION) to call a BTP / cloud
+    # endpoint under the source system's cloud identity.  Lateral
+    # movement + valid alternate auth material.
+    "lateral.btp_cert_proxy":    ["T1550", "T1078.004"],
+    # Auto-probe of a cert-authenticated Type-G/H destination that
+    # returned 2xx — proves the endpoint is trusted AND authorized
+    # end-to-end.  Semantically the same as btp_cert_proxy but the
+    # key exists as a separate name for finding provenance clarity.
+    "lateral.cert_proxy_open":   ["T1550", "T1078.004"],
     "lateral.internal_ip_spoof": ["T1078"],
     "lateral.ssh_key_reuse":     ["T1021.004", "T1078.001"],
 
@@ -236,6 +261,25 @@ CAPABILITY_MAP: Dict[str, List[str]] = {
     # creds.
     "data.scc_users_dump_via_lpe": ["T1068", "T1003", "T1213"],
     "data.loot_stage":           ["T1074"],
+
+    # ---- Stealth / Defense Impairment (Tier 3) ----
+    # Virtual SAP Death Star = live disp+work hook that swallows SAL /
+    # DBTABLOG / ETD events matching a filter.  Ptrace-based process
+    # injection, kernel-of-target patch that keeps the hooked bytes in
+    # memory only.  ATT&CK: T1562 Impair Defenses (subtype: indicator
+    # blocking) + T1055.008 Ptrace System Calls for the injection.
+    "evasion.death_star":        ["T1562", "T1055"],
+
+    # ---- Impact ----
+    # Ransapware encrypts productive table fields in place — the DB
+    # rows still exist, their contents are ciphertext until we decrypt
+    # via the stored manifest.  Dual-tag: T1486 (Data Encrypted for
+    # Impact) for the ransomware framing, T1565.001 (Stored Data
+    # Manipulation) for the DB-row overwrite framing.  Decrypt is
+    # the reversal — same tags apply because a defender monitoring
+    # for T1486/T1565 should catch both operations.
+    "ransapware.encrypt":        ["T1486", "T1565.001"],
+    "ransapware.decrypt":        ["T1486", "T1565.001"],
 }
 
 

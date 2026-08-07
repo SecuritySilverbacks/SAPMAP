@@ -4121,7 +4121,8 @@ def _maybe_build_scc_node(scan_result: dict, timeout: float = 5.0,
                 tag = "CONFIRMED" if status == "confirmed" else "suspected"
                 emit_finding(c["severity"], host,
                              f"SCC {node.version} [{tag}]: {c['headline']}",
-                             cve=c["cve"], ref=c.get("ref", ""))
+                             cve=c["cve"], ref=c.get("ref", ""),
+                             attack_capability="recon.scc_fingerprint")
         except Exception as e:
             logger.debug("CVE bucket lookup failed for %s: %s", host, e)
 
@@ -4139,13 +4140,15 @@ def _maybe_build_scc_node(scan_result: dict, timeout: float = 5.0,
                     node.version_source = "api"
                 emit_finding("CRITICAL", host,
                              f"SCC default credentials live: {sess.user}/manage",
-                             ref="scc.default.creds.live")
+                             ref="scc.default.creds.live",
+                             attack_capability="creds.default_probe")
                 logout(sess)
             else:
                 tried = ", ".join(a["user"] for a in attempts) or "none"
                 emit_finding("HIGH", host,
                              f"SCC default-cred probe ran (rejected): tried {tried}",
-                             ref="scc.default.creds.absent.but.probed")
+                             ref="scc.default.creds.absent.but.probed",
+                             attack_capability="creds.default_probe")
         except Exception as e:
             logger.debug("Default-creds probe failed for %s: %s", host, e)
 
@@ -5087,6 +5090,7 @@ def _sapology_system_to_node(sys_obj, target_ip: str) -> SAPNode:
                     "Gateway accepts SAPXPG register_ep — "
                     "unauthenticated OS command execution possible",
                     cve="SAP Note 1408081 (Gateway ACL)",
+                    attack_capability="exploit.10kblaze",
                 )
 
     # Determine DB type — SAPology sets db_type and has_hana/has_maxdb/etc.

@@ -2289,7 +2289,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     sapmap_findings.emit_finding(
                         "HIGH", host,
                         f"SCC default-cred probe ran (rejected): tried {tried}",
-                        ref="scc.default.creds.absent.but.probed")
+                        ref="scc.default.creds.absent.but.probed",
+                        attack_capability="creds.default_probe")
             except Exception as e:
                 print(f"[-] SCC {host}: probe failed: {e}")
             finally:
@@ -2338,7 +2339,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     f"Connector configuration access (mappings, channels, "
                     f"trust store, principal-propagation CA).",
                     ref="scc.admin.creds.verified",
-                    meta={"user": user})
+                    meta={"user": user},
+                    attack_capability="creds.default_probe")
                 if sess.version:
                     sn.version = sess.version
                     sn.version_source = "api"
@@ -2389,6 +2391,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             f"Compromise of either node yields the same "
                             f"tunnel privkey + PP CA — both must be patched.",
                             ref="scc.ha.pair",
+                            attack_capability="recon.scc_fingerprint",
                             meta={"role": sn.ha_role,
                                   "peer_role": ha.get("peer_role"),
                                   "peer_host": peer_host})
@@ -2456,7 +2459,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                 f"scc_config.ini.",
                                 ref="scc.ha.shadow.no_peer",
                                 meta={"role": sn.ha_role,
-                                      "raw": ha.get("raw", {})})
+                                      "raw": ha.get("raw", {})},
+                                attack_capability="recon.scc_fingerprint")
                         else:
                             sapmap_findings.emit_finding(
                                 "INFO", host,
@@ -2517,6 +2521,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
             "HIGH", host,
             f"SCC mappings extracted: {len(all_maps)} mapping(s), "
             f"{len(uuids)} subaccount(s)",
+            attack_capability="recon.scc_fingerprint",
             ref="scc.mappings.extracted",
             meta={"subaccounts": len(uuids), "mappings": len(all_maps)})
         for m in all_maps:
@@ -2534,7 +2539,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     f"any user the SCC asserts.",
                     ref="scc.mapping.principal_propagation",
                     meta={"mapping": label, "auth": auth,
-                          "sid": sid_label, "backend_type": bt})
+                          "sid": sid_label, "backend_type": bt},
+                    attack_capability="recon.scc_fingerprint")
             for r in (m.get("path_allowlist") or []):
                 if not isinstance(r, dict):
                     continue
@@ -2551,7 +2557,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         f"path '/' (full backend) to subaccount "
                         f"{m.get('virtual_host','?')}.",
                         ref="scc.mapping.path.root",
-                        meta={"mapping": label, "path": rpath, "sid": sid_label})
+                        meta={"mapping": label, "path": rpath, "sid": sid_label},
+                        attack_capability="recon.scc_fingerprint")
                 elif rpath in ("/sap/", "/sap") and is_subpath_match:
                     sapmap_findings.emit_finding(
                         "MEDIUM", host,
@@ -2672,7 +2679,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 ref="scc.ssfs.decrypted",
                 meta={"secrets_path": sn.ssfs_secrets_path,
                       "keys": list(sn.ssfs_secrets_keys),
-                      "native_lib": res.get("native_lib", "")})
+                      "native_lib": res.get("native_lib", "")},
+                attack_capability="creds.scc_keystore")
         else:
             print(f"[*] SCC {host}: SSFS decrypt yielded 0 secrets "
                   f"(backup zip is double-encrypted — use 'Decrypt On-Host "
@@ -2693,7 +2701,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                       "cert_sha256": k.get("cert_sha256"),
                       "key_type": k.get("key_type"),
                       "key_size": k.get("key_size"),
-                      "valid_until": k.get("cert_not_after")})
+                      "valid_until": k.get("cert_not_after")},
+                attack_capability="creds.scc_keystore")
         for kn in sn.ssfs_secrets_keys:
             if kn == "CLOUD_CONN/JAVA_KEYSTORE_PASSWORD":
                 continue
@@ -2701,6 +2710,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 "HIGH", host,
                 f"SCC SSFS secret recovered: {kn} — see "
                 f"{sn.ssfs_secrets_path} for plaintext.",
+                attack_capability="creds.scc_keystore",
                 ref="scc.ssfs.secret.recovered",
                 meta={"key": kn,
                       "secrets_path": sn.ssfs_secrets_path})
@@ -2813,7 +2823,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                           "system_p12_sha256": sys_ks.get("sha256"),
                           "tunnel_count": len(tun_ks),
                           "ssfs": res.get("ssfs_present"),
-                          "users_xml": res.get("users_xml_present")})
+                          "users_xml": res.get("users_xml_present")},
+                    attack_capability="creds.scc_keystore")
                 # Per-subaccount finding so the operator sees every
                 # tunnel cert they now own.
                 for k in tun_ks:
@@ -2826,7 +2837,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         meta={"subaccount": k["subaccount"],
                               "region": k["region"],
                               "sha256": k["sha256"],
-                              "path_in_zip": k["path"]})
+                              "path_in_zip": k["path"]},
+                        attack_capability="creds.scc_keystore")
                 if res.get("users_xml_present"):
                     sapmap_findings.emit_finding(
                         "HIGH", host,
@@ -2834,7 +2846,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         f"(sha256={res.get('users_xml_sha256','')[:16]}…) — "
                         f"hashed local user passwords available for offline crack.",
                         ref="scc.keystore.users.xml",
-                        meta={"users_xml_sha256": res.get("users_xml_sha256")})
+                        meta={"users_xml_sha256": res.get("users_xml_sha256")},
+                        attack_capability="creds.scc_users_xml")
                 # Sharpen version from manifest if available.
                 man_v = (res.get("manifest") or {}).get("version") or ""
                 if man_v and not sn.version:
@@ -2890,6 +2903,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                 f"same tunnel privkey + PP CA — both "
                                 f"must be patched.",
                                 ref="scc.ha.pair.backup",
+                                attack_capability="recon.scc_fingerprint",
                                 meta={"role": sn.ha_role,
                                       "peer_role": peer_role,
                                       "peer_host": peer,
@@ -3912,7 +3926,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     ref="scc.users.password_cracked",
                     meta={"username": username,
                           "algorithm": item.get("algorithm", ""),
-                          "source": "hashes.com"})
+                          "source": "hashes.com"},
+                    attack_capability="creds.scc_users_xml")
                 # Also append to loot file (one line per user)
                 try:
                     os.makedirs(loot_dir, exist_ok=True)
@@ -4485,7 +4500,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         f"(from {scc_root}/scc_config/ via {sid} OS-exec)",
                         ref="scc.ssfs.onhost.secret",
                         meta={"key": k, "source_sid": sid,
-                              "scc_root": scc_root})
+                              "scc_root": scc_root},
+                        attack_capability="creds.scc_keystore")
 
             except Exception as e:
                 print(f"[-] {sid}: harvest_scc_ssfs error: {e}")
@@ -4858,7 +4874,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                               "user": user,
                               "confidence": conf,
                               "destination": bundle.get("destination_used", ""),
-                              "verified_at": vat})
+                              "verified_at": vat},
+                        attack_capability="lateral.scc_tunnel_impersonate")
                 else:
                     verdict = bundle.get("verdict") or "?"
                     sapmap_findings.emit_finding(
@@ -4968,7 +4985,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         meta={"scc_host": used_scc,
                               "rule": imp.get("rule_template"),
                               "matched_count": len(matched),
-                              "privileged_users": [p["bname"] for p in privs]})
+                              "privileged_users": [p["bname"] for p in privs]},
+                        attack_capability="lateral.scc_tunnel_impersonate")
                 elif matched and imp.get("rule_caller_controlled"):
                     sapmap_findings.emit_finding(
                         "HIGH", sid,
@@ -4979,7 +4997,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         f"{imp.get('rule_template','?')} rule.",
                         ref="scc.pp.impersonation.unprivileged",
                         meta={"scc_host": used_scc,
-                              "matched_count": len(matched)})
+                              "matched_count": len(matched)},
+                        attack_capability="lateral.scc_tunnel_impersonate")
             except Exception as e:
                 print(f"[-] {sid}: read_usrextid error: {e}")
             finally:
@@ -5311,7 +5330,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 f"service-key carries (typically destination read).",
                 ref="onprem.to.btp.token_minted",
                 meta={"region": region, "client_id": client_id,
-                      "uaa_url": uaa_url})
+                      "uaa_url": uaa_url},
+                attack_capability="lateral.scc_tunnel_impersonate")
         except Exception:
             pass
 
@@ -5472,7 +5492,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                       "destination":  dest_name,
                       "pse":          conn.http_cert_pse or "",
                       "thumbprint":   thumbprint,
-                      "target_host":  target_host})
+                      "target_host":  target_host},
+                attack_capability="lateral.scc_tunnel_impersonate")
         except Exception:
             pass
 
@@ -5576,7 +5597,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                       "client_id":  client_id,
                       "cert_path":  cert_path,
                       "thumbprint": thumbprint,
-                      "uaa_url":    uaa_url})
+                      "uaa_url":    uaa_url},
+                attack_capability="lateral.scc_tunnel_impersonate")
         except Exception:
             pass
 
@@ -6203,6 +6225,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     f"verified ({working[0]}) — full wdisp/system_* "
                     f"table now reachable",
                     cve="",
+                    attack_capability="creds.default_probe",
                 )
                 if extract:
                     print(f"[*] {sid}: pulling wdisp/system_* table ...")
@@ -6332,6 +6355,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         f"+ kernel patch level all reachable without "
                         f"further effort",
                         cve="",
+                        attack_capability="creds.default_probe",
                     )
                     node.findings.append(Finding(
                         name=(f"WD admin default credentials live "
@@ -6583,6 +6607,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
             meta={"users": [h["username"] for h in parsed],
                   "algorithms": algos,
                   "source": source},
+            attack_capability="creds.wd_icmauth",
         )
 
         # hashes.com auto-lookup — same shape as scc_lookup_hashes_online.
@@ -6719,6 +6744,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                           "algorithm": original.get("algorithm", ""),
                           "source": "hashes.com",
                           "icmauth_source": source},
+                    attack_capability="creds.wd_icmauth",
                 )
                 # Append to cracked-loot file
                 try:
@@ -7269,7 +7295,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         ref=f"lpe.{method}.system_obtained",
                         meta={"command": command,
                               "method": method,
-                              "stdout": res.get("stdout", "")[:500]})
+                              "stdout": res.get("stdout", "")[:500]},
+                        attack_capability=(f"lpe.{method}"
+                                           if method != "?" else None))
                     print(f"[+] {sid}: {method} SYSTEM — output: "
                           f"{res.get('stdout', '')[:300]!r}")
                 else:
@@ -7321,7 +7349,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         ref=f"lpe.{method}.root_obtained",
                         meta={"command": command,
                               "method": method,
-                              "stdout": res.get("stdout", "")[:500]})
+                              "stdout": res.get("stdout", "")[:500]},
+                        attack_capability=(f"lpe.{method}"
+                                           if method != "?" else None))
                     print(f"[+] {sid}: {method} root — output: "
                           f"{res.get('stdout', '')[:300]!r}")
                 else:
@@ -7493,6 +7523,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         f"Java Secure Store decrypted — "
                         f"{r['credentials_added']} credential(s) imported, "
                         f"{r['downstream_added']} downstream system(s) added",
+                        attack_capability="creds.java_secstore",
                     )
             else:
                 print(f"[-] {sid}: Java Secure Store extraction failed: "
@@ -8942,7 +8973,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         f"{conn.http_cert_pse or '?'}) is trusted at "
                         f"the TLS layer — target accepted our client "
                         f"cert but denied this endpoint.  Other APIs "
-                        f"may grant access.")
+                        f"may grant access.",
+                        attack_capability="lateral.cert_proxy_open")
                     if t_node is not None:
                         t_node.cert_auth_trusted = True
                 # Opportunistic BTP-destination-service parse.  Fires
@@ -9997,7 +10029,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                 f"trusted at the TLS layer — the "
                                 f"target accepted our client cert "
                                 f"but denied this endpoint.  Other "
-                                f"APIs may grant access.")
+                                f"APIs may grant access.",
+                                attack_capability=(
+                                    "lateral.cert_proxy_open"))
                             if _t_node is not None:
                                 _t_node.cert_auth_trusted = True
                         # Opportunistic BTP-destination-service parse.
@@ -10570,6 +10604,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                     f"kernel-level pivot confirmed",
                                     meta={"source_sid": conn.source_sid,
                                           "target_sid": conn.target_sid},
+                                    attack_capability=(
+                                        "lateral.rfc_propagate"),
                                 )
                             except Exception:
                                 pass
@@ -10793,6 +10829,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                                   "target_sid":
                                                     conn.target_sid,
                                                   "channel": "ctcws"},
+                                                attack_capability=(
+                                                    "lateral.rfc_propagate"),
                                             )
                                         except Exception:
                                             pass
@@ -14554,6 +14592,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             _sev_for(r.severity.value), sid,
                             f"Business impact [{r.scenario}]: {r.headline} "
                             f"({r.record_count} record(s))",
+                            attack_capability="data.read_table",
                         )
             else:
                 print(f"[*] {sid}: Running all business impact scenarios...")
@@ -14574,6 +14613,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             _sev_for(r.severity.value), sid,
                             f"Business impact [{r.scenario}]: {r.headline} "
                             f"({r.record_count} record(s))",
+                            attack_capability="data.read_table",
                         )
                 if total > 0:
                     roll_sev = "CRITICAL" if crit else ("HIGH" if high
@@ -14582,6 +14622,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         roll_sev, sid,
                         f"Business-impact assessment: {total} scenario(s) "
                         f"returned data ({crit} critical, {high} high)",
+                        attack_capability="data.read_table",
                     )
 
         _bg(f"{sid}:impact", "Business Impact Assessment", _run)
@@ -14839,6 +14880,15 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     verb = "recovery" if reverse else "decryption"
                     print(f"[+] RanSAPware {sid}: {verb} complete, "
                           f"manifest updated")
+                    # Surface the reversal so the ATT&CK grid lights
+                    # T1486 / T1565.001 on the decrypt path too — a
+                    # blue-team viewer needs to see both operations.
+                    sapmap_findings.emit_finding(
+                        "HIGH", sid,
+                        f"RanSAPware {verb} — table "
+                        f"{manifest.table} ({manifest.rows_encrypted} rows)",
+                        attack_capability="ransapware.decrypt",
+                    )
             except Exception as e:
                 import traceback
                 print(f"[-] RanSAPware {sid}: {e}")
@@ -15216,7 +15266,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     f"in destinations.  Anyone with AccessClientSecrets "
                     f"on the destination service can pull them.",
                     ref="btp.cleartext.captured",
-                    meta={"subaccount": sub_uuid, "count": captured})
+                    meta={"subaccount": sub_uuid, "count": captured},
+                    attack_capability="creds.btp_destinations")
             except Exception:
                 pass
         return json.dumps({
@@ -15447,7 +15498,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     f"`destination_configuration.ApiAccess` scope on "
                     f"this subaccount can pull them.",
                     ref="btp.cleartext.captured",
-                    meta={"subaccount": uuid, "count": captured})
+                    meta={"subaccount": uuid, "count": captured},
+                    attack_capability="creds.btp_destinations")
             except Exception:
                 pass
         return json.dumps({

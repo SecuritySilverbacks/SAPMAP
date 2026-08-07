@@ -167,6 +167,7 @@ def harvest_scc_from_pwned_node(node: SAPNode, state: SAPMAPState) -> dict:
                 f"SCC found on same host as pwned {sid} at {scc_path}",
                 ref="scc.harvest.same_host",
                 meta={"path": scc_path},
+                attack_capability="recon.scc_fingerprint",
             )
     except Exception as e:
         logger.debug(f"harvest_scc [{sid}]: Bundle 1 error: {format_rfc_exception(e)}")
@@ -251,6 +252,7 @@ def harvest_scc_from_pwned_node(node: SAPNode, state: SAPMAPState) -> dict:
                             f"{sid} — auto-added to map",
                             ref="scc.harvest.neighbor",
                             meta={"ip": ip},
+                            attack_capability="recon.scc_fingerprint",
                         )
                 except Exception as probe_err:
                     logger.debug(f"harvest_scc [{sid}]: 8443 probe {ip} failed: {probe_err}")
@@ -316,6 +318,7 @@ def harvest_scc_from_pwned_node(node: SAPNode, state: SAPMAPState) -> dict:
                 f"May enable pivot to SCC VM.",
                 ref="scc.harvest.ssh_keys",
                 meta={"paths": result["ssh_keys_found"]},
+                attack_capability="creds.ssh_private_key",
             )
         if kh_entries:
             emit_finding(
@@ -385,6 +388,7 @@ def harvest_scc_from_pwned_node(node: SAPNode, state: SAPMAPState) -> dict:
                     f"{method_label}: SSFS, scc.p12 recovered at "
                     f"{loot_path}",
                     ref="scc.harvest.loot_exfilled",
+                    attack_capability="creds.scc_keystore",
                     meta={"loot_path": loot_path,
                           "size": len(raw_bytes),
                           "method": method_label})
@@ -606,6 +610,7 @@ def harvest_scc_from_pwned_node(node: SAPNode, state: SAPMAPState) -> dict:
                                         f"SSFS_SCC.{fname.upper()} at "
                                         f"/tmp/.scc_{fname}.bin",
                                         ref="scc.harvest.procfd",
+                                        attack_capability="creds.scc_keystore",
                                         meta={"pid": pid_out,
                                               "file": fname})
                 except Exception as pe_err:
@@ -642,6 +647,7 @@ def harvest_scc_from_pwned_node(node: SAPNode, state: SAPMAPState) -> dict:
                     f"use certutil/copy to exfil manually: {scc_win_path}",
                     ref="scc.harvest.win_files_found",
                     meta={"path": scc_win_path},
+                    attack_capability="recon.scc_fingerprint",
                 )
         except Exception as e:
             logger.debug(f"harvest_scc [{sid}]: Bundle 4 Windows error: {format_rfc_exception(e)}")
@@ -1213,6 +1219,7 @@ def harvest_scc_mappings_from_pwned_node(node: SAPNode, state: SAPMAPState) -> d
             f"{len(all_maps)} mapping(s) in {len(uuids)} subaccount(s). "
             f"No SCC admin credentials needed.",
             ref="scc.harvest.mappings",
+            attack_capability="recon.scc_fingerprint",
             meta={"mappings": len(all_maps), "subaccounts": len(uuids),
                   "regions": regions})
     except Exception:

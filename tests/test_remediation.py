@@ -50,6 +50,23 @@ def test_every_capability_in_attack_map_has_remediation_or_explicit_exemption():
         "lateral.sxpg_exec", "lateral.wd_pivot",
         "lateral.saprouter_tunnel", "lateral.scc_tunnel_impersonate",
         "lateral.internal_ip_spoof",
+        # Cert-proxied HTTP lateral — post-foothold; fix is at the
+        # STRUST + destination-config layer, covered by the SCC keystore
+        # rotation catalog entry.
+        "lateral.btp_cert_proxy", "lateral.cert_proxy_open",
+        # LPE peditcow — same Linux-kernel-cred class as lpe.copyfail;
+        # its parent catalog entry is the "keep kernel + libc patched"
+        # advice already carried by copyfail/dirtyfrag.
+        "lpe.peditcow",
+        # WD icmauth extraction — remediation is "rotate WD admin
+        # creds + rotate icmauth.txt", same shape as the WD default
+        # creds entry; keep info-only until the WD catalog grows.
+        "creds.wd_icmauth",
+        # RanSAPware — operator-side impact demo, not a target
+        # vulnerability with a vendor fix.  Awareness only.
+        "ransapware.encrypt", "ransapware.decrypt",
+        # Tier 3 evasion — operator-side OPSEC, no target fix.
+        "evasion.death_star",
         # Persistence sub-actions covered by persist.create_user etc.
         "persist.sap_all_assign", "persist.ssh_key_plant",
         "persist.web_shell",

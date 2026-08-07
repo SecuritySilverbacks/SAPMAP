@@ -1589,7 +1589,8 @@ def tier3_sal_death_star_launch(state, node,
             f"{scope}.  Hook PID "
             f"{result['hook_pid']} on the target; stop with the "
             f"paired Disarm action or SIGTERM to restore INT3 bytes."
-            f"{af_note}")
+            f"{af_note}",
+            attack_capability="evasion.death_star")
         # If plant_bp refused to patch on any site (kernel-build offset
         # mismatch), surface a distinct WARNING finding so the operator
         # can't miss the "hook attached but not fully intercepting"

@@ -2431,6 +2431,7 @@ class SAPMAPState:
                     f"— lateral-movement hop confirmed",
                     meta={"source_sid": conn.source_sid,
                           "target_sid": conn.target_sid},
+                    attack_capability="lateral.rfc_propagate",
                 )
             except Exception:
                 pass
@@ -2514,6 +2515,7 @@ class SAPMAPState:
                 f"— lateral-movement hop confirmed",
                 meta={"source_sid": conn.source_sid,
                       "target_sid": conn.target_sid},
+                attack_capability="lateral.rfc_propagate",
             )
         except Exception:
             pass
@@ -2642,6 +2644,7 @@ class SAPMAPState:
                 f"{ticket.client}{pin_note}, "
                 f"valid {ticket.validity_min} min — replayable across "
                 f"the {ticket.sid} STRUSTSSO2 trust subgraph",
+                attack_capability="lateral.mysapsso2_forge",
             )
         except Exception:
             pass
@@ -2743,7 +2746,8 @@ class SAPMAPState:
                         f"ABAP SecStore decrypted (auto-triggered "
                         f"after user creation) — {len(ok)} RFC "
                         f"destination password(s) recovered.",
-                        ref="secstore.auto.decrypted")
+                        ref="secstore.auto.decrypted",
+                        attack_capability="creds.abap_secstore")
             except Exception as e:
                 print(f"[-] SecStore {node.sid} (auto): failed "
                       f"silently — {e}")
