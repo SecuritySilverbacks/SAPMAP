@@ -53,6 +53,27 @@ def test_every_capability_in_attack_map_has_remediation_or_explicit_exemption():
         # default-creds catalog entry already prescribes rotating the
         # WD admin password; no separate fix needed.
         "data.wd_backend_table_read",
+        # SAProuter tunnel scan via NI_ROUTE — network-side discovery,
+        # the fix is the standard SAProuter ACL hardening covered by
+        # the existing saprouter-info catalog entry.
+        "recon.saprouter_route_enum",
+        # SNC posture check — passive read-only observation.  The
+        # remediation (enable SNC + enforce) is a landscape-level
+        # policy call, not a per-finding action.
+        "recon.snc_posture",
+        # Default-credential brute-force sweep against the ABAP kernel
+        # — remediation for a HIT is "rotate the credentials" which
+        # is already carried by creds.default_probe.  This key exists
+        # to surface the SWEEP itself on the ATT&CK grid, not to
+        # duplicate the vendor-fix guidance.
+        "recon.brute_force_default",
+        # PSE export via LPE / ticket-forge chain — the fix (rotate
+        # SAPSYS.pse + refresh STRUSTSSO2 trust) is covered by the
+        # ticket-forgery remediation the parent key carries.
+        "data.pse_export",
+        # Bulk ticket fanout — same remediation as single-ticket
+        # replay (already exempt): rotate SAPSYS.pse.
+        "lateral.ticket_propagate_all",
         # Mid-chain post-foothold capabilities; their parent persist/
         # lateral entry carries the operator fix.
         "exploit.sapxpg",

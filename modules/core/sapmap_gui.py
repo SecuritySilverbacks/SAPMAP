@@ -5891,6 +5891,20 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         api.state.add_node(n)
                 print(f"[+] {sid}: Router scan complete — "
                       f"{len(nodes)} system(s) discovered")
+                # ATT&CK: TA0007 + TA0011 — router-tunnel-enabled
+                # network-service discovery via NI_ROUTE.  Info-level
+                # (the individual node-plotted findings carry higher
+                # severity when a system turns out to be exploitable).
+                try:
+                    emit_finding(
+                        "INFO", sid,
+                        f"SAProuter route scan via {sid} — "
+                        f"{len(nodes)} system(s) discovered through "
+                        f"the tunnel",
+                        ref="saprouter.route_scan",
+                        attack_capability="recon.saprouter_route_enum")
+                except Exception:
+                    pass
             except Exception as e:
                 print(f"[-] {sid}: Router scan error: {e}")
                 import traceback
@@ -7962,6 +7976,23 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 channels=channels, timeout=timeout)
             print(f"[*] {sid}: propagation done — "
                   f"{r['succeeded']}/{r['tried']} succeeded")
+            # ATT&CK: bulk ticket-replay wave across the STRUSTSSO2
+            # trust subgraph — distinct from a single replay
+            # (already tagged inside propagate_to_trusted_subgraph
+            # per-target), this is the aggregate fan-out signal.
+            try:
+                from sapmap_findings import emit_finding as _ef
+                sev = ("CRITICAL" if r.get("succeeded", 0) else
+                       "HIGH" if r.get("tried", 0) else "INFO")
+                _ef(
+                    sev, sid,
+                    f"MYSAPSSO2 ticket fanout: "
+                    f"{r.get('succeeded', 0)}/{r.get('tried', 0)} "
+                    f"target(s) accepted the forged ticket",
+                    ref="ticket.propagate.fanout",
+                    attack_capability="lateral.ticket_propagate_all")
+            except Exception:
+                pass
 
             # Per-target ICM discovery summary
             for entry in r["results"]:
@@ -13471,6 +13502,17 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     host, probe_port, timeout=8,
                     saprouter=node.saprouter)
             print(f"[+] {sid}: {format_summary(node.snc_info)}")
+            # ATT&CK: TA0007 T1082 — passive SNC-capability
+            # discovery.  Info-level; carries the summary text so
+            # the finding drawer shows the actual posture.
+            try:
+                emit_finding(
+                    "INFO", sid,
+                    f"SNC posture: {format_summary(node.snc_info)}",
+                    ref="snc.posture",
+                    attack_capability="recon.snc_posture")
+            except Exception:
+                pass
 
         _bg(f"{sid}:check_snc", "Check SNC Posture", _run)
         return json.dumps({"status": "started"})
@@ -13612,8 +13654,30 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         node.credentials.append(cred)
                         print(f"    [{f['severity']}] {f['username']}:{f['password']} "
                               f"client {f['client']} — {f['detail']}")
+                # ATT&CK: Brute Force / Password Guessing on the ABAP
+                # kernel — populate the finding drawer + heatmap.
+                try:
+                    emit_finding(
+                        "CRITICAL", sid,
+                        f"Default credential sweep landed "
+                        f"{len(findings)} live account(s) via DIAG",
+                        ref="default_creds.hits",
+                        attack_capability="recon.brute_force_default")
+                except Exception:
+                    pass
             else:
                 print(f"[*] {sid}: No default credentials found")
+                # Even the no-hit sweep is an ATT&CK-visible event
+                # (password-guessing attempts on the auth stack).
+                try:
+                    emit_finding(
+                        "INFO", sid,
+                        f"Default credential sweep ran — no hits "
+                        f"(clients: {', '.join(clients)})",
+                        ref="default_creds.no_hits",
+                        attack_capability="recon.brute_force_default")
+                except Exception:
+                    pass
 
         _bg(f"{sid}:default_creds", "Check Default Accounts", _run)
         return json.dumps({"status": "started"})

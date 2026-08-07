@@ -111,6 +111,17 @@ TECHNIQUES: Dict[str, Dict] = {
 
     # Privilege Escalation
     "T1068":     {"name": "Exploitation for Privilege Escalation", "tactic": "TA0004"},
+    # Access Token Manipulation — used by the Windows "potato" family
+    # (GodPotato, EfsPotato).  These abuse SeImpersonatePrivilege to
+    # steal a SYSTEM token via a COM/RPC round-trip rather than
+    # exploiting a kernel bug.  Sub-technique .001 = Token Impersonation.
+    "T1134":     {"name": "Access Token Manipulation",      "tactic": "TA0004"},
+    "T1134.001": {"name": "Token Impersonation/Theft",      "tactic": "TA0004", "sub_of": "T1134"},
+    # Kernel/user-space exploits like copyfail / dirtyfrag / peditcow /
+    # miniplasma.  T1211 lives in TA0005 (Stealth) in MITRE — bypassing
+    # kernel-level defenses — and complements T1068 for LPEs that
+    # exploit vulnerabilities rather than misconfig.
+    "T1211":     {"name": "Exploitation for Defense Evasion", "tactic": "TA0005"},
 
     # Stealth (formerly Defense Evasion — renamed in ATT&CK v19)
     "T1574":     {"name": "Hijack Execution Flow",          "tactic": "TA0005"},
@@ -121,6 +132,8 @@ TECHNIQUES: Dict[str, Dict] = {
 
     # Credential Access
     "T1003":     {"name": "OS Credential Dumping",          "tactic": "TA0006"},
+    "T1110":     {"name": "Brute Force",                    "tactic": "TA0006"},
+    "T1110.001": {"name": "Password Guessing",              "tactic": "TA0006", "sub_of": "T1110"},
     "T1552":     {"name": "Unsecured Credentials",          "tactic": "TA0006"},
     "T1552.001": {"name": "Credentials In Files",           "tactic": "TA0006", "sub_of": "T1552"},
     "T1552.004": {"name": "Private Keys",                   "tactic": "TA0006", "sub_of": "T1552"},
@@ -186,6 +199,19 @@ CAPABILITY_MAP: Dict[str, List[str]] = {
     "recon.btp_subaccount_enum": ["T1526"],
     "recon.saprouter_info":      ["T1018", "T1592"],
     "snc.scan":                  ["T1082"],
+    # SAProuter route enumeration via NI_ROUTE probing — reveals what
+    # SIDs / ports are reachable through the router.  Discovery +
+    # internal-proxy discovery.
+    "recon.saprouter_route_enum": ["T1592", "T1090.001", "T1046"],
+    # SNC posture check — no auth, no exploit, but observes crypto
+    # config on the target.  System-info + network-service discovery.
+    "recon.snc_posture":         ["T1082", "T1046"],
+    # DIAG-based default-cred sweep against 16 SAP-shipped accounts.
+    # Password-guessing (T1110.001) + attempting valid accounts
+    # (T1078.001) — separate key from creds.default_probe (SCC) because
+    # this one exercises the ABAP kernel auth stack, not the SCC web
+    # form; distinct detection signatures.
+    "recon.brute_force_default": ["T1110.001", "T1078.001", "T1078"],
     # Pre-auth kernel/hostname/instance leak via V6/V2/Chipik RFC probes.
     # This runs on every fresh scan target — first ATT&CK step in the
     # engagement, previously invisible on the grid.
@@ -213,15 +239,28 @@ CAPABILITY_MAP: Dict[str, List[str]] = {
     "privesc.dpmon_sap_star":    ["T1068", "T1078"],
     "privesc.bapi_profiles":     ["T1068", "T1098"],
     "privesc.webgui_rsbdcos0":   ["T1068", "T1059.006"],
-    "lpe.copyfail":              ["T1068"],
-    "lpe.dirtyfrag":             ["T1068"],
-    "lpe.peditcow":              ["T1068"],
-    "lpe.miniplasma":            ["T1068"],
-    "lpe.godpotato":             ["T1068"],
-    "lpe.efspotato":             ["T1068"],
+    # Linux kernel LPEs — copyfail (copy_from_user), dirtyfrag
+    # (dirtypagetable-family), peditcow (dirty-cow variant).  All
+    # three exploit kernel bugs, so dual-tag T1068 + T1211 to make
+    # the "kernel exploit" nature visible on the Stealth column too.
+    "lpe.copyfail":              ["T1068", "T1211"],
+    "lpe.dirtyfrag":             ["T1068", "T1211"],
+    "lpe.peditcow":              ["T1068", "T1211"],
+    # Windows kernel LPE — same kernel-exploit shape as above.
+    "lpe.miniplasma":            ["T1068", "T1211"],
+    # Windows token-impersonation LPEs — the "Potato" family abuses
+    # SeImpersonatePrivilege via a COM/RPC round-trip to steal a
+    # SYSTEM token.  T1134.001 is the correct primary; T1068 stays
+    # for grid-column parity with the kernel LPEs.
+    "lpe.godpotato":             ["T1068", "T1134.001"],
+    "lpe.efspotato":             ["T1068", "T1134.001"],
 
     # ---- Credential Access ----
-    "creds.default_probe":       ["T1078.001"],
+    # Default-credential probing = attempting a small vendor-shipped
+    # wordlist against the target.  T1078.001 for the "valid default
+    # account" outcome + T1110.001 to populate the Brute Force column
+    # even on a rejected sweep.
+    "creds.default_probe":       ["T1078.001", "T1110.001"],
     "creds.user_password_hash":  ["T1003"],
     "creds.abap_secstore":       ["T1555"],
     "creds.java_secstore":       ["T1555"],
@@ -232,6 +271,11 @@ CAPABILITY_MAP: Dict[str, List[str]] = {
     "creds.scc_keystore":        ["T1555", "T1552.004", "T1567"],
     "creds.scc_users_xml":       ["T1555"],
     "creds.pse_loot":            ["T1552.004"],
+    # STRUST/SAPSYS PSE export — pulling the ABAP kernel's private-key
+    # material via SSFS / LPE / MYSAPSSO2 signer chain.  Distinct from
+    # pse_loot (which covers ad-hoc credential-file reads) because
+    # this one is the specific ticket-forgery precursor.
+    "data.pse_export":           ["T1552.004", "T1145"],
     "creds.ssh_private_key":     ["T1552.004", "T1145"],
     "creds.oa2c_secrets":        ["T1555"],
     # Web Dispatcher's icmauth.txt is an on-disk password file that
@@ -245,6 +289,12 @@ CAPABILITY_MAP: Dict[str, List[str]] = {
     "lateral.sapmap_user":       ["T1078", "T1136"],
     "lateral.mysapsso2_forge":   ["T1606"],
     "lateral.mysapsso2_replay":  ["T1550.004", "T1078"],
+    # Bulk fanout of a forged ticket across every STRUSTSSO2-trusted
+    # receiver.  Same primitives as mysapsso2_replay but at fleet
+    # scale — a distinct capability key so the ATT&CK grid shows the
+    # amplification step separately.  Adds T1021 (Remote Services)
+    # because the fanout is a many-target lateral-movement wave.
+    "lateral.ticket_propagate_all": ["T1550.004", "T1078", "T1021"],
     "lateral.sxpg_exec":         ["T1021", "T1059"],
     "lateral.wd_pivot":          ["T1090", "T1021"],
     "lateral.saprouter_tunnel":  ["T1090.001"],
