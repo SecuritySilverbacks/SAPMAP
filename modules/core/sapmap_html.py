@@ -3584,6 +3584,16 @@ function updateMap() {
     return null;
   };
   conns.forEach((conn, ci) => {
+    // `ci` here is an index into the FILTERED conns array (used
+    // internally for pairIdx bookkeeping + marker IDs).  The click
+    // handler `showConnInfo` looks up by index into the UNFILTERED
+    // mapState.connections, so we compute the true index once and
+    // use it in every onclick binding below.  Without this rebase
+    // any filtered-out connection (bare-AWS default, edge to hidden
+    // node) shifts every subsequent arrow's click target to a
+    // different connection — e.g. clicking "test → WAS" opens the
+    // details of an unrelated "S4A → S4H" destination.
+    const realCi = (mapState.connections || []).indexOf(conn);
     let srcNode = nodes[conn.source_sid] || _resolveBtpSrc(conn.source_sid);
     // Target lookup falls through btpNodes when the destination points
     // at a *.hana.ondemand.com host — those live in state.btp_subaccounts
@@ -3674,8 +3684,8 @@ function updateMap() {
       const cpx = sx + loopR;
       html += `<path class="edge-line" d="M${sx},${sy} C${cpx},${sy} ${cpx},${ey} ${sx},${ey}" ` +
         `stroke="${color}" stroke-width="${width}" fill="none"${dashAttr}${newAttr} data-orig-dash="${dashArray}" ` +
-        `marker-start="url(#src-${ci})" marker-end="url(#arrow-${ci})" data-conn-idx="${ci}" ` +
-        `onclick="showConnInfo(event, ${ci})" />`;
+        `marker-start="url(#src-${ci})" marker-end="url(#arrow-${ci})" data-conn-idx="${realCi}" ` +
+        `onclick="showConnInfo(event, ${realCi})" />`;
       // Mid-loop direction arrow.  Cubic Bezier P0→P1→P2→P3 with
       // P0=(sx,sy), P1=P2=(cpx,sy)/(cpx,ey), P3=(sx,ey).  At t=0.5
       // the point simplifies to (cpx·0.75 + sx·0.25, (sy+ey)/2) —
@@ -3754,12 +3764,12 @@ function updateMap() {
       if (dashArray) {
         html += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" ` +
           `stroke="transparent" stroke-width="${width + 10}" ` +
-          `data-conn-idx="${ci}" onclick="showConnInfo(event, ${ci})" />`;
+          `data-conn-idx="${realCi}" onclick="showConnInfo(event, ${realCi})" />`;
       }
       html += `<line class="edge-line" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" ` +
         `stroke="${color}" stroke-width="${width}" fill="none"${dashAttr}${newAttr} data-orig-dash="${dashArray}" ` +
-        `marker-start="url(#src-${ci})" marker-end="url(#arrow-${ci})" data-conn-idx="${ci}" ` +
-        `onclick="showConnInfo(event, ${ci})" />`;
+        `marker-start="url(#src-${ci})" marker-end="url(#arrow-${ci})" data-conn-idx="${realCi}" ` +
+        `onclick="showConnInfo(event, ${realCi})" />`;
       // Mid-line direction arrow — visible even when the source
       // bullet is behind the source box.
       html += midArrow((x1+x2)/2, (y1+y2)/2, x2-x1, y2-y1, 8);
@@ -3809,12 +3819,12 @@ function updateMap() {
       if (dashArray) {
         html += `<path d="M${x1},${y1} Q${qx},${qy} ${x2},${y2}" ` +
           `stroke="transparent" stroke-width="${width + 10}" fill="none" ` +
-          `data-conn-idx="${ci}" onclick="showConnInfo(event, ${ci})" />`;
+          `data-conn-idx="${realCi}" onclick="showConnInfo(event, ${realCi})" />`;
       }
       html += `<path class="edge-line" d="M${x1},${y1} Q${qx},${qy} ${x2},${y2}" ` +
         `stroke="${color}" stroke-width="${width}" fill="none"${dashAttr}${newAttr} data-orig-dash="${dashArray}" ` +
-        `marker-start="url(#src-${ci})" marker-end="url(#arrow-${ci})" data-conn-idx="${ci}" ` +
-        `onclick="showConnInfo(event, ${ci})" />`;
+        `marker-start="url(#src-${ci})" marker-end="url(#arrow-${ci})" data-conn-idx="${realCi}" ` +
+        `onclick="showConnInfo(event, ${realCi})" />`;
       // Mid-line direction arrow on the curve.  For a quadratic
       // Bezier P0→P1→P2, the point at t=0.5 is
       // (P0 + 2·P1 + P2) / 4 — offset from the straight-line
