@@ -11595,6 +11595,13 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                       f"could not read profiles "
                                       f"({conn.user_detail_error[:120]}) "
                                       f"— SAP_ALL status unknown")
+                            # Issue #23 — SecStore-password direct
+                            # path used to return here without probing
+                            # the create-user reach, so the panel
+                            # stayed "not probed" forever on every
+                            # secstore-cred'd destination.
+                            _probe_create_user_reach(
+                                api.state, conn, creds)
                             return
                     except Exception as e:
                         print(f"[-] Direct test failed: {e}")
@@ -11739,7 +11746,28 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         print(f"[-] {dest_name}: Logon failed")
             print(f"[+] Single test done for {dest_name}")
 
-        _bg(f"{sid}:test_rfc:{dest_name}", "Test RFC", _run)
+        # Issue #23 — `_run` has many branches (SecStore-direct RFC,
+        # Type-G HTTP direct-target logon, SOAP-RFC RFC_PING, source-
+        # side /SDF/RFC_CHECK, …) and each early-returns on its own
+        # success path.  Rather than re-thread the create-user reach
+        # probe through every branch, wrap `_run` at the call site
+        # so the probe always fires once the test finishes, no
+        # matter which branch handled logon.
+        def _run_with_probe():
+            _run()
+            try:
+                conn_ref = None
+                for c in api.state.get_connections_from(sid):
+                    if c.destination_name == dest_name:
+                        conn_ref = c
+                        break
+                if conn_ref and conn_ref.logon_successful:
+                    _probe_create_user_reach(
+                        api.state, conn_ref, node.best_credentials())
+            except Exception as _e:
+                print(f"[!] {dest_name}: reach probe wrapper "
+                      f"crashed: {type(_e).__name__}: {_e}")
+        _bg(f"{sid}:test_rfc:{dest_name}", "Test RFC", _run_with_probe)
         return json.dumps({"status": "started"})
 
     @app.route("/api/node/<sid>/canary_create_user", method="POST")
