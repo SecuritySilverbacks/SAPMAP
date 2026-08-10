@@ -235,32 +235,6 @@ def next_sapmap_username(node: SAPNode, creds: Credentials = None) -> Optional[s
     return None
 
 
-def get_installation_number(node: SAPNode,
-                            creds: Credentials = None) -> str:
-    """Fetch the 10-digit SAP installation number (INSTNR) via
-    /SDF/CMO_GET_INSTNO — a remote-enabled Solution-Manager FM
-    that takes no input parameters and returns EV_INSTNO.
-
-    Used by SAPMAPState.add_node's collision handling (issue #25)
-    to disambiguate two different SAP systems that happen to share
-    the same 3-char SID.
-
-    Returns "" on any failure — silent, non-fatal.  Callers must
-    treat an empty return as "unknown", not "no installation".
-    """
-    try:
-        with _get_connection(node, creds) as conn:
-            result = conn.call("/SDF/CMO_GET_INSTNO")
-        instno = (result.get("EV_INSTNO") or "").strip()
-        # SAP right-pads / zero-pads to 10 chars; strip surrounding
-        # whitespace but keep the leading zeros.
-        return instno
-    except Exception as e:
-        logger.debug(
-            f"get_installation_number({node.sid}): {format_rfc_exception(e)}")
-        return ""
-
-
 # ---------------------------------------------------------------------------
 # User details retrieval
 # ---------------------------------------------------------------------------
