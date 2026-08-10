@@ -697,11 +697,19 @@ def _probe_create_user_reach(state, conn, fallback_creds) -> None:
                 username=conn.rfc_user,
                 password=conn.secstore_password,
                 client=conn.client or "")
+        # Route the Layer-3 ABAP AUTHORITY-CHECK through the SOURCE
+        # system's destination — same network path Test Connection
+        # just validated.  Falls back to a direct RFC to the target
+        # if source lookup fails.
+        source_node = state.get_node(conn.source_sid)
         cu = sapmap_rfc.check_can_create_user(
             target,
             existing_profiles=conn.profiles,
             existing_roles=conn.roles,
-            creds=creds_arg)
+            creds=creds_arg,
+            source_node=source_node,
+            destination=conn.destination_name,
+            source_creds=fallback_creds)
         conn.can_create_user      = cu.get("can_create_user")
         conn.can_assign_sap_all   = cu.get("can_assign_sap_all")
         conn.can_assign_role      = cu.get("can_assign_role")

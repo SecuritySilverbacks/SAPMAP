@@ -8198,6 +8198,8 @@ function _connInfoStateKey(c) {
     // or the operator-triggered canary route).
     can_create_user:  c.can_create_user,
     create_user_probe: c.create_user_probe || '',
+    create_user_probe_at: c.create_user_probe_at || '',
+    create_user_probe_err_len: (c.create_user_probe_error || '').length,
     sapxpg_remote_works: !!c.sapxpg_remote_works,
     trusted_system:   !!c.trusted_system,
     ping_ok:          !!c.ping_ok,
@@ -8423,9 +8425,33 @@ function showConnInfo(e, connIdx) {
       const ev = conn.create_user_evidence || '';
       if (conn.can_create_user === null || conn.can_create_user === undefined) {
         if (!conn.logon_successful) return '';
-        return `<div class="info-section" style="color:#484f58;font-size:11px">
-          <strong style="color:#8b949e">Create-user reach:</strong>
-          <span style="color:#8b949e">not probed — run Test Connection to check</span></div>`;
+        // Distinguish "never probed" from "probe ran but couldn't
+        // reach a verdict" (Layer 3 blocked AND no admin role for
+        // Layer 2 heuristic).  The second case gets a canary offer.
+        const wasAttempted = !!(conn.create_user_probe_at
+                                 || conn.create_user_probe_error);
+        if (!wasAttempted) {
+          return `<div class="info-section" style="color:#484f58;font-size:11px">
+            <strong style="color:#8b949e">Create-user reach:</strong>
+            <span style="color:#8b949e">not probed — run Test Connection to check</span></div>`;
+        }
+        // Inconclusive — offer canary + surface the probe error.
+        const canaryBtn = (conn.rfc_user) ? (
+          `<button class="btn" style="margin-left:8px;font-size:10px;padding:2px 8px" `
+          + `onclick="runCanaryCreate('${escHtml(conn.source_sid)}','${escHtml(conn.destination_name)}')" `
+          + `title="Layer 4 — creates + immediately deletes a canary user. Leaves an audit trail.">`
+          + `Verify by canary</button>`
+        ) : '';
+        const errText = conn.create_user_probe_error
+          ? `<div style="color:#484f58;font-size:10px;margin-top:2px">${escHtml(conn.create_user_probe_error)}</div>`
+          : '';
+        return `<div class="info-section">
+          <strong style="font-size:11px;color:#8b949e">Create-user reach</strong>
+          <div style="font-size:12px;color:#d29922;margin-top:2px">
+            &#128993; Inconclusive — probe ran but couldn't verify (BAPI_USER_GET_DETAIL / RFC_ABAP_INSTALL_AND_RUN blocked)${canaryBtn}
+          </div>
+          ${errText}
+        </div>`;
       }
       let icon, color, label;
       if (conn.can_create_user === true) {

@@ -201,3 +201,89 @@ def test_known_admin_roles_include_common_names():
     list — must include the roles Basis engagements actually see."""
     assert "SAP_BC_USER_ADMIN" in _KNOWN_ADMIN_ROLES
     assert "SAP_BC_BASIS_ADMIN" in _KNOWN_ADMIN_ROLES
+
+
+def test_layer3_prefers_source_side_path_when_available():
+    """When source_node + destination are supplied, Layer 3 must route
+    the ABAP execution through the source's SM59 destination (same
+    working path as Test Connection).  Falls back to the direct
+    connection only when the source path isn't specified."""
+    source = SAPNode(sid="S4H", hostname="s4h", ip="192.168.2.209",
+                      system_type="ABAP")
+    target = SAPNode(sid="W74", hostname="w74", ip="192.168.2.29",
+                      system_type="ABAP")
+    fake_conn = MagicMock()
+    mgr = MagicMock()
+    mgr.__enter__.return_value = fake_conn
+    mgr.__exit__.return_value = False
+    # Direct-target path should NOT be called when the source path is
+    # in play.  Patch both and assert.
+    def _fake_dest_ok(_conn, _lines, _dest, _prog):
+        return {"success": True, "output": [
+            "GRP_SUPER=            0",
+            "GRP_DEFAULT=          4",
+            "PRO_SAPALL=           0",
+            "AGR_ADMIN=            4",
+        ], "fm_name": "RFC_ABAP_INSTALL_AND_RUN", "error": ""}
+    with patch("sapmap_rfc._get_connection", return_value=mgr) as mgc, \
+         patch("sapmap_rfc._run_abap_program_with_destination",
+                side_effect=_fake_dest_ok) as m_dest, \
+         patch("sapmap_rfc._run_abap_program") as m_direct:
+        result = check_can_create_user(
+            target, existing_profiles=[], existing_roles=[],
+            source_node=source, destination="W74_T2",
+            source_creds=Credentials(username="SAPADM",
+                                      password="Whatever",
+                                      client="000"))
+    # Source path used, not the direct one
+    assert m_dest.call_count == 1
+    assert m_direct.call_count == 0
+    assert result["can_create_user"] is True
+    assert result["probe"] == "authority_check"
+
+
+def test_layer3_direct_target_fallback_when_no_source():
+    """Without source_node/destination, Layer 3 falls back to the
+    old direct-RFC-to-target path."""
+    target = SAPNode(sid="W74", hostname="w74", ip="10.0.0.1",
+                      system_type="ABAP")
+    fake_conn = MagicMock()
+    mgr = MagicMock()
+    mgr.__enter__.return_value = fake_conn
+    mgr.__exit__.return_value = False
+    with patch("sapmap_rfc._get_connection", return_value=mgr), \
+         patch("sapmap_rfc._run_abap_program_with_destination") as m_dest, \
+         patch("sapmap_rfc._run_abap_program",
+                return_value={"success": True, "output": [
+                    "GRP_SUPER=            0",
+                    "GRP_DEFAULT=          4",
+                    "PRO_SAPALL=           4",
+                    "AGR_ADMIN=            4",
+                ], "fm_name": "RFC_ABAP_INSTALL_AND_RUN", "error": ""}) as m_direct:
+        result = check_can_create_user(
+            target, existing_profiles=[], existing_roles=[])
+    assert m_dest.call_count == 0
+    assert m_direct.call_count == 1
+    assert result["can_create_user"] is True
+    assert result["can_assign_sap_all"] is False
+
+
+def test_layer2_verdict_survives_layer3_failure_via_source_path():
+    """T2's real-world scenario: SAP_BC_USER_ADMIN role is present so
+    Layer 2 fires; Layer 3 blows up on the source path; final verdict
+    stays "role_heuristic" instead of collapsing to None."""
+    source = SAPNode(sid="S4H", hostname="s4h", ip="1.1.1.1",
+                      system_type="ABAP")
+    target = SAPNode(sid="W74", hostname="w74", ip="2.2.2.2",
+                      system_type="ABAP")
+    with patch("sapmap_rfc._get_connection",
+                side_effect=RuntimeError("routing failed")):
+        result = check_can_create_user(
+            target,
+            existing_profiles=["T-W4810024", "T-W4810025"],
+            existing_roles=["SAP_BC_USER_ADMIN", "Z_RFCPING"],
+            source_node=source, destination="W74_T2")
+    # Heuristic verdict preserved despite Layer 3 blowing up
+    assert result["can_create_user"] is True
+    assert result["probe"] == "role_heuristic"
+    assert "SAP_BC_USER_ADMIN" in result["evidence"]

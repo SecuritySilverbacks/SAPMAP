@@ -291,6 +291,102 @@ def get_user_details(node: SAPNode, username: str,
     return result_info
 
 
+def _run_abap_program_with_destination(conn, abap_lines: list,
+                                        destination: str,
+                                        program_name: str = "ZSAPMAP") -> dict:
+    """Run an ABAP program ON the target reachable via `destination`
+    from the currently-connected source session.
+
+    Wraps the caller-supplied ABAP body in an RFC_ABAP_INSTALL_AND_RUN
+    call with DESTINATION '<destination>', so the compiled program
+    executes under the destination's RFC user on the target — the
+    same network + auth path Test Connection just validated.
+
+    Both the wrapper AND the payload need to compile.  The wrapper
+    is emitted here; abap_lines is the raw payload the caller wrote
+    (its output must land in the wrapper's `t_output` table).
+
+    Returns the same shape as `_run_abap_program`.
+    """
+    # Rewrite the caller's `WRITE: / ...` lines into APPENDs on a
+    # local table so the OUTER wrapper can read them back.  We keep
+    # the original AUTHORITY-CHECK statements unchanged — only the
+    # last-mile output plumbing changes.
+    payload = []
+    for ln in abap_lines:
+        s = ln.strip()
+        # Skip REPORT header and outer DATA (we redeclare in wrapper)
+        if s.upper().startswith("REPORT") or s.upper().startswith("DATA:"):
+            continue
+        # Convert WRITE lines into APPENDs on t_output
+        if s.upper().startswith("WRITE:"):
+            # Very simple parser — supported forms:
+            #   WRITE: / 'LABEL=', var.
+            m = _re.match(
+                r"WRITE:\s*/\s*'([^']+)'\s*,\s*([A-Za-z_][A-Za-z0-9_]*)\s*\.?",
+                s, _re.IGNORECASE)
+            if m:
+                label, var = m.group(1), m.group(2)
+                payload.append(
+                    f"CONCATENATE '{label}' {var} INTO l_line "
+                    f"SEPARATED BY space.")
+                payload.append("APPEND l_line TO t_output.")
+                continue
+        payload.append(ln.rstrip('.').rstrip() + ".")
+
+    wrapper = [
+        f"REPORT {program_name}.",
+        "DATA: t_output TYPE TABLE OF string,",
+        "      l_line   TYPE string,",
+        "      rc_grp_super TYPE i, rc_grp_default TYPE i,",
+        "      rc_pro       TYPE i, rc_agr         TYPE i.",
+    ]
+    wrapper.extend(payload)
+    wrapper.extend([
+        "LOOP AT t_output INTO l_line.",
+        "  WRITE: / l_line.",
+        "ENDLOOP.",
+    ])
+    program_table = [{"LINE": ln} for ln in wrapper]
+
+    # Only try the standard FM here — the /SAPDS/ variant doesn't
+    # accept the DESTINATION addition in most builds.
+    try:
+        run_result = conn.call(
+            "RFC_ABAP_INSTALL_AND_RUN",
+            PROGRAMNAME=program_name,
+            MODE="F",
+            PROGRAM=program_table,
+            DESTINATION=destination,
+        )
+    except Exception as e:
+        return {
+            "success": False, "output": [],
+            "fm_name": "RFC_ABAP_INSTALL_AND_RUN",
+            "error": format_rfc_exception(e),
+        }
+
+    writes = run_result.get("WRITES") or []
+    output_lines = []
+    for row in writes:
+        line = ""
+        if isinstance(row, dict):
+            line = (row.get("ZEILE", "") or row.get("LINE", "")
+                    or row.get("WA", "")).strip()
+        elif isinstance(row, str):
+            line = row.strip()
+        if line:
+            output_lines.append(line)
+    msg = (run_result.get("MESSAGE", "")
+            or run_result.get("ERRORMESSAGE", "")).strip()
+    if not output_lines and msg:
+        return {"success": False, "output": [],
+                "fm_name": "RFC_ABAP_INSTALL_AND_RUN",
+                "error": msg[:400]}
+    return {"success": True, "output": output_lines,
+            "fm_name": "RFC_ABAP_INSTALL_AND_RUN", "error": ""}
+
+
 _KNOWN_ADMIN_ROLES = frozenset({
     "SAP_BC_USER_ADMIN",
     "SAP_BC_USER_ADMIN_CUA",
@@ -304,7 +400,10 @@ _KNOWN_ADMIN_ROLES = frozenset({
 def check_can_create_user(node: SAPNode,
                           existing_profiles: list = None,
                           existing_roles: list = None,
-                          creds: Credentials = None) -> dict:
+                          creds: Credentials = None,
+                          source_node: SAPNode = None,
+                          destination: str = "",
+                          source_creds: Credentials = None) -> dict:
     """Probe whether the RFC user has enough authorization to call
     BAPI_USER_CREATE1 on the target — layered check, first
     authoritative answer wins.
@@ -313,7 +412,12 @@ def check_can_create_user(node: SAPNode,
     Layer 2  Role-name heuristic — SAP_BC_USER_ADMIN & friends.
     Layer 3  Native ABAP AUTHORITY-CHECK via RFC_ABAP_INSTALL_AND_RUN
              for S_USER_GRP 01/{SUPER,''} + S_USER_PRO 22/SAP_ALL
-             + S_USER_AGR 22/SAP_BC_USER_ADMIN.
+             + S_USER_AGR 22/SAP_BC_USER_ADMIN.  When `source_node`
+             + `destination` are supplied, the ABAP program is run
+             ON THE TARGET via a source-side DESTINATION clause —
+             mirrors the working Test Connection network path so
+             the probe succeeds on target-only-reachable-via-SM59
+             environments (SAProuter, isolated segment, etc.).
 
     Layer 4 (canary create+delete) is NOT run here — it's operator-
     triggered via a separate route because it leaves an audit trail.
@@ -392,9 +496,31 @@ def check_can_create_user(node: SAPNode,
         "WRITE: / 'PRO_SAPALL=',  rc_pro.",
         "WRITE: / 'AGR_ADMIN=',   rc_agr.",
     ]
+    # Choose the connection path:
+    #   Preferred — open RFC to the SOURCE and use
+    #     RFC_ABAP_INSTALL_AND_RUN DESTINATION '<dest>' — routes the
+    #     ABAP execution to the target via the same SM59 destination
+    #     Test Connection just validated.  Works when the target isn't
+    #     directly reachable from SAPMAP's host (SAProuter, isolated
+    #     segment, etc.).
+    #   Fallback — direct RFC to the target with the RFC user's creds.
+    #     Requires SAPMAP host → target routing to work.
+    use_source_path = bool(source_node and destination)
     try:
-        with _get_connection(node, creds) as conn:
-            run = _run_abap_program(conn, abap_lines, "ZSAPMAP_AC")
+        if use_source_path:
+            src_creds = source_creds or (creds if not use_source_path else None)
+            # If the caller didn't hand us a source cred, fall back
+            # to whatever creds are on the source node.  This mirrors
+            # get_remote_user_profiles which uses the source's
+            # best_credentials for the ABAP execution session.
+            if src_creds is None:
+                src_creds = source_node.best_credentials()
+            with _get_connection(source_node, src_creds) as _sconn:
+                run = _run_abap_program_with_destination(
+                    _sconn, abap_lines, destination, "ZSAPMAP_AC")
+        else:
+            with _get_connection(node, creds) as _conn:
+                run = _run_abap_program(_conn, abap_lines, "ZSAPMAP_AC")
     except Exception as e:
         # Only report the ABAP-run error if the heuristic didn't
         # already produce a verdict — otherwise keep the heuristic
