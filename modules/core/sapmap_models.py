@@ -572,6 +572,12 @@ class SAPNode:
     db_type: str = ""                   # HDB, ORA, MSS, ADA, DB6
     kernel: str = ""
     sap_release: str = ""
+    # 10-digit SAP installation number (INSTNR).  Fetched
+    # opportunistically via /SDF/CMO_GET_INSTNO after successful
+    # authenticated logon.  Primary disambiguator when two systems
+    # share a SID — see SAPMAPState.add_node for the merge/split
+    # logic that uses this field.  Empty until probed.
+    installation_number: str = ""
     clients: list = field(default_factory=list)     # [{"nr": "100", "category": "P"}, ...]
     is_production: bool = False
     findings: list = field(default_factory=list)    # [Finding, ...]
@@ -910,6 +916,7 @@ class SAPNode:
             "db_type": self.db_type,
             "kernel": self.kernel,
             "sap_release": self.sap_release,
+            "installation_number": self.installation_number,
             "clients": self.clients,
             "is_production": self.is_production,
             "findings": [f.to_dict() for f in self.findings],
@@ -1023,6 +1030,7 @@ class SAPNode:
             db_type=d.get("db_type", ""),
             kernel=d.get("kernel", ""),
             sap_release=d.get("sap_release", ""),
+            installation_number=d.get("installation_number", ""),
             clients=d.get("clients", []),
             is_production=d.get("is_production", False),
             findings=[Finding.from_dict(f) for f in d.get("findings", [])],
@@ -1749,6 +1757,64 @@ class BTPSubaccountNode:
         return cls(**{k: v for k, v in d.items() if k in known})
 
 
+def _pick_collision_suffix(existing: SAPNode, incoming: SAPNode) -> str:
+    """Pick a short SID suffix that distinguishes `incoming` from
+    `existing` in a display-friendly way.  First available wins:
+      1. Last 4 digits of installation_number (e.g. DEV#0685)
+      2. Lowercase hostname (e.g. DEV#winwas740)
+      3. Last IP octet (e.g. DEV#29)
+      4. "dup" — last-resort placeholder
+    """
+    if incoming.installation_number and len(incoming.installation_number) >= 4:
+        return incoming.installation_number[-4:]
+    if incoming.hostname:
+        # Trim to first 16 chars so extremely long FQDNs stay readable.
+        return incoming.hostname.split(".")[0].lower()[:16]
+    if incoming.ip:
+        try:
+            return incoming.ip.split(".")[-1]
+        except Exception:
+            pass
+    return "dup"
+
+
+def _merge_sap_node_fields(dst: SAPNode, src: SAPNode) -> None:
+    """Merge non-empty fields from `src` into `dst` — used when
+    add_node re-discovers the SAME physical system (matched by
+    installation number, hostname or IP).  Never overwrites a
+    truthy value on `dst`; instances / findings / credentials /
+    created_users are extended without duplicating exact matches.
+    """
+    _scalar_fields = (
+        "system_type", "hostname", "ip", "os_type", "db_type",
+        "kernel", "sap_release", "installation_number",
+        "gw_vulnerable_port", "ms_port",
+    )
+    for f in _scalar_fields:
+        if not getattr(dst, f, None):
+            v = getattr(src, f, None)
+            if v:
+                setattr(dst, f, v)
+    for flag in (
+        "is_production", "has_critical_finding", "pwned",
+        "cert_auth_trusted", "gw_vulnerable", "ms_vulnerable",
+        "ms_acl_protected",
+    ):
+        if not getattr(dst, flag, False) and getattr(src, flag, False):
+            setattr(dst, flag, True)
+    # List-of-dataclass / list-of-dict merges — dedup by repr.
+    for name in ("instances", "clients", "findings", "credentials",
+                 "created_users", "forged_tickets", "icm_ports"):
+        dst_list = list(getattr(dst, name, []) or [])
+        src_list = list(getattr(src, name, []) or [])
+        seen = {repr(x) for x in dst_list}
+        for item in src_list:
+            if repr(item) not in seen:
+                dst_list.append(item)
+                seen.add(repr(item))
+        setattr(dst, name, dst_list)
+
+
 # ---------------------------------------------------------------------------
 # SAPMAPState — full session state (serializable)
 # ---------------------------------------------------------------------------
@@ -1789,6 +1855,51 @@ class SAPMAPState:
     # -- Node management --
 
     def add_node(self, node: SAPNode) -> None:
+        # SID-collision handling (issue #25) — decides whether an
+        # incoming node with a duplicate SID represents the SAME
+        # physical system (merge) or a DIFFERENT system that happens
+        # to share the SID (split under a disambiguated key).
+        existing = self.nodes.get(node.sid)
+        if existing is not None and existing is not node:
+            same_instno = bool(
+                existing.installation_number and node.installation_number
+                and existing.installation_number == node.installation_number)
+            same_host = bool(
+                existing.hostname and node.hostname
+                and existing.hostname.lower() == node.hostname.lower())
+            same_ip = bool(existing.ip and node.ip
+                           and existing.ip == node.ip)
+            if same_instno or same_host or same_ip:
+                # Same physical system rediscovered — merge and bail.
+                _merge_sap_node_fields(existing, node)
+                return
+            # Real collision: two different systems sharing a SID.
+            # Rename the incoming node to a suffixed SID + emit a
+            # warning so the operator sees it.
+            suffix = _pick_collision_suffix(existing, node)
+            new_sid = f"{node.sid}#{suffix}"
+            # Make sure the suffix is itself unique — extremely rare
+            # (would require 3+ same-SID systems), but cheap to check.
+            _n = 2
+            while new_sid in self.nodes:
+                new_sid = f"{node.sid}#{suffix}-{_n}"
+                _n += 1
+            print(f"[!] SID collision: {node.sid} — existing "
+                  f"host={existing.hostname or existing.ip or '?'}, "
+                  f"new host={node.hostname or node.ip or '?'} — "
+                  f"disambiguating new node as {new_sid}")
+            try:
+                from sapmap_findings import emit_finding
+                emit_finding(
+                    "MEDIUM", node.sid,
+                    f"SID collision: two different SAP systems share "
+                    f"SID {node.sid} — original stays on this SID, "
+                    f"new install renamed to {new_sid} "
+                    f"(host={node.hostname or node.ip or '?'})",
+                    ref="sid.collision.split")
+            except Exception:
+                pass
+            node.sid = new_sid
         is_new = node.sid not in self.nodes
         self.nodes[node.sid] = node
         if is_new:

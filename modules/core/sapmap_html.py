@@ -9074,6 +9074,8 @@ function showDetails(sid, opts) {
       <div class="detail-row"><span class="detail-key">Database</span><span class="detail-val">${escHtml(n.db_type)}</span></div>
       <div class="detail-row"><span class="detail-key">Kernel</span><span class="detail-val">${escHtml(n.kernel)}</span></div>
       <div class="detail-row"><span class="detail-key">SAP Release</span><span class="detail-val">${escHtml(n.sap_release)}</span></div>
+      ${n.installation_number ? `<div class="detail-row"><span class="detail-key">Installation #</span><span class="detail-val mono">${escHtml(n.installation_number)}</span></div>` : ''}
+      ${(n.sid || '').indexOf('#') !== -1 ? `<div class="detail-row" style="color:#d29922;font-size:11px"><span class="detail-key">SID collision</span><span class="detail-val">Disambiguated (${escHtml(n.sid.split('#')[0])} shared with another system on the map)</span></div>` : ''}
       <div class="detail-row"><span class="detail-key">Production</span><span class="detail-val">${n.is_production ? '<span style="color:#f85149">YES</span>' : 'No'}</span></div>
       <div class="detail-row"><span class="detail-key">Pwned</span><span class="detail-val">${n.pwned ? '<span style="color:#f0883e">&#9889; YES</span>' : 'No'}</span></div>
       <div class="detail-row"><span class="detail-key">GW Vulnerable</span><span class="detail-val">${n.gw_vulnerable ? `<span style="color:#f85149">YES — SAPXPG</span>${!n.pwned ? `<span class="detail-action-btn" onclick="selectedNodeSid='${escHtml(n.sid)}';ctxAction('create_user_gw')">Exploit →</span>` : ''}` : 'No'}</span></div>

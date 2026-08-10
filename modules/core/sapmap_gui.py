@@ -13909,6 +13909,23 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         attack_capability="recon.brute_force_default")
                 except Exception:
                     pass
+                # Issue #25 — opportunistically fetch installation
+                # number now that we have working creds.  Silent on
+                # failure; the collision handler in add_node falls
+                # back to hostname/IP disambiguation when this is
+                # empty.
+                try:
+                    if not node.installation_number:
+                        best = node.best_credentials()
+                        if best:
+                            instno = sapmap_rfc.get_installation_number(
+                                node, creds=best)
+                            if instno:
+                                node.installation_number = instno
+                                print(f"[+] {sid}: installation "
+                                      f"number = {instno}")
+                except Exception:
+                    pass
             else:
                 print(f"[*] {sid}: No default credentials found")
                 # Even the no-hit sweep is an ATT&CK-visible event
@@ -14028,6 +14045,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 _set("db_type", info.get("db_type"))
                 _set("kernel", info.get("kernel"))
                 _set("sap_release", info.get("sap_release"))
+                _set("installation_number", info.get("installation_number"))
                 sc_abap = info.get("_is_abap", False)
                 sc_java = info.get("_is_java", False)
                 if sc_abap or sc_java:
