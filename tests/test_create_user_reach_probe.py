@@ -385,3 +385,62 @@ def test_canary_source_side_rejects_when_create_errors():
     assert result["created"] is False
     assert result["success"] is False
     assert "User group SUPER not authorized" in result["error"]
+
+
+def test_abap_wrapper_uses_string_templates_not_concatenate_for_ints():
+    """Regression: an earlier version of the payload rewriter emitted
+    `CONCATENATE 'LABEL=' rc_i INTO l_line SEPARATED BY space.` which
+    ABAP rejects at compile time — "must be a character-like data
+    object".  The rewriter must use string templates instead so
+    TYPE i variables get formatted inline."""
+    from sapmap_rfc import _run_abap_program_with_destination
+    fake_conn = MagicMock()
+    fake_conn.call.return_value = {"WRITES": [{"ZEILE": "GRP_SUPER= 0"}]}
+    body = [
+        "REPORT zsapmap_ac.",
+        "DATA: rc_grp_super TYPE i.",
+        "AUTHORITY-CHECK OBJECT 'S_USER_GRP' ID 'ACTVT' FIELD '01' ID 'CLASS' FIELD 'SUPER'.",
+        "rc_grp_super = sy-subrc.",
+        "WRITE: / 'GRP_SUPER=', rc_grp_super.",
+    ]
+    _run_abap_program_with_destination(
+        fake_conn, body, "W74_T2", "ZTEST")
+    program_lines = [row["LINE"] for row in
+                     fake_conn.call.call_args.kwargs["PROGRAM"]]
+    joined = "\n".join(program_lines)
+    # No CONCATENATE-into-l_line-with-bare-integer patterns
+    assert "CONCATENATE 'GRP_SUPER=' rc_grp_super INTO l_line" not in joined
+    # And the string-template form IS present
+    assert "l_line = |GRP_SUPER={ rc_grp_super }|." in joined
+
+
+def test_canary_source_side_wrapper_uses_string_templates():
+    """Same regression check for the source-side canary wrapper —
+    rc_c / rc_d are TYPE i and must be rendered via | ... { rc } | |
+    string templates, not CONCATENATE."""
+    from sapmap_rfc import canary_create_user_probe
+    source = SAPNode(sid="S4H", hostname="s4h", ip="1.1.1.1",
+                      system_type="ABAP")
+    target = SAPNode(sid="TWT", hostname="twt", ip="2.2.2.2",
+                      system_type="ABAP")
+    fake_conn = MagicMock()
+    mgr = MagicMock()
+    mgr.__enter__.return_value = fake_conn
+    mgr.__exit__.return_value = False
+    def _capture(_conn, abap_lines, _prog):
+        joined = "\n".join(abap_lines)
+        # Old broken pattern must be gone
+        assert "CONCATENATE 'CREATE_RC=' rc_c INTO l_line" not in joined
+        assert "CONCATENATE 'DELETE_RC=' rc_d INTO l_line" not in joined
+        # New template form present
+        assert "l_line = |CREATE_RC={ rc_c }|." in joined
+        assert "l_line = |DELETE_RC={ rc_d }|." in joined
+        return {"success": True, "output": ["CREATE_RC= 0", "DELETE_RC= 0"],
+                "fm_name": "RFC_ABAP_INSTALL_AND_RUN", "error": ""}
+    with patch("sapmap_rfc._get_connection", return_value=mgr), \
+         patch("sapmap_rfc._run_abap_program", side_effect=_capture):
+        res = canary_create_user_probe(
+            target, source_node=source, destination="S4H_TO_TWT",
+            source_creds=Credentials(username="SAPADM",
+                                      password="x", client="000"))
+    assert res["success"] is True

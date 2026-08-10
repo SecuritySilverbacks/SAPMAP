@@ -328,9 +328,11 @@ def _run_abap_program_with_destination(conn, abap_lines: list,
                 s, _re.IGNORECASE)
             if m:
                 label, var = m.group(1), m.group(2)
-                payload.append(
-                    f"CONCATENATE '{label}' {var} INTO l_line "
-                    f"SEPARATED BY space.")
+                # Use an ABAP string template so TYPE i variables
+                # (rc_grp_super etc.) get formatted inline —
+                # CONCATENATE INTO l_line rejects integer operands
+                # with "must be a character-like data object".
+                payload.append(f"l_line = |{label}{{ {var} }}|.")
                 payload.append("APPEND l_line TO t_output.")
                 continue
         payload.append(ln.rstrip('.').rstrip() + ".")
@@ -632,6 +634,10 @@ def canary_create_user_probe(node: SAPNode,
                                 f"logon on the source to invoke the "
                                 f"canary via DESTINATION.")
             return result
+        # ABAP payload for the source-side canary.  Uses string
+        # templates (|...{ var }...|) rather than CONCATENATE for the
+        # integer→string joins — CONCATENATE INTO l_line rejects
+        # TYPE i operands with "must be a character-like data object".
         abap = [
             "REPORT zsapmap_cn.",
             "DATA: t_output TYPE TABLE OF string,",
@@ -653,10 +659,10 @@ def canary_create_user_probe(node: SAPNode,
             "rc_c = 0.",
             "LOOP AT t_ret WHERE type = 'E' OR type = 'A'.",
             "  rc_c = 4.",
-            "  CONCATENATE 'CREATE_ERR=' t_ret-message INTO l_line SEPARATED BY space.",
+            "  l_line = |CREATE_ERR={ t_ret-message }|.",
             "  APPEND l_line TO t_output.",
             "ENDLOOP.",
-            "CONCATENATE 'CREATE_RC=' rc_c INTO l_line SEPARATED BY space.",
+            "l_line = |CREATE_RC={ rc_c }|.",
             "APPEND l_line TO t_output.",
             "IF rc_c = 0.",
             f"  CALL FUNCTION 'BAPI_USER_DELETE' DESTINATION '{destination}'",
@@ -665,10 +671,10 @@ def canary_create_user_probe(node: SAPNode,
             "  rc_d = 0.",
             "  LOOP AT t_ret WHERE type = 'E' OR type = 'A'.",
             "    rc_d = 4.",
-            "    CONCATENATE 'DELETE_ERR=' t_ret-message INTO l_line SEPARATED BY space.",
+            "    l_line = |DELETE_ERR={ t_ret-message }|.",
             "    APPEND l_line TO t_output.",
             "  ENDLOOP.",
-            "  CONCATENATE 'DELETE_RC=' rc_d INTO l_line SEPARATED BY space.",
+            "  l_line = |DELETE_RC={ rc_d }|.",
             "  APPEND l_line TO t_output.",
             "ENDIF.",
             "LOOP AT t_output INTO l_line.",
