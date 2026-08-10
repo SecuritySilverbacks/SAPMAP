@@ -678,18 +678,27 @@ _ui_cmd_lock = threading.Lock()
 
 def _probe_create_user_reach(state, conn, fallback_creds) -> None:
     """Run the layered create-user reach probe on `conn` and stash
-    the verdict on the connection.  Silent on non-fatal errors —
-    caller keeps whatever prior verdict existed.
+    the verdict on the connection.  Layers 1-3 only (fast, safe).
+    Layer 4 (canary create+delete) lives on a separate operator-
+    triggered route.  Issue #23.
 
-    Layers 1-3 only (fast, safe).  Layer 4 (canary create+delete)
-    lives on a separate operator-triggered route.  Issue #23.
+    Always sets `create_user_probe_at` before invoking the layered
+    check so the panel can distinguish "never probed" from "probe
+    ran but crashed" — even if the check itself blows up in an
+    unexpected way.
     """
+    if not (conn.logon_successful and conn.rfc_user and conn.target_sid):
+        return
+    target = state.get_node(conn.target_sid)
+    if target is None:
+        return
+    from datetime import datetime as _dt, timezone as _tz
+    # Mark the attempt FIRST so a downstream crash doesn't leave the
+    # panel reading "not probed" — the reach row detects an attempted
+    # probe via this timestamp / the error field.
+    conn.create_user_probe_at = (
+        _dt.now(_tz.utc).isoformat(timespec="seconds"))
     try:
-        if not (conn.logon_successful and conn.rfc_user and conn.target_sid):
-            return
-        target = state.get_node(conn.target_sid)
-        if target is None:
-            return
         creds_arg = fallback_creds
         if conn.secstore_password:
             from sapmap_models import Credentials
@@ -710,21 +719,37 @@ def _probe_create_user_reach(state, conn, fallback_creds) -> None:
             source_node=source_node,
             destination=conn.destination_name,
             source_creds=fallback_creds)
+    except Exception as _e:
+        # Record the crash so the panel shows "Inconclusive — probe
+        # crashed" instead of misleading "not probed".
+        conn.create_user_probe_error = (
+            f"probe crashed: {type(_e).__name__}: {_e}")
+        print(f"[!] {conn.destination_name}: create-user probe "
+              f"crashed: {type(_e).__name__}: {_e}")
+        return
+    try:
         conn.can_create_user      = cu.get("can_create_user")
         conn.can_assign_sap_all   = cu.get("can_assign_sap_all")
         conn.can_assign_role      = cu.get("can_assign_role")
         conn.create_user_probe    = cu.get("probe", "")
         conn.create_user_evidence = cu.get("evidence", "")
         conn.create_user_probe_error = cu.get("error", "")
-        from datetime import datetime as _dt, timezone as _tz
-        conn.create_user_probe_at = (
-            _dt.now(_tz.utc).isoformat(timespec="seconds"))
         if conn.can_create_user and not conn.has_sap_all:
             print(f"[+] {conn.destination_name}: create-user reach "
                   f"WITHOUT SAP_ALL — {conn.create_user_evidence}")
+        elif conn.can_create_user is None:
+            print(f"[*] {conn.destination_name}: create-user reach "
+                  f"INCONCLUSIVE — {conn.create_user_evidence or conn.create_user_probe_error}")
+        else:
+            print(f"[*] {conn.destination_name}: create-user reach "
+                  f"= {conn.can_create_user} "
+                  f"(probe={conn.create_user_probe}, "
+                  f"evidence={conn.create_user_evidence})")
     except Exception as _e:
+        conn.create_user_probe_error = (
+            f"assignment failed: {type(_e).__name__}: {_e}")
         print(f"[!] {conn.destination_name}: create-user probe "
-              f"failed: {_e}")
+              f"assignment failed: {_e}")
 
 
 def ui_command(cmd: str, **kwargs):

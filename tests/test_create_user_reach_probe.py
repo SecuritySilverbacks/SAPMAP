@@ -287,3 +287,37 @@ def test_layer2_verdict_survives_layer3_failure_via_source_path():
     assert result["can_create_user"] is True
     assert result["probe"] == "role_heuristic"
     assert "SAP_BC_USER_ADMIN" in result["evidence"]
+
+
+def test_run_abap_program_with_destination_wraps_and_calls_correctly():
+    """Regression: `_re` was previously referenced in this helper
+    without being imported at module scope; the resulting NameError
+    was swallowed silently by the outer probe helper and manifested
+    as `Create-user reach: not probed` on real T2-shaped connections.
+    """
+    from sapmap_rfc import _run_abap_program_with_destination
+    fake_conn = MagicMock()
+    fake_conn.call.return_value = {"WRITES": [
+        {"ZEILE": "GRP_SUPER=            0"},
+        {"ZEILE": "GRP_DEFAULT=          4"},
+        {"ZEILE": "PRO_SAPALL=           0"},
+        {"ZEILE": "AGR_ADMIN=            4"},
+    ]}
+    body = [
+        "REPORT zsapmap_ac.",
+        "DATA: rc_grp_super TYPE i.",
+        "AUTHORITY-CHECK OBJECT 'S_USER_GRP' ID 'ACTVT' FIELD '01' ID 'CLASS' FIELD 'SUPER'.",
+        "rc_grp_super = sy-subrc.",
+        "WRITE: / 'GRP_SUPER=', rc_grp_super.",
+    ]
+    r = _run_abap_program_with_destination(
+        fake_conn, body, "W74_T2", "ZTEST")
+    assert r["success"] is True
+    # The compiled wrapper called RFC_ABAP_INSTALL_AND_RUN with
+    # DESTINATION set — proves the source-side path was taken.
+    fake_conn.call.assert_called_once()
+    kwargs = fake_conn.call.call_args.kwargs
+    assert kwargs["DESTINATION"] == "W74_T2"
+    assert kwargs["PROGRAMNAME"] == "ZTEST"
+    # And the four subrc-parseable lines round-tripped
+    assert any("GRP_SUPER" in ln for ln in r["output"])

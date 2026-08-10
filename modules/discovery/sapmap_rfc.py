@@ -312,6 +312,7 @@ def _run_abap_program_with_destination(conn, abap_lines: list,
     # local table so the OUTER wrapper can read them back.  We keep
     # the original AUTHORITY-CHECK statements unchanged — only the
     # last-mile output plumbing changes.
+    import re as _re
     payload = []
     for ln in abap_lines:
         s = ln.strip()
