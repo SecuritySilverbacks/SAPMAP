@@ -590,22 +590,31 @@ def check_can_create_user(node: SAPNode,
 
 def canary_create_user_probe(node: SAPNode,
                              creds: Credentials = None,
-                             username: str = "") -> dict:
+                             username: str = "",
+                             source_node: SAPNode = None,
+                             destination: str = "",
+                             source_creds: Credentials = None) -> dict:
     """Layer 4 — attempt BAPI_USER_CREATE1 with a canary username
     and immediately delete it.  Definitively answers "can this RFC
     user create a user?" even when RFC_ABAP_INSTALL_AND_RUN is
     blocked, at the cost of a real audit trail.
 
-    Operator-triggered only — never called from Test Connection.
+    Two execution paths:
 
-    Returns:
-        {
-          "success":  bool,       # canary create AND delete succeeded
-          "created":  bool,       # BAPI_USER_CREATE1 returned OK
-          "deleted":  bool,       # cleanup delete succeeded
-          "username": str,        # the canary name used
-          "error":    str,
-        }
+    * **Direct** (default) — open RFC to `node` with `creds` and
+      call the BAPIs there.  Requires a real password on the target
+      side.  Used for classic Type-3 destinations with a stored
+      SecStore password.
+
+    * **Source-side** (when `source_node` + `destination` are
+      supplied) — open RFC to `source_node` with `source_creds` and
+      invoke the BAPIs via `RFC_ABAP_INSTALL_AND_RUN` with a
+      `DESTINATION '<dest>'` clause.  Lets the canary run on
+      trusted-RFC destinations where SAPMAP holds no target-side
+      password — the STRUSTSSO2 assertion ticket is signed by the
+      source kernel.
+
+    Operator-triggered only — never called from Test Connection.
     """
     import time
     if not username:
@@ -614,6 +623,99 @@ def canary_create_user_probe(node: SAPNode,
     username = username.upper()
     result = {"success": False, "created": False, "deleted": False,
               "username": username, "error": ""}
+    # ---- Source-side path (trusted RFC / no target password) ---------
+    if source_node and destination:
+        src_creds = source_creds or source_node.best_credentials()
+        if src_creds is None:
+            result["error"] = (f"No source-side credentials for "
+                                f"{source_node.sid} — need a working "
+                                f"logon on the source to invoke the "
+                                f"canary via DESTINATION.")
+            return result
+        abap = [
+            "REPORT zsapmap_cn.",
+            "DATA: t_output TYPE TABLE OF string,",
+            "      l_line   TYPE string,",
+            "      rc_c     TYPE i, rc_d TYPE i.",
+            "DATA: ls_addr TYPE bapiaddr3.",
+            "DATA: ls_pwd  TYPE bapipwd.",
+            "DATA: ls_logd TYPE bapilogond.",
+            "DATA: t_ret   TYPE TABLE OF bapiret2 WITH HEADER LINE.",
+            "ls_addr-lastname = 'SAPMAP CANARY'.",
+            "ls_pwd-bapipwd = 'Sapmap_Canary_1!'.",
+            "ls_logd-ustyp = 'A'.",
+            f"CALL FUNCTION 'BAPI_USER_CREATE1' DESTINATION '{destination}'",
+            f"  EXPORTING username = '{username}'",
+            "            password = ls_pwd",
+            "            address  = ls_addr",
+            "            logondata = ls_logd",
+            "  TABLES return = t_ret.",
+            "rc_c = 0.",
+            "LOOP AT t_ret WHERE type = 'E' OR type = 'A'.",
+            "  rc_c = 4.",
+            "  CONCATENATE 'CREATE_ERR=' t_ret-message INTO l_line SEPARATED BY space.",
+            "  APPEND l_line TO t_output.",
+            "ENDLOOP.",
+            "CONCATENATE 'CREATE_RC=' rc_c INTO l_line SEPARATED BY space.",
+            "APPEND l_line TO t_output.",
+            "IF rc_c = 0.",
+            f"  CALL FUNCTION 'BAPI_USER_DELETE' DESTINATION '{destination}'",
+            f"    EXPORTING username = '{username}'",
+            "    TABLES return = t_ret.",
+            "  rc_d = 0.",
+            "  LOOP AT t_ret WHERE type = 'E' OR type = 'A'.",
+            "    rc_d = 4.",
+            "    CONCATENATE 'DELETE_ERR=' t_ret-message INTO l_line SEPARATED BY space.",
+            "    APPEND l_line TO t_output.",
+            "  ENDLOOP.",
+            "  CONCATENATE 'DELETE_RC=' rc_d INTO l_line SEPARATED BY space.",
+            "  APPEND l_line TO t_output.",
+            "ENDIF.",
+            "LOOP AT t_output INTO l_line.",
+            "  WRITE: / l_line.",
+            "ENDLOOP.",
+        ]
+        try:
+            with _get_connection(source_node, src_creds) as _sconn:
+                run = _run_abap_program(_sconn, abap, "ZSAPMAP_CN")
+        except Exception as e:
+            result["error"] = (f"source RFC failed: "
+                                f"{format_rfc_exception(e)}")
+            return result
+        if not run.get("success"):
+            result["error"] = (f"ABAP wrapper failed: "
+                                + (run.get("error") or "unknown"))
+            return result
+        out = run.get("output", []) or []
+        create_rc = None
+        delete_rc = None
+        create_err = ""
+        delete_err = ""
+        for line in out:
+            s = line.strip()
+            if s.startswith("CREATE_RC="):
+                try: create_rc = int(s.split("=", 1)[1].strip())
+                except Exception: pass
+            elif s.startswith("DELETE_RC="):
+                try: delete_rc = int(s.split("=", 1)[1].strip())
+                except Exception: pass
+            elif s.startswith("CREATE_ERR="):
+                create_err = s.split("=", 1)[1].strip()[:200]
+            elif s.startswith("DELETE_ERR="):
+                delete_err = s.split("=", 1)[1].strip()[:200]
+        result["created"] = (create_rc == 0)
+        result["deleted"] = (delete_rc == 0)
+        result["success"] = result["created"] and result["deleted"]
+        if create_err:
+            result["error"] = create_err
+        elif delete_err and result["created"]:
+            result["error"] = f"delete failed: {delete_err}"
+        elif not result["created"] and create_rc is None:
+            result["error"] = ("wrapper compiled but produced no "
+                                "CREATE_RC — likely S_RFC blocked "
+                                "the DESTINATION addition on the source")
+        return result
+    # ---- Direct path (target-side password) --------------------------
     try:
         with _get_connection(node, creds) as conn:
             # Minimum-viable create — no profiles, no roles.

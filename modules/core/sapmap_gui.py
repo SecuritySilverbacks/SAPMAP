@@ -687,10 +687,23 @@ def _probe_create_user_reach(state, conn, fallback_creds) -> None:
     ran but crashed" — even if the check itself blows up in an
     unexpected way.
     """
+    # Entry log — makes silent failures visible when the operator
+    # can't work out why "Create-user reach" isn't updating.
+    _dest_name = getattr(conn, "destination_name", "?")
+    print(f"[*] {_dest_name}: create-user reach probe entered "
+          f"(logon={getattr(conn, 'logon_successful', None)}, "
+          f"rfc_user={getattr(conn, 'rfc_user', '')!r}, "
+          f"target_sid={getattr(conn, 'target_sid', '')!r}, "
+          f"profiles={len(conn.profiles or [])}, "
+          f"roles={len(conn.roles or [])})")
     if not (conn.logon_successful and conn.rfc_user and conn.target_sid):
+        print(f"[*] {_dest_name}: create-user reach — early-return "
+              f"(logon/rfc_user/target_sid gate missed)")
         return
     target = state.get_node(conn.target_sid)
     if target is None:
+        print(f"[*] {_dest_name}: create-user reach — early-return "
+              f"(target node {conn.target_sid!r} not on map)")
         return
     from datetime import datetime as _dt, timezone as _tz
     # Mark the attempt FIRST so a downstream crash doesn't leave the
@@ -11772,8 +11785,21 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         username=conn.rfc_user,
                         password=conn.secstore_password,
                         client=conn.client or "")
+                # Always pass the source-side route as a fallback:
+                # trusted-RFC destinations don't carry a target-side
+                # password, so the canary must run via
+                # RFC_ABAP_INSTALL_AND_RUN + DESTINATION on the
+                # source system (STRUSTSSO2 ticket is signed by the
+                # source kernel).  The direct path is used only when
+                # source-side info is unavailable.
+                source_node = api.state.get_node(conn.source_sid)
+                source_creds = (node.best_credentials()
+                                 if source_node is not None else None)
                 res = sapmap_rfc.canary_create_user_probe(
-                    target, creds=creds)
+                    target, creds=creds,
+                    source_node=source_node,
+                    destination=conn.destination_name,
+                    source_creds=source_creds)
                 # Update the create-user reach fields based on the
                 # canary outcome — this is the most authoritative
                 # answer, so it always overwrites prior verdicts.

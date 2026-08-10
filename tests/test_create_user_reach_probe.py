@@ -321,3 +321,67 @@ def test_run_abap_program_with_destination_wraps_and_calls_correctly():
     assert kwargs["PROGRAMNAME"] == "ZTEST"
     # And the four subrc-parseable lines round-tripped
     assert any("GRP_SUPER" in ln for ln in r["output"])
+
+
+def test_canary_source_side_path_no_target_password():
+    """Trusted-RFC destinations carry no target-side password.  The
+    canary must invoke BAPI_USER_CREATE1 via RFC_ABAP_INSTALL_AND_RUN
+    with a DESTINATION clause on the SOURCE — no direct RFC to the
+    target, no ValueError from missing target creds."""
+    source = SAPNode(sid="S4H", hostname="s4h", ip="1.1.1.1",
+                      system_type="ABAP")
+    target = SAPNode(sid="TWT", hostname="twt", ip="2.2.2.2",
+                      system_type="ABAP")
+    src_creds = Credentials(username="SAPADM", password="Whatever",
+                             client="000")
+    fake_conn = MagicMock()
+    mgr = MagicMock()
+    mgr.__enter__.return_value = fake_conn
+    mgr.__exit__.return_value = False
+    ok_output = [
+        "CREATE_RC= 0",
+        "DELETE_RC= 0",
+    ]
+    with patch("sapmap_rfc._get_connection", return_value=mgr), \
+         patch("sapmap_rfc._run_abap_program",
+                return_value={"success": True, "output": ok_output,
+                              "fm_name": "RFC_ABAP_INSTALL_AND_RUN",
+                              "error": ""}):
+        result = canary_create_user_probe(
+            target, creds=None,
+            source_node=source, destination="S4H_TO_TWT",
+            source_creds=src_creds)
+    assert result["created"] is True
+    assert result["deleted"] is True
+    assert result["success"] is True
+    assert result["error"] == ""
+
+
+def test_canary_source_side_rejects_when_create_errors():
+    """Source-side canary parses CREATE_ERR lines and reports failure
+    without attempting the delete."""
+    source = SAPNode(sid="S4H", hostname="s4h", ip="1.1.1.1",
+                      system_type="ABAP")
+    target = SAPNode(sid="TWT", hostname="twt", ip="2.2.2.2",
+                      system_type="ABAP")
+    fake_conn = MagicMock()
+    mgr = MagicMock()
+    mgr.__enter__.return_value = fake_conn
+    mgr.__exit__.return_value = False
+    err_output = [
+        "CREATE_ERR= User group SUPER not authorized for user JORIS",
+        "CREATE_RC= 4",
+    ]
+    with patch("sapmap_rfc._get_connection", return_value=mgr), \
+         patch("sapmap_rfc._run_abap_program",
+                return_value={"success": True, "output": err_output,
+                              "fm_name": "RFC_ABAP_INSTALL_AND_RUN",
+                              "error": ""}):
+        result = canary_create_user_probe(
+            target, creds=None,
+            source_node=source, destination="S4H_TO_TWT",
+            source_creds=Credentials(username="SAPADM",
+                                      password="x", client="000"))
+    assert result["created"] is False
+    assert result["success"] is False
+    assert "User group SUPER not authorized" in result["error"]
