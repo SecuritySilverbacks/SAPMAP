@@ -8437,19 +8437,34 @@ function showConnInfo(e, connIdx) {
         }
         // Inconclusive — offer canary + surface the probe error.
         const canaryBtn = (conn.rfc_user) ? (
-          `<button class="btn" style="margin-left:8px;font-size:10px;padding:2px 8px" `
+          `<button class="btn" style="margin-left:8px;font-size:11px;padding:3px 10px;background:#d29922;color:#0d1117;font-weight:600" `
           + `onclick="runCanaryCreate('${escHtml(conn.source_sid)}','${escHtml(conn.destination_name)}')" `
           + `title="Layer 4 — creates + immediately deletes a canary user. Leaves an audit trail.">`
-          + `Verify by canary</button>`
+          + `&rarr; Verify by canary</button>`
         ) : '';
-        const errText = conn.create_user_probe_error
-          ? `<div style="color:#484f58;font-size:10px;margin-top:2px">${escHtml(conn.create_user_probe_error)}</div>`
+        // Distill common ABAP error patterns into human hints so
+        // the operator doesn't have to decode "FU_NOT_FOUND".
+        let hint = '';
+        const rawErr = conn.create_user_probe_error || '';
+        if (/FU_NOT_FOUND/i.test(rawErr)) {
+          hint = 'The RFC user lacks S_RFC for RFC_ABAP_INSTALL_AND_RUN on the target (SAP returns FU_NOT_FOUND on auth failure). Canary probe uses BAPI_USER_CREATE1 directly and typically works when that FM is blocked.';
+        } else if (/not permitted in this client/i.test(rawErr)) {
+          hint = 'RFC_ABAP_INSTALL_AND_RUN is blocked on this client (SCC4 / auth-check flag). Canary uses a different FM and often gets through.';
+        } else if (/authorization/i.test(rawErr) || /AUTHORIZATION/.test(rawErr)) {
+          hint = 'Auth check blocked from reading the answer. Canary CREATE+DELETE gives a definitive yes/no.';
+        }
+        const errText = rawErr
+          ? `<div style="color:#484f58;font-size:10px;margin-top:6px;line-height:1.4">${escHtml(rawErr)}</div>`
+          : '';
+        const hintText = hint
+          ? `<div style="color:#8b949e;font-size:11px;margin-top:6px;line-height:1.45"><i>${escHtml(hint)}</i></div>`
           : '';
         return `<div class="info-section">
           <strong style="font-size:11px;color:#8b949e">Create-user reach</strong>
-          <div style="font-size:12px;color:#d29922;margin-top:2px">
-            &#128993; Inconclusive — probe ran but couldn't verify (BAPI_USER_GET_DETAIL / RFC_ABAP_INSTALL_AND_RUN blocked)${canaryBtn}
+          <div style="font-size:12px;color:#d29922;margin-top:4px">
+            &#128993; Inconclusive — click <b>Verify by canary</b> for a definitive yes/no ${canaryBtn}
           </div>
+          ${hintText}
           ${errText}
         </div>`;
       }

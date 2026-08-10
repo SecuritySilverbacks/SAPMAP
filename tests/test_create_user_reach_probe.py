@@ -444,3 +444,36 @@ def test_canary_source_side_wrapper_uses_string_templates():
             source_creds=Credentials(username="SAPADM",
                                       password="x", client="000"))
     assert res["success"] is True
+
+
+def test_layer2_matches_custom_zrole_naming_conventions():
+    """Custom Z_/Y_ role names that clearly denote user admin (e.g.
+    Z_USER_AGR_GRANT, Y_USER_ADMIN_CREATE) must be recognised even
+    though they're not on the exact SAP-shipped allowlist."""
+    from sapmap_rfc import _match_admin_role
+    assert _match_admin_role(["Z_USER_AGR_GRANT"]) == "Z_USER_AGR_GRANT"
+    assert _match_admin_role(["Y_USER_ADMIN_CREATE"]) == "Y_USER_ADMIN_CREATE"
+    assert _match_admin_role(["Z_BASIS_ADMIN_XX"]) == "Z_BASIS_ADMIN_XX"
+    assert _match_admin_role(["Z_AGR_USER_MAINT"]) == "Z_AGR_USER_MAINT"
+    # Roles that DON'T grant create — must NOT match
+    assert _match_admin_role(["Z_USER_READ"]) == ""
+    assert _match_admin_role(["Z_RFCPING"]) == ""
+    assert _match_admin_role(["SAP_BC_ENDUSER"]) == ""
+    # Exact allowlist still wins first
+    assert _match_admin_role(["Z_USER_READ",
+                               "SAP_BC_USER_ADMIN"]) == "SAP_BC_USER_ADMIN"
+
+
+def test_layer2_custom_role_triggers_heuristic_verdict():
+    """T6's Z_USER_AGR_GRANT role should fire Layer 2 without needing
+    the SAP-shipped SAP_BC_USER_ADMIN name."""
+    with patch("sapmap_rfc._get_connection",
+                side_effect=RuntimeError("Layer 3 blocked")):
+        result = check_can_create_user(
+            _fake_node(),
+            existing_profiles=[],
+            existing_roles=["Z_RFCPING", "Z_USER_AGR_GRANT"],
+        )
+    assert result["can_create_user"] is True
+    assert result["probe"] == "role_heuristic"
+    assert "Z_USER_AGR_GRANT" in result["evidence"]

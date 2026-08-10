@@ -13,6 +13,7 @@ Uses sap_rfc_ctypes.RFCConnection for all authenticated operations:
 """
 
 import logging
+import re as _re
 import threading
 import time
 from datetime import datetime
@@ -399,6 +400,32 @@ _KNOWN_ADMIN_ROLES = frozenset({
     "Z_BASIS_ADMIN", "Y_BASIS_ADMIN",
 })
 
+# Loose regex patterns for role names that STRONGLY suggest user-admin
+# authority — used by Layer 2 as a second-chance heuristic when the
+# exact-name allowlist above misses.  Case-insensitive.  Requires the
+# role name to contain BOTH the "user"-ish token AND either the
+# "admin/grant" verb OR the "AGR" (activity-group) marker — filters
+# out benign roles like `Z_USER_READ` that don't grant create.
+_ADMIN_ROLE_PATTERNS = [
+    _re.compile(r"user.*(admin|grant|creat|maint)", _re.IGNORECASE),
+    _re.compile(r"(admin|maint).*user", _re.IGNORECASE),
+    _re.compile(r"basis.*admin", _re.IGNORECASE),
+    _re.compile(r"user.*agr", _re.IGNORECASE),   # AGR = activity group
+    _re.compile(r"agr.*(user|grant)", _re.IGNORECASE),
+]
+
+
+def _match_admin_role(roles) -> str:
+    """Return the first role name that looks like user-admin — exact
+    allowlist first, then loose regex.  Empty string on no match."""
+    for r in roles:
+        if r in _KNOWN_ADMIN_ROLES:
+            return r
+    for r in roles:
+        if any(p.search(r) for p in _ADMIN_ROLE_PATTERNS):
+            return r
+    return ""
+
 
 def check_can_create_user(node: SAPNode,
                           existing_profiles: list = None,
@@ -458,8 +485,12 @@ def check_can_create_user(node: SAPNode,
         })
         return result
 
-    # ---- Layer 2 — well-known admin role heuristic -------------------
-    hit_role = next((r for r in roles if r in _KNOWN_ADMIN_ROLES), "")
+    # ---- Layer 2 — admin role heuristic ------------------------------
+    # Exact allowlist first, then loose regex for custom Z_* / Y_*
+    # role names that STRONGLY suggest user-admin authority (e.g.
+    # `Z_USER_AGR_GRANT`, `Y_USER_ADMIN_CREATE`).  The heuristic
+    # verdict is preserved when Layer 3 can't run.
+    hit_role = _match_admin_role(roles)
     if hit_role:
         result.update({
             "can_create_user": True,
