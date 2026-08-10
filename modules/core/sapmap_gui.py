@@ -689,8 +689,11 @@ def _probe_create_user_reach(state, conn, fallback_creds) -> None:
     """
     # Entry log — makes silent failures visible when the operator
     # can't work out why "Create-user reach" isn't updating.
+    # (issue-#23 diagnostic build — presence of this line in the
+    # console proves the probe was reached; absence proves the
+    # SAPMAP process is running stale bytecode from before the fix.)
     _dest_name = getattr(conn, "destination_name", "?")
-    print(f"[*] {_dest_name}: create-user reach probe entered "
+    print(f"[*] {_dest_name}: [issue#23 probe/v3] create-user reach probe entered "
           f"(logon={getattr(conn, 'logon_successful', None)}, "
           f"rfc_user={getattr(conn, 'rfc_user', '')!r}, "
           f"target_sid={getattr(conn, 'target_sid', '')!r}, "
