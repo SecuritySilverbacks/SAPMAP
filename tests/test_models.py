@@ -422,3 +422,58 @@ def test_state_stats_pwned_includes_btp_subaccounts():
     s = state.stats()
     # 1 SAP pwned + 1 BTP pwned = 2 (SAP-only count would be 1)
     assert s["pwned"] == 2
+
+
+def test_add_node_suppresses_plotted_finding_for_bare_aws_default():
+    """SAPMAP auto-materialises placeholder SAP nodes for the two
+    SAP-shipped CSI_AWS_EC2 / CSI_AWS_S3 Type-G destinations, then
+    the frontend explicitly hides them from the map.  The
+    "New … system plotted" INFO finding used to fire regardless,
+    confusing the operator with a ping about a system they'd never
+    see.  The finding must be suppressed for bare AWS placeholders
+    but still emit for real systems and for AWS nodes that have
+    accumulated any real enrichment."""
+    from sapmap_models import SAPMAPState, SAPNode
+    import sapmap_findings
+
+    def _bare_aws(sid, host):
+        return SAPNode(sid=sid, system_type="SAP", hostname=host, ip="")
+
+    # 1. Bare AWS default → no finding emitted
+    state = SAPMAPState()
+    sapmap_findings.clear()
+    state.add_node(_bare_aws("CSI1", "ec2.amazonaws.com"))
+    plotted = [f for f in sapmap_findings.get_since(0)["findings"]
+               if "plotted" in (f.get("msg") or "")]
+    assert plotted == [], (
+        f"bare AWS default emitted plotted finding: {plotted}")
+
+    # 2. Different bare AWS default (s3) → also suppressed
+    sapmap_findings.clear()
+    state = SAPMAPState()
+    state.add_node(_bare_aws("CSI2", "s3.amazonaws.com"))
+    plotted = [f for f in sapmap_findings.get_since(0)["findings"]
+               if "plotted" in (f.get("msg") or "")]
+    assert plotted == []
+
+    # 3. Real system (non-AWS host) → finding still emitted
+    sapmap_findings.clear()
+    state = SAPMAPState()
+    state.add_node(SAPNode(sid="S4H", system_type="ABAP",
+                            hostname="s4hanadev", ip="10.0.0.1"))
+    plotted = [f for f in sapmap_findings.get_since(0)["findings"]
+               if "plotted" in (f.get("msg") or "")]
+    assert len(plotted) == 1, (
+        f"real system should have emitted plotted finding, got: {plotted}")
+
+    # 4. AWS host that HAS acquired enrichment (pwned) → still emits
+    sapmap_findings.clear()
+    state = SAPMAPState()
+    enriched = _bare_aws("CSI3", "ec2.amazonaws.com")
+    enriched.pwned = True
+    state.add_node(enriched)
+    plotted = [f for f in sapmap_findings.get_since(0)["findings"]
+               if "plotted" in (f.get("msg") or "")]
+    assert len(plotted) == 1, (
+        f"enriched AWS node should still emit plotted finding, "
+        f"got: {plotted}")

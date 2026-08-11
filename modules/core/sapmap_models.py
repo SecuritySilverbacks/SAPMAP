@@ -1749,6 +1749,48 @@ class BTPSubaccountNode:
         return cls(**{k: v for k, v in d.items() if k in known})
 
 
+_BARE_AWS_DEFAULT_HOST_RE = _re.compile(
+    r'^(ec2|s3)([.-][a-z0-9.-]+)?\.amazonaws\.com$', _re.IGNORECASE)
+
+
+def _is_bare_aws_default_node(node) -> bool:
+    """Return True when `node` is a placeholder auto-materialised
+    from one of the two SAP-shipped Type-G HTTP destinations
+    (CSI_AWS_EC2, CSI_AWS_S3) that ship with every S/4 system and
+    point at ec2.amazonaws.com / s3.amazonaws.com — with no stored
+    credentials and no other enrichment.
+
+    Mirrors the JS-side `_isBareAwsDefaultNode` filter that hides
+    these placeholders from the map.  Called from `add_node` so we
+    don't emit the misleading "New SAP system plotted" INFO
+    finding for a node the operator will never see on the map.
+    """
+    if node is None:
+        return False
+    host = (getattr(node, "hostname", "") or "").lower()
+    ip = (getattr(node, "ip", "") or "").lower()
+    if (not _BARE_AWS_DEFAULT_HOST_RE.match(host)
+            and not _BARE_AWS_DEFAULT_HOST_RE.match(ip)):
+        return False
+    # If anything real has already landed on the node, it stops
+    # being a "bare" default — pwn state, credentials, findings,
+    # real open ports.
+    any_real_port = any(
+        i and getattr(i, "ports", None) and len(i.ports) > 0
+        for i in (getattr(node, "instances", None) or []))
+    return not (
+        getattr(node, "pwned", False)
+        or (getattr(node, "credentials", None) or [])
+        or (getattr(node, "created_users", None) or [])
+        or (getattr(node, "findings", None) or [])
+        or getattr(node, "gw_vulnerable", False)
+        or getattr(node, "ms_vulnerable", False)
+        or getattr(node, "cve_2025_31324_vulnerable", False)
+        or getattr(node, "cve_2020_6287_vulnerable", False)
+        or getattr(node, "cve_2022_22536_vulnerable", False)
+        or any_real_port)
+
+
 # ---------------------------------------------------------------------------
 # SAPMAPState — full session state (serializable)
 # ---------------------------------------------------------------------------
@@ -1789,35 +1831,27 @@ class SAPMAPState:
     # -- Node management --
 
     def add_node(self, node: SAPNode) -> None:
-        # Diagnostic (issue: SBD lost on scan) — trace every add_node
-        # call so we can see when the SID gets in, when it gets
-        # overwritten, and by what.
-        _existed = node.sid in self.nodes
-        _prev = self.nodes.get(node.sid)
-        _len_before = len(self.nodes)
-        print(f"[add_node] sid={node.sid!r} host={node.hostname!r} "
-              f"ip={node.ip!r} type={node.system_type!r} "
-              f"insts={node.instance_nrs()} "
-              f"existed={_existed} prev_type="
-              f"{getattr(_prev, 'system_type', None)!r} "
-              f"prev_host={getattr(_prev, 'hostname', None)!r} "
-              f"nodes_before={_len_before}")
         is_new = node.sid not in self.nodes
         self.nodes[node.sid] = node
-        print(f"[add_node] after insert: nodes_after={len(self.nodes)} "
-              f"is_new={is_new} keys={sorted(self.nodes)}")
         if is_new:
-            try:
-                from sapmap_findings import emit_finding
-                host = node.ip or node.hostname or "?"
-                sys_type = node.system_type or "SAP"
-                kernel = f" K:{node.kernel}" if node.kernel else ""
-                emit_finding(
-                    "INFO", node.sid,
-                    f"New {sys_type} system plotted — {host}{kernel}",
-                )
-            except Exception:
-                pass
+            # Suppress the "New system plotted" finding for the two
+            # SAP-shipped ec2/s3 CSI Type-G placeholders that the
+            # front-end explicitly hides — otherwise the operator
+            # sees an INFO ping about a system that never appears
+            # on the map, which is confusing.
+            _visible_on_map = not _is_bare_aws_default_node(node)
+            if _visible_on_map:
+                try:
+                    from sapmap_findings import emit_finding
+                    host = node.ip or node.hostname or "?"
+                    sys_type = node.system_type or "SAP"
+                    kernel = f" K:{node.kernel}" if node.kernel else ""
+                    emit_finding(
+                        "INFO", node.sid,
+                        f"New {sys_type} system plotted — {host}{kernel}",
+                    )
+                except Exception:
+                    pass
             # Re-link any WD-discovered backend placeholders that
             # match the newly-added node's kernel/release/hostname.
             # Without this, a WD-only first scan + a separate scan of
