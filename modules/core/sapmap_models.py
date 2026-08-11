@@ -1789,8 +1789,23 @@ class SAPMAPState:
     # -- Node management --
 
     def add_node(self, node: SAPNode) -> None:
+        # Diagnostic (issue: SBD lost on scan) — trace every add_node
+        # call so we can see when the SID gets in, when it gets
+        # overwritten, and by what.
+        _existed = node.sid in self.nodes
+        _prev = self.nodes.get(node.sid)
+        _len_before = len(self.nodes)
+        print(f"[add_node] sid={node.sid!r} host={node.hostname!r} "
+              f"ip={node.ip!r} type={node.system_type!r} "
+              f"insts={node.instance_nrs()} "
+              f"existed={_existed} prev_type="
+              f"{getattr(_prev, 'system_type', None)!r} "
+              f"prev_host={getattr(_prev, 'hostname', None)!r} "
+              f"nodes_before={_len_before}")
         is_new = node.sid not in self.nodes
         self.nodes[node.sid] = node
+        print(f"[add_node] after insert: nodes_after={len(self.nodes)} "
+              f"is_new={is_new} keys={sorted(self.nodes)}")
         if is_new:
             try:
                 from sapmap_findings import emit_finding
