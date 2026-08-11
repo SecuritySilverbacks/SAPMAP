@@ -4052,13 +4052,28 @@ def enumerate_system_clients(host: str, disp_port: int, timeout: float = 5,
         status = result.get("status", "unknown")
         probed = result.get("probed", 0)
         errors = result.get("errors", 0)
+        err_msg = result.get("error", "")
         if clients:
             print(f"[+] {tag}: Found {len(clients)} clients: {', '.join(clients[:15])}"
                   f"{'...' if len(clients) > 15 else ''}"
                   f" (probed={probed}, errors={errors})")
         else:
+            # Surface the underlying error string so the operator
+            # sees WHY enumeration produced nothing — previously
+            # only status/probed/errors was shown, which reads as
+            # "silently gave up" on SNC-required kernels.
             print(f"[*] {tag}: No clients found (status={status}, "
                   f"probed={probed}, errors={errors})")
+            if err_msg:
+                print(f"      reason: {err_msg}")
+            # Even when DIAG init fails, client 000 is ALWAYS
+            # present on any SAP system.  Return it so downstream
+            # code (default-cred probe, RFC login) has something
+            # concrete to try instead of an empty list.
+            if status == "error":
+                print(f"      (falling back to guaranteed client "
+                      f"'000' so downstream tests still run)")
+                return ["000"]
         return clients
     except Exception as e:
         print(f"[-] {tag}: Client enumeration error on {host}:{disp_port}: {e}")

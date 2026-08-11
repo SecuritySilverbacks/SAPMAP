@@ -590,21 +590,49 @@ def enumerate_clients(host, port, timeout=5, max_workers=20,
     """
     result = {"clients": [], "status": "ok", "probed": 0, "errors": 0}
 
-    # Quick init to verify the port is a DIAG dispatcher
+    # Quick init to verify the port is a DIAG dispatcher.  On S/4
+    # kernels that enforce SNC (snc/accept_insecure_gui=0) the plain-
+    # text DIAG init gets silently rejected (server closes the socket
+    # without an NI frame → resp is empty or too short to parse).
+    # Give it a slightly longer window than the default 5 s because
+    # a loaded dispatcher on modern S/4 sometimes takes >2 s to
+    # complete TERM_INI.
+    _init_timeout = max(timeout, 10)
     try:
-        sock = _diag_connect(host, port, timeout, saprouter)
+        sock = _diag_connect(host, port, _init_timeout, saprouter)
         ni_send(sock, build_diag_init(terminal))
-        resp = ni_recv(sock, timeout)
-        sock.close()
-        if not resp or len(resp) < 50:
+        resp = ni_recv(sock, _init_timeout)
+        try:
+            sock.close()
+        except Exception:
+            pass
+        resp_len = len(resp or b"")
+        if not resp or resp_len < 50:
+            # Short / empty response — surface every byte we DID get
+            # so the operator can decide whether it's SNC-required,
+            # a firewalled port, or a genuinely non-dispatcher service.
+            hex_preview = (resp[:200].hex() if resp else "")
+            ascii_preview = (
+                "".join(chr(b) if 32 <= b < 127 else "." for b in resp[:100])
+                if resp else "")
+            reason = "empty response (peer closed without sending)"
+            if resp:
+                reason = (f"short response ({resp_len} bytes, expected "
+                          f"≥50) — possible SNC-required rejection or "
+                          f"non-dispatcher service")
             result["status"] = "error"
-            result["error"] = "DIAG init failed - port may not be a dispatcher"
+            result["error"] = ("DIAG init failed on "
+                                f"{host}:{port} — {reason}"
+                                + (f"; raw={hex_preview!r} "
+                                    f"ascii={ascii_preview!r}"
+                                    if resp else ""))
             return result
         if verbose:
-            print("  DIAG init OK (%d bytes response)" % len(resp))
+            print("  DIAG init OK (%d bytes response)" % resp_len)
     except Exception as e:
         result["status"] = "error"
-        result["error"] = "DIAG init failed: %s" % str(e)
+        result["error"] = (f"DIAG init failed on {host}:{port} — "
+                            f"{type(e).__name__}: {e}")
         return result
 
     # Detect client redirection (S/4HANA systems with login/system_client)
