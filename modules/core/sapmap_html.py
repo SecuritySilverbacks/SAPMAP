@@ -4758,6 +4758,14 @@ function updateMap() {
            + `onmousedown="startDrag(event,'${dragId}')" `
            + `onclick="showDBCONDetail('${escHtml(src.sid)}','${escHtml(e.con_name)}')" `
            + `oncontextmenu="showDBCONCtxMenu(event,'${escHtml(src.sid)}','${escHtml(e.con_name)}')">`;
+      // Invisible hit rect covering the FULL cylinder bounding box —
+      // SVG only fires clicks where a shape is actually filled, so
+      // without this the empty space between text lines and inside
+      // the bottom-half ellipse arc (fill=none) is unclickable.
+      // fill=transparent (not "none") is required for pointer events.
+      html += `<rect x="${x - 1}" y="${yTop - ry - 1}" `
+           + `width="${DB_BOX_W + 2}" height="${(yBottom + ry) - (yTop - ry) + 2}" `
+           + `fill="transparent" stroke="none" style="cursor:pointer" />`;
       // Body rectangle (between the two ellipses)
       html += `<rect x="${x}" y="${yMid}" width="${DB_BOX_W}" `
            + `height="${yBottomBand - yMid}" fill="${fill}" stroke="none" />`;
