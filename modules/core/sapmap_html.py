@@ -10437,17 +10437,38 @@ function showDBCONCtxMenu(e, srcSid, conName) {
   menu.classList.add('visible');
 }
 
-function toggleDBCONPassword(el) {
-  if (!el) return;
+// Ephemeral per-DBCON UI state — survives the auto-refresh
+// innerHTML rebuild that would otherwise wipe input values, toggle
+// state, and inner scroll positions.  Keyed by "srcSid|conName".
+let dbconUiState = {};
+
+function _dbconUiKey(srcSid, conName) {
+  return srcSid + '|' + conName;
+}
+
+function _applyDBCONPasswordReveal(el, shown) {
   const pw = el.dataset.pw || '';
-  const shown = el.dataset.shown === '1';
   if (shown) {
+    el.textContent = pw + '  (click to hide)';
+    el.dataset.shown = '1';
+  } else {
     el.textContent = '●●●● (' + pw.length +
       ' chars — click to reveal — from SecStore)';
     el.dataset.shown = '0';
-  } else {
-    el.textContent = pw + '  (click to hide)';
-    el.dataset.shown = '1';
+  }
+}
+
+function toggleDBCONPassword(el) {
+  if (!el) return;
+  const shown = el.dataset.shown === '1';
+  _applyDBCONPasswordReveal(el, !shown);
+  // Persist so the next auto-refresh re-applies it.
+  const sidKey = document.getElementById('detail-panel').dataset.sid || '';
+  if (sidKey.startsWith('dbcon:')) {
+    const rest = sidKey.slice(6);
+    const st = dbconUiState[rest.replace(':', '|')] || {};
+    st.pwShown = !shown;
+    dbconUiState[rest.replace(':', '|')] = st;
   }
 }
 
@@ -10466,21 +10487,33 @@ function showDBCONDetail(srcSid, conName, opts) {
     return;
   }
   const preservedScroll = refresh ? (panel.scrollTop || 0) : 0;
-  // Capture in-flight input values so the auto-refresh doesn't wipe
-  // what the operator is typing (peek inputs, future custom SQL, ...).
-  // Restored after innerHTML is rebuilt below.
+  // Snapshot everything the auto-refresh would otherwise wipe:
+  // input values, focused element + caret, inner-scroll positions,
+  // password toggle state.  Restored at the bottom of this fn.
+  const _uiKey = _dbconUiKey(srcSid, conName);
+  const _uiSaved = dbconUiState[_uiKey] || {};
   const _schemaEl = document.getElementById(
     `dbcon-peek-schema-${srcSid}-${conName}`);
   const _tableEl  = document.getElementById(
     `dbcon-peek-table-${srcSid}-${conName}`);
-  const _preservedSchema = _schemaEl ? _schemaEl.value : null;
-  const _preservedTable  = _tableEl  ? _tableEl.value  : null;
-  const _focusedInputId  = (document.activeElement &&
+  if (_schemaEl) _uiSaved.schema = _schemaEl.value;
+  if (_tableEl)  _uiSaved.table  = _tableEl.value;
+  const _enumScrollEl = document.getElementById(
+    `dbcon-enum-scroll-${srcSid}-${conName}`);
+  const _reconScrollEl = document.getElementById(
+    `dbcon-recon-scroll-${srcSid}-${conName}`);
+  if (_enumScrollEl)  _uiSaved.enumScroll  = _enumScrollEl.scrollTop;
+  if (_reconScrollEl) _uiSaved.reconScroll = _reconScrollEl.scrollTop;
+  const _pwEl = document.querySelector(
+    `#detail-panel .dbcon-pw[data-shown]`);
+  if (_pwEl) _uiSaved.pwShown = (_pwEl.dataset.shown === '1');
+  const _focusedInputId = (document.activeElement &&
     document.activeElement.id &&
     document.activeElement.id.startsWith('dbcon-peek-'))
     ? document.activeElement.id : null;
   const _focusedSelStart = (_focusedInputId && document.activeElement.selectionStart) || 0;
   const _focusedSelEnd   = (_focusedInputId && document.activeElement.selectionEnd) || 0;
+  dbconUiState[_uiKey] = _uiSaved;
   panel.setAttribute('data-view', 'dbcon');
   panel.dataset.sid = sidKey;
   const stateChip = edge.pwned ? '<span class="risk-badge risk-CRITICAL">&#9889; PWNED</span>'
@@ -10528,7 +10561,7 @@ function showDBCONDetail(srcSid, conName, opts) {
   const reconSection = Object.keys(reconFacts).length
     ? `<div class="info-section">
          <div style="color:#f0883e;font-weight:bold;margin-bottom:4px">HANA recon facts</div>
-         <div style="max-height:200px;overflow:auto;padding:4px;background:#0a0d10;border-radius:3px">${reconRows}</div>
+         <div id="dbcon-recon-scroll-${escHtml(srcSid)}-${escHtml(conName)}" style="max-height:200px;overflow:auto;padding:4px;background:#0a0d10;border-radius:3px">${reconRows}</div>
        </div>`
     : '';
   // USR02 dump loot pointer
@@ -10554,7 +10587,7 @@ function showDBCONDetail(srcSid, conName, opts) {
   const enumSection = (edge.enumerated_tables && edge.enumerated_tables.length)
     ? `<div class="info-section">
          <div style="color:#f0883e;font-weight:bold;margin-bottom:4px">Enumerated tables (${edge.enumerated_tables.length})</div>
-         <div style="max-height:220px;overflow:auto;border:1px solid #30363d;border-radius:3px">
+         <div id="dbcon-enum-scroll-${escHtml(srcSid)}-${escHtml(conName)}" style="max-height:220px;overflow:auto;border:1px solid #30363d;border-radius:3px">
            <table style="border-collapse:collapse;font-size:11px;width:100%">
              <thead><tr style="background:#161b22">
                <th style="text-align:left;padding:3px 6px;color:#8b949e">Schema</th>
@@ -10601,17 +10634,30 @@ function showDBCONDetail(srcSid, conName, opts) {
   `;
   panel.classList.add('visible');
   if (refresh && preservedScroll) panel.scrollTop = preservedScroll;
-  // Restore in-flight input state after the innerHTML rebuild
-  // wiped the previous DOM nodes.  Otherwise every 1-second state
-  // poll clobbers whatever the operator was typing.
+  // Restore ALL preserved UI state — inputs, inner scrolls, password
+  // reveal, focus + caret.  Without this the auto-refresh (1/s)
+  // wipes anything the operator was interacting with.
   const _newSchemaEl = document.getElementById(
     `dbcon-peek-schema-${srcSid}-${conName}`);
   const _newTableEl  = document.getElementById(
     `dbcon-peek-table-${srcSid}-${conName}`);
-  if (_newSchemaEl && _preservedSchema !== null)
-    _newSchemaEl.value = _preservedSchema;
-  if (_newTableEl && _preservedTable !== null)
-    _newTableEl.value = _preservedTable;
+  if (_newSchemaEl && _uiSaved.schema !== undefined)
+    _newSchemaEl.value = _uiSaved.schema;
+  if (_newTableEl && _uiSaved.table !== undefined)
+    _newTableEl.value  = _uiSaved.table;
+  const _newEnumScroll = document.getElementById(
+    `dbcon-enum-scroll-${srcSid}-${conName}`);
+  const _newReconScroll = document.getElementById(
+    `dbcon-recon-scroll-${srcSid}-${conName}`);
+  if (_newEnumScroll && _uiSaved.enumScroll !== undefined)
+    _newEnumScroll.scrollTop = _uiSaved.enumScroll;
+  if (_newReconScroll && _uiSaved.reconScroll !== undefined)
+    _newReconScroll.scrollTop = _uiSaved.reconScroll;
+  if (_uiSaved.pwShown) {
+    const _newPwEl = document.querySelector(
+      `#detail-panel .dbcon-pw[data-shown]`);
+    if (_newPwEl) _applyDBCONPasswordReveal(_newPwEl, true);
+  }
   if (_focusedInputId) {
     const _el = document.getElementById(_focusedInputId);
     if (_el) {

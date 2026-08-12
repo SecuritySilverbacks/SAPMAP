@@ -1018,18 +1018,18 @@ _RECON_QUERIES = [
      "SELECT HOST, VALUE FROM M_HOST_INFORMATION "
      "WHERE KEY IN ('build_version', 'build_date', 'sid') LIMIT 20",
      "hostname + build"),
+    # SELECT * on the small metadata views — column names differ
+    # across HANA releases (M_DATABASE lost ACTIVE_STATUS around
+    # HANA 2.0 SP04, M_LICENSE renamed VALID_FROM→START_DATE).  Ask
+    # for everything and let the panel show whatever the FM returns.
     ("database",
-     "SELECT DATABASE_NAME, ACTIVE_STATUS, IS_DATABASE_LOCAL "
-     "FROM M_DATABASE",
+     "SELECT * FROM M_DATABASE",
      "tenant / MDC info"),
     ("license",
-     "SELECT SYSTEM_ID, HARDWARE_KEY, INSTALL_NO, PRODUCT_NAME, "
-     "PRODUCT_LIMIT, VALID_FROM, EXPIRATION_DATE, IS_PERMANENT "
-     "FROM M_LICENSE",
+     "SELECT * FROM M_LICENSE",
      "license + HWKEY"),
     ("services",
-     "SELECT SERVICE_NAME, PORT, PROCESS_ID, ACTIVE_STATUS "
-     "FROM M_SERVICES WHERE ACTIVE_STATUS='YES' LIMIT 20",
+     "SELECT SERVICE_NAME, PORT, PROCESS_ID FROM M_SERVICES LIMIT 20",
      "running HANA services"),
     ("clients",
      "SELECT DISTINCT MANDT FROM T000 ORDER BY MANDT",
@@ -1040,9 +1040,8 @@ _RECON_QUERIES = [
      "AND KEY='global_auditing_state' LIMIT 1",
      "audit-log state"),
     ("privileged_users",
-     "SELECT USER_NAME, CREATOR, USER_MODE "
-     "FROM SYS.USERS WHERE USER_MODE='LOCAL' "
-     "AND USER_NAME IN ('SYSTEM', 'SYS', '_SYS_REPO', 'SAPHANADB', "
+     "SELECT USER_NAME, CREATOR FROM SYS.USERS "
+     "WHERE USER_NAME IN ('SYSTEM', 'SYS', '_SYS_REPO', 'SAPHANADB', "
      "'SAPABAP1', 'SAPSR3') LIMIT 20",
      "known-privileged users present"),
 ]
