@@ -4749,10 +4749,11 @@ function updateMap() {
       let strokeW = 2;
       let labelColor = "#8b949e";
       if (e.reachable && e.is_sap_shape) {
-        // green background is the "SAP DB confirmed" signal
-        fill = "#1c2f1c";
+        // Distinctive brighter green fill so SAP-shape reads
+        // unmistakably from the non-SAP yellow-brown at any zoom.
+        fill = "#0f2e0f";
         stroke = e.pwned ? "#f0883e" : "#3fb950";
-        strokeW = e.pwned ? 5 : 4;
+        strokeW = e.pwned ? 6 : 4;
         labelColor = e.pwned ? "#f0883e" : "#3fb950";
       } else if (e.reachable) {
         // non-SAP but reachable — yellow; pwned still allowed
@@ -4782,11 +4783,13 @@ function updateMap() {
       html += `<line x1="${_sx}" y1="${_sy}" x2="${_tx}" y2="${_ty}" `
            + `stroke="${lineColor}" stroke-width="2"${dashAttr} `
            + `pointer-events="none" opacity="0.85" />`;
-      // Line label (DBCON name) at midpoint
+      // Line label: DBMS / CON_NAME so the operator can identify which
+      // DBCON entry the line belongs to when there are multiple.
       const _mx = (_sx + _tx) / 2, _my = (_sy + _ty) / 2 - 4;
+      const _lineLbl = `${e.dbms || 'DB'} / ${e.con_name || '?'}`;
       html += `<text x="${_mx}" y="${_my}" text-anchor="middle" `
            + `fill="${lineColor}" font-size="9" font-family="monospace" `
-           + `pointer-events="none">${escHtml(e.dbms || 'DB')}</text>`;
+           + `pointer-events="none">${escHtml(_lineLbl)}</text>`;
 
       const dragId = `dbcon:${src.sid}:${e.con_name}`;
       html += `<g class="node-box" data-dbcon="${escHtml(src.sid + '|' + e.con_name)}" `
@@ -4834,6 +4837,22 @@ function updateMap() {
         html += `<text x="${cx}" y="${yMid + 54}" text-anchor="middle" `
              + `fill="${labelColor}" font-size="10" font-family="monospace" `
              + `pointer-events="none" font-weight="bold">SID: ${escHtml(e.target_sid)}</text>`;
+      }
+      // SAP-shape badge — mirrors the "ABAP" pill on S4H nodes so
+      // an SAP-shape DB is instantly identifiable at a glance.
+      // Top-left of the cylinder, rides just above the top ellipse.
+      if (e.is_sap_shape) {
+        const _badgeX = x - 6, _badgeY = y - 6;
+        const _badgeW = 44, _badgeH = 18;
+        html += `<rect x="${_badgeX}" y="${_badgeY}" width="${_badgeW}" `
+             + `height="${_badgeH}" rx="9" fill="#1f6feb" `
+             + `stroke="#58a6ff" stroke-width="1.5" `
+             + `pointer-events="none" />`;
+        html += `<text x="${_badgeX + _badgeW / 2}" `
+             + `y="${_badgeY + _badgeH / 2 + 4}" text-anchor="middle" `
+             + `fill="#ffffff" font-size="11" font-weight="bold" `
+             + `font-family="Arial,sans-serif" `
+             + `pointer-events="none">SAP</text>`;
       }
       // Lightning bolt on pwn
       if (e.pwned) {
@@ -10129,6 +10148,34 @@ async function runDBCONTest(srcSid, conName) {
   startPolling();
 }
 
+async function runDBCONPeekCustom(srcSid, conName) {
+  console.log(`[DBCON] runDBCONPeekCustom: ${srcSid} / ${conName}`);
+  const edge = _getDBCONEdge(srcSid, conName);
+  if (!edge) return;
+  if (!edge.reachable) {
+    alert('Run "Test connection" first — peek needs a live driver connection.');
+    return;
+  }
+  // Two-step prompt (schema, table) — some ops know exact table
+  // names ahead of enumeration, or want to peek a system table
+  // that was filtered out by the enumerator.
+  const schema = prompt(
+    `Peek an arbitrary table on ${edge.host}:${edge.port}\n\n` +
+    `Schema (case-sensitive; HANA typically uppercase):`,
+    'SAPHANADB');
+  if (schema === null) return;
+  const table = prompt(
+    `Table name in ${schema}:\n\n` +
+    `Common SAP tables: USR02 (users), T000 (clients), TCPIC (connections),\n` +
+    `AGR_USERS (role assignments), DDIC (table catalog), BKPF (fin docs)`,
+    'USR02');
+  if (table === null) return;
+  const s = (schema || '').trim();
+  const t = (table || '').trim();
+  if (!s || !t) return;
+  await runDBCONPeek(srcSid, conName, s, t);
+}
+
 async function runDBCONEnumerate(srcSid, conName) {
   console.log(`[DBCON] runDBCONEnumerate: ${srcSid} / ${conName}`);
   const edge = _getDBCONEdge(srcSid, conName);
@@ -10264,6 +10311,9 @@ function showDBCONCtxMenu(e, srcSid, conName) {
     <div class="ctx-item${edge.reachable ? '' : ' ctx-item-disabled'}" `
     + `onclick="runDBCONEnumerate('${escHtml(srcSid)}','${escHtml(conName)}');hideCtxMenu()">`
     + `${enumLbl}</div>
+    <div class="ctx-item${edge.reachable ? '' : ' ctx-item-disabled'}" `
+    + `onclick="runDBCONPeekCustom('${escHtml(srcSid)}','${escHtml(conName)}');hideCtxMenu()">`
+    + `Peek table (by name)&hellip;</div>
     <div class="ctx-item" onclick="showDBCONDetail('${escHtml(srcSid)}','${escHtml(conName)}');hideCtxMenu()">Show details</div>
   `;
   menu.style.left = e.clientX + 'px';
@@ -10325,6 +10375,19 @@ function showDBCONDetail(srcSid, conName, opts) {
        <td style="padding:2px 6px;color:#6e7681;font-size:10px">${escHtml(t.table_type || '')}</td>
      </tr>`
   ).join('');
+  const peekInputSection = edge.reachable
+    ? `<div class="info-section">
+         <div style="color:#f0883e;font-weight:bold;margin-bottom:4px">Peek arbitrary table</div>
+         <div style="display:flex;gap:4px;font-size:11px">
+           <input id="dbcon-peek-schema-${escHtml(srcSid)}-${escHtml(conName)}" placeholder="Schema" value="SAPHANADB"
+             style="flex:1;background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:3px 6px;border-radius:3px;font-family:monospace" />
+           <input id="dbcon-peek-table-${escHtml(srcSid)}-${escHtml(conName)}" placeholder="Table" value="USR02"
+             style="flex:1;background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:3px 6px;border-radius:3px;font-family:monospace" />
+           <button class="btn" style="padding:2px 10px"
+             onclick="runDBCONPeek('${escHtml(srcSid)}','${escHtml(conName)}',document.getElementById('dbcon-peek-schema-${escHtml(srcSid)}-${escHtml(conName)}').value.trim(),document.getElementById('dbcon-peek-table-${escHtml(srcSid)}-${escHtml(conName)}').value.trim())">Peek</button>
+         </div>
+       </div>`
+    : '';
   const enumSection = (edge.enumerated_tables && edge.enumerated_tables.length)
     ? `<div class="info-section">
          <div style="color:#f0883e;font-weight:bold;margin-bottom:4px">Enumerated tables (${edge.enumerated_tables.length})</div>
@@ -10359,6 +10422,7 @@ function showDBCONDetail(srcSid, conName, opts) {
     <div class="info-row"><span class="info-label">SAP-shape:</span><span class="info-val" style="font-size:11px;color:#c9d1d9">${escHtml(reasonText)}</span></div>
     ${edge.tested_at ? `<div class="info-row"><span class="info-label">Tested at:</span><span class="info-val" style="font-size:11px;color:#8b949e">${escHtml(edge.tested_at)}</span></div>` : ''}
     ${edge.error ? `<div class="info-section" style="color:#f85149;font-size:11px">${escHtml(edge.error)}</div>` : ''}
+    ${peekInputSection}
     ${enumSection}
     <div style="text-align:right;margin-top:12px;display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">
       <button class="btn" onclick="runDBCONTest('${escHtml(srcSid)}','${escHtml(conName)}')">${edge.tested ? 'Re-test' : 'Test Connection'}</button>
