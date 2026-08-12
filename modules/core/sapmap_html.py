@@ -10113,16 +10113,15 @@ function showDBCONCtxMenu(e, srcSid, conName) {
   e.stopPropagation();
   const edge = _getDBCONEdge(srcSid, conName);
   if (!edge) return;
-  // Reuse the generic ctx-menu container; wire two actions.
-  const menu = document.getElementById('ctx-menu') || (() => {
-    const d = document.createElement('div');
-    d.id = 'ctx-menu';
-    d.className = 'ctx-menu';
-    document.body.appendChild(d);
-    return d;
-  })();
+  // Reuse the shared ctx-menu container.  It's created once in the
+  // HTML skeleton and shown/hidden via the 'visible' class — must
+  // NOT touch menu.style.display directly, or hideCtxMenu()
+  // (classList.remove) can't hide it.
+  hideCtxMenu(); hideSCCCtxMenu(); hideBTPCtxMenu();
+  const menu = document.getElementById('ctx-menu');
+  if (!menu) return;
   const testLbl = edge.tested
-    ? (edge.reachable ? 'Re-test connection ✓' : 'Re-test connection ✗')
+    ? (edge.reachable ? 'Re-test connection &#10003;' : 'Re-test connection &#10007;')
     : 'Test connection';
   const createLbl = edge.is_sap_shape
     ? 'Create SAPMAP00 via direct SQL'
@@ -10130,21 +10129,22 @@ function showDBCONCtxMenu(e, srcSid, conName) {
   const createDisabled = !edge.is_sap_shape;
   menu.innerHTML = `
     <div class="ctx-header">DBCON ${escHtml(conName)} (${escHtml(edge.dbms || '?')})</div>
-    <div class="ctx-item" onclick="runDBCONTest('${escHtml(srcSid)}','${escHtml(conName)}');closeCtxMenu()">${testLbl}</div>
+    <div class="ctx-item" onclick="runDBCONTest('${escHtml(srcSid)}','${escHtml(conName)}');hideCtxMenu()">${testLbl}</div>
     <div class="ctx-item${createDisabled ? ' ctx-item-disabled' : ''}" `
-    + `onclick="${createDisabled ? '' : `runDBCONCreateUser('${escHtml(srcSid)}','${escHtml(conName)}');`}closeCtxMenu()">`
+    + `onclick="${createDisabled ? 'hideCtxMenu()' : `runDBCONCreateUser('${escHtml(srcSid)}','${escHtml(conName)}');hideCtxMenu()`}">`
     + `${createLbl}</div>
-    <div class="ctx-item" onclick="showDBCONDetail('${escHtml(srcSid)}','${escHtml(conName)}');closeCtxMenu()">Show details</div>
+    <div class="ctx-item" onclick="showDBCONDetail('${escHtml(srcSid)}','${escHtml(conName)}');hideCtxMenu()">Show details</div>
   `;
   menu.style.left = e.clientX + 'px';
   menu.style.top  = e.clientY + 'px';
-  menu.style.display = 'block';
+  menu.classList.add('visible');
 }
 
 function showDBCONDetail(srcSid, conName) {
   const edge = _getDBCONEdge(srcSid, conName);
   if (!edge) return;
-  const panel = document.getElementById('info-panel');
+  const panel = document.getElementById('detail-panel');
+  if (!panel) return;
   panel.dataset.sid = `dbcon:${srcSid}:${conName}`;
   const stateChip = edge.pwned ? '<span class="risk-badge risk-CRITICAL">&#9889; PWNED</span>'
     : edge.reachable && edge.is_sap_shape ? '<span class="risk-badge risk-HIGH">SAP-shape reachable</span>'
@@ -10167,7 +10167,7 @@ function showDBCONDetail(srcSid, conName) {
     <div style="text-align:right;margin-top:12px;display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">
       <button class="btn" onclick="runDBCONTest('${escHtml(srcSid)}','${escHtml(conName)}')">${edge.tested ? 'Re-test' : 'Test Connection'}</button>
       ${edge.is_sap_shape ? `<button class="btn" style="background:#b33;color:#fff" onclick="runDBCONCreateUser('${escHtml(srcSid)}','${escHtml(conName)}')">Create SAPMAP00 (direct SQL)</button>` : ''}
-      <button class="btn" onclick="document.getElementById('info-panel').classList.remove('visible')">Close</button>
+      <button class="btn" onclick="document.getElementById('detail-panel').classList.remove('visible')">Close</button>
     </div>
   `;
   panel.classList.add('visible');
