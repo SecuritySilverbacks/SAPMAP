@@ -10087,14 +10087,33 @@ async function runDBCONTest(srcSid, conName) {
 }
 
 async function runDBCONCreateUser(srcSid, conName) {
+  console.log(`[DBCON] runDBCONCreateUser: ${srcSid} / ${conName}`);
   const edge = _getDBCONEdge(srcSid, conName);
-  if (!edge) return;
+  if (!edge) {
+    console.warn(`[DBCON] edge not found for ${srcSid}/${conName}`);
+    alert(`DBCON edge ${conName} not found on ${srcSid}. Re-run SecStore extract first.`);
+    return;
+  }
+  console.log(`[DBCON] edge state`, edge);
+  if (!edge.tested) {
+    alert(`Run "Test connection" first.\n\n` +
+      `SAPMAP needs to open a live driver connection to ${edge.host}:${edge.port} ` +
+      `to verify the DBCON is reachable and that the target has USR02 (SAP-shape). ` +
+      `Only then can we plant SAPMAP00 via direct SQL.`);
+    return;
+  }
   if (!edge.reachable) {
-    alert('Run "Test Connection" first — need to verify the DBCON is reachable.');
+    alert(`DBCON ${conName} is not reachable.\n\n` +
+      `Last Test Connection failed:\n${edge.error || '(no error captured)'}\n\n` +
+      `Re-test after fixing the network path / credentials / hdbcli install.`);
     return;
   }
   if (!edge.is_sap_shape) {
-    alert('DBCON target is not a SAP-shape DB (USR02 not present). Direct user creation only works against SAP DBs.');
+    alert(`DBCON ${conName} is reachable but NOT a SAP-shape DB.\n\n` +
+      `USR02 is not present on ${edge.host}:${edge.port} — this looks like a ` +
+      `non-SAP HANA (e.g. analytics / data-lake tenant). Direct user creation ` +
+      `only works against SAP-shape DBs; use "Show details" to inspect ` +
+      `what came back from the probe.`);
     return;
   }
   const client = prompt(
@@ -10102,9 +10121,13 @@ async function runDBCONCreateUser(srcSid, conName) {
     `This runs 17 INSERT/UPDATE statements on ${edge.host}:${edge.port} using the DBCON password.\n\n` +
     `Client:`, '000');
   if (client === null) return;
+  const trimmedClient = (client || '000').trim();
+  console.log(`[DBCON] posting create_user: ${srcSid} conName=${conName} client=${trimmedClient}`);
   flashActivity(`${srcSid}: DBCON create SAPMAP00 → ${conName}`, 6000);
-  await api('POST', `node/${srcSid}/dbcon/create_user`, {
-    con_name: conName, client: (client || '000').trim() });
+  const r = await api('POST', `node/${srcSid}/dbcon/create_user`, {
+    con_name: conName, client: trimmedClient });
+  console.log(`[DBCON] create_user response`, r);
+  if (r && r.error) alert(`DBCON create failed: ${r.error}`);
   startPolling();
 }
 
@@ -10126,12 +10149,15 @@ function showDBCONCtxMenu(e, srcSid, conName) {
   const createLbl = edge.is_sap_shape
     ? 'Create SAPMAP00 via direct SQL'
     : 'Create user (needs reachable SAP-shape DB)';
-  const createDisabled = !edge.is_sap_shape;
+  // Always route the click through runDBCONCreateUser — it inspects
+  // edge state and pops an alert explaining what's still missing
+  // (untested / unreachable / non-SAP-shape).  Silent no-op menu
+  // items are terrible UX.
   menu.innerHTML = `
     <div class="ctx-header">DBCON ${escHtml(conName)} (${escHtml(edge.dbms || '?')})</div>
     <div class="ctx-item" onclick="runDBCONTest('${escHtml(srcSid)}','${escHtml(conName)}');hideCtxMenu()">${testLbl}</div>
-    <div class="ctx-item${createDisabled ? ' ctx-item-disabled' : ''}" `
-    + `onclick="${createDisabled ? 'hideCtxMenu()' : `runDBCONCreateUser('${escHtml(srcSid)}','${escHtml(conName)}');hideCtxMenu()`}">`
+    <div class="ctx-item${edge.is_sap_shape ? '' : ' ctx-item-disabled'}" `
+    + `onclick="runDBCONCreateUser('${escHtml(srcSid)}','${escHtml(conName)}');hideCtxMenu()">`
     + `${createLbl}</div>
     <div class="ctx-item" onclick="showDBCONDetail('${escHtml(srcSid)}','${escHtml(conName)}');hideCtxMenu()">Show details</div>
   `;
@@ -10140,12 +10166,33 @@ function showDBCONCtxMenu(e, srcSid, conName) {
   menu.classList.add('visible');
 }
 
+function toggleDBCONPassword(el) {
+  if (!el) return;
+  const pw = el.dataset.pw || '';
+  const shown = el.dataset.shown === '1';
+  if (shown) {
+    el.textContent = '●●●● (' + pw.length +
+      ' chars — click to reveal — from SecStore)';
+    el.dataset.shown = '0';
+  } else {
+    el.textContent = pw + '  (click to hide)';
+    el.dataset.shown = '1';
+  }
+}
+
 function showDBCONDetail(srcSid, conName) {
   const edge = _getDBCONEdge(srcSid, conName);
   if (!edge) return;
   const panel = document.getElementById('detail-panel');
   if (!panel) return;
-  panel.dataset.sid = `dbcon:${srcSid}:${conName}`;
+  const sidKey = `dbcon:${srcSid}:${conName}`;
+  // Toggle: clicking the same cylinder / re-invoking Show details
+  // for the currently-open DBCON dismisses the drawer.
+  if (panel.classList.contains('visible') && panel.dataset.sid === sidKey) {
+    panel.classList.remove('visible');
+    return;
+  }
+  panel.dataset.sid = sidKey;
   const stateChip = edge.pwned ? '<span class="risk-badge risk-CRITICAL">&#9889; PWNED</span>'
     : edge.reachable && edge.is_sap_shape ? '<span class="risk-badge risk-HIGH">SAP-shape reachable</span>'
     : edge.reachable ? '<span class="risk-badge risk-MEDIUM">Reachable (non-SAP)</span>'
@@ -10159,7 +10206,10 @@ function showDBCONDetail(srcSid, conName) {
     <div class="info-row"><span class="info-label">Port:</span><span class="info-val">${edge.port || '?'}</span></div>
     <div class="info-row"><span class="info-label">User:</span><span class="info-val mono">${escHtml(edge.user || '?')}</span></div>
     ${edge.dbname ? `<div class="info-row"><span class="info-label">Tenant:</span><span class="info-val mono">${escHtml(edge.dbname)}</span></div>` : ''}
-    <div class="info-row"><span class="info-label">Password:</span><span class="info-val" style="color:#3fb950">&#9679;&#9679;&#9679;&#9679; (${(edge.password||'').length} chars — from SecStore)</span></div>
+    <div class="info-row"><span class="info-label">Password:</span><span class="info-val mono dbcon-pw" style="color:#3fb950;cursor:pointer" `
+    + `data-pw="${escHtml(edge.password || '')}" `
+    + `title="Click to reveal / hide plaintext password" `
+    + `onclick="toggleDBCONPassword(this)">&#9679;&#9679;&#9679;&#9679; (${(edge.password||'').length} chars — click to reveal — from SecStore)</span></div>
     ${edge.target_sid ? `<div class="info-row"><span class="info-label">Target SID:</span><span class="info-val mono" style="color:#3fb950;font-weight:bold">${escHtml(edge.target_sid)}</span></div>` : ''}
     <div class="info-row"><span class="info-label">Status:</span><span class="info-val">${stateChip}</span></div>
     ${edge.tested_at ? `<div class="info-row"><span class="info-label">Tested at:</span><span class="info-val" style="font-size:11px;color:#8b949e">${escHtml(edge.tested_at)}</span></div>` : ''}

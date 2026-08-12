@@ -13483,17 +13483,24 @@ def create_app(api: SAPMAPApi) -> Bottle:
         response.content_type = "application/json"
         data = request.json or {}
         con_name = (data.get("con_name") or "").strip()
+        print(f"[*] {sid}: DBCON test POST received — con_name={con_name!r}")
         if not con_name:
+            print(f"[-] {sid}: DBCON test rejected: no con_name")
             return json.dumps({"error": "con_name required"})
         node = api.state.get_node(sid)
         if not node:
+            print(f"[-] {sid}: DBCON test rejected: node not found")
             return json.dumps({"error": f"Node {sid} not found"})
         edge = next((e for e in (node.dbcon_edges or [])
                      if e.con_name.upper() == con_name.upper()), None)
         if edge is None:
+            avail = [e.con_name for e in (node.dbcon_edges or [])]
+            print(f"[-] {sid}: DBCON test rejected: edge {con_name!r} "
+                  f"not on node (available: {avail})")
             return json.dumps({
                 "error": f"DBCON {con_name!r} not on {sid} — "
                          f"run SecStore integration first"})
+        print(f"[+] {sid}: DBCON {con_name} test accepted — spawning bg task")
 
         def _run():
             _task_start(f"{sid}:dbcon_test:{con_name}",
@@ -13533,36 +13540,58 @@ def create_app(api: SAPMAPApi) -> Bottle:
         data = request.json or {}
         con_name = (data.get("con_name") or "").strip()
         client = (data.get("client") or "000").strip() or "000"
+        print(f"[*] {sid}: DBCON create_user POST received — "
+              f"con_name={con_name!r} client={client!r}")
         if not con_name:
+            print(f"[-] {sid}: DBCON create_user rejected: no con_name")
             return json.dumps({"error": "con_name required"})
         node = api.state.get_node(sid)
         if not node:
+            print(f"[-] {sid}: DBCON create_user rejected: node not found")
             return json.dumps({"error": f"Node {sid} not found"})
         edge = next((e for e in (node.dbcon_edges or [])
                      if e.con_name.upper() == con_name.upper()), None)
         if edge is None:
+            avail = [e.con_name for e in (node.dbcon_edges or [])]
+            print(f"[-] {sid}: DBCON create_user rejected: edge "
+                  f"{con_name!r} not on node (available: {avail})")
             return json.dumps({
                 "error": f"DBCON {con_name!r} not on {sid} — "
                          f"run SecStore integration first"})
+        print(f"[*] {sid}: DBCON {con_name} edge state: "
+              f"tested={edge.tested} reachable={edge.reachable} "
+              f"is_sap_shape={edge.is_sap_shape} "
+              f"target_sid={edge.target_sid!r} dbms={edge.dbms} "
+              f"host={edge.host}:{edge.port}")
         if not edge.reachable:
+            print(f"[-] {sid}: DBCON {con_name} create_user rejected: "
+                  f"edge not reachable — err={edge.error!r}")
             return json.dumps({
                 "error": (f"DBCON {con_name} not reachable — click "
                           f"Test Connection first")})
         if not edge.is_sap_shape:
+            print(f"[-] {sid}: DBCON {con_name} create_user rejected: "
+                  f"target is not SAP-shape (USR02 absent)")
             return json.dumps({
                 "error": (f"DBCON {con_name} target is not a "
                           f"SAP-shape DB (USR02 not present) — direct "
                           f"user creation only works against SAP DBs")})
         target_sid = edge.target_sid or con_name.upper()[:3]
+        print(f"[+] {sid}: DBCON {con_name} create_user accepted — "
+              f"spawning bg task, target_sid={target_sid}, client={client}")
 
         def _run():
             _task_start(f"{sid}:dbcon_create:{con_name}",
                         f"DBCON create SAPMAP00 → {con_name}")
             try:
+                print(f"[*] {sid}: DBCON {con_name} — invoking "
+                      f"create_sapmap_user_via_dbcon(target_sid="
+                      f"{target_sid}, client={client})")
                 from sap_dbcon_probe import create_sapmap_user_via_dbcon
                 res = create_sapmap_user_via_dbcon(
                     edge, target_sid=target_sid, client=client,
                     state=api.state, source_node=node)
+                print(f"[*] {sid}: DBCON {con_name} — result: {res}")
                 if res.get("ok"):
                     sapmap_findings.emit_finding(
                         "CRITICAL", sid,
@@ -13576,7 +13605,15 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         attack_capability="lateral.dbcon_direct")
                 else:
                     print(f"[-] {sid}: DBCON {con_name} create-user "
-                          f"failed: {res.get('error', 'unknown')}")
+                          f"failed: {res.get('error', 'unknown')} "
+                          f"(statements_ok="
+                          f"{res.get('statements_ok', 0)}/"
+                          f"{res.get('statements_total', 0)})")
+            except Exception as _ex:
+                import traceback as _tb
+                print(f"[!] {sid}: DBCON {con_name} — uncaught "
+                      f"exception: {type(_ex).__name__}: {_ex}")
+                _tb.print_exc()
             finally:
                 _task_end(f"{sid}:dbcon_create:{con_name}")
 
