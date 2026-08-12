@@ -2778,6 +2778,7 @@ let dragOffset = { x: 0, y: 0 };
 let dragMoved = false;
 let dragStartPos = { x: 0, y: 0 };
 let unkPositions = {};  // persistent positions for unknown target boxes
+let dbconPositions = {}; // persistent positions for DBCON cylinders (key: "sid|con_name")
 let activeTasks = {};   // key → label for active background operations
 let knownNodeSids = new Set();   // SIDs seen in previous renders
 let knownConnKeys = new Set();   // connection keys seen in previous renders
@@ -4692,10 +4693,20 @@ function updateMap() {
     const baseX = srcX + 240 + 80;   // BOX_W (240) + gap
     let stackY = srcY;
     edges.forEach((e, i) => {
-      // Cache the auto-computed position on the edge itself so the
-      // detail panel and next render pass agree.
-      if (e._x === undefined) e._x = baseX;
-      if (e._y === undefined) e._y = stackY + i * (DB_BOX_H + 24);
+      // Position persistence: DBCON edges are re-materialized from
+      // the server on every state poll, which wipes any transient
+      // ._x/._y on the JS object.  Keep a client-side dict keyed by
+      // "sid|con_name" so drag positions survive the poll cycle
+      // (same pattern as unkPositions for unknown-target boxes).
+      const posKey = src.sid + '|' + e.con_name;
+      if (dbconPositions[posKey]) {
+        e._x = dbconPositions[posKey]._x;
+        e._y = dbconPositions[posKey]._y;
+      } else {
+        e._x = baseX;
+        e._y = stackY + i * (DB_BOX_H + 24);
+        dbconPositions[posKey] = { _x: e._x, _y: e._y };
+      }
       const x = e._x, y = e._y;
 
       // Cylinder silhouette: top ellipse + rectangle body + bottom ellipse arc.
@@ -14644,17 +14655,28 @@ function _getDragTarget(sid) {
   if (sid.startsWith('unk:')) return unkPositions[sid.slice(4)];
   if (sid.startsWith('scc:')) return (mapState.scc_nodes || {})[sid.slice(4)];
   if (sid.startsWith('btp:')) return (mapState.btp_subaccounts || {})[sid.slice(4)];
-  // dbcon:<source_sid>:<con_name> — issue #21 DBCON cylinders
+  // dbcon:<source_sid>:<con_name> — issue #21 DBCON cylinders.
+  // Return the client-side position dict (mirrors unkPositions),
+  // NOT the edge object on mapState.nodes.dbcon_edges — the latter
+  // is replaced on every state poll and would lose the drag.
   if (sid.startsWith('dbcon:')) {
     const rest = sid.slice(6);
     const colonIdx = rest.indexOf(':');
     if (colonIdx < 0) return null;
     const srcSid = rest.slice(0, colonIdx);
     const conName = rest.slice(colonIdx + 1);
-    const src = mapState.nodes[srcSid];
-    if (!src) return null;
-    return (src.dbcon_edges || []).find(
-      e => e.con_name === conName) || null;
+    const posKey = srcSid + '|' + conName;
+    if (!dbconPositions[posKey]) {
+      // First-time drag before render seeded it — synthesise from
+      // the live edge if present.
+      const src = mapState.nodes[srcSid];
+      const edge = src && (src.dbcon_edges || []).find(
+        x => x.con_name === conName);
+      if (edge && edge._x !== undefined) {
+        dbconPositions[posKey] = { _x: edge._x, _y: edge._y };
+      }
+    }
+    return dbconPositions[posKey] || null;
   }
   return mapState.nodes[sid];
 }
