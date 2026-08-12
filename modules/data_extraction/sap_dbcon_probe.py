@@ -89,10 +89,15 @@ def read_dbcon(node: SAPNode, creds: Credentials = None) -> list:
         {"FIELDNAME": "USER_NAME"},
         {"FIELDNAME": "CON_ENV"},
     ]
+    result = None
+    used_flag = False
     try:
         with _get_connection(node, creds) as conn:
-            # First: modern kernels — USE_ET_DATA_4_RETURN='X' forces
-            # the DATA exporting table to be populated.
+            # Modern kernels: USE_ET_DATA_4_RETURN='X' routes rows into
+            # the wider ET_DATA_4_RETURN table (TAB2048); the classic
+            # DATA (TAB512) truncates at 512 chars and can come back
+            # empty on newer S/4 systems.  Always prefer the wide path
+            # when the kernel accepts the kwarg.
             try:
                 result = conn.call(
                     RFC_READ_TABLE,
@@ -102,8 +107,11 @@ def read_dbcon(node: SAPNode, creds: Credentials = None) -> list:
                     ROWCOUNT=500,
                     USE_ET_DATA_4_RETURN="X",
                 )
-            except Exception:
-                # Older kernels reject the extra kwarg — retry without.
+                used_flag = True
+            except Exception as _e_flag:
+                print(f"[*] {node.sid}: read_dbcon: kernel rejected "
+                      f"USE_ET_DATA_4_RETURN kwarg ({type(_e_flag).__name__}"
+                      f") — falling back to plain RFC_READ_TABLE")
                 result = conn.call(
                     RFC_READ_TABLE,
                     QUERY_TABLE="DBCON",
@@ -116,8 +124,19 @@ def read_dbcon(node: SAPNode, creds: Credentials = None) -> list:
               f"{format_rfc_exception(e)}")
         return []
 
+    # When the wide flag was accepted, rows land in ET_DATA_4_RETURN;
+    # older kernels populate DATA.  Read whichever bucket has content
+    # (some kernels populate both — dedup on WA).
+    wide_rows   = result.get("ET_DATA_4_RETURN") or []
+    narrow_rows = result.get("DATA") or []
+    raw_rows = wide_rows if wide_rows else narrow_rows
+    print(f"[*] {node.sid}: read_dbcon: RFC_READ_TABLE returned "
+          f"{len(narrow_rows)} DATA rows, {len(wide_rows)} "
+          f"ET_DATA_4_RETURN rows (used_flag={used_flag}) — using "
+          f"{'wide' if wide_rows else 'narrow'} bucket")
+
     rows = []
-    for r in result.get("DATA", []) or []:
+    for r in raw_rows:
         parts = [p.strip() for p in (r.get("WA", "") or "").split("|")]
         if len(parts) < 4:
             continue

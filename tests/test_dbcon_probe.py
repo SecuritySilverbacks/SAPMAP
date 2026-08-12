@@ -106,6 +106,109 @@ def test_parse_con_env_non_hdb_no_match_returns_empty():
 
 
 # ---------------------------------------------------------------------------
+# read_dbcon — result-bucket handling (DATA vs ET_DATA_4_RETURN)
+# ---------------------------------------------------------------------------
+
+class _FakeRFCConn:
+    def __init__(self, result_by_kwargs_pred):
+        self._pred = result_by_kwargs_pred
+        self.calls = []
+
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+
+    def call(self, fm, **kw):
+        self.calls.append((fm, kw))
+        r = self._pred(kw)
+        if isinstance(r, Exception): raise r
+        return r
+
+
+def _install_fake_rfc(monkeypatch, conn):
+    """Wire dbcon.read_dbcon to use a fake connection."""
+    import sap_dbcon_probe as _dbcon
+    import sys as _sys
+    fake_rfc_mod = types.ModuleType("sapmap_rfc")
+    fake_rfc_mod._get_connection = lambda node, creds: conn
+    fake_errors = types.ModuleType("sapmap_errors")
+    fake_errors.format_rfc_exception = lambda e: f"{type(e).__name__}: {e}"
+    monkeypatch.setitem(_sys.modules, "sapmap_rfc", fake_rfc_mod)
+    monkeypatch.setitem(_sys.modules, "sapmap_errors", fake_errors)
+
+
+def test_read_dbcon_prefers_wide_bucket_when_flag_accepted(monkeypatch):
+    """Modern S/4 fills ET_DATA_4_RETURN when USE_ET_DATA_4_RETURN='X'
+    is passed; DATA stays empty.  Bug that shipped in v1: we read only
+    DATA and got 0 rows.  This regression test locks in the fix."""
+    def _pred(kw):
+        assert kw.get("USE_ET_DATA_4_RETURN") == "X"
+        return {
+            "DATA": [],
+            "ET_DATA_4_RETURN": [
+                {"WA": "HDB_DWH|HDB|SAPMAP|10.0.0.14:30215"},
+                {"WA": "ORA_LEG|ORA|SYS|HOST=oracle01 PORT=1521"},
+            ],
+        }
+    conn = _FakeRFCConn(_pred)
+    _install_fake_rfc(monkeypatch, conn)
+    rows = dbcon.read_dbcon(SAPNode(sid="S4H", ip="10.0.0.1"), None)
+    assert len(rows) == 2
+    assert rows[0]["con_name"] == "HDB_DWH" and rows[0]["dbms"] == "HDB"
+    assert rows[0]["user"] == "SAPMAP"
+    assert rows[0]["con_env"] == "10.0.0.14:30215"
+    assert rows[1]["con_name"] == "ORA_LEG"
+
+
+def test_read_dbcon_falls_back_to_narrow_bucket(monkeypatch):
+    """Older kernels ignore USE_ET_DATA_4_RETURN and populate DATA."""
+    def _pred(kw):
+        return {
+            "DATA": [{"WA": "HDB_DWH|HDB|SAPMAP|10.0.0.14:30215"}],
+            "ET_DATA_4_RETURN": [],
+        }
+    conn = _FakeRFCConn(_pred)
+    _install_fake_rfc(monkeypatch, conn)
+    rows = dbcon.read_dbcon(SAPNode(sid="S4H", ip="10.0.0.1"), None)
+    assert len(rows) == 1 and rows[0]["con_name"] == "HDB_DWH"
+    assert rows[0]["con_env"] == "10.0.0.14:30215"
+
+
+def test_read_dbcon_retries_without_flag_on_kwarg_reject(monkeypatch):
+    """Older kernels raise when the kwarg is unknown to the FM
+    signature — we retry without and read from DATA."""
+    call_state = {"n": 0}
+    def _pred(kw):
+        call_state["n"] += 1
+        if call_state["n"] == 1:
+            assert kw.get("USE_ET_DATA_4_RETURN") == "X"
+            raise Exception("parameter USE_ET_DATA_4_RETURN not found")
+        assert "USE_ET_DATA_4_RETURN" not in kw
+        return {"DATA": [{"WA": "HDB_X|HDB|X|h:30015"}]}
+    conn = _FakeRFCConn(_pred)
+    _install_fake_rfc(monkeypatch, conn)
+    rows = dbcon.read_dbcon(SAPNode(sid="S4H", ip="10.0.0.1"), None)
+    assert call_state["n"] == 2
+    assert len(rows) == 1 and rows[0]["con_name"] == "HDB_X"
+
+
+def test_read_dbcon_empty_both_buckets_returns_empty(monkeypatch):
+    conn = _FakeRFCConn(lambda kw: {"DATA": [], "ET_DATA_4_RETURN": []})
+    _install_fake_rfc(monkeypatch, conn)
+    assert dbcon.read_dbcon(SAPNode(sid="S4H", ip="10.0.0.1"), None) == []
+
+
+def test_read_dbcon_malformed_row_skipped(monkeypatch):
+    conn = _FakeRFCConn(lambda kw: {"ET_DATA_4_RETURN": [
+        {"WA": "GOOD|HDB|U|h:30015"},
+        {"WA": "|HDB|U|h:30015"},           # empty con_name
+        {"WA": "TOO|FEW"},                   # missing fields
+    ]})
+    _install_fake_rfc(monkeypatch, conn)
+    rows = dbcon.read_dbcon(SAPNode(sid="S4H", ip="10.0.0.1"), None)
+    assert len(rows) == 1 and rows[0]["con_name"] == "GOOD"
+
+
+# ---------------------------------------------------------------------------
 # SecStore <-> DBCON pairing
 # ---------------------------------------------------------------------------
 
