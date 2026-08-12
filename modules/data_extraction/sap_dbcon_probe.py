@@ -181,19 +181,37 @@ def read_dbcon(node: SAPNode, creds: Credentials = None) -> list:
         return _read_dbcon_via_abap(node, creds)
 
     raw, n_narrow, n_wide = _pick_rows(result)
-
-    raw, n_narrow, n_wide = _pick_rows(result)
     print(f"[*] {node.sid}: read_dbcon: {table_used} (variant "
           f"{field_variant_used}, flag={used_flag}) → "
           f"{n_wide + n_narrow} row(s) via "
           f"{'wide' if n_wide else 'narrow'} bucket")
+    if raw:
+        # First-row shape dump — critical when the row parses to zero
+        # (WA name / delimiter / structured-vs-flat differs across
+        # kernels).  Truncate to 200 chars so it stays log-friendly.
+        _first = raw[0]
+        _shape = (f"keys={list(_first.keys())} sample="
+                   f"{str(_first)[:200]}" if isinstance(_first, dict)
+                   else f"type={type(_first).__name__} val={str(_first)[:200]}")
+        print(f"[*] {node.sid}: read_dbcon: first row shape → {_shape}")
 
     rows = []
     for r in raw:
-        parts = [p.strip() for p in (r.get("WA", "") or "").split("|")]
-        if len(parts) < 4:
-            continue
-        con_name, dbms, user_name, con_env = parts[0], parts[1], parts[2], parts[3]
+        con_name = dbms = user_name = con_env = ""
+        if isinstance(r, dict):
+            # Shape A — classic DATA / ET_DATA_4_RETURN: {"WA": "a|b|c|d"}
+            wa = r.get("WA") or r.get("ZEILE") or r.get("LINE") or ""
+            if wa:
+                parts = [p.strip() for p in wa.split("|")]
+                if len(parts) >= 4:
+                    con_name, dbms, user_name, con_env = parts[:4]
+            # Shape B — some kernels populate ET_DATA as a structured
+            # row with the DDIC field names directly.
+            if not con_name:
+                con_name  = (r.get("CON_NAME")  or r.get("con_name") or "").strip()
+                dbms      = (r.get("DBMS")       or r.get("dbms")     or "").strip()
+                user_name = (r.get("USER_NAME") or r.get("user_name") or "").strip()
+                con_env   = (r.get("CON_ENV")   or r.get("con_env")  or r.get("CONN_INFO") or "").strip()
         if not con_name:
             continue
         rows.append({
@@ -202,6 +220,15 @@ def read_dbcon(node: SAPNode, creds: Credentials = None) -> list:
             "user":     user_name,
             "con_env":  con_env,
         })
+
+    if not rows and raw:
+        # Retrieved rows but couldn't parse any — kernel returned an
+        # unfamiliar row shape.  Escalate to the ABAP fallback rather
+        # than silently drop them.
+        print(f"[!] {node.sid}: read_dbcon: {len(raw)} row(s) came "
+              f"back from RFC but parser recovered 0 — falling back "
+              f"to ABAP SELECT to get a known shape")
+        return _read_dbcon_via_abap(node, creds)
     return rows
 
 
