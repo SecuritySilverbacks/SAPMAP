@@ -10504,9 +10504,15 @@ function showDBCONDetail(srcSid, conName, opts) {
     `dbcon-recon-scroll-${srcSid}-${conName}`);
   if (_enumScrollEl)  _uiSaved.enumScroll  = _enumScrollEl.scrollTop;
   if (_reconScrollEl) _uiSaved.reconScroll = _reconScrollEl.scrollTop;
+  // Only overwrite the saved state if the current DOM actually
+  // exposes data-shown (i.e. toggleDBCONPassword has run at least
+  // once).  Otherwise a freshly-rendered span without the attr
+  // would set pwShown=false and clobber the state the toggle just
+  // wrote into dbconUiState.
   const _pwEl = document.querySelector(
-    `#detail-panel .dbcon-pw[data-shown]`);
-  if (_pwEl) _uiSaved.pwShown = (_pwEl.dataset.shown === '1');
+    `#detail-panel .dbcon-pw`);
+  if (_pwEl && _pwEl.hasAttribute('data-shown'))
+    _uiSaved.pwShown = (_pwEl.dataset.shown === '1');
   const _focusedInputId = (document.activeElement &&
     document.activeElement.id &&
     document.activeElement.id.startsWith('dbcon-peek-'))
@@ -10654,8 +10660,12 @@ function showDBCONDetail(srcSid, conName, opts) {
   if (_newReconScroll && _uiSaved.reconScroll !== undefined)
     _newReconScroll.scrollTop = _uiSaved.reconScroll;
   if (_uiSaved.pwShown) {
+    // NB: query WITHOUT [data-shown] — the freshly-rendered password
+    // span has no data-shown attr yet (that's set by our own
+    // toggle/apply code), so [data-shown] would return null and
+    // the restore would silently no-op, flickering back to ●●●●.
     const _newPwEl = document.querySelector(
-      `#detail-panel .dbcon-pw[data-shown]`);
+      `#detail-panel .dbcon-pw`);
     if (_newPwEl) _applyDBCONPasswordReveal(_newPwEl, true);
   }
   if (_focusedInputId) {
