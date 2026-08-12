@@ -808,6 +808,16 @@ class SAPNode:
     # this host).  Same GUI treatment as discovered_via_btp — dashed
     # outline until an active scan promotes it.
     discovered_via_rfc_g: bool = False
+    # True when this node was materialised from a DBCON direct-DB
+    # pivot (issue #21) — a source ABAP had a /DBCON/<name>
+    # secstore entry pointing at THIS host's HANA and probe found
+    # USR02 present.  Renders like the other _via_ discovery flags.
+    discovered_via_dbcon: bool = False
+    # Which source SAP + DBCON entry name led us here.  Purely
+    # informational — used by the map to draw the trust line from
+    # the source cylinder to this node once it's promoted.
+    dbcon_parent_sid: str = ""
+    dbcon_parent_con_name: str = ""
 
     # USREXTID table — on-prem cert-CN → ABAP user mapping.  Populated
     # by Data Extraction → Read USREXTID.  Each entry is a row dict
@@ -1007,6 +1017,9 @@ class SAPNode:
             "dpmon_sap_star_used": self.dpmon_sap_star_used,
             "discovered_via_btp": self.discovered_via_btp,
             "discovered_via_rfc_g": self.discovered_via_rfc_g,
+            "discovered_via_dbcon": self.discovered_via_dbcon,
+            "dbcon_parent_sid": self.dbcon_parent_sid,
+            "dbcon_parent_con_name": self.dbcon_parent_con_name,
             "oauth2_profiles": list(self.oauth2_profiles),
             "usrextid_entries": list(self.usrextid_entries),
             "usrextid_read_at": self.usrextid_read_at,
@@ -1129,6 +1142,9 @@ class SAPNode:
             dpmon_sap_star_used=d.get("dpmon_sap_star_used", False),
             discovered_via_btp=d.get("discovered_via_btp", False),
             discovered_via_rfc_g=d.get("discovered_via_rfc_g", False),
+            discovered_via_dbcon=d.get("discovered_via_dbcon", False),
+            dbcon_parent_sid=d.get("dbcon_parent_sid", ""),
+            dbcon_parent_con_name=d.get("dbcon_parent_con_name", ""),
             oauth2_profiles=list(d.get("oauth2_profiles", [])),
             capability_results=list(d.get("capability_results", [])),
             capability_row_counts=dict(
@@ -1174,6 +1190,12 @@ class DBCONConnection:
     # SYS.M_TABLES (HANA), populated by dbcon/enumerate_tables.
     # Each row: {schema, table, rows, table_type}
     enumerated_tables: list = field(default_factory=list)
+    # HANA reconnaissance sweep results (M_LICENSE, M_HOST_INFORMATION,
+    # M_DATABASE, M_SYSTEM_LIMITS...) — keyed dict of facts populated
+    # by dbcon/recon_sweep.
+    recon_facts: dict = field(default_factory=dict)
+    # Loot file path if we've dumped USR02 hashes from this target.
+    usr02_hashes_loot_path: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -1194,6 +1216,8 @@ class DBCONConnection:
             "error":        self.error,
             "tested_at":    self.tested_at,
             "enumerated_tables": list(self.enumerated_tables or []),
+            "recon_facts": dict(self.recon_facts or {}),
+            "usr02_hashes_loot_path": self.usr02_hashes_loot_path,
         }
 
     @classmethod

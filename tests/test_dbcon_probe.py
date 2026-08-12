@@ -804,12 +804,229 @@ def test_dbcon_connection_roundtrip_carries_new_fields():
     e = DBCONConnection(
         source_sid="S4H", con_name="HDB_DWH", dbms="HDB",
         sap_shape_reason="no_permission",
-        enumerated_tables=[{"schema": "S", "table": "T", "rows": 1, "table_type": "ROW"}])
+        enumerated_tables=[{"schema": "S", "table": "T", "rows": 1, "table_type": "ROW"}],
+        recon_facts={"license": {"columns": ["SID"], "rows": [["DWH"]], "count": 1}},
+        usr02_hashes_loot_path="/tmp/x.txt")
     d = e.to_dict()
     r = DBCONConnection.from_dict(d)
     assert r.sap_shape_reason == "no_permission"
     assert len(r.enumerated_tables) == 1
     assert r.enumerated_tables[0]["schema"] == "S"
+    assert r.recon_facts["license"]["count"] == 1
+    assert r.usr02_hashes_loot_path == "/tmp/x.txt"
+
+
+# ---------------------------------------------------------------------------
+# describe_hana_table, hana_recon_sweep, dump_usr02_hashes
+# ---------------------------------------------------------------------------
+
+def test_describe_hana_table_rejects_bad_identifier():
+    e = DBCONConnection(source_sid="S4H", con_name="X", dbms="HDB",
+                          reachable=True)
+    r = dbcon.describe_hana_table(e, 'BAD"; DROP', 'ok')
+    assert r["ok"] is False and "invalid schema identifier" in r["error"]
+
+
+def test_describe_hana_table_happy_path(monkeypatch):
+    class _Cur(_FakeCursor):
+        def execute(self, sql, params=None):
+            assert "TABLE_COLUMNS" in sql
+        def fetchall(self):
+            return [
+                ("BNAME", "NVARCHAR", 12, "FALSE", 1),
+                ("BCODE", "VARBINARY", 8, "TRUE", 2),
+            ]
+    class _Conn(_FakeConn):
+        def cursor(self): return _Cur(self._map)
+    conn = _Conn({})
+    monkeypatch.setattr(dbcon, "_import_hdbcli",
+                          lambda: (_fake_dbapi_module(conn), None))
+    e = DBCONConnection(source_sid="S4H", con_name="X", dbms="HDB",
+                          host="h", port=30215, user="x", password="y",
+                          reachable=True)
+    r = dbcon.describe_hana_table(e, "SAPHANADB", "USR02")
+    assert r["ok"] is True and len(r["columns"]) == 2
+    assert r["columns"][0]["name"] == "BNAME"
+    assert r["columns"][0]["nullable"] is False
+    assert r["columns"][1]["nullable"] is True
+
+
+def test_hana_recon_sweep_captures_per_query_errors(monkeypatch):
+    """Individual query failures must be stored per-key without
+    aborting the whole sweep."""
+    call_log = []
+    class _Cur(_FakeCursor):
+        description = [("HOST",), ("VALUE",)]
+        def execute(self, sql, params=None):
+            call_log.append(sql[:60])
+            if "T000" in sql:
+                exc = Exception("(258, 'insufficient privilege: T000')")
+                exc.errorcode = 258
+                raise exc
+        def fetchall(self):
+            return [("srv01", "2.00.070")]
+    class _Conn(_FakeConn):
+        def cursor(self): return _Cur(self._map)
+    conn = _Conn({})
+    monkeypatch.setattr(dbcon, "_import_hdbcli",
+                          lambda: (_fake_dbapi_module(conn), None))
+    e = DBCONConnection(source_sid="S4H", con_name="X", dbms="HDB",
+                          host="h", port=30215, user="x", password="y",
+                          reachable=True)
+    r = dbcon.hana_recon_sweep(e)
+    assert r["ok"] is True
+    # T000 (clients query) should have an error captured, others rows
+    assert "error" in r["facts"]["clients"]
+    assert "258" in r["facts"]["clients"]["error"]
+    assert r["facts"]["host_info"]["count"] == 1
+    # Ensure cached back onto the edge
+    assert e.recon_facts["host_info"]["count"] == 1
+
+
+def test_hana_recon_sweep_unreachable_short_circuits():
+    e = DBCONConnection(source_sid="S4H", con_name="X", dbms="HDB",
+                          reachable=False)
+    r = dbcon.hana_recon_sweep(e)
+    assert r["ok"] is False and "not reachable" in r["error"]
+
+
+def test_dump_usr02_refuses_non_sap_shape():
+    e = DBCONConnection(source_sid="S4H", con_name="X", dbms="HDB",
+                          reachable=True, is_sap_shape=False)
+    r = dbcon.dump_usr02_hashes(e)
+    assert r["ok"] is False and "SAP-shape" in r["error"]
+
+
+def test_dump_usr02_writes_hashcat_file(monkeypatch, tmp_path):
+    """SELECT + write loot flow — verify header format and row layout."""
+    class _Cur(_FakeCursor):
+        def execute(self, sql, params=None):
+            self._last_sql = sql
+        def fetchone(self):
+            # Called for schema resolution: SYS.TABLES probe
+            return (1,) if "SYS.TABLES" in getattr(self, "_last_sql", "") else None
+        def fetchall(self):
+            if "USR02" in getattr(self, "_last_sql", "") \
+               and "SELECT MANDT" in getattr(self, "_last_sql", ""):
+                return [
+                    ("000", "SAP*", None, None, ""),          # dropped: BNAME=SAP*
+                    ("000", "DDIC",
+                     b"\xde\xad\xbe\xef",           # BCODE
+                     b"\xca\xfe\xba\xbe\xff",       # PASSCODE
+                     "{x-issha, 1024}abc="),
+                    ("100", "SAPMAP00", b"", b"", "{x-issha}xyz="),
+                ]
+            return []
+    class _Conn(_FakeConn):
+        def cursor(self): return _Cur(self._map)
+    conn = _Conn({})
+    monkeypatch.setattr(dbcon, "_import_hdbcli",
+                          lambda: (_fake_dbapi_module(conn), None))
+    monkeypatch.setattr(dbcon, "_resolve_sap_schema",
+                          lambda *a, **kw: "SAPHANADB")
+    e = DBCONConnection(source_sid="S4H", con_name="HDB_DWH", dbms="HDB",
+                          host="h", port=30215, user="x", password="y",
+                          reachable=True, is_sap_shape=True,
+                          target_sid="DWH")
+    r = dbcon.dump_usr02_hashes(e, loot_dir=str(tmp_path))
+    assert r["ok"] is True
+    assert r["count"] == 3         # SAP* row now kept (filter removed)
+    assert r["hash_types"]["bcode"] == 1
+    assert r["hash_types"]["passcode"] == 1
+    assert r["hash_types"]["pwdsaltedhash"] == 2
+    assert e.usr02_hashes_loot_path == r["loot_path"]
+    content = open(r["loot_path"]).read()
+    assert "SAPMAP DBCON USR02" in content
+    assert "DEADBEEF" in content   # BCODE hex
+    assert "CAFEBABEFF" in content # PASSCODE hex
+    assert "{x-issha, 1024}abc=" in content
+
+
+# ---------------------------------------------------------------------------
+# materialize_target_as_sap_node
+# ---------------------------------------------------------------------------
+
+def test_materialize_creates_new_sap_node(monkeypatch):
+    from sapmap_models import SAPMAPState
+    state = SAPMAPState()
+    state.add_node(SAPNode(sid="S4H", ip="10.0.0.1"))
+    edge = DBCONConnection(source_sid="S4H", con_name="HDB_DWH",
+                              dbms="HDB", host="s4hanadev", port=30215,
+                              reachable=True, is_sap_shape=True,
+                              target_sid="DWH")
+    node = dbcon.materialize_target_as_sap_node(edge, state)
+    assert node is not None
+    assert node.sid == "DWH"
+    assert node.ip == "s4hanadev"
+    assert node.discovered_via_dbcon is True
+    assert node.dbcon_parent_sid == "S4H"
+    assert node.dbcon_parent_con_name == "HDB_DWH"
+    assert state.get_node("DWH") is not None
+
+
+def test_materialize_idempotent_tags_existing_node():
+    from sapmap_models import SAPMAPState
+    state = SAPMAPState()
+    state.add_node(SAPNode(sid="DWH", ip="10.0.0.14",
+                             discovered_via_dbcon=False))
+    edge = DBCONConnection(source_sid="S4H", con_name="X", dbms="HDB",
+                              reachable=True, is_sap_shape=True,
+                              target_sid="DWH", host="10.0.0.14")
+    node = dbcon.materialize_target_as_sap_node(edge, state)
+    # Same node — tagged but not duplicated
+    assert node is state.get_node("DWH")
+    assert node.discovered_via_dbcon is True
+    assert node.dbcon_parent_sid == "S4H"
+    # Still exactly one node in state
+    assert len([n for n in state.nodes.values() if n.sid == "DWH"]) == 1
+
+
+def test_materialize_skips_when_not_sap_shape():
+    from sapmap_models import SAPMAPState
+    state = SAPMAPState()
+    edge = DBCONConnection(source_sid="S4H", con_name="X", dbms="HDB",
+                              reachable=True, is_sap_shape=False,
+                              target_sid="DWH")
+    assert dbcon.materialize_target_as_sap_node(edge, state) is None
+    assert state.get_node("DWH") is None
+
+
+def test_probe_dbcon_edge_auto_materializes_with_state(monkeypatch):
+    """probe_dbcon_edge with state= should auto-add the target SAPNode
+    when SAP-shape + target_sid land."""
+    from sapmap_models import SAPMAPState
+    conn = _FakeConn({
+        "SELECT COUNT(*) FROM USR02": [(1,)],
+        "SELECT SYSID FROM T000":    [("DWH",)],
+    })
+    monkeypatch.setattr(dbcon, "_import_hdbcli",
+                          lambda: (_fake_dbapi_module(conn), None))
+    state = SAPMAPState()
+    state.add_node(SAPNode(sid="S4H", ip="10.0.0.1"))
+    e = DBCONConnection(source_sid="S4H", con_name="HDB_DWH",
+                          dbms="HDB", host="s4hanadev", port=30215,
+                          user="x", password="y")
+    dbcon.probe_dbcon_edge(e, state=state)
+    assert e.is_sap_shape is True and e.target_sid == "DWH"
+    dwh = state.get_node("DWH")
+    assert dwh is not None
+    assert dwh.discovered_via_dbcon is True
+
+
+def test_probe_dbcon_edge_skips_materialize_without_state(monkeypatch):
+    """Backwards-compat: probe without state=state stays a no-op on
+    the state side, just mutates the edge (original v1 contract)."""
+    conn = _FakeConn({
+        "SELECT COUNT(*) FROM USR02": [(1,)],
+        "SELECT SYSID FROM T000":    [("DWH",)],
+    })
+    monkeypatch.setattr(dbcon, "_import_hdbcli",
+                          lambda: (_fake_dbapi_module(conn), None))
+    e = DBCONConnection(source_sid="S4H", con_name="HDB_DWH",
+                          dbms="HDB", host="h", port=30215,
+                          user="x", password="y")
+    dbcon.probe_dbcon_edge(e)   # no state arg
+    assert e.is_sap_shape is True and e.target_sid == "DWH"
 
 
 def test_create_user_verify_missing_row_marks_failure(monkeypatch):
