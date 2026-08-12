@@ -10466,6 +10466,21 @@ function showDBCONDetail(srcSid, conName, opts) {
     return;
   }
   const preservedScroll = refresh ? (panel.scrollTop || 0) : 0;
+  // Capture in-flight input values so the auto-refresh doesn't wipe
+  // what the operator is typing (peek inputs, future custom SQL, ...).
+  // Restored after innerHTML is rebuilt below.
+  const _schemaEl = document.getElementById(
+    `dbcon-peek-schema-${srcSid}-${conName}`);
+  const _tableEl  = document.getElementById(
+    `dbcon-peek-table-${srcSid}-${conName}`);
+  const _preservedSchema = _schemaEl ? _schemaEl.value : null;
+  const _preservedTable  = _tableEl  ? _tableEl.value  : null;
+  const _focusedInputId  = (document.activeElement &&
+    document.activeElement.id &&
+    document.activeElement.id.startsWith('dbcon-peek-'))
+    ? document.activeElement.id : null;
+  const _focusedSelStart = (_focusedInputId && document.activeElement.selectionStart) || 0;
+  const _focusedSelEnd   = (_focusedInputId && document.activeElement.selectionEnd) || 0;
   panel.setAttribute('data-view', 'dbcon');
   panel.dataset.sid = sidKey;
   const stateChip = edge.pwned ? '<span class="risk-badge risk-CRITICAL">&#9889; PWNED</span>'
@@ -10586,6 +10601,25 @@ function showDBCONDetail(srcSid, conName, opts) {
   `;
   panel.classList.add('visible');
   if (refresh && preservedScroll) panel.scrollTop = preservedScroll;
+  // Restore in-flight input state after the innerHTML rebuild
+  // wiped the previous DOM nodes.  Otherwise every 1-second state
+  // poll clobbers whatever the operator was typing.
+  const _newSchemaEl = document.getElementById(
+    `dbcon-peek-schema-${srcSid}-${conName}`);
+  const _newTableEl  = document.getElementById(
+    `dbcon-peek-table-${srcSid}-${conName}`);
+  if (_newSchemaEl && _preservedSchema !== null)
+    _newSchemaEl.value = _preservedSchema;
+  if (_newTableEl && _preservedTable !== null)
+    _newTableEl.value = _preservedTable;
+  if (_focusedInputId) {
+    const _el = document.getElementById(_focusedInputId);
+    if (_el) {
+      _el.focus();
+      try { _el.setSelectionRange(_focusedSelStart, _focusedSelEnd); }
+      catch (_) {}
+    }
+  }
 }
 
 function showBTPDetail(uuid, opts) {
