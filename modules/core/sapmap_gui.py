@@ -13621,6 +13621,101 @@ def create_app(api: SAPMAPApi) -> Bottle:
              f"DBCON create-user {con_name}", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/dbcon/enumerate_tables", method="POST")
+    def node_dbcon_enumerate_tables(sid):
+        """List tables on the DBCON target — useful for non-SAP DBs
+        where the create-user path doesn't apply."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        con_name = (data.get("con_name") or "").strip()
+        limit = int(data.get("limit") or 200)
+        print(f"[*] {sid}: DBCON enumerate_tables — con_name={con_name!r} "
+              f"limit={limit}")
+        if not con_name:
+            return json.dumps({"error": "con_name required"})
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        edge = next((e for e in (node.dbcon_edges or [])
+                     if e.con_name.upper() == con_name.upper()), None)
+        if edge is None:
+            return json.dumps({
+                "error": f"DBCON {con_name!r} not on {sid}"})
+        if not edge.reachable:
+            return json.dumps({
+                "error": (f"DBCON {con_name} not reachable — run "
+                          f"Test Connection first")})
+
+        def _run():
+            _task_start(f"{sid}:dbcon_enum:{con_name}",
+                        f"DBCON enum tables → {con_name}")
+            try:
+                from sap_dbcon_probe import enumerate_hana_tables
+                res = enumerate_hana_tables(edge, limit=limit)
+                if res.get("ok"):
+                    sapmap_findings.emit_finding(
+                        "HIGH", sid,
+                        f"DBCON {con_name} — enumerated "
+                        f"{res.get('count', 0)} tables on "
+                        f"{edge.host}:{edge.port} via direct driver "
+                        f"(non-SAP data-extraction reach)",
+                        ref="dbcon.enum.tables",
+                        attack_capability="data.dbcon_dump")
+                else:
+                    print(f"[-] {sid}: DBCON {con_name} — enumeration "
+                          f"failed: {res.get('error', 'unknown')}")
+            except Exception as _ex:
+                import traceback as _tb
+                print(f"[!] {sid}: DBCON {con_name} — enumeration "
+                      f"crashed: {type(_ex).__name__}: {_ex}")
+                _tb.print_exc()
+            finally:
+                _task_end(f"{sid}:dbcon_enum:{con_name}")
+
+        _bg(f"{sid}:dbcon_enum:{con_name}",
+             f"DBCON enum {con_name}", _run)
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/dbcon/peek_table", method="POST")
+    def node_dbcon_peek_table(sid):
+        """Return the top N rows from one enumerated table.  Synchronous
+        (small payload) so the panel can render the result inline."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        con_name = (data.get("con_name") or "").strip()
+        schema   = (data.get("schema") or "").strip()
+        table    = (data.get("table") or "").strip()
+        limit    = int(data.get("limit") or 10)
+        print(f"[*] {sid}: DBCON peek_table — con_name={con_name!r} "
+              f"schema={schema!r} table={table!r} limit={limit}")
+        if not (con_name and schema and table):
+            return json.dumps({
+                "error": "con_name, schema, table all required"})
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        edge = next((e for e in (node.dbcon_edges or [])
+                     if e.con_name.upper() == con_name.upper()), None)
+        if edge is None:
+            return json.dumps({"error": f"DBCON {con_name!r} not on {sid}"})
+        try:
+            from sap_dbcon_probe import peek_hana_table
+            res = peek_hana_table(edge, schema, table, limit=limit)
+            if res.get("ok") and res.get("rows"):
+                sapmap_findings.emit_finding(
+                    "MEDIUM", sid,
+                    f"DBCON {con_name} — peeked "
+                    f"{schema}.{table} ({len(res['rows'])} row(s)) "
+                    f"via direct driver",
+                    ref="dbcon.peek.table",
+                    attack_capability="data.dbcon_dump")
+            return json.dumps(res)
+        except Exception as _ex:
+            import traceback as _tb
+            _tb.print_exc()
+            return json.dumps({"error":
+                f"peek crashed: {type(_ex).__name__}: {_ex}"})
+
     @app.route("/api/node/<sid>/create_tcpip_dest", method="POST")
     def node_create_tcpip(sid):
         response.content_type = "application/json"

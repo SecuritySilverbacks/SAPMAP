@@ -510,7 +510,10 @@ def test_probe_hdb_non_sap_shape(monkeypatch):
     class _NoUsr02Cur(_FakeCursor):
         def execute(self, sql, params=None):
             if "USR02" in sql.upper():
-                raise Exception("table USR02 not found")
+                # HANA 259 — invalid table name
+                exc = Exception("(259, 'invalid table name: USR02')")
+                exc.errorcode = 259
+                raise exc
             super().execute(sql, params)
 
     class _Conn(_FakeConn):
@@ -527,7 +530,72 @@ def test_probe_hdb_non_sap_shape(monkeypatch):
     dbcon.probe_dbcon_edge(e)
     assert e.tested is True and e.reachable is True
     assert e.is_sap_shape is False
+    assert e.sap_shape_reason == "usr02_missing"
     assert e.target_sid == ""
+
+
+def test_probe_hdb_no_permission_is_inconclusive(monkeypatch):
+    """HANA 258 (insufficient privilege) means SAP-shape verdict is
+    INCONCLUSIVE, not definitively non-SAP — a hardened SAP DB with
+    a restricted DBCON user looks identical to a real non-SAP DB
+    otherwise."""
+    class _NoAuthCur(_FakeCursor):
+        def execute(self, sql, params=None):
+            if "USR02" in sql.upper():
+                exc = Exception("(258, 'insufficient privilege: Not authorized')")
+                exc.errorcode = 258
+                raise exc
+            super().execute(sql, params)
+
+    class _Conn(_FakeConn):
+        def cursor(self):
+            return _NoAuthCur(self._map)
+
+    conn = _Conn({})
+    monkeypatch.setattr(
+        dbcon, "_import_hdbcli",
+        lambda: (_fake_dbapi_module(conn), None))
+    e = DBCONConnection(
+        source_sid="S4H", con_name="X", dbms="HDB",
+        host="h", port=30015, user="x", password="y")
+    dbcon.probe_dbcon_edge(e)
+    assert e.tested is True and e.reachable is True
+    assert e.is_sap_shape is False
+    assert e.sap_shape_reason == "no_permission"
+    assert "258" in e.error
+
+
+def test_probe_hdb_sap_shape_records_reason(monkeypatch):
+    conn = _FakeConn({
+        "SELECT COUNT(*) FROM USR02": [(42,)],
+        "SELECT SYSID FROM T000":    [("DWH",)],
+    })
+    monkeypatch.setattr(
+        dbcon, "_import_hdbcli",
+        lambda: (_fake_dbapi_module(conn), None))
+    e = DBCONConnection(
+        source_sid="S4H", con_name="HDB_DWH", dbms="HDB",
+        host="10.0.0.14", port=30215, user="SAPMAP", password="x")
+    dbcon.probe_dbcon_edge(e)
+    assert e.is_sap_shape is True
+    assert e.sap_shape_reason == "usr02_present"
+
+
+def test_hana_error_code_parses_from_errorcode_attr():
+    class _E(Exception):
+        def __init__(self, msg, code):
+            super().__init__(msg); self.errorcode = code
+    assert dbcon._hana_error_code(_E("boom", 259)) == 259
+    assert dbcon._hana_error_code(_E("nope", 258)) == 258
+
+
+def test_hana_error_code_parses_from_message_tuple():
+    e = Exception("(259, 'invalid table name: USR02')")
+    assert dbcon._hana_error_code(e) == 259
+
+
+def test_hana_error_code_returns_none_on_plain_exception():
+    assert dbcon._hana_error_code(Exception("random failure")) is None
 
 
 def test_probe_hdb_connect_raises(monkeypatch):
@@ -639,6 +707,109 @@ def test_create_user_happy_path_records_created_user(monkeypatch):
     cu = src.created_users[0]
     assert cu.username == "SAPMAP00" and cu.sid == "DWH"
     assert cu.client == "000" and cu.method == "dbcon_direct"
+
+
+def test_enumerate_hana_tables_happy_path(monkeypatch):
+    """SYS.M_TABLES returns rows sorted by row-count desc; the fn
+    caches them onto edge.enumerated_tables and returns a summary."""
+    class _MtCur(_FakeCursor):
+        def execute(self, sql, params=None):
+            self._executed_sql = sql.upper()
+
+        def fetchall(self):
+            if "M_TABLES" in getattr(self, "_executed_sql", ""):
+                return [
+                    ("SAPQAS", "BKPF",    1234567, "COLUMN"),
+                    ("SAPQAS", "BSEG",     987654, "COLUMN"),
+                    ("PROJECT", "AUDIT_LOG", 100, "ROW"),
+                ]
+            return []
+
+    class _Conn(_FakeConn):
+        def cursor(self):
+            return _MtCur(self._map)
+
+    conn = _Conn({})
+    monkeypatch.setattr(
+        dbcon, "_import_hdbcli",
+        lambda: (_fake_dbapi_module(conn), None))
+    e = DBCONConnection(
+        source_sid="S4H", con_name="HDB_DWH", dbms="HDB",
+        host="10.0.0.14", port=30215, user="x", password="y",
+        reachable=True)
+    res = dbcon.enumerate_hana_tables(e, limit=50)
+    assert res["ok"] is True and res["count"] == 3
+    assert res["tables"][0]["schema"] == "SAPQAS"
+    assert res["tables"][0]["table"] == "BKPF"
+    assert res["tables"][0]["rows"] == 1234567
+    # Cached onto the edge for later panel re-render
+    assert len(e.enumerated_tables) == 3
+
+
+def test_enumerate_hana_tables_unreachable_short_circuits():
+    e = DBCONConnection(source_sid="S4H", con_name="X", dbms="HDB",
+                          reachable=False)
+    r = dbcon.enumerate_hana_tables(e)
+    assert r["ok"] is False and "not reachable" in r["error"]
+
+
+def test_enumerate_hana_tables_non_hdb_refused():
+    e = DBCONConnection(source_sid="S4H", con_name="X", dbms="ORA",
+                          reachable=True)
+    r = dbcon.enumerate_hana_tables(e)
+    assert r["ok"] is False and "HDB only" in r["error"]
+
+
+def test_peek_hana_table_rejects_bad_identifier():
+    e = DBCONConnection(source_sid="S4H", con_name="X", dbms="HDB",
+                          reachable=True)
+    r = dbcon.peek_hana_table(e, 'ok', 'BAD"; DROP TABLE X --')
+    assert r["ok"] is False and "invalid table identifier" in r["error"]
+    r = dbcon.peek_hana_table(e, 'BAD"; DROP', 'ok')
+    assert r["ok"] is False and "invalid schema identifier" in r["error"]
+
+
+def test_peek_hana_table_happy_path(monkeypatch):
+    class _Cur(_FakeCursor):
+        description = [("COL1",), ("COL2",)]
+        def execute(self, sql, params=None):
+            assert '"SAPQAS"."BKPF"' in sql, \
+                f"identifier not properly quoted: {sql}"
+            assert "LIMIT 5" in sql
+        def fetchall(self):
+            return [(1, "hello"), (2, None), (3, "world")]
+
+    class _Conn(_FakeConn):
+        def cursor(self):
+            return _Cur(self._map)
+
+    conn = _Conn({})
+    monkeypatch.setattr(
+        dbcon, "_import_hdbcli",
+        lambda: (_fake_dbapi_module(conn), None))
+    e = DBCONConnection(
+        source_sid="S4H", con_name="HDB_DWH", dbms="HDB",
+        host="h", port=30215, user="x", password="y",
+        reachable=True)
+    r = dbcon.peek_hana_table(e, "SAPQAS", "BKPF", limit=5)
+    assert r["ok"] is True
+    assert r["columns"] == ["COL1", "COL2"]
+    assert len(r["rows"]) == 3
+    # None survives round-trip; other values become strings
+    assert r["rows"][0] == ["1", "hello"]
+    assert r["rows"][1] == ["2", None]
+
+
+def test_dbcon_connection_roundtrip_carries_new_fields():
+    e = DBCONConnection(
+        source_sid="S4H", con_name="HDB_DWH", dbms="HDB",
+        sap_shape_reason="no_permission",
+        enumerated_tables=[{"schema": "S", "table": "T", "rows": 1, "table_type": "ROW"}])
+    d = e.to_dict()
+    r = DBCONConnection.from_dict(d)
+    assert r.sap_shape_reason == "no_permission"
+    assert len(r.enumerated_tables) == 1
+    assert r.enumerated_tables[0]["schema"] == "S"
 
 
 def test_create_user_verify_missing_row_marks_failure(monkeypatch):

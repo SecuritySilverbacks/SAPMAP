@@ -457,6 +457,24 @@ def _import_hdbcli():
                        f"({type(e).__name__}: {e})")
 
 
+def _hana_error_code(exc):
+    """Extract the HANA numeric error code from an hdbcli exception.
+
+    hdbcli.dbapi.Error carries `.errorcode` on modern versions; older
+    versions and generic Exception paths embed it in str(exc) as
+    ``(NNN, 'text')``.  Returns int or None.
+    """
+    for attr in ("errorcode", "sqlcode"):
+        v = getattr(exc, attr, None)
+        if isinstance(v, int) and v:
+            return v
+    m = _re.match(r"^\((\d+),", str(exc) or "")
+    if m:
+        try: return int(m.group(1))
+        except ValueError: pass
+    return None
+
+
 def probe_dbcon_edge(edge: DBCONConnection) -> None:
     """Open a driver-level connection to the DBCON target, mark it
     tested + reachable, and fingerprint what's on the other side
@@ -510,14 +528,28 @@ def probe_dbcon_edge(edge: DBCONConnection) -> None:
             edge.error = "connect returned but isconnected() = False"
             return
 
-        # SAP-shape check: USR02 presence
+        # SAP-shape check: USR02 presence.  Distinguish HANA errors:
+        #   259 = invalid table name → definitive non-SAP
+        #   258 = insufficient privilege → INCONCLUSIVE (real SAP DB
+        #         with a hardened DBCON user looks identical to
+        #         non-SAP under a naive presence check)
         cur = conn.cursor()
         try:
             cur.execute("SELECT COUNT(*) FROM USR02")
             _ = cur.fetchone()
             edge.is_sap_shape = True
-        except Exception:
+            edge.sap_shape_reason = "usr02_present"
+        except Exception as _e:
+            code = _hana_error_code(_e)
             edge.is_sap_shape = False
+            if code == 259:
+                edge.sap_shape_reason = "usr02_missing"
+            elif code == 258:
+                edge.sap_shape_reason = "no_permission"
+            else:
+                edge.sap_shape_reason = "unknown_error"
+            edge.error = (f"USR02 probe: HANA {code or '?'} — "
+                          f"{str(_e)[:200]}")
         finally:
             cur.close()
 
@@ -539,8 +571,17 @@ def probe_dbcon_edge(edge: DBCONConnection) -> None:
                      if edge.target_sid else "")
                   + " — direct SAPMAP00 create possible")
         else:
+            _hint = {
+                "usr02_missing": "definitive non-SAP HANA (USR02 does "
+                                  "not exist)",
+                "no_permission": "INCONCLUSIVE — DBCON user lacks "
+                                  "SELECT on USR02.  Could still be a "
+                                  "real SAP DB with hardened creds",
+                "unknown_error": "probe raised an unrecognised HANA "
+                                  "error — inspect edge.error",
+            }.get(edge.sap_shape_reason, "unknown")
             print(f"[*] {edge.source_sid}: DBCON {edge.con_name} — "
-                  f"connected; USR02 not present (non-SAP DB)")
+                  f"connected; SAP-shape verdict: NO — {_hint}")
     except Exception as e:
         edge.reachable = False
         edge.error = f"{type(e).__name__}: {e}"
@@ -688,3 +729,187 @@ def create_sapmap_user_via_dbcon(edge: DBCONConnection, target_sid: str,
         except Exception:
             pass
     return result
+
+
+# ============================================================================
+# Non-SAP data-extraction: table enumeration + row-peek
+# ============================================================================
+
+def enumerate_hana_tables(edge: DBCONConnection, limit: int = 200) -> dict:
+    """List tables visible to the DBCON user via SYS.M_TABLES.
+
+    Works on both SAP and non-SAP HANA — a defender-friendly way to
+    show WHAT this DBCON gives up when the direct-SQL user-create
+    path isn't available (non-SAP DB, or SAP DB where USR02 probe
+    was inconclusive).
+
+    Returns {ok, error, count, tables: [{schema, table, rows,
+    table_type}...]}.  Tables are sorted by row count desc so the
+    biggest / most interesting ones show up first.  System schemas
+    (_SYS_*, SYS, PUBLIC) are filtered — they're noise for an
+    engagement.  Cached on edge.enumerated_tables so the panel can
+    re-render without re-querying.
+    """
+    out = {"ok": False, "error": "", "count": 0, "tables": []}
+    if edge.dbms != "HDB":
+        out["error"] = f"v1 supports HDB only (dbms={edge.dbms})"
+        return out
+    if not edge.reachable:
+        out["error"] = "edge not reachable — Test Connection first"
+        return out
+
+    dbapi, err = _import_hdbcli()
+    if dbapi is None:
+        out["error"] = err
+        return out
+
+    kwargs = {
+        "address": edge.host, "port": edge.port,
+        "user": edge.user, "password": edge.password,
+        "autocommit": True, "communicationTimeout": 30000,
+    }
+    if edge.dbname: kwargs["databaseName"] = edge.dbname
+
+    print(f"[*] {edge.source_sid}: DBCON {edge.con_name} — "
+          f"enumerating tables via SYS.M_TABLES (limit={limit})")
+    conn = None
+    try:
+        conn = dbapi.connect(**kwargs)
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "SELECT SCHEMA_NAME, TABLE_NAME, RECORD_COUNT, TABLE_TYPE "
+                "FROM SYS.M_TABLES "
+                "WHERE SCHEMA_NAME NOT LIKE '\\_SYS\\_%' ESCAPE '\\' "
+                "  AND SCHEMA_NAME NOT IN ('SYS', 'PUBLIC', 'SYSTEM') "
+                "ORDER BY RECORD_COUNT DESC "
+                "LIMIT ?", (int(limit),))
+            for row in cur.fetchall():
+                out["tables"].append({
+                    "schema":     str(row[0] or ""),
+                    "table":      str(row[1] or ""),
+                    "rows":       int(row[2] or 0),
+                    "table_type": str(row[3] or ""),
+                })
+        finally:
+            cur.close()
+
+        # Fallback: SYS.M_TABLES may itself be restricted on hardened
+        # HANA — try the SQL-standard information_schema view.
+        if not out["tables"]:
+            print(f"[*] {edge.source_sid}: DBCON {edge.con_name} — "
+                  f"SYS.M_TABLES returned 0 rows, trying SYS.TABLES")
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    "SELECT SCHEMA_NAME, TABLE_NAME "
+                    "FROM SYS.TABLES "
+                    "WHERE SCHEMA_NAME NOT LIKE '\\_SYS\\_%' ESCAPE '\\' "
+                    "  AND SCHEMA_NAME NOT IN ('SYS', 'PUBLIC', 'SYSTEM') "
+                    "LIMIT ?", (int(limit),))
+                for row in cur.fetchall():
+                    out["tables"].append({
+                        "schema": str(row[0] or ""),
+                        "table":  str(row[1] or ""),
+                        "rows":   -1,   # unknown — SYS.TABLES doesn't carry it
+                        "table_type": "",
+                    })
+            finally:
+                cur.close()
+
+        out["ok"] = True
+        out["count"] = len(out["tables"])
+        edge.enumerated_tables = list(out["tables"])
+        print(f"[+] {edge.source_sid}: DBCON {edge.con_name} — "
+              f"enumerated {out['count']} tables "
+              f"(top schemas: "
+              f"{sorted(set(t['schema'] for t in out['tables']))[:5]})")
+    except Exception as e:
+        code = _hana_error_code(e)
+        out["error"] = f"HANA {code or '?'}: {str(e)[:200]}"
+        print(f"[-] {edge.source_sid}: DBCON {edge.con_name} — "
+              f"enumerate_hana_tables failed: {out['error']}")
+    finally:
+        try:
+            if conn is not None: conn.close()
+        except Exception: pass
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Row-peek: SELECT TOP N from a chosen table for quick reconnaissance
+# ---------------------------------------------------------------------------
+
+_HANA_IDENT_RE = _re.compile(r"^[A-Za-z_][A-Za-z0-9_$#]*$")
+
+
+def peek_hana_table(edge: DBCONConnection, schema: str, table: str,
+                      limit: int = 10) -> dict:
+    """SELECT the first `limit` rows from schema.table via the DBCON.
+
+    Whitelists identifiers against HANA's naming rules — SQL
+    injection defence for the schema/table strings that come from
+    the operator's ctx-menu click on an enumerated row.
+
+    Returns {ok, error, columns: [str], rows: [[val, ...]], truncated}.
+    """
+    out = {"ok": False, "error": "", "columns": [], "rows": [],
+           "truncated": False}
+    if not _HANA_IDENT_RE.match(schema or ""):
+        out["error"] = f"invalid schema identifier: {schema!r}"
+        return out
+    if not _HANA_IDENT_RE.match(table or ""):
+        out["error"] = f"invalid table identifier: {table!r}"
+        return out
+    if edge.dbms != "HDB":
+        out["error"] = f"v1 supports HDB only (dbms={edge.dbms})"
+        return out
+    if not edge.reachable:
+        out["error"] = "edge not reachable"
+        return out
+
+    dbapi, err = _import_hdbcli()
+    if dbapi is None:
+        out["error"] = err
+        return out
+
+    kwargs = {
+        "address": edge.host, "port": edge.port,
+        "user": edge.user, "password": edge.password,
+        "autocommit": True, "communicationTimeout": 30000,
+    }
+    if edge.dbname: kwargs["databaseName"] = edge.dbname
+
+    limit = max(1, min(int(limit), 500))
+    sql = f'SELECT * FROM "{schema}"."{table}" LIMIT {limit}'
+    print(f"[*] {edge.source_sid}: DBCON {edge.con_name} — peek: {sql}")
+    conn = None
+    try:
+        conn = dbapi.connect(**kwargs)
+        cur = conn.cursor()
+        try:
+            cur.execute(sql)
+            out["columns"] = [d[0] for d in (cur.description or [])]
+            for r in cur.fetchall():
+                out["rows"].append([
+                    (v.isoformat() if hasattr(v, "isoformat")
+                     else (str(v) if v is not None else None))
+                    for v in r])
+            out["truncated"] = len(out["rows"]) == limit
+            out["ok"] = True
+        finally:
+            cur.close()
+        print(f"[+] {edge.source_sid}: DBCON {edge.con_name} — peek "
+              f"{schema}.{table}: {len(out['rows'])} row(s), "
+              f"{len(out['columns'])} column(s)"
+              + (" (truncated)" if out["truncated"] else ""))
+    except Exception as e:
+        code = _hana_error_code(e)
+        out["error"] = f"HANA {code or '?'}: {str(e)[:200]}"
+        print(f"[-] {edge.source_sid}: DBCON {edge.con_name} — peek "
+              f"{schema}.{table} failed: {out['error']}")
+    finally:
+        try:
+            if conn is not None: conn.close()
+        except Exception: pass
+    return out

@@ -10094,6 +10094,60 @@ async function runDBCONTest(srcSid, conName) {
   startPolling();
 }
 
+async function runDBCONEnumerate(srcSid, conName) {
+  console.log(`[DBCON] runDBCONEnumerate: ${srcSid} / ${conName}`);
+  const edge = _getDBCONEdge(srcSid, conName);
+  if (!edge) return;
+  if (!edge.reachable) {
+    alert('Run "Test connection" first — enumeration needs a live driver connection.');
+    return;
+  }
+  flashActivity(`${srcSid}: DBCON enumerate tables → ${conName}`, 4000);
+  await api('POST', `node/${srcSid}/dbcon/enumerate_tables`,
+    { con_name: conName, limit: 200 });
+  startPolling();
+}
+
+async function runDBCONPeek(srcSid, conName, schema, table) {
+  console.log(`[DBCON] runDBCONPeek: ${srcSid} / ${conName} / ${schema}.${table}`);
+  flashActivity(`${srcSid}: DBCON peek → ${schema}.${table}`, 3000);
+  const r = await api('POST', `node/${srcSid}/dbcon/peek_table`, {
+    con_name: conName, schema, table, limit: 25 });
+  if (r && r.error) { alert(`Peek failed: ${r.error}`); return; }
+  _showDBCONPeekOverlay(srcSid, conName, schema, table, r);
+}
+
+function _showDBCONPeekOverlay(srcSid, conName, schema, table, res) {
+  // Simple overlay — DevTools-style table dump for quick recon.
+  let existing = document.getElementById('dbcon-peek-overlay');
+  if (existing) existing.remove();
+  const div = document.createElement('div');
+  div.id = 'dbcon-peek-overlay';
+  div.style = 'position:fixed;top:8%;left:8%;right:8%;bottom:8%;'
+    + 'background:#0d1117;border:2px solid #f0883e;border-radius:6px;'
+    + 'z-index:10000;padding:12px 16px;overflow:auto;'
+    + 'box-shadow:0 12px 40px rgba(0,0,0,0.7);font-family:monospace;'
+    + 'color:#e6edf3;font-size:12px';
+  const cols = (res.columns || []).map(c =>
+    `<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #30363d;color:#f0883e">${escHtml(c)}</th>`
+  ).join('');
+  const rows = (res.rows || []).map(r =>
+    '<tr>' + r.map(v =>
+      `<td style="padding:4px 8px;border-bottom:1px solid #21262d;vertical-align:top;max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${v === null ? '<i style="color:#6e7681">null</i>' : escHtml(String(v))}</td>`
+    ).join('') + '</tr>').join('');
+  div.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <div><b style="color:#f0883e">DBCON peek — ${escHtml(schema)}.${escHtml(table)}</b>
+        <span style="color:#8b949e;margin-left:12px">${(res.rows||[]).length} row(s), ${(res.columns||[]).length} col(s)${res.truncated ? ' — truncated' : ''}</span></div>
+      <button class="btn" onclick="this.closest('#dbcon-peek-overlay').remove()">Close</button>
+    </div>
+    <div style="overflow:auto;max-height:calc(100% - 60px)">
+      <table style="border-collapse:collapse;min-width:100%"><thead><tr>${cols}</tr></thead><tbody>${rows}</tbody></table>
+    </div>
+  `;
+  document.body.appendChild(div);
+}
+
 async function runDBCONCreateUser(srcSid, conName) {
   console.log(`[DBCON] runDBCONCreateUser: ${srcSid} / ${conName}`);
   const edge = _getDBCONEdge(srcSid, conName);
@@ -10161,12 +10215,20 @@ function showDBCONCtxMenu(e, srcSid, conName) {
   // edge state and pops an alert explaining what's still missing
   // (untested / unreachable / non-SAP-shape).  Silent no-op menu
   // items are terrible UX.
+  const enumLbl = edge.reachable
+    ? (edge.enumerated_tables && edge.enumerated_tables.length
+        ? `Re-enumerate tables (${edge.enumerated_tables.length} known)`
+        : 'Enumerate tables (non-SAP data reach)')
+    : 'Enumerate tables (needs reachable DB)';
   menu.innerHTML = `
     <div class="ctx-header">DBCON ${escHtml(conName)} (${escHtml(edge.dbms || '?')})</div>
     <div class="ctx-item" onclick="runDBCONTest('${escHtml(srcSid)}','${escHtml(conName)}');hideCtxMenu()">${testLbl}</div>
     <div class="ctx-item${edge.is_sap_shape ? '' : ' ctx-item-disabled'}" `
     + `onclick="runDBCONCreateUser('${escHtml(srcSid)}','${escHtml(conName)}');hideCtxMenu()">`
     + `${createLbl}</div>
+    <div class="ctx-item${edge.reachable ? '' : ' ctx-item-disabled'}" `
+    + `onclick="runDBCONEnumerate('${escHtml(srcSid)}','${escHtml(conName)}');hideCtxMenu()">`
+    + `${enumLbl}</div>
     <div class="ctx-item" onclick="showDBCONDetail('${escHtml(srcSid)}','${escHtml(conName)}');hideCtxMenu()">Show details</div>
   `;
   menu.style.left = e.clientX + 'px';
@@ -10206,6 +10268,41 @@ function showDBCONDetail(srcSid, conName) {
     : edge.reachable ? '<span class="risk-badge risk-MEDIUM">Reachable (non-SAP)</span>'
     : edge.tested ? '<span class="risk-badge risk-LOW">Unreachable</span>'
     : '<span class="risk-badge">Untested</span>';
+  const reasonMap = {
+    'usr02_present': 'USR02 exists → confirmed ABAP-shape DB',
+    'usr02_missing': 'USR02 does NOT exist (HANA 259) → confirmed non-SAP DB',
+    'no_permission': 'INCONCLUSIVE — DBCON user lacks SELECT on USR02 (HANA 258). May still be SAP with hardened creds.',
+    'unknown_error': 'Probe raised an unrecognised HANA error — see error below',
+    '': 'Not yet probed — run Test connection',
+  };
+  const reasonText = reasonMap[edge.sap_shape_reason || ''] || edge.sap_shape_reason;
+  const enumRows = (edge.enumerated_tables || []).slice(0, 40).map(t =>
+    `<tr>
+       <td style="padding:2px 6px;color:#8b949e">${escHtml(t.schema)}</td>
+       <td style="padding:2px 6px;color:#e6edf3;cursor:pointer;text-decoration:underline"
+           title="Peek first 25 rows"
+           onclick="runDBCONPeek('${escHtml(srcSid)}','${escHtml(conName)}','${escHtml(t.schema)}','${escHtml(t.table)}')">${escHtml(t.table)}</td>
+       <td style="padding:2px 6px;color:#8b949e;text-align:right">${t.rows >= 0 ? t.rows.toLocaleString() : '?'}</td>
+       <td style="padding:2px 6px;color:#6e7681;font-size:10px">${escHtml(t.table_type || '')}</td>
+     </tr>`
+  ).join('');
+  const enumSection = (edge.enumerated_tables && edge.enumerated_tables.length)
+    ? `<div class="info-section">
+         <div style="color:#f0883e;font-weight:bold;margin-bottom:4px">Enumerated tables (${edge.enumerated_tables.length})</div>
+         <div style="max-height:220px;overflow:auto;border:1px solid #30363d;border-radius:3px">
+           <table style="border-collapse:collapse;font-size:11px;width:100%">
+             <thead><tr style="background:#161b22">
+               <th style="text-align:left;padding:3px 6px;color:#8b949e">Schema</th>
+               <th style="text-align:left;padding:3px 6px;color:#8b949e">Table (click to peek)</th>
+               <th style="text-align:right;padding:3px 6px;color:#8b949e">Rows</th>
+               <th style="text-align:left;padding:3px 6px;color:#8b949e">Type</th>
+             </tr></thead>
+             <tbody>${enumRows}</tbody>
+           </table>
+         </div>
+         ${edge.enumerated_tables.length > 40 ? `<div style="color:#6e7681;font-size:10px;margin-top:4px">Showing top 40 by row count — ${edge.enumerated_tables.length - 40} more not displayed.</div>` : ''}
+       </div>`
+    : '';
   panel.innerHTML = `
     <h3>DBCON — ${escHtml(conName)}</h3>
     <div class="info-row"><span class="info-label">Source:</span><span class="info-val">${escHtml(srcSid)}</span></div>
@@ -10220,10 +10317,13 @@ function showDBCONDetail(srcSid, conName) {
     + `onclick="toggleDBCONPassword(this)">&#9679;&#9679;&#9679;&#9679; (${(edge.password||'').length} chars — click to reveal — from SecStore)</span></div>
     ${edge.target_sid ? `<div class="info-row"><span class="info-label">Target SID:</span><span class="info-val mono" style="color:#3fb950;font-weight:bold">${escHtml(edge.target_sid)}</span></div>` : ''}
     <div class="info-row"><span class="info-label">Status:</span><span class="info-val">${stateChip}</span></div>
+    <div class="info-row"><span class="info-label">SAP-shape:</span><span class="info-val" style="font-size:11px;color:#c9d1d9">${escHtml(reasonText)}</span></div>
     ${edge.tested_at ? `<div class="info-row"><span class="info-label">Tested at:</span><span class="info-val" style="font-size:11px;color:#8b949e">${escHtml(edge.tested_at)}</span></div>` : ''}
     ${edge.error ? `<div class="info-section" style="color:#f85149;font-size:11px">${escHtml(edge.error)}</div>` : ''}
+    ${enumSection}
     <div style="text-align:right;margin-top:12px;display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">
       <button class="btn" onclick="runDBCONTest('${escHtml(srcSid)}','${escHtml(conName)}')">${edge.tested ? 'Re-test' : 'Test Connection'}</button>
+      ${edge.reachable ? `<button class="btn" onclick="runDBCONEnumerate('${escHtml(srcSid)}','${escHtml(conName)}')">Enumerate tables</button>` : ''}
       ${edge.is_sap_shape ? `<button class="btn" style="background:#b33;color:#fff" onclick="runDBCONCreateUser('${escHtml(srcSid)}','${escHtml(conName)}')">Create SAPMAP00 (direct SQL)</button>` : ''}
       <button class="btn" onclick="document.getElementById('detail-panel').classList.remove('visible')">Close</button>
     </div>

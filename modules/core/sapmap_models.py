@@ -1159,10 +1159,21 @@ class DBCONConnection:
     tested:       bool = False
     reachable:    bool = False
     is_sap_shape: bool = False  # target schema has USR02 → SAP-side DB
+    # WHY we came to the SAP-shape verdict.  One of:
+    #   "usr02_present"    — probe ran, USR02 found (definitive SAP)
+    #   "usr02_missing"    — HANA 259 invalid_table (definitive non-SAP)
+    #   "no_permission"    — HANA 258 insufficient_privilege (INCONCLUSIVE)
+    #   "unknown_error"    — probe raised, unrecognised error code
+    #   ""                 — not yet probed
+    sap_shape_reason: str = ""
     target_sid:   str = ""     # T000-SYSID on the other side (once tested)
     pwned:        bool = False  # SAPMAP00 created on the target via direct SQL
     error:        str = ""
     tested_at:    str = ""
+    # Non-SAP data-extraction: cached table enumeration from
+    # SYS.M_TABLES (HANA), populated by dbcon/enumerate_tables.
+    # Each row: {schema, table, rows, table_type}
+    enumerated_tables: list = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -1177,10 +1188,12 @@ class DBCONConnection:
             "tested":       self.tested,
             "reachable":    self.reachable,
             "is_sap_shape": self.is_sap_shape,
+            "sap_shape_reason": self.sap_shape_reason,
             "target_sid":   self.target_sid,
             "pwned":        self.pwned,
             "error":        self.error,
             "tested_at":    self.tested_at,
+            "enumerated_tables": list(self.enumerated_tables or []),
         }
 
     @classmethod
