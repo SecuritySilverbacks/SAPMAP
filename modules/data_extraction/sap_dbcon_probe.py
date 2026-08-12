@@ -83,60 +83,109 @@ def read_dbcon(node: SAPNode, creds: Credentials = None) -> list:
     from sapmap_config import RFC_READ_TABLE
     from sapmap_errors import format_rfc_exception
 
-    fields = [
-        {"FIELDNAME": "CON_NAME"},
-        {"FIELDNAME": "DBMS"},
-        {"FIELDNAME": "USER_NAME"},
-        {"FIELDNAME": "CON_ENV"},
+    # DBCON has been renamed / split across releases.  Try each
+    # candidate in order and keep the first that returns rows.
+    #   DBCON        — canonical ABAP DBCON table
+    #   DBCONNAM     — text/name view on newer S/4
+    #   DBCONUSR     — user-fields table on split releases
+    #   V_DBCON      — DDIC view exposing the merged connect record
+    CANDIDATE_TABLES = ["DBCON", "DBCONNAM", "DBCONUSR", "V_DBCON"]
+    FIELD_VARIANTS = [
+        # Modern S/4 field list — CON_NAME + DBMS + USER_NAME + CON_ENV
+        [{"FIELDNAME": "CON_NAME"}, {"FIELDNAME": "DBMS"},
+         {"FIELDNAME": "USER_NAME"}, {"FIELDNAME": "CON_ENV"}],
+        # Older 7.x — CONN_INFO holds the connect string, PASSWORD is
+        # blank because it moved to RSECTAB
+        [{"FIELDNAME": "CON_NAME"}, {"FIELDNAME": "DBMS"},
+         {"FIELDNAME": "USER_NAME"}, {"FIELDNAME": "CONN_INFO"}],
     ]
+
+    def _do_call(conn, table, field_list, with_flag):
+        kw = dict(QUERY_TABLE=table, DELIMITER="|",
+                  FIELDS=field_list, ROWCOUNT=500)
+        if with_flag:
+            kw["USE_ET_DATA_4_RETURN"] = "X"
+        return conn.call(RFC_READ_TABLE, **kw)
+
+    def _pick_rows(res):
+        wide   = res.get("ET_DATA_4_RETURN") or []
+        narrow = res.get("DATA") or []
+        return (wide if wide else narrow, len(narrow), len(wide))
+
     result = None
+    table_used = None
     used_flag = False
+    field_variant_used = 0
+    return_msgs = []
     try:
         with _get_connection(node, creds) as conn:
-            # Modern kernels: USE_ET_DATA_4_RETURN='X' routes rows into
-            # the wider ET_DATA_4_RETURN table (TAB2048); the classic
-            # DATA (TAB512) truncates at 512 chars and can come back
-            # empty on newer S/4 systems.  Always prefer the wide path
-            # when the kernel accepts the kwarg.
-            try:
-                result = conn.call(
-                    RFC_READ_TABLE,
-                    QUERY_TABLE="DBCON",
-                    DELIMITER="|",
-                    FIELDS=fields,
-                    ROWCOUNT=500,
-                    USE_ET_DATA_4_RETURN="X",
-                )
-                used_flag = True
-            except Exception as _e_flag:
-                print(f"[*] {node.sid}: read_dbcon: kernel rejected "
-                      f"USE_ET_DATA_4_RETURN kwarg ({type(_e_flag).__name__}"
-                      f") — falling back to plain RFC_READ_TABLE")
-                result = conn.call(
-                    RFC_READ_TABLE,
-                    QUERY_TABLE="DBCON",
-                    DELIMITER="|",
-                    FIELDS=fields,
-                    ROWCOUNT=500,
-                )
+            for table in CANDIDATE_TABLES:
+                for v_idx, field_list in enumerate(FIELD_VARIANTS):
+                    try:
+                        try:
+                            res = _do_call(conn, table, field_list, with_flag=True)
+                            _flag = True
+                        except Exception as _e_flag:
+                            # Kernel doesn't know the kwarg — retry plain
+                            res = _do_call(conn, table, field_list, with_flag=False)
+                            _flag = False
+                    except Exception as _e_table:
+                        # Table doesn't exist here — move on to the next
+                        # candidate.  Only log for the primary table.
+                        if table == "DBCON":
+                            print(f"[*] {node.sid}: read_dbcon: {table} + "
+                                  f"variant {v_idx} raised "
+                                  f"{format_rfc_exception(_e_table)}")
+                        continue
+                    raw, n_narrow, n_wide = _pick_rows(res)
+                    return_msgs = [
+                        f"{m.get('TYPE','?')}: {m.get('MESSAGE','')}"
+                        for m in (res.get("RETURN") or [])
+                        if m.get("MESSAGE")]
+                    if raw:
+                        result = res
+                        table_used = table
+                        used_flag = _flag
+                        field_variant_used = v_idx
+                        break
+                    else:
+                        print(f"[*] {node.sid}: read_dbcon: {table} "
+                              f"variant {v_idx} → 0 rows (DATA={n_narrow}, "
+                              f"ET_DATA_4_RETURN={n_wide}, flag={_flag})"
+                              + (f" — RETURN: {return_msgs}"
+                                 if return_msgs else ""))
+                if result is not None:
+                    break
     except Exception as e:
-        print(f"[-] {node.sid}: read_dbcon: RFC_READ_TABLE failed — "
+        print(f"[-] {node.sid}: read_dbcon: connection/call failed — "
               f"{format_rfc_exception(e)}")
         return []
 
-    # When the wide flag was accepted, rows land in ET_DATA_4_RETURN;
-    # older kernels populate DATA.  Read whichever bucket has content
-    # (some kernels populate both — dedup on WA).
-    wide_rows   = result.get("ET_DATA_4_RETURN") or []
-    narrow_rows = result.get("DATA") or []
-    raw_rows = wide_rows if wide_rows else narrow_rows
-    print(f"[*] {node.sid}: read_dbcon: RFC_READ_TABLE returned "
-          f"{len(narrow_rows)} DATA rows, {len(wide_rows)} "
-          f"ET_DATA_4_RETURN rows (used_flag={used_flag}) — using "
-          f"{'wide' if wide_rows else 'narrow'} bucket")
+    if result is None:
+        # Nothing came back from ANY candidate.  Give the operator
+        # something actionable to try next.
+        hint = ""
+        if return_msgs:
+            hint = f" — last RFC RETURN: {return_msgs}"
+        elif any(("NOT_AUTHORIZED" in m or "no auth" in m.lower())
+                 for m in return_msgs):
+            hint = " — RFC_READ_TABLE denied by S_TABU_NAM"
+        print(f"[-] {node.sid}: read_dbcon: no DBCON candidate table "
+              f"returned rows (tried {CANDIDATE_TABLES}){hint}. "
+              f"Options: (a) verify DBCON entries exist in SM30/DBCO, "
+              f"(b) grant S_TABU_NAM=DBCON to the RFC user, or "
+              f"(c) if entries live in a release-specific table, "
+              f"extend CANDIDATE_TABLES.")
+        return []
+
+    raw, n_narrow, n_wide = _pick_rows(result)
+    print(f"[*] {node.sid}: read_dbcon: {table_used} (variant "
+          f"{field_variant_used}, flag={used_flag}) → "
+          f"{n_wide + n_narrow} row(s) via "
+          f"{'wide' if n_wide else 'narrow'} bucket")
 
     rows = []
-    for r in raw_rows:
+    for r in raw:
         parts = [p.strip() for p in (r.get("WA", "") or "").split("|")]
         if len(parts) < 4:
             continue
