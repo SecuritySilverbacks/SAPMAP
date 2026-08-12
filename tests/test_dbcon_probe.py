@@ -201,6 +201,32 @@ def test_read_dbcon_empty_both_buckets_returns_empty(monkeypatch):
     assert dbcon.read_dbcon(SAPNode(sid="S4H", ip="10.0.0.1"), None) == []
 
 
+def test_read_dbcon_falls_back_to_abap_on_undelimited_line(monkeypatch):
+    """S/4 2025 fingerprint (from operator SE37 capture, 2026-08-12):
+    ET_DATA rows come back as {'LINE': 'concatenated-fields'} with
+    DELIMITER ignored and each field TRIMMED, e.g.
+    'TEST_S4DHDBsystems4hanadev:3021500' — unparseable by field
+    boundary.  We must recognise the shape, discard the row, and
+    escalate to the ABAP-SELECT fallback so the operator still gets
+    their DBCON edges."""
+    conn = _FakeRFCConn(lambda kw: {
+        "DATA": [],
+        "ET_DATA": [{"LINE": "TEST_S4DHDBsystems4hanadev:3021500"}],
+    })
+    _install_fake_rfc(monkeypatch, conn)
+    called = {"n": 0}
+    def _fake_abap(node, creds):
+        called["n"] += 1
+        return [{"con_name": "TEST_S4D", "dbms": "HDB",
+                 "user": "system", "con_env": "s4hanadev:30215"}]
+    monkeypatch.setattr(dbcon, "_read_dbcon_via_abap", _fake_abap)
+    rows = dbcon.read_dbcon(SAPNode(sid="S4H", ip="10.0.0.1"), None)
+    assert called["n"] == 1, "ABAP fallback must fire on unparseable LINE"
+    assert len(rows) == 1
+    assert rows[0]["con_name"] == "TEST_S4D"
+    assert rows[0]["con_env"] == "s4hanadev:30215"
+
+
 def test_read_dbcon_falls_back_to_abap_when_all_rfc_empty(monkeypatch):
     """Modern-S/4 hardening symptom: RFC_READ_TABLE succeeds with 0
     rows on every candidate table because DBCON is on the FM's
