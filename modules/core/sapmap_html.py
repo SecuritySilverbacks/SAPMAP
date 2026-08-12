@@ -10378,14 +10378,14 @@ function showDBCONDetail(srcSid, conName, opts) {
   const peekInputSection = edge.reachable
     ? `<div class="info-section">
          <div style="color:#f0883e;font-weight:bold;margin-bottom:4px">Peek arbitrary table</div>
-         <div style="display:flex;gap:4px;font-size:11px">
+         <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:11px;margin-bottom:6px">
            <input id="dbcon-peek-schema-${escHtml(srcSid)}-${escHtml(conName)}" placeholder="Schema" value="SAPHANADB"
-             style="flex:1;background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:3px 6px;border-radius:3px;font-family:monospace" />
+             style="min-width:0;background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:4px 6px;border-radius:3px;font-family:monospace" />
            <input id="dbcon-peek-table-${escHtml(srcSid)}-${escHtml(conName)}" placeholder="Table" value="USR02"
-             style="flex:1;background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:3px 6px;border-radius:3px;font-family:monospace" />
-           <button class="btn" style="padding:2px 10px"
-             onclick="runDBCONPeek('${escHtml(srcSid)}','${escHtml(conName)}',document.getElementById('dbcon-peek-schema-${escHtml(srcSid)}-${escHtml(conName)}').value.trim(),document.getElementById('dbcon-peek-table-${escHtml(srcSid)}-${escHtml(conName)}').value.trim())">Peek</button>
+             style="min-width:0;background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:4px 6px;border-radius:3px;font-family:monospace" />
          </div>
+         <button class="btn" style="width:100%;padding:5px 10px;background:#238636;color:#fff;font-weight:bold;border:none;border-radius:3px;cursor:pointer"
+           onclick="runDBCONPeek('${escHtml(srcSid)}','${escHtml(conName)}',document.getElementById('dbcon-peek-schema-${escHtml(srcSid)}-${escHtml(conName)}').value.trim(),document.getElementById('dbcon-peek-table-${escHtml(srcSid)}-${escHtml(conName)}').value.trim())">&#128064; Peek 25 rows</button>
        </div>`
     : '';
   const enumSection = (edge.enumerated_tables && edge.enumerated_tables.length)
