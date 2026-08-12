@@ -3069,6 +3069,25 @@ async function pollUpdates() {
               _detailsRefreshKind = 'btp';
               _detailsRefreshKey = uuid;
             }
+          } else if (view === 'dbcon' && dsid.indexOf('dbcon:') === 0) {
+            // dsid: dbcon:<srcSid>:<con_name>
+            const rest = dsid.slice(6);
+            const colonIdx = rest.indexOf(':');
+            if (colonIdx > 0) {
+              const srcSid = rest.slice(0, colonIdx);
+              const conName = rest.slice(colonIdx + 1);
+              const oldEdge = ((mapState.nodes || {})[srcSid] || {})
+                .dbcon_edges || [];
+              const newEdge = ((state.nodes || {})[srcSid] || {})
+                .dbcon_edges || [];
+              const oldE = oldEdge.find(x => x.con_name === conName);
+              const newE = newEdge.find(x => x.con_name === conName);
+              if (newE && JSON.stringify(oldE) !== JSON.stringify(newE)) {
+                _detailsPanelNeedsRefresh = true;
+                _detailsRefreshKind = 'dbcon';
+                _detailsRefreshKey = { srcSid, conName };
+              }
+            }
           }
         }
       } catch (_) { /* details refresh never blocks state update */ }
@@ -3083,6 +3102,10 @@ async function pollUpdates() {
             showSCCDetail(_detailsRefreshKey, {refresh: true});
           } else if (_detailsRefreshKind === 'btp') {
             showBTPDetail(_detailsRefreshKey, {refresh: true});
+          } else if (_detailsRefreshKind === 'dbcon') {
+            showDBCONDetail(_detailsRefreshKey.srcSid,
+                             _detailsRefreshKey.conName,
+                             {refresh: true});
           }
         } catch (_) {}
       }
@@ -4715,29 +4738,41 @@ function updateMap() {
       const yTop = y, yBottom = y + DB_BOX_H;
       const yMid = yTop + ry;
       const yBottomBand = yBottom - ry;
-      // Fill / border reflect probe state
+      // Fill / border reflect probe state.  Precedence:
+      //   is_sap_shape wins the FILL (green background = "SAP DB")
+      //   pwned wins the BORDER (orange = "owned")
+      //   so a pwned SAP DB looks like a green cylinder with an
+      //   orange border + orange label + ⚡, unmistakably distinct
+      //   from a non-SAP reachable (yellow) or an unreachable (red).
       let fill = "#1c2128";
       let stroke = "#8b949e";
       let strokeW = 2;
       let labelColor = "#8b949e";
-      if (e.pwned) {
-        fill = "#4d1c1c"; stroke = "#8b0000"; strokeW = 5; labelColor = "#f0883e";
-      } else if (e.reachable && e.is_sap_shape) {
-        fill = "#1c2f1c"; stroke = "#3fb950"; strokeW = 4; labelColor = "#3fb950";
+      if (e.reachable && e.is_sap_shape) {
+        // green background is the "SAP DB confirmed" signal
+        fill = "#1c2f1c";
+        stroke = e.pwned ? "#f0883e" : "#3fb950";
+        strokeW = e.pwned ? 5 : 4;
+        labelColor = e.pwned ? "#f0883e" : "#3fb950";
       } else if (e.reachable) {
-        fill = "#2d2c1c"; stroke = "#d29922"; strokeW = 4; labelColor = "#d29922";
+        // non-SAP but reachable — yellow; pwned still allowed
+        fill = "#2d2c1c";
+        stroke = e.pwned ? "#f0883e" : "#d29922";
+        strokeW = e.pwned ? 5 : 4;
+        labelColor = e.pwned ? "#f0883e" : "#d29922";
       } else if (e.tested) {
-        fill = "#2d1c1c"; stroke = "#f85149"; strokeW = 3; labelColor = "#f85149";
+        // tested but unreachable — red
+        fill = "#2d1c1c"; stroke = "#f85149"; strokeW = 3;
+        labelColor = "#f85149";
       }
 
-      // Connecting line: source-node right-edge → cylinder left-edge.
-      // Colour follows probe state (dashed grey untested → solid
-      // green on reachable+SAP-shape → red on unreachable).
+      // Connecting line follows the same colour language as the border.
       let lineColor, lineDash;
-      if (e.pwned) { lineColor = '#f0883e'; lineDash = ''; }
-      else if (e.reachable && e.is_sap_shape) { lineColor = '#3fb950'; lineDash = ''; }
-      else if (e.reachable) { lineColor = '#d29922'; lineDash = ''; }
-      else if (e.tested) { lineColor = '#f85149'; lineDash = '5,4'; }
+      if (e.reachable && e.is_sap_shape) {
+        lineColor = e.pwned ? '#f0883e' : '#3fb950'; lineDash = '';
+      } else if (e.reachable) {
+        lineColor = e.pwned ? '#f0883e' : '#d29922'; lineDash = '';
+      } else if (e.tested) { lineColor = '#f85149'; lineDash = '5,4'; }
       else { lineColor = '#8b949e'; lineDash = '5,4'; }
       const _sx = srcX + 240;      // right edge of source SAP box
       const _sy = srcY + 60;       // roughly middle of source header row
@@ -10250,18 +10285,22 @@ function toggleDBCONPassword(el) {
   }
 }
 
-function showDBCONDetail(srcSid, conName) {
+function showDBCONDetail(srcSid, conName, opts) {
   const edge = _getDBCONEdge(srcSid, conName);
   if (!edge) return;
   const panel = document.getElementById('detail-panel');
   if (!panel) return;
   const sidKey = `dbcon:${srcSid}:${conName}`;
+  const refresh = !!(opts && opts.refresh);
   // Toggle: clicking the same cylinder / re-invoking Show details
-  // for the currently-open DBCON dismisses the drawer.
-  if (panel.classList.contains('visible') && panel.dataset.sid === sidKey) {
+  // for the currently-open DBCON dismisses the drawer.  Refresh
+  // path skips the toggle (state-poll auto-update).
+  if (!refresh && panel.classList.contains('visible') && panel.dataset.sid === sidKey) {
     panel.classList.remove('visible');
     return;
   }
+  const preservedScroll = refresh ? (panel.scrollTop || 0) : 0;
+  panel.setAttribute('data-view', 'dbcon');
   panel.dataset.sid = sidKey;
   const stateChip = edge.pwned ? '<span class="risk-badge risk-CRITICAL">&#9889; PWNED</span>'
     : edge.reachable && edge.is_sap_shape ? '<span class="risk-badge risk-HIGH">SAP-shape reachable</span>'
@@ -10329,6 +10368,7 @@ function showDBCONDetail(srcSid, conName) {
     </div>
   `;
   panel.classList.add('visible');
+  if (refresh && preservedScroll) panel.scrollTop = preservedScroll;
 }
 
 function showBTPDetail(uuid, opts) {
