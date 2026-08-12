@@ -192,9 +192,86 @@ def test_read_dbcon_retries_without_flag_on_kwarg_reject(monkeypatch):
 
 
 def test_read_dbcon_empty_both_buckets_returns_empty(monkeypatch):
+    """When both RFC_READ_TABLE and the ABAP fallback return empty,
+    read_dbcon returns []."""
     conn = _FakeRFCConn(lambda kw: {"DATA": [], "ET_DATA_4_RETURN": []})
     _install_fake_rfc(monkeypatch, conn)
+    monkeypatch.setattr(dbcon, "_read_dbcon_via_abap",
+                          lambda node, creds: [])
     assert dbcon.read_dbcon(SAPNode(sid="S4H", ip="10.0.0.1"), None) == []
+
+
+def test_read_dbcon_falls_back_to_abap_when_all_rfc_empty(monkeypatch):
+    """Modern-S/4 hardening symptom: RFC_READ_TABLE succeeds with 0
+    rows on every candidate table because DBCON is on the FM's
+    protected-tables deny-list.  We must fall through to the
+    RFC_ABAP_INSTALL_AND_RUN direct-SELECT path."""
+    conn = _FakeRFCConn(lambda kw: {"DATA": [], "ET_DATA_4_RETURN": []})
+    _install_fake_rfc(monkeypatch, conn)
+    called = {"n": 0}
+    def _fake_abap(node, creds):
+        called["n"] += 1
+        return [{"con_name": "TEST_S4D", "dbms": "HDB",
+                 "user": "system", "con_env": "s4hanadev:30215"}]
+    monkeypatch.setattr(dbcon, "_read_dbcon_via_abap", _fake_abap)
+    rows = dbcon.read_dbcon(SAPNode(sid="S4H", ip="10.0.0.1"), None)
+    assert called["n"] == 1
+    assert len(rows) == 1 and rows[0]["con_name"] == "TEST_S4D"
+    assert rows[0]["con_env"] == "s4hanadev:30215"
+
+
+def test_read_dbcon_via_abap_parses_output(monkeypatch):
+    """Direct unit test on the ABAP fallback — verify the '~~~'
+    delimited output from RFC_ABAP_INSTALL_AND_RUN's WRITES is
+    correctly parsed."""
+    import sap_dbcon_probe as _dbcon
+    import sys as _sys
+    fake_rfc_mod = types.ModuleType("sapmap_rfc")
+
+    class _CM:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    fake_rfc_mod._get_connection = lambda node, creds: _CM()
+    def _fake_run(conn, abap, name):
+        return {
+            "success": True,
+            "output": [
+                "TEST_S4D~~~HDB~~~system~~~s4hanadev:30215",
+                "ORA_LEG~~~ORA~~~SYS~~~HOST=oracle01 PORT=1521",
+                "",   # blank lines from ABAP list padding
+                "MALFORMED~~~ONLY_TWO",
+            ],
+            "error": "", "fm_name": "RFC_ABAP_INSTALL_AND_RUN",
+        }
+    fake_rfc_mod._run_abap_program = _fake_run
+    fake_errors = types.ModuleType("sapmap_errors")
+    fake_errors.format_rfc_exception = lambda e: str(e)
+    monkeypatch.setitem(_sys.modules, "sapmap_rfc", fake_rfc_mod)
+    monkeypatch.setitem(_sys.modules, "sapmap_errors", fake_errors)
+    rows = _dbcon._read_dbcon_via_abap(SAPNode(sid="S4H", ip="10.0.0.1"), None)
+    assert len(rows) == 2
+    assert rows[0]["con_name"] == "TEST_S4D" and rows[0]["dbms"] == "HDB"
+    assert rows[1]["con_name"] == "ORA_LEG"
+
+
+def test_read_dbcon_via_abap_failure_returns_empty(monkeypatch):
+    import sap_dbcon_probe as _dbcon
+    import sys as _sys
+    class _CM:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    fake_rfc_mod = types.ModuleType("sapmap_rfc")
+    fake_rfc_mod._get_connection = lambda node, creds: _CM()
+    fake_rfc_mod._run_abap_program = lambda *a, **kw: {
+        "success": False, "output": [],
+        "error": "S_DEVELOP denied", "fm_name": None}
+    fake_errors = types.ModuleType("sapmap_errors")
+    fake_errors.format_rfc_exception = lambda e: str(e)
+    monkeypatch.setitem(_sys.modules, "sapmap_rfc", fake_rfc_mod)
+    monkeypatch.setitem(_sys.modules, "sapmap_errors", fake_errors)
+    assert _dbcon._read_dbcon_via_abap(SAPNode(sid="S4H", ip="10.0.0.1"),
+                                          None) == []
 
 
 def test_read_dbcon_malformed_row_skipped(monkeypatch):

