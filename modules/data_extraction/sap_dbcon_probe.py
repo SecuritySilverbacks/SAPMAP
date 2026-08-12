@@ -478,56 +478,26 @@ def _hana_error_code(exc):
 def _resolve_hana_target_sid(conn, edge) -> str:
     """Resolve the target SID on a HANA DBCON connection.
 
-    Tries multiple sources in order of preference — the naive
-    `SELECT SYSID FROM T000` fails silently on modern HANA when the
-    connected user's search path doesn't include the SAP tenant
-    schema (SAPHANADB / SAPABAP1 / ...).  Logs every attempt so
-    debugging is a one-line log grep away.
+    Ordered by likelihood-of-success (empirically verified against
+    real S/4 HANA):
+      1. M_HOST_INFORMATION.sid    — always present, always readable
+      2. M_LICENSE.SYSTEM_ID        — always present, always readable
+      3. M_SYSTEM_OVERVIEW.SID      — older HANA fallback
+      4. TSYST.SYSID (schema-qualified) — ABAP dictionary fallback
+      5. TSYST.SYSID (bare)         — works if user default schema
+                                      = the ABAP tenant schema
+
+    NB: T000 doesn't have a SYSID column — my earlier attempts
+    against it were a mistake (T000 has MANDT / MTEXT / ORT01 /
+    MWAER etc., but SYSID lives on TSYST or M_HOST_INFORMATION).
+
+    Each attempt logs its HANA error code so failures are one-line
+    grep-able; the first non-empty result wins.
     """
-    attempts = []
-    # 1. Unqualified T000 — works when default schema = SAP tenant
-    for sql in (
-        "SELECT SYSID FROM T000",
-        # 2. Schema-qualified variants across common SAP naming
-    ):
-        attempts.append(sql)
-    # Build the qualified-T000 attempt list dynamically so the
-    # release-vanilla schema names try first.
-    for schema in _SAP_SCHEMA_CANDIDATES:
-        attempts.append(f'SELECT SYSID FROM "{schema}"."T000"')
     if edge.target_sid:
-        # If already known (rare — from prior probe), skip resolution
-        # attempts and reuse.
         return edge.target_sid.upper().strip()
 
-    for sql in attempts:
-        cur = conn.cursor()
-        try:
-            cur.execute(sql)
-            r = cur.fetchone()
-            if r and r[0]:
-                sid = str(r[0]).strip().upper()
-                if sid:
-                    print(f"[+] {edge.source_sid}: DBCON "
-                          f"{edge.con_name} — target SID resolved to "
-                          f"{sid} via `{sql}`")
-                    return sid
-        except Exception as _e:
-            code = _hana_error_code(_e)
-            print(f"    [*] target-SID attempt `{sql}` → HANA "
-                  f"{code or '?'} — {str(_e)[:100]}")
-        finally:
-            cur.close()
-
-    # 3. HANA system metadata — always readable if user can connect.
-    for sql, note in (
-        ("SELECT VALUE FROM M_HOST_INFORMATION WHERE KEY='sid' LIMIT 1",
-         "M_HOST_INFORMATION"),
-        ("SELECT SYSTEM_ID FROM M_LICENSE LIMIT 1",
-         "M_LICENSE"),
-        ("SELECT VALUE FROM M_SYSTEM_OVERVIEW WHERE NAME='SID' LIMIT 1",
-         "M_SYSTEM_OVERVIEW"),
-    ):
+    def _try(sql, note):
         cur = conn.cursor()
         try:
             cur.execute(sql)
@@ -545,10 +515,37 @@ def _resolve_hana_target_sid(conn, edge) -> str:
                   f"{code or '?'} — {str(_e)[:100]}")
         finally:
             cur.close()
+        return ""
+
+    # Priority 1-3 — HANA system views, always readable if we can connect
+    for sql, note in (
+        ("SELECT VALUE FROM M_HOST_INFORMATION WHERE KEY='sid' LIMIT 1",
+         "M_HOST_INFORMATION"),
+        ("SELECT SYSTEM_ID FROM M_LICENSE LIMIT 1",
+         "M_LICENSE"),
+        ("SELECT VALUE FROM M_SYSTEM_OVERVIEW WHERE NAME='SID' LIMIT 1",
+         "M_SYSTEM_OVERVIEW"),
+    ):
+        sid = _try(sql, note)
+        if sid:
+            return sid
+
+    # Priority 4-5 — ABAP dictionary fallback via TSYST (has SYSID);
+    # try bare first, then schema-qualified in case the default schema
+    # isn't the tenant.
+    sid = _try("SELECT SYSID FROM TSYST LIMIT 1", "TSYST")
+    if sid:
+        return sid
+    for schema in _SAP_SCHEMA_CANDIDATES:
+        sid = _try(f'SELECT SYSID FROM "{schema}"."TSYST" LIMIT 1',
+                    f'"{schema}".TSYST')
+        if sid:
+            return sid
 
     print(f"[-] {edge.source_sid}: DBCON {edge.con_name} — target SID "
-          f"could not be resolved via T000 / M_HOST_INFORMATION / "
-          f"M_LICENSE / M_SYSTEM_OVERVIEW — materialize will skip")
+          f"could not be resolved via any of M_HOST_INFORMATION / "
+          f"M_LICENSE / M_SYSTEM_OVERVIEW / TSYST — materialize will "
+          f"skip")
     return ""
 
 

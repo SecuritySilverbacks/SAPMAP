@@ -489,9 +489,12 @@ def _fake_dbapi_module(conn):
 
 
 def test_probe_hdb_sap_shape_reads_sid(monkeypatch):
+    # M_HOST_INFORMATION is now the FIRST attempt in _resolve_hana_
+    # target_sid — T000 has no SYSID column on real HANA (it lives on
+    # TSYST / M_HOST_INFORMATION), so the earlier test data was wrong.
     conn = _FakeConn({
         "SELECT COUNT(*) FROM USR02": [(42,)],
-        "SELECT SYSID FROM T000":    [("DWH",)],
+        "SELECT VALUE FROM M_HOST_INFORMATION": [("DWH",)],
     })
     monkeypatch.setattr(
         dbcon, "_import_hdbcli",
@@ -534,28 +537,27 @@ def test_probe_hdb_non_sap_shape(monkeypatch):
     assert e.target_sid == ""
 
 
-def test_probe_hdb_resolves_target_sid_via_schema_qualified_t000(monkeypatch):
-    """Regression: on modern HANA the connected user's default
-    search path often doesn't include T000, so the unqualified
-    `SELECT SYSID FROM T000` fails silently and target_sid stays
-    empty — which then skips the materialize-as-SAP-node step.
-    The resolver must fall through to schema-qualified T000."""
+def test_probe_hdb_resolves_target_sid_via_schema_qualified_tsyst(monkeypatch):
+    """Regression: when M_HOST_INFORMATION / M_LICENSE /
+    M_SYSTEM_OVERVIEW / bare TSYST all fail, the resolver must
+    fall through to schema-qualified TSYST — the last-resort
+    fallback for hardened HANA where only the tenant schema has
+    read access to the ABAP dictionary."""
     class _SchemaCur(_FakeCursor):
         def execute(self, sql, params=None):
             self._sql = sql
-            if "USR02" in sql:
-                pass  # succeed, is_sap_shape=True
-            elif sql == "SELECT SYSID FROM T000":
-                # HANA 259 — unqualified T000 not in search path
-                exc = Exception("(259, 'invalid table name: T000')")
-                exc.errorcode = 259
-                raise exc
-            elif '"SAPHANADB"."T000"' in sql:
-                # Schema-qualified — works
-                pass
+            u = sql.upper()
+            if "USR02" in u:
+                return
+            if '"SAPHANADB"."TSYST"' in sql:
+                return   # succeeds
+            # Every earlier attempt raises 260/259
+            exc = Exception("(260, 'invalid column name / not found')")
+            exc.errorcode = 260
+            raise exc
         def fetchone(self):
-            if "USR02" in self._sql: return (42,)
-            if '"SAPHANADB"."T000"' in self._sql: return ("DWH",)
+            if "USR02" in self._sql.upper(): return (42,)
+            if '"SAPHANADB"."TSYST"' in self._sql: return ("DWH",)
             return None
 
     class _Conn(_FakeConn):
@@ -569,7 +571,7 @@ def test_probe_hdb_resolves_target_sid_via_schema_qualified_t000(monkeypatch):
     dbcon.probe_dbcon_edge(e)
     assert e.is_sap_shape is True
     assert e.target_sid == "DWH", \
-        "resolver must fall through to schema-qualified T000"
+        "resolver must fall through to schema-qualified TSYST"
 
 
 def test_probe_hdb_resolves_target_sid_via_m_host_information(monkeypatch):
@@ -1132,7 +1134,7 @@ def test_probe_dbcon_edge_auto_materializes_with_state(monkeypatch):
     from sapmap_models import SAPMAPState
     conn = _FakeConn({
         "SELECT COUNT(*) FROM USR02": [(1,)],
-        "SELECT SYSID FROM T000":    [("DWH",)],
+        "SELECT VALUE FROM M_HOST_INFORMATION": [("DWH",)],
     })
     monkeypatch.setattr(dbcon, "_import_hdbcli",
                           lambda: (_fake_dbapi_module(conn), None))
@@ -1153,7 +1155,7 @@ def test_probe_dbcon_edge_skips_materialize_without_state(monkeypatch):
     the state side, just mutates the edge (original v1 contract)."""
     conn = _FakeConn({
         "SELECT COUNT(*) FROM USR02": [(1,)],
-        "SELECT SYSID FROM T000":    [("DWH",)],
+        "SELECT VALUE FROM M_HOST_INFORMATION": [("DWH",)],
     })
     monkeypatch.setattr(dbcon, "_import_hdbcli",
                           lambda: (_fake_dbapi_module(conn), None))

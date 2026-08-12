@@ -4790,6 +4790,28 @@ function updateMap() {
       html += `<text x="${_mx}" y="${_my}" text-anchor="middle" `
            + `fill="${lineColor}" font-size="9" font-family="monospace" `
            + `pointer-events="none">${escHtml(_lineLbl)}</text>`;
+      // Materialized-target link: if the DBCON's target_sid is on
+      // the map as its own SAPNode (auto-materialised via
+      // materialize_target_as_sap_node), draw a dashed link from
+      // this cylinder to that node.  Makes the DBCON pivot
+      // visually obvious — the cylinder becomes "the trust that
+      // led us to node X" instead of a mystery box.
+      if (e.target_sid && nodes[e.target_sid] &&
+          e.target_sid !== src.sid) {
+        const tgt = nodes[e.target_sid];
+        const tgtX = tgt._x || 0, tgtY = tgt._y || 0;
+        // Connect from cylinder centre to left-middle of the SAP box
+        const _lx = x + DB_BOX_W / 2, _ly = y + DB_BOX_H / 2;
+        const _rx = tgtX, _ry = tgtY + 60;   // node header height
+        html += `<line x1="${_lx}" y1="${_ly}" x2="${_rx}" y2="${_ry}" `
+             + `stroke="${lineColor}" stroke-width="1.5" `
+             + `stroke-dasharray="3,3" opacity="0.7" `
+             + `pointer-events="none" />`;
+        const _cmx = (_lx + _rx) / 2, _cmy = (_ly + _ry) / 2 - 4;
+        html += `<text x="${_cmx}" y="${_cmy}" text-anchor="middle" `
+             + `fill="${lineColor}" font-size="8" font-style="italic" `
+             + `font-family="monospace" pointer-events="none">is</text>`;
+      }
 
       const dragId = `dbcon:${src.sid}:${e.con_name}`;
       html += `<g class="node-box" data-dbcon="${escHtml(src.sid + '|' + e.con_name)}" `
