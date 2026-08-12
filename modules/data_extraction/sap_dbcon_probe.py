@@ -108,7 +108,11 @@ def read_dbcon(node: SAPNode, creds: Credentials = None) -> list:
         return conn.call(RFC_READ_TABLE, **kw)
 
     def _pick_rows(res):
-        wide   = res.get("ET_DATA_4_RETURN") or []
+        # The flag is called USE_ET_DATA_4_RETURN but the export
+        # parameter the FM actually populates is ET_DATA (confirmed
+        # via SE37 on S/4 2025).  Some kernels alias it to
+        # ET_DATA_4_RETURN — read both, prefer whichever has rows.
+        wide = (res.get("ET_DATA") or res.get("ET_DATA_4_RETURN") or [])
         narrow = res.get("DATA") or []
         return (wide if wide else narrow, len(narrow), len(wide))
 
@@ -151,7 +155,7 @@ def read_dbcon(node: SAPNode, creds: Credentials = None) -> list:
                     else:
                         print(f"[*] {node.sid}: read_dbcon: {table} "
                               f"variant {v_idx} → 0 rows (DATA={n_narrow}, "
-                              f"ET_DATA_4_RETURN={n_wide}, flag={_flag})"
+                              f"ET_DATA={n_wide}, flag={_flag})"
                               + (f" — RETURN: {return_msgs}"
                                  if return_msgs else ""))
                 if result is not None:

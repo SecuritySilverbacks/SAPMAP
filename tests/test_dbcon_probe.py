@@ -144,7 +144,7 @@ def test_read_dbcon_prefers_wide_bucket_when_flag_accepted(monkeypatch):
         assert kw.get("USE_ET_DATA_4_RETURN") == "X"
         return {
             "DATA": [],
-            "ET_DATA_4_RETURN": [
+            "ET_DATA": [
                 {"WA": "HDB_DWH|HDB|SAPMAP|10.0.0.14:30215"},
                 {"WA": "ORA_LEG|ORA|SYS|HOST=oracle01 PORT=1521"},
             ],
@@ -164,7 +164,7 @@ def test_read_dbcon_falls_back_to_narrow_bucket(monkeypatch):
     def _pred(kw):
         return {
             "DATA": [{"WA": "HDB_DWH|HDB|SAPMAP|10.0.0.14:30215"}],
-            "ET_DATA_4_RETURN": [],
+            "ET_DATA": [],
         }
     conn = _FakeRFCConn(_pred)
     _install_fake_rfc(monkeypatch, conn)
@@ -194,7 +194,7 @@ def test_read_dbcon_retries_without_flag_on_kwarg_reject(monkeypatch):
 def test_read_dbcon_empty_both_buckets_returns_empty(monkeypatch):
     """When both RFC_READ_TABLE and the ABAP fallback return empty,
     read_dbcon returns []."""
-    conn = _FakeRFCConn(lambda kw: {"DATA": [], "ET_DATA_4_RETURN": []})
+    conn = _FakeRFCConn(lambda kw: {"DATA": [], "ET_DATA": []})
     _install_fake_rfc(monkeypatch, conn)
     monkeypatch.setattr(dbcon, "_read_dbcon_via_abap",
                           lambda node, creds: [])
@@ -206,7 +206,7 @@ def test_read_dbcon_falls_back_to_abap_when_all_rfc_empty(monkeypatch):
     rows on every candidate table because DBCON is on the FM's
     protected-tables deny-list.  We must fall through to the
     RFC_ABAP_INSTALL_AND_RUN direct-SELECT path."""
-    conn = _FakeRFCConn(lambda kw: {"DATA": [], "ET_DATA_4_RETURN": []})
+    conn = _FakeRFCConn(lambda kw: {"DATA": [], "ET_DATA": []})
     _install_fake_rfc(monkeypatch, conn)
     called = {"n": 0}
     def _fake_abap(node, creds):
@@ -275,7 +275,7 @@ def test_read_dbcon_via_abap_failure_returns_empty(monkeypatch):
 
 
 def test_read_dbcon_malformed_row_skipped(monkeypatch):
-    conn = _FakeRFCConn(lambda kw: {"ET_DATA_4_RETURN": [
+    conn = _FakeRFCConn(lambda kw: {"ET_DATA": [
         {"WA": "GOOD|HDB|U|h:30015"},
         {"WA": "|HDB|U|h:30015"},           # empty con_name
         {"WA": "TOO|FEW"},                   # missing fields
