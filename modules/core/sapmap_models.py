@@ -572,6 +572,11 @@ class SAPNode:
     db_type: str = ""                   # HDB, ORA, MSS, ADA, DB6
     kernel: str = ""
     sap_release: str = ""
+    # External DBs this ABAP calls via NATIVE_SQL / ADBC (DBCON
+    # entries paired with RSECTAB /DBCON/<CONNAME> passwords).
+    # Populated by sap_dbcon_probe.integrate_dbcon_from_secstore.
+    # Issue #21.
+    dbcon_edges: list = field(default_factory=list)   # [DBCONConnection, ...]
     clients: list = field(default_factory=list)     # [{"nr": "100", "category": "P"}, ...]
     is_production: bool = False
     findings: list = field(default_factory=list)    # [Finding, ...]
@@ -910,6 +915,7 @@ class SAPNode:
             "db_type": self.db_type,
             "kernel": self.kernel,
             "sap_release": self.sap_release,
+            "dbcon_edges": [e.to_dict() for e in (self.dbcon_edges or [])],
             "clients": self.clients,
             "is_production": self.is_production,
             "findings": [f.to_dict() for f in self.findings],
@@ -1023,6 +1029,8 @@ class SAPNode:
             db_type=d.get("db_type", ""),
             kernel=d.get("kernel", ""),
             sap_release=d.get("sap_release", ""),
+            dbcon_edges=[DBCONConnection.from_dict(e)
+                         for e in d.get("dbcon_edges", [])],
             clients=d.get("clients", []),
             is_production=d.get("is_production", False),
             findings=[Finding.from_dict(f) for f in d.get("findings", [])],
@@ -1127,6 +1135,58 @@ class SAPNode:
                 d.get("capability_row_counts", {})),
         )
         return node
+
+
+# ---------------------------------------------------------------------------
+# DBCONConnection — an external DB the source ABAP calls via NATIVE_SQL.
+# Discovered by pairing RSECTAB `/DBCON/<CONNAME>` entries with the
+# DBCON table row of the same CON_NAME.  When the paired credential
+# opens successfully and the target schema carries USR02, SAPMAP can
+# create SAPMAP00 there directly via the DB driver — no RFC hop, no
+# SAPXPG on the target.  Non-SAP targets get a data-dump path.  Issue #21.
+# ---------------------------------------------------------------------------
+
+@dataclass
+class DBCONConnection:
+    source_sid:   str = ""     # SID of the ABAP node that owns this DBCON entry
+    con_name:     str = ""     # /DBCON/<con_name>  — DBCON.CON_NAME
+    dbms:         str = ""     # HDB | ORA | MSS | DB6 | ADA | SYB (upper)
+    host:         str = ""     # parsed from DBCON.CON_ENV
+    port:         int = 0
+    user:         str = ""     # DBCON.USER_NAME
+    password:     str = ""     # from RSECTAB (plaintext — matches secstore precedent)
+    dbname:       str = ""     # HANA MDC tenant / DB2 DB name / MSSQL initial catalog
+    tested:       bool = False
+    reachable:    bool = False
+    is_sap_shape: bool = False  # target schema has USR02 → SAP-side DB
+    target_sid:   str = ""     # T000-SYSID on the other side (once tested)
+    pwned:        bool = False  # SAPMAP00 created on the target via direct SQL
+    error:        str = ""
+    tested_at:    str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "source_sid":   self.source_sid,
+            "con_name":     self.con_name,
+            "dbms":         self.dbms,
+            "host":         self.host,
+            "port":         self.port,
+            "user":         self.user,
+            "password":     self.password,
+            "dbname":       self.dbname,
+            "tested":       self.tested,
+            "reachable":    self.reachable,
+            "is_sap_shape": self.is_sap_shape,
+            "target_sid":   self.target_sid,
+            "pwned":        self.pwned,
+            "error":        self.error,
+            "tested_at":    self.tested_at,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "DBCONConnection":
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in d.items() if k in known})
 
 
 # ---------------------------------------------------------------------------

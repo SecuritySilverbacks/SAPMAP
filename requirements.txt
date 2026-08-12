@@ -30,6 +30,21 @@ mcp>=1.0            # Model Context Protocol SDK for LLM integration (--mcp)
 #
 # pyjks>=20         # PBE-with-SHA-and-3DES-CBC keystore reader
 
+# --- Optional: DBCON direct-DB pivot (issue #21) ---
+# hdbcli is SAP's official HANA Python driver.  Enables the DBCON
+# direct-connect pivot in modules/data_extraction/sap_dbcon_probe.py
+# — after SecStore extraction SAPMAP pairs the /DBCON/<name> secrets
+# with the DBCON table and, if hdbcli is installed, connects to each
+# external HANA over the wire (bypassing the source SAP), fingerprints
+# whether it is SAP-shape (USR02 present), reads T000-SYSID, and
+# optionally creates SAPMAP00 via the direct-SQL user-create chain.
+# Without hdbcli the feature degrades gracefully — the DBCON edges
+# still appear on the map but "Test Connection" reports a missing
+# driver.  v1 covers HANA only; MSSQL / Oracle / DB2 / MaxDB drivers
+# will be added when v2 lands.
+#
+# hdbcli>=2.19       # SAP HANA Python client (pip install hdbcli)
+
 # --- Optional platform GUI extras ---
 # pyobjc-framework-Cocoa ; sys_platform == "darwin"   # macOS dock icon
 # pygobject         ; sys_platform == "linux"         # Linux GTK/WebKit2 native window

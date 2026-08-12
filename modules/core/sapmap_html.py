@@ -4674,6 +4674,124 @@ function updateMap() {
     html += '</g>';
   });
 
+  // Draw DBCON edges (issue #21) — external databases the source
+  // ABAP calls via NATIVE_SQL, discovered by pairing RSECTAB
+  // /DBCON/<name> entries with the DBCON table.  Each edge is
+  // rendered as a database-cylinder-shape node placed to the right
+  // of its source, plus a connecting line whose colour reflects
+  // probe state (dashed grey = untested, green = reachable, red =
+  // unreachable) and a lightning glyph when SAPMAP has planted a
+  // user on the target via direct SQL.
+  const DB_BOX_W = 150, DB_BOX_H = 100;
+  Object.values(nodes).forEach(src => {
+    const edges = src.dbcon_edges || [];
+    if (!edges.length) return;
+    // Stack DBCON nodes vertically to the right of the source
+    // (or below when source is far to the right of the canvas).
+    const srcX = src._x || 0, srcY = src._y || 0;
+    const baseX = srcX + 240 + 80;   // BOX_W (240) + gap
+    let stackY = srcY;
+    edges.forEach((e, i) => {
+      // Cache the auto-computed position on the edge itself so the
+      // detail panel and next render pass agree.
+      if (e._x === undefined) e._x = baseX;
+      if (e._y === undefined) e._y = stackY + i * (DB_BOX_H + 24);
+      const x = e._x, y = e._y;
+
+      // Cylinder silhouette: top ellipse + rectangle body + bottom ellipse arc.
+      const rx = DB_BOX_W / 2, ry = 14;
+      const cx = x + rx;
+      const yTop = y, yBottom = y + DB_BOX_H;
+      const yMid = yTop + ry;
+      const yBottomBand = yBottom - ry;
+      // Fill / border reflect probe state
+      let fill = "#1c2128";
+      let stroke = "#8b949e";
+      let strokeW = 2;
+      let labelColor = "#8b949e";
+      if (e.pwned) {
+        fill = "#4d1c1c"; stroke = "#8b0000"; strokeW = 5; labelColor = "#f0883e";
+      } else if (e.reachable && e.is_sap_shape) {
+        fill = "#1c2f1c"; stroke = "#3fb950"; strokeW = 4; labelColor = "#3fb950";
+      } else if (e.reachable) {
+        fill = "#2d2c1c"; stroke = "#d29922"; strokeW = 4; labelColor = "#d29922";
+      } else if (e.tested) {
+        fill = "#2d1c1c"; stroke = "#f85149"; strokeW = 3; labelColor = "#f85149";
+      }
+
+      // Connecting line: source-node right-edge → cylinder left-edge.
+      // Colour follows probe state (dashed grey untested → solid
+      // green on reachable+SAP-shape → red on unreachable).
+      let lineColor, lineDash;
+      if (e.pwned) { lineColor = '#f0883e'; lineDash = ''; }
+      else if (e.reachable && e.is_sap_shape) { lineColor = '#3fb950'; lineDash = ''; }
+      else if (e.reachable) { lineColor = '#d29922'; lineDash = ''; }
+      else if (e.tested) { lineColor = '#f85149'; lineDash = '5,4'; }
+      else { lineColor = '#8b949e'; lineDash = '5,4'; }
+      const _sx = srcX + 240;      // right edge of source SAP box
+      const _sy = srcY + 60;       // roughly middle of source header row
+      const _tx = x;               // left edge of cylinder
+      const _ty = y + DB_BOX_H / 2;
+      const dashAttr = lineDash ? ` stroke-dasharray="${lineDash}"` : '';
+      html += `<line x1="${_sx}" y1="${_sy}" x2="${_tx}" y2="${_ty}" `
+           + `stroke="${lineColor}" stroke-width="2"${dashAttr} `
+           + `pointer-events="none" opacity="0.85" />`;
+      // Line label (DBCON name) at midpoint
+      const _mx = (_sx + _tx) / 2, _my = (_sy + _ty) / 2 - 4;
+      html += `<text x="${_mx}" y="${_my}" text-anchor="middle" `
+           + `fill="${lineColor}" font-size="9" font-family="monospace" `
+           + `pointer-events="none">${escHtml(e.dbms || 'DB')}</text>`;
+
+      const dragId = `dbcon:${src.sid}:${e.con_name}`;
+      html += `<g class="node-box" data-dbcon="${escHtml(src.sid + '|' + e.con_name)}" `
+           + `onmousedown="startDrag(event,'${dragId}')" `
+           + `onclick="showDBCONDetail('${escHtml(src.sid)}','${escHtml(e.con_name)}')" `
+           + `oncontextmenu="showDBCONCtxMenu(event,'${escHtml(src.sid)}','${escHtml(e.con_name)}')">`;
+      // Body rectangle (between the two ellipses)
+      html += `<rect x="${x}" y="${yMid}" width="${DB_BOX_W}" `
+           + `height="${yBottomBand - yMid}" fill="${fill}" stroke="none" />`;
+      // Top ellipse (full)
+      html += `<ellipse cx="${cx}" cy="${yMid}" rx="${rx}" ry="${ry}" `
+           + `fill="${fill}" stroke="${stroke}" stroke-width="${strokeW}" />`;
+      // Bottom ellipse (front half only — an arc)
+      html += `<path d="M${x},${yBottomBand} A${rx},${ry} 0 0 0 ${x + DB_BOX_W},${yBottomBand}" `
+           + `fill="none" stroke="${stroke}" stroke-width="${strokeW}" />`;
+      // Body side lines
+      html += `<line x1="${x}" y1="${yMid}" x2="${x}" y2="${yBottomBand}" stroke="${stroke}" stroke-width="${strokeW}" />`;
+      html += `<line x1="${x + DB_BOX_W}" y1="${yMid}" x2="${x + DB_BOX_W}" y2="${yBottomBand}" stroke="${stroke}" stroke-width="${strokeW}" />`;
+      // Two horizontal bands inside body (canonical DB icon)
+      const bandY1 = yMid + (yBottomBand - yMid) * 0.33;
+      const bandY2 = yMid + (yBottomBand - yMid) * 0.66;
+      html += `<path d="M${x},${bandY1} A${rx},${ry} 0 0 0 ${x + DB_BOX_W},${bandY1}" fill="none" stroke="${stroke}" stroke-width="1.5" opacity="0.6" />`;
+      html += `<path d="M${x},${bandY2} A${rx},${ry} 0 0 0 ${x + DB_BOX_W},${bandY2}" fill="none" stroke="${stroke}" stroke-width="1.5" opacity="0.6" />`;
+
+      // Text — label, dbms, host:port, target sid
+      const label = e.con_name || 'DBCON';
+      html += `<text x="${cx}" y="${yMid + 8}" text-anchor="middle" `
+           + `fill="${labelColor}" font-size="12" font-weight="bold" `
+           + `font-family="monospace" pointer-events="none">${escHtml(label.slice(0, 16))}</text>`;
+      html += `<text x="${cx}" y="${yMid + 24}" text-anchor="middle" `
+           + `fill="#cfd9df" font-size="10" font-family="monospace" `
+           + `pointer-events="none">${escHtml(e.dbms || '?')}</text>`;
+      html += `<text x="${cx}" y="${yMid + 40}" text-anchor="middle" `
+           + `fill="#8b949e" font-size="9" font-family="monospace" `
+           + `pointer-events="none">${escHtml((e.host || '?').slice(0, 20))}:${e.port || '?'}</text>`;
+      if (e.target_sid) {
+        html += `<text x="${cx}" y="${yMid + 54}" text-anchor="middle" `
+             + `fill="${labelColor}" font-size="10" font-family="monospace" `
+             + `pointer-events="none" font-weight="bold">SID: ${escHtml(e.target_sid)}</text>`;
+      }
+      // Lightning bolt on pwn
+      if (e.pwned) {
+        html += `<text x="${x + DB_BOX_W - 10}" y="${y + 18}" font-size="26" `
+             + `fill="#f0883e" stroke="#0d1117" stroke-width="2.5" paint-order="stroke" `
+             + `text-anchor="middle" dominant-baseline="middle" font-weight="bold" `
+             + `pointer-events="none">&#9889;</text>`;
+      }
+      html += '</g>';
+    });
+  });
+
   // Draw unknown target boxes (dashed border, dimmed)
   if (showUnknown) {
     for (const key in unknownTargets) {
@@ -9945,6 +10063,105 @@ function showSCCDetail(host, opts) {
   if (refresh && preservedScroll) panel.scrollTop = preservedScroll;
 }
 
+function _getDBCONEdge(srcSid, conName) {
+  const src = mapState.nodes[srcSid];
+  if (!src) return null;
+  return (src.dbcon_edges || []).find(e => e.con_name === conName) || null;
+}
+
+async function runDBCONTest(srcSid, conName) {
+  flashActivity(`${srcSid}: DBCON test → ${conName}`, 4000);
+  await api('POST', `node/${srcSid}/dbcon/test`, { con_name: conName });
+  startPolling();
+}
+
+async function runDBCONCreateUser(srcSid, conName) {
+  const edge = _getDBCONEdge(srcSid, conName);
+  if (!edge) return;
+  if (!edge.reachable) {
+    alert('Run "Test Connection" first — need to verify the DBCON is reachable.');
+    return;
+  }
+  if (!edge.is_sap_shape) {
+    alert('DBCON target is not a SAP-shape DB (USR02 not present). Direct user creation only works against SAP DBs.');
+    return;
+  }
+  const client = prompt(
+    `Create SAPMAP00 on ${edge.target_sid || conName} via direct ${edge.dbms}?\n\n` +
+    `This runs 17 INSERT/UPDATE statements on ${edge.host}:${edge.port} using the DBCON password.\n\n` +
+    `Client:`, '000');
+  if (client === null) return;
+  flashActivity(`${srcSid}: DBCON create SAPMAP00 → ${conName}`, 6000);
+  await api('POST', `node/${srcSid}/dbcon/create_user`, {
+    con_name: conName, client: (client || '000').trim() });
+  startPolling();
+}
+
+function showDBCONCtxMenu(e, srcSid, conName) {
+  e.preventDefault();
+  e.stopPropagation();
+  const edge = _getDBCONEdge(srcSid, conName);
+  if (!edge) return;
+  // Reuse the generic ctx-menu container; wire two actions.
+  const menu = document.getElementById('ctx-menu') || (() => {
+    const d = document.createElement('div');
+    d.id = 'ctx-menu';
+    d.className = 'ctx-menu';
+    document.body.appendChild(d);
+    return d;
+  })();
+  const testLbl = edge.tested
+    ? (edge.reachable ? 'Re-test connection ✓' : 'Re-test connection ✗')
+    : 'Test connection';
+  const createLbl = edge.is_sap_shape
+    ? 'Create SAPMAP00 via direct SQL'
+    : 'Create user (needs reachable SAP-shape DB)';
+  const createDisabled = !edge.is_sap_shape;
+  menu.innerHTML = `
+    <div class="ctx-header">DBCON ${escHtml(conName)} (${escHtml(edge.dbms || '?')})</div>
+    <div class="ctx-item" onclick="runDBCONTest('${escHtml(srcSid)}','${escHtml(conName)}');closeCtxMenu()">${testLbl}</div>
+    <div class="ctx-item${createDisabled ? ' ctx-item-disabled' : ''}" `
+    + `onclick="${createDisabled ? '' : `runDBCONCreateUser('${escHtml(srcSid)}','${escHtml(conName)}');`}closeCtxMenu()">`
+    + `${createLbl}</div>
+    <div class="ctx-item" onclick="showDBCONDetail('${escHtml(srcSid)}','${escHtml(conName)}');closeCtxMenu()">Show details</div>
+  `;
+  menu.style.left = e.clientX + 'px';
+  menu.style.top  = e.clientY + 'px';
+  menu.style.display = 'block';
+}
+
+function showDBCONDetail(srcSid, conName) {
+  const edge = _getDBCONEdge(srcSid, conName);
+  if (!edge) return;
+  const panel = document.getElementById('info-panel');
+  panel.dataset.sid = `dbcon:${srcSid}:${conName}`;
+  const stateChip = edge.pwned ? '<span class="risk-badge risk-CRITICAL">&#9889; PWNED</span>'
+    : edge.reachable && edge.is_sap_shape ? '<span class="risk-badge risk-HIGH">SAP-shape reachable</span>'
+    : edge.reachable ? '<span class="risk-badge risk-MEDIUM">Reachable (non-SAP)</span>'
+    : edge.tested ? '<span class="risk-badge risk-LOW">Unreachable</span>'
+    : '<span class="risk-badge">Untested</span>';
+  panel.innerHTML = `
+    <h3>DBCON — ${escHtml(conName)}</h3>
+    <div class="info-row"><span class="info-label">Source:</span><span class="info-val">${escHtml(srcSid)}</span></div>
+    <div class="info-row"><span class="info-label">DBMS:</span><span class="info-val">${escHtml(edge.dbms || '?')}</span></div>
+    <div class="info-row"><span class="info-label">Host:</span><span class="info-val mono">${escHtml(edge.host || '?')}</span></div>
+    <div class="info-row"><span class="info-label">Port:</span><span class="info-val">${edge.port || '?'}</span></div>
+    <div class="info-row"><span class="info-label">User:</span><span class="info-val mono">${escHtml(edge.user || '?')}</span></div>
+    ${edge.dbname ? `<div class="info-row"><span class="info-label">Tenant:</span><span class="info-val mono">${escHtml(edge.dbname)}</span></div>` : ''}
+    <div class="info-row"><span class="info-label">Password:</span><span class="info-val" style="color:#3fb950">&#9679;&#9679;&#9679;&#9679; (${(edge.password||'').length} chars — from SecStore)</span></div>
+    ${edge.target_sid ? `<div class="info-row"><span class="info-label">Target SID:</span><span class="info-val mono" style="color:#3fb950;font-weight:bold">${escHtml(edge.target_sid)}</span></div>` : ''}
+    <div class="info-row"><span class="info-label">Status:</span><span class="info-val">${stateChip}</span></div>
+    ${edge.tested_at ? `<div class="info-row"><span class="info-label">Tested at:</span><span class="info-val" style="font-size:11px;color:#8b949e">${escHtml(edge.tested_at)}</span></div>` : ''}
+    ${edge.error ? `<div class="info-section" style="color:#f85149;font-size:11px">${escHtml(edge.error)}</div>` : ''}
+    <div style="text-align:right;margin-top:12px;display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">
+      <button class="btn" onclick="runDBCONTest('${escHtml(srcSid)}','${escHtml(conName)}')">${edge.tested ? 'Re-test' : 'Test Connection'}</button>
+      ${edge.is_sap_shape ? `<button class="btn" style="background:#b33;color:#fff" onclick="runDBCONCreateUser('${escHtml(srcSid)}','${escHtml(conName)}')">Create SAPMAP00 (direct SQL)</button>` : ''}
+      <button class="btn" onclick="document.getElementById('info-panel').classList.remove('visible')">Close</button>
+    </div>
+  `;
+  panel.classList.add('visible');
+}
+
 function showBTPDetail(uuid, opts) {
   const bn = (mapState.btp_subaccounts || {})[uuid];
   if (!bn) return;
@@ -14427,6 +14644,18 @@ function _getDragTarget(sid) {
   if (sid.startsWith('unk:')) return unkPositions[sid.slice(4)];
   if (sid.startsWith('scc:')) return (mapState.scc_nodes || {})[sid.slice(4)];
   if (sid.startsWith('btp:')) return (mapState.btp_subaccounts || {})[sid.slice(4)];
+  // dbcon:<source_sid>:<con_name> — issue #21 DBCON cylinders
+  if (sid.startsWith('dbcon:')) {
+    const rest = sid.slice(6);
+    const colonIdx = rest.indexOf(':');
+    if (colonIdx < 0) return null;
+    const srcSid = rest.slice(0, colonIdx);
+    const conName = rest.slice(colonIdx + 1);
+    const src = mapState.nodes[srcSid];
+    if (!src) return null;
+    return (src.dbcon_edges || []).find(
+      e => e.con_name === conName) || null;
+  }
   return mapState.nodes[sid];
 }
 function startDrag(e, sid) {
@@ -14906,7 +15135,11 @@ document.addEventListener('mousemove', e => {
 });
 
 document.addEventListener('mouseup', () => {
-  if (dragNode && !dragMoved && !dragNode.startsWith('unk:')) showDetails(dragNode);
+  if (dragNode && !dragMoved
+      && !dragNode.startsWith('unk:')
+      && !dragNode.startsWith('scc:')
+      && !dragNode.startsWith('btp:')
+      && !dragNode.startsWith('dbcon:')) showDetails(dragNode);
   dragNode = null; isPanning = false;
 });
 

@@ -112,6 +112,10 @@ def test_every_capability_in_attack_map_has_remediation_or_explicit_exemption():
         "data.read_table", "data.capability_analyse",
         "data.scc_users_dump", "data.scc_users_dump_via_lpe",
         "data.loot_stage",
+        # DBCON direct-DB pivot (issue #21) — post-foothold; the
+        # remediation (rotate the DBCON password, review who can
+        # read RSECTAB) is landscape-policy not per-finding.
+        "lateral.dbcon_direct", "data.dbcon_dump",
     }
     missing = []
     for cap in sapmap_attack.CAPABILITY_MAP:

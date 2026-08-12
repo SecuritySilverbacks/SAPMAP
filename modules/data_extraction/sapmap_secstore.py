@@ -1707,6 +1707,29 @@ def integrate_results(node, state, results: list):
                   f"{conn.rfc_user}@{target_node.sid} client {client} "
                   f"(from {conn.destination_name})")
 
+    # --- Pair /DBCON/<CONNAME> entries with DBCON table rows ---
+    # Issue #21 — every `db`-category secstore entry has a plaintext
+    # password but no host / port / DBMS metadata.  DBCON table holds
+    # the other half; join them into DBCONConnection edges on the node
+    # so the panel + map can offer a direct-DB pivot.  Silent when no
+    # `db` entries or when RFC_READ_TABLE is denied — the operator
+    # gets a hint in the console either way.
+    try:
+        db_entries_present = any(
+            e.get("category") == "db" and e.get("password")
+            for e in results)
+        if db_entries_present:
+            from sap_dbcon_probe import integrate_dbcon_from_secstore
+            _creds = None
+            try:
+                _creds = node.best_credentials()
+            except Exception:
+                pass
+            integrate_dbcon_from_secstore(node, state, _creds)
+    except Exception as _e:
+        print(f"[!] SecStore: DBCON pair failed on {node.sid} — "
+              f"{type(_e).__name__}: {_e}")
+
 
 # ---------------------------------------------------------------------------
 # Loot persistence
