@@ -10230,21 +10230,25 @@ function _showDBCONColumnsOverlay(schema, table, res) {
   document.body.appendChild(div);
 }
 
-function _downloadDBCONPeekCSV(schema, table) {
+async function _saveDBCONPeekCSV(srcSid, conName, schema, table) {
+  // pywebview's embedded browser doesn't honor <a download> for
+  // blob:/data: URLs — it navigates the current window and renders
+  // the CSV as text.  Route through the server instead: POST the
+  // in-memory rows to the backend which writes to loot/ and
+  // returns the file path.  Matches the USR02 dump save pattern.
   const overlay = document.getElementById('dbcon-peek-overlay');
   if (!overlay) return;
   const rowsData = overlay._peekRows || [];
-  const cols = overlay._peekCols || [];
-  const esc = v => v === null ? '' : `"${String(v).replace(/"/g, '""')}"`;
-  const csv = [cols.map(esc).join(',')]
-    .concat(rowsData.map(r => r.map(esc).join(',')))
-    .join('\n');
-  const blob = new Blob([csv], { type: 'text/csv' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `dbcon_${schema}_${table}_${Date.now()}.csv`;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  const cols     = overlay._peekCols || [];
+  if (!rowsData.length) { alert('No rows to export.'); return; }
+  const r = await api('POST', `node/${srcSid}/dbcon/save_peek_csv`, {
+    con_name: conName, schema, table,
+    columns: cols, rows: rowsData });
+  if (r && r.error) { alert(`Save failed: ${r.error}`); return; }
+  if (r && r.ok) {
+    alert(`CSV saved to loot:\n${r.loot_path}\n\n` +
+      `${r.rows} row(s), ${r.columns} column(s).`);
+  }
 }
 
 async function runDBCONPeekCustom(srcSid, conName) {
@@ -10325,7 +10329,7 @@ function _showDBCONPeekOverlay(srcSid, conName, schema, table, res) {
         <span style="color:#8b949e;margin-left:12px">${(res.rows||[]).length} row(s), ${(res.columns||[]).length} col(s)${res.truncated ? ' — truncated' : ''}</span></div>
       <div style="display:flex;gap:6px">
         <button class="btn" onclick="runDBCONDescribe('${escHtml(srcSid)}','${escHtml(conName)}','${escHtml(schema)}','${escHtml(table)}')">&#128712; Columns</button>
-        <button class="btn" style="background:#238636;color:#fff" onclick="_downloadDBCONPeekCSV('${escHtml(schema)}','${escHtml(table)}')">&#8681; CSV</button>
+        <button class="btn" style="background:#238636;color:#fff" onclick="_saveDBCONPeekCSV('${escHtml(srcSid)}','${escHtml(conName)}','${escHtml(schema)}','${escHtml(table)}')">&#8681; Save CSV to loot</button>
         <button class="btn" onclick="this.closest('#dbcon-peek-overlay').remove()">Close</button>
       </div>
     </div>

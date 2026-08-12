@@ -769,6 +769,39 @@ def test_peek_hana_table_rejects_bad_identifier():
     assert r["ok"] is False and "invalid schema identifier" in r["error"]
 
 
+def test_peek_hana_table_hex_encodes_binary_columns(monkeypatch):
+    """RAW/BLOB columns come back as memoryview / bytes from hdbcli.
+    str(v) → '<memory at 0x…>' which is useless in a CSV.  We must
+    hex-encode instead so the value round-trips."""
+    class _Cur(_FakeCursor):
+        description = [("BNAME",), ("BCODE",), ("PASSCODE",)]
+        def execute(self, sql, params=None): pass
+        def fetchall(self):
+            return [
+                ("DDIC", memoryview(b"\xde\xad\xbe\xef"),
+                 b"\xca\xfe\xba\xbe\xff"),
+                ("SAPADM", None, bytearray(b"\x00\x11")),
+            ]
+    class _Conn(_FakeConn):
+        def cursor(self): return _Cur(self._map)
+    conn = _Conn({})
+    monkeypatch.setattr(dbcon, "_import_hdbcli",
+                          lambda: (_fake_dbapi_module(conn), None))
+    e = DBCONConnection(source_sid="S4H", con_name="X", dbms="HDB",
+                          host="h", port=30215, user="x", password="y",
+                          reachable=True)
+    r = dbcon.peek_hana_table(e, "SAPHANADB", "USR02", limit=5)
+    assert r["ok"] is True
+    assert r["rows"][0] == ["DDIC", "DEADBEEF", "CAFEBABEFF"]
+    assert r["rows"][1] == ["SAPADM", None, "0011"]
+    # Absolutely never the Python repr
+    for row in r["rows"]:
+        for v in row:
+            if v is not None:
+                assert "<memory" not in v, \
+                    f"binary column leaked Python repr: {v!r}"
+
+
 def test_peek_hana_table_happy_path(monkeypatch):
     class _Cur(_FakeCursor):
         description = [("COL1",), ("COL2",)]

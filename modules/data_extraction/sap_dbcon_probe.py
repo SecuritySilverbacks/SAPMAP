@@ -898,11 +898,22 @@ def peek_hana_table(edge: DBCONConnection, schema: str, table: str,
         try:
             cur.execute(sql)
             out["columns"] = [d[0] for d in (cur.description or [])]
+            def _cell(v):
+                if v is None:
+                    return None
+                # hdbcli returns memoryview / bytes for RAW/BLOB/LOB
+                # columns.  str(memoryview) → "<memory at 0x…>" which
+                # is useless; hex-encode instead (matches the USR02
+                # dump format so CSVs are downstream-compatible).
+                if isinstance(v, memoryview):
+                    return v.tobytes().hex().upper()
+                if isinstance(v, (bytes, bytearray)):
+                    return bytes(v).hex().upper()
+                if hasattr(v, "isoformat"):
+                    return v.isoformat()
+                return str(v)
             for r in cur.fetchall():
-                out["rows"].append([
-                    (v.isoformat() if hasattr(v, "isoformat")
-                     else (str(v) if v is not None else None))
-                    for v in r])
+                out["rows"].append([_cell(v) for v in r])
             out["truncated"] = len(out["rows"]) == limit
             out["ok"] = True
         finally:

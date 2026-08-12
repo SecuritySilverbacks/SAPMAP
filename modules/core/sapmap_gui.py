@@ -13718,6 +13718,60 @@ def create_app(api: SAPMAPApi) -> Bottle:
             return json.dumps({"error":
                 f"peek crashed: {type(_ex).__name__}: {_ex}"})
 
+    @app.route("/api/node/<sid>/dbcon/save_peek_csv", method="POST")
+    def node_dbcon_save_peek_csv(sid):
+        """Persist a peek result to loot/ as a CSV file.  Client-side
+        `<a download>` doesn't work reliably in pywebview (opens the
+        CSV in-window instead of downloading), so we route through
+        the server — same pattern USR02 hash dump uses.
+
+        Body: {con_name, schema, table, columns:[str], rows:[[...],...]}
+        """
+        response.content_type = "application/json"
+        data = request.json or {}
+        con_name = (data.get("con_name") or "").strip()
+        schema   = (data.get("schema") or "").strip()
+        table    = (data.get("table") or "").strip()
+        columns  = data.get("columns") or []
+        rows     = data.get("rows") or []
+        if not (con_name and schema and table):
+            return json.dumps({
+                "error": "con_name, schema, table required"})
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        import os as _os, csv as _csv
+        from datetime import datetime as _dt
+        loot_dir = _os.path.join(_os.getcwd(), "loot", "dbcon")
+        try:
+            _os.makedirs(loot_dir, exist_ok=True)
+            ts = _dt.utcnow().strftime("%Y%m%d_%H%M%S")
+            safe = lambda s: "".join(
+                c if c.isalnum() or c in "-_" else "_" for c in s)
+            path = _os.path.join(
+                loot_dir,
+                f"peek_{safe(schema)}_{safe(table)}_{safe(con_name)}_{ts}.csv")
+            with open(path, "w", newline="") as fh:
+                w = _csv.writer(fh)
+                w.writerow(columns)
+                for r in rows:
+                    w.writerow(["" if v is None else str(v) for v in r])
+            try:
+                _os.chmod(path, 0o600)
+            except Exception:
+                pass
+            print(f"[+] {sid}: DBCON peek CSV saved → {path} "
+                  f"({len(rows)} rows, {len(columns)} cols)")
+            return json.dumps({
+                "ok": True, "loot_path": path,
+                "rows": len(rows), "columns": len(columns)})
+        except Exception as _ex:
+            import traceback as _tb
+            _tb.print_exc()
+            return json.dumps({
+                "error": f"save failed: {type(_ex).__name__}: {_ex}"})
+
     @app.route("/api/node/<sid>/dbcon/describe_table", method="POST")
     def node_dbcon_describe_table(sid):
         """Return column metadata for schema.table — sync, small
