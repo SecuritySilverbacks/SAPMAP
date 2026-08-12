@@ -534,6 +534,108 @@ def test_probe_hdb_non_sap_shape(monkeypatch):
     assert e.target_sid == ""
 
 
+def test_probe_hdb_resolves_target_sid_via_schema_qualified_t000(monkeypatch):
+    """Regression: on modern HANA the connected user's default
+    search path often doesn't include T000, so the unqualified
+    `SELECT SYSID FROM T000` fails silently and target_sid stays
+    empty — which then skips the materialize-as-SAP-node step.
+    The resolver must fall through to schema-qualified T000."""
+    class _SchemaCur(_FakeCursor):
+        def execute(self, sql, params=None):
+            self._sql = sql
+            if "USR02" in sql:
+                pass  # succeed, is_sap_shape=True
+            elif sql == "SELECT SYSID FROM T000":
+                # HANA 259 — unqualified T000 not in search path
+                exc = Exception("(259, 'invalid table name: T000')")
+                exc.errorcode = 259
+                raise exc
+            elif '"SAPHANADB"."T000"' in sql:
+                # Schema-qualified — works
+                pass
+        def fetchone(self):
+            if "USR02" in self._sql: return (42,)
+            if '"SAPHANADB"."T000"' in self._sql: return ("DWH",)
+            return None
+
+    class _Conn(_FakeConn):
+        def cursor(self): return _SchemaCur(self._map)
+
+    conn = _Conn({})
+    monkeypatch.setattr(dbcon, "_import_hdbcli",
+                          lambda: (_fake_dbapi_module(conn), None))
+    e = DBCONConnection(source_sid="S4H", con_name="X", dbms="HDB",
+                          host="h", port=30215, user="x", password="y")
+    dbcon.probe_dbcon_edge(e)
+    assert e.is_sap_shape is True
+    assert e.target_sid == "DWH", \
+        "resolver must fall through to schema-qualified T000"
+
+
+def test_probe_hdb_resolves_target_sid_via_m_host_information(monkeypatch):
+    """Both unqualified and schema-qualified T000 fail — resolver
+    must still resolve target_sid via M_HOST_INFORMATION."""
+    class _MHostCur(_FakeCursor):
+        def execute(self, sql, params=None):
+            self._sql = sql
+            if "USR02" in sql:
+                return
+            if "T000" in sql:
+                exc = Exception("(259, 'invalid table name')")
+                exc.errorcode = 259
+                raise exc
+            if "M_HOST_INFORMATION" in sql:
+                return
+            if "M_LICENSE" in sql or "M_SYSTEM_OVERVIEW" in sql:
+                return
+        def fetchone(self):
+            if "USR02" in self._sql: return (42,)
+            if "M_HOST_INFORMATION" in self._sql: return ("HDW",)
+            return None
+
+    class _Conn(_FakeConn):
+        def cursor(self): return _MHostCur(self._map)
+
+    conn = _Conn({})
+    monkeypatch.setattr(dbcon, "_import_hdbcli",
+                          lambda: (_fake_dbapi_module(conn), None))
+    e = DBCONConnection(source_sid="S4H", con_name="X", dbms="HDB",
+                          host="h", port=30215, user="x", password="y")
+    dbcon.probe_dbcon_edge(e)
+    assert e.target_sid == "HDW"
+
+
+def test_probe_hdb_target_sid_unresolvable_leaves_empty(monkeypatch):
+    """All resolvers fail — target_sid stays empty (which suppresses
+    the materialize step)."""
+    class _NoSidCur(_FakeCursor):
+        def execute(self, sql, params=None):
+            self._sql = sql
+            if "USR02" in sql: return
+            # Everything else raises
+            raise Exception("(259, 'invalid table')")
+        def fetchone(self):
+            if "USR02" in self._sql: return (42,)
+            return None
+    class _Conn(_FakeConn):
+        def cursor(self): return _NoSidCur(self._map)
+    conn = _Conn({})
+    monkeypatch.setattr(dbcon, "_import_hdbcli",
+                          lambda: (_fake_dbapi_module(conn), None))
+    from sapmap_models import SAPMAPState
+    state = SAPMAPState()
+    state.add_node(SAPNode(sid="S4H", ip="10.0.0.1"))
+    e = DBCONConnection(source_sid="S4H", con_name="X", dbms="HDB",
+                          host="h", port=30215, user="x", password="y")
+    dbcon.probe_dbcon_edge(e, state=state)
+    assert e.is_sap_shape is True
+    assert e.target_sid == ""
+    # Materialize skipped because target_sid empty
+    assert state.get_node("") is None
+    # Original node still present, no phantom new node added
+    assert len(state.nodes) == 1
+
+
 def test_probe_hdb_no_permission_is_inconclusive(monkeypatch):
     """HANA 258 (insufficient privilege) means SAP-shape verdict is
     INCONCLUSIVE, not definitively non-SAP — a hardened SAP DB with

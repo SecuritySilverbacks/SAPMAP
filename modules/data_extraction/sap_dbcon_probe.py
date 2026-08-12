@@ -475,6 +475,83 @@ def _hana_error_code(exc):
     return None
 
 
+def _resolve_hana_target_sid(conn, edge) -> str:
+    """Resolve the target SID on a HANA DBCON connection.
+
+    Tries multiple sources in order of preference — the naive
+    `SELECT SYSID FROM T000` fails silently on modern HANA when the
+    connected user's search path doesn't include the SAP tenant
+    schema (SAPHANADB / SAPABAP1 / ...).  Logs every attempt so
+    debugging is a one-line log grep away.
+    """
+    attempts = []
+    # 1. Unqualified T000 — works when default schema = SAP tenant
+    for sql in (
+        "SELECT SYSID FROM T000",
+        # 2. Schema-qualified variants across common SAP naming
+    ):
+        attempts.append(sql)
+    # Build the qualified-T000 attempt list dynamically so the
+    # release-vanilla schema names try first.
+    for schema in _SAP_SCHEMA_CANDIDATES:
+        attempts.append(f'SELECT SYSID FROM "{schema}"."T000"')
+    if edge.target_sid:
+        # If already known (rare — from prior probe), skip resolution
+        # attempts and reuse.
+        return edge.target_sid.upper().strip()
+
+    for sql in attempts:
+        cur = conn.cursor()
+        try:
+            cur.execute(sql)
+            r = cur.fetchone()
+            if r and r[0]:
+                sid = str(r[0]).strip().upper()
+                if sid:
+                    print(f"[+] {edge.source_sid}: DBCON "
+                          f"{edge.con_name} — target SID resolved to "
+                          f"{sid} via `{sql}`")
+                    return sid
+        except Exception as _e:
+            code = _hana_error_code(_e)
+            print(f"    [*] target-SID attempt `{sql}` → HANA "
+                  f"{code or '?'} — {str(_e)[:100]}")
+        finally:
+            cur.close()
+
+    # 3. HANA system metadata — always readable if user can connect.
+    for sql, note in (
+        ("SELECT VALUE FROM M_HOST_INFORMATION WHERE KEY='sid' LIMIT 1",
+         "M_HOST_INFORMATION"),
+        ("SELECT SYSTEM_ID FROM M_LICENSE LIMIT 1",
+         "M_LICENSE"),
+        ("SELECT VALUE FROM M_SYSTEM_OVERVIEW WHERE NAME='SID' LIMIT 1",
+         "M_SYSTEM_OVERVIEW"),
+    ):
+        cur = conn.cursor()
+        try:
+            cur.execute(sql)
+            r = cur.fetchone()
+            if r and r[0]:
+                sid = str(r[0]).strip().upper()
+                if sid:
+                    print(f"[+] {edge.source_sid}: DBCON "
+                          f"{edge.con_name} — target SID resolved to "
+                          f"{sid} via {note}")
+                    return sid
+        except Exception as _e:
+            code = _hana_error_code(_e)
+            print(f"    [*] target-SID via {note} → HANA "
+                  f"{code or '?'} — {str(_e)[:100]}")
+        finally:
+            cur.close()
+
+    print(f"[-] {edge.source_sid}: DBCON {edge.con_name} — target SID "
+          f"could not be resolved via T000 / M_HOST_INFORMATION / "
+          f"M_LICENSE / M_SYSTEM_OVERVIEW — materialize will skip")
+    return ""
+
+
 def probe_dbcon_edge(edge: DBCONConnection,
                        state: SAPMAPState = None) -> None:
     """Open a driver-level connection to the DBCON target, mark it
@@ -555,21 +632,11 @@ def probe_dbcon_edge(edge: DBCONConnection,
             cur.close()
 
         if edge.is_sap_shape:
-            # Grab the SID from T000 to plot on the map
-            cur = conn.cursor()
-            try:
-                cur.execute("SELECT SYSID FROM T000")
-                r = cur.fetchone()
-                if r and r[0]:
-                    edge.target_sid = str(r[0]).strip()
-            except Exception:
-                pass
-            finally:
-                cur.close()
+            edge.target_sid = _resolve_hana_target_sid(conn, edge)
             print(f"[+] {edge.source_sid}: DBCON {edge.con_name} — "
                   f"SAP-shape DB confirmed"
                   + (f" (target SID {edge.target_sid})"
-                     if edge.target_sid else "")
+                     if edge.target_sid else " (target SID UNRESOLVED)")
                   + " — direct SAPMAP00 create possible")
             # Materialise the target as a real SAP node so the map
             # shows it and normal scan/exploit flow can reach it.
