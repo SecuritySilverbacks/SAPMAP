@@ -14870,6 +14870,12 @@ async function analyzeChains() {
 
 function showChainResults(chains) {
   const panel = document.getElementById('detail-panel');
+  // Mark this view distinct from details/scc/btp/dbcon so the
+  // state-poll auto-refresh doesn't immediately clobber the chain
+  // results with a re-render of whatever SAP node was last opened.
+  // Also drop any stale dataset.sid so the poll's diff checks skip.
+  panel.setAttribute('data-view', 'chains');
+  panel.dataset.sid = 'chains';
   const sevColors = { 5:'#e74c3c', 4:'#e67e22', 3:'#f1c40f', 2:'#3498db', 1:'#95a5a6' };
 
   if (chains.length === 0) {
