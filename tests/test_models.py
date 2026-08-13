@@ -406,6 +406,28 @@ def test_track_created_user_pads_short_client_to_three_digits():
     assert state.get_node("W74").clients[0]["nr"] == "001"
 
 
+def test_state_stats_pwned_includes_dbcon_edges():
+    """Same off-by-one class as SCCs and BTP: the map draws ⚡ on
+    every DBCONConnection.pwned=True cylinder.  Status-bar counter
+    must include those or operator sees N+k bolts vs N count
+    (operator screenshot: 7 ⚡ on the map, status bar said 6 pwned
+    — the missing one was TEST_S4D2 pwned via direct SQL)."""
+    from sapmap_models import DBCONConnection
+    state = SAPMAPState()
+    s4h = SAPNode(sid="S4H", system_type="ABAP", pwned=True)
+    s4h.dbcon_edges = [
+        DBCONConnection(source_sid="S4H", con_name="TEST_S4D2",
+                          dbms="HDB", host="s4hanadev", port=30215,
+                          pwned=True),
+        DBCONConnection(source_sid="S4H", con_name="TEST_S4D",
+                          dbms="HDB", pwned=False),
+    ]
+    state.add_node(s4h)
+    s = state.stats()
+    # 1 SAP pwned + 1 DBCON pwned = 2 (SAP-only count would be 1)
+    assert s["pwned"] == 2
+
+
 def test_state_stats_pwned_includes_btp_subaccounts():
     """Same off-by-one risk as SCCs: the map draws a ⚡ over any
     BTPSubaccountNode.pwned=True, so the status-bar Pwned counter

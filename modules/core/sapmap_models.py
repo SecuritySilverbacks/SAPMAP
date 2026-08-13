@@ -2934,19 +2934,24 @@ class SAPMAPState:
     # -- Statistics --
 
     def stats(self) -> dict:
-        # Count SAP nodes + SCCs + BTP subaccounts.  The map draws a
-        # lightning bolt over any of those when their .pwned flag is
-        # set, so the status-bar count has to include all three or
-        # the operator sees an off-by-one (e.g. "Pwned: 1" while the
-        # map shows 2 ⚡ symbols — one on S4H, one on the BTP cloud).
+        # Count SAP nodes + SCCs + BTP subaccounts + DBCON cylinders.
+        # The map draws a lightning bolt over any of those when their
+        # .pwned flag is set, so the status-bar count has to include
+        # all four or the operator sees an off-by-one (e.g. "Pwned: 6"
+        # while the map shows 7 ⚡ symbols — one of them on a DBCON
+        # cylinder that we've planted SAPMAP00 on via direct SQL).
         scc_pwned = sum(1 for s in self.scc_nodes.values()
                         if getattr(s, "pwned", False))
         btp_pwned = sum(1 for b in (self.btp_subaccounts or {}).values()
                          if getattr(b, "pwned", False))
+        dbcon_pwned = sum(
+            1 for n in self.nodes.values()
+              for e in (getattr(n, "dbcon_edges", None) or [])
+              if getattr(e, "pwned", False))
         # SAProuter nodes already live in self.nodes (SAPNode with
         # .saprouter set), so they are counted via len(self.nodes).
-        # SCCs and BTP subaccounts are tracked in their own dicts, so
-        # they have to be summed in explicitly to match the box count
+        # SCCs, BTP subaccounts, and DBCON edges are tracked
+        # separately, so summed in explicitly to match the box count
         # the operator sees on the map.
         return {
             "systems": (len(self.nodes)
@@ -2954,7 +2959,7 @@ class SAPMAPState:
                         + len(self.btp_subaccounts or {})),
             "connections": len(self.connections),
             "pwned": (sum(1 for n in self.nodes.values() if n.pwned)
-                      + scc_pwned + btp_pwned),
+                      + scc_pwned + btp_pwned + dbcon_pwned),
             "users_created": len(self.created_users),
             "production_systems": sum(1 for n in self.nodes.values() if n.is_production),
             "critical_connections": sum(1 for c in self.connections

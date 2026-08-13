@@ -3434,6 +3434,14 @@ function updateMap() {
         btpX = Math.max(btpX, bn._x + BOX_W + MARGIN);
       }
     });
+    // And DBCON cylinders — otherwise a freshly-materialised BTP
+    // node can land right on top of an existing cylinder.
+    for (const pk in dbconPositions) {
+      const p = dbconPositions[pk];
+      if (p._y != null && p._y < _topBandHi && p._y + BOX_H > MARGIN) {
+        btpX = Math.max(btpX, p._x + 150 + MARGIN);
+      }
+    }
     btpKeys.forEach(uuid => {
       const bn = btpNodes[uuid];
       if (bn._x == null) {
@@ -4726,8 +4734,60 @@ function updateMap() {
         e._x = dbconPositions[posKey]._x;
         e._y = dbconPositions[posKey]._y;
       } else {
-        e._x = baseX;
-        e._y = stackY + i * (DB_BOX_H + 24);
+        // Initial placement: right of source, stacked vertically.
+        // Then walk the candidate down + right until it clears
+        // every already-placed box (SAP nodes, SCCs, BTPs, other
+        // DBCON cylinders).  Prevents the 2-cylinders-on-top-of-a-
+        // BTP-cloud pileup the operator screenshotted.
+        let cx = baseX, cy = stackY + i * (DB_BOX_H + 24);
+        const _rectOverlap = (ax, ay, aw, ah, bx, by, bw, bh) =>
+          ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
+        const _collides = (tx, ty) => {
+          const tw = DB_BOX_W, th = DB_BOX_H;
+          // Against SAP nodes
+          for (const nk in nodes) {
+            const n = nodes[nk];
+            if (n === src) continue;   // ok to overlap the source
+            if (n._x == null) continue;
+            if (_rectOverlap(tx, ty, tw, th,
+                              n._x, n._y, 240, 130)) return true;
+          }
+          // Against SCC nodes
+          for (const sk in sccNodes) {
+            const sn = sccNodes[sk];
+            if (sn._x == null) continue;
+            if (_rectOverlap(tx, ty, tw, th,
+                              sn._x, sn._y, 240, 130)) return true;
+          }
+          // Against BTP subaccounts
+          for (const bk in btpNodes) {
+            const bn = btpNodes[bk];
+            if (bn._x == null) continue;
+            if (_rectOverlap(tx, ty, tw, th,
+                              bn._x, bn._y, 240, 130)) return true;
+          }
+          // Against other DBCON cylinders already placed
+          for (const pk in dbconPositions) {
+            if (pk === posKey) continue;
+            const p = dbconPositions[pk];
+            if (_rectOverlap(tx, ty, tw, th,
+                              p._x, p._y, DB_BOX_W, DB_BOX_H)) return true;
+          }
+          return false;
+        };
+        // Try current position; if it collides, step down; if we've
+        // walked too far down, jump right and reset y.
+        const _STEP = DB_BOX_H + 24;
+        let _guard = 0;
+        while (_collides(cx, cy) && _guard < 40) {
+          cy += _STEP;
+          if (cy - (srcY || 0) > 600) {
+            cx += DB_BOX_W + 60;
+            cy = stackY;
+          }
+          _guard++;
+        }
+        e._x = cx; e._y = cy;
         dbconPositions[posKey] = { _x: e._x, _y: e._y };
       }
       const x = e._x, y = e._y;
@@ -10742,17 +10802,65 @@ function showDBCONDetail(srcSid, conName, opts) {
        </td>
      </tr>`
   ).join('');
-  // HANA recon-sweep facts card
+  // HANA recon-sweep facts card — render as compact col=value
+  // pairs.  Long values (M_LICENSE's measurement XML blob is 4KB+)
+  // get truncated with a click-to-expand toggle so the panel stays
+  // readable.  Highlights the fields operators actually care about:
+  // SID, HARDWARE_KEY, INSTALL_NO, PRODUCT_NAME.
+  const _HIGHLIGHT_COLS = new Set([
+    'SYSTEM_ID', 'SID', 'HARDWARE_KEY', 'INSTALL_NO', 'PRODUCT_NAME',
+    'PRODUCT_LIMIT', 'IS_PERMANENT', 'EXPIRATION_DATE',
+    'BUILD_VERSION', 'BUILD_DATE', 'DATABASE_NAME', 'ACTIVE_STATUS',
+    'MANDT', 'USER_NAME', 'KEY', 'VALUE',
+    'SERVICE_NAME', 'PORT', 'HOST']);
+  const _fmtCell = (v, maxLen) => {
+    if (v === null || v === undefined) return '<i style="color:#6e7681">∅</i>';
+    const s = String(v);
+    if (s.length <= maxLen) return escHtml(s);
+    // XML / long blob — clickable expand
+    const id = 'recon-cell-' + Math.random().toString(36).slice(2, 10);
+    return `<span id="${id}" data-full="${escHtml(s)}"
+      style="cursor:pointer;color:#8b949e"
+      title="Click to expand full value (${s.length} chars)"
+      onclick="const _f=this.dataset.full;this.textContent=_f;this.style.color='#c9d1d9';this.onclick=null"
+      >${escHtml(s.slice(0, maxLen))}<span style="color:#f0883e">…+${s.length - maxLen}</span></span>`;
+  };
+  const _renderReconRow = (cols, row) => {
+    if (!cols || !cols.length) {
+      return escHtml((row || []).map(x =>
+        x === null ? '∅' : String(x)).slice(0, 4).join(' | '));
+    }
+    // key=value with the "interesting" fields bolded
+    const parts = [];
+    for (let i = 0; i < cols.length; i++) {
+      const c = String(cols[i] || '').toUpperCase();
+      const v = row[i];
+      // Skip completely empty cells — they clutter the panel
+      if (v === null || v === undefined || String(v).trim() === '')
+        continue;
+      const hi = _HIGHLIGHT_COLS.has(c);
+      // Long-column budget: values >120 chars get truncated
+      const maxLen = (c === 'VALUE' || c === 'MTEXT') ? 60 : 120;
+      parts.push(
+        `<span style="${hi ? 'color:#f0883e;font-weight:bold' : 'color:#8b949e'}">${escHtml(cols[i])}</span>` +
+        `<span style="color:#586069">=</span>` +
+        `<span style="color:#c9d1d9">${_fmtCell(v, maxLen)}</span>`
+      );
+    }
+    return parts.join(
+      '<span style="color:#30363d;margin:0 6px">·</span>');
+  };
   const reconFacts = edge.recon_facts || {};
   const reconRows = Object.keys(reconFacts).map(k => {
     const v = reconFacts[k];
-    if (v.error) return `<div style="font-size:10px;color:#f85149">${escHtml(k)}: ${escHtml(v.error)}</div>`;
-    const sample = (v.rows || []).slice(0, 3).map(r =>
-      `<div style="font-size:10px;color:#c9d1d9;margin-left:8px;white-space:pre-wrap;word-break:break-all">${escHtml((r || []).map(x => x === null ? '∅' : String(x)).join(' | '))}</div>`
+    if (v.error) return `<div style="font-size:10px;color:#f85149;margin-bottom:6px"><b>${escHtml(k)}</b>: ${escHtml(v.error)}</div>`;
+    const rowsToShow = (v.rows || []).slice(0, 3);
+    const sample = rowsToShow.map(r =>
+      `<div style="font-size:10px;margin-left:8px;padding:2px 0;white-space:pre-wrap;word-break:break-word;line-height:1.5">${_renderReconRow(v.columns, r)}</div>`
     ).join('');
-    const more = (v.count || 0) > 3 ? `<div style="font-size:9px;color:#6e7681;margin-left:8px">… +${v.count - 3} more</div>` : '';
-    return `<div style="margin-bottom:6px">
-       <div style="font-size:11px;color:#3fb950;font-weight:bold">${escHtml(k)} <span style="color:#8b949e;font-weight:normal">(${v.count || 0})</span></div>
+    const more = (v.count || 0) > 3 ? `<div style="font-size:9px;color:#6e7681;margin-left:8px">… +${v.count - 3} more row(s)</div>` : '';
+    return `<div style="margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid #21262d">
+       <div style="font-size:11px;color:#3fb950;font-weight:bold">${escHtml(k)} <span style="color:#8b949e;font-weight:normal">(${v.count || 0} row${v.count === 1 ? '' : 's'})</span></div>
        ${sample}${more}
      </div>`;
   }).join('');
