@@ -1214,6 +1214,56 @@ def _secstore_section(state: SAPMAPState) -> list:
     return out
 
 
+def _dbcon_section(state: SAPMAPState) -> list:
+    """DBCON direct-DB pivot results (issue #21)."""
+    edges = []
+    for sid, n in sorted(state.nodes.items()):
+        for e in (n.dbcon_edges or []):
+            edges.append((sid, e))
+    if not edges:
+        return []
+    out = ["## DBCON direct-DB pivot", ""]
+    out.append(
+        "External DB connections defined on the source ABAP whose "
+        "passwords SAPMAP recovered from RSECTAB.  When the target "
+        "is SAP-shape (USR02 present), SAPMAP can plant SAPMAP00 "
+        "via direct SQL — no RFC hop, no SAPXPG on the target.  "
+        "Non-SAP targets get a data-extraction path (SYS.M_TABLES "
+        "enumeration, targeted SELECT dumps).")
+    out.append("")
+    out.append("| Source | DBCON | DBMS | Host:Port | User | "
+                "SAP-shape? | Target SID | Pwned | USR02 loot |")
+    out.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    for sid, e in edges:
+        shape = ("✅" if e.is_sap_shape
+                  else ("⚠ inconclusive" if e.sap_shape_reason == "no_permission"
+                        else ("❌" if e.tested else "?")))
+        pwned = "⚡ **YES**" if e.pwned else ("—" if e.tested else "?")
+        loot = f"`{e.usr02_hashes_loot_path}`" if e.usr02_hashes_loot_path else "—"
+        out.append(
+            f"| {sid} | `{_esc(e.con_name)}` | {_esc(e.dbms)} | "
+            f"`{_esc(e.host)}:{e.port}` | `{_esc(e.user)}` | "
+            f"{shape} | {_esc(e.target_sid or '—')} | {pwned} | "
+            f"{loot} |")
+    out.append("")
+    # Materialise-target callout
+    materialised = [n for n in state.nodes.values()
+                    if getattr(n, "discovered_via_dbcon", False)]
+    if materialised:
+        out.append(f"### DBCON-materialised SAP nodes ({len(materialised)})")
+        out.append("")
+        out.append("SAP systems added to the map because a DBCON "
+                    "pivot uncovered them:")
+        out.append("")
+        for n in sorted(materialised, key=lambda x: x.sid):
+            out.append(
+                f"- **{n.sid}** @ `{_esc(n.ip or n.hostname)}` — "
+                f"discovered via `{_esc(n.dbcon_parent_sid)}` / "
+                f"DBCON `{_esc(n.dbcon_parent_con_name)}`")
+        out.append("")
+    return out
+
+
 def _created_users_section(state: SAPMAPState) -> list:
     """Every SAPMAP-created account across the landscape."""
     users = list(getattr(state, "created_users", []) or [])
@@ -2068,6 +2118,7 @@ def build_markdown_report(state: SAPMAPState,
         sections.extend(cert_dest_section)
     for extra in (_impact_section(state),
                   _secstore_section(state),
+                  _dbcon_section(state),
                   _created_users_section(state),
                   _persistence_section(state),
                   _evasion_section(state)):

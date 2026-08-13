@@ -64,6 +64,13 @@ def _node_summary(n) -> dict:
         "findings_count":    len(getattr(n, "findings", []) or []),
         "secstore_count":    len(getattr(n, "secstore_entries", []) or []),
         "java_secstore_count": len(getattr(n, "java_secstore_entries", []) or []),
+        # DBCON pivot summary — number of edges + pwned edges +
+        # discovered-via-dbcon flag (so a materialise-tag change
+        # shows up in the diff view).
+        "dbcon_edges_count": len(getattr(n, "dbcon_edges", []) or []),
+        "dbcon_edges_pwned": sum(1 for e in getattr(n, "dbcon_edges", [])
+                                  or [] if getattr(e, "pwned", False)),
+        "discovered_via_dbcon": bool(getattr(n, "discovered_via_dbcon", False)),
     }
 
 
@@ -109,7 +116,9 @@ def _changed_node_fields(old: dict, new: dict) -> list:
     for k in ("system_type", "os_type", "db_type", "hostname",
               "is_production", "pwned", "has_critical_finding",
               "credentials_count", "findings_count",
-              "secstore_count", "java_secstore_count"):
+              "secstore_count", "java_secstore_count",
+              "dbcon_edges_count", "dbcon_edges_pwned",
+              "discovered_via_dbcon"):
         if old.get(k) != new.get(k):
             out.append((k, old.get(k), new.get(k)))
     return out

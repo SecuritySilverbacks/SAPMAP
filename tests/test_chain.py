@@ -376,3 +376,51 @@ class TestEntryMethod:
     def test_description(self):
         assert "unauthenticated" in _entry_description("gw_exploit").lower()
         assert "10KBlaze" in _entry_description("betrusted_10kblaze")
+
+
+# ---------------------------------------------------------------------------
+# DBCON direct-DB pivot as a first-class chain edge (issue #21)
+# ---------------------------------------------------------------------------
+
+def test_dbcon_edge_appears_in_chain():
+    """A pwned SAP source with a SAP-shape DBCON edge to another SID
+    should yield a chain hop labeled DBCON."""
+    from sapmap_models import DBCONConnection
+    state = SAPMAPState()
+    s4h = SAPNode(sid="S4H", ip="10.0.0.1", pwned=True, is_production=True)
+    s4h.dbcon_edges = [DBCONConnection(
+        source_sid="S4H", con_name="TEST_S4D", dbms="HDB",
+        host="s4hanadev", port=30215, user="saphanadb",
+        password="pw", tested=True, reachable=True,
+        is_sap_shape=True, target_sid="S4D", pwned=True)]
+    s4d = SAPNode(sid="S4D", ip="s4hanadev", hostname="s4hanadev",
+                    discovered_via_dbcon=True)
+    state.add_node(s4h); state.add_node(s4d)
+    chains = find_all_chains(state)
+    dbcon_chains = [c for c in chains
+                    if any(h.target_sid == "S4D" for h in c.hops)]
+    assert dbcon_chains, "expected at least one chain reaching S4D via DBCON"
+    hop = [h for h in dbcon_chains[0].hops if h.target_sid == "S4D"][0]
+    assert "DBCON" in hop.method
+    assert "PWNED" in hop.method   # edge.pwned reflects has_sap_all
+    assert "[dbcon]" in hop.description
+
+
+def test_dbcon_non_sap_shape_edge_skipped_in_chain():
+    """A non-SAP-shape DBCON is data-extraction only — not a
+    user-plantable lateral hop.  The chain BFS must skip it."""
+    from sapmap_models import DBCONConnection
+    state = SAPMAPState()
+    src = SAPNode(sid="S4H", ip="10.0.0.1", pwned=True)
+    src.dbcon_edges = [DBCONConnection(
+        source_sid="S4H", con_name="TEST_S4D", dbms="HDB",
+        host="10.9.9.9", port=30215, user="x", password="y",
+        tested=True, reachable=True, is_sap_shape=False,
+        target_sid="DWH")]
+    tgt = SAPNode(sid="DWH", ip="10.9.9.9")
+    state.add_node(src); state.add_node(tgt)
+    chains = find_all_chains(state)
+    assert not any(
+        any(h.target_sid == "DWH" and "DBCON" in h.method for h in c.hops)
+        for c in chains), \
+        "non-SAP-shape DBCON should not yield a chain hop"

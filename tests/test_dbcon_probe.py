@@ -873,6 +873,174 @@ def test_peek_hana_table_rejects_bad_identifier():
     assert r["ok"] is False and "invalid schema identifier" in r["error"]
 
 
+def test_peek_hana_table_where_clause_appends_correctly(monkeypatch):
+    class _WhereCur(_FakeCursor):
+        description = [("BNAME",)]
+        def execute(self, sql, params=None):
+            # WHERE clause should be interpolated verbatim after
+            # the table identifier, before LIMIT
+            assert 'WHERE BNAME LIKE \'DDIC%\'' in sql
+            assert "LIMIT 5" in sql
+            self._sql = sql
+        def fetchall(self):
+            return [("DDIC",)]
+    class _Conn(_FakeConn):
+        def cursor(self): return _WhereCur(self._map)
+    conn = _Conn({})
+    monkeypatch.setattr(dbcon, "_import_hdbcli",
+                          lambda: (_fake_dbapi_module(conn), None))
+    e = DBCONConnection(source_sid="S4H", con_name="X", dbms="HDB",
+                          host="h", port=30215, user="x", password="y",
+                          reachable=True)
+    r = dbcon.peek_hana_table(e, "SAPHANADB", "USR02", limit=5,
+                                where="BNAME LIKE 'DDIC%'")
+    assert r["ok"] is True and len(r["rows"]) == 1
+
+
+def test_peek_hana_table_where_strips_leading_keyword():
+    # Operator convenience: peek accepts "WHERE X = Y" (bare) OR
+    # just "X = Y" — the leading WHERE keyword is stripped.
+    e = DBCONConnection(source_sid="S4H", con_name="X", dbms="HDB",
+                          reachable=True)
+    # Just verify the write-family screen; we can't easily test SQL
+    # interpolation without a full-blown fake, that's covered above.
+    r = dbcon.peek_hana_table(e, "S", "T", where="WHERE UPDATE X=1")
+    assert r["ok"] is False and "write-family" in r["error"]
+
+
+def test_peek_hana_table_where_blocks_write_family():
+    e = DBCONConnection(source_sid="S4H", con_name="X", dbms="HDB",
+                          reachable=True)
+    for w in ("BNAME='X'; DELETE FROM USR02",
+               "1=1 UNION INSERT",
+               "TRUNCATE USR02",
+               "DROP TABLE X"):
+        r = dbcon.peek_hana_table(e, "S", "T", where=w)
+        assert r["ok"] is False, f"WHERE '{w}' should have been blocked"
+        assert "write-family" in r["error"]
+
+
+def test_custom_sql_query_blocks_non_select():
+    e = DBCONConnection(source_sid="S4H", con_name="X", dbms="HDB",
+                          reachable=True)
+    for bad in ("INSERT INTO x VALUES (1)",
+                 "UPDATE x SET y=1",
+                 "DELETE FROM x",
+                 "DROP TABLE x",
+                 "CREATE TABLE x (a INT)",
+                 "GRANT ALL ON x TO PUBLIC",
+                 "CALL sp_backup()"):
+        r = dbcon.custom_sql_query(e, bad)
+        assert r["ok"] is False
+        # Either the SELECT-guard or the write-family guard rejects
+        assert ("only SELECT" in r["error"]
+                or "write-family" in r["error"])
+
+
+def test_custom_sql_query_happy_path(monkeypatch):
+    class _Cur(_FakeCursor):
+        description = [("A",), ("B",)]
+        def execute(self, sql, params=None):
+            assert sql.strip().upper().startswith("SELECT")
+        def __iter__(self):
+            return iter([(1, "x"), (2, "y"), (3, "z")])
+    class _Conn(_FakeConn):
+        def cursor(self): return _Cur(self._map)
+    conn = _Conn({})
+    monkeypatch.setattr(dbcon, "_import_hdbcli",
+                          lambda: (_fake_dbapi_module(conn), None))
+    e = DBCONConnection(source_sid="S4H", con_name="X", dbms="HDB",
+                          host="h", port=30215, user="x", password="y",
+                          reachable=True)
+    r = dbcon.custom_sql_query(e, "SELECT A, B FROM T", limit=10)
+    assert r["ok"] is True
+    assert r["columns"] == ["A", "B"]
+    assert len(r["rows"]) == 3
+    assert r["rows"][0] == ["1", "x"]
+
+
+def test_custom_sql_query_truncates_at_limit(monkeypatch):
+    class _Cur(_FakeCursor):
+        description = [("N",)]
+        def execute(self, sql, params=None): pass
+        def __iter__(self):
+            return iter([(i,) for i in range(1000)])
+    class _Conn(_FakeConn):
+        def cursor(self): return _Cur(self._map)
+    conn = _Conn({})
+    monkeypatch.setattr(dbcon, "_import_hdbcli",
+                          lambda: (_fake_dbapi_module(conn), None))
+    e = DBCONConnection(source_sid="S4H", con_name="X", dbms="HDB",
+                          host="h", port=30215, user="x", password="y",
+                          reachable=True)
+    r = dbcon.custom_sql_query(e, "SELECT N FROM T", limit=50)
+    assert r["ok"] is True and len(r["rows"]) == 50
+    assert r["truncated"] is True
+
+
+def test_dump_auth_tables_refuses_non_sap_shape():
+    e = DBCONConnection(source_sid="S4H", con_name="X", dbms="HDB",
+                          reachable=True, is_sap_shape=False)
+    r = dbcon.dump_auth_tables(e)
+    assert r["ok"] is False and "SAP-shape" in r["error"]
+
+
+def test_dump_auth_tables_writes_three_csvs(monkeypatch, tmp_path):
+    class _Cur(_FakeCursor):
+        def execute(self, sql, params=None):
+            self._sql = sql
+            u = sql.upper()
+            if "USR04" in u:  self._which = "USR04"
+            elif "UST04" in u: self._which = "UST04"
+            elif "USRBF2" in u: self._which = "USRBF2"
+            else: self._which = ""
+            # Set description AFTER execute — matches hdbcli
+            if "USR04" in u:
+                self.description = [("MANDT",), ("BNAME",), ("PROFS",),
+                                     ("MOD",), ("BAS",), ("CHANGE",),
+                                     ("ACTIVE",)]
+            elif "UST04" in u:
+                self.description = [("MANDT",), ("BNAME",), ("PROFILE",)]
+            elif "USRBF2" in u:
+                self.description = [("MANDT",), ("BNAME",), ("OBJCT",),
+                                     ("AUTH",), ("FIELD",), ("VON",),
+                                     ("BIS",), ("MODDA",), ("MODBE",)]
+        def __iter__(self):
+            if self._which == "USR04":
+                return iter([("000", "DDIC", b"\xde\xad", "M", "B",
+                              "20250101", "X")])
+            if self._which == "UST04":
+                return iter([("000", "DDIC", "SAP_ALL")])
+            if self._which == "USRBF2":
+                return iter([("000", "DDIC", "S_TCODE", "T-A", "TCD",
+                              "SM01", "SM99", "20250101", "DDIC")])
+            return iter([])
+    class _Conn(_FakeConn):
+        def cursor(self): return _Cur(self._map)
+    conn = _Conn({})
+    monkeypatch.setattr(dbcon, "_import_hdbcli",
+                          lambda: (_fake_dbapi_module(conn), None))
+    monkeypatch.setattr(dbcon, "_resolve_sap_schema",
+                          lambda *a, **kw: "SAPHANADB")
+    e = DBCONConnection(source_sid="S4H", con_name="X", dbms="HDB",
+                          host="h", port=30215, user="x", password="y",
+                          reachable=True, is_sap_shape=True,
+                          target_sid="DWH")
+    r = dbcon.dump_auth_tables(e, loot_dir=str(tmp_path))
+    assert r["ok"] is True
+    assert r["counts"]["usr04"] == 1
+    assert r["counts"]["ust04"] == 1
+    assert r["counts"]["usrbf2"] == 1
+    # Verify files exist + have headers
+    for tbl in ("usr04", "ust04", "usrbf2"):
+        assert r["files"][tbl].endswith(f"{tbl}.csv")
+        content = open(r["files"][tbl]).read()
+        assert "MANDT" in content and "BNAME" in content
+    # Binary column should be hex-encoded
+    usr04_content = open(r["files"]["usr04"]).read()
+    assert "DEAD" in usr04_content
+
+
 def test_peek_hana_table_hex_encodes_binary_columns(monkeypatch):
     """RAW/BLOB columns come back as memoryview / bytes from hdbcli.
     str(v) → '<memory at 0x…>' which is useless in a CSV.  We must

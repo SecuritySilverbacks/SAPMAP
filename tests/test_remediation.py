@@ -116,6 +116,16 @@ def test_every_capability_in_attack_map_has_remediation_or_explicit_exemption():
         # remediation (rotate the DBCON password, review who can
         # read RSECTAB) is landscape-policy not per-finding.
         "lateral.dbcon_direct", "data.dbcon_dump",
+        # DBCON reconnaissance / enumeration / peek — same landscape
+        # remediation as the parent lateral.dbcon_direct (rotate the
+        # DBCON credential + tighten RSECTAB reads).  These keys
+        # exist so the ATT&CK grid surfaces each discrete DBCON
+        # action, not to duplicate vendor-fix guidance.
+        "recon.dbcon_resolve", "recon.dbcon_probe",
+        "recon.dbcon_hana_sweep", "recon.dbcon_enumerate",
+        "recon.dbcon_describe",
+        "data.dbcon_peek", "data.dbcon_custom_sql",
+        "creds.dbcon_usr02_dump", "creds.dbcon_auth_dump",
     }
     missing = []
     for cap in sapmap_attack.CAPABILITY_MAP:

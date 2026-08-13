@@ -300,6 +300,39 @@ CAPABILITY_MAP: Dict[str, List[str]] = {
     # exports).  T1213 for repository read, T1005 for local-system
     # data (the DB is a local resource from the ABAP's perspective).
     "data.dbcon_dump":           ["T1213", "T1005"],
+    # DBCON pair — /DBCON/<name> secstore entry joined with a DBCON
+    # table row to produce a live credential + host/port tuple.
+    # Discovery of a service link + accessing password-protected data.
+    "recon.dbcon_resolve":       ["T1082", "T1552.001"],
+    # DBCON probe — driver-level connection + SAP-shape fingerprint
+    # (USR02 presence, T000/M_HOST_INFORMATION SYSID readback).
+    # Remote-service discovery + valid-account confirmation.
+    "recon.dbcon_probe":         ["T1046", "T1078", "T1082"],
+    # HANA reconnaissance sweep — M_LICENSE / M_HOST_INFORMATION /
+    # M_DATABASE / M_SERVICES / SYS.USERS via direct driver.  System-
+    # info + service + software discovery in one shot.
+    "recon.dbcon_hana_sweep":    ["T1082", "T1518", "T1046"],
+    # SYS.M_TABLES enumeration — discovery of every schema/table
+    # visible to the DBCON user for planning subsequent dumps.
+    "recon.dbcon_enumerate":     ["T1082", "T1518"],
+    # SYS.TABLE_COLUMNS column browser — column-level table
+    # metadata, precursor to targeted peeks.
+    "recon.dbcon_describe":      ["T1082"],
+    # Row-level peek — SELECT * LIMIT N with optional WHERE.  Same
+    # data-access class as data.dbcon_dump but per-table shape.
+    "data.dbcon_peek":           ["T1213", "T1005"],
+    # Arbitrary read-only SELECT via direct driver — most permissive
+    # DBCON action after peek.  Data-access repository read + local
+    # data.  Blocked at write attempts, so no persistence tag.
+    "data.dbcon_custom_sql":     ["T1213", "T1005"],
+    # USR02 password-hash dump via direct SQL — same class as
+    # creds.user_password_hash but distinct source (bypasses the
+    # ABAP kernel).  Repository read + credential access.
+    "creds.dbcon_usr02_dump":    ["T1003", "T1552.001", "T1213"],
+    # USR04 / UST04 / USRBF2 auth-object dump — profile / role /
+    # authorisation-buffer tables.  Enables offline "what can user
+    # X do" analysis after the operator has the hashes.
+    "creds.dbcon_auth_dump":     ["T1552", "T1213", "T1082"],
     "lateral.sapmap_user":       ["T1078", "T1136"],
     "lateral.mysapsso2_forge":   ["T1606"],
     "lateral.mysapsso2_replay":  ["T1550.004", "T1078"],

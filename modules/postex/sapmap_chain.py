@@ -227,6 +227,38 @@ def find_all_chains(state: SAPMAPState, max_depth: int = 6,
             adj[issuer] = []
         adj[issuer].append((trusting, synthetic))
 
+    # DBCON direct-DB pivot edges (issue #21).  When source S has a
+    # DBCON entry that points at target T's HANA AND we've probed it
+    # SAP-shape reachable, that's a CRITICAL lateral edge: SAPMAP
+    # can plant SAPMAP00 on T via direct SQL, no RFC/SAPXPG on T.
+    # Represented as a synthetic RFCConnection-shaped edge so the
+    # BFS + severity ranker treat it as a first-class hop.
+    for src_node in state.nodes.values():
+        for edge in (src_node.dbcon_edges or []):
+            tgt_sid = (edge.target_sid or "").strip().upper()
+            if not tgt_sid or tgt_sid == src_node.sid:
+                continue
+            if not edge.is_sap_shape:
+                # non-SAP DBCON is data-extraction only, not a
+                # user-plantable lateral hop — skip
+                continue
+            synthetic = type("DbconEdge", (), {
+                "source_sid":       src_node.sid,
+                "target_sid":       tgt_sid,
+                "destination_name": f"DBCON/{edge.con_name}",
+                "rfc_user":         edge.user or "*",
+                # SAPMAP00 planted → effectively SAP_ALL on target
+                "has_sap_all":      bool(edge.pwned),
+                "trusted_system":   False,
+                "trust_type":       "dbcon_direct",
+                "tested":           bool(edge.tested),
+                "logon_successful": bool(edge.reachable),
+                "client":           "000",
+            })()
+            if src_node.sid not in adj:
+                adj[src_node.sid] = []
+            adj[src_node.sid].append((tgt_sid, synthetic))
+
     # Find entry points.  Each entry is a (sid, entry_method) pair so
     # we can mix on-prem SAPNode entries with BTP-subaccount entries
     # without forcing a fake SAPNode shim through the rest of the
@@ -287,7 +319,13 @@ def find_all_chains(state: SAPMAPState, max_depth: int = 6,
                 untested = not conn.tested
                 is_trusted = getattr(conn, "trusted_system", False)
                 is_sso2 = (getattr(conn, "trust_type", "") == "strustsso2")
-                if is_sso2:
+                is_dbcon = (getattr(conn, "trust_type", "") == "dbcon_direct")
+                if is_dbcon:
+                    method = ("DBCON direct SQL (SAP-shape "
+                               + ("PWNED" if conn.has_sap_all
+                                   else "reachable — planted user pending")
+                               + ")")
+                elif is_sso2:
                     method = "Forged MYSAPSSO2 ticket (STRUSTSSO2)"
                 elif is_trusted:
                     method = "Trusted RFC (no password)"
@@ -295,7 +333,7 @@ def find_all_chains(state: SAPMAPState, max_depth: int = 6,
                     method = "BAPI (SAP_ALL)"
                 else:
                     method = "RFC logon"
-                if untested and not is_trusted and not is_sso2:
+                if untested and not is_trusted and not is_sso2 and not is_dbcon:
                     method += " — UNTESTED"
                 hop = ChainHop(
                     source_sid=current_sid,
@@ -306,9 +344,10 @@ def find_all_chains(state: SAPMAPState, max_depth: int = 6,
                     method=method,
                     description=(
                         (f"via {conn.destination_name}" if conn.destination_name else "")
+                        + (" [dbcon]" if is_dbcon else "")
                         + (" [strustsso2]" if is_sso2 else "")
                         + (" [trusted]" if is_trusted else "")
-                        + (" [untested]" if untested and not is_trusted and not is_sso2 else "")
+                        + (" [untested]" if untested and not is_trusted and not is_sso2 and not is_dbcon else "")
                     ).strip(),
                 )
                 new_path = path + [hop]
