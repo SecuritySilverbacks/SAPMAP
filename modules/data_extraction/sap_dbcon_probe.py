@@ -971,6 +971,29 @@ def peek_hana_table(edge: DBCONConnection, schema: str, table: str,
     limit = max(1, min(int(limit), 500))
     where = (where or "").strip()
     if where:
+        # Normalise smart quotes to ASCII — copy-pasting a WHERE
+        # from a doc / Excel / macOS autocorrect commonly swaps
+        # ' -> ' or ' and " -> " -> " which HANA's parser sees as
+        # random Unicode symbols, not string delimiters.  Result:
+        # "unterminated quoted string literal" a dozen columns in.
+        _quote_map = {
+            "‘": "'", "’": "'",   # curly single quotes
+            "“": '"', "”": '"',   # curly double quotes
+            "′": "'", "″": '"',   # prime marks
+            "´": "'",                    # acute accent
+        }
+        for _bad, _good in _quote_map.items():
+            where = where.replace(_bad, _good)
+        # Pre-flight: check for unmatched quotes.  HANA's error
+        # gives the failing column but no hint that the whole
+        # clause is mal-quoted; catch it here with a clearer message.
+        _sq = where.count("'")
+        if _sq % 2 != 0:
+            out["error"] = (
+                f"WHERE has an unmatched single quote "
+                f"({_sq} ' characters — must be even).  "
+                f"Sanitised where: {where!r}")
+            return out
         if _SQL_WRITE_RE.search(where):
             out["error"] = ("WHERE clause contains write-family "
                              "keyword — blocked to prevent mutation")
@@ -1016,7 +1039,10 @@ def peek_hana_table(edge: DBCONConnection, schema: str, table: str,
               + (" (truncated)" if out["truncated"] else ""))
     except Exception as e:
         code = _hana_error_code(e)
-        out["error"] = f"HANA {code or '?'}: {str(e)[:200]}"
+        # Surface the actual SQL sent — the operator's error message
+        # otherwise gives a col/pos in a SQL string they can't see.
+        out["error"] = (f"HANA {code or '?'}: {str(e)[:200]}"
+                        f"\n\nSQL sent: {sql}")
         print(f"[-] {edge.source_sid}: DBCON {edge.con_name} — peek "
               f"{schema}.{table} failed: {out['error']}")
     finally:

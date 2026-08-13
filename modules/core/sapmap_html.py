@@ -10700,9 +10700,14 @@ function showDBCONDetail(srcSid, conName, opts) {
     `#detail-panel .dbcon-pw`);
   if (_pwEl && _pwEl.hasAttribute('data-shown'))
     _uiSaved.pwShown = (_pwEl.dataset.shown === '1');
-  const _focusedInputId = (document.activeElement &&
-    document.activeElement.id &&
-    document.activeElement.id.startsWith('dbcon-peek-'))
+  // Focus preservation — widened to ANY dbcon-* input inside the
+  // panel (peek schema/table/where, enum search, future custom-SQL
+  // inputs).  Previously only dbcon-peek- prefixed inputs were
+  // covered, which meant typing in the enum-search field lost focus
+  // every refresh and subsequent keystrokes went nowhere.
+  const _focusedInputId = (document.activeElement
+    && document.activeElement.id
+    && /^dbcon-(peek|enum)-/.test(document.activeElement.id))
     ? document.activeElement.id : null;
   const _focusedSelStart = (_focusedInputId && document.activeElement.selectionStart) || 0;
   const _focusedSelEnd   = (_focusedInputId && document.activeElement.selectionEnd) || 0;
