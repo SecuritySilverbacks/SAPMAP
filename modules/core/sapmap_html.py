@@ -10339,26 +10339,85 @@ async function _runDBCONCustomSQLNow(srcSid, conName) {
   const r = await api('POST', `node/${srcSid}/dbcon/custom_sql`,
     { con_name: conName, sql, limit });
   if (r && r.error) {
-    resDiv.innerHTML = `<pre style="color:#f85149;white-space:pre-wrap">${escHtml(r.error)}</pre>`;
+    resDiv.innerHTML = `<pre style="color:#f85149;white-space:pre-wrap;user-select:text">${escHtml(r.error)}</pre>`;
     return;
   }
   if (!r || !r.ok) {
     resDiv.innerHTML = `<pre style="color:#f85149">unexpected response</pre>`;
     return;
   }
+  // Cache result on the overlay so the save-to-loot handler can
+  // grab columns+rows without a re-fetch (same pattern peek uses).
+  const overlay = document.getElementById('dbcon-sql-overlay');
+  if (overlay) {
+    overlay._sqlCols = r.columns || [];
+    overlay._sqlRows = r.rows || [];
+    overlay._sqlText = sql;
+  }
   const cols = (r.columns || []).map(c =>
-    `<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #30363d;color:#58a6ff">${escHtml(c)}</th>`).join('');
+    `<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #30363d;color:#58a6ff;position:sticky;top:0;background:#0d1117;z-index:1">${escHtml(c)}</th>`).join('');
+  // user-select:text explicitly + white-space:pre-wrap + word-break
+  // so cells expand vertically, text is fully visible and cleanly
+  // selectable by mouse or keyboard.  vertical-align:top keeps
+  // multi-line rows readable.
   const rows = (r.rows || []).map(row =>
     '<tr>' + row.map(v =>
-      `<td style="padding:4px 8px;border-bottom:1px solid #21262d;vertical-align:top;max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${v === null ? '<i style="color:#6e7681">null</i>' : escHtml(String(v))}</td>`
+      `<td style="padding:4px 8px;border-bottom:1px solid #21262d;vertical-align:top;max-width:520px;white-space:pre-wrap;word-break:break-word;user-select:text">${v === null ? '<i style="color:#6e7681">null</i>' : escHtml(String(v))}</td>`
     ).join('') + '</tr>').join('');
   resDiv.innerHTML = `
-    <div style="color:#8b949e;margin-bottom:4px">${(r.rows||[]).length} row(s), ${(r.columns||[]).length} col(s)${r.truncated ? ' — <b style="color:#d29922">truncated at limit</b>' : ''}</div>
-    <table style="border-collapse:collapse;min-width:100%">
-      <thead><tr>${cols}</tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
+    <div style="color:#8b949e;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
+      <span>${(r.rows||[]).length} row(s), ${(r.columns||[]).length} col(s)${r.truncated ? ' — <b style="color:#d29922">truncated at limit</b>' : ''}</span>
+      <span style="display:flex;gap:6px">
+        <button class="btn" onclick="_copyDBCONSQLToClipboard()" title="Copy all rows to clipboard as TSV">&#128203; Copy TSV</button>
+        <button class="btn" style="background:#238636;color:#fff" onclick="_saveDBCONCustomSQLAs('${escHtml(srcSid)}','${escHtml(conName)}','csv')">&#8681; CSV</button>
+        <button class="btn" style="background:#238636;color:#fff" onclick="_saveDBCONCustomSQLAs('${escHtml(srcSid)}','${escHtml(conName)}','json')">&#8681; JSON</button>
+      </span>
+    </div>
+    <div style="user-select:text;overflow:auto;max-height:calc(100vh - 400px);border:1px solid #21262d;border-radius:3px">
+      <table style="border-collapse:collapse;min-width:100%;user-select:text">
+        <thead><tr>${cols}</tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
   `;
+}
+
+async function _saveDBCONCustomSQLAs(srcSid, conName, fmt) {
+  const overlay = document.getElementById('dbcon-sql-overlay');
+  if (!overlay || !overlay._sqlRows || !overlay._sqlRows.length) {
+    alert('No rows to export.'); return;
+  }
+  // Reuse the peek save-CSV route — it's generic (takes columns+rows
+  // and writes to loot).  Synthetic schema/table so the filename
+  // reads as a custom-SQL dump instead of a table peek.
+  const ts = Math.floor(Date.now() / 1000);
+  const r = await api('POST', `node/${srcSid}/dbcon/save_peek_csv`, {
+    con_name: conName, schema: 'custom_sql', table: 'query_' + ts,
+    columns: overlay._sqlCols, rows: overlay._sqlRows, format: fmt });
+  if (r && r.error) { alert(`Save failed: ${r.error}`); return; }
+  if (r && r.ok) {
+    alert(`${(fmt||'csv').toUpperCase()} saved to loot:\n${r.loot_path}\n\n` +
+      `${r.rows} row(s), ${r.columns} column(s).\n\n` +
+      `Original SQL:\n${overlay._sqlText || ''}`);
+  }
+}
+
+function _copyDBCONSQLToClipboard() {
+  const overlay = document.getElementById('dbcon-sql-overlay');
+  if (!overlay) return;
+  const cols = overlay._sqlCols || [];
+  const rows = overlay._sqlRows || [];
+  // TSV — tabs between cells, newlines between rows.  Pastes cleanly
+  // into Excel / Google Sheets / most editors.  Newlines within
+  // cells replaced with \n literal so row boundaries stay intact.
+  const esc = v => v === null ? ''
+    : String(v).replace(/\t/g, ' ').replace(/\r?\n/g, '\\n');
+  const tsv = [cols.map(esc).join('\t')]
+    .concat(rows.map(r => r.map(esc).join('\t')))
+    .join('\n');
+  navigator.clipboard.writeText(tsv).then(
+    () => flashActivity(`Copied ${rows.length} row(s) as TSV`, 2000),
+    (err) => alert('Clipboard write failed: ' + err));
 }
 
 async function runDBCONReconSweep(srcSid, conName) {
