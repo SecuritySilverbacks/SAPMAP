@@ -2951,6 +2951,12 @@ class SAPMAPState:
             1 for n in self.nodes.values()
               for e in (getattr(n, "dbcon_edges", None) or [])
               if getattr(e, "pwned", False))
+        # Exclude bare AWS placeholder SAPNodes (CSI_AWS_EC2 /
+        # CSI_AWS_S3) — the frontend hides them from the map, so
+        # counting them here would make the status-bar disagree
+        # with what the operator sees ("14 systems" vs "I count 12").
+        visible_sap_nodes = [n for n in self.nodes.values()
+                              if not _is_bare_aws_default_node(n)]
         # SAProuter nodes already live in self.nodes (SAPNode with
         # .saprouter set), so they are counted via len(self.nodes).
         # SCCs, BTP subaccounts, and DBCON edges are tracked
@@ -2959,12 +2965,12 @@ class SAPMAPState:
         # own map box and its own ⚡ candidate, so it counts as a
         # "system" for the % readout to be honest.
         return {
-            "systems": (len(self.nodes)
+            "systems": (len(visible_sap_nodes)
                         + len(self.scc_nodes)
                         + len(self.btp_subaccounts or {})
                         + dbcon_edges_total),
             "connections": len(self.connections),
-            "pwned": (sum(1 for n in self.nodes.values() if n.pwned)
+            "pwned": (sum(1 for n in visible_sap_nodes if n.pwned)
                       + scc_pwned + btp_pwned + dbcon_pwned),
             "users_created": len(self.created_users),
             "production_systems": sum(1 for n in self.nodes.values() if n.is_production),

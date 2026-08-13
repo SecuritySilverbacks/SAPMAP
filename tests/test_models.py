@@ -406,6 +406,32 @@ def test_track_created_user_pads_short_client_to_three_digits():
     assert state.get_node("W74").clients[0]["nr"] == "001"
 
 
+def test_state_stats_systems_excludes_hidden_bare_aws_nodes():
+    """CSI_AWS_EC2 / CSI_AWS_S3 auto-placeholders are hidden from
+    the map by the frontend.  The status-bar 'Systems: N' counter
+    used to include them anyway, so the operator saw '14 systems'
+    while visually counting 12 boxes.  Fixed by mirroring the
+    _is_bare_aws_default_node filter in stats()."""
+    state = SAPMAPState()
+    # Real node — should count
+    state.add_node(SAPNode(sid="S4H", ip="192.168.2.209",
+                             hostname="s4hanadev"))
+    # Two AWS placeholders auto-materialised from Type-G destinations
+    csi = SAPNode(sid="CSI", ip="ec2.amazonaws.com",
+                   hostname="ec2.amazonaws.com",
+                   discovered_via_rfc_g=True)
+    csi1 = SAPNode(sid="CSI1", ip="s3.amazonaws.com",
+                    hostname="s3.amazonaws.com",
+                    discovered_via_rfc_g=True)
+    state.add_node(csi)
+    state.add_node(csi1)
+    s = state.stats()
+    # Only S4H should count — CSI + CSI1 are hidden from the map
+    assert s["systems"] == 1, (
+        f"expected 1 visible system (S4H), got {s['systems']} — "
+        f"hidden AWS placeholders should not count")
+
+
 def test_state_stats_pwned_includes_dbcon_edges():
     """Same off-by-one class as SCCs and BTP: the map draws ⚡ on
     every DBCONConnection.pwned=True cylinder.  Status-bar counter
