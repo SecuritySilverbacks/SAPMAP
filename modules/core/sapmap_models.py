@@ -2944,6 +2944,9 @@ class SAPMAPState:
                         if getattr(s, "pwned", False))
         btp_pwned = sum(1 for b in (self.btp_subaccounts or {}).values()
                          if getattr(b, "pwned", False))
+        dbcon_edges_total = sum(
+            len(getattr(n, "dbcon_edges", None) or [])
+            for n in self.nodes.values())
         dbcon_pwned = sum(
             1 for n in self.nodes.values()
               for e in (getattr(n, "dbcon_edges", None) or [])
@@ -2952,11 +2955,14 @@ class SAPMAPState:
         # .saprouter set), so they are counted via len(self.nodes).
         # SCCs, BTP subaccounts, and DBCON edges are tracked
         # separately, so summed in explicitly to match the box count
-        # the operator sees on the map.
+        # the operator sees on the map — each DBCON cylinder is its
+        # own map box and its own ⚡ candidate, so it counts as a
+        # "system" for the % readout to be honest.
         return {
             "systems": (len(self.nodes)
                         + len(self.scc_nodes)
-                        + len(self.btp_subaccounts or {})),
+                        + len(self.btp_subaccounts or {})
+                        + dbcon_edges_total),
             "connections": len(self.connections),
             "pwned": (sum(1 for n in self.nodes.values() if n.pwned)
                       + scc_pwned + btp_pwned + dbcon_pwned),
