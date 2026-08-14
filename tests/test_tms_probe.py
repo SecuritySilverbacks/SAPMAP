@@ -315,6 +315,93 @@ def test_read_recent_transports_refuses_unverified_logon():
     assert r["ok"] is False and "logon not verified" in r["error"]
 
 
+def test_read_tms_buffer_prefers_target_over_tmsadm(monkeypatch):
+    """RFC_READ_TABLE with TMSADM triggers RFC_COMMUNICATION_FAILURE
+    ("no conversation found") because TMSADM is only authorised for
+    RFC_PING + TMS-specific FMs.  read_tms_buffer must therefore
+    prefer the target node's real credentials over TMSADM's password.
+    """
+    from sapmap_models import Credentials
+    captured_creds = {}
+    conn = _FakeConn({"TMSBUFFER": {"ET_DATA": []}})
+    fake_mod = types.ModuleType("sapmap_rfc")
+    def _get_conn(node, creds):
+        captured_creds["username"] = creds.username
+        return conn
+    fake_mod._get_connection = _get_conn
+    fake_errors = types.ModuleType("sapmap_errors")
+    fake_errors.format_rfc_exception = lambda e: str(e)
+    monkeypatch.setitem(sys.modules, "sapmap_rfc", fake_mod)
+    monkeypatch.setitem(sys.modules, "sapmap_errors", fake_errors)
+
+    state = SAPMAPState()
+    q01 = SAPNode(sid="Q01", ip="q01host")
+    # Verified cred on the target node — should be picked
+    q01.credentials = [Credentials(
+        username="SAPMAP00", password="pw",
+        client="000", instance_nr="00", verified=True)]
+    state.add_node(q01)
+    d = TMSDestination(source_sid="S4H", target_sid="Q01",
+                          target_host="q01host", domain="X",
+                          password="tmsadm-pw", logon_ok=True)
+    tms.read_tms_buffer(d, state=state)
+    assert captured_creds["username"] == "SAPMAP00", \
+        "should prefer target's verified cred over TMSADM"
+
+
+def test_read_tms_buffer_falls_back_to_source_creds(monkeypatch):
+    """When target has no verified cred but source does (self-
+    reference case: TMSADM@S4H.DOMAIN_S4H on S4H itself), read_tms_
+    buffer should use source's cred.  This is the primary operator
+    flow — S4H's own SAPMAP00 has TMSCSYS + TMSBUFFER read rights."""
+    from sapmap_models import Credentials
+    captured = {}
+    conn = _FakeConn({"TMSBUFFER": {"ET_DATA": []}})
+    fake_mod = types.ModuleType("sapmap_rfc")
+    def _get_conn(node, creds):
+        captured["username"] = creds.username
+        return conn
+    fake_mod._get_connection = _get_conn
+    fake_errors = types.ModuleType("sapmap_errors")
+    fake_errors.format_rfc_exception = lambda e: str(e)
+    monkeypatch.setitem(sys.modules, "sapmap_rfc", fake_mod)
+    monkeypatch.setitem(sys.modules, "sapmap_errors", fake_errors)
+
+    state = SAPMAPState()
+    s4h = SAPNode(sid="S4H", ip="s4hanadev")
+    s4h.credentials = [Credentials(
+        username="joris", password="pw",
+        client="100", instance_nr="00", verified=True)]
+    state.add_node(s4h)
+    d = TMSDestination(source_sid="S4H", target_sid="S4H",
+                          target_host="s4hanadev", domain="DOMAIN_S4H",
+                          password="tmsadm-pw", logon_ok=True)
+    tms.read_tms_buffer(d, state=state)
+    assert captured["username"] == "joris"
+
+
+def test_read_tms_buffer_falls_back_to_tmsadm_when_no_other_cred(monkeypatch):
+    """No verified cred anywhere → TMSADM is used (last resort;
+    caller will likely see RFC_COMMUNICATION_FAILURE but at least a
+    real error, not a silent misfire)."""
+    captured = {}
+    conn = _FakeConn({"TMSBUFFER": {"ET_DATA": []}})
+    fake_mod = types.ModuleType("sapmap_rfc")
+    def _get_conn(node, creds):
+        captured["username"] = creds.username
+        return conn
+    fake_mod._get_connection = _get_conn
+    fake_errors = types.ModuleType("sapmap_errors")
+    fake_errors.format_rfc_exception = lambda e: str(e)
+    monkeypatch.setitem(sys.modules, "sapmap_rfc", fake_mod)
+    monkeypatch.setitem(sys.modules, "sapmap_errors", fake_errors)
+    d = TMSDestination(source_sid="S4H", target_sid="Q01",
+                          target_host="q01host", domain="X",
+                          password="tmsadm-pw", logon_ok=True)
+    tms.read_tms_buffer(d, state=None)
+    assert captured["username"] == "TMSADM"
+
+
 def test_read_tms_buffer_happy_path(monkeypatch):
     conn = _FakeConn({
         "TMSBUFFER": {"ET_DATA": [

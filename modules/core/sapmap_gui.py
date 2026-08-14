@@ -13957,7 +13957,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
             return json.dumps({"error": f"TMSADM@{target} not on {sid}"})
         try:
             from sap_tms_probe import read_tms_buffer
-            res = read_tms_buffer(dest)
+            res = read_tms_buffer(dest, state=api.state)
             if res.get("ok"):
                 sapmap_findings.emit_finding(
                     "MEDIUM", sid,
@@ -13990,7 +13990,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
             return json.dumps({"error": f"TMSADM@{target} not on {sid}"})
         try:
             from sap_tms_probe import read_recent_transports
-            res = read_recent_transports(dest, limit=limit)
+            res = read_recent_transports(dest, limit=limit,
+                                            state=api.state)
             if res.get("ok"):
                 sapmap_findings.emit_finding(
                     "MEDIUM", sid,

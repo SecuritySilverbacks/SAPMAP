@@ -560,23 +560,67 @@ def _materialize_tms_target(dest: TMSDestination,
 # TMSBUFFER + transport history (read-only intel)
 # ============================================================================
 
-def read_tms_buffer(dest: TMSDestination) -> dict:
+def _best_read_creds(dest: TMSDestination,
+                       state: SAPMAPState = None):
+    """Pick the best credential for RFC_READ_TABLE against the DEST's
+    target.  TMSADM (dest.password) is only authorised for RFC_PING
+    + TMS-specific FMs — RFC_READ_TABLE with it makes the kernel drop
+    the conversation (RFC_COMMUNICATION_FAILURE, "no conversation
+    found").
+
+    Preference order:
+      1. TARGET node's best_credentials (if the target is on the map
+         and has a verified cred there — e.g. we planted SAPMAP00
+         on it directly)
+      2. SOURCE node's best_credentials — works when source==target
+         (self-referential TMSADM@S4H.DOMAIN_S4H) and often works
+         cross-system too when SAPMAP00 was propagated
+      3. Fall back to TMSADM (dest.password) — call will likely
+         fail for table reads but caller gets a real error not a
+         silent misfire
+    """
+    if state is not None:
+        tgt = state.get_node(dest.target_sid)
+        if tgt is not None:
+            c = tgt.best_credentials()
+            if c and c.username.upper() != "TMSADM":
+                return c, "target-node cred"
+        src = state.get_node(dest.source_sid)
+        if src is not None:
+            c = src.best_credentials()
+            if c and c.username.upper() != "TMSADM":
+                return c, "source-node cred"
+    return _make_creds(dest), "TMSADM (fallback, unlikely to work for RFC_READ_TABLE)"
+
+
+def _target_sapnode(dest: TMSDestination) -> SAPNode:
+    """Build a synthetic SAPNode for dispatching an RFC connection
+    to the DEST's target host.  Not added to state — this is
+    per-call and short-lived."""
+    tgt = SAPNode(sid=dest.target_sid,
+                    ip=dest.target_host,
+                    hostname=dest.target_host)
+    from sapmap_models import InstanceInfo
+    tgt.instances = [InstanceInfo(instance_nr="00",
+                                     ip=dest.target_host)]
+    return tgt
+
+
+def read_tms_buffer(dest: TMSDestination,
+                     state: SAPMAPState = None) -> dict:
     """Read TMSBUFFER on the target — pending imports.
 
-    Requires dest.logon_ok.  Returns {ok, error, count, rows: [{trkorr,
-    tarsystem, mode, ...}]}.  Also caches the count on
-    dest.buffer_count.
+    Requires dest.logon_ok.  Uses the best available RFC credential
+    for the target — NOT TMSADM (which is only authorised for
+    RFC_PING + TMS-specific FMs).  Returns {ok, error, count,
+    rows: [{trkorr, tarsystem, mode, ...}]}.  Also caches the count
+    on dest.buffer_count.
     """
     out = {"ok": False, "error": "", "count": 0, "rows": []}
     if not dest.logon_ok:
         out["error"] = "TMSADM logon not verified — Test first"
         return out
-    tgt = SAPNode(sid=dest.target_sid,
-                   ip=dest.target_host,
-                   hostname=dest.target_host)
-    from sapmap_models import InstanceInfo
-    tgt.instances = [InstanceInfo(instance_nr="00",
-                                     ip=dest.target_host)]
+    tgt = _target_sapnode(dest)
 
     try:
         from sapmap_rfc import _get_connection
@@ -585,7 +629,9 @@ def read_tms_buffer(dest: TMSDestination) -> dict:
         out["error"] = f"import failed: {e}"
         return out
 
-    creds = _make_creds(dest)
+    creds, cred_note = _best_read_creds(dest, state)
+    print(f"[*] {dest.source_sid}: TMSBUFFER on {dest.target_sid} "
+          f"— using {creds.username} ({cred_note})")
     try:
         with _get_connection(tgt, creds) as conn:
             rows_raw, flag, err = _rfc_read_table(
@@ -611,20 +657,16 @@ def read_tms_buffer(dest: TMSDestination) -> dict:
     return out
 
 
-def read_recent_transports(dest: TMSDestination, limit: int = 50) -> dict:
-    """Read E070 (transport request headers) on the target.  Returns
-    the most recent `limit` releases so the operator can see what's
-    been landing in this system lately."""
+def read_recent_transports(dest: TMSDestination, limit: int = 50,
+                              state: SAPMAPState = None) -> dict:
+    """Read E070 (transport request headers) on the target.  Uses the
+    same best-cred selector as read_tms_buffer — TMSADM can't do
+    RFC_READ_TABLE."""
     out = {"ok": False, "error": "", "count": 0, "rows": []}
     if not dest.logon_ok:
         out["error"] = "TMSADM logon not verified — Test first"
         return out
-    tgt = SAPNode(sid=dest.target_sid,
-                   ip=dest.target_host,
-                   hostname=dest.target_host)
-    from sapmap_models import InstanceInfo
-    tgt.instances = [InstanceInfo(instance_nr="00",
-                                     ip=dest.target_host)]
+    tgt = _target_sapnode(dest)
 
     try:
         from sapmap_rfc import _get_connection
@@ -633,7 +675,9 @@ def read_recent_transports(dest: TMSDestination, limit: int = 50) -> dict:
         out["error"] = f"import failed: {e}"
         return out
 
-    creds = _make_creds(dest)
+    creds, cred_note = _best_read_creds(dest, state)
+    print(f"[*] {dest.source_sid}: E070 on {dest.target_sid} "
+          f"— using {creds.username} ({cred_note})")
     try:
         with _get_connection(tgt, creds) as conn:
             rows_raw, flag, err = _rfc_read_table(

@@ -4994,12 +4994,29 @@ def read_table(node: SAPNode, table_name: str, fields: list = None,
             if fields:
                 params["FIELDS"] = [{"FIELDNAME": f} for f in fields]
             if where:
-                # Split WHERE into 72-char chunks (SAP table parameter limit)
+                # Split WHERE into ≤72-char rows (SAP OPTIONS row width).
+                # Naive [::72] slicing breaks tokens in half — the ABAP
+                # parser then sees `AGR_NAME = 'SAP_BC_USER_A DMIN'`
+                # and raises OPTION_NOT_VALID / "A Boolean expression …"
+                # (surfaced by capability-analyser reads of AGR_1251 with
+                # 8+ role names OR-joined).  Split at whitespace inside
+                # the 72-char window instead so every row ends on a
+                # token boundary.  Degenerate case (single token > 72
+                # chars) falls back to hard split so we still make
+                # forward progress.
                 options = []
-                while where:
-                    chunk = where[:72]
-                    options.append({"TEXT": chunk})
-                    where = where[72:]
+                _rest = where
+                while _rest:
+                    if len(_rest) <= 72:
+                        options.append({"TEXT": _rest})
+                        break
+                    # Prefer a whitespace break within the 72-char window
+                    split_at = _rest.rfind(" ", 0, 72)
+                    if split_at <= 0:
+                        # No whitespace to split on — hard-cut at 72
+                        split_at = 72
+                    options.append({"TEXT": _rest[:split_at]})
+                    _rest = _rest[split_at:].lstrip()
                 params["OPTIONS"] = options
             if long_strings:
                 params["USE_ET_DATA_4_RETURN"] = "X"

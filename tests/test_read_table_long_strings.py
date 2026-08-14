@@ -146,6 +146,70 @@ def test_read_table_typed_struct_lowercase_keys(monkeypatch):
     assert rows[1]["TYPE"] == "LD"
 
 
+def test_read_table_where_splits_at_word_boundary(monkeypatch):
+    """Operator-surfaced bug: capability analyser AGR_1251 reads with
+    8+ OR-joined role names produced OPTION_NOT_VALID / "A Boolean
+    expression …".  Cause: read_table sliced the WHERE clause at
+    exactly 72 chars, breaking a role-name token in half.  ABAP
+    concatenates the OPTIONS rows and sees garbage.
+
+    Fix asserts every emitted OPTIONS row ends at a whitespace
+    boundary so no token gets split across rows."""
+    import sapmap_rfc
+    captured = {}
+    def _capture(*_args, **params):
+        captured.update(params)
+        return {"FIELDS": [], "DATA": []}
+    class _C:
+        call = staticmethod(_capture)
+    from contextlib import contextmanager
+    @contextmanager
+    def _ctx(*a, **kw): yield _C()
+    monkeypatch.setattr(sapmap_rfc, "_get_connection", _ctx)
+    where = " OR ".join(
+        f"AGR_NAME = 'SAP_BC_BASIS_ADMINISTRATOR_{i}'" for i in range(6))
+    sapmap_rfc.read_table(
+        _node(), "AGR_1251", fields=["AGR_NAME", "OBJECT"],
+        where=where, max_rows=100)
+    opts = captured.get("OPTIONS") or []
+    assert opts, "OPTIONS should be populated for non-empty WHERE"
+    # Each row ≤ 72 chars
+    for row in opts:
+        assert len(row["TEXT"]) <= 72, \
+            f"row exceeds 72 chars: {row['TEXT']!r}"
+    # No mid-token split — no row ends with an unbalanced quote or
+    # partial role name.  Concatenating rows back with spaces must
+    # reproduce the original clause (modulo whitespace normalisation).
+    joined = " ".join(r["TEXT"] for r in opts)
+    # Every role name from the original clause is present intact
+    for i in range(6):
+        role = f"SAP_BC_BASIS_ADMINISTRATOR_{i}"
+        assert role in joined, \
+            f"role {role!r} split across OPTIONS rows: {joined!r}"
+
+
+def test_read_table_where_hard_split_when_no_whitespace(monkeypatch):
+    """Degenerate case: a single token >72 chars.  Hard-split at 72
+    is the only option — assert we still emit rows and don't hang."""
+    import sapmap_rfc
+    captured = {}
+    def _capture(*_args, **params):
+        captured.update(params); return {"FIELDS": [], "DATA": []}
+    class _C: call = staticmethod(_capture)
+    from contextlib import contextmanager
+    @contextmanager
+    def _ctx(*a, **kw): yield _C()
+    monkeypatch.setattr(sapmap_rfc, "_get_connection", _ctx)
+    huge = "A" * 200   # 200-char token, no whitespace
+    sapmap_rfc.read_table(_node(), "T", fields=["F"],
+                           where=huge, max_rows=1)
+    opts = captured["OPTIONS"]
+    assert len(opts) == 3   # 200 / 72 = 2.78 → 3 rows
+    for row in opts[:-1]:
+        assert len(row["TEXT"]) == 72
+    assert "".join(r["TEXT"] for r in opts) == huge
+
+
 def test_read_table_typed_struct_with_wa_present_but_no_delim(monkeypatch):
     """Edge case: kernel returns BOTH a WA (empty / non-delimited) and
     typed-struct keys.  Parser should prefer the typed-struct payload
