@@ -1264,6 +1264,53 @@ def _dbcon_section(state: SAPMAPState) -> list:
     return out
 
 
+def _tms_section(state: SAPMAPState) -> list:
+    """CTS/TMS pivot results (Bundle 1)."""
+    dests = []
+    for sid, n in sorted(state.nodes.items()):
+        for d in (getattr(n, "tms_destinations", None) or []):
+            dests.append((sid, d))
+    if not dests:
+        return []
+    out = ["## CTS/TMS pivot", ""]
+    out.append(
+        "Cross-system transport-management RFC destinations "
+        "(`TMSADM@<SID>.DOMAIN_<X>`) whose passwords SAPMAP recovered "
+        "from RSECTAB.  Each row is a system in the transport "
+        "domain that SAPMAP can reach as TMSADM — cross-system "
+        "transport rights.  The domain controller (marked "
+        "**CTRL**) additionally owns the full TMS configuration.")
+    out.append("")
+    out.append("| Source | Target | Domain | Host | Logon | "
+                "TMSADM roles | SAP_ALL | Buffer | Controller |")
+    out.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    for sid, d in dests:
+        logon = ("✅" if d.logon_ok
+                  else ("❌" if d.tested else "?"))
+        sap_all = "⚡ **YES**" if d.tmsadm_has_sap_all else "—"
+        ctrl = "🎯 **CTRL**" if d.is_controller else "—"
+        roles = ", ".join(d.tmsadm_roles[:3]) if d.tmsadm_roles else "—"
+        buf = d.buffer_count if d.buffer_count > 0 else "—"
+        out.append(
+            f"| {sid} | `TMSADM@{_esc(d.target_sid)}` | "
+            f"`{_esc(d.domain)}` | `{_esc(d.target_host)}` | "
+            f"{logon} | {_esc(roles)} | {sap_all} | {buf} | {ctrl} |")
+    out.append("")
+    materialised = [n for n in state.nodes.values()
+                    if getattr(n, "discovered_via_tms", False)]
+    if materialised:
+        out.append(f"### TMS-materialised SAP nodes ({len(materialised)})")
+        out.append("")
+        for n in sorted(materialised, key=lambda x: x.sid):
+            ctrl = " — **DOMAIN CONTROLLER**" if n.is_tms_controller else ""
+            out.append(
+                f"- **{n.sid}** @ `{_esc(n.ip or n.hostname)}` "
+                f"(domain `{_esc(n.tms_domain)}`) — discovered via "
+                f"`{_esc(n.tms_parent_sid)}`{ctrl}")
+        out.append("")
+    return out
+
+
 def _created_users_section(state: SAPMAPState) -> list:
     """Every SAPMAP-created account across the landscape."""
     users = list(getattr(state, "created_users", []) or [])
@@ -2119,6 +2166,7 @@ def build_markdown_report(state: SAPMAPState,
     for extra in (_impact_section(state),
                   _secstore_section(state),
                   _dbcon_section(state),
+                  _tms_section(state),
                   _created_users_section(state),
                   _persistence_section(state),
                   _evasion_section(state)):

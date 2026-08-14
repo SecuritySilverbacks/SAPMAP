@@ -406,6 +406,30 @@ def test_dbcon_edge_appears_in_chain():
     assert "[dbcon]" in hop.description
 
 
+def test_tms_edge_appears_in_chain_with_controller_has_sap_all():
+    """CTS/TMS domain-controller destinations must appear as chain
+    hops labelled 'TMSADM RFC' and treated as has_sap_all (landscape-
+    wide transport rights) — Bundle 1 of the CTS/TMS epic."""
+    from sapmap_models import TMSDestination
+    state = SAPMAPState()
+    dev = SAPNode(sid="DEV", ip="10.0.0.1", pwned=True)
+    dev.tms_destinations = [TMSDestination(
+        source_sid="DEV", target_sid="PRD", target_host="prdhost",
+        domain="DOMAIN_DEV", is_controller=True, password="x",
+        tested=True, logon_ok=True, tmsadm_has_sap_all=False)]
+    prd = SAPNode(sid="PRD", ip="prdhost", is_production=True)
+    state.add_node(dev); state.add_node(prd)
+    chains = find_all_chains(state)
+    tms_chains = [c for c in chains
+                    if any(h.target_sid == "PRD" for h in c.hops)]
+    assert tms_chains, "expected chain reaching PRD via TMS controller"
+    hop = [h for h in tms_chains[0].hops if h.target_sid == "PRD"][0]
+    assert "TMSADM" in hop.method
+    assert hop.has_sap_all, \
+        "controller edge should carry has_sap_all=True regardless of TMSADM's actual profiles"
+    assert "[tms]" in hop.description
+
+
 def test_dbcon_non_sap_shape_edge_skipped_in_chain():
     """A non-SAP-shape DBCON is data-extraction only — not a
     user-plantable lateral hop.  The chain BFS must skip it."""

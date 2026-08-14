@@ -126,6 +126,15 @@ def test_every_capability_in_attack_map_has_remediation_or_explicit_exemption():
         "recon.dbcon_describe",
         "data.dbcon_peek", "data.dbcon_custom_sql",
         "creds.dbcon_usr02_dump", "creds.dbcon_auth_dump",
+        # CTS/TMS pivot (Bundle 1) — post-foothold reconnaissance
+        # and cross-system logon.  The remediation (rotate TMSADM
+        # password + tighten RSECTAB read auth + audit S_TRANSPRT
+        # assignments) is landscape-policy not per-finding.  When
+        # Bundle 2 (write primitives) ships, persist.transport_inject
+        # will keep the same exemption note because the fix is still
+        # policy-shape.
+        "recon.tms_domain", "lateral.tmsadm_rfc",
+        "recon.tms_buffer", "data.tms_transport_history",
     }
     missing = []
     for cap in sapmap_attack.CAPABILITY_MAP:

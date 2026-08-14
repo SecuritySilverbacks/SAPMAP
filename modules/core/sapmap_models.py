@@ -577,6 +577,12 @@ class SAPNode:
     # Populated by sap_dbcon_probe.integrate_dbcon_from_secstore.
     # Issue #21.
     dbcon_edges: list = field(default_factory=list)   # [DBCONConnection, ...]
+    # CTS/TMS destinations this ABAP has for cross-system transport
+    # moves (TMSADM@<SID>.DOMAIN_<DOMAIN> entries paired with
+    # RSECTAB /RFC/TMSADM@... passwords).  Populated by
+    # sap_tms_probe.integrate_tms_from_secstore.  Bundle 1 of the
+    # CTS/TMS epic.
+    tms_destinations: list = field(default_factory=list)  # [TMSDestination, ...]
     clients: list = field(default_factory=list)     # [{"nr": "100", "category": "P"}, ...]
     is_production: bool = False
     findings: list = field(default_factory=list)    # [Finding, ...]
@@ -818,6 +824,17 @@ class SAPNode:
     # the source cylinder to this node once it's promoted.
     dbcon_parent_sid: str = ""
     dbcon_parent_con_name: str = ""
+    # Similar flag for the CTS/TMS pivot (Bundle 1).  True when this
+    # node was auto-materialised by probing a TMSADM RFC destination
+    # from another SAP system — parent = the ABAP that owned the
+    # /RFC/TMSADM@<us>.DOMAIN_<x> secstore entry.
+    discovered_via_tms: bool = False
+    tms_parent_sid: str = ""
+    # True when this node is the transport-domain controller.  Set
+    # when TMSMCONF.DOMAINCTL matches this SID.  Rendered as a
+    # "CTRL" pill on the map (like the "SAP" badge on DBCON).
+    is_tms_controller: bool = False
+    tms_domain: str = ""
 
     # USREXTID table — on-prem cert-CN → ABAP user mapping.  Populated
     # by Data Extraction → Read USREXTID.  Each entry is a row dict
@@ -1020,6 +1037,11 @@ class SAPNode:
             "discovered_via_dbcon": self.discovered_via_dbcon,
             "dbcon_parent_sid": self.dbcon_parent_sid,
             "dbcon_parent_con_name": self.dbcon_parent_con_name,
+            "discovered_via_tms": self.discovered_via_tms,
+            "tms_parent_sid": self.tms_parent_sid,
+            "is_tms_controller": self.is_tms_controller,
+            "tms_domain": self.tms_domain,
+            "tms_destinations": [d.to_dict() for d in (self.tms_destinations or [])],
             "oauth2_profiles": list(self.oauth2_profiles),
             "usrextid_entries": list(self.usrextid_entries),
             "usrextid_read_at": self.usrextid_read_at,
@@ -1145,6 +1167,12 @@ class SAPNode:
             discovered_via_dbcon=d.get("discovered_via_dbcon", False),
             dbcon_parent_sid=d.get("dbcon_parent_sid", ""),
             dbcon_parent_con_name=d.get("dbcon_parent_con_name", ""),
+            discovered_via_tms=d.get("discovered_via_tms", False),
+            tms_parent_sid=d.get("tms_parent_sid", ""),
+            is_tms_controller=d.get("is_tms_controller", False),
+            tms_domain=d.get("tms_domain", ""),
+            tms_destinations=[TMSDestination.from_dict(t)
+                for t in d.get("tms_destinations", [])],
             oauth2_profiles=list(d.get("oauth2_profiles", [])),
             capability_results=list(d.get("capability_results", [])),
             capability_row_counts=dict(
@@ -1222,6 +1250,58 @@ class DBCONConnection:
 
     @classmethod
     def from_dict(cls, d: dict) -> "DBCONConnection":
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in d.items() if k in known})
+
+
+# ---------------------------------------------------------------------------
+# TMSDestination — a TMSADM RFC destination for the CTS/TMS pivot
+# (CTS/TMS epic Bundle 1).  Pairs a /RFC/TMSADM@<SID>.DOMAIN_<X>
+# RSECTAB entry with a row in TMSCSYS (transport-system config)
+# so we know host + client + controller flag for each domain member.
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TMSDestination:
+    source_sid:     str = ""    # owner ABAP that has /RFC/TMSADM@... in RSECTAB
+    target_sid:     str = ""    # TMSADM@<SID> — the transport-domain member
+    target_host:    str = ""    # from TMSCSYS.HOSTNAME / SYS_NAME
+    target_client:  str = "000" # TMSADM lives in 000 by convention
+    domain:         str = ""    # transport domain (TMSMCONF.DOMAIN)
+    is_controller:  bool = False  # this target owns TMS config for the domain
+    password:       str = ""    # from RSECTAB (plaintext — same precedent as DBCON)
+    tested:         bool = False
+    logon_ok:       bool = False
+    tmsadm_roles:   list = field(default_factory=list)   # profile names observed
+    tmsadm_has_sap_all: bool = False
+    buffer_count:   int = 0     # pending imports on target (TMSBUFFER count)
+    recent_transports: list = field(default_factory=list)  # E070/E071 rows
+    pwned:          bool = False   # write primitive succeeded (Bundle 2)
+    error:          str = ""
+    tested_at:      str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "source_sid":     self.source_sid,
+            "target_sid":     self.target_sid,
+            "target_host":    self.target_host,
+            "target_client":  self.target_client,
+            "domain":         self.domain,
+            "is_controller":  self.is_controller,
+            "password":       self.password,
+            "tested":         self.tested,
+            "logon_ok":       self.logon_ok,
+            "tmsadm_roles":   list(self.tmsadm_roles or []),
+            "tmsadm_has_sap_all": self.tmsadm_has_sap_all,
+            "buffer_count":   self.buffer_count,
+            "recent_transports": list(self.recent_transports or []),
+            "pwned":          self.pwned,
+            "error":          self.error,
+            "tested_at":      self.tested_at,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "TMSDestination":
         known = {f.name for f in fields(cls)}
         return cls(**{k: v for k, v in d.items() if k in known})
 

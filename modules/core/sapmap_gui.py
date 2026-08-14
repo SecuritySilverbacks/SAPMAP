@@ -13822,6 +13822,151 @@ def create_app(api: SAPMAPApi) -> Bottle:
              f"DBCON auth dump {con_name}", _run)
         return json.dumps({"status": "started"})
 
+    # ---- CTS/TMS pivot (Bundle 1) ----
+
+    @app.route("/api/node/<sid>/tms/discover", method="POST")
+    def node_tms_discover(sid):
+        """Read TMSMCONF + TMSCSYS on this SAP node and pair the
+        resulting topology with /RFC/TMSADM@... RSECTAB entries.
+
+        No-op if SecStore hasn't been dumped yet.  Populates
+        node.tms_destinations."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        if not (node.secstore_entries or []):
+            return json.dumps({
+                "error": "No SecStore entries on this node yet — "
+                          "run SecStore extract first."})
+
+        def _run():
+            _task_start(f"{sid}:tms_discover", f"TMS discover on {sid}")
+            try:
+                from sap_tms_probe import integrate_tms_from_secstore
+                _creds = None
+                try: _creds = node.best_credentials()
+                except Exception: pass
+                added = integrate_tms_from_secstore(node, api.state, _creds)
+                print(f"[+] {sid}: TMS discover: "
+                      f"{len(added)} destination(s) resolved")
+            except Exception as _ex:
+                import traceback as _tb
+                print(f"[!] {sid}: TMS discover crashed: "
+                      f"{type(_ex).__name__}: {_ex}")
+                _tb.print_exc()
+            finally:
+                _task_end(f"{sid}:tms_discover")
+
+        _bg(f"{sid}:tms_discover", f"TMS discover {sid}", _run)
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/tms/test", method="POST")
+    def node_tms_test(sid):
+        """Test TMSADM RFC logon against one TMS destination."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        target = (data.get("target_sid") or "").strip().upper()
+        domain = (data.get("domain") or "").strip().upper()
+        print(f"[*] {sid}: TMS test — target={target!r} domain={domain!r}")
+        if not target:
+            return json.dumps({"error": "target_sid required"})
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        dest = next((d for d in (node.tms_destinations or [])
+                     if d.target_sid.upper() == target
+                     and (not domain or d.domain.upper() == domain)),
+                    None)
+        if dest is None:
+            avail = [(d.target_sid, d.domain)
+                     for d in (node.tms_destinations or [])]
+            return json.dumps({
+                "error": f"TMSADM@{target} not on {sid} — "
+                          f"available: {avail}"})
+
+        def _run():
+            _task_start(f"{sid}:tms_test:{target}",
+                        f"TMS test → {target}")
+            try:
+                from sap_tms_probe import probe_tms_destination
+                probe_tms_destination(dest, state=api.state)
+            except Exception as _ex:
+                import traceback as _tb
+                print(f"[!] {sid}: TMS test crashed: "
+                      f"{type(_ex).__name__}: {_ex}")
+                _tb.print_exc()
+            finally:
+                _task_end(f"{sid}:tms_test:{target}")
+
+        _bg(f"{sid}:tms_test:{target}", f"TMS test {target}", _run)
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/tms/read_buffer", method="POST")
+    def node_tms_read_buffer(sid):
+        """Read TMSBUFFER on the target — pending imports."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        target = (data.get("target_sid") or "").strip().upper()
+        if not target:
+            return json.dumps({"error": "target_sid required"})
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        dest = next((d for d in (node.tms_destinations or [])
+                     if d.target_sid.upper() == target), None)
+        if dest is None:
+            return json.dumps({"error": f"TMSADM@{target} not on {sid}"})
+        try:
+            from sap_tms_probe import read_tms_buffer
+            res = read_tms_buffer(dest)
+            if res.get("ok"):
+                sapmap_findings.emit_finding(
+                    "MEDIUM", sid,
+                    f"CTS/TMS: {res.get('count', 0)} pending "
+                    f"import(s) in TMSBUFFER on {target}",
+                    ref="tms.buffer.read",
+                    attack_capability="recon.tms_buffer")
+            return json.dumps(res)
+        except Exception as _ex:
+            import traceback as _tb
+            _tb.print_exc()
+            return json.dumps({"error":
+                f"read_buffer crashed: {type(_ex).__name__}: {_ex}"})
+
+    @app.route("/api/node/<sid>/tms/history", method="POST")
+    def node_tms_history(sid):
+        """Read E070 recent transports on the target."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        target = (data.get("target_sid") or "").strip().upper()
+        limit  = int(data.get("limit") or 50)
+        if not target:
+            return json.dumps({"error": "target_sid required"})
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        dest = next((d for d in (node.tms_destinations or [])
+                     if d.target_sid.upper() == target), None)
+        if dest is None:
+            return json.dumps({"error": f"TMSADM@{target} not on {sid}"})
+        try:
+            from sap_tms_probe import read_recent_transports
+            res = read_recent_transports(dest, limit=limit)
+            if res.get("ok"):
+                sapmap_findings.emit_finding(
+                    "MEDIUM", sid,
+                    f"CTS/TMS: recent-transports read on {target} — "
+                    f"{res.get('count', 0)} row(s) from E070",
+                    ref="tms.history.read",
+                    attack_capability="data.tms_transport_history")
+            return json.dumps(res)
+        except Exception as _ex:
+            import traceback as _tb
+            _tb.print_exc()
+            return json.dumps({"error":
+                f"history crashed: {type(_ex).__name__}: {_ex}"})
+
     @app.route("/api/node/<sid>/dbcon/save_peek_csv", method="POST")
     def node_dbcon_save_peek_csv(sid):
         """Persist a peek result to loot/ as a CSV file.  Client-side

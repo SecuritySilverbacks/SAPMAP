@@ -333,6 +333,20 @@ CAPABILITY_MAP: Dict[str, List[str]] = {
     # authorisation-buffer tables.  Enables offline "what can user
     # X do" analysis after the operator has the hashes.
     "creds.dbcon_auth_dump":     ["T1552", "T1213", "T1082"],
+    # ---- CTS/TMS pivot (Bundle 1) ----
+    # Enumerate the transport-domain topology (TMSCSYS + TMSMCONF)
+    # and pair RSECTAB /RFC/TMSADM@... with domain members.
+    # Discovery + credential-in-file.
+    "recon.tms_domain":          ["T1082", "T1018", "T1552.001"],
+    # TMSADM RFC logon to a domain member — remote services +
+    # valid accounts.  Precondition for transport injection.
+    "lateral.tmsadm_rfc":        ["T1021", "T1078"],
+    # Read TMSBUFFER on target — pending imports.  Data from
+    # information repositories.
+    "recon.tms_buffer":          ["T1082", "T1213"],
+    # Read E070 / E071 — recent transport history on target.
+    # Data-from-repositories + system-info discovery.
+    "data.tms_transport_history": ["T1213", "T1082"],
     "lateral.sapmap_user":       ["T1078", "T1136"],
     "lateral.mysapsso2_forge":   ["T1606"],
     "lateral.mysapsso2_replay":  ["T1550.004", "T1078"],

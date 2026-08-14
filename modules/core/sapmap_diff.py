@@ -71,6 +71,12 @@ def _node_summary(n) -> dict:
         "dbcon_edges_pwned": sum(1 for e in getattr(n, "dbcon_edges", [])
                                   or [] if getattr(e, "pwned", False)),
         "discovered_via_dbcon": bool(getattr(n, "discovered_via_dbcon", False)),
+        # CTS/TMS pivot (Bundle 1)
+        "tms_destinations_count": len(getattr(n, "tms_destinations", []) or []),
+        "tms_logons_ok": sum(1 for d in getattr(n, "tms_destinations", [])
+                              or [] if getattr(d, "logon_ok", False)),
+        "discovered_via_tms": bool(getattr(n, "discovered_via_tms", False)),
+        "is_tms_controller": bool(getattr(n, "is_tms_controller", False)),
     }
 
 
@@ -118,7 +124,9 @@ def _changed_node_fields(old: dict, new: dict) -> list:
               "credentials_count", "findings_count",
               "secstore_count", "java_secstore_count",
               "dbcon_edges_count", "dbcon_edges_pwned",
-              "discovered_via_dbcon"):
+              "discovered_via_dbcon",
+              "tms_destinations_count", "tms_logons_ok",
+              "discovered_via_tms", "is_tms_controller"):
         if old.get(k) != new.get(k):
             out.append((k, old.get(k), new.get(k)))
     return out

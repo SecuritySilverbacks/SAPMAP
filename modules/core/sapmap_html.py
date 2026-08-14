@@ -1351,6 +1351,7 @@ body {
       <div class="ctx-item" data-action="download_hashes">&#128273; Extract Hashes for Cracking</div>
       <div class="ctx-item" data-action="wd_extract_icmauth">&#128272; Extract WD password hashes (icmauth.txt)</div>
       <div class="ctx-item" data-action="download_secstore">&#128273; Download SecStore (RSECTAB)</div>
+      <div class="ctx-item" data-action="tms_discover">&#128260; Read CTS/TMS domain (needs SecStore)</div>
       <div class="ctx-item" data-action="download_java_secstore">&#128273; Download Java Secure Store</div>
       <div class="ctx-item" data-action="view_java_secstore">&#128203; View Java Secure Store Results</div>
       <div class="ctx-item" data-action="download_table">&#128229; Download Table Data</div>
@@ -2779,6 +2780,7 @@ let dragMoved = false;
 let dragStartPos = { x: 0, y: 0 };
 let unkPositions = {};  // persistent positions for unknown target boxes
 let dbconPositions = {}; // persistent positions for DBCON cylinders (key: "sid|con_name")
+let tmsPositions = {};   // persistent positions for TMS cylinders (key: "tms:sid|target|domain")
 let activeTasks = {};   // key → label for active background operations
 let knownNodeSids = new Set();   // SIDs seen in previous renders
 let knownConnKeys = new Set();   // connection keys seen in previous renders
@@ -3069,6 +3071,23 @@ async function pollUpdates() {
               _detailsRefreshKind = 'btp';
               _detailsRefreshKey = uuid;
             }
+          } else if (view === 'tms' && dsid.indexOf('tms:') === 0) {
+            // dsid: tms:<srcSid>:<target>:<domain>
+            const parts = dsid.split(':');
+            if (parts.length >= 4) {
+              const [_p, srcSid, target, domain] = parts;
+              const src = ((mapState.nodes || {})[srcSid] || {});
+              const src2 = ((state.nodes || {})[srcSid] || {});
+              const oldD = (src.tms_destinations || []).find(
+                d => d.target_sid === target && d.domain === domain);
+              const newD = (src2.tms_destinations || []).find(
+                d => d.target_sid === target && d.domain === domain);
+              if (newD && JSON.stringify(oldD) !== JSON.stringify(newD)) {
+                _detailsPanelNeedsRefresh = true;
+                _detailsRefreshKind = 'tms';
+                _detailsRefreshKey = { srcSid, target, domain };
+              }
+            }
           } else if (view === 'dbcon' && dsid.indexOf('dbcon:') === 0) {
             // dsid: dbcon:<srcSid>:<con_name>
             const rest = dsid.slice(6);
@@ -3106,6 +3125,10 @@ async function pollUpdates() {
             showDBCONDetail(_detailsRefreshKey.srcSid,
                              _detailsRefreshKey.conName,
                              {refresh: true});
+          } else if (_detailsRefreshKind === 'tms') {
+            showTMSDetail(_detailsRefreshKey.srcSid,
+                            _detailsRefreshKey.target,
+                            _detailsRefreshKey.domain);
           }
         } catch (_) {}
       }
@@ -4947,6 +4970,173 @@ function updateMap() {
     });
   });
 
+  // ===================================================================
+  // TMS destinations — teal cylinders (CTS/TMS epic Bundle 1).
+  // Same shape/pattern as DBCON — sits below the DBCON stack.
+  // Distinct teal palette + CTRL badge on the domain controller.
+  // ===================================================================
+  const TMS_BOX_W = 160, TMS_BOX_H = 100;
+  Object.values(nodes).forEach(src => {
+    const dests = src.tms_destinations || [];
+    if (!dests.length) return;
+    // Stack TMS cylinders vertically to the LEFT of the source
+    // (DBCON stacks to the right — this keeps the two families
+    // visually separated).
+    const srcX = src._x || 0, srcY = src._y || 0;
+    const baseX = srcX - TMS_BOX_W - 80;
+    const stackY = srcY;
+    dests.forEach((e, i) => {
+      const posKey = 'tms:' + src.sid + '|' + e.target_sid + '|' + e.domain;
+      if (tmsPositions[posKey]) {
+        e._x = tmsPositions[posKey]._x;
+        e._y = tmsPositions[posKey]._y;
+      } else {
+        let cx = baseX, cy = stackY + i * (TMS_BOX_H + 24);
+        const _rectOverlap = (ax, ay, aw, ah, bx, by, bw, bh) =>
+          ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
+        const _collides = (tx, ty) => {
+          const tw = TMS_BOX_W, th = TMS_BOX_H;
+          for (const nk in nodes) {
+            const n = nodes[nk];
+            if (n === src) continue;
+            if (n._x == null) continue;
+            if (_rectOverlap(tx, ty, tw, th, n._x, n._y, 240, 130)) return true;
+          }
+          for (const sk in sccNodes) {
+            const sn = sccNodes[sk];
+            if (sn._x == null) continue;
+            if (_rectOverlap(tx, ty, tw, th, sn._x, sn._y, 240, 130)) return true;
+          }
+          for (const bk in btpNodes) {
+            const bn = btpNodes[bk];
+            if (bn._x == null) continue;
+            if (_rectOverlap(tx, ty, tw, th, bn._x, bn._y, 240, 130)) return true;
+          }
+          for (const pk in dbconPositions) {
+            const p = dbconPositions[pk];
+            if (_rectOverlap(tx, ty, tw, th, p._x, p._y, 150, 100)) return true;
+          }
+          for (const pk in tmsPositions) {
+            if (pk === posKey) continue;
+            const p = tmsPositions[pk];
+            if (_rectOverlap(tx, ty, tw, th, p._x, p._y, TMS_BOX_W, TMS_BOX_H)) return true;
+          }
+          return false;
+        };
+        let _guard = 0;
+        while (_collides(cx, cy) && _guard < 40) {
+          cy += TMS_BOX_H + 24;
+          if (cy - (srcY || 0) > 600) { cx -= TMS_BOX_W + 60; cy = stackY; }
+          _guard++;
+        }
+        e._x = cx; e._y = cy;
+        tmsPositions[posKey] = { _x: e._x, _y: e._y };
+      }
+      const x = e._x, y = e._y;
+
+      const rx = TMS_BOX_W / 2, ry = 14;
+      const cx = x + rx;
+      const yTop = y, yBottom = y + TMS_BOX_H;
+      const yMid = yTop + ry;
+      const yBottomBand = yBottom - ry;
+      // Teal palette for TMS — distinct from green DBCON, orange
+      // pwned, yellow non-SAP-shape.
+      let fill = "#1c2128";
+      let stroke = "#8b949e";
+      let strokeW = 2;
+      let labelColor = "#8b949e";
+      if (e.logon_ok) {
+        // Cyan/teal palette.  Controller = brighter, thicker
+        // border; regular = standard cyan.  Pwned (Bundle 2) will
+        // add orange border on top.
+        fill = "#0f2831";
+        stroke = e.pwned ? "#f0883e" : (e.is_controller ? "#39d1c4" : "#2e9d9d");
+        strokeW = e.is_controller ? 5 : 4;
+        labelColor = e.pwned ? "#f0883e" :
+                       (e.is_controller ? "#39d1c4" : "#2e9d9d");
+      } else if (e.tested) {
+        fill = "#2d1c1c"; stroke = "#f85149"; strokeW = 3;
+        labelColor = "#f85149";
+      }
+
+      let lineColor, lineDash;
+      if (e.logon_ok) {
+        lineColor = e.pwned ? '#f0883e' :
+                     (e.is_controller ? '#39d1c4' : '#2e9d9d');
+        lineDash = '';
+      } else if (e.tested) { lineColor = '#f85149'; lineDash = '5,4'; }
+      else { lineColor = '#8b949e'; lineDash = '5,4'; }
+      const _sx = srcX;                    // left edge of source SAP box
+      const _sy = srcY + 60;
+      const _tx = x + TMS_BOX_W;           // right edge of cylinder
+      const _ty = y + TMS_BOX_H / 2;
+      const dashAttr = lineDash ? ` stroke-dasharray="${lineDash}"` : '';
+      html += `<line x1="${_sx}" y1="${_sy}" x2="${_tx}" y2="${_ty}" `
+           + `stroke="${lineColor}" stroke-width="2"${dashAttr} `
+           + `pointer-events="none" opacity="0.85" />`;
+      const _mx = (_sx + _tx) / 2, _my = (_sy + _ty) / 2 - 4;
+      const _lineLbl = `TMSADM / ${e.domain || '?'}`;
+      html += `<text x="${_mx}" y="${_my}" text-anchor="middle" `
+           + `fill="${lineColor}" font-size="9" font-family="monospace" `
+           + `pointer-events="none">${escHtml(_lineLbl)}</text>`;
+
+      const dragId = 'tms:' + src.sid + ':' + e.target_sid + ':' + e.domain;
+      html += `<g class="node-box" data-tms="${escHtml(dragId)}" `
+           + `onmousedown="startDrag(event,'${dragId}')" `
+           + `onclick="showTMSDetail('${escHtml(src.sid)}','${escHtml(e.target_sid)}','${escHtml(e.domain)}')" `
+           + `oncontextmenu="showTMSCtxMenu(event,'${escHtml(src.sid)}','${escHtml(e.target_sid)}','${escHtml(e.domain)}')">`;
+      html += `<rect x="${x - 1}" y="${yTop - ry - 1}" `
+           + `width="${TMS_BOX_W + 2}" height="${(yBottom + ry) - (yTop - ry) + 2}" `
+           + `fill="transparent" stroke="none" style="cursor:pointer" />`;
+      html += `<rect x="${x}" y="${yMid}" width="${TMS_BOX_W}" `
+           + `height="${yBottomBand - yMid}" fill="${fill}" stroke="none" />`;
+      html += `<ellipse cx="${cx}" cy="${yMid}" rx="${rx}" ry="${ry}" `
+           + `fill="${fill}" stroke="${stroke}" stroke-width="${strokeW}" />`;
+      html += `<path d="M${x},${yBottomBand} A${rx},${ry} 0 0 0 ${x + TMS_BOX_W},${yBottomBand}" `
+           + `fill="none" stroke="${stroke}" stroke-width="${strokeW}" />`;
+      html += `<line x1="${x}" y1="${yMid}" x2="${x}" y2="${yBottomBand}" stroke="${stroke}" stroke-width="${strokeW}" />`;
+      html += `<line x1="${x + TMS_BOX_W}" y1="${yMid}" x2="${x + TMS_BOX_W}" y2="${yBottomBand}" stroke="${stroke}" stroke-width="${strokeW}" />`;
+      const bandY1 = yMid + (yBottomBand - yMid) * 0.33;
+      const bandY2 = yMid + (yBottomBand - yMid) * 0.66;
+      html += `<path d="M${x},${bandY1} A${rx},${ry} 0 0 0 ${x + TMS_BOX_W},${bandY1}" fill="none" stroke="${stroke}" stroke-width="1.5" opacity="0.6" />`;
+      html += `<path d="M${x},${bandY2} A${rx},${ry} 0 0 0 ${x + TMS_BOX_W},${bandY2}" fill="none" stroke="${stroke}" stroke-width="1.5" opacity="0.6" />`;
+
+      // Text — target SID, domain, host
+      html += `<text x="${cx}" y="${yMid + 8}" text-anchor="middle" `
+           + `fill="${labelColor}" font-size="12" font-weight="bold" `
+           + `font-family="monospace" pointer-events="none">TMSADM@${escHtml(e.target_sid || '?')}</text>`;
+      html += `<text x="${cx}" y="${yMid + 24}" text-anchor="middle" `
+           + `fill="#cfd9df" font-size="10" font-family="monospace" `
+           + `pointer-events="none">domain ${escHtml(e.domain || '?')}</text>`;
+      html += `<text x="${cx}" y="${yMid + 40}" text-anchor="middle" `
+           + `fill="#8b949e" font-size="9" font-family="monospace" `
+           + `pointer-events="none">${escHtml((e.target_host || '?').slice(0, 22))}</text>`;
+      if (e.buffer_count) {
+        html += `<text x="${cx}" y="${yMid + 54}" text-anchor="middle" `
+             + `fill="${labelColor}" font-size="10" font-family="monospace" `
+             + `pointer-events="none" font-weight="bold">${e.buffer_count} pending</text>`;
+      }
+      // CTRL badge — top-left, teal pill (mirrors SAP badge on DBCON)
+      if (e.is_controller) {
+        const bx = x - 6, by = y - 6, bw = 48, bh = 18;
+        html += `<rect x="${bx}" y="${by}" width="${bw}" height="${bh}" `
+             + `rx="9" fill="#0e7c76" stroke="#39d1c4" stroke-width="1.5" `
+             + `pointer-events="none" />`;
+        html += `<text x="${bx + bw / 2}" y="${by + bh / 2 + 4}" `
+             + `text-anchor="middle" fill="#ffffff" font-size="11" `
+             + `font-weight="bold" font-family="Arial,sans-serif" `
+             + `pointer-events="none">CTRL</text>`;
+      }
+      if (e.pwned) {
+        html += `<text x="${x + TMS_BOX_W - 10}" y="${y + 18}" font-size="26" `
+             + `fill="#f0883e" stroke="#0d1117" stroke-width="2.5" paint-order="stroke" `
+             + `text-anchor="middle" dominant-baseline="middle" font-weight="bold" `
+             + `pointer-events="none">&#9889;</text>`;
+      }
+      html += '</g>';
+    });
+  });
+
   // Draw unknown target boxes (dashed border, dimmed)
   if (showUnknown) {
     for (const key in unknownTargets) {
@@ -5494,6 +5684,12 @@ function showCtxMenu(e, sid) {
     'download_hashes':    hasUsableAbapAccess ||
                           (isJavaStack && (hasCve31324 || hasGwVuln || hasJavaDeploy || hasSapControlOsExec)),
     'download_secstore':  hasUsableAbapAccess,        // RSECTAB is ABAP
+    // Read TMS domain — same auth requirement as SecStore (ABAP
+    // access needed for TMSCSYS + TMSMCONF).  Extra gate: at least
+    // one /RFC/TMSADM@... in the already-dumped SecStore.
+    'tms_discover':       hasUsableAbapAccess &&
+                          (n && (n.secstore_entries || []).some(e =>
+                            (e.ident_clean || e.ident || '').indexOf('TMSADM@') !== -1)),
     // Java SecStore extraction reads three files off the OS
     // filesystem ($SAPGLOBAL/security/data/SecStore.{properties,key}
     // + the encrypted contents).  Any OS-exec path lets us do that
@@ -8114,6 +8310,8 @@ async function ctxAction(action) {
     }
     case 'download_secstore':
       await api('POST', `node/${sid}/download_secstore`); break;
+    case 'tms_discover':
+      await runTMSDiscover(sid); break;
     case 'download_table': {
       const nt = (mapState.nodes || {})[sid];
       const sysTt = (nt && nt.system_type || '').toUpperCase();
@@ -10216,6 +10414,153 @@ function showSCCDetail(host, opts) {
   `;
   panel.classList.add('visible');
   if (refresh && preservedScroll) panel.scrollTop = preservedScroll;
+}
+
+// -------- CTS/TMS pivot (Bundle 1) --------
+
+function _getTMSDest(srcSid, target, domain) {
+  const src = mapState.nodes[srcSid];
+  if (!src) return null;
+  return (src.tms_destinations || []).find(
+    d => d.target_sid === target && d.domain === domain) || null;
+}
+
+async function runTMSDiscover(srcSid) {
+  console.log(`[TMS] runTMSDiscover: ${srcSid}`);
+  flashActivity(`${srcSid}: CTS/TMS discover`, 4000);
+  const r = await api('POST', `node/${srcSid}/tms/discover`, {});
+  if (r && r.error) { alert(`TMS discover failed: ${r.error}`); return; }
+  startPolling();
+}
+
+async function runTMSTest(srcSid, target, domain) {
+  console.log(`[TMS] runTMSTest: ${srcSid}/${target}/${domain}`);
+  flashActivity(`${srcSid}: TMS test → TMSADM@${target}`, 4000);
+  await api('POST', `node/${srcSid}/tms/test`,
+    { target_sid: target, domain });
+  startPolling();
+}
+
+async function runTMSReadBuffer(srcSid, target) {
+  const r = await api('POST', `node/${srcSid}/tms/read_buffer`,
+    { target_sid: target });
+  if (r && r.error) { alert(`Buffer read failed: ${r.error}`); return; }
+  _showTMSListOverlay('TMSBUFFER on ' + target,
+    ['TRKORR','TARSYSTEM','MODE','MAXRC','BUFFER'],
+    r.rows || []);
+}
+
+async function runTMSHistory(srcSid, target) {
+  const r = await api('POST', `node/${srcSid}/tms/history`,
+    { target_sid: target, limit: 100 });
+  if (r && r.error) { alert(`History read failed: ${r.error}`); return; }
+  _showTMSListOverlay('Recent transports on ' + target,
+    ['TRKORR','TRFUNCTION','TRSTATUS','AS4USER','AS4DATE','AS4TIME'],
+    r.rows || []);
+}
+
+function _showTMSListOverlay(title, cols, rows) {
+  let existing = document.getElementById('tms-list-overlay');
+  if (existing) existing.remove();
+  const div = document.createElement('div');
+  div.id = 'tms-list-overlay';
+  div.style = 'position:fixed;top:8%;left:12%;right:12%;bottom:8%;'
+    + 'background:#0d1117;border:2px solid #39d1c4;border-radius:6px;'
+    + 'z-index:10000;padding:12px 16px;overflow:auto;'
+    + 'box-shadow:0 12px 40px rgba(0,0,0,0.7);font-family:monospace;'
+    + 'color:#e6edf3;font-size:12px';
+  const th = cols.map(c =>
+    `<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #30363d;color:#39d1c4">${escHtml(c)}</th>`).join('');
+  const tr = rows.map(row =>
+    '<tr>' + cols.map(c =>
+      `<td style="padding:4px 8px;border-bottom:1px solid #21262d;user-select:text">${escHtml(String(row[c] === undefined ? '' : row[c]))}</td>`
+    ).join('') + '</tr>').join('');
+  div.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <b style="color:#39d1c4">${escHtml(title)}</b>
+      <span style="color:#8b949e;margin-left:auto;margin-right:12px">${rows.length} row(s)</span>
+      <button class="btn" onclick="this.closest('#tms-list-overlay').remove()">Close</button>
+    </div>
+    <div style="overflow:auto;max-height:calc(100% - 60px);user-select:text">
+      <table style="border-collapse:collapse;min-width:100%"><thead><tr>${th}</tr></thead><tbody>${tr}</tbody></table>
+    </div>
+  `;
+  document.body.appendChild(div);
+}
+
+function showTMSCtxMenu(e, srcSid, target, domain) {
+  e.preventDefault(); e.stopPropagation();
+  const dest = _getTMSDest(srcSid, target, domain);
+  if (!dest) return;
+  hideCtxMenu(); hideSCCCtxMenu(); hideBTPCtxMenu();
+  const menu = document.getElementById('ctx-menu');
+  if (!menu) return;
+  const testLbl = dest.tested
+    ? (dest.logon_ok ? 'Re-test logon &#10003;' : 'Re-test logon &#10007;')
+    : 'Test TMSADM logon';
+  const bufLbl  = dest.logon_ok
+    ? `Read TMSBUFFER (${dest.buffer_count || 0} known)`
+    : 'Read TMSBUFFER (needs logon)';
+  const histLbl = dest.logon_ok
+    ? 'Read recent transports (E070)'
+    : 'Read recent transports (needs logon)';
+  const ctrlLbl = dest.is_controller
+    ? ' — 🎯 DOMAIN CONTROLLER' : '';
+  menu.innerHTML = `
+    <div class="ctx-header">TMSADM@${escHtml(target)} · ${escHtml(domain)}${ctrlLbl}</div>
+    <div class="ctx-item" onclick="runTMSTest('${escHtml(srcSid)}','${escHtml(target)}','${escHtml(domain)}');hideCtxMenu()">${testLbl}</div>
+    <div class="ctx-item${dest.logon_ok ? '' : ' ctx-item-disabled'}" onclick="runTMSReadBuffer('${escHtml(srcSid)}','${escHtml(target)}');hideCtxMenu()">${bufLbl}</div>
+    <div class="ctx-item${dest.logon_ok ? '' : ' ctx-item-disabled'}" onclick="runTMSHistory('${escHtml(srcSid)}','${escHtml(target)}');hideCtxMenu()">${histLbl}</div>
+    <div class="ctx-item" onclick="showTMSDetail('${escHtml(srcSid)}','${escHtml(target)}','${escHtml(domain)}');hideCtxMenu()">Show details</div>
+  `;
+  menu.style.left = e.clientX + 'px';
+  menu.style.top  = e.clientY + 'px';
+  menu.classList.add('visible');
+}
+
+function showTMSDetail(srcSid, target, domain) {
+  const dest = _getTMSDest(srcSid, target, domain);
+  if (!dest) return;
+  const panel = document.getElementById('detail-panel');
+  if (!panel) return;
+  const sidKey = `tms:${srcSid}:${target}:${domain}`;
+  if (panel.classList.contains('visible') && panel.dataset.sid === sidKey) {
+    panel.classList.remove('visible');
+    return;
+  }
+  panel.setAttribute('data-view', 'tms');
+  panel.dataset.sid = sidKey;
+  const stateChip = dest.pwned ? '<span class="risk-badge risk-CRITICAL">&#9889; PWNED</span>'
+    : dest.logon_ok ? (dest.is_controller
+        ? '<span class="risk-badge risk-CRITICAL">CTRL logon OK</span>'
+        : '<span class="risk-badge risk-HIGH">Logon OK</span>')
+    : dest.tested ? '<span class="risk-badge risk-LOW">Logon failed</span>'
+    : '<span class="risk-badge">Untested</span>';
+  const rolesLine = (dest.tmsadm_roles && dest.tmsadm_roles.length)
+    ? dest.tmsadm_roles.map(r =>
+        `<span style="background:#21262d;padding:1px 6px;border-radius:3px;margin-right:4px;color:${r === 'SAP_ALL' ? '#f85149' : '#c9d1d9'};font-weight:${r === 'SAP_ALL' ? 'bold' : 'normal'}">${escHtml(r)}</span>`
+      ).join(' ')
+    : '<span style="color:#6e7681">not yet fetched</span>';
+  panel.innerHTML = `
+    <h3>TMSADM@${escHtml(target)}<span style="color:#8b949e;font-weight:normal;font-size:12px"> · domain ${escHtml(domain)}</span></h3>
+    <div class="info-row"><span class="info-label">Source:</span><span class="info-val">${escHtml(srcSid)}</span></div>
+    <div class="info-row"><span class="info-label">Target host:</span><span class="info-val mono">${escHtml(dest.target_host || '?')}</span></div>
+    <div class="info-row"><span class="info-label">Target client:</span><span class="info-val">${escHtml(dest.target_client || '000')}</span></div>
+    <div class="info-row"><span class="info-label">Domain ctrl:</span><span class="info-val">${dest.is_controller ? '🎯 <b>YES</b> — landscape-wide TMS rights' : 'no'}</span></div>
+    <div class="info-row"><span class="info-label">Status:</span><span class="info-val">${stateChip}</span></div>
+    <div class="info-row"><span class="info-label">TMSADM roles:</span><span class="info-val">${rolesLine}</span></div>
+    <div class="info-row"><span class="info-label">SAP_ALL:</span><span class="info-val" style="color:${dest.tmsadm_has_sap_all ? '#f85149' : '#8b949e'};font-weight:${dest.tmsadm_has_sap_all ? 'bold' : 'normal'}">${dest.tmsadm_has_sap_all ? '⚡ YES' : 'no'}</span></div>
+    <div class="info-row"><span class="info-label">Pending imports:</span><span class="info-val">${dest.buffer_count || 0}</span></div>
+    ${dest.tested_at ? `<div class="info-row"><span class="info-label">Tested at:</span><span class="info-val" style="font-size:11px;color:#8b949e">${escHtml(dest.tested_at)}</span></div>` : ''}
+    ${dest.error ? `<div class="info-section" style="color:#f85149;font-size:11px">${escHtml(dest.error)}</div>` : ''}
+    <div style="text-align:right;margin-top:12px;display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">
+      <button class="btn" onclick="runTMSTest('${escHtml(srcSid)}','${escHtml(target)}','${escHtml(domain)}')">${dest.tested ? 'Re-test' : 'Test logon'}</button>
+      ${dest.logon_ok ? `<button class="btn" onclick="runTMSReadBuffer('${escHtml(srcSid)}','${escHtml(target)}')">TMSBUFFER</button>` : ''}
+      ${dest.logon_ok ? `<button class="btn" onclick="runTMSHistory('${escHtml(srcSid)}','${escHtml(target)}')">History</button>` : ''}
+      <button class="btn" onclick="document.getElementById('detail-panel').classList.remove('visible')">Close</button>
+    </div>
+  `;
+  panel.classList.add('visible');
 }
 
 function _getDBCONEdge(srcSid, conName) {
@@ -15541,6 +15886,21 @@ function _getDragTarget(sid) {
   if (sid.startsWith('unk:')) return unkPositions[sid.slice(4)];
   if (sid.startsWith('scc:')) return (mapState.scc_nodes || {})[sid.slice(4)];
   if (sid.startsWith('btp:')) return (mapState.btp_subaccounts || {})[sid.slice(4)];
+  // tms:<source_sid>:<target_sid>:<domain> — CTS/TMS cylinders
+  if (sid.startsWith('tms:')) {
+    const parts = sid.split(':');
+    if (parts.length < 4) return null;
+    const posKey = 'tms:' + parts[1] + '|' + parts[2] + '|' + parts[3];
+    if (!tmsPositions[posKey]) {
+      const src = mapState.nodes[parts[1]];
+      const dest = src && (src.tms_destinations || []).find(
+        d => d.target_sid === parts[2] && d.domain === parts[3]);
+      if (dest && dest._x !== undefined) {
+        tmsPositions[posKey] = { _x: dest._x, _y: dest._y };
+      }
+    }
+    return tmsPositions[posKey] || null;
+  }
   // dbcon:<source_sid>:<con_name> — issue #21 DBCON cylinders.
   // Return the client-side position dict (mirrors unkPositions),
   // NOT the edge object on mapState.nodes.dbcon_edges — the latter
@@ -16047,7 +16407,8 @@ document.addEventListener('mouseup', () => {
       && !dragNode.startsWith('unk:')
       && !dragNode.startsWith('scc:')
       && !dragNode.startsWith('btp:')
-      && !dragNode.startsWith('dbcon:')) showDetails(dragNode);
+      && !dragNode.startsWith('dbcon:')
+      && !dragNode.startsWith('tms:')) showDetails(dragNode);
   dragNode = null; isPanning = false;
 });
 

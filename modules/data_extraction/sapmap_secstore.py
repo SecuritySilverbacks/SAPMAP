@@ -1730,6 +1730,27 @@ def integrate_results(node, state, results: list):
         print(f"[!] SecStore: DBCON pair failed on {node.sid} — "
               f"{type(_e).__name__}: {_e}")
 
+    # CTS/TMS pairing — same shape as DBCON.  Fires when at least
+    # one RFC entry looks like a TMSADM cross-domain destination.
+    # Skipped otherwise so we don't burn a TMSCSYS read on systems
+    # with no cross-system transport rights.
+    try:
+        tms_present = any(
+            e.get("category") == "rfc" and e.get("password")
+            and "TMSADM@" in (e.get("ident_clean") or e.get("ident") or "")
+            for e in results)
+        if tms_present:
+            from sap_tms_probe import integrate_tms_from_secstore
+            _creds = None
+            try:
+                _creds = node.best_credentials()
+            except Exception:
+                pass
+            integrate_tms_from_secstore(node, state, _creds)
+    except Exception as _e:
+        print(f"[!] SecStore: TMS pair failed on {node.sid} — "
+              f"{type(_e).__name__}: {_e}")
+
 
 # ---------------------------------------------------------------------------
 # Loot persistence

@@ -259,6 +259,38 @@ def find_all_chains(state: SAPMAPState, max_depth: int = 6,
                 adj[src_node.sid] = []
             adj[src_node.sid].append((tgt_sid, synthetic))
 
+    # CTS/TMS TMSADM RFC destinations (CTS/TMS epic Bundle 1).
+    # Every /RFC/TMSADM@<sid>.DOMAIN_<x> secstore entry the source
+    # has is a lateral-movement edge to <sid> — even before we've
+    # tested it, since we hold the password and can retry any time.
+    # is_controller edges carry has_sap_all=True because the domain
+    # controller confers write rights over TMS for the whole
+    # transport landscape.
+    for src_node in state.nodes.values():
+        for dest in (getattr(src_node, "tms_destinations", None) or []):
+            tgt_sid = (dest.target_sid or "").strip().upper()
+            if not tgt_sid or tgt_sid == src_node.sid:
+                continue
+            synthetic = type("TmsEdge", (), {
+                "source_sid":       src_node.sid,
+                "target_sid":       tgt_sid,
+                "destination_name":
+                    f"TMSADM@{dest.target_sid}.DOMAIN_{dest.domain}",
+                "rfc_user":         "TMSADM",
+                # Controller access + SAP_ALL TMSADM = full transport
+                # rights.  Even non-SAP_ALL TMSADM can inject/import.
+                "has_sap_all":      bool(dest.tmsadm_has_sap_all
+                                          or dest.is_controller),
+                "trusted_system":   False,
+                "trust_type":       "tmsadm_rfc",
+                "tested":           bool(dest.tested),
+                "logon_successful": bool(dest.logon_ok),
+                "client":           dest.target_client or "000",
+            })()
+            if src_node.sid not in adj:
+                adj[src_node.sid] = []
+            adj[src_node.sid].append((tgt_sid, synthetic))
+
     # Find entry points.  Each entry is a (sid, entry_method) pair so
     # we can mix on-prem SAPNode entries with BTP-subaccount entries
     # without forcing a fake SAPNode shim through the rest of the
@@ -320,7 +352,13 @@ def find_all_chains(state: SAPMAPState, max_depth: int = 6,
                 is_trusted = getattr(conn, "trusted_system", False)
                 is_sso2 = (getattr(conn, "trust_type", "") == "strustsso2")
                 is_dbcon = (getattr(conn, "trust_type", "") == "dbcon_direct")
-                if is_dbcon:
+                is_tms = (getattr(conn, "trust_type", "") == "tmsadm_rfc")
+                if is_tms:
+                    method = ("TMSADM RFC "
+                               + ("(controller — landscape-wide "
+                                   "transport rights)" if conn.has_sap_all
+                                  else "(cross-system transport rights)"))
+                elif is_dbcon:
                     method = ("DBCON direct SQL (SAP-shape "
                                + ("PWNED" if conn.has_sap_all
                                    else "reachable — planted user pending")
@@ -333,7 +371,7 @@ def find_all_chains(state: SAPMAPState, max_depth: int = 6,
                     method = "BAPI (SAP_ALL)"
                 else:
                     method = "RFC logon"
-                if untested and not is_trusted and not is_sso2 and not is_dbcon:
+                if untested and not is_trusted and not is_sso2 and not is_dbcon and not is_tms:
                     method += " — UNTESTED"
                 hop = ChainHop(
                     source_sid=current_sid,
@@ -345,9 +383,10 @@ def find_all_chains(state: SAPMAPState, max_depth: int = 6,
                     description=(
                         (f"via {conn.destination_name}" if conn.destination_name else "")
                         + (" [dbcon]" if is_dbcon else "")
+                        + (" [tms]" if is_tms else "")
                         + (" [strustsso2]" if is_sso2 else "")
                         + (" [trusted]" if is_trusted else "")
-                        + (" [untested]" if untested and not is_trusted and not is_sso2 and not is_dbcon else "")
+                        + (" [untested]" if untested and not is_trusted and not is_sso2 and not is_dbcon and not is_tms else "")
                     ).strip(),
                 )
                 new_path = path + [hop]
