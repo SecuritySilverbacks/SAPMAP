@@ -3128,7 +3128,8 @@ async function pollUpdates() {
           } else if (_detailsRefreshKind === 'tms') {
             showTMSDetail(_detailsRefreshKey.srcSid,
                             _detailsRefreshKey.target,
-                            _detailsRefreshKey.domain);
+                            _detailsRefreshKey.domain,
+                            {refresh: true});
           }
         } catch (_) {}
       }
@@ -10518,16 +10519,23 @@ function showTMSCtxMenu(e, srcSid, target, domain) {
   menu.classList.add('visible');
 }
 
-function showTMSDetail(srcSid, target, domain) {
+function showTMSDetail(srcSid, target, domain, opts) {
   const dest = _getTMSDest(srcSid, target, domain);
   if (!dest) return;
   const panel = document.getElementById('detail-panel');
   if (!panel) return;
   const sidKey = `tms:${srcSid}:${target}:${domain}`;
-  if (panel.classList.contains('visible') && panel.dataset.sid === sidKey) {
+  const refresh = !!(opts && opts.refresh);
+  // Toggle-close ONLY on operator click.  The state-poll refresh
+  // path passes {refresh:true} and MUST skip this branch, otherwise
+  // the panel appears briefly then hides itself on the next tick.
+  // (Same bug shape as the trust-chains flicker + DBCON drawer.)
+  if (!refresh && panel.classList.contains('visible')
+      && panel.dataset.sid === sidKey) {
     panel.classList.remove('visible');
     return;
   }
+  const preservedScroll = refresh ? (panel.scrollTop || 0) : 0;
   panel.setAttribute('data-view', 'tms');
   panel.dataset.sid = sidKey;
   const stateChip = dest.pwned ? '<span class="risk-badge risk-CRITICAL">&#9889; PWNED</span>'
@@ -10561,6 +10569,7 @@ function showTMSDetail(srcSid, target, domain) {
     </div>
   `;
   panel.classList.add('visible');
+  if (refresh && preservedScroll) panel.scrollTop = preservedScroll;
 }
 
 function _getDBCONEdge(srcSid, conName) {
