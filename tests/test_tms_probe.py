@@ -190,6 +190,53 @@ def test_probe_no_host_short_circuits():
     assert "no target host" in d.error
 
 
+def test_probe_self_reference_resolves_host_from_source(monkeypatch):
+    """TMSADM@S4H.DOMAIN_S4H on S4H itself — the discovery read may
+    have returned no TMSCSYS row (empty domain, or TMSADM had no read
+    rights).  The Test action must fall back to using the SOURCE's
+    own host — it's literally the same server."""
+    class _OK:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+    fake_mod = types.ModuleType("sapmap_rfc")
+    fake_mod._get_connection = lambda node, creds: _OK()
+    fake_mod.get_user_details = lambda *a, **kw: {"profiles": [],
+                                                     "has_sap_all": False}
+    monkeypatch.setitem(sys.modules, "sapmap_rfc", fake_mod)
+    state = SAPMAPState()
+    state.add_node(SAPNode(sid="S4H", ip="192.168.2.209",
+                             hostname="s4hanadev"))
+    d = TMSDestination(source_sid="S4H", target_sid="S4H",
+                          target_host="", domain="DOMAIN_S4H",
+                          password="p")
+    tms.probe_tms_destination(d, state=state)
+    assert d.target_host == "192.168.2.209", \
+        "self-reference should resolve to source's own host"
+    assert d.logon_ok is True
+
+
+def test_probe_missing_host_resolves_from_existing_map_node(monkeypatch):
+    """When target already exists on the map (from earlier scan) and
+    dest.target_host is empty, Test should pick up the host from the
+    existing SAPNode instead of failing."""
+    class _OK:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+    fake_mod = types.ModuleType("sapmap_rfc")
+    fake_mod._get_connection = lambda node, creds: _OK()
+    fake_mod.get_user_details = lambda *a, **kw: {"profiles": [],
+                                                     "has_sap_all": False}
+    monkeypatch.setitem(sys.modules, "sapmap_rfc", fake_mod)
+    state = SAPMAPState()
+    state.add_node(SAPNode(sid="S4H", ip="10.0.0.1"))
+    state.add_node(SAPNode(sid="Q01", ip="10.0.0.2", hostname="q01host"))
+    d = TMSDestination(source_sid="S4H", target_sid="Q01",
+                          target_host="", domain="X", password="p")
+    tms.probe_tms_destination(d, state=state)
+    assert d.target_host == "10.0.0.2"
+    assert d.logon_ok is True
+
+
 def test_probe_logon_failure_captured(monkeypatch):
     """When the RFC connect raises, dest.error carries the reason."""
     class _Boom:

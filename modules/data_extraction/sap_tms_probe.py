@@ -320,6 +320,66 @@ def _make_creds(dest: TMSDestination) -> Credentials:
     )
 
 
+def _resolve_missing_host(dest: TMSDestination,
+                            state: SAPMAPState = None) -> str:
+    """When dest.target_host is empty (TMSCSYS read during discovery
+    returned nothing — often because SAPMAP had only TMSADM's low-priv
+    password at the time), try harder now that Test is being called:
+
+      1. If target_sid == source_sid, use the source node's own host
+         (self-referential TMSADM@S4H.DOMAIN_S4H is trivial to resolve)
+      2. If state is available and target_sid already exists on the
+         map (from an earlier scan), copy its host
+      3. Re-run read_tms_config on the SOURCE using its best_credentials
+         — SAPMAP00 or another verified ABAP cred usually has TMSCSYS
+         read rights that TMSADM doesn't
+    """
+    if dest.target_host:
+        return dest.target_host
+    tgt = (dest.target_sid or "").upper().strip()
+    if not tgt:
+        return ""
+    if state is not None:
+        source = state.get_node(dest.source_sid)
+        # Self-reference: TMSADM@S4H.DOMAIN_S4H on S4H itself
+        if source is not None and tgt == source.sid.upper():
+            host = source.ip or source.hostname
+            if host:
+                print(f"[+] {dest.source_sid}: resolve host — self-"
+                      f"reference: using source's host {host!r}")
+                return host
+        # Existing map node for the target
+        existing = state.get_node(tgt)
+        if existing is not None:
+            host = existing.ip or existing.hostname
+            if host:
+                print(f"[+] {dest.source_sid}: resolve host — "
+                      f"target already on map: {host!r}")
+                return host
+    # Last resort: re-run TMSCSYS read with source's best creds
+    if state is not None:
+        source = state.get_node(dest.source_sid)
+        if source is not None:
+            creds = None
+            try:
+                creds = source.best_credentials()
+            except Exception:
+                pass
+            if creds:
+                print(f"[*] {dest.source_sid}: resolve host — re-"
+                      f"reading TMSCSYS with {creds.username}")
+                cfg = read_tms_config(source, creds)
+                for m in (cfg.get("members") or []):
+                    if m.get("sid", "").upper() == tgt:
+                        host = m.get("host", "")
+                        if host:
+                            print(f"[+] {dest.source_sid}: resolve host "
+                                  f"— TMSCSYS re-read via "
+                                  f"{creds.username}: {host!r}")
+                            return host
+    return ""
+
+
 def probe_tms_destination(dest: TMSDestination,
                             state: SAPMAPState = None) -> None:
     """Open a live RFC logon to `dest` as TMSADM and inspect the
@@ -339,9 +399,17 @@ def probe_tms_destination(dest: TMSDestination,
     dest.tmsadm_has_sap_all = False
     dest.error = ""
 
+    # Re-resolve host if the discovery read couldn't populate it —
+    # TMSADM often can't read TMSCSYS, but the source SAP node has
+    # a better credential (SAPMAP00 typically) that can.
+    if not dest.target_host:
+        dest.target_host = _resolve_missing_host(dest, state)
+
     if not dest.target_host:
         dest.error = ("no target host — TMSCSYS row for "
-                       f"SID={dest.target_sid} was not found")
+                       f"SID={dest.target_sid} was not found "
+                       "(tried self-reference, existing map node, "
+                       "and re-read via source's best credentials)")
         print(f"[-] {dest.source_sid}: TMS probe → "
               f"{dest.target_sid}: {dest.error}")
         return

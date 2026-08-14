@@ -4052,6 +4052,44 @@ def create_app(api: SAPMAPApi) -> Bottle:
                            "unique_hashes": unique_count})
 
     # -- Node operations --
+    @app.route("/api/node/<sid>/credentials/remove", method="POST")
+    def node_credentials_remove(sid):
+        """Remove one stored credential from `node.credentials`.
+
+        Match by (username, client, instance_nr) — enough to uniquely
+        identify what the operator sees in the removal picker without
+        exposing internal list indices (which would drift the moment
+        another credential is added elsewhere).
+        """
+        response.content_type = "application/json"
+        data = request.json or {}
+        username = (data.get("username") or "").strip()
+        client   = (data.get("client")   or "").strip()
+        instance = (data.get("instance_nr") or "").strip()
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        if not username:
+            return json.dumps({"error": "username required"})
+        before = len(node.credentials or [])
+        node.credentials = [
+            c for c in (node.credentials or [])
+            if not (c.username == username
+                    and (not client   or c.client == client)
+                    and (not instance or c.instance_nr == instance))]
+        removed = before - len(node.credentials)
+        print(f"[*] {sid}: removed {removed} credential(s) matching "
+              f"user={username!r} client={client!r} "
+              f"instance={instance!r}")
+        # If we just removed the last real credential AND there are no
+        # SAPMAP-created users either, mark the node as no-longer-pwned
+        # (mirrors sapmap_cleanup's logic after user deletion).
+        if not node.credentials and not (node.created_users or []):
+            node.pwned = False
+        return json.dumps({
+            "ok": True, "removed": removed,
+            "remaining": len(node.credentials or [])})
+
     @app.route("/api/node/<sid>/credentials", method="POST")
     def node_credentials(sid):
         response.content_type = "application/json"

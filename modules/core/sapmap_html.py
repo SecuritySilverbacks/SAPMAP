@@ -1206,6 +1206,7 @@ body {
   <div class="ctx-item" data-action="findings">&#128203; View Findings</div>
   <div class="ctx-item" data-action="wd_admin_creds">&#128273; Add WD admin credentials (webadm / pull backend table)</div>
   <div class="ctx-item" data-action="credentials">&#128273; Provide Credentials</div>
+  <div class="ctx-item" data-action="remove_credentials">&#128465;&#65039; Remove Credentials</div>
   <div class="ctx-sep"></div>
   <!-- Scanning submenu -->
   <div class="ctx-group">
@@ -2781,6 +2782,20 @@ let dragStartPos = { x: 0, y: 0 };
 let unkPositions = {};  // persistent positions for unknown target boxes
 let dbconPositions = {}; // persistent positions for DBCON cylinders (key: "sid|con_name")
 let tmsPositions = {};   // persistent positions for TMS cylinders (key: "tms:sid|target|domain")
+
+// Central detail-panel closer.  Clears data-view + dataset.sid so
+// that when the operator later opens a different detail (SAP node,
+// SCC, BTP, DBCON, TMS, chains…) there's no stale attribute left
+// behind for the auto-refresh loop to re-hydrate off.  Previously
+// closing a TMS detail then opening an S/4 SAP detail could
+// resurrect the TMS view because dsid still said "tms:...".
+function _closeDetailPanel() {
+  const p = document.getElementById('detail-panel');
+  if (!p) return;
+  p.classList.remove('visible');
+  p.removeAttribute('data-view');
+  p.dataset.sid = '';
+}
 let activeTasks = {};   // key → label for active background operations
 let knownNodeSids = new Set();   // SIDs seen in previous renders
 let knownConnKeys = new Set();   // connection keys seen in previous renders
@@ -5559,6 +5574,8 @@ function showCtxMenu(e, sid) {
     'details':          true,                       // always available
     'findings':         true,                       // always (shows "no findings" if empty)
     'credentials':      true,                       // always available
+    // Remove Credentials — only show when there's something to remove
+    'remove_credentials': (n && (n.credentials || []).length > 0),
     'rfc_system_info':  hasGwPort,                   // need a gateway port
     'check_gw':         hasGwPort,                   // need a gateway port
     // Probes the message server internal port (39NN) for CVE-2020-6207
@@ -7419,6 +7436,7 @@ async function ctxAction(action) {
     case 'details': showDetails(sid); break;
     case 'findings': showFindings(sid); break;
     case 'credentials': showCredModal(sid); break;
+    case 'remove_credentials': showRemoveCredsModal(sid); break;
     case 'rfc_system_info':
       await api('POST', `node/${sid}/rfc_system_info`); break;
     case 'check_gw':
@@ -9525,7 +9543,7 @@ function showDetails(sid, opts) {
   const panel = document.getElementById('detail-panel');
   const refresh = !!(opts && opts.refresh);
   if (!refresh && panel.classList.contains('visible') && panel.dataset.sid === sid) {
-    panel.classList.remove('visible');
+    _closeDetailPanel();
     return;
   }
   // Preserve scroll position on refresh so live updates don't yank the
@@ -9534,7 +9552,7 @@ function showDetails(sid, opts) {
   panel.dataset.sid = sid;
   panel.setAttribute('data-view', 'details');
   panel.innerHTML = `
-    <span class="close-btn" onclick="this.parentElement.classList.remove('visible')">&times;</span>
+    <span class="close-btn" onclick="_closeDetailPanel()">&times;</span>
     <h3>${escHtml(n.sid)} System Details</h3>
     ${renderPhaseProgress(getPhaseProgress(n, sid))}
     <div class="detail-section">
@@ -10207,7 +10225,7 @@ function showSCCDetail(host, opts) {
   const panel = document.getElementById('detail-panel');
   const refresh = !!(opts && opts.refresh);
   if (!refresh && panel.classList.contains('visible') && panel.dataset.sid === 'scc:' + host) {
-    panel.classList.remove('visible');
+    _closeDetailPanel();
     return;
   }
   const preservedScroll = refresh ? (panel.scrollTop || 0) : 0;
@@ -10216,7 +10234,7 @@ function showSCCDetail(host, opts) {
   const tls = sn.tls_fingerprint || {};
   const cves = [].concat(sn.cves_confirmed || [], sn.cves_suspected || []);
   panel.innerHTML = `
-    <span class="close-btn" onclick="this.parentElement.classList.remove('visible')">&times;</span>
+    <span class="close-btn" onclick="_closeDetailPanel()">&times;</span>
     <h3>&#9729; SAP Cloud Connector — ${escHtml(host)}</h3>
     ${renderPhaseProgress(getSCCPhaseProgress(sn))}
     <div class="detail-section">
@@ -10532,7 +10550,7 @@ function showTMSDetail(srcSid, target, domain, opts) {
   // (Same bug shape as the trust-chains flicker + DBCON drawer.)
   if (!refresh && panel.classList.contains('visible')
       && panel.dataset.sid === sidKey) {
-    panel.classList.remove('visible');
+    _closeDetailPanel();
     return;
   }
   const preservedScroll = refresh ? (panel.scrollTop || 0) : 0;
@@ -10565,7 +10583,7 @@ function showTMSDetail(srcSid, target, domain, opts) {
       <button class="btn" onclick="runTMSTest('${escHtml(srcSid)}','${escHtml(target)}','${escHtml(domain)}')">${dest.tested ? 'Re-test' : 'Test logon'}</button>
       ${dest.logon_ok ? `<button class="btn" onclick="runTMSReadBuffer('${escHtml(srcSid)}','${escHtml(target)}')">TMSBUFFER</button>` : ''}
       ${dest.logon_ok ? `<button class="btn" onclick="runTMSHistory('${escHtml(srcSid)}','${escHtml(target)}')">History</button>` : ''}
-      <button class="btn" onclick="document.getElementById('detail-panel').classList.remove('visible')">Close</button>
+      <button class="btn" onclick="_closeDetailPanel()">Close</button>
     </div>
   `;
   panel.classList.add('visible');
@@ -11137,7 +11155,7 @@ function showDBCONDetail(srcSid, conName, opts) {
   // for the currently-open DBCON dismisses the drawer.  Refresh
   // path skips the toggle (state-poll auto-update).
   if (!refresh && panel.classList.contains('visible') && panel.dataset.sid === sidKey) {
-    panel.classList.remove('visible');
+    _closeDetailPanel();
     return;
   }
   const preservedScroll = refresh ? (panel.scrollTop || 0) : 0;
@@ -11353,7 +11371,7 @@ function showDBCONDetail(srcSid, conName, opts) {
       ${edge.reachable ? `<button class="btn" onclick="runDBCONReconSweep('${escHtml(srcSid)}','${escHtml(conName)}')">HANA recon</button>` : ''}
       ${(edge.reachable && edge.is_sap_shape) ? `<button class="btn" style="background:#b3671f;color:#fff" onclick="runDBCONDumpUsr02('${escHtml(srcSid)}','${escHtml(conName)}')">${edge.usr02_hashes_loot_path ? 'Re-dump USR02' : 'Dump USR02 &rarr; loot'}</button>` : ''}
       ${edge.is_sap_shape ? `<button class="btn" style="background:#b33;color:#fff" onclick="runDBCONCreateUser('${escHtml(srcSid)}','${escHtml(conName)}')">Create SAPMAP00 (direct SQL)</button>` : ''}
-      <button class="btn" onclick="document.getElementById('detail-panel').classList.remove('visible')">Close</button>
+      <button class="btn" onclick="_closeDetailPanel()">Close</button>
     </div>
   `;
   panel.classList.add('visible');
@@ -11413,7 +11431,7 @@ function showBTPDetail(uuid, opts) {
   const panel = document.getElementById('detail-panel');
   const refresh = !!(opts && opts.refresh);
   if (!refresh && panel.classList.contains('visible') && panel.dataset.sid === 'btp:' + uuid) {
-    panel.classList.remove('visible');
+    _closeDetailPanel();
     return;
   }
   const preservedScroll = refresh ? (panel.scrollTop || 0) : 0;
@@ -11442,7 +11460,7 @@ function showBTPDetail(uuid, opts) {
     </div>`;
   }).join('');
   panel.innerHTML = `
-    <span class="close-btn" onclick="this.parentElement.classList.remove('visible')">&times;</span>
+    <span class="close-btn" onclick="_closeDetailPanel()">&times;</span>
     <h3>&#9729; BTP Subaccount — ${escHtml(bn.display_name || bn.subdomain || uuid.slice(0, 8))}</h3>
     ${renderPhaseProgress(getBTPPhaseProgress(bn))}
     <div class="detail-section">
@@ -12494,7 +12512,7 @@ function showImpactDetail(sid) {
   const empty = results.filter(r => r.record_count === 0 && !r.error);
 
   panel.innerHTML = `
-    <span class="close-btn" onclick="this.parentElement.classList.remove('visible')">&times;</span>
+    <span class="close-btn" onclick="_closeDetailPanel()">&times;</span>
     <h3>&#128200; ${escHtml(n.sid)} — Business Impact (${withData.length} findings)</h3>
     ${withData.length === 0 ? '<div style="color:#8b949e;padding:8px">No impact data yet. Right-click → Business Impact → Run ABAP/Java Impact Scenarios.</div>' : ''}
     ${withData.map(r => {
@@ -12584,7 +12602,7 @@ async function showRansapwareModal(sid) {
   ).join('');
 
   panel.innerHTML = `
-    <span class="close-btn" onclick="this.parentElement.classList.remove('visible')">&times;</span>
+    <span class="close-btn" onclick="_closeDetailPanel()">&times;</span>
     <h3 style="color:#f85149">&#128274; RanSAPware Awareness PoC — ${escHtml(sid)}</h3>
     <div style="background:#2d1215;border:1px solid #f85149;border-radius:6px;padding:10px 14px;margin-bottom:12px">
       <div style="font-weight:bold;color:#f85149;margin-bottom:4px">&#9888; DESTRUCTIVE OPERATION</div>
@@ -12779,7 +12797,7 @@ async function showRansapwareDecryptModal(sid) {
   };
 
   panel.innerHTML = `
-    <span class="close-btn" onclick="this.parentElement.classList.remove('visible')">&times;</span>
+    <span class="close-btn" onclick="_closeDetailPanel()">&times;</span>
     <h3>&#128275; RanSAPware — Decrypt / Restore — ${escHtml(sid)}</h3>
     ${!manifests.length ? '<div style="color:#8b949e;padding:12px">No ransapware manifests found for this system.  Run Encrypt first.</div>' : ''}
     ${active.length ? '<h4 style="color:#f85149">Active (encrypted)</h4>' + active.map(row).join('') : ''}
@@ -12874,7 +12892,7 @@ function showFindings(sid) {
     : '';
 
   panel.innerHTML = `
-    <span class="close-btn" onclick="this.parentElement.classList.remove('visible')">&times;</span>
+    <span class="close-btn" onclick="_closeDetailPanel()">&times;</span>
     <h3>${escHtml(n.sid)} — Findings (${all.length})${liveCountLabel}</h3>
     ${all.map(f => {
       const cls = 'finding-' + (sevMap[f.severity] || 'info');
@@ -12945,6 +12963,82 @@ async function testCredentials() {
   };
   const res = await api('POST', `node/${selectedNodeSid}/credentials`, { ...creds, test_only: true });
   alert(res.success ? 'Connection successful!' : 'Connection failed: ' + (res.message || 'Unknown error'));
+}
+
+function showRemoveCredsModal(sid) {
+  selectedNodeSid = sid;
+  const n = (mapState.nodes || {})[sid];
+  const creds = (n && n.credentials) || [];
+  let existing = document.getElementById('remove-creds-overlay');
+  if (existing) existing.remove();
+  const div = document.createElement('div');
+  div.id = 'remove-creds-overlay';
+  div.style = 'position:fixed;top:15%;left:25%;right:25%;max-height:70%;'
+    + 'background:#0d1117;border:2px solid #f85149;border-radius:6px;'
+    + 'z-index:10000;padding:14px 18px;overflow:auto;'
+    + 'box-shadow:0 12px 40px rgba(0,0,0,0.7);font-family:sans-serif;'
+    + 'color:#e6edf3;font-size:12px';
+  if (!creds.length) {
+    div.innerHTML = `
+      <h3 style="color:#f85149;margin-top:0">&#128465;&#65039; Remove Credentials — ${escHtml(sid)}</h3>
+      <div style="color:#8b949e;margin:12px 0">No stored credentials on this node.</div>
+      <div style="text-align:right">
+        <button class="btn" onclick="this.closest('#remove-creds-overlay').remove()">Close</button>
+      </div>`;
+    document.body.appendChild(div);
+    return;
+  }
+  const rows = creds.map((c, i) => {
+    const verified = c.verified ? '<span style="color:#3fb950">&#10003; verified</span>'
+                                 : '<span style="color:#8b949e">untested</span>';
+    const src = c.source ? `<span style="color:#8b949e;font-size:10px"> (${escHtml(c.source)})</span>` : '';
+    return `<tr style="border-bottom:1px solid #21262d">
+      <td style="padding:6px 8px;font-family:monospace">${escHtml(c.username || '')}</td>
+      <td style="padding:6px 8px;font-family:monospace">${escHtml(c.client || '')}</td>
+      <td style="padding:6px 8px;font-family:monospace">${escHtml(c.instance_nr || '')}</td>
+      <td style="padding:6px 8px;font-size:11px">${verified}${src}</td>
+      <td style="padding:6px 8px;text-align:right">
+        <button class="btn" style="background:#8b1c1c;color:#fff;padding:2px 10px"
+          onclick="removeOneCredential('${escHtml(sid)}','${escHtml(c.username || '')}','${escHtml(c.client || '')}','${escHtml(c.instance_nr || '')}')">Delete</button>
+      </td>
+    </tr>`;
+  }).join('');
+  div.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <h3 style="color:#f85149;margin:0">&#128465;&#65039; Remove Credentials — ${escHtml(sid)}</h3>
+      <button class="btn" onclick="this.closest('#remove-creds-overlay').remove()">Close</button>
+    </div>
+    <div style="color:#8b949e;font-size:11px;margin-bottom:10px">
+      Deletes only from SAPMAP's stored-credentials list.  Does NOT
+      delete the account on the target system (use <b>Cleanup Users</b>
+      for that — only affects SAPMAP-created accounts).
+    </div>
+    <table style="border-collapse:collapse;width:100%;font-size:12px">
+      <thead>
+        <tr style="border-bottom:1px solid #30363d;color:#f85149;text-align:left">
+          <th style="padding:6px 8px">User</th>
+          <th style="padding:6px 8px">Client</th>
+          <th style="padding:6px 8px">Inst</th>
+          <th style="padding:6px 8px">Status</th>
+          <th style="padding:6px 8px;text-align:right">Action</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+  document.body.appendChild(div);
+}
+
+async function removeOneCredential(sid, username, client, instance) {
+  if (!confirm(`Remove credential "${username}" (client ${client}, inst ${instance}) from ${sid}?\n\n` +
+                `This only removes SAPMAP's stored copy — the account on the target system is untouched.`))
+    return;
+  const r = await api('POST', `node/${sid}/credentials/remove`, {
+    username, client, instance_nr: instance });
+  if (r && r.error) { alert(`Remove failed: ${r.error}`); return; }
+  flashActivity(`${sid}: removed credential ${username}`, 3000);
+  // Re-render the picker (or close if now empty)
+  startPolling();
+  setTimeout(() => showRemoveCredsModal(sid), 400);
 }
 
 async function saveCredentials() {
@@ -15234,7 +15328,7 @@ function showChainResults(chains) {
 
   if (chains.length === 0) {
     panel.innerHTML = `
-      <span class="close-btn" onclick="this.parentElement.classList.remove('visible')">&times;</span>
+      <span class="close-btn" onclick="_closeDetailPanel()">&times;</span>
       <h3>&#128279; Trust Chain Analysis</h3>
       <div style="color:#8b949e;padding:12px">
         No exploitable attack chains found.<br><br>
@@ -15251,7 +15345,7 @@ function showChainResults(chains) {
   const prodChains = chains.filter(c => c.end_is_production);
 
   panel.innerHTML = `
-    <span class="close-btn" onclick="this.parentElement.classList.remove('visible')">&times;</span>
+    <span class="close-btn" onclick="_closeDetailPanel()">&times;</span>
     <h3>&#128279; Trust Chain Analysis (${chains.length} paths${prodChains.length ? ', ' + prodChains.length + ' reach production' : ''})</h3>
     ${chains.map((c, idx) => {
       const col = sevColors[c.severity] || '#95a5a6';
