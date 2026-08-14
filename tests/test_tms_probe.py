@@ -460,10 +460,12 @@ def test_read_recent_transports_table_without_data_treated_as_zero_rows(monkeypa
 
 
 def test_read_tms_buffer_happy_path(monkeypatch):
+    # Real column order matches _BUFFER_FIELDS in the probe:
+    # DOMNAM|SYSNAM|BUFPOS|TRKORR|UMODES|IMPFLG|MAXRC|TRFUNC
     conn = _FakeConn({
         "TMSBUFFER": {"ET_DATA": [
-            {"WA": "DEVK900001|Q01|0|1|B|I"},
-            {"WA": "DEVK900002|Q01|0|1|B|I"},
+            {"WA": "DOMAIN_S4H|Q01|000001|DEVK900001|I|k|0000|K"},
+            {"WA": "DOMAIN_S4H|Q01|000002|DEVK900002|I|w|0004|W"},
         ]},
     })
     fake_mod = types.ModuleType("sapmap_rfc")

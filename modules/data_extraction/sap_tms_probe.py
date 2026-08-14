@@ -644,16 +644,30 @@ def read_tms_buffer(dest: TMSDestination,
     creds, cred_note = _best_read_creds(dest, state)
     print(f"[*] {dest.source_sid}: TMSBUFFER on {dest.target_sid} "
           f"— using {creds.username} ({cred_note})")
+    # TMSBUFFER real DDIC columns (verified against SE16 on S/4 2025):
+    #   DOMNAM   domain name
+    #   SYSNAM   target system (this is the SID being imported INTO)
+    #   BUFPOS   position in the import queue
+    #   BUFLVL   buffer level (0 = normal queue)
+    #   TRKORR   transport request number
+    #   UMODES   unconditional-modes (I / 1S / 2 …)
+    #   IMPFLG   import status flag (k=to-do / w=waiting / t=in-progress)
+    #   MAXRC    highest return code from previous import attempts
+    #   TRFUNC   transport type (K=customizing, W=workbench, T=task…)
+    # NB: previous field list asked for TARSYSTEM / COUNT / BUFFER /
+    # MODE — none of those exist in TMSBUFFER on modern S/4.
+    # RFC_READ_TABLE raises AD 718 when fields are unknown and my
+    # "table-without-data" handler was swallowing it.  Real columns
+    # fix both the empty-result symptom and give the operator the
+    # useful data (which system, which transport, what state).
+    _BUFFER_FIELDS = ["DOMNAM", "SYSNAM", "BUFPOS", "TRKORR",
+                       "UMODES", "IMPFLG", "MAXRC", "TRFUNC"]
     try:
         with _get_connection(tgt, creds) as conn:
             rows_raw, flag, err = _rfc_read_table(
-                conn, "TMSBUFFER",
-                ["TRKORR", "TARSYSTEM", "MAXRC",
-                 "COUNT", "BUFFER", "MODE"], rowcount=200)
+                conn, "TMSBUFFER", _BUFFER_FIELDS, rowcount=200)
             if err:
                 if _is_table_without_data(err):
-                    # Legitimate empty result on single-system
-                    # landscapes: nothing queued for import here.
                     out["ok"] = True
                     dest.buffer_count = 0
                     print(f"[+] TMSBUFFER on {dest.target_sid}: "
@@ -663,8 +677,7 @@ def read_tms_buffer(dest: TMSDestination,
                                  f"{format_rfc_exception(err)}")
                 return out
             for r in rows_raw:
-                p = _parse_wa_row(r, ["TRKORR", "TARSYSTEM", "MAXRC",
-                                        "COUNT", "BUFFER", "MODE"])
+                p = _parse_wa_row(r, _BUFFER_FIELDS)
                 if p and p.get("TRKORR"):
                     out["rows"].append(p)
             out["ok"] = True

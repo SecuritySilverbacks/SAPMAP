@@ -10465,7 +10465,9 @@ async function runTMSReadBuffer(srcSid, target) {
     { target_sid: target });
   if (r && r.error) { alert(`Buffer read failed: ${r.error}`); return; }
   _showTMSListOverlay('TMSBUFFER on ' + target,
-    ['TRKORR','TARSYSTEM','MODE','MAXRC','BUFFER'],
+    // Real TMSBUFFER columns on modern S/4 — matches the DDIC
+    // definition, not the (wrong) names in earlier build.
+    ['BUFPOS','TRKORR','SYSNAM','DOMNAM','IMPFLG','TRFUNC','UMODES','MAXRC'],
     r.rows || []);
 }
 
