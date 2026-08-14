@@ -91,6 +91,18 @@ def _parse_wa_row(r, keys: list):
     return out if out.get(keys[0]) else None
 
 
+def _is_table_without_data(exc) -> bool:
+    """SAP raises ABAPApplicationError AD 718 / TABLE_WITHOUT_DATA
+    when RFC_READ_TABLE finds no matching rows.  This is a
+    LEGITIMATE empty result, not a failure — e.g. TMSBUFFER on a
+    single-system landscape has zero pending imports.  Callers
+    should treat this as success-with-zero-rows.
+    """
+    s = str(exc)
+    return ("TABLE_WITHOUT_DATA" in s
+            or ("AD" in s and "718" in s and "Number:718" in s))
+
+
 def _rfc_read_table(conn, table: str, fields: list, rowcount: int = 500):
     """Wrap RFC_READ_TABLE with the ET_DATA / narrow bucket handling
     proven on DBCON.  Returns (rows_raw, used_flag, error_or_None)."""
@@ -639,6 +651,14 @@ def read_tms_buffer(dest: TMSDestination,
                 ["TRKORR", "TARSYSTEM", "MAXRC",
                  "COUNT", "BUFFER", "MODE"], rowcount=200)
             if err:
+                if _is_table_without_data(err):
+                    # Legitimate empty result on single-system
+                    # landscapes: nothing queued for import here.
+                    out["ok"] = True
+                    dest.buffer_count = 0
+                    print(f"[+] TMSBUFFER on {dest.target_sid}: "
+                          f"0 pending import(s) (TABLE_WITHOUT_DATA)")
+                    return out
                 out["error"] = (f"TMSBUFFER read failed — "
                                  f"{format_rfc_exception(err)}")
                 return out
@@ -686,6 +706,13 @@ def read_recent_transports(dest: TMSDestination, limit: int = 50,
                  "AS4USER", "AS4DATE", "AS4TIME"],
                 rowcount=int(limit))
             if err:
+                if _is_table_without_data(err):
+                    out["ok"] = True
+                    dest.recent_transports = []
+                    print(f"[+] Recent transports on "
+                          f"{dest.target_sid}: 0 row(s) "
+                          f"(TABLE_WITHOUT_DATA — E070 truly empty)")
+                    return out
                 out["error"] = (f"E070 read failed — "
                                  f"{format_rfc_exception(err)}")
                 return out

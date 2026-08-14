@@ -402,6 +402,63 @@ def test_read_tms_buffer_falls_back_to_tmsadm_when_no_other_cred(monkeypatch):
     assert captured["username"] == "TMSADM"
 
 
+def test_read_tms_buffer_table_without_data_treated_as_zero_rows(monkeypatch):
+    """SAP AD 718 / TABLE_WITHOUT_DATA on TMSBUFFER is a legitimate
+    empty result on single-system landscapes (S4H alone, no other
+    domain members to queue transports for).  Operator screenshot:
+    ABAPApplicationError: RFC_ABAP_EXCEPTION: ID:AD Type:E Number:718
+    Must be treated as success-with-zero-rows, NOT as a hard error."""
+    class _ThrowsAD718:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def call(self, *a, **kw):
+            raise Exception(
+                "ABAPApplicationError: RFC_ABAP_EXCEPTION: ID:AD "
+                "Type:E Number:718 TMSBUFFER "
+                "[key=TABLE_WITHOUT_DATA, msg_class=AD, "
+                "msg_number=718, msg_type=E, msg_v1=TMSBUFFER]")
+    fake_mod = types.ModuleType("sapmap_rfc")
+    fake_mod._get_connection = lambda node, creds: _ThrowsAD718()
+    fake_errors = types.ModuleType("sapmap_errors")
+    fake_errors.format_rfc_exception = lambda e: str(e)
+    monkeypatch.setitem(sys.modules, "sapmap_rfc", fake_mod)
+    monkeypatch.setitem(sys.modules, "sapmap_errors", fake_errors)
+
+    d = TMSDestination(source_sid="S4H", target_sid="S4H",
+                          target_host="s4hanadev",
+                          domain="DOMAIN_S4H", password="p",
+                          logon_ok=True)
+    r = tms.read_tms_buffer(d)
+    assert r["ok"] is True, (
+        f"AD 718 must not surface as an error — {r.get('error')!r}")
+    assert r["count"] == 0
+    assert d.buffer_count == 0
+
+
+def test_read_recent_transports_table_without_data_treated_as_zero_rows(monkeypatch):
+    class _ThrowsAD718:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def call(self, *a, **kw):
+            raise Exception(
+                "ABAPApplicationError: RFC_ABAP_EXCEPTION: ID:AD "
+                "Type:E Number:718 E070 [key=TABLE_WITHOUT_DATA]")
+    fake_mod = types.ModuleType("sapmap_rfc")
+    fake_mod._get_connection = lambda node, creds: _ThrowsAD718()
+    fake_errors = types.ModuleType("sapmap_errors")
+    fake_errors.format_rfc_exception = lambda e: str(e)
+    monkeypatch.setitem(sys.modules, "sapmap_rfc", fake_mod)
+    monkeypatch.setitem(sys.modules, "sapmap_errors", fake_errors)
+
+    d = TMSDestination(source_sid="S4H", target_sid="S4H",
+                          target_host="s4hanadev",
+                          domain="DOMAIN_S4H", password="p",
+                          logon_ok=True)
+    r = tms.read_recent_transports(d)
+    assert r["ok"] is True
+    assert r["count"] == 0
+
+
 def test_read_tms_buffer_happy_path(monkeypatch):
     conn = _FakeConn({
         "TMSBUFFER": {"ET_DATA": [
