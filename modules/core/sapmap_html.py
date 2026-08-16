@@ -1787,8 +1787,21 @@ body {
         performs the full import logic but rolls back at the end — safe.
         Only uncheck dry-run after written authorisation.
       </div>
-      <div class="form-row">
-        <label>Transport zip
+      <div id="import-tr-bundled-row" style="margin-bottom:12px;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:4px">
+        <div style="font-size:11px;color:#8b949e;margin-bottom:6px">
+          Bundled payloads <span>— one-click, no file dialog. Post-verify + credential auto-pin where applicable.</span>
+        </div>
+        <div id="import-tr-bundled-buttons" style="display:flex;flex-wrap:wrap;gap:6px">
+          <span style="color:#8b949e;font-size:12px">Loading…</span>
+        </div>
+        <div id="import-tr-bundled-selected" style="display:none;margin-top:8px;font-size:11.5px;color:#3fb950">
+          <span id="import-tr-bundled-sel-txt"></span>
+          <button type="button" class="btn" style="margin-left:8px;padding:2px 8px;font-size:11px"
+                  onclick="clearImportTrBundled()">Clear</button>
+        </div>
+      </div>
+      <div class="form-row" id="import-tr-file-row">
+        <label>&hellip; or upload your own transport zip
           <span style="color:#8b949e;font-weight:normal">(must contain one
           <code>K&lt;num&gt;.&lt;SID&gt;</code> + one <code>R&lt;num&gt;.&lt;SID&gt;</code>)</span>
         </label>
@@ -14223,10 +14236,87 @@ let _importTrSid = null;
 let _importTrTaskId = null;
 let _importTrPollTimer = null;
 
+let _importTrBundled = null;   // selected bundle key ('canary'|'usrcreate'|null)
+let _importTrBundles = null;   // cached registry from GET /api/transports/bundled
+
+async function _loadImportTrBundles() {
+  if (_importTrBundles) return _importTrBundles;
+  try {
+    const r = await fetch('/api/transports/bundled');
+    const j = await r.json();
+    _importTrBundles = (j && Array.isArray(j.bundles)) ? j.bundles : [];
+  } catch (e) {
+    _importTrBundles = [];
+  }
+  return _importTrBundles;
+}
+
+function _renderImportTrBundledButtons() {
+  const holder = document.getElementById('import-tr-bundled-buttons');
+  if (!holder) return;
+  if (!_importTrBundles || !_importTrBundles.length) {
+    holder.innerHTML = '<span style="color:#8b949e;font-size:12px">'
+      + '(no bundled payloads found in scripts/transports/)</span>';
+    return;
+  }
+  holder.innerHTML = _importTrBundles.map(b => {
+    const verifyTag = b.has_post_verify
+      ? '<span style="color:#3fb950;font-size:10px;margin-left:4px">+auto-pin cred</span>'
+      : '';
+    const active = (_importTrBundled === b.key);
+    const style = active
+      ? 'background:#0f5b3f;border:1px solid #3fb950;color:#e6edf3'
+      : 'background:#161b22;border:1px solid #30363d;color:#e6edf3';
+    return '<button type="button" class="btn"'
+      + ' style="' + style + ';padding:6px 10px;font-size:12px;text-align:left;line-height:1.3"'
+      + ' title="' + escHtml(b.description) + '"'
+      + ' onclick="pickImportTrBundle(\'' + escHtml(b.key) + '\')">'
+      + '<div><strong>' + escHtml(b.label) + '</strong>' + verifyTag + '</div>'
+      + '<div style="color:#8b949e;font-size:10px;margin-top:2px">'
+      + escHtml(b.trkorr) + ' — ' + Math.round(b.size / 1024) + ' KB</div>'
+      + '</button>';
+  }).join('');
+}
+
+function pickImportTrBundle(key) {
+  _importTrBundled = key;
+  const b = (_importTrBundles || []).find(x => x.key === key);
+  const selRow = document.getElementById('import-tr-bundled-selected');
+  const selTxt = document.getElementById('import-tr-bundled-sel-txt');
+  if (b && selRow && selTxt) {
+    selTxt.innerHTML = '<strong>Selected:</strong> ' + escHtml(b.label)
+      + ' <span style="color:#8b949e">(' + escHtml(b.trkorr) + ')</span>';
+    selRow.style.display = '';
+  }
+  // Disable + grey out the file input while a bundle is picked.
+  const fileInput = document.getElementById('import-tr-zip');
+  if (fileInput) { fileInput.value = ''; fileInput.disabled = true; }
+  const fileRow = document.getElementById('import-tr-file-row');
+  if (fileRow) fileRow.style.opacity = '0.4';
+  _renderImportTrBundledButtons();
+}
+
+function clearImportTrBundled() {
+  _importTrBundled = null;
+  const selRow = document.getElementById('import-tr-bundled-selected');
+  if (selRow) selRow.style.display = 'none';
+  const fileInput = document.getElementById('import-tr-zip');
+  if (fileInput) fileInput.disabled = false;
+  const fileRow = document.getElementById('import-tr-file-row');
+  if (fileRow) fileRow.style.opacity = '1';
+  _renderImportTrBundledButtons();
+}
+
 function showImportTransportModal(sid) {
   _importTrSid = sid;
+  _importTrBundled = null;
   const n = (mapState.nodes || {})[sid];
   if (!n) return;
+  _loadImportTrBundles().then(_renderImportTrBundledButtons);
+  const selRow = document.getElementById('import-tr-bundled-selected');
+  if (selRow) selRow.style.display = 'none';
+  const fileRow = document.getElementById('import-tr-file-row');
+  if (fileRow) fileRow.style.opacity = '1';
 
   // Channel availability — derive from the node state.  Mirrors
   // _resolve_channel() in sap_transport_import.py so the modal and
@@ -14300,26 +14390,36 @@ async function runImportTransport() {
   const sid = _importTrSid;
   if (!sid) return;
   const fileInput = document.getElementById('import-tr-zip');
-  if (!fileInput.files.length) {
-    alert('Pick a transport zip first.');
+  const useBundle = !!_importTrBundled;
+  if (!useBundle && !fileInput.files.length) {
+    alert('Pick a bundled payload above, or upload a transport zip.');
     return;
   }
-  const file = fileInput.files[0];
   const client = (document.getElementById('import-tr-client').value || '001').trim();
   const dryRun = document.getElementById('import-tr-dryrun').checked;
   const channelEl = document.querySelector('input[name="import-tr-channel"]:checked');
   const channel = channelEl ? channelEl.value : 'auto';
 
   if (!dryRun) {
+    let extra = '';
+    if (useBundle) {
+      const b = (_importTrBundles || []).find(x => x.key === _importTrBundled);
+      if (b) extra = '\nBundle: ' + b.label + ' (' + b.trkorr + ')';
+      if (b && b.has_post_verify) extra += '\nPost-import: RFC_PING verify + auto-pin cred.';
+    }
     if (!confirm(
         'Run REAL tp import on ' + sid + ' (client ' + client + ')?\n\n' +
         'This permanently modifies the target\'s ABAP data dictionary.\n' +
-        'Cross-domain unconditional flags U1268 will be set.\n\n' +
+        'Cross-domain unconditional flags U1268 will be set.' + extra + '\n\n' +
         'Continue?')) return;
   }
 
   const fd = new FormData();
-  fd.append('zip', file);
+  if (useBundle) {
+    fd.append('bundled', _importTrBundled);
+  } else {
+    fd.append('zip', fileInput.files[0]);
+  }
   fd.append('target_client', client);
   fd.append('dry_run', dryRun ? '1' : '0');
   fd.append('channel', channel);
@@ -14448,10 +14548,37 @@ function _renderImportTrResult(res) {
   if (res.datafile_md5) html += '<div><b>datafile md5:</b> <code>' + escHtml(res.datafile_md5) + '</code></div>';
   html += '<div><b>tp addtobuffer rc:</b> ' + (res.addtobuffer_rc != null ? res.addtobuffer_rc : '—') + '</div>';
   html += '<div><b>tp ' + (res.dry_run ? 'tst' : 'import') + ' rc:</b> ' + (res.import_rc != null ? res.import_rc : '—') + '</div>';
+  // Post-import verify block — only present when a bundled payload
+  // with a post_import_verify hook was used (e.g. user-create → RFC_PING).
+  if (res.post_verify && res.post_verify.attempted) {
+    const pv = res.post_verify;
+    const pvColor = pv.verified ? '#3fb950' : '#d29922';
+    const pvIcon  = pv.verified ? '✅' : '⚠️';
+    let pvLine = pvIcon + ' Post-import verify: <b>' + escHtml(pv.username || '?')
+      + '</b> / client ' + escHtml(pv.client || '?');
+    if (pv.verified) {
+      pvLine += ' — RFC_PING OK';
+      if (pv.pinned) pvLine += ' — credential pinned to node';
+    } else {
+      pvLine += ' — failed: ' + escHtml(pv.error || 'unknown');
+    }
+    html += '<div style="margin-top:6px;color:' + pvColor + '">' + pvLine + '</div>';
+    if (pv.verified) {
+      html += '<div style="color:#8b949e;font-size:11px;margin-top:2px">'
+        + 'XPRA runs under sy-mandt=000 so the user lands in client 000 '
+        + 'regardless of the target client above. The credential is now '
+        + 'available in the SAP-node ctx-menu.</div>';
+    }
+  }
   if (res.log_path) {
     html += '<div style="margin-top:6px;color:#8b949e">Full log: <code>' + escHtml(res.log_path) + '</code></div>';
   }
   el.innerHTML = html;
+  // Kick a state poll so the new credential shows up in the ctx menu
+  // without waiting for the next scheduled tick.
+  if (res.post_verify && res.post_verify.verified && res.post_verify.pinned) {
+    try { startPolling && startPolling(); } catch(_) {}
+  }
 }
 
 async function showShellModal(sid) {

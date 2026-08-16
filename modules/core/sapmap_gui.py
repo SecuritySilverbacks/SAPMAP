@@ -13412,12 +13412,31 @@ def create_app(api: SAPMAPApi) -> Bottle:
         if not node:
             return json.dumps({"error": f"Node {sid} not found"})
 
-        upload = request.files.get("zip")
-        if not upload:
-            return json.dumps({"error": "missing zip upload"})
-        zip_bytes = upload.file.read()
-        if not zip_bytes:
-            return json.dumps({"error": "empty zip"})
+        # Either the operator picked one of the bundled payloads
+        # (scripts/transports/*.zip) via a quick-pick button, OR they
+        # uploaded a zip via the file input.  Bundle takes priority
+        # so a stale file input from a previous run can't slip in.
+        bundled_name = (request.forms.get("bundled") or "").strip().lower()
+        zip_bytes: bytes = b""
+        if bundled_name:
+            from sap_transport_bundles import read_bundle_zip, get_bundle
+            zip_bytes = read_bundle_zip(bundled_name) or b""
+            if not zip_bytes:
+                return json.dumps({
+                    "error": f"unknown or missing bundled transport {bundled_name!r}"})
+            bmeta = get_bundle(bundled_name)
+            print(f"[i] {sid}: import_transport using bundle "
+                  f"{bundled_name} ({bmeta['filename']}, "
+                  f"trkorr {bmeta['trkorr']})")
+        else:
+            upload = request.files.get("zip")
+            if not upload:
+                return json.dumps({
+                    "error": "missing zip upload (and no bundled= selected)"})
+            zip_bytes = upload.file.read()
+            if not zip_bytes:
+                return json.dumps({"error": "empty zip"})
+            bundled_name = None
 
         target_client = (request.forms.get("target_client") or "001").strip()
         dry_run = (request.forms.get("dry_run") or "1").strip() != "0"
@@ -13433,7 +13452,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
         def _run():
             try:
                 import_transport(node, zip_bytes, target_client,
-                                 dry_run, task_id, channel=channel)
+                                 dry_run, task_id, channel=channel,
+                                 bundled_name=bundled_name)
             except Exception as e:
                 from sap_transport_import import _new_progress
                 setp = _new_progress(task_id)   # ensure entry exists
@@ -13444,6 +13464,19 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:import_transport:{task_id}",
              "Import Local Transport", _run)
         return json.dumps({"status": "started", "task_id": task_id})
+
+    @app.route("/api/transports/bundled")
+    def transports_bundled_list():
+        """Return the registry of bundled transport payloads for the
+        quick-pick row in the Import Local Transport modal.  Metadata
+        only — the actual zip bytes are read server-side when the
+        operator picks one via POST ... ?bundled=<key>."""
+        response.content_type = "application/json"
+        try:
+            from sap_transport_bundles import list_bundles
+            return json.dumps({"bundles": list_bundles()})
+        except Exception as e:
+            return json.dumps({"bundles": [], "error": str(e)})
 
     @app.route("/api/node/<sid>/transport_progress")
     def node_transport_progress(sid):
