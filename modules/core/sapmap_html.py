@@ -1226,6 +1226,7 @@ body {
       <div class="ctx-item" data-action="deep_scan">&#128260; Deep Scan (full SAPology)</div>
       <div class="ctx-item" data-action="retrieve_rfcs">&#128225; Retrieve RFC Connections</div>
       <div class="ctx-item" data-action="read_java_destinations">&#128225; Read Java JCo Destinations</div>
+      <div class="ctx-item" data-action="tms_discover">&#128225; Discover TMS topology (TMSMCONF/TMSCSYS)</div>
       <div class="ctx-item" data-action="test_rfcs">&#129514; Test RFC Connections</div>
       <div class="ctx-item" data-action="enum_clients">&#128202; Enumerate Clients</div>
       <div class="ctx-item" data-action="client_roles">&#128202; Retrieve Client Roles</div>
@@ -1352,7 +1353,6 @@ body {
       <div class="ctx-item" data-action="download_hashes">&#128273; Extract Hashes for Cracking</div>
       <div class="ctx-item" data-action="wd_extract_icmauth">&#128272; Extract WD password hashes (icmauth.txt)</div>
       <div class="ctx-item" data-action="download_secstore">&#128273; Download SecStore (RSECTAB)</div>
-      <div class="ctx-item" data-action="tms_discover">&#128260; Read CTS/TMS domain (needs SecStore)</div>
       <div class="ctx-item" data-action="download_java_secstore">&#128273; Download Java Secure Store</div>
       <div class="ctx-item" data-action="view_java_secstore">&#128203; View Java Secure Store Results</div>
       <div class="ctx-item" data-action="download_table">&#128229; Download Table Data</div>
