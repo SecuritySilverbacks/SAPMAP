@@ -1473,6 +1473,12 @@ body {
   <div class="ctx-item" data-action="btp_remove" style="color:#f85149">&#128465; Remove from Map</div>
 </div>
 
+<!-- TMSADM Edge Context Menu — filled by showTMSCtxMenu -->
+<div class="ctx-menu" id="tms-ctx-menu"></div>
+
+<!-- DBCON Edge Context Menu — filled by showDBCONCtxMenu -->
+<div class="ctx-menu" id="dbcon-ctx-menu"></div>
+
 <!-- Connection Info Panel -->
 <div class="info-panel" id="info-panel"></div>
 <div id="toast-stack" style="position:fixed;right:16px;bottom:16px;z-index:2000;
@@ -5505,6 +5511,8 @@ function showCtxMenu(e, sid) {
   hideMapCtxMenu();
   hideSCCCtxMenu();
   hideBTPCtxMenu();
+  hideTMSCtxMenu();
+  hideDBCONCtxMenu();
   selectedNodeSid = sid;
   const n = (mapState.nodes || {})[sid];
   const menu = document.getElementById('ctx-menu');
@@ -6468,7 +6476,7 @@ function hideCtxMenu() {
   }
   function hide() { tip.classList.remove('visible'); }
   window._hideCtxTooltip = hide;
-  ['ctx-menu', 'scc-ctx-menu', 'btp-ctx-menu'].forEach(id => {
+  ['ctx-menu', 'scc-ctx-menu', 'btp-ctx-menu', 'tms-ctx-menu', 'dbcon-ctx-menu'].forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
     el.addEventListener('mouseover', show);
@@ -6477,6 +6485,16 @@ function hideCtxMenu() {
     });
   });
 })();
+
+function hideTMSCtxMenu() {
+  const el = document.getElementById('tms-ctx-menu');
+  if (el) el.classList.remove('visible');
+}
+
+function hideDBCONCtxMenu() {
+  const el = document.getElementById('dbcon-ctx-menu');
+  if (el) el.classList.remove('visible');
+}
 
 // Delegate clicks from context menu items
 document.getElementById('ctx-menu').addEventListener('click', function(e) {
@@ -6524,6 +6542,8 @@ function showSCCCtxMenu(e, host) {
   hideCtxMenu();
   hideMapCtxMenu();
   hideBTPCtxMenu();
+  hideTMSCtxMenu();
+  hideDBCONCtxMenu();
   selectedSccHost = host;
   const menu = document.getElementById('scc-ctx-menu');
 
@@ -6651,6 +6671,8 @@ function showBTPCtxMenu(e, uuid) {
   hideCtxMenu();
   hideSCCCtxMenu();
   hideMapCtxMenu();
+  hideTMSCtxMenu();
+  hideDBCONCtxMenu();
   selectedBtpUuid = uuid;
   const menu = document.getElementById('btp-ctx-menu');
   // Disable copy items when the underlying field is empty so the
@@ -10513,8 +10535,12 @@ function showTMSCtxMenu(e, srcSid, target, domain) {
   e.preventDefault(); e.stopPropagation();
   const dest = _getTMSDest(srcSid, target, domain);
   if (!dest) return;
-  hideCtxMenu(); hideSCCCtxMenu(); hideBTPCtxMenu();
-  const menu = document.getElementById('ctx-menu');
+  // Dedicated container — MUST NOT reuse #ctx-menu, or the SAP-node
+  // template it holds (Import Local Transport, Add Credentials, …)
+  // gets clobbered by our innerHTML assign below and the next
+  // showCtxMenu() call on the parent node has nothing to restyle.
+  hideCtxMenu(); hideSCCCtxMenu(); hideBTPCtxMenu(); hideDBCONCtxMenu();
+  const menu = document.getElementById('tms-ctx-menu');
   if (!menu) return;
   const testLbl = dest.tested
     ? (dest.logon_ok ? 'Re-test logon &#10003;' : 'Re-test logon &#10007;')
@@ -10529,10 +10555,10 @@ function showTMSCtxMenu(e, srcSid, target, domain) {
     ? ' — 🎯 DOMAIN CONTROLLER' : '';
   menu.innerHTML = `
     <div class="ctx-header">TMSADM@${escHtml(target)} · ${escHtml(domain)}${ctrlLbl}</div>
-    <div class="ctx-item" onclick="runTMSTest('${escHtml(srcSid)}','${escHtml(target)}','${escHtml(domain)}');hideCtxMenu()">${testLbl}</div>
-    <div class="ctx-item${dest.logon_ok ? '' : ' ctx-item-disabled'}" onclick="runTMSReadBuffer('${escHtml(srcSid)}','${escHtml(target)}');hideCtxMenu()">${bufLbl}</div>
-    <div class="ctx-item${dest.logon_ok ? '' : ' ctx-item-disabled'}" onclick="runTMSHistory('${escHtml(srcSid)}','${escHtml(target)}');hideCtxMenu()">${histLbl}</div>
-    <div class="ctx-item" onclick="showTMSDetail('${escHtml(srcSid)}','${escHtml(target)}','${escHtml(domain)}');hideCtxMenu()">Show details</div>
+    <div class="ctx-item" onclick="runTMSTest('${escHtml(srcSid)}','${escHtml(target)}','${escHtml(domain)}');hideTMSCtxMenu()">${testLbl}</div>
+    <div class="ctx-item${dest.logon_ok ? '' : ' ctx-item-disabled'}" onclick="runTMSReadBuffer('${escHtml(srcSid)}','${escHtml(target)}');hideTMSCtxMenu()">${bufLbl}</div>
+    <div class="ctx-item${dest.logon_ok ? '' : ' ctx-item-disabled'}" onclick="runTMSHistory('${escHtml(srcSid)}','${escHtml(target)}');hideTMSCtxMenu()">${histLbl}</div>
+    <div class="ctx-item" onclick="showTMSDetail('${escHtml(srcSid)}','${escHtml(target)}','${escHtml(domain)}');hideTMSCtxMenu()">Show details</div>
   `;
   menu.style.left = e.clientX + 'px';
   menu.style.top  = e.clientY + 'px';
@@ -11036,12 +11062,12 @@ function showDBCONCtxMenu(e, srcSid, conName) {
   e.stopPropagation();
   const edge = _getDBCONEdge(srcSid, conName);
   if (!edge) return;
-  // Reuse the shared ctx-menu container.  It's created once in the
-  // HTML skeleton and shown/hidden via the 'visible' class — must
-  // NOT touch menu.style.display directly, or hideCtxMenu()
-  // (classList.remove) can't hide it.
-  hideCtxMenu(); hideSCCCtxMenu(); hideBTPCtxMenu();
-  const menu = document.getElementById('ctx-menu');
+  // Dedicated container — MUST NOT reuse #ctx-menu, or the SAP-node
+  // template it holds (Import Local Transport, Add Credentials, …)
+  // gets clobbered by our innerHTML assign below and the next
+  // showCtxMenu() call on the parent node has nothing to restyle.
+  hideCtxMenu(); hideSCCCtxMenu(); hideBTPCtxMenu(); hideTMSCtxMenu();
+  const menu = document.getElementById('dbcon-ctx-menu');
   if (!menu) return;
   const testLbl = edge.tested
     ? (edge.reachable ? 'Re-test connection &#10003;' : 'Re-test connection &#10007;')
@@ -11060,29 +11086,29 @@ function showDBCONCtxMenu(e, srcSid, conName) {
     : 'Enumerate tables (needs reachable DB)';
   menu.innerHTML = `
     <div class="ctx-header">DBCON ${escHtml(conName)} (${escHtml(edge.dbms || '?')})</div>
-    <div class="ctx-item" onclick="runDBCONTest('${escHtml(srcSid)}','${escHtml(conName)}');hideCtxMenu()">${testLbl}</div>
+    <div class="ctx-item" onclick="runDBCONTest('${escHtml(srcSid)}','${escHtml(conName)}');hideDBCONCtxMenu()">${testLbl}</div>
     <div class="ctx-item${edge.is_sap_shape ? '' : ' ctx-item-disabled'}" `
-    + `onclick="runDBCONCreateUser('${escHtml(srcSid)}','${escHtml(conName)}');hideCtxMenu()">`
+    + `onclick="runDBCONCreateUser('${escHtml(srcSid)}','${escHtml(conName)}');hideDBCONCtxMenu()">`
     + `${createLbl}</div>
     <div class="ctx-item${edge.reachable ? '' : ' ctx-item-disabled'}" `
-    + `onclick="runDBCONEnumerate('${escHtml(srcSid)}','${escHtml(conName)}');hideCtxMenu()">`
+    + `onclick="runDBCONEnumerate('${escHtml(srcSid)}','${escHtml(conName)}');hideDBCONCtxMenu()">`
     + `${enumLbl}</div>
     <div class="ctx-item${edge.reachable ? '' : ' ctx-item-disabled'}" `
-    + `onclick="runDBCONPeekCustom('${escHtml(srcSid)}','${escHtml(conName)}');hideCtxMenu()">`
+    + `onclick="runDBCONPeekCustom('${escHtml(srcSid)}','${escHtml(conName)}');hideDBCONCtxMenu()">`
     + `Peek table (by name)&hellip;</div>
     <div class="ctx-item${edge.reachable ? '' : ' ctx-item-disabled'}" `
-    + `onclick="runDBCONReconSweep('${escHtml(srcSid)}','${escHtml(conName)}');hideCtxMenu()">`
+    + `onclick="runDBCONReconSweep('${escHtml(srcSid)}','${escHtml(conName)}');hideDBCONCtxMenu()">`
     + `HANA recon sweep (M_LICENSE / M_HOST / T000&hellip;)</div>
     <div class="ctx-item${(edge.reachable && edge.is_sap_shape) ? '' : ' ctx-item-disabled'}" `
-    + `onclick="runDBCONDumpUsr02('${escHtml(srcSid)}','${escHtml(conName)}');hideCtxMenu()">`
+    + `onclick="runDBCONDumpUsr02('${escHtml(srcSid)}','${escHtml(conName)}');hideDBCONCtxMenu()">`
     + `${edge.usr02_hashes_loot_path ? 'Re-dump USR02 hashes' : 'Dump USR02 hashes &rarr; loot/'}</div>
     <div class="ctx-item${(edge.reachable && edge.is_sap_shape) ? '' : ' ctx-item-disabled'}" `
-    + `onclick="runDBCONDumpAuthTables('${escHtml(srcSid)}','${escHtml(conName)}');hideCtxMenu()">`
+    + `onclick="runDBCONDumpAuthTables('${escHtml(srcSid)}','${escHtml(conName)}');hideDBCONCtxMenu()">`
     + `Dump auth tables (USR04/UST04/USRBF2) &rarr; loot/</div>
     <div class="ctx-item${edge.reachable ? '' : ' ctx-item-disabled'}" `
-    + `onclick="runDBCONCustomSQL('${escHtml(srcSid)}','${escHtml(conName)}');hideCtxMenu()">`
+    + `onclick="runDBCONCustomSQL('${escHtml(srcSid)}','${escHtml(conName)}');hideDBCONCtxMenu()">`
     + `Custom read-only SQL&hellip;</div>
-    <div class="ctx-item" onclick="showDBCONDetail('${escHtml(srcSid)}','${escHtml(conName)}');hideCtxMenu()">Show details</div>
+    <div class="ctx-item" onclick="showDBCONDetail('${escHtml(srcSid)}','${escHtml(conName)}');hideDBCONCtxMenu()">Show details</div>
   `;
   menu.style.left = e.clientX + 'px';
   menu.style.top  = e.clientY + 'px';
@@ -16535,6 +16561,8 @@ document.addEventListener('click', e => {
   hideCtxMenu();
   hideSCCCtxMenu();
   hideBTPCtxMenu();
+  hideTMSCtxMenu();
+  hideDBCONCtxMenu();
   if (!e.target.closest('.info-panel') && !e.target.closest('.edge-line'))
     document.getElementById('info-panel').classList.remove('visible');
 });
@@ -16546,6 +16574,8 @@ document.addEventListener('contextmenu', e => {
   hideCtxMenu();
   hideSCCCtxMenu();
   hideBTPCtxMenu();
+  hideTMSCtxMenu();
+  hideDBCONCtxMenu();
   hideMapCtxMenu();
   if (!nodeBox && (e.target === mapSvg || e.target === mapContainer ||
       mapSvg.contains(e.target) || mapContainer.contains(e.target))) {
