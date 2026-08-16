@@ -15,11 +15,24 @@ source SID even exist in the victim landscape.
 
 | Zip                                    | Report          | Trkorr        | What it does |
 |----------------------------------------|-----------------|---------------|--------------|
-| `ZSAPMAP_CANARY_S4H_900066.zip`        | ZSAPMAP_CANARY  | `S4HK900066`  | Writes a `SAPMAP canary import verified at <ts>` line to SM21 via `RSLG_WRITE_SYSLOG_ENTRY`. Harmless smoke test — proves the whole `tp addtobuffer` + `tp import` chain landed. |
-| `ZSAPMAP_USRCREATE_S4H_900068.zip`     | ZSAPMAP_USRCREATE | `S4HK900068` | Calls `BAPI_USER_CREATE1` for `SAPMAP00` (service user, password `Andinyougo123!`), then `BAPI_USER_PROFILES_ASSIGN` with `SAP_ALL`, then `BAPI_TRANSACTION_COMMIT`. Instant SAP_ALL landfall on any client the operator picks at import time. |
+| `ZSAPMAP_CANARY_S4H_900070.zip`        | ZSAPMAP_CANARY  | `S4HK900070`  | Writes a `SAPMAP canary import verified at <ts>` line to SM21 via `RSLG_WRITE_SYSLOG_ENTRY`. Harmless smoke test — proves the whole `tp addtobuffer` + `tp import` chain landed AND the after-import execution fired. |
+| `ZSAPMAP_USRCREATE_S4H_900072.zip`     | ZSAPMAP_USRCREATE | `S4HK900072` | Calls `BAPI_USER_CREATE1` for `SAPMAP00` (service user, password `Andinyougo123!`), then `BAPI_USER_PROFILES_ASSIGN` with `SAP_ALL`, then `BAPI_TRANSACTION_COMMIT`. Instant SAP_ALL landfall on any client the operator picks at import time. |
 
 Raw `K` (cofile) + `R` (datafile) pairs are kept alongside the zips for
 inspection and re-zipping. The pipeline only needs the zips.
+
+### XPRA (Execute After Import) — required
+
+Both transports carry an **R3TR XPRA** entry alongside the R3TR PROG
+object. XPRA tells `tp` to auto-execute the report as a post-import
+step; without it the transport merely installs the source into REPOSRC
+and sits idle — the operator would then need SE38 access on the target
+to actually run it, which defeats the point.
+
+The CO header field at position 10 (the count column) is `2` on both
+transports here, versus `1` for a plain PROG-only transport. If you
+rebuild your own transports and see count=1, you forgot to add the
+`XPRA` line in SE01 → Object List Editor.
 
 ## Source
 
