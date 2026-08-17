@@ -2804,6 +2804,44 @@ class SAPMAPState:
                 cli = user.client.zfill(3)
                 if not any(c.get("nr") == cli for c in node.clients):
                     node.clients.append({"nr": cli, "category": "V"})
+            # Pin the credential as verified — track_created_user is
+            # only reached AFTER the creation path ran test_connection
+            # (and typically _user_has_sap_all) against the fresh
+            # user, so we know these creds work end-to-end.  Without
+            # this the GW-exploit / dpmon paths leave the credential
+            # dangling in node.created_users, but nothing lands in
+            # node.credentials with verified=True — downstream
+            # consumers that filter on verified (e.g. TMS SM59-test
+            # source-side cred collector) then act as if we have no
+            # working credential at all.
+            #
+            # Dedupe by (username, client) — if a matching entry
+            # already exists, upgrade its ``verified`` flag rather
+            # than appending a duplicate.  Password is refreshed too
+            # in case the creation just rotated it.
+            if user.password and user.username:
+                cli = (user.client or "").zfill(3) if user.client else ""
+                match_key = (user.username.upper(), cli)
+                existing = None
+                for c in node.credentials:
+                    ex_cli = (c.client or "").zfill(3) if c.client else ""
+                    if (c.username or "").upper() == match_key[0] \
+                            and ex_cli == match_key[1]:
+                        existing = c
+                        break
+                if existing is not None:
+                    existing.password = user.password
+                    existing.verified = True
+                    if user.instance_nr and not existing.instance_nr:
+                        existing.instance_nr = user.instance_nr
+                else:
+                    node.credentials.append(Credentials(
+                        username=user.username,
+                        password=user.password,
+                        client=user.client or "000",
+                        instance_nr=user.instance_nr or "00",
+                        verified=True,
+                    ))
         # Map the creation METHOD to the right ATT&CK capability key so
         # the heatmap reflects what the operator actually exercised.
         # Methods that use an established RFC destination from another
