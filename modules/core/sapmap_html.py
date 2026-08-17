@@ -6356,12 +6356,36 @@ function showCtxMenu(e, sid) {
     info.className = 'ctx-cred-info';
     info.style.cssText = 'padding:4px 12px;font-size:10px;color:#8b949e;border-top:1px solid #30363d;pointer-events:none';
     let lines = [];
+    // Build a (username, client) \u2192 CreatedUser lookup so we can
+    // merge the "created" marker into the credentials line instead
+    // of showing the same user twice.  Since track_created_user now
+    // pins a verified Credentials for every CreatedUser, every
+    // created user has a matching credentials row \u2014 listing both
+    // used to render as two lines for the same underlying account
+    // (see feedback screenshot).
+    const createdMap = {};
+    for (const u of (n.created_users || [])) {
+      const k = `${(u.username || '').toUpperCase()}|${(u.client || '').padStart(3, '0')}`;
+      createdMap[k] = u;
+    }
+    const shownCreated = new Set();
     for (const c of (n.credentials || [])) {
       const mark = c.verified ? '\u2705' : '\u274C';
-      lines.push(`${mark} ${c.username} / client ${c.client} / inst ${c.instance_nr}`);
+      const k = `${(c.username || '').toUpperCase()}|${(c.client || '').padStart(3, '0')}`;
+      const cu = createdMap[k];
+      const suffix = cu
+        ? ` \u26A1 (created via ${escHtml(cu.method || 'unknown')})`
+        : '';
+      lines.push(`${mark} ${c.username} / client ${c.client} / inst ${c.instance_nr}${suffix}`);
+      if (cu) shownCreated.add(k);
     }
+    // Any created user that has no matching credentials row (edge
+    // case \u2014 e.g. cred was manually removed but the CreatedUser
+    // audit record survived) still deserves a line.
     for (const u of (n.created_users || [])) {
-      lines.push(`\u26A1 ${u.username} / client ${u.client} (created)`);
+      const k = `${(u.username || '').toUpperCase()}|${(u.client || '').padStart(3, '0')}`;
+      if (shownCreated.has(k)) continue;
+      lines.push(`\u26A1 ${u.username} / client ${u.client} (created, no live cred)`);
     }
     if (lines.length) info.innerHTML = lines.join('<br>');
     // Insert after the "Provide Credentials" item
