@@ -15017,6 +15017,60 @@ function _renderTMSPropResult(res) {
   if (res.error) {
     html += '<div style="color:#ffcccc;margin-top:6px">' + escHtml(res.error) + '</div>';
   }
+  // Per-hop breakdown — surfaces RFC vs OS-exec errors separately so
+  // the operator can tell "RFC forward broken by DDIC gap" from
+  // "OS-exec couldn't reach target".
+  for (const h of (res.hops || [])) {
+    const hopColor = h.ok ? '#3fb950' : '#f85149';
+    const mark = h.ok ? '✅' : '❌';
+    html += '<div style="margin-top:10px;padding:8px;border:1px solid #30363d;border-radius:4px;background:#0d1117">';
+    html += '<div style="color:' + hopColor + ';font-weight:600">'
+      + mark + ' ' + escHtml(h.target_sid || '?')
+      + ' <span style="opacity:0.7;font-weight:normal;font-size:11px">via '
+      + escHtml(h.path || '?') + ', ' + (h.duration_s || '?') + 's</span></div>';
+    if (h.rfc_error) {
+      html += '<div style="margin-top:4px;font-size:11px;color:#8b949e">'
+        + '<b style="color:#d29922">RFC path:</b> '
+        + escHtml(h.rfc_error) + '</div>';
+    }
+    if (h.os_error) {
+      html += '<div style="margin-top:4px;font-size:11px;color:#8b949e">'
+        + '<b style="color:#d29922">OS-exec path:</b> '
+        + escHtml(h.os_error) + '</div>';
+    }
+    // Manual-step callout when the failure signature matches the
+    // "forward FM silently no-ops on this kernel" pattern (RETCODE=012
+    // from CTS_API + trkorr not in target buffer + operator remedies
+    // mentioned).  Give a green "here's how to unblock" box instead of
+    // a red opaque error string.
+    const rfc = (h.rfc_error || '').toLowerCase();
+    const needsManual = !h.ok && (
+      rfc.indexOf("retcode=012") >= 0 ||
+      rfc.indexOf("not in") >= 0 && rfc.indexOf("tmsbuffer") >= 0 ||
+      rfc.indexOf("stms_tp_forwards") >= 0 ||
+      rfc.indexOf("da 300") >= 0
+    );
+    if (needsManual) {
+      const trkorr = res.trkorr || '?';
+      const src    = res.source_sid || '?';
+      const tgt    = h.target_sid || '?';
+      html += '<div style="margin-top:8px;padding:8px 10px;background:#161b22;border-left:3px solid #d29922;font-size:11px">';
+      html += '<b style="color:#d29922">👉 Manual step needed on this kernel</b><br>';
+      html += 'The <code>TMS_MGR_FORWARD_TR_REQUEST</code> FM silently no-ops on ';
+      html += escHtml(src) + ' (likely missing DDIC nametab <code>STMS_TP_FORWARDS</code>), ';
+      html += 'so SAPMAP could not automatically queue <code>' + escHtml(trkorr) + '</code> ';
+      html += 'for <code>' + escHtml(tgt) + '</code>. Two operator remedies:<br>';
+      html += '<b>(a)</b> STMS UI on <code>' + escHtml(src) + '</code>:<br>';
+      html += '&nbsp;&nbsp;<code>SE38 → STMS_IMPORT → ' + escHtml(tgt);
+      html += ' → Extras → Other Requests → Add → ' + escHtml(trkorr) + '</code><br>';
+      html += '<b>(b)</b> Shell on <code>' + escHtml(src) + '</code>\'s host:<br>';
+      html += '&nbsp;&nbsp;<code>tp addtobuffer ' + escHtml(trkorr) + ' ' + escHtml(tgt);
+      html += ' pf=/usr/sap/trans/bin/TP_DOMAIN_' + escHtml(src) + '.PFL</code><br>';
+      html += 'Then re-run the propagation — the CTS_API-driven import will pick it up automatically.';
+      html += '</div>';
+    }
+    html += '</div>';
+  }
   el.innerHTML = html;
 }
 
