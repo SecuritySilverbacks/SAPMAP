@@ -332,6 +332,144 @@ def _make_creds(dest: TMSDestination) -> Credentials:
     )
 
 
+def _collect_source_side_creds(dest: TMSDestination,
+                                 state: "SAPMAPState" = None) -> list:
+    """Collect ``(creds, label)`` pairs for a source-side SM59 test.
+    These are creds that live on the ``source`` node — the one that
+    already has the ``TMSADM@<target>.DOMAIN_<x>`` destination
+    configured in SM59.  SAPMAP00 is preferred (SAP_ALL, so guaranteed
+    to have S_RFC on /SDF/RFC_CHECK); other verified creds follow.
+    """
+    seen = set()
+    out  = []
+
+    def _add(cred, label):
+        if not cred or not cred.username or not cred.password:
+            return
+        key = (cred.username.upper(), (cred.client or "").strip())
+        if key in seen:
+            return
+        seen.add(key)
+        out.append((cred, label))
+
+    if state is None:
+        return out
+    src = state.get_node(dest.source_sid)
+    if src is None:
+        return out
+    # SAPMAP-family first — they carry SAP_ALL, so /SDF/RFC_CHECK
+    # never fails on auth.
+    for c in (src.credentials or []):
+        if (getattr(c, "verified", False)
+                and (c.username or "").upper().startswith("SAPMAP")):
+            _add(c, f"{dest.source_sid}.credentials (SAPMAP)")
+    # Then any other verified source-side cred.
+    for c in (src.credentials or []):
+        if (getattr(c, "verified", False)
+                and not (c.username or "").upper().startswith("SAPMAP")):
+            _add(c, f"{dest.source_sid}.credentials")
+    return out
+
+
+def _try_source_side_test(dest: TMSDestination,
+                            state: "SAPMAPState" = None) -> Optional[dict]:
+    """Preferred TMSADM test path: log on to the SOURCE system as
+    SAPMAP00 (or any verified source cred) and call the SAP-standard
+    RFC destination test primitive — ``/SDF/RFC_CHECK`` first,
+    ``DEST_CHECK_CONNECTION`` as fallback.  These FMs are what SM59's
+    "Test connection" button uses under the hood: they read the SM59
+    destination config (host + TMSADM password stored server-side) and
+    execute the ping using those settings.
+
+    Advantages over the direct TMSADM logon path:
+      * No host resolution needed — SM59 already knows the host.
+      * No TMSADM password extraction needed — SM59 stores it.
+      * DEST_CHECK_CONNECTION returns ``CONNECTION_PROPERTIES`` with
+        HOSTNAME/IPADDR, which we harvest into ``dest.target_host``
+        for downstream operations (Bundle 2 transport execution, etc).
+
+    Returns ``None`` if we cannot mount the test (no source creds, no
+    source node); otherwise a dict with:
+
+        {ok, logon_ok, ping_ok, tested_via, remote_host, error}
+
+    ``ok`` is the combined "SM59 test succeeded" verdict (logon_ok AND
+    ping_ok).  Caller inspects the individual fields to decide.
+    """
+    if state is None:
+        return None
+    src = state.get_node(dest.source_sid)
+    if src is None:
+        return None
+    creds_list = _collect_source_side_creds(dest, state)
+    if not creds_list:
+        return {"ok": False, "logon_ok": False, "ping_ok": False,
+                "tested_via": "", "remote_host": "",
+                "error": "no verified source-side creds "
+                          "(need SAPMAP00 or equivalent on "
+                          f"{dest.source_sid} first)"}
+
+    dest_name = f"TMSADM@{dest.target_sid}.{dest.domain}"
+    try:
+        from sapmap_rfc import test_rfc_destination
+    except Exception as e:
+        return {"ok": False, "logon_ok": False, "ping_ok": False,
+                "tested_via": "", "remote_host": "",
+                "error": f"sapmap_rfc import failed: {e}"}
+
+    last_err = ""
+    for cred, label in creds_list:
+        print(f"    [*] {dest.source_sid}: SM59-test destination "
+              f"{dest_name!r} as {cred.username}@{cred.client} "
+              f"(from {label})")
+        try:
+            r = test_rfc_destination(src, dest_name, creds=cred)
+        except Exception as e:
+            last_err = f"{cred.username}: {type(e).__name__}: {str(e)[:120]}"
+            print(f"    [-] {dest.source_sid}: SM59-test threw as "
+                  f"{cred.username}: {last_err}")
+            continue
+
+        logon_ok = bool(r.get("logon_ok", False))
+        ping_ok  = bool(r.get("ping_ok",  False))
+        remote_host = (r.get("remote_hostname", "")
+                        or r.get("hostname", "")
+                        or "").strip()
+        err_txt  = (r.get("error", "") or r.get("logon_message", "")
+                    or "").strip()
+        # DEST_CHECK_CONNECTION returns CONNECTION_PROPERTIES; some
+        # kernels use IPADDR when HOSTNAME is empty.  test_rfc_destination
+        # already normalises these into remote_hostname when it can, but
+        # older paths just stash them under raw keys.
+        # (Best-effort — worst case remote_host stays empty and we fall
+        # back to the manual host override.)
+
+        if logon_ok:
+            tested_via = f"{cred.username}@{cred.client} " \
+                         f"→ /SDF/RFC_CHECK on {dest.source_sid}"
+            print(f"    [+] {dest.source_sid}: SM59-test SUCCESS as "
+                  f"{cred.username}@{cred.client} — "
+                  f"logon_ok={logon_ok}, ping_ok={ping_ok}"
+                  + (f", remote={remote_host}" if remote_host else ""))
+            return {"ok":         (logon_ok and (ping_ok or True)),
+                     # ping_ok can be False on TMSADM (RFCPING auth
+                     # denied) but the logon still worked — that's OK.
+                     "logon_ok":   logon_ok,
+                     "ping_ok":    ping_ok,
+                     "tested_via": tested_via,
+                     "remote_host": remote_host,
+                     "error":      err_txt}
+        else:
+            last_err = f"{cred.username}: {err_txt or 'logon failed'}"
+            print(f"    [-] {dest.source_sid}: SM59-test as "
+                  f"{cred.username} — logon_ok=False, "
+                  f"err={err_txt or '(empty)'}")
+
+    return {"ok": False, "logon_ok": False, "ping_ok": False,
+            "tested_via": "", "remote_host": "",
+            "error": last_err or "all source-side creds failed"}
+
+
 def _collect_fallback_creds(dest: TMSDestination,
                              state: "SAPMAPState" = None) -> list:
     """Collect ``(creds, source_label)`` pairs we can try against the
@@ -530,6 +668,9 @@ def probe_tms_destination(dest: TMSDestination,
     dest.tmsadm_roles = []
     dest.tmsadm_has_sap_all = False
     dest.error = ""
+    dest.host_reachable = False
+    dest.reachable_via  = ""
+    dest.fallback_error = ""
 
     # Operator-supplied host wins over auto-resolution — we persist
     # it so the "Test" button never needs to be given the host twice.
@@ -543,19 +684,72 @@ def probe_tms_destination(dest: TMSDestination,
                   f"using operator-supplied host {override!r}")
         dest.target_host = override
 
-    # Re-resolve host if the discovery read couldn't populate it —
-    # TMSADM often can't read TMSCSYS, but the source SAP node has
-    # a better credential (SAPMAP00 typically) that can.
+    # ---------------------------------------------------------------
+    # PRIMARY TEST PATH — SM59-style source-side ping
+    # ---------------------------------------------------------------
+    # Log on to the source system as SAPMAP00 (or any verified source
+    # cred) and call /SDF/RFC_CHECK on the SM59 destination.  This is
+    # the same primitive SM59's "Test" button uses: SAP resolves the
+    # destination server-side (host + TMSADM password from RFCDES) and
+    # issues the ping.
+    #
+    # Why this is the right primary:
+    #   * No host resolution needed (SM59 has it).
+    #   * No TMSADM password extraction needed (SM59 stores it).
+    #   * DEST_CHECK_CONNECTION even returns the remote HOSTNAME,
+    #     which we harvest into dest.target_host so Bundle 2/3
+    #     transport execution has it for free.
+    #   * TMSADM's limited-auth caveat doesn't apply — /SDF/RFC_CHECK
+    #     runs under SAPMAP00 (SAP_ALL), not TMSADM.
+    ss = _try_source_side_test(dest, state)
+    if ss and ss.get("logon_ok"):
+        dest.logon_ok       = True
+        dest.host_reachable = True
+        dest.reachable_via  = ss.get("tested_via") or "SM59 test"
+        # Harvest the target host from CONNECTION_PROPERTIES if the
+        # SM59 test returned it and we didn't already know.
+        if ss.get("remote_host") and not dest.target_host:
+            dest.target_host = ss["remote_host"]
+            print(f"[+] {dest.source_sid}: harvested target host "
+                  f"{dest.target_host!r} from SM59 test response")
+        print(f"[+] {dest.source_sid}: TMS probe → {dest.target_sid}: "
+              f"SM59-style logon OK via {dest.reachable_via}")
+        # Skip the direct-logon path — SM59 test is authoritative for
+        # "is this destination usable" — and jump straight to profile
+        # fetch / materialization.  Note we may still not have a
+        # target_host if the kernel didn't expose it; downstream paths
+        # will use the source's SM59 config either way.
+        _maybe_fetch_tmsadm_profiles(dest, state)
+        _emit_and_materialize(dest, state)
+        return
+    elif ss:
+        # Record why the SM59 test didn't succeed — but fall through
+        # to the direct-logon path.  On some kernels SAPMAP00 lacks
+        # S_RFC on /SDF/RFC_CHECK; on others the destination is fine
+        # but no source cred is available yet.
+        dest.fallback_error = ss.get("error", "") or "SM59 test declined"
+        print(f"[-] {dest.source_sid}: SM59-style test unavailable: "
+              f"{dest.fallback_error}")
+
+    # ---------------------------------------------------------------
+    # FALLBACK PATH — direct TMSADM logon with SecStore password
+    # ---------------------------------------------------------------
+    # Only reachable when the SM59-style test above did not succeed
+    # (no source cred, /SDF/RFC_CHECK denied, or the destination is
+    # actually broken).  Needs dest.target_host, which we now try
+    # harder to resolve.
     if not dest.target_host:
         dest.target_host = _resolve_missing_host(dest, state)
 
     if not dest.target_host:
+        prior = f" (SM59-test also failed: {dest.fallback_error})" \
+                    if dest.fallback_error else ""
         dest.error = ("no target host — TMSCSYS row for "
                        f"SID={dest.target_sid} was not found "
                        "(tried self-reference, existing map node, "
                        "and re-read via source's best credentials). "
                        "Set the target host manually in the modal "
-                       "and re-test.")
+                       "and re-test." + prior)
         print(f"[-] {dest.source_sid}: TMS probe → "
               f"{dest.target_sid}: {dest.error}")
         return
@@ -582,9 +776,6 @@ def probe_tms_destination(dest: TMSDestination,
         return
 
     creds = _make_creds(dest)
-    dest.host_reachable = False
-    dest.reachable_via  = ""
-    dest.fallback_error = ""
     print(f"[*] {dest.source_sid}: TMS probe → TMSADM@"
           f"{dest.target_sid} at {dest.target_host}:00 (domain "
           f"{dest.domain}"
@@ -594,7 +785,7 @@ def probe_tms_destination(dest: TMSDestination,
         with _get_connection(tgt_node, creds) as _c:
             dest.logon_ok = True
             dest.host_reachable = True
-            dest.reachable_via  = f"TMSADM@{creds.client}"
+            dest.reachable_via  = f"TMSADM@{creds.client} (direct)"
             print(f"[+] {dest.source_sid}: TMSADM logon to "
                   f"{dest.target_sid} succeeded")
     except Exception as e:
@@ -611,9 +802,31 @@ def probe_tms_destination(dest: TMSDestination,
         _try_fallback_logon(tgt_node, dest, state)
         return
 
-    # Once logon succeeded — fetch TMSADM's profile assignments.
+    # Direct-logon path succeeded — fetch TMSADM's profile
+    # assignments (best-effort) and run the shared success tail.
+    _maybe_fetch_tmsadm_profiles(dest, state, tgt_node=tgt_node,
+                                    tmsadm_creds=creds)
+    _emit_and_materialize(dest, state)
+
+
+def _maybe_fetch_tmsadm_profiles(dest: TMSDestination,
+                                    state: "SAPMAPState",
+                                    tgt_node: "SAPNode" = None,
+                                    tmsadm_creds: "Credentials" = None) -> None:
+    """Best-effort BAPI_USER_GET_DETAIL for TMSADM on the target.  On
+    the direct-logon success path we already have a working TMSADM
+    connection — use it.  On the SM59-source-side path we don't have
+    an inbound TMSADM handle; skip gracefully (TMSADM's own S_USER_GRP
+    is usually absent anyway, so the call would fail).  Never fatal.
+    """
+    if tgt_node is None or tmsadm_creds is None:
+        return
     try:
-        det = get_user_details(tgt_node, "TMSADM", creds)
+        from sapmap_rfc import get_user_details
+    except Exception:
+        return
+    try:
+        det = get_user_details(tgt_node, "TMSADM", tmsadm_creds)
         dest.tmsadm_roles = list(det.get("profiles", []) or [])
         dest.tmsadm_has_sap_all = bool(det.get("has_sap_all", False))
         print(f"    [+] TMSADM profiles: "
@@ -623,6 +836,13 @@ def probe_tms_destination(dest: TMSDestination,
         print(f"    [*] BAPI_USER_GET_DETAIL raised (non-fatal): "
               f"{type(e).__name__}: {str(e)[:120]}")
 
+
+def _emit_and_materialize(dest: TMSDestination,
+                            state: "SAPMAPState") -> None:
+    """Shared success tail — materialize target as first-class SAPNode
+    and emit the ``tms.logon.ok`` finding.  Called by both the SM59
+    source-side success path and the direct-logon success path.
+    """
     # Materialize the target as a real SAPNode (mirrors the DBCON
     # pattern).  On the domain controller, this is especially
     # important since the operator will want to click into it.
@@ -638,15 +858,17 @@ def probe_tms_destination(dest: TMSDestination,
         sev = "CRITICAL" if dest.is_controller else "HIGH"
         ctrl = " (DOMAIN CONTROLLER)" if dest.is_controller else ""
         sap_all = " with SAP_ALL" if dest.tmsadm_has_sap_all else ""
+        via  = f" via {dest.reachable_via}" if dest.reachable_via else ""
         emit_finding(
             sev, dest.source_sid,
-            f"CTS/TMS: TMSADM logon to {dest.target_sid} "
-            f"({dest.target_host}) succeeded{ctrl}{sap_all} — "
-            f"cross-system transport rights available",
+            f"CTS/TMS: TMSADM destination to {dest.target_sid} "
+            f"({dest.target_host or '?'}) verified{ctrl}{sap_all}{via} "
+            f"— cross-system transport rights available",
             ref="tms.logon.ok",
-            meta={"target_sid": dest.target_sid,
+            meta={"target_sid":   dest.target_sid,
                   "is_controller": dest.is_controller,
-                  "domain": dest.domain},
+                  "domain":        dest.domain,
+                  "reachable_via": dest.reachable_via},
             attack_capability="lateral.tmsadm_rfc")
     except Exception:
         pass
