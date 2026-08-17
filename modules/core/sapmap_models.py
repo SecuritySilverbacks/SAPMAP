@@ -1280,6 +1280,17 @@ class TMSDestination:
     error:          str = ""
     tested_at:      str = ""
 
+    # Fallback reachability — when TMSADM logon fails (wrong password,
+    # user locked, S_RFC missing) but another credential we already
+    # hold DID succeed against the target host + client 000, we record
+    # it here.  This proves the host is up and gives us an alternative
+    # path (e.g. SAPMAP00 → BAPI_USER_CREATE1, or OS-exec via a
+    # privileged user).  ``logon_ok`` stays False in this case — only
+    # TMSADM logon success sets logon_ok True.
+    host_reachable: bool = False
+    reachable_via:  str = ""    # "<user>@<client>" or "" if not reached
+    fallback_error: str = ""    # last fallback error if none worked
+
     def to_dict(self) -> dict:
         return {
             "source_sid":     self.source_sid,
@@ -1298,6 +1309,9 @@ class TMSDestination:
             "pwned":          self.pwned,
             "error":          self.error,
             "tested_at":      self.tested_at,
+            "host_reachable": self.host_reachable,
+            "reachable_via":  self.reachable_via,
+            "fallback_error": self.fallback_error,
         }
 
     @classmethod

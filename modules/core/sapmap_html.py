@@ -10709,6 +10709,23 @@ function showTMSDetail(srcSid, target, domain, opts) {
     return;
   }
   const preservedScroll = refresh ? (panel.scrollTop || 0) : 0;
+  // Snapshot the manual-host input so the state-poll refresh doesn't
+  // wipe what the operator is currently typing.  We restore its value,
+  // focus, and caret position after the innerHTML swap.  Without this
+  // the panel re-renders every ~1s and the field becomes untypeable.
+  const manualHostId = `tms-manual-host-${srcSid}-${target}-${domain}`;
+  let manualHostSnapshot = null;
+  if (refresh) {
+    const oldInp = document.getElementById(manualHostId);
+    if (oldInp) {
+      manualHostSnapshot = {
+        value:  oldInp.value,
+        focus:  (document.activeElement === oldInp),
+        start:  oldInp.selectionStart,
+        end:    oldInp.selectionEnd,
+      };
+    }
+  }
   panel.setAttribute('data-view', 'tms');
   panel.dataset.sid = sidKey;
   const stateChip = dest.pwned ? '<span class="risk-badge risk-CRITICAL">&#9889; PWNED</span>'
@@ -10733,7 +10750,10 @@ function showTMSDetail(srcSid, target, domain, opts) {
     <div class="info-row"><span class="info-label">SAP_ALL:</span><span class="info-val" style="color:${dest.tmsadm_has_sap_all ? '#f85149' : '#8b949e'};font-weight:${dest.tmsadm_has_sap_all ? 'bold' : 'normal'}">${dest.tmsadm_has_sap_all ? '⚡ YES' : 'no'}</span></div>
     <div class="info-row"><span class="info-label">Pending imports:</span><span class="info-val">${dest.buffer_count || 0}</span></div>
     ${dest.tested_at ? `<div class="info-row"><span class="info-label">Tested at:</span><span class="info-val" style="font-size:11px;color:#8b949e">${escHtml(dest.tested_at)}</span></div>` : ''}
+    ${(dest.host_reachable && !dest.logon_ok) ? `<div class="info-row"><span class="info-label">Reachable via:</span><span class="info-val" style="color:#d29922">&#9888; ${escHtml(dest.reachable_via || '')} — TMSADM logon failed, but host is up</span></div>` : ''}
+    ${(dest.host_reachable && dest.logon_ok) ? `<div class="info-row"><span class="info-label">Reachable via:</span><span class="info-val" style="color:#3fb950">&#10003; ${escHtml(dest.reachable_via || '')}</span></div>` : ''}
     ${dest.error ? `<div class="info-section" style="color:#f85149;font-size:11px">${escHtml(dest.error)}</div>` : ''}
+    ${(dest.fallback_error && !dest.host_reachable) ? `<div class="info-section" style="color:#d29922;font-size:11px">Fallback: ${escHtml(dest.fallback_error)}</div>` : ''}
     ${(!dest.target_host || (dest.tested && !dest.logon_ok)) ? `
       <div class="info-section" style="margin-top:10px;padding:8px 10px;background:#161b22;border:1px solid #30363d;border-radius:4px">
         <div style="font-size:11px;color:#8b949e;margin-bottom:4px">
@@ -10756,6 +10776,21 @@ function showTMSDetail(srcSid, target, domain, opts) {
   `;
   panel.classList.add('visible');
   if (refresh && preservedScroll) panel.scrollTop = preservedScroll;
+  // Restore the manual-host input after the innerHTML swap so the
+  // operator's mid-typing keystrokes survive the polling refresh.
+  if (manualHostSnapshot) {
+    const newInp = document.getElementById(manualHostId);
+    if (newInp) {
+      newInp.value = manualHostSnapshot.value;
+      if (manualHostSnapshot.focus) {
+        newInp.focus();
+        try {
+          newInp.setSelectionRange(manualHostSnapshot.start,
+                                    manualHostSnapshot.end);
+        } catch (_e) { /* selection API unavailable for this input type */ }
+      }
+    }
+  }
 }
 
 function _getDBCONEdge(srcSid, conName) {

