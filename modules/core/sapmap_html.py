@@ -15061,8 +15061,9 @@ function _renderTMSPropResult(res) {
       html += 'so SAPMAP could not automatically queue <code>' + escHtml(trkorr) + '</code> ';
       html += 'for <code>' + escHtml(tgt) + '</code>. Two operator remedies:<br>';
       html += '<b>(a)</b> STMS UI on <code>' + escHtml(src) + '</code>:<br>';
-      html += '&nbsp;&nbsp;<code>SE38 → STMS_IMPORT → ' + escHtml(tgt);
-      html += ' → Extras → Other Requests → Add → ' + escHtml(trkorr) + '</code><br>';
+      html += '&nbsp;&nbsp;Run transaction <code>STMS_IMPORT</code>, then ';
+      html += 'select <code>' + escHtml(tgt) + '</code> → <code>Extras → ';
+      html += 'Other Requests → Add → ' + escHtml(trkorr) + '</code><br>';
       html += '<b>(b)</b> Shell on <code>' + escHtml(src) + '</code>\'s host:<br>';
       html += '&nbsp;&nbsp;<code>tp addtobuffer ' + escHtml(trkorr) + ' ' + escHtml(tgt);
       html += ' pf=/usr/sap/trans/bin/TP_DOMAIN_' + escHtml(src) + '.PFL</code><br>';
