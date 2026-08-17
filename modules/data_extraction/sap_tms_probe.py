@@ -338,7 +338,18 @@ def _collect_source_side_creds(dest: TMSDestination,
     These are creds that live on the ``source`` node — the one that
     already has the ``TMSADM@<target>.DOMAIN_<x>`` destination
     configured in SM59.  SAPMAP00 is preferred (SAP_ALL, so guaranteed
-    to have S_RFC on /SDF/RFC_CHECK); other verified creds follow.
+    to have S_RFC on /SDF/RFC_CHECK); other creds follow.
+
+    Ordering:
+      1. Verified SAPMAP-family (best case)
+      2. Un-verified SAPMAP-family — SAPMAP00 that was created via
+         the write-primitive path but whose ``verified`` flag was
+         never toggled (the post-create verify sometimes runs on a
+         different code path that doesn't set it).  These are still
+         high-value candidates; the SM59-test will just fail cheaply
+         if they turn out to be stale.
+      3. Verified non-SAPMAP creds
+      4. Un-verified non-SAPMAP creds — last resort.
     """
     seen = set()
     out  = []
@@ -357,17 +368,25 @@ def _collect_source_side_creds(dest: TMSDestination,
     src = state.get_node(dest.source_sid)
     if src is None:
         return out
-    # SAPMAP-family first — they carry SAP_ALL, so /SDF/RFC_CHECK
-    # never fails on auth.
+    def _is_sapmap(c):
+        return (c.username or "").upper().startswith("SAPMAP")
+    # 1. Verified SAPMAP-family — SAP_ALL guaranteed
     for c in (src.credentials or []):
-        if (getattr(c, "verified", False)
-                and (c.username or "").upper().startswith("SAPMAP")):
-            _add(c, f"{dest.source_sid}.credentials (SAPMAP)")
-    # Then any other verified source-side cred.
+        if getattr(c, "verified", False) and _is_sapmap(c):
+            _add(c, f"{dest.source_sid}.credentials (SAPMAP, verified)")
+    # 2. Un-verified SAPMAP-family — still worth trying; the create
+    #    path may have skipped the verify toggle
     for c in (src.credentials or []):
-        if (getattr(c, "verified", False)
-                and not (c.username or "").upper().startswith("SAPMAP")):
-            _add(c, f"{dest.source_sid}.credentials")
+        if not getattr(c, "verified", False) and _is_sapmap(c):
+            _add(c, f"{dest.source_sid}.credentials (SAPMAP, unverified)")
+    # 3. Verified non-SAPMAP creds
+    for c in (src.credentials or []):
+        if getattr(c, "verified", False) and not _is_sapmap(c):
+            _add(c, f"{dest.source_sid}.credentials (verified)")
+    # 4. Un-verified non-SAPMAP creds — last resort
+    for c in (src.credentials or []):
+        if not getattr(c, "verified", False) and not _is_sapmap(c):
+            _add(c, f"{dest.source_sid}.credentials (unverified)")
     return out
 
 
@@ -405,9 +424,10 @@ def _try_source_side_test(dest: TMSDestination,
     if not creds_list:
         return {"ok": False, "logon_ok": False, "ping_ok": False,
                 "tested_via": "", "remote_host": "",
-                "error": "no verified source-side creds "
-                          "(need SAPMAP00 or equivalent on "
-                          f"{dest.source_sid} first)"}
+                "error": "no source-side credentials on "
+                          f"{dest.source_sid} — pin at least one via "
+                          "the SAP-node ctx menu → Provide Credentials, "
+                          "or run Default-Credentials probe first"}
 
     dest_name = f"TMSADM@{dest.target_sid}.{dest.domain}"
     try:
@@ -506,29 +526,41 @@ def _collect_fallback_creds(dest: TMSDestination,
 
     tgt_sid = (dest.target_sid or "").upper()
 
+    def _is_sapmap(c):
+        return (c.username or "").upper().startswith("SAPMAP")
+
     if state is not None:
-        # Target node's own verified creds (SAPMAP00 pinned by a prior
+        # Target node's own creds (SAPMAP00 pinned by a prior
         # user-create transport, DDIC via default-creds, …).
+        # Verified first, then un-verified as best-effort — the
+        # write-primitive path pins SAPMAP00 without always toggling
+        # the ``verified`` flag, so requiring it strictly locks us out
+        # of creds that actually work.
         tgt = state.get_node(tgt_sid)
         if tgt is not None:
             for c in (tgt.credentials or []):
-                if getattr(c, "verified", False):
-                    # SAPMAP00 first
-                    if (c.username or "").upper().startswith("SAPMAP"):
-                        _add(c, f"{tgt_sid}.credentials (SAPMAP-family)")
+                if getattr(c, "verified", False) and _is_sapmap(c):
+                    _add(c, f"{tgt_sid}.credentials (SAPMAP, verified)")
             for c in (tgt.credentials or []):
-                if (getattr(c, "verified", False)
-                        and not (c.username or "").upper().startswith("SAPMAP")):
-                    _add(c, f"{tgt_sid}.credentials")
+                if not getattr(c, "verified", False) and _is_sapmap(c):
+                    _add(c, f"{tgt_sid}.credentials (SAPMAP, unverified)")
+            for c in (tgt.credentials or []):
+                if getattr(c, "verified", False) and not _is_sapmap(c):
+                    _add(c, f"{tgt_sid}.credentials (verified)")
+            for c in (tgt.credentials or []):
+                if not getattr(c, "verified", False) and not _is_sapmap(c):
+                    _add(c, f"{tgt_sid}.credentials (unverified)")
 
         # Source node's SAPMAP00 — landscape-shared user (common
-        # after prior SAPMAP propagation).
+        # after prior SAPMAP propagation).  Same verified-first policy.
         src = state.get_node(dest.source_sid)
         if src is not None:
             for c in (src.credentials or []):
-                if (getattr(c, "verified", False)
-                        and (c.username or "").upper().startswith("SAPMAP")):
-                    _add(c, f"{dest.source_sid}.credentials (SAPMAP-shared)")
+                if getattr(c, "verified", False) and _is_sapmap(c):
+                    _add(c, f"{dest.source_sid}.credentials (SAPMAP-shared, verified)")
+            for c in (src.credentials or []):
+                if not getattr(c, "verified", False) and _is_sapmap(c):
+                    _add(c, f"{dest.source_sid}.credentials (SAPMAP-shared, unverified)")
             for c in (src.credentials or []):
                 if (getattr(c, "verified", False)
                         and not (c.username or "").upper().startswith("SAPMAP")):
