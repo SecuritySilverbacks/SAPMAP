@@ -15044,30 +15044,55 @@ function _renderTMSPropResult(res) {
     // mentioned).  Give a green "here's how to unblock" box instead of
     // a red opaque error string.
     const rfc = (h.rfc_error || '').toLowerCase();
+    const isTargetMismatch = rfc.indexOf("root cause: e070.tarsystem") >= 0;
+    const isAddtobufferOk  = rfc.indexOf("addtobuffer succeeded") >= 0;
     const needsManual = !h.ok && (
       rfc.indexOf("retcode=012") >= 0 ||
       rfc.indexOf("not in") >= 0 && rfc.indexOf("tmsbuffer") >= 0 ||
       rfc.indexOf("stms_tp_forwards") >= 0 ||
-      rfc.indexOf("da 300") >= 0
+      rfc.indexOf("da 300") >= 0 ||
+      isTargetMismatch
     );
     if (needsManual) {
       const trkorr = res.trkorr || '?';
       const src    = res.source_sid || '?';
       const tgt    = h.target_sid || '?';
       html += '<div style="margin-top:8px;padding:8px 10px;background:#161b22;border-left:3px solid #d29922;font-size:11px">';
-      html += '<b style="color:#d29922">👉 Manual step needed on this kernel</b><br>';
-      html += 'The <code>TMS_MGR_FORWARD_TR_REQUEST</code> FM silently no-ops on ';
-      html += escHtml(src) + ' (likely missing DDIC nametab <code>STMS_TP_FORWARDS</code>), ';
-      html += 'so SAPMAP could not automatically queue <code>' + escHtml(trkorr) + '</code> ';
-      html += 'for <code>' + escHtml(tgt) + '</code>. Two operator remedies:<br>';
-      html += '<b>(a)</b> STMS UI on <code>' + escHtml(src) + '</code>:<br>';
-      html += '&nbsp;&nbsp;Run transaction <code>STMS_IMPORT</code>, then ';
-      html += 'select <code>' + escHtml(tgt) + '</code> → <code>Extras → ';
-      html += 'Other Requests → Add → ' + escHtml(trkorr) + '</code><br>';
-      html += '<b>(b)</b> Shell on <code>' + escHtml(src) + '</code>\'s host:<br>';
-      html += '&nbsp;&nbsp;<code>tp addtobuffer ' + escHtml(trkorr) + ' ' + escHtml(tgt);
-      html += ' pf=/usr/sap/trans/bin/TP_DOMAIN_' + escHtml(src) + '.PFL</code><br>';
-      html += 'Then re-run the propagation — the CTS_API-driven import will pick it up automatically.';
+      if (isAddtobufferOk && isTargetMismatch) {
+        // Best-case: addtobuffer worked, only the E070 target-system
+        // mismatch is stopping CTS_API — one STMS click completes it.
+        html += '<b style="color:#3fb950">✓ Transport already queued in ' + escHtml(tgt) + '\'s buffer</b><br>';
+        html += 'SAPMAP successfully ran <code>tp addtobuffer</code> on <code>' + escHtml(src) + '</code>, ';
+        html += 'so <code>' + escHtml(trkorr) + '</code> is now in <code>' + escHtml(tgt) + '</code>\'s TMSBUFFER. ';
+        html += 'CTS_API refused to auto-import because the transport was released targeting a different ';
+        html += 'system (see <code>E070.TARSYSTEM</code> in the error above), and CTS_API blocks cross-target imports. ';
+        html += 'STMS UI\'s "Import Request" click accepts cross-target imports as a standard operator workflow.<br>';
+        html += '<b>👉 One-click remedy on <code>' + escHtml(src) + '</code>:</b><br>';
+        html += '&nbsp;&nbsp;Run transaction <code>STMS_IMPORT</code>, select <code>' + escHtml(tgt);
+        html += '</code>, right-click <code>' + escHtml(trkorr) + '</code> → <b>Import Request</b> → confirm.<br>';
+        html += 'Then re-run this modal — the post-import verify auto-pins SAPMAP00 on <code>' + escHtml(tgt) + '</code>.';
+      } else if (isAddtobufferOk) {
+        html += '<b style="color:#3fb950">✓ Transport queued in ' + escHtml(tgt) + '\'s buffer</b><br>';
+        html += 'SAPMAP successfully ran <code>tp addtobuffer</code>. CTS_API_IMPORT declined for a non-'
+              + 'target-mismatch reason (see error above).<br>';
+        html += '<b>👉 One-click remedy on <code>' + escHtml(src) + '</code>:</b><br>';
+        html += '&nbsp;&nbsp;<code>STMS_IMPORT</code> → <code>' + escHtml(tgt);
+        html += '</code> → right-click <code>' + escHtml(trkorr) + '</code> → <b>Import Request</b>';
+      } else {
+        html += '<b style="color:#d29922">👉 Manual step needed on this kernel</b><br>';
+        html += 'The <code>TMS_MGR_FORWARD_TR_REQUEST</code> FM silently no-ops on ';
+        html += escHtml(src) + ' (likely missing DDIC nametab <code>STMS_TP_FORWARDS</code>), ';
+        html += 'and the automatic <code>tp addtobuffer</code> fallback also failed. ';
+        html += 'Two operator remedies:<br>';
+        html += '<b>(a)</b> STMS UI on <code>' + escHtml(src) + '</code>:<br>';
+        html += '&nbsp;&nbsp;Run transaction <code>STMS_IMPORT</code>, then ';
+        html += 'select <code>' + escHtml(tgt) + '</code> → <code>Extras → ';
+        html += 'Other Requests → Add → ' + escHtml(trkorr) + '</code><br>';
+        html += '<b>(b)</b> Shell on <code>' + escHtml(src) + '</code>\'s host:<br>';
+        html += '&nbsp;&nbsp;<code>tp addtobuffer ' + escHtml(trkorr) + ' ' + escHtml(tgt);
+        html += ' pf=&lt;shared&gt;\\bin\\TP_DOMAIN_' + escHtml(src) + '.PFL</code><br>';
+        html += 'Then re-run the propagation.';
+      }
       html += '</div>';
     }
     html += '</div>';
