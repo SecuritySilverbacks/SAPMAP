@@ -10588,11 +10588,24 @@ async function runTMSDiscover(srcSid) {
   startPolling();
 }
 
-async function runTMSTest(srcSid, target, domain) {
-  console.log(`[TMS] runTMSTest: ${srcSid}/${target}/${domain}`);
-  flashActivity(`${srcSid}: TMS test → TMSADM@${target}`, 4000);
-  await api('POST', `node/${srcSid}/tms/test`,
-    { target_sid: target, domain });
+async function runTMSTest(srcSid, target, domain, opts) {
+  opts = opts || {};
+  // If the operator typed a host into the modal's manual-host input,
+  // pass it through — the probe persists it to dest.target_host so
+  // subsequent buffer / history / propagate calls skip the (failed)
+  // TMSCSYS auto-resolution.
+  let host = (opts.target_host || '').trim();
+  if (!host) {
+    const inp = document.getElementById(
+      `tms-manual-host-${srcSid}-${target}-${domain}`);
+    if (inp) host = (inp.value || '').trim();
+  }
+  const hostLbl = host ? ` (host ${host})` : '';
+  console.log(`[TMS] runTMSTest: ${srcSid}/${target}/${domain}${hostLbl}`);
+  flashActivity(`${srcSid}: TMS test → TMSADM@${target}${hostLbl}`, 4000);
+  const body = { target_sid: target, domain };
+  if (host) body.target_host = host;
+  await api('POST', `node/${srcSid}/tms/test`, body);
   startPolling();
 }
 
@@ -10721,6 +10734,19 @@ function showTMSDetail(srcSid, target, domain, opts) {
     <div class="info-row"><span class="info-label">Pending imports:</span><span class="info-val">${dest.buffer_count || 0}</span></div>
     ${dest.tested_at ? `<div class="info-row"><span class="info-label">Tested at:</span><span class="info-val" style="font-size:11px;color:#8b949e">${escHtml(dest.tested_at)}</span></div>` : ''}
     ${dest.error ? `<div class="info-section" style="color:#f85149;font-size:11px">${escHtml(dest.error)}</div>` : ''}
+    ${(!dest.target_host || (dest.tested && !dest.logon_ok)) ? `
+      <div class="info-section" style="margin-top:10px;padding:8px 10px;background:#161b22;border:1px solid #30363d;border-radius:4px">
+        <div style="font-size:11px;color:#8b949e;margin-bottom:4px">
+          Manual host override — paste the target's ASHOST (IP or FQDN)
+          if TMSCSYS auto-resolution couldn't find it. Persisted to
+          <code style="color:#c9d1d9">dest.target_host</code> after a
+          successful re-test.
+        </div>
+        <input type="text" id="tms-manual-host-${escHtml(srcSid)}-${escHtml(target)}-${escHtml(domain)}"
+               placeholder="e.g. 192.168.2.210 or twp.lab.local"
+               style="width:100%;background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:4px 6px;border-radius:3px;font-family:monospace;font-size:12px"
+               value="${escHtml(dest.target_host || '')}"/>
+      </div>` : ''}
     <div style="text-align:right;margin-top:12px;display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">
       <button class="btn" onclick="runTMSTest('${escHtml(srcSid)}','${escHtml(target)}','${escHtml(domain)}')">${dest.tested ? 'Re-test' : 'Test logon'}</button>
       ${dest.logon_ok ? `<button class="btn" onclick="runTMSReadBuffer('${escHtml(srcSid)}','${escHtml(target)}')">TMSBUFFER</button>` : ''}

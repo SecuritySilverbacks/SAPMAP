@@ -166,13 +166,42 @@ def test_connection(node: SAPNode, creds: Credentials = None,
     try:
         with _get_connection(node, creds,
                               host_override=host_override) as conn:
-            ok = conn.ping()
+            # Prefer ping_verbose() so we can distinguish the SM59
+            # "Cancel + No RFC authorization for function module
+            # RFCPING" case (role-limited user like TMSADM logged on
+            # successfully but has no S_RFC for RFCPING) from a real
+            # session failure.  Both SM59 modes of "did we log on"
+            # answer YES the moment the target accepted the creds —
+            # the auth denial only proves the *function module* call
+            # was refused, not the logon.
+            try:
+                ok, err_key, err_msg = conn.ping_verbose()
+            except AttributeError:
+                # Older RFCConnection without ping_verbose — fall back.
+                ok = conn.ping()
+                err_key, err_msg = "", ""
+            if not ok:
+                is_auth_denied = (
+                    err_key == "RFC_NO_AUTHORITY"
+                    or "no rfc authorization" in (err_msg or "").lower()
+                    or "no authorization" in (err_msg or "").lower()
+                    and "rfcping" in (err_msg or "").lower())
+                if is_auth_denied:
+                    ok = True
+                    print(f"[+] Connection test OK for {node.sid} "
+                          f"(host={host_label}, user="
+                          f"{creds.username if creds else '?'}, "
+                          f"client={creds.client if creds else '?'}, "
+                          f"inst={creds.instance_nr if creds else '?'})"
+                          f" — RFCPING auth denied (role-limited "
+                          f"user), but logon succeeded")
             if ok and creds:
                 creds.verified = True
-                print(f"[+] Connection test OK for {node.sid} "
-                      f"(host={host_label}, user={creds.username}, "
-                      f"client={creds.client}, "
-                      f"inst={creds.instance_nr})")
+                if err_key != "RFC_NO_AUTHORITY":
+                    print(f"[+] Connection test OK for {node.sid} "
+                          f"(host={host_label}, user={creds.username}, "
+                          f"client={creds.client}, "
+                          f"inst={creds.instance_nr})")
             return ok
     except Exception as e:
         err = format_rfc_exception(e)

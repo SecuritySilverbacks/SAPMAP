@@ -848,6 +848,30 @@ class RFCConnection:
         rc = self._sdk.RfcPing(self._handle, byref(error_info))
         return rc == RFC_OK
 
+    def ping_verbose(self):
+        """Same as ``ping()`` but returns ``(ok, key, message)`` so the
+        caller can distinguish the SM59-style outcomes:
+
+          * (True,  '',                  '')             — RFC_PING OK
+          * (False, 'RFC_NO_AUTHORITY',  'No RFC …')     — logged on
+              but the user lacks S_RFC for RFCPING (typical for TMSADM,
+              some role-limited service users).  From a "did the logon
+              succeed" standpoint this counts as YES — the target
+              accepted our credentials, it just refused the specific
+              function-module call.
+          * (False, '<other>',           '<other>')     — real failure
+              (session dead, communication error, …).
+        """
+        if self._handle is None:
+            return (False, "RFC_INVALID_HANDLE", "connection is closed")
+        error_info = RFC_ERROR_INFO()
+        rc = self._sdk.RfcPing(self._handle, byref(error_info))
+        if rc == RFC_OK:
+            return (True, "", "")
+        key = _uc_to_str(error_info.key).rstrip()
+        msg = _uc_to_str(error_info.message).rstrip()
+        return (False, key, msg)
+
     def get_attributes(self):
         """Get connection attributes (system ID, hostname, user, etc.).
 

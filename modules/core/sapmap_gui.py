@@ -14026,12 +14026,22 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
     @app.route("/api/node/<sid>/tms/test", method="POST")
     def node_tms_test(sid):
-        """Test TMSADM RFC logon against one TMS destination."""
+        """Test TMSADM RFC logon against one TMS destination.
+
+        Body:
+          target_sid:  required
+          domain:      optional (filters when the same target SID is
+                       reachable from multiple domains)
+          target_host: optional operator-supplied host — overrides the
+                       TMSCSYS-resolved value, persists to dest.target_host
+        """
         response.content_type = "application/json"
         data = request.json or {}
         target = (data.get("target_sid") or "").strip().upper()
         domain = (data.get("domain") or "").strip().upper()
-        print(f"[*] {sid}: TMS test — target={target!r} domain={domain!r}")
+        target_host = (data.get("target_host") or "").strip()
+        print(f"[*] {sid}: TMS test — target={target!r} domain={domain!r}"
+              + (f" host_override={target_host!r}" if target_host else ""))
         if not target:
             return json.dumps({"error": "target_sid required"})
         node = api.state.get_node(sid)
@@ -14053,7 +14063,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         f"TMS test → {target}")
             try:
                 from sap_tms_probe import probe_tms_destination
-                probe_tms_destination(dest, state=api.state)
+                probe_tms_destination(dest, state=api.state,
+                                       host_override=target_host)
             except Exception as _ex:
                 import traceback as _tb
                 print(f"[!] {sid}: TMS test crashed: "

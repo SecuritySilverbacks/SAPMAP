@@ -393,9 +393,17 @@ def _resolve_missing_host(dest: TMSDestination,
 
 
 def probe_tms_destination(dest: TMSDestination,
-                            state: SAPMAPState = None) -> None:
+                            state: SAPMAPState = None,
+                            host_override: str = "") -> None:
     """Open a live RFC logon to `dest` as TMSADM and inspect the
     account.  Mutates `dest` in-place.
+
+    ``host_override`` — operator-supplied target host, used when
+    TMSCSYS auto-resolution failed (e.g. TMSADM on the source has
+    no read auth for TMSCSYS and no SAPMAP-grade cred is available
+    yet).  When set, we persist it into ``dest.target_host`` so
+    subsequent operations (buffer read, propagate) reuse the same
+    host without re-prompting.
 
     Success path:
       1. Open the connection (proves the SecStore password is live)
@@ -411,6 +419,18 @@ def probe_tms_destination(dest: TMSDestination,
     dest.tmsadm_has_sap_all = False
     dest.error = ""
 
+    # Operator-supplied host wins over auto-resolution — we persist
+    # it so the "Test" button never needs to be given the host twice.
+    if host_override and host_override.strip():
+        override = host_override.strip()
+        if dest.target_host and dest.target_host != override:
+            print(f"[*] {dest.source_sid}: TMS probe → {dest.target_sid}: "
+                  f"host override {override!r} replaces {dest.target_host!r}")
+        else:
+            print(f"[*] {dest.source_sid}: TMS probe → {dest.target_sid}: "
+                  f"using operator-supplied host {override!r}")
+        dest.target_host = override
+
     # Re-resolve host if the discovery read couldn't populate it —
     # TMSADM often can't read TMSCSYS, but the source SAP node has
     # a better credential (SAPMAP00 typically) that can.
@@ -421,7 +441,9 @@ def probe_tms_destination(dest: TMSDestination,
         dest.error = ("no target host — TMSCSYS row for "
                        f"SID={dest.target_sid} was not found "
                        "(tried self-reference, existing map node, "
-                       "and re-read via source's best credentials)")
+                       "and re-read via source's best credentials). "
+                       "Set the target host manually in the modal "
+                       "and re-test.")
         print(f"[-] {dest.source_sid}: TMS probe → "
               f"{dest.target_sid}: {dest.error}")
         return
