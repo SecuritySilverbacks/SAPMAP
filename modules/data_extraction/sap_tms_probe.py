@@ -390,6 +390,73 @@ def _collect_source_side_creds(dest: TMSDestination,
     return out
 
 
+def _resolve_host_from_rfcdes(dest: TMSDestination,
+                                state: "SAPMAPState") -> str:
+    """Read the destination's ASHOST directly from RFCDES on the
+    source system.  Same primitive SAPMAP uses for RFC-destination
+    fallback ping (sapmap_rfc line ~3141): RFC_READ_TABLE with
+    QUERY_TABLE='RFCDES' WHERE RFCDEST='<name>', parse the RFCOPTIONS
+    string for ``H=<host>``.
+
+    Handles the case the operator flagged: when TMSCSYS auto-resolution
+    fails but the RFC destination itself is configured with a valid
+    ASHOST on the source system, we can read that host directly and
+    stop showing "Target host: ?" in the modal.
+
+    Returns the host string (may be an IP or FQDN) or "" if unavailable.
+    """
+    if state is None:
+        return ""
+    src = state.get_node(dest.source_sid)
+    if src is None:
+        return ""
+    creds_list = _collect_source_side_creds(dest, state)
+    if not creds_list:
+        return ""
+    try:
+        from sapmap_rfc import _get_connection
+    except Exception:
+        return ""
+    dest_name = f"TMSADM@{dest.target_sid}.{dest.domain}"
+    for cred, label in creds_list:
+        try:
+            with _get_connection(src, cred) as conn:
+                rows = conn.call(
+                    "RFC_READ_TABLE",
+                    QUERY_TABLE="RFCDES", DELIMITER="|",
+                    FIELDS=[{"FIELDNAME": "RFCDEST"},
+                             {"FIELDNAME": "RFCOPTIONS"}],
+                    OPTIONS=[{"TEXT": f"RFCDEST = '{dest_name}'"}])
+                for row in rows.get("DATA", []):
+                    wa = row.get("WA", "")
+                    parts = wa.split("|")
+                    if len(parts) < 2:
+                        continue
+                    opts = parts[1].strip()
+                    for token in opts.split(","):
+                        token = token.strip()
+                        if token.startswith("H="):
+                            host = token.split("=", 1)[1].strip()
+                            if host:
+                                print(f"    [+] {dest.source_sid}: "
+                                      f"RFCDES read via "
+                                      f"{cred.username}@{cred.client} "
+                                      f"({label}) → {dest_name} "
+                                      f"host={host!r}")
+                                return host
+                # RFCDES row found but H= missing (very old shim
+                # destination) — keep trying with next cred.
+                print(f"    [i] {dest.source_sid}: RFCDES row for "
+                      f"{dest_name} had no H= token (RFCOPTIONS "
+                      f"empty or exotic format), trying next cred")
+        except Exception as e:
+            print(f"    [i] {dest.source_sid}: RFCDES read as "
+                  f"{cred.username} raised {type(e).__name__}: "
+                  f"{str(e)[:120]} — trying next cred")
+            continue
+    return ""
+
+
 def _try_source_side_test(dest: TMSDestination,
                             state: "SAPMAPState" = None) -> Optional[dict]:
     """Preferred TMSADM test path: log on to the SOURCE system as
@@ -437,6 +504,19 @@ def _try_source_side_test(dest: TMSDestination,
                 "tested_via": "", "remote_host": "",
                 "error": f"sapmap_rfc import failed: {e}"}
 
+    def _is_benign_rfcping_denial(msg: str) -> bool:
+        """SM59 semantics: 'No RFC authorization for function module
+        RFCPING' proves the destination CAN reach the target and CAN
+        log on — the target simply refused the specific FM call.  For
+        role-limited destination users (TMSADM being the canonical
+        case) this is the *expected* healthy response.  Same logic
+        applied by test_connection() in sapmap_rfc.
+        """
+        low = (msg or "").lower()
+        return ("rfc_no_authority" in low
+                or ("no rfc authorization" in low and "rfcping" in low)
+                or ("no authorization" in low and "rfcping" in low))
+
     last_err = ""
     for cred, label in creds_list:
         print(f"    [*] {dest.source_sid}: SM59-test destination "
@@ -445,7 +525,28 @@ def _try_source_side_test(dest: TMSDestination,
         try:
             r = test_rfc_destination(src, dest_name, creds=cred)
         except Exception as e:
-            last_err = f"{cred.username}: {type(e).__name__}: {str(e)[:120]}"
+            exc_txt = f"{type(e).__name__}: {str(e)[:200]}"
+            # RFCPING auth-denied bubbles up as an ABAPRuntimeError
+            # from test_rfc_destination when /SDF/RFC_CHECK's inner
+            # RFC_PING call is refused by the destination user.  Same
+            # verdict as the in-result case below: the destination
+            # works, just the FM is denied.
+            if _is_benign_rfcping_denial(exc_txt):
+                tested_via = (f"{cred.username}@{cred.client} → "
+                                f"/SDF/RFC_CHECK on {dest.source_sid} "
+                                f"(destination user's RFCPING denied — "
+                                f"benign, connection is live)")
+                print(f"    [+] {dest.source_sid}: SM59-test SUCCESS as "
+                      f"{cred.username}@{cred.client} — RFCPING auth "
+                      f"denied (destination user has limited role like "
+                      f"TMSADM), which proves the destination IS working")
+                return {"ok":         True,
+                         "logon_ok":   True,
+                         "ping_ok":    False,
+                         "tested_via": tested_via,
+                         "remote_host": "",
+                         "error":      ""}
+            last_err = f"{cred.username}: {exc_txt[:120]}"
             print(f"    [-] {dest.source_sid}: SM59-test threw as "
                   f"{cred.username}: {last_err}")
             continue
@@ -463,6 +564,25 @@ def _try_source_side_test(dest: TMSDestination,
         # older paths just stash them under raw keys.
         # (Best-effort — worst case remote_host stays empty and we fall
         # back to the manual host override.)
+
+        # /SDF/RFC_CHECK may report logon_ok=False but stash an
+        # RFCPING-denial error string — same SM59 semantics, still
+        # a healthy destination.
+        if (not logon_ok) and _is_benign_rfcping_denial(err_txt):
+            tested_via = (f"{cred.username}@{cred.client} → "
+                            f"/SDF/RFC_CHECK on {dest.source_sid} "
+                            f"(destination user's RFCPING denied — "
+                            f"benign, connection is live)")
+            print(f"    [+] {dest.source_sid}: SM59-test SUCCESS as "
+                  f"{cred.username}@{cred.client} — RFCPING auth denied "
+                  f"(destination user has limited role), destination IS "
+                  f"working")
+            return {"ok":         True,
+                     "logon_ok":   True,
+                     "ping_ok":    False,
+                     "tested_via": tested_via,
+                     "remote_host": remote_host,
+                     "error":      ""}
 
         if logon_ok:
             tested_via = f"{cred.username}@{cred.client} " \
@@ -715,6 +835,17 @@ def probe_tms_destination(dest: TMSDestination,
             print(f"[*] {dest.source_sid}: TMS probe → {dest.target_sid}: "
                   f"using operator-supplied host {override!r}")
         dest.target_host = override
+
+    # Read the destination's ASHOST directly from RFCDES on the source.
+    # Works whenever we have any source cred — this is what SM59 shows
+    # you in the "Technical Settings" tab and never depends on TMSCSYS
+    # having a row for the target.  Stops the modal showing "?" the
+    # moment we have a working source cred, independent of whether
+    # SM59-test itself succeeds.
+    if not dest.target_host:
+        rfcdes_host = _resolve_host_from_rfcdes(dest, state)
+        if rfcdes_host:
+            dest.target_host = rfcdes_host
 
     # ---------------------------------------------------------------
     # PRIMARY TEST PATH — SM59-style source-side ping
