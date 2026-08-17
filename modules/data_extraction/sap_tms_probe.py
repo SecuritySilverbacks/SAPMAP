@@ -103,17 +103,29 @@ def _is_table_without_data(exc) -> bool:
             or ("AD" in s and "718" in s and "Number:718" in s))
 
 
-def _rfc_read_table(conn, table: str, fields: list, rowcount: int = 500):
+def _rfc_read_table(conn, table: str, fields: list, rowcount: int = 500,
+                     where: list = None):
     """Wrap RFC_READ_TABLE with the ET_DATA / narrow bucket handling
-    proven on DBCON.  Returns (rows_raw, used_flag, error_or_None)."""
+    proven on DBCON.  Returns (rows_raw, used_flag, error_or_None).
+
+    ``where`` — optional list of ABAP-WHERE fragments (each ≤ 72 chars,
+    joined with implicit AND by the FM).  E.g.
+    ``where=["SYSNAM = 'TWP'"]``.  Without this parameter the query
+    returns EVERY row in the table — that's fine for a narrow-key
+    table like TMSCSYS, but wrong for domain-wide tables like TMSBUFFER
+    where the operator asked for "TMSBUFFER on <target>" but got the
+    whole domain queue back.
+    """
     from sapmap_config import RFC_READ_TABLE
     field_list = [{"FIELDNAME": f} for f in fields]
+    options    = [{"TEXT": w} for w in (where or [])]
     try:
         try:
             res = conn.call(RFC_READ_TABLE,
                              QUERY_TABLE=table,
                              DELIMITER="|",
                              FIELDS=field_list,
+                             OPTIONS=options,
                              ROWCOUNT=rowcount,
                              USE_ET_DATA_4_RETURN="X")
             used_flag = True
@@ -122,6 +134,7 @@ def _rfc_read_table(conn, table: str, fields: list, rowcount: int = 500):
                              QUERY_TABLE=table,
                              DELIMITER="|",
                              FIELDS=field_list,
+                             OPTIONS=options,
                              ROWCOUNT=rowcount)
             used_flag = False
         raw, _n, _w = _pick_rows(res)
@@ -1196,8 +1209,15 @@ def read_tms_buffer(dest: TMSDestination,
                        "UMODES", "IMPFLG", "MAXRC", "TRFUNC"]
     try:
         with _get_connection(tgt, creds) as conn:
+            # TMSBUFFER is DOMAIN-WIDE — reading it from any system in
+            # the domain returns entries queued for EVERY target in the
+            # domain, not just the connected one.  The operator opened
+            # "TMSBUFFER on <target>" expecting "requests queued for
+            # <target>" — scope with SYSNAM = <target_sid> so we return
+            # only the pending imports for the intended target.
             rows_raw, flag, err = _rfc_read_table(
-                conn, "TMSBUFFER", _BUFFER_FIELDS, rowcount=200)
+                conn, "TMSBUFFER", _BUFFER_FIELDS, rowcount=200,
+                where=[f"SYSNAM = '{dest.target_sid}'"])
             if err:
                 if _is_table_without_data(err):
                     out["ok"] = True
