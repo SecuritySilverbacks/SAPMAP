@@ -1954,7 +1954,7 @@ body {
       <div id="tms-prop-grid" style="display:flex;flex-direction:column;gap:4px;font-family:monospace;font-size:11px;max-height:340px;overflow:auto"></div>
     </div>
 
-    <div id="tms-prop-result" style="display:none;margin-top:10px;font-size:12px"></div>
+    <div id="tms-prop-result" style="display:none;margin-top:10px;font-size:12px;user-select:text;-webkit-user-select:text;cursor:text"></div>
 
     <div class="form-actions" style="margin-top:12px">
       <button id="tms-prop-go" class="btn btn-primary" onclick="runTMSPropagate()">Run</button>
