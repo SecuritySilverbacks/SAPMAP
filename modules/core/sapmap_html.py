@@ -15046,19 +15046,43 @@ function _renderTMSPropResult(res) {
     const rfc = (h.rfc_error || '').toLowerCase();
     const isTargetMismatch = rfc.indexOf("root cause: e070.tarsystem") >= 0;
     const isAddtobufferOk  = rfc.indexOf("addtobuffer succeeded") >= 0;
+    const isAlreadyCompleted = rfc.indexOf("known kernel limitation") >= 0
+                                || rfc.indexOf("already imported on a prior run") >= 0;
     const needsManual = !h.ok && (
       rfc.indexOf("retcode=012") >= 0 ||
       rfc.indexOf("not in") >= 0 && rfc.indexOf("tmsbuffer") >= 0 ||
       rfc.indexOf("stms_tp_forwards") >= 0 ||
       rfc.indexOf("da 300") >= 0 ||
-      isTargetMismatch
+      isTargetMismatch ||
+      isAlreadyCompleted
     );
     if (needsManual) {
       const trkorr = res.trkorr || '?';
       const src    = res.source_sid || '?';
       const tgt    = h.target_sid || '?';
       html += '<div style="margin-top:8px;padding:8px 10px;background:#161b22;border-left:3px solid #d29922;font-size:11px">';
-      if (isAddtobufferOk && isTargetMismatch) {
+      if (isAlreadyCompleted) {
+        // Transport already imported once (IMPFLG='2') but bundle
+        // credential doesn't work — user creation inside XPRA
+        // probably failed with warnings.  Kernel refuses re-import.
+        html += '<b style="color:#d29922">⚠ Transport already imported on ' + escHtml(tgt) + ' — but the user wasn\'t created</b><br>';
+        html += 'The transport <code>' + escHtml(trkorr) + '</code> was imported previously ';
+        html += '(<code>IMPFLG=\'2\'</code>, <code>MAXRC=4</code> = tp warnings), ';
+        html += 'but the bundle credential doesn\'t log on to <code>' + escHtml(tgt) + '</code>. ';
+        html += 'The earlier import\'s XPRA report (the ABAP that creates <code>SAPMAP00</code>) probably failed silently.<br>';
+        html += 'This kernel refuses to re-import an already-completed transport via RFC ';
+        html += '(verified against <code>TMS_MGR_IMPORT</code>, <code>TMS_TP_IMPORT</code>, <code>tp import</code>, ';
+        html += 'and <code>tp addtobuffer</code> — all silently no-op on <code>IMPFLG=\'2\'</code>).<br>';
+        html += '<b>Remedies:</b><br>';
+        html += '<b>(a)</b> <b style="color:#3fb950">RELEASE A FRESH TRANSPORT with a new trkorr</b> — ';
+        html += 'SAPMAP handles fresh transports end-to-end (verified).  ';
+        html += 'Rebuild the bundle transport with a new number and retry.<br>';
+        html += '<b>(b)</b> STMS UI on <code>' + escHtml(src) + '</code>: <code>STMS_IMPORT</code> → ';
+        html += 'select <code>' + escHtml(tgt) + '</code> → right-click <code>' + escHtml(trkorr) + '</code> → ';
+        html += '<b>Import Request Again</b> → check "Options" tab → tick "Ignore Invalid Component Version" ';
+        html += 'and "Import Again" → OK.  The STMS UI path bypasses the RFC re-import block by triggering ';
+        html += 'a background job instead of an inline FM call.';
+      } else if (isAddtobufferOk && isTargetMismatch) {
         // Best-case: addtobuffer worked, only the E070 target-system
         // mismatch is stopping CTS_API — one STMS click completes it.
         html += '<b style="color:#3fb950">✓ Transport already queued in ' + escHtml(tgt) + '\'s buffer</b><br>';
