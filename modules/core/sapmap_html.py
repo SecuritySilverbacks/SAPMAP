@@ -3710,31 +3710,50 @@ function updateMap() {
   const prevConns = new Set(knownConnKeys);
 
   // ── Hosting-zone background boxes ───────────────────────────────────────
-  // Group every node (SAP + SCC) by its canonical IP address.  Nodes that
-  // share an IP are co-located on the same physical host and get a common
-  // background zone drawn behind them.
+  // Group every node (SAP + SCC) by its canonical host key.  Nodes that
+  // share a host (matched on IP first, then on hostname) are co-located
+  // on the same physical host and get a common background zone drawn
+  // behind them.
+  //
+  // Prior implementation required IPv4 match — TWP + SCC nodes reached
+  // via hostname (e.g. "twtestenv2") both had ``ip = "twtestenv2"``
+  // (a hostname, not an IP), so the IPv4 regex rejected them and the
+  // zone never formed.  Now: prefer IP if numeric, else fall back to
+  // hostname/host — hostnames are equally valid host keys as long as
+  // they match across the co-located nodes.
   {
     const IP_RE = /^\d{1,3}(\.\d{1,3}){3}$/;
-    // ip -> [ {x, y, w, h, label, nodeType} ]
+    // Canonical host key for a node — IPv4 if we have one, else a
+    // lowercased hostname (matches SCC's `host` field, which is
+    // usually just the hostname).  Empty string means "can't group".
+    const hostKey = obj => {
+      const cand = [obj.ip, obj.hostname, obj.host]
+        .map(s => (s || "").trim())
+        .filter(Boolean);
+      // Prefer IPv4 to avoid short/long-name mismatches for the same
+      // host (e.g. "twp" vs "twp.corp.local").
+      for (const c of cand) if (IP_RE.test(c)) return c;
+      // Fall back to first non-empty non-IP string, lowercased.
+      return (cand[0] || "").toLowerCase();
+    };
+    // key -> [ {x, y, w, h, label, nodeType} ]
     const zoneMap = {};
-    const addToZone = (ip, x, y, label, nodeType) => {
-      if (!ip || !IP_RE.test(ip)) return;
+    const addToZone = (key, x, y, label, nodeType) => {
+      if (!key) return;
       if (x == null || y == null) return;
-      if (!zoneMap[ip]) zoneMap[ip] = [];
-      zoneMap[ip].push({ x, y, w: BOX_W, h: BOX_H, label, nodeType });
+      if (!zoneMap[key]) zoneMap[key] = [];
+      zoneMap[key].push({ x, y, w: BOX_W, h: BOX_H, label, nodeType });
     };
 
     Object.entries(nodes).forEach(([sid, n]) => {
-      const ip = n.ip || (IP_RE.test(n.hostname||'') ? n.hostname : '');
-      addToZone(ip, n._x, n._y, sid, 'sap');
+      addToZone(hostKey(n), n._x, n._y, sid, 'sap');
     });
     Object.entries(sccNodes).forEach(([host, sn]) => {
-      const ip = sn.ip || (IP_RE.test(sn.host||'') ? sn.host : '');
-      addToZone(ip, sn._x, sn._y, host, 'scc');
+      addToZone(hostKey(sn), sn._x, sn._y, host, 'scc');
     });
 
     const PAD = 28;
-    Object.entries(zoneMap).forEach(([ip, members]) => {
+    Object.entries(zoneMap).forEach(([key, members]) => {
       if (members.length < 2) return;
       const xs = members.map(m => m.x);
       const ys = members.map(m => m.y);
@@ -3748,21 +3767,20 @@ function updateMap() {
               `rx="14" fill="#111e26" fill-opacity="0.55" ` +
               `stroke="#2e5060" stroke-width="1.5" stroke-dasharray="7,4" />`;
 
-      // Label: hostname from any member that has one, else the raw IP
+      // Label: prefer "IP (hostname)" when we have both distinct
+      // pieces of info, else fall back to whichever we have.
       const allNodes = [
-        ...Object.values(nodes).filter(n => {
-          const nip = n.ip || (IP_RE.test(n.hostname||'') ? n.hostname : '');
-          return nip === ip;
-        }),
-        ...Object.values(sccNodes).filter(sn => {
-          const snip = sn.ip || (IP_RE.test(sn.host||'') ? sn.host : '');
-          return snip === ip;
-        }),
+        ...Object.values(nodes).filter(n => hostKey(n) === key),
+        ...Object.values(sccNodes).filter(sn => hostKey(sn) === key),
       ];
-      const hostnameHint = allNodes
-        .map(x => x.hostname || '')
-        .find(h => h && !IP_RE.test(h)) || '';
-      const labelText = hostnameHint ? `${ip}  (${hostnameHint})` : ip;
+      const ipHint   = allNodes.map(x => x.ip || '')
+                                 .find(v => IP_RE.test(v)) || '';
+      const hostHint = allNodes.map(x => x.hostname || x.host || '')
+                                 .find(v => v && !IP_RE.test(v)) || '';
+      let labelText;
+      if (ipHint && hostHint) labelText = `${ipHint}  (${hostHint})`;
+      else if (ipHint)         labelText = ipHint;
+      else                     labelText = hostHint || key;
       const typeIcons = [...new Set(members.map(m =>
         m.nodeType === 'scc' ? '⬡ SCC' : '▣ SAP')
       )].join('  ');
