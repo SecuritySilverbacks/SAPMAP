@@ -14006,13 +14006,58 @@ def create_app(api: SAPMAPApi) -> Bottle:
         def _run():
             _task_start(f"{sid}:tms_discover", f"TMS discover on {sid}")
             try:
-                from sap_tms_probe import integrate_tms_from_secstore
+                from sap_tms_probe import (integrate_tms_from_secstore,
+                                             probe_tms_destination)
                 _creds = None
                 try: _creds = node.best_credentials()
                 except Exception: pass
                 added = integrate_tms_from_secstore(node, api.state, _creds)
                 print(f"[+] {sid}: TMS discover: "
                       f"{len(added)} destination(s) resolved")
+
+                # Implicit connection test on every newly-added
+                # destination — the operator asked for this because
+                # transport propagation needs `logon_ok=True` on the
+                # target destination.  Skipping the manual "right-
+                # click → Test TMSADM logon" round-trip is worth the
+                # extra few seconds per hop at discovery time.
+                # Idempotent: destinations that already carried
+                # `logon_ok=True` from a prior run are skipped.
+                to_test = [d for d in added
+                            if not (getattr(d, "logon_ok", False)
+                                     and d.target_host)]
+                if to_test:
+                    print(f"[*] {sid}: auto-testing {len(to_test)} "
+                          f"TMS destination(s) (prereq for "
+                          f"Propagate Transport)")
+                    for d in to_test:
+                        try:
+                            print(f"[*] {sid}: auto-test → "
+                                  f"TMSADM@{d.target_sid}."
+                                  f"{d.domain}")
+                            probe_tms_destination(d, state=api.state)
+                            outcome = ("OK" if getattr(d, "logon_ok", False)
+                                       else ("reachable via "
+                                             f"{getattr(d, 'reachable_via', '?')}"
+                                             if getattr(d, "host_reachable", False)
+                                             else "failed"))
+                            print(f"[+] {sid}: auto-test → "
+                                  f"TMSADM@{d.target_sid}: {outcome}")
+                        except Exception as _pe:
+                            print(f"[!] {sid}: auto-test crashed on "
+                                  f"TMSADM@{d.target_sid}: "
+                                  f"{type(_pe).__name__}: {_pe!s}")
+                    ok_count = sum(1 for d in to_test
+                                    if getattr(d, "logon_ok", False))
+                    reach_count = sum(1 for d in to_test
+                                       if getattr(d, "host_reachable", False))
+                    print(f"[+] {sid}: auto-test summary: {ok_count}/"
+                          f"{len(to_test)} TMSADM logon OK "
+                          f"(+{reach_count - ok_count} reachable via "
+                          f"fallback cred)")
+                else:
+                    print(f"[i] {sid}: no destinations to auto-test "
+                          f"(all already verified from a prior run)")
             except Exception as _ex:
                 import traceback as _tb
                 print(f"[!] {sid}: TMS discover crashed: "

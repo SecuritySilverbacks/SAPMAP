@@ -1740,13 +1740,33 @@ def integrate_results(node, state, results: list):
             and "TMSADM@" in (e.get("ident_clean") or e.get("ident") or "")
             for e in results)
         if tms_present:
-            from sap_tms_probe import integrate_tms_from_secstore
+            from sap_tms_probe import (integrate_tms_from_secstore,
+                                         probe_tms_destination)
             _creds = None
             try:
                 _creds = node.best_credentials()
             except Exception:
                 pass
-            integrate_tms_from_secstore(node, state, _creds)
+            added = integrate_tms_from_secstore(node, state, _creds)
+            # Auto-test each fresh TMSADM destination — transport
+            # propagation needs logon_ok=True, and running the probe
+            # implicitly here saves the operator from a manual
+            # right-click → Test on every cylinder.  Idempotent:
+            # destinations that already carried logon_ok from a
+            # prior run are skipped.
+            to_test = [d for d in (added or [])
+                        if not getattr(d, "logon_ok", False)]
+            if to_test:
+                print(f"[*] {node.sid}: auto-testing {len(to_test)} "
+                      f"TMSADM destination(s) (prereq for Propagate "
+                      f"Transport)")
+                for d in to_test:
+                    try:
+                        probe_tms_destination(d, state=state)
+                    except Exception as _pe:
+                        print(f"[!] {node.sid}: TMS auto-test crashed "
+                              f"on TMSADM@{d.target_sid}: "
+                              f"{type(_pe).__name__}: {_pe!s}")
     except Exception as _e:
         print(f"[!] SecStore: TMS pair failed on {node.sid} — "
               f"{type(_e).__name__}: {_e}")
