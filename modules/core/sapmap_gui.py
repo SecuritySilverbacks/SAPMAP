@@ -13570,6 +13570,180 @@ def create_app(api: SAPMAPApi) -> Bottle:
         from sap_tms_propagate import get_progress
         return json.dumps(get_progress(task_id))
 
+    # ────────────────────────────────────────────────────────────
+    # STMS Secure-Trust bypass (SINSON=1 landscapes)
+    # ────────────────────────────────────────────────────────────
+
+    @app.route("/api/node/<sid>/tms_impersonation_recon", method="POST")
+    def node_tms_impersonation_recon(sid):
+        """Reads TMSMCONF.SINSON on the source's domain + enumerates
+        USR02 candidates (filtered + ranked).  Returns:
+          {sinson_active, candidates: [{bname, ustyp, rank, profiles, trdat}],
+           persisted_impersonation_user}
+        Called by the Propagate modal on open.  Cheap — one RFC round
+        trip for SINSON, one RFC_ABAP_INSTALL_AND_RUN for the enum.
+        """
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"node {sid} not found"})
+        target_sid = (request.forms.get("target_sid") or "").strip().upper()
+        dest = None
+        for d in (node.tms_destinations or []):
+            if d.target_sid.upper() == target_sid:
+                dest = d
+                break
+        if dest is None:
+            return json.dumps({"error": f"no TMS dest to {target_sid} on {sid}"})
+
+        from sap_tms_probe import (read_secure_trust_state,
+                                     enumerate_impersonation_candidates)
+        creds = node.best_credentials() if hasattr(node, "best_credentials") else None
+        src_client = (creds.client if creds else "001") or "001"
+
+        st = read_secure_trust_state(node, dest.domain, node.sid, creds)
+        dest.sinson_active = bool(st.get("sinson_active"))
+        cands = {"ok": True, "candidates": []}
+        if dest.sinson_active:
+            cands = enumerate_impersonation_candidates(node, src_client, creds)
+
+        return json.dumps({
+            "sinson_active": dest.sinson_active,
+            "sinson_error":  st.get("error", ""),
+            "candidates":    cands.get("candidates", []),
+            "candidates_error": cands.get("error", ""),
+            "persisted_impersonation_user":
+                dest.impersonation_user or "",
+        })
+
+    @app.route("/api/node/<sid>/tms_impersonation_test", method="POST")
+    def node_tms_impersonation_test(sid):
+        """Kick off the XBP test-import as <user>.  Uses the CANARY
+        bundle (S4HK…070 — SM21 log line only, no privilege change).
+        Runs in the background; poll /tms_propagate_progress with
+        the returned task_id to watch.  On success, pins the user
+        as dest.impersonation_user.
+        """
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"node {sid} not found"})
+        target_sid = (request.forms.get("target_sid") or "").strip().upper()
+        user = (request.forms.get("impersonation_user") or "").strip()
+        if not (target_sid and user):
+            return json.dumps({
+                "error": "target_sid and impersonation_user required"})
+        dest = None
+        for d in (node.tms_destinations or []):
+            if d.target_sid.upper() == target_sid:
+                dest = d
+                break
+        if dest is None:
+            return json.dumps({"error": f"no TMS dest to {target_sid}"})
+
+        import uuid as _uuid
+        task_id = f"{sid}_imperstest_{_uuid.uuid4().hex[:8]}"
+
+        from sap_tms_propagate import (_import_via_xbp_as_user,
+                                          _verify_import_on_target_queue,
+                                          _set as _tp_set,
+                                          _update_hop, _new_progress)
+        from sap_transport_bundles import (BUNDLED_TRANSPORTS,
+                                             read_bundle_zip)
+        canary = BUNDLED_TRANSPORTS.get("canary") or {}
+        trkorr = canary.get("trkorr", "")
+        if not trkorr:
+            return json.dumps({"error": "canary bundle missing trkorr"})
+
+        creds = node.best_credentials()
+
+        def _run():
+            _new_progress(task_id, node.sid, trkorr, [{
+                "target_sid":    target_sid,
+                "target_host":   dest.target_host,
+                "domain":        dest.domain,
+                "is_controller": bool(dest.is_controller),
+            }])
+            _tp_set(task_id, phase="init",
+                     message=(f"Testing impersonation as {user!r} — "
+                                f"XBP job with canary {trkorr}"))
+            _update_hop(task_id, target_sid, status="running",
+                         phase="xbp", started=__import__("time").time(),
+                         message=(f"XBP submit as {user}: install "
+                                    f"report + BAPI_XMI_LOGON…"))
+            log_prefix = f"[TMS-IMPERS {node.sid}→{target_sid}]"
+
+            xbp = _import_via_xbp_as_user(
+                node, node.sid, target_sid,
+                dest.target_client or "000", dest.domain,
+                trkorr, user, creds, log_prefix)
+
+            _update_hop(task_id, target_sid,
+                         message=(f"XBP job returned status="
+                                    f"{xbp.get('job_status', '?')} "
+                                    f"subrc={xbp.get('job_subrc', '?')}"))
+
+            queue_verdict = None
+            if xbp.get("ok"):
+                _update_hop(task_id, target_sid,
+                             message="Verifying via TMSBUFFER…")
+                # pre_impflg unknown for this canary; pass '' so any
+                # transition counts as change
+                queue_verdict = _verify_import_on_target_queue(
+                    node, node.sid, target_sid, trkorr,
+                    pre_impflg="", creds=creds, log_prefix=log_prefix)
+
+            final_ok = bool(xbp.get("ok")
+                             and (not queue_verdict or queue_verdict.get("ok")))
+            if final_ok:
+                # Pin the user on the dest for reuse
+                from datetime import datetime, timezone as _tz
+                dest.impersonation_user = user
+                dest.impersonation_verified_at = datetime.now(
+                    _tz.utc).isoformat(timespec="seconds")
+                _update_hop(task_id, target_sid, status="success",
+                             verified=True, pinned=True,
+                             phase="done",
+                             message=(f"✓ {user} verified — impersonation "
+                                        f"user pinned for reuse"),
+                             finished=__import__("time").time())
+                _tp_set(task_id, phase="done",
+                         message=f"✓ Impersonation as {user} works",
+                         result={
+                             "ok":            True,
+                             "impersonation_user": user,
+                             "job_status":    xbp.get("job_status"),
+                             "job_subrc":     xbp.get("job_subrc"),
+                             "queue":         queue_verdict or {},
+                             "joblog_tail":   xbp.get("joblog_tail", ""),
+                         })
+            else:
+                err = (xbp.get("error")
+                        or (queue_verdict or {}).get("error")
+                        or "unknown failure")
+                fclass = (xbp.get("failure_class")
+                            or ("5D" if xbp.get("ok") else "5A"))
+                _update_hop(task_id, target_sid, status="error",
+                             phase="error",
+                             message=err[:200],
+                             finished=__import__("time").time())
+                _tp_set(task_id, phase="error",
+                         message=err[:200],
+                         result={
+                             "ok":            False,
+                             "impersonation_user": user,
+                             "job_status":    xbp.get("job_status"),
+                             "job_subrc":     xbp.get("job_subrc"),
+                             "queue":         queue_verdict or {},
+                             "joblog_tail":   xbp.get("joblog_tail", ""),
+                             "failure_class": fclass,
+                             "error":         err,
+                         })
+
+        _bg(f"{sid}:tms_imperstest:{task_id}",
+             "TMS Impersonation Test", _run)
+        return json.dumps({"status": "started", "task_id": task_id})
+
     @app.route("/api/node/<sid>/transport_progress")
     def node_transport_progress(sid):
         """Polled by the modal — returns the live progress dict for a

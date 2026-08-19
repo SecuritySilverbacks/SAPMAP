@@ -1291,6 +1291,18 @@ class TMSDestination:
     reachable_via:  str = ""    # "<user>@<client>" or "" if not reached
     fallback_error: str = ""    # last fallback error if none worked
 
+    # STMS Secure-Trust bypass (SINSON=1 landscapes).  When the
+    # domain enforces "caller username must exist in target client
+    # 000", we run a test-import via XBP as a candidate user; the
+    # first one that both (a) satisfies the target's trust check
+    # AND (b) actually lands the transport gets pinned here.
+    # Subsequent Propagate runs against this destination reuse the
+    # same impersonation user automatically — no re-picker.
+    # Empty means "not yet tested" or "SINSON=0 (no need)".
+    impersonation_user:   str = ""
+    impersonation_verified_at: str = ""
+    sinson_active:        bool = False   # cached TMSMCONF.SINSON
+
     def to_dict(self) -> dict:
         return {
             "source_sid":     self.source_sid,
@@ -1312,6 +1324,9 @@ class TMSDestination:
             "host_reachable": self.host_reachable,
             "reachable_via":  self.reachable_via,
             "fallback_error": self.fallback_error,
+            "impersonation_user":       self.impersonation_user,
+            "impersonation_verified_at": self.impersonation_verified_at,
+            "sinson_active":            self.sinson_active,
         }
 
     @classmethod

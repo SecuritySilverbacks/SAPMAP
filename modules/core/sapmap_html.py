@@ -1938,6 +1938,35 @@ body {
         </div>
       </div>
 
+      <!-- ─── STMS Secure-Trust impersonation section ───────────
+           Auto-populated after recon.  Hidden when SINSON=0.
+           When SINSON=1 and no impersonation user is pinned yet,
+           shows the candidate picker + Test button.  When one IS
+           pinned, shows the confirmed user with a "Re-test" link. -->
+      <div id="tms-prop-impers-row" style="display:none;margin-top:12px;padding:10px 12px;background:#161b22;border-left:3px solid #d29922;border-radius:4px">
+        <div style="font-size:12px;color:#d29922;font-weight:600;margin-bottom:4px">
+          🔐 STMS Secure Trust active (SINSON=1) — impersonation required
+        </div>
+        <div id="tms-prop-impers-help" style="font-size:11px;color:#8b949e;margin-bottom:8px">
+          Target verifies the caller username exists in its client 000.
+          Pick a source user to test as (SAP_ALL first):
+        </div>
+        <div id="tms-prop-impers-pinned" style="display:none;font-size:11px;color:#3fb950;margin-bottom:8px"></div>
+        <div id="tms-prop-impers-picker" style="max-height:200px;overflow:auto;background:#0d1117;border:1px solid #30363d;border-radius:3px;padding:4px">
+          <div style="color:#6e7681;font-size:11px;padding:6px">
+            (Loading candidates…)
+          </div>
+        </div>
+        <div style="margin-top:8px;display:flex;gap:8px;align-items:center;font-size:11px">
+          <button id="tms-prop-impers-test-btn" class="btn"
+                  onclick="runTMSImpersonationTest()"
+                  disabled style="font-size:11px;padding:4px 10px">
+            🧪 Test impersonation (canary)
+          </button>
+          <span id="tms-prop-impers-status" style="color:#8b949e"></span>
+        </div>
+      </div>
+
       <div style="margin-top:14px;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:4px">
         <label for="tms-prop-dryrun" style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:0;font-size:13px;color:#e6edf3">
           <input id="tms-prop-dryrun" type="checkbox" checked
@@ -14890,6 +14919,157 @@ function showTMSPropagateModal(sid) {
   document.getElementById('tms-prop-path-mode').value = 'rfc-first';
   _tmsPropRenderHopsPreview(sid);
   document.getElementById('tms-propagate-modal').classList.add('visible');
+  // Reset impersonation section and kick off recon
+  document.getElementById('tms-prop-impers-row').style.display = 'none';
+  document.getElementById('tms-prop-impers-status').textContent = '';
+  document.getElementById('tms-prop-impers-picker').innerHTML =
+    '<div style="color:#6e7681;font-size:11px;padding:6px">(Loading candidates…)</div>';
+  document.getElementById('tms-prop-impers-test-btn').disabled = true;
+  _tmsPropImpersSelected = null;
+  _tmsPropStartImpersonationRecon(sid);
+}
+
+let _tmsPropImpersSelected = null;
+let _tmsPropImpersTaskId = null;
+let _tmsPropImpersPollTimer = null;
+
+async function _tmsPropStartImpersonationRecon(sid) {
+  const n = (mapState.nodes || {})[sid];
+  if (!n) return;
+  // Pick the first (or only) TMS destination — the modal currently
+  // supports one target at a time via the hops preview.  If multiple,
+  // recon runs against the first pending destination.
+  const dest = (n.tms_destinations || []).find(d => d.target_sid);
+  if (!dest) return;
+  try {
+    const fd = new FormData();
+    fd.append('target_sid', dest.target_sid);
+    const r = await fetch(
+      '/api/node/' + encodeURIComponent(sid) + '/tms_impersonation_recon',
+      { method: 'POST', body: fd });
+    const j = await r.json();
+    if (j.error) {
+      document.getElementById('tms-prop-impers-picker').innerHTML =
+        '<div style="color:#f85149;font-size:11px;padding:6px">Recon error: '
+        + escHtml(j.error) + '</div>';
+      return;
+    }
+    if (!j.sinson_active) {
+      // Secure Trust off — hide the whole section (legacy flow works)
+      document.getElementById('tms-prop-impers-row').style.display = 'none';
+      return;
+    }
+    document.getElementById('tms-prop-impers-row').style.display = '';
+    _tmsPropRenderImpersonationPicker(j);
+  } catch (e) {
+    console.error('impers recon:', e);
+  }
+}
+
+function _tmsPropRenderImpersonationPicker(j) {
+  const picker = document.getElementById('tms-prop-impers-picker');
+  const pinnedDiv = document.getElementById('tms-prop-impers-pinned');
+  const cands = j.candidates || [];
+  const pinned = j.persisted_impersonation_user || '';
+  if (pinned) {
+    pinnedDiv.style.display = '';
+    pinnedDiv.innerHTML = '✓ Impersonation user pinned: <b>'
+      + escHtml(pinned) + '</b> — will be re-used automatically. '
+      + 'Pick a different one below to re-test.';
+  } else {
+    pinnedDiv.style.display = 'none';
+  }
+  if (!cands.length) {
+    picker.innerHTML = '<div style="color:#f85149;font-size:11px;padding:6px">'
+      + 'No candidates found. '
+      + escHtml(j.candidates_error || '') + '</div>';
+    return;
+  }
+  const rankColor = r => r >= 100 ? '#3fb950'
+    : r >= 80 ? '#d29922' : r >= 40 ? '#8b949e' : '#6e7681';
+  const rows = cands.map((c, i) => {
+    const isPinned = c.bname === pinned;
+    const checked = (i === 0 && !pinned) || isPinned;
+    if (checked) _tmsPropImpersSelected = c.bname;
+    const profStr = (c.profiles || []).slice(0, 3).join(', ')
+      + ((c.profiles || []).length > 3 ? '…' : '');
+    return '<label style="display:flex;gap:8px;align-items:center;padding:4px 6px;font-size:11px;font-family:monospace;color:#e6edf3;cursor:pointer;border-radius:3px" '
+      + 'onmouseover="this.style.background=\'#161b22\'" '
+      + 'onmouseout="this.style.background=\'\'">'
+      + '<input type="radio" name="tms-impers-cand" value="' + escHtml(c.bname) + '"'
+      + (checked ? ' checked' : '')
+      + ' onchange="_tmsPropImpersSelected=this.value;document.getElementById(\'tms-prop-impers-test-btn\').disabled=false">'
+      + '<span style="width:120px">' + escHtml(c.bname) + '</span>'
+      + '<span style="width:50px;color:#8b949e">' + escHtml(c.ustyp || '?') + '</span>'
+      + '<span style="width:36px;color:' + rankColor(c.rank || 0) + ';font-weight:600">r' + (c.rank || 0) + '</span>'
+      + '<span style="flex:1;color:#8b949e">' + escHtml(profStr) + '</span>'
+      + '<span style="color:#6e7681">' + escHtml(c.trdat || '') + '</span>'
+      + (isPinned ? '<span style="color:#3fb950">✓ pinned</span>' : '')
+      + '</label>';
+  }).join('');
+  picker.innerHTML = rows;
+  document.getElementById('tms-prop-impers-test-btn').disabled =
+    !_tmsPropImpersSelected;
+}
+
+async function runTMSImpersonationTest() {
+  const sid = _tmsPropSid;
+  const user = _tmsPropImpersSelected;
+  if (!sid || !user) return;
+  const n = (mapState.nodes || {})[sid];
+  const dest = (n.tms_destinations || []).find(d => d.target_sid);
+  if (!dest) return;
+  document.getElementById('tms-prop-impers-test-btn').disabled = true;
+  document.getElementById('tms-prop-impers-status').textContent =
+    '⏳ Submitting XBP job as ' + user + '…';
+  try {
+    const fd = new FormData();
+    fd.append('target_sid', dest.target_sid);
+    fd.append('impersonation_user', user);
+    const r = await fetch(
+      '/api/node/' + encodeURIComponent(sid) + '/tms_impersonation_test',
+      { method: 'POST', body: fd });
+    const j = await r.json();
+    if (j.error) throw new Error(j.error);
+    _tmsPropImpersTaskId = j.task_id;
+    document.getElementById('tms-prop-progress').style.display = '';
+    if (_tmsPropImpersPollTimer) clearInterval(_tmsPropImpersPollTimer);
+    _tmsPropImpersPollTimer = setInterval(_tmsPropPollImpers, 700);
+    _tmsPropPollImpers();
+  } catch (e) {
+    document.getElementById('tms-prop-impers-status').textContent =
+      '❌ ' + (e.message || e);
+    document.getElementById('tms-prop-impers-test-btn').disabled = false;
+  }
+}
+
+async function _tmsPropPollImpers() {
+  const sid = _tmsPropSid;
+  if (!sid || !_tmsPropImpersTaskId) return;
+  const r = await fetch('/api/node/' + encodeURIComponent(sid)
+    + '/tms_propagate_progress?task_id=' + encodeURIComponent(_tmsPropImpersTaskId));
+  const p = await r.json();
+  if (!p || !p.phase) return;
+  document.getElementById('tms-prop-phase').textContent = p.phase;
+  document.getElementById('tms-prop-msg').textContent = p.message || '';
+  if (p.phase === 'done' || p.phase === 'error') {
+    clearInterval(_tmsPropImpersPollTimer);
+    _tmsPropImpersPollTimer = null;
+    const res = p.result || {};
+    const el = document.getElementById('tms-prop-impers-status');
+    document.getElementById('tms-prop-impers-test-btn').disabled = false;
+    if (res.ok) {
+      el.innerHTML = '<span style="color:#3fb950">✅ ' + escHtml(res.impersonation_user)
+        + ' verified — pinned. Now click <b>Run</b> to propagate the real payload.</span>';
+    } else {
+      const cls = res.failure_class || '5?';
+      el.innerHTML = '<span style="color:#f85149">❌ [' + escHtml(cls) + '] '
+        + escHtml(res.error || 'failed') + '</span>'
+        + (res.joblog_tail ? '<pre style="margin-top:6px;padding:6px;background:#0d1117;color:#8b949e;border:1px solid #30363d;border-radius:3px;font-size:10px;max-height:120px;overflow:auto;user-select:text">'
+          + escHtml(res.joblog_tail) + '</pre>' : '');
+    }
+    try { startPolling && startPolling(); } catch(_) {}
+  }
 }
 
 async function runTMSPropagate() {
