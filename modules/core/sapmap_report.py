@@ -1296,6 +1296,44 @@ def _tms_section(state: SAPMAPState) -> list:
             f"`{_esc(d.domain)}` | `{_esc(d.target_host)}` | "
             f"{logon} | {_esc(roles)} | {sap_all} | {buf} | {ctrl} |")
     out.append("")
+
+    # STMS Secure-Trust bypasses.  When the target domain enforces
+    # SINSON=1 (caller username must exist in target client 000),
+    # plain TMSADM can't propagate — SAPMAP finds a candidate user
+    # existing on both source and target, runs a canary import via
+    # an XBP batch job impersonating that user (BAPI_XBP_JOB_ADD_
+    # ABAP_STEP.SAP_USER_NAME field, authorised by the SAP_ALL we
+    # have on the source), and pins the winner for reuse.  Every
+    # pinned row here represents a Secure-Trust hardening that
+    # SAPMAP defeated.
+    bypassed = [(sid, d) for sid, d in dests
+                if getattr(d, "impersonation_user", "")]
+    if bypassed:
+        out.append("### STMS Secure Trust bypassed via impersonation")
+        out.append("")
+        out.append(
+            "Every row below is a source→target hop where "
+            "TMSMCONF.SINSON='1' was enforced on the source's "
+            "domain (caller-username-must-exist-in-target-client-000 "
+            "check) AND SAPMAP found a candidate user whose XBP "
+            "batch-job impersonation was accepted by the target's "
+            "tp binary.  The pinned user's identity is now the "
+            "SAP_USER_NAME field on every subsequent cross-domain "
+            "propagate to that target — TMSADM's default trust "
+            "restriction is fully bypassed.")
+        out.append("")
+        out.append("| Source | Target | Domain | Impersonated user | "
+                    "Pinned since | SINSON on source |")
+        out.append("| --- | --- | --- | --- | --- | --- |")
+        for sid, d in bypassed:
+            verified = (d.impersonation_verified_at or "").split("+")[0]
+            sinson = "🔐 SINSON=1" if d.sinson_active else "?"
+            out.append(
+                f"| {sid} | `{_esc(d.target_sid)}` | "
+                f"`{_esc(d.domain)}` | **{_esc(d.impersonation_user)}** | "
+                f"`{_esc(verified) if verified else '—'}` | {sinson} |")
+        out.append("")
+
     materialised = [n for n in state.nodes.values()
                     if getattr(n, "discovered_via_tms", False)]
     if materialised:

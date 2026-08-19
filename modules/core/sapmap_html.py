@@ -5202,21 +5202,17 @@ function updateMap() {
       }
       const x = e._x, y = e._y;
 
-      const rx = TMS_BOX_W / 2, ry = 14;
-      const cx = x + rx;
-      const yTop = y, yBottom = y + TMS_BOX_H;
-      const yMid = yTop + ry;
-      const yBottomBand = yBottom - ry;
       // Teal palette for TMS — distinct from green DBCON, orange
-      // pwned, yellow non-SAP-shape.
+      // pwned, yellow non-SAP-shape.  Same fill/stroke/labelColor
+      // rules the cylinder used; the shape changed from cylinder to
+      // truck (SAP's own STMS UI uses a truck icon for transport
+      // destinations, so the DB-cylinder shape was misleading —
+      // it reads as "database", not "transport route").
       let fill = "#1c2128";
       let stroke = "#8b949e";
       let strokeW = 2;
       let labelColor = "#8b949e";
       if (e.logon_ok) {
-        // Cyan/teal palette.  Controller = brighter, thicker
-        // border; regular = standard cyan.  Pwned (Bundle 2) will
-        // add orange border on top.
         fill = "#0f2831";
         stroke = e.pwned ? "#f0883e" : (e.is_controller ? "#39d1c4" : "#2e9d9d");
         strokeW = e.is_controller ? 5 : 4;
@@ -5236,7 +5232,7 @@ function updateMap() {
       else { lineColor = '#8b949e'; lineDash = '5,4'; }
       const _sx = srcX;                    // left edge of source SAP box
       const _sy = srcY + 60;
-      const _tx = x + TMS_BOX_W;           // right edge of cylinder
+      const _tx = x + TMS_BOX_W;           // right edge of truck
       const _ty = y + TMS_BOX_H / 2;
       const dashAttr = lineDash ? ` stroke-dasharray="${lineDash}"` : '';
       html += `<line x1="${_sx}" y1="${_sy}" x2="${_tx}" y2="${_ty}" `
@@ -5253,34 +5249,87 @@ function updateMap() {
            + `onmousedown="startDrag(event,'${dragId}')" `
            + `onclick="showTMSDetail('${escHtml(src.sid)}','${escHtml(e.target_sid)}','${escHtml(e.domain)}')" `
            + `oncontextmenu="showTMSCtxMenu(event,'${escHtml(src.sid)}','${escHtml(e.target_sid)}','${escHtml(e.domain)}')">`;
-      html += `<rect x="${x - 1}" y="${yTop - ry - 1}" `
-           + `width="${TMS_BOX_W + 2}" height="${(yBottom + ry) - (yTop - ry) + 2}" `
-           + `fill="transparent" stroke="none" style="cursor:pointer" />`;
-      html += `<rect x="${x}" y="${yMid}" width="${TMS_BOX_W}" `
-           + `height="${yBottomBand - yMid}" fill="${fill}" stroke="none" />`;
-      html += `<ellipse cx="${cx}" cy="${yMid}" rx="${rx}" ry="${ry}" `
-           + `fill="${fill}" stroke="${stroke}" stroke-width="${strokeW}" />`;
-      html += `<path d="M${x},${yBottomBand} A${rx},${ry} 0 0 0 ${x + TMS_BOX_W},${yBottomBand}" `
-           + `fill="none" stroke="${stroke}" stroke-width="${strokeW}" />`;
-      html += `<line x1="${x}" y1="${yMid}" x2="${x}" y2="${yBottomBand}" stroke="${stroke}" stroke-width="${strokeW}" />`;
-      html += `<line x1="${x + TMS_BOX_W}" y1="${yMid}" x2="${x + TMS_BOX_W}" y2="${yBottomBand}" stroke="${stroke}" stroke-width="${strokeW}" />`;
-      const bandY1 = yMid + (yBottomBand - yMid) * 0.33;
-      const bandY2 = yMid + (yBottomBand - yMid) * 0.66;
-      html += `<path d="M${x},${bandY1} A${rx},${ry} 0 0 0 ${x + TMS_BOX_W},${bandY1}" fill="none" stroke="${stroke}" stroke-width="1.5" opacity="0.6" />`;
-      html += `<path d="M${x},${bandY2} A${rx},${ry} 0 0 0 ${x + TMS_BOX_W},${bandY2}" fill="none" stroke="${stroke}" stroke-width="1.5" opacity="0.6" />`;
 
-      // Text — target SID, domain, host
-      html += `<text x="${cx}" y="${yMid + 8}" text-anchor="middle" `
-           + `fill="${labelColor}" font-size="12" font-weight="bold" `
+      // Truck silhouette — cargo box + cab + 2 wheels.  All shapes
+      // share the same fill/stroke as the old cylinder so the
+      // logon/pwned/controller states remain visually consistent
+      // with the rest of the map.
+      //
+      // Coordinate layout inside the 160×100 bounding box:
+      //   Cargo box:  (x+2, y+16) → (x+108, y+72)   106w × 56h
+      //   Cab body:   (x+108, y+32) → (x+150, y+72)  42w × 40h
+      //   Windshield: (x+114, y+38) → (x+146, y+54)  32w × 16h
+      //   Rear wheel: cx=x+28, cy=y+78, r=8
+      //   Front wheel: cx=x+134, cy=y+78, r=8
+      // Text stacks inside the cargo box between y+30 and y+66.
+      const CARGO_X = x + 2, CARGO_Y = y + 16;
+      const CARGO_W = 106, CARGO_H = 56;
+      const CAB_X   = x + 108, CAB_Y = y + 32;
+      const CAB_W   = 42, CAB_H = 40;
+      // Full-box hit rect so drag/click still work anywhere over the
+      // truck silhouette + wheels + CTRL badge overhang.
+      html += `<rect x="${x - 6}" y="${y - 6}" `
+           + `width="${TMS_BOX_W + 12}" height="${TMS_BOX_H + 12}" `
+           + `fill="transparent" stroke="none" style="cursor:pointer" />`;
+      // Cargo box body
+      html += `<rect x="${CARGO_X}" y="${CARGO_Y}" width="${CARGO_W}" `
+           + `height="${CARGO_H}" rx="3" fill="${fill}" stroke="${stroke}" `
+           + `stroke-width="${strokeW}" />`;
+      // Cargo box door lines (2 vertical bands, mimics the cylinder's
+      // horizontal bands — decorative, keeps a sense of "container")
+      const doorX1 = CARGO_X + CARGO_W * 0.35;
+      const doorX2 = CARGO_X + CARGO_W * 0.68;
+      html += `<line x1="${doorX1}" y1="${CARGO_Y + 4}" x2="${doorX1}" `
+           + `y2="${CARGO_Y + CARGO_H - 4}" stroke="${stroke}" `
+           + `stroke-width="1" opacity="0.5" />`;
+      html += `<line x1="${doorX2}" y1="${CARGO_Y + 4}" x2="${doorX2}" `
+           + `y2="${CARGO_Y + CARGO_H - 4}" stroke="${stroke}" `
+           + `stroke-width="1" opacity="0.5" />`;
+      // Cab body (rectangle) with slanted top-right hood cut — draws
+      // as a 5-point path: bottom-left, top-left, top-right-of-flat,
+      // slanted down to a mid-height corner, then down to bottom-right.
+      html += `<path d="M${CAB_X},${CAB_Y + CAB_H} `
+           + `L${CAB_X},${CAB_Y} `
+           + `L${CAB_X + CAB_W - 10},${CAB_Y} `
+           + `L${CAB_X + CAB_W},${CAB_Y + 14} `
+           + `L${CAB_X + CAB_W},${CAB_Y + CAB_H} Z" `
+           + `fill="${fill}" stroke="${stroke}" stroke-width="${strokeW}" />`;
+      // Windshield — small light rect on the cab
+      const winX = CAB_X + 4, winY = CAB_Y + 4;
+      const winW = CAB_W - 16, winH = 12;
+      html += `<path d="M${winX},${winY + winH} `
+           + `L${winX},${winY} `
+           + `L${winX + winW - 4},${winY} `
+           + `L${winX + winW + 2},${winY + winH} Z" `
+           + `fill="${labelColor}" opacity="0.35" stroke="${stroke}" `
+           + `stroke-width="1" />`;
+      // 2 wheels — hub outer + inner dark centre for depth
+      const wheelR = 9, wheelHubR = 3;
+      const wheelY = CARGO_Y + CARGO_H + 6;
+      const wheelRearX = CARGO_X + 26;
+      const wheelFrontX = CAB_X + CAB_W - 8;
+      [wheelRearX, wheelFrontX].forEach(wx => {
+        html += `<circle cx="${wx}" cy="${wheelY}" r="${wheelR}" `
+             + `fill="#0d1117" stroke="${stroke}" stroke-width="${strokeW}" />`;
+        html += `<circle cx="${wx}" cy="${wheelY}" r="${wheelHubR}" `
+             + `fill="${stroke}" opacity="0.8" />`;
+      });
+
+      // Text — target SID, domain, host — inside the cargo box
+      const textCX = CARGO_X + CARGO_W / 2;
+      html += `<text x="${textCX}" y="${CARGO_Y + 16}" text-anchor="middle" `
+           + `fill="${labelColor}" font-size="11" font-weight="bold" `
            + `font-family="monospace" pointer-events="none">TMSADM@${escHtml(e.target_sid || '?')}</text>`;
-      html += `<text x="${cx}" y="${yMid + 24}" text-anchor="middle" `
-           + `fill="#cfd9df" font-size="10" font-family="monospace" `
-           + `pointer-events="none">domain ${escHtml(e.domain || '?')}</text>`;
-      html += `<text x="${cx}" y="${yMid + 40}" text-anchor="middle" `
-           + `fill="#8b949e" font-size="9" font-family="monospace" `
-           + `pointer-events="none">${escHtml((e.target_host || '?').slice(0, 22))}</text>`;
+      html += `<text x="${textCX}" y="${CARGO_Y + 30}" text-anchor="middle" `
+           + `fill="#cfd9df" font-size="9" font-family="monospace" `
+           + `pointer-events="none">dom ${escHtml((e.domain || '?').slice(0, 12))}</text>`;
+      html += `<text x="${textCX}" y="${CARGO_Y + 43}" text-anchor="middle" `
+           + `fill="#8b949e" font-size="8" font-family="monospace" `
+           + `pointer-events="none">${escHtml((e.target_host || '?').slice(0, 18))}</text>`;
       if (e.buffer_count) {
-        html += `<text x="${cx}" y="${yMid + 54}" text-anchor="middle" `
+        // Buffer count sits BELOW the wheels so it's always visible
+        // and doesn't overlap the truck body.
+        html += `<text x="${textCX}" y="${y + TMS_BOX_H - 4}" text-anchor="middle" `
              + `fill="${labelColor}" font-size="10" font-family="monospace" `
              + `pointer-events="none" font-weight="bold">${e.buffer_count} pending</text>`;
       }
@@ -14972,9 +15021,19 @@ function _tmsPropRenderImpersonationPicker(j) {
   const pinned = j.persisted_impersonation_user || '';
   if (pinned) {
     pinnedDiv.style.display = '';
-    pinnedDiv.innerHTML = '✓ Impersonation user pinned: <b>'
-      + escHtml(pinned) + '</b> — will be re-used automatically. '
-      + 'Pick a different one below to re-test.';
+    // Row: pinned-user text + inline "Clear pin" button.  Clear
+    // is deliberately styled subtly (link-like) so it doesn't
+    // compete with the primary "Test impersonation" CTA — this is
+    // a maintenance action, not the main workflow.
+    pinnedDiv.innerHTML =
+      '<div style="display:flex;align-items:center;gap:12px">'
+      +   '<span style="flex:1">✓ Impersonation user pinned: <b>'
+      +     escHtml(pinned) + '</b> — will be re-used automatically. '
+      +     'Pick a different one below to re-test.</span>'
+      +   '<a href="#" onclick="return clearTMSImpersonationPin(event);" '
+      +      'style="color:#8b949e;font-size:10px;text-decoration:underline;'
+      +      'white-space:nowrap;cursor:pointer">Clear pin</a>'
+      + '</div>';
   } else {
     pinnedDiv.style.display = 'none';
   }
@@ -15009,6 +15068,45 @@ function _tmsPropRenderImpersonationPicker(j) {
   picker.innerHTML = rows;
   document.getElementById('tms-prop-impers-test-btn').disabled =
     !_tmsPropImpersSelected;
+}
+
+async function clearTMSImpersonationPin(ev) {
+  // Called by the "Clear pin" link in the pinned-user banner.
+  // POSTs to /api/node/<sid>/tms_impersonation_clear then refreshes
+  // the picker so the pinned banner disappears and the operator can
+  // pick a fresh candidate (or simply close the modal — the real
+  // propagate falls back to _import_via_abap_wrapper when no user
+  // is pinned).
+  if (ev) { ev.preventDefault(); ev.stopPropagation(); }
+  const sid = _tmsPropSid;
+  if (!sid) return false;
+  const n = (mapState.nodes || {})[sid];
+  const dest = (n && n.tms_destinations || []).find(d => d.target_sid);
+  if (!dest) return false;
+  if (!confirm('Clear the pinned impersonation user for '
+                 + sid + '→' + dest.target_sid + '?\n\n'
+                 + 'Next Propagate run against this destination will '
+                 + 'fall back to plain TMSADM — which fails if the '
+                 + 'target still enforces SINSON=1.')) {
+    return false;
+  }
+  try {
+    const fd = new FormData();
+    fd.append('target_sid', dest.target_sid);
+    const r = await fetch(
+      '/api/node/' + encodeURIComponent(sid) + '/tms_impersonation_clear',
+      { method: 'POST', body: fd });
+    const j = await r.json();
+    if (j.error) throw new Error(j.error);
+    showToast('Impersonation pin cleared for ' + sid + '→'
+                + dest.target_sid + ' (was: ' + (j.cleared_user || '?') + ')',
+              'success');
+    // Refresh the recon so the picker re-renders without the pin.
+    _tmsPropStartImpersonationRecon(sid);
+  } catch (e) {
+    showToast('Clear pin failed: ' + (e.message || e), 'error');
+  }
+  return false;
 }
 
 async function runTMSImpersonationTest() {

@@ -13616,6 +13616,40 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 dest.impersonation_user or "",
         })
 
+    @app.route("/api/node/<sid>/tms_impersonation_clear", method="POST")
+    def node_tms_impersonation_clear(sid):
+        """Un-pin the impersonation user on a TMS destination.
+
+        Called when the operator wants to fully clear the pin — e.g.
+        the target admin disabled SINSON, or the previously-verified
+        user was locked/removed on the target, or a re-verification
+        is needed against a fresh candidate.  Just picking a
+        different candidate + re-testing already re-pins, so this
+        endpoint's sole purpose is the "no impersonation needed
+        anymore" case that the picker workflow doesn't cover."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"node {sid} not found"})
+        target_sid = (request.forms.get("target_sid") or "").strip().upper()
+        dest = None
+        for d in (node.tms_destinations or []):
+            if d.target_sid.upper() == target_sid:
+                dest = d
+                break
+        if dest is None:
+            return json.dumps({"error": f"no TMS dest to {target_sid}"})
+        prior_user = dest.impersonation_user or ""
+        dest.impersonation_user = ""
+        dest.impersonation_verified_at = ""
+        print(f"[*] {sid}→{target_sid}: impersonation pin cleared "
+              f"(was {prior_user!r})")
+        return json.dumps({
+            "ok": True,
+            "cleared_user": prior_user,
+            "target_sid":   target_sid,
+        })
+
     @app.route("/api/node/<sid>/tms_impersonation_test", method="POST")
     def node_tms_impersonation_test(sid):
         """Kick off the XBP test-import as <user>.  Uses the CANARY
@@ -13701,6 +13735,51 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 dest.impersonation_user = user
                 dest.impersonation_verified_at = datetime.now(
                     _tz.utc).isoformat(timespec="seconds")
+                # Emit a CRITICAL finding — this is a defeated security
+                # control.  STMS Secure Trust (SINSON=1) is a
+                # customer-configured hardening that RESTRICTS TMSADM's
+                # default cross-system trust to require caller-username
+                # matches in target client 000.  When SAPMAP can
+                # impersonate an existing user via an XBP job on the
+                # source and have the target's tp accept the import,
+                # the control is bypassed entirely.  Same severity as
+                # the equivalent finding for direct TMSADM abuse when
+                # SINSON is off.
+                #
+                # Emitted ONCE per successful pin.  Subsequent real
+                # propagations against this destination reuse the pin
+                # silently; they get their own "user created" /
+                # "transport landed" findings which don't need to
+                # repeat this bypass claim.
+                try:
+                    from sapmap_findings import emit_finding
+                    emit_finding(
+                        severity="CRITICAL",
+                        node=sid,
+                        msg=(f"STMS Secure Trust (SINSON=1) BYPASSED "
+                              f"on {sid}→{target_sid} — XBP job "
+                              f"impersonated user {user!r} and the "
+                              f"target's tp accepted the trust "
+                              f"handshake.  Every subsequent "
+                              f"cross-domain transport propagate to "
+                              f"{target_sid} reuses this pin "
+                              f"automatically."),
+                        ref=(f"tms.secure_trust.bypass.{sid}."
+                              f"{target_sid}.{user}"),
+                        meta={
+                            "source_sid":     sid,
+                            "target_sid":     target_sid,
+                            "domain":         dest.domain or "",
+                            "impersonation_user": user,
+                            "verified_at":    dest.impersonation_verified_at,
+                            "canary_trkorr":  trkorr,
+                            "primitive":     "xbp_sap_user_name",
+                        },
+                        attack_capability="lateral.tms.propagate",
+                    )
+                except Exception as _e:
+                    print(f"[!] {sid}: emit_finding for STMS Secure "
+                          f"Trust bypass raised: {_e!r}")
                 _update_hop(task_id, target_sid, status="success",
                              verified=True, pinned=True,
                              phase="done",
