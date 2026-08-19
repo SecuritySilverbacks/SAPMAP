@@ -1367,16 +1367,24 @@ def read_secure_trust_state(source_node, source_domain: str,
     return out
 
 
-# Users we always exclude from the candidate list — either always
-# locked (SAP*, DDIC), or reserved for RFC/system use where
-# impersonation via XBP job wouldn't make sense (they can't hold
-# the substitution because kernel-owned or the target sees them as
-# service-only).  SAPMAP-family users are DELIBERATELY NOT excluded
-# even though they start with 'SAP' — the operator may want to test
-# with their own created user.
+# Users we always exclude from the candidate list.  Kept small so
+# the operator sees more choices — the point of impersonation is
+# specifically to find a user that ALSO exists on the target, and
+# DDIC / SAP* are perfect candidates for that (they exist in every
+# client of every SAP system by default).
+#
+# Only excluded:
+#   * TMSADM   — this is the identity we're TRYING to bypass; using
+#                it as the impersonation user defeats the purpose
+#   * SAPCPIC  — communication-interface-only user, can't run batch
+#   * SAPSYS   — kernel-owned pseudo-user, never a real logon
+#   * SAPADM   — OS admin user (<sid>adm equiv), not an ABAP user
+# SAPMAP-family users are kept (operator may want to test with own).
+# SAP* and DDIC are kept — highly audited but frequently present
+# cross-system and satisfy the Secure Trust check reliably.
+# EARLYWATCH is kept — often exists cross-system if SolMan is used.
 _IMPERSONATION_ALWAYS_EXCLUDE = {
-    "SAP*", "DDIC", "TMSADM", "EARLYWATCH", "SAPCPIC", "SAPSYS",
-    "SAPADM",
+    "TMSADM", "SAPCPIC", "SAPSYS", "SAPADM",
 }
 
 
@@ -1475,9 +1483,6 @@ def enumerate_impersonation_candidates(source_node,
                 if section == "USR02" and len(parts) >= 4:
                     bname = parts[0].strip()
                     if not bname or bname in _IMPERSONATION_ALWAYS_EXCLUDE:
-                        continue
-                    if (bname.upper().startswith("SAP")
-                            and not bname.upper().startswith("SAPMAP")):
                         continue
                     users.append({
                         "bname":    bname,

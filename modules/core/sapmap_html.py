@@ -1967,13 +1967,12 @@ body {
         </div>
       </div>
 
-      <div style="margin-top:14px;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:4px">
-        <label for="tms-prop-dryrun" style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:0;font-size:13px;color:#e6edf3">
-          <input id="tms-prop-dryrun" type="checkbox" checked
-                 style="width:18px;height:18px;flex:0 0 18px;margin:0;cursor:pointer;accent-color:#3fb950">
-          <span><strong>Dry-run only</strong> (per-target <code>tp tst</code>)</span>
-        </label>
-      </div>
+      <!-- Dry-run checkbox intentionally removed from the TMS
+           propagation modal — this action always executes the real
+           import as part of the lateral-movement demonstration.
+           The equivalent checkbox is still present in the "Import
+           Local Transport" modal for safe local trial-runs. -->
+      <input id="tms-prop-dryrun" type="hidden" value="">
     </div>
 
     <div id="tms-prop-progress" style="display:none;margin-top:10px">
