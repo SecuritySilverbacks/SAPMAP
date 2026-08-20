@@ -4953,51 +4953,73 @@ function updateMap() {
       // "sid|con_name" so drag positions survive the poll cycle
       // (same pattern as unkPositions for unknown-target boxes).
       const posKey = src.sid + '|' + e.con_name;
-      if (dbconPositions[posKey]) {
-        e._x = dbconPositions[posKey]._x;
-        e._y = dbconPositions[posKey]._y;
+      // Shared collision predicate — used both for initial placement
+      // AND for re-checking a persisted position after new SAP nodes
+      // were discovered by a later scan.  Extracted so the two paths
+      // stay in sync.
+      const _rectOverlap = (ax, ay, aw, ah, bx, by, bw, bh) =>
+        ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
+      const _collides = (tx, ty) => {
+        const tw = DB_BOX_W, th = DB_BOX_H;
+        // Against SAP nodes
+        for (const nk in nodes) {
+          const n = nodes[nk];
+          if (n === src) continue;   // ok to overlap the source
+          if (n._x == null) continue;
+          if (_rectOverlap(tx, ty, tw, th,
+                            n._x, n._y, 240, 130)) return true;
+        }
+        // Against SCC nodes
+        for (const sk in sccNodes) {
+          const sn = sccNodes[sk];
+          if (sn._x == null) continue;
+          if (_rectOverlap(tx, ty, tw, th,
+                            sn._x, sn._y, 240, 130)) return true;
+        }
+        // Against BTP subaccounts
+        for (const bk in btpNodes) {
+          const bn = btpNodes[bk];
+          if (bn._x == null) continue;
+          if (_rectOverlap(tx, ty, tw, th,
+                            bn._x, bn._y, 240, 130)) return true;
+        }
+        // Against other DBCON cylinders already placed
+        for (const pk in dbconPositions) {
+          if (pk === posKey) continue;
+          const p = dbconPositions[pk];
+          if (_rectOverlap(tx, ty, tw, th,
+                            p._x, p._y, DB_BOX_W, DB_BOX_H)) return true;
+        }
+        return false;
+      };
+
+      // Persistence check.  A previously-placed DBCON position may
+      // now overlap a SAP node discovered by a later scan — the
+      // original placement walked collision-free against the smaller
+      // node set that existed at that time, and the persisted spot
+      // was never re-checked.  Re-walk when we detect an overlap,
+      // UNLESS the operator explicitly dragged it there (dbconPositions
+      // entry carries `pinned: true` after a drag; auto-placed
+      // entries don't).  Preserves manual arrangement while still
+      // fixing the "cylinder ends up on top of a newly-scanned SAP
+      // node" case reported after a fresh scan.
+      const _existing = dbconPositions[posKey];
+      const _needsRewalk = _existing && !_existing.pinned &&
+                             _collides(_existing._x, _existing._y);
+      if (_existing && !_needsRewalk) {
+        e._x = _existing._x;
+        e._y = _existing._y;
       } else {
+        if (_needsRewalk) {
+          console.log('DBCON auto-reposition: ' + posKey +
+                       ' overlapped a newly-scanned node, re-walking');
+        }
         // Initial placement: right of source, stacked vertically.
         // Then walk the candidate down + right until it clears
         // every already-placed box (SAP nodes, SCCs, BTPs, other
         // DBCON cylinders).  Prevents the 2-cylinders-on-top-of-a-
         // BTP-cloud pileup the operator screenshotted.
         let cx = baseX, cy = stackY + i * (DB_BOX_H + 24);
-        const _rectOverlap = (ax, ay, aw, ah, bx, by, bw, bh) =>
-          ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
-        const _collides = (tx, ty) => {
-          const tw = DB_BOX_W, th = DB_BOX_H;
-          // Against SAP nodes
-          for (const nk in nodes) {
-            const n = nodes[nk];
-            if (n === src) continue;   // ok to overlap the source
-            if (n._x == null) continue;
-            if (_rectOverlap(tx, ty, tw, th,
-                              n._x, n._y, 240, 130)) return true;
-          }
-          // Against SCC nodes
-          for (const sk in sccNodes) {
-            const sn = sccNodes[sk];
-            if (sn._x == null) continue;
-            if (_rectOverlap(tx, ty, tw, th,
-                              sn._x, sn._y, 240, 130)) return true;
-          }
-          // Against BTP subaccounts
-          for (const bk in btpNodes) {
-            const bn = btpNodes[bk];
-            if (bn._x == null) continue;
-            if (_rectOverlap(tx, ty, tw, th,
-                              bn._x, bn._y, 240, 130)) return true;
-          }
-          // Against other DBCON cylinders already placed
-          for (const pk in dbconPositions) {
-            if (pk === posKey) continue;
-            const p = dbconPositions[pk];
-            if (_rectOverlap(tx, ty, tw, th,
-                              p._x, p._y, DB_BOX_W, DB_BOX_H)) return true;
-          }
-          return false;
-        };
         // Try current position; if it collides, step down; if we've
         // walked too far down, jump right and reset y.
         const _STEP = DB_BOX_H + 24;
@@ -5187,42 +5209,53 @@ function updateMap() {
     const stackY = srcY;
     dests.forEach((e, i) => {
       const posKey = 'tms:' + src.sid + '|' + e.target_sid + '|' + e.domain;
-      if (tmsPositions[posKey]) {
-        e._x = tmsPositions[posKey]._x;
-        e._y = tmsPositions[posKey]._y;
+      // Same auto-reposition-on-collision logic as DBCON.  Fixes the
+      // "TMS truck ends up on top of a newly-scanned SAP node" case
+      // reported after a fresh scan discovered new hosts.  `pinned:
+      // true` set by the drag handler protects manual placements.
+      const _rectOverlap = (ax, ay, aw, ah, bx, by, bw, bh) =>
+        ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
+      const _collides = (tx, ty) => {
+        const tw = TMS_BOX_W, th = TMS_BOX_H;
+        for (const nk in nodes) {
+          const n = nodes[nk];
+          if (n === src) continue;
+          if (n._x == null) continue;
+          if (_rectOverlap(tx, ty, tw, th, n._x, n._y, 240, 130)) return true;
+        }
+        for (const sk in sccNodes) {
+          const sn = sccNodes[sk];
+          if (sn._x == null) continue;
+          if (_rectOverlap(tx, ty, tw, th, sn._x, sn._y, 240, 130)) return true;
+        }
+        for (const bk in btpNodes) {
+          const bn = btpNodes[bk];
+          if (bn._x == null) continue;
+          if (_rectOverlap(tx, ty, tw, th, bn._x, bn._y, 240, 130)) return true;
+        }
+        for (const pk in dbconPositions) {
+          const p = dbconPositions[pk];
+          if (_rectOverlap(tx, ty, tw, th, p._x, p._y, 150, 100)) return true;
+        }
+        for (const pk in tmsPositions) {
+          if (pk === posKey) continue;
+          const p = tmsPositions[pk];
+          if (_rectOverlap(tx, ty, tw, th, p._x, p._y, TMS_BOX_W, TMS_BOX_H)) return true;
+        }
+        return false;
+      };
+      const _existing = tmsPositions[posKey];
+      const _needsRewalk = _existing && !_existing.pinned &&
+                             _collides(_existing._x, _existing._y);
+      if (_existing && !_needsRewalk) {
+        e._x = _existing._x;
+        e._y = _existing._y;
       } else {
+        if (_needsRewalk) {
+          console.log('TMS auto-reposition: ' + posKey +
+                       ' overlapped a newly-scanned node, re-walking');
+        }
         let cx = baseX, cy = stackY + i * (TMS_BOX_H + 24);
-        const _rectOverlap = (ax, ay, aw, ah, bx, by, bw, bh) =>
-          ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
-        const _collides = (tx, ty) => {
-          const tw = TMS_BOX_W, th = TMS_BOX_H;
-          for (const nk in nodes) {
-            const n = nodes[nk];
-            if (n === src) continue;
-            if (n._x == null) continue;
-            if (_rectOverlap(tx, ty, tw, th, n._x, n._y, 240, 130)) return true;
-          }
-          for (const sk in sccNodes) {
-            const sn = sccNodes[sk];
-            if (sn._x == null) continue;
-            if (_rectOverlap(tx, ty, tw, th, sn._x, sn._y, 240, 130)) return true;
-          }
-          for (const bk in btpNodes) {
-            const bn = btpNodes[bk];
-            if (bn._x == null) continue;
-            if (_rectOverlap(tx, ty, tw, th, bn._x, bn._y, 240, 130)) return true;
-          }
-          for (const pk in dbconPositions) {
-            const p = dbconPositions[pk];
-            if (_rectOverlap(tx, ty, tw, th, p._x, p._y, 150, 100)) return true;
-          }
-          for (const pk in tmsPositions) {
-            if (pk === posKey) continue;
-            const p = tmsPositions[pk];
-            if (_rectOverlap(tx, ty, tw, th, p._x, p._y, TMS_BOX_W, TMS_BOX_H)) return true;
-          }
-          return false;
-        };
         let _guard = 0;
         while (_collides(cx, cy) && _guard < 40) {
           cy += TMS_BOX_H + 24;
@@ -17537,6 +17570,29 @@ document.addEventListener('mouseup', () => {
       && !dragNode.startsWith('btp:')
       && !dragNode.startsWith('dbcon:')
       && !dragNode.startsWith('tms:')) showDetails(dragNode);
+  // Mark drag-targeted DBCON/TMS positions as pinned so the auto-
+  // reposition-on-collision logic in the render loop leaves them
+  // alone.  Only fires when the user actually moved the cursor
+  // (dragMoved), so a single-click on the accessory doesn't lock
+  // its position.
+  if (dragNode && dragMoved) {
+    if (dragNode.startsWith('dbcon:')) {
+      const rest = dragNode.slice(6);
+      const colonIdx = rest.indexOf(':');
+      if (colonIdx > 0) {
+        const pk = rest.slice(0, colonIdx) + '|' + rest.slice(colonIdx + 1);
+        if (dbconPositions[pk]) dbconPositions[pk].pinned = true;
+      }
+    } else if (dragNode.startsWith('tms:')) {
+      // tms drag id is 'tms:<sid>:<target>:<domain>' — but the pos key
+      // is 'tms:<sid>|<target>|<domain>'.  Reconstruct.
+      const parts = dragNode.split(':');
+      if (parts.length >= 4) {
+        const pk = 'tms:' + parts[1] + '|' + parts[2] + '|' + parts[3];
+        if (tmsPositions[pk]) tmsPositions[pk].pinned = true;
+      }
+    }
+  }
   dragNode = null; isPanning = false;
 });
 
