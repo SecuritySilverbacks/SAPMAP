@@ -4941,11 +4941,18 @@ function updateMap() {
   Object.values(nodes).forEach(src => {
     const edges = src.dbcon_edges || [];
     if (!edges.length) return;
-    // Stack DBCON nodes vertically to the right of the source
-    // (or below when source is far to the right of the canvas).
+    // Stack DBCON nodes vertically BELOW the source.  Prior versions
+    // stacked to the RIGHT of the source, but in landscapes with
+    // multiple physical hosts the right-side neighbor's SAP nodes
+    // sit exactly where the cylinders would land — the collision
+    // walk then cascaded down + through the neighbor's zone and
+    // ended up at the bottom of the map, well outside the source's
+    // own host zone.  Placing them below source keeps them inside
+    // the source's zone by default and looks like a natural
+    // "outbound accessory" arrangement.
     const srcX = src._x || 0, srcY = src._y || 0;
-    const baseX = srcX + 240 + 80;   // BOX_W (240) + gap
-    let stackY = srcY;
+    const baseX = srcX;                       // source column
+    let stackY = srcY + 130 + 24;             // BOX_H (130) + gap
     edges.forEach((e, i) => {
       // Position persistence: DBCON edges are re-materialized from
       // the server on every state poll, which wipes any transient
@@ -5080,10 +5087,13 @@ function updateMap() {
         lineColor = e.pwned ? '#f0883e' : '#d29922'; lineDash = '';
       } else if (e.tested) { lineColor = '#f85149'; lineDash = '5,4'; }
       else { lineColor = '#8b949e'; lineDash = '5,4'; }
-      const _sx = srcX + 240;      // right edge of source SAP box
-      const _sy = srcY + 60;       // roughly middle of source header row
-      const _tx = x;               // left edge of cylinder
-      const _ty = y + DB_BOX_H / 2;
+      // Line origin/target: source's BOTTOM to cylinder's TOP now
+      // that DBCON stacks below source instead of to the right.
+      // Keeps the connector visually short + inside the host zone.
+      const _sx = srcX + 120;      // roughly middle of source (BOX_W=240)
+      const _sy = srcY + 130;      // bottom edge of source
+      const _tx = x + DB_BOX_W / 2;
+      const _ty = y;               // top edge of cylinder
       const dashAttr = lineDash ? ` stroke-dasharray="${lineDash}"` : '';
       html += `<line x1="${_sx}" y1="${_sy}" x2="${_tx}" y2="${_ty}" `
            + `stroke="${lineColor}" stroke-width="2"${dashAttr} `
@@ -5201,12 +5211,17 @@ function updateMap() {
   Object.values(nodes).forEach(src => {
     const dests = src.tms_destinations || [];
     if (!dests.length) return;
-    // Stack TMS cylinders vertically to the LEFT of the source
-    // (DBCON stacks to the right — this keeps the two families
-    // visually separated).
+    // Stack TMS trucks vertically BELOW the source, in a column
+    // RIGHT of the DBCON column.  Prior versions placed TMS to the
+    // LEFT of source, but on hosts with a neighbouring SAP node
+    // to the left (typical row-layout) the truck would collide
+    // with that neighbour and the walk-down cascade would drop it
+    // into no-man's-land between zones.  Below-source + offset
+    // right (past the DBCON column at srcX..srcX+DB_W) keeps both
+    // accessory families inside the source's host zone by default.
     const srcX = src._x || 0, srcY = src._y || 0;
-    const baseX = srcX - TMS_BOX_W - 80;
-    const stackY = srcY;
+    const baseX = srcX + 150 + 20;    // right of DBCON column
+    const stackY = srcY + 130 + 24;   // below source
     dests.forEach((e, i) => {
       const posKey = 'tms:' + src.sid + '|' + e.target_sid + '|' + e.domain;
       // Same auto-reposition-on-collision logic as DBCON.  Fixes the
@@ -5259,7 +5274,12 @@ function updateMap() {
         let _guard = 0;
         while (_collides(cx, cy) && _guard < 40) {
           cy += TMS_BOX_H + 24;
-          if (cy - (srcY || 0) > 600) { cx -= TMS_BOX_W + 60; cy = stackY; }
+          // Wraparound goes RIGHT (matches new below-source stacking
+          // direction).  Old code wrapped LEFT because trucks used
+          // to stack left-of-source; now they stack right-of-DBCON
+          // below source, so LEFT would push them into the DBCON
+          // column.
+          if (cy - (srcY || 0) > 600) { cx += TMS_BOX_W + 60; cy = stackY; }
           _guard++;
         }
         e._x = cx; e._y = cy;
@@ -5295,10 +5315,14 @@ function updateMap() {
         lineDash = '';
       } else if (e.tested) { lineColor = '#f85149'; lineDash = '5,4'; }
       else { lineColor = '#8b949e'; lineDash = '5,4'; }
-      const _sx = srcX;                    // left edge of source SAP box
-      const _sy = srcY + 60;
-      const _tx = x + TMS_BOX_W;           // right edge of truck
-      const _ty = y + TMS_BOX_H / 2;
+      // Line origin/target: source's BOTTOM to truck's TOP now that
+      // TMS stacks below source (right of the DBCON column) instead
+      // of to the left.  Keeps the connector visually short + inside
+      // the host zone.
+      const _sx = srcX + 120;              // roughly middle of source
+      const _sy = srcY + 130;              // bottom edge of source
+      const _tx = x + TMS_BOX_W / 2;
+      const _ty = y;                       // top edge of truck
       const dashAttr = lineDash ? ` stroke-dasharray="${lineDash}"` : '';
       html += `<line x1="${_sx}" y1="${_sy}" x2="${_tx}" y2="${_ty}" `
            + `stroke="${lineColor}" stroke-width="2"${dashAttr} `
