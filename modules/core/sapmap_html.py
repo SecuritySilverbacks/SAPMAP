@@ -14735,15 +14735,52 @@ function fbRefresh() {
   fbNavigate(_fbCurrentPath);
 }
 
+// Polls activeTasks (refreshed by the main state loop every ~1s) until
+// `taskKey` disappears — signalling the background thread finished.
+// Then runs `onDone(hadError)`.  Guards with a 10-minute cap so a
+// stuck task doesn't loop forever.
+function _fbWaitForTask(taskKey, onDone) {
+  const startedAt = Date.now();
+  const HARD_CAP_MS = 10 * 60 * 1000;
+  const seenActive = { v: false };
+  const tick = () => {
+    const stillRunning = !!(activeTasks && activeTasks[taskKey]);
+    if (stillRunning) seenActive.v = true;
+    // We need to have SEEN it active at least once before deciding
+    // "gone means done" — otherwise the very first poll can fire
+    // before the state refresh has picked up the task and we'd
+    // report completion instantly.
+    if (seenActive.v && !stillRunning) {
+      onDone(false);
+      return;
+    }
+    if (Date.now() - startedAt > HARD_CAP_MS) {
+      onDone(true);
+      return;
+    }
+    setTimeout(tick, 750);
+  };
+  setTimeout(tick, 750);
+}
+
 async function fbDownload(remotePath) {
-  document.getElementById('fb-status').textContent = 'Downloading ' + remotePath + '...';
+  const status = document.getElementById('fb-status');
+  status.textContent = 'Downloading ' + remotePath + '...';
   try {
     await api('POST', `node/${_fbSid}/fs/download`, { path: remotePath });
-    document.getElementById('fb-status').textContent =
-      'Download started for ' + remotePath + ' — check console for progress';
     showToast('Download started: ' + remotePath, 'info');
+    _fbWaitForTask(_fbSid + ':fs_download', function(timedOut) {
+      if (timedOut) {
+        status.textContent = 'Download of ' + remotePath +
+          ' — no completion notification after 10 min; check console';
+      } else {
+        status.textContent = 'Download of ' + remotePath +
+          ' finished — check console for loot path';
+        showToast('Downloaded: ' + remotePath, 'success');
+      }
+    });
   } catch (e) {
-    document.getElementById('fb-status').textContent = 'Download error: ' + e;
+    status.textContent = 'Download error: ' + e;
   }
 }
 
@@ -14752,7 +14789,8 @@ async function fbUploadFile() {
   if (!input.files || !input.files[0]) return;
   const file = input.files[0];
   const remotePath = (_fbCurrentPath === '/' ? '/' : _fbCurrentPath + '/') + file.name;
-  document.getElementById('fb-upload-status').textContent =
+  const status = document.getElementById('fb-upload-status');
+  status.textContent =
     'Uploading ' + file.name + ' (' + _fbFormatSize(file.size) + ')...';
   const formData = new FormData();
   formData.append('file', file);
@@ -14764,15 +14802,28 @@ async function fbUploadFile() {
     });
     const res = await resp.json();
     if (res.status === 'started') {
-      document.getElementById('fb-upload-status').textContent =
-        'Upload started: ' + file.name + ' → ' + remotePath;
+      status.textContent =
+        'Uploading ' + file.name + ' → ' + remotePath + '...';
       showToast('Upload started: ' + file.name, 'info');
+      _fbWaitForTask(_fbSid + ':fs_upload', function(timedOut) {
+        if (timedOut) {
+          status.textContent = 'Upload of ' + file.name +
+            ' — no completion after 10 min; check console';
+        } else {
+          status.textContent = 'Uploaded: ' + file.name + ' → ' +
+            remotePath + ' (check console for MD5 verify result)';
+          showToast('Upload finished: ' + file.name, 'success');
+          // Refresh directory so the freshly-uploaded file appears
+          if (_fbCurrentPath && remotePath.startsWith(_fbCurrentPath)) {
+            fbRefresh();
+          }
+        }
+      });
     } else {
-      document.getElementById('fb-upload-status').textContent =
-        'Upload error: ' + (res.error || 'unknown');
+      status.textContent = 'Upload error: ' + (res.error || 'unknown');
     }
   } catch (e) {
-    document.getElementById('fb-upload-status').textContent = 'Upload error: ' + e;
+    status.textContent = 'Upload error: ' + e;
   }
   input.value = '';
 }

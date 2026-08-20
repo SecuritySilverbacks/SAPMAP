@@ -153,7 +153,7 @@ class TargetFS:
 
     def __init__(self, node, exec_fn: ExecFn,
                  os_family: Optional[str] = None,
-                 python3_spec: str = "/usr/bin/python3",
+                 python3_spec: Optional[str] = None,
                  label: str = ""):
         """
         Args:
@@ -177,8 +177,34 @@ class TargetFS:
         self.os_family = (os_family or self._detect_os(node)).lower()
         if self.os_family not in ("linux", "windows"):
             self.os_family = "linux"
+        # python3_spec is now lazy — probed on first upload via
+        # _ensure_python3_spec.  Callers may pass an explicit spec
+        # (tests do) to skip discovery.
         self.python3_spec = python3_spec
+        self._python3_probed = python3_spec is not None
         self.label = label or getattr(node, "sid", "?")
+
+    def _ensure_python3_spec(self) -> Optional[str]:
+        """Lazy-probe a working python3 on the target.  Reuses the
+        battle-tested probe from :mod:`sap_dpmon_sapstar` so we pick up
+        HANA-shipped interpreters under
+        ``/hana/shared/<HDB_SID>/exe/<arch>/hdb/Python3/bin/python3`` —
+        same fix as Julian's issue #8.  Returns the resolved spec
+        (bare path or env-wrapped) or ``None`` when no python3 exists
+        on the target."""
+        if self._python3_probed:
+            return self.python3_spec
+        try:
+            from sap_dpmon_sapstar import _probe_python3_via_exec_fn
+            sid = getattr(self.node, "sid", "?")
+            spec = _probe_python3_via_exec_fn(self.exec_fn, sid=sid,
+                                                label=self.label)
+        except Exception as e:
+            print(f"[-] {self.label}: python3 probe error: {e!r}")
+            spec = None
+        self.python3_spec = spec
+        self._python3_probed = True
+        return spec
 
     @staticmethod
     def _detect_os(node) -> str:
@@ -397,6 +423,18 @@ class TargetFS:
         """Chunked base64 write via python3 + b64decode.  Same recipe
         as ``sap_db_sql_writers._chunked_b64_write_via_python3`` — kept
         as a private method here so this module stays standalone."""
+        # Probe python3 lazily so upload works on HANA hosts where
+        # /usr/bin/python3 is absent but /hana/shared/<HDB_SID>/exe/.../
+        # python3 exists.
+        spec = self._ensure_python3_spec()
+        if not spec:
+            return {"ok": False,
+                     "error": ("no python3 discovered on target — "
+                               "upload requires python3 for chunked "
+                               "base64 write.  Install python3 or "
+                               "authenticate first."),
+                     "chunks": 0, "chunk_size": 0}
+
         b64 = base64.b64encode(content).decode("ascii")
         b64_path = remote_path + ".b64"
 
@@ -466,40 +504,74 @@ class TargetFS:
         return ""
 
     def _download_linux(self, remote_path: str, size: int) -> Optional[bytes]:
-        """Chunked base64 read.  Same slicing pattern as
-        :func:`sap_pse_loot._read_chunked` — python3 slices the file
-        by byte offset and prints one b64-encoded chunk at a time,
-        each small enough to survive the kernel-793 TLV output cap
-        (~128 bytes/line)."""
+        """Download a file from the target as base64.
+
+        Strategy (tried in order — first success wins):
+
+        1. ``/usr/bin/base64 <path>`` — universal on Linux (part of
+           GNU coreutils, present on RHEL / SLES / Debian / hardened
+           SAP appliances).  Single command, no python3 dependency.
+           Base64 output naturally wraps at 76 chars/line so it
+           survives the kernel-793 TLV ~128B/line cap without any
+           slicing.  This is the fast path — works for the vast
+           majority of downloads.
+
+        2. python3 chunked read — same slicing pattern as
+           :func:`sap_pse_loot._read_chunked`.  Only reached when
+           /usr/bin/base64 is absent AND python3 was discovered by
+           the probe.  Slices the file by byte offset and prints one
+           b64-encoded chunk at a time, each small enough to survive
+           TLV truncation.
+
+        Returns the reassembled bytes, or ``None`` when both paths
+        failed.  Prints diagnostic output on every intermediate
+        failure so the operator can see which channel was tried.
+        """
+        # --- Path 1: /usr/bin/base64 (no python3 required) ------------
+        base64_paths = ("/usr/bin/base64", "/bin/base64",
+                         "/usr/local/bin/base64")
+        for b64_bin in base64_paths:
+            r = self.exec_fn(b64_bin, remote_path)
+            out_lines = r.get("output", [])
+            if not out_lines:
+                continue
+            first_lo = out_lines[0].lower()
+            if ("no such file" in first_lo or "cannot open" in first_lo
+                    or "not found" in first_lo):
+                # base64 binary present but the target file isn't
+                print(f"[-] {self.label}: {b64_bin}: {out_lines[0].strip()}")
+                continue
+            b64_blob = "".join(out_lines)
+            b64_clean = re.sub(r"[^A-Za-z0-9+/=]", "", b64_blob)
+            if not b64_clean:
+                continue
+            try:
+                decoded = base64.b64decode(b64_clean, validate=True)
+            except Exception as e:
+                print(f"[-] {self.label}: {b64_bin} b64 decode error: "
+                      f"{e!r} — trying next path")
+                continue
+            if len(decoded) == size:
+                print(f"[+] {self.label}: downloaded via {b64_bin} "
+                      f"({size} B, single-shot)")
+                return decoded
+            print(f"[-] {self.label}: {b64_bin} returned "
+                  f"{len(decoded)} B, expected {size} — "
+                  f"probably TLV-truncated, falling back to chunked read")
+            break
+
+        # --- Path 2: python3 chunked read ------------------------------
+        spec = self._ensure_python3_spec()
+        if not spec:
+            print(f"[-] {self.label}: no /usr/bin/base64 AND no python3 "
+                  f"— cannot download {remote_path}.  Install "
+                  f"coreutils base64 or python3 on the target.")
+            return None
+
         # 72 raw bytes → 96 base64 chars, safely under the 128B TLV
         # ceiling most kernels enforce.  Same value used by
         # sap_pse_loot for the same reason.
         RAW_CHUNK = 72
-
-        # Try full-file single-shot first for small files (< 5 KB).
-        # Saves ~size/72 round-trips for the common case (config
-        # files, small logs).
-        if size <= 5000:
-            body = (f"-c "
-                     f"__import__('sys').stdout.write("
-                     f"__import__('base64').b64encode("
-                     f"open('{remote_path}','rb').read()"
-                     f").decode())")
-            cmd, params = _py3_params(self.python3_spec, body)
-            r = self.exec_fn(cmd, params)
-            b64_blob = "".join(r.get("output", []))
-            # Strip whitespace / TLV noise
-            b64_clean = re.sub(r"[^A-Za-z0-9+/=]", "", b64_blob)
-            try:
-                decoded = base64.b64decode(b64_clean, validate=True)
-                if len(decoded) == size:
-                    return decoded
-                # Length mismatch → probably TLV-truncated; fall
-                # through to chunked read.
-            except Exception:
-                pass  # fall through
-
-        # Chunked read.
         parts = []
         offset = 0
         while offset < size:
@@ -509,7 +581,7 @@ class TargetFS:
                      f"__import__('base64').b64encode("
                      f"open('{remote_path}','rb').read()[{offset}:{end}]"
                      f").decode())")
-            cmd, params = _py3_params(self.python3_spec, body)
+            cmd, params = _py3_params(spec, body)
             r = self.exec_fn(cmd, params)
             b64_blob = "".join(r.get("output", []))
             b64_clean = re.sub(r"[^A-Za-z0-9+/=]", "", b64_blob)
@@ -527,32 +599,78 @@ class TargetFS:
         return b"".join(parts)
 
     def _list_dir_linux(self, remote_path: str) -> dict:
-        """Parse ``ls -la --time-style=+%Y-%m-%dT%H:%M:%S`` output.
+        """Parse ``ls -la`` output into an entry list.
 
-        Format (GNU coreutils):
-          -rw-r--r-- 1 owner group 12345 2026-08-20T09:00:00 name
+        Two ls variants are tried in order — the first one that returns
+        output wins:
 
-        Non-GNU ls falls back to the shorter format — we handle
-        both.
+        1. ``ls -la --time-style=+%Y-%m-%dT%H:%M:%S <path>`` — GNU
+           coreutils with ISO-style timestamps.
+        2. ``ls -la <path>`` — bare ``-la`` for BSD ls / minimal
+           busybox / hardened SAP appliances where ``--time-style``
+           may print an "unrecognized option" error to stderr and
+           kill the listing.
+
+        Fallback #2 also handles the "/tmp returned empty" case: on
+        some kernels the SAPXPG output-capture drops long stdout
+        completely when combined with the extra ``--time-style`` arg,
+        and the bare form succeeds where the fancy form fails.
+
+        Result entries are deduplicated by (name, mode, size).  SAPXPG
+        on kernel 793+ has been observed to echo each stdout line
+        twice (once in the P3 TLV, once in P4) which used to produce
+        duplicate rows in the file browser.
         """
         r = self.exec_fn("/bin/ls",
                           f"-la --time-style=+%Y-%m-%dT%H:%M:%S "
                           f"{remote_path}")
-        lines = r.get("output", [])
+        lines = r.get("output", []) or []
+
+        # Detect "no such file" in the first line before deciding to
+        # retry — no point re-running an ls that will fail the same
+        # way.
+        if lines:
+            first = lines[0].lower()
+            if "cannot access" in first or "no such" in first:
+                return {"ok": False, "path": remote_path,
+                         "entries": [], "error": lines[0].strip()}
+
+        # Retry with bare -la when nothing came back or when parsing
+        # yields zero entries (BSD ls silently ignores --time-style
+        # on some builds; SAPXPG can drop the whole output on others).
+        needs_retry = (not lines) or all(
+            _parse_ls_line(l) is None for l in lines
+        )
+        if needs_retry:
+            r2 = self.exec_fn("/bin/ls", f"-la {remote_path}")
+            lines2 = r2.get("output", []) or []
+            if lines2:
+                first2 = lines2[0].lower()
+                if "cannot access" in first2 or "no such" in first2:
+                    return {"ok": False, "path": remote_path,
+                             "entries": [],
+                             "error": lines2[0].strip()}
+                lines = lines2
+
         if not lines:
             return {"ok": False, "path": remote_path, "entries": [],
-                     "error": "ls returned no output (path missing "
-                     "or unreadable via exec channel)"}
-        # Detect "no such file" in the first line
-        first = lines[0].lower() if lines else ""
-        if "cannot access" in first or "no such" in first:
-            return {"ok": False, "path": remote_path, "entries": [],
-                     "error": lines[0].strip()}
+                     "error": (f"ls returned no output for "
+                               f"{remote_path} — the exec channel "
+                               f"dropped its stdout (kernel-793 TLV "
+                               f"cap, or SAPXPG output limit).  Try a "
+                               f"smaller subdirectory.")}
+
         entries = []
+        seen = set()
         for line in lines:
             e = _parse_ls_line(line)
-            if e:
-                entries.append(e)
+            if not e:
+                continue
+            key = (e["name"], e.get("mode", ""), e.get("size", -1))
+            if key in seen:
+                continue
+            seen.add(key)
+            entries.append(e)
         return {"ok": True, "path": remote_path, "entries": entries,
                  "error": ""}
 
@@ -622,21 +740,18 @@ class TargetFS:
 # ls -la parser (module-level for unit-testability)
 # --------------------------------------------------------------------------
 
-# GNU ls -la --time-style=iso format:
-#   -rw-r--r-- 1 owner group 12345 2026-08-20T09:00:00 name
-#   drwxr-xr-x 2 owner group  4096 2026-08-20T09:00:00 dirname
-#   lrwxrwxrwx 1 owner group    12 2026-08-20T09:00:00 link -> target
+# Handles both ls output styles:
 #
-# We accept slight variations (BSD ls, older coreutils) by treating
-# the first token as the mode string, extracting size (numeric-only
-# token in positions 3-6), and taking the last non-arrow token as
-# the name.
-
-_LS_LINE_RE = re.compile(
-    r"^([-dlbcps])([-r][-w][-xstS]){3}"
-    r"[+.]?\s+\d+\s+\S+\s+\S+\s+(\d+)\s+"
-    r"(\S+(?:\s+\S+)?)\s+(.+?)(?:\s+->\s+.+)?$"
-)
+# 1. GNU coreutils with --time-style=iso:
+#      -rw-r--r-- 1 owner group 12345 2026-08-20T09:00:00 name
+#      lrwxrwxrwx 1 owner group    12 2026-08-20T09:00:00 link -> target
+#
+# 2. Traditional ls (BSD, busybox, or GNU without --time-style):
+#      -rw-r--r-- 1 owner group 12345 Aug 20 09:00 name
+#      -rw-r--r-- 1 owner group 12345 Aug 20  2025 name
+#
+# We split on whitespace and figure out the mtime length from the
+# token count.  Simpler and more robust than a fat regex.
 
 
 def _parse_ls_line(line: str) -> Optional[dict]:
@@ -647,52 +762,48 @@ def _parse_ls_line(line: str) -> Optional[dict]:
         return None
     if s.startswith("total "):
         return None
-    # Strip a symlink "-> target" suffix up front so the greedy mtime
-    # group can't swallow the link name (e.g. "... mylink -> target").
+    # Strip a symlink "-> target" suffix up front so it doesn't
+    # confuse token counting (e.g. "... mylink -> target").
     if " -> " in s:
         s = s.split(" -> ", 1)[0].rstrip()
-    m = _LS_LINE_RE.match(s)
-    if not m:
-        # Fallback: split on whitespace, look for a numeric size in
-        # position 4.  Handles BSD ls + odd locales.
-        parts = s.split(None, 8)
-        if len(parts) < 8:
-            return None
-        mode = parts[0]
-        if not (mode and mode[0] in "-dlbcps"):
-            return None
-        try:
-            size = int(parts[4])
-        except (ValueError, IndexError):
-            return None
-        name = parts[-1]
-        # Skip '.' and '..' — never useful for a file browser
-        if name in (".", ".."):
-            return None
-        # Handle symlink '->' target
-        if " -> " in name:
-            name = name.split(" -> ", 1)[0]
-        return {
-            "name":   name,
-            "size":   size,
-            "is_dir": mode[0] == "d",
-            "mtime":  " ".join(parts[5:7]) if len(parts) >= 7 else "",
-            "mode":   mode,
-        }
-    file_type = m.group(1)
-    size = int(m.group(3))
-    mtime = m.group(4)
-    name = m.group(5).strip()
-    if " -> " in name:
-        name = name.split(" -> ", 1)[0]
+
+    parts = s.split()
+    if len(parts) < 7:
+        return None
+    mode = parts[0]
+    if not (mode and mode[0] in "-dlbcps"):
+        return None
+    # Size is the first purely-numeric token after positions 3-5
+    # (positions 1-3 are nlink + owner + group; owner/group can be
+    # numeric so we scan by position).  For standard ls the size
+    # sits at parts[4].
+    try:
+        size = int(parts[4])
+    except (ValueError, IndexError):
+        return None
+
+    # Detect mtime span:
+    #   ISO:         parts[5] contains "T" or "-" → 1 token
+    #   Traditional: parts[5] is a month name → 3 tokens (Mon DD HH:MM|YYYY)
+    if "T" in parts[5] or "-" in parts[5]:
+        mtime_tokens = 1
+    else:
+        mtime_tokens = 3
+    name_start = 5 + mtime_tokens
+    if len(parts) < name_start + 1:
+        return None
+    mtime = " ".join(parts[5:name_start])
+    # Rejoin the remaining tokens so filenames with spaces survive.
+    name = " ".join(parts[name_start:])
+
     if name in (".", ".."):
         return None
     return {
         "name":   name,
         "size":   size,
-        "is_dir": file_type == "d",
+        "is_dir": mode[0] == "d",
         "mtime":  mtime,
-        "mode":   s.split()[0],
+        "mode":   mode,
     }
 
 

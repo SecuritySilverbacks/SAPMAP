@@ -451,6 +451,87 @@ def test_list_dir_returns_entries():
         assert e["size"] in (3, 4)
 
 
+def test_list_dir_dedupes_sapxpg_double_echo():
+    """SAPXPG P3+P4 TLV frames can each echo the same stdout line —
+    list_dir must dedupe by (name, mode, size) so the browser doesn't
+    show each entry twice.  Reproduces the exact bug the user
+    reported in the first-feedback screenshots."""
+    def _fake_exec(program, args):
+        if program != "/bin/ls":
+            return {"success": False, "output": [], "error": "?"}
+        # Emit each line TWICE — the SAPXPG P3+P4 double-echo pattern
+        raw = ("total 8\n"
+                "drwxr-xr-x 2 root root 4096 2026-08-20T09:00:00 bin\n"
+                "drwxr-xr-x 2 root root 4096 2026-08-20T09:00:00 bin\n"
+                "drwxr-xr-x 3 root root 4096 2026-08-20T09:00:00 etc\n"
+                "drwxr-xr-x 3 root root 4096 2026-08-20T09:00:00 etc\n")
+        return {"success": True, "output": raw.splitlines(),
+                 "error": ""}
+    fs = TargetFS(_FakeNode(), _fake_exec)
+    r = fs.list_dir("/")
+    assert r["ok"], r.get("error")
+    names = [e["name"] for e in r["entries"]]
+    assert names == ["bin", "etc"], f"duplicates not stripped: {names}"
+
+
+def test_list_dir_falls_back_to_bare_la_when_time_style_returns_empty():
+    """Some builds of ls print an "unrecognized option --time-style"
+    to stderr and produce no stdout — list_dir must retry with bare
+    -la instead of returning empty.  Same failure pattern as the
+    "/tmp returned empty" issue the user reported."""
+    calls = []
+    def _fake_exec(program, args):
+        calls.append((program, args))
+        if program != "/bin/ls":
+            return {"success": False, "output": [], "error": "?"}
+        # First call (with --time-style) → empty. Retry (bare -la) → entries.
+        if "--time-style" in args:
+            return {"success": True, "output": [], "error": ""}
+        return {"success": True, "output": [
+            "total 4",
+            "-rw-r--r-- 1 root root 5 Aug 20 09:00 hello.txt",
+        ], "error": ""}
+    fs = TargetFS(_FakeNode(), _fake_exec)
+    r = fs.list_dir("/tmp")
+    assert r["ok"], r.get("error")
+    names = [e["name"] for e in r["entries"]]
+    assert names == ["hello.txt"]
+    # Both variants must have been attempted
+    variants = [c[1] for c in calls if c[0] == "/bin/ls"]
+    assert any("--time-style" in v for v in variants)
+    assert any("--time-style" not in v for v in variants)
+
+
+def test_download_prefers_usr_bin_base64():
+    """The new download path tries /usr/bin/base64 first — it works
+    without python3 (fixes downloads on HANA hosts where python3 is
+    only under /hana/shared/...)."""
+    called = []
+    payload = b"hello world content\n"
+    def _fake_exec(program, args):
+        called.append(program)
+        if program in ("/usr/bin/base64", "/bin/base64",
+                        "/usr/local/bin/base64"):
+            if program == "/usr/bin/base64" and args == "/tmp/x":
+                return {"success": True,
+                         "output": [base64.b64encode(payload).decode()],
+                         "error": ""}
+            return {"success": True, "output": [], "error": ""}
+        if program == "/usr/bin/stat":
+            return {"success": True,
+                     "output": [f"{len(payload)}|2026-08-20 09:00:00|0644|regular file"],
+                     "error": ""}
+        return {"success": False, "output": [], "error": "?"}
+    fs = TargetFS(_FakeNode(), _fake_exec)
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as td:
+        r = fs.download("/tmp/x", loot_dir=td)
+    assert r["ok"], r.get("error")
+    assert r["bytes"] == len(payload)
+    # /usr/bin/base64 must have been called first
+    assert "/usr/bin/base64" in called
+
+
 def test_stat_returns_size_and_mtime():
     target = _FakeLinuxTarget()
     target.fs["/etc/hostname"] = b"host1\n"
