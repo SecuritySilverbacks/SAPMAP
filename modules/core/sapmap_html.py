@@ -4952,7 +4952,7 @@ function updateMap() {
     // "outbound accessory" arrangement.
     const srcX = src._x || 0, srcY = src._y || 0;
     const baseX = srcX;                       // source column
-    let stackY = srcY + 130 + 24;             // BOX_H (130) + gap
+    let stackY = srcY + 174 + 20;             // BOX_H (174) + gap
     edges.forEach((e, i) => {
       // Position persistence: DBCON edges are re-materialized from
       // the server on every state poll, which wipes any transient
@@ -4974,21 +4974,21 @@ function updateMap() {
           if (n === src) continue;   // ok to overlap the source
           if (n._x == null) continue;
           if (_rectOverlap(tx, ty, tw, th,
-                            n._x, n._y, 240, 130)) return true;
+                            n._x, n._y, 240, 174)) return true;
         }
         // Against SCC nodes
         for (const sk in sccNodes) {
           const sn = sccNodes[sk];
           if (sn._x == null) continue;
           if (_rectOverlap(tx, ty, tw, th,
-                            sn._x, sn._y, 240, 130)) return true;
+                            sn._x, sn._y, 240, 174)) return true;
         }
         // Against BTP subaccounts
         for (const bk in btpNodes) {
           const bn = btpNodes[bk];
           if (bn._x == null) continue;
           if (_rectOverlap(tx, ty, tw, th,
-                            bn._x, bn._y, 240, 130)) return true;
+                            bn._x, bn._y, 240, 174)) return true;
         }
         // Against other DBCON cylinders already placed
         for (const pk in dbconPositions) {
@@ -5091,7 +5091,7 @@ function updateMap() {
       // that DBCON stacks below source instead of to the right.
       // Keeps the connector visually short + inside the host zone.
       const _sx = srcX + 120;      // roughly middle of source (BOX_W=240)
-      const _sy = srcY + 130;      // bottom edge of source
+      const _sy = srcY + 174;      // bottom edge of source (BOX_H)
       const _tx = x + DB_BOX_W / 2;
       const _ty = y;               // top edge of cylinder
       const dashAttr = lineDash ? ` stroke-dasharray="${lineDash}"` : '';
@@ -5221,7 +5221,7 @@ function updateMap() {
     // accessory families inside the source's host zone by default.
     const srcX = src._x || 0, srcY = src._y || 0;
     const baseX = srcX + 150 + 20;    // right of DBCON column
-    const stackY = srcY + 130 + 24;   // below source
+    const stackY = srcY + 174 + 20;   // BOX_H (174) + gap
     dests.forEach((e, i) => {
       const posKey = 'tms:' + src.sid + '|' + e.target_sid + '|' + e.domain;
       // Same auto-reposition-on-collision logic as DBCON.  Fixes the
@@ -5236,17 +5236,17 @@ function updateMap() {
           const n = nodes[nk];
           if (n === src) continue;
           if (n._x == null) continue;
-          if (_rectOverlap(tx, ty, tw, th, n._x, n._y, 240, 130)) return true;
+          if (_rectOverlap(tx, ty, tw, th, n._x, n._y, 240, 174)) return true;
         }
         for (const sk in sccNodes) {
           const sn = sccNodes[sk];
           if (sn._x == null) continue;
-          if (_rectOverlap(tx, ty, tw, th, sn._x, sn._y, 240, 130)) return true;
+          if (_rectOverlap(tx, ty, tw, th, sn._x, sn._y, 240, 174)) return true;
         }
         for (const bk in btpNodes) {
           const bn = btpNodes[bk];
           if (bn._x == null) continue;
-          if (_rectOverlap(tx, ty, tw, th, bn._x, bn._y, 240, 130)) return true;
+          if (_rectOverlap(tx, ty, tw, th, bn._x, bn._y, 240, 174)) return true;
         }
         for (const pk in dbconPositions) {
           const p = dbconPositions[pk];
@@ -5320,7 +5320,7 @@ function updateMap() {
       // of to the left.  Keeps the connector visually short + inside
       // the host zone.
       const _sx = srcX + 120;              // roughly middle of source
-      const _sy = srcY + 130;              // bottom edge of source
+      const _sy = srcY + 174;              // bottom edge of source (BOX_H)
       const _tx = x + TMS_BOX_W / 2;
       const _ty = y;                       // top edge of truck
       const dashAttr = lineDash ? ` stroke-dasharray="${lineDash}"` : '';
