@@ -1,0 +1,497 @@
+"""Tests for sap_target_fs — TargetFS class + helpers.
+
+All tests use a fake ExecFn recorder that emulates a healthy Linux
+target: python3 chunk writes accepted, md5sum returns hashes, stat
+returns metadata, ls returns entries.  Real target-side testing
+happens in integration runs against live SAP hosts.
+"""
+from __future__ import annotations
+
+import base64
+import hashlib
+import os
+import re
+import tempfile
+
+import pytest
+
+from sap_target_fs import (
+    TargetFS,
+    _split_python3_spec,
+    _py3_chunk_size,
+    _py3_params,
+    _parse_ls_line,
+)
+
+
+# --------------------------------------------------------------------------
+# Fake node + ExecFn
+# --------------------------------------------------------------------------
+
+class _FakeNode:
+    def __init__(self, sid="TST", os_type="Linux"):
+        self.sid = sid
+        self.os_type = os_type
+
+
+class _FakeLinuxTarget:
+    """In-memory Linux target that responds to the exec-fn calls
+    TargetFS makes.  Simulates a virtual filesystem so we can
+    round-trip upload → download → verify without touching a real
+    SAP host."""
+
+    def __init__(self):
+        self.fs = {}   # path -> bytes
+        self.calls = []
+        self.python3_can_write = True
+
+    def exec_fn(self, program, args):
+        self.calls.append((program, args))
+        if program == "/bin/rm":
+            paths = [p for p in args.split() if p.startswith("/")]
+            for p in paths:
+                self.fs.pop(p, None)
+            return {"success": True, "output": [], "error": ""}
+        if program == "/usr/bin/md5sum":
+            path = args.strip()
+            if path in self.fs:
+                h = hashlib.md5(self.fs[path]).hexdigest()
+                return {"success": True,
+                         "output": [f"{h}  {path}"], "error": ""}
+            return {"success": True,
+                     "output": [f"md5sum: {path}: No such file"],
+                     "error": ""}
+        if program == "/usr/bin/openssl":
+            m = re.match(r"^md5 -r (\S+)$", args)
+            if m:
+                path = m.group(1)
+                if path in self.fs:
+                    h = hashlib.md5(self.fs[path]).hexdigest()
+                    return {"success": True,
+                             "output": [f"{h}  {path}"], "error": ""}
+            return {"success": False, "output": [], "error": "?"}
+        if program == "/usr/bin/stat":
+            m = re.match(r"^-c\s+\S+\s+(\S+)$", args)
+            if m:
+                path = m.group(1)
+                if path in self.fs:
+                    size = len(self.fs[path])
+                    return {"success": True,
+                             "output": [f"{size}|2026-08-20 09:00:00|0644|regular file"],
+                             "error": ""}
+                if path.rstrip("/") in {p.rstrip("/") for p in self.fs
+                                          if p.endswith("/")}:
+                    return {"success": True,
+                             "output": ["4096|2026-08-20 09:00:00|0755|directory"],
+                             "error": ""}
+                return {"success": True,
+                         "output": [f"stat: cannot stat '{path}': No such file"],
+                         "error": ""}
+        if program == "/bin/ls":
+            # Just support the args our list_dir builds
+            m = re.match(r"^-la\s+--time-style=\S+\s+(\S+)$", args)
+            if m:
+                path = m.group(1).rstrip("/") + "/"
+                out = ["total 42"]
+                for p, data in sorted(self.fs.items()):
+                    if p.startswith(path) and "/" not in p[len(path):]:
+                        name = p[len(path):]
+                        out.append(f"-rw-r--r-- 1 owner group "
+                                    f"{len(data)} 2026-08-20T09:00:00 "
+                                    f"{name}")
+                return {"success": True, "output": out, "error": ""}
+        if program == "/bin/mkdir":
+            return {"success": True, "output": [], "error": ""}
+        if program.endswith("python3") or program == "/usr/bin/env":
+            # Handle env-wrapped case
+            if program == "/usr/bin/env":
+                # args = "LD_LIBRARY_PATH=... /hana/.../python3 -c ..."
+                # Extract the -c body
+                m = re.search(r"-c\s+(.+)$", args)
+                if not m:
+                    return {"success": False, "output": [], "error": "no -c"}
+                body = m.group(1)
+            else:
+                m = re.match(r"^-c\s+(.+)$", args)
+                if not m:
+                    return {"success": False, "output": [], "error": "no -c"}
+                body = m.group(1)
+            return self._exec_python(body)
+        return {"success": False, "output": [], "error":
+                 f"unmocked program: {program} {args}"}
+
+    def _exec_python(self, body):
+        """Emulate python3 -c <body> against our fake FS.  We only
+        support the specific patterns TargetFS emits."""
+        if not self.python3_can_write:
+            return {"success": True, "output": [], "error": ""}
+        # Pattern 1: open('path','wb'|'ab').write(b'CHUNK')
+        m = re.match(
+            r"^open\('([^']+)','(wb|ab)'\)\.write\(b'([A-Za-z0-9+/=]*)'\)$",
+            body)
+        if m:
+            path, mode, chunk = m.group(1), m.group(2), m.group(3)
+            existing = self.fs.get(path, b"")
+            new_bytes = chunk.encode("ascii")
+            if mode == "wb":
+                self.fs[path] = new_bytes
+            else:
+                self.fs[path] = existing + new_bytes
+            return {"success": True, "output": [], "error": ""}
+        # Pattern 2: open('out','wb').write(__import__('base64')
+        #             .b64decode(open('in','rb').read()))
+        m = re.match(
+            r"^open\('([^']+)','wb'\)\.write\("
+            r"__import__\('base64'\)\.b64decode\("
+            r"open\('([^']+)','rb'\)\.read\(\)\)\)$",
+            body)
+        if m:
+            out_path, in_path = m.group(1), m.group(2)
+            b64_data = self.fs.get(in_path, b"")
+            try:
+                self.fs[out_path] = base64.b64decode(b64_data)
+            except Exception:
+                return {"success": True, "output": [], "error": ""}
+            return {"success": True, "output": [], "error": ""}
+        # Pattern 3: __import__('sys').stdout.write(
+        #             __import__('base64').b64encode(
+        #             open('path','rb').read()[O:E]).decode())
+        m = re.match(
+            r"^__import__\('sys'\)\.stdout\.write\("
+            r"__import__\('base64'\)\.b64encode\("
+            r"open\('([^']+)','rb'\)\.read\(\)(?:\[(\d+):(\d+)\])?"
+            r"\)\.decode\(\)\)$",
+            body)
+        if m:
+            path = m.group(1)
+            data = self.fs.get(path, b"")
+            if m.group(2) and m.group(3):
+                data = data[int(m.group(2)):int(m.group(3))]
+            b64 = base64.b64encode(data).decode("ascii")
+            return {"success": True, "output": [b64], "error": ""}
+        return {"success": False, "output": [], "error":
+                 f"unmocked python body: {body[:80]}"}
+
+
+# --------------------------------------------------------------------------
+# _split_python3_spec / _py3_chunk_size / _py3_params
+# --------------------------------------------------------------------------
+
+def test_split_bare_python3():
+    cmd, prefix = _split_python3_spec("/usr/bin/python3")
+    assert cmd == "/usr/bin/python3"
+    assert prefix == ""
+
+
+def test_split_env_wrapped_hana():
+    spec = ("/usr/bin/env "
+            "LD_LIBRARY_PATH=/hana/shared/HDB/exe/linuxx86_64/hdb/Python3/lib "
+            "/hana/shared/HDB/exe/linuxx86_64/hdb/Python3/bin/python3")
+    cmd, prefix = _split_python3_spec(spec)
+    assert cmd == "/usr/bin/env"
+    assert "LD_LIBRARY_PATH=" in prefix
+    assert prefix.endswith("/python3")
+
+
+def test_chunk_size_bare():
+    """/usr/bin/python3 (0-byte prefix) leaves ~198B for base64."""
+    size = _py3_chunk_size("/usr/bin/python3", "/tmp/sapmap_wrap.b64")
+    assert size > 150   # plenty of room
+    assert size < 220
+
+
+def test_chunk_size_env_wrapped():
+    """Env-wrapped HANA python3 (121B prefix) caps chunks near 80B."""
+    spec = ("/usr/bin/env "
+            "LD_LIBRARY_PATH=/hana/shared/HDB/exe/linuxx86_64/hdb/Python3/lib "
+            "/hana/shared/HDB/exe/linuxx86_64/hdb/Python3/bin/python3")
+    size = _py3_chunk_size(spec, "/tmp/sapmap_wrap.b64")
+    assert 50 < size < 120, f"expected 50-120B, got {size}"
+
+
+def test_py3_params_bare_prepends_nothing():
+    cmd, params = _py3_params("/usr/bin/python3", "-c print(1)")
+    assert cmd == "/usr/bin/python3"
+    assert params == "-c print(1)"
+
+
+def test_py3_params_env_wrapped_prepends_env():
+    spec = "/usr/bin/env LD_LIBRARY_PATH=/tmp/foo /opt/python3"
+    cmd, params = _py3_params(spec, "-c print(1)")
+    assert cmd == "/usr/bin/env"
+    assert params.startswith("LD_LIBRARY_PATH=/tmp/foo /opt/python3 -c")
+
+
+def test_full_params_never_exceeds_255():
+    """Regression against Julian's issue #8 root cause: env-wrapped
+    python3 + a chunk of chunk_size bytes must produce PARAMS ≤ 255."""
+    spec = ("/usr/bin/env "
+            "LD_LIBRARY_PATH=/hana/shared/HDB/exe/linuxx86_64/hdb/Python3/lib "
+            "/hana/shared/HDB/exe/linuxx86_64/hdb/Python3/bin/python3")
+    tmp = "/tmp/sapmap_hana_wrap.b64"
+    chunk_size = _py3_chunk_size(spec, tmp)
+    body = f"-c open('{tmp}','ab').write(b'{'A' * chunk_size}')"
+    cmd, params = _py3_params(spec, body)
+    assert len(params) <= 255, \
+        f"PARAMS length {len(params)} exceeds 255-byte SAPXPG limit"
+
+
+# --------------------------------------------------------------------------
+# _parse_ls_line
+# --------------------------------------------------------------------------
+
+def test_parse_ls_total_header():
+    assert _parse_ls_line("total 42") is None
+
+
+def test_parse_ls_regular_file():
+    line = "-rw-r--r-- 1 root root 1234 2026-08-20T09:00:00 hello.txt"
+    e = _parse_ls_line(line)
+    assert e is not None
+    assert e["name"] == "hello.txt"
+    assert e["size"] == 1234
+    assert not e["is_dir"]
+
+
+def test_parse_ls_directory():
+    line = "drwxr-xr-x 2 root root 4096 2026-08-20T09:00:00 mydir"
+    e = _parse_ls_line(line)
+    assert e is not None
+    assert e["name"] == "mydir"
+    assert e["is_dir"] is True
+
+
+def test_parse_ls_symlink():
+    line = "lrwxrwxrwx 1 root root 12 2026-08-20T09:00:00 mylink -> target"
+    e = _parse_ls_line(line)
+    assert e is not None
+    assert e["name"] == "mylink"
+    assert not e["is_dir"]
+
+
+def test_parse_ls_skips_dot_entries():
+    assert _parse_ls_line("drwxr-xr-x 2 root root 4096 2026-08-20T09:00:00 .") is None
+    assert _parse_ls_line("drwxr-xr-x 2 root root 4096 2026-08-20T09:00:00 ..") is None
+
+
+def test_parse_ls_blank():
+    assert _parse_ls_line("") is None
+    assert _parse_ls_line("   ") is None
+
+
+# --------------------------------------------------------------------------
+# TargetFS.upload — happy path + integrity
+# --------------------------------------------------------------------------
+
+def test_upload_roundtrip_verifies_md5(tmp_path):
+    """Full upload happy path: bytes land on target, remote MD5
+    matches local MD5, ok=True."""
+    target = _FakeLinuxTarget()
+    fs = TargetFS(_FakeNode(), target.exec_fn)
+    local = tmp_path / "hello.txt"
+    payload = b"hello sapmap"
+    local.write_bytes(payload)
+
+    r = fs.upload(str(local), "/tmp/hello.txt")
+    assert r["ok"], r.get("error")
+    assert r["bytes"] == len(payload)
+    assert r["md5_local"] == hashlib.md5(payload).hexdigest()
+    assert r["md5_remote"] == r["md5_local"]
+    # Bytes actually landed in the fake FS
+    assert target.fs["/tmp/hello.txt"] == payload
+
+
+def test_upload_larger_payload_still_verifies(tmp_path):
+    """Multi-chunk payload (400 bytes → 6-8 chunks) still verifies."""
+    target = _FakeLinuxTarget()
+    fs = TargetFS(_FakeNode(), target.exec_fn)
+    local = tmp_path / "big.bin"
+    payload = bytes(range(256)) * 4   # 1024 bytes
+    local.write_bytes(payload)
+    r = fs.upload(str(local), "/tmp/big.bin")
+    assert r["ok"], r.get("error")
+    assert r["md5_remote"] == r["md5_local"]
+    assert target.fs["/tmp/big.bin"] == payload
+    # More than one chunk should have been used for a 1 KB payload
+    assert r["chunks"] > 1
+
+
+def test_upload_md5_mismatch_fails():
+    """If the target reports a different MD5 (simulated corruption),
+    upload must ok=False with a mismatch message."""
+    target = _FakeLinuxTarget()
+    # Poison md5sum to return a wrong hash regardless of file content
+    orig_exec = target.exec_fn
+    def poisoned(program, args):
+        if program == "/usr/bin/md5sum":
+            return {"success": True,
+                     "output": [f"deadbeef{'0'*24}  {args.strip()}"],
+                     "error": ""}
+        return orig_exec(program, args)
+    fs = TargetFS(_FakeNode(), poisoned)
+    with tempfile.NamedTemporaryFile("wb", delete=False) as f:
+        f.write(b"hello")
+        local = f.name
+    try:
+        r = fs.upload(local, "/tmp/hello")
+        assert not r["ok"]
+        assert "MD5 mismatch" in r["error"]
+    finally:
+        os.unlink(local)
+
+
+def test_upload_env_wrapped_python3_uses_smaller_chunks(tmp_path):
+    """Env-wrapped HANA python3 spec → chunks capped near 80B, more
+    chunks needed for same payload."""
+    target = _FakeLinuxTarget()
+    spec = ("/usr/bin/env "
+            "LD_LIBRARY_PATH=/hana/shared/HDB/exe/linuxx86_64/hdb/Python3/lib "
+            "/hana/shared/HDB/exe/linuxx86_64/hdb/Python3/bin/python3")
+    fs = TargetFS(_FakeNode(), target.exec_fn, python3_spec=spec)
+    local = tmp_path / "hello.txt"
+    payload = b"x" * 500
+    local.write_bytes(payload)
+    r = fs.upload(str(local), "/tmp/hello")
+    assert r["ok"], r.get("error")
+    # Bare python3 would need ~4 chunks for 500B; env-wrapped needs 8+
+    assert r["chunks"] >= 6, f"env-wrap should force smaller chunks: {r}"
+    assert r["chunk_size"] < 120
+
+
+def test_upload_skip_integrity_still_writes(tmp_path):
+    target = _FakeLinuxTarget()
+    fs = TargetFS(_FakeNode(), target.exec_fn)
+    local = tmp_path / "hello.txt"
+    local.write_bytes(b"data")
+    r = fs.upload(str(local), "/tmp/hello", skip_integrity=True)
+    assert r["ok"]
+    assert r["md5_remote"] == ""
+    assert target.fs.get("/tmp/hello") == b"data"
+
+
+def test_upload_missing_local_returns_error():
+    target = _FakeLinuxTarget()
+    fs = TargetFS(_FakeNode(), target.exec_fn)
+    r = fs.upload("/nonexistent/path/that/does/not/exist",
+                    "/tmp/x")
+    assert not r["ok"]
+    assert "local read failed" in r["error"]
+
+
+# --------------------------------------------------------------------------
+# TargetFS.download
+# --------------------------------------------------------------------------
+
+def test_download_reads_file_from_target(tmp_path):
+    target = _FakeLinuxTarget()
+    target.fs["/tmp/loot.txt"] = b"secret data"
+    fs = TargetFS(_FakeNode(), target.exec_fn)
+    r = fs.download("/tmp/loot.txt", loot_dir=str(tmp_path))
+    assert r["ok"], r.get("error")
+    assert r["bytes"] == 11
+    assert r["md5"] == hashlib.md5(b"secret data").hexdigest()
+    with open(r["loot_path"], "rb") as f:
+        assert f.read() == b"secret data"
+
+
+def test_download_missing_file_fails(tmp_path):
+    target = _FakeLinuxTarget()
+    fs = TargetFS(_FakeNode(), target.exec_fn)
+    r = fs.download("/tmp/nothere", loot_dir=str(tmp_path))
+    assert not r["ok"]
+    assert "does not exist" in r["error"]
+
+
+def test_download_respects_size_cap(tmp_path):
+    target = _FakeLinuxTarget()
+    target.fs["/tmp/huge"] = b"x" * 1000
+    fs = TargetFS(_FakeNode(), target.exec_fn)
+    r = fs.download("/tmp/huge", loot_dir=str(tmp_path), max_size=100)
+    assert not r["ok"]
+    assert "too large" in r["error"]
+
+
+def test_download_empty_file(tmp_path):
+    target = _FakeLinuxTarget()
+    target.fs["/tmp/empty"] = b""
+    fs = TargetFS(_FakeNode(), target.exec_fn)
+    r = fs.download("/tmp/empty", loot_dir=str(tmp_path))
+    assert r["ok"]
+    assert r["bytes"] == 0
+
+
+def test_download_chunked_multi_slice(tmp_path):
+    """Large file (>5KB) forces the chunked-read code path."""
+    target = _FakeLinuxTarget()
+    payload = bytes(range(256)) * 40  # 10 KB
+    target.fs["/tmp/big"] = payload
+    fs = TargetFS(_FakeNode(), target.exec_fn)
+    r = fs.download("/tmp/big", loot_dir=str(tmp_path))
+    assert r["ok"], r.get("error")
+    assert r["bytes"] == len(payload)
+    with open(r["loot_path"], "rb") as f:
+        assert f.read() == payload
+
+
+# --------------------------------------------------------------------------
+# TargetFS.list_dir + stat
+# --------------------------------------------------------------------------
+
+def test_list_dir_returns_entries():
+    target = _FakeLinuxTarget()
+    target.fs["/tmp/a.txt"] = b"aaa"
+    target.fs["/tmp/b.txt"] = b"bbbb"
+    fs = TargetFS(_FakeNode(), target.exec_fn)
+    r = fs.list_dir("/tmp")
+    assert r["ok"], r.get("error")
+    names = sorted(e["name"] for e in r["entries"])
+    assert names == ["a.txt", "b.txt"]
+    for e in r["entries"]:
+        assert not e["is_dir"]
+        assert e["size"] in (3, 4)
+
+
+def test_stat_returns_size_and_mtime():
+    target = _FakeLinuxTarget()
+    target.fs["/etc/hostname"] = b"host1\n"
+    fs = TargetFS(_FakeNode(), target.exec_fn)
+    r = fs.stat("/etc/hostname")
+    assert r["ok"]
+    assert r["exists"]
+    assert r["size"] == 6
+    assert not r["is_dir"]
+
+
+def test_stat_missing_file_ok_exists_false():
+    target = _FakeLinuxTarget()
+    fs = TargetFS(_FakeNode(), target.exec_fn)
+    r = fs.stat("/nonexistent")
+    assert r["ok"]
+    assert not r["exists"]
+
+
+# --------------------------------------------------------------------------
+# OS detection
+# --------------------------------------------------------------------------
+
+def test_detect_windows_from_os_type():
+    node = _FakeNode(os_type="Windows Server 2019")
+    fs = TargetFS(node, lambda p, a: {"success": True, "output": [], "error": ""})
+    assert fs.os_family == "windows"
+
+
+def test_detect_linux_default():
+    node = _FakeNode(os_type="")
+    fs = TargetFS(node, lambda p, a: {"success": True, "output": [], "error": ""})
+    assert fs.os_family == "linux"
+
+
+def test_windows_upload_returns_not_implemented(tmp_path):
+    """Phase 1 stubs Windows out with a clear error message."""
+    node = _FakeNode(os_type="Windows")
+    fs = TargetFS(node, lambda p, a: {"success": True, "output": [], "error": ""})
+    local = tmp_path / "x"
+    local.write_bytes(b"y")
+    r = fs.upload(str(local), "C:\\tmp\\x")
+    assert not r["ok"]
+    assert "Phase 2" in r["error"]

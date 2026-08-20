@@ -12530,6 +12530,146 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
         return json.dumps(result)
 
+    # -- Target File System (issue #37) -----------------------------------
+
+    @app.route("/api/node/<sid>/fs/list", method="POST")
+    def node_fs_list(sid):
+        """List directory contents on a target via TargetFS."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"ok": False, "error": f"Node {sid} not found"})
+        data = request.json or {}
+        path = data.get("path", "/tmp")
+        method = data.get("method", "auto")
+        try:
+            from sap_target_fs import TargetFS, make_exec_fn_from_node
+            exec_fn = make_exec_fn_from_node(node, prefer=method)
+            tfs = TargetFS(node, exec_fn)
+            return json.dumps(tfs.list_dir(path))
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e),
+                                "path": path, "entries": []})
+
+    @app.route("/api/node/<sid>/fs/stat", method="POST")
+    def node_fs_stat(sid):
+        """Stat a single path on the target."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"ok": False, "error": f"Node {sid} not found"})
+        data = request.json or {}
+        path = data.get("path", "")
+        if not path:
+            return json.dumps({"ok": False, "error": "path is required"})
+        method = data.get("method", "auto")
+        try:
+            from sap_target_fs import TargetFS, make_exec_fn_from_node
+            exec_fn = make_exec_fn_from_node(node, prefer=method)
+            tfs = TargetFS(node, exec_fn)
+            return json.dumps(tfs.stat(path))
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    @app.route("/api/node/<sid>/fs/download", method="POST")
+    def node_fs_download(sid):
+        """Download a file from the target (async — runs in background)."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"ok": False, "error": f"Node {sid} not found"})
+        data = request.json or {}
+        path = data.get("path", "")
+        if not path:
+            return json.dumps({"ok": False, "error": "path is required"})
+        method = data.get("method", "auto")
+        max_size = data.get("max_size", 100 * 1024 * 1024)
+
+        def _run():
+            _task_start(f"{sid}:fs_download",
+                        f"{sid}: Downloading {path}")
+            try:
+                from sap_target_fs import TargetFS, make_exec_fn_from_node
+                exec_fn = make_exec_fn_from_node(node, prefer=method)
+                tfs = TargetFS(node, exec_fn)
+                r = tfs.download(path, max_size=max_size)
+                if r.get("ok"):
+                    print(f"[+] {sid}: downloaded {path} → "
+                          f"{r.get('loot_path')} "
+                          f"({r.get('bytes')} B, "
+                          f"MD5 {r.get('md5', '?')[:8]}..., "
+                          f"{r.get('elapsed')}s)")
+                else:
+                    print(f"[-] {sid}: download {path} failed: "
+                          f"{r.get('error')}")
+            except Exception as e:
+                print(f"[-] {sid}: download {path} error: {e}")
+            finally:
+                _task_end(f"{sid}:fs_download")
+
+        threading.Thread(target=_run, daemon=True).start()
+        return json.dumps({"status": "started",
+                            "message": f"Downloading {path} — "
+                            f"check console for progress"})
+
+    @app.route("/api/node/<sid>/fs/upload", method="POST")
+    def node_fs_upload(sid):
+        """Upload a file to the target (async — runs in background).
+
+        Expects a multipart/form-data POST with:
+          - file: the file to upload
+          - remote_path: target path (optional — defaults to /tmp/<filename>)
+          - method: exec method (optional, default "auto")
+        """
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"ok": False, "error": f"Node {sid} not found"})
+
+        upload = request.files.get("file")
+        if not upload:
+            return json.dumps({"ok": False,
+                                "error": "No file uploaded"})
+        remote_path = request.forms.get("remote_path", "").strip()
+        if not remote_path:
+            remote_path = f"/tmp/{upload.filename}"
+        method = request.forms.get("method", "auto")
+
+        # Save the upload to a temp file so the background thread can read it
+        import tempfile as _tf
+        tmp = _tf.NamedTemporaryFile(delete=False, suffix="_" + upload.filename)
+        upload.save(tmp.name, overwrite=True)
+        tmp_path = tmp.name
+
+        def _run():
+            _task_start(f"{sid}:fs_upload",
+                        f"{sid}: Uploading → {remote_path}")
+            try:
+                from sap_target_fs import TargetFS, make_exec_fn_from_node
+                exec_fn = make_exec_fn_from_node(node, prefer=method)
+                tfs = TargetFS(node, exec_fn)
+                r = tfs.upload(tmp_path, remote_path)
+                if r.get("ok"):
+                    print(f"[+] {sid}: uploaded {remote_path} "
+                          f"({r.get('bytes')} B, "
+                          f"{r.get('chunks')} chunks, "
+                          f"MD5 match ✓, {r.get('elapsed')}s)")
+                else:
+                    print(f"[-] {sid}: upload {remote_path} failed: "
+                          f"{r.get('error')}")
+            except Exception as e:
+                print(f"[-] {sid}: upload {remote_path} error: {e}")
+            finally:
+                _task_end(f"{sid}:fs_upload")
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+
+        threading.Thread(target=_run, daemon=True).start()
+        return json.dumps({"status": "started",
+                            "message": f"Uploading → {remote_path}"})
+
     # -- Reverse Shell endpoints --
 
     @app.route("/api/shell/detect_ip", method="GET")
