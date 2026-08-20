@@ -3766,18 +3766,50 @@ function updateMap() {
     };
     // key -> [ {x, y, w, h, label, nodeType} ]
     const zoneMap = {};
-    const addToZone = (key, x, y, label, nodeType) => {
+    const addToZone = (key, x, y, w, h, label, nodeType) => {
       if (!key) return;
       if (x == null || y == null) return;
       if (!zoneMap[key]) zoneMap[key] = [];
-      zoneMap[key].push({ x, y, w: BOX_W, h: BOX_H, label, nodeType });
+      zoneMap[key].push({ x, y, w, h, label, nodeType });
     };
 
+    // DBCON cylinders + TMS trucks live in their source SAP node's
+    // host cluster (they're that source's outbound accessories), so
+    // the physical-host zone box should visually wrap them too.
+    // Without this the zone hugs the SAP boxes and the cylinders /
+    // truck stick out to the right and below, looking orphaned.
+    // Constants match the DBCON / TMS drawing loops further down —
+    // if those get resized, update these too.
+    const _DB_ACCESSORY_W = 150, _DB_ACCESSORY_H = 100;
+    const _TMS_ACCESSORY_W = 160, _TMS_ACCESSORY_H = 100;
+
     Object.entries(nodes).forEach(([sid, n]) => {
-      addToZone(hostKey(n), n._x, n._y, sid, 'sap');
+      const k = hostKey(n);
+      addToZone(k, n._x, n._y, BOX_W, BOX_H, sid, 'sap');
+      // DBCON accessories — persisted positions from prior render.
+      // First render for a new node has no persisted pos yet, so
+      // the zone excludes it; next render picks it up (positions
+      // are computed + persisted during the DBCON drawing loop
+      // further down in this render, and the next poll re-enters
+      // this block).
+      for (const edge of (n.dbcon_edges || [])) {
+        const pk = sid + '|' + edge.con_name;
+        const p = dbconPositions[pk];
+        if (p) addToZone(k, p._x, p._y,
+                          _DB_ACCESSORY_W, _DB_ACCESSORY_H,
+                          `dbcon:${edge.con_name}`, 'dbcon');
+      }
+      // TMS trucks — same story.
+      for (const dest of (n.tms_destinations || [])) {
+        const pk = 'tms:' + sid + '|' + dest.target_sid + '|' + dest.domain;
+        const p = tmsPositions[pk];
+        if (p) addToZone(k, p._x, p._y,
+                          _TMS_ACCESSORY_W, _TMS_ACCESSORY_H,
+                          `tms:${dest.target_sid}`, 'tms');
+      }
     });
     Object.entries(sccNodes).forEach(([host, sn]) => {
-      addToZone(hostKey(sn), sn._x, sn._y, host, 'scc');
+      addToZone(hostKey(sn), sn._x, sn._y, BOX_W, BOX_H, host, 'scc');
     });
 
     const PAD = 28;
