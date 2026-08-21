@@ -2524,6 +2524,7 @@ body {
         <button class="btn btn-primary" onclick="fbNavigate(document.getElementById('fb-path').value)" style="white-space:nowrap">Go</button>
         <button class="btn" onclick="fbRefresh()" title="Refresh">&#8635;</button>
       </div>
+      <div id="fb-banner" style="font-size:11px;margin-bottom:4px;flex-shrink:0"></div>
       <div id="fb-status" style="font-size:11px;color:#8b949e;margin-bottom:6px;flex-shrink:0"></div>
       <div style="overflow-y:auto;flex:1 1 0;border:1px solid #30363d;border-radius:4px;
                   user-select:text;-webkit-user-select:text;cursor:default;
@@ -14651,11 +14652,29 @@ let _fbCurrentPath = '/tmp';
 function showFileBrowserModal(sid) {
   _fbSid = sid;
   _fbCurrentPath = '/tmp';
+  const n = (mapState.nodes || {})[sid];
+  const hasCreated = !!(n && (n.created_users || []).length > 0);
+  const hasGwOnly = !!(n && n.gw_vulnerable) && !hasCreated
+                     && !(n && n.cve_2025_31324_vulnerable);
   document.getElementById('fb-sid').textContent = sid;
   document.getElementById('fb-path').value = _fbCurrentPath;
-  document.getElementById('fb-status').textContent = '';
   document.getElementById('fb-tbody').innerHTML = '';
   document.getElementById('fb-upload-status').textContent = '';
+  // Show a subtle warning when we're on the pure-GW-SAPXPG channel —
+  // populous dirs and large binaries suffer from the kernel-793 TLV
+  // stdout cap that SXPG doesn't have.  Operators regularly hit
+  // "no output" on /tmp / /etc and truncated downloads and think
+  // it's a SAPMAP bug rather than a channel limitation.
+  if (hasGwOnly) {
+    document.getElementById('fb-banner').innerHTML =
+      '<span style="color:#f0883e">⚠ GW SAPXPG channel only — ' +
+      'listings on populous dirs (/tmp, /etc) and binary downloads ' +
+      'may fail due to the kernel-793 stdout cap. ' +
+      'Create a SAPMAP user (SXPG channel) to remove this limit.</span>';
+  } else {
+    document.getElementById('fb-banner').textContent = '';
+  }
+  document.getElementById('fb-status').textContent = '';
   const win = document.getElementById('fb-window');
   win.style.top = '50%'; win.style.left = '50%';
   win.style.transform = 'translate(-50%, -50%)';

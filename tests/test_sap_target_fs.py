@@ -24,6 +24,19 @@ from sap_target_fs import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _clear_py3_cache():
+    """Wipe the module-level python3 probe cache before every test.
+    The cache is keyed by ``id(exec_fn)`` and Python recycles ids
+    after garbage-collection, causing spurious cache hits across
+    tests when the previous test's fake exec_fn happens to reuse
+    the same id."""
+    from sap_dpmon_sapstar import _PY3_CACHE
+    _PY3_CACHE.clear()
+    yield
+    _PY3_CACHE.clear()
+
+
 # --------------------------------------------------------------------------
 # Fake node + ExecFn
 # --------------------------------------------------------------------------
@@ -169,6 +182,26 @@ class _FakeLinuxTarget:
                 data = data[int(m.group(2)):int(m.group(3))]
             b64 = base64.b64encode(data).decode("ascii")
             return {"success": True, "output": [b64], "error": ""}
+        # Pattern 4: print(__import__('base64').b64encode(
+        #             open('path','rb').read()[O:E]).decode())
+        # (chunked download uses this — print() is safer than
+        # sys.stdout.write() against SAPXPG early-termination)
+        m = re.match(
+            r"^print\("
+            r"__import__\('base64'\)\.b64encode\("
+            r"open\('([^']+)','rb'\)\.read\(\)(?:\[(\d+):(\d+)\])?"
+            r"\)\.decode\(\)\)$",
+            body)
+        if m:
+            path = m.group(1)
+            data = self.fs.get(path, b"")
+            if m.group(2) and m.group(3):
+                data = data[int(m.group(2)):int(m.group(3))]
+            b64 = base64.b64encode(data).decode("ascii")
+            return {"success": True, "output": [b64], "error": ""}
+        # Trivial probe: print(42)
+        if body == "print(42)":
+            return {"success": True, "output": ["42"], "error": ""}
         return {"success": False, "output": [], "error":
                  f"unmocked python body: {body[:80]}"}
 
@@ -505,6 +538,75 @@ def test_list_dir_falls_back_to_find_when_ls_empty():
     assert by_name["systemd-private-xxx"]["is_dir"]
     assert not by_name["somefile.tmp"]["is_dir"]
     assert by_name["somefile.tmp"]["size"] == 456
+
+
+def test_list_dir_falls_back_to_ls1_when_find_also_empty():
+    """SAPXPG's PARAMS tokenizer can mangle find's -printf escape
+    sequence so find returns unparseable garbage; ls -1a is the
+    last-resort fallback that just lists names."""
+    def _fake_exec(program, args):
+        if program == "/usr/bin/stat":
+            return {"success": True,
+                     "output": ["4096|2026-08-20 09:00:00|0755|directory"],
+                     "error": ""}
+        if program == "/bin/ls" and "-la" in args:
+            return {"success": True, "output": [], "error": ""}
+        if program in ("/usr/bin/find", "/bin/find"):
+            # find returns unparseable output — mimics SAPXPG mangling
+            # of the \n in -printf
+            return {"success": True, "output": ["gibberish no pipes"],
+                     "error": ""}
+        if program == "/bin/ls" and args.startswith("-1a"):
+            return {"success": True, "output": [
+                ".", "..", "hosts", "passwd", "shadow", "resolv.conf"
+            ], "error": ""}
+        return {"success": False, "output": [], "error": "?"}
+    fs = TargetFS(_FakeNode(), _fake_exec)
+    r = fs.list_dir("/etc")
+    assert r["ok"], r.get("error")
+    names = sorted(e["name"] for e in r["entries"])
+    assert names == ["hosts", "passwd", "resolv.conf", "shadow"]
+
+
+def test_download_tolerates_truncated_b64_padding():
+    """If /usr/bin/base64's output is truncated so the total length
+    isn't a multiple of 4, we pad with '=' and decode leniently.
+    The size-check then decides whether to fall back to python3."""
+    def _fake_exec(program, args):
+        if program == "/usr/bin/stat":
+            return {"success": True,
+                     "output": ["100|2026-08-20 09:00:00|0644|regular file"],
+                     "error": ""}
+        if program == "/usr/bin/base64":
+            # Return 5 chars of b64 → not a multiple of 4, decode
+            # would raise "Incorrect padding" without the fix.
+            return {"success": True, "output": ["ABCDE"], "error": ""}
+        if program in ("/bin/base64", "/usr/local/bin/base64"):
+            return {"success": True, "output": [], "error": ""}
+        # python3 fallback returns full content
+        if program == "/usr/bin/python3":
+            m = re.search(r"\[(\d+):(\d+)\]", args)
+            if m:
+                lo, hi = int(m.group(1)), int(m.group(2))
+                data = (b"x" * 100)[lo:hi]
+                return {"success": True,
+                         "output": [base64.b64encode(data).decode()],
+                         "error": ""}
+        if program == "/bin/cat" and args == "/etc/hostname":
+            return {"success": True, "output": ["host1"], "error": ""}
+        if program == "/bin/ls":
+            # python3 probe expects /bin/ls readback
+            return {"success": True, "output": [args.split()[-1]],
+                     "error": ""}
+        return {"success": False, "output": [], "error": "?"}
+    fs = TargetFS(_FakeNode(), _fake_exec)
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as td:
+        r = fs.download("/tmp/x", loot_dir=td)
+    # Should succeed via python3 fallback after b64 length-mismatch
+    # falls through (not via the "Incorrect padding" exception).
+    assert r["ok"], r.get("error")
+    assert r["bytes"] == 100
 
 
 def test_list_dir_treats_file_as_single_entry():
