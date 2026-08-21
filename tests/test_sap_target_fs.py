@@ -21,6 +21,9 @@ from sap_target_fs import (
     _py3_chunk_size,
     _py3_params,
     _parse_ls_line,
+    _parse_win_dir_line,
+    _decode_certutil_b64,
+    ntpath_basename,
 )
 
 
@@ -796,12 +799,303 @@ def test_detect_linux_default():
     assert fs.os_family == "linux"
 
 
-def test_windows_upload_returns_not_implemented(tmp_path):
-    """Phase 1 stubs Windows out with a clear error message."""
+# --------------------------------------------------------------------------
+# ntpath_basename / _decode_certutil_b64 / _parse_win_dir_line
+# --------------------------------------------------------------------------
+
+def test_ntpath_basename_backslash():
+    assert ntpath_basename("C:\\Windows\\notepad.exe") == "notepad.exe"
+
+
+def test_ntpath_basename_forward_slash():
+    assert ntpath_basename("C:/Windows/notepad.exe") == "notepad.exe"
+
+
+def test_ntpath_basename_trailing_slash():
+    assert ntpath_basename("C:\\Windows\\") == "Windows"
+
+
+def test_decode_certutil_b64_roundtrip():
+    payload = b"hello world" * 20
+    b64 = base64.b64encode(payload).decode()
+    # certutil wraps at 64 chars and adds the PEM markers.
+    wrapped = "\n".join(b64[i:i+64] for i in range(0, len(b64), 64))
+    text = (f"-----BEGIN CERTIFICATE-----\r\n{wrapped}\r\n"
+            f"-----END CERTIFICATE-----\r\n")
+    assert _decode_certutil_b64(text) == payload
+
+
+def test_decode_certutil_b64_returns_none_for_garbage():
+    assert _decode_certutil_b64("") is None
+    assert _decode_certutil_b64("nothing here") is None
+
+
+def test_decode_certutil_b64_tolerates_truncation():
+    """SAPXPG can drop the tail; lenient decode should still return
+    whatever prefix decodes cleanly."""
+    payload = b"hello world"
+    b64 = base64.b64encode(payload).decode()
+    # Chop off the trailing '=' padding certutil emits.
+    truncated = b64.rstrip("=")
+    text = (f"-----BEGIN CERTIFICATE-----\n{truncated}\n"
+            f"-----END CERTIFICATE-----\n")
+    r = _decode_certutil_b64(text)
+    assert r is not None
+    assert r.startswith(b"hello")
+
+
+def test_parse_win_dir_us_file():
+    e = _parse_win_dir_line("08/20/2026  09:00 AM              1234 hosts")
+    assert e is not None
+    assert e["name"] == "hosts"
+    assert e["size"] == 1234
+    assert not e["is_dir"]
+
+
+def test_parse_win_dir_us_dir():
+    e = _parse_win_dir_line("08/20/2026  09:00 AM    <DIR>          System32")
+    assert e is not None
+    assert e["name"] == "System32"
+    assert e["is_dir"] is True
+    assert e["size"] == 0
+
+
+def test_parse_win_dir_de_locale():
+    e = _parse_win_dir_line("20.08.2026  09:00                 1234 hosts")
+    assert e is not None
+    assert e["name"] == "hosts"
+    assert e["size"] == 1234
+
+
+def test_parse_win_dir_skips_headers():
+    assert _parse_win_dir_line(" Volume in drive C is Windows") is None
+    assert _parse_win_dir_line(" Directory of C:\\Windows") is None
+    assert _parse_win_dir_line("               42 File(s)  99999 bytes") is None
+    assert _parse_win_dir_line("") is None
+
+
+def test_parse_win_dir_skips_dot_entries():
+    assert _parse_win_dir_line(
+        "08/20/2026  09:00 AM    <DIR>          .") is None
+    assert _parse_win_dir_line(
+        "08/20/2026  09:00 AM    <DIR>          ..") is None
+
+
+def test_parse_win_dir_name_with_spaces():
+    e = _parse_win_dir_line(
+        "08/20/2026  09:00 AM              1024 my file.txt")
+    assert e is not None
+    assert e["name"] == "my file.txt"
+    assert e["size"] == 1024
+
+
+# --------------------------------------------------------------------------
+# _FakeWindowsTarget + Windows upload/download/list/stat round-trips
+# --------------------------------------------------------------------------
+
+class _FakeWindowsTarget:
+    """In-memory Windows target that responds to the cmd.exe /C
+    invocations TargetFS emits.  Supports enough of dir /-C /A,
+    echo>>, certutil -encode/-decode, and certutil -hashfile to
+    round-trip upload → verify → download."""
+
+    def __init__(self):
+        self.fs = {}     # normalised path -> bytes
+        self.calls = []
+
+    @staticmethod
+    def _norm(path: str) -> str:
+        return path.replace("/", "\\").strip('"').lower()
+
+    def exec_fn(self, program, args):
+        self.calls.append((program, args))
+        if program != "cmd.exe":
+            return {"success": False, "output": [],
+                     "error": f"unmocked program {program}"}
+        # args starts with "/C "
+        if not args.startswith("/C "):
+            return {"success": False, "output": [],
+                     "error": "unmocked args shape"}
+        cmd = args[3:]
+
+        # del /q /f "PATH" ["PATH2"] 2>nul
+        m = re.match(r'^del\s+/q\s+/f\s+(.+?)(?:\s+2>nul)?$', cmd)
+        if m:
+            for tok in re.findall(r'"([^"]+)"', m.group(1)):
+                self.fs.pop(self._norm(tok), None)
+            return {"success": True, "output": [], "error": ""}
+
+        # echo BASE64>"path"   or   echo BASE64>>"path"
+        m = re.match(r'^echo\s+([A-Za-z0-9+/=]+)(>{1,2})"([^"]+)"$', cmd)
+        if m:
+            chunk, op, path = m.group(1), m.group(2), m.group(3)
+            key = self._norm(path)
+            existing = self.fs.get(key, b"")
+            data = chunk.encode("ascii") + b"\r\n"
+            self.fs[key] = data if op == ">" else existing + data
+            return {"success": True, "output": [], "error": ""}
+
+        # certutil -decode "src" "dst" >nul
+        m = re.match(
+            r'^certutil\s+-decode\s+"([^"]+)"\s+"([^"]+)"(?:\s+>nul)?$',
+            cmd)
+        if m:
+            src, dst = self._norm(m.group(1)), self._norm(m.group(2))
+            blob = self.fs.get(src, b"")
+            clean = re.sub(rb"[^A-Za-z0-9+/=]", b"", blob)
+            try:
+                self.fs[dst] = base64.b64decode(clean, validate=False)
+                return {"success": True, "output": [], "error": ""}
+            except Exception as e:
+                return {"success": False, "output": [str(e)], "error": ""}
+
+        # certutil -encode "src" "tmp" >nul & type "tmp" & del /q /f "tmp"
+        m = re.match(
+            r'^certutil\s+-encode\s+"([^"]+)"\s+"([^"]+)"\s+>nul\s+&\s+'
+            r'type\s+"([^"]+)"\s+&\s+del\s+/q\s+/f\s+"([^"]+)"$',
+            cmd)
+        if m:
+            src = self._norm(m.group(1))
+            if src not in self.fs:
+                return {"success": False,
+                         "output": ["CertUtil: -encode command FAILED: 0x1"],
+                         "error": ""}
+            payload = self.fs[src]
+            b64 = base64.b64encode(payload).decode()
+            wrapped = "\n".join(b64[i:i+64]
+                                  for i in range(0, len(b64), 64))
+            out = ["-----BEGIN CERTIFICATE-----",
+                   *wrapped.split("\n"),
+                   "-----END CERTIFICATE-----"]
+            return {"success": True, "output": out, "error": ""}
+
+        # certutil -hashfile "path" MD5
+        m = re.match(r'^certutil\s+-hashfile\s+"([^"]+)"\s+MD5$', cmd)
+        if m:
+            path = self._norm(m.group(1))
+            if path not in self.fs:
+                return {"success": False,
+                         "output": ["CertUtil: -hashfile FAILED: 0x2"],
+                         "error": ""}
+            h = hashlib.md5(self.fs[path]).hexdigest()
+            return {"success": True,
+                     "output": [f"MD5 hash of {m.group(1)}:", h,
+                                 "CertUtil: -hashfile command completed."],
+                     "error": ""}
+
+        # dir /-C /A "path"
+        m = re.match(r'^dir\s+/-C\s+/A\s+"([^"]+)"$', cmd)
+        if m:
+            path = self._norm(m.group(1))
+            # File?
+            if path in self.fs:
+                name = ntpath_basename(m.group(1))
+                size = len(self.fs[path])
+                return {"success": True,
+                         "output": [
+                            f" Volume in drive C is Windows",
+                            f" Directory of {m.group(1)}",
+                            f"08/20/2026  09:00 AM              {size} {name}",
+                            f"               1 File(s)     {size} bytes",
+                         ], "error": ""}
+            # Directory? — enumerate entries whose parent is `path`
+            prefix = path.rstrip("\\") + "\\"
+            children = [(p, data) for p, data in self.fs.items()
+                          if p.startswith(prefix)
+                          and "\\" not in p[len(prefix):]]
+            if not children and prefix != "c:\\windows\\temp\\":
+                return {"success": True,
+                         "output": ["File Not Found"], "error": ""}
+            out = [
+                " Volume in drive C is Windows",
+                f" Directory of {m.group(1)}",
+            ]
+            for p, data in sorted(children):
+                name = p[len(prefix):]
+                out.append(
+                    f"08/20/2026  09:00 AM              "
+                    f"{len(data)} {name}")
+            out.append(
+                f"               {len(children)} File(s)  100 bytes")
+            out.append("               1 Dir(s)  99999999 bytes free")
+            return {"success": True, "output": out, "error": ""}
+
+        # mkdir "path"
+        m = re.match(r'^mkdir\s+"([^"]+)"$', cmd)
+        if m:
+            return {"success": True, "output": [], "error": ""}
+
+        return {"success": False, "output": [],
+                 "error": f"unmocked cmd tail: {cmd[:100]}"}
+
+
+def test_windows_upload_roundtrip_verifies_md5(tmp_path):
+    target = _FakeWindowsTarget()
+    node = _FakeNode(os_type="Windows Server 2019")
+    fs = TargetFS(node, target.exec_fn)
+    local = tmp_path / "payload.bin"
+    payload = b"hello windows world " * 10
+    local.write_bytes(payload)
+    r = fs.upload(str(local), "C:\\Windows\\Temp\\payload.bin")
+    assert r["ok"], r
+    assert r["bytes"] == len(payload)
+    assert r["md5_local"] == r["md5_remote"]
+    assert target.fs["c:\\windows\\temp\\payload.bin"] == payload
+
+
+def test_windows_upload_mkdir_stat(tmp_path):
+    target = _FakeWindowsTarget()
     node = _FakeNode(os_type="Windows")
-    fs = TargetFS(node, lambda p, a: {"success": True, "output": [], "error": ""})
-    local = tmp_path / "x"
-    local.write_bytes(b"y")
-    r = fs.upload(str(local), "C:\\tmp\\x")
-    assert not r["ok"]
-    assert "Phase 2" in r["error"]
+    fs = TargetFS(node, target.exec_fn)
+    r_mkdir = fs.mkdir("C:\\Windows\\Temp\\newdir")
+    assert r_mkdir["ok"]
+
+    # Put a file, then stat it
+    target.fs["c:\\windows\\temp\\hi.txt"] = b"hey"
+    r_stat = fs.stat("C:\\Windows\\Temp\\hi.txt")
+    assert r_stat["ok"] and r_stat["exists"]
+    assert r_stat["size"] == 3
+    assert not r_stat["is_dir"]
+
+
+def test_windows_download_roundtrip(tmp_path):
+    target = _FakeWindowsTarget()
+    target.fs["c:\\windows\\temp\\loot.bin"] = b"secret bytes " * 50
+    node = _FakeNode(os_type="Windows")
+    fs = TargetFS(node, target.exec_fn)
+    r = fs.download("C:\\Windows\\Temp\\loot.bin",
+                     loot_dir=str(tmp_path))
+    assert r["ok"], r
+    assert r["bytes"] == len(b"secret bytes " * 50)
+    with open(r["loot_path"], "rb") as fh:
+        assert fh.read() == b"secret bytes " * 50
+
+
+def test_windows_list_dir_and_file(tmp_path):
+    target = _FakeWindowsTarget()
+    target.fs["c:\\windows\\temp\\a.txt"] = b"aaa"
+    target.fs["c:\\windows\\temp\\b.log"] = b"bbbbbb"
+    node = _FakeNode(os_type="Windows")
+    fs = TargetFS(node, target.exec_fn)
+
+    # Directory listing
+    r_dir = fs.list_dir("C:\\Windows\\Temp")
+    assert r_dir["ok"]
+    names = sorted(e["name"] for e in r_dir["entries"])
+    assert "a.txt" in names and "b.log" in names
+
+    # Single-file listing (short-circuits to stat)
+    r_file = fs.list_dir("C:\\Windows\\Temp\\a.txt")
+    assert r_file["ok"]
+    assert len(r_file["entries"]) == 1
+    assert r_file["entries"][0]["name"] == "a.txt"
+    assert r_file["entries"][0]["abs_path"] == "C:\\Windows\\Temp\\a.txt"
+
+
+def test_windows_stat_missing():
+    target = _FakeWindowsTarget()
+    node = _FakeNode(os_type="Windows")
+    fs = TargetFS(node, target.exec_fn)
+    r = fs.stat("C:\\Windows\\Temp\\does_not_exist.txt")
+    assert r["ok"]
+    assert not r["exists"]

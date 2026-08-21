@@ -14665,8 +14665,13 @@ let _fbSortDir = 1;
 
 function showFileBrowserModal(sid) {
   _fbSid = sid;
-  _fbCurrentPath = '/tmp';
   const n = (mapState.nodes || {})[sid];
+  // Pick a sensible default starting directory based on OS —
+  // /tmp is meaningless on Windows and C:\Windows\Temp is meaningless
+  // on Linux.  Falls back to /tmp when os_type is unknown.
+  const osType = (n && n.os_type || '').toLowerCase();
+  const isWin = /windows|win|nt/.test(osType);
+  _fbCurrentPath = isWin ? 'C:\\Windows\\Temp' : '/tmp';
   const hasCreated = !!(n && (n.created_users || []).length > 0);
   const hasGwOnly = !!(n && n.gw_vulnerable) && !hasCreated
                      && !(n && n.cve_2025_31324_vulnerable);
@@ -14706,12 +14711,19 @@ function _fbFormatSize(bytes) {
 }
 
 async function fbNavigate(path) {
+  // Detect Windows-style path so 'up-one-level' walks backslashes
+  // instead of forward slashes.  Also drop trailing separators
+  // uniformly regardless of separator style.
+  const isWinPath = /^[A-Za-z]:[\\\/]/.test(_fbCurrentPath);
+  const sep = isWinPath ? '\\' : '/';
+  const splitRe = isWinPath ? /[\\\/]/ : /\//;
+  const trimRe = isWinPath ? /[\\\/]+$/ : /\/+$/;
   if (path === '..') {
-    const parts = _fbCurrentPath.replace(/\/+$/, '').split('/');
+    const parts = _fbCurrentPath.replace(trimRe, '').split(splitRe);
     parts.pop();
-    path = parts.join('/') || '/';
+    path = parts.join(sep) || (isWinPath ? 'C:\\' : '/');
   }
-  path = path.replace(/\/+$/, '') || '/';
+  path = path.replace(trimRe, '') || (isWinPath ? 'C:\\' : '/');
   _fbCurrentPath = path;
   document.getElementById('fb-path').value = path;
   document.getElementById('fb-status').textContent = 'Loading...';
@@ -14783,6 +14795,8 @@ function _fbRenderEntries() {
   const tbody = document.getElementById('fb-tbody');
   tbody.innerHTML = '';
   const path = _fbCurrentPath;
+  const isWinPath = /^[A-Za-z]:[\\\/]/.test(path);
+  const sep = isWinPath ? '\\' : '/';
   const sorted = _fbSortEntries(_fbEntries);
   for (const e of sorted) {
     const tr = document.createElement('tr');
@@ -14797,10 +14811,14 @@ function _fbRenderEntries() {
     let fullPath;
     if (e.abs_path) {
       fullPath = e.abs_path;
-    } else if (e.name && e.name[0] === '/') {
+    } else if (e.name && (e.name[0] === '/'
+                            || /^[A-Za-z]:[\\\/]/.test(e.name))) {
       fullPath = e.name;
     } else {
-      fullPath = (path === '/' ? '/' : path + '/') + e.name;
+      // Trim any trailing separator on `path` (root cases: "/" and "C:\")
+      // before adding our own separator.
+      const base = path.replace(/[\\\/]+$/, '') || (isWinPath ? 'C:' : '');
+      fullPath = base + sep + e.name;
     }
     if (e.is_dir) {
       tr.ondblclick = function(){ fbNavigate(fullPath); };
@@ -14924,7 +14942,11 @@ async function fbUploadFile() {
   const input = document.getElementById('fb-upload-input');
   if (!input.files || !input.files[0]) return;
   const file = input.files[0];
-  const remotePath = (_fbCurrentPath === '/' ? '/' : _fbCurrentPath + '/') + file.name;
+  const isWinPath = /^[A-Za-z]:[\\\/]/.test(_fbCurrentPath);
+  const sep = isWinPath ? '\\' : '/';
+  const uploadBase = _fbCurrentPath.replace(/[\\\/]+$/, '')
+                       || (isWinPath ? 'C:' : '');
+  const remotePath = uploadBase + sep + file.name;
   const status = document.getElementById('fb-upload-status');
   status.textContent =
     'Uploading ' + file.name + ' (' + _fbFormatSize(file.size) + ')...';
