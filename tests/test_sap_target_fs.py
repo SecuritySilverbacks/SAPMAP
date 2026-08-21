@@ -474,6 +474,63 @@ def test_list_dir_dedupes_sapxpg_double_echo():
     assert names == ["bin", "etc"], f"duplicates not stripped: {names}"
 
 
+def test_list_dir_falls_back_to_find_when_ls_empty():
+    """When both ls variants return empty (SAPXPG buffer drop on
+    populous /tmp, /etc, /var/log), list_dir falls back to
+    ``find -printf`` which fits under the SAPXPG stdout cap.
+    Reproduces the reported '/tmp cannot be read' failure."""
+    def _fake_exec(program, args):
+        if program == "/bin/ls":
+            # Both ls variants return NOTHING — SAPXPG cap exceeded
+            return {"success": True, "output": [], "error": ""}
+        if program == "/usr/bin/stat":
+            # Path is a directory
+            return {"success": True,
+                     "output": ["4096|2026-08-20 09:00:00|0755|directory"],
+                     "error": ""}
+        if program == "/usr/bin/find":
+            return {"success": True, "output": [
+                "d|0755|4096|2026-08-20T09:00:00|systemd-private-xxx",
+                "f|0644|123|2026-08-20T09:01:00|.X0-lock",
+                "f|0644|456|2026-08-20T09:02:00|somefile.tmp",
+            ], "error": ""}
+        return {"success": False, "output": [], "error": "?"}
+    fs = TargetFS(_FakeNode(), _fake_exec)
+    r = fs.list_dir("/tmp")
+    assert r["ok"], r.get("error")
+    names = sorted(e["name"] for e in r["entries"])
+    assert names == [".X0-lock", "somefile.tmp", "systemd-private-xxx"]
+    # Verify types
+    by_name = {e["name"]: e for e in r["entries"]}
+    assert by_name["systemd-private-xxx"]["is_dir"]
+    assert not by_name["somefile.tmp"]["is_dir"]
+    assert by_name["somefile.tmp"]["size"] == 456
+
+
+def test_list_dir_treats_file_as_single_entry():
+    """When the operator types a file path (e.g. /etc/passwd) as the
+    directory to browse, list_dir returns a single entry with
+    abs_path set so the UI can offer download without corrupting
+    the path via /current_dir/name join.  Reproduces the
+    '/etc/passwd//etc/passwd' download bug."""
+    def _fake_exec(program, args):
+        if program == "/usr/bin/stat":
+            # Path is a regular file
+            return {"success": True,
+                     "output": ["2841|2026-08-20 09:00:00|0644|regular file"],
+                     "error": ""}
+        return {"success": False, "output": [], "error": "?"}
+    fs = TargetFS(_FakeNode(), _fake_exec)
+    r = fs.list_dir("/etc/passwd")
+    assert r["ok"], r.get("error")
+    assert len(r["entries"]) == 1
+    e = r["entries"][0]
+    assert e["name"] == "passwd"
+    assert e["abs_path"] == "/etc/passwd"
+    assert e["size"] == 2841
+    assert not e["is_dir"]
+
+
 def test_list_dir_falls_back_to_bare_la_when_time_style_returns_empty():
     """Some builds of ls print an "unrecognized option --time-style"
     to stderr and produce no stdout — list_dir must retry with bare

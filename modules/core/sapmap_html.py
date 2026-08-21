@@ -14702,7 +14702,18 @@ async function fbNavigate(path) {
       tr.onmouseover = function(){ this.style.background='#161b22'; };
       tr.onmouseout = function(){ this.style.background=''; };
       const icon = e.is_dir ? '📁' : '📄';
-      const fullPath = (path === '/' ? '/' : path + '/') + e.name;
+      // Prefer abs_path when the backend supplied one (single-file
+      // listing case).  Otherwise if the name is already absolute
+      // (some ls variants echo the full path when given a file arg),
+      // use it directly.  Otherwise join with the current directory.
+      let fullPath;
+      if (e.abs_path) {
+        fullPath = e.abs_path;
+      } else if (e.name && e.name[0] === '/') {
+        fullPath = e.name;
+      } else {
+        fullPath = (path === '/' ? '/' : path + '/') + e.name;
+      }
       if (e.is_dir) {
         tr.ondblclick = function(){ fbNavigate(fullPath); };
       }

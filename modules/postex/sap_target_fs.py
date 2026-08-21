@@ -599,28 +599,53 @@ class TargetFS:
         return b"".join(parts)
 
     def _list_dir_linux(self, remote_path: str) -> dict:
-        """Parse ``ls -la`` output into an entry list.
+        """Parse a directory listing.
 
-        Two ls variants are tried in order — the first one that returns
-        output wins:
+        Three strategies are tried in order — the first one that
+        returns parseable output wins:
 
         1. ``ls -la --time-style=+%Y-%m-%dT%H:%M:%S <path>`` — GNU
            coreutils with ISO-style timestamps.
         2. ``ls -la <path>`` — bare ``-la`` for BSD ls / minimal
-           busybox / hardened SAP appliances where ``--time-style``
-           may print an "unrecognized option" error to stderr and
-           kill the listing.
+           busybox where ``--time-style`` may error out.
+        3. ``find <path> -maxdepth 1 -mindepth 1 -printf "..."`` — the
+           SAPXPG-friendly fallback.  ``ls -la`` output on populous
+           dirs (/tmp, /etc, /var/log) routinely overflows SAPXPG's
+           stdout capture and the entire response comes back empty.
+           ``find -printf`` produces a much tighter one-line-per-entry
+           format (~40 B/entry vs ~80 for ls) that fits under the
+           buffer cap, and %f gives the basename only so filenames
+           with spaces or absolute paths (single-file listing case)
+           don't confuse downstream path-joining.
 
-        Fallback #2 also handles the "/tmp returned empty" case: on
-        some kernels the SAPXPG output-capture drops long stdout
-        completely when combined with the extra ``--time-style`` arg,
-        and the bare form succeeds where the fancy form fails.
+        Special case: if ``remote_path`` turns out to be a file (not
+        a directory), a single-entry result is returned so the UI
+        can offer the file for download.
 
-        Result entries are deduplicated by (name, mode, size).  SAPXPG
-        on kernel 793+ has been observed to echo each stdout line
-        twice (once in the P3 TLV, once in P4) which used to produce
-        duplicate rows in the file browser.
+        Result entries are deduplicated by (name, mode, size).
+        SAPXPG on kernel 793+ echoes each stdout line twice (P3 + P4
+        TLV frames), which would otherwise show every entry twice.
         """
+        # Short-circuit: if path is a file, stat it and return a
+        # single entry — /etc/passwd and friends land here when the
+        # operator types the full file path in the address bar.
+        st = self._stat_linux(remote_path)
+        if st.get("ok") and st.get("exists") and not st.get("is_dir"):
+            basename = os.path.basename(remote_path.rstrip("/")) \
+                        or remote_path
+            return {"ok": True, "path": remote_path,
+                     "entries": [{
+                        "name":   basename,
+                        "size":   st.get("size", 0),
+                        "is_dir": False,
+                        "mtime":  st.get("mtime", ""),
+                        "mode":   st.get("mode", ""),
+                        # Preserve the absolute path for the UI so
+                        # the download button doesn't try to join.
+                        "abs_path": remote_path,
+                     }],
+                     "error": ""}
+
         r = self.exec_fn("/bin/ls",
                           f"-la --time-style=+%Y-%m-%dT%H:%M:%S "
                           f"{remote_path}")
@@ -652,6 +677,21 @@ class TargetFS:
                              "error": lines2[0].strip()}
                 lines = lines2
 
+        # --- Strategy 3: find -printf (SAPXPG-friendly compact) -----
+        # Kicks in when both ls variants produced zero parseable
+        # entries (very common on /tmp, /etc, /var/log with dozens
+        # or hundreds of entries).
+        need_find = (not lines) or all(
+            _parse_ls_line(l) is None for l in lines
+        )
+        if need_find:
+            find_entries = self._list_dir_via_find(remote_path)
+            if find_entries is not None:
+                # find_entries is [] for genuinely-empty dirs — that's
+                # a successful result, not a fallback failure.
+                return {"ok": True, "path": remote_path,
+                         "entries": find_entries, "error": ""}
+
         if not lines:
             return {"ok": False, "path": remote_path, "entries": [],
                      "error": (f"ls returned no output for "
@@ -673,6 +713,65 @@ class TargetFS:
             entries.append(e)
         return {"ok": True, "path": remote_path, "entries": entries,
                  "error": ""}
+
+    def _list_dir_via_find(self, remote_path: str) -> Optional[list]:
+        """SAPXPG-friendly directory listing via ``find -printf``.
+
+        Format::
+
+            <type>|<mode_octal>|<size>|<mtime_iso>|<basename>
+
+        e.g. ``f|0644|1234|2026-08-20T09:00:00|hosts``.  Pipe as
+        separator so filenames with spaces survive.  Basename only
+        (%f) so absolute paths never leak into the entry name.
+
+        Returns:
+            list of entry dicts on success (empty list == empty dir),
+            or None when find is unavailable / stdout still dropped.
+        """
+        printf_fmt = ("%y|%m|%s|%TY-%Tm-%TdT%TH:%TM:%TS|%f\\n")
+        for find_bin in ("/usr/bin/find", "/bin/find"):
+            r = self.exec_fn(find_bin,
+                              f"{remote_path} -maxdepth 1 -mindepth 1 "
+                              f"-printf {printf_fmt}")
+            lines = r.get("output", []) or []
+            if not lines:
+                # Try next find location
+                continue
+            first_lo = lines[0].lower()
+            if ("no such" in first_lo or "cannot" in first_lo
+                    or "not a directory" in first_lo):
+                continue
+
+            entries = []
+            seen = set()
+            for line in lines:
+                s = line.rstrip()
+                if not s or "|" not in s:
+                    continue
+                parts = s.split("|", 4)
+                if len(parts) < 5:
+                    continue
+                ftype, mode, size_str, mtime, name = parts
+                if name in (".", ".."):
+                    continue
+                try:
+                    size = int(size_str)
+                except ValueError:
+                    continue
+                key = (name, mode, size)
+                if key in seen:
+                    continue
+                seen.add(key)
+                entries.append({
+                    "name":   name,
+                    "size":   size,
+                    "is_dir": ftype == "d",
+                    "mtime":  mtime,
+                    "mode":   mode,
+                })
+            return entries
+        return None
 
     def _stat_linux(self, remote_path: str) -> dict:
         """Read size / mtime / mode / is_dir via ``stat -c``.
