@@ -735,29 +735,25 @@ class TargetFS:
                              "error": lines2[0].strip()}
                 lines = lines2
 
-        # --- Strategy 3: find -printf (SAPXPG-friendly compact) -----
-        # Kicks in when both ls variants produced zero parseable
-        # entries (very common on /tmp, /etc, /var/log with dozens
-        # or hundreds of entries).  _list_dir_via_find returns None
-        # for "nothing came back" — we treat that as "keep trying".
-        need_find = (not lines) or all(
+        # --- Strategy 3: names-only listing + batched stat ----------
+        # Kicks in when both ls -la variants overflowed SAPXPG's
+        # stdout buffer (very common on /tmp, /etc, /var/log with
+        # dozens or hundreds of entries).  Multiple bare-name
+        # commands are tried in order of preference; the first one
+        # that returns anything wins.  Metadata is then filled in
+        # via batched stat calls (~10 names per batch).
+        need_names = (not lines) or all(
             _parse_ls_line(l) is None for l in lines
         )
-        if need_find:
-            find_entries = self._list_dir_via_find(remote_path)
-            if find_entries:  # non-empty list
+        if need_names:
+            names_entries = self._list_dir_via_names(remote_path)
+            if names_entries:
                 return {"ok": True, "path": remote_path,
-                         "entries": find_entries, "error": ""}
-
-            # --- Strategy 4: ls -1a (names only — last resort) ------
-            ls1_entries = self._list_dir_via_ls1(remote_path)
-            if ls1_entries:
-                return {"ok": True, "path": remote_path,
-                         "entries": ls1_entries, "error": ""}
+                         "entries": names_entries, "error": ""}
 
         if not lines:
             return {"ok": False, "path": remote_path, "entries": [],
-                     "error": (f"ls / find / ls -1a all returned no "
+                     "error": (f"ls / find / ls -1 all returned no "
                                f"parseable output for {remote_path} "
                                f"— the exec channel dropped its "
                                f"stdout.  Check the console for the "
@@ -777,128 +773,122 @@ class TargetFS:
         return {"ok": True, "path": remote_path, "entries": entries,
                  "error": ""}
 
-    def _list_dir_via_find(self, remote_path: str) -> Optional[list]:
-        """SAPXPG-friendly directory listing via ``find -printf``.
+    def _list_dir_via_names(self, remote_path: str) -> Optional[list]:
+        """Names-first fallback for populous dirs on SAPXPG.
 
-        Format::
+        The operator confirmed ``ls /tmp`` works over GW SAPXPG when
+        ``ls -la /tmp`` does not — the per-entry metadata line pushes
+        the total stdout past the kernel-793 cap, but the bare name
+        list fits.  This method tries a battery of compact
+        name-listing commands in order of preference, splits the
+        output into names, then fills metadata via batched stat.
 
-            <type>|<mode_octal>|<size>|<mtime_iso>|<basename>
+        Commands tried in order (whichever returns names first wins):
 
-        e.g. ``f|0644|1234|2026-08-20T09:00:00|hosts``.  Pipe as
-        separator so filenames with spaces survive.  Basename only
-        (%f) so absolute paths never leak into the entry name.
+        1. ``ls -1 <path>``       — one per line, visible only
+        2. ``ls -1 -a <path>``    — one per line, with hidden
+        3. ``ls <path>``          — bare multi-column, visible only
+        4. ``ls -a <path>``       — bare multi-column, with hidden
+        5. ``find <path> -maxdepth 1 -mindepth 1`` — plain paths,
+           no ``-printf`` (SAPXPG mangles the pipe-separated format
+           string on some kernels, e.g. "find: possible unquoted
+           pattern after predicate `-printf'?")
 
-        Returns:
-            list of entry dicts on success (empty list == empty dir),
-            or None when find is unavailable / stdout still dropped
-            / nothing parseable came back.
+        Trade-off: 1 + ceil(N / BATCH) GW round trips instead of 1
+        for ls -la.  For /tmp with ~100 entries that's ~11 calls
+        (~30-60 s) — slow but working.  SXPG-authenticated is
+        immune and skips this whole path.
         """
-        printf_fmt = ("%y|%m|%s|%TY-%Tm-%TdT%TH:%TM:%TS|%f\\n")
-        for find_bin in ("/usr/bin/find", "/bin/find"):
-            r = self.exec_fn(find_bin,
-                              f"{remote_path} -maxdepth 1 -mindepth 1 "
-                              f"-printf {printf_fmt}")
+        candidates = [
+            ("/bin/ls", f"-1 {remote_path}",        "ls -1"),
+            ("/bin/ls", f"-1 -a {remote_path}",     "ls -1 -a"),
+            ("/bin/ls", f"{remote_path}",           "ls"),
+            ("/bin/ls", f"-a {remote_path}",        "ls -a"),
+            ("/usr/bin/find",
+                f"{remote_path} -maxdepth 1 -mindepth 1", "find"),
+            ("/bin/find",
+                f"{remote_path} -maxdepth 1 -mindepth 1", "find"),
+        ]
+        for prog, args, tag in candidates:
+            r = self.exec_fn(prog, args)
             lines = r.get("output", []) or []
             if not lines:
-                # Try next find location
                 continue
             first_lo = lines[0].lower()
-            if ("no such" in first_lo or "cannot" in first_lo
+            if ("no such" in first_lo or "cannot access" in first_lo
                     or "not a directory" in first_lo):
+                # Fatal error — path is bad; abort the whole chain.
+                return None
+            if "paths must precede" in first_lo \
+                    or "possible unquoted" in first_lo \
+                    or "invalid option" in first_lo \
+                    or "unrecognized option" in first_lo:
+                # Tool-level error (SAPXPG mangling / BSD variant);
+                # try the next command.
+                print(f"[-] {self.label}: {tag} rejected — "
+                      f"{lines[0].strip()[:100]}")
                 continue
 
-            entries = []
-            seen = set()
-            for line in lines:
-                s = line.rstrip()
-                if not s or "|" not in s:
-                    continue
-                parts = s.split("|", 4)
-                if len(parts) < 5:
-                    continue
-                ftype, mode, size_str, mtime, name = parts
-                if name in (".", ".."):
-                    continue
-                try:
-                    size = int(size_str)
-                except ValueError:
-                    continue
-                key = (name, mode, size)
-                if key in seen:
-                    continue
-                seen.add(key)
-                entries.append({
-                    "name":   name,
-                    "size":   size,
-                    "is_dir": ftype == "d",
-                    "mtime":  mtime,
-                    "mode":   mode,
-                })
-            if entries:
-                print(f"[*] {self.label}: find fallback → "
-                      f"{len(entries)} entries in {remote_path}")
-                return entries
-            # find returned lines but nothing parsed.  Log the first
-            # few for diagnostics — usually means SAPXPG mangled the
-            # `\n` in -printf so all entries came back concatenated
-            # on one line.
-            print(f"[-] {self.label}: find returned "
-                  f"{len(lines)} lines but no parseable entries — "
-                  f"raw sample: {[l[:80] for l in lines[:2]]}")
-            return None
+            names = self._extract_names(lines, remote_path, tag)
+            if not names:
+                continue
+
+            print(f"[*] {self.label}: {tag} → {len(names)} names in "
+                  f"{remote_path}; batched-stat for metadata")
+            entries = self._batched_stat(remote_path, names)
+            print(f"[*] {self.label}: names fallback ({tag}) → "
+                  f"{len(entries)} entries with metadata")
+            return entries
+        print(f"[-] {self.label}: every name-listing fallback "
+              f"returned empty on {remote_path} — SAPXPG channel "
+              f"is silently dropping stdout even for compact output")
         return None
 
-    def _list_dir_via_ls1(self, remote_path: str) -> Optional[list]:
-        """SAPXPG-friendly listing: ``ls -1a`` for names, then batched
-        ``stat`` calls to fill in size / mode / mtime / is_dir.
-
-        Why this exists: on the pure GW SAPXPG channel with kernel 793+,
-        ``ls -la /tmp`` and ``find /tmp -maxdepth 1 -printf ...`` both
-        overflow the stdout capture and return empty, but bare
-        ``ls /tmp`` (names only) survives — its per-entry output is
-        <20 B vs ls -la's ~80 B and find's ~50 B.
-
-        Trade-off: N+ceil(N/BATCH) GW round-trips per listing instead
-        of 1.  Each stat call groups up to BATCH filenames whose total
-        joined length stays under a conservative PARAMS budget so we
-        don't silently truncate.  For /tmp with 100 entries that's
-        ~11 calls (~30-60 s over SAPXPG) — slow but working, and the
-        operator sees the correct sizes / dates instead of a wall of
-        zeros.  SXPG-authenticated skips this fallback entirely.
-        """
-        r = self.exec_fn("/bin/ls", f"-1a {remote_path}")
-        lines = r.get("output", []) or []
-        if not lines:
-            return None
-        first_lo = lines[0].lower()
-        if "no such" in first_lo or "cannot" in first_lo:
-            return None
+    def _extract_names(self, lines: list, remote_path: str,
+                        tag: str) -> list:
+        """Extract a deduplicated list of basenames from bare
+        ls / find output.  Handles both one-per-line and
+        multi-column outputs."""
         names = []
         seen = set()
+        dir_prefix = remote_path.rstrip("/") + "/"
         for line in lines:
-            name = line.strip()
-            if not name or name in (".", ".."):
+            s = line.rstrip()
+            if not s:
                 continue
-            # Skip anything with embedded whitespace — messages like
-            # "total N" or "cannot access foo: Permission denied" leak
-            # in on some ls builds and we don't want them treated as
-            # filenames.
-            if " " in name or "\t" in name:
-                continue
-            if name in seen:
-                continue
-            seen.add(name)
-            names.append(name.rstrip("/"))
-        if not names:
-            return None
-
-        print(f"[*] {self.label}: ls -1a → {len(names)} names in "
-              f"{remote_path}; batched-stat for metadata")
-        # Fill in metadata via batched stat calls.
-        entries = self._batched_stat(remote_path, names)
-        print(f"[*] {self.label}: ls -1a fallback → "
-              f"{len(entries)} entries with metadata")
-        return entries
+            # find prints full paths — strip the leading dir_prefix.
+            # ls -1 prints one name per line.
+            # bare ls prints multi-column (whitespace-separated).
+            if tag == "find":
+                tokens = [s]
+            else:
+                # Multi-column and single-column both split cleanly
+                # on whitespace.  Filenames with embedded spaces
+                # would break this, but they're extremely rare in
+                # /tmp / /etc / /var/log and the operator can fall
+                # back to specifying an explicit subdirectory.
+                tokens = s.split()
+            for tok in tokens:
+                name = tok.strip()
+                if not name:
+                    continue
+                if name.startswith(dir_prefix):
+                    name = name[len(dir_prefix):]
+                # Trailing slash on some ls builds when -F/--classify
+                # is default via alias — keep as an is_dir hint but
+                # strip from the name.
+                name = name.rstrip("/")
+                if not name or name in (".", ".."):
+                    continue
+                # Skip lines that are obviously error text.
+                lo = name.lower()
+                if lo in ("total",):
+                    continue
+                if name in seen:
+                    continue
+                seen.add(name)
+                names.append(name)
+        return names
 
     def _batched_stat(self, dir_path: str, names: list) -> list:
         """Run ``stat -c '%n|%s|%y|%a|%F' <p1> <p2> ...`` in batches.

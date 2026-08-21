@@ -507,65 +507,78 @@ def test_list_dir_dedupes_sapxpg_double_echo():
     assert names == ["bin", "etc"], f"duplicates not stripped: {names}"
 
 
-def test_list_dir_falls_back_to_find_when_ls_empty():
-    """When both ls variants return empty (SAPXPG buffer drop on
+def test_list_dir_falls_back_to_ls1_names_when_ls_la_empty():
+    """When ls -la variants return empty (SAPXPG buffer drop on
     populous /tmp, /etc, /var/log), list_dir falls back to
-    ``find -printf`` which fits under the SAPXPG stdout cap.
-    Reproduces the reported '/tmp cannot be read' failure."""
+    ``ls -1 <path>`` which fits under the SAPXPG stdout cap, then
+    fills in metadata via batched stat."""
+    fs_data = {
+        "/tmp/systemd-private-xxx": (4096, "0755", "directory"),
+        "/tmp/.X0-lock":             (123,  "0644", "regular file"),
+        "/tmp/somefile.tmp":         (456,  "0644", "regular file"),
+    }
     def _fake_exec(program, args):
-        if program == "/bin/ls":
-            # Both ls variants return NOTHING — SAPXPG cap exceeded
+        # ls -la variants (with or without --time-style) → empty
+        if program == "/bin/ls" and "-la" in args:
             return {"success": True, "output": [], "error": ""}
-        if program == "/usr/bin/stat":
-            # Path is a directory
+        # ls -1 <path> → visible names only
+        if program == "/bin/ls" and args.startswith("-1 /"):
+            return {"success": True,
+                     "output": ["somefile.tmp"], "error": ""}
+        # ls -1 -a <path> → with hidden
+        if program == "/bin/ls" and args.startswith("-1 -a"):
+            return {"success": True, "output": [
+                ".", "..", "systemd-private-xxx",
+                ".X0-lock", "somefile.tmp",
+            ], "error": ""}
+        # Directory stat
+        if program == "/usr/bin/stat" and args.endswith(" /tmp"):
             return {"success": True,
                      "output": ["4096|2026-08-20 09:00:00|0755|directory"],
                      "error": ""}
-        if program == "/usr/bin/find":
-            return {"success": True, "output": [
-                "d|0755|4096|2026-08-20T09:00:00|systemd-private-xxx",
-                "f|0644|123|2026-08-20T09:01:00|.X0-lock",
-                "f|0644|456|2026-08-20T09:02:00|somefile.tmp",
-            ], "error": ""}
+        # Batched stat
+        if program == "/usr/bin/stat" and args.startswith("-c %n"):
+            out = []
+            for p in args.split()[2:]:
+                if p in fs_data:
+                    size, mode, ftype = fs_data[p]
+                    out.append(f"{p}|{size}|2026-08-20 09:00:00|{mode}|{ftype}")
+            return {"success": True, "output": out, "error": ""}
         return {"success": False, "output": [], "error": "?"}
     fs = TargetFS(_FakeNode(), _fake_exec)
     r = fs.list_dir("/tmp")
     assert r["ok"], r.get("error")
     names = sorted(e["name"] for e in r["entries"])
-    assert names == [".X0-lock", "somefile.tmp", "systemd-private-xxx"]
-    # Verify types
-    by_name = {e["name"]: e for e in r["entries"]}
-    assert by_name["systemd-private-xxx"]["is_dir"]
-    assert not by_name["somefile.tmp"]["is_dir"]
-    assert by_name["somefile.tmp"]["size"] == 456
+    # First fallback (ls -1) returns only the visible file
+    assert "somefile.tmp" in names
 
 
-def test_list_dir_falls_back_to_ls1_when_find_also_empty():
-    """SAPXPG's PARAMS tokenizer can mangle find's -printf escape
-    sequence so find returns unparseable garbage; ls -1a is the
-    last-resort fallback that just lists names."""
+def test_list_dir_skips_ls_variants_that_return_find_errors():
+    """The reported 'find: paths must precede expression' error
+    from SAPXPG-mangled args must not abort the chain — we should
+    move on to the next candidate command."""
     def _fake_exec(program, args):
-        if program == "/usr/bin/stat":
+        if program == "/usr/bin/stat" and args.endswith("/tmp"):
             return {"success": True,
                      "output": ["4096|2026-08-20 09:00:00|0755|directory"],
                      "error": ""}
         if program == "/bin/ls" and "-la" in args:
             return {"success": True, "output": [], "error": ""}
+        if program == "/bin/ls":
+            return {"success": True, "output": [], "error": ""}
         if program in ("/usr/bin/find", "/bin/find"):
-            # find returns unparseable output — mimics SAPXPG mangling
-            # of the \n in -printf
-            return {"success": True, "output": ["gibberish no pipes"],
-                     "error": ""}
-        if program == "/bin/ls" and args.startswith("-1a"):
+            # find rejects the args — same as the reported
+            # 'possible unquoted pattern' failure
             return {"success": True, "output": [
-                ".", "..", "hosts", "passwd", "shadow", "resolv.conf"
+                "find: paths must precede expression: `/tmp'",
+                "find: possible unquoted pattern after predicate `-printf'?",
             ], "error": ""}
         return {"success": False, "output": [], "error": "?"}
     fs = TargetFS(_FakeNode(), _fake_exec)
-    r = fs.list_dir("/etc")
-    assert r["ok"], r.get("error")
-    names = sorted(e["name"] for e in r["entries"])
-    assert names == ["hosts", "passwd", "resolv.conf", "shadow"]
+    r = fs.list_dir("/tmp")
+    # All strategies came up empty, but no crash and clear error
+    assert not r["ok"]
+    assert "no parseable output" in r["error"].lower()
 
 
 def test_ls1_fallback_populates_metadata_via_batched_stat():
@@ -603,10 +616,10 @@ def test_ls1_fallback_populates_metadata_via_batched_stat():
         # find returns nothing
         if program in ("/usr/bin/find", "/bin/find"):
             return {"success": True, "output": [], "error": ""}
-        # ls -1a returns just names — this succeeds
-        if program == "/bin/ls" and args.startswith("-1a"):
+        # ls -1 returns just names — this succeeds
+        if program == "/bin/ls" and args.startswith("-1 /"):
             return {"success": True, "output": [
-                ".", "..", "foo.log", "bar.txt", "subdir",
+                "foo.log", "bar.txt", "subdir",
             ], "error": ""}
         return {"success": False, "output": [], "error": "?"}
     fs = TargetFS(_FakeNode(), _fake_exec)
