@@ -198,7 +198,8 @@ class TargetFS:
             from sap_dpmon_sapstar import _probe_python3_via_exec_fn
             sid = getattr(self.node, "sid", "?")
             spec = _probe_python3_via_exec_fn(self.exec_fn, sid=sid,
-                                                label=self.label)
+                                                label=self.label,
+                                                context="file browser")
         except Exception as e:
             print(f"[-] {self.label}: python3 probe error: {e!r}")
             spec = None
