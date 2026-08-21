@@ -849,14 +849,22 @@ class TargetFS:
         return None
 
     def _list_dir_via_ls1(self, remote_path: str) -> Optional[list]:
-        """Last-resort: ``ls -1a`` names-only listing.
+        """SAPXPG-friendly listing: ``ls -1a`` for names, then batched
+        ``stat`` calls to fill in size / mode / mtime / is_dir.
 
-        No metadata (size / mode / mtime shown as blank), but at
-        <20 B/entry it survives even a heavily-buffered SAPXPG
-        stdout channel.  Used when both ls -la AND find failed to
-        return anything parseable.  The file browser degrades
-        gracefully — folders vs files are re-checked via stat
-        when the operator navigates into one.
+        Why this exists: on the pure GW SAPXPG channel with kernel 793+,
+        ``ls -la /tmp`` and ``find /tmp -maxdepth 1 -printf ...`` both
+        overflow the stdout capture and return empty, but bare
+        ``ls /tmp`` (names only) survives — its per-entry output is
+        <20 B vs ls -la's ~80 B and find's ~50 B.
+
+        Trade-off: N+ceil(N/BATCH) GW round-trips per listing instead
+        of 1.  Each stat call groups up to BATCH filenames whose total
+        joined length stays under a conservative PARAMS budget so we
+        don't silently truncate.  For /tmp with 100 entries that's
+        ~11 calls (~30-60 s over SAPXPG) — slow but working, and the
+        operator sees the correct sizes / dates instead of a wall of
+        zeros.  SXPG-authenticated skips this fallback entirely.
         """
         r = self.exec_fn("/bin/ls", f"-1a {remote_path}")
         lines = r.get("output", []) or []
@@ -865,34 +873,101 @@ class TargetFS:
         first_lo = lines[0].lower()
         if "no such" in first_lo or "cannot" in first_lo:
             return None
-        entries = []
+        names = []
         seen = set()
         for line in lines:
             name = line.strip()
             if not name or name in (".", ".."):
                 continue
-            # ls -1 can also emit summary lines on some builds; skip
-            # anything with whitespace inside.
+            # Skip anything with embedded whitespace — messages like
+            # "total N" or "cannot access foo: Permission denied" leak
+            # in on some ls builds and we don't want them treated as
+            # filenames.
             if " " in name or "\t" in name:
                 continue
             if name in seen:
                 continue
             seen.add(name)
-            # Best-effort is_dir guess: trailing slash if present.
-            is_dir = name.endswith("/")
-            entries.append({
-                "name":   name.rstrip("/"),
-                "size":   0,
-                "is_dir": is_dir,
-                "mtime":  "",
-                "mode":   "",
-            })
-        if entries:
-            print(f"[*] {self.label}: ls -1a last-resort fallback → "
-                  f"{len(entries)} entries in {remote_path} "
-                  f"(no metadata — dir/file inferred on navigate)")
-            return entries
-        return None
+            names.append(name.rstrip("/"))
+        if not names:
+            return None
+
+        print(f"[*] {self.label}: ls -1a → {len(names)} names in "
+              f"{remote_path}; batched-stat for metadata")
+        # Fill in metadata via batched stat calls.
+        entries = self._batched_stat(remote_path, names)
+        print(f"[*] {self.label}: ls -1a fallback → "
+              f"{len(entries)} entries with metadata")
+        return entries
+
+    def _batched_stat(self, dir_path: str, names: list) -> list:
+        """Run ``stat -c '%n|%s|%y|%a|%F' <p1> <p2> ...`` in batches.
+
+        Batch size is picked so the PARAMS payload stays well under
+        the SAPXPG 255 B limit — we sum the joined path lengths and
+        cut the batch when the next path would push us past the
+        budget.  Output is parsed line-by-line; each line is
+        ``<full_path>|<size>|<mtime>|<mode>|<type>``.
+        """
+        # Reserve PARAMS budget for "-c %n|%s|%y|%a|%F " prefix + safety.
+        _PARAMS_BUDGET = 220
+        prefix = "-c %n|%s|%y|%a|%F"
+        dir_prefix = dir_path.rstrip("/")
+        by_name = {n: {"name":   n,
+                        "size":   0,
+                        "is_dir": False,
+                        "mtime":  "",
+                        "mode":   ""} for n in names}
+
+        # Build batches
+        batches = []
+        current = []
+        current_len = len(prefix) + 1
+        for name in names:
+            full = f"{dir_prefix}/{name}"
+            add_len = len(full) + 1
+            if current and current_len + add_len > _PARAMS_BUDGET:
+                batches.append(current)
+                current = []
+                current_len = len(prefix) + 1
+            current.append(full)
+            current_len += add_len
+        if current:
+            batches.append(current)
+
+        for bi, batch in enumerate(batches, 1):
+            params = prefix + " " + " ".join(batch)
+            r = self.exec_fn("/usr/bin/stat", params)
+            for line in r.get("output", []) or []:
+                s = line.strip()
+                if not s or "|" not in s:
+                    continue
+                lo = s.lower()
+                if "cannot stat" in lo or "no such" in lo:
+                    continue
+                parts = s.split("|", 4)
+                if len(parts) < 5:
+                    continue
+                full_path, size_str, mtime, mode, ftype = parts
+                base = os.path.basename(full_path.rstrip("/"))
+                if base not in by_name:
+                    continue
+                try:
+                    size = int(size_str)
+                except ValueError:
+                    size = 0
+                by_name[base].update({
+                    "size":   size,
+                    "is_dir": "directory" in ftype.lower(),
+                    "mtime":  mtime,
+                    "mode":   mode,
+                })
+            if bi % 5 == 0 or bi == len(batches):
+                print(f"[*] {self.label}: stat batch "
+                      f"{bi}/{len(batches)} — "
+                      f"{min(bi * _PARAMS_BUDGET // 20, len(names))} "
+                      f"names covered")
+        return list(by_name.values())
 
     def _stat_linux(self, remote_path: str) -> dict:
         """Read size / mtime / mode / is_dir via ``stat -c``.

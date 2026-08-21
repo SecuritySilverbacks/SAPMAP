@@ -568,6 +568,63 @@ def test_list_dir_falls_back_to_ls1_when_find_also_empty():
     assert names == ["hosts", "passwd", "resolv.conf", "shadow"]
 
 
+def test_ls1_fallback_populates_metadata_via_batched_stat():
+    """When ls -la / find both fail (SAPXPG cap), ls -1a gives us
+    names and then batched `stat` calls fill in size/mode/mtime/
+    is_dir per entry.  Verifies the "ls /tmp works but ls -la /tmp
+    doesn't" workaround the operator suggested."""
+    fs_data = {
+        "/tmp/foo.log":  (500,  "0644", "regular file"),
+        "/tmp/bar.txt":  (128,  "0600", "regular file"),
+        "/tmp/subdir":   (4096, "0755", "directory"),
+    }
+    stat_calls = {"n": 0}
+    def _fake_exec(program, args):
+        if program == "/usr/bin/stat" and args.startswith("-c %n|%s|%y|%a|%F"):
+            stat_calls["n"] += 1
+            out = []
+            # Parse the paths off the end of args
+            paths = args.split()[2:]
+            for p in paths:
+                if p in fs_data:
+                    size, mode, ftype = fs_data[p]
+                    out.append(f"{p}|{size}|2026-08-20 09:00:00|{mode}|{ftype}")
+                else:
+                    out.append(f"stat: cannot stat '{p}': No such file")
+            return {"success": True, "output": out, "error": ""}
+        # /tmp itself for the up-front stat short-circuit
+        if program == "/usr/bin/stat" and args.endswith("/tmp"):
+            return {"success": True,
+                     "output": ["4096|2026-08-20 09:00:00|0755|directory"],
+                     "error": ""}
+        # ls -la returns nothing — mimics SAPXPG buffer overflow
+        if program == "/bin/ls" and "-la" in args:
+            return {"success": True, "output": [], "error": ""}
+        # find returns nothing
+        if program in ("/usr/bin/find", "/bin/find"):
+            return {"success": True, "output": [], "error": ""}
+        # ls -1a returns just names — this succeeds
+        if program == "/bin/ls" and args.startswith("-1a"):
+            return {"success": True, "output": [
+                ".", "..", "foo.log", "bar.txt", "subdir",
+            ], "error": ""}
+        return {"success": False, "output": [], "error": "?"}
+    fs = TargetFS(_FakeNode(), _fake_exec)
+    r = fs.list_dir("/tmp")
+    assert r["ok"], r.get("error")
+    by_name = {e["name"]: e for e in r["entries"]}
+    assert set(by_name) == {"foo.log", "bar.txt", "subdir"}
+    # Metadata was populated by batched stat, not left as 0/blank
+    assert by_name["foo.log"]["size"] == 500
+    assert by_name["foo.log"]["mode"] == "0644"
+    assert not by_name["foo.log"]["is_dir"]
+    assert by_name["subdir"]["is_dir"]
+    assert by_name["subdir"]["size"] == 4096
+    assert by_name["bar.txt"]["mtime"] == "2026-08-20 09:00:00"
+    # 3 files should fit in one stat batch (paths are short)
+    assert stat_calls["n"] >= 1
+
+
 def test_download_tolerates_truncated_b64_padding():
     """If /usr/bin/base64's output is truncated so the total length
     isn't a multiple of 4, we pad with '=' and decode leniently.
