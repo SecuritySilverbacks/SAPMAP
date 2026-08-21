@@ -949,25 +949,38 @@ class _FakeWindowsTarget:
             except Exception as e:
                 return {"success": False, "output": [str(e)], "error": ""}
 
-        # certutil -encode "src" "tmp" >nul & type "tmp" & del /q /f "tmp"
+        # certutil -encode "src" "tmp" (writes PEM-wrapped b64 to tmp)
         m = re.match(
-            r'^certutil\s+-encode\s+"([^"]+)"\s+"([^"]+)"\s+>nul\s+&\s+'
-            r'type\s+"([^"]+)"\s+&\s+del\s+/q\s+/f\s+"([^"]+)"$',
-            cmd)
+            r'^certutil\s+-encode\s+"([^"]+)"\s+"([^"]+)"$', cmd)
         if m:
             src = self._norm(m.group(1))
+            dst = self._norm(m.group(2))
             if src not in self.fs:
                 return {"success": False,
                          "output": ["CertUtil: -encode command FAILED: 0x1"],
                          "error": ""}
             payload = self.fs[src]
             b64 = base64.b64encode(payload).decode()
-            wrapped = "\n".join(b64[i:i+64]
+            wrapped = "-----BEGIN CERTIFICATE-----\n"
+            wrapped += "\n".join(b64[i:i+64]
                                   for i in range(0, len(b64), 64))
-            out = ["-----BEGIN CERTIFICATE-----",
-                   *wrapped.split("\n"),
-                   "-----END CERTIFICATE-----"]
-            return {"success": True, "output": out, "error": ""}
+            wrapped += "\n-----END CERTIFICATE-----\n"
+            self.fs[dst] = wrapped.encode("ascii")
+            return {"success": True, "output": [], "error": ""}
+
+        # type "path" — return file contents as output lines
+        m = re.match(r'^type\s+"([^"]+)"$', cmd)
+        if m:
+            path = self._norm(m.group(1))
+            if path not in self.fs:
+                return {"success": False,
+                         "output": ["The system cannot find the file specified."],
+                         "error": ""}
+            content = self.fs[path]
+            if isinstance(content, bytes):
+                content = content.decode("ascii", errors="replace")
+            return {"success": True,
+                     "output": content.split("\n"), "error": ""}
 
         # certutil -hashfile "path" MD5
         m = re.match(r'^certutil\s+-hashfile\s+"([^"]+)"\s+MD5$', cmd)
@@ -1018,6 +1031,20 @@ class _FakeWindowsTarget:
             out.append(
                 f"               {len(children)} File(s)  100 bytes")
             out.append("               1 Dir(s)  99999999 bytes free")
+            return {"success": True, "output": out, "error": ""}
+
+        # dir /B /A "path" — bare names only
+        m = re.match(r'^dir\s+/B\s+/A\s+"([^"]+)"$', cmd)
+        if m:
+            path = self._norm(m.group(1))
+            prefix = path.rstrip("\\") + "\\"
+            children = [(p, data) for p, data in self.fs.items()
+                          if p.startswith(prefix)
+                          and "\\" not in p[len(prefix):]]
+            if not children:
+                return {"success": True,
+                         "output": ["File Not Found"], "error": ""}
+            out = [p[len(prefix):] for p, _ in sorted(children)]
             return {"success": True, "output": out, "error": ""}
 
         # mkdir "path"

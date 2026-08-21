@@ -1096,10 +1096,12 @@ class TargetFS:
     #
     # ``certutil -decode <tmp> <file>`` is the reverse operation.
 
-    # cmd.exe PARAMS budget for a single call.  The SAPXPG PARAMS field
-    # caps at 255 bytes; ``/C `` prefix + 200 chars of base64 payload
-    # + a small tail (``>>"path"``) still fits under 255.
-    _WIN_CHUNK_B64_CHARS = 120
+    # EXTPROG budget for upload echo.  The full command line
+    # ``cmd.exe /C echo <chunk>>>"<tmp_path>"`` must fit in the
+    # 128-byte EXTPROG field.  Overhead is ~60 chars (cmd prefix +
+    # redirection op + quoted temp path), leaving ~68 for the b64
+    # chunk.  Use 60 with safety margin.
+    _WIN_CHUNK_B64_CHARS = 60
 
     _WIN_TMP_DIR = "C:\\Windows\\Temp"
 
@@ -1113,17 +1115,31 @@ class TargetFS:
         tag = "".join(_r.choice(_s.ascii_lowercase) for _ in range(8))
         return f"{self._WIN_TMP_DIR}\\sapmap_{tag}{suffix}"
 
+    # EXTPROG field is 128 bytes.  "cmd.exe /C " prefix is 11 chars,
+    # leaving 117 for the tail.  Commands under this threshold go
+    # entirely in EXTPROG (stdout works on GW SAPXPG).  Longer ones
+    # must split program/args — stdout may be empty for some commands
+    # but at least the command executes without truncation.
+    _EXTPROG_MAX = 128
+    _EXTPROG_PREFIX = "cmd.exe /C "
+    _EXTPROG_TAIL_MAX = _EXTPROG_MAX - len(_EXTPROG_PREFIX)
+
     def _win_cmd(self, tail: str) -> dict:
         """Run ``cmd.exe /C <tail>``.  ``tail`` must be a single
         command line — no argv splitting.  Returns the raw exec_fn
         dict so callers can inspect ``output`` / ``error`` /
         ``success`` themselves.
 
-        The full command line goes in EXTPROG (program arg) with
-        PARAMS left empty — matching the OS terminal pattern in
-        sapmap_gui.py.  GW SAPXPG on Windows kernels silently drops
-        stdout when the command is split across EXTPROG/PARAMS."""
-        return self.exec_fn(f"cmd.exe /C {tail}", "")
+        Short commands go entirely in EXTPROG (program arg) with
+        PARAMS left empty — matching the OS terminal pattern that
+        makes GW SAPXPG stdout capture work.  Commands longer than
+        EXTPROG's 128-byte field fall back to program=cmd.exe,
+        args=/C <tail> — stdout may be dropped on some kernels but
+        the command at least executes without truncation."""
+        full = f"cmd.exe /C {tail}"
+        if len(full) <= self._EXTPROG_MAX:
+            return self.exec_fn(full, "")
+        return self.exec_fn("cmd.exe", f"/C {tail}")
 
     def _upload_windows(self, remote_path: str, content: bytes,
                           progress_cb: "Optional[Callable[[int,int,str],None]]" = None
@@ -1217,13 +1233,20 @@ class TargetFS:
 
         _emit(0, "single_shot")
         tmp = self._win_tmp(".b64")
-        # certutil writes the b64 to a temp file; `type` pipes it back
-        # via SAPXPG's stdout.  `& del` (not `&&`) so cleanup happens
-        # even if `type` returns non-zero.
+        # Step 1: certutil -encode → temp file (no stdout needed)
         r = self._win_cmd(
-            f'certutil -encode "{remote_path}" "{tmp}" >nul & '
-            f'type "{tmp}" & del /q /f "{tmp}"')
+            f'certutil -encode "{remote_path}" "{tmp}"')
+        out_lo = " ".join(r.get("output", [])).lower()
+        if "failed" in out_lo or not r.get("success"):
+            self._win_cmd(f'del /q /f "{tmp}" 2>nul')
+            print(f"[-] {self.label}: certutil -encode failed for "
+                  f"{remote_path} — {out_lo[:200]}")
+            return None
+        # Step 2: type the temp file to read the b64 payload
+        r = self._win_cmd(f'type "{tmp}"')
         out_text = "\n".join(r.get("output", []))
+        # Step 3: cleanup
+        self._win_cmd(f'del /q /f "{tmp}" 2>nul')
         decoded = _decode_certutil_b64(out_text)
         if decoded is None:
             print(f"[-] {self.label}: certutil -encode returned no "
@@ -1311,16 +1334,13 @@ class TargetFS:
 
         r = self._win_cmd(f'dir /-C /A "{remote_path}"')
         lines = r.get("output", []) or []
-        if not lines:
-            return {"ok": False, "path": remote_path, "entries": [],
-                     "error": ("dir returned no output — SAPXPG may "
-                               "have dropped stdout, or the path "
-                               "doesn't exist")}
-        first_lo = lines[0].lower()
-        if "file not found" in first_lo or "path not found" in first_lo \
-                or "cannot find" in first_lo:
-            return {"ok": False, "path": remote_path, "entries": [],
-                     "error": lines[0].strip()}
+        if lines:
+            first_lo = lines[0].lower()
+            if "file not found" in first_lo \
+                    or "path not found" in first_lo \
+                    or "cannot find" in first_lo:
+                return {"ok": False, "path": remote_path, "entries": [],
+                         "error": lines[0].strip()}
 
         entries = []
         seen = set()
@@ -1333,8 +1353,74 @@ class TargetFS:
                 continue
             seen.add(key)
             entries.append(entry)
-        return {"ok": True, "path": remote_path,
-                 "entries": entries, "error": ""}
+
+        if entries:
+            return {"ok": True, "path": remote_path,
+                     "entries": entries, "error": ""}
+
+        # Fallback: dir /B (bare names, one per line) — much less
+        # stdout than dir /-C /A, survives GW SAPXPG buffer limits
+        # on populous dirs.  Then batched stat for metadata.
+        entries = self._list_dir_via_names_windows(remote_path)
+        if entries is not None:
+            return {"ok": True, "path": remote_path,
+                     "entries": entries, "error": ""}
+
+        return {"ok": False, "path": remote_path, "entries": [],
+                 "error": ("dir returned no output — SAPXPG may "
+                           "have dropped stdout, or the path "
+                           "doesn't exist")}
+
+    def _list_dir_via_names_windows(self, remote_path: str
+                                      ) -> Optional[list]:
+        """Names-only fallback for populous Windows dirs.
+
+        ``dir /B /A`` outputs one bare filename per line — far less
+        stdout than ``dir /-C /A`` which includes dates, sizes, and
+        summary lines.  After collecting names, stat each entry via
+        individual ``dir /-C /A "<path>\\<name>"`` calls to retrieve
+        size, mtime, and is_dir.
+        """
+        r = self._win_cmd(f'dir /B /A "{remote_path}"')
+        lines = r.get("output", []) or []
+        if not lines:
+            return None
+        first_lo = lines[0].lower()
+        if "file not found" in first_lo or "path not found" in first_lo:
+            return None
+        names = []
+        seen = set()
+        for ln in lines:
+            name = ln.strip()
+            if not name or name in (".", ".."):
+                continue
+            if name.lower() in seen:
+                continue
+            seen.add(name.lower())
+            names.append(name)
+        if not names:
+            return None
+        print(f"[*] {self.label}: dir /B → {len(names)} names in "
+              f"{remote_path}; batched stat for metadata")
+        entries = self._batched_stat_windows(remote_path, names)
+        return entries
+
+    def _batched_stat_windows(self, dir_path: str,
+                                names: list) -> list:
+        """Stat each name via individual ``dir /-C /A`` calls."""
+        dp = dir_path.rstrip("\\")
+        entries = []
+        for name in names:
+            full = f"{dp}\\{name}"
+            st = self._stat_windows(full)
+            entries.append({
+                "name":   name,
+                "size":   st.get("size", 0),
+                "is_dir": st.get("is_dir", False),
+                "mtime":  st.get("mtime", ""),
+                "mode":   "<DIR>" if st.get("is_dir") else "",
+            })
+        return entries
 
     def _stat_windows(self, remote_path: str) -> dict:
         """Get size / mtime / is_dir via ``dir /-C /A <path>``.
