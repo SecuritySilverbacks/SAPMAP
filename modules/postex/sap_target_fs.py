@@ -736,8 +736,31 @@ class TargetFS:
                              "error": lines2[0].strip()}
                 lines = lines2
 
+        # --- Strategy 2b: shell-wrapped ls -la ---------------------
+        # Direct /bin/ls calls return empty on GW SAPXPG for some
+        # dirs (SAPXPG stdout capture quirk). Shell-wrapping via
+        # /bin/sh -c with ${IFS} as separator is proven to work
+        # (the OS terminal in sapmap_gui uses the same pattern).
+        need_sh = (not lines) or all(
+            _parse_ls_line(l) is None for l in lines
+        )
+        if need_sh:
+            p = remote_path
+            r3 = self.exec_fn(
+                "/bin/sh",
+                f"-c ls${{IFS}}-la${{IFS}}"
+                f"--time-style=+%Y-%m-%dT%H:%M:%S${{IFS}}{p}")
+            lines3 = r3.get("output", []) or []
+            if lines3:
+                first3 = lines3[0].lower()
+                if "cannot access" in first3 or "no such" in first3:
+                    return {"ok": False, "path": remote_path,
+                             "entries": [],
+                             "error": lines3[0].strip()}
+                lines = lines3
+
         # --- Strategy 3: names-only listing + batched stat ----------
-        # Kicks in when both ls -la variants overflowed SAPXPG's
+        # Kicks in when all ls -la variants overflowed SAPXPG's
         # stdout buffer (very common on /tmp, /etc, /var/log with
         # dozens or hundreds of entries).  Multiple bare-name
         # commands are tried in order of preference; the first one
@@ -777,38 +800,47 @@ class TargetFS:
     def _list_dir_via_names(self, remote_path: str) -> Optional[list]:
         """Names-first fallback for populous dirs on SAPXPG.
 
-        The operator confirmed ``ls /tmp`` works over GW SAPXPG when
-        ``ls -la /tmp`` does not — the per-entry metadata line pushes
-        the total stdout past the kernel-793 cap, but the bare name
-        list fits.  This method tries a battery of compact
-        name-listing commands in order of preference, splits the
-        output into names, then fills metadata via batched stat.
+        The operator confirmed ``ls -1 /tmp`` works over GW SAPXPG
+        **when shell-wrapped** (``/bin/sh -c ls${IFS}-1${IFS}/tmp``)
+        but returns empty when calling ``/bin/ls`` directly with
+        ``-1 /tmp``.  This is a SAPXPG stdout-capture quirk: the
+        P3/P4 TLV output frames are populated differently for
+        direct-exec vs shell-wrapped programs on some kernels.
+
+        Shell-wrapped candidates use ``${IFS}`` as the space
+        separator (same pattern as the OS terminal in sapmap_gui)
+        so SAPXPG's PARAMS field carries no literal spaces that the
+        kernel could mis-split.
 
         Commands tried in order (whichever returns names first wins):
 
-        1. ``ls -1 <path>``       — one per line, visible only
-        2. ``ls -1 -a <path>``    — one per line, with hidden
-        3. ``ls <path>``          — bare multi-column, visible only
-        4. ``ls -a <path>``       — bare multi-column, with hidden
-        5. ``find <path> -maxdepth 1 -mindepth 1`` — plain paths,
-           no ``-printf`` (SAPXPG mangles the pipe-separated format
-           string on some kernels, e.g. "find: possible unquoted
-           pattern after predicate `-printf'?")
+        1-4. Shell-wrapped ``ls`` variants via ``/bin/sh -c``
+        5-8. Direct ``/bin/ls`` variants (for non-GW channels)
+        9-10. ``find`` as a last resort
 
         Trade-off: 1 + ceil(N / BATCH) GW round trips instead of 1
         for ls -la.  For /tmp with ~100 entries that's ~11 calls
         (~30-60 s) — slow but working.  SXPG-authenticated is
         immune and skips this whole path.
         """
+        p = remote_path
         candidates = [
-            ("/bin/ls", f"-1 {remote_path}",        "ls -1"),
-            ("/bin/ls", f"-1 -a {remote_path}",     "ls -1 -a"),
-            ("/bin/ls", f"{remote_path}",           "ls"),
-            ("/bin/ls", f"-a {remote_path}",        "ls -a"),
+            ("/bin/sh", f"-c ls${{IFS}}-1${{IFS}}{p}",
+                "sh:ls -1"),
+            ("/bin/sh", f"-c ls${{IFS}}-1${{IFS}}-a${{IFS}}{p}",
+                "sh:ls -1 -a"),
+            ("/bin/sh", f"-c ls${{IFS}}{p}",
+                "sh:ls"),
+            ("/bin/sh", f"-c ls${{IFS}}-a${{IFS}}{p}",
+                "sh:ls -a"),
+            ("/bin/ls", f"-1 {p}",        "ls -1"),
+            ("/bin/ls", f"-1 -a {p}",     "ls -1 -a"),
+            ("/bin/ls", f"{p}",           "ls"),
+            ("/bin/ls", f"-a {p}",        "ls -a"),
             ("/usr/bin/find",
-                f"{remote_path} -maxdepth 1 -mindepth 1", "find"),
+                f"{p} -maxdepth 1 -mindepth 1", "find"),
             ("/bin/find",
-                f"{remote_path} -maxdepth 1 -mindepth 1", "find"),
+                f"{p} -maxdepth 1 -mindepth 1", "find"),
         ]
         for prog, args, tag in candidates:
             r = self.exec_fn(prog, args)
