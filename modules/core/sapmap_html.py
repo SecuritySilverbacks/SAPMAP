@@ -2526,6 +2526,15 @@ body {
       </div>
       <div id="fb-banner" style="font-size:11px;margin-bottom:4px;flex-shrink:0"></div>
       <div id="fb-status" style="font-size:11px;color:#8b949e;margin-bottom:6px;flex-shrink:0"></div>
+      <div id="fb-progress-wrap" style="display:none;margin-bottom:6px;flex-shrink:0">
+        <div style="display:flex;justify-content:space-between;font-size:11px;color:#8b949e;margin-bottom:2px">
+          <span id="fb-progress-label">Downloading...</span>
+          <span id="fb-progress-pct">0%</span>
+        </div>
+        <div style="width:100%;height:8px;background:#161b22;border:1px solid #30363d;border-radius:4px;overflow:hidden">
+          <div id="fb-progress-bar" style="width:0%;height:100%;background:linear-gradient(90deg,#238636,#3fb950);transition:width 0.3s ease"></div>
+        </div>
+      </div>
       <div style="overflow-y:auto;flex:1 1 0;border:1px solid #30363d;border-radius:4px;
                   user-select:text;-webkit-user-select:text;cursor:default;
                   scrollbar-width:auto;scrollbar-color:#484f58 #161b22">
@@ -14769,13 +14778,20 @@ function fbRefresh() {
 // `taskKey` disappears — signalling the background thread finished.
 // Then runs `onDone(hadError)`.  Guards with a 10-minute cap so a
 // stuck task doesn't loop forever.
-function _fbWaitForTask(taskKey, onDone) {
+// `onProgress(label)` (optional) fires on every tick while the task is
+// active with the current backend label (which includes progress like
+// "42% (3312/7834 B)" for downloads).
+function _fbWaitForTask(taskKey, onDone, onProgress) {
   const startedAt = Date.now();
   const HARD_CAP_MS = 10 * 60 * 1000;
   const seenActive = { v: false };
   const tick = () => {
-    const stillRunning = !!(activeTasks && activeTasks[taskKey]);
-    if (stillRunning) seenActive.v = true;
+    const label = activeTasks && activeTasks[taskKey];
+    const stillRunning = !!label;
+    if (stillRunning) {
+      seenActive.v = true;
+      if (onProgress) { try { onProgress(label); } catch (_) {} }
+    }
     // We need to have SEEN it active at least once before deciding
     // "gone means done" — otherwise the very first poll can fire
     // before the state refresh has picked up the task and we'd
@@ -14793,23 +14809,60 @@ function _fbWaitForTask(taskKey, onDone) {
   setTimeout(tick, 750);
 }
 
+// Show / hide / update the foreground progress bar in the file browser.
+// The backend embeds "NN% (done/total B)" in the task label; this
+// helper parses it and updates the bar without needing a second API.
+function _fbShowProgress(labelText) {
+  const wrap = document.getElementById('fb-progress-wrap');
+  const bar = document.getElementById('fb-progress-bar');
+  const pctEl = document.getElementById('fb-progress-pct');
+  const lblEl = document.getElementById('fb-progress-label');
+  wrap.style.display = 'block';
+  const m = /(\d+)%\s*\(([\d]+)\/([\d]+)\s*B\)/.exec(labelText || '');
+  if (m) {
+    const pct = Math.min(100, Math.max(0, parseInt(m[1], 10)));
+    bar.style.width = pct + '%';
+    pctEl.textContent = pct + '%';
+    lblEl.textContent = labelText;
+  } else {
+    // No numeric progress yet (single-shot base64 path or pre-first-chunk) —
+    // show an indeterminate-style label; keep bar at 0.
+    lblEl.textContent = labelText || 'Working...';
+    pctEl.textContent = '';
+  }
+}
+
+function _fbHideProgress() {
+  document.getElementById('fb-progress-wrap').style.display = 'none';
+  document.getElementById('fb-progress-bar').style.width = '0%';
+}
+
 async function fbDownload(remotePath) {
   const status = document.getElementById('fb-status');
   status.textContent = 'Downloading ' + remotePath + '...';
+  _fbShowProgress('Downloading ' + remotePath + '...');
   try {
     await api('POST', `node/${_fbSid}/fs/download`, { path: remotePath });
     showToast('Download started: ' + remotePath, 'info');
-    _fbWaitForTask(_fbSid + ':fs_download', function(timedOut) {
-      if (timedOut) {
-        status.textContent = 'Download of ' + remotePath +
-          ' — no completion notification after 10 min; check console';
-      } else {
-        status.textContent = 'Download of ' + remotePath +
-          ' finished — check console for loot path';
-        showToast('Downloaded: ' + remotePath, 'success');
+    _fbWaitForTask(
+      _fbSid + ':fs_download',
+      function(timedOut) {
+        _fbHideProgress();
+        if (timedOut) {
+          status.textContent = 'Download of ' + remotePath +
+            ' — no completion notification after 10 min; check console';
+        } else {
+          status.textContent = 'Download of ' + remotePath +
+            ' finished — check console for loot path';
+          showToast('Downloaded: ' + remotePath, 'success');
+        }
+      },
+      function(label) {
+        _fbShowProgress(label);
       }
-    });
+    );
   } catch (e) {
+    _fbHideProgress();
     status.textContent = 'Download error: ' + e;
   }
 }

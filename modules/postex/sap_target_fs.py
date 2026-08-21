@@ -281,7 +281,9 @@ class TargetFS:
     def download(self, remote_path: str,
                   loot_dir: Optional[str] = None,
                   loot_subdir: str = "fs",
-                  max_size: int = 100 * 1024 * 1024) -> dict:
+                  max_size: int = 100 * 1024 * 1024,
+                  progress_cb: "Optional[Callable[[int,int,str],None]]" = None
+                  ) -> dict:
         """Fetch a file from the target and save it under ``loot/``.
 
         Args:
@@ -297,6 +299,13 @@ class TargetFS:
                 Larger files fail cleanly — chunked reads over
                 SAPXPG scale linearly with size and would spend
                 hours before finishing on a multi-GB log.
+          progress_cb: Optional ``callable(done, total, phase)`` where
+                ``done`` and ``total`` are byte counts and ``phase`` is
+                one of ``"stat" | "single_shot" | "chunked" | "done"``.
+                Called at least once per chunk on the chunked path so
+                the GUI can render a foreground progress bar; the
+                single-shot base64 path calls it twice
+                (``phase="single_shot"`` at 0% and 100%).
 
         Returns::
 
@@ -342,7 +351,8 @@ class TargetFS:
                      "elapsed": round(time.time() - t0, 2)}
 
         # Chunked base64 read
-        content = self._download_linux(remote_path, size)
+        content = self._download_linux(remote_path, size,
+                                         progress_cb=progress_cb)
         if content is None:
             return {"ok": False, "error":
                      "chunked read failed — see console output"}
@@ -504,7 +514,9 @@ class TargetFS:
                 return m.group(1)
         return ""
 
-    def _download_linux(self, remote_path: str, size: int) -> Optional[bytes]:
+    def _download_linux(self, remote_path: str, size: int,
+                          progress_cb: Optional[Callable] = None
+                          ) -> Optional[bytes]:
         """Download a file from the target as base64.
 
         Strategy (tried in order — first success wins):
@@ -537,6 +549,14 @@ class TargetFS:
         # pad with '=' and retry with validate=False so the partial
         # data is still recovered and the size-check decides what to
         # do next.
+        def _emit(done: int, phase: str) -> None:
+            if progress_cb:
+                try:
+                    progress_cb(done, size, phase)
+                except Exception:
+                    pass
+
+        _emit(0, "single_shot")
         base64_paths = ("/usr/bin/base64", "/bin/base64",
                          "/usr/local/bin/base64")
         for b64_bin in base64_paths:
@@ -567,6 +587,7 @@ class TargetFS:
             if len(decoded) == size:
                 print(f"[+] {self.label}: downloaded via {b64_bin} "
                       f"({size} B, single-shot)")
+                _emit(size, "single_shot")
                 return decoded
             print(f"[-] {self.label}: {b64_bin} returned "
                   f"{len(decoded)} B, expected {size} — "
@@ -592,6 +613,7 @@ class TargetFS:
         progress_every = max(1, n_chunks // 10)
         print(f"[*] {self.label}: chunked download of {remote_path} "
               f"({size} B, {n_chunks} chunks of {RAW_CHUNK} B via {spec})")
+        _emit(0, "chunked")
         parts = []
         offset = 0
         chunk_idx = 0
@@ -650,6 +672,7 @@ class TargetFS:
                 return None
             offset = end
             chunk_idx += 1
+            _emit(end, "chunked")
             if chunk_idx == 1 or chunk_idx == n_chunks \
                     or chunk_idx % progress_every == 0:
                 pct = (chunk_idx * 100) // n_chunks

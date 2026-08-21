@@ -898,6 +898,16 @@ def _task_end(key: str):
         _active_tasks.pop(key, None)
 
 
+def _task_update(key: str, label: str):
+    """Overwrite the label of an already-started task.  Used by
+    long-running downloads/uploads to expose fine-grained progress
+    (e.g. "42% (3312/7834 B)") via the same activeTasks map the GUI
+    already polls each second."""
+    with _active_tasks_lock:
+        if key in _active_tasks:
+            _active_tasks[key] = label
+
+
 def _get_active_tasks() -> dict:
     with _active_tasks_lock:
         return dict(_active_tasks)
@@ -12586,13 +12596,36 @@ def create_app(api: SAPMAPApi) -> Bottle:
         max_size = data.get("max_size", 100 * 1024 * 1024)
 
         def _run():
-            _task_start(f"{sid}:fs_download",
-                        f"{sid}: Downloading {path}")
+            task_key = f"{sid}:fs_download"
+            _task_start(task_key, f"{sid}: Downloading {path}")
+
+            # Throttle updates: the chunked path fires progress on
+            # every 72 B chunk, but the GUI only polls activeTasks
+            # every ~1 s — so squashing intermediate updates keeps
+            # the lock quiet without losing user-visible resolution.
+            _last_pct = [-1]
+
+            def _progress(done: int, total: int, phase: str):
+                if total <= 0:
+                    return
+                pct = (done * 100) // total
+                # Emit on every whole percent OR when done == total,
+                # whichever hits first.  Cheaper than a time check
+                # and gives the JS smooth-enough motion.
+                if pct == _last_pct[0] and done != total:
+                    return
+                _last_pct[0] = pct
+                _task_update(
+                    task_key,
+                    f"{sid}: Downloading {path} — "
+                    f"{pct}% ({done}/{total} B)")
+
             try:
                 from sap_target_fs import TargetFS, make_exec_fn_from_node
                 exec_fn = make_exec_fn_from_node(node, prefer=method)
                 tfs = TargetFS(node, exec_fn)
-                r = tfs.download(path, max_size=max_size)
+                r = tfs.download(path, max_size=max_size,
+                                  progress_cb=_progress)
                 if r.get("ok"):
                     print(f"[+] {sid}: downloaded {path} → "
                           f"{r.get('loot_path')} "
@@ -12605,7 +12638,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
             except Exception as e:
                 print(f"[-] {sid}: download {path} error: {e}")
             finally:
-                _task_end(f"{sid}:fs_download")
+                _task_end(task_key)
 
         threading.Thread(target=_run, daemon=True).start()
         return json.dumps({"status": "started",
