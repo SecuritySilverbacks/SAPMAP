@@ -2524,6 +2524,7 @@ body {
         <button class="btn btn-primary" onclick="fbNavigate(document.getElementById('fb-path').value)" style="white-space:nowrap">Go</button>
         <button class="btn" onclick="fbRefresh()" title="Refresh">&#8635;</button>
       </div>
+      <div id="fb-drives" style="display:none;font-size:11px;margin-bottom:4px;flex-shrink:0;gap:4px;flex-wrap:wrap;align-items:center"></div>
       <div id="fb-banner" style="font-size:11px;margin-bottom:4px;flex-shrink:0"></div>
       <div id="fb-status" style="font-size:11px;color:#8b949e;margin-bottom:6px;flex-shrink:0"></div>
       <div id="fb-progress-wrap" style="display:none;margin-bottom:6px;flex-shrink:0">
@@ -14693,6 +14694,13 @@ function showFileBrowserModal(sid) {
   } else {
     document.getElementById('fb-banner').textContent = '';
   }
+  // Drive bar: fetch and show available drives on Windows targets
+  const drivesEl = document.getElementById('fb-drives');
+  drivesEl.style.display = 'none';
+  drivesEl.innerHTML = '';
+  if (isWin) {
+    _fbLoadDrives(sid);
+  }
   document.getElementById('fb-status').textContent = '';
   const win = document.getElementById('fb-window');
   win.style.top = '50%'; win.style.left = '50%';
@@ -14700,6 +14708,24 @@ function showFileBrowserModal(sid) {
   win.style.width = '900px'; win.style.height = '600px';
   document.getElementById('fb-modal').classList.add('visible');
   fbNavigate(_fbCurrentPath);
+}
+
+async function _fbLoadDrives(sid) {
+  const el = document.getElementById('fb-drives');
+  try {
+    const res = await api('GET', 'node/' + sid + '/fs/drives');
+    if (!res.ok || !res.drives || !res.drives.length) return;
+    el.style.display = 'flex';
+    el.innerHTML = '<span style="color:#8b949e;margin-right:2px">Drives:</span>';
+    for (const d of res.drives) {
+      const btn = document.createElement('button');
+      btn.className = 'btn';
+      btn.style.cssText = 'padding:1px 8px;font-size:11px;font-family:monospace;margin:0';
+      btn.textContent = d;
+      btn.onclick = function() { fbNavigate(d + '\\'); };
+      el.appendChild(btn);
+    }
+  } catch (_) {}
 }
 
 function _fbFormatSize(bytes) {
@@ -14714,7 +14740,7 @@ async function fbNavigate(path) {
   // Detect Windows-style path so 'up-one-level' walks backslashes
   // instead of forward slashes.  Also drop trailing separators
   // uniformly regardless of separator style.
-  const isWinPath = /^[A-Za-z]:[\\\/]/.test(_fbCurrentPath);
+  const isWinPath = /^[A-Za-z]:/.test(_fbCurrentPath) || /^[A-Za-z]:/.test(path);
   const sep = isWinPath ? '\\' : '/';
   const splitRe = isWinPath ? /[\\\/]/ : /\//;
   const trimRe = isWinPath ? /[\\\/]+$/ : /\/+$/;
@@ -14724,6 +14750,8 @@ async function fbNavigate(path) {
     path = parts.join(sep) || (isWinPath ? 'C:\\' : '/');
   }
   path = path.replace(trimRe, '') || (isWinPath ? 'C:\\' : '/');
+  // Normalize bare drive letter "P:" to "P:\" so the backend sees a root dir
+  if (/^[A-Za-z]:$/.test(path)) { path = path + '\\'; }
   _fbCurrentPath = path;
   document.getElementById('fb-path').value = path;
   document.getElementById('fb-status').textContent = 'Loading...';
@@ -14834,7 +14862,7 @@ function _fbRenderEntries() {
       '<td style="padding:4px 8px;text-align:center">' +
         (e.is_dir ? '' :
           '<button class="btn" style="padding:2px 8px;font-size:11px" ' +
-          'onclick="event.stopPropagation();fbDownload(\'' + _esc(fullPath).replace(/'/g, "\\'") + '\')">' +
+          'onclick="event.stopPropagation();fbDownload(\'' + _esc(fullPath).replace(/\\/g, "\\\\").replace(/'/g, "\\'") + '\')">' +
           '⬇</button>') +
       '</td>';
     tbody.appendChild(tr);

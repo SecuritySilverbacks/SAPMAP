@@ -12542,6 +12542,23 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
     # -- Target File System (issue #37) -----------------------------------
 
+    @app.route("/api/node/<sid>/fs/drives", method="GET")
+    def node_fs_drives(sid):
+        """Enumerate available drive letters on a Windows target."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"ok": False, "drives": [],
+                                "error": f"Node {sid} not found"})
+        try:
+            from sap_target_fs import TargetFS, make_exec_fn_from_node
+            exec_fn = make_exec_fn_from_node(node)
+            tfs = TargetFS(node, exec_fn)
+            return json.dumps(tfs.enumerate_drives())
+        except Exception as e:
+            return json.dumps({"ok": False, "drives": [],
+                                "error": str(e)})
+
     @app.route("/api/node/<sid>/fs/list", method="POST")
     def node_fs_list(sid):
         """List directory contents on a target via TargetFS."""

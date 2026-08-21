@@ -909,14 +909,14 @@ class _FakeWindowsTarget:
 
     def exec_fn(self, program, args):
         self.calls.append((program, args))
-        if program != "cmd.exe":
+        # _win_cmd now puts full "cmd.exe /C ..." in program, args=""
+        if program.startswith("cmd.exe /C "):
+            cmd = program[len("cmd.exe /C "):]
+        elif program == "cmd.exe" and args.startswith("/C "):
+            cmd = args[3:]
+        else:
             return {"success": False, "output": [],
                      "error": f"unmocked program {program}"}
-        # args starts with "/C "
-        if not args.startswith("/C "):
-            return {"success": False, "output": [],
-                     "error": "unmocked args shape"}
-        cmd = args[3:]
 
         # del /q /f "PATH" ["PATH2"] 2>nul
         m = re.match(r'^del\s+/q\s+/f\s+(.+?)(?:\s+2>nul)?$', cmd)
@@ -1025,6 +1025,12 @@ class _FakeWindowsTarget:
         if m:
             return {"success": True, "output": [], "error": ""}
 
+        # wmic logicaldisk get name
+        if cmd.strip().startswith("wmic logicaldisk"):
+            return {"success": True,
+                     "output": ["Name", "C:", "D:", "P:"],
+                     "error": ""}
+
         return {"success": False, "output": [],
                  "error": f"unmocked cmd tail: {cmd[:100]}"}
 
@@ -1099,3 +1105,33 @@ def test_windows_stat_missing():
     r = fs.stat("C:\\Windows\\Temp\\does_not_exist.txt")
     assert r["ok"]
     assert not r["exists"]
+
+
+def test_windows_enumerate_drives():
+    target = _FakeWindowsTarget()
+    node = _FakeNode(os_type="Windows")
+    fs = TargetFS(node, target.exec_fn)
+    r = fs.enumerate_drives()
+    assert r["ok"]
+    assert "C:" in r["drives"]
+    assert "P:" in r["drives"]
+    assert len(r["drives"]) == 3
+
+
+def test_enumerate_drives_linux_returns_error():
+    target = _FakeWindowsTarget()
+    node = _FakeNode(os_type="Linux")
+    fs = TargetFS(node, target.exec_fn)
+    r = fs.enumerate_drives()
+    assert not r["ok"]
+
+
+def test_windows_bare_drive_path_normalized():
+    """list_dir('P:') normalizes to 'P:\\' so dir sees a root."""
+    target = _FakeWindowsTarget()
+    target.fs["p:\\readme.txt"] = b"hello"
+    node = _FakeNode(os_type="Windows")
+    fs = TargetFS(node, target.exec_fn)
+    r = fs.list_dir("P:")
+    assert r["ok"]
+    assert any(e["name"] == "readme.txt" for e in r["entries"])

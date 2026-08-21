@@ -1117,8 +1117,13 @@ class TargetFS:
         """Run ``cmd.exe /C <tail>``.  ``tail`` must be a single
         command line — no argv splitting.  Returns the raw exec_fn
         dict so callers can inspect ``output`` / ``error`` /
-        ``success`` themselves."""
-        return self.exec_fn("cmd.exe", f"/C {tail}")
+        ``success`` themselves.
+
+        The full command line goes in EXTPROG (program arg) with
+        PARAMS left empty — matching the OS terminal pattern in
+        sapmap_gui.py.  GW SAPXPG on Windows kernels silently drops
+        stdout when the command is split across EXTPROG/PARAMS."""
+        return self.exec_fn(f"cmd.exe /C {tail}", "")
 
     def _upload_windows(self, remote_path: str, content: bytes,
                           progress_cb: "Optional[Callable[[int,int,str],None]]" = None
@@ -1235,6 +1240,41 @@ class TargetFS:
         _emit(size, "single_shot")
         return decoded
 
+    def enumerate_drives(self) -> dict:
+        """List available drive letters on a Windows target.
+
+        Uses ``wmic logicaldisk get name`` which works on every
+        Windows Server SKU SAPMAP supports (2012+).  Returns::
+
+            {
+              ok:      bool,
+              drives:  ["C:", "D:", "P:", ...],
+              error:   str,
+            }
+        """
+        if self.os_family != "windows":
+            return {"ok": False, "drives": [],
+                     "error": "drive enumeration is Windows-only"}
+        r = self._win_cmd("wmic logicaldisk get name")
+        lines = r.get("output", []) or []
+        drives = []
+        for ln in lines:
+            s = ln.strip()
+            if re.match(r"^[A-Za-z]:$", s):
+                drives.append(s.upper())
+        if not drives:
+            r2 = self._win_cmd("fsutil fsinfo drives")
+            for ln in r2.get("output", []) or []:
+                for tok in re.findall(r"([A-Za-z]):\\", ln):
+                    d = tok.upper() + ":"
+                    if d not in drives:
+                        drives.append(d)
+        if not drives:
+            return {"ok": False, "drives": [],
+                     "error": "wmic/fsutil returned no drive letters"}
+        drives.sort()
+        return {"ok": True, "drives": drives, "error": ""}
+
     def _list_dir_windows(self, remote_path: str) -> dict:
         """List a directory via ``dir /-C /A /Q``.
 
@@ -1249,6 +1289,10 @@ class TargetFS:
         and returns a single-entry listing; we route that through
         stat first so the UI can offer a download button.
         """
+        # Normalize bare drive letter "P:" → "P:\" so dir sees a root.
+        if re.match(r"^[A-Za-z]:$", remote_path):
+            remote_path = remote_path + "\\"
+
         # Short-circuit for a file path so the operator can type
         # C:\Windows\System32\drivers\etc\hosts and get a download link.
         st = self._stat_windows(remote_path)
@@ -1302,6 +1346,8 @@ class TargetFS:
         that case by looking at the summary line
         (``N File(s)`` / ``N Dir(s)``) and reporting is_dir=True.
         """
+        if re.match(r"^[A-Za-z]:$", remote_path):
+            remote_path = remote_path + "\\"
         r = self._win_cmd(f'dir /-C /A "{remote_path}"')
         lines = r.get("output", []) or []
         if not lines:
