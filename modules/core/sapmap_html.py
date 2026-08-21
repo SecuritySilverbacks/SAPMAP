@@ -2542,10 +2542,10 @@ body {
           <thead style="position:sticky;top:0;background:#161b22;z-index:1">
             <tr style="color:#8b949e;border-bottom:1px solid #30363d">
               <th style="text-align:left;padding:6px 8px;width:40px"></th>
-              <th style="text-align:left;padding:6px 8px">Name</th>
-              <th style="text-align:right;padding:6px 8px;width:90px">Size</th>
-              <th style="text-align:left;padding:6px 8px;width:110px">Mode</th>
-              <th style="text-align:left;padding:6px 8px;width:180px">Modified</th>
+              <th id="fb-th-name" style="text-align:left;padding:6px 8px;cursor:pointer;user-select:none" onclick="fbSort('name')">Name <span id="fb-sort-name" style="color:#484f58"></span></th>
+              <th id="fb-th-size" style="text-align:right;padding:6px 8px;width:90px;cursor:pointer;user-select:none" onclick="fbSort('size')">Size <span id="fb-sort-size" style="color:#484f58"></span></th>
+              <th id="fb-th-mode" style="text-align:left;padding:6px 8px;width:110px;cursor:pointer;user-select:none" onclick="fbSort('mode')">Mode <span id="fb-sort-mode" style="color:#484f58"></span></th>
+              <th id="fb-th-mtime" style="text-align:left;padding:6px 8px;width:180px;cursor:pointer;user-select:none" onclick="fbSort('mtime')">Modified <span id="fb-sort-mtime" style="color:#484f58"></span></th>
               <th style="text-align:center;padding:6px 8px;width:60px"></th>
             </tr>
           </thead>
@@ -14657,6 +14657,11 @@ async function termExec() {
 // --- File Browser ---
 let _fbSid = '';
 let _fbCurrentPath = '/tmp';
+let _fbEntries = [];
+// Sort column ('name'|'size'|'mode'|'mtime') and direction (1 asc, -1 desc).
+// Dirs always float to the top; the chosen column orders each group.
+let _fbSortCol = 'name';
+let _fbSortDir = 1;
 
 function showFileBrowserModal(sid) {
   _fbSid = sid;
@@ -14715,56 +14720,13 @@ async function fbNavigate(path) {
     const res = await api('POST', `node/${_fbSid}/fs/list`, { path });
     if (!res.ok) {
       document.getElementById('fb-status').textContent = 'Error: ' + (res.error || 'unknown');
+      _fbEntries = [];
       return;
     }
-    const entries = res.entries || [];
+    _fbEntries = res.entries || [];
     document.getElementById('fb-status').textContent =
-      path + ' — ' + entries.length + ' entries';
-    const tbody = document.getElementById('fb-tbody');
-    tbody.innerHTML = '';
-    const dirs = entries.filter(e => e.is_dir).sort((a,b) => a.name.localeCompare(b.name));
-    const files = entries.filter(e => !e.is_dir).sort((a,b) => a.name.localeCompare(b.name));
-    for (const e of [...dirs, ...files]) {
-      const tr = document.createElement('tr');
-      tr.style.cssText = 'border-bottom:1px solid #21262d;cursor:pointer';
-      tr.onmouseover = function(){ this.style.background='#161b22'; };
-      tr.onmouseout = function(){ this.style.background=''; };
-      const icon = e.is_dir ? '📁' : '📄';
-      // Prefer abs_path when the backend supplied one (single-file
-      // listing case).  Otherwise if the name is already absolute
-      // (some ls variants echo the full path when given a file arg),
-      // use it directly.  Otherwise join with the current directory.
-      let fullPath;
-      if (e.abs_path) {
-        fullPath = e.abs_path;
-      } else if (e.name && e.name[0] === '/') {
-        fullPath = e.name;
-      } else {
-        fullPath = (path === '/' ? '/' : path + '/') + e.name;
-      }
-      if (e.is_dir) {
-        tr.ondblclick = function(){ fbNavigate(fullPath); };
-      }
-      tr.innerHTML =
-        '<td style="padding:4px 8px;text-align:center">' + icon + '</td>' +
-        '<td style="padding:4px 8px;color:' + (e.is_dir ? '#58a6ff' : '#c9d1d9') + '">' +
-          _esc(e.name) + '</td>' +
-        '<td style="padding:4px 8px;text-align:right;color:#8b949e">' +
-          (e.is_dir ? '' : _fbFormatSize(e.size)) + '</td>' +
-        '<td style="padding:4px 8px;color:#8b949e">' + _esc(e.mode || '') + '</td>' +
-        '<td style="padding:4px 8px;color:#8b949e">' + _esc(e.mtime || '') + '</td>' +
-        '<td style="padding:4px 8px;text-align:center">' +
-          (e.is_dir ? '' :
-            '<button class="btn" style="padding:2px 8px;font-size:11px" ' +
-            'onclick="event.stopPropagation();fbDownload(\'' + _esc(fullPath).replace(/'/g, "\\'") + '\')">' +
-            '⬇</button>') +
-        '</td>';
-      tbody.appendChild(tr);
-    }
-    if (entries.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="6" style="padding:12px;color:#8b949e;text-align:center">' +
-        '(empty directory)</td></tr>';
-    }
+      path + ' — ' + _fbEntries.length + ' entries';
+    _fbRenderEntries();
   } catch (e) {
     document.getElementById('fb-status').textContent = 'Error: ' + e;
   }
@@ -14772,6 +14734,97 @@ async function fbNavigate(path) {
 
 function fbRefresh() {
   fbNavigate(_fbCurrentPath);
+}
+
+// Column click: toggle direction if same column, else switch column
+// and default to ascending (name/mode/mtime) or descending (size, since
+// biggest-first is usually what you want when hunting for logs to grab).
+function fbSort(col) {
+  if (_fbSortCol === col) {
+    _fbSortDir = -_fbSortDir;
+  } else {
+    _fbSortCol = col;
+    _fbSortDir = (col === 'size' || col === 'mtime') ? -1 : 1;
+  }
+  _fbRenderEntries();
+}
+
+function _fbSortEntries(entries) {
+  const col = _fbSortCol;
+  const dir = _fbSortDir;
+  const key = (e) => {
+    if (col === 'size')  return e.size || 0;
+    if (col === 'mode')  return (e.mode || '').toLowerCase();
+    if (col === 'mtime') return (e.mtime || '');
+    return (e.name || '').toLowerCase();
+  };
+  const cmp = (a, b) => {
+    const ka = key(a), kb = key(b);
+    if (typeof ka === 'number' && typeof kb === 'number') return (ka - kb) * dir;
+    if (ka < kb) return -1 * dir;
+    if (ka > kb) return  1 * dir;
+    return 0;
+  };
+  const dirs  = entries.filter(e => e.is_dir).slice().sort(cmp);
+  const files = entries.filter(e => !e.is_dir).slice().sort(cmp);
+  return [...dirs, ...files];
+}
+
+function _fbUpdateSortIndicators() {
+  ['name','size','mode','mtime'].forEach(c => {
+    const el = document.getElementById('fb-sort-' + c);
+    if (el) el.textContent = (c === _fbSortCol)
+                                ? (_fbSortDir > 0 ? '▲' : '▼') : '';
+  });
+}
+
+function _fbRenderEntries() {
+  _fbUpdateSortIndicators();
+  const tbody = document.getElementById('fb-tbody');
+  tbody.innerHTML = '';
+  const path = _fbCurrentPath;
+  const sorted = _fbSortEntries(_fbEntries);
+  for (const e of sorted) {
+    const tr = document.createElement('tr');
+    tr.style.cssText = 'border-bottom:1px solid #21262d;cursor:pointer';
+    tr.onmouseover = function(){ this.style.background='#161b22'; };
+    tr.onmouseout = function(){ this.style.background=''; };
+    const icon = e.is_dir ? '📁' : '📄';
+    // Prefer abs_path when the backend supplied one (single-file
+    // listing case).  Otherwise if the name is already absolute
+    // (some ls variants echo the full path when given a file arg),
+    // use it directly.  Otherwise join with the current directory.
+    let fullPath;
+    if (e.abs_path) {
+      fullPath = e.abs_path;
+    } else if (e.name && e.name[0] === '/') {
+      fullPath = e.name;
+    } else {
+      fullPath = (path === '/' ? '/' : path + '/') + e.name;
+    }
+    if (e.is_dir) {
+      tr.ondblclick = function(){ fbNavigate(fullPath); };
+    }
+    tr.innerHTML =
+      '<td style="padding:4px 8px;text-align:center">' + icon + '</td>' +
+      '<td style="padding:4px 8px;color:' + (e.is_dir ? '#58a6ff' : '#c9d1d9') + '">' +
+        _esc(e.name) + '</td>' +
+      '<td style="padding:4px 8px;text-align:right;color:#8b949e">' +
+        (e.is_dir ? '' : _fbFormatSize(e.size)) + '</td>' +
+      '<td style="padding:4px 8px;color:#8b949e">' + _esc(e.mode || '') + '</td>' +
+      '<td style="padding:4px 8px;color:#8b949e">' + _esc(e.mtime || '') + '</td>' +
+      '<td style="padding:4px 8px;text-align:center">' +
+        (e.is_dir ? '' :
+          '<button class="btn" style="padding:2px 8px;font-size:11px" ' +
+          'onclick="event.stopPropagation();fbDownload(\'' + _esc(fullPath).replace(/'/g, "\\'") + '\')">' +
+          '⬇</button>') +
+      '</td>';
+    tbody.appendChild(tr);
+  }
+  if (sorted.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="6" style="padding:12px;color:#8b949e;text-align:center">' +
+      '(empty directory)</td></tr>';
+  }
 }
 
 // Polls activeTasks (refreshed by the main state loop every ~1s) until
