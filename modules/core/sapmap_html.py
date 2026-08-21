@@ -14875,6 +14875,7 @@ async function fbUploadFile() {
   const status = document.getElementById('fb-upload-status');
   status.textContent =
     'Uploading ' + file.name + ' (' + _fbFormatSize(file.size) + ')...';
+  _fbShowProgress('Uploading ' + file.name + '...');
   const formData = new FormData();
   formData.append('file', file);
   formData.append('remote_path', remotePath);
@@ -14888,24 +14889,33 @@ async function fbUploadFile() {
       status.textContent =
         'Uploading ' + file.name + ' → ' + remotePath + '...';
       showToast('Upload started: ' + file.name, 'info');
-      _fbWaitForTask(_fbSid + ':fs_upload', function(timedOut) {
-        if (timedOut) {
-          status.textContent = 'Upload of ' + file.name +
-            ' — no completion after 10 min; check console';
-        } else {
-          status.textContent = 'Uploaded: ' + file.name + ' → ' +
-            remotePath + ' (check console for MD5 verify result)';
-          showToast('Upload finished: ' + file.name, 'success');
-          // Refresh directory so the freshly-uploaded file appears
-          if (_fbCurrentPath && remotePath.startsWith(_fbCurrentPath)) {
-            fbRefresh();
+      _fbWaitForTask(
+        _fbSid + ':fs_upload',
+        function(timedOut) {
+          _fbHideProgress();
+          if (timedOut) {
+            status.textContent = 'Upload of ' + file.name +
+              ' — no completion after 10 min; check console';
+          } else {
+            status.textContent = 'Uploaded: ' + file.name + ' → ' +
+              remotePath + ' (check console for MD5 verify result)';
+            showToast('Upload finished: ' + file.name, 'success');
+            // Refresh directory so the freshly-uploaded file appears
+            if (_fbCurrentPath && remotePath.startsWith(_fbCurrentPath)) {
+              fbRefresh();
+            }
           }
+        },
+        function(label) {
+          _fbShowProgress(label);
         }
-      });
+      );
     } else {
+      _fbHideProgress();
       status.textContent = 'Upload error: ' + (res.error || 'unknown');
     }
   } catch (e) {
+    _fbHideProgress();
     status.textContent = 'Upload error: ' + e;
   }
   input.value = '';

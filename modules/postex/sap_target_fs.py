@@ -223,7 +223,9 @@ class TargetFS:
     # ------------------------------------------------------------------
 
     def upload(self, local_path: str, remote_path: str,
-                skip_integrity: bool = False) -> dict:
+                skip_integrity: bool = False,
+                progress_cb: "Optional[Callable[[int,int,str],None]]" = None
+                ) -> dict:
         """Push a local file to the target.
 
         Returns::
@@ -252,7 +254,8 @@ class TargetFS:
                      "implemented — Phase 2 of issue #37"}
 
         # Linux path: chunked b64 write via python3 + b64decode + verify
-        result = self._upload_linux(remote_path, content)
+        result = self._upload_linux(remote_path, content,
+                                      progress_cb=progress_cb)
         result["bytes"] = len(content)
         result["md5_local"] = md5_local
         result["elapsed"] = round(time.time() - t0, 2)
@@ -264,6 +267,11 @@ class TargetFS:
         if skip_integrity:
             result["md5_remote"] = ""
             return result
+        if progress_cb:
+            try:
+                progress_cb(len(content), len(content), "verify")
+            except Exception:
+                pass
         md5_remote = self._remote_md5_linux(remote_path)
         result["md5_remote"] = md5_remote
         if md5_remote and md5_remote != md5_local:
@@ -430,7 +438,9 @@ class TargetFS:
     # Linux implementations
     # ------------------------------------------------------------------
 
-    def _upload_linux(self, remote_path: str, content: bytes) -> dict:
+    def _upload_linux(self, remote_path: str, content: bytes,
+                        progress_cb: "Optional[Callable[[int,int,str],None]]" = None
+                        ) -> dict:
         """Chunked base64 write via python3 + b64decode.  Same recipe
         as ``sap_db_sql_writers._chunked_b64_write_via_python3`` — kept
         as a private method here so this module stays standalone."""
@@ -464,6 +474,16 @@ class TargetFS:
 
         chunks = [b64[i:i + chunk_size]
                    for i in range(0, len(b64), chunk_size)]
+        total_bytes = len(content)
+
+        def _emit(done: int, phase: str) -> None:
+            if progress_cb:
+                try:
+                    progress_cb(done, total_bytes, phase)
+                except Exception:
+                    pass
+
+        _emit(0, "chunked")
         for i, chunk in enumerate(chunks):
             mode = "wb" if i == 0 else "ab"
             body = f"-c open('{b64_path}','{mode}').write(b'{chunk}')"
@@ -475,6 +495,12 @@ class TargetFS:
                          "error": f"chunk {i + 1}/{len(chunks)} "
                          f"failed at exec: {r.get('error', '?')}",
                          "chunks": i, "chunk_size": chunk_size}
+            # Map chunk-index → decoded-bytes-written so the bar
+            # tracks the local file size rather than the 4/3-inflated
+            # base64 stream.  Last chunk clamps to total_bytes.
+            done_est = min(total_bytes,
+                            ((i + 1) * total_bytes) // len(chunks))
+            _emit(done_est, "chunked")
 
         # Decode base64 → final file
         decode_body = (

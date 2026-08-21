@@ -12675,13 +12675,36 @@ def create_app(api: SAPMAPApi) -> Bottle:
         tmp_path = tmp.name
 
         def _run():
-            _task_start(f"{sid}:fs_upload",
+            task_key = f"{sid}:fs_upload"
+            _task_start(task_key,
                         f"{sid}: Uploading → {remote_path}")
+
+            _last_pct = [-1]
+
+            def _progress(done: int, total: int, phase: str):
+                if total <= 0:
+                    return
+                pct = (done * 100) // total
+                if pct == _last_pct[0] and phase != "verify":
+                    return
+                _last_pct[0] = pct
+                if phase == "verify":
+                    _task_update(
+                        task_key,
+                        f"{sid}: Uploading → {remote_path} — "
+                        f"100% ({total}/{total} B) verifying MD5...")
+                else:
+                    _task_update(
+                        task_key,
+                        f"{sid}: Uploading → {remote_path} — "
+                        f"{pct}% ({done}/{total} B)")
+
             try:
                 from sap_target_fs import TargetFS, make_exec_fn_from_node
                 exec_fn = make_exec_fn_from_node(node, prefer=method)
                 tfs = TargetFS(node, exec_fn)
-                r = tfs.upload(tmp_path, remote_path)
+                r = tfs.upload(tmp_path, remote_path,
+                                progress_cb=_progress)
                 if r.get("ok"):
                     print(f"[+] {sid}: uploaded {remote_path} "
                           f"({r.get('bytes')} B, "
@@ -12693,7 +12716,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
             except Exception as e:
                 print(f"[-] {sid}: upload {remote_path} error: {e}")
             finally:
-                _task_end(f"{sid}:fs_upload")
+                _task_end(task_key)
                 try:
                     os.unlink(tmp_path)
                 except Exception:
