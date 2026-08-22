@@ -1677,59 +1677,56 @@ class TargetFS:
         """Read a text file on the Windows target in batches.
 
         Uses ``findstr /n "^"`` to number every line in the file,
-        then ``findstr /r`` with digit-count regex patterns to read
-        century-sized batches (~100 lines each).  Each batch produces
-        at most ~2.5 KB of stdout, well under SAPXPG's buffer cap.
+        then ``findstr /r`` with decade-sized regex patterns to read
+        ≤10 lines per call (~300 B stdout each).  SAPXPG's stdout
+        buffer on some kernels is as small as ~1-2 KB, so century-
+        sized batches (100 entries) overflow; decades are safe.
 
-        Patterns by line-number digit count::
+        Patterns::
 
-            ^[1-9]:           →  lines 1-9        (9 max)
-            ^[1-9][0-9]:      →  lines 10-99      (90 max)
-            ^1[0-9][0-9]:     →  lines 100-199    (100 max)
-            ^2[0-9][0-9]:     →  lines 200-299    (100 max)
+            ^[1-9]:           →  lines 1-9     (9 max)
+            ^1[0-9]:          →  lines 10-19   (10 max)
+            ^2[0-9]:          →  lines 20-29   (10 max)
             …
-            ^9[0-9][0-9]:     →  lines 900-999    (100 max)
+            ^9[0-9]:          →  lines 90-99   (10 max)
+            ^10[0-9]:         →  lines 100-109 (10 max)
+            …
+            ^99[0-9]:         →  lines 990-999 (10 max)
 
-        Handles up to 999 entries, which covers every SAP exe / work
-        directory observed in the field.
+        Stops after 5 consecutive empty batches (all entries
+        consumed).  Handles up to 999 entries.
         """
         tmp_num = tmp_path.rsplit(".", 1)[0] + ".n"
         self._win_cmd(f'findstr /n "^" "{tmp_path}" >"{tmp_num}"')
 
         all_lines = []
-
-        # Lines 1-9
-        r = self._win_cmd(f'findstr /r "^[1-9]:" "{tmp_num}"')
-        batch = r.get("output", []) or []
-        for ln in batch:
-            ci = ln.find(":")
-            if ci >= 0:
-                all_lines.append(ln[ci + 1:])
-
-        if not batch:
-            self._win_cmd(f'del /q /f "{tmp_num}" 2>nul')
-            return all_lines
-
-        # Lines 10-99
-        r = self._win_cmd(f'findstr /r "^[1-9][0-9]:" "{tmp_num}"')
-        for ln in r.get("output", []) or []:
-            ci = ln.find(":")
-            if ci >= 0:
-                all_lines.append(ln[ci + 1:])
-
-        # Lines 100-999 in centuries
+        patterns = ["^[1-9]:"]
         for d in range(1, 10):
+            patterns.append(f"^{d}[0-9]:")
+        for h in range(1, 10):
+            for d in range(10):
+                patterns.append(f"^{h}{d}[0-9]:")
+
+        dry = 0
+        for pat in patterns:
             r = self._win_cmd(
-                f'findstr /r "^{d}[0-9][0-9]:" "{tmp_num}"')
+                f'findstr /r "{pat}" "{tmp_num}"')
             batch = r.get("output", []) or []
             if not batch:
-                break
+                dry += 1
+                if dry >= 5:
+                    break
+                continue
+            dry = 0
             for ln in batch:
                 ci = ln.find(":")
                 if ci >= 0:
                     all_lines.append(ln[ci + 1:])
 
         self._win_cmd(f'del /q /f "{tmp_num}" 2>nul')
+        print(f"[*] {self.label}:   paginated: "
+              f"{len(all_lines)} lines across "
+              f"{len(patterns) - dry} findstr batches")
         return all_lines
 
     def _stat_windows(self, remote_path: str) -> dict:
