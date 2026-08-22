@@ -53,6 +53,7 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 - [SAProuter Support](#saprouter-support)
 - [SAP Secure Store Decryption](#sap-secure-store-rsectab-decryption)
 - [SAP Cloud Connector (SCC)](#sap-cloud-connector-scc)
+- [File Browser](#file-browser)
 - [Engagement Reports & Diffs](#engagement-reports--diffs)
 - [Evasion & Detection Avoidance (Tier 3)](#evasion--detection-avoidance-tier-3)
 - [Standalone Tools](#standalone-tools)
@@ -184,6 +185,13 @@ The OA2C reader uses a three-tier resilience chain: `DDIF_FIELDINFO_GET` for col
 - **Business Impact Assessment (BIA)** — Scenario-based queries against compromised systems (customer data breach, payroll, supply chain, etc.) — exports per-scenario CSV to loot/bia/
 - **Client role detection** — Identify production (P), QA (Q), test (T) systems from T000 with CCCORACTIV
 - **hashes.com integration** — Submit recovered hashes (ABAP BCODE/PASSCODE/PWDSALTEDHASH and SCC SHA-1/SHA-256/PBKDF2) directly to hashes.com rainbow-table API; cracked plaintext is auto-stored as a credential and the node is marked pwned. Auto-lookup toggle (default ON) fires immediately after every hash extract; results fan out across users that share a hash so one cracked password lights up every account using it
+
+### File Browser
+- **Interactive file browser** — Browse, upload, and download files on compromised SAP targets through any available OS-exec channel (GW SAPXPG, SXPG-authenticated, CTCWebService, SAPControl, CVE-2025-31324 JSP webshell).  Address bar navigation, clickable column sorting, Windows drive enumeration
+- **Cross-OS** — Linux (python3 chunked b64 + /usr/bin/base64) and Windows (certutil -encode/-decode + cmd.exe echo) with automatic OS detection
+- **Integrity verification** — Every upload computes local MD5, transfers via chunked base64, computes remote MD5, and hard-fails on mismatch.  Downloads verify reassembled size against pre-flight stat
+- **SAPXPG-resilient** — Multi-fallback chain for stdout-dropping exec channels: dir /-C /A → dir /B /A (bare names + batched stat) → file redirect (dir > tmpfile + type) for directory listings; single-shot base64 → python3 chunked read for downloads
+- **ATT&CK mapped** — T1083 File and Directory Discovery, T1005 Data from Local System, T1105 Ingress Tool Transfer
 
 ### Engagement Reports & Diffs
 - **Self-contained HTML engagement report** — File → Export Engagement Report writes both Markdown and HTML versions to `loot/reports/`. The HTML is presentable: gradient hero with colour-coded overall-risk pill, 9 KPI cards with delta colouring, severity-coloured finding cards, ranked attack-path table, **inline SVG snapshot of the discovered landscape** (auto-grid layout, ⚡ pwned overlay, red production halo), folded SCC + SAP inventory, masked credentials table, and **structural recommendations derived from state** (gateway ACL, MS ACL, SAProuter ACL, default-cred rotation, SecStore rotation, SCC default creds, IR for pwned PRD, untested-RFC-to-PRD review, etc., each with SAP Note refs)

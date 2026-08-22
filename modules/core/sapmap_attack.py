@@ -160,11 +160,17 @@ TECHNIQUES: Dict[str, Dict] = {
     "T1071":     {"name": "Application Layer Protocol",     "tactic": "TA0011"},
     "T1071.001": {"name": "Web Protocols",                  "tactic": "TA0011", "sub_of": "T1071"},
 
+    # Discovery — file-system enumeration via the file browser
+    "T1083":     {"name": "File and Directory Discovery",   "tactic": "TA0007"},
+
     # Collection
     "T1213":     {"name": "Data from Information Repositories", "tactic": "TA0009"},
     "T1074":     {"name": "Data Staged",                    "tactic": "TA0009"},
     "T1005":     {"name": "Data from Local System",         "tactic": "TA0009"},
     "T1560":     {"name": "Archive Collected Data",         "tactic": "TA0009"},
+
+    # Command and Control — file upload to target (ingress tool transfer)
+    "T1105":     {"name": "Ingress Tool Transfer",          "tactic": "TA0011"},
 
     # Exfiltration — SCC backup zip / users.xml pull leaves the
     # target over the SCC admin HTTPS port; populates TA0010 which
@@ -404,6 +410,17 @@ CAPABILITY_MAP: Dict[str, List[str]] = {
     # target before exfil.  When SAPMAP tars/zips before pulling it's
     # also Archive Collected Data (T1560).
     "data.loot_stage":           ["T1074", "T1560"],
+
+    # ---- File Browser (Issue #37) ----
+    # Interactive file-system browsing via TargetFS — lists directories,
+    # downloads files from the target, uploads files to the target.
+    # Each maps to a distinct ATT&CK technique:
+    #   list  = T1083 File and Directory Discovery (TA0007)
+    #   download = T1005 Data from Local System (TA0009)
+    #   upload = T1105 Ingress Tool Transfer (TA0011)
+    "data.fs_list":              ["T1083"],
+    "data.fs_download":          ["T1005"],
+    "data.fs_upload":            ["T1105"],
 
     # ---- Stealth / Defense Impairment (Tier 3) ----
     # Virtual SAP Death Star = live disp+work hook that swallows SAL /

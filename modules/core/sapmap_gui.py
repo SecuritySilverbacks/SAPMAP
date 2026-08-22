@@ -12649,6 +12649,13 @@ def create_app(api: SAPMAPApi) -> Bottle:
                           f"({r.get('bytes')} B, "
                           f"MD5 {r.get('md5', '?')[:8]}..., "
                           f"{r.get('elapsed')}s)")
+                    sapmap_findings.emit_finding(
+                        "INFO", sid,
+                        f"File downloaded: {path} "
+                        f"({r.get('bytes', 0)} B, "
+                        f"MD5 {r.get('md5', '?')[:8]}…)",
+                        ref="fs.download",
+                        attack_capability="data.fs_download")
                 else:
                     print(f"[-] {sid}: download {path} failed: "
                           f"{r.get('error')}")
@@ -12727,6 +12734,13 @@ def create_app(api: SAPMAPApi) -> Bottle:
                           f"({r.get('bytes')} B, "
                           f"{r.get('chunks')} chunks, "
                           f"MD5 match ✓, {r.get('elapsed')}s)")
+                    sapmap_findings.emit_finding(
+                        "INFO", sid,
+                        f"File uploaded: {remote_path} "
+                        f"({r.get('bytes', 0)} B, "
+                        f"MD5 verified)",
+                        ref="fs.upload",
+                        attack_capability="data.fs_upload")
                 else:
                     print(f"[-] {sid}: upload {remote_path} failed: "
                           f"{r.get('error')}")
