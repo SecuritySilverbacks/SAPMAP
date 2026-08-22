@@ -1157,6 +1157,39 @@ class _FakeWindowsTarget:
             out = [p[len(prefix):] for p, _ in sorted(children)]
             return {"success": True, "output": out, "error": ""}
 
+        # findstr /n "^" "src" >"dst" — number lines
+        m = re.match(
+            r'^findstr\s+/n\s+"\^"\s+"([^"]+)"\s+>"([^"]+)"$', cmd)
+        if m:
+            src = self._norm(m.group(1))
+            dst = self._norm(m.group(2))
+            data = self.fs.get(src, b"")
+            if isinstance(data, bytes):
+                data = data.decode("ascii", errors="replace")
+            lines = data.splitlines()
+            numbered = "\r\n".join(
+                f"{i + 1}:{ln}" for i, ln in enumerate(lines)
+                if ln.strip()) + "\r\n"
+            self.fs[dst] = numbered.encode("ascii")
+            return {"success": True, "output": [], "error": ""}
+
+        # findstr /r "^pattern" "file" — regex line filter
+        m = re.match(
+            r'^findstr\s+/r\s+"([^"]+)"\s+"([^"]+)"$', cmd)
+        if m:
+            pattern_str = m.group(1)
+            path = self._norm(m.group(2))
+            data = self.fs.get(path, b"")
+            if isinstance(data, bytes):
+                data = data.decode("ascii", errors="replace")
+            try:
+                pat = re.compile(pattern_str)
+            except re.error:
+                return {"success": True, "output": [], "error": ""}
+            out = [ln for ln in data.splitlines()
+                   if ln.strip() and pat.search(ln)]
+            return {"success": True, "output": out, "error": ""}
+
         # mkdir "path"
         m = re.match(r'^mkdir\s+"([^"]+)"$', cmd)
         if m:
@@ -1317,3 +1350,56 @@ def test_windows_list_dir_file_redirect_fallback():
     assert "a.txt" in names
     assert "b.log" in names
     assert len(r["entries"]) == 2
+
+
+def test_windows_list_dir_paginated_redirect_fallback():
+    """When type also overflows SAPXPG stdout on a populous Windows
+    directory, the paginated findstr read kicks in — reading the temp
+    file in century-sized batches."""
+    target = _FakeWindowsTarget()
+    # Create 15 files in P:\usr\sap\TWT\D00\exe to simulate a
+    # populous dir (real dirs have 500+ but 15 suffices to test
+    # the paginated read across 1-digit and 2-digit line ranges).
+    exe_dir = "p:\\usr\\sap\\twt\\d00\\exe"
+    file_names = [f"prog{i:02d}.exe" for i in range(15)]
+    for name in file_names:
+        target.fs[f"{exe_dir}\\{name}"] = b"x" * 100
+    node = _FakeNode(os_type="Windows")
+
+    orig_exec = target.exec_fn
+    _overflow_path = target._norm("P:\\usr\\sap\\TWT\\D00\\exe")
+
+    def overflow_exec(program, args):
+        if program.startswith("cmd.exe /C "):
+            cmd = program[len("cmd.exe /C "):]
+        elif program == "cmd.exe" and args.startswith("/C "):
+            cmd = args[3:]
+        else:
+            cmd = None
+        if cmd:
+            stripped = cmd.strip()
+            # dir /-C /A "path" (no redirect) → empty
+            m = re.match(r'^dir\s+/-C\s+/A\s+"([^"]+)"$', stripped)
+            if m and target._norm(m.group(1)) == _overflow_path:
+                return {"success": True, "output": [], "error": ""}
+            # dir /B /A "path" (no redirect) → empty
+            m = re.match(r'^dir\s+/B\s+/A\s+"([^"]+)"$', stripped)
+            if m and target._norm(m.group(1)) == _overflow_path:
+                return {"success": True, "output": [], "error": ""}
+            # type "tmpfile" → empty (simulate stdout overflow)
+            m = re.match(r'^type\s+"([^"]+)"$', stripped)
+            if m:
+                path = target._norm(m.group(1))
+                if path.startswith(exe_dir + "\\sapmap_") \
+                        and path.endswith(".dir"):
+                    return {"success": True, "output": [],
+                             "error": ""}
+        return orig_exec(program, args)
+
+    fs = TargetFS(node, overflow_exec)
+    r = fs.list_dir("P:\\usr\\sap\\TWT\\D00\\exe")
+    assert r["ok"], r.get("error", "")
+    names = {e["name"] for e in r["entries"]}
+    for fn in file_names:
+        assert fn in names, f"{fn} not found in listing"
+    assert len(r["entries"]) == 15

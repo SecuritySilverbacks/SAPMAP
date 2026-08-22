@@ -1599,23 +1599,26 @@ class TargetFS:
     def _list_dir_via_file_redirect_windows(self, remote_path: str
                                                ) -> Optional[list]:
         """Last-resort fallback: redirect dir output to a temp file,
-        then read the file back via ``type``.
+        then read the file back.
 
         Bypasses SAPXPG's stdout buffer entirely — the dir output is
         written to the target filesystem instead of flowing through
-        the exec channel's P3/P4 TLV frames.  The temp file is then
-        read back via ``type`` which works reliably for small files.
+        the exec channel's P3/P4 TLV frames.
+
+        For small listings (< ~200 entries), ``type`` reads the file
+        back in one shot.  For populous dirs where ``type`` also
+        overflows, a paginated read is used: ``findstr /n "^"``
+        numbers the lines, then ``findstr /r`` with digit-count
+        patterns reads century-sized batches (~100 lines each), each
+        well within the stdout buffer.
 
         Flow:
           1. ``dir /B /A "path" > tmpfile``  (no stdout — redirect)
-          2. ``type "tmpfile"``              (read names back)
-          3. ``del /q /f "tmpfile" 2>nul``   (cleanup)
+          2. ``type "tmpfile"``              (try one-shot read)
+          3. If type is empty → paginated read via findstr batches
           4. Parse names → batched stat for metadata
+          5. Cleanup temp files
         """
-        # Use a dummy file name inside the listed directory as the
-        # anchor for _win_tmp_near — avoids the C:\Windows\Temp ACL
-        # issue.  If the directory itself is not writable (unlikely
-        # for dirs we can enumerate), _win_cmd will fail gracefully.
         tmp = self._win_tmp_near(
             remote_path.rstrip("\\") + "\\x", ".dir")
         print(f"[*] {self.label}:   file-redirect: "
@@ -1626,15 +1629,30 @@ class TargetFS:
         lines = r.get("output", []) or []
         print(f"[*] {self.label}:   file-redirect: type returned "
               f"{len(lines)} lines")
+
+        if lines:
+            first_lo = lines[0].lower()
+            if "file not found" in first_lo \
+                    or "path not found" in first_lo:
+                print(f"[-] {self.label}:   file-redirect: "
+                      f"{lines[0].strip()}")
+                self._win_cmd(f'del /q /f "{tmp}" 2>nul')
+                return None
+        elif not lines:
+            # type returned empty — either the dir redirect failed
+            # (empty directory, permission error) OR the listing
+            # overflowed SAPXPG stdout.  Try paginated read.
+            print(f"[*] {self.label}:   file-redirect: type "
+                  f"overflowed — trying paginated findstr read")
+            lines = self._win_read_lines_paginated(tmp)
+            print(f"[*] {self.label}:   file-redirect: paginated "
+                  f"read returned {len(lines)} lines")
+
         self._win_cmd(f'del /q /f "{tmp}" 2>nul')
 
         if not lines:
-            print(f"[-] {self.label}:   file-redirect: type returned "
-                  f"empty — tmpfile was not written or is empty")
-            return None
-        first_lo = lines[0].lower()
-        if "file not found" in first_lo or "path not found" in first_lo:
-            print(f"[-] {self.label}:   file-redirect: {lines[0].strip()}")
+            print(f"[-] {self.label}:   file-redirect: no lines "
+                  f"recovered — tmpfile was not written or is empty")
             return None
 
         names = []
@@ -1654,6 +1672,65 @@ class TargetFS:
         print(f"[*] {self.label}:   file-redirect: {len(names)} names → "
               f"batched stat")
         return self._batched_stat_windows(remote_path, names)
+
+    def _win_read_lines_paginated(self, tmp_path: str) -> list:
+        """Read a text file on the Windows target in batches.
+
+        Uses ``findstr /n "^"`` to number every line in the file,
+        then ``findstr /r`` with digit-count regex patterns to read
+        century-sized batches (~100 lines each).  Each batch produces
+        at most ~2.5 KB of stdout, well under SAPXPG's buffer cap.
+
+        Patterns by line-number digit count::
+
+            ^[1-9]:           →  lines 1-9        (9 max)
+            ^[1-9][0-9]:      →  lines 10-99      (90 max)
+            ^1[0-9][0-9]:     →  lines 100-199    (100 max)
+            ^2[0-9][0-9]:     →  lines 200-299    (100 max)
+            …
+            ^9[0-9][0-9]:     →  lines 900-999    (100 max)
+
+        Handles up to 999 entries, which covers every SAP exe / work
+        directory observed in the field.
+        """
+        tmp_num = tmp_path.rsplit(".", 1)[0] + ".n"
+        self._win_cmd(f'findstr /n "^" "{tmp_path}" >"{tmp_num}"')
+
+        all_lines = []
+
+        # Lines 1-9
+        r = self._win_cmd(f'findstr /r "^[1-9]:" "{tmp_num}"')
+        batch = r.get("output", []) or []
+        for ln in batch:
+            ci = ln.find(":")
+            if ci >= 0:
+                all_lines.append(ln[ci + 1:])
+
+        if not batch:
+            self._win_cmd(f'del /q /f "{tmp_num}" 2>nul')
+            return all_lines
+
+        # Lines 10-99
+        r = self._win_cmd(f'findstr /r "^[1-9][0-9]:" "{tmp_num}"')
+        for ln in r.get("output", []) or []:
+            ci = ln.find(":")
+            if ci >= 0:
+                all_lines.append(ln[ci + 1:])
+
+        # Lines 100-999 in centuries
+        for d in range(1, 10):
+            r = self._win_cmd(
+                f'findstr /r "^{d}[0-9][0-9]:" "{tmp_num}"')
+            batch = r.get("output", []) or []
+            if not batch:
+                break
+            for ln in batch:
+                ci = ln.find(":")
+                if ci >= 0:
+                    all_lines.append(ln[ci + 1:])
+
+        self._win_cmd(f'del /q /f "{tmp_num}" 2>nul')
+        return all_lines
 
     def _stat_windows(self, remote_path: str) -> dict:
         """Get size / mtime / is_dir via ``dir /-C /A <path>``.
