@@ -135,6 +135,12 @@ def test_every_capability_in_attack_map_has_remediation_or_explicit_exemption():
         # policy-shape.
         "recon.tms_domain", "lateral.tmsadm_rfc",
         "recon.tms_buffer", "data.tms_transport_history",
+        # File browser (Issue #37) — post-exploitation ops that
+        # use whichever OS-exec channel is already available (GW
+        # SAPXPG, SXPG, CVE-2025-31324, etc.).  Remediation is
+        # always "fix the underlying channel" which is already
+        # covered by lateral.gw_xpg / lateral.cve_2025_31324 / etc.
+        "data.fs_list", "data.fs_download", "data.fs_upload",
     }
     missing = []
     for cap in sapmap_attack.CAPABILITY_MAP:

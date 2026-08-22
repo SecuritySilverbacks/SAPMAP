@@ -764,6 +764,100 @@ def test_download_prefers_usr_bin_base64():
     assert "/usr/bin/base64" in called
 
 
+def test_linux_list_dir_file_redirect_fallback():
+    """When all ls/find variants overflow SAPXPG stdout on a populous
+    Linux directory, the file-redirect fallback kicks in:
+    ls -1 > /tmp/sapmap_xxx.ls + download temp file + parse names."""
+    real_files = {
+        "/usr/sap/S4H/D00/exe/disp+work": (12345, "0755", "regular file"),
+        "/usr/sap/S4H/D00/exe/gwrd":      (67890, "0755", "regular file"),
+        "/usr/sap/S4H/D00/exe/icman":     (11111, "0755", "regular file"),
+    }
+    listing_text = "disp+work\ngwrd\nicman\n"
+    listing_bytes = listing_text.encode()
+    tmp_state = {}  # track the temp file written by the redirect
+
+    def _fake_exec(program, args):
+        # ls -la variants → empty (overflow)
+        if program == "/bin/ls" and "-la" in args:
+            return {"success": True, "output": [], "error": ""}
+        # Shell-wrapped ls -la → empty (overflow)
+        if program == "/bin/sh" and args.startswith("-c ls${IFS}-la"):
+            return {"success": True, "output": [], "error": ""}
+        # Shell-wrapped ls -1 / ls (names-only) → empty (overflow)
+        if program == "/bin/sh" and args.startswith("-c ls"):
+            # Check if this is a redirect (contains ">")
+            if ">" in args:
+                # File-redirect: ls -1 path > tmpfile
+                m = re.search(r'>(/tmp/sapmap_\w+\.ls)', args)
+                if m:
+                    tmp_state["path"] = m.group(1)
+                    tmp_state["data"] = listing_bytes
+                    return {"success": True, "output": [], "error": ""}
+            return {"success": True, "output": [], "error": ""}
+        # Direct ls → empty
+        if program == "/bin/ls":
+            return {"success": True, "output": [], "error": ""}
+        # Shell-wrapped find → empty (overflow)
+        if program == "/bin/sh" and "find" in args:
+            return {"success": True, "output": [], "error": ""}
+        # Direct find → mangled args error
+        if program in ("/usr/bin/find", "/bin/find"):
+            return {"success": True, "output": [
+                "find: paths must precede expression: "
+                "`/usr/sap/S4H/D00/exe'",
+            ], "error": ""}
+        # stat on the directory itself
+        if program == "/usr/bin/stat" and \
+                args.endswith("/usr/sap/S4H/D00/exe"):
+            return {"success": True,
+                     "output": ["4096|2026-08-20 09:00:00|0755|directory"],
+                     "error": ""}
+        # stat on the temp file
+        if program == "/usr/bin/stat" and tmp_state.get("path") \
+                and tmp_state["path"] in args:
+            sz = len(tmp_state["data"])
+            return {"success": True,
+                     "output": [f"{sz}|2026-08-20 09:00:00|0644|regular file"],
+                     "error": ""}
+        # base64 read of the temp file (single-shot download)
+        if program in ("/usr/bin/base64", "/bin/base64",
+                        "/usr/local/bin/base64"):
+            path = args.strip()
+            if tmp_state.get("path") and path == tmp_state["path"]:
+                b64 = base64.b64encode(tmp_state["data"]).decode()
+                return {"success": True, "output": [b64], "error": ""}
+            return {"success": True, "output": [], "error": ""}
+        # Batched stat for the actual files
+        if program == "/usr/bin/stat" and args.startswith("-c %n"):
+            out = []
+            for p in args.split()[2:]:
+                bn = os.path.basename(p)
+                full = f"/usr/sap/S4H/D00/exe/{bn}"
+                if full in real_files:
+                    sz, mode, ftype = real_files[full]
+                    out.append(f"{p}|{sz}|2026-08-20 09:00:00|{mode}|{ftype}")
+            return {"success": True, "output": out, "error": ""}
+        # rm -f (cleanup)
+        if program == "/bin/rm":
+            tmp_state.clear()
+            return {"success": True, "output": [], "error": ""}
+        return {"success": False, "output": [], "error": "?"}
+
+    fs = TargetFS(_FakeNode(), _fake_exec)
+    r = fs.list_dir("/usr/sap/S4H/D00/exe")
+    assert r["ok"], r.get("error", "")
+    names = {e["name"] for e in r["entries"]}
+    assert "disp+work" in names
+    assert "gwrd" in names
+    assert "icman" in names
+    assert len(r["entries"]) == 3
+    # Verify metadata was filled in via batched stat
+    by_name = {e["name"]: e for e in r["entries"]}
+    assert by_name["disp+work"]["size"] == 12345
+    assert by_name["gwrd"]["size"] == 67890
+
+
 def test_stat_returns_size_and_mtime():
     target = _FakeLinuxTarget()
     target.fs["/etc/hostname"] = b"host1\n"
