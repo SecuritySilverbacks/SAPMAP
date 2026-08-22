@@ -1033,6 +1033,22 @@ class _FakeWindowsTarget:
             out.append("               1 Dir(s)  99999999 bytes free")
             return {"success": True, "output": out, "error": ""}
 
+        # dir /B /A "path" >"tmpfile" — redirect to file
+        m = re.match(r'^dir\s+/B\s+/A\s+"([^"]+)"\s+>"([^"]+)"$', cmd)
+        if m:
+            path = self._norm(m.group(1))
+            dst = self._norm(m.group(2))
+            prefix = path.rstrip("\\") + "\\"
+            children = [(p, data) for p, data in self.fs.items()
+                          if p.startswith(prefix)
+                          and "\\" not in p[len(prefix):]]
+            if not children:
+                return {"success": True, "output": [], "error": ""}
+            names = "\r\n".join(p[len(prefix):]
+                                 for p, _ in sorted(children)) + "\r\n"
+            self.fs[dst] = names.encode("ascii")
+            return {"success": True, "output": [], "error": ""}
+
         # dir /B /A "path" — bare names only
         m = re.match(r'^dir\s+/B\s+/A\s+"([^"]+)"$', cmd)
         if m:
@@ -1162,3 +1178,48 @@ def test_windows_bare_drive_path_normalized():
     r = fs.list_dir("P:")
     assert r["ok"]
     assert any(e["name"] == "readme.txt" for e in r["entries"])
+
+
+def test_windows_list_dir_file_redirect_fallback():
+    """When dir /-C /A and dir /B /A both overflow SAPXPG stdout,
+    the file-redirect fallback (dir > tmp + type tmp) kicks in."""
+    target = _FakeWindowsTarget()
+    target.fs["c:\\windows\\temp\\a.txt"] = b"aaa"
+    target.fs["c:\\windows\\temp\\b.log"] = b"bbb"
+    node = _FakeNode(os_type="Windows")
+
+    # Patch: make non-redirect dir calls return empty for this path
+    # to simulate SAPXPG stdout overflow.
+    orig_exec = target.exec_fn
+    _overflow_path = target._norm("C:\\Windows\\Temp")
+
+    def overflow_exec(program, args):
+        # Intercept: if this is a non-redirect dir call on the
+        # overflow path, return empty to simulate stdout drop.
+        if program.startswith("cmd.exe /C "):
+            cmd = program[len("cmd.exe /C "):]
+        elif program == "cmd.exe" and args.startswith("/C "):
+            cmd = args[3:]
+        else:
+            cmd = None
+        if cmd:
+            stripped = cmd.strip()
+            # dir /-C /A "path" (no redirect) → empty
+            if re.match(r'^dir\s+/-C\s+/A\s+"([^"]+)"$', stripped):
+                m = re.match(r'^dir\s+/-C\s+/A\s+"([^"]+)"$', stripped)
+                if target._norm(m.group(1)) == _overflow_path:
+                    return {"success": True, "output": [], "error": ""}
+            # dir /B /A "path" (no redirect) → empty
+            if re.match(r'^dir\s+/B\s+/A\s+"([^"]+)"$', stripped):
+                m = re.match(r'^dir\s+/B\s+/A\s+"([^"]+)"$', stripped)
+                if target._norm(m.group(1)) == _overflow_path:
+                    return {"success": True, "output": [], "error": ""}
+        return orig_exec(program, args)
+
+    fs = TargetFS(node, overflow_exec)
+    r = fs.list_dir("C:\\Windows\\Temp")
+    assert r["ok"], r.get("error", "")
+    names = {e["name"] for e in r["entries"]}
+    assert "a.txt" in names
+    assert "b.log" in names
+    assert len(r["entries"]) == 2
