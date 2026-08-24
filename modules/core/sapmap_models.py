@@ -864,6 +864,9 @@ class SAPNode:
     # /api/node/<sid>/read_oa2c.  Each entry is a plain dict so
     # to_dict() stays JSON-safe.
     oauth2_profiles: list = field(default_factory=list)
+    # Auto-test results for OA2C client_secret → BTP token mint.
+    # Each entry: {client_uuid, client_id, token_endpoint, valid, error}
+    oa2c_test_results: list = field(default_factory=list)
 
     # Capability analyser results — what each pwned/credentialed user
     # on this node can actually read/do, mapped from raw auth-object
@@ -1043,6 +1046,7 @@ class SAPNode:
             "tms_domain": self.tms_domain,
             "tms_destinations": [d.to_dict() for d in (self.tms_destinations or [])],
             "oauth2_profiles": list(self.oauth2_profiles),
+            "oa2c_test_results": list(self.oa2c_test_results),
             "usrextid_entries": list(self.usrextid_entries),
             "usrextid_read_at": self.usrextid_read_at,
             "pp_impersonation": dict(self.pp_impersonation or {}),
@@ -1174,6 +1178,7 @@ class SAPNode:
             tms_destinations=[TMSDestination.from_dict(t)
                 for t in d.get("tms_destinations", [])],
             oauth2_profiles=list(d.get("oauth2_profiles", [])),
+            oa2c_test_results=list(d.get("oa2c_test_results", [])),
             capability_results=list(d.get("capability_results", [])),
             capability_row_counts=dict(
                 d.get("capability_row_counts", {})),

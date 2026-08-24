@@ -10455,6 +10455,8 @@ function showDetails(sid, opts) {
       if (ss.length === 0) return '';
       const catColors = {rfc:'#f0883e',db:'#58a6ff',cts:'#3fb950',smtp:'#bc8cff',hmac:'#484f58',pse:'#484f58',oauth2_client:'#a371f7',other:'#484f58'};
       const catLabels = {rfc:'RFC',db:'DB',cts:'CTS',smtp:'SMTP',hmac:'HMAC',pse:'PSE',oauth2_client:'OAuth',other:'?'};
+      const oa2cProfiles = n.oauth2_profiles || [];
+      const oa2cTests = n.oa2c_test_results || [];
       return '<div class="detail-section"><h4>&#128273; SecStore (' + ss.length + ' entries)</h4>' +
         ss.filter(e => !e.error).map(e => {
           const cat = e.category || 'other';
@@ -10464,9 +10466,40 @@ function showDetails(sid, opts) {
           const plen = e.password_len || pwd.length || 0;
           const masked = plen > 0 ? '&#9679;'.repeat(Math.min(plen, 8)) + ' (' + plen + ' chars)' : '(empty)';
           const ident = e.ident_clean || e.ident || '?';
+          // OA2C enrichment: pair with profile metadata + test result
+          let oa2cExtra = '';
+          if (cat === 'oauth2_client' && e.client_uuid) {
+            const prof = oa2cProfiles.find(
+              p => (p.client_uuid || '').toLowerCase() === e.client_uuid);
+            const test = oa2cTests.find(
+              t => (t.client_uuid || '').toLowerCase() === e.client_uuid);
+            if (prof) {
+              const cid = prof.client_id || '';
+              const ep = prof.token_endpoint || '';
+              const desc = prof.description || '';
+              oa2cExtra += '<br><span style="color:#a371f7;font-size:10px">'
+                + (cid ? '&#128273; ' + escHtml(cid) : '')
+                + (ep ? ' &rarr; ' + escHtml(ep) : '')
+                + (desc ? ' (' + escHtml(desc) + ')' : '')
+                + '</span>';
+            } else if (oa2cProfiles.length === 0) {
+              oa2cExtra += '<br><span style="color:#484f58;font-size:10px;font-style:italic">'
+                + 'Run Read OA2C Profiles to identify this client</span>';
+            }
+            if (test) {
+              if (test.valid) {
+                oa2cExtra += '<br><span style="color:#3fb950;font-size:10px">'
+                  + '&#10004; BTP token minted successfully</span>';
+              } else {
+                oa2cExtra += '<br><span style="color:#f85149;font-size:10px">'
+                  + '&#10008; ' + escHtml(test.error || 'mint failed') + '</span>';
+              }
+            }
+          }
           return '<div class="detail-row ss-reveal" style="cursor:pointer">' +
             '<span class="detail-key" style="color:' + col + ';min-width:50px">' + lbl + '</span>' +
             '<span class="detail-val" style="font-size:11px">' + escHtml(ident) +
+            oa2cExtra +
             '<br><span class="ss-masked" style="color:#8b949e">' + masked + '</span>' +
             '<span class="ss-plain" style="display:none;color:#3fb950">' + escHtml(pwd) + '</span>' +
             '</span></div>';
