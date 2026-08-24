@@ -48,7 +48,7 @@ def test_read_table_long_strings_recovers_when_kernel_omits_fields_meta(
     rfc_result = {
         "FIELDS":  [],                  # <-- empty metadata
         "ET_DATA": [
-            {"WA": "001|DDIC|joris.vdvis@securitybridge.com|DN|000"},
+            {"WA": "001|DDIC|testuser@example.com|DN|000"},
             {"WA": "001|JORIS|jvdv@example.com|DN|000"},
         ],
     }
@@ -61,7 +61,7 @@ def test_read_table_long_strings_recovers_when_kernel_omits_fields_meta(
     assert len(rows) == 2
     assert rows[0]["MANDT"] == "001"
     assert rows[0]["BNAME"] == "DDIC"
-    assert rows[0]["EXTID"] == "joris.vdvis@securitybridge.com"
+    assert rows[0]["EXTID"] == "testuser@example.com"
     assert rows[0]["TYPE"] == "DN"
     assert rows[0]["SEQNO"] == "000"
     assert rows[1]["BNAME"] == "JORIS"
@@ -78,7 +78,7 @@ def test_read_table_long_strings_honours_kernel_fields_when_present(
         "FIELDS":  [{"FIELDNAME": "BNAME", "OFFSET": 0, "LENGTH": 12},
                     {"FIELDNAME": "EXTID", "OFFSET": 0, "LENGTH": 1024},
                     {"FIELDNAME": "TYPE",  "OFFSET": 0, "LENGTH": 1}],
-        "ET_DATA": [{"WA": "DDIC|joris.vdvis@securitybridge.com|DN"}],
+        "ET_DATA": [{"WA": "DDIC|testuser@example.com|DN"}],
     }
     with _fake_conn(rfc_result) as ctx_factory:
         monkeypatch.setattr(sapmap_rfc, "_get_connection", ctx_factory)
@@ -88,7 +88,7 @@ def test_read_table_long_strings_honours_kernel_fields_when_present(
             long_strings=True)
     assert len(rows) == 1
     assert rows[0]["BNAME"] == "DDIC"
-    assert rows[0]["EXTID"] == "joris.vdvis@securitybridge.com"
+    assert rows[0]["EXTID"] == "testuser@example.com"
     assert rows[0]["TYPE"] == "DN"
 
 
@@ -101,7 +101,7 @@ def test_read_table_typed_struct_rows_still_work(monkeypatch):
         "FIELDS":  [],
         "ET_DATA": [
             {"MANDT": "001", "BNAME": "DDIC",
-             "EXTID": "joris.vdvis@securitybridge.com",
+             "EXTID": "testuser@example.com",
              "TYPE": "DN", "SEQNO": "000"},
         ],
     }
@@ -125,7 +125,7 @@ def test_read_table_typed_struct_lowercase_keys(monkeypatch):
         "FIELDS":  [],
         "ET_DATA": [
             {"mandt": "001", "bname": "DDIC",
-             "extid": "joris.vdvis@securitybridge.com",
+             "extid": "testuser@example.com",
              "type":  "DN", "seqno": "000"},
             {"mandt": "001", "bname": "JORIS",
              "extid": "joris@example.com",
@@ -140,7 +140,7 @@ def test_read_table_typed_struct_lowercase_keys(monkeypatch):
             long_strings=True)
     assert len(rows) == 2
     assert rows[0]["BNAME"] == "DDIC"
-    assert rows[0]["EXTID"] == "joris.vdvis@securitybridge.com"
+    assert rows[0]["EXTID"] == "testuser@example.com"
     assert rows[0]["TYPE"] == "DN"
     assert rows[1]["BNAME"] == "JORIS"
     assert rows[1]["TYPE"] == "LD"

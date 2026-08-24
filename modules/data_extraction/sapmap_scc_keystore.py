@@ -34,7 +34,7 @@ as crown-jewels material.  Findings emitted are CRITICAL.
 Usage
 -----
     from sapmap_scc_keystore import extract_keystore
-    res = extract_keystore("192.168.2.167", "Administrator", "SccAdmin123!",
+    res = extract_keystore("10.0.0.1", "Administrator", "SccAdmin123!",
                            backup_password="SccAdmin123!")
     # res = {
     #   "ok": True,

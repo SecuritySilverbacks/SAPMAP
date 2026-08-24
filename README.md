@@ -1339,7 +1339,7 @@ Set a SAProuter route string when adding a system manually, or right-click an ex
 /H/<router_ip>/S/<router_port>/W/<password>
 ```
 
-Example: `/H/3.221.134.53/S/3299/W/my_password`
+Example: `/H/198.51.100.53/S/3299/W/my_password`
 
 ### What Routes Through SAProuter
 
@@ -1704,7 +1704,7 @@ Unauthenticated system info retrieval (supports SAProuter):
 
 ```bash
 python3 modules/protocols/sap_rfc_system_info.py -t 192.168.1.100 -p 3300 -v
-python3 modules/protocols/sap_rfc_system_info.py -t 172.31.14.107 -p 3200 -R 3.221.134.53:3299 -v
+python3 modules/protocols/sap_rfc_system_info.py -t 172.31.14.107 -p 3200 -R 198.51.100.53:3299 -v
 ```
 
 Extracts SID, hostname, OS, kernel version, database type, and IP addresses using four probe methods (V6 single-packet, V2 error leak, Chipik-style, DIAG login screen).

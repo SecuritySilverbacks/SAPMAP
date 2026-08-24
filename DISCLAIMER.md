@@ -63,6 +63,14 @@ The authors and contributors accept **no liability** for any claim,
 damages, or other liability arising from the use or misuse of this
 software.
 
+## Jurisdiction
+
+Laws governing computer security testing vary by jurisdiction. Users are
+responsible for understanding and complying with all applicable local,
+national, and international laws — including the Computer Fraud and Abuse
+Act (US), Computer Misuse Act (UK), and equivalent legislation in their
+country of operation.
+
 ## Reporting responsibly
 
 If you discover a new vulnerability using SAPMAP or its research, please
