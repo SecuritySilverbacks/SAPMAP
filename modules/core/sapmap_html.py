@@ -9953,6 +9953,15 @@ function showDetails(sid, opts) {
   // Preserve scroll position on refresh so live updates don't yank the
   // panel back to the top while the operator is reading.
   const preservedScroll = refresh ? (panel.scrollTop || 0) : 0;
+  // Snapshot which SecStore entries are currently revealed so the
+  // innerHTML rebuild doesn't flip them back to masked.
+  const revealedSS = new Set();
+  if (refresh) {
+    panel.querySelectorAll('.ss-reveal').forEach((row, i) => {
+      const m = row.querySelector('.ss-masked');
+      if (m && m.style.display === 'none') revealedSS.add(i);
+    });
+  }
   panel.dataset.sid = sid;
   panel.setAttribute('data-view', 'details');
   panel.innerHTML = `
@@ -10608,14 +10617,21 @@ function showDetails(sid, opts) {
     })()}
   `;
 
-  // Wire up click-to-reveal on SecStore entries
-  panel.querySelectorAll('.ss-reveal').forEach(row => {
+  // Wire up click-to-reveal on SecStore entries and restore any that
+  // were already revealed before the auto-refresh rebuilt the HTML.
+  panel.querySelectorAll('.ss-reveal').forEach((row, i) => {
     row.addEventListener('click', () => {
       const m = row.querySelector('.ss-masked');
       const p = row.querySelector('.ss-plain');
       if (m.style.display === 'none') { m.style.display = ''; p.style.display = 'none'; }
       else { m.style.display = 'none'; p.style.display = ''; }
     });
+    if (revealedSS.has(i)) {
+      const m = row.querySelector('.ss-masked');
+      const p = row.querySelector('.ss-plain');
+      if (m) m.style.display = 'none';
+      if (p) p.style.display = '';
+    }
   });
 
   panel.classList.add('visible');
