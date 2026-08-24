@@ -780,6 +780,8 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
     # Skipped for single-target scans where the time saving is negligible.
     if cancel_event and cancel_event.is_set():
         return result
+    quick_hit = True   # assume alive when quick check is skipped
+    quick_rtt = 999.0  # no measurement → keep original timeout
     if not skip_quick_check:
         # Quick probe set: dispatcher range (3200-3299) + SAPControl 5XX13
         # + SAPHostControl (1128) + the WD well-known ports.  The WD
@@ -793,6 +795,7 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
         )
         quick_timeout = min(timeout, 1.5)
         quick_hit = False
+        t_quick_start = time.time()
         qe = ThreadPoolExecutor(max_workers=min(len(QUICK_PORTS), 20))
         qf = [qe.submit(_scan_port, host, p, quick_timeout) for p in QUICK_PORTS]
         for f in as_completed(qf):
@@ -801,6 +804,7 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
             if f.result():
                 quick_hit = True
                 break
+        quick_rtt = time.time() - t_quick_start
         qe.shutdown(wait=False)
         if cancel_event and cancel_event.is_set():
             return result
@@ -811,7 +815,18 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
 
     _cancelled = lambda: cancel_event and cancel_event.is_set()
 
-    def _do_scan(port_list, label="scan"):
+    # Adaptive timeout: on fast LANs the default 3s timeout wastes time
+    # waiting for closed ports that silently drop packets (Windows hosts).
+    # If the quick probe got a hit within 200ms, cap the port scan timeout
+    # at 0.5s — any port that doesn't respond in 0.5s on a LAN is closed.
+    scan_timeout = timeout
+    if quick_hit and quick_rtt < 0.2:
+        scan_timeout = max(0.5, min(timeout, quick_rtt * 10))
+        print(f"[*] {host}: fast network (first response {quick_rtt*1000:.0f}ms)"
+              f" — port scan timeout {scan_timeout:.1f}s")
+
+    def _do_scan(port_list, label="scan", port_timeout=None):
+        _timeout = port_timeout if port_timeout is not None else scan_timeout
         hits = {}
         total = len(port_list)
         # Aim for ~4 progress ticks per pass, clamped between 25 and 200 ports.
@@ -823,7 +838,7 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
             port, svc, inst = args
             if _cancelled():
                 return None
-            if _scan_port(host, port, timeout):
+            if _scan_port(host, port, _timeout):
                 return (port, svc, inst)
             return None
         with ThreadPoolExecutor(max_workers=threads) as executor:
@@ -2111,17 +2126,32 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
     # ABAP flag into SJ1's info dict, mis-labelling SJ1 as ABAP+JAVA.
     info.setdefault("http_ports", {})   # {inst_nr: (http_port, https_port)}
     sc_to = min(timeout, 5 if saprouter else 3)
+
+    # Fire all SAPControl probes in parallel — each is an independent SOAP
+    # call on a different port (5XX13).  Wall-clock drops from sum-of-all
+    # to max-of-slowest (typically 7s instead of 16s for 3 instances).
+    from concurrent.futures import ThreadPoolExecutor as _SCPool
+    _sc_futures = {}
+    _sc_pool = _SCPool(max_workers=min(len(ordered_nrs), 5))
     for inst_nr in ordered_nrs:
         sc_port = 50000 + inst_nr * 100 + 13
-        sid, is_java, is_abap, db_type, icm_http, icm_https = \
-            _query_sapcontrol_sid(host, sc_port, timeout=sc_to,
-                                   saprouter=saprouter)
+        _sc_futures[inst_nr] = _sc_pool.submit(
+            _query_sapcontrol_sid, host, sc_port,
+            timeout=sc_to, saprouter=saprouter)
+
+    # Process results in priority order (ordered_nrs) to respect SID
+    # precedence and early-exit logic.
+    for inst_nr in ordered_nrs:
+        sc_port = 50000 + inst_nr * 100 + 13
+        try:
+            sid, is_java, is_abap, db_type, icm_http, icm_https = \
+                _sc_futures[inst_nr].result()
+        except Exception:
+            continue
         if sid and not info["sid"]:
             info["sid"] = sid
-            tag = sid  # update tag with discovered SID
+            tag = sid
             print(f"[+] {tag}: SID from SAPControl ({host}:{sc_port}): {sid}")
-        # Only accumulate stack flags from a SAPControl whose SID matches the
-        # one this enrichment is about.  Skip silently when SIDs differ.
         sid_matches = (
             (sid and info["sid"] and sid.upper() == info["sid"].upper())
             or (sid and not info["sid"])
@@ -2130,9 +2160,6 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
             print(f"[*] {info['sid'] or tag}: ignoring stack reading from "
                   f"{host}:{sc_port} — that SAPControl reports SID={sid} "
                   f"(different system on the same host)")
-            # Still pick up SID-agnostic data we might use later
-            if db_type and not info.get("db_type"):
-                pass  # do NOT take db_type from a different SID either
         elif is_java or is_abap:
             info["_is_java"] = info.get("_is_java", False) or is_java
             info["_is_abap"] = info.get("_is_abap", False) or is_abap
@@ -2142,8 +2169,6 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
                   f"{'  [ABAP]' if is_abap else ''}"
                   f"{'  [JAVA]' if is_java else ''}"
                   f"  (SID match{', ' + decided_by if decided_by else ''})")
-        # Same SID-scoping rule for db_type and ICM ports — these belong
-        # to the SID running on this instance, not the one we're enriching.
         if db_type and not info["db_type"] and sid_matches:
             info["db_type"] = db_type
             print(f"[+] {tag}: DB type from SAPControl ({host}:{sc_port}): "
@@ -2155,12 +2180,10 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
             if icm_https: bits.append(f"HTTPS:{icm_https}")
             print(f"[+] {tag}: ICM ports for instance {inst_nr:02d} "
                   f"from SAPControl ({host}:{sc_port}): {', '.join(bits)}")
-        # For double-stack, ABAP and JAVA run on different instances.
-        # Keep querying until we have SID + db_type + both stack flags checked,
-        # or all instances are exhausted.
         if (info["sid"] and info["db_type"]
                 and info.get("_is_java") and info.get("_is_abap")):
-            break  # Found both stacks, no need to continue
+            break
+    _sc_pool.shutdown(wait=False)
 
     # /sap/public/info pre-auth fingerprint — fills any RFCSI fields the
     # gateway probe couldn't extract.  ABAP-only ICF service: a Java
