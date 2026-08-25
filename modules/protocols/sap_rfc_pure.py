@@ -41,9 +41,35 @@ try:
     _original_encode = _codec.encode
     _original_decode = _codec.decode
 
+    def _default_for_field(child):
+        rt = getattr(child, 'rfctype', 0)
+        if rt in (8, 9, 10, 31):  # INT, INT2, INT1, INT8
+            return 0
+        if rt == 7:  # FLOAT
+            return 0.0
+        if rt in (4, 30):  # BYTE, XSTRING
+            return b''
+        return ''
+
+    def _pad_row(row, type_desc):
+        if type_desc is None:
+            return row
+        padded = None
+        for child in type_desc.fields:
+            if child.name not in row:
+                if padded is None:
+                    padded = dict(row)
+                padded[child.name] = _default_for_field(child)
+        return padded if padded is not None else row
+
     def _patched_encode(rfctype, value, field):
+        td = getattr(field, 'type_desc', None)
         if isinstance(value, list) and rfctype == 17:
+            if td is not None:
+                value = [_pad_row(r, td) for r in value]
             return _codec._encode_table(value, field)
+        if isinstance(value, dict) and td is not None:
+            value = _pad_row(value, td)
         return _original_encode(rfctype, value, field)
 
     def _patched_decode(rfctype, value, field):
