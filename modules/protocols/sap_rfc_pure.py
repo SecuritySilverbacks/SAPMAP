@@ -6,7 +6,9 @@ saprfclib requires Python 3.12+.  On older interpreters this module
 will fail to import, and SAPMAP falls back to the C SDK automatically.
 """
 
+import datetime
 import logging
+import traceback as _tb
 from struct import error as struct_error
 
 logger = logging.getLogger(__name__)
@@ -174,6 +176,34 @@ _SAPRFCLIB_PARAMS = frozenset(
 
 
 # ---------------------------------------------------------------------------
+# Result normalization — saprfclib → C-SDK-compatible format
+# ---------------------------------------------------------------------------
+
+def _normalize_result(result):
+    """Convert saprfclib call results to match the C SDK's return format.
+
+    saprfclib converts DATE/TIME fields to datetime.date/datetime.time
+    objects.  The C SDK returns raw strings ("YYYYMMDD" / "HHMMSS").
+    SAPMAP code expects strings, so we convert back.
+    """
+    if isinstance(result, dict):
+        return {k: _normalize_value(v) for k, v in result.items()}
+    return result
+
+
+def _normalize_value(val):
+    if isinstance(val, datetime.date) and not isinstance(val, datetime.datetime):
+        return val.strftime('%Y%m%d')
+    if isinstance(val, datetime.time):
+        return val.strftime('%H%M%S')
+    if isinstance(val, dict):
+        return {k: _normalize_value(v) for k, v in val.items()}
+    if isinstance(val, list):
+        return [_normalize_value(item) for item in val]
+    return val
+
+
+# ---------------------------------------------------------------------------
 # RFCConnection — drop-in replacement for sap_rfc_ctypes.RFCConnection
 # ---------------------------------------------------------------------------
 
@@ -308,10 +338,16 @@ class RFCConnection:
     def call(self, func_name, **kwargs):
         self._ensure_open()
         try:
-            return self._conn.call(func_name, **kwargs)
+            result = self._conn.call(func_name, **kwargs)
+            return _normalize_result(result)
         except _lib.SapRfcError as e:
             raise _translate_exception(e) from e
         except Exception as e:
+            tb_str = _tb.format_exc()
+            print(f"[!] saprfclib call({func_name}) internal error:\n"
+                  f"    {type(e).__name__}: {e}\n"
+                  f"    --- saprfclib traceback ---\n{tb_str}"
+                  f"    --------------------------")
             raise RFCError(f"saprfclib call({func_name}) failed: {e}") from e
 
     def _make_type_desc(self, name, fields):
@@ -362,12 +398,25 @@ class RFCConnection:
         return _FunctionDesc(name=func_name, parameters=param_descs)
 
     def call_raw(self, func_name, func_desc, **kwargs):
-        """Call using a manually-built function description."""
+        """Call using a manually-built function description.
+
+        saprfclib always auto-fetches metadata from the server, so the
+        func_desc is only used as fallback when the auto-fetch fails.
+        """
         self._ensure_open()
         try:
-            return self._conn.call(func_name, func_desc=func_desc, **kwargs)
+            result = self._conn.call(func_name, **kwargs)
+            return _normalize_result(result)
         except _lib.SapRfcError as e:
             raise _translate_exception(e) from e
+        except Exception as e:
+            tb_str = _tb.format_exc()
+            print(f"[!] saprfclib call_raw({func_name}) internal error:\n"
+                  f"    {type(e).__name__}: {e}\n"
+                  f"    --- saprfclib traceback ---\n{tb_str}"
+                  f"    --------------------------")
+            raise RFCError(
+                f"saprfclib call_raw({func_name}) failed: {e}") from e
 
     # -- Internal --
 
