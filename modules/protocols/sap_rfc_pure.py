@@ -26,12 +26,19 @@ from saprfclib import (
 
 # ---------------------------------------------------------------------------
 # Monkey-patch: saprfclib classifies TABLE-direction params as
-# RFCTYPE_STRUCTURE in the auto-fetched FunctionDesc.  The codec's
-# encode() then calls _encode_structure() on a list[dict] → crash.
-# Fix: if value is a list and rfctype says STRUCTURE, redirect to
-# _encode_table.  Safe because STRUCTURE values are always dicts.
-# Also patch decode: TABLE response bytes decoded as single STRUCTURE
-# instead of list-of-dicts causes empty/wrong results.
+# RFCTYPE_STRUCTURE (17) in the auto-fetched FunctionDesc.  This causes
+# two problems:
+#   1. encode() calls _encode_structure() on a list[dict] → crash
+#   2. The TLV tag says STRUCTURE but the data is TABLE → server rejects
+#      with CALL_FUNCTION_ILLEGAL_P_TYPE
+#   3. decode() returns a single dict instead of list[dict] → empty results
+#
+# Root fix: patch Connection.call() to correct rfctype on TABLE-direction
+# params (17→5) in the FunctionDesc BEFORE invoke uses it.  This fixes
+# TLV tags, encode dispatch, AND decode dispatch in one place.
+#
+# Also patch codec.encode to pad missing fields with type-appropriate
+# defaults (C SDK fills them; saprfclib requires all fields present).
 # ---------------------------------------------------------------------------
 
 try:
@@ -40,6 +47,54 @@ try:
 
     _original_encode = _codec.encode
     _original_decode = _codec.decode
+
+    # -- Direction detection (handles str, int, enum) --
+
+    def _is_table_direction(direction):
+        if isinstance(direction, str):
+            return 'TABLE' in direction.upper()
+        if isinstance(direction, int):
+            return direction == 7
+        name = getattr(direction, 'name', '')
+        if isinstance(name, str) and 'TABLE' in name.upper():
+            return True
+        val = getattr(direction, 'value', None)
+        if isinstance(val, int) and val == 7:
+            return True
+        return False
+
+    # -- Metadata fix: TABLE params rfctype 17→5 --
+
+    def _fix_table_params(func_desc):
+        params = getattr(func_desc, 'parameters', None)
+        if params is None:
+            return
+        for param in params:
+            if _is_table_direction(getattr(param, 'direction', '')):
+                if getattr(param, 'rfctype', 0) == 17:
+                    try:
+                        param.rfctype = 5
+                    except (AttributeError, TypeError):
+                        pass
+
+    if hasattr(_lib, 'Connection'):
+        _orig_conn_call = _lib.Connection.call
+
+        def _patched_conn_call(self, function_module, **params):
+            if hasattr(self, 'get_function_description'):
+                try:
+                    func_desc = self.get_function_description(
+                        function_module)
+                    _fix_table_params(func_desc)
+                except Exception:
+                    pass
+            return _orig_conn_call(self, function_module, **params)
+
+        _lib.Connection.call = _patched_conn_call
+        logger.debug('saprfclib Connection.call patched for TABLE '
+                      'rfctype fix')
+
+    # -- Pad missing fields with type-appropriate defaults --
 
     def _default_for_field(child):
         rt = getattr(child, 'rfctype', 0)
@@ -62,9 +117,15 @@ try:
                 padded[child.name] = _default_for_field(child)
         return padded if padded is not None else row
 
+    # -- Encode patch: pad missing fields + TABLE fallback --
+
     def _patched_encode(rfctype, value, field):
         td = getattr(field, 'type_desc', None)
-        if isinstance(value, list) and rfctype == 17:
+        if isinstance(value, list) and rfctype in (5, 17):
+            try:
+                field.rfctype = 5
+            except (AttributeError, TypeError):
+                pass
             if td is not None:
                 value = [_pad_row(r, td) for r in value]
             return _codec._encode_table(value, field)
@@ -72,10 +133,15 @@ try:
             value = _pad_row(value, td)
         return _original_encode(rfctype, value, field)
 
+    # -- Decode patch: TABLE direction fallback --
+
     def _patched_decode(rfctype, value, field):
-        direction = getattr(field, 'direction', '')
-        if isinstance(direction, str) and 'TABLE' in direction.upper():
+        if _is_table_direction(getattr(field, 'direction', '')):
             if rfctype != 5:
+                try:
+                    field.rfctype = 5
+                except (AttributeError, TypeError):
+                    pass
                 return _codec._decode_table(value, field)
         return _original_decode(rfctype, value, field)
 
@@ -86,7 +152,8 @@ try:
     if hasattr(_invoke, 'decode'):
         _invoke.decode = _patched_decode
 
-    logger.debug('saprfclib codec patched for TABLE param dispatch')
+    logger.debug('saprfclib codec patched for TABLE param dispatch + '
+                  'field padding')
 except Exception as _patch_err:
     logger.warning('saprfclib codec patch failed: %s', _patch_err)
 
