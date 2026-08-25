@@ -84,22 +84,47 @@ try:
 
     from saprfclib import connection as _conn_mod
 
-    _orig_parse_row = _conn_mod._parse_params_row
-
-    def _patched_parse_params_row(row):
-        fd = _orig_parse_row(row)
-        if _is_table_direction(getattr(fd, 'direction', 0)) and getattr(fd, 'rfctype', 0) == 17:
-            fd.rfctype = 5
+    def _fix_table_rfctype_post(desc, ctx=""):
+        """Change TABLE-direction params from rfctype 17 (STRUCTURE) to 5
+        (TABLE) AFTER _call_bootstrap has attached type_desc via the
+        STRUCTURE lookup path."""
+        fixed = []
+        for p in getattr(desc, 'parameters', []):
+            if (_is_table_direction(getattr(p, 'direction', 0))
+                    and getattr(p, 'rfctype', 0) == 17):
+                p.rfctype = 5
+                fixed.append(p.name)
+        if fixed:
             _sys.stderr.write(
-                f"[DBG-STDERR] _parse_params_row: fixed {fd.name!r} "
-                f"(direction=T) rfctype 17->5\n")
+                f"[DBG-STDERR] {ctx}: promoted STRUCTURE->TABLE for "
+                f"{fixed} (type_desc preserved: "
+                f"{[getattr(p, 'type_desc', None) is not None for p in desc.parameters if p.name in fixed]})\n")
             _sys.stderr.flush()
-        return fd
+        return desc
 
-    _conn_mod._parse_params_row = _patched_parse_params_row
-    _sys.stderr.write("[DBG-STDERR] saprfclib: _parse_params_row patched\n")
+    # Patch AsyncConnection._call_bootstrap (the async path used by classic TCP)
+    _AsyncConn = _conn_mod.AsyncConnection
+    _orig_async_bootstrap = _AsyncConn._call_bootstrap
+
+    async def _patched_async_bootstrap(self, func_name):
+        desc = await _orig_async_bootstrap(self, func_name)
+        return _fix_table_rfctype_post(desc, f"async_bootstrap({func_name})")
+
+    _AsyncConn._call_bootstrap = _patched_async_bootstrap
+
+    # Patch Connection._call_bootstrap (the sync path used by WS/SNC)
+    _SyncConn = _conn_mod.Connection
+    _orig_sync_bootstrap = _SyncConn._call_bootstrap
+
+    def _patched_sync_bootstrap(self, func_name):
+        desc = _orig_sync_bootstrap(self, func_name)
+        return _fix_table_rfctype_post(desc, f"sync_bootstrap({func_name})")
+
+    _SyncConn._call_bootstrap = _patched_sync_bootstrap
+
+    _sys.stderr.write("[DBG-STDERR] saprfclib: _call_bootstrap patched on both Connection classes\n")
     _sys.stderr.flush()
-    print("[DBG] saprfclib: _parse_params_row patched in connection module (sync+async path)", flush=True)
+    print("[DBG] saprfclib: _call_bootstrap patched (sync+async) — rfctype fix runs AFTER type_desc attach", flush=True)
 
     # -- Pad missing fields with type-appropriate defaults --
 
