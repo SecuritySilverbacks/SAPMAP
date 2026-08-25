@@ -25,6 +25,46 @@ from saprfclib import (
 )
 
 # ---------------------------------------------------------------------------
+# Monkey-patch: saprfclib classifies TABLE-direction params as
+# RFCTYPE_STRUCTURE in the auto-fetched FunctionDesc.  The codec's
+# encode() then calls _encode_structure() on a list[dict] → crash.
+# Fix: if value is a list and rfctype says STRUCTURE, redirect to
+# _encode_table.  Safe because STRUCTURE values are always dicts.
+# Also patch decode: TABLE response bytes decoded as single STRUCTURE
+# instead of list-of-dicts causes empty/wrong results.
+# ---------------------------------------------------------------------------
+
+try:
+    from saprfclib import codec as _codec
+    from saprfclib import invoke as _invoke
+
+    _original_encode = _codec.encode
+    _original_decode = _codec.decode
+
+    def _patched_encode(rfctype, value, field):
+        if isinstance(value, list) and rfctype == 17:
+            return _codec._encode_table(value, field)
+        return _original_encode(rfctype, value, field)
+
+    def _patched_decode(rfctype, value, field):
+        direction = getattr(field, 'direction', '')
+        if isinstance(direction, str) and 'TABLE' in direction.upper():
+            if rfctype != 5:
+                return _codec._decode_table(value, field)
+        return _original_decode(rfctype, value, field)
+
+    _codec.encode = _patched_encode
+    _codec.decode = _patched_decode
+    if hasattr(_invoke, 'encode'):
+        _invoke.encode = _patched_encode
+    if hasattr(_invoke, 'decode'):
+        _invoke.decode = _patched_decode
+
+    logger.debug('saprfclib codec patched for TABLE param dispatch')
+except Exception as _patch_err:
+    logger.warning('saprfclib codec patch failed: %s', _patch_err)
+
+# ---------------------------------------------------------------------------
 # Constants — identical numeric values to sap_rfc_ctypes
 # ---------------------------------------------------------------------------
 
