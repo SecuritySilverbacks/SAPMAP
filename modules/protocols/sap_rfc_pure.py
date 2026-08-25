@@ -88,6 +88,11 @@ try:
 
     def _patched_get_func_desc(conn, func_name, **kwargs):
         desc = _orig_get_func_desc(conn, func_name, **kwargs)
+        if func_name.upper() in ('BAPI_USER_GET_DETAIL', 'RFC_READ_TABLE'):
+            _sys.stderr.write(f"[DBG-STDERR] get_func_desc({func_name}) -> {len(getattr(desc, 'parameters', []))} params:\n")
+            for p in getattr(desc, 'parameters', []):
+                _sys.stderr.write(f"    name={p.name!r} direction={getattr(p, 'direction', '?')!r} rfctype={getattr(p, 'rfctype', '?')!r} type_desc={'<td>' if getattr(p, 'type_desc', None) else 'None'}\n")
+            _sys.stderr.flush()
         fixed = 0
         for p in getattr(desc, 'parameters', []):
             if _is_table_direction(getattr(p, 'direction', '')) and getattr(p, 'rfctype', 0) == 17:
