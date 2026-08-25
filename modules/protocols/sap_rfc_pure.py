@@ -84,30 +84,22 @@ try:
 
     from saprfclib import connection as _conn_mod
 
-    _orig_get_func_desc = _conn_mod.get_function_desc
+    _orig_parse_row = _conn_mod._parse_params_row
 
-    def _patched_get_func_desc(conn, func_name, **kwargs):
-        desc = _orig_get_func_desc(conn, func_name, **kwargs)
-        if func_name.upper() in ('BAPI_USER_GET_DETAIL', 'RFC_READ_TABLE'):
-            _sys.stderr.write(f"[DBG-STDERR] get_func_desc({func_name}) -> {len(getattr(desc, 'parameters', []))} params:\n")
-            for p in getattr(desc, 'parameters', []):
-                _sys.stderr.write(f"    name={p.name!r} direction={getattr(p, 'direction', '?')!r} rfctype={getattr(p, 'rfctype', '?')!r} type_desc={'<td>' if getattr(p, 'type_desc', None) else 'None'}\n")
+    def _patched_parse_params_row(row):
+        fd = _orig_parse_row(row)
+        if _is_table_direction(getattr(fd, 'direction', 0)) and getattr(fd, 'rfctype', 0) == 17:
+            fd.rfctype = 5
+            _sys.stderr.write(
+                f"[DBG-STDERR] _parse_params_row: fixed {fd.name!r} "
+                f"(direction=T) rfctype 17->5\n")
             _sys.stderr.flush()
-        fixed = 0
-        for p in getattr(desc, 'parameters', []):
-            if _is_table_direction(getattr(p, 'direction', '')) and getattr(p, 'rfctype', 0) == 17:
-                p.rfctype = 5
-                fixed += 1
-        if fixed:
-            msg = f"[DBG] saprfclib: fixed {fixed} TABLE param(s) rfctype 17->5 for {func_name}"
-            print(msg, flush=True)
-            _sys.stderr.write(msg + "\n"); _sys.stderr.flush()
-        return desc
+        return fd
 
-    _conn_mod.get_function_desc = _patched_get_func_desc
-    _sys.stderr.write("[DBG-STDERR] saprfclib: get_function_desc patched\n")
+    _conn_mod._parse_params_row = _patched_parse_params_row
+    _sys.stderr.write("[DBG-STDERR] saprfclib: _parse_params_row patched\n")
     _sys.stderr.flush()
-    print("[DBG] saprfclib: get_function_desc patched in connection module", flush=True)
+    print("[DBG] saprfclib: _parse_params_row patched in connection module (sync+async path)", flush=True)
 
     # -- Pad missing fields with type-appropriate defaults --
 
