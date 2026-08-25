@@ -83,12 +83,17 @@ try:
 
     def _patched_get_func_desc(conn, func_name, **kwargs):
         desc = _orig_get_func_desc(conn, func_name, **kwargs)
-        _fix_table_params(desc)
+        fixed = 0
+        for p in getattr(desc, 'parameters', []):
+            if _is_table_direction(getattr(p, 'direction', '')) and getattr(p, 'rfctype', 0) == 17:
+                p.rfctype = 5
+                fixed += 1
+        if fixed:
+            print(f"[DBG] saprfclib: fixed {fixed} TABLE param(s) rfctype 17→5 for {func_name}")
         return desc
 
     _conn_mod.get_function_desc = _patched_get_func_desc
-    logger.debug('saprfclib get_function_desc patched for TABLE '
-                  'rfctype fix (17→5)')
+    print("[DBG] saprfclib: get_function_desc patched in connection module")
 
     # -- Pad missing fields with type-appropriate defaults --
 
@@ -151,6 +156,7 @@ try:
     logger.debug('saprfclib codec patched for TABLE param dispatch + '
                   'field padding')
 except Exception as _patch_err:
+    print(f"[DBG] saprfclib: monkey-patch FAILED: {_patch_err}")
     logger.warning('saprfclib codec patch failed: %s', _patch_err)
 
 # ---------------------------------------------------------------------------
