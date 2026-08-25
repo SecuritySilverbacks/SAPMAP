@@ -212,10 +212,18 @@ class RFCConnection:
         dropped = set(self._params) - set(filtered)
         if dropped:
             logger.debug('saprfclib: dropped unsupported params: %s', dropped)
+        # saprfclib expects sysnr as int
+        if 'sysnr' in filtered:
+            try:
+                filtered['sysnr'] = int(filtered['sysnr'])
+            except (ValueError, TypeError):
+                pass
         try:
             self._conn = _lib.connect(**filtered)
         except _lib.SapRfcError as e:
             raise _translate_exception(e) from e
+        except Exception as e:
+            raise RFCError(f"saprfclib connect failed: {e}") from e
         logger.info('RFC connection opened (pure-python)')
 
     def close(self):
@@ -242,7 +250,8 @@ class RFCConnection:
             return False
         try:
             return self._conn.ping()
-        except Exception:
+        except Exception as e:
+            logger.debug('saprfclib ping() raised: %s', e)
             return False
 
     def ping_verbose(self):
@@ -252,7 +261,7 @@ class RFCConnection:
             ok = self._conn.ping()
             if ok:
                 return (True, "", "")
-            return (False, "", "ping returned False")
+            return (False, "", "saprfclib ping() returned False")
         except _lib.AbapApplicationError as e:
             key = getattr(e, 'key', '')
             return (False, key, str(e))
@@ -260,7 +269,7 @@ class RFCConnection:
             key = getattr(e, 'key', '')
             return (False, key, str(e))
         except Exception as e:
-            return (False, "", str(e))
+            return (False, type(e).__name__, str(e))
 
     def get_attributes(self):
         self._ensure_open()
@@ -292,6 +301,8 @@ class RFCConnection:
             return self._conn.call(func_name, **kwargs)
         except _lib.SapRfcError as e:
             raise _translate_exception(e) from e
+        except Exception as e:
+            raise RFCError(f"saprfclib call({func_name}) failed: {e}") from e
 
     def _make_type_desc(self, name, fields):
         """Create a type description manually.

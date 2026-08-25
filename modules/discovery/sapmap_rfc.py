@@ -236,6 +236,17 @@ def test_connection(node: SAPNode, creds: Credentials = None,
                           f"inst={creds.instance_nr if creds else '?'})"
                           f" — RFCPING auth denied (role-limited "
                           f"user), but logon succeeded")
+                else:
+                    cred_ctx = ""
+                    if creds:
+                        cred_ctx = (f", user={creds.username}, "
+                                    f"client={creds.client}, "
+                                    f"inst={creds.instance_nr}")
+                    print(f"[-] Connection test failed for {node.sid} "
+                          f"(host={host_label}{cred_ctx}): "
+                          f"ping returned False"
+                          f"{f' key={err_key}' if err_key else ''}"
+                          f"{f' msg={err_msg}' if err_msg else ''}")
             if ok and creds:
                 creds.verified = True
                 if err_key != "RFC_NO_AUTHORITY":
