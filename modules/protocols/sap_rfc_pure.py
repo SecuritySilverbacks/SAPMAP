@@ -77,22 +77,18 @@ try:
                     except (AttributeError, TypeError):
                         pass
 
-    if hasattr(_lib, 'Connection'):
-        _orig_conn_call = _lib.Connection.call
+    from saprfclib import connection as _conn_mod
 
-        def _patched_conn_call(self, function_module, **params):
-            if hasattr(self, 'get_function_description'):
-                try:
-                    func_desc = self.get_function_description(
-                        function_module)
-                    _fix_table_params(func_desc)
-                except Exception:
-                    pass
-            return _orig_conn_call(self, function_module, **params)
+    _orig_get_func_desc = _conn_mod.get_function_desc
 
-        _lib.Connection.call = _patched_conn_call
-        logger.debug('saprfclib Connection.call patched for TABLE '
-                      'rfctype fix')
+    def _patched_get_func_desc(conn, func_name, **kwargs):
+        desc = _orig_get_func_desc(conn, func_name, **kwargs)
+        _fix_table_params(desc)
+        return desc
+
+    _conn_mod.get_function_desc = _patched_get_func_desc
+    logger.debug('saprfclib get_function_desc patched for TABLE '
+                  'rfctype fix (17→5)')
 
     # -- Pad missing fields with type-appropriate defaults --
 
