@@ -13,6 +13,11 @@ from struct import error as struct_error
 
 logger = logging.getLogger(__name__)
 
+import sys as _sys
+_sys.stderr.write("[DBG-STDERR] sap_rfc_pure module is being imported\n")
+_sys.stderr.flush()
+print("[DBG] sap_rfc_pure module is being imported", flush=True)
+
 # ---------------------------------------------------------------------------
 # Import saprfclib — fast-fail if it is not installed
 # ---------------------------------------------------------------------------
@@ -89,11 +94,15 @@ try:
                 p.rfctype = 5
                 fixed += 1
         if fixed:
-            print(f"[DBG] saprfclib: fixed {fixed} TABLE param(s) rfctype 17→5 for {func_name}")
+            msg = f"[DBG] saprfclib: fixed {fixed} TABLE param(s) rfctype 17->5 for {func_name}"
+            print(msg, flush=True)
+            _sys.stderr.write(msg + "\n"); _sys.stderr.flush()
         return desc
 
     _conn_mod.get_function_desc = _patched_get_func_desc
-    print("[DBG] saprfclib: get_function_desc patched in connection module")
+    _sys.stderr.write("[DBG-STDERR] saprfclib: get_function_desc patched\n")
+    _sys.stderr.flush()
+    print("[DBG] saprfclib: get_function_desc patched in connection module", flush=True)
 
     # -- Pad missing fields with type-appropriate defaults --
 
@@ -156,7 +165,11 @@ try:
     logger.debug('saprfclib codec patched for TABLE param dispatch + '
                   'field padding')
 except Exception as _patch_err:
-    print(f"[DBG] saprfclib: monkey-patch FAILED: {_patch_err}")
+    import traceback as _tb2
+    _tb_str = _tb2.format_exc()
+    _sys.stderr.write(f"[DBG-STDERR] saprfclib: monkey-patch FAILED: {_patch_err}\n{_tb_str}\n")
+    _sys.stderr.flush()
+    print(f"[DBG] saprfclib: monkey-patch FAILED: {_patch_err}", flush=True)
     logger.warning('saprfclib codec patch failed: %s', _patch_err)
 
 # ---------------------------------------------------------------------------
