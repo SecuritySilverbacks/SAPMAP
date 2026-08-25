@@ -7,6 +7,7 @@ will fail to import, and SAPMAP falls back to the C SDK automatically.
 """
 
 import logging
+from struct import error as struct_error
 
 logger = logging.getLogger(__name__)
 
@@ -250,6 +251,12 @@ class RFCConnection:
             return False
         try:
             return self._conn.ping()
+        except (ValueError, struct_error):
+            # saprfclib got a response but couldn't parse it — the
+            # connection IS alive, just a parser mismatch with this
+            # kernel's RFCPING reply format.
+            logger.debug('saprfclib ping() parse error (connection alive)')
+            return True
         except Exception as e:
             logger.debug('saprfclib ping() raised: %s', e)
             return False
@@ -262,6 +269,9 @@ class RFCConnection:
             if ok:
                 return (True, "", "")
             return (False, "", "saprfclib ping() returned False")
+        except (ValueError, struct_error):
+            # Response received but unparseable — connection IS alive
+            return (True, "", "")
         except _lib.AbapApplicationError as e:
             key = getattr(e, 'key', '')
             return (False, key, str(e))
