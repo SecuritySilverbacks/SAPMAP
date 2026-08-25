@@ -226,6 +226,17 @@ def main():
         sapmap_rfc.set_pure_rfc(True)
         print("[*] Pure-Python RFC backend requested (--pure-rfc)")
 
+    # Probe which RFC backend will be used and tell the operator
+    try:
+        _rfc_cls = sapmap_rfc._get_rfc_backend()
+        _mod = _rfc_cls.__module__
+        if 'pure' in _mod:
+            print("[*] RFC backend: saprfclib (pure-Python, no C SDK)")
+        else:
+            print(f"[*] RFC backend: SAP NW RFC SDK (ctypes)")
+    except ImportError:
+        print("[-] RFC backend: NONE (no SAP NW RFC SDK and no saprfclib)")
+
     sapology_path, sapology_source = _resolve_sapology_path(args.sapology)
     if sapology_path:
         from sapmap_scanner import set_sapology_path as _set_sapology

@@ -161,6 +161,18 @@ _RFCTYPE_NAME = {
 
 
 # ---------------------------------------------------------------------------
+# Discover which params saprfclib.connect() actually accepts (varies by
+# version) so we can silently drop unsupported ones like 'lang'.
+# ---------------------------------------------------------------------------
+
+import inspect as _inspect
+
+_SAPRFCLIB_PARAMS = frozenset(
+    _inspect.signature(_lib.connect).parameters.keys()
+)
+
+
+# ---------------------------------------------------------------------------
 # RFCConnection — drop-in replacement for sap_rfc_ctypes.RFCConnection
 # ---------------------------------------------------------------------------
 
@@ -195,8 +207,13 @@ class RFCConnection:
     def open(self):
         if self._conn is not None:
             return
+        filtered = {k: v for k, v in self._params.items()
+                    if k in _SAPRFCLIB_PARAMS}
+        dropped = set(self._params) - set(filtered)
+        if dropped:
+            logger.debug('saprfclib: dropped unsupported params: %s', dropped)
         try:
-            self._conn = _lib.connect(**self._params)
+            self._conn = _lib.connect(**filtered)
         except _lib.SapRfcError as e:
             raise _translate_exception(e) from e
         logger.info('RFC connection opened (pure-python)')
