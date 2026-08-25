@@ -96,6 +96,9 @@ logger = logging.getLogger(__name__)
 # SDK path (set globally or per-connection)
 _sdk_path = None
 
+# Pure-Python RFC backend preference
+_use_pure_rfc = False
+
 
 def set_sdk_path(path: str):
     """Set the NW RFC SDK library path globally."""
@@ -111,6 +114,44 @@ def get_sdk_path() -> str:
     return _sdk_path or ""
 
 
+def set_pure_rfc(enabled: bool):
+    """Enable or disable the pure-Python RFC backend (saprfclib)."""
+    global _use_pure_rfc
+    _use_pure_rfc = enabled
+
+
+def _get_rfc_backend():
+    """Return the RFCConnection class from the active backend.
+
+    Selection order:
+    1. --pure-rfc flag → try sap_rfc_pure
+    2. Default → try sap_rfc_ctypes
+    3. Auto-fallback → if ctypes fails (no SDK), try sap_rfc_pure
+    """
+    if _use_pure_rfc:
+        try:
+            from sap_rfc_pure import RFCConnection
+            return RFCConnection
+        except ImportError:
+            logger.warning("saprfclib not available, falling back to C SDK")
+
+    try:
+        from sap_rfc_ctypes import RFCConnection
+        return RFCConnection
+    except Exception:
+        pass
+
+    try:
+        from sap_rfc_pure import RFCConnection
+        logger.info("C SDK unavailable, using pure-Python RFC backend")
+        return RFCConnection
+    except ImportError:
+        raise ImportError(
+            "No RFC backend available. Install the SAP NW RFC SDK "
+            "or install saprfclib (Python 3.12+)."
+        )
+
+
 def _get_connection(node: SAPNode, creds: Credentials = None,
                      host_override: str = ""):
     """Create an RFC connection to a node using credentials.
@@ -122,9 +163,9 @@ def _get_connection(node: SAPNode, creds: Credentials = None,
     internal address the source can reach; discovery found a
     different NAT-ed IP).
 
-    Returns an sap_rfc_ctypes.RFCConnection (context manager).
+    Returns an RFCConnection (context manager) from the active backend.
     """
-    from sap_rfc_ctypes import RFCConnection
+    RFCConnection = _get_rfc_backend()
 
     if creds is None:
         creds = node.best_credentials()

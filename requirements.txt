@@ -13,6 +13,14 @@ pycryptodome>=3.18  # DES/3DES + PBKDF2 for SecStore decryption (ABAP + Java)
 pyyaml>=6.0         # YAML parser for scripted scenarios (--script foo.yaml)
 mcp>=1.0            # Model Context Protocol SDK for LLM integration (--mcp)
 
+# --- Optional: pure-Python RFC backend (replaces SAP NW RFC SDK) ---
+# saprfclib reimplements the RFC wire protocol in pure Python — no
+# native C library needed.  Requires Python 3.12+.  When installed,
+# SAPMAP auto-detects it as a fallback when the C SDK is absent; or
+# pass --pure-rfc to force it.  On Python < 3.12 this line is a no-op
+# thanks to the environment marker.
+saprfclib ; python_version >= "3.12"
+
 # --- Optional: Java SecStore offline decryption ---
 # pyjks enables the OFFLINE 3DES decryption path in
 # modules/data_extraction/sap_java_secstore.py (used when you already

@@ -261,7 +261,8 @@ def cleanup_destinations(node: SAPNode, state: SAPMAPState) -> int:
     print(f"[*] Cleaning up {len(sapmap_dests)} SAPMAP destinations in {node.sid}...")
 
     try:
-        from sap_rfc_ctypes import RFCConnection
+        from sapmap_rfc import _get_rfc_backend
+        RFCConnection = _get_rfc_backend()
 
         host = node.ip or node.hostname
         with RFCConnection(

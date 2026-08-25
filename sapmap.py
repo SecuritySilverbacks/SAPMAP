@@ -188,6 +188,11 @@ def main():
                              "transport, allowing LLM agents (Claude, etc.) "
                              "to drive SAPMAP programmatically.  Connects "
                              "to the same HTTP server as the GUI.")
+    parser.add_argument("--pure-rfc", action="store_true",
+                        help="Use pure-Python RFC backend (saprfclib) "
+                             "instead of the SAP NW RFC SDK.  Requires "
+                             "Python 3.12+ and saprfclib installed.  "
+                             "Falls back to the C SDK if unavailable.")
     parser.add_argument("--allow-evasion", action="store_true",
                         help="Arm Tier 3 active-evasion techniques "
                              "(SAL filter narrow, kernel-param dynamic-set, "
@@ -216,6 +221,10 @@ def main():
     if sdk_path:
         sapmap_rfc.set_sdk_path(sdk_path)
         print(f"[*] NW RFC SDK path: {sdk_path} (source: {sdk_source})")
+
+    if getattr(args, "pure_rfc", False):
+        sapmap_rfc.set_pure_rfc(True)
+        print("[*] Pure-Python RFC backend requested (--pure-rfc)")
 
     sapology_path, sapology_source = _resolve_sapology_path(args.sapology)
     if sapology_path:

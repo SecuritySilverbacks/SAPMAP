@@ -460,7 +460,8 @@ def lpe_bapi_profiles_assign(node: SAPNode, creds: Credentials) -> bool:
     low priority number (tried first — it's fast and harmless if it fails).
     """
     try:
-        from sap_rfc_ctypes import RFCConnection
+        from sapmap_rfc import _get_rfc_backend
+        RFCConnection = _get_rfc_backend()
     except ImportError:
         return False
 
