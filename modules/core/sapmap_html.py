@@ -895,6 +895,11 @@ body {
       <div class="dd-item" onclick="exportJSON()">&#128196; Export JSON</div>
       <div class="dd-item" onclick="exportReport()">&#128221; Export Engagement Report (HTML + Markdown)</div>
       <div class="dd-item" onclick="openDiffModal()">&#128202; Diff Two Runs (compare snapshots)</div>
+      <!-- Browse Loot: hidden by default; unhidden by initMode() only when
+           the server was started with --enable-loot-browser AND handed
+           the frontend a per-run token via /api/mode. -->
+      <div id="dd-browse-loot" class="dd-item" style="display:none"
+           onclick="openLootBrowser()">&#128194; Browse Loot (remote download)</div>
       <div class="dd-sep"></div>
       <div class="dd-item" onclick="if(confirm('Exit SAPMAP?'))api('POST','exit').then(()=>window.close())">&#10060; Exit</div>
     </div>
@@ -18391,12 +18396,15 @@ document.addEventListener('click', () => hideMapCtxMenu());
     { attributes: true, attributeFilter: ['style', 'class'] }));
 })();
 
-// --- Read-only mode init ---
+// --- Read-only + loot-browser mode init ---
 // Poll /api/mode once at boot.  If the server was started with
 // --read-only, add body.read-only (CSS then hides every .write-op
 // element) and unhide the green READ-ONLY badge next to the logo.
-// Never polls again — the flag is set at process start and cannot
+// If --enable-loot-browser is on, stash the per-run token so
+// openLootBrowser() can attach it to /api/loot/{list,download} URLs.
+// Never polls again — flags are set at process start and cannot
 // change at runtime.
+let LOOT_TOKEN = "";
 async function initMode() {
   try {
     const m = await api('GET', 'mode');
@@ -18405,6 +18413,11 @@ async function initMode() {
       const badge = document.getElementById('mode-badge');
       if (badge) badge.style.display = 'inline-block';
     }
+    if (m && m.loot_browser && m.loot_token) {
+      LOOT_TOKEN = m.loot_token;
+      const item = document.getElementById('dd-browse-loot');
+      if (item) item.style.display = '';
+    }
   } catch (e) {
     // /api/mode is new — if the server doesn't have it yet, silently
     // stay in the default (full) mode.  Backend guarding still fires
@@ -18412,6 +18425,117 @@ async function initMode() {
   }
 }
 initMode();
+
+// --- Loot browser (only reachable when --enable-loot-browser is set) ---
+// Renders a modal with the current loot subtree.  Every request adds
+// the per-run token that /api/mode handed us at boot.  Files stream
+// via a plain <a href> download link with the token in the query;
+// directories re-list in place.  Path traversal is impossible client
+// side because the backend canonicalises every rel path against the
+// loot root — this is UX only.
+function _lootFmtBytes(n) {
+  if (n == null) return '';
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+  if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MB';
+  return (n / 1073741824).toFixed(2) + ' GB';
+}
+function _lootFmtTs(sec) {
+  if (!sec) return '';
+  try { return new Date(sec * 1000).toISOString().replace('T', ' ').slice(0, 19); }
+  catch (e) { return ''; }
+}
+function _lootEsc(s) {
+  return String(s).replace(/[&<>"']/g,
+    c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+async function _lootList(relPath) {
+  const url = 'loot/list?token=' + encodeURIComponent(LOOT_TOKEN)
+              + (relPath ? '&path=' + encodeURIComponent(relPath) : '');
+  const r = await api('GET', url);
+  return r || { entries: [], root: '.', error: 'no_response' };
+}
+async function openLootBrowser() {
+  if (!LOOT_TOKEN) {
+    showToast('Loot browser is not enabled (start SAPMAP with --enable-loot-browser)', 'warn');
+    return;
+  }
+  const modal = document.createElement('div');
+  modal.id = 'loot-browser-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);'
+    + 'z-index:3000;display:flex;align-items:center;justify-content:center';
+  modal.innerHTML =
+    '<div style="background:#161b22;border:1px solid #30363d;border-radius:10px;'
+    + 'width:min(920px,90vw);max-height:80vh;display:flex;flex-direction:column;'
+    + 'box-shadow:0 20px 40px rgba(0,0,0,0.5)">'
+    + '  <div style="display:flex;align-items:center;gap:8px;padding:12px 16px;'
+    + '       border-bottom:1px solid #30363d">'
+    + '    <span style="font-size:16px;font-weight:600;flex:1">&#128194; Loot Browser</span>'
+    + '    <span id="loot-crumbs" style="font-family:monospace;color:#8b949e;font-size:12px"></span>'
+    + '    <span style="cursor:pointer;font-size:20px;color:#8b949e;padding:0 6px" '
+    + '          onclick="document.getElementById(\'loot-browser-modal\').remove()">&times;</span>'
+    + '  </div>'
+    + '  <div id="loot-body" style="flex:1;overflow-y:auto;padding:8px 4px"></div>'
+    + '  <div style="padding:8px 16px;border-top:1px solid #30363d;color:#8b949e;font-size:11px">'
+    + '    Read-only.  Path traversal blocked server-side.  Downloads served with attachment disposition.'
+    + '  </div>'
+    + '</div>';
+  document.body.appendChild(modal);
+  await _lootRender('');
+}
+async function _lootRender(relPath) {
+  const body = document.getElementById('loot-body');
+  const crumbs = document.getElementById('loot-crumbs');
+  if (!body) return;
+  body.innerHTML = '<div style="padding:20px;color:#8b949e">Loading…</div>';
+  const r = await _lootList(relPath);
+  if (r.error) {
+    body.innerHTML = '<div style="padding:20px;color:#f85149">Error: '
+      + _lootEsc(r.error) + (r.message ? ' — ' + _lootEsc(r.message) : '') + '</div>';
+    return;
+  }
+  const at = r.root === '.' ? 'loot/' : 'loot/' + r.root + '/';
+  crumbs.textContent = at;
+  const rows = [];
+  if (relPath) {
+    const parent = relPath.includes('/')
+      ? relPath.substring(0, relPath.lastIndexOf('/')) : '';
+    rows.push('<div class="loot-row" style="cursor:pointer;padding:6px 16px;'
+      + 'display:flex;gap:12px" onclick="_lootRender(' + JSON.stringify(parent) + ')">'
+      + '<span style="flex:1">&#8617; ..</span></div>');
+  }
+  for (const e of (r.entries || [])) {
+    const path = JSON.stringify(e.path);
+    if (e.is_dir) {
+      rows.push('<div class="loot-row" style="cursor:pointer;padding:6px 16px;'
+        + 'display:flex;gap:12px" onclick="_lootRender(' + path + ')">'
+        + '<span style="flex:1">&#128193; ' + _lootEsc(e.name) + '/</span>'
+        + '<span style="color:#8b949e;font-size:11px">'
+        + _lootFmtTs(e.mtime) + '</span></div>');
+    } else {
+      const dlUrl = '/api/loot/download?token=' + encodeURIComponent(LOOT_TOKEN)
+                    + '&path=' + encodeURIComponent(e.path);
+      rows.push('<div class="loot-row" style="padding:6px 16px;display:flex;gap:12px">'
+        + '<span style="flex:1">&#128196; <a href="' + dlUrl + '" download="'
+        + _lootEsc(e.name) + '" style="color:#79c0ff;text-decoration:none">'
+        + _lootEsc(e.name) + '</a></span>'
+        + '<span style="color:#8b949e;font-size:11px;min-width:80px;text-align:right">'
+        + _lootFmtBytes(e.size) + '</span>'
+        + '<span style="color:#8b949e;font-size:11px;min-width:130px;text-align:right">'
+        + _lootFmtTs(e.mtime) + '</span></div>');
+    }
+  }
+  if (!(r.entries || []).length && !relPath) {
+    rows.push('<div style="padding:20px;color:#8b949e;text-align:center">'
+      + 'No loot yet — run a scan first.</div>');
+  }
+  body.innerHTML = rows.join('');
+  // Hover styling for row items
+  for (const el of body.querySelectorAll('.loot-row')) {
+    el.addEventListener('mouseenter', () => el.style.background = '#21262d');
+    el.addEventListener('mouseleave', () => el.style.background = '');
+  }
+}
 
 // --- Init ---
 startPolling();

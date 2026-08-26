@@ -2485,13 +2485,143 @@ def create_app(api: SAPMAPApi) -> Bottle:
     # -- Operating mode (constant per process) --
     # Polled once at page load; the frontend toggles a body.read-only
     # CSS class that hides destructive menu items and shows a green
-    # READ-ONLY badge in the top bar.
+    # READ-ONLY badge in the top bar.  Also carries the loot-browser
+    # enable flag + per-run token when --enable-loot-browser was set
+    # (nothing when it wasn't, so the token never leaks by default).
     @app.route("/api/mode")
     def get_mode():
         response.content_type = "application/json"
+        from sapmap_mode import (
+            is_read_only as _ro,
+            is_loot_browser_enabled as _lb,
+            loot_browser_token as _lb_tok,
+        )
+        payload = {"read_only": _ro(), "loot_browser": _lb()}
+        if _lb():
+            # The GUI is served from the same origin, so handing the
+            # token back here is fine — anyone who can reach /api/mode
+            # can already hit any other endpoint on this server.  Off
+            # by default (see the boot-time --enable-loot-browser flag).
+            payload["loot_token"] = _lb_tok()
+        return json.dumps(payload)
+
+    # -- Loot browser: list + download ------------------------------------
+    # OFF by default.  Turned on by --enable-loot-browser at startup,
+    # which mints a per-run URL-safe token.  Every request must include
+    # that token as ?token=... .  Path traversal is blocked by
+    # canonicalising the requested path (os.path.realpath) and refusing
+    # anything that lands outside the loot root — symlinks pointing out
+    # of the tree get resolved before the check so they can't escape.
+    from sapmap_mode import (
+        is_loot_browser_enabled as _loot_enabled,
+        check_loot_browser_token as _loot_check_token,
+    )
+    from sapmap_state import LOOT_DIR as _LOOT_ROOT
+    _LOOT_ROOT_REAL = os.path.realpath(_LOOT_ROOT)
+
+    def _loot_gate():
+        """Common gate for both loot endpoints.  Returns (ok, error_body)."""
+        if not _loot_enabled():
+            response.status = 404
+            response.content_type = "application/json"
+            return False, json.dumps({
+                "error": "loot_browser_disabled",
+                "message": "Loot browser is not enabled.  Start SAPMAP "
+                           "with --enable-loot-browser.",
+            })
+        token = (request.query.get("token") or "").strip()
+        if not _loot_check_token(token):
+            response.status = 403
+            response.content_type = "application/json"
+            return False, json.dumps({
+                "error": "bad_or_missing_token",
+                "message": "Loot browser token missing or wrong.",
+            })
+        return True, None
+
+    def _resolve_loot_path(rel: str) -> str:
+        """Return the absolute real path for a loot-relative user input,
+        or "" when the request would escape the loot root.  Empty rel
+        means the root itself.  Trailing slashes are normalised."""
+        rel = (rel or "").strip().lstrip("/\\")
+        target = os.path.realpath(os.path.join(_LOOT_ROOT_REAL, rel))
+        # Ensure the resolved path is INSIDE the loot root — reject any
+        # traversal that lands elsewhere.  os.path.commonpath is the
+        # authoritative comparison (handles trailing-slash quirks and
+        # platform separators correctly).
+        try:
+            common = os.path.commonpath([_LOOT_ROOT_REAL, target])
+        except ValueError:
+            # Different drives on Windows, mixed separators, etc.
+            return ""
+        if common != _LOOT_ROOT_REAL:
+            return ""
+        return target
+
+    @app.route("/api/loot/list")
+    def loot_list():
+        ok, err = _loot_gate()
+        if not ok:
+            return err
+        rel = request.query.get("path", "") or ""
+        target = _resolve_loot_path(rel)
+        if not target:
+            response.status = 400
+            response.content_type = "application/json"
+            return json.dumps({
+                "error": "path_outside_loot_root",
+                "message": "Requested path resolves outside loot/.",
+            })
+        if not os.path.exists(target):
+            response.status = 404
+            response.content_type = "application/json"
+            return json.dumps({"error": "not_found", "path": rel})
+        if not os.path.isdir(target):
+            response.status = 400
+            response.content_type = "application/json"
+            return json.dumps({
+                "error": "not_a_directory",
+                "message": "Use /api/loot/download to fetch files.",
+            })
+        entries = []
+        for name in sorted(os.listdir(target)):
+            full = os.path.join(target, name)
+            try:
+                st = os.stat(full)
+            except OSError:
+                continue
+            entries.append({
+                "name": name,
+                "path": os.path.relpath(full, _LOOT_ROOT_REAL).replace(
+                    os.sep, "/"),
+                "is_dir": os.path.isdir(full),
+                "size": st.st_size if os.path.isfile(full) else None,
+                "mtime": int(st.st_mtime),
+            })
+        response.content_type = "application/json"
         return json.dumps({
-            "read_only": is_read_only(),
+            "root": os.path.relpath(target, _LOOT_ROOT_REAL).replace(
+                os.sep, "/") or ".",
+            "entries": entries,
         })
+
+    @app.route("/api/loot/download")
+    def loot_download():
+        ok, err = _loot_gate()
+        if not ok:
+            return err
+        rel = request.query.get("path", "") or ""
+        target = _resolve_loot_path(rel)
+        if not target or not os.path.isfile(target):
+            response.status = 404
+            return "not found"
+        # Serve with Content-Disposition: attachment so browsers download
+        # rather than render (blocks XSS via crafted filenames + keeps
+        # HTML reports off-domain).  Bottle's static_file handles the
+        # streaming, mime detection and range support.
+        directory = os.path.dirname(target)
+        filename = os.path.basename(target)
+        return static_file(filename, root=directory, download=filename)
 
     # -- State --
     @app.route("/api/state")

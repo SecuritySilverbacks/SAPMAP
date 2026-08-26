@@ -111,3 +111,40 @@ def test_mcp_readonly_guard_passes_when_off():
         assert _read_only_guard() == ""
     finally:
         _READ_ONLY_CACHE.update({"checked": False, "read_only": False})
+
+
+def test_loot_browser_disabled_by_default():
+    assert sapmap_mode.is_loot_browser_enabled() is False
+    assert sapmap_mode.loot_browser_token() == ""
+    assert sapmap_mode.check_loot_browser_token("anything") is False
+
+
+def test_loot_browser_enable_mints_token():
+    # Reset first so we know the token is fresh
+    import sapmap_mode as _mm
+    _mm._loot_browser_enabled = False
+    _mm._loot_browser_token = ""
+    try:
+        tok = sapmap_mode.enable_loot_browser()
+        assert sapmap_mode.is_loot_browser_enabled() is True
+        assert isinstance(tok, str) and len(tok) >= 32
+        assert sapmap_mode.loot_browser_token() == tok
+        assert sapmap_mode.check_loot_browser_token(tok) is True
+        assert sapmap_mode.check_loot_browser_token("") is False
+        assert sapmap_mode.check_loot_browser_token(tok + "x") is False
+    finally:
+        _mm._loot_browser_enabled = False
+        _mm._loot_browser_token = ""
+
+
+def test_gui_wires_loot_browser_endpoints():
+    """Source-level check: loot list + download endpoints are registered."""
+    with open("modules/core/sapmap_gui.py", encoding="utf-8") as f:
+        src = f.read()
+    assert '@app.route("/api/loot/list")' in src
+    assert '@app.route("/api/loot/download")' in src
+    assert "_loot_gate" in src
+    assert "_resolve_loot_path" in src
+    # Confirm the canonicalisation-against-loot-root guard is in place
+    assert "os.path.commonpath" in src
+    assert "os.path.realpath" in src

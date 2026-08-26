@@ -40,6 +40,7 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 - [Installation](#installation)
 - [Usage](#usage)
 - [Read-Only Mode](#read-only-mode)
+- [Loot Browser](#loot-browser---enable-loot-browser)
 - [Pure-Python RFC Backend](#pure-python-rfc-backend---pure-rfc)
 - [Web GUI](#web-gui)
 - [Scanning](#scanning)
@@ -687,6 +688,7 @@ python3 sapmap.py --script scripts/demo_10kblaze.yaml  # Run scripted scenario w
 | `--pure-rfc` | Use pure-Python RFC backend (saprfclib) instead of the SAP NW RFC SDK.  Requires Python 3.12+ and saprfclib installed.  Falls back to the C SDK if unavailable |
 | `--allow-evasion` | Arm Tier 3 active-evasion techniques (SAL filter narrow, kernel-param dynamic-set, STAD silencing, DBTABLOG suppression, NWA log-config flip, ICM trace flip).  Without this flag, every Tier 3 entry point refuses with `EvasionGateError` |
 | `--read-only` | Viewer-safe mode — disable every destructive action (see [Read-Only Mode](#read-only-mode)) |
+| `--enable-loot-browser` | Enable a read-only loot browser + download endpoint reachable from the web GUI, gated by a per-run random token printed to the console at boot (see [Loot Browser](#loot-browser---enable-loot-browser)) |
 | `-v, --verbose` | Verbose output |
 | `--debug` | Enable debug logging |
 
@@ -758,6 +760,71 @@ Read-only mode is a **UX + API guardrail**, not a security control.
 An operator can restart the process without `--read-only` at any time.
 For proper role separation across users, wait on the domain-joined
 auth work planned in [issue #38](https://github.com/kloris/SAPMAP/issues/38).
+
+---
+
+## Loot Browser (`--enable-loot-browser`)
+
+When SAPMAP runs on a jump host / VPS / cloud VM and you connect from
+a laptop's browser, `loot/` files (hashes, SecStore dumps, engagement
+reports, table dumps, business-impact CSVs) sit on the remote host and
+you'd normally need `scp` to fetch them.  `--enable-loot-browser` adds
+a **read-only** loot browser reachable from the web GUI so you can
+navigate the tree and download files directly.
+
+```bash
+# On the SAPMAP host
+python3 sapmap.py --no-gui --host 0.0.0.0 --port 8080 --enable-loot-browser
+
+# … prints a boxed banner with the per-run token, then continues normally
+```
+
+Open a browser to the SAPMAP host and use **File → Browse Loot** (the
+menu item only appears when the flag is on and the frontend has picked
+up the token from `/api/mode`).  Directories are clickable; files
+download with the browser's normal download flow.
+
+### Why it's off by default
+
+Loot holds cleartext RFC destination passwords (from SecStore decrypts),
+USR02 password hashes, PII pulled from business tables, and SecStore
+keys.  You do not want this endpoint on by accident.
+
+### Security model
+
+- **Off by default.** No endpoint exists without `--enable-loot-browser`.
+- **Per-run URL-safe random token** minted at boot and required on
+  every `/api/loot/list` and `/api/loot/download` request.  Missing or
+  wrong token → HTTP 403.  Constant-time compare (`secrets.compare_digest`).
+- **Path traversal blocked.** Every request path is canonicalised
+  (`os.path.realpath`) and compared against the loot root with
+  `os.path.commonpath` — anything that lands outside `loot/` is
+  refused as `400 path_outside_loot_root`.  Symlink escapes are
+  resolved before the check.
+- **Content-Disposition: attachment** on downloads, so a crafted
+  filename can't XSS the browser and HTML reports don't render
+  in-origin.
+- **Read only.** No upload, delete, or write endpoints — just `GET`.
+
+The token is regenerated on every SAPMAP start; when you kill the
+process the URL becomes useless.  Combine with `--read-only` if you're
+handing the URL to a viewer.
+
+### Combining with remote access
+
+```bash
+# Recommended: SSH tunnel — no need to bind to 0.0.0.0
+ssh -L 8080:127.0.0.1:8080 you@jumphost \
+    'cd sapmap && python3 sapmap.py --no-gui --port 8080 --enable-loot-browser'
+# Then open http://127.0.0.1:8080 locally
+```
+
+Or bind to the LAN if you're inside a segmented network you trust:
+
+```bash
+python3 sapmap.py --no-gui --host 0.0.0.0 --port 8080 \
+    --enable-loot-browser --read-only
+```
 
 ---
 

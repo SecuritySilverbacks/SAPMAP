@@ -202,6 +202,18 @@ def main():
                              "Backend routes return 403; MCP write tools "
                              "are not registered; UI hides destructive "
                              "menu items and shows a green READ-ONLY badge.")
+    parser.add_argument("--enable-loot-browser", action="store_true",
+                        help="Enable a read-only GET /api/loot/{list,download} "
+                             "endpoint that lets a remote operator browse "
+                             "and download files from loot/ via the web "
+                             "GUI when SAPMAP is running on a jump host.  "
+                             "OFF by default because loot contains cleartext "
+                             "RFC passwords, USR02 hashes and PII table "
+                             "dumps.  A random per-run token is printed to "
+                             "the console at startup and MUST be included on "
+                             "every request (path canonicalisation + symlink "
+                             "escape blocked; File → Browse Loot in the GUI "
+                             "picks the token up automatically).")
     parser.add_argument("--allow-evasion", action="store_true",
                         help="Arm Tier 3 active-evasion techniques "
                              "(SAL filter narrow, kernel-param dynamic-set, "
@@ -247,6 +259,24 @@ def main():
         print("  report export remain available.  Every destructive")
         print("  action (create-user, exploit, autopwn, cleanup,")
         print("  ransapware, SecStore/DBCON dumps) is blocked.")
+        print(_bar)
+        print()
+
+    if getattr(args, "enable_loot_browser", False):
+        import sapmap_mode
+        _loot_token = sapmap_mode.enable_loot_browser()
+        _bar = "=" * 64
+        print()
+        print(_bar)
+        print("        LOOT BROWSER ENABLED — token required per request")
+        print(_bar)
+        print("  Loot browsing is available at File → Browse Loot in the")
+        print("  GUI, or directly at:")
+        print(f"    GET /api/loot/list?token={_loot_token}")
+        print(f"    GET /api/loot/download?token={_loot_token}&path=<rel>")
+        print("  The GUI picks the token up automatically at page load.")
+        print("  Loot holds cleartext credentials and hashes — keep this")
+        print("  token secret; a fresh token is generated on every start.")
         print(_bar)
         print()
 
