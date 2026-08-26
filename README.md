@@ -40,6 +40,7 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 - [Installation](#installation)
 - [Usage](#usage)
 - [Read-Only Mode](#read-only-mode)
+- [Pure-Python RFC Backend](#pure-python-rfc-backend---pure-rfc)
 - [Web GUI](#web-gui)
 - [Scanning](#scanning)
 - [Default Account Detection](#default-account-detection)
@@ -756,6 +757,79 @@ Read-only mode is a **UX + API guardrail**, not a security control.
 An operator can restart the process without `--read-only` at any time.
 For proper role separation across users, wait on the domain-joined
 auth work planned in [issue #38](https://github.com/kloris/SAPMAP/issues/38).
+
+---
+
+## Pure-Python RFC Backend (`--pure-rfc`)
+
+By default SAPMAP uses the proprietary **SAP NW RFC SDK** via `ctypes`
+for every authenticated RFC operation.  That SDK is a native shared
+library, requires an SAP S-user download, has to be extracted to a
+fixed lib directory, and has to match the platform (Linux / macOS /
+Windows).  On systems where installing it is impractical (locked-down
+laptops, ARM Macs, containers without the SDK preloaded), `--pure-rfc`
+switches to [saprfclib](https://github.com/randomstr1ng/saprfclib) —
+a **zero-native-dependency** pure-Python re-implementation of the RFC
+wire protocol.
+
+```bash
+pip3 install saprfclib                                    # one-off install (Python 3.12+)
+python3 sapmap.py --pure-rfc                              # GUI on the pure-Python backend
+python3 sapmap.py --pure-rfc --no-gui --targets 10.0.0/24 # CLI scan without the C SDK
+```
+
+### When to use it
+
+- macOS / ARM laptops without the C SDK preloaded
+- CI or ephemeral containers where the ~40 MB SDK download is painful
+- Any run where the pyrfc / SDK install path is broken
+- Testing / reproducing saprfclib upstream fixes end-to-end
+
+### When to leave the default (C SDK)
+
+- Production engagements where you already have the SDK working — the
+  C path is battle-tested across every SAP kernel / codepage combo
+- Anywhere `--pure-rfc` reports a saprfclib bug you'd rather not chase
+
+### Backend selection order
+
+1. `--pure-rfc` flag set → try saprfclib first
+2. Default → try the C SDK first
+3. Auto-fallback → if the primary backend fails to load, try the other
+
+You'll see the resolved backend printed at startup:
+
+```text
+[*] RFC backend: SAP NW RFC SDK (ctypes)          # default
+[*] RFC backend: saprfclib (pure-Python, no C SDK) # --pure-rfc
+```
+
+### Requirements
+
+- Python 3.12+ (`saprfclib` uses `match` statements and PEP-604 syntax)
+- `pip3 install saprfclib` — or `pip3 install --upgrade --break-system-packages saprfclib`
+  on Homebrew Python where PEP-668 blocks system-wide installs
+- Nothing else — no SDK, no `LD_LIBRARY_PATH`, no native compile
+
+### Known gaps
+
+Live-tested end-to-end against S/4HANA 2023 (kernel 793) and NetWeaver
+7.42.  Julian (the saprfclib author) fixed six issues surfaced during
+integration ([#7](https://github.com/randomstr1ng/saprfclib/issues/7),
+[#8](https://github.com/randomstr1ng/saprfclib/issues/8),
+[#9](https://github.com/randomstr1ng/saprfclib/issues/9),
+[#10](https://github.com/randomstr1ng/saprfclib/issues/10),
+[#11](https://github.com/randomstr1ng/saprfclib/issues/11),
+[#12](https://github.com/randomstr1ng/saprfclib/issues/12)).  Two thin
+workarounds remain in `modules/protocols/sap_rfc_pure.py` (silent
+drop of unknown kwargs to match C-SDK behaviour; clean `RFCError`
+when saprfclib's `_build_invoke_frame` overflows the 64 KB uint16
+frame footer for very large ABAP payloads).  Both are single-line
+retries around `self._conn.call()`; both go away as soon as the
+upstream fixes land.
+
+`pip3 install --upgrade saprfclib` (add `--break-system-packages` on
+Homebrew Python) pulls the newest fixes.
 
 ---
 
