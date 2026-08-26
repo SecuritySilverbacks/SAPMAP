@@ -2041,9 +2041,47 @@ class SAPMAPState:
 
     # -- Node management --
 
+    def _resolve_add_node_key(self, node: SAPNode) -> str:
+        """Return the storage key add_node should use for ``node``.
+
+        Same SID + same physical host → the bare SID (merge/overwrite).
+        Same SID + different host → mangled ``<sid>@<anchor>`` so both
+        systems survive on the map.  Empty anchors (placeholder waiting
+        to be filled) merge into the existing entry.
+        """
+        n_ip = (node.ip or "").strip()
+        n_host = (node.hostname or "").strip().lower()
+        existing = self.nodes.get(node.sid)
+        if existing is None:
+            return node.sid
+        e_ip = (existing.ip or "").strip()
+        e_host = (existing.hostname or "").strip().lower()
+        # Merge when either side has no physical anchor at all
+        # (placeholder cases).
+        if not (e_ip or e_host) or not (n_ip or n_host):
+            return node.sid
+        # Merge when any anchor matches — same physical host.
+        if (e_ip and e_ip == n_ip) or (e_host and e_host == n_host):
+            return node.sid
+        # Genuine collision on a different host — mangle deterministically.
+        anchor = n_ip or n_host
+        return f"{node.sid}@{anchor}"
+
     def add_node(self, node: SAPNode) -> None:
-        is_new = node.sid not in self.nodes
-        self.nodes[node.sid] = node
+        # Resolve storage key: usually node.sid, but split same-SID
+        # collisions on different physical hosts (SAP Diagnostics
+        # Agent 'DAA' replicates on every host; SIDs like JP1 can span
+        # multiple app servers).  Without the split the second write
+        # silently overwrites the first, keeping its stale map
+        # position — which drags its new zone's siblings into the
+        # wrong column on the map.
+        key = self._resolve_add_node_key(node)
+        if key != node.sid:
+            print(f"[!] SID collision: '{node.sid}' already stored for a "
+                  f"different host; new instance keyed as '{key}'")
+            node.sid = key
+        is_new = key not in self.nodes
+        self.nodes[key] = node
         if is_new:
             # Suppress the "New system plotted" finding for the two
             # SAP-shipped ec2/s3 CSI Type-G placeholders that the

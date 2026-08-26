@@ -277,6 +277,52 @@ def test_sapmapstate_add_node():
     assert retrieved.hostname == "s4hana"
 
 
+def test_sapmapstate_same_sid_different_host_splits():
+    """Same SID on two hosts (DAA agent scenario) → mangled second key."""
+    state = SAPMAPState()
+    state.add_node(SAPNode(sid="DAA", ip="10.0.0.1", hostname="host-a"))
+    state.add_node(SAPNode(sid="DAA", ip="10.0.0.2", hostname="host-b"))
+
+    assert "DAA" in state.nodes
+    assert "DAA@10.0.0.2" in state.nodes
+    assert state.nodes["DAA"].ip == "10.0.0.1"
+    assert state.nodes["DAA@10.0.0.2"].ip == "10.0.0.2"
+    assert state.nodes["DAA@10.0.0.2"].sid == "DAA@10.0.0.2"
+
+
+def test_sapmapstate_same_sid_same_host_merges():
+    """Re-scan of same SID on same host → overwrite, no mangling."""
+    state = SAPMAPState()
+    state.add_node(SAPNode(sid="S4H", ip="10.0.0.1", hostname="s4hana",
+                            kernel="793"))
+    state.add_node(SAPNode(sid="S4H", ip="10.0.0.1", hostname="s4hana",
+                            kernel="794"))
+
+    assert list(state.nodes.keys()) == ["S4H"]
+    assert state.nodes["S4H"].kernel == "794"
+
+
+def test_sapmapstate_same_sid_repeat_split_is_stable():
+    """Re-scan of split host → same mangled key, no proliferation."""
+    state = SAPMAPState()
+    state.add_node(SAPNode(sid="DAA", ip="10.0.0.1"))
+    state.add_node(SAPNode(sid="DAA", ip="10.0.0.2"))
+    state.add_node(SAPNode(sid="DAA", ip="10.0.0.2", kernel="754"))
+
+    assert sorted(state.nodes.keys()) == ["DAA", "DAA@10.0.0.2"]
+    assert state.nodes["DAA@10.0.0.2"].kernel == "754"
+
+
+def test_sapmapstate_empty_anchor_merges():
+    """Placeholder with no ip/hostname merges into existing SID."""
+    state = SAPMAPState()
+    state.add_node(SAPNode(sid="AE3", ip="", hostname=""))  # placeholder
+    state.add_node(SAPNode(sid="AE3", ip="10.0.0.5", hostname="abex3"))
+
+    assert list(state.nodes.keys()) == ["AE3"]
+    assert state.nodes["AE3"].ip == "10.0.0.5"
+
+
 def test_sapmapstate_add_connection():
     state = SAPMAPState()
     state.add_node(SAPNode(sid="S4H", ip="10.0.0.1"))
