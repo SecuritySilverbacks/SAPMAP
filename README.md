@@ -39,6 +39,7 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 - [Architecture](#architecture)
 - [Installation](#installation)
 - [Usage](#usage)
+- [Read-Only Mode](#read-only-mode)
 - [Web GUI](#web-gui)
 - [Scanning](#scanning)
 - [Default Account Detection](#default-account-detection)
@@ -681,8 +682,80 @@ python3 sapmap.py --script scripts/demo_10kblaze.yaml  # Run scripted scenario w
 | `--fast` | Fast scan mode (default) |
 | `--deep` | Deep scan mode (full SAPology) |
 | `--mcp` | Launch MCP server alongside GUI for LLM-driven operation ([details](#mcp-server)) |
+| `--pure-rfc` | Use pure-Python RFC backend (saprfclib) instead of the SAP NW RFC SDK.  Requires Python 3.12+ and saprfclib installed.  Falls back to the C SDK if unavailable |
+| `--allow-evasion` | Arm Tier 3 active-evasion techniques (SAL filter narrow, kernel-param dynamic-set, STAD silencing, DBTABLOG suppression, NWA log-config flip, ICM trace flip).  Without this flag, every Tier 3 entry point refuses with `EvasionGateError` |
+| `--read-only` | Viewer-safe mode — disable every destructive action (see [Read-Only Mode](#read-only-mode)) |
 | `-v, --verbose` | Verbose output |
 | `--debug` | Enable debug logging |
+
+---
+
+## Read-Only Mode
+
+`--read-only` turns SAPMAP into a **viewer** — discovery, vulnerability
+checks, chain analysis, and report export still run; every action that
+would touch a target system, dump credentials, or plant persistence is
+refused.  Intended for blue-team / SOC engineers, defensive research,
+customer demos, training, and any scenario where accidental clicks on
+an "Exploit" button must be impossible.
+
+```bash
+python3 sapmap.py --read-only                                # GUI + read-only
+python3 sapmap.py --read-only --no-gui --targets 10.0.0.0/24 # CLI scan, no exploits
+python3 sapmap.py --read-only --mcp                          # MCP viewer for LLM agents
+python3 sapmap.py --read-only --script scripts/scan_only.yaml # refuses if script has destructive steps
+```
+
+### What you'll see
+
+- A boxed **READ-ONLY MODE — exploits disabled** banner after the
+  DISCLAIMER at startup
+- A green **READ-ONLY** pill next to the ⚡ SAPMAP logo in the top bar
+- The Actions menu loses AutoPwn / Auto-Propagate / Cleanup All
+- Node context menu hides the entire **Exploitation**, **Data Extraction**,
+  **Cloud Connector**, **RanSAPware**, and **Cleanup** submenus
+- SCC context menu keeps only "View SCC Details" and "Remove from Map"
+- BTP context menu hides both mint-token entries
+- Evasion submenu keeps the Tier 1 probes and Tier 3 discovery reads
+  but hides every Tier 3 mutation
+- Scanning submenu keeps the pre-auth vulnerability checks but hides
+  actions that require an RFC login (Analyse User Capabilities,
+  Retrieve Client Roles, Check Default Accounts)
+
+### What still works
+
+- All discovery: port scan, RFC_SYSTEM_INFO pre-auth leak, SAPControl
+  SOAP, `/sap/public/info`, SCC fingerprint, wdisp/admin, RECON /
+  ICMAD / GW / MS / 31324 vulnerability checks
+- All chain / trust analysis and ATT&CK coverage
+- Report export (Engagement Report Markdown + HTML), JSON export,
+  Diff Two Runs, save / load state
+- Local map metadata edits (add system, set SID / type / DB / OS /
+  SAProuter, provide/remove credentials in the local store)
+- MCP read tools (`get_landscape`, `scan_network`, `probe_system`,
+  `check_vulnerability`, `get_findings`, `get_attack_chains`,
+  `get_system_detail`, `business_impact`, `export_report`, `save_state`,
+  `add_system`)
+
+### Enforcement layers
+
+- **Backend** — a Bottle `before_request` hook in `sapmap_gui.py`
+  matches every request against a `WRITE_ROUTES` frozenset (~45 routes)
+  and refuses with `403 {"error":"read_only_mode","message":...,"route":...}`
+- **Frontend** — every destructive control carries a `write-op` class;
+  CSS rule `body.read-only .write-op { display: none !important; }`
+  hides them the moment the frontend polls `/api/mode` at boot
+- **MCP** — write-side tools cache the server's mode at first call
+  and return a helpful `"ERROR: SAPMAP is running in --read-only mode…"`
+  reply instead of surfacing an HTTP 403
+- **Script runner** — refuses to start any `--script` run that
+  contains steps in `DESTRUCTIVE_ACTIONS`, listing each offender by
+  index and action name
+
+Read-only mode is a **UX + API guardrail**, not a security control.
+An operator can restart the process without `--read-only` at any time.
+For proper role separation across users, wait on the domain-joined
+auth work planned in [issue #38](https://github.com/kloris/SAPMAP/issues/38).
 
 ---
 
