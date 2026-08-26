@@ -193,6 +193,15 @@ def main():
                              "instead of the SAP NW RFC SDK.  Requires "
                              "Python 3.12+ and saprfclib installed.  "
                              "Falls back to the C SDK if unavailable.")
+    parser.add_argument("--read-only", action="store_true",
+                        help="Disable every destructive action — no user "
+                             "creation, no OS exec, no exploit, no cleanup, "
+                             "no ransapware, no SecStore/DBCON dumps.  "
+                             "Discovery, vulnerability checks, chain "
+                             "analysis, and report export remain available.  "
+                             "Backend routes return 403; MCP write tools "
+                             "are not registered; UI hides destructive "
+                             "menu items and shows a green READ-ONLY badge.")
     parser.add_argument("--allow-evasion", action="store_true",
                         help="Arm Tier 3 active-evasion techniques "
                              "(SAL filter narrow, kernel-param dynamic-set, "
@@ -225,6 +234,21 @@ def main():
     if getattr(args, "pure_rfc", False):
         sapmap_rfc.set_pure_rfc(True)
         print("[*] Pure-Python RFC backend requested (--pure-rfc)")
+
+    if getattr(args, "read_only", False):
+        import sapmap_mode
+        sapmap_mode.set_read_only(True)
+        _bar = "=" * 64
+        print()
+        print(_bar)
+        print("             READ-ONLY MODE — exploits disabled")
+        print(_bar)
+        print("  Discovery, vulnerability checks, chain analysis, and")
+        print("  report export remain available.  Every destructive")
+        print("  action (create-user, exploit, autopwn, cleanup,")
+        print("  ransapware, SecStore/DBCON dumps) is blocked.")
+        print(_bar)
+        print()
 
     # Probe which RFC backend will be used and tell the operator
     try:
@@ -360,6 +384,24 @@ def main():
         except Exception as e:
             print(f"[!] Failed to load script: {e}")
             return
+        # Read-only mode is incompatible with any script that carries
+        # destructive steps.  Refuse to start rather than let each
+        # step bounce off a 403 mid-run — clearer feedback for the
+        # operator + never accidentally partial-executes a chain.
+        if getattr(args, "read_only", False):
+            try:
+                offenders = runner.list_destructive_steps()
+            except AttributeError:
+                # Older ScriptRunner without the helper — fall back to
+                # a coarse block that refuses any script in read-only.
+                offenders = ["<unknown — ScriptRunner lacks list_destructive_steps>"]
+            if offenders:
+                print("[!] --read-only refuses to run a script containing "
+                      "destructive steps:")
+                for step_desc in offenders:
+                    print(f"    - {step_desc}")
+                print("[!] Remove the destructive steps or drop --read-only.")
+                return
         # Run script in a background thread so the GUI launches immediately
         script_thread = threading.Thread(
             target=lambda: runner.run(print_fn=print),

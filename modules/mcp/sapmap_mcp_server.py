@@ -88,6 +88,45 @@ def _local_ip() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Read-only mode probe
+# ---------------------------------------------------------------------------
+# The MCP server runs as a separate process; the read-only flag lives in
+# the main SAPMAP process's memory.  We ask the server for its mode over
+# HTTP the first time a write tool is called, cache the result, and short-
+# circuit further attempts with a helpful error the model sees inline.
+# The backend still enforces via a 403, so this is a UX layer — the model
+# doesn't have to fumble through an HTTP error to learn a whole class of
+# tools is off.
+_READ_ONLY_CACHE: dict = {"checked": False, "read_only": False}
+
+
+def _is_read_only() -> bool:
+    if not _READ_ONLY_CACHE["checked"]:
+        try:
+            data = _api("GET", "/api/mode", timeout=3.0)
+            _READ_ONLY_CACHE["read_only"] = bool(data.get("read_only"))
+        except Exception:
+            _READ_ONLY_CACHE["read_only"] = False
+        _READ_ONLY_CACHE["checked"] = True
+    return _READ_ONLY_CACHE["read_only"]
+
+
+_READ_ONLY_REPLY = (
+    "ERROR: SAPMAP is running in --read-only mode.  Destructive actions "
+    "(create-user, exploit, autopwn, cleanup, ransapware, SecStore / "
+    "DBCON dumps) are disabled.  Restart SAPMAP without --read-only to "
+    "enable this tool."
+)
+
+
+def _read_only_guard() -> str:
+    """Return an error string if read-only is on, or '' if the tool may proceed."""
+    if _is_read_only():
+        return _READ_ONLY_REPLY
+    return ""
+
+
+# ---------------------------------------------------------------------------
 # MCP Server
 # ---------------------------------------------------------------------------
 
@@ -476,6 +515,8 @@ def exploit(sid: str, action: str, method: str = "",
         attacker_ip: For betrusted — your IP or 'auto'
         command: For exploit_cve_31324/linux_lpe/windows_lpe — OS command
     """
+    if (ro := _read_only_guard()):
+        return ro
     if not confirm:
         return json.dumps({
             "status": "blocked",
@@ -532,6 +573,8 @@ def exec_command(sid: str, cmdline: str, method: str = "gateway",
         method: Execution channel — gateway, sxpg, cve_31324, sapcontrol
         confirm: Must be true to execute
     """
+    if (ro := _read_only_guard()):
+        return ro
     if not confirm:
         return json.dumps({
             "status": "blocked",
@@ -562,6 +605,10 @@ def manage_rfcs(sid: str, action: str = "retrieve",
         destination: For test_single — the destination name
     """
     action = action.lower().strip()
+    # Propagation is destructive; retrieve/test are OK to run in read-only.
+    if action in ("propagate", "propagate_all"):
+        if (ro := _read_only_guard()):
+            return ro
     if action == "retrieve":
         resp = _api("POST", f"/api/node/{sid}/retrieve_rfcs", {})
     elif action == "test":
@@ -594,6 +641,8 @@ def create_user_via_rfc(sid: str, destination: str,
         target_sid: Expected target SID (for verification)
         confirm: Must be true to execute
     """
+    if (ro := _read_only_guard()):
+        return ro
     if not confirm:
         return json.dumps({
             "status": "blocked",
@@ -623,6 +672,8 @@ def create_tcpip_dest(sid: str, destination: str, host: str,
         program: Registered server program ID (optional)
         confirm: Must be true to execute
     """
+    if (ro := _read_only_guard()):
+        return ro
     if not confirm:
         return json.dumps({
             "status": "blocked",
@@ -654,6 +705,8 @@ def sapcontrol_osexecute(sid: str, destination_name: str,
         timeout: Command timeout in seconds (default 30)
         confirm: Must be true to execute
     """
+    if (ro := _read_only_guard()):
+        return ro
     if not confirm:
         return json.dumps({
             "status": "blocked",
@@ -690,6 +743,8 @@ def autopwn(max_waves: int = 5, scan_gw: bool = True,
         include_btp: Run BTP cloud lateral movement phase
         confirm: Must be true to execute
     """
+    if (ro := _read_only_guard()):
+        return ro
     if not confirm:
         return json.dumps({
             "status": "blocked",
@@ -734,6 +789,8 @@ def extract_data(sid: str, action: str, table: str = "",
         where: For table — WHERE clause
         max_rows: Max rows to read (default 500)
     """
+    if (ro := _read_only_guard()):
+        return ro
     action = action.lower().strip()
 
     if action == "hashes":
@@ -797,6 +854,8 @@ def scc_action(target: str, action: str, username: str = "",
         backup_password: For extract_keystore
         confirm: Required for extract_keystore
     """
+    if (ro := _read_only_guard()):
+        return ro
     action = action.lower().strip()
 
     if action == "extract_keystore" and not confirm:
@@ -863,6 +922,12 @@ def btp_action(action: str, region: str = "", token: str = "",
     """
     action = action.lower().strip()
 
+    # Destructive sub-actions require operator + writable mode; read
+    # actions (set_token, enumerate, pull_destinations, test_destination)
+    # stay available.
+    if action in ("create_user_on_target", "harvest_creds", "mint_token"):
+        if (ro := _read_only_guard()):
+            return ro
     if action == "create_user_on_target" and not confirm:
         return json.dumps({
             "status": "blocked",
@@ -924,6 +989,9 @@ def ticket_forgery(sid: str, action: str = "forge",
         confirm: Required for forge and fanout
     """
     action = action.lower().strip()
+    if action in ("forge", "fanout"):
+        if (ro := _read_only_guard()):
+            return ro
 
     if action in ("forge", "fanout") and not confirm:
         return json.dumps({
@@ -966,6 +1034,8 @@ def ssh_lateral(sid: str, action: str = "harvest",
         confirm: Required for plant_key
     """
     action = action.lower().strip()
+    if (ro := _read_only_guard()):
+        return ro
     if action == "plant_key" and not confirm:
         return json.dumps({
             "status": "blocked",
@@ -1011,6 +1081,9 @@ def ransapware(sid: str, action: str = "list_tables",
         confirm: Required for encrypt
     """
     action = action.lower().strip()
+    if action in ("encrypt", "decrypt", "get_fields"):
+        if (ro := _read_only_guard()):
+            return ro
 
     if action == "encrypt" and not confirm:
         return json.dumps({
@@ -1119,6 +1192,8 @@ def cleanup(sid: str = "", confirm: bool = False) -> str:
         sid: System SID to clean up (empty = all systems)
         confirm: Must be true to execute
     """
+    if (ro := _read_only_guard()):
+        return ro
     if not confirm:
         return json.dumps({
             "status": "blocked",
@@ -1158,6 +1233,9 @@ def run_sapmap_action(action: str, target: str = "",
         "btp_create_user_on_target", "lpe",
     }
 
+    if action in DESTRUCTIVE:
+        if (ro := _read_only_guard()):
+            return ro
     if action in DESTRUCTIVE and not confirm:
         return json.dumps({
             "status": "blocked",

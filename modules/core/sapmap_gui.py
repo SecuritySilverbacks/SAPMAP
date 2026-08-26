@@ -2200,6 +2200,132 @@ def _resolve_probe_target(state, conn):
 def create_app(api: SAPMAPApi) -> Bottle:
     app = Bottle()
 
+    # -- Read-only guard --------------------------------------------------
+    # When the process was started with --read-only, every destructive
+    # route returns 403 with a structured error the frontend can render
+    # as a toast.  Implemented as a before_request hook that matches
+    # request.route.rule against a maintained set of write-route
+    # patterns — one place to look, no risk of forgetting the decorator
+    # on a new endpoint (the WRITE_ROUTES set has to be updated
+    # explicitly, so the intent is visible in review).
+    #
+    # The frontend ALSO hides these actions via a body.read-only CSS
+    # class fed by /api/mode, so the 403 is a defence-in-depth
+    # guarantee — an operator hitting the API directly (or an MCP tool
+    # that slipped through, or a script) still gets refused.
+    from sapmap_mode import is_read_only
+
+    # Route rules that mutate target state or dump credentials.  Kept
+    # as Bottle rule strings ('/api/node/<sid>/foo') so we can match
+    # them without regex work at request time.  Discovery, vulnerability
+    # checks, chain analysis, and report export are intentionally
+    # ABSENT — they stay available in read-only mode.
+    WRITE_ROUTES = frozenset({
+        # LPE payload delivery
+        "/api/_lpe_blob/<token>",
+        # User creation / propagation
+        "/api/node/<sid>/create_user",
+        "/api/node/<sid>/create_user_java",
+        "/api/node/<sid>/create_user_via_rfc",
+        "/api/node/<sid>/canary_create_user",
+        "/api/actions/propagate_all",
+        # OS command execution
+        "/api/node/<sid>/sapcontrol_osexecute",
+        "/api/node/<sid>/ctcws_osexecute",
+        # Exploit primitives
+        "/api/node/<sid>/exploit_windows_lpe",
+        "/api/node/<sid>/exploit_linux_lpe",
+        "/api/node/<sid>/exploit_copyfail",
+        "/api/node/<sid>/exploit_cve_2025_31324",
+        "/api/node/<sid>/lpe",
+        "/api/node/<sid>/betrusted_chain",
+        "/api/node/<sid>/dpmon_sapstar",
+        # Ticket forgery + fanout
+        "/api/node/<sid>/forge_ticket",
+        "/api/node/<sid>/forge_and_fanout",
+        # TCP/IP destination creation (writes to RFCDES)
+        "/api/node/<sid>/create_tcpip_dest",
+        # Cleanup (removes created users)
+        "/api/node/<sid>/cleanup",
+        "/api/actions/cleanup_all",
+        # Autopwn chain
+        "/api/actions/autopwn",
+        # Ransapware
+        "/api/node/<sid>/ransapware/fields",
+        "/api/node/<sid>/ransapware/encrypt",
+        "/api/node/<sid>/ransapware/decrypt",
+        "/api/node/<sid>/ransapware/manifest/delete",
+        "/api/ransapware/suggested_tables",
+        # BTP writes
+        "/api/node/<sid>/mint_btp_token",
+        "/api/node/<sid>/mint_btp_token_via_cert",
+        "/api/btp/mint_token_via_local_cert",
+        "/api/btp/create_user_on_target",
+        # SSH lateral
+        "/api/node/<sid>/ssh_plant_key",
+        "/api/node/<sid>/ssh_test_keys",
+        "/api/node/<sid>/ssh_harvest",
+        "/api/node/<sid>/ssh_loot_keys",
+        # DBCON writes / dumps
+        "/api/node/<sid>/dbcon/create_user",
+        "/api/node/<sid>/dbcon/custom_sql",
+        "/api/node/<sid>/dbcon/dump_auth_tables",
+        "/api/node/<sid>/dbcon/dump_usr02",
+        "/api/node/<sid>/dbcon/describe_table",
+        # Authenticated reads that dump secrets (credentials, PSE,
+        # SecStore, OAuth secrets, capability data) — gated because
+        # they require RFC auth and touch sensitive tables.
+        "/api/node/<sid>/read_usrextid",
+        "/api/node/<sid>/read_oa2c",
+        "/api/node/<sid>/harvest_scc",
+        "/api/node/<sid>/harvest_scc_hashes_via_lpe",
+        "/api/node/<sid>/harvest_scc_mappings",
+        "/api/node/<sid>/harvest_scc_ssfs",
+        "/api/node/<sid>/harvest_btp_creds",
+        "/api/node/<sid>/analyse_capabilities",
+        "/api/node/<sid>/verify_pp_impersonation",
+        "/api/node/<sid>/client_roles",
+        "/api/node/<sid>/wd_admin_set_credentials",
+        "/api/node/<sid>/wd_admin_probe_defaults",
+        "/api/node/<sid>/wd_extract_icmauth",
+        "/api/node/<sid>/check_default_creds",
+        # SCC destructive / auth
+        "/api/scc/<host>/probe_creds",
+        "/api/scc/<host>/pull_mappings",
+        "/api/scc/<host>/extract_keystore",
+        "/api/scc/<host>/decrypt_ssfs",
+        "/api/scc/<host>/set_credentials",
+        "/api/scc/<host>/download_user_hashes",
+        "/api/scc/<host>/lookup_hashes_online",
+        "/api/scc/<host>/probe_mappings",
+        "/api/scc/<host>/analyse_pp",
+    })
+
+    @app.hook("before_request")
+    def _readonly_gate():
+        if not is_read_only():
+            return
+        rule = getattr(request.route, "rule", "") or ""
+        if rule in WRITE_ROUTES:
+            response.status = 403
+            response.content_type = "application/json"
+            # Bottle 'before_request' hooks can't return a body directly;
+            # raise HTTPResponse to short-circuit with the JSON payload.
+            from bottle import HTTPResponse
+            raise HTTPResponse(
+                body=json.dumps({
+                    "error": "read_only_mode",
+                    "message": (
+                        "This action is disabled in read-only mode.  "
+                        "Restart SAPMAP without --read-only to enable "
+                        "destructive actions."
+                    ),
+                    "route": rule,
+                }),
+                status=403,
+                headers={"Content-Type": "application/json"},
+            )
+
     # -- Serve the SPA --
     @app.route("/")
     def index():
@@ -2339,6 +2465,17 @@ def create_app(api: SAPMAPApi) -> Bottle:
             cmds = list(_ui_commands)
             _ui_commands.clear()
         return json.dumps(cmds)
+
+    # -- Operating mode (constant per process) --
+    # Polled once at page load; the frontend toggles a body.read-only
+    # CSS class that hides destructive menu items and shows a green
+    # READ-ONLY badge in the top bar.
+    @app.route("/api/mode")
+    def get_mode():
+        response.content_type = "application/json"
+        return json.dumps({
+            "read_only": is_read_only(),
+        })
 
     # -- State --
     @app.route("/api/state")

@@ -31,6 +31,11 @@ _HTML = r"""<!DOCTYPE html>
 /* === Reset & Base === */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; overflow: hidden; }
+
+/* Read-only mode: hide every destructive control from the UI.
+   Class is toggled on <body> by initMode() after polling /api/mode.
+   Backend still enforces via a 403 hook, this is the UX layer. */
+body.read-only .write-op { display: none !important; }
 body {
   font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
   background: #0d1117; color: #e6edf3; font-size: 13px;
@@ -876,6 +881,12 @@ body {
 <!-- Menu Bar -->
 <div class="menu-bar">
   <span class="logo">&#9889; SAPMAP</span>
+  <!-- READ-ONLY badge: shown only when body.read-only is set (see /api/mode
+       poll in initMode() below).  Green pill sits next to the logo so it's
+       impossible to miss, and its :not() sibling selector keeps the layout
+       identical when the mode is off. -->
+  <span id="mode-badge" class="mode-badge ro-badge" title="Read-only mode: exploits, cleanup, credential dumps and other destructive actions are disabled.  Restart SAPMAP without --read-only to enable them."
+        style="display:none;background:#3fb950;color:#0d1117;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;margin-left:8px;letter-spacing:0.3px;vertical-align:middle">READ-ONLY</span>
   <div class="menu-item">File
     <div class="menu-dropdown">
       <div class="dd-item" onclick="loadState()">&#128194; Load State...</div>
@@ -897,10 +908,10 @@ body {
     <div class="menu-dropdown">
       <div class="dd-header">Landscape-wide</div>
       <div class="dd-item" onclick="scanAllVulns()" style="color:#f0883e">&#128270; Scan for All Vulnerabilities</div>
-      <div class="dd-item" onclick="showAutoPwnModal()" style="color:#f85149;font-weight:bold">&#9889; AutoPwn</div>
-      <div class="dd-item" onclick="propagateAll()">&#128640; Auto-Propagate All</div>
+      <div class="dd-item write-op" onclick="showAutoPwnModal()" style="color:#f85149;font-weight:bold">&#9889; AutoPwn</div>
+      <div class="dd-item write-op" onclick="propagateAll()">&#128640; Auto-Propagate All</div>
       <div class="dd-item" onclick="testAllRFCs()">&#129514; Test All RFC Destinations</div>
-      <div class="dd-item" onclick="cleanupAll()">&#129529; Cleanup All Users</div>
+      <div class="dd-item write-op" onclick="cleanupAll()">&#129529; Cleanup All Users</div>
       <div class="dd-sep"></div>
       <!-- Bulk vuln checks — mirror of the map's right-click context menu so
            every "Check All …" entry is reachable without right-clicking the
@@ -1204,7 +1215,7 @@ body {
   <!-- Top-level quick actions -->
   <div class="ctx-item" data-action="details">&#128269; View System Details</div>
   <div class="ctx-item" data-action="findings">&#128203; View Findings</div>
-  <div class="ctx-item" data-action="wd_admin_creds">&#128273; Add WD admin credentials (webadm / pull backend table)</div>
+  <div class="ctx-item write-op" data-action="wd_admin_creds">&#128273; Add WD admin credentials (webadm / pull backend table)</div>
   <div class="ctx-item" data-action="credentials">&#128273; Provide Credentials</div>
   <div class="ctx-item" data-action="remove_credentials">&#128465;&#65039; Remove Credentials</div>
   <div class="ctx-sep"></div>
@@ -1213,7 +1224,7 @@ body {
     <div class="ctx-item">&#128225; Scanning</div>
     <div class="ctx-sub">
       <div class="ctx-item" data-action="standard_scan">&#128270; Standard Scan (fingerprint host)</div>
-      <div class="ctx-item" data-action="analyse_capabilities">&#128201; Analyse User Capabilities</div>
+      <div class="ctx-item write-op" data-action="analyse_capabilities">&#128201; Analyse User Capabilities</div>
       <div class="ctx-item" data-action="rfc_system_info">&#128225; RFC System Info</div>
       <div class="ctx-item" data-action="check_gw">&#128270; Check GW Vulnerability</div>
       <div class="ctx-item" data-action="check_ms">&#128270; Check MS Betrusted (CVE-2020-6207)</div>
@@ -1229,14 +1240,14 @@ body {
       <div class="ctx-item" data-action="tms_discover">&#128225; Discover TMS topology (TMSMCONF/TMSCSYS)</div>
       <div class="ctx-item" data-action="test_rfcs">&#129514; Test RFC Connections</div>
       <div class="ctx-item" data-action="enum_clients">&#128202; Enumerate Clients</div>
-      <div class="ctx-item" data-action="client_roles">&#128202; Retrieve Client Roles</div>
-      <div class="ctx-item" data-action="default_creds">&#9888; Check Default Accounts</div>
+      <div class="ctx-item write-op" data-action="client_roles">&#128202; Retrieve Client Roles</div>
+      <div class="ctx-item write-op" data-action="default_creds">&#9888; Check Default Accounts</div>
       <div class="ctx-item" data-action="check_router_info">&#128268; Check SAProuter Info Leak</div>
       <div class="ctx-item" data-action="router_scan">&#128270; Scan Internally via SAProuter</div>
     </div>
   </div>
   <!-- Exploitation submenu -->
-  <div class="ctx-group">
+  <div class="ctx-group write-op">
     <div class="ctx-item">&#9876; Exploitation</div>
     <div class="ctx-sub">
       <div class="ctx-item" data-action="lpe">&#128274; ABAP Local Privilege Escalation</div>
@@ -1281,7 +1292,7 @@ body {
     </div>
   </div>
   <!-- Cloud Connector submenu (visible only when SCC is on same host) -->
-  <div class="ctx-group" id="ctx-scc-group">
+  <div class="ctx-group write-op" id="ctx-scc-group">
     <div class="ctx-item">&#9889; Cloud Connector</div>
     <div class="ctx-sub">
       <div class="ctx-item" data-action="scc_via_sap_set_credentials">&#128273; Set SCC Credentials</div>
@@ -1322,34 +1333,34 @@ body {
       <div class="ctx-item" data-action="probe_rsau_dyn_profile"
            title="Tier 3 discovery. Calls RSAU_API_GET_PROFILE(ID_DYN_CONF='X') and dumps the verbatim ET_FILT / ET_FILTEX / ET_TEXT / ET_LOG rows to loot/baseline/<SID>/dyn_profile_<ts>.json. Reveals the exact 12-field RSAUPROF row shape the writer needs to construct. Pure read; no mutation."
            >&#128270; Probe RSAU Dynamic Profile (Tier 3 discovery)</div>
-      <div class="ctx-item" data-action="tier3_sal_slot_disable"
+      <div class="ctx-item write-op" data-action="tier3_sal_slot_disable"
            title="Tier 3 MUTATION. Disables one or more SAL filter slots for a hold window, then auto-restores. Accepts a single slot ('1'), comma list ('1,2,3'), or 'ALL'. Primary path: RSAU_UPD_AUDIT_CONFIG (shared-memory only — no disk persistence, no SM19 header change). Fallback: RSAU_API_SET_PROFILE (persists to disk if legacy FMs unavailable)."
            >&#128263; Disable SAL Slot(s)... (Tier 3 mutation)</div>
-      <div class="ctx-item" data-action="tier3_gw_logging_off"
+      <div class="ctx-item write-op" data-action="tier3_gw_logging_off"
            title="Tier 3 MUTATION. Sets gw/logging=0 (Gateway logging level) via TH_CHANGE_PARAMETER (shared memory only — no profile-file rewrite). Suppresses dev_rd / dev_ms gateway action logs for the session. Auto-restores baseline value on exit. Confirmed runtime-changeable on S/4 793."
            >&#128683; Suppress Gateway Logging (Tier 3 mutation)</div>
-      <div class="ctx-item" data-action="tier3_rdisp_trace_off"
+      <div class="ctx-item write-op" data-action="tier3_rdisp_trace_off"
            title="Tier 3 MUTATION. Sets rdisp/TRACE=0 (dispatcher trace level) via TH_CHANGE_PARAMETER (shared memory only — no profile-file rewrite). Stops dev_disp / dev_w* dispatcher and work-process trace writes. Auto-restores baseline value on exit. Confirmed runtime-changeable on S/4 793."
            >&#128683; Suppress Dispatcher Trace (Tier 3 mutation)</div>
-      <div class="ctx-item" data-action="tier3_sal_uname_narrow"
+      <div class="ctx-item write-op" data-action="tier3_sal_uname_narrow"
            title="Tier 3 MUTATION. Swaps one or more SAL slots' UNAME filter to a replacement value (e.g. operator's real user) for a hold window. Slot stays STATUS='X' (looks active in SM19) but no longer matches SAPMAP00. Stealth path only (RSAU_UPD_AUDIT_CONFIG, SHM-only — no disk persistence, no SM19 header change). Baseline UNAMEs auto-restored on exit."
            >&#129399; Narrow SAL Slot UNAME... (Tier 3 mutation)</div>
-      <div class="ctx-item" data-action="tier3_java_sal_suppress"
+      <div class="ctx-item write-op" data-action="tier3_java_sal_suppress"
            title="Tier 3 MUTATION (Java). Deploys a LogController JSP and sets the 6 Java Security Audit Log categories (/System/Security/Audit + 5 subcategories) to Severity.NONE via Category.setEffectiveSeverity(). Runtime-only (JVM heap — no config file change, no NWA change-log entry). Auto-restores baseline severity on exit. Requires a Java deployment path (CVE-2025-31324, CTC, telnet, or GW)."
            >&#128683; Suppress Java SAL... (Tier 3 mutation)</div>
-      <div class="ctx-item" data-action="tier3_dbtablog_purge"
+      <div class="ctx-item write-op" data-action="tier3_dbtablog_purge"
            title="Tier 3 MUTATION (ABAP). Captures MAX(LOGID) baseline on DBTABLOG, waits hold_seconds, then DELETEs every row written after that point (optional TABNAME whitelist). DBTABLOG is delivery class L (not itself logged) — the DELETE does not recurse. No DD09L touch, no DDIC activation, no transport object. Requires RFC_ABAP_INSTALL_AND_RUN."
            >&#129529; Purge DBTABLOG... (Tier 3 mutation)</div>
-      <div class="ctx-item" data-action="tier3_sal_death_star_launch"
+      <div class="ctx-item write-op" data-action="tier3_sal_death_star_launch"
            title="Tier 3 MUTATION (Linux). Virtual SAP Death Star (Julian Petersohn / @randomstr1ng). Uploads sap_audit_hook.c to /tmp, compiles as <sid>adm, ptrace-attaches to a disp+work worker, plants INT3 breakpoints on the three SAL sinks (fwrite×2 + write_event_to_DB + EtdSendEvent). In --suppress mode audit records matching the filter are silently dropped in-memory — SM20 shows nothing, no disk write, no DB row, no ETD/SIEM. Persists as a background process until Disarm. Requires Linux + <sid>adm + kernel.yama.ptrace_scope <= 1. Not a 0-day — SAP publicly confirmed this is post-exploitation."
            >&#127770; Arm Virtual SAP Death Star... (Tier 3 mutation)</div>
-      <div class="ctx-item" data-action="tier3_sal_death_star_stop"
+      <div class="ctx-item write-op" data-action="tier3_sal_death_star_stop"
            title="Tier 3 disarm. SIGTERM the running sap_audit_hook. Its signal handler runs detach_all() which restores every INT3 byte in the target disp+work text segment and releases ptrace cleanly. Idempotent — safe to click even when nothing is running."
            >&#10071; Disarm Virtual SAP Death Star (Tier 3 disarm)</div>
     </div>
   </div>
   <!-- Data Extraction submenu -->
-  <div class="ctx-group">
+  <div class="ctx-group write-op">
     <div class="ctx-item">&#128230; Data Extraction</div>
     <div class="ctx-sub">
       <div class="ctx-item" data-action="download_hashes">&#128273; Extract Hashes for Cracking</div>
@@ -1371,7 +1382,7 @@ body {
     </div>
   </div>
   <!-- RanSAPware Awareness PoC -->
-  <div class="ctx-group">
+  <div class="ctx-group write-op">
     <div class="ctx-item" style="color:#f85149">&#128274; RanSAPware Awareness</div>
     <div class="ctx-sub">
       <div class="ctx-item" data-action="ransapware_encrypt" style="color:#f85149">&#128274; Encrypt Table Data</div>
@@ -1379,7 +1390,7 @@ body {
     </div>
   </div>
   <!-- Cleanup submenu -->
-  <div class="ctx-group">
+  <div class="ctx-group write-op">
     <div class="ctx-item">&#128465; Cleanup</div>
     <div class="ctx-sub">
       <div class="ctx-item" data-action="cleanup">&#128465; Delete SAPMAP00 User</div>
@@ -1407,9 +1418,9 @@ body {
 <div class="ctx-menu" id="map-ctx-menu">
   <div class="ctx-item" data-action="map_add_system">&#10133; Add System Manually</div>
   <div class="ctx-sep"></div>
-  <div class="ctx-item" data-action="map_autopwn" style="color:#f85149;font-weight:bold">&#9889; AutoPwn</div>
-  <div class="ctx-item" data-action="map_propagate_all">&#128640; Auto-Propagate All</div>
-  <div class="ctx-item" data-action="map_cleanup_all">&#129529; Cleanup All Users</div>
+  <div class="ctx-item write-op" data-action="map_autopwn" style="color:#f85149;font-weight:bold">&#9889; AutoPwn</div>
+  <div class="ctx-item write-op" data-action="map_propagate_all">&#128640; Auto-Propagate All</div>
+  <div class="ctx-item write-op" data-action="map_cleanup_all">&#129529; Cleanup All Users</div>
   <div class="ctx-item" data-action="map_scan_all_vulns" style="color:#f0883e">&#128270; Scan for All Vulnerabilities</div>
   <div class="ctx-item" id="map-ctx-check-all-gw" data-action="map_check_all_gw">&#128272; Check All GW Vulnerabilities</div>
   <div class="ctx-item" id="map-ctx-check-all-betrusted" data-action="map_check_all_betrusted">&#128272; Check All 10KBlaze (MS Betrusted)</div>
@@ -1429,10 +1440,10 @@ body {
 <div class="ctx-menu" id="scc-ctx-menu">
   <!-- Top-level quick actions -->
   <div class="ctx-item" data-action="scc_details">&#128269; View SCC Details</div>
-  <div class="ctx-item" data-action="scc_set_credentials">&#128273; Set Credentials</div>
+  <div class="ctx-item write-op" data-action="scc_set_credentials">&#128273; Set Credentials</div>
   <div class="ctx-sep"></div>
   <!-- Scanning submenu -->
-  <div class="ctx-group">
+  <div class="ctx-group write-op">
     <div class="ctx-item">&#128225; Scanning</div>
     <div class="ctx-sub">
       <div class="ctx-item" data-action="scc_probe_creds">&#128273; Probe Default Account (Administrator/manage)</div>
@@ -1441,14 +1452,14 @@ body {
     </div>
   </div>
   <!-- Exploitation submenu -->
-  <div class="ctx-group">
+  <div class="ctx-group write-op">
     <div class="ctx-item">&#9876; Exploitation</div>
     <div class="ctx-sub">
       <div class="ctx-item" data-action="scc_extract_keystore" style="color:#f85149">&#128272; Extract Keystore + Decrypt SSFS (FULL BACKUP — CROWN JEWELS)</div>
     </div>
   </div>
   <!-- Data Extraction submenu -->
-  <div class="ctx-group">
+  <div class="ctx-group write-op">
     <div class="ctx-item">&#128230; Data Extraction</div>
     <div class="ctx-sub">
       <div class="ctx-item" data-action="scc_pull_mappings">&#128194; Pull Mappings</div>
@@ -1463,8 +1474,8 @@ body {
 <div class="ctx-menu" id="btp-ctx-menu">
   <div class="ctx-item" data-action="btp_details">&#128269; View Subaccount Details</div>
   <div class="ctx-sep"></div>
-  <div class="ctx-item" data-action="btp_mint_via_cert">&#128273; Mint Token via Cert-Auth (RFC 8705)</div>
-  <div class="ctx-item" data-action="btp_mint_via_local_cert">&#128274; Mint Token via Local Cert Files (workstation)</div>
+  <div class="ctx-item write-op" data-action="btp_mint_via_cert">&#128273; Mint Token via Cert-Auth (RFC 8705)</div>
+  <div class="ctx-item write-op" data-action="btp_mint_via_local_cert">&#128274; Mint Token via Local Cert Files (workstation)</div>
   <div class="ctx-item" data-action="btp_pull_destinations">&#128229; Refresh Destinations</div>
   <div class="ctx-item" data-action="btp_highlight_links">&#128279; Highlight Linked On-prem Targets</div>
   <div class="ctx-sep"></div>
@@ -18379,6 +18390,28 @@ document.addEventListener('click', () => hideMapCtxMenu());
   observed.forEach(el => mo.observe(el,
     { attributes: true, attributeFilter: ['style', 'class'] }));
 })();
+
+// --- Read-only mode init ---
+// Poll /api/mode once at boot.  If the server was started with
+// --read-only, add body.read-only (CSS then hides every .write-op
+// element) and unhide the green READ-ONLY badge next to the logo.
+// Never polls again — the flag is set at process start and cannot
+// change at runtime.
+async function initMode() {
+  try {
+    const m = await api('GET', 'mode');
+    if (m && m.read_only) {
+      document.body.classList.add('read-only');
+      const badge = document.getElementById('mode-badge');
+      if (badge) badge.style.display = 'inline-block';
+    }
+  } catch (e) {
+    // /api/mode is new — if the server doesn't have it yet, silently
+    // stay in the default (full) mode.  Backend guarding still fires
+    // if it happens to be a newer server with an older HTML cached.
+  }
+}
+initMode();
 
 // --- Init ---
 startPolling();

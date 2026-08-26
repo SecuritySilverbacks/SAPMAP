@@ -1360,6 +1360,20 @@ class ScriptRunner:
         except Exception as e:
             return {"error": str(e)}
 
+    def list_destructive_steps(self) -> list:
+        """Return a list of human-readable descriptions for every step
+        whose `action` is in DESTRUCTIVE_ACTIONS.  Used by --read-only
+        to refuse scripts up-front rather than error mid-run.
+        """
+        out = []
+        for i, step in enumerate(self.steps or []):
+            action = (step.get("action") or "").strip()
+            if action in DESTRUCTIVE_ACTIONS:
+                target = step.get("target") or step.get("sid") or ""
+                out.append(f"step {i + 1}: action={action}"
+                           + (f" target={target}" if target else ""))
+        return out
+
     def _wait_for_completion(self, timeout: float = 600):
         """Poll /api/state until active_tasks is empty."""
         deadline = time.time() + timeout
