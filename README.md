@@ -416,7 +416,7 @@ The `modules/__init__.py` registers each subpackage on `sys.path` so existing fl
 
 - **Python 3.8+**
 - The Python packages listed below (all required — see `requirements.txt`)
-- **SAP NetWeaver RFC SDK** — strongly recommended for a real engagement; enables the entire authenticated attack surface
+- **SAP NetWeaver RFC SDK** — strongly recommended for a real engagement; enables the entire authenticated attack surface.  Alternative: install [`saprfclib`](https://github.com/randomstr1ng/saprfclib) (pure-Python, Python 3.12+, zero native deps) and pass `--pure-rfc` — the C SDK becomes optional.  Live-tested end-to-end against S/4HANA 2023 and NetWeaver 7.42; a handful of minor edge-case bugs remain (two thin workarounds in `sap_rfc_pure.py`, tracked upstream at randomstr1ng/saprfclib).  For an engagement you can't afford weirdness in, stay on the C SDK; for a locked-down laptop / ARM Mac / CI container without the SDK installed, the pure-Python backend is a viable substitute.  See [Pure-Python RFC Backend](#pure-python-rfc-backend---pure-rfc) for the full write-up
 
 ### Python packages (all required)
 
