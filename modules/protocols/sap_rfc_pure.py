@@ -15,12 +15,23 @@ upstream at randomstr1ng/saprfclib):
     #11 _encode_structure raised KeyError for partial row dicts
     #12 _call_bootstrap only fetched type_desc when rfctype==STRUCTURE
 
+Active workarounds (still upstream-open; re-check when saprfclib bumps):
+
+    #24 Connection.call() raises ValueError on unknown kwargs — C SDK / pyrfc
+        silently drop them.  We catch the ValueError, remove the offending
+        kwargs from the message, and retry once.
+    (n/a) _build_invoke_frame's `struct.pack('>HH', 0, len(tlv_body))` overflows
+        when the ABAP program body exceeds 64KB.  We catch struct.error and
+        raise a clean RFCError so SAPMAP's fallback chains can react.
+
 If you see regressions, `pip3 install --upgrade saprfclib` first.
 """
 
 import datetime
 import inspect
 import logging
+import re as _re
+import struct as _struct
 import traceback as _tb
 
 logger = logging.getLogger(__name__)
@@ -338,13 +349,49 @@ class RFCConnection:
 
     # -- RFC Function Invocation --
 
+    # saprfclib issue #24 — Connection.call() rejects unknown kwargs.  Both
+    # pyrfc and the C SDK silently drop extras.  We catch the ValueError,
+    # parse the rejected param names out of the message, and retry once
+    # with those kwargs removed.  Regex is anchored on saprfclib's exact
+    # phrasing so a message-format change here shows up as a test failure
+    # rather than silent misbehaviour.
+    _UNKNOWN_KWARG_RE = _re.compile(
+        r"^([^:]+): parameter\(s\) (.+?) are not in the function interface"
+    )
+
+    def _call_with_unknown_kwarg_retry(self, func_name, kwargs):
+        try:
+            return self._conn.call(func_name, **kwargs)
+        except ValueError as e:
+            m = self._UNKNOWN_KWARG_RE.match(str(e))
+            if not m:
+                raise
+            unknown = {p.strip() for p in m.group(2).split(",") if p.strip()}
+            filtered = {k: v for k, v in kwargs.items() if k not in unknown}
+            if len(filtered) == len(kwargs):
+                raise
+            logger.debug(
+                "saprfclib #24 workaround: %s rejected kwargs %s; retrying "
+                "without them", func_name, sorted(unknown))
+            return self._conn.call(func_name, **filtered)
+
     def call(self, func_name, **kwargs):
         self._ensure_open()
         try:
-            result = self._conn.call(func_name, **kwargs)
+            result = self._call_with_unknown_kwarg_retry(func_name, kwargs)
             return _normalize_result(result)
         except _lib.SapRfcError as e:
             raise _translate_exception(e) from e
+        except _struct.error as e:
+            # saprfclib _build_invoke_frame overflows 'H' (uint16) for TLV
+            # bodies > 64KB (large ABAP INSTALL_AND_RUN payloads etc.).
+            # Surface as a clean RFCError so SAPMAP's fallback chains
+            # (SXPG DB CLI, RFC_READ_TABLE, /SAPDS/RFC_ABAP_INSTALL_RUN)
+            # get a chance to run.
+            raise RFCError(
+                f"saprfclib call({func_name}) failed: TLV body exceeds "
+                f"64KB — saprfclib frame footer overflow (struct: {e})"
+            ) from e
         except Exception as e:
             tb_str = _tb.format_exc()
             logger.debug(
@@ -407,10 +454,15 @@ class RFCConnection:
         """
         self._ensure_open()
         try:
-            result = self._conn.call(func_name, **kwargs)
+            result = self._call_with_unknown_kwarg_retry(func_name, kwargs)
             return _normalize_result(result)
         except _lib.SapRfcError as e:
             raise _translate_exception(e) from e
+        except _struct.error as e:
+            raise RFCError(
+                f"saprfclib call_raw({func_name}) failed: TLV body exceeds "
+                f"64KB — saprfclib frame footer overflow (struct: {e})"
+            ) from e
         except Exception as e:
             tb_str = _tb.format_exc()
             logger.debug(
