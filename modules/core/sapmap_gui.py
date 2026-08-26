@@ -2301,30 +2301,46 @@ def create_app(api: SAPMAPApi) -> Bottle:
         "/api/scc/<host>/analyse_pp",
     })
 
+    # Bottle's 'before_request' hook fires BEFORE the router picks a
+    # route, so request.route is not populated yet (touching it raises
+    # RuntimeError).  Instead, pre-compile each write rule to a regex
+    # that matches request.path — '<name>' path params become one URL
+    # segment '[^/]+'.  Matched once per request; ~45 patterns; cheap.
+    import re as _re
+    _WRITE_PATH_PATTERNS = tuple(
+        _re.compile("^" + _re.sub(r"<[^>]+>", "[^/]+", rule) + "$")
+        for rule in WRITE_ROUTES
+    )
+
+    def _matched_write_rule(path: str) -> str:
+        for rule, pat in zip(WRITE_ROUTES, _WRITE_PATH_PATTERNS):
+            if pat.match(path):
+                return rule
+        return ""
+
     @app.hook("before_request")
     def _readonly_gate():
         if not is_read_only():
             return
-        rule = getattr(request.route, "rule", "") or ""
-        if rule in WRITE_ROUTES:
-            response.status = 403
-            response.content_type = "application/json"
-            # Bottle 'before_request' hooks can't return a body directly;
-            # raise HTTPResponse to short-circuit with the JSON payload.
-            from bottle import HTTPResponse
-            raise HTTPResponse(
-                body=json.dumps({
-                    "error": "read_only_mode",
-                    "message": (
-                        "This action is disabled in read-only mode.  "
-                        "Restart SAPMAP without --read-only to enable "
-                        "destructive actions."
-                    ),
-                    "route": rule,
-                }),
-                status=403,
-                headers={"Content-Type": "application/json"},
-            )
+        rule = _matched_write_rule(request.path)
+        if not rule:
+            return
+        # before_request hooks can't return a body directly; raise
+        # HTTPResponse to short-circuit with the JSON payload.
+        from bottle import HTTPResponse
+        raise HTTPResponse(
+            body=json.dumps({
+                "error": "read_only_mode",
+                "message": (
+                    "This action is disabled in read-only mode.  "
+                    "Restart SAPMAP without --read-only to enable "
+                    "destructive actions."
+                ),
+                "route": rule,
+            }),
+            status=403,
+            headers={"Content-Type": "application/json"},
+        )
 
     # -- Serve the SPA --
     @app.route("/")
