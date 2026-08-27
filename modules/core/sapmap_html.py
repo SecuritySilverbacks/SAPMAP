@@ -6102,11 +6102,14 @@ function showCtxMenu(e, sid) {
     //   - GW SAPXPG: works on ANY SAP gateway (ABAP or Java), regardless
     //     of stack — SAPMAP's own probe confirms by running `whoami` as
     //     <sid>adm. So hasGwVuln enables terminal regardless of stack.
-    //   - ABAP SXPG: requires an ABAP dialog/RFC user with SAP_ALL.
+    //   - ABAP SXPG: needs an ABAP RFC user with S_LOG_COM (any SAP_ALL
+    //     cred qualifies).  Enable for any verified cred OR SAPMAP-created
+    //     user — if the manual cred is lower-priv, SXPG will fail cleanly
+    //     with an authority error.
     //   - CVE-2025-31324 webshell: Java only, unauth.
-    'os_terminal':      hasGwVuln || (isAbapStack && hasCreatedUsers) || hasCve31324 || hasSshAccess || hasSapControlOsExec,
-    'file_browser':     hasGwVuln || (isAbapStack && hasCreatedUsers) || hasCve31324 || hasSshAccess || hasSapControlOsExec,
-    'reverse_shell':    hasGwVuln || (isAbapStack && hasCreatedUsers) || hasCve31324 || hasSshAccess || hasSapControlOsExec,
+    'os_terminal':      hasGwVuln || (isAbapStack && hasUsableAbapAccess) || hasCve31324 || hasSshAccess || hasSapControlOsExec,
+    'file_browser':     hasGwVuln || (isAbapStack && hasUsableAbapAccess) || hasCve31324 || hasSshAccess || hasSapControlOsExec,
+    'reverse_shell':    hasGwVuln || (isAbapStack && hasUsableAbapAccess) || hasCve31324 || hasSshAccess || hasSapControlOsExec,
     'ssh_harvest':      !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers),
     'ssh_harvest_root': !isWindows && (hasGwVuln || hasCve31324 || hasCreatedUsers)
                           && !!(n && (n.copyfail_root_obtained || n.dirtyfrag_root_obtained
@@ -6369,9 +6372,9 @@ function showCtxMenu(e, sid) {
     'impact_assess_java': (javaDeployBlocked
         ? 'RECON admin user exists but no JSP-deploy primitive is reachable (CTC ConfigServlet removed, admin telnet firewalled). System is hardened — data extraction not available from here.'
         : 'Requires Java/dual-stack + CVE-2025-31324, GW SAPXPG, or a Java admin user with a reachable CTC / telnet endpoint'),
-    'os_terminal':      'Requires an OS-exec path: vulnerable GW (any stack), ABAP+created-user (SXPG), CVE-2025-31324 webshell (Java), SSH lateral movement, or SAPControl OSExecute from a verified Type-G destination',
-    'file_browser':     'Requires an OS-exec path: vulnerable GW, ABAP+created-user, CVE-2025-31324 webshell, SSH lateral, or SAPControl OSExecute',
-    'reverse_shell':    'Requires an OS-exec path: vulnerable GW (any stack), ABAP+created-user (SXPG), or CVE-2025-31324 webshell (Java)',
+    'os_terminal':      'Requires an OS-exec path: vulnerable GW (any stack), ABAP verified/created user (SXPG), CVE-2025-31324 webshell (Java), SSH lateral movement, or SAPControl OSExecute from a verified Type-G destination',
+    'file_browser':     'Requires an OS-exec path: vulnerable GW, ABAP verified/created user, CVE-2025-31324 webshell, SSH lateral, or SAPControl OSExecute',
+    'reverse_shell':    'Requires an OS-exec path: vulnerable GW (any stack), ABAP verified/created user (SXPG), or CVE-2025-31324 webshell (Java)',
     'ssh_harvest':      'Requires OS-exec on a Linux host — reads /etc/passwd + .ssh dirs via GW SAPXPG, CVE-2025-31324, or SXPG_STEP_XPG_START',
     'ssh_harvest_root': 'Requires a viable Linux LPE (Copy Fail / pedit-COW / Dirty Frag) — run "Escalate to Root" first. Reads ALL users\' .ssh directories as root.',
     'ssh_test_keys':    'Test previously harvested SSH keys against all map nodes — run SSH Harvest first',
