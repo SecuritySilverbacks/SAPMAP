@@ -18488,7 +18488,14 @@ async function _lootRender(relPath) {
   const crumbs = document.getElementById('loot-crumbs');
   if (!body) return;
   body.innerHTML = '<div style="padding:20px;color:#8b949e">Loading…</div>';
-  const r = await _lootList(relPath);
+  let r;
+  try {
+    r = await _lootList(relPath);
+  } catch (ex) {
+    body.innerHTML = '<div style="padding:20px;color:#f85149">Fetch error: '
+      + _lootEsc(String(ex)) + '</div>';
+    return;
+  }
   if (r.error) {
     body.innerHTML = '<div style="padding:20px;color:#f85149">Error: '
       + _lootEsc(r.error) + (r.message ? ' — ' + _lootEsc(r.message) : '') + '</div>';
@@ -18500,15 +18507,16 @@ async function _lootRender(relPath) {
   if (relPath) {
     const parent = relPath.includes('/')
       ? relPath.substring(0, relPath.lastIndexOf('/')) : '';
-    rows.push('<div class="loot-row" style="cursor:pointer;padding:6px 16px;'
-      + 'display:flex;gap:12px" onclick="_lootRender(' + JSON.stringify(parent) + ')">'
+    rows.push('<div class="loot-row loot-dir" data-path="' + _lootEsc(parent)
+      + '" style="cursor:pointer;padding:6px 16px;'
+      + 'display:flex;gap:12px">'
       + '<span style="flex:1">&#8617; ..</span></div>');
   }
   for (const e of (r.entries || [])) {
-    const path = JSON.stringify(e.path);
     if (e.is_dir) {
-      rows.push('<div class="loot-row" style="cursor:pointer;padding:6px 16px;'
-        + 'display:flex;gap:12px" onclick="_lootRender(' + path + ')">'
+      rows.push('<div class="loot-row loot-dir" data-path="' + _lootEsc(e.path)
+        + '" style="cursor:pointer;padding:6px 16px;'
+        + 'display:flex;gap:12px">'
         + '<span style="flex:1">&#128193; ' + _lootEsc(e.name) + '/</span>'
         + '<span style="color:#8b949e;font-size:11px">'
         + _lootFmtTs(e.mtime) + '</span></div>');
@@ -18530,7 +18538,11 @@ async function _lootRender(relPath) {
       + 'No loot yet — run a scan first.</div>');
   }
   body.innerHTML = rows.join('');
-  // Hover styling for row items
+  for (const el of body.querySelectorAll('.loot-dir')) {
+    const p = el.dataset.path;
+    el.addEventListener('click', () => _lootRender(p).catch(ex =>
+      body.innerHTML = '<div style="padding:20px;color:#f85149">' + _lootEsc(String(ex)) + '</div>'));
+  }
   for (const el of body.querySelectorAll('.loot-row')) {
     el.addEventListener('mouseenter', () => el.style.background = '#21262d');
     el.addEventListener('mouseleave', () => el.style.background = '');
