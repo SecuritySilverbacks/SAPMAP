@@ -3135,7 +3135,38 @@ def http_basic_auth_probe(url: str, user: str, password: str,
         out["logon_successful"] = False
         out["error"] = "HTTP 401 — credentials rejected"
         return out
-    if out["status"] in (200, 302, 303, 403):
+    if out["status"] in (302, 303):
+        # An AS Java /useradmin/ endpoint sends 302 for BOTH success
+        # (redirect to the admin landing) and failure (redirect to
+        # /logon or /irj/portal for form-based auth).  The Location
+        # header tells us which — a target under /logon, /login,
+        # /portal/logon, /webdynpro/dispatcher/sap.com/tc~sec~ume~
+        # wd_umefetchticket or an ?returnUrl-carrying login page is
+        # the definitive "your basic-auth was rejected, go pick a
+        # session" answer.  Without this check we call every 302 a
+        # win and cheerfully report "user already exists" for users
+        # that don't — the exact false positive an operator hit on
+        # SJJ (SAPMAP00 didn't exist, precheck said it did because
+        # /useradmin/ 302'd to the logon page).
+        loc_m = _re.search(rb"(?im)^Location:\s*([^\r\n]+)", resp)
+        loc = (loc_m.group(1).decode("iso-8859-1", errors="replace").strip()
+               if loc_m else "")
+        loc_low = loc.lower()
+        _LOGIN_MARKERS = (
+            "/logon", "/login", "/authentication",
+            "wd_umefetchticket", "logonpage", "logonservlet",
+            "returnurl=", "sap-login",
+        )
+        if any(m in loc_low for m in _LOGIN_MARKERS):
+            out["ok"] = True
+            out["logon_successful"] = False
+            out["error"] = (f"HTTP {out['status']} → login page "
+                            f"({loc[:120]}) — credentials rejected")
+            return out
+        out["ok"] = True
+        out["logon_successful"] = True
+        return out
+    if out["status"] in (200, 403):
         out["ok"] = True
         out["logon_successful"] = True
         return out
