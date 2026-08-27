@@ -3136,73 +3136,61 @@ def http_basic_auth_probe(url: str, user: str, password: str,
         out["error"] = "HTTP 401 — credentials rejected"
         return out
     if out["status"] in (302, 303):
-        # An AS Java /useradmin/ endpoint sends 302 for BOTH success
-        # (redirect to the admin landing) and failure (redirect to
-        # /logon or /irj/portal for form-based auth).  The Location
-        # header tells us which.  The safest cut:
+        # 302 on AS Java is genuinely ambiguous — it can mean auth-OK
+        # (redirect to admin landing with session cookie) OR auth-FAIL
+        # (redirect to /logon, or same-root ?sap-syscmd=nocarrier
+        # "please re-auth" indicator).  Multiple heuristic passes
+        # (marker list, cross-app-root check) still missed a real
+        # case on SJJ where the redirect stayed inside /useradmin/*
+        # and looked legit but the credentials were rejected.
         #
-        #   Redirects that STAY inside the same app root (e.g.
-        #   /useradmin/ → /useradmin/index.jsp) are session-cookie
-        #   handoffs and mean the credentials worked.  Redirects
-        #   that HOP to a different app root (/webdynpro/, /irj/,
-        #   /nwbc/, /logon/, /sap/public/bc/, ...) are the AS Java
-        #   "you're not authenticated, go pick a session" flow —
-        #   basic-auth was rejected and the server is falling back
-        #   to form-based auth.
-        #
-        # A curated known-login-surface list handles pre-4.5 servers
-        # where the redirect goes straight to a portal home page
-        # (which happens to answer 200 to everyone but isn't proof
-        # of a valid user).  Reported by an operator on SJJ where
-        # SAPMAP00 didn't exist but the precheck said it did.
+        # New rule: default 302 to INCONCLUSIVE.  Only accept it as a
+        # success signal when the response ALSO carries a
+        # Set-Cookie header (real basic-auth acceptance almost
+        # always ships a JSESSIONID / MYSAPSSO2 / SAP_SESSIONID_ )
+        # AND the Location doesn't route through any login surface.
+        # Inconclusive maps to logon_successful=False so callers fall
+        # through to the full deploy path.  A false negative (extra
+        # 75s of deploy on a target where the user already exists) is
+        # a much smaller cost than a false positive (SAPMAP tells the
+        # operator a user exists when it doesn't — reported on SJJ).
         loc_m = _re.search(rb"(?im)^Location:\s*([^\r\n]+)", resp)
         loc = (loc_m.group(1).decode("iso-8859-1", errors="replace").strip()
                if loc_m else "")
         loc_low = loc.lower()
-        # Extract the path from Location (strip absolute host if any).
-        loc_path = loc_low
-        if "://" in loc_low:
-            try:
-                loc_path = "/" + loc_low.split("://", 1)[1].split("/", 1)[1]
-            except IndexError:
-                loc_path = "/"
-        if "?" in loc_path:
-            loc_path = loc_path.split("?", 1)[0]
-
-        # Original request path root (first segment).  "/useradmin/x"
-        # → "/useradmin", "/nwa/foo" → "/nwa".
-        req_root = "/" + path.lstrip("/").split("/", 1)[0].split("?", 1)[0]
-        loc_root = "/" + loc_path.lstrip("/").split("/", 1)[0]
-
+        # Log what we saw so operators can diagnose ambiguous cases
+        # without needing to patch the probe.
+        print(f"[*] basic-auth probe: HTTP {out['status']} on "
+              f"{path} → Location={loc!r}")
         _LOGIN_MARKERS = (
             "/logon", "/login", "/authentication",
             "wd_umefetchticket", "logonpage", "logonservlet",
             "returnurl=", "sap-login", "/irj/portal", "/webdynpro",
             "/nwbc/logon", "/sap/public/bc/icf/logoff",
             "/sap/public/bc/logon", "logonpage.jsp",
-            "sapumelogonpage", "loginpage",
+            "sapumelogonpage", "loginpage", "sap-syscmd=nocarrier",
         )
+        has_session_cookie = bool(_re.search(
+            rb"(?im)^Set-Cookie:\s*(JSESSIONID|MYSAPSSO2|SAP_SESSIONID_)",
+            resp))
         if any(m in loc_low for m in _LOGIN_MARKERS):
             out["ok"] = True
             out["logon_successful"] = False
-            out["error"] = (f"HTTP {out['status']} → login page "
+            out["error"] = (f"HTTP {out['status']} → login surface "
                             f"({loc[:120]}) — credentials rejected")
             return out
-        # Different-app-root redirect on a basic-auth-protected
-        # endpoint = auth failure fall-through to form-based on
-        # nearly every AS Java install.  Only accept 302 as success
-        # when the redirect stays inside the same app.
-        if loc_root and loc_root != "/" and req_root != "/" \
-                and loc_root != req_root:
+        if has_session_cookie:
             out["ok"] = True
-            out["logon_successful"] = False
-            out["error"] = (
-                f"HTTP {out['status']} → cross-app redirect "
-                f"{req_root}/… → {loc_root}/… "
-                f"({loc[:120]}) — treating as credential rejected")
+            out["logon_successful"] = True
             return out
+        # No Set-Cookie + no login marker = ambiguous.  Force the
+        # caller to run its full deploy path rather than claim
+        # success and skip user creation.
         out["ok"] = True
-        out["logon_successful"] = True
+        out["logon_successful"] = False
+        out["error"] = (
+            f"HTTP {out['status']} → {loc[:80] or 'no Location'} "
+            f"(no session cookie) — inconclusive, treating as fail")
         return out
     if out["status"] in (200, 403):
         out["ok"] = True
