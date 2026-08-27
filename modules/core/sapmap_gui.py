@@ -13769,8 +13769,53 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 if result.get("output"):
                     for line in result["output"][:5]:
                         print(f"    {line}")
+                # For bind mode: check for a listener-side failure BEFORE
+                # trying to connect.  Otherwise we can end up talking to
+                # whatever service ALREADY listens on that port on the
+                # target — a very real hazard on Windows targets where
+                # SAP ICM often binds 8000/8443/443 and Windows itself
+                # reserves ports in the excluded range for HTTP.sys /
+                # WinNAT — the payload hits "socket in a way forbidden"
+                # (WSAEACCES 10013) or "Address already in use", but a
+                # blind TCP connect to the same port lands on the
+                # pre-existing service and reports "connected" for a
+                # shell that doesn't exist.
+                out_blob = " ".join(str(l) for l in
+                                     (result.get("output") or []))
+                bind_fail_markers = (
+                    "socket in a way forbidden",     # WSAEACCES 10013
+                    "already in use",                # EADDRINUSE
+                    "Address already in use",        # Linux python
+                    "Only one usage of each socket", # WSAEADDRINUSE 10048
+                    "Cannot bind to",                # generic
+                    "Permission denied",             # Linux privileged
+                    "TcpListener",                   # PowerShell fallout
+                )
+                bind_failed = (shell_mode == "bind"
+                    and any(m.lower() in out_blob.lower()
+                            for m in bind_fail_markers))
+                if bind_failed:
+                    _hit = next((m for m in bind_fail_markers
+                                 if m.lower() in out_blob.lower()), "")
+                    print(f"[-] {sid}: bind listener FAILED — payload "
+                          f"delivery reached the target but the shell "
+                          f"could not bind port {shell_port} "
+                          f"(matched: {_hit!r})")
+                    print(f"    Not connecting — port {shell_port} is "
+                          f"likely reserved (Windows excluded range / "
+                          f"HTTP.sys URL ACL) or already bound by "
+                          f"another service.  Try a random high port "
+                          f"like 5555, 7777, or 9999.  On Windows: "
+                          f"`netsh interface ipv4 show excludedportrange "
+                          f"protocol=tcp` lists ports Windows blocks.")
+                    with _shell_lock:
+                        if _shell_session and _shell_session.status == "waiting":
+                            _shell_session.status = "error"
+                            _shell_session.error_msg = (
+                                f"Bind failed on port {shell_port} "
+                                f"({_hit}) — pick a different port")
                 # For bind mode: start connecting to the target
-                if shell_mode == "bind":
+                elif shell_mode == "bind":
                     import time
                     time.sleep(2)  # give the bind shell time to start
                     with _shell_lock:
