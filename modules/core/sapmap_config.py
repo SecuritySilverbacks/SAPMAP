@@ -362,6 +362,15 @@ DEFAULT_MAX_POLL_ATTEMPTS = 40
 # Fast scan: only these port patterns
 FAST_SCAN_PORT_PATTERNS = {
     "dispatcher": 3200,    # 3200 + instance_nr
+    "gateway":    3300,    # 3300 + instance_nr
+    # Gateway included so GW-only / SCS-only / minimal installs that
+    # don't expose a 32XX dispatcher on the interface we're scanning
+    # still get discovered.  Reported on W74 (Windows Server 2008 R2)
+    # where the gateway was reachable on 3340 but no 3240 dispatcher
+    # was listening — fast scan missed the whole system and Pass 2
+    # (which normally covers 33XX) never fired because Pass 2 is gated
+    # on a dispatcher hit.  Doubles the fast-scan port count (~200 →
+    # ~300 per host) but catches this real class of target.
 }
 
 # ---------------------------------------------------------------------------

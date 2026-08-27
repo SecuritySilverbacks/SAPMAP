@@ -783,13 +783,18 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
     quick_hit = True   # assume alive when quick check is skipped
     quick_rtt = 999.0  # no measurement → keep original timeout
     if not skip_quick_check:
-        # Quick probe set: dispatcher range (3200-3299) + SAPControl 5XX13
-        # + SAPHostControl (1128) + the WD well-known ports.  The WD
-        # ports go in here so a host that ONLY runs a hardened DMZ WD
-        # (no dispatcher port, no SAPControl) still trips the quick
-        # check and gets a full scan.
+        # Quick probe set: dispatcher range (3200-3299), gateway range
+        # (3300-3399), SAPControl 5XX13, SAPHostControl (1128), and the
+        # WD well-known ports.  The WD ports go in here so a hardened
+        # DMZ WD (no dispatcher port, no SAPControl) still trips the
+        # quick check and gets a full scan.  The gateway range covers
+        # GW-only / SCS-only / minimal installs where the 32XX
+        # dispatcher isn't reachable (e.g. W74's 3340 gateway with no
+        # 3240 dispatcher listening) — without this the quick check
+        # marks the host dead and the full scan never fires.
         QUICK_PORTS = (
             list(range(3200, 3300))
+            + list(range(3300, 3400))
             + [50013, 50113, 50213, 50313, 54213, 1128]
             + list(WELL_KNOWN_WD_PORTS)
         )
