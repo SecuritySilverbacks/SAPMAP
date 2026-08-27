@@ -900,6 +900,41 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
     print(f"[*] {host}: Pass 1 done in {time.time() - t0:.1f}s — "
           f"{len(hits1)} open port(s)")
 
+    # Verification pass — when Pass 1 came up empty, retry the SAP ports
+    # sequentially with a longer timeout.  Kernel-level SYN rate limits
+    # on macOS (and some Linux distros with certain sysctl tuning) can
+    # drop packets when the client fires many concurrent connect_ex
+    # against the same host, so a slower single-threaded sweep may find
+    # ports the parallel Pass 1 missed.  Reported on a Mac client
+    # scanning W74 (192.168.2.29:3340) — parallel scan reported 0 open,
+    # a follow-up `nc -w 3 -zv` from the same host reached the port.
+    if not hits1 and not _cancelled():
+        # Only the SAP-native ports (32XX + 33XX), no need to re-do the
+        # WD or Host Agent probes since those aren't rate-limit prone.
+        _sap_ports = [(p, s, i) for (p, s, i) in ports_pass1
+                       if s in ("dispatcher", "gateway", "saprouter")]
+        print(f"[*] {host}: Pass 1 found nothing — sequential retry of "
+              f"{len(_sap_ports)} SAP ports with slower cadence "
+              f"(likely kernel-rate-limited on the initial parallel pass)")
+        t_retry = time.time()
+        _seq_hits = {}
+        _retry_timeout = max(scan_timeout, 1.5)
+        for _pi, (p, svc, inst) in enumerate(_sap_ports):
+            if _cancelled():
+                break
+            if _scan_port(host, p, _retry_timeout):
+                _seq_hits[p] = {"service": svc, "instance_nr": inst}
+                print(f"[+]   {host}:{p:<6} OPEN  ({svc}, inst {inst}) "
+                      f"[retry pass]")
+            # Small pause between probes so we stay well under any
+            # rate-limit window.
+            time.sleep(0.02)
+        if _seq_hits:
+            result["open_ports"].update(_seq_hits)
+            print(f"[*] {host}: retry pass done in "
+                  f"{time.time() - t_retry:.1f}s — {len(_seq_hits)} "
+                  f"port(s) that Pass 1 missed")
+
     # Verify dispatcher ports with DIAG protocol probe
     disp_ports = [p for p, info in result["open_ports"].items()
                   if info["service"] == "dispatcher"]
@@ -1206,6 +1241,16 @@ def fast_scan_network(targets: list, instance_range: tuple = DEFAULT_INSTANCE_RA
     max_parallel = max(concurrent_hosts, 1)
     if host_count <= 10:
         max_parallel = min(max_parallel, 2)
+    # Single-target port scan: firing 20 concurrent connect_ex against the
+    # same host burns through the client's ephemeral-port pool and trips
+    # kernel-level SYN rate-limiting on macOS (BSD net stack).  Operator
+    # reported ALL 331 probes returning "no open" against a host whose
+    # port 3340 was open (verified live with `nc -w 3 -zv`).  Dropping
+    # to 8 threads keeps kernel-side back-pressure below the rate-limit
+    # threshold without meaningfully slowing a single-host scan (300
+    # ports @ 8 threads @ ~50 ms per open port ≈ 2 seconds real).
+    if host_count == 1:
+        port_threads = min(port_threads, 8)
     print(f"[*] SAP port scanning {host_count} alive hosts "
           f"({max_parallel} concurrent, {port_threads} threads/host, "
           f"port timeout={port_timeout}s) ...")
