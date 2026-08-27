@@ -2496,7 +2496,7 @@ body {
         <label>Method</label>
         <select id="term-method" style="width:100%">
           <option value="gateway">Gateway (unauthenticated)</option>
-          <option value="sxpg">SXPG (via SAP_ALL user)</option>
+          <option value="sxpg">SXPG (via any SAP user)</option>
           <option value="soap_rfc" id="term-method-soap-rfc">SXPG over SOAP-RFC (HTTP only — for firewalled gateway)</option>
           <option value="cve_31324">CVE-2025-31324 (Java unauth)</option>
           <option value="winlpe_system" id="term-method-winlpe">&#128293; NT AUTHORITY\SYSTEM (via Windows LPE)</option>
@@ -2641,7 +2641,7 @@ body {
           <label style="font-size:11px;color:#8b949e">Execution Method</label>
           <select id="shell-method" style="width:100%">
             <option value="gateway">Gateway (unauthenticated)</option>
-            <option value="sxpg">SXPG (via SAP_ALL user)</option>
+            <option value="sxpg">SXPG (via any SAP user)</option>
             <option value="cve_31324">CVE-2025-31324 (Java unauth)</option>
           </select>
         </div>
@@ -14585,13 +14585,18 @@ function showTerminalModal(sid) {
   twin.style.width = '820px'; twin.style.height = '520px';
   const hasGw = n && n.gw_vulnerable;
   const hasCreated = n && (n.created_users || []).length > 0;
+  const hasVerifiedCredT = !!(n && (n.credentials || []).some(c => c && c.verified));
+  const hasAbapUser = hasCreated || hasVerifiedCredT;
   const hasCve = n && n.cve_2025_31324_vulnerable;
   const hasCveShell = n && (n.cve_2025_31324_shells || []).length > 0;
   const sysTypeT = (n && n.system_type || '').toUpperCase();
   const isAbapT = sysTypeT.indexOf('ABAP') !== -1;
   const methodSel = document.getElementById('term-method');
-  // Rebuild options from scratch — SXPG is ABAP-only (requires SAP_ALL
-  // dialog user), so it is physically absent on pure-Java stacks.
+  // Rebuild options from scratch — SXPG is ABAP-only (requires an
+  // ABAP RFC user), so it is physically absent on pure-Java stacks.
+  // We enable it for ANY provided user (SAPMAP-created or manually
+  // verified); if the cred lacks S_LOG_COM the call fails with a
+  // clean authority error.
   methodSel.innerHTML = '';
   const addT = (v, label, disabled) => {
     const o = document.createElement('option');
@@ -14599,7 +14604,7 @@ function showTerminalModal(sid) {
     methodSel.appendChild(o);
   };
   addT('gateway', 'Gateway (unauthenticated)', !hasGw);
-  if (isAbapT) addT('sxpg', 'SXPG (via SAP_ALL user)', !hasCreated);
+  if (isAbapT) addT('sxpg', 'SXPG (via any SAP user)', !hasAbapUser);
   addT('cve_31324', 'CVE-2025-31324 (Java unauth)', !hasCve);
   // SAPControl OSExecute — enabled when there's an incoming Type-G
   // destination with os_exec_verified=True.  Shell as <sid>adm via
@@ -14648,13 +14653,13 @@ function showTerminalModal(sid) {
                   : hasLinuxLpe ? 'linuxlpe_root'
                               : (hasCve ? 'cve_31324'
                                         : (hasGw ? 'gateway'
-                                                 : (isAbapT && hasCreated ? 'sxpg'
+                                                 : (isAbapT && hasAbapUser ? 'sxpg'
                                                    : (_scConn ? 'sapcontrol'
                                                      : (hasSsh ? 'ssh' : 'gateway')))));
   // Info text
   let info = [];
   if (hasGw) info.push('Gateway: vulnerable');
-  if (hasCreated && isAbapT) info.push('SXPG: user available');
+  if (hasAbapUser && isAbapT) info.push('SXPG: user available');
   if (hasCve) {
     info.push(hasCveShell
       ? 'CVE-2025-31324: vulnerable (shell dropped — output captured)'
@@ -15253,7 +15258,7 @@ function showImportTransportModal(sid) {
   autoHint.textContent = autoVerdict;
   let notes = [];
   if (!gwAvail)    notes.push('GW disabled — node is not gw_vulnerable.');
-  if (!credsAvail) notes.push('SXPG disabled — no SAP_ALL credential on this node.');
+  if (!credsAvail) notes.push('SXPG disabled — no ABAP credential on this node.');
   note.textContent = notes.join(' ');
 
   document.getElementById('import-transport-modal').classList.add('visible');
@@ -16025,12 +16030,16 @@ async function showShellModal(sid) {
   // Method availability
   const hasGw = n && n.gw_vulnerable;
   const hasCreated = n && (n.created_users || []).length > 0;
+  const hasVerifiedCredS = !!(n && (n.credentials || []).some(c => c && c.verified));
+  const hasAbapUserS = hasCreated || hasVerifiedCredS;
   const hasCve = n && n.cve_2025_31324_vulnerable;
   const sysTypeS = (n && n.system_type || '').toUpperCase();
   const isAbapS = sysTypeS.indexOf('ABAP') !== -1;
   const methodSel = document.getElementById('shell-method');
-  // Rebuild options from scratch — SXPG is ABAP-only (requires SAP_ALL
-  // dialog user), so it is physically absent on pure-Java stacks.
+  // Rebuild options from scratch — SXPG is ABAP-only (requires an ABAP
+  // RFC user), so it is physically absent on pure-Java stacks.  Enabled
+  // for ANY provided user (SAPMAP-created or manually verified); if
+  // the cred lacks S_LOG_COM the call fails with an authority error.
   methodSel.innerHTML = '';
   const addS = (v, label, disabled) => {
     const o = document.createElement('option');
@@ -16038,7 +16047,7 @@ async function showShellModal(sid) {
     methodSel.appendChild(o);
   };
   addS('gateway', 'Gateway (unauthenticated)', !hasGw);
-  if (isAbapS) addS('sxpg', 'SXPG (via SAP_ALL user)', !hasCreated);
+  if (isAbapS) addS('sxpg', 'SXPG (via any SAP user)', !hasAbapUserS);
   addS('cve_31324', 'CVE-2025-31324 (Java unauth)', !hasCve);
   // SYSTEM via Windows LPE — only meaningful for Windows targets +
   // a viable Windows LPE technique was reported by Check Windows LPE.
@@ -16069,12 +16078,12 @@ async function showShellModal(sid) {
                   : hasLinuxLpeS  ? 'linuxlpe_root'
                                : (hasCve ? 'cve_31324'
                                          : (hasGw ? 'gateway'
-                                                  : (isAbapS && hasCreated ? 'sxpg'
+                                                  : (isAbapS && hasAbapUserS ? 'sxpg'
                                                     : (hasSshS ? 'ssh' : 'gateway'))));
 
   let info = [];
   if (hasGw) info.push('Gateway: vulnerable');
-  if (hasCreated && isAbapS) info.push('SXPG: user available');
+  if (hasAbapUserS && isAbapS) info.push('SXPG: user available');
   if (hasCve) info.push('CVE-2025-31324: vulnerable');
   if (hasWinLpeS) {
     const techS = n.efspotato_vulnerable ? 'EfsPotato'
