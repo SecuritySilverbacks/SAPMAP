@@ -3139,29 +3139,67 @@ def http_basic_auth_probe(url: str, user: str, password: str,
         # An AS Java /useradmin/ endpoint sends 302 for BOTH success
         # (redirect to the admin landing) and failure (redirect to
         # /logon or /irj/portal for form-based auth).  The Location
-        # header tells us which — a target under /logon, /login,
-        # /portal/logon, /webdynpro/dispatcher/sap.com/tc~sec~ume~
-        # wd_umefetchticket or an ?returnUrl-carrying login page is
-        # the definitive "your basic-auth was rejected, go pick a
-        # session" answer.  Without this check we call every 302 a
-        # win and cheerfully report "user already exists" for users
-        # that don't — the exact false positive an operator hit on
-        # SJJ (SAPMAP00 didn't exist, precheck said it did because
-        # /useradmin/ 302'd to the logon page).
+        # header tells us which.  The safest cut:
+        #
+        #   Redirects that STAY inside the same app root (e.g.
+        #   /useradmin/ → /useradmin/index.jsp) are session-cookie
+        #   handoffs and mean the credentials worked.  Redirects
+        #   that HOP to a different app root (/webdynpro/, /irj/,
+        #   /nwbc/, /logon/, /sap/public/bc/, ...) are the AS Java
+        #   "you're not authenticated, go pick a session" flow —
+        #   basic-auth was rejected and the server is falling back
+        #   to form-based auth.
+        #
+        # A curated known-login-surface list handles pre-4.5 servers
+        # where the redirect goes straight to a portal home page
+        # (which happens to answer 200 to everyone but isn't proof
+        # of a valid user).  Reported by an operator on SJJ where
+        # SAPMAP00 didn't exist but the precheck said it did.
         loc_m = _re.search(rb"(?im)^Location:\s*([^\r\n]+)", resp)
         loc = (loc_m.group(1).decode("iso-8859-1", errors="replace").strip()
                if loc_m else "")
         loc_low = loc.lower()
+        # Extract the path from Location (strip absolute host if any).
+        loc_path = loc_low
+        if "://" in loc_low:
+            try:
+                loc_path = "/" + loc_low.split("://", 1)[1].split("/", 1)[1]
+            except IndexError:
+                loc_path = "/"
+        if "?" in loc_path:
+            loc_path = loc_path.split("?", 1)[0]
+
+        # Original request path root (first segment).  "/useradmin/x"
+        # → "/useradmin", "/nwa/foo" → "/nwa".
+        req_root = "/" + path.lstrip("/").split("/", 1)[0].split("?", 1)[0]
+        loc_root = "/" + loc_path.lstrip("/").split("/", 1)[0]
+
         _LOGIN_MARKERS = (
             "/logon", "/login", "/authentication",
             "wd_umefetchticket", "logonpage", "logonservlet",
-            "returnurl=", "sap-login",
+            "returnurl=", "sap-login", "/irj/portal", "/webdynpro",
+            "/nwbc/logon", "/sap/public/bc/icf/logoff",
+            "/sap/public/bc/logon", "logonpage.jsp",
+            "sapumelogonpage", "loginpage",
         )
         if any(m in loc_low for m in _LOGIN_MARKERS):
             out["ok"] = True
             out["logon_successful"] = False
             out["error"] = (f"HTTP {out['status']} → login page "
                             f"({loc[:120]}) — credentials rejected")
+            return out
+        # Different-app-root redirect on a basic-auth-protected
+        # endpoint = auth failure fall-through to form-based on
+        # nearly every AS Java install.  Only accept 302 as success
+        # when the redirect stays inside the same app.
+        if loc_root and loc_root != "/" and req_root != "/" \
+                and loc_root != req_root:
+            out["ok"] = True
+            out["logon_successful"] = False
+            out["error"] = (
+                f"HTTP {out['status']} → cross-app redirect "
+                f"{req_root}/… → {loc_root}/… "
+                f"({loc[:120]}) — treating as credential rejected")
             return out
         out["ok"] = True
         out["logon_successful"] = True
