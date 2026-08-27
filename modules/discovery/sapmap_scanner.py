@@ -900,25 +900,40 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
     print(f"[*] {host}: Pass 1 done in {time.time() - t0:.1f}s — "
           f"{len(hits1)} open port(s)")
 
-    # Verification pass — when Pass 1 came up empty, retry the SAP ports
-    # sequentially with a longer timeout.  Kernel-level SYN rate limits
-    # on macOS (and some Linux distros with certain sysctl tuning) can
-    # drop packets when the client fires many concurrent connect_ex
-    # against the same host, so a slower single-threaded sweep may find
-    # ports the parallel Pass 1 missed.  Reported on a Mac client
-    # scanning W74 (192.168.2.29:3340) — parallel scan reported 0 open,
-    # a follow-up `nc -w 3 -zv` from the same host reached the port.
-    if not hits1 and not _cancelled():
+    # Verification pass — retry the SAP-native ports sequentially with
+    # a longer timeout when Pass 1 either came up empty OR found only
+    # non-SAP services (e.g. an Apache-Coyote on 8080 that later gets
+    # dropped by the WD fingerprint).  Rate-limit / firewall dropped
+    # packets on the initial parallel pass are common:
+    #   - client-side kernel SYN rate limits on macOS
+    #   - Windows Firewall on the target flagging 32XX/33XX sequential
+    #     probes as a port scan and blocking our source IP mid-sweep
+    # Reported on a Mac scanning W74 (192.168.2.29:3340): parallel scan
+    # missed 3340 outright, `nc -w 3 -zv` from same host reached it,
+    # and a second parallel scan tripped Windows Firewall further
+    # (only 8080 came back).  This pass runs a sequential SAP-only
+    # sweep with a small delay + randomised order so it looks less
+    # scan-like on the wire and each probe stays well under any
+    # rate-limit window.
+    _sap_hits_in_pass1 = any(
+        v["service"] in ("dispatcher", "gateway", "saprouter")
+        for v in hits1.values())
+    if not _sap_hits_in_pass1 and not _cancelled():
         # Only the SAP-native ports (32XX + 33XX), no need to re-do the
         # WD or Host Agent probes since those aren't rate-limit prone.
         _sap_ports = [(p, s, i) for (p, s, i) in ports_pass1
                        if s in ("dispatcher", "gateway", "saprouter")]
-        print(f"[*] {host}: Pass 1 found nothing — sequential retry of "
-              f"{len(_sap_ports)} SAP ports with slower cadence "
-              f"(likely kernel-rate-limited on the initial parallel pass)")
+        # Randomise so we don't hit 3200, 3201, 3202 ... which looks
+        # like a textbook port scan to any IDS/host firewall.
+        import random as _rnd_seq
+        _rnd_seq.shuffle(_sap_ports)
+        print(f"[*] {host}: no SAP ports in Pass 1 — sequential retry "
+              f"of {len(_sap_ports)} SAP ports (shuffled, slower "
+              f"cadence — parallel probes were likely rate-limited "
+              f"or firewall-dropped)")
         t_retry = time.time()
         _seq_hits = {}
-        _retry_timeout = max(scan_timeout, 1.5)
+        _retry_timeout = max(scan_timeout, 2.0)
         for _pi, (p, svc, inst) in enumerate(_sap_ports):
             if _cancelled():
                 break
@@ -926,14 +941,19 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
                 _seq_hits[p] = {"service": svc, "instance_nr": inst}
                 print(f"[+]   {host}:{p:<6} OPEN  ({svc}, inst {inst}) "
                       f"[retry pass]")
-            # Small pause between probes so we stay well under any
-            # rate-limit window.
-            time.sleep(0.02)
+            # 50 ms pause between probes — under 20 probes/sec is well
+            # below the default Windows Firewall SYN-flood threshold
+            # (per-second connection limit is typically hundreds).
+            time.sleep(0.05)
         if _seq_hits:
             result["open_ports"].update(_seq_hits)
             print(f"[*] {host}: retry pass done in "
                   f"{time.time() - t_retry:.1f}s — {len(_seq_hits)} "
                   f"port(s) that Pass 1 missed")
+        else:
+            print(f"[*] {host}: retry pass done in "
+                  f"{time.time() - t_retry:.1f}s — still nothing "
+                  f"(target may be truly closed or firewalled)")
 
     # Verify dispatcher ports with DIAG protocol probe
     disp_ports = [p for p, info in result["open_ports"].items()
