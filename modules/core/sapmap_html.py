@@ -6458,10 +6458,15 @@ function showCtxMenu(e, sid) {
     'download_secstore':     !isAbapStack,  // RSECTAB is an ABAP table
     'ransapware_encrypt':    !isAbapStack,
     'ransapware_decrypt':    !isAbapStack,
-    // create_user_gw stays visible on both ABAP and Java — click handler
-    // dispatches to the right backend (ABAP USR02 SQL insert vs. Java UME
-    // via JSP), and is hidden only on non-ABAP/non-Java stacks.
-    'create_user_gw':        !(isAbapStack || isJavaStack),
+    // create_user_gw stays visible on ABAP, Java, AND unknown-stack
+    // nodes — the GW SAPXPG primitive works at the OS layer as sidadm,
+    // so it's usable regardless of what runs on top (or before we've
+    // even fingerprinted the stack).  Hide ONLY on the two known
+    // non-user-hosting variants: SAProuter and a dedicated
+    // WebDispatcher (neither has a USR02 or a UME to write into).
+    // Click handler dispatches to the right backend once the stack is
+    // known; on empty system_type the operator gets to pick.
+    'create_user_gw':        isSaprouter || isWebDispatcher,
     // SAProuter-only: reads the ROUTER_ADM info page
     'check_router_info': !isSaprouter,
     // Items that don't apply to a standalone Web Dispatcher (no
