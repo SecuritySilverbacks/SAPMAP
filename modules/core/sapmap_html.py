@@ -18484,7 +18484,7 @@ async function openLootBrowser() {
   document.body.appendChild(modal);
   await _lootRender('');
 }
-let _lootSort = { col: 'name', asc: true };
+let _lootSort = { col: 'mtime', asc: false };
 function _lootSortEntries(entries) {
   const dirs = entries.filter(e => e.is_dir);
   const files = entries.filter(e => !e.is_dir);
