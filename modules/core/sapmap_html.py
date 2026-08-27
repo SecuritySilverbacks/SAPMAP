@@ -18475,6 +18475,7 @@ async function openLootBrowser() {
     + '    <span style="cursor:pointer;font-size:20px;color:#8b949e;padding:0 6px" '
     + '          onclick="document.getElementById(\'loot-browser-modal\').remove()">&times;</span>'
     + '  </div>'
+    + '  <div id="loot-header" style="padding:4px 4px 0"></div>'
     + '  <div id="loot-body" style="flex:1;overflow-y:auto;padding:8px 4px"></div>'
     + '  <div style="padding:8px 16px;border-top:1px solid #30363d;color:#8b949e;font-size:11px">'
     + '    Read-only.  Path traversal blocked server-side.  Downloads served with attachment disposition.'
@@ -18483,11 +18484,34 @@ async function openLootBrowser() {
   document.body.appendChild(modal);
   await _lootRender('');
 }
+let _lootSort = { col: 'name', asc: true };
+function _lootSortEntries(entries) {
+  const dirs = entries.filter(e => e.is_dir);
+  const files = entries.filter(e => !e.is_dir);
+  const cmp = (a, b) => {
+    let va, vb;
+    if (_lootSort.col === 'size') { va = a.size || 0; vb = b.size || 0; }
+    else if (_lootSort.col === 'mtime') { va = a.mtime || 0; vb = b.mtime || 0; }
+    else { va = a.name.toLowerCase(); vb = b.name.toLowerCase(); }
+    if (va < vb) return _lootSort.asc ? -1 : 1;
+    if (va > vb) return _lootSort.asc ? 1 : -1;
+    return 0;
+  };
+  dirs.sort(cmp);
+  files.sort(cmp);
+  return dirs.concat(files);
+}
+function _lootSortArrow(col) {
+  if (_lootSort.col !== col) return '';
+  return _lootSort.asc ? ' &#9650;' : ' &#9660;';
+}
 async function _lootRender(relPath) {
   const body = document.getElementById('loot-body');
+  const hdr = document.getElementById('loot-header');
   const crumbs = document.getElementById('loot-crumbs');
   if (!body) return;
   body.innerHTML = '<div style="padding:20px;color:#8b949e">Loading…</div>';
+  if (hdr) hdr.innerHTML = '';
   let r;
   try {
     r = await _lootList(relPath);
@@ -18503,50 +18527,97 @@ async function _lootRender(relPath) {
   }
   const at = r.root === '.' ? 'loot/' : 'loot/' + r.root + '/';
   crumbs.textContent = at;
-  const rows = [];
-  if (relPath) {
-    const parent = relPath.includes('/')
-      ? relPath.substring(0, relPath.lastIndexOf('/')) : '';
-    rows.push('<div class="loot-row loot-dir" data-path="' + _lootEsc(parent)
-      + '" style="cursor:pointer;padding:6px 16px;'
-      + 'display:flex;gap:12px">'
-      + '<span style="flex:1">&#8617; ..</span></div>');
-  }
-  for (const e of (r.entries || [])) {
-    if (e.is_dir) {
-      rows.push('<div class="loot-row loot-dir" data-path="' + _lootEsc(e.path)
+  const sorted = _lootSortEntries(r.entries || []);
+  const _buildRows = () => {
+    const rows = [];
+    if (relPath) {
+      const parent = relPath.includes('/')
+        ? relPath.substring(0, relPath.lastIndexOf('/')) : '';
+      rows.push('<div class="loot-row loot-dir" data-path="' + _lootEsc(parent)
         + '" style="cursor:pointer;padding:6px 16px;'
         + 'display:flex;gap:12px">'
-        + '<span style="flex:1">&#128193; ' + _lootEsc(e.name) + '/</span>'
-        + '<span style="color:#8b949e;font-size:11px">'
-        + _lootFmtTs(e.mtime) + '</span></div>');
-    } else {
-      const dlUrl = '/api/loot/download?token=' + encodeURIComponent(LOOT_TOKEN)
-                    + '&path=' + encodeURIComponent(e.path);
-      rows.push('<div class="loot-row" style="padding:6px 16px;display:flex;gap:12px">'
-        + '<span style="flex:1">&#128196; <a href="' + dlUrl + '" download="'
-        + _lootEsc(e.name) + '" style="color:#79c0ff;text-decoration:none">'
-        + _lootEsc(e.name) + '</a></span>'
-        + '<span style="color:#8b949e;font-size:11px;min-width:80px;text-align:right">'
-        + _lootFmtBytes(e.size) + '</span>'
-        + '<span style="color:#8b949e;font-size:11px;min-width:130px;text-align:right">'
-        + _lootFmtTs(e.mtime) + '</span></div>');
+        + '<span style="flex:1">&#8617; ..</span></div>');
+    }
+    for (const e of sorted) {
+      if (e.is_dir) {
+        rows.push('<div class="loot-row loot-dir" data-path="' + _lootEsc(e.path)
+          + '" style="cursor:pointer;padding:6px 16px;'
+          + 'display:flex;gap:12px">'
+          + '<span style="flex:1">&#128193; ' + _lootEsc(e.name) + '/</span>'
+          + '<span style="color:#8b949e;font-size:11px;min-width:130px;text-align:right">'
+          + _lootFmtTs(e.mtime) + '</span></div>');
+      } else {
+        const dlUrl = '/api/loot/download?token=' + encodeURIComponent(LOOT_TOKEN)
+                      + '&path=' + encodeURIComponent(e.path);
+        rows.push('<div class="loot-row" style="padding:6px 16px;display:flex;gap:12px">'
+          + '<span style="flex:1">&#128196; <a href="' + dlUrl + '" download="'
+          + _lootEsc(e.name) + '" style="color:#79c0ff;text-decoration:none">'
+          + _lootEsc(e.name) + '</a></span>'
+          + '<span style="color:#8b949e;font-size:11px;min-width:80px;text-align:right">'
+          + _lootFmtBytes(e.size) + '</span>'
+          + '<span style="color:#8b949e;font-size:11px;min-width:130px;text-align:right">'
+          + _lootFmtTs(e.mtime) + '</span></div>');
+      }
+    }
+    if (!sorted.length && !relPath) {
+      rows.push('<div style="padding:20px;color:#8b949e;text-align:center">'
+        + 'No loot yet — run a scan first.</div>');
+    }
+    return rows;
+  };
+  const _wireRows = () => {
+    for (const el of body.querySelectorAll('.loot-dir')) {
+      const p = el.dataset.path;
+      el.addEventListener('click', () => _lootRender(p).catch(ex =>
+        body.innerHTML = '<div style="padding:20px;color:#f85149">' + _lootEsc(String(ex)) + '</div>'));
+    }
+    for (const el of body.querySelectorAll('.loot-row')) {
+      el.addEventListener('mouseenter', () => el.style.background = '#21262d');
+      el.addEventListener('mouseleave', () => el.style.background = '');
+    }
+  };
+  if (hdr && sorted.length) {
+    const hasFiles = sorted.some(e => !e.is_dir);
+    hdr.innerHTML = '<div style="display:flex;gap:12px;padding:4px 16px;'
+      + 'border-bottom:1px solid #30363d;color:#8b949e;font-size:11px;'
+      + 'text-transform:uppercase;letter-spacing:.5px;user-select:none">'
+      + '<span class="loot-sort" data-col="name" style="flex:1;cursor:pointer">'
+      + 'Name' + _lootSortArrow('name') + '</span>'
+      + (hasFiles ? '<span class="loot-sort" data-col="size" '
+        + 'style="min-width:80px;text-align:right;cursor:pointer">'
+        + 'Size' + _lootSortArrow('size') + '</span>' : '')
+      + '<span class="loot-sort" data-col="mtime" '
+      + 'style="min-width:130px;text-align:right;cursor:pointer">'
+      + 'Modified' + _lootSortArrow('mtime') + '</span></div>';
+    for (const el of hdr.querySelectorAll('.loot-sort')) {
+      el.addEventListener('click', () => {
+        const col = el.dataset.col;
+        if (_lootSort.col === col) _lootSort.asc = !_lootSort.asc;
+        else { _lootSort.col = col; _lootSort.asc = col === 'name'; }
+        sorted.sort((a, b) => {
+          if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+          let va, vb;
+          if (_lootSort.col === 'size') { va = a.size || 0; vb = b.size || 0; }
+          else if (_lootSort.col === 'mtime') { va = a.mtime || 0; vb = b.mtime || 0; }
+          else { va = a.name.toLowerCase(); vb = b.name.toLowerCase(); }
+          if (va < vb) return _lootSort.asc ? -1 : 1;
+          if (va > vb) return _lootSort.asc ? 1 : -1;
+          return 0;
+        });
+        for (const s of hdr.querySelectorAll('.loot-sort')) {
+          const c = s.dataset.col;
+          s.innerHTML = (c === 'name' ? 'Name' : c === 'size' ? 'Size' : 'Modified')
+            + _lootSortArrow(c);
+        }
+        body.innerHTML = _buildRows().join('');
+        _wireRows();
+      });
+      el.addEventListener('mouseenter', () => el.style.color = '#c9d1d9');
+      el.addEventListener('mouseleave', () => el.style.color = '#8b949e');
     }
   }
-  if (!(r.entries || []).length && !relPath) {
-    rows.push('<div style="padding:20px;color:#8b949e;text-align:center">'
-      + 'No loot yet — run a scan first.</div>');
-  }
-  body.innerHTML = rows.join('');
-  for (const el of body.querySelectorAll('.loot-dir')) {
-    const p = el.dataset.path;
-    el.addEventListener('click', () => _lootRender(p).catch(ex =>
-      body.innerHTML = '<div style="padding:20px;color:#f85149">' + _lootEsc(String(ex)) + '</div>'));
-  }
-  for (const el of body.querySelectorAll('.loot-row')) {
-    el.addEventListener('mouseenter', () => el.style.background = '#21262d');
-    el.addEventListener('mouseleave', () => el.style.background = '');
-  }
+  body.innerHTML = _buildRows().join('');
+  _wireRows();
 }
 
 // --- Init ---
