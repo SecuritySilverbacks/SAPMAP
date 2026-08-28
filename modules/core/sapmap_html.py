@@ -2664,6 +2664,16 @@ body {
         </div>
       </div>
       <div style="font-size:10px;color:#484f58;margin-bottom:8px" id="shell-payload-preview"></div>
+      <div id="shell-bind-firewall-hint" style="display:none;font-size:11px;color:#d29922;background:#1c1810;border-left:3px solid #d29922;padding:6px 10px;margin-bottom:8px;border-radius:3px">
+        &#9888; The bind port must be reachable INBOUND on the target — most SAP hosts
+        only allow SAP-native ports (32XX/33XX/36XX/39XX/50XX/80XX) through the host
+        firewall by default.  On Linux check <code style="color:#e6edf3">iptables -L</code>
+        / <code style="color:#e6edf3">firewalld</code>.  On Windows open the port with
+        <code style="color:#e6edf3">netsh advfirewall firewall add rule name=SAPMAP_bind dir=in action=allow protocol=tcp localport=&lt;PORT&gt;</code>,
+        or pick a port already in the SAP-blessed range (e.g. an unused 36XX / 39XX).
+        If the connect times out, that's almost always the firewall — the shell script
+        itself will have bound the port cleanly.
+      </div>
       <button class="btn btn-primary" onclick="shellStart()" style="width:100%">&#9654; Start Listener &amp; Send Payload</button>
     </div>
     <div id="shell-status-bar" style="display:none;padding:6px 0;font-size:12px">
@@ -16142,10 +16152,13 @@ async function showShellModal(sid) {
 function shellModeChanged() {
   const mode = document.getElementById('shell-mode').value;
   const ipRow = document.getElementById('shell-ip-row');
+  const fwHint = document.getElementById('shell-bind-firewall-hint');
   if (mode === 'bind') {
     ipRow.style.display = 'none';  // No callback IP needed for bind
+    if (fwHint) fwHint.style.display = '';
   } else {
     ipRow.style.display = '';
+    if (fwHint) fwHint.style.display = 'none';
   }
 }
 
