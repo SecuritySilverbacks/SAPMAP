@@ -343,32 +343,87 @@ def make_chunked_read_adapter(raw_exec_fn: GwExecFn,
         return out
 
     # Detect which python interpreter is available on the target.
-    # python3 preferred; fall back to python (covers older systems
-    # like NPL that only have python2.6).
-    _py_cmd = [None]  # mutable cell for closure
+    # SXPG runs with a stripped PATH (typically /usr/sap/<SID>/<inst>/
+    # exe only), so bare ``python3`` / ``python`` execve-fails with
+    # "Can't exec external program (2)" on hardened S/4HANA appliances
+    # even though python3 is installed.  Extend the candidate list to
+    # include the common absolute paths + the HANA-shipped interpreter
+    # under /hana/shared/<SID>/exe/<arch>/hdb/Python3/bin/python3.  For
+    # the HANA-shipped one we also need LD_LIBRARY_PATH pointed at its
+    # own lib/ dir, so the returned "python spec" may include an env-
+    # wrap prefix — callers concatenate that in front of the actual
+    # python arguments.  Same discovery already lives in
+    # sap_db_sql_writers._probe_python3_via_gw (which we'd love to
+    # reuse) but that helper wants (host, gw_port, ...) directly, not
+    # a raw_exec_fn, so we do a lightweight in-place probe instead.
+    _py_cmd = [None]  # mutable cell for closure; holds (head, prefix)
+    _CAND_LIST = (
+        "python3",
+        "python",
+        "/usr/bin/python3",
+        "/usr/bin/python3.12",
+        "/usr/bin/python3.11",
+        "/usr/bin/python3.10",
+        "/usr/bin/python3.9",
+        "/usr/bin/python3.6",
+        "/usr/local/bin/python3",
+        "/usr/bin/python",
+    )
     def _detect_python():
         if _py_cmd[0] is not None:
             return _py_cmd[0]
-        for py in ("python3", "python"):
+        for py in _CAND_LIST:
             r = raw_exec_fn(py, "-c print(42777)")
             lines = _dedupe(r.get("output", []))
             if r.get("success") and any(
                     ln.strip() == "42777" for ln in lines):
-                _py_cmd[0] = py
+                _py_cmd[0] = (py, "")
                 print(f"  [chunked] python interpreter: {py}")
-                return py
-            print(f"  [chunked] {py} probe: "
-                  f"{[l[:60] for l in lines[:2]]}")
+                return _py_cmd[0]
+            if lines:
+                print(f"  [chunked] {py} probe: "
+                      f"{[l[:60] for l in lines[:2]]}")
+        # HANA-shipped fallback: enumerate /hana/shared/ SIDs and try
+        # each one's arch × Python3/bin/python3, env-wrapped so the
+        # interpreter finds its own libpython under sapxpg's env.
+        try:
+            ls_r = raw_exec_fn("/bin/ls", "/hana/shared/")
+            for line in _dedupe(ls_r.get("output", [])):
+                for word in line.split():
+                    w = word.strip().strip("/")
+                    if not (len(w) == 3 and w.isalnum()
+                            and w.isupper() and w[0].isalpha()):
+                        continue
+                    for arch in ("linuxx86_64", "linuxppc64le",
+                                  "linuxaarch64"):
+                        cand = (f"/hana/shared/{w}/exe/{arch}/hdb/"
+                                f"Python3/bin/python3")
+                        lib = f"/hana/shared/{w}/exe/{arch}/hdb/Python3/lib"
+                        # Env-wrap: /usr/bin/env LD_LIBRARY_PATH=<lib> <cand> -c ...
+                        prefix = f"LD_LIBRARY_PATH={lib} {cand} "
+                        r = raw_exec_fn("/usr/bin/env",
+                                         prefix + "-c print(42777)")
+                        lines = _dedupe(r.get("output", []))
+                        if r.get("success") and any(
+                                ln.strip() == "42777" for ln in lines):
+                            _py_cmd[0] = ("/usr/bin/env", prefix)
+                            print(f"  [chunked] python interpreter: "
+                                  f"{cand} (HANA-shipped, env-wrapped)")
+                            return _py_cmd[0]
+        except Exception as _e:
+            print(f"  [chunked] HANA python3 sweep errored: "
+                  f"{type(_e).__name__}: {_e}")
         print(f"  [chunked] WARNING: no python found on target")
-        _py_cmd[0] = "python3"
-        return "python3"
+        _py_cmd[0] = ("python3", "")
+        return _py_cmd[0]
 
     def _get_size(file_path: str) -> int:
         """Get file size on the target via python os.path.getsize."""
-        py = _detect_python()
+        py_head, py_prefix = _detect_python()
         r = raw_exec_fn(
-            py,
-            f"-c print(__import__('os').path.getsize('{file_path}'))")
+            py_head,
+            (py_prefix +
+             f"-c print(__import__('os').path.getsize('{file_path}'))"))
         out_lines = _dedupe(r.get("output", []))
         print(f"  [chunked] _get_size({file_path}): "
               f"success={r.get('success')}, "
@@ -427,9 +482,13 @@ def make_chunked_read_adapter(raw_exec_fn: GwExecFn,
             code = (f"print(__import__('base64').b64encode("
                     f"open('{file_path}','rb').read()[{offset}:{end}])"
                     f".decode())")
-            py = _detect_python()
-            program = "sudo" if use_sudo else py
-            params = f"{py} -c {code}" if use_sudo else f"-c {code}"
+            py_head, py_prefix = _detect_python()
+            program = "sudo" if use_sudo else py_head
+            if use_sudo:
+                # sudo <py_head> <py_prefix -c CODE>
+                params = f"{py_head} {py_prefix}-c {code}"
+            else:
+                params = f"{py_prefix}-c {code}"
 
             r = raw_exec_fn(program, params)
             if not r.get("success"):
