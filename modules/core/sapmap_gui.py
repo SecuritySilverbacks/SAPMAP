@@ -14906,6 +14906,12 @@ def create_app(api: SAPMAPApi) -> Bottle:
                     state=api.state, source_node=node)
                 print(f"[*] {sid}: DBCON {con_name} — result: {res}")
                 if res.get("ok"):
+                    sap_all_note = ("SAP_ALL confirmed"
+                                    if res.get("sap_all_verified")
+                                    else "SAP_ALL unconfirmed")
+                    rfc_note = ("RFC login OK"
+                                if res.get("rfc_verified")
+                                else "RFC not tested")
                     sapmap_findings.emit_finding(
                         "CRITICAL", sid,
                         f"DBCON {con_name} — SAPMAP00 created on "
@@ -14913,7 +14919,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         f"{edge.dbms} connection ("
                         f"{res.get('statements_ok', 0)}/"
                         f"{res.get('statements_total', 0)} SQL "
-                        f"statements accepted, USR02 verify OK)",
+                        f"statements accepted, USR02 verify OK, "
+                        f"{sap_all_note}, {rfc_note})",
                         ref="dbcon.create.ok",
                         attack_capability="lateral.dbcon_direct")
                 else:

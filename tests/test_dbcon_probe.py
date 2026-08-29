@@ -767,6 +767,8 @@ class _RecordingCursor:
         s = sql.strip().upper()
         if s.startswith("SELECT COUNT(*) FROM USR02"):
             self._pending_row = (self._verify_count,)
+        elif s.startswith("SELECT COUNT(*) FROM UST04"):
+            self._pending_row = (self._verify_count,)
         else:
             self._pending_row = None
 
@@ -795,6 +797,9 @@ def test_create_user_happy_path_records_created_user(monkeypatch):
     monkeypatch.setattr(
         dbcon, "_import_hdbcli",
         lambda: (_fake_dbapi_module(conn), None))
+    monkeypatch.setattr(
+        dbcon, "_resolve_sap_schema",
+        lambda _conn, target_sid="": "SAPABAP1")
     e = DBCONConnection(
         source_sid="S4H", con_name="HDB_DWH", dbms="HDB",
         host="10.0.0.14", port=30215, user="SAPMAP", password="x",
@@ -1340,6 +1345,9 @@ def test_create_user_verify_missing_row_marks_failure(monkeypatch):
     monkeypatch.setattr(
         dbcon, "_import_hdbcli",
         lambda: (_fake_dbapi_module(conn), None))
+    monkeypatch.setattr(
+        dbcon, "_resolve_sap_schema",
+        lambda _conn, target_sid="": "SAPABAP1")
     e = DBCONConnection(
         source_sid="S4H", con_name="HDB_DWH", dbms="HDB",
         host="10.0.0.14", port=30215, user="SAPMAP", password="x",

