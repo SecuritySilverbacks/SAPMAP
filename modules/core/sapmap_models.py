@@ -824,6 +824,14 @@ class SAPNode:
     # the source cylinder to this node once it's promoted.
     dbcon_parent_sid: str = ""
     dbcon_parent_con_name: str = ""
+    # Which SAPMAP enrichment stage produced the authoritative
+    # sysinfo (SID / hostname / DB type / kernel / release / OS).
+    # Values today: "rfcsi_anon" (Stage 0 pure-stdlib RFC_SYSTEM_INFO
+    # probe, from Julian's sap-rfm-enum), "sapcontrol",
+    # "public_info", "diag", "ms_http", or "" when unknown / mixed.
+    # Shown in the engagement report + GUI detail panel so an
+    # operator can tell where a field came from.
+    sysinfo_source: str = ""
     # Similar flag for the CTS/TMS pivot (Bundle 1).  True when this
     # node was auto-materialised by probing a TMSADM RFC destination
     # from another SAP system — parent = the ABAP that owned the
@@ -1040,6 +1048,7 @@ class SAPNode:
             "discovered_via_dbcon": self.discovered_via_dbcon,
             "dbcon_parent_sid": self.dbcon_parent_sid,
             "dbcon_parent_con_name": self.dbcon_parent_con_name,
+            "sysinfo_source": self.sysinfo_source,
             "discovered_via_tms": self.discovered_via_tms,
             "tms_parent_sid": self.tms_parent_sid,
             "is_tms_controller": self.is_tms_controller,
@@ -1171,6 +1180,7 @@ class SAPNode:
             discovered_via_dbcon=d.get("discovered_via_dbcon", False),
             dbcon_parent_sid=d.get("dbcon_parent_sid", ""),
             dbcon_parent_con_name=d.get("dbcon_parent_con_name", ""),
+            sysinfo_source=d.get("sysinfo_source", ""),
             discovered_via_tms=d.get("discovered_via_tms", False),
             tms_parent_sid=d.get("tms_parent_sid", ""),
             is_tms_controller=d.get("is_tms_controller", False),

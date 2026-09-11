@@ -2088,69 +2088,55 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
     # 5s over the tunnel — local RFC paths keep the full timeout.
     rfc_timeout = min(timeout, 5) if saprouter else timeout
 
-    try:
-        result = probe_sap_system(host, gw_port, timeout=rfc_timeout,
-                                  verbose=verbose, router=router_tuple)
-        status = result.get("status", "unknown")
-
-        # Extract from standard RFCSI_EXPORT fields first
-        if status in ("rfc_success", "info_extracted", "partial_info",
-                       "ok", "partial"):
-            info["sid"] = result.get("RFCSYSID", "").strip()
-            info["hostname"] = (result.get("RFCHOST2", "") or
-                                result.get("RFCHOST", "")).strip()
-            info["os_type"] = result.get("RFCOPSYS", "").strip()
-            info["db_type"] = result.get("RFCDBSYS", "").strip()
-            info["kernel"] = result.get("RFCKERNRL", "").strip()
-            info["sap_release"] = result.get("RFCSAPRL", "").strip()
-            rfcip = (result.get("RFCIPV6ADDR", "") or
-                     result.get("RFCIPADDR", "")).strip()
+    # Stage 0 — pure-stdlib CPIC anonymous RFC_SYSTEM_INFO probe (from
+    # Julian's sap-rfm-enum, https://github.com/randomstr1ng/sap-rfm-enum).
+    # On modern kernels (verified 7.42 / 7.53 / 7.93) returns the full
+    # 20-field RFCSI_EXPORT in ~50ms with no auth.  On older kernels or
+    # locked-down gateways the probe returns {"error": ...} and we fall
+    # through to the existing probe_sap_system chain below.  SAProuter
+    # tunneling is not implemented in the pure-stdlib probe, so any
+    # saprouter'd target also falls through.
+    info["sysinfo_source"] = ""
+    rfcsi_ok = False
+    if not saprouter:
+        try:
+            from sap_rfc_sysinfo_probe import probe_rfcsi
+            rfcsi = probe_rfcsi(host, gw_port, timeout=rfc_timeout)
+        except Exception as _e:
+            rfcsi = {"error": f"{type(_e).__name__}: {_e}"}
+        if rfcsi and not rfcsi.get("error") and rfcsi.get("RFCSYSID"):
+            _rfcsi_db_map = {"HDB": "HDB", "ADABAS D": "ADA",
+                              "ORACLE": "ORA", "MSSQL": "MSS",
+                              "DB6": "DB6", "SYB": "SYB", "SYBASE": "SYB",
+                              "INFORMIX": "IFX", "MAXDB": "ADA"}
+            raw_db = rfcsi.get("RFCDBSYS", "").strip()
+            db_norm = _rfcsi_db_map.get(raw_db.upper(), raw_db.upper())
+            info["sid"]         = info["sid"]         or rfcsi.get("RFCSYSID", "").strip()
+            info["hostname"]    = info["hostname"]    or (rfcsi.get("RFCHOST2", "") or rfcsi.get("RFCHOST", "")).strip()
+            info["os_type"]     = info["os_type"]     or rfcsi.get("RFCOPSYS", "").strip()
+            info["db_type"]     = info["db_type"]     or db_norm
+            info["kernel"]      = info["kernel"]      or rfcsi.get("RFCKERNRL", "").strip()
+            info["sap_release"] = info["sap_release"] or rfcsi.get("RFCSAPRL", "").strip()
+            rfcip = (rfcsi.get("RFCIPV6ADDR", "") or
+                     rfcsi.get("RFCIPADDR", "")).strip()
             if rfcip:
                 info["ip"] = rfcip
-
-        # Fallback: extract from gateway error parsing fields (chipik method).
-        # These are populated when the v6/v2 full RFCSI parse fails but the
-        # gateway still leaks info in error messages.
-        if not info["sid"]:
-            # Try to derive SID from hostname (format: hostname_SID_NN or just SID in gw name)
-            gw_name = result.get("gateway_name", "")  # e.g. "sapgw00"
-            hostname_full = result.get("hostname", "")  # e.g. "s4hanadev.mooo.com"
-            if hostname_full and not info["hostname"]:
-                info["hostname"] = hostname_full.split(".")[0]  # short hostname
-        if not info["kernel"]:
-            info["kernel"] = result.get("kernel_release", "").strip()
-        if not info["os_type"]:
-            info["os_type"] = result.get("os_hint", "").strip()
-        if not info["sap_release"]:
-            info["sap_release"] = result.get("sap_release_approx", "").strip()
-        # Try to extract SID from hostname pattern: <host>_<SID>_<inst>
-        # or from the hostname itself if it follows SAP naming conventions
-        if not info["sid"] and info["hostname"]:
-            hn = info["hostname"].lower()
-            # Common SAP naming: the SID is often embedded, e.g. "s4hanadev" -> S4H
-            # Check instance number from result
-            inst_nr = result.get("instance_number", "")
-            gw_svc = result.get("gw_service", "")  # e.g. "sapgw00"
-            if gw_svc and gw_svc.startswith("sapgw"):
-                inst_nr = inst_nr or gw_svc[5:]
-
-        if info["sid"] or info["hostname"] or info["kernel"]:
-            # Update tag with discovered SID for subsequent messages
+            info["sysinfo_source"] = "rfcsi_anon"
+            rfcsi_ok = True
             if info["sid"]:
                 tag = info["sid"]
-            print(f"[+] {tag}: RFC_SYSTEM_INFO ({status}): SID={info['sid'] or '?'}, "
-                  f"Host={info['hostname'] or '?'}, OS={info['os_type'] or '?'}, "
-                  f"DB={info['db_type'] or '?'}, Kernel={info['kernel'] or '?'}, "
+            print(f"[+] {tag}: RFCSI_ANON (Stage 0, {host}:{gw_port}): "
+                  f"SID={info['sid'] or '?'}, "
+                  f"Host={info['hostname'] or '?'}, "
+                  f"OS={info['os_type'] or '?'}, "
+                  f"DB={info['db_type'] or '?'}, "
+                  f"Kernel={info['kernel'] or '?'}, "
                   f"Release={info['sap_release'] or '?'}")
-            # Info-level ATT&CK-tagged finding so the heatmap lights
-            # TA0043 Reconnaissance / TA0007 Discovery on the very
-            # first thing SAPMAP does against a target.  Skips when
-            # nothing meaningful leaked (pure gateway-alive result).
             try:
                 emit_finding(
                     "INFO", tag,
-                    f"Pre-auth kernel/hostname leak via RFC_SYSTEM_INFO "
-                    f"({status}) on {host}:{gw_port} — "
+                    f"Pre-auth kernel/hostname leak via anonymous "
+                    f"RFC_SYSTEM_INFO on {host}:{gw_port} — "
                     f"SID={info['sid'] or '?'}, "
                     f"Host={info['hostname'] or '?'}, "
                     f"Kernel={info['kernel'] or '?'}",
@@ -2158,15 +2144,112 @@ def enrich_system_info(host: str, gw_port: int, timeout: float = 10,
                     attack_capability="recon.rfc_system_info_leak")
             except Exception:
                 pass
-        else:
-            methods = result.get("methods_tried", [])
-            methods_ok = result.get("methods_success", [])
-            print(f"[!] {tag}: RFC_SYSTEM_INFO: no data extracted (status={status}, "
-                  f"methods tried={methods}, success={methods_ok})")
+        elif verbose:
+            _err = (rfcsi or {}).get("error", "unknown")
+            print(f"[*] {tag}: RFCSI anonymous probe (Stage 0) skipped/"
+                  f"failed on {host}:{gw_port} — {_err}; falling back "
+                  f"to legacy chain")
 
-    except Exception as e:
-        print(f"[-] {tag}: RFC_SYSTEM_INFO error on {host}:{gw_port}: {e}")
-        logger.debug(f"RFC_SYSTEM_INFO failed for {host}:{gw_port}: {e}")
+    # If Stage 0 already got SID + hostname + kernel we can skip the
+    # legacy 3-method chain entirely — it's slower and produces the
+    # same fields.  Anything else missing (rare on modern kernels) is
+    # picked up by the SAPControl / public_info stages further down.
+    if rfcsi_ok and info["sid"] and info["hostname"] and info["kernel"]:
+        result = {"status": "rfcsi_anon", "methods_tried": ["rfcsi_anon"],
+                   "methods_success": ["rfcsi_anon"]}
+        status = "rfcsi_anon"
+    else:
+        try:
+            result = probe_sap_system(host, gw_port, timeout=rfc_timeout,
+                                      verbose=verbose, router=router_tuple)
+            status = result.get("status", "unknown")
+
+            # Extract from standard RFCSI_EXPORT fields — only fill blanks so
+            # a successful Stage 0 result isn't clobbered by the legacy chain.
+            if status in ("rfc_success", "info_extracted", "partial_info",
+                           "ok", "partial"):
+                info["sid"] = info["sid"] or result.get("RFCSYSID", "").strip()
+                info["hostname"] = info["hostname"] or (
+                    result.get("RFCHOST2", "") or
+                    result.get("RFCHOST", "")).strip()
+                info["os_type"] = info["os_type"] or result.get("RFCOPSYS", "").strip()
+                info["db_type"] = info["db_type"] or result.get("RFCDBSYS", "").strip()
+                info["kernel"] = info["kernel"] or result.get("RFCKERNRL", "").strip()
+                info["sap_release"] = info["sap_release"] or result.get("RFCSAPRL", "").strip()
+                rfcip = (result.get("RFCIPV6ADDR", "") or
+                         result.get("RFCIPADDR", "")).strip()
+                if rfcip and not info.get("ip"):
+                    info["ip"] = rfcip
+
+            # Fallback: extract from gateway error parsing fields (chipik method).
+            # These are populated when the v6/v2 full RFCSI parse fails but the
+            # gateway still leaks info in error messages.
+            if not info["sid"]:
+                # Try to derive SID from hostname (format: hostname_SID_NN or just SID in gw name)
+                gw_name = result.get("gateway_name", "")  # e.g. "sapgw00"
+                hostname_full = result.get("hostname", "")  # e.g. "s4hanadev.mooo.com"
+                if hostname_full and not info["hostname"]:
+                    info["hostname"] = hostname_full.split(".")[0]  # short hostname
+            if not info["kernel"]:
+                info["kernel"] = result.get("kernel_release", "").strip()
+            if not info["os_type"]:
+                info["os_type"] = result.get("os_hint", "").strip()
+            if not info["sap_release"]:
+                info["sap_release"] = result.get("sap_release_approx", "").strip()
+            # Try to extract SID from hostname pattern: <host>_<SID>_<inst>
+            # or from the hostname itself if it follows SAP naming conventions
+            if not info["sid"] and info["hostname"]:
+                hn = info["hostname"].lower()
+                # Common SAP naming: the SID is often embedded, e.g. "s4hanadev" -> S4H
+                # Check instance number from result
+                inst_nr = result.get("instance_number", "")
+                gw_svc = result.get("gw_service", "")  # e.g. "sapgw00"
+                if gw_svc and gw_svc.startswith("sapgw"):
+                    inst_nr = inst_nr or gw_svc[5:]
+
+            # Record legacy chain as the source ONLY when Stage 0 didn't
+            # already claim provenance and we got at least the SID.
+            if not info["sysinfo_source"] and info["sid"]:
+                info["sysinfo_source"] = "rfc_system_info_legacy"
+
+            if info["sid"] or info["hostname"] or info["kernel"]:
+                # Update tag with discovered SID for subsequent messages
+                if info["sid"]:
+                    tag = info["sid"]
+                print(f"[+] {tag}: RFC_SYSTEM_INFO ({status}): SID={info['sid'] or '?'}, "
+                      f"Host={info['hostname'] or '?'}, OS={info['os_type'] or '?'}, "
+                      f"DB={info['db_type'] or '?'}, Kernel={info['kernel'] or '?'}, "
+                      f"Release={info['sap_release'] or '?'}")
+                # Info-level ATT&CK-tagged finding so the heatmap lights
+                # TA0043 Reconnaissance / TA0007 Discovery on the very
+                # first thing SAPMAP does against a target.  Skips when
+                # nothing meaningful leaked (pure gateway-alive result).
+                # Stage 0 already emitted an equivalent finding when it
+                # fired, so don't double-emit on its success path.
+                if not rfcsi_ok:
+                    try:
+                        emit_finding(
+                            "INFO", tag,
+                            f"Pre-auth kernel/hostname leak via RFC_SYSTEM_INFO "
+                            f"({status}) on {host}:{gw_port} — "
+                            f"SID={info['sid'] or '?'}, "
+                            f"Host={info['hostname'] or '?'}, "
+                            f"Kernel={info['kernel'] or '?'}",
+                            ref="rfc.system_info.leak",
+                            attack_capability="recon.rfc_system_info_leak")
+                    except Exception:
+                        pass
+            else:
+                methods = result.get("methods_tried", [])
+                methods_ok = result.get("methods_success", [])
+                print(f"[!] {tag}: RFC_SYSTEM_INFO: no data extracted (status={status}, "
+                      f"methods tried={methods}, success={methods_ok})")
+
+        except Exception as e:
+            print(f"[-] {tag}: RFC_SYSTEM_INFO error on {host}:{gw_port}: {e}")
+            logger.debug(f"RFC_SYSTEM_INFO failed for {host}:{gw_port}: {e}")
+            result = {"status": "error", "methods_tried": [], "methods_success": []}
+            status = "error"
 
     # Build ordered instance number list for SAPControl queries
     _seen = set()
@@ -4762,6 +4845,7 @@ def _build_nodes_from_fast_scan(scan_result: dict, timeout: float = 10,
             kernel=sys_info.get("kernel", ""),
             sap_release=sys_info.get("sap_release", ""),
             clients=clients,
+            sysinfo_source=sys_info.get("sysinfo_source", ""),
         )
         # Tag confirmed Web Dispatchers (drives ICMAD severity ladder
         # in check_cve_2022_22536 + GUI menu gating in sapmap_html).
@@ -5516,13 +5600,26 @@ def deep_scan_single(node: SAPNode, timeout: float = DEFAULT_TIMEOUT,
         sys_obj = landscape[0]
         fresh = _sapology_system_to_node(sys_obj, host)
 
-        # Update node fields from the fresh scan
-        node.system_type = fresh.system_type or node.system_type
-        node.hostname = fresh.hostname or node.hostname
-        node.os_type = fresh.os_type or node.os_type
-        node.db_type = fresh.db_type or node.db_type
-        node.kernel = fresh.kernel or node.kernel
-        node.sap_release = fresh.sap_release or node.sap_release
+        # Update node fields from the fresh scan.  When the node already
+        # carries authoritative sysinfo from Stage 0 RFCSI (Julian's
+        # anonymous RFC_SYSTEM_INFO probe), keep the existing values and
+        # only backfill blanks — a sapology rescan uses SAPControl banner
+        # parsing which can be less accurate than the RFCSI record.
+        _authoritative = node.sysinfo_source == "rfcsi_anon"
+        if _authoritative:
+            node.system_type = node.system_type or fresh.system_type
+            node.hostname    = node.hostname    or fresh.hostname
+            node.os_type     = node.os_type     or fresh.os_type
+            node.db_type     = node.db_type     or fresh.db_type
+            node.kernel      = node.kernel      or fresh.kernel
+            node.sap_release = node.sap_release or fresh.sap_release
+        else:
+            node.system_type = fresh.system_type or node.system_type
+            node.hostname    = fresh.hostname    or node.hostname
+            node.os_type     = fresh.os_type     or node.os_type
+            node.db_type     = fresh.db_type     or node.db_type
+            node.kernel      = fresh.kernel      or node.kernel
+            node.sap_release = fresh.sap_release or node.sap_release
         node.instances = fresh.instances or node.instances
         node.clients = fresh.clients or node.clients
         node.gw_vulnerable = fresh.gw_vulnerable or node.gw_vulnerable

@@ -6594,21 +6594,34 @@ def create_app(api: SAPMAPApi) -> Bottle:
             info = sapmap_scanner.enrich_system_info(
                 host, gw_port, instance_nrs=inst_nrs,
                 sid_hint=node.sid, saprouter=node.saprouter)
-            # Update node with retrieved info
+            # Update node with retrieved info.  The user asked for a
+            # refresh, so we normally overwrite existing fields.  BUT:
+            # if the node already has data from an authoritative Stage 0
+            # RFCSI probe (rfcsi_anon) and this rerun's info dict came
+            # from a less-authoritative source (legacy leak / SAPControl
+            # banner), preserve the existing authoritative values.  When
+            # the rerun's data is also from rfcsi_anon we simply refresh.
+            new_source = info.get("sysinfo_source", "")
+            node_was_authoritative = (node.sysinfo_source == "rfcsi_anon")
+            new_is_authoritative   = (new_source == "rfcsi_anon")
+            _keep_existing = (node_was_authoritative and not new_is_authoritative)
+
             if info.get("sid") and not node.sid.startswith("UNK"):
                 pass  # keep existing SID
             elif info.get("sid"):
                 node.sid = info["sid"]
-            if info.get("hostname"):
+            if info.get("hostname") and not _keep_existing:
                 node.hostname = info["hostname"]
-            if info.get("os_type"):
+            if info.get("os_type") and not _keep_existing:
                 node.os_type = info["os_type"]
-            if info.get("db_type"):
+            if info.get("db_type") and not _keep_existing:
                 node.db_type = info["db_type"]
-            if info.get("kernel"):
+            if info.get("kernel") and not _keep_existing:
                 node.kernel = info["kernel"]
-            if info.get("sap_release"):
+            if info.get("sap_release") and not _keep_existing:
                 node.sap_release = info["sap_release"]
+            if new_source and (new_is_authoritative or not node.sysinfo_source):
+                node.sysinfo_source = new_source
 
             # Set system type from SAPControl ABAP/JAVA detection
             sc_abap = info.get("_is_abap", False)

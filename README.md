@@ -2610,6 +2610,30 @@ Linux, Windows, AIX, HP-UX, SunOS
 
 ---
 
+## Credits & Prior Art
+
+SAPMAP stands on prior work.  These deserve explicit credit:
+
+- **[randomstr1ng/sap-rfm-enum](https://github.com/randomstr1ng/sap-rfm-enum)** —
+  Julian's anonymous CPIC/RFC function-module enumerator.  Julian
+  reverse-engineered the 80-byte APPC v6 header layout against kernel
+  7.93 and demonstrated that the anonymous connect path can dispatch
+  `RFC_SYSTEM_INFO`, `RFC_PING`, and `SYSTEM_INVISIBLE_GUI` pre-logon,
+  returning real replies (not just error banners).  SAPMAP's stdlib-only
+  `RFC_SYSTEM_INFO` probe (`tools/rfc_sysinfo.py` +
+  `modules/protocols/sap_rfc_sysinfo_probe.py`) is a de-pysap'd
+  single-FM extraction of Julian's work — the wire-format contribution
+  is his.
+
+- **[OWASP pysap](https://github.com/OWASP/pysap)** — the reference SAP
+  protocol library (NI, RFC, DIAG, MS, SAPRouter framing).  SAPMAP no
+  longer imports pysap at runtime, but the historical protocol
+  understanding behind several modules was informed by it.  Third-party
+  files that were originally ported from pysap are listed in
+  [NOTICE](NOTICE) and stay under GPLv2-or-later.
+
+---
+
 ## License
 
 SAPMAP is licensed under the GNU General Public License v3.0 (or, at
