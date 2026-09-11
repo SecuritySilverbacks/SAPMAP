@@ -332,46 +332,67 @@ def test_reverse_payload_various_os_strings():
 # _generate_bind_payload
 # ===========================================================================
 
+def _bind_code(p):
+    """Return the payload code from params or long_params.
+
+    The Linux bind payload lives in `params` when it fits in the
+    255-byte SXPG PARAMS cap, or overflows to `long_params` when it
+    doesn't. Callers just want the code string, wherever it landed."""
+    code = p.get("params") or ""
+    if not code:
+        code = p.get("long_params") or ""
+    return code
+
+
 def test_bind_payload_linux():
     p = _generate_bind_payload("Linux", 4444)
     assert p["command"] == "python3"
-    assert p["params"].startswith("-c ")
-    assert "4444" in p["params"]
+    code = _bind_code(p)
+    assert code.startswith("-c ")
+    assert "4444" in code
     assert "bind" in p["display"].lower()
 
 
 def test_bind_payload_linux_no_spaces():
     p = _generate_bind_payload("Linux", 4444)
-    code = p["params"][3:]
+    code = _bind_code(p)[3:]
     assert " " not in code
 
 
 def test_bind_payload_linux_under_255_chars():
-    """SXPG PARAMS field is CHAR255 — total params must fit."""
+    """SXPG PARAMS field is CHAR255 — anything longer must ride LONG_PARAMS.
+
+    So EITHER params fits in 255 bytes OR params is empty and the code
+    lives in long_params (which has no such cap)."""
     for port in (1234, 4444, 9999, 65535):
         p = _generate_bind_payload("Linux", port)
-        assert len(p["params"]) <= 255, (
-            f"PARAMS too long for port {port}: {len(p['params'])} chars")
+        params = p.get("params") or ""
+        long_params = p.get("long_params") or ""
+        if params:
+            assert len(params) <= 255, (
+                f"PARAMS too long for port {port}: {len(params)} chars")
+        else:
+            assert long_params, (
+                f"port {port}: empty params but no long_params either")
 
 
 def test_bind_payload_contains_fork():
     """Bind shell must fork() to survive SAPXPG disconnect."""
     p = _generate_bind_payload("Linux", 4444)
-    assert "fork()" in p["params"]
+    assert "fork()" in _bind_code(p)
 
 
 def test_bind_payload_closes_stdout_stderr():
     """Bind shell must close fd 1+2 so SXPG's stdout pipe gets EOF."""
-    p = _generate_bind_payload("Linux", 4444)
-    assert "close(1)" in p["params"]
-    assert "close(2)" in p["params"]
+    code = _bind_code(_generate_bind_payload("Linux", 4444))
+    assert "close(1)" in code
+    assert "close(2)" in code
 
 
 def test_bind_payload_has_setsockopt_reuseaddr():
     """Bind shell should set SO_REUSEADDR to avoid port conflicts."""
-    p = _generate_bind_payload("Linux", 4444)
     # setsockopt(SOL_SOCKET=1, SO_REUSEADDR=2, 1)
-    assert "setsockopt(1,2,1)" in p["params"]
+    assert "setsockopt(1,2,1)" in _bind_code(_generate_bind_payload("Linux", 4444))
 
 
 def test_bind_payload_windows():
