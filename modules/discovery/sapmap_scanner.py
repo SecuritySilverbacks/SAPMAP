@@ -934,8 +934,23 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
         t_retry = time.time()
         _seq_hits = {}
         _retry_timeout = max(scan_timeout, 2.0)
+        # Silently-filtered hosts (every SAP port hits its full timeout
+        # with no RST) can turn this loop into a ~400s stall (200 ports
+        # × 2s).  Two safeguards:
+        #   1. RETRY_WALL_CAP — hard wall-clock cap.  Aborts the pass
+        #      and marks the host as filtered.
+        #   2. Heartbeat log every 10s so the operator can see the loop
+        #      is alive and cancel if desired (was previously silent
+        #      for the whole duration).
+        RETRY_WALL_CAP = 60.0
+        _last_beat = t_retry
+        _aborted = False
         for _pi, (p, svc, inst) in enumerate(_sap_ports):
             if _cancelled():
+                break
+            _elapsed = time.time() - t_retry
+            if _elapsed >= RETRY_WALL_CAP:
+                _aborted = True
                 break
             if _scan_port(host, p, _retry_timeout):
                 _seq_hits[p] = {"service": svc, "instance_nr": inst}
@@ -945,14 +960,31 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
             # below the default Windows Firewall SYN-flood threshold
             # (per-second connection limit is typically hundreds).
             time.sleep(0.05)
+            # Heartbeat: keep the operator informed every 10s.
+            _now = time.time()
+            if _now - _last_beat >= 10.0:
+                print(f"[*] {host}: retry pass in progress — "
+                      f"{_pi + 1}/{len(_sap_ports)} probed, "
+                      f"{len(_seq_hits)} open, "
+                      f"{_now - t_retry:.0f}s elapsed "
+                      f"(wall cap {RETRY_WALL_CAP:.0f}s)")
+                _last_beat = _now
+        _took = time.time() - t_retry
         if _seq_hits:
             result["open_ports"].update(_seq_hits)
             print(f"[*] {host}: retry pass done in "
-                  f"{time.time() - t_retry:.1f}s — {len(_seq_hits)} "
+                  f"{_took:.1f}s — {len(_seq_hits)} "
                   f"port(s) that Pass 1 missed")
+        elif _aborted:
+            _probed = _pi   # last completed index before the break
+            print(f"[*] {host}: retry pass aborted after "
+                  f"{_took:.1f}s ({_probed}/{len(_sap_ports)} probed) "
+                  f"— wall-clock cap {RETRY_WALL_CAP:.0f}s hit with no "
+                  f"hits (target silently filters SAP ports — every "
+                  f"probe hit full timeout)")
         else:
             print(f"[*] {host}: retry pass done in "
-                  f"{time.time() - t_retry:.1f}s — still nothing "
+                  f"{_took:.1f}s — still nothing "
                   f"(target may be truly closed or firewalled)")
 
     # Verify dispatcher ports with DIAG protocol probe
