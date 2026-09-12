@@ -308,7 +308,7 @@ def main():
                      help="how long to drain server replies after each "
                           "LOGON (default: 2.5s)")
     ap.add_argument("--rogue-port-base", type=int, default=31300,
-                     help="each candidate uses base + hash(name) % 100")
+                     help="each candidate uses base + hash(name) %% 100")
     ap.add_argument("--dump-all", action="store_true",
                      help="hex-dump the FULL body of every reply, not "
                           "just the summary line")
