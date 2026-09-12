@@ -7888,7 +7888,12 @@ async function ctxAction(action) {
       await api('POST', `node/${sid}/check_cve_2026_58240`); break;
     case 'exploit_cve_58240_register': {
       const nn = (mapState.nodes || {})[sid];
-      if (!nn || !nn.cve_2026_58240_vulnerable) {
+      // Gate on the CHECK-phase evidence, not on `vulnerable` — the
+      // vulnerable flag is set only after this register step confirms
+      // via broadcast, so it would always be false pre-register.
+      const evidenceOk = nn && (nn.cve_2026_58240_evidence === 'opcode_recognised'
+                                || nn.cve_2026_58240_evidence === 'confirmed_vulnerable');
+      if (!evidenceOk) {
         showToast('Run "Check CVE-2026-58240" first — opcode family status unknown', 'warn');
         break;
       }

