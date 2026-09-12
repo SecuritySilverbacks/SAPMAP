@@ -336,8 +336,9 @@ def main():
     print("=" * 60)
     for r in results:
         icon = "!" if r["hit_markers"] else " "
+        markers_str = ",".join(r["hit_markers"]) if r["hit_markers"] else "none"
         print(f"  [{icon}] {r['name']:<28s} replies={r['replies']:<3d} "
-              f"markers_hit={r['hit_markers'] or 'none':<32s}"
+              f"markers_hit={markers_str:<32s}"
               + (f" err={r['err']}" if r["err"] else ""))
     hits = [r for r in results if r["hit_markers"]]
     print()

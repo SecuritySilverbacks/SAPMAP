@@ -37,32 +37,32 @@ def test_opcode_values():
 # ---------------------------------------------------------------------------
 
 def test_logon_payload_layout():
+    """Fixed-struct shape verified live against IDE (9.16 PL75):
+        03 | 00*6 | port_be_2 | host_40 | ip_4 | pid_be_4 → 57 bytes."""
     p = mod.build_ascs_gw_logon_payload(
         host="ATTACKER_ROGUE", port=31337, ip="10.0.0.1", pid=42)
-    # type
-    assert p[0:2] == struct.pack("!H", 0x0001)
-    # port
-    assert p[2:4] == struct.pack("!H", 31337)
-    # addr
-    assert p[4:8] == socket.inet_aton("10.0.0.1")
-    # host TLV
-    hlen = struct.unpack("!H", p[8:10])[0]
-    assert hlen == len(b"ATTACKER_ROGUE")
-    assert p[10:10 + hlen] == b"ATTACKER_ROGUE"
-    off = 10 + hlen
-    # pid TLV
-    plen = struct.unpack("!H", p[off:off + 2])[0]
-    assert p[off + 2:off + 2 + plen] == b"42"
-    # end sentinel
-    assert p[-2:] == b"\xff\xff"
+    assert len(p) == 57
+    # 0x03 marker + 6 pad bytes
+    assert p[0] == 0x03
+    assert p[1:7] == b"\x00" * 6
+    # port BE at offset 7-8 — this is the byte range the server echoes
+    # into the broadcast body on a successful registration.
+    assert p[7:9] == struct.pack("!H", 31337)
+    # 40-byte hostname field, zero-padded
+    assert p[9:9 + 14] == b"ATTACKER_ROGUE"
+    assert p[9 + 14:49] == b"\x00" * 26
+    # IPv4 network order
+    assert p[49:53] == socket.inet_aton("10.0.0.1")
+    # PID big-endian uint32
+    assert p[53:57] == struct.pack("!I", 42)
 
 
 def test_logon_payload_truncates_long_hostname():
+    """40-byte host field truncates anything longer."""
     long_name = "A" * 200
     p = mod.build_ascs_gw_logon_payload(long_name, 1234)
-    hlen = struct.unpack("!H", p[8:10])[0]
-    assert hlen == 80        # truncated per module contract
-    assert p[10:10 + 80] == b"A" * 80
+    assert len(p) == 57
+    assert p[9:49] == b"A" * 40   # exactly 40 bytes of A
 
 
 # ---------------------------------------------------------------------------
