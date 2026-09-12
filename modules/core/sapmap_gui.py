@@ -7960,6 +7960,10 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 node.cve_2026_58240_vulnerable = True
                 node.cve_2026_58240_registered = True
                 node.cve_2026_58240_evidence = "confirmed_vulnerable"
+                # Persist the port we registered so the cleanup handler
+                # can verify removal against the same value (defaults
+                # to 31337 but the operator may have picked another).
+                node.cve_2026_58240_rogue_port = rogue_port
                 print(f"[!!] {sid}: CONFIRMED VULNERABLE — "
                       f"broadcast fired, rogue ASCS registered.")
                 sapmap_findings.emit_finding(
@@ -8024,25 +8028,65 @@ def create_app(api: SAPMAPApi) -> Bottle:
     @app.route("/api/node/<sid>/exploit_cve_2026_58240_unregister",
                 method="POST")
     def node_exploit_cve_2026_58240_unregister(sid):
-        """Best-effort cleanup — send LOGOFF/KEEPALIVE opcode with an
-        empty body.  The server also expires the entry after ~60s of
-        no keep-alive.  Idempotent."""
+        """Verified cleanup — overwrite gAscsGw with port=0 and re-check
+        via STATUS.  Reports whether the rogue port was actually
+        removed (`ok=True`) or is still present.  Also acknowledges
+        that the server-side ~60 s keep-alive timeout is a valid
+        fallback path."""
         response.content_type = "application/json"
+        data = request.json or {}
         node = api.state.get_node(sid)
         if not node:
             return json.dumps({"error": f"Node {sid} not found"})
         ms_port = node.cve_2026_58240_ms_port or 3900
+        # Prefer the port we actually registered on this node (persisted
+        # at register time); accept an override from the POST body; fall
+        # back to 31337 for older sessions where rogue_port wasn't
+        # persisted.
+        rogue_port = int(data.get("rogue_port")
+                          or node.cve_2026_58240_rogue_port
+                          or 31337)
 
         def _run():
             print(f"[*] {sid}: cleanup rogue ASCS_GW on "
-                  f"{node.ip}:{ms_port}")
+                  f"{node.ip}:{ms_port} (verifying removal of port "
+                  f"{rogue_port})")
             try:
                 from sap_cve_2026_58240 import unregister_rogue_ascs_gw
-                r = unregister_rogue_ascs_gw(node.ip, ms_port)
-                print(f"[*] {sid}: unregister result: {r}")
-                node.cve_2026_58240_registered = False
+                r = unregister_rogue_ascs_gw(node.ip, ms_port,
+                                              rogue_port=rogue_port)
             except Exception as e:
-                print(f"[-] {sid}: unregister failed: {e!r}")
+                print(f"[-] {sid}: unregister raised: {e!r}")
+                return
+            # Verdict logging — no more ambiguous 'ok=True' with
+            # no context.
+            still = r.get("rogue_port_still_present")
+            if r.get("ok") and still is False:
+                node.cve_2026_58240_registered = False
+                print(f"[+] {sid}: CLEANUP VERIFIED — STATUS "
+                      f"broadcast confirms port {rogue_port} is no "
+                      f"longer in the ASCS_GW trust entry.  The "
+                      f"rogue registration has been neutralised.")
+                print(f"    post-cleanup body: "
+                      f"{r.get('post_status_body_hex', '')[:80]}"
+                      f"{'...' if len(r.get('post_status_body_hex','')) > 80 else ''}")
+            elif still is True:
+                print(f"[-] {sid}: CLEANUP FAILED — STATUS still "
+                      f"shows port {rogue_port} in the ASCS_GW "
+                      f"broadcast body.  Options: (1) wait ~60 s "
+                      f"for the server-side keep-alive timeout to "
+                      f"expire our entry, (2) restart the ASCS "
+                      f"instance on the target.")
+                print(f"    post-status body: "
+                      f"{r.get('post_status_body_hex', '')[:80]}"
+                      f"{'...' if len(r.get('post_status_body_hex','')) > 80 else ''}")
+            else:
+                err = r.get("error") or "no STATUS broadcast received"
+                print(f"[?] {sid}: CLEANUP UNVERIFIED — {err}")
+                print(f"    Suggested: re-run 'Check "
+                      f"CVE-2026-58240' in ~60 s.  If the check no "
+                      f"longer shows opcode_recognised leaking the "
+                      f"rogue port, the entry has aged out.")
 
         _bg(f"{sid}:unregister_cve_58240",
              "CVE-2026-58240 rogue ASCS_GW cleanup", _run)

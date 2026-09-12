@@ -331,6 +331,7 @@ def test_sapnode_cve_2026_58240_fields_default():
     assert n.cve_2026_58240_ms_port == 0
     assert n.cve_2026_58240_ascs_identity == ""
     assert n.cve_2026_58240_registered is False
+    assert n.cve_2026_58240_rogue_port == 0
 
 
 def test_sapnode_cve_2026_58240_fields_roundtrip():
@@ -340,6 +341,7 @@ def test_sapnode_cve_2026_58240_fields_roundtrip():
     n.cve_2026_58240_ms_port = 3901
     n.cve_2026_58240_ascs_identity = "vhcala4hci_A4H_00"
     n.cve_2026_58240_registered = False
+    n.cve_2026_58240_rogue_port = 31337
     n.cve_2026_58240_evidence = "opcode_recognised"
     d = n.to_dict()
     n2 = SAPNode.from_dict(d)
@@ -347,4 +349,5 @@ def test_sapnode_cve_2026_58240_fields_roundtrip():
     assert n2.cve_2026_58240_vulnerable is True
     assert n2.cve_2026_58240_ms_port == 3901
     assert n2.cve_2026_58240_ascs_identity == "vhcala4hci_A4H_00"
+    assert n2.cve_2026_58240_rogue_port == 31337
     assert n2.cve_2026_58240_evidence == "opcode_recognised"

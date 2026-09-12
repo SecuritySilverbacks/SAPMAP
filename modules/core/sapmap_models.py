@@ -632,6 +632,7 @@ class SAPNode:
     cve_2026_58240_ms_port: int = 0               # port that answered
     cve_2026_58240_ascs_identity: str = ""        # leaked <host>_<SID>_<inst>
     cve_2026_58240_registered: bool = False       # write path exercised
+    cve_2026_58240_rogue_port: int = 0             # port we advertised when registering
     cve_2026_58240_evidence: str = ""             # verdict from probe
     # CVE-2025-31324 — Java VisualComposer metadatauploader unauth RCE
     cve_2025_31324_checked: bool = False
@@ -986,6 +987,7 @@ class SAPNode:
             "cve_2026_58240_ms_port": self.cve_2026_58240_ms_port,
             "cve_2026_58240_ascs_identity": self.cve_2026_58240_ascs_identity,
             "cve_2026_58240_registered": self.cve_2026_58240_registered,
+            "cve_2026_58240_rogue_port": self.cve_2026_58240_rogue_port,
             "cve_2026_58240_evidence": self.cve_2026_58240_evidence,
             "cve_2025_31324_vulnerable": self.cve_2025_31324_vulnerable,
             "cve_2025_31324_port": self.cve_2025_31324_port,
@@ -1117,6 +1119,7 @@ class SAPNode:
             cve_2026_58240_ms_port=d.get("cve_2026_58240_ms_port", 0),
             cve_2026_58240_ascs_identity=d.get("cve_2026_58240_ascs_identity", ""),
             cve_2026_58240_registered=d.get("cve_2026_58240_registered", False),
+            cve_2026_58240_rogue_port=d.get("cve_2026_58240_rogue_port", 0),
             cve_2026_58240_evidence=d.get("cve_2026_58240_evidence", ""),
             cve_2025_31324_vulnerable=d.get("cve_2025_31324_vulnerable", False),
             cve_2025_31324_port=d.get("cve_2025_31324_port", 0),
