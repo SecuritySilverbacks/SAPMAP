@@ -1580,9 +1580,27 @@ def check_cve_2026_58240(node: SAPNode, timeout: float = 6.0) -> bool:
         # One log line per port so the operator can see the probe pattern
         # instead of a single opaque "not exposed".  Format matches other
         # per-port debug lines the scanner emits.
+        #
+        # `identity_cached` marker: A4H MS server keeps per-source-IP
+        # client state.  The identity leak only fires on the FIRST
+        # probe from a given source IP.  Follow-up probes see the
+        # cached-client short reply (151 B header+opcode+ACCESS_DENIED
+        # marker, no ADMIN dump).  The probe now sends IFLAG_LOGOUT
+        # before closing, which usually clears the cache — but if the
+        # server hasn't processed the LOGOUT yet, the very next check
+        # can still land in cached-state territory.  Note the fact
+        # explicitly rather than confusing the operator with "(no
+        # identity in reply)".
+        _ident_note = ""
+        if ident:
+            _ident_note = f" leaked_identity={ident!r}"
+        elif verdict == "opcode_recognised":
+            _ident_note = (" leaked_identity=(cached — server has our "
+                            "source IP in its client cache; try again "
+                            "in ~60s if you need a fresh dump)")
         print(f"[*] {node.sid}:   {host}:{ms_port} → verdict={verdict}"
               f" reply_len(82/83)={r82_len}/{r83_len}"
-              + (f" leaked_identity={ident!r}" if ident else "")
+              f"{_ident_note}"
               + (f" err={result['error']}" if result.get("error") else ""))
         # Retain the strongest signal we've seen across ports so a
         # later no_ms_reply doesn't overwrite an earlier
