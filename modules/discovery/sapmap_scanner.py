@@ -1548,12 +1548,22 @@ def check_cve_2026_58240(node: SAPNode, timeout: float = 6.0) -> bool:
         try:
             inst_nr = int(inst.instance_nr)
             candidate_ports.add(3900 + inst_nr)
+            # Also try inst_nr+1 — some installs (verified on A4H docker)
+            # bind the internal MS listener on 3901 while the ABAP
+            # dispatcher is on inst 00 (3900 is silent-drop, 3901 speaks
+            # MS).  Cheap belt-and-braces vs. missing the whole check.
+            candidate_ports.add(3900 + inst_nr + 1)
         except (ValueError, TypeError):
             pass
     if not candidate_ports:
         candidate_ports = {3900, 3901, 3902}
 
     node.cve_2026_58240_checked = True
+    _verdicts_seen = {}      # port → verdict, for the summary log line
+    _identity_seen = ""
+    print(f"[*] {node.sid}: CVE-2026-58240 — probing "
+          f"{len(candidate_ports)} MS port(s): "
+          f"{sorted(candidate_ports)}")
     for ms_port in sorted(candidate_ports):
         try:
             import sapmap_stop
@@ -1563,13 +1573,38 @@ def check_cve_2026_58240(node: SAPNode, timeout: float = 6.0) -> bool:
             pass
         result = check_ascs_gw_registration(host, ms_port, timeout=timeout)
         verdict = result.get("verdict", "")
-        node.cve_2026_58240_evidence = verdict
+        _verdicts_seen[ms_port] = verdict
+        r82_len = result.get("opcode_82_reply_len", 0)
+        r83_len = result.get("opcode_83_reply_len", 0)
+        ident   = result.get("ascs_identity", "")
+        # One log line per port so the operator can see the probe pattern
+        # instead of a single opaque "not exposed".  Format matches other
+        # per-port debug lines the scanner emits.
+        print(f"[*] {node.sid}:   {host}:{ms_port} → verdict={verdict}"
+              f" reply_len(82/83)={r82_len}/{r83_len}"
+              + (f" leaked_identity={ident!r}" if ident else "")
+              + (f" err={result['error']}" if result.get("error") else ""))
+        # Retain the strongest signal we've seen across ports so a
+        # later no_ms_reply doesn't overwrite an earlier
+        # opcode_recognised evidence.  Precedence:
+        #   opcode_recognised > login_denied > opcode_absent >
+        #   no_ms_reply > unreachable
+        _rank = {"opcode_recognised": 5, "login_denied": 4,
+                  "opcode_absent": 3, "no_ms_reply": 2, "unreachable": 1}
+        if (_rank.get(verdict, 0)
+                > _rank.get(node.cve_2026_58240_evidence, 0)):
+            node.cve_2026_58240_evidence = verdict
+        if ident and not _identity_seen:
+            _identity_seen = ident
 
         if verdict == "opcode_recognised":
             node.cve_2026_58240_vulnerable = True
             node.cve_2026_58240_ms_port = ms_port
-            node.cve_2026_58240_ascs_identity = result.get("ascs_identity", "")
-            leaked = result.get("ascs_identity") or "(no identity in reply)"
+            node.cve_2026_58240_ascs_identity = ident
+            leaked = ident or "(no identity in reply)"
+            print(f"[+] {node.sid}: MS port {ms_port} — ASCS_GW opcode "
+                  f"family PRESENT; leaked identity: {leaked}; "
+                  f"kernel is in CVE-2026-58240 fix window")
             logger.info(f"{node.sid}: MS port {ms_port} — ASCS_GW opcode "
                         f"family present; leaked identity: {leaked}")
             emit_finding(
@@ -1617,6 +1652,39 @@ def check_cve_2026_58240(node: SAPNode, timeout: float = 6.0) -> bool:
             # keep scanning other ports — a multi-instance host might
             # answer differently on different ports.
             continue
+
+    # No port yielded opcode_recognised.  Summarise so the operator can
+    # tell an ACL-hardened MS ("no_ms_reply" everywhere → probably fine,
+    # port filtered) apart from a pre-9.x kernel ("opcode_absent" → not
+    # in scope) apart from an unreachable target.
+    if not node.cve_2026_58240_vulnerable:
+        _by_verdict: dict[str, list] = {}
+        for _p, _v in _verdicts_seen.items():
+            _by_verdict.setdefault(_v, []).append(_p)
+        _summary = ", ".join(
+            f"{v}: {sorted(ps)}" for v, ps in sorted(_by_verdict.items()))
+        _hint = {
+            "no_ms_reply":  ("MS silently drops our LOGIN_2 — port has "
+                              "an ACL or is the external sapms<SID> "
+                              "filter, not the internal MS.  Try the "
+                              "true internal port 39NN (usually "
+                              "3900+instance_nr) reachable from a "
+                              "trusted host."),
+            "opcode_absent": ("kernel is pre-9.x — the ASCS_GW opcode "
+                              "family (0x52 / 0x53) was introduced in "
+                              "the 9.x kernel line, so this system is "
+                              "not affected by CVE-2026-58240."),
+            "login_denied":  ("MS accepts TCP but the MS_LOGIN_2 "
+                              "handshake errored — likely an ACL "
+                              "rejecting our source IP."),
+            "unreachable":   ("MS port TCP-refused or timed out — the "
+                              "internal MS port may not be exposed on "
+                              "the interface SAPMAP is scanning from."),
+        }.get(node.cve_2026_58240_evidence, "")
+        print(f"[*] {node.sid}: CVE-2026-58240 — no vulnerable port "
+              f"found. Verdicts: {_summary or '(none)'}. "
+              f"Strongest signal: {node.cve_2026_58240_evidence!r}."
+              + (f"  Hint: {_hint}" if _hint else ""))
 
     return node.cve_2026_58240_vulnerable
 

@@ -7866,16 +7866,22 @@ def create_app(api: SAPMAPApi) -> Bottle:
             print(f"[*] {sid}: Checking CVE-2026-58240 "
                   f"(MS ASCS_GW rogue registration)...")
             found = sapmap_scanner.check_cve_2026_58240(node)
+            # The scanner helper prints one line per port + a summary
+            # hint on failure — repeat only the final verdict + the
+            # actionable next step so the operator gets the punchline.
             if found:
-                print(f"[+] {sid}: opcode family present on port "
-                      f"{node.cve_2026_58240_ms_port} — kernel in fix "
-                      f"window (leaked identity: "
-                      f"{node.cve_2026_58240_ascs_identity or '?'})")
-            elif node.cve_2026_58240_evidence:
-                print(f"[*] {sid}: not exposed "
-                      f"({node.cve_2026_58240_evidence})")
+                print(f"[+] {sid}: VULNERABLE — MS port "
+                      f"{node.cve_2026_58240_ms_port} recognises the "
+                      f"ASCS_GW opcode family.  Leaked ASCS identity: "
+                      f"{node.cve_2026_58240_ascs_identity or '(none)'}."
+                      f"  Next: right-click → Exploitation → 'Register "
+                      f"Rogue ASCS Gateway (CVE-2026-58240)' to "
+                      f"exercise the write path.")
             else:
-                print(f"[*] {sid}: no MS internal port responded")
+                _ev = node.cve_2026_58240_evidence or "no_response"
+                print(f"[*] {sid}: not exposed to CVE-2026-58240 "
+                      f"(strongest signal: {_ev}).  See the per-port "
+                      f"lines above for the reason.")
 
         _bg(f"{sid}:check_cve_58240", "Check CVE-2026-58240", _run)
         return json.dumps({"status": "started"})
