@@ -624,6 +624,13 @@ class SAPNode:
     ms_port: int = 0                    # MS internal port found (39NN), 0 = not found
     ms_vulnerable: bool = False         # True if MS lacks ACL protection (CVE-2020-6207)
     ms_acl_protected: bool = False      # True if MS port reachable but ACL blocks our IP
+    # kloris/SAPMAP#41 — True when the MS internal port speaks TLS
+    # (system/secure_communication = ON).  Detected via a TLS
+    # ClientHello probe in sap_ms_betrusted.probe_ms_tls_required.
+    # When True, both 10KBLAZE (CVE-2020-6207) and CVE-2026-58240
+    # ASCS_GW rogue registration are BLOCKED at the wire layer —
+    # SAPMAP does not speak SNC/SystemPKI yet.
+    ms_secure_comms_required: bool = False
     # CVE-2026-58240 — MS ASCS_GW rogue registration (trust-list pollution).
     # Set by sap_cve_2026_58240.check_ascs_gw_registration() on any node
     # with an MS internal port (39NN) reachable + ABAP stack.
@@ -981,6 +988,7 @@ class SAPNode:
             "ms_port": self.ms_port,
             "ms_vulnerable": self.ms_vulnerable,
             "ms_acl_protected": self.ms_acl_protected,
+            "ms_secure_comms_required": self.ms_secure_comms_required,
             "cve_2025_31324_checked": self.cve_2025_31324_checked,
             "cve_2026_58240_checked": self.cve_2026_58240_checked,
             "cve_2026_58240_vulnerable": self.cve_2026_58240_vulnerable,
@@ -1113,6 +1121,7 @@ class SAPNode:
             ms_port=d.get("ms_port", 0),
             ms_vulnerable=d.get("ms_vulnerable", False),
             ms_acl_protected=d.get("ms_acl_protected", False),
+            ms_secure_comms_required=d.get("ms_secure_comms_required", False),
             cve_2025_31324_checked=d.get("cve_2025_31324_checked", False),
             cve_2026_58240_checked=d.get("cve_2026_58240_checked", False),
             cve_2026_58240_vulnerable=d.get("cve_2026_58240_vulnerable", False),

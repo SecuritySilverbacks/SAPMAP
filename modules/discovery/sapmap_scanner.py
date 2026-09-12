@@ -1442,6 +1442,8 @@ def check_ms_betrusted(node: SAPNode, timeout: float = 8.0) -> bool:
             node.ms_port = ms_p
             node.ms_vulnerable    = result["vulnerable"]
             node.ms_acl_protected = result.get("acl_protected", False)
+            node.ms_secure_comms_required = result.get(
+                "secure_comms_required", False)
 
             if result["vulnerable"]:
                 logger.info(f"{node.sid}: MS port {ms_p} VULNERABLE (CVE-2020-6207) "
@@ -1473,6 +1475,57 @@ def check_ms_betrusted(node: SAPNode, timeout: float = 8.0) -> bool:
                 ))
                 node.has_critical_finding = True
                 break  # found a vulnerable MS — no need to probe more
+            elif result.get("secure_comms_required"):
+                # kloris/SAPMAP#41 — MS port speaks TLS/SystemPKI.
+                # Plaintext MS_LOGIN_2 is impossible from any source
+                # without a SystemPKI client cert.  This is a strong
+                # compensating control (better than the ms/acl_info
+                # list, which is IP-based), but does NOT remove the
+                # underlying kernel vuln — if secure_communication is
+                # later disabled, the exploit surface reopens.
+                print(f"[+] {node.sid}: MS port {ms_p} requires TLS / "
+                      f"SystemPKI (system/secure_communication = "
+                      f"ON) — betrusted attack CLOSED via this "
+                      f"port.  SAPMAP does not speak SNC yet, so we "
+                      f"cannot exercise the write path even if the "
+                      f"kernel is unpatched.  This is a robust "
+                      f"compensating control.")
+                logger.info(f"{node.sid}: MS port {ms_p} TLS-only "
+                             f"(system/secure_communication = ON)")
+                if not any("TLS" in getattr(f, "name", "")
+                            for f in node.findings):
+                    node.findings.append(Finding(
+                        name="MS Internal Port Requires TLS / SystemPKI (secure_communication)",
+                        severity=Severity.INFO,
+                        attack_techniques=_attack_for("recon.fast_scan"),
+                        description=(
+                            "SAP Message Server internal port speaks "
+                            "TLS with the SAP SystemPKI client "
+                            "certificate — plaintext MS_LOGIN_2 is "
+                            "silently refused.  This is the "
+                            "hardening enabled by "
+                            "`system/secure_communication = ON` (or "
+                            "the MS-specific `ms/enforce_secure_"
+                            "communication`).  10KBLAZE (CVE-2020-"
+                            "6207) and CVE-2026-58240 ASCS_GW rogue "
+                            "registration are both BLOCKED at the "
+                            "wire layer while this is on.  The "
+                            "underlying kernel vulnerabilities may "
+                            "still be present — treat the parameter "
+                            "as defence in depth, not a "
+                            "replacement for the patches."),
+                        remediation=(
+                            "Keep system/secure_communication = ON "
+                            "and manage the SystemPKI cert lifecycle. "
+                            "Continue to apply MS-related kernel "
+                            "notes so the exploit surface stays "
+                            "closed if the parameter is ever "
+                            "toggled off."),
+                        detail=f"Port {ms_p} reachable; TLS "
+                                f"handshake succeeded / cert "
+                                f"required — no plaintext MS.",
+                    ))
+                break
             elif result["acl_protected"]:
                 logger.info(f"{node.sid}: MS port {ms_p} accessible but ACL-protected "
                             f"(errorno={result.get('errorno', '?')})")
@@ -1747,12 +1800,52 @@ def check_cve_2026_58240(node: SAPNode, timeout: float = 6.0) -> bool:
         kernel_9x = 900 <= kernel_major <= 999
         if (node.cve_2026_58240_evidence == "login_denied"
                 and kernel_9x):
-            # Try to disambiguate: is the block ms/acl_info, or is it
-            # system/secure_communication enforcing SNC/TLS on the MS
-            # wire?  SAPControl exposes ParameterValue at
-            # protection=NONE by default — anonymous HTTP query
-            # returns the runtime value for both cases, so we can
-            # tell the operator EXACTLY what's blocking us.
+            # First: probe TLS on the exact MS port that gave us the
+            # login_denied.  If it speaks TLS/SystemPKI, we have our
+            # answer without needing SAPControl at all (per Julian,
+            # kloris/SAPMAP#41).
+            _login_denied_ports = sorted(_by_verdict.get("login_denied", []))
+            _tls_hit = False
+            for _p in _login_denied_ports:
+                try:
+                    from sap_ms_betrusted import probe_ms_tls_required
+                    if probe_ms_tls_required(host, _p, timeout=4.0) == "tls_required":
+                        _tls_hit = True
+                        node.cve_2026_58240_evidence = "blocked_secure_comms"
+                        print(f"[!] {node.sid}: MS port {_p} speaks "
+                              f"TLS / SystemPKI — "
+                              f"system/secure_communication = ON.  "
+                              f"CVE-2026-58240 write path CLOSED at "
+                              f"the wire layer (kernel may still be "
+                              f"unpatched but SAPMAP cannot reach "
+                              f"the ASCS_GW opcode without SNC).")
+                        emit_finding(
+                            "INFO", node.sid,
+                            f"MS port {_p} on {node.ip} requires "
+                            f"TLS/SystemPKI.  CVE-2026-58240 is not "
+                            f"reachable via plaintext.  The kernel "
+                            f"may still be vulnerable — treat "
+                            f"secure_communication as defence in "
+                            f"depth, not a replacement for the "
+                            f"patch.",
+                            cve="CVE-2026-58240",
+                            attack_capability="")
+                        break
+                except Exception:
+                    pass
+            if _tls_hit:
+                return node.cve_2026_58240_vulnerable
+
+            # Second: if the port DIDN'T speak TLS, fall back to the
+            # SAPControl ParameterValue query — same purpose,
+            # different mechanism.  This works when
+            # ms/enforce_secure_communication is off but a different
+            # ACL is doing the blocking.
+            # SAPControl exposes ParameterValue at protection=NONE
+            # by default — anonymous HTTP query returns the runtime
+            # value.  On hardened systems where
+            # service/protectedwebmethods = ALL, this query will
+            # fail; we log the fallback path explicitly.
             _sc_ports = set()
             for inst in node.instances:
                 try:

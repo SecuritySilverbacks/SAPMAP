@@ -6685,6 +6685,12 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 print(f"[*] {sid}: MS internal port not found/reachable")
             elif node.ms_vulnerable:
                 print(f"[+] {sid}: MS port {node.ms_port} VULNERABLE — betrusted attack possible!")
+            elif node.ms_secure_comms_required:
+                print(f"[+] {sid}: MS port {node.ms_port} requires TLS / "
+                      f"SystemPKI (system/secure_communication = ON) "
+                      f"— betrusted attack CLOSED at the wire layer.  "
+                      f"Kernel vuln may still be present but SAPMAP "
+                      f"cannot reach it without SNC.")
             elif node.ms_acl_protected:
                 print(f"[~] {sid}: MS port {node.ms_port} reachable but ACL-protected")
 
@@ -16467,6 +16473,10 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 if node.ms_vulnerable:
                     print(f"[+] {sid}: MS port {node.ms_port} VULNERABLE "
                           f"— betrusted attack possible (10KBLAZE)")
+                elif node.ms_secure_comms_required:
+                    print(f"[+] {sid}: MS port {node.ms_port} requires "
+                          f"TLS / SystemPKI — betrusted CLOSED at "
+                          f"the wire layer")
                 elif node.ms_port:
                     print(f"[*] {sid}: MS port {node.ms_port} reachable "
                           f"({'ACL-protected' if node.ms_acl_protected else 'open'})")
