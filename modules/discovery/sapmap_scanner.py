@@ -1532,31 +1532,38 @@ def check_cve_2026_58240(node: SAPNode, timeout: float = 6.0) -> bool:
     if stype and "ABAP" not in stype and "DUAL" not in stype:
         return False
 
-    # Enumerate candidate MS internal ports from what the scanner
-    # already discovered.  Also fall back to 3900+NN for each known
-    # instance so we still probe when the port wasn't picked up in
-    # Pass 2 (e.g. rate-limited or firewalled during the fast scan).
-    candidate_ports = set()
+    # Enumerate candidate MS ports.
+    # The CVE-2026-58240 write path can go through EITHER the internal
+    # MS port 39XX OR the external sapms<SID> port 36XX (verified in
+    # the RedRays PoC which targeted 3602).  We probe both families
+    # for every known instance + a small sweep of adjacent instance
+    # numbers so we don't miss ASCS instances that Pass 1 hadn't
+    # fingerprinted (typical shape: dispatcher on inst 00 + ASCS on
+    # inst 01, both bind their own MS pair).
+    candidate_ports: set[int] = set()
     for inst in node.instances:
         for port in inst.ports:
             try:
                 p = int(port)
-                if 3900 <= p <= 3999:
+                if 3900 <= p <= 3999 or 3600 <= p <= 3699:
                     candidate_ports.add(p)
             except (ValueError, TypeError):
                 pass
         try:
             inst_nr = int(inst.instance_nr)
-            candidate_ports.add(3900 + inst_nr)
-            # Also try inst_nr+1 — some installs (verified on A4H docker)
-            # bind the internal MS listener on 3901 while the ABAP
-            # dispatcher is on inst 00 (3900 is silent-drop, 3901 speaks
-            # MS).  Cheap belt-and-braces vs. missing the whole check.
-            candidate_ports.add(3900 + inst_nr + 1)
+            # Both external (36XX) and internal (39XX) MS for this
+            # instance AND the next one — ASCS is typically instance
+            # (dispatcher_nr + 1); on A4H docker it's exactly that.
+            for offset in (0, 1):
+                candidate_ports.add(3600 + inst_nr + offset)
+                candidate_ports.add(3900 + inst_nr + offset)
         except (ValueError, TypeError):
             pass
     if not candidate_ports:
-        candidate_ports = {3900, 3901, 3902}
+        # Bare hosts we know nothing about — sweep instances 00-02 for
+        # both the external and internal MS ports.  Six probes total,
+        # ~6s worst case at the default timeout.
+        candidate_ports = {3600, 3601, 3602, 3900, 3901, 3902}
 
     node.cve_2026_58240_checked = True
     _verdicts_seen = {}      # port → verdict, for the summary log line
