@@ -1486,7 +1486,7 @@ def check_ms_betrusted(node: SAPNode, timeout: float = 8.0) -> bool:
                 print(f"[+] {node.sid}: MS port {ms_p} requires TLS / "
                       f"SystemPKI (system/secure_communication = "
                       f"ON) — betrusted attack CLOSED via this "
-                      f"port.  SAPMAP does not speak SNC yet, so we "
+                      f"port.  SAPMAP does not currently hold a SystemPKI client certificate signed by the target's CA, so it cannot present one during the TLS handshake, so we "
                       f"cannot exercise the write path even if the "
                       f"kernel is unpatched.  This is a robust "
                       f"compensating control.")
@@ -1798,43 +1798,69 @@ def check_cve_2026_58240(node: SAPNode, timeout: float = 6.0) -> bool:
         except ValueError:
             kernel_major = 0
         kernel_9x = 900 <= kernel_major <= 999
+        # Kick off the TLS probe on ALL suspicious ports (login_denied
+        # and no_ms_reply).  The classic secure-comms signature on a
+        # 39NN internal MS is a silent no_ms_reply — the kernel drops
+        # our plaintext frame without a formal error.  On a 36NN
+        # external sapms<SID> the same block manifests as login_denied
+        # with errno=236.  Both should be probed.  Per Julian
+        # (kloris/SAPMAP#41): TLS ClientHello is the definitive
+        # oracle here, no SAPControl needed.
+        _suspicious_ports = sorted(
+            set(_by_verdict.get("login_denied", []))
+            | set(_by_verdict.get("no_ms_reply", [])))
+        _tls_hit = False
+        _tls_probed_port = 0
+        if _suspicious_ports and kernel_9x:
+            print(f"[*] {node.sid}: probing TLS on {len(_suspicious_ports)} "
+                  f"suspicious MS port(s) to detect "
+                  f"system/secure_communication (kloris/SAPMAP#41) …")
+        for _p in _suspicious_ports:
+            try:
+                from sap_ms_betrusted import probe_ms_tls_required
+                _tls_verdict = probe_ms_tls_required(host, _p, timeout=4.0)
+            except Exception as _e:
+                print(f"[*] {node.sid}:   {host}:{_p} TLS probe error: "
+                      f"{type(_e).__name__}: {_e}")
+                continue
+            print(f"[*] {node.sid}:   {host}:{_p} TLS probe → "
+                  f"{_tls_verdict}")
+            if _tls_verdict == "tls_required":
+                _tls_hit = True
+                _tls_probed_port = _p
+                break
+
+        if _tls_hit and kernel_9x:
+            node.cve_2026_58240_evidence = "blocked_secure_comms"
+            print(f"[!] {node.sid}: MS port {_tls_probed_port} speaks "
+                  f"TLS / SystemPKI — "
+                  f"system/secure_communication = ON.  "
+                  f"CVE-2026-58240 write path CLOSED at the wire "
+                  f"layer.  The kernel may still be unpatched, but "
+                  f"SAPMAP has no SystemPKI client certificate "
+                  f"signed by this landscape's CA to present during "
+                  f"the TLS handshake — so we cannot reach the "
+                  f"ASCS_GW opcode.  This is a robust compensating "
+                  f"control.")
+            emit_finding(
+                "INFO", node.sid,
+                f"MS port {_tls_probed_port} on {node.ip} requires "
+                f"TLS/SystemPKI.  CVE-2026-58240 is not reachable "
+                f"via plaintext.  The kernel may still be "
+                f"vulnerable — treat secure_communication as "
+                f"defence in depth, not a replacement for the "
+                f"patch.",
+                cve="CVE-2026-58240",
+                attack_capability="")
+            return node.cve_2026_58240_vulnerable
+
+        # Only continue the login_denied → ACL/SAPControl branch when
+        # we actually SAW a login_denied.  A pure no_ms_reply pattern
+        # (nothing at all came back) without a TLS-required hit is
+        # ambiguous — the SAPControl fallback below handles the
+        # login_denied case only.
         if (node.cve_2026_58240_evidence == "login_denied"
                 and kernel_9x):
-            # First: probe TLS on the exact MS port that gave us the
-            # login_denied.  If it speaks TLS/SystemPKI, we have our
-            # answer without needing SAPControl at all (per Julian,
-            # kloris/SAPMAP#41).
-            _login_denied_ports = sorted(_by_verdict.get("login_denied", []))
-            _tls_hit = False
-            for _p in _login_denied_ports:
-                try:
-                    from sap_ms_betrusted import probe_ms_tls_required
-                    if probe_ms_tls_required(host, _p, timeout=4.0) == "tls_required":
-                        _tls_hit = True
-                        node.cve_2026_58240_evidence = "blocked_secure_comms"
-                        print(f"[!] {node.sid}: MS port {_p} speaks "
-                              f"TLS / SystemPKI — "
-                              f"system/secure_communication = ON.  "
-                              f"CVE-2026-58240 write path CLOSED at "
-                              f"the wire layer (kernel may still be "
-                              f"unpatched but SAPMAP cannot reach "
-                              f"the ASCS_GW opcode without SNC).")
-                        emit_finding(
-                            "INFO", node.sid,
-                            f"MS port {_p} on {node.ip} requires "
-                            f"TLS/SystemPKI.  CVE-2026-58240 is not "
-                            f"reachable via plaintext.  The kernel "
-                            f"may still be vulnerable — treat "
-                            f"secure_communication as defence in "
-                            f"depth, not a replacement for the "
-                            f"patch.",
-                            cve="CVE-2026-58240",
-                            attack_capability="")
-                        break
-                except Exception:
-                    pass
-            if _tls_hit:
-                return node.cve_2026_58240_vulnerable
 
             # Second: if the port DIDN'T speak TLS, fall back to the
             # SAPControl ParameterValue query — same purpose,

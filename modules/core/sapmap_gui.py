@@ -6690,7 +6690,9 @@ def create_app(api: SAPMAPApi) -> Bottle:
                       f"SystemPKI (system/secure_communication = ON) "
                       f"— betrusted attack CLOSED at the wire layer.  "
                       f"Kernel vuln may still be present but SAPMAP "
-                      f"cannot reach it without SNC.")
+                      f"has no SystemPKI client certificate signed by "
+                      f"this landscape's CA, so we cannot complete "
+                      f"the TLS handshake to reach the MS.")
             elif node.ms_acl_protected:
                 print(f"[~] {sid}: MS port {node.ms_port} reachable but ACL-protected")
 
