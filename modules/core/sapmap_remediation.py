@@ -190,6 +190,52 @@ CATALOG: Dict[str, Remediation] = {
         severity_if_delayed="CRITICAL",
     ),
 
+    "exploit.ms_ascs_gw_rogue": Remediation(
+        fix_summary=(
+            "Apply SAP Security Note 3759472 (CVE-2026-58240) — kernel "
+            "binary patch; no workaround"
+        ),
+        fix_steps=[
+            "Apply the fixed kernel patch level for your release: "
+            "9.16 PL100, 9.18 PL032, 9.19 PL017, 9.20 PL007.  Older "
+            "kernels (pre-9.x) don't have the vulnerable opcode family "
+            "and are not affected by this note.",
+            "The patch adds a post-parse check on the MS_ASCS_GW_LOGON "
+            "opcode ('logon not made on the internal port' / 'logon "
+            "not made from the ASCS host') — rogue registrations are "
+            "rejected at the opcode layer regardless of ACL.",
+            "Defence in depth: enable system/secure_communication = ON "
+            "(or ms/enforce_secure_communication = ON) — this blocks "
+            "plaintext MS_LOGIN_2 from any source and makes the "
+            "vulnerable opcode unreachable without an SNC channel.  "
+            "SAPMAP confirms this via SAPControl ParameterValue during "
+            "the check phase and reports it as a compensating control.",
+            "Network layer: firewall the internal MS port (39NN) to "
+            "the application-server subnet only.  The external "
+            "sapms<SID> port (36NN) can stay open for name lookup but "
+            "should not accept mutating opcodes from arbitrary hosts.",
+        ],
+        verification=[
+            "Re-run SAPMAP → Check All CVE-2026-58240.  A patched "
+            "kernel produces evidence 'confirmed_patched' after the "
+            "register step; unpatched produces 'confirmed_vulnerable' "
+            "with a CRITICAL finding.",
+            "Verify the kernel binary contains the patched trace "
+            "strings: `strings msg_server | grep 'ASCS gateway "
+            "logoff'` returns a hit only on PL100+ / PL032+ / PL017+ "
+            "/ PL007+.",
+        ],
+        refs=[
+            _cve("CVE-2026-58240"),
+            _attack("T1190"),
+            _attack("T1078"),
+            _attack("T1557"),
+        ],
+        requires_restart=True,    # kernel patch → sapstartsrv restart
+        effort_minutes=120,
+        severity_if_delayed="CRITICAL",
+    ),
+
     "exploit.cve_2025_31324": Remediation(
         fix_summary=(
             "Patch VisualComposer; remove dropped JSP webshells; restrict "

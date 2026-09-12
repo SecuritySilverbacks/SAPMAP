@@ -17076,13 +17076,27 @@ def create_app(api: SAPMAPApi) -> Bottle:
                         print(f"[!] STOP — vuln sweep aborted")
                         return
 
+                # 4b. CVE-2026-58240 (MS ASCS_GW rogue registration) —
+                # ABAP / double-stack only.  Read-only check probes
+                # the MS internal port for the opcode family.  Skipped
+                # for pure Java (no ABAP MS) and SAProuter.
+                is_abap = "ABAP" in sys_type
+                if selected.get("cve_58240") and is_abap and not is_router:
+                    try:
+                        print(f"[*] {node.sid}: check_cve_2026_58240")
+                        sapmap_scanner.check_cve_2026_58240(node)
+                    except Exception as e:
+                        print(f"[-] {node.sid}: check_cve_58240 failed: {e}")
+                    if sapmap_stop.is_stop_requested():
+                        print(f"[!] STOP — vuln sweep aborted")
+                        return
+
                 # 5. CVE-2022-22536 (ICMAD HTTP smuggling) — every
                 # HTTP-serving SAP stack: ABAP / Java / dedicated WD /
                 # any node fingerprinted as is_web_dispatcher.  The
                 # ICM Content-Length smuggling primitive lives in
                 # the SAP ICM kernel module shared across these
                 # stacks.  Skipped for SAProuter (no ICM).
-                is_abap = "ABAP" in sys_type
                 is_wd = "WEB_DISPATCHER" in sys_type
                 is_http = (is_abap or is_java or is_wd
                              or getattr(node, "is_web_dispatcher", False))

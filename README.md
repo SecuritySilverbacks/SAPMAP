@@ -89,6 +89,7 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 - **Gateway SAPXPG exploit** — Unauthenticated OS command execution via the 10KBLAZE technique (P1→P2→P3→P4 protocol chain)
 - **dpmon virtual SAP\* user creation (kernel ≥ 790, ABAP)** — Chains GW SAPXPG → `dpmon` → SAP\* one-time password → BAPI_USER_CREATE1 with SAP_ALL.  DB-agnostic alternative to the SQL-INSERT writer chain: single dpmon invocation vs ~40 SAPXPG chunks, kernel-blessed (SAP Note 3303172, won't be patched out), bypasses SCC4 client lock / DBCO routing edge cases.  Available on Phase 2 of AutoPwn and via the right-click context menu
 - **CVE-2025-31324 (VisualComposer metadatauploader)** — Unauth Java JSP webshell deployment with chunked-base64 file write, OS-aware command wrapping (cmd.exe / /bin/sh), session-resilient shell tracking
+- **CVE-2026-58240 (MS ASCS_GW rogue registration, SAP Note 3759472)** — Unauthenticated MS `ASCS_GW_LOGON` (opcode 82) write path.  Register a rogue "ASCS gateway" host/port in the Message Server's `gAscsGw` struct — the MS broadcasts our forged entry to every subscribed application server, polluting the trust list of the whole landscape.  Check + confirm-gated register + verified STATUS-based cleanup, with automatic detection of `system/secure_communication = ON` (compensating control that blocks the plaintext path).  Kernel fix at 9.16 PL100 / 9.18 PL032 / 9.19 PL017 / 9.20 PL007.  First confirmed end-to-end exploit against kernel 9.16 PL75 (Sept 2026)
 - **Message Server betrusted (CVE-2020-6207 / 10KBLAZE)** — Register a fake dispatcher with the MS so the attacker IP is added to the SAP Gateway's trusted-host list, enabling unauthenticated OS command execution via SAPXPG
 - **Direct database injection** — Create SAP users by injecting into USR02/UST04/USRBF2 tables via SQL CLI tools (hdbsql, sqlcli, sqlcmd, sqlplus, db2)
 - **BAPI user creation** — Authenticated user creation with SAP_ALL via BAPI_USER_CREATE1
@@ -229,6 +230,7 @@ The OA2C reader uses a three-tier resilience chain: `DDIF_FIELDINFO_GET` for col
 |---|---|---|
 | 10KBlaze Gateway SAPXPG OS exec | **1408081** (also 1421005, 821875) | Unauth gateway-registered server abuse (`gw/sec_info`, `gw/reg_info`) |
 | Message Server betrusted (CVE-2020-6207) | **2890213** | Unauth internal MS port abuse / ACL bypass |
+| MS ASCS_GW rogue registration (CVE-2026-58240) | **3759472** | Unauth `ASCS_GW_LOGON` opcode 82 write — kernel binary patch, no workaround |
 | VisualComposer JSP webshell (CVE-2025-31324) | **3594142** | Unauth file upload via `/developmentserver/metadatauploader` |
 | RECON Java LM Wizard (CVE-2020-6287) | **2934135** (FAQ 2948106) | Unauth Java admin user creation via `/CTCWebService/CTCWebServiceBean` |
 | SAProuter info leak (CVE-2022-22536) | **3123396** | Unauth landscape discovery via SAProuter response |

@@ -146,6 +146,11 @@ TECHNIQUES: Dict[str, Dict] = {
     "T1078.001": {"name": "Default Accounts",               "tactic": "TA0001", "sub_of": "T1078"},
     "T1078.004": {"name": "Cloud Accounts",                 "tactic": "TA0001", "sub_of": "T1078"},
 
+    # Adversary-in-the-Middle (used for CVE-2026-58240 rogue ASCS
+    # gateway registration — application servers route trusted
+    # cross-instance traffic to the attacker-controlled endpoint).
+    "T1557":     {"name": "Adversary-in-the-Middle",         "tactic": "TA0009"},
+
     # Lateral Movement
     "T1021":     {"name": "Remote Services",                "tactic": "TA0008"},
     "T1021.004": {"name": "SSH",                             "tactic": "TA0008", "sub_of": "T1021"},
@@ -241,6 +246,13 @@ CAPABILITY_MAP: Dict[str, List[str]] = {
     "exploit.cve_2020_6287":     ["T1190", "T1136.001"],
     "exploit.cve_2022_22536":    ["T1190", "T1574"],
     "exploit.ms_betrusted":      ["T1190", "T1078"],
+    # CVE-2026-58240 — MS ASCS_GW rogue registration.  Same shape as
+    # ms_betrusted (T1190 exploit-public-facing + T1078 valid accounts
+    # via trust-list pollution), plus T1557 "adversary-in-the-middle"
+    # because the rogue ASCS entry redirects internal cross-instance
+    # traffic (enqueue coordination, SSO2 ticket relay, internal RFC
+    # callbacks) to the attacker-controlled endpoint.
+    "exploit.ms_ascs_gw_rogue":  ["T1190", "T1078", "T1557"],
     "exploit.sapxpg":            ["T1190", "T1059"],
 
     # ---- Privilege Escalation ----

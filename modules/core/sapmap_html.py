@@ -931,6 +931,7 @@ body {
       <div class="dd-item" onclick="checkAllCve31324()">&#128272; Check All CVE-2025-31324 (Java VisualComposer)</div>
       <div class="dd-item" onclick="checkAllCve6287()">&#128272; Check All CVE-2020-6287 (RECON)</div>
       <div class="dd-item" onclick="checkAllCve22536()">&#128272; Check All CVE-2022-22536 (ICMAD)</div>
+      <div class="dd-item" onclick="checkAllCve58240()">&#128272; Check All CVE-2026-58240 (MS ASCS_GW rogue reg.)</div>
       <div class="dd-item" onclick="checkAllRouterInfo()">&#128272; Check All SAProuter Info Leak</div>
       <div class="dd-item" onclick="checkAllSnc()">&#128274; Check All SNC Posture</div>
       <div class="dd-sep"></div>
@@ -1435,6 +1436,7 @@ body {
   <div class="ctx-item" id="map-ctx-check-all-cve-31324" data-action="map_check_all_cve_31324">&#128272; Check All CVE-2025-31324 (Java VisualComposer)</div>
   <div class="ctx-item" id="map-ctx-check-all-cve-6287" data-action="map_check_all_cve_6287">&#128272; Check All CVE-2020-6287 (RECON)</div>
   <div class="ctx-item" id="map-ctx-check-all-cve-22536" data-action="map_check_all_cve_22536">&#128272; Check All CVE-2022-22536 (ICMAD)</div>
+  <div class="ctx-item" id="map-ctx-check-all-cve-58240" data-action="map_check_all_cve_58240">&#128272; Check All CVE-2026-58240 (MS ASCS_GW rogue reg.)</div>
   <div class="ctx-item" id="map-ctx-check-all-router-info" data-action="map_check_all_router_info">&#128272; Check All SAProuter Info Leak</div>
   <div class="ctx-item" id="map-ctx-check-all-snc" data-action="map_check_all_snc">&#128274; Check All SNC Posture</div>
   <div class="ctx-item" data-action="map_attack_coverage">&#9876;&#65039; ATT&amp;CK Coverage Matrix</div>
@@ -2111,6 +2113,7 @@ body {
       <label class="autopwn-cb"><input type="checkbox" id="vsel-cve-31324" checked> CVE-2025-31324 — VisualComposer JSP unauth (Java only)</label>
       <label class="autopwn-cb"><input type="checkbox" id="vsel-cve-6287" checked> CVE-2020-6287 — RECON (Java only)</label>
       <label class="autopwn-cb"><input type="checkbox" id="vsel-cve-22536" checked> CVE-2022-22536 — ICMAD smuggle (ABAP / Java / WD)</label>
+      <label class="autopwn-cb"><input type="checkbox" id="vsel-cve-58240" checked> CVE-2026-58240 — MS ASCS_GW rogue registration (ABAP only)</label>
       <label class="autopwn-cb"><input type="checkbox" id="vsel-router-info" checked> SAProuter Info Leak (SAProuter nodes)</label>
       <label class="autopwn-cb" style="color:#d29922">
         <input type="checkbox" id="vsel-default-creds">
@@ -16422,18 +16425,21 @@ function scanAllVulns() {
 }
 function selectAllVulns(on) {
   ['vsel-gw', 'vsel-ms', 'vsel-cve-31324', 'vsel-cve-6287',
-   'vsel-cve-22536', 'vsel-router-info', 'vsel-default-creds']
-    .forEach(id => { document.getElementById(id).checked = on; });
+   'vsel-cve-22536', 'vsel-cve-58240', 'vsel-router-info',
+   'vsel-default-creds']
+    .forEach(id => { const el = document.getElementById(id); if (el) el.checked = on; });
 }
 async function runSelectedVulns() {
+  const _q = id => { const el = document.getElementById(id); return !!(el && el.checked); };
   const checks = {
-    gw:            document.getElementById('vsel-gw').checked,
-    ms:            document.getElementById('vsel-ms').checked,
-    cve_31324:     document.getElementById('vsel-cve-31324').checked,
-    cve_6287:      document.getElementById('vsel-cve-6287').checked,
-    cve_22536:     document.getElementById('vsel-cve-22536').checked,
-    router_info:   document.getElementById('vsel-router-info').checked,
-    default_creds: document.getElementById('vsel-default-creds').checked,
+    gw:            _q('vsel-gw'),
+    ms:            _q('vsel-ms'),
+    cve_31324:     _q('vsel-cve-31324'),
+    cve_6287:      _q('vsel-cve-6287'),
+    cve_22536:     _q('vsel-cve-22536'),
+    cve_58240:     _q('vsel-cve-58240'),
+    router_info:   _q('vsel-router-info'),
+    default_creds: _q('vsel-default-creds'),
   };
   if (!Object.values(checks).some(v => v)) {
     alert('Select at least one check.');
@@ -16512,6 +16518,27 @@ async function checkAllCve22536() {
   if (confirm(`Check CVE-2022-22536 (ICMAD HTTP smuggling) on ${eligible.length} system(s)?\n\n` +
               `Probes for the ICM Content-Length smuggling primitive - passive, no payload sent to internal apps.`))
     await api('POST', 'actions/check_all_cve_22536');
+  startPolling();
+}
+async function checkAllCve58240() {
+  // CVE-2026-58240 — MS ASCS_GW rogue registration.  The check probes
+  // the MS internal port (39NN) with anonymous MS_LOGIN_2, so it's
+  // meaningful only on nodes with an ABAP MS: pure ABAP or
+  // double-stack ABAP+Java.  Pure Java (ASCS/SCS on Java) has no
+  // ABAP MS and no ASCS_GW opcode.
+  const nodes = Object.values(mapState.nodes || {});
+  const eligible = nodes.filter(n => {
+    const st = (n.system_type || '').toUpperCase();
+    return st.indexOf('ABAP') !== -1 || st.indexOf('DUAL') !== -1;
+  });
+  if (eligible.length < 1) {
+    alert('No ABAP / double-stack systems on the map — CVE-2026-58240 only affects the ABAP MS.');
+    return;
+  }
+  if (confirm(`Check CVE-2026-58240 (MS ASCS_GW rogue registration) on ${eligible.length} system(s)?\n\n` +
+              `Anonymous MS_LOGIN_2 + opcode 82/83 probe — read-only, no rogue registration.  ` +
+              `Vulnerable kernels: 9.16 <PL100 / 9.18 <PL032 / 9.19 <PL017 / 9.20 <PL007.`))
+    await api('POST', 'actions/check_all_cve_58240');
   startPolling();
 }
 async function checkAllRouterInfo() {
@@ -18375,6 +18402,7 @@ document.getElementById('map-ctx-menu').addEventListener('click', function(e) {
     case 'map_check_all_cve_31324': checkAllCve31324(); break;
     case 'map_check_all_cve_6287': checkAllCve6287(); break;
     case 'map_check_all_cve_22536': checkAllCve22536(); break;
+    case 'map_check_all_cve_58240': checkAllCve58240(); break;
     case 'map_check_all_router_info': checkAllRouterInfo(); break;
     case 'map_check_all_snc': checkAllSnc(); break;
     case 'map_attack_coverage': showAttackCoverage(); break;

@@ -1533,6 +1533,75 @@ def _derive_landscape_recommendations(state: SAPMAPState) -> list:
             "refs": "SAP Note 3594142",
         })
 
+    # 3a. CVE-2026-58240 — MS ASCS_GW rogue registration (SAP Note 3759472)
+    ascs_confirmed = sorted(
+        n.sid for n in nodes
+        if getattr(n, "cve_2026_58240_evidence", "") == "confirmed_vulnerable"
+           or getattr(n, "cve_2026_58240_vulnerable", False))
+    ascs_opcodes = sorted(
+        n.sid for n in nodes
+        if getattr(n, "cve_2026_58240_evidence", "") == "opcode_recognised"
+           and n.sid not in ascs_confirmed)
+    ascs_secure_comms = sorted(
+        n.sid for n in nodes
+        if getattr(n, "cve_2026_58240_evidence", "") == "blocked_secure_comms")
+    if ascs_confirmed or ascs_opcodes or ascs_secure_comms:
+        scope_bits = []
+        if ascs_confirmed:
+            scope_bits.append("CONFIRMED VULNERABLE: " + ", ".join(ascs_confirmed))
+        if ascs_opcodes:
+            scope_bits.append("opcodes present (patched status unverified): "
+                              + ", ".join(ascs_opcodes))
+        if ascs_secure_comms:
+            scope_bits.append("kernel in fix window but blocked by "
+                              "system/secure_communication: "
+                              + ", ".join(ascs_secure_comms))
+        body = (
+            "SAP Security Note 3759472 (CVE-2026-58240, CVSS 9.8 "
+            "HotNews) — Missing authentication check in the SAP "
+            "NetWeaver Message Server.  An unauthenticated attacker "
+            "with network access to the internal MS port (39NN) or "
+            "the external sapms<SID> port (36NN) can register a "
+            "rogue \"ASCS gateway\" component via opcode "
+            "MS_ASCS_GW_LOGON (0x52).  The Message Server broadcasts "
+            "the forged entry to every subscribed application server "
+            "— polluting the trust list of the whole landscape and "
+            "enabling downstream ticket theft, enqueue coordination "
+            "abuse, and internal RFC redirection."
+        )
+        if ascs_confirmed:
+            body += (f"\n\nLive registration confirmed on: "
+                     f"{', '.join(ascs_confirmed)} — the rogue port "
+                     f"was observed in the MsSSndAscsGwInfo "
+                     f"broadcast body.  Cleanup was performed via "
+                     f"SAPMAP's verified STATUS re-query.")
+        if ascs_secure_comms:
+            body += (f"\n\nOn {', '.join(ascs_secure_comms)} the "
+                     f"exploit is BLOCKED at the wire layer by "
+                     f"system/secure_communication or a related "
+                     f"parameter.  This is a strong compensating "
+                     f"control but does not remove the underlying "
+                     f"kernel vulnerability — patch to eliminate "
+                     f"the exposure completely, and treat the "
+                     f"secure-comms parameter as a defence-in-"
+                     f"depth setting.")
+        body += (
+            "\n\nFixed kernel patch levels: 9.16 PL100, 9.18 PL032, "
+            "9.19 PL017, 9.20 PL007.  No workaround — the fix is a "
+            "kernel binary patch that adds a post-parse check "
+            "(\"logon not made on the internal port\" / \"logon "
+            "not made from the ASCS host\").  Older kernels (pre-"
+            "9.x) don't have the ASCS_GW opcode family at all and "
+            "are not affected."
+        )
+        items.append({
+            "category": "Kernel patching",
+            "scope": " | ".join(scope_bits),
+            "title": "Patch CVE-2026-58240 (MS ASCS_GW rogue registration)",
+            "body": body,
+            "refs": "SAP Security Note 3759472",
+        })
+
     # 3b. CVE-2022-22536 (ICMAD)
     icmad_live = sorted(n.sid for n in nodes
                           if getattr(n, "cve_2022_22536_vulnerable", False))
