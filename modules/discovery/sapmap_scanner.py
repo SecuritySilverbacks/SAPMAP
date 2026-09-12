@@ -1778,10 +1778,15 @@ def check_cve_2026_58240(node: SAPNode, timeout: float = 6.0) -> bool:
                     host, _sc_ports, timeout=3.0)
             except Exception:
                 _sc_snapshot = {}
-            _sc_on = secure_comms_enforced(_sc_snapshot) if _sc_snapshot else False
+            # An endpoint answered iff sapcontrol_port is set — the
+            # snapshot dict may otherwise contain only `endpoints_tried`
+            # (the list of probes we attempted before giving up).
+            _sc_answered = bool(_sc_snapshot.get("sapcontrol_port")) \
+                             if _sc_snapshot else False
+            _sc_on = secure_comms_enforced(_sc_snapshot) if _sc_answered else False
             _sc_summary = ", ".join(
                 f"{n}={_sc_snapshot.get(n, '?')!r}"
-                for n in _SECURE_COMM_PARAMS) if _sc_snapshot else ""
+                for n in _SECURE_COMM_PARAMS) if _sc_answered else ""
 
             if _sc_on:
                 print(f"[!] {node.sid}: MS on port "
@@ -1819,24 +1824,73 @@ def check_cve_2026_58240(node: SAPNode, timeout: float = 6.0) -> bool:
                 # cause, different remediation.
                 return node.cve_2026_58240_vulnerable
 
-            if _sc_snapshot and not _sc_on:
+            if _sc_answered and not _sc_on:
                 print(f"[*] {node.sid}: SAPControl on port "
-                      f"{_sc_snapshot.get('sapcontrol_port')} reports "
-                      f"secure-comms OFF ({_sc_summary}).  The MS "
-                      f"login_denied is therefore an ACL rejection, "
-                      f"NOT a secure-comms enforcement.")
-            elif not _sc_snapshot:
-                print(f"[*] {node.sid}: SAPControl not answering on "
-                      f"{_sc_ports} — could not confirm whether the "
-                      f"login_denied is ACL or secure-comms.")
-            print(f"[!] {node.sid}: MS accepts TCP but ACL rejects our "
-                  f"MS_LOGIN_2 (errorno=236 style).  Kernel {kernel_str} "
+                      f"{_sc_snapshot.get('sapcontrol_port')} "
+                      f"({_sc_snapshot.get('endpoint_kind', 'sapcontrol')}) "
+                      f"reports secure-comms OFF ({_sc_summary}).  "
+                      f"The MS login_denied is therefore an ACL "
+                      f"rejection, NOT a secure-comms enforcement.")
+            elif not _sc_answered:
+                # Verbose fallback: explain the WHAT we tried, the
+                # WHY the probe might not have worked, the HOW to
+                # confirm manually, and the STRONG HINT the errno
+                # 236 pattern gives us.
+                _tried = (_sc_snapshot.get("endpoints_tried")
+                           if isinstance(_sc_snapshot, dict) else None)
+                if not _tried:
+                    _tried = ([(p, "sapcontrol-http") for p in _sc_ports]
+                                + [(p + 1, "sapcontrol-https") for p in _sc_ports]
+                                + [(1128, "hostagent-http"),
+                                   (1129, "hostagent-https")])
+                _tried_str = ", ".join(f"{p}({k})" for p, k in _tried)
+                print(f"[?] {node.sid}: SAPControl / SAP Host Agent "
+                      f"unavailable — tried {_tried_str} and none "
+                      f"responded.  Cannot AUTHORITATIVELY confirm "
+                      f"whether the MS errno=236 is ACL rejection "
+                      f"or system/secure_communication enforcement.")
+                print(f"[?] {node.sid}: Reasons the probe may have "
+                      f"failed:")
+                print(f"[?] {node.sid}:   1. Firewall between SAPMAP "
+                      f"and the target — SAPControl ports typically "
+                      f"aren't exposed on the internet.")
+                print(f"[?] {node.sid}:   2. `service/protectedwebmethods "
+                      f"= ALL` (or `= ParameterValue`) — the "
+                      f"ParameterValue method requires HTTP Basic "
+                      f"auth on hardened systems.  SAPMAP does not "
+                      f"authenticate to SAPControl here (yet — "
+                      f"anonymous probe by design).")
+                print(f"[?] {node.sid}:   3. SAPControl only listens "
+                      f"on management VLAN / localhost.")
+                print(f"[?] {node.sid}: To confirm the root cause "
+                      f"manually, run ON the target as <sid>adm:")
+                print(f"[?] {node.sid}:   sappfpar name=system/"
+                      f"secure_communication pf=/usr/sap/<SID>/SYS/"
+                      f"profile/DEFAULT.PFL")
+                print(f"[?] {node.sid}:   sappfpar name=ms/"
+                      f"enforce_secure_communication pf=/usr/sap/"
+                      f"<SID>/SYS/profile/DEFAULT.PFL")
+                print(f"[?] {node.sid}: STRONG HINT: MS errno=236 is "
+                      f"most commonly seen when "
+                      f"system/secure_communication is ON — the "
+                      f"kernel refuses plaintext MS_LOGIN_2 with "
+                      f"exactly this error code (verified against "
+                      f"SBD, 2026-09-12).  A genuine "
+                      f"ms/acl_info denial typically returns a "
+                      f"different errno or silently drops the TCP "
+                      f"connection.  Absent SAPControl confirmation "
+                      f"the operator should treat errno=236 as "
+                      f"'probably secure-comms enforcement' when "
+                      f"triaging.")
+            print(f"[!] {node.sid}: MS accepts TCP but rejects our "
+                  f"MS_LOGIN_2 with errno=236.  Kernel {kernel_str} "
                   f"is in the CVE-2026-58240 fix window (9.x).  If "
-                  f"kernel is at PL < fix-level (100/32/17/7 for "
-                  f"9.16/9.18/9.19/9.20), the vuln IS present — the "
-                  f"ms/acl_info list is the only thing blocking "
-                  f"remote exploitation.  Pivot via a trusted host to "
-                  f"reach the write path.")
+                  f"the kernel is at PL < fix-level (100/32/17/7 "
+                  f"for 9.16/9.18/9.19/9.20), the underlying vuln "
+                  f"IS present — the block we're hitting is either "
+                  f"ms/acl_info (pivot via a trusted host reaches "
+                  f"it) or system/secure_communication (need SNC "
+                  f"to reach it — SAPMAP doesn't speak SNC yet).")
             emit_finding(
                 "MEDIUM", node.sid,
                 f"MS on {node.ip} is reachable on port "
