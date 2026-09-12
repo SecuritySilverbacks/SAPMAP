@@ -371,6 +371,15 @@ FAST_SCAN_PORT_PATTERNS = {
     # (which normally covers 33XX) never fired because Pass 2 is gated
     # on a dispatcher hit.  Doubles the fast-scan port count (~200 →
     # ~300 per host) but catches this real class of target.
+    "sapms":      3600,    # 3600 + instance_nr  — sapms<SID> external MS
+    # The external Message Server port (documented as `sapms<SID>` in
+    # /etc/services).  Traditionally used for name lookup / MS HTTP
+    # browsing on 8100+NN.  CVE-2026-58240 (MS ASCS_GW rogue
+    # registration) is theoretically reachable via this port on
+    # unpatched 9.x kernels — we detect it here so the check module
+    # has a target to probe.  Bind + ACL on modern kernels usually
+    # keeps 3600 read-only; the internal port 3900+NN (already covered
+    # by Pass 2) is the primary exploit vector.
 }
 
 # ---------------------------------------------------------------------------

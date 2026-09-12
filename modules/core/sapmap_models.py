@@ -624,6 +624,15 @@ class SAPNode:
     ms_port: int = 0                    # MS internal port found (39NN), 0 = not found
     ms_vulnerable: bool = False         # True if MS lacks ACL protection (CVE-2020-6207)
     ms_acl_protected: bool = False      # True if MS port reachable but ACL blocks our IP
+    # CVE-2026-58240 — MS ASCS_GW rogue registration (trust-list pollution).
+    # Set by sap_cve_2026_58240.check_ascs_gw_registration() on any node
+    # with an MS internal port (39NN) reachable + ABAP stack.
+    cve_2026_58240_checked: bool = False
+    cve_2026_58240_vulnerable: bool = False       # opcode 82/83 recognised
+    cve_2026_58240_ms_port: int = 0               # port that answered
+    cve_2026_58240_ascs_identity: str = ""        # leaked <host>_<SID>_<inst>
+    cve_2026_58240_registered: bool = False       # write path exercised
+    cve_2026_58240_evidence: str = ""             # verdict from probe
     # CVE-2025-31324 — Java VisualComposer metadatauploader unauth RCE
     cve_2025_31324_checked: bool = False
     cve_2025_31324_vulnerable: bool = False
@@ -972,6 +981,12 @@ class SAPNode:
             "ms_vulnerable": self.ms_vulnerable,
             "ms_acl_protected": self.ms_acl_protected,
             "cve_2025_31324_checked": self.cve_2025_31324_checked,
+            "cve_2026_58240_checked": self.cve_2026_58240_checked,
+            "cve_2026_58240_vulnerable": self.cve_2026_58240_vulnerable,
+            "cve_2026_58240_ms_port": self.cve_2026_58240_ms_port,
+            "cve_2026_58240_ascs_identity": self.cve_2026_58240_ascs_identity,
+            "cve_2026_58240_registered": self.cve_2026_58240_registered,
+            "cve_2026_58240_evidence": self.cve_2026_58240_evidence,
             "cve_2025_31324_vulnerable": self.cve_2025_31324_vulnerable,
             "cve_2025_31324_port": self.cve_2025_31324_port,
             "cve_2025_31324_https": self.cve_2025_31324_https,
@@ -1097,6 +1112,12 @@ class SAPNode:
             ms_vulnerable=d.get("ms_vulnerable", False),
             ms_acl_protected=d.get("ms_acl_protected", False),
             cve_2025_31324_checked=d.get("cve_2025_31324_checked", False),
+            cve_2026_58240_checked=d.get("cve_2026_58240_checked", False),
+            cve_2026_58240_vulnerable=d.get("cve_2026_58240_vulnerable", False),
+            cve_2026_58240_ms_port=d.get("cve_2026_58240_ms_port", 0),
+            cve_2026_58240_ascs_identity=d.get("cve_2026_58240_ascs_identity", ""),
+            cve_2026_58240_registered=d.get("cve_2026_58240_registered", False),
+            cve_2026_58240_evidence=d.get("cve_2026_58240_evidence", ""),
             cve_2025_31324_vulnerable=d.get("cve_2025_31324_vulnerable", False),
             cve_2025_31324_port=d.get("cve_2025_31324_port", 0),
             cve_2025_31324_https=d.get("cve_2025_31324_https", False),

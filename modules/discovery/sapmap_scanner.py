@@ -916,13 +916,13 @@ def fast_scan_host(host: str, instance_range: tuple = DEFAULT_INSTANCE_RANGE,
     # scan-like on the wire and each probe stays well under any
     # rate-limit window.
     _sap_hits_in_pass1 = any(
-        v["service"] in ("dispatcher", "gateway", "saprouter")
+        v["service"] in ("dispatcher", "gateway", "saprouter", "sapms")
         for v in hits1.values())
     if not _sap_hits_in_pass1 and not _cancelled():
         # Only the SAP-native ports (32XX + 33XX), no need to re-do the
         # WD or Host Agent probes since those aren't rate-limit prone.
         _sap_ports = [(p, s, i) for (p, s, i) in ports_pass1
-                       if s in ("dispatcher", "gateway", "saprouter")]
+                       if s in ("dispatcher", "gateway", "saprouter", "sapms")]
         # Randomise so we don't hit 3200, 3201, 3202 ... which looks
         # like a textbook port scan to any IDS/host firewall.
         import random as _rnd_seq
@@ -1493,6 +1493,132 @@ def check_ms_betrusted(node: SAPNode, timeout: float = 8.0) -> bool:
                 break
 
     return found_any
+
+
+# ---------------------------------------------------------------------------
+# CVE-2026-58240 — MS ASCS_GW rogue registration (SAP Note 3759472)
+# ---------------------------------------------------------------------------
+
+def check_cve_2026_58240(node: SAPNode, timeout: float = 6.0) -> bool:
+    """Probe the MS internal port for the MS_ASCS_GW opcode family.
+
+    Runs the read-only check from `sap_cve_2026_58240` — anonymous
+    MS_LOGIN_2 followed by opcodes 82/83.  The opcodes only exist in
+    the 9.x kernel line; pre-9.x kernels return a short echo reply
+    with err=1 and `verdict="opcode_absent"`.
+
+    Updates:
+      node.cve_2026_58240_checked         — set True after any probe attempt
+      node.cve_2026_58240_vulnerable      — True on `verdict=opcode_recognised`
+      node.cve_2026_58240_ms_port         — port that answered
+      node.cve_2026_58240_ascs_identity   — leaked `<host>_<SID>_<inst>` on 9.x
+      node.cve_2026_58240_evidence        — verdict string
+
+    Returns True when we produced a signal (either verdict).
+    """
+    try:
+        from sap_cve_2026_58240 import check_ascs_gw_registration
+    except ImportError:
+        logger.warning("sap_cve_2026_58240 not available — skipping")
+        return False
+
+    host = node.ip or node.hostname
+    if not host:
+        return False
+
+    # Only meaningful on ABAP / dual-stack nodes.  Pure Java has no MS
+    # protocol at all; pure HANA / SAProuter obviously not either.
+    stype = (node.system_type or "").upper()
+    if stype and "ABAP" not in stype and "DUAL" not in stype:
+        return False
+
+    # Enumerate candidate MS internal ports from what the scanner
+    # already discovered.  Also fall back to 3900+NN for each known
+    # instance so we still probe when the port wasn't picked up in
+    # Pass 2 (e.g. rate-limited or firewalled during the fast scan).
+    candidate_ports = set()
+    for inst in node.instances:
+        for port in inst.ports:
+            try:
+                p = int(port)
+                if 3900 <= p <= 3999:
+                    candidate_ports.add(p)
+            except (ValueError, TypeError):
+                pass
+        try:
+            inst_nr = int(inst.instance_nr)
+            candidate_ports.add(3900 + inst_nr)
+        except (ValueError, TypeError):
+            pass
+    if not candidate_ports:
+        candidate_ports = {3900, 3901, 3902}
+
+    node.cve_2026_58240_checked = True
+    for ms_port in sorted(candidate_ports):
+        try:
+            import sapmap_stop
+            if sapmap_stop.is_stop_requested():
+                return False
+        except ImportError:
+            pass
+        result = check_ascs_gw_registration(host, ms_port, timeout=timeout)
+        verdict = result.get("verdict", "")
+        node.cve_2026_58240_evidence = verdict
+
+        if verdict == "opcode_recognised":
+            node.cve_2026_58240_vulnerable = True
+            node.cve_2026_58240_ms_port = ms_port
+            node.cve_2026_58240_ascs_identity = result.get("ascs_identity", "")
+            leaked = result.get("ascs_identity") or "(no identity in reply)"
+            logger.info(f"{node.sid}: MS port {ms_port} — ASCS_GW opcode "
+                        f"family present; leaked identity: {leaked}")
+            emit_finding(
+                "HIGH", node.sid,
+                f"MS port {ms_port} recognises the ASCS_GW opcode "
+                f"family (opcodes 82/83) pre-auth — kernel is in "
+                f"the CVE-2026-58240 fix window.  Leaked ASCS "
+                f"identity: {leaked}.  Confirmation of rogue "
+                f"registration requires the write step (menu → "
+                f"Exploitation → 'Register rogue ASCS gateway').",
+                cve="CVE-2026-58240",
+                attack_capability="exploit.ms_ascs_gw_rogue",
+            )
+            node.findings.append(Finding(
+                name="MS ASCS_GW Opcode Family Present (CVE-2026-58240)",
+                severity=Severity.HIGH,
+                attack_techniques=_attack_for("exploit.ms_ascs_gw_rogue"),
+                description=(
+                    "The SAP Message Server internal port recognises "
+                    "the ASCS_GW opcode family (0x52 MS_ASCS_GW_LOGON, "
+                    "0x53 MS_ASCS_GW_STATUS) pre-authentication.  On "
+                    "kernels below the fix level (9.16 PL100 / 9.18 "
+                    "PL032 / 9.19 PL017 / 9.20 PL007), an attacker "
+                    "can register a rogue ASCS gateway component and "
+                    "pollute the trust list of every subscribed "
+                    "application server (CVSS 9.8, SAP Note 3759472). "
+                    "This probe cannot distinguish patched from "
+                    "unpatched without exercising the destructive "
+                    "write path — use the register menu action to "
+                    "confirm impact on an authorised target."
+                ),
+                remediation=(
+                    "Apply SAP Security Note 3759472.  Fixed kernel "
+                    "patch levels: 9.16 PL100, 9.18 PL032, 9.19 "
+                    "PL017, 9.20 PL007.  No workaround."
+                ),
+                detail=f"Verdict: {verdict}; leaked identity: {leaked}",
+            ))
+            node.has_critical_finding = True
+            return True
+
+        if verdict in ("opcode_absent",):
+            logger.debug(f"{node.sid}: MS port {ms_port} — "
+                          f"opcode 82/83 absent (kernel pre-9.x)")
+            # keep scanning other ports — a multi-instance host might
+            # answer differently on different ports.
+            continue
+
+    return node.cve_2026_58240_vulnerable
 
 
 # ---------------------------------------------------------------------------
