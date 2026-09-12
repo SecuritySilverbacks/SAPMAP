@@ -5903,6 +5903,13 @@ function showCtxMenu(e, sid) {
   const hasGwVuln = n && n.gw_vulnerable;
   const hasMsVuln = n && n.ms_vulnerable;
   const hasMsPort = n && n.ms_port > 0;
+  // kloris/SAPMAP#41 — set by check_ms_betrusted when the MS internal
+  // port only speaks TLS/SystemPKI (system/secure_communication = ON).
+  // Both betrusted (CVE-2020-6207) and the CVE-2026-58240 write path
+  // are BLOCKED at the wire layer while this is on — hide the
+  // corresponding menu items so the operator can't fire a doomed
+  // attempt.
+  const msSecureComms = !!(n && n.ms_secure_comms_required);
   const sysType = (n && typeof n.system_type === 'string') ? n.system_type.toUpperCase() : '';
   const isJavaStack = sysType.indexOf('JAVA') !== -1;
   const isAbapStack = sysType.indexOf('ABAP') !== -1;
@@ -5997,8 +6004,14 @@ function showCtxMenu(e, sid) {
                                   && n.cve_2022_22536_acl_bypass['/heapdump/']
                                   && n.cve_2022_22536_acl_bypass['/heapdump/'].via === 'smuggle'),
     'create_user_java':      isJavaStack && (hasCve31324 || hasCve6287 || hasGwVuln),
-    'betrusted':             hasMsPort,              // need a known MS port
-    'create_user_betrusted': hasMsVuln || hasGwVuln, // need vulnerable MS or GW
+    // Betrusted needs a plaintext MS.  If the port speaks TLS
+    // (msSecureComms), the attack path is closed regardless of the
+    // rest — hide the menu item.
+    'betrusted':             hasMsPort && !msSecureComms,
+    // Same gate for the composite user-creation flow when it relies
+    // on the MS betrusted primitive.  GW-based user creation is a
+    // separate flag and doesn't care about MS TLS.
+    'create_user_betrusted': (hasMsVuln && !msSecureComms) || hasGwVuln,
     'create_user_gw':   hasGwVuln,                  // need GW vulnerability
     'create_user_dpmon_sapstar': hasGwVuln && isAbapStack && n.dpmon_sap_star_available,  // kernel>=790 + ABAP + GW
     // Transport import needs an OS-exec channel on the target.  Two
@@ -6273,8 +6286,12 @@ function showCtxMenu(e, sid) {
   const hints = {
     'rfc_system_info':  'No gateway port detected',
     'check_gw':         'No gateway port detected',
-    'betrusted':             'Run Check MS Betrusted first to find the MS port',
-    'create_user_betrusted': 'Requires a vulnerable MS (betrusted) or gateway',
+    'betrusted':             (msSecureComms
+        ? 'MS port requires TLS/SystemPKI (system/secure_communication = ON) — betrusted attack CLOSED at the wire layer.  SAPMAP has no SystemPKI client certificate signed by this landscape\'s CA to present during the TLS handshake.'
+        : 'Run Check MS Betrusted first to find the MS port'),
+    'create_user_betrusted': (msSecureComms && !hasGwVuln
+        ? 'MS port requires TLS/SystemPKI and no vulnerable RFC Gateway is available.  Neither betrusted nor GW SAPXPG can be used to create a user on this target.'
+        : 'Requires a vulnerable MS (betrusted) or gateway'),
     'check_cve_31324':       'Only applicable to Java / double-stack systems',
     'check_cve_58240':       'Only applicable to ABAP / double-stack systems (MS is an ABAP kernel component)',
     'exploit_cve_58240_register':   'Run "Check CVE-2026-58240" first — need a target where the opcode family is recognised',
@@ -6494,6 +6511,11 @@ function showCtxMenu(e, sid) {
     'create_tcpip':          !isAbapStack,
     'create_user_creds':     !isAbapStack,
     'create_user_betrusted': !isAbapStack,
+    // Hide betrusted entirely on MS-TLS-hardened targets — the attack
+    // path is closed at the wire layer, no point showing the option
+    // even greyed out.  Matches the behaviour we already do for other
+    // wire-layer-blocked primitives.
+    'betrusted':             msSecureComms,
     'download_secstore':     !isAbapStack,  // RSECTAB is an ABAP table
     'ransapware_encrypt':    !isAbapStack,
     'ransapware_decrypt':    !isAbapStack,
