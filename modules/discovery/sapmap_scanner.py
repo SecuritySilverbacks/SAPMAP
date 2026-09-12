@@ -1747,6 +1747,88 @@ def check_cve_2026_58240(node: SAPNode, timeout: float = 6.0) -> bool:
         kernel_9x = 900 <= kernel_major <= 999
         if (node.cve_2026_58240_evidence == "login_denied"
                 and kernel_9x):
+            # Try to disambiguate: is the block ms/acl_info, or is it
+            # system/secure_communication enforcing SNC/TLS on the MS
+            # wire?  SAPControl exposes ParameterValue at
+            # protection=NONE by default — anonymous HTTP query
+            # returns the runtime value for both cases, so we can
+            # tell the operator EXACTLY what's blocking us.
+            _sc_ports = set()
+            for inst in node.instances:
+                try:
+                    inr = int(inst.instance_nr)
+                    _sc_ports.add(50013 + inr * 100)
+                except (ValueError, TypeError):
+                    pass
+                for _p in inst.ports:
+                    try:
+                        _pp = int(_p)
+                        if 50000 <= _pp <= 59999 and _pp % 100 == 13:
+                            _sc_ports.add(_pp)
+                    except (ValueError, TypeError):
+                        pass
+            if not _sc_ports:
+                _sc_ports = {50013, 50113, 50213}
+            _sc_ports = sorted(_sc_ports)
+            try:
+                from sap_cve_2026_58240 import (
+                    probe_secure_comms_config, secure_comms_enforced,
+                    _SECURE_COMM_PARAMS)
+                _sc_snapshot = probe_secure_comms_config(
+                    host, _sc_ports, timeout=3.0)
+            except Exception:
+                _sc_snapshot = {}
+            _sc_on = secure_comms_enforced(_sc_snapshot) if _sc_snapshot else False
+            _sc_summary = ", ".join(
+                f"{n}={_sc_snapshot.get(n, '?')!r}"
+                for n in _SECURE_COMM_PARAMS) if _sc_snapshot else ""
+
+            if _sc_on:
+                print(f"[!] {node.sid}: MS on port "
+                      f"{sorted(_by_verdict.get('login_denied', []))[0]} "
+                      f"rejected our plaintext MS_LOGIN_2 (errorno "
+                      f"236).  SAPControl on port "
+                      f"{_sc_snapshot.get('sapcontrol_port')} reports "
+                      f"{_sc_summary}.  The rejection is NOT the "
+                      f"ms/acl_info list — it's SAP's secure-comms "
+                      f"enforcement.  The MS won't accept ANY "
+                      f"plaintext MS_LOGIN_2 from any source until "
+                      f"the parameter is switched off or the caller "
+                      f"speaks SNC/TLS.  SAPMAP's CVE-2026-58240 "
+                      f"probe cannot reach the write path here — the "
+                      f"kernel may still be unpatched, but the "
+                      f"secure-comms enforcement is a robust "
+                      f"compensating control.")
+                emit_finding(
+                    "INFO", node.sid,
+                    f"MS on {node.ip} rejects plaintext MS_LOGIN_2 "
+                    f"because system/secure_communication or a "
+                    f"related parameter is enabled ({_sc_summary}). "
+                    f"CVE-2026-58240 is not reachable via a "
+                    f"plaintext probe.  The exploit surface only "
+                    f"opens if the parameter is later disabled or "
+                    f"the attacker speaks SNC.",
+                    cve="CVE-2026-58240",
+                    attack_capability="",
+                )
+                # Downgrade evidence so the register menu action
+                # doesn't stay armed — nothing SAPMAP can do here
+                # without an SNC channel.
+                node.cve_2026_58240_evidence = "blocked_secure_comms"
+                # Skip the ACL-hint MEDIUM finding — different root
+                # cause, different remediation.
+                return node.cve_2026_58240_vulnerable
+
+            if _sc_snapshot and not _sc_on:
+                print(f"[*] {node.sid}: SAPControl on port "
+                      f"{_sc_snapshot.get('sapcontrol_port')} reports "
+                      f"secure-comms OFF ({_sc_summary}).  The MS "
+                      f"login_denied is therefore an ACL rejection, "
+                      f"NOT a secure-comms enforcement.")
+            elif not _sc_snapshot:
+                print(f"[*] {node.sid}: SAPControl not answering on "
+                      f"{_sc_ports} — could not confirm whether the "
+                      f"login_denied is ACL or secure-comms.")
             print(f"[!] {node.sid}: MS accepts TCP but ACL rejects our "
                   f"MS_LOGIN_2 (errorno=236 style).  Kernel {kernel_str} "
                   f"is in the CVE-2026-58240 fix window (9.x).  If "

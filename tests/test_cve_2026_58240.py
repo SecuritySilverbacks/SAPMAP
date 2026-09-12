@@ -237,6 +237,38 @@ def test_check_unreachable_returns_error():
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
+# secure_comms_enforced() classifier
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("value,expected", [
+    ("on", True),  ("ON", True),  ("On", True),
+    ("true", True), ("TRUE", True),
+    ("yes", True),  ("1", True),
+    ("all", True),  ("mandatory", True),
+    ("off", False), ("OFF", False), ("0", False),
+    ("false", False), ("no", False), ("", False),
+    ("optional", False),
+])
+def test_secure_comms_enforced_recognises_truthy(value, expected):
+    snap = {"system/secure_communication": value,
+             "ms/enforce_secure_communication": "",
+             "snc/enable": ""}
+    assert mod.secure_comms_enforced(snap) is expected
+
+
+def test_secure_comms_enforced_any_true_wins():
+    """If any of the three params is truthy, the classifier says True."""
+    snap = {"system/secure_communication": "off",
+             "ms/enforce_secure_communication": "off",
+             "snc/enable": "on"}
+    assert mod.secure_comms_enforced(snap) is True
+
+
+def test_secure_comms_enforced_empty_is_false():
+    assert mod.secure_comms_enforced({}) is False
+
+
+# ---------------------------------------------------------------------------
 # Live-captured "winning broadcast" fixture
 # ---------------------------------------------------------------------------
 #
