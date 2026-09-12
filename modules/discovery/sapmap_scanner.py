@@ -1731,6 +1731,72 @@ def check_cve_2026_58240(node: SAPNode, timeout: float = 6.0) -> bool:
               f"Strongest signal: {node.cve_2026_58240_evidence!r}."
               + (f"  Hint: {_hint}" if _hint else ""))
 
+        # Special case: login_denied on any MS port + kernel is in the
+        # 9.x fix window means the CVE-2026-58240 code path IS present
+        # on the target — the ACL is a compensating control, not a
+        # patch.  Emit a MEDIUM finding calling that out so the
+        # operator sees "vulnerable kernel, ACL-hardened" rather than a
+        # blanket "not exposed".  If the operator later gains a
+        # foothold on a host that IS on the MS ACL, the exploit
+        # becomes reachable via a pivot.
+        kernel_str = (node.kernel or "").strip()
+        try:
+            kernel_major = int(kernel_str[:3]) if kernel_str else 0
+        except ValueError:
+            kernel_major = 0
+        kernel_9x = 900 <= kernel_major <= 999
+        if (node.cve_2026_58240_evidence == "login_denied"
+                and kernel_9x):
+            print(f"[!] {node.sid}: MS accepts TCP but ACL rejects our "
+                  f"MS_LOGIN_2 (errorno=236 style).  Kernel {kernel_str} "
+                  f"is in the CVE-2026-58240 fix window (9.x).  If "
+                  f"kernel is at PL < fix-level (100/32/17/7 for "
+                  f"9.16/9.18/9.19/9.20), the vuln IS present — the "
+                  f"ms/acl_info list is the only thing blocking "
+                  f"remote exploitation.  Pivot via a trusted host to "
+                  f"reach the write path.")
+            emit_finding(
+                "MEDIUM", node.sid,
+                f"MS on {node.ip} is reachable on port "
+                f"{sorted(_by_verdict.get('login_denied', []))[0]} "
+                f"but rejects anonymous LOGIN_2 via ACL (errorno "
+                f"236 style).  Kernel {kernel_str} is in the "
+                f"CVE-2026-58240 fix window — if patch level is "
+                f"below the fix (9.16 PL100 / 9.18 PL032 / 9.19 "
+                f"PL017 / 9.20 PL007), the ASCS_GW rogue "
+                f"registration exploit is present; the MS ACL is "
+                f"the compensating control.  Reachable via any "
+                f"host on the ms/acl_info list (typically every "
+                f"application server in the landscape).",
+                cve="CVE-2026-58240",
+                attack_capability="exploit.ms_ascs_gw_rogue",
+            )
+            node.findings.append(Finding(
+                name="MS ACL-Blocked but Kernel in CVE-2026-58240 Window",
+                severity=Severity.MEDIUM,
+                attack_techniques=_attack_for(
+                    "exploit.ms_ascs_gw_rogue"),
+                description=(
+                    "The Message Server is running on a kernel in "
+                    "the CVE-2026-58240 fix window (9.x series) but "
+                    "the ms/acl_info list blocks our source IP from "
+                    "completing MS_LOGIN_2.  The vulnerability is "
+                    "present in the kernel — if the operator gains "
+                    "a foothold on any host in the ms/acl_info "
+                    "list (typically all application servers in the "
+                    "landscape), the exploit becomes reachable "
+                    "via that pivot.  Verify the patch level from "
+                    "the target: kernel 9.16 PL100+ / 9.18 PL032+ "
+                    "/ 9.19 PL017+ / 9.20 PL007+ closes the code "
+                    "path regardless of ACL."),
+                remediation=(
+                    "Apply SAP Security Note 3759472.  Keep the "
+                    "ms/acl_info list tight (application-server "
+                    "hosts only) as defense in depth."),
+                detail=(f"Kernel: {kernel_str}; verdicts: "
+                        f"{_summary}"),
+            ))
+
     return node.cve_2026_58240_vulnerable
 
 
