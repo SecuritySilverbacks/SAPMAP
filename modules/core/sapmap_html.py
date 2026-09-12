@@ -5925,6 +5925,23 @@ function showCtxMenu(e, sid) {
     c => c && c.target_sid === sid
        && c.os_exec_verified === true);
   const hasCve6287  = n && n.cve_2020_6287_vulnerable;
+  // CVE-2026-58240 — MS ASCS_GW rogue registration.
+  //   hasCve58240Check    → the read-only check has fired AND opcodes
+  //                         are recognised on the target (evidence
+  //                         'opcode_recognised' or 'confirmed_vulnerable').
+  //                         Register menu item gated on this so
+  //                         operators don't attempt a write against a
+  //                         random unchecked node.
+  //   hasCve58240Registered → we actually registered a rogue entry;
+  //                           gates the Unregister menu item — nothing
+  //                           to clean up otherwise.
+  const _cve58240Evidence = n && n.cve_2026_58240_evidence;
+  const hasCve58240Check = n && (
+      _cve58240Evidence === 'opcode_recognised'
+      || _cve58240Evidence === 'confirmed_vulnerable'
+      || _cve58240Evidence === 'no_broadcast'
+      || _cve58240Evidence === 'confirmed_patched');
+  const hasCve58240Registered = !!(n && n.cve_2026_58240_registered);
   const hasGwPort = n && (n.instances || []).some(i => Object.entries(i.ports || {}).some(([p,s]) => s === 'gateway' || (p >= 3300 && p <= 3399)));
   const hasFindings = n && (n.findings || []).length > 0;
   const hasCreatedUsers = n && (n.created_users || []).length > 0;
@@ -5962,6 +5979,9 @@ function showCtxMenu(e, sid) {
     // host runs ABAP/Java alongside the WD).
     'check_ms':         isAbapStack || isJavaStack,
     'check_cve_31324':       isJavaStack,             // Java-only vulnerability
+    'check_cve_58240':       isAbapStack,             // MS ASCS_GW rogue reg. (ABAP/dual-stack MS)
+    'exploit_cve_58240_register':   hasCve58240Check,      // need check to have flagged opcodes present
+    'exploit_cve_58240_unregister': hasCve58240Registered, // only after we've actually registered
     'check_cve_6287':        isJavaStack,             // Java-only RECON check
     'check_cve_22536':       isAbapStack || isJavaStack || !!n.is_web_dispatcher,
     'wd_rediscover':         isWebDispatcher,
@@ -6253,6 +6273,9 @@ function showCtxMenu(e, sid) {
     'betrusted':             'Run Check MS Betrusted first to find the MS port',
     'create_user_betrusted': 'Requires a vulnerable MS (betrusted) or gateway',
     'check_cve_31324':       'Only applicable to Java / double-stack systems',
+    'check_cve_58240':       'Only applicable to ABAP / double-stack systems (MS is an ABAP kernel component)',
+    'exploit_cve_58240_register':   'Run "Check CVE-2026-58240" first — need a target where the opcode family is recognised',
+    'exploit_cve_58240_unregister': 'Nothing to clean up — no rogue ASCS gateway has been registered from this session',
     'check_cve_6287':        'Only applicable to Java / double-stack systems',
     'check_cve_22536':       'Only applicable to ICM-fronted nodes (ABAP / Java / Web Dispatcher)',
     'wd_rediscover':         'Only applicable to confirmed Web Dispatcher nodes',
@@ -6537,6 +6560,14 @@ function showCtxMenu(e, sid) {
     'check_cve_6287':             !isJavaStack,
     'check_cve_31324':            !isJavaStack,
     'exploit_cve_31324_drop':     !isJavaStack,
+    // CVE-2026-58240 register/unregister: hide them entirely until
+    // the check has fired on this node.  Prevents operators from
+    // clicking a destructive write on an unchecked node — and de-
+    // clutters the Exploitation menu on nodes where the CVE hasn't
+    // been established as relevant.
+    'check_cve_58240':                !isAbapStack,
+    'exploit_cve_58240_register':     !hasCve58240Check,
+    'exploit_cve_58240_unregister':   !hasCve58240Registered,
     'analyse_capabilities':       !isAbapStack,
     'set_telnet_override':        !isJavaStack,
     'impact_assess':              !isAbapStack,

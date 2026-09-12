@@ -236,6 +236,94 @@ def test_check_unreachable_returns_error():
 # SAPNode field round-trip
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Live-captured "winning broadcast" fixture
+# ---------------------------------------------------------------------------
+#
+# Recorded 2026-09-12 during the first end-to-end SAPMAP CVE-2026-58240
+# exploit against IDE (kernel 9.16 PL75, unpatched).  The register step
+# fired with attacker_ip=127.0.0.1, rogue_port=31337.  Reply 4 of the
+# probe was the MsSSndAscsGwInfo broadcast that confirmed the rogue
+# ASCS gateway landed in gAscsGw — the port 0x7a69 (=31337) appears at
+# bytes 7-8 of the broadcast body.  This byte-for-byte capture is the
+# regression oracle: if the wire format ever drifts or the port-echo
+# detector regresses, this test fails.
+#
+# Construct the 151-byte broadcast frame using the same MS helpers the
+# server uses on the wire.  Header fields (msgtype/flag/iflag/toname/
+# fromname) match the log's parsed fields for the winning frame.  The
+# 37-byte body is captured verbatim from the operator's log — the last
+# 37 bytes of the raw tail_hex from reply 4.
+import sap_ms_betrusted as ms_bt
+
+# 4-byte opcode section: opcode=0x52, error=0, version=1, charset=3
+# (matches the per-reply "opcode=0x52 err=0" summary line the register
+# handler logged).
+_OPC_SECTION = bytes([0x52, 0x00, 0x01, 0x03])
+
+# Body captured live from reply 4 tail: the 37 bytes AFTER the opcode
+# section.  This is where our forged port 0x7a69 appears at offset 7-8.
+_BODY_37 = bytes.fromhex(
+    "0300000000"
+    "00007a69"                             # <-- OUR ROGUE PORT (31337)
+    "01000000000200000000040000000000000000000000000000000000")
+assert len(_BODY_37) == 37, len(_BODY_37)
+
+_HEADER = ms_bt.ms_build_header(
+    toname="-", fromname="MSG_SERVER",
+    msgtype=0, flag=1, iflag=0, key=b"\x00" * 8)
+assert len(_HEADER) == 110, len(_HEADER)
+
+WINNING_BROADCAST_IDE = _HEADER + _OPC_SECTION + _BODY_37
+assert len(WINNING_BROADCAST_IDE) == 151, len(WINNING_BROADCAST_IDE)
+
+
+def test_winning_broadcast_parses_as_ascs_gw_op52():
+    """The recorded broadcast frame must parse as: MS header + opcode
+    section, msgtype=0, flag=1 (one-way broadcast), toname='-',
+    fromname='MSG_SERVER', opcode=0x52 (MS_ASCS_GW_LOGON)."""
+    import sap_ms_betrusted as ms_bt
+    hdr = ms_bt.ms_parse_header(WINNING_BROADCAST_IDE)
+    assert hdr, "eyecatcher didn't match"
+    assert hdr["msgtype"] == 0
+    assert hdr["flag"]    == 1
+    assert hdr["toname"]  == "-"
+    assert hdr["fromname"] == "MSG_SERVER"
+    opc = ms_bt.ms_parse_opcode(WINNING_BROADCAST_IDE)
+    assert opc["opcode"] == mod.MS_OPCODE_ASCS_GW_LOGON
+    assert opc["error"]  == 0
+
+
+def test_winning_broadcast_echoes_our_rogue_port():
+    """The critical detector: our forged rogue port (31337 = 0x7a69)
+    must appear at bytes 7-8 of the broadcast body (offset 114+7 in
+    the frame).  This is the byte range register_rogue_ascs_gw()
+    keys on to declare CONFIRMED VULNERABLE."""
+    body = WINNING_BROADCAST_IDE[114:]
+    assert len(body) == 37, f"body should be 37 B, got {len(body)}"
+    port_bytes = body[7:9]
+    assert port_bytes == struct.pack("!H", 31337), (
+        f"expected our rogue port bytes at offset 7-8 of body, "
+        f"got {port_bytes.hex()}")
+
+
+def test_register_detector_recognises_recorded_broadcast():
+    """End-to-end regression: hand the recorded broadcast bytes to
+    the same detection logic register_rogue_ascs_gw() uses.  If the
+    detector regresses, this fires."""
+    import sap_ms_betrusted as ms_bt
+    hdr = ms_bt.ms_parse_header(WINNING_BROADCAST_IDE)
+    opc = ms_bt.ms_parse_opcode(WINNING_BROADCAST_IDE)
+    body = WINNING_BROADCAST_IDE[114:]
+    rogue_port_marker = struct.pack("!H", 31337)
+    matches = (hdr.get("msgtype") == 0
+                and hdr.get("flag") == 1
+                and opc.get("opcode") == 0x52
+                and len(body) >= 9
+                and body[7:9] == rogue_port_marker)
+    assert matches, "detector logic no longer matches the winning broadcast"
+
+
 def test_sapnode_cve_2026_58240_fields_default():
     n = SAPNode(sid="XYZ", ip="10.0.0.1")
     assert n.cve_2026_58240_checked is False

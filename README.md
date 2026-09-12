@@ -2683,6 +2683,17 @@ is the human-readable version.
   on SAP hash storage.
 - **[erpscanteam/CVE-2018-2380](https://github.com/erpscanteam/CVE-2018-2380)**
   — CRM path reference for the SAPCAR / RSECTAB chain.
+- **[redrays.io — SAP Note 3759472 / CVE-2026-58240](https://redrays.io/blog/sap-note-3759472-message-server-ascs-gateway-cve-2026-58240/)**
+  — Julian Petersohn / RedRays.  Kernel-binary diff and public
+  write-up of the Message Server ASCS_GW rogue-registration
+  vulnerability (CVSS 9.8, September 2026 SAP Patch Day).
+  The screenshot's partial payload fragment (`030000000000007a691000…`)
+  seeded SAPMAP's fuzzer; the winning 57-byte shape
+  (`03 | 00×6 | port_be | host_40 | ip_4 | pid_be_4`) was
+  reverse-engineered live against an unpatched target and shipped
+  as a full check + register + cleanup PoC in
+  `modules/exploitation/sap_cve_2026_58240.py`.  First confirmed
+  end-to-end exploit against kernel 9.16 PL75 on 2026-09-12.
 
 ### SSO2 ticket forgery
 
