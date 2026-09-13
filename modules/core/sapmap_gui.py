@@ -8029,12 +8029,23 @@ def create_app(api: SAPMAPApi) -> Bottle:
         auto_cap = data.get("auto_capture", True)
 
         # DIAG port: use the node's dispatcher if we know it, else 3200.
+        # `node.instances` is a list of InstanceInfo dataclasses (not
+        # dicts) — pick the first port labelled "dispatcher" or the
+        # first 32NN port on any instance.
         diag_port = int(data.get("diag_port") or 0)
         if diag_port <= 0:
             for inst in getattr(node, "instances", []) or []:
-                p = inst.get("dispatcher_port") or inst.get("port")
-                if p and 3200 <= int(p) <= 3299:
-                    diag_port = int(p); break
+                ports = getattr(inst, "ports", {}) or {}
+                for p, lbl in ports.items():
+                    try:
+                        p_int = int(p)
+                    except (TypeError, ValueError):
+                        continue
+                    if lbl == "dispatcher" or 3200 <= p_int <= 3299:
+                        diag_port = p_int
+                        break
+                if diag_port > 0:
+                    break
             if diag_port <= 0:
                 diag_port = 3200
 
