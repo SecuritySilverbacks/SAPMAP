@@ -1881,13 +1881,44 @@ def check_cve_2026_58240(node: SAPNode, timeout: float = 6.0) -> bool:
               f" reply_len(82/83)={r82_len}/{r83_len}"
               f"{_ident_note}"
               + (f" err={result['error']}" if result.get("error") else ""))
+        # Kernel-version guard: the ASCS_GW opcode family was introduced
+        # with the 9.x kernel line.  On pre-9.x kernels (7.x / 8.x) the
+        # numeric opcode 0x53 sometimes overlaps with a completely
+        # different, benign MS opcode (server list, etc.) that returns
+        # a long reply and trips the payload-size heuristic in
+        # sap_cve_2026_58240.check_ascs_gw_registration.  When we know
+        # the kernel is pre-9.x, downgrade the verdict so no MEDIUM
+        # finding is emitted and the register menu stays disabled.
+        # Only opcode 82 is the actual CVE-2026-58240 write primitive;
+        # a matching 82 stub echo on pre-9.x confirms the kernel doesn't
+        # implement the opcode at all.
+        kernel_str = str(getattr(node, "kernel", "") or "").strip()
+        try:
+            _k_major = int(kernel_str.split(".")[0]) if kernel_str else 0
+        except (ValueError, TypeError):
+            _k_major = 0
+        if verdict == "opcode_recognised" and 0 < _k_major < 900:
+            print(f"[*] {node.sid}:   kernel {kernel_str} is pre-9.x — "
+                  f"CVE-2026-58240 opcode family didn't exist yet, "
+                  f"downgrading verdict from opcode_recognised to "
+                  f"opcode_out_of_scope (opcode 82 stub={r82_len}B, "
+                  f"opcode 83 payload likely overlaps a different "
+                  f"benign MS opcode on this kernel line)")
+            verdict = "opcode_out_of_scope"
+            _verdicts_seen[ms_port] = verdict
+            # Also clear any identity leak we may have parsed — it
+            # can't be a real ASCS identity on a pre-9.x server.
+            ident = ""
+            _ident_note = ""
+
         # Retain the strongest signal we've seen across ports so a
         # later no_ms_reply doesn't overwrite an earlier
         # opcode_recognised evidence.  Precedence:
         #   opcode_recognised > login_denied > opcode_absent >
-        #   no_ms_reply > unreachable
+        #   opcode_out_of_scope > no_ms_reply > unreachable
         _rank = {"opcode_recognised": 5, "login_denied": 4,
-                  "opcode_absent": 3, "no_ms_reply": 2, "unreachable": 1}
+                  "opcode_absent": 3, "opcode_out_of_scope": 2,
+                  "no_ms_reply": 2, "unreachable": 1}
         if (_rank.get(verdict, 0)
                 > _rank.get(node.cve_2026_58240_evidence, 0)):
             node.cve_2026_58240_evidence = verdict
