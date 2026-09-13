@@ -1549,6 +1549,225 @@ def check_ms_betrusted(node: SAPNode, timeout: float = 8.0) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# CVE-2026-44756 — SAP kernel EPP pre-auth memory corruption (Note 3747649)
+# ---------------------------------------------------------------------------
+
+def check_cve_2026_44756(node: SAPNode, timeout: float = 6.0,
+                          patch_level: int = None) -> bool:
+    """Probe an SAP ICM / Web Dispatcher for CVE-2026-44756 exposure.
+
+    Read-only: sends a well-formed SAP Extended Passport in the HTTP
+    `sap-passport` header on the target's known ICM ports.  The check
+    only confirms the endpoint ACCEPTS the passport (i.e. the parser
+    is reachable pre-auth); the destructive DoS trigger stays on a
+    separate confirm-gated menu action.
+
+    Cross-references node.kernel against the fix table (7.93 PL412+ /
+    9.16 PL100+ / 9.18 PL032+ / 9.19 PL017+ / 9.20 PL007+).  If
+    patch_level is supplied and is below the fix, marks the node
+    vulnerable.  If patch_level is unknown, still marks the endpoint
+    reachable so the operator can decide.
+
+    Updates:
+      node.cve_2026_44756_checked      — probe attempted
+      node.cve_2026_44756_vulnerable   — kernel + endpoint both in scope
+      node.cve_2026_44756_http_port    — port that answered
+      node.cve_2026_44756_http_path    — path that answered
+      node.cve_2026_44756_https        — True if endpoint uses TLS
+      node.cve_2026_44756_evidence     — verdict string
+    """
+    try:
+        from sap_cve_2026_44756 import (
+            check_http, kernel_in_fix_window, kernel_below_fix)
+    except ImportError:
+        logger.warning("sap_cve_2026_44756 not available — skipping")
+        return False
+
+    host = node.ip or node.hostname
+    if not host:
+        return False
+
+    # Only meaningful on ABAP / Web Dispatcher targets that have an
+    # ICM.  Pure Java also has an ICM and is technically in scope,
+    # but we key on the presence of an HTTP port rather than the
+    # stack type — same effect, no false negatives on unknown-stack
+    # nodes.
+    node.cve_2026_44756_checked = True
+
+    # Enumerate candidate HTTP ports.  Prefer ports already found by
+    # the scanner (any port tagged http/wd/icm); fall back to the SAP
+    # defaults 8000, 8080, 50000-50020.
+    candidates: list = []   # (port, is_https)
+    seen = set()
+    for inst in node.instances:
+        for port, svc in inst.ports.items():
+            try:
+                p = int(port)
+            except (ValueError, TypeError):
+                continue
+            if p in seen:
+                continue
+            seen.add(p)
+            svc_l = (svc or "").lower()
+            if "https" in svc_l or "icms" in svc_l:
+                candidates.append((p, True))
+            elif "http" in svc_l or "icm" in svc_l or "wd" in svc_l:
+                candidates.append((p, False))
+    for p in (8000, 8080, 443, 80, 8443, 50000):
+        if p not in seen:
+            candidates.append((p, p in (443, 8443)))
+            seen.add(p)
+
+    if not candidates:
+        node.cve_2026_44756_evidence = "no_http_port"
+        return False
+
+    print(f"[*] {node.sid}: CVE-2026-44756 — probing "
+          f"{len(candidates)} ICM/WD port(s): "
+          f"{[p for p, _ in candidates]}")
+
+    hit = None
+    for port, is_https in candidates:
+        try:
+            import sapmap_stop
+            if sapmap_stop.is_stop_requested():
+                return False
+        except ImportError:
+            pass
+        result = check_http(host, port, use_tls=is_https, timeout=timeout)
+        scheme = "https" if is_https else "http"
+        if result.get("error"):
+            print(f"[*] {node.sid}:   {scheme}://{host}:{port} — "
+                  f"{result['error']}")
+            continue
+        if result.get("reachable"):
+            print(f"[*] {node.sid}:   {scheme}://{host}:{port} → "
+                  f"HTTP {result.get('status_code')} in "
+                  f"{result.get('elapsed_ms')}ms "
+                  f"(is_sap={result.get('is_sap')})")
+            if result.get("is_sap"):
+                hit = (port, is_https, result)
+                break
+
+    if hit is None:
+        node.cve_2026_44756_evidence = "no_sap_icm_answer"
+        print(f"[*] {node.sid}: no SAP ICM answered on the "
+              f"candidate ports — not exposed via HTTP")
+        return False
+
+    port, is_https, _ = hit
+    node.cve_2026_44756_http_port = port
+    node.cve_2026_44756_http_path = "/sap/public/ping"
+    node.cve_2026_44756_https     = is_https
+
+    # Kernel version + patch level cross-reference.
+    kernel_str = (node.kernel or "").strip()
+    in_scope   = kernel_in_fix_window(kernel_str)
+    below_fix  = kernel_below_fix(kernel_str, patch_level) \
+                     if patch_level is not None else None
+
+    if in_scope and below_fix:
+        node.cve_2026_44756_vulnerable = True
+        node.cve_2026_44756_evidence   = "kernel_pl_below_fix"
+        _emit_vulnerable(node, port, is_https, kernel_str, patch_level)
+    elif in_scope and below_fix is None:
+        node.cve_2026_44756_vulnerable = True
+        node.cve_2026_44756_evidence   = "kernel_in_scope_pl_unknown"
+        _emit_kernel_in_scope(node, port, is_https, kernel_str)
+    elif in_scope:
+        node.cve_2026_44756_evidence   = "kernel_pl_at_or_above_fix"
+        print(f"[+] {node.sid}: kernel {kernel_str} PL {patch_level} "
+              f"is AT/ABOVE the CVE-2026-44756 fix — endpoint is "
+              f"reachable but not vulnerable.")
+    else:
+        node.cve_2026_44756_evidence   = "kernel_out_of_scope"
+        print(f"[*] {node.sid}: kernel {kernel_str} is out of "
+              f"scope for CVE-2026-44756 (affects 7.93 / 9.16 / "
+              f"9.18 / 9.19 / 9.20 kernel lines only).")
+
+    return node.cve_2026_44756_vulnerable
+
+
+def _emit_vulnerable(node: SAPNode, port: int, is_https: bool,
+                       kernel: str, pl) -> None:
+    scheme = "https" if is_https else "http"
+    print(f"[!!] {node.sid}: VULNERABLE — kernel {kernel} PL {pl} is "
+          f"below the CVE-2026-44756 fix.  ICM at {scheme}://"
+          f"{node.ip}:{port} accepts the sap-passport header pre-"
+          f"auth.  Right-click → Exploitation → 'Trigger CVE-2026-"
+          f"44756 DoS' to prove the crash primitive.")
+    try:
+        emit_finding(
+            "CRITICAL", node.sid,
+            f"CVE-2026-44756 EPP pre-auth memory corruption "
+            f"(CVSS 10.0, SAP Note 3747649).  Kernel {kernel} "
+            f"PL {pl} is below the fix; ICM at {scheme}://"
+            f"{node.ip}:{port} accepts sap-passport headers pre-"
+            f"auth.  The bug-C stack overflow overwrites the saved "
+            f"return address in the ICM worker — DoS proof is one "
+            f"click away, DIAG RCE reachable with any OS-exec "
+            f"channel we hold.",
+            cve="CVE-2026-44756",
+            attack_capability="exploit.cve_2026_44756",
+        )
+        node.findings.append(Finding(
+            name="CVE-2026-44756 Pre-Auth EPP Memory Corruption",
+            severity=Severity.CRITICAL,
+            attack_techniques=_attack_for("exploit.cve_2026_44756"),
+            description=(
+                "The SAP kernel Extended Passport parser "
+                "(`eppDeserialize`) contains three memory-safety "
+                "bugs reachable pre-authentication on HTTP, RFC, "
+                "and DIAG.  Bug C — an unbounded type-4 item "
+                "transcode into a 0x430-byte stack buffer — writes "
+                "past the saved return address.  On HTTP the ICM "
+                "worker crashes (SAP restarts it within seconds); "
+                "on DIAG the work process's stable base allows "
+                "reliable arbitrary command execution as `<sid>adm`. "
+                "CVSS 10.0 (network / no auth / no user interaction "
+                "/ all-High impact / scope changed).  The Web "
+                "Dispatcher HTTP workaround in SAP Note 3756304 "
+                "does NOT cover RFC or DIAG."),
+            remediation=(
+                "Apply SAP Security Note 3747649.  Fixed kernel "
+                "patch levels: 7.93 PL412, 9.16 PL100, 9.18 PL032, "
+                "9.19 PL017, 9.20 PL007.  No workaround for "
+                "RFC/DIAG.  Web Dispatcher HTTP-only workaround: "
+                "SAP Note 3756304."),
+            detail=(f"Kernel {kernel} PL {pl}; endpoint "
+                    f"{scheme}://{node.ip}:{port}"),
+        ))
+        node.has_critical_finding = True
+    except Exception:
+        pass
+
+
+def _emit_kernel_in_scope(node: SAPNode, port: int, is_https: bool,
+                            kernel: str) -> None:
+    scheme = "https" if is_https else "http"
+    print(f"[!] {node.sid}: kernel {kernel} is in the CVE-2026-44756 "
+          f"scope (affects 7.93 / 9.16 / 9.18 / 9.19 / 9.20) but "
+          f"the patch level is unknown to SAPMAP.  If the PL is "
+          f"below fix-level (412 / 100 / 32 / 17 / 7 respectively) "
+          f"the system is vulnerable — run the DoS trigger to "
+          f"confirm.")
+    try:
+        emit_finding(
+            "HIGH", node.sid,
+            f"CVE-2026-44756 EPP pre-auth memory corruption — "
+            f"kernel {kernel} is in the fix window and the ICM at "
+            f"{scheme}://{node.ip}:{port} accepts sap-passport "
+            f"headers pre-auth.  Patch level unknown to SAPMAP; "
+            f"if PL is below fix, the system is CRITICAL "
+            f"(CVSS 10.0, SAP Note 3747649).",
+            cve="CVE-2026-44756",
+            attack_capability="exploit.cve_2026_44756",
+        )
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # CVE-2026-58240 — MS ASCS_GW rogue registration (SAP Note 3759472)
 # ---------------------------------------------------------------------------
 

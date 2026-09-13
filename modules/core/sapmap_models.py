@@ -631,6 +631,21 @@ class SAPNode:
     # ASCS_GW rogue registration are BLOCKED at the wire layer —
     # SAPMAP does not speak SNC/SystemPKI yet.
     ms_secure_comms_required: bool = False
+    # CVE-2026-44756 — SAP kernel EPP pre-auth memory corruption
+    # (OVERPASS, SAP Note 3747649).  Set by
+    # sap_cve_2026_44756.check_http() on any ABAP / Web Dispatcher
+    # node with an ICM HTTP port reachable.
+    cve_2026_44756_checked: bool = False
+    cve_2026_44756_vulnerable: bool = False       # kernel in fix window + endpoint accepts passports
+    cve_2026_44756_http_port: int = 0             # ICM/WD HTTP port that responded
+    cve_2026_44756_http_path: str = ""            # path the check confirmed on
+    cve_2026_44756_https: bool = False            # True if endpoint uses TLS
+    cve_2026_44756_dos_confirmed: bool = False    # bug-C write-path exercised, ICM crashed
+    cve_2026_44756_rce_confirmed: bool = False    # DIAG RCE proof file observed (Phase 2)
+    cve_2026_44756_evidence: str = ""             # short verdict string
+    cve_2026_44756_dw_base: str = ""              # captured disp+work text base (Phase 2)
+    cve_2026_44756_libc_base: str = ""            # captured libc base (Phase 2)
+    cve_2026_44756_session_rdx: str = ""          # captured DIAG session buffer address (Phase 2)
     # CVE-2026-58240 — MS ASCS_GW rogue registration (trust-list pollution).
     # Set by sap_cve_2026_58240.check_ascs_gw_registration() on any node
     # with an MS internal port (39NN) reachable + ABAP stack.
@@ -990,6 +1005,17 @@ class SAPNode:
             "ms_acl_protected": self.ms_acl_protected,
             "ms_secure_comms_required": self.ms_secure_comms_required,
             "cve_2025_31324_checked": self.cve_2025_31324_checked,
+            "cve_2026_44756_checked": self.cve_2026_44756_checked,
+            "cve_2026_44756_vulnerable": self.cve_2026_44756_vulnerable,
+            "cve_2026_44756_http_port": self.cve_2026_44756_http_port,
+            "cve_2026_44756_http_path": self.cve_2026_44756_http_path,
+            "cve_2026_44756_https": self.cve_2026_44756_https,
+            "cve_2026_44756_dos_confirmed": self.cve_2026_44756_dos_confirmed,
+            "cve_2026_44756_rce_confirmed": self.cve_2026_44756_rce_confirmed,
+            "cve_2026_44756_evidence": self.cve_2026_44756_evidence,
+            "cve_2026_44756_dw_base": self.cve_2026_44756_dw_base,
+            "cve_2026_44756_libc_base": self.cve_2026_44756_libc_base,
+            "cve_2026_44756_session_rdx": self.cve_2026_44756_session_rdx,
             "cve_2026_58240_checked": self.cve_2026_58240_checked,
             "cve_2026_58240_vulnerable": self.cve_2026_58240_vulnerable,
             "cve_2026_58240_ms_port": self.cve_2026_58240_ms_port,
@@ -1123,6 +1149,17 @@ class SAPNode:
             ms_acl_protected=d.get("ms_acl_protected", False),
             ms_secure_comms_required=d.get("ms_secure_comms_required", False),
             cve_2025_31324_checked=d.get("cve_2025_31324_checked", False),
+            cve_2026_44756_checked=d.get("cve_2026_44756_checked", False),
+            cve_2026_44756_vulnerable=d.get("cve_2026_44756_vulnerable", False),
+            cve_2026_44756_http_port=d.get("cve_2026_44756_http_port", 0),
+            cve_2026_44756_http_path=d.get("cve_2026_44756_http_path", ""),
+            cve_2026_44756_https=d.get("cve_2026_44756_https", False),
+            cve_2026_44756_dos_confirmed=d.get("cve_2026_44756_dos_confirmed", False),
+            cve_2026_44756_rce_confirmed=d.get("cve_2026_44756_rce_confirmed", False),
+            cve_2026_44756_evidence=d.get("cve_2026_44756_evidence", ""),
+            cve_2026_44756_dw_base=d.get("cve_2026_44756_dw_base", ""),
+            cve_2026_44756_libc_base=d.get("cve_2026_44756_libc_base", ""),
+            cve_2026_44756_session_rdx=d.get("cve_2026_44756_session_rdx", ""),
             cve_2026_58240_checked=d.get("cve_2026_58240_checked", False),
             cve_2026_58240_vulnerable=d.get("cve_2026_58240_vulnerable", False),
             cve_2026_58240_ms_port=d.get("cve_2026_58240_ms_port", 0),

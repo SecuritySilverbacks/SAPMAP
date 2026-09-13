@@ -1234,6 +1234,7 @@ body {
       <div class="ctx-item" data-action="rfc_system_info">&#128225; RFC System Info</div>
       <div class="ctx-item" data-action="check_gw">&#128270; Check GW Vulnerability</div>
       <div class="ctx-item" data-action="check_ms">&#128270; Check MS Betrusted (CVE-2020-6207)</div>
+      <div class="ctx-item" data-action="check_cve_44756">&#128270; Check CVE-2026-44756 (SAP EPP OVERPASS, CVSS 10)</div>
       <div class="ctx-item" data-action="check_cve_58240">&#128270; Check CVE-2026-58240 (MS ASCS_GW rogue reg.)</div>
       <div class="ctx-item" data-action="check_cve_31324">&#128270; Check CVE-2025-31324 (Java VisualComposer)</div>
       <div class="ctx-item" data-action="check_cve_6287">&#128270; Check CVE-2020-6287 (RECON)</div>
@@ -1262,6 +1263,7 @@ body {
       <div class="ctx-item" data-action="exploit_windows_lpe">&#9889; Escalate to SYSTEM (auto: EfsPotato / GodPotato / MiniPlasma)</div>
       <div class="ctx-item" data-action="betrusted">&#128272; Betrusted — Inject Trusted IP (10KBLAZE)</div>
       <div class="ctx-item" data-action="create_user_betrusted">&#128272; Create User (10KBLAZE Full Chain)</div>
+      <div class="ctx-item" data-action="exploit_cve_44756_dos">&#9889; Trigger CVE-2026-44756 DoS (crashes ICM worker)</div>
       <div class="ctx-item" data-action="exploit_cve_58240_register">&#9889; Register Rogue ASCS Gateway (CVE-2026-58240)</div>
       <div class="ctx-item" data-action="exploit_cve_58240_unregister">&#128245; Unregister Rogue ASCS Gateway (cleanup)</div>
       <div class="ctx-item" data-action="create_user_java">&#128100; Create User (Java UME)</div>
@@ -5945,6 +5947,9 @@ function showCtxMenu(e, sid) {
   //   hasCve58240Registered → we actually registered a rogue entry;
   //                           gates the Unregister menu item — nothing
   //                           to clean up otherwise.
+  // CVE-2026-44756 — DoS action needs a discovered ICM HTTP port
+  // AND a check verdict marking the target as reachable / vulnerable.
+  const hasCve44756Endpoint = !!(n && n.cve_2026_44756_http_port);
   const _cve58240Evidence = n && n.cve_2026_58240_evidence;
   const hasCve58240Check = n && (
       _cve58240Evidence === 'opcode_recognised'
@@ -5990,6 +5995,11 @@ function showCtxMenu(e, sid) {
     'check_ms':         isAbapStack || isJavaStack,
     'check_cve_31324':       isJavaStack,             // Java-only vulnerability
     'check_cve_58240':       isAbapStack,             // MS ASCS_GW rogue reg. (ABAP/dual-stack MS)
+    // CVE-2026-44756 — check available on any ABAP / dual-stack /
+    // Web Dispatcher node (they all have an ICM).
+    'check_cve_44756':              isAbapStack || isWebDispatcher,
+    // DoS trigger available once the check has flagged an ICM port.
+    'exploit_cve_44756_dos':        hasCve44756Endpoint,
     'exploit_cve_58240_register':   hasCve58240Check,      // need check to have flagged opcodes present
     'exploit_cve_58240_unregister': hasCve58240Registered, // only after we've actually registered
     'check_cve_6287':        isJavaStack,             // Java-only RECON check
@@ -6294,6 +6304,8 @@ function showCtxMenu(e, sid) {
         : 'Requires a vulnerable MS (betrusted) or gateway'),
     'check_cve_31324':       'Only applicable to Java / double-stack systems',
     'check_cve_58240':       'Only applicable to ABAP / double-stack systems (MS is an ABAP kernel component)',
+    'check_cve_44756':              'Only applicable to systems with an ICM (ABAP / double-stack / Web Dispatcher)',
+    'exploit_cve_44756_dos':        'Run "Check CVE-2026-44756" first — no ICM port on record',
     'exploit_cve_58240_register':   'Run "Check CVE-2026-58240" first — need a target where the opcode family is recognised',
     'exploit_cve_58240_unregister': 'Nothing to clean up — no rogue ASCS gateway has been registered from this session',
     'check_cve_6287':        'Only applicable to Java / double-stack systems',
@@ -6591,6 +6603,11 @@ function showCtxMenu(e, sid) {
     // clutters the Exploitation menu on nodes where the CVE hasn't
     // been established as relevant.
     'check_cve_58240':                !isAbapStack,
+    // CVE-2026-44756 — hide the DoS trigger entirely until the check
+    // has established an ICM endpoint.  Prevents accidental clicks
+    // on a node we haven't fingerprinted yet.
+    'check_cve_44756':                !(isAbapStack || isWebDispatcher),
+    'exploit_cve_44756_dos':          !hasCve44756Endpoint,
     'exploit_cve_58240_register':     !hasCve58240Check,
     'exploit_cve_58240_unregister':   !hasCve58240Registered,
     'analyse_capabilities':       !isAbapStack,
@@ -7942,6 +7959,42 @@ async function ctxAction(action) {
       await api('POST', `node/${sid}/check_cve_2025_31324`); break;
     case 'check_cve_58240':
       await api('POST', `node/${sid}/check_cve_2026_58240`); break;
+    case 'check_cve_44756': {
+      const nn = (mapState.nodes || {})[sid];
+      const pl = prompt(
+        'CVE-2026-44756 (OVERPASS, CVSS 10.0) affects kernel 7.93 <PL412, '
+        + '9.16 <PL100, 9.18 <PL032, 9.19 <PL017, 9.20 <PL007.\n\n'
+        + 'If you know the target\'s kernel patch level (SM51 → Release Info → '
+        + 'patch number), enter it here so SAPMAP can classify vulnerable vs '
+        + 'patched.  Leave blank to run the endpoint check anyway (finding '
+        + 'will be HIGH instead of CRITICAL).',
+        '');
+      if (pl === null) break;
+      const body = pl.trim() ? {patch_level: parseInt(pl.trim(), 10)} : {};
+      await api('POST', `node/${sid}/check_cve_2026_44756`, body);
+      break;
+    }
+    case 'exploit_cve_44756_dos': {
+      const nn = (mapState.nodes || {})[sid];
+      if (!nn || !nn.cve_2026_44756_http_port) {
+        showToast('Run "Check CVE-2026-44756" first — no ICM port on record', 'warn');
+        break;
+      }
+      const scheme = nn.cve_2026_44756_https ? 'https' : 'http';
+      const port = nn.cve_2026_44756_http_port;
+      if (!confirm(
+        '⚠️ DESTRUCTIVE — CVE-2026-44756 DoS trigger\n\n'
+        + 'This will:\n'
+        + '  • Send a crafted sap-passport header to ' + scheme + '://' + nn.ip + ':' + port + '\n'
+        + '  • Overwrite the saved return address of the ICM worker handling the request\n'
+        + '  • Crash the ICM worker (SIGSEGV) — SAP auto-restarts within seconds\n'
+        + '  • Users attached to that worker will see one failed request\n\n'
+        + '❌ DO NOT run against production systems.\n'
+        + '✅ Confirm ONLY if you have written authorization to test ' + sid + '.\n\n'
+        + 'Proceed?')) break;
+      await api('POST', `node/${sid}/exploit_cve_2026_44756_dos`, {confirm: true});
+      break;
+    }
     case 'exploit_cve_58240_register': {
       const nn = (mapState.nodes || {})[sid];
       // Gate on the CHECK-phase evidence, not on `vulnerable` — the

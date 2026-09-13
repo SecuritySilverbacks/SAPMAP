@@ -236,6 +236,60 @@ CATALOG: Dict[str, Remediation] = {
         severity_if_delayed="CRITICAL",
     ),
 
+    "exploit.cve_2026_44756": Remediation(
+        fix_summary=(
+            "Apply SAP Security Note 3747649 (CVE-2026-44756 OVERPASS) — "
+            "kernel binary patch fixing three EPP-parser memory-safety "
+            "bugs; no workaround for RFC/DIAG"
+        ),
+        fix_steps=[
+            "Apply the fixed kernel patch level for your release: "
+            "7.93 PL412+, 9.16 PL100+, 9.18 PL032+, 9.19 PL017+, "
+            "9.20 PL007+.  Older 7.x kernels below 7.93 and 8.x kernels "
+            "are not affected by this note.",
+            "The patch closes three bugs in `eppDeserialize`: signed "
+            "varPartOffset OOB read (bug A), itemLen underflow (bug B), "
+            "and — the critical one — unbounded type-4 transcode into "
+            "a 0x430-byte stack buffer (bug C).  Bug C gives saved-RIP "
+            "control on all three channels.",
+            "Web Dispatcher HTTP-only interim workaround: SAP Note "
+            "3756304.  This ONLY covers the HTTP vector via the WD; "
+            "RFC gateway (3300) and DIAG (3200) remain fully exposed "
+            "until the kernel is patched.  Apply as a stopgap ONLY if "
+            "the kernel patch cannot land immediately.",
+            "Network layer: firewall port 3200 (DIAG) and 3300 (RFC "
+            "gateway) to the trusted admin / application-server "
+            "subnet only.  DIAG is the RCE-capable vector; RFC is "
+            "DoS-only but still a Denial-of-Service against your "
+            "central instance.",
+            "ICM hardening: `icm/HTTP/logging_0 = PREFIX=/, "
+            "LOGFILE=…` to audit the sap-passport header, tune "
+            "detection SIEM rules for oversized (≥1578 hex chars) "
+            "passport headers.",
+        ],
+        verification=[
+            "Re-run SAPMAP → Check CVE-2026-44756.  A patched kernel "
+            "produces evidence 'kernel_pl_at_or_above_fix'; unpatched "
+            "produces 'kernel_pl_below_fix' with a CRITICAL finding.",
+            "Attempt the DoS trigger from an authorised host: a "
+            "patched ICM answers normally (400/404); an unpatched "
+            "ICM's worker crashes with a connection RST.",
+            "Verify the kernel binary contains the fixed guards: "
+            "`readelf -a disp+work | grep eppDeserialize` on the "
+            "patched build shows a shorter `.cold` section (the "
+            "three added guards) vs unpatched.",
+        ],
+        refs=[
+            _cve("CVE-2026-44756"),
+            _attack("T1190"),
+            _attack("T1499.004"),
+            _attack("T1055"),
+        ],
+        requires_restart=True,     # kernel patch → sapstartsrv restart
+        effort_minutes=120,
+        severity_if_delayed="CRITICAL",
+    ),
+
     "exploit.cve_2025_31324": Remediation(
         fix_summary=(
             "Patch VisualComposer; remove dropped JSP webshells; restrict "
