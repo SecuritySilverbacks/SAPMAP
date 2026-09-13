@@ -90,6 +90,7 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 - **dpmon virtual SAP\* user creation (kernel ≥ 790, ABAP)** — Chains GW SAPXPG → `dpmon` → SAP\* one-time password → BAPI_USER_CREATE1 with SAP_ALL.  DB-agnostic alternative to the SQL-INSERT writer chain: single dpmon invocation vs ~40 SAPXPG chunks, kernel-blessed (SAP Note 3303172, won't be patched out), bypasses SCC4 client lock / DBCO routing edge cases.  Available on Phase 2 of AutoPwn and via the right-click context menu
 - **CVE-2025-31324 (VisualComposer metadatauploader)** — Unauth Java JSP webshell deployment with chunked-base64 file write, OS-aware command wrapping (cmd.exe / /bin/sh), session-resilient shell tracking
 - **CVE-2026-58240 (MS ASCS_GW rogue registration, SAP Note 3759472)** — Unauthenticated MS `ASCS_GW_LOGON` (opcode 82) write path.  Register a rogue "ASCS gateway" host/port in the Message Server's `gAscsGw` struct — the MS broadcasts our forged entry to every subscribed application server, polluting the trust list of the whole landscape.  Check + confirm-gated register + verified STATUS-based cleanup, with automatic detection of `system/secure_communication = ON` (compensating control that blocks the plaintext path).  Kernel fix at 9.16 PL100 / 9.18 PL032 / 9.19 PL017 / 9.20 PL007.  First confirmed end-to-end exploit against kernel 9.16 PL75 (Sept 2026)
+- **CVE-2026-44756 "OVERPASS" (SAP kernel EPP parser, SAP Note 3747649, CVSS 10.0)** — Three memory-safety bugs in `eppDeserialize` reachable pre-auth on HTTP, RFC, and DIAG.  Bug C: a type-4 var-part item is transcoded UTF-8→UTF-16 into a 0x430-byte stack buffer with no length cap, overwriting the saved return address.  SAPMAP ships (a) kernel-PL cross-reference detection with a CRITICAL finding, (b) confirm-gated HTTP DoS crash-proof against the ICM worker, (c) full DIAG arbitrary-command RCE — auto-captures dw/libc bases via SAPMAP's OS-exec channels, delivers Julian Petersohn's two-stage COP chain (`mov rdi,[rdx+0x10]; …; call [rax+0x30]` → `system(<cmd>)`).  Detection signatures for Suricata / Snort / YARA / Sigma shipped in `tools/detection/cve-2026-44756/` alongside a 12-pcap validation corpus.  Kernel fix at 7.93 PL412 / 9.16 PL100 / 9.18 PL032 / 9.19 PL017 / 9.20 PL007
 - **Message Server betrusted (CVE-2020-6207 / 10KBLAZE)** — Register a fake dispatcher with the MS so the attacker IP is added to the SAP Gateway's trusted-host list, enabling unauthenticated OS command execution via SAPXPG
 - **Direct database injection** — Create SAP users by injecting into USR02/UST04/USRBF2 tables via SQL CLI tools (hdbsql, sqlcli, sqlcmd, sqlplus, db2)
 - **BAPI user creation** — Authenticated user creation with SAP_ALL via BAPI_USER_CREATE1
@@ -231,6 +232,7 @@ The OA2C reader uses a three-tier resilience chain: `DDIF_FIELDINFO_GET` for col
 | 10KBlaze Gateway SAPXPG OS exec | **1408081** (also 1421005, 821875) | Unauth gateway-registered server abuse (`gw/sec_info`, `gw/reg_info`) |
 | Message Server betrusted (CVE-2020-6207) | **2890213** | Unauth internal MS port abuse / ACL bypass |
 | MS ASCS_GW rogue registration (CVE-2026-58240) | **3759472** | Unauth `ASCS_GW_LOGON` opcode 82 write — kernel binary patch, no workaround |
+| SAP kernel EPP `eppDeserialize` (CVE-2026-44756, OVERPASS, CVSS 10.0) | **3747649** (WD workaround: 3756304) | Three memory-safety bugs reachable pre-auth on HTTP / RFC / DIAG.  Kernel binary patch — fix at 7.93 PL412 / 9.16 PL100 / 9.18 PL032 / 9.19 PL017 / 9.20 PL007.  WD workaround covers HTTP only |
 | VisualComposer JSP webshell (CVE-2025-31324) | **3594142** | Unauth file upload via `/developmentserver/metadatauploader` |
 | RECON Java LM Wizard (CVE-2020-6287) | **2934135** (FAQ 2948106) | Unauth Java admin user creation via `/CTCWebService/CTCWebServiceBean` |
 | SAProuter info leak (CVE-2022-22536) | **3123396** | Unauth landscape discovery via SAProuter response |
@@ -2696,6 +2698,25 @@ is the human-readable version.
   as a full check + register + cleanup PoC in
   `modules/exploitation/sap_cve_2026_58240.py`.  First confirmed
   end-to-end exploit against kernel 9.16 PL75 on 2026-09-12.
+- **CVE-2026-44756 (OVERPASS, SAP Note 3747649, CVSS 10.0)** — Julian
+  Petersohn (randomstr1ng).  Full reverse-engineering of the SAP kernel
+  Extended Passport parser (`eppDeserialize`): PL18/PL19 SDK binary
+  diff, three-bug root cause (A: OOB read, B: item-length underflow,
+  C: type-4 UTF-8→UTF-16 transcode stack overflow → saved-RIP hijack).
+  Julian's research package handed off: EPP wire-format builder
+  (`poc/epp.py`), working DIAG arbitrary-command RCE with a two-stage
+  COP chain (`poc/diag/diag_rce_write.py`), C ptrace tracer for the
+  session-buffer rdx measurement (`analysis/wp_crash_tracer.c`), 12
+  reference PCAPs, and the detection-invariant table (HANDOFF §5).
+  SAPMAP integrates this as `modules/protocols/sap_epp.py` (wire
+  builder, port), `modules/exploitation/sap_cve_2026_44756.py` (HTTP
+  DoS + kernel-PL cross-reference detection),
+  `modules/exploitation/sap_cve_2026_44756_diag.py` (pure-stdlib DIAG
+  RCE with OS-exec-driven base auto-capture),
+  `tools/cve-2026-44756/find_rdx.py` (pure-stdlib ptrace rdx measure),
+  and `tools/detection/cve-2026-44756/` (Suricata / Snort / YARA /
+  Sigma rules validated against Julian's PCAP corpus).  Every wire
+  byte is Julian's discovery.
 
 ### SSO2 ticket forgery
 
