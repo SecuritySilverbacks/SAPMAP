@@ -37,10 +37,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import socket
 import struct
 import sys
 import time
+
+
+# A well-formed RFCSI reply pins these two fields to fixed shapes.  If a
+# reply parses but either shape is wrong, we probably grabbed the wrong
+# TLV — happens on NPL 7.53 dev-edition, where the biggest TLV is not
+# the RFCSI export but a comma-separated connect-string.  Rejecting on
+# shape lets Stage 0 fall through cleanly to the legacy Chipik chain.
+_SID_RE = re.compile(r"^[A-Z0-9]{3}$")
+_KERNEL_RE = re.compile(r"^\d{3,4}$")
 
 
 # ---------------------------------------------------------------------------
@@ -546,10 +556,20 @@ def probe_rfcsi(host, port=3300, timeout=5.0, client="001"):
         return {"error": f"{type(e).__name__}: {e}"}
     if not info:
         return {"error": "empty RFCSI reply"}
-    # Sanity: a non-ABAP endpoint may return a reply that parses but
-    # has no SID.  Callers use this to decide whether to trust the
-    # data; keep the fields but flag it.
-    if not info.get("RFCSYSID"):
+    # Shape validation — if the biggest TLV wasn't the RFCSI export
+    # (NPL 7.53 dev-edition regression) the parser will happily slice
+    # a comma-separated param string into 20 fields.  Reject anything
+    # whose SID or KERNRL doesn't match the fixed SAP shape.  A blank
+    # SID is OK — target may not be ABAP; a malformed SID is not.
+    sid = info.get("RFCSYSID", "").strip()
+    kernrl = info.get("RFCKERNRL", "").strip()
+    if sid and not _SID_RE.match(sid):
+        return {"error": f"reply parsed but RFCSYSID={sid!r} is not a "
+                         f"valid SID — probably wrong TLV"}
+    if kernrl and not _KERNEL_RE.match(kernrl):
+        return {"error": f"reply parsed but RFCKERNRL={kernrl!r} is not "
+                         f"a valid kernel release — probably wrong TLV"}
+    if not sid:
         info["_note"] = "no RFCSYSID in reply — target may not be ABAP"
     return info
 

@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import socket
 import struct
 import sys
@@ -395,6 +396,14 @@ RFCSI_FIELDS = [
 ]
 
 
+# If a reply parses but the SID or KERNRL shape is wrong we probably
+# grabbed the wrong TLV — happens on NPL 7.53 dev-edition where the
+# biggest TLV is not the RFCSI export but a comma-separated
+# connect-string.  Reject on shape so the caller can fall through.
+_SID_RE = re.compile(r"^[A-Z0-9]{3}$")
+_KERNEL_RE = re.compile(r"^\d{3,4}$")
+
+
 def parse_rfcsi(record):
     if not isinstance(record, str):
         record = as_text(record)
@@ -403,6 +412,19 @@ def parse_rfcsi(record):
         out[name] = record[off:off + width].strip()
         off += width
     return out
+
+
+def _rfcsi_shape_ok(info):
+    """Return None if the RFCSI record looks well-formed, else a reason."""
+    sid = info.get("RFCSYSID", "").strip()
+    if sid and not _SID_RE.match(sid):
+        return (f"RFCSYSID={sid!r} is not a valid SID — "
+                f"probably grabbed wrong TLV")
+    kernrl = info.get("RFCKERNRL", "").strip()
+    if kernrl and not _KERNEL_RE.match(kernrl):
+        return (f"RFCKERNRL={kernrl!r} is not a valid kernel release "
+                f"— probably grabbed wrong TLV")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -503,7 +525,11 @@ class RFCClient:
                     f"kernel refused RFC_SYSTEM_INFO: {detail.code} "
                     f"{detail.message}")
             record = max((v for _, v in detail), key=len, default=b"")
-            return parse_rfcsi(record)
+            info = parse_rfcsi(record)
+            bad = _rfcsi_shape_ok(info)
+            if bad:
+                raise RFCProbeError(f"malformed RFCSI reply: {bad}")
+            return info
         raise RFCProbeError("no reply after F_SAP_SEND")
 
     def close(self):
