@@ -7990,8 +7990,10 @@ async function ctxAction(action) {
     case 'check_cve_44756': {
       const nn = (mapState.nodes || {})[sid];
       const pl = prompt(
-        'CVE-2026-44756 (OVERPASS, CVSS 10.0) affects kernel 7.93 <PL412, '
-        + '9.16 <PL100, 9.18 <PL032, 9.19 <PL017, 9.20 <PL007.\n\n'
+        'CVE-2026-44756 (OVERPASS, CVSS 10.0) — fix PLs from SAP support note:\n'
+        + '  7.22/EX2/EX3/EXT <PL1518   7.53 <PL1610   7.54 <PL646\n'
+        + '  7.77 <PL912   7.93 <PL412   8.04 <PL242\n'
+        + '  9.16 <PL100   9.18 <PL029   9.19 <PL014   9.20 <PL004\n\n'
         + 'If you know the target\'s kernel patch level (SM51 → Release Info → '
         + 'patch number), enter it here so SAPMAP can classify vulnerable vs '
         + 'patched.  Leave blank to run the endpoint check anyway (finding '
