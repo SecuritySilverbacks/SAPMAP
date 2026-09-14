@@ -129,12 +129,6 @@ TECHNIQUES: Dict[str, Dict] = {
     "T1562.001": {"name": "Disable or Modify Tools",        "tactic": "TA0005", "sub_of": "T1562"},
     "T1562.006": {"name": "Indicator Blocking",             "tactic": "TA0005", "sub_of": "T1562"},
     "T1055":     {"name": "Process Injection",              "tactic": "TA0005"},
-    # Endpoint DoS — CVE-2026-44756 ICM worker crash primitive
-    # (bug-C stack overflow → SIGSEGV → SAP auto-restart).  T1499.004
-    # is the specific sub-technique for application-exhaustion / flood.
-    "T1499":     {"name": "Endpoint Denial of Service",      "tactic": "TA0040"},
-    "T1499.004": {"name": "Application or System Exploitation",
-                    "tactic": "TA0040", "sub_of": "T1499"},
 
     # Credential Access
     "T1003":     {"name": "OS Credential Dumping",          "tactic": "TA0006"},
@@ -259,14 +253,6 @@ CAPABILITY_MAP: Dict[str, List[str]] = {
     # traffic (enqueue coordination, SSO2 ticket relay, internal RFC
     # callbacks) to the attacker-controlled endpoint.
     "exploit.ms_ascs_gw_rogue":  ["T1190", "T1078", "T1557"],
-    # CVE-2026-44756 (OVERPASS) — SAP kernel EPP pre-auth memory
-    # corruption.  T1190 (exploit public-facing app) covers the
-    # network-reachable ICM/DIAG/RFC vector; T1499.004 (endpoint
-    # DoS: application exhaustion flood) covers the ICM worker
-    # crash primitive; T1055 (process injection / control-flow
-    # hijack) covers the DIAG RCE via saved-RIP overwrite and
-    # subsequent COP chain into `system()`.
-    "exploit.cve_2026_44756":    ["T1190", "T1499.004", "T1055"],
     "exploit.sapxpg":            ["T1190", "T1059"],
 
     # ---- Privilege Escalation ----
