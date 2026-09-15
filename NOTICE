@@ -6,6 +6,10 @@ under the terms of the GNU General Public License, version 3 (or,
 at your option, any later version), as published by the Free
 Software Foundation.  See the LICENSE file for the full text.
 
+Prebuilt container images are published to
+ghcr.io/securitysilverbacks/sapmap (:latest tracks main; :vX.Y.Z per
+release; :sha-<short> per commit).  See README.md § Docker.
+
 ---------------------------------------------------------------------
 Third-party code incorporated into SAPMAP
 ---------------------------------------------------------------------

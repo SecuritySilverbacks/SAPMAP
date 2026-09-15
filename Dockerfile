@@ -23,7 +23,7 @@ FROM python:3.12-slim-bookworm
 
 LABEL org.opencontainers.image.title="SAPMAP"
 LABEL org.opencontainers.image.description="SAP Landscape Attack Path Mapper — authorized security testing only"
-LABEL org.opencontainers.image.source="https://github.com/kloris/SAPMAP"
+LABEL org.opencontainers.image.source="https://github.com/SecuritySilverbacks/SAPMAP"
 LABEL org.opencontainers.image.licenses="GPL-3.0-or-later"
 
 # Build tooling for the twofish C extension pulled in by pyjks.

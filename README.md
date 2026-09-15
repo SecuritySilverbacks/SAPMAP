@@ -473,9 +473,18 @@ The container image bundles every Python dependency (including the tricky `pyjks
 
 - Docker (or Podman aliased to `docker`) — Docker Desktop is fine on macOS / Windows; native `docker` on Linux.
 - The **Linux x86-64** variant of the NW RFC SDK from SAP Software Center, extracted to a folder on your host (e.g. `~/nwrfcsdk/` or `/opt/nwrfcsdk/`).  Even on macOS and Windows hosts you need the *Linux* SDK — the container runs Linux Python and can't load a macOS `.dylib` or Windows `.dll`.
-- First build takes ~5–10 min (the `twofish` C extension is slow to compile inside `pyjks`).  Subsequent builds are cached and take seconds.
 
-**Easiest path — use the wrapper:**
+**Fastest path — pull the prebuilt image:**
+
+```bash
+docker pull ghcr.io/securitysilverbacks/sapmap:latest
+IMAGE=ghcr.io/securitysilverbacks/sapmap:latest \
+    SDK_PATH=~/nwrfcsdk ./scripts/run-container.sh
+```
+
+`:latest` tracks the tip of `main`; a `:vX.Y.Z` tag is published for every release.  Every push to `main` also publishes an immutable `:sha-<short>` tag, useful when you need to pin to an exact commit for a repeatable engagement.  The image is `linux/amd64` only — same rationale as the SDK constraint.  Skip the pull if you want to build from source (see below).
+
+**Easiest path (from source) — use the wrapper:**
 
 ```bash
 SDK_PATH=~/nwrfcsdk ./scripts/run-container.sh
@@ -483,7 +492,9 @@ SDK_PATH=~/nwrfcsdk ./scripts/run-container.sh
 
 The wrapper auto-detects Linux vs macOS, arm64 vs x86-64, sets `--platform linux/amd64` where needed, and mounts everything correctly.  Env vars: `SDK_PATH`, `IMAGE`, `LOOT_DIR`, `STATE_DIR`.  Add `DEBUG=1` to print the exact `docker run` command the wrapper is about to execute (handy for troubleshooting).
 
-**Manual — Linux:**
+**Manual — Linux (build from source):**
+
+First build takes ~5–10 min (the `twofish` C extension is slow to compile inside `pyjks`).  Subsequent builds are cached and take seconds.  Skip the `docker build` line if you're pulling from GHCR — replace `sapmap:latest` at the end with `ghcr.io/securitysilverbacks/sapmap:latest`.
 
 ```bash
 docker build -t sapmap:latest .

@@ -1,0 +1,86 @@
+# Build and publish the SAPMAP container image to GitHub Container Registry.
+#
+# Triggers:
+#   * Every push to `main`      → publishes `:latest` and `:main` and `:sha-<short>`
+#   * Every semver tag `v*`     → publishes `:vX.Y.Z`, `:vX.Y`, `:vX`, and refreshes `:latest`
+#   * Manual `workflow_dispatch` → publishes `:latest` and `:sha-<short>`
+#
+# Image lands at `ghcr.io/securitysilverbacks/sapmap`.  Anyone can `docker pull`
+# it without auth once the container package is set to Public in the org's
+# Packages settings (a one-time click on the first publish).
+#
+# The SAP NW RFC SDK is NOT included in the image (SAP EULA forbids
+# redistribution).  Consumers mount their own SDK at run-time — see README.md.
+
+name: Publish Docker image
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+# Concurrency: cancel superseded runs on the same branch so a rapid
+# series of pushes doesn't queue three long builds.
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # ghcr.io/<owner-in-lowercase>/<repo-in-lowercase>
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/sapmap
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read       # checkout
+      packages: write      # push to GHCR
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          # tags:
+          #   :latest       — on default branch and on any v* tag
+          #   :main         — on the default-branch push
+          #   :sha-<short>  — every build
+          #   :v1.2.3, :v1.2, :v1  — on a semver tag push
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=sha,prefix=sha-,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # linux/amd64 only — the SAP NW RFC SDK is x86-64-Linux only,
+          # so a linux/arm64 SAPMAP image would only ever be useful for
+          # unauthenticated features.  Not worth the build time until
+          # asked for.
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # gha cache — massively speeds up the twofish/pyjks compile
+          # layer across runs (that compile is ~4 min on the free tier).
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
