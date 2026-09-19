@@ -720,6 +720,17 @@ class SAPNode:
     #         qop_max, qop_min, qop_flag, mech_id, mech_label, cryptolib,
     #         error}.  Empty dict = never probed.
     snc_info: dict = field(default_factory=dict)
+    # MS text/dump info-disclosure results (issue #48).  Populated by
+    # sapmap_scanner.check_ms_info_disclosure — the Message Server HTTP
+    # port (81NN) exposes /msgserver/text/dump?<section>=1 to any
+    # unauthenticated client when the ACL is at its default.  Sections
+    # 3 (ms/* profile params) and 8 (kernel release + git hash) leak
+    # instance identity, log-file paths, and precise patch information.
+    # Shape: {checked, vulnerable, http_port, sid, instance, host, ip,
+    #         kernel_rel, patch_level, git_hash, git_vers, params_count,
+    #         params_loot_path, kernel_loot_path, evidence, error}.
+    # Empty dict = never probed.
+    ms_info_leak: dict = field(default_factory=dict)
     scc_links: list = field(default_factory=list)       # SCC hosts whose mappings reach this node
     # Inbound trusted-RFC ACL (from RFCSYSACL table).  Each entry:
     # {rfcsysid, rfcclient, rfcequser, rfcuser, rfcsnc, rfcsameusr}
@@ -1031,6 +1042,7 @@ class SAPNode:
             "saprouter": self.saprouter,
             "saprouter_info": self.saprouter_info,
             "snc_info": dict(self.snc_info or {}),
+            "ms_info_leak": dict(self.ms_info_leak or {}),
             "scc_links": list(self.scc_links),
             "rfcsysacl_entries": list(self.rfcsysacl_entries),
             "sapsys_cert_subject_dn": self.sapsys_cert_subject_dn,
@@ -1164,6 +1176,7 @@ class SAPNode:
             saprouter=d.get("saprouter", ""),
             saprouter_info=d.get("saprouter_info", {}),
             snc_info=dict(d.get("snc_info", {})),
+            ms_info_leak=dict(d.get("ms_info_leak", {})),
             scc_links=list(d.get("scc_links", [])),
             rfcsysacl_entries=list(d.get("rfcsysacl_entries", [])),
             sapsys_cert_subject_dn=d.get("sapsys_cert_subject_dn", ""),

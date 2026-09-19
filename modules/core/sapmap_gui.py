@@ -16071,6 +16071,26 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:check_router_info", "Check SAProuter Info", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/check_ms_info_disclosure", method="POST")
+    def node_check_ms_info_disclosure(sid):
+        """Probe the MS text/dump endpoint for the info-disclosure leak.
+        Read-only.  Any 200 response carrying the MS_DUMP_* banner is
+        treated as vulnerable — the ACL isn't enforced and both the
+        ms/* profile parameter list and the kernel build identity are
+        being handed out to any unauthenticated caller."""
+        response.content_type = "application/json"
+        node = api.state.get_node(sid)
+        if not node:
+            return json.dumps({"error": f"Node {sid} not found"})
+
+        def _run():
+            print(f"[*] {sid}: Checking MS text/dump info-disclosure "
+                  f"(SAP Notes 1421005 / 2696233)...")
+            sapmap_scanner.check_ms_info_disclosure(node)
+
+        _bg(f"{sid}:check_ms_info", "Check MS Info Disclosure", _run)
+        return json.dumps({"status": "started"})
+
     @app.route("/api/node/<sid>/check_snc", method="POST")
     def node_check_snc(sid):
         """Probe SNC posture for a single node.  Info only — no Finding."""
@@ -16834,6 +16854,49 @@ def create_app(api: SAPMAPApi) -> Bottle:
 
         _bg("_check_all_router_info", "Check All SAProuter Info Leak", _run)
         return json.dumps({"status": "started", "systems": len(nodes)})
+
+    @app.route("/api/actions/check_all_ms_info_disclosure", method="POST")
+    def actions_check_all_ms_info_disclosure():
+        """Sweep every ABAP / dual-stack node for the MS text/dump
+        info-disclosure leak.  Skips pure Java (no ms_http port in
+        practice), skips SAProuters, skips SCC nodes.  Nodes without
+        a known instance number are still probed on the derived
+        8100+00 default so we never miss a leak the scanner didn't
+        yet fingerprint the MS HTTP port on."""
+        response.content_type = "application/json"
+        eligible = []
+        for n in api.state.nodes.values():
+            st = (n.system_type or "").upper()
+            if "SAPROUTER" in st:
+                continue
+            # ABAP / dual-stack / unknown-but-has-instances all get
+            # probed; pure Java is the only positive skip.
+            if st == "JAVA":
+                continue
+            if not n.instances and not (n.ip or n.hostname):
+                continue
+            eligible.append(n)
+        if not eligible:
+            return json.dumps({"error": "No ABAP / dual-stack nodes on "
+                                         "the map to probe"})
+
+        def _run():
+            print(f"[*] MS info-disclosure sweep — probing "
+                  f"{len(eligible)} node(s)")
+            hits = 0
+            for node in eligible:
+                try:
+                    if sapmap_scanner.check_ms_info_disclosure(node):
+                        hits += 1
+                except Exception as e:
+                    print(f"[-] {node.sid}: MS info-disclosure "
+                          f"probe failed: {e}")
+            print(f"[+] MS info-disclosure sweep complete — {hits}/"
+                  f"{len(eligible)} vulnerable")
+
+        _bg("_check_all_ms_info", "Check All MS Info Disclosure", _run)
+        return json.dumps({"status": "started",
+                            "systems": len(eligible)})
 
     @app.route("/api/actions/check_all_snc", method="POST")
     def actions_check_all_snc():

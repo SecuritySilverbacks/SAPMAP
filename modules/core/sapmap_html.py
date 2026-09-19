@@ -933,6 +933,7 @@ body {
       <div class="dd-item" onclick="checkAllCve22536()">&#128272; Check All CVE-2022-22536 (ICMAD)</div>
       <div class="dd-item" onclick="checkAllCve58240()">&#128272; Check All CVE-2026-58240 (MS ASCS_GW rogue reg.)</div>
       <div class="dd-item" onclick="checkAllRouterInfo()">&#128272; Check All SAProuter Info Leak</div>
+      <div class="dd-item" onclick="checkAllMsInfoDisclosure()">&#128272; Check All MS Info Disclosure (text/dump ACL)</div>
       <div class="dd-item" onclick="checkAllSnc()">&#128274; Check All SNC Posture</div>
       <div class="dd-sep"></div>
       <div class="dd-header">Analysis</div>
@@ -1250,6 +1251,7 @@ body {
       <div class="ctx-item write-op" data-action="client_roles">&#128202; Retrieve Client Roles</div>
       <div class="ctx-item write-op" data-action="default_creds">&#9888; Check Default Accounts</div>
       <div class="ctx-item" data-action="check_router_info">&#128268; Check SAProuter Info Leak</div>
+      <div class="ctx-item" data-action="check_ms_info_leak" title="Message Server text/dump info disclosure.  Sends HTTP GET /msgserver/text/dump?3=1 (ms/* profile parameters) and ?8=1 (kernel release + git hash) to the MS HTTP port (81NN).  When the MS ACL is at its default (unset) the response contains the ENTIRE ms/* profile — timeouts, HTTP handler config, ACL settings, log-file paths — plus precise kernel PL and Git commit hash.  Raw dumps land in loot/msinfo/ per system; the finding is HIGH.  Fix: set ms/acl_info + ms/HTTP/acl_info (SAP Notes 1421005, 2696233).">&#128268; Check MS Info Disclosure (text/dump ACL)</div>
       <div class="ctx-item" data-action="router_scan">&#128270; Scan Internally via SAProuter</div>
     </div>
   </div>
@@ -6276,6 +6278,7 @@ function showCtxMenu(e, sid) {
     'enum_clients':     true,                       // always (uses DIAG, no creds needed)
     'default_creds':    true,                       // always (uses DIAG, no creds needed)
     'check_router_info': true,                     // always (direct TCP, no creds)
+    'check_ms_info_leak': !isSaprouter,             // MS HTTP dump probe; SAProuters have no MS
     'router_scan':      true,                       // always (probes via SAProuter, no creds)
     'set_saprouter':    true,                       // always available
     'set_telnet_override': isJavaStack,              // only meaningful for Java stacks
@@ -6530,6 +6533,8 @@ function showCtxMenu(e, sid) {
     'create_user_gw':        isSaprouter || isWebDispatcher,
     // SAProuter-only: reads the ROUTER_ADM info page
     'check_router_info': !isSaprouter,
+    // MS text/dump info leak — hide on SAProuters (no MS at all)
+    'check_ms_info_leak': isSaprouter,
     // Items that don't apply to a standalone Web Dispatcher (no
     // message server, no JCo destinations, no SecStore): hide them
     // outright on pure-WD nodes so the menu stays tidy.
@@ -9021,6 +9026,8 @@ async function ctxAction(action) {
     case 'set_instance_nr': showInstanceNrModal(sid); break;
     case 'check_router_info':
       await api('POST', `node/${sid}/check_router_info`); break;
+    case 'check_ms_info_leak':
+      await api('POST', `node/${sid}/check_ms_info_disclosure`); break;
     case 'check_snc':
       await api('POST', `node/${sid}/check_snc`); break;
     case 'router_scan': showRouterScanModal(sid); break;
@@ -16585,6 +16592,30 @@ async function checkAllRouterInfo() {
   if (confirm(`Check SAProuter Info Leak on ${eligible.length} SAProuter node(s)?\n\n` +
               `Sends a ROUTER_ADM info request - the router responds with its routtab and connected clients list when the NIINFO ACL is unset.`))
     await api('POST', 'actions/check_all_router_info');
+  startPolling();
+}
+
+async function checkAllMsInfoDisclosure() {
+  // MS text/dump info disclosure — probes every ABAP / dual-stack /
+  // unknown-stack node.  Pure Java skipped (no ms_http endpoint in
+  // practice); SAProuters skipped.  Endpoint is /msgserver/text/dump
+  // on port 81NN; leak is HIGH.
+  const nodes = Object.values(mapState.nodes || {});
+  const eligible = nodes.filter(n => {
+    const st = (n.system_type || '').toUpperCase();
+    if (st.indexOf('SAPROUTER') !== -1) return false;
+    if (st === 'JAVA') return false;
+    return true;
+  });
+  if (eligible.length < 1) {
+    alert('No ABAP / dual-stack nodes on the map to probe. Add one first.');
+    return;
+  }
+  if (confirm(`Check MS text/dump info disclosure on ${eligible.length} node(s)?\n\n` +
+              `Sends 2 unauthenticated HTTP GETs per node (dump?3=1 for ms/* params, dump?8=1 for kernel build). ` +
+              `Vulnerable nodes get their raw dumps written to loot/msinfo/ and a HIGH finding raised. ` +
+              `Read-only.`))
+    await api('POST', 'actions/check_all_ms_info_disclosure');
   startPolling();
 }
 

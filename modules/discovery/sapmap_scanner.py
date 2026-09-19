@@ -1549,6 +1549,250 @@ def check_ms_betrusted(node: SAPNode, timeout: float = 8.0) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# MS text/dump info disclosure (issue #48; SAP Notes 1421005 / 2696233)
+# ---------------------------------------------------------------------------
+
+def check_ms_info_disclosure(node: SAPNode, timeout: float = 5.0,
+                              loot_dir: str = "") -> bool:
+    """Probe the Message Server HTTP endpoint for the text/dump info leak.
+
+    The MS HTTP port (81NN — 8100 + instance number) exposes
+    ``/msgserver/text/dump?<section>=1`` to any unauthenticated HTTP
+    client when the ACL is at its default (unset).  Sections 3 and 8
+    leak the full ms/* profile parameter table plus the kernel build
+    identity (release, patch level, git commit hash).  The leak feeds
+    downstream attacks — patch-status cross-references land here,
+    log-file paths land here, HTTP handler ACLs land here.
+
+    Updates:
+      node.ms_info_leak['checked']           — probe attempted
+      node.ms_info_leak['vulnerable']        — dump returned MS_DUMP_*
+      node.ms_info_leak['http_port']         — MS HTTP port probed
+      node.ms_info_leak['sid'/'instance'/…]  — identity fields
+      node.ms_info_leak['params_count']      — number of ms/* params leaked
+      node.ms_info_leak['params_loot_path']  — path of raw params dump
+      node.ms_info_leak['kernel_loot_path']  — path of raw kernel dump
+      node.ms_info_leak['evidence']          — short verdict string
+      node.ms_info_leak['error']             — non-empty when probe failed
+
+    Returns True when the dump was disclosed.
+    """
+    try:
+        from sap_ms_info_disclosure import probe_ms_info
+    except ImportError:
+        logger.warning("sap_ms_info_disclosure not available — skipping")
+        return False
+
+    host = node.ip or node.hostname
+    if not host:
+        return False
+
+    # Discover candidate MS HTTP ports.  Prefer any port already tagged
+    # ``ms_http`` / ``msghttp`` in the scan results; fall back to
+    # 8100+inst_nr for every known instance.  Sweep in the order they
+    # appear so operator-recorded instances take priority.
+    candidates: list = []   # (http_port, inst_nr)
+    seen: set = set()
+    for inst in node.instances:
+        inst_nr = None
+        try:
+            inst_nr = int(inst.instance_nr)
+        except (AttributeError, TypeError, ValueError):
+            inst_nr = None
+        for port, svc in (inst.ports or {}).items():
+            try:
+                p = int(port)
+            except (ValueError, TypeError):
+                continue
+            svc_l = (svc or "").lower()
+            if ("ms_http" in svc_l or "msghttp" in svc_l
+                    or (8100 <= p <= 8199)):
+                if p not in seen:
+                    candidates.append((p, inst_nr if inst_nr is not None
+                                                 else (p - 8100)))
+                    seen.add(p)
+        # Also try the derived port even if it wasn't discovered — the
+        # port may be firewalled from the scanner but reachable now
+        # from the operator's console.
+        if inst_nr is not None:
+            derived = 8100 + inst_nr
+            if derived not in seen:
+                candidates.append((derived, inst_nr))
+                seen.add(derived)
+
+    if not candidates:
+        node.ms_info_leak = {
+            "checked": True, "vulnerable": False, "http_port": 0,
+            "evidence": "no_ms_http_candidate",
+            "error": "no MS HTTP port on record and no instance "
+                     "number to derive one from",
+        }
+        return False
+
+    print(f"[*] {node.sid}: MS info-disclosure — probing "
+          f"{len(candidates)} MS HTTP port(s): "
+          f"{[p for p, _ in candidates]}")
+
+    # Try each candidate; first one that leaks wins.  Track the LAST
+    # error so we can surface something useful when none work.
+    hit = None
+    last_error = ""
+    for port, inst_nr in candidates:
+        try:
+            import sapmap_stop
+            if sapmap_stop.is_stop_requested():
+                return False
+        except ImportError:
+            pass
+        result = probe_ms_info(host, inst_nr=inst_nr, http_port=port,
+                                 timeout=timeout,
+                                 saprouter=(node.saprouter or ""))
+        if result.get("vulnerable"):
+            hit = (port, inst_nr, result)
+            break
+        err = result.get("error") or "no data disclosed"
+        print(f"[*] {node.sid}:   {host}:{port} — {err}")
+        last_error = err
+
+    if hit is None:
+        node.ms_info_leak = {
+            "checked": True, "vulnerable": False, "http_port": 0,
+            "evidence": "no_dump_disclosed",
+            "error": last_error,
+        }
+        return False
+
+    port, inst_nr, result = hit
+    ident = result.get("identity") or {}
+    sections = result.get("sections") or {}
+    params = sections.get("params") or {}
+    kernel = sections.get("kernel_build") or {}
+    params_count = len(params.get("ms_params") or [])
+
+    # Write both dumps to loot verbatim.  The raw text is what an
+    # engagement report / a triage engineer / a customer-side auditor
+    # actually wants — the parsed identity dict is just the summary.
+    params_loot = ""
+    kernel_loot = ""
+    try:
+        if not loot_dir:
+            from sapmap_state import ensure_loot_dir
+            loot_dir = ensure_loot_dir("msinfo")
+        stem = f"{node.sid}_{host.replace(':', '_')}_{inst_nr:02d}"
+        if params.get("raw_text"):
+            p = os.path.join(loot_dir, f"{stem}_msparams.txt")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(params["raw_text"])
+            params_loot = p
+        if kernel.get("raw_text"):
+            p = os.path.join(loot_dir, f"{stem}_kernelbuild.txt")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(kernel["raw_text"])
+            kernel_loot = p
+    except Exception as _e:
+        print(f"[!] {node.sid}: MS info-disclosure — loot write "
+              f"failed: {_e}.  Findings still emitted; the raw dumps "
+              f"just aren't persisted.")
+
+    node.ms_info_leak = {
+        "checked":          True,
+        "vulnerable":       True,
+        "http_port":        port,
+        "sid":              ident.get("sid", ""),
+        "instance":         ident.get("instance", ""),
+        "host":             ident.get("host", ""),
+        "ip":               ident.get("ip", ""),
+        "kernel_rel":       ident.get("kernel_rel", ""),
+        "patch_level":      ident.get("patch_level", ""),
+        "git_hash":         ident.get("git_hash", ""),
+        "git_vers":         ident.get("git_vers", ""),
+        "build_time":       ident.get("build_time", ""),
+        "params_count":     params_count,
+        "params_loot_path": params_loot,
+        "kernel_loot_path": kernel_loot,
+        "evidence":         "ms_dump_disclosed",
+        "error":            "",
+    }
+
+    # Emit the finding.  HIGH severity — the leak isn't RCE by itself
+    # but it feeds every SAP-kernel CVE cross-reference an attacker
+    # would ever want, hands out log-file paths for follow-up file-
+    # write bugs, and exposes the ACL config that would otherwise
+    # need SM19/SM20 to inspect.  SAP Notes 1421005 and 2696233 are
+    # the canonical remediation refs.
+    dump_url = f"http://{host}:{port}/msgserver/text/dump?3=1"
+    summary_bits = []
+    if ident.get("sid"):
+        summary_bits.append(f"SID={ident['sid']}")
+    if ident.get("instance"):
+        summary_bits.append(f"inst={ident['instance']}")
+    if ident.get("kernel_rel") and ident.get("patch_level"):
+        summary_bits.append(f"kernel {ident['kernel_rel']} "
+                              f"PL{ident['patch_level']}")
+    if ident.get("git_hash"):
+        summary_bits.append(f"git={ident['git_hash'][:12]}")
+    summary = "; ".join(summary_bits) if summary_bits else "no identity"
+
+    print(f"[!] {node.sid}: MS info-disclosure VULNERABLE — "
+          f"{host}:{port} leaks MS_DUMP_PARAMS ({params_count} ms/* "
+          f"params) + MS_DUMP_RELEASE ({summary})")
+    if params_loot:
+        print(f"    params dump  → {params_loot}")
+    if kernel_loot:
+        print(f"    kernel dump  → {kernel_loot}")
+
+    try:
+        emit_finding(
+            "HIGH", node.sid,
+            f"Message Server HTTP text/dump endpoint discloses "
+            f"internal state pre-auth on {host}:{port}.  "
+            f"{params_count} ms/* profile parameters and full kernel "
+            f"build identity ({summary}) returned to any unauthenticated "
+            f"HTTP client.  Fix: set ms/acl_info and ms/HTTP/acl_info "
+            f"(SAP Notes 1421005 / 2696233).  Reproduce with "
+            f"`curl {dump_url}`.",
+            cve="Info Disclosure / MS ACL missing (Notes 1421005 / 2696233)",
+            ref="ms.info_disclosure.text_dump",
+            attack_capability="recon.ms_info_disclosure",
+        )
+        node.findings.append(Finding(
+            name="Message Server HTTP text/dump Info Disclosure",
+            severity=Severity.HIGH,
+            attack_techniques=_attack_for("recon.ms_info_disclosure"),
+            description=(
+                "The SAP Message Server HTTP port (81NN by default) "
+                "exposes /msgserver/text/dump?<section>=1 to any "
+                "unauthenticated HTTP client when the Message Server "
+                "ACL configuration is not enforced.  Sections 3 "
+                "(MS_DUMP_PARAMS) and 8 (MS_DUMP_RELEASE) return the "
+                "entire ms/* profile parameter list, log-file paths, "
+                "ACL settings, server identity, and the precise kernel "
+                "release + patch level + Git commit hash.  The leak "
+                "is a strong recon primitive: it hands an attacker "
+                "the exact CVE cross-reference they need, spells out "
+                "where log files live for follow-up file-write bugs, "
+                "and reveals ACL enforcement gaps without needing "
+                "SM19/SM20 access."),
+            remediation=(
+                "Enforce the MS ACLs.  Set ms/acl_info to a restrictive "
+                "file (SAP Note 1421005) AND ms/HTTP/acl_info for the "
+                "HTTP path (SAP Note 2696233).  After the change, both "
+                "/msgserver/text/dump and /msgserver/text/logon return "
+                "HTTP 403 with an empty body to unauthorised sources.  "
+                "Network-layer defence-in-depth: firewall MS ports "
+                "(36NN, 39NN, 81NN) to the trusted admin subnet."),
+            detail=(f"Endpoint: {dump_url}; "
+                     f"{params_count} ms/* params leaked; "
+                     f"identity: {summary}"),
+        ))
+        node.has_critical_finding = True
+    except Exception:
+        pass
+
+    return True
+
+
+# ---------------------------------------------------------------------------
 # CVE-2026-58240 — MS ASCS_GW rogue registration (SAP Note 3759472)
 # ---------------------------------------------------------------------------
 

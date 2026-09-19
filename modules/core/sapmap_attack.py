@@ -211,6 +211,14 @@ CAPABILITY_MAP: Dict[str, List[str]] = {
     "recon.scc_relay":           ["T1018"],
     "recon.btp_subaccount_enum": ["T1526"],
     "recon.saprouter_info":      ["T1018", "T1592"],
+    # MS text/dump info disclosure (issue #48) — the Message Server
+    # HTTP endpoint returns ms/* profile parameters and precise kernel
+    # build identity to any unauthenticated client when the ACL is
+    # unset.  T1592 (gather victim host information) covers the
+    # identity + build leak; T1082 (system information discovery) is
+    # the classic recon slot; T1046 (network service scanning) is
+    # what we did to reach the port.
+    "recon.ms_info_disclosure":  ["T1592", "T1082", "T1046"],
     "snc.scan":                  ["T1082"],
     # SAProuter route enumeration via NI_ROUTE probing — reveals what
     # SIDs / ports are reachable through the router.  Discovery +

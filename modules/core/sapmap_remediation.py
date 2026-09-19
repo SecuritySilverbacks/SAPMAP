@@ -993,6 +993,48 @@ CATALOG: Dict[str, Remediation] = {
         severity_if_delayed="HIGH",
     ),
 
+    "recon.ms_info_disclosure": Remediation(
+        fix_summary=(
+            "Enforce the Message Server ACLs so /msgserver/text/dump "
+            "and /msgserver/text/logon require authorisation"
+        ),
+        fix_steps=[
+            "Configure ms/acl_info to point at a restrictive ACL file "
+            "listing only the legitimate application-server / router "
+            "hosts (SAP Note 1421005).  This blocks the internal MS "
+            "port (36NN) from anonymous admin queries.",
+            "Configure ms/HTTP/acl_info to point at a restrictive ACL "
+            "file for the MS HTTP port (81NN) (SAP Note 2696233).  "
+            "This closes the text/dump + text/logon endpoints.",
+            "Restart the Message Server (`stopsap ms` / `startsap ms` "
+            "on the ASCS instance) so the new ACLs load.",
+            "Defence in depth: firewall MS ports 36NN, 39NN, and 81NN "
+            "so only the trusted admin subnet can reach them.  The MS "
+            "ports have no business being exposed to end-user networks.",
+        ],
+        verification=[
+            "Re-run SAPMAP → Check MS Info Disclosure.  The "
+            "ms_info_leak.vulnerable flag must drop to False; the "
+            "per-node check should report `HTTP 403` on the dump "
+            "endpoint.",
+            "From an unauthorised network segment run "
+            "`curl http://<ms-host>:81NN/msgserver/text/dump?3=1` and "
+            "confirm the response is empty / 403 rather than the "
+            "MS_DUMP_PARAMS banner.",
+        ],
+        refs=[
+            ("SAP Note 1421005 — ms/acl_info configuration",
+             "https://launchpad.support.sap.com/#/notes/1421005"),
+            ("SAP Note 2696233 — ms/HTTP/acl_info configuration",
+             "https://launchpad.support.sap.com/#/notes/2696233"),
+            _attack("T1592"),
+            _attack("T1082"),
+        ],
+        requires_restart=True,    # MS restart required for new ACL
+        effort_minutes=30,
+        severity_if_delayed="HIGH",
+    ),
+
     "snc.scan": Remediation(
         fix_summary=(
             "Enable SNC on every dispatcher and SAProuter listening port "
