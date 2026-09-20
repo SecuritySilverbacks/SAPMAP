@@ -10280,20 +10280,31 @@ function showDetails(sid, opts) {
       // msinfo/ subdirectory.
       const paramsPath = mi.params_loot_path || '';
       const kernelPath = mi.kernel_loot_path || '';
-      const mkPathRow = (label, path) => {
+      const mkPathRow = (label, path, which) => {
         if (!path) return '';
         const shortPath = path.length > 60
           ? '…' + path.slice(-58)
           : path;
+        const sidJson = JSON.stringify(sid);
+        const whichJson = JSON.stringify(which);
+        const pathJson = JSON.stringify(path);
         return '<div class="detail-row">'
           + '<span class="detail-key">' + label + '</span>'
           + '<span class="detail-val" style="font-family:monospace;font-size:11px" '
           + '      title="' + escHtml(path) + '">'
+          + '<span style="cursor:pointer;color:#58a6ff;text-decoration:underline" '
+          + '       title="Open file content in-app" '
+          + '       onclick="showMsInfoDumpModal(' + sidJson + ',' + whichJson + ',' + JSON.stringify(label) + ')">'
           + escHtml(shortPath)
+          + '</span>'
+          + ' <span style="cursor:pointer;color:#58a6ff;margin-left:6px" '
+          + '       title="Open file content in-app" '
+          + '       onclick="showMsInfoDumpModal(' + sidJson + ',' + whichJson + ',' + JSON.stringify(label) + ')">'
+          + '&#128065;</span>'          /* 👁 view */
           + ' <span style="cursor:pointer;color:#58a6ff;margin-left:4px" '
           + '       title="Copy full path" '
-          + '       onclick="_copyToClipboard(' + JSON.stringify(path) + ', \'loot path\')">'
-          + '&#128203;</span>'
+          + '       onclick="_copyToClipboard(' + pathJson + ', \'loot path\')">'
+          + '&#128203;</span>'         /* 📋 copy */
           + '</span></div>';
       };
       const dumpUrl = 'http://' + escHtml(mi.ip || (n.ip || n.hostname || '?'))
@@ -10324,8 +10335,8 @@ function showDetails(sid, opts) {
         '<div class="detail-row"><span class="detail-key">ms/* params</span>'
           + '<span class="detail-val"><b style="color:#f0883e">' + (mi.params_count || 0)
           + '</b> leaked</span></div>' +
-        mkPathRow('Params dump', paramsPath) +
-        mkPathRow('Kernel dump', kernelPath) +
+        mkPathRow('Params dump', paramsPath, 'params') +
+        mkPathRow('Kernel dump', kernelPath, 'kernel') +
         (openLootBtn ? '<div style="margin-top:8px">' + openLootBtn + '</div>' : '') +
         '<div style="color:#8b949e;font-size:11px;margin-top:6px">'
           + 'Fix: set <code>ms/acl_info</code> and <code>ms/HTTP/acl_info</code> '
@@ -14189,6 +14200,66 @@ async function submitSshLateral() {
     os_users: osUsers,
   });
   startPolling();
+}
+
+async function showMsInfoDumpModal(sid, which, label) {
+  // Fetches the raw text of an MS info-disclosure loot file
+  // (params or kernel) via /api/node/<sid>/msinfo_dump?which=…
+  // and renders it in a full-screen modal with a scrollable
+  // <pre> block, a Copy-content button, and a Close.
+  const url = 'node/' + encodeURIComponent(sid)
+              + '/msinfo_dump?which=' + encodeURIComponent(which);
+  // Fetch as text — api() JSON-parses, so hit the endpoint directly
+  // with fetch() to keep the response body as a string.
+  let content = '';
+  let errText = '';
+  try {
+    const r = await fetch('/api/' + url);
+    content = await r.text();
+    if (!r.ok) {
+      errText = 'HTTP ' + r.status + ': ' + (content || r.statusText);
+      content = '';
+    }
+  } catch (e) {
+    errText = String(e);
+  }
+
+  const modal = document.createElement('div');
+  modal.id = 'msinfo-dump-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.65);'
+    + 'z-index:3000;display:flex;align-items:center;justify-content:center';
+  modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+
+  const title = (label || which) + ' — ' + sid;
+  const bodyHtml = errText
+    ? '<div style="color:#f85149;font-family:monospace;font-size:12px;padding:16px">'
+      + escHtml(errText) + '</div>'
+    : '<pre style="margin:0;padding:14px 18px;font-family:monospace;font-size:12px;'
+      + 'color:#c9d1d9;white-space:pre-wrap;word-break:break-word;line-height:1.45">'
+      + escHtml(content) + '</pre>';
+
+  modal.innerHTML =
+    '<div style="background:#161b22;border:1px solid #30363d;border-radius:10px;'
+    + 'width:min(920px,92vw);max-height:85vh;display:flex;flex-direction:column;'
+    + 'box-shadow:0 20px 40px rgba(0,0,0,0.5)">'
+    + '  <div style="display:flex;align-items:center;gap:8px;padding:12px 16px;'
+    + '       border-bottom:1px solid #30363d">'
+    + '    <span style="font-size:15px;font-weight:600;flex:1;color:#f0f6fc">'
+    + '      &#128268; ' + escHtml(title) + '</span>'
+    + '    <button class="btn" style="font-size:11px;padding:3px 10px" '
+    + '            id="msinfo-copy-content">&#128203; Copy content</button>'
+    + '    <span style="cursor:pointer;font-size:20px;color:#8b949e;padding:0 6px" '
+    + '          onclick="document.getElementById(\'msinfo-dump-modal\').remove()">&times;</span>'
+    + '  </div>'
+    + '  <div style="flex:1;overflow-y:auto">' + bodyHtml + '</div>'
+    + '</div>';
+  document.body.appendChild(modal);
+  const copyBtn = document.getElementById('msinfo-copy-content');
+  if (copyBtn) {
+    copyBtn.onclick = () => {
+      _copyToClipboard(content || errText, label || which);
+    };
+  }
 }
 
 function showRouterScanModal(sid) {

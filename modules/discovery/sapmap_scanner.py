@@ -1694,6 +1694,29 @@ def check_ms_info_disclosure(node: SAPNode, timeout: float = 5.0,
               f"failed: {_e}.  Findings still emitted; the raw dumps "
               f"just aren't persisted.")
 
+    # Record the MS HTTP port on the node's own instance list so the
+    # sidebar's Open-Ports display picks it up.  A successful dump
+    # response proves the port is reachable, and the operator wants to
+    # see it in the port breakdown alongside dispatcher / gateway.
+    try:
+        inst_str = f"{inst_nr:02d}"
+        matched = None
+        for inst in node.instances:
+            if getattr(inst, "instance_nr", "") == inst_str:
+                matched = inst
+                break
+        if matched is None:
+            matched = InstanceInfo(instance_nr=inst_str,
+                                    ip=(host or ""), ports={})
+            node.instances.append(matched)
+        if int(port) not in (matched.ports or {}):
+            matched.ports[int(port)] = "msghttp"
+    except Exception as _e:
+        # Non-fatal — the finding still fires; port list just misses
+        # this entry.  Log and continue.
+        print(f"[!] {node.sid}: MS info-disclosure — could not attach "
+              f"port {port} to instance {inst_nr}: {_e}")
+
     node.ms_info_leak = {
         "checked":          True,
         "vulnerable":       True,

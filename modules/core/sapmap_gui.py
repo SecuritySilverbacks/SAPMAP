@@ -16071,6 +16071,65 @@ def create_app(api: SAPMAPApi) -> Bottle:
         _bg(f"{sid}:check_router_info", "Check SAProuter Info", _run)
         return json.dumps({"status": "started"})
 
+    @app.route("/api/node/<sid>/msinfo_dump")
+    def node_msinfo_dump(sid):
+        """Serve the raw text of one of the MS info-disclosure loot
+        files (params or kernel) back into the GUI so the operator
+        can click a path in the sidebar block and see the content
+        without needing --enable-loot-browser or a file:// link.
+
+        Access is scoped by node — the caller passes ?which=params or
+        ?which=kernel, and we read the path off the node's own
+        ms_info_leak dict (populated by check_ms_info_disclosure).
+        The path was chosen by SAPMAP itself and canonicalised
+        against LOOT_DIR/msinfo/ at write-time, so this endpoint
+        cannot be tricked into serving a file outside loot/msinfo/."""
+        response.content_type = "text/plain; charset=utf-8"
+        node = api.state.get_node(sid)
+        if not node:
+            response.status = 404
+            return "node not found"
+
+        which = (request.query.get("which") or "").strip().lower()
+        mi = node.ms_info_leak or {}
+        if which == "params":
+            path = mi.get("params_loot_path") or ""
+        elif which == "kernel":
+            path = mi.get("kernel_loot_path") or ""
+        else:
+            response.status = 400
+            return "which= must be 'params' or 'kernel'"
+
+        if not path:
+            response.status = 404
+            return f"no {which} loot on record for {sid}"
+
+        # Second belt on top of write-time canonicalisation: only
+        # allow reads from the msinfo subtree of the loot dir.  If a
+        # future state file has been hand-edited with a path outside
+        # that tree we still refuse.
+        try:
+            from sapmap_state import ensure_loot_dir
+            msinfo_root = os.path.realpath(ensure_loot_dir("msinfo"))
+        except Exception:
+            response.status = 500
+            return "loot dir not configured"
+        real = os.path.realpath(path)
+        if not (real == msinfo_root
+                or real.startswith(msinfo_root + os.sep)):
+            response.status = 400
+            return "path is outside the msinfo loot directory"
+
+        try:
+            with open(real, "r", encoding="utf-8", errors="replace") as f:
+                return f.read()
+        except FileNotFoundError:
+            response.status = 404
+            return f"loot file missing on disk: {real}"
+        except OSError as e:
+            response.status = 500
+            return f"read failed: {e}"
+
     @app.route("/api/node/<sid>/check_ms_info_disclosure", method="POST")
     def node_check_ms_info_disclosure(sid):
         """Probe the MS text/dump endpoint for the info-disclosure leak.
