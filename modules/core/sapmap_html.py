@@ -10285,25 +10285,41 @@ function showDetails(sid, opts) {
         const shortPath = path.length > 60
           ? '…' + path.slice(-58)
           : path;
-        const sidJson = JSON.stringify(sid);
-        const whichJson = JSON.stringify(which);
-        const pathJson = JSON.stringify(path);
+        // Backslash-escape single quotes so we can embed each token
+        // as a single-quoted JS string INSIDE the double-quoted HTML
+        // attribute.  Earlier take used JSON.stringify(sid) which
+        // returned "W74" (with literal double quotes); the HTML parser
+        // then treated the first inner double-quote as the onclick=""
+        // terminator and silently dropped the handler.  All three
+        // values are SAPMAP-generated (sid = 3 chars, which = params
+        // /kernel, label = "Params dump"/"Kernel dump"), so escaping
+        // ' and the raw path is sufficient.
+        const esc = (s) => String(s).replace(/'/g, "\\'");
+        const sidS   = esc(sid);
+        const whichS = esc(which);
+        const labelS = esc(label);
+        const pathS  = esc(path);
+        const openCall = "showMsInfoDumpModal(&#39;" + escHtml(sidS)
+                          + "&#39;,&#39;" + escHtml(whichS)
+                          + "&#39;,&#39;" + escHtml(labelS) + "&#39;)";
+        const copyCall = "_copyToClipboard(&#39;" + escHtml(pathS)
+                          + "&#39;,&#39;loot path&#39;)";
         return '<div class="detail-row">'
           + '<span class="detail-key">' + label + '</span>'
           + '<span class="detail-val" style="font-family:monospace;font-size:11px" '
           + '      title="' + escHtml(path) + '">'
           + '<span style="cursor:pointer;color:#58a6ff;text-decoration:underline" '
           + '       title="Open file content in-app" '
-          + '       onclick="showMsInfoDumpModal(' + sidJson + ',' + whichJson + ',' + JSON.stringify(label) + ')">'
+          + '       onclick="' + openCall + '">'
           + escHtml(shortPath)
           + '</span>'
           + ' <span style="cursor:pointer;color:#58a6ff;margin-left:6px" '
           + '       title="Open file content in-app" '
-          + '       onclick="showMsInfoDumpModal(' + sidJson + ',' + whichJson + ',' + JSON.stringify(label) + ')">'
+          + '       onclick="' + openCall + '">'
           + '&#128065;</span>'          /* 👁 view */
           + ' <span style="cursor:pointer;color:#58a6ff;margin-left:4px" '
           + '       title="Copy full path" '
-          + '       onclick="_copyToClipboard(' + pathJson + ', \'loot path\')">'
+          + '       onclick="' + copyCall + '">'
           + '&#128203;</span>'         /* 📋 copy */
           + '</span></div>';
       };
