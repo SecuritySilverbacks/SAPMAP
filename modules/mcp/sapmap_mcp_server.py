@@ -446,6 +446,10 @@ def check_vulnerability(sid: str, vuln: str) -> str:
         vuln: Vulnerability to check:
             - gw: Gateway SAPXPG (10KBlaze)
             - ms: Message Server betrusted (CVE-2020-6207)
+            - ms_info: Message Server text/dump info disclosure
+                (missing ms/acl_info + ms/HTTP/acl_info — SAP Notes
+                1421005 / 2696233; ms/* profile parameters and kernel
+                build identity leaked pre-auth on port 81NN)
             - cve_2025_31324: VisualComposer JSP RCE
             - cve_2020_6287: RECON Java user creation
             - cve_2022_22536: ICMAD HTTP smuggling
@@ -453,13 +457,16 @@ def check_vulnerability(sid: str, vuln: str) -> str:
             - windows_lpe: Windows SYSTEM LPE viability
             - all_gw: Check all systems for GW vulnerability
             - all_ms: Check all for MS betrusted
+            - all_ms_info: Sweep MS text/dump info disclosure
             - all_vulns: Full vulnerability sweep on all systems
+              (includes ms_info)
     """
     vuln = vuln.lower().strip()
 
     landscape_wide = {
         "all_gw": "/api/actions/check_all_gw",
         "all_ms": "/api/actions/check_all_ms",
+        "all_ms_info": "/api/actions/check_all_ms_info_disclosure",
         "all_cve_31324": "/api/actions/check_all_cve_31324",
         "all_cve_6287": "/api/actions/check_all_cve_6287",
         "all_cve_22536": "/api/actions/check_all_cve_22536",
@@ -468,6 +475,7 @@ def check_vulnerability(sid: str, vuln: str) -> str:
     per_system = {
         "gw": f"/api/node/{sid}/check_gw",
         "ms": f"/api/node/{sid}/check_ms",
+        "ms_info": f"/api/node/{sid}/check_ms_info_disclosure",
         "cve_2025_31324": f"/api/node/{sid}/check_cve_2025_31324",
         "cve_2020_6287": f"/api/node/{sid}/check_cve_2020_6287",
         "cve_2022_22536": f"/api/node/{sid}/check_cve_2022_22536",

@@ -2117,6 +2117,7 @@ body {
       <label class="autopwn-cb"><input type="checkbox" id="vsel-cve-22536" checked> CVE-2022-22536 — ICMAD smuggle (ABAP / Java / WD)</label>
       <label class="autopwn-cb"><input type="checkbox" id="vsel-cve-58240" checked> CVE-2026-58240 — MS ASCS_GW rogue registration (ABAP only)</label>
       <label class="autopwn-cb"><input type="checkbox" id="vsel-router-info" checked> SAProuter Info Leak (SAProuter nodes)</label>
+      <label class="autopwn-cb"><input type="checkbox" id="vsel-ms-info" checked> MS text/dump Info Disclosure (ABAP / dual-stack / WD)</label>
       <label class="autopwn-cb" style="color:#d29922">
         <input type="checkbox" id="vsel-default-creds">
         Default Credentials Test (DIAG) &mdash; <strong>may LOCK accounts</strong>
@@ -16619,6 +16620,7 @@ function scanAllVulns() {
 function selectAllVulns(on) {
   ['vsel-gw', 'vsel-ms', 'vsel-cve-31324', 'vsel-cve-6287',
    'vsel-cve-22536', 'vsel-cve-58240', 'vsel-router-info',
+   'vsel-ms-info',
    'vsel-default-creds']
     .forEach(id => { const el = document.getElementById(id); if (el) el.checked = on; });
 }
@@ -16632,6 +16634,7 @@ async function runSelectedVulns() {
     cve_22536:     _q('vsel-cve-22536'),
     cve_58240:     _q('vsel-cve-58240'),
     router_info:   _q('vsel-router-info'),
+    ms_info:       _q('vsel-ms-info'),
     default_creds: _q('vsel-default-creds'),
   };
   if (!Object.values(checks).some(v => v)) {

@@ -77,6 +77,7 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 - **Client enumeration** — Bruteforce SAP clients 000–999 via DIAG protocol
 - **System identification** — Unauthenticated RFC_SYSTEM_INFO probing (3 methods: V6 single-packet, V2 error leak, Chipik-style)
 - **SAPControl queries** — Extract SID, database type, system type, and OS via SOAP API (GetInstanceProperties, GetProcessList)
+- **Message Server info disclosure** — Unauthenticated HTTP GET on the MS HTTP port (81NN) hits `/msgserver/text/dump?3=1` for the full `ms/*` profile parameter table and `?8=1` for the precise kernel release + patch level + Git commit hash.  Fires whenever `ms/acl_info` + `ms/HTTP/acl_info` are at their defaults (SAP Notes 1421005 / 2696233).  Both dumps land in `loot/msinfo/<SID>_<host>_<inst>_*.txt`; raises a HIGH finding, adds the discovered port to the node's port list, and populates a dedicated sidebar block with SID / instance / kernel PL / MS ports (36NN + 39NN) / system-type banner and in-app viewers for the raw dumps
 - **Database detection** — Port fingerprinting for HANA, MaxDB, MSSQL, Oracle, DB2
 
 ### Default Account Detection
@@ -230,6 +231,7 @@ The OA2C reader uses a three-tier resilience chain: `DDIF_FIELDINFO_GET` for col
 |---|---|---|
 | 10KBlaze Gateway SAPXPG OS exec | **1408081** (also 1421005, 821875) | Unauth gateway-registered server abuse (`gw/sec_info`, `gw/reg_info`) |
 | Message Server betrusted (CVE-2020-6207) | **2890213** | Unauth internal MS port abuse / ACL bypass |
+| Message Server text/dump info disclosure | **1421005** + **2696233** | `ms/acl_info` (internal 36NN) + `ms/HTTP/acl_info` (81NN) — closes `/msgserver/text/dump` + `/msgserver/text/logon` to anonymous callers |
 | MS ASCS_GW rogue registration (CVE-2026-58240) | **3759472** | Unauth `ASCS_GW_LOGON` opcode 82 write — kernel binary patch, no workaround |
 | VisualComposer JSP webshell (CVE-2025-31324) | **3594142** | Unauth file upload via `/developmentserver/metadatauploader` |
 | RECON Java LM Wizard (CVE-2020-6287) | **2934135** (FAQ 2948106) | Unauth Java admin user creation via `/CTCWebService/CTCWebServiceBean` |
@@ -2037,6 +2039,7 @@ Actions marked **⚠** are exploitation / destructive — they only run when the
 | `enum_clients` | `target` | DIAG-based enumeration of visible SAP clients |
 | `client_roles` | `target` | Read T000 client roles table |
 | `check_router_info` | `target` | CVE-2017-12636 / ROUTER_ADM info leak probe on a SAProuter node |
+| `check_ms_info_disclosure` | `target` | MS text/dump info leak probe (unauth HTTP on 81NN — dumps `ms/*` profile + kernel PL / Git hash when `ms/acl_info` unset; SAP Notes 1421005 / 2696233) |
 | `check_linux_lpe` (alias `check_copyfail`) | `target` | Probe Copy Fail + Dirty Frag root-LPE viability |
 | `check_windows_lpe` | `target` | Probe EfsPotato / GodPotato / MiniPlasma SYSTEM-LPE viability |
 | `check_all_gw` | *(none)* | Sweep GW vulnerability across every node |
@@ -2046,6 +2049,7 @@ Actions marked **⚠** are exploitation / destructive — they only run when the
 | `check_all_cve_6287` | *(none)* | Sweep CVE-2020-6287 (RECON) |
 | `check_all_cve_22536` | *(none)* | Sweep ICMAD |
 | `check_all_router_info` | *(none)* | Sweep CVE-2017-12636 on every SAProuter node |
+| `check_all_ms_info_disclosure` | *(none)* | Sweep MS text/dump info leak across every non-Java non-SAProuter node |
 | `check_all_snc` | *(none)* | Sweep SNC config |
 | `check_all_vulns` | *(none)* | Meta-sweep: every vuln check across the landscape |
 
@@ -2494,7 +2498,7 @@ Opens a browser UI to browse tool schemas, call tools interactively, and inspect
 | `probe_system` | Probe a system (RFC info, clients, SNC, ports) |
 | `check_default_credentials` | Test 16 default SAP credentials |
 | **Vulnerability Checking** | |
-| `check_vulnerability` | Check specific CVEs (GW, MS, 31324, RECON, ICMAD) |
+| `check_vulnerability` | Check specific CVEs (GW, MS, MS text/dump info leak, 31324, RECON, ICMAD).  Pass `vuln="ms_info"` (per-node) or `vuln="all_ms_info"` (landscape sweep) for the SAP Notes 1421005 / 2696233 MS info disclosure |
 | **Exploitation** | |
 | `exploit` | Execute exploitation actions (requires `confirm: true`) |
 | `exec_command` | OS command execution on pwned systems |

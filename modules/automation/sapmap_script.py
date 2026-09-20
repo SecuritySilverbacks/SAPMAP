@@ -61,6 +61,8 @@ Supported actions:
     set_telnet_override,
     # SAProuter
     set_saprouter, check_router_info, router_scan,
+    # Message Server info disclosure (text/dump ACL — issue #48)
+    check_ms_info_disclosure,
     # SAP Cloud Connector
     scc_set_credentials, scc_probe_creds, scc_pull_mappings,
     scc_probe_mappings, scc_extract_keystore, scc_download_hashes,
@@ -76,6 +78,7 @@ Supported actions:
     autopwn, propagate, propagate_all,
     check_all_gw, check_all_ms, check_all_betrusted, check_all_cve_31324,
     check_all_cve_6287, check_all_cve_22536, check_all_router_info,
+    check_all_ms_info_disclosure,
     check_all_snc, check_all_vulns,
     # State management
     save_state, load_state,
@@ -379,6 +382,15 @@ def _map_step(step: dict) -> tuple:
     if action == "check_router_info":
         # CVE-2017-12636 / ROUTER_ADM info leak probe on a SAProuter node.
         return ("POST", f"/api/node/{target}/check_router_info", {}, True)
+
+    if action == "check_ms_info_disclosure":
+        # MS text/dump info leak probe on the Message Server HTTP port
+        # (81NN).  Vulnerable when ms/acl_info + ms/HTTP/acl_info are
+        # unset — the endpoint returns the full ms/* profile and the
+        # kernel build identity to anyone.  Raw dumps land in
+        # loot/msinfo/ and a HIGH finding is raised (issue #48).
+        return ("POST",
+                f"/api/node/{target}/check_ms_info_disclosure", {}, True)
 
     if action == "router_scan":
         # Scan internal hosts through a SAProuter node.
@@ -961,6 +973,12 @@ def _map_step(step: dict) -> tuple:
         # Sweep CVE-2017-12636 across every SAProuter node.
         return ("POST", "/api/actions/check_all_router_info", {}, True)
 
+    if action == "check_all_ms_info_disclosure":
+        # Sweep MS text/dump info leak across every ABAP / dual-stack
+        # node.  Pure Java + SAProuters skipped by the backend gate.
+        return ("POST",
+                "/api/actions/check_all_ms_info_disclosure", {}, True)
+
     if action == "check_all_snc":
         # Sweep SNC configuration across the landscape.
         return ("POST", "/api/actions/check_all_snc", {}, True)
@@ -1191,6 +1209,7 @@ _ACTION_LABELS = {
     "set_sid":                "Renaming node SID",
     "set_instance_nr":        "Setting instance number",
     "check_router_info":      "Probing SAProuter info leak",
+    "check_ms_info_disclosure": "Probing MS text/dump info leak",
     "router_scan":            "Scanning internal net via SAProuter",
     "layout":                 "Rearranging map",
     "sleep":                  "Pausing",
@@ -1258,6 +1277,7 @@ _ACTION_LABELS = {
     "check_all_cve_6287":         "Sweeping CVE-2020-6287",
     "check_all_cve_22536":        "Sweeping CVE-2022-22536 (ICMAD)",
     "check_all_router_info":      "Sweeping SAProuter info leak",
+    "check_all_ms_info_disclosure": "Sweeping MS text/dump info leak",
     "check_all_snc":              "Sweeping SNC config",
     "check_all_vulns":            "Sweeping every vuln check",
     # Tier 3 evasion

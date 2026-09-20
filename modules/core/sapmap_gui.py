@@ -17125,6 +17125,8 @@ def create_app(api: SAPMAPApi) -> Bottle:
           - cve_6287      — Java / double-stack only
           - cve_22536     — every HTTP-serving stack (ABAP/Java/WD)
           - router_info   — SAProuter nodes only
+          - ms_info       — every non-Java non-SAProuter node
+                              (MS text/dump ACL leak, issue #48)
           - default_creds — opt-in (may LOCK accounts after failed
                               attempts; the GUI surfaces a warning)
         """
@@ -17133,6 +17135,7 @@ def create_app(api: SAPMAPApi) -> Bottle:
         selected = data.get("checks") or {
             "gw": True, "ms": True, "cve_31324": True,
             "cve_6287": True, "cve_22536": True, "router_info": True,
+            "ms_info": True,
             "default_creds": False,
         }
         nodes = list(api.state.nodes.values())
@@ -17280,6 +17283,23 @@ def create_app(api: SAPMAPApi) -> Bottle:
                                 )
                     except Exception as e:
                         print(f"[-] {node.sid}: check_router_info failed: {e}")
+
+                # 6b. MS text/dump info disclosure (issue #48) — every
+                # non-Java non-SAProuter node.  Read-only HTTP probe on
+                # the MS HTTP port (81NN).  When ms/acl_info +
+                # ms/HTTP/acl_info are unset, the endpoint returns the
+                # full ms/* profile and kernel build identity.
+                if (selected.get("ms_info") and not is_router
+                        and sys_type != "JAVA"):
+                    try:
+                        print(f"[*] {node.sid}: check_ms_info_disclosure")
+                        sapmap_scanner.check_ms_info_disclosure(node)
+                    except Exception as e:
+                        print(f"[-] {node.sid}: check_ms_info_disclosure "
+                              f"failed: {e}")
+                    if sapmap_stop.is_stop_requested():
+                        print(f"[!] STOP — vuln sweep aborted")
+                        return
 
                 # 7. Default credentials (DIAG) — opt-in.  May lock
                 # accounts after the configured retry threshold; the GUI
