@@ -313,6 +313,14 @@ def probe_ms_info(host: str, inst_nr: Optional[int] = None,
             "ip":          pkv.get("server addr", ""),
             "kernel_rel":  pkv.get("Release", ""),
             "build_time":  pkv.get("build time", ""),
+            # Wire-side ports the operator most cares about after
+            # seeing the leak — external (36NN) and internal (39NN).
+            "ms_port_ext": pkv.get("server port", ""),
+            "ms_port_int": pkv.get("server port (internal)", ""),
+            # System-type banner is a quick OS/hardware signal for the
+            # operator: "PC with Windows NT" vs "AMD/Intel x86_64 with
+            # Linux" — informs which post-ex playbook applies.
+            "system_type": pkv.get("system type", ""),
         }
     kb = sections.get("kernel_build")
     if kb and kb.get("kv"):

@@ -10258,6 +10258,83 @@ function showDetails(sid, opts) {
         '</div>';
     })()}
     ${(() => {
+      // MS text/dump info-disclosure — mirror of the SAProuter block
+      // above.  Renders when the node's MS Info Disclosure check
+      // returned MS_DUMP_PARAMS / MS_DUMP_RELEASE (issue #48).
+      const mi = n.ms_info_leak || {};
+      if (!mi.vulnerable) return '';
+      const sid = n.sid;
+      const kernelLabel = (mi.kernel_rel && mi.patch_level)
+        ? escHtml(mi.kernel_rel) + ' PL' + escHtml(mi.patch_level)
+        : (mi.kernel_rel ? escHtml(mi.kernel_rel) : '?');
+      const portsLabel = (mi.ms_port_ext || mi.ms_port_int)
+        ? escHtml(mi.ms_port_ext || '?') + ' <span style="color:#484f58">(external)</span>'
+          + ' &nbsp; / &nbsp; '
+          + escHtml(mi.ms_port_int || '?') + ' <span style="color:#484f58">(internal)</span>'
+        : '<span style="color:#484f58">—</span>';
+      // Loot paths — plain monospace strings the operator can copy.
+      // A dedicated per-file "Copy" button uses the existing
+      // _copyToClipboard() helper (line 7789) so we don't invent a
+      // new mechanism.  When --enable-loot-browser is set, an extra
+      // "Open in Loot Browser" button opens the browser at the
+      // msinfo/ subdirectory.
+      const paramsPath = mi.params_loot_path || '';
+      const kernelPath = mi.kernel_loot_path || '';
+      const mkPathRow = (label, path) => {
+        if (!path) return '';
+        const shortPath = path.length > 60
+          ? '…' + path.slice(-58)
+          : path;
+        return '<div class="detail-row">'
+          + '<span class="detail-key">' + label + '</span>'
+          + '<span class="detail-val" style="font-family:monospace;font-size:11px" '
+          + '      title="' + escHtml(path) + '">'
+          + escHtml(shortPath)
+          + ' <span style="cursor:pointer;color:#58a6ff;margin-left:4px" '
+          + '       title="Copy full path" '
+          + '       onclick="_copyToClipboard(' + JSON.stringify(path) + ', \'loot path\')">'
+          + '&#128203;</span>'
+          + '</span></div>';
+      };
+      const dumpUrl = 'http://' + escHtml(mi.ip || (n.ip || n.hostname || '?'))
+        + ':' + (mi.http_port || '81NN') + '/msgserver/text/dump?3=1';
+      const openLootBtn = LOOT_TOKEN
+        ? '<button class="btn btn-primary" style="font-size:11px;padding:3px 10px" '
+          + 'onclick="openLootBrowser()">&#128194; Open Loot Browser</button>'
+        : '';
+      return '<div class="detail-section">' +
+        '<h4 style="color:#f85149">&#128268; MS Info Disclosure (Vulnerable — HIGH)</h4>' +
+        '<div class="detail-row"><span class="detail-key">Endpoint</span>'
+          + '<span class="detail-val" style="font-family:monospace;font-size:11px">'
+          + escHtml(dumpUrl) + '</span></div>' +
+        (mi.sid ? '<div class="detail-row"><span class="detail-key">SID</span>'
+          + '<span class="detail-val">' + escHtml(mi.sid) + '</span></div>' : '') +
+        (mi.instance ? '<div class="detail-row"><span class="detail-key">Instance</span>'
+          + '<span class="detail-val">' + escHtml(mi.instance) + '</span></div>' : '') +
+        (mi.host ? '<div class="detail-row"><span class="detail-key">Server host</span>'
+          + '<span class="detail-val">' + escHtml(mi.host) + '</span></div>' : '') +
+        (mi.ip ? '<div class="detail-row"><span class="detail-key">Server IP</span>'
+          + '<span class="detail-val">' + escHtml(mi.ip) + '</span></div>' : '') +
+        '<div class="detail-row"><span class="detail-key">Kernel</span>'
+          + '<span class="detail-val">' + kernelLabel + '</span></div>' +
+        (mi.system_type ? '<div class="detail-row"><span class="detail-key">System type</span>'
+          + '<span class="detail-val" style="color:#8b949e">' + escHtml(mi.system_type) + '</span></div>' : '') +
+        '<div class="detail-row"><span class="detail-key">MS ports</span>'
+          + '<span class="detail-val" style="font-family:monospace">' + portsLabel + '</span></div>' +
+        '<div class="detail-row"><span class="detail-key">ms/* params</span>'
+          + '<span class="detail-val"><b style="color:#f0883e">' + (mi.params_count || 0)
+          + '</b> leaked</span></div>' +
+        mkPathRow('Params dump', paramsPath) +
+        mkPathRow('Kernel dump', kernelPath) +
+        (openLootBtn ? '<div style="margin-top:8px">' + openLootBtn + '</div>' : '') +
+        '<div style="color:#8b949e;font-size:11px;margin-top:6px">'
+          + 'Fix: set <code>ms/acl_info</code> and <code>ms/HTTP/acl_info</code> '
+          + '(SAP Notes 1421005 / 2696233).  After the ACL loads, the '
+          + '<code>text/dump</code> endpoint returns HTTP 403.'
+          + '</div>' +
+        '</div>';
+    })()}
+    ${(() => {
       const s = n.snc_info || {};
       if (!s.checked) return '';
       const sid = n.sid;
