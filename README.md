@@ -32,6 +32,10 @@ SAPMAP discovers SAP systems on a network, maps RFC connections between them, ex
 
 ---
 
+## In the press
+
+- **Onapsis, 2026** — [SAPMAP: mapping the SAP attack surface](https://onapsis.com/blog/sapmap/)
+
 ## Table of Contents
 
 - [Features](#features)
