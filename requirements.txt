@@ -19,7 +19,9 @@ mcp>=1.0            # Model Context Protocol SDK for LLM integration (--mcp)
 # SAPMAP auto-detects it as a fallback when the C SDK is absent; or
 # pass --pure-rfc to force it.  On Python < 3.12 this line is a no-op
 # thanks to the environment marker.
-saprfclib ; python_version >= "3.12"
+# >= 0.1.5: carries the upstream fixes (strict_params default, >64KB TLV
+# frames) that let sap_rfc_pure.py run without any workarounds.
+saprfclib >= 0.1.5 ; python_version >= "3.12"
 
 # --- Optional: Java SecStore offline decryption ---
 # pyjks enables the OFFLINE 3DES decryption path in
