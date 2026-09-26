@@ -146,45 +146,6 @@ def _translate_exception(exc):
 
 
 # ---------------------------------------------------------------------------
-# Direction constant mapping for _make_func_desc
-# ---------------------------------------------------------------------------
-
-_DIR_MAP = {
-    RFC_IMPORT:   'RFC_IMPORT',
-    RFC_EXPORT:   'RFC_EXPORT',
-    RFC_CHANGING: 'RFC_CHANGING',
-    RFC_TABLES:   'RFC_TABLES',
-}
-
-
-# ---------------------------------------------------------------------------
-# RFCTYPE int → saprfclib type-name mapping
-# ---------------------------------------------------------------------------
-
-_RFCTYPE_NAME = {
-    0:  'RFCTYPE_CHAR',
-    1:  'RFCTYPE_DATE',
-    2:  'RFCTYPE_BCD',
-    3:  'RFCTYPE_TIME',
-    4:  'RFCTYPE_BYTE',
-    5:  'RFCTYPE_TABLE',
-    6:  'RFCTYPE_NUM',
-    7:  'RFCTYPE_FLOAT',
-    8:  'RFCTYPE_INT',
-    9:  'RFCTYPE_INT2',
-    10: 'RFCTYPE_INT1',
-    14: 'RFCTYPE_NULL',
-    17: 'RFCTYPE_STRUCTURE',
-    23: 'RFCTYPE_DECF16',
-    24: 'RFCTYPE_DECF34',
-    29: 'RFCTYPE_STRING',
-    30: 'RFCTYPE_XSTRING',
-    31: 'RFCTYPE_INT8',
-    32: 'RFCTYPE_UTCLONG',
-}
-
-
-# ---------------------------------------------------------------------------
 # Discover which params saprfclib.connect() actually accepts (varies by
 # version) so we can silently drop unsupported ones.  Defensive belt —
 # doesn't hide bugs, just keeps SAPMAP running when saprfclib adds or
@@ -371,20 +332,29 @@ class RFCConnection:
         Args:
             name: type name (e.g. "TAB200")
             fields: list of (field_name, rfctype, nuc_length, uc_length)
+
+        rfctype is a numeric RFCTYPE_* constant (same contract as the C-SDK
+        adapter).  saprfclib's FieldDesc / TypeDesc take the numeric type and
+        explicit field offsets / row sizes, so we accumulate offsets and set
+        the total non-unicode / unicode row widths just like the C SDK does.
         """
         field_descs = []
+        nuc_offset = 0
+        uc_offset = 0
         for fname, ftype, nuc_len, uc_len in fields:
-            fd = _FieldDesc(
+            field_descs.append(_FieldDesc(
                 name=fname,
-                field_type=_RFCTYPE_NAME.get(ftype, 'RFCTYPE_CHAR'),
+                rfctype=ftype,
                 nuc_length=nuc_len,
+                nuc_offset=nuc_offset,
                 uc_length=uc_len,
-                nuc_offset=0,
-                uc_offset=0,
+                uc_offset=uc_offset,
                 decimals=0,
-            )
-            field_descs.append(fd)
-        return _TypeDesc(name=name, fields=field_descs)
+            ))
+            nuc_offset += nuc_len
+            uc_offset += uc_len
+        return _TypeDesc(name=name, fields=field_descs,
+                         nuc_size=nuc_offset, uc_size=uc_offset)
 
     def _make_func_desc(self, func_name, params):
         """Create a function description manually.
@@ -393,23 +363,25 @@ class RFCConnection:
             func_name: FM name
             params: list of (name, direction, rfctype, uc_length,
                     nuc_length, type_desc_handle) tuples
+
+        direction is a numeric RFC_* constant and rfctype a numeric RFCTYPE_*
+        constant (same contract as the C-SDK adapter); saprfclib's FieldDesc
+        takes both as ints directly.
         """
         param_descs = []
         for pname, direction, ptype, uc_len, nuc_len, td_handle in params:
-            dir_str = _DIR_MAP.get(direction, 'RFC_IMPORT')
-            type_str = _RFCTYPE_NAME.get(ptype, 'RFCTYPE_CHAR')
-            fd = _FieldDesc(
+            param_descs.append(_FieldDesc(
                 name=pname,
-                field_type=type_str,
+                rfctype=ptype,
                 nuc_length=nuc_len,
-                uc_length=uc_len,
                 nuc_offset=0,
+                uc_length=uc_len,
                 uc_offset=0,
                 decimals=0,
-                direction=dir_str,
+                direction=direction,
                 type_desc=td_handle,
-            )
-            param_descs.append(fd)
+                optional=True,
+            ))
         return _FunctionDesc(name=func_name, parameters=param_descs)
 
     def call_raw(self, func_name, func_desc, **kwargs):
