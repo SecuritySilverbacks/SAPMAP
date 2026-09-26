@@ -481,12 +481,14 @@ The container image bundles every Python dependency (including the tricky `pyjks
 **Fastest path — pull the prebuilt image:**
 
 ```bash
-docker pull ghcr.io/securitysilverbacks/sapmap:latest
+docker pull --platform=linux/amd64 ghcr.io/securitysilverbacks/sapmap:latest
 IMAGE=ghcr.io/securitysilverbacks/sapmap:latest \
     SDK_PATH=~/nwrfcsdk ./scripts/run-container.sh
 ```
 
 `:latest` tracks the tip of `main`; a `:vX.Y.Z` tag is published for every release.  Every push to `main` also publishes an immutable `:sha-<short>` tag, useful when you need to pin to an exact commit for a repeatable engagement.  The image is `linux/amd64` only — same rationale as the SDK constraint.  Skip the pull if you want to build from source (see below).
+
+> **Apple Silicon (macOS arm64):** the `--platform=linux/amd64` flag above is required.  Without it the pull fails with `no matching manifest for linux/arm64/v8 in the manifest list entries`.  The image then runs under Rosetta 2 — the wrapper below sets the same flag automatically at run time.
 
 **Easiest path (from source) — use the wrapper:**
 
