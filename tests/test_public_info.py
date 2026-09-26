@@ -179,6 +179,15 @@ def test_public_info_returns_empty_on_connection_failure(monkeypatch):
 def _no_op_diag_ms_os(monkeypatch):
     """Stub out the DIAG/MS-HTTP/OS fallbacks so they don't interfere."""
     import sapmap_scanner
+    # Stage 0 anonymous RFC_SYSTEM_INFO probe.  enrich_system_info() imports
+    # it lazily as `from sap_rfc_sysinfo_probe import probe_rfcsi`, so patch
+    # the source module (resolved at call time).  Without this the probe hits
+    # a real gateway and its live kernel/OS values fill the fields before
+    # public/info runs, making these tests non-hermetic (and flaky on a LAN
+    # with a reachable SAP system).
+    import sap_rfc_sysinfo_probe
+    monkeypatch.setattr(sap_rfc_sysinfo_probe, "probe_rfcsi",
+                         lambda *a, **k: {"error": "disabled in tests"})
     monkeypatch.setattr(sapmap_scanner, "_query_diag_dispatcher_info",
                          lambda *a, **k: ("", "", ""))
     monkeypatch.setattr(sapmap_scanner, "_query_ms_http_info",
