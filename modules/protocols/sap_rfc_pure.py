@@ -284,26 +284,52 @@ class RFCConnection:
         except Exception as e:
             return (False, type(e).__name__, str(e))
 
+    # Connection-attribute keys SAPMAP callers read are the C-SDK / pyrfc
+    # camelCase names (sysId, partnerHost, kernelRel, ...).  saprfclib's
+    # ConnectionAttributes exposes snake_case fields (sys_id, partner_host,
+    # kernel_rel, ...), so map each canonical key from whichever spelling the
+    # backend provides — keeping get_attributes() a drop-in for the C SDK.
+    _ATTR_ALIASES = (
+        ("dest",                ("dest",)),
+        ("host",                ("host",)),
+        ("partnerHost",         ("partner_host", "partnerHost")),
+        ("sysNumber",           ("sys_number", "sysNumber")),
+        ("sysId",               ("sys_id", "sysId")),
+        ("client",              ("client",)),
+        ("user",                ("user",)),
+        ("language",            ("language",)),
+        ("isoLanguage",         ("iso_language", "isoLanguage")),
+        ("codepage",            ("codepage",)),
+        ("partnerCodepage",     ("partner_codepage", "partnerCodepage")),
+        ("rfcRole",             ("rfc_role", "rfcRole")),
+        ("type",                ("type",)),
+        ("partnerType",         ("partner_type", "partnerType")),
+        ("rel",                 ("rel",)),
+        ("partnerRel",          ("partner_rel", "partnerRel")),
+        ("kernelRel",           ("kernel_rel", "kernelRel")),
+        ("partnerBytesPerChar", ("partner_bytes_per_char", "partnerBytesPerChar")),
+        ("partnerIP",           ("partner_ip", "partnerIP")),
+        ("partnerIPv6",         ("partner_ipv6", "partnerIPv6")),
+    )
+
     def get_attributes(self):
         self._ensure_open()
         try:
             attrs = self._conn.get_connection_attributes()
         except _lib.SapRfcError as e:
             raise _translate_exception(e) from e
-        if isinstance(attrs, dict):
-            return attrs
+
+        def _read(src, name):
+            return src.get(name) if isinstance(attrs, dict) \
+                else getattr(src, name, None)
+
         result = {}
-        for field in ('dest', 'host', 'partnerHost', 'sysNumber',
-                      'sysId', 'client', 'user', 'language',
-                      'trace', 'isoLanguage', 'codepage',
-                      'partnerCodepage', 'rfcRole', 'type',
-                      'partnerType', 'rel', 'partnerRel',
-                      'kernelRel', 'cpicConvId', 'progName',
-                      'partnerBytesPerChar', 'partnerSystemCodepage',
-                      'partnerIP', 'partnerIPv6'):
-            val = getattr(attrs, field, None)
-            if val is not None and str(val).strip():
-                result[field] = str(val).strip()
+        for canonical, aliases in self._ATTR_ALIASES:
+            for name in aliases:
+                val = _read(attrs, name)
+                if val is not None and str(val).strip():
+                    result[canonical] = str(val).strip()
+                    break
         return result
 
     # -- RFC Function Invocation --
